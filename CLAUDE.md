@@ -1,4 +1,4 @@
-# OneCLI Cloud
+# OneCLI
 
 Cloud backend for OneCLI — manages authentication, integrations, and permissions for the OneCLI agent gateway.
 
