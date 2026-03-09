@@ -17,6 +17,7 @@
     "db:migrate": "dotenv -e .env -- pnpm --filter @onecli/db db:migrate",
     "db:init-dev": "pnpm --filter @onecli/db db:init-dev",
     "db:studio": "dotenv -e .env -- pnpm --filter @onecli/db prisma studio",
+    "test": "turbo run test",
     "prepare": "husky"
   },
   "devDependencies": {

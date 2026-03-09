@@ -46,3 +46,6 @@ data/
 
 # CDK
 cdk.out
+
+# Rust
+apps/proxy/target/

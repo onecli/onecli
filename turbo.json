@@ -25,6 +25,17 @@
       "inputs": ["$TURBO_DEFAULT$", ".env*"],
       "outputs": [".next/**", "!.next/cache/**", "dist/**"]
     },
+    "@onecli/proxy#build": {
+      "inputs": ["src/**", "Cargo.toml", "Cargo.lock"],
+      "outputs": ["target/release/**"]
+    },
+    "@onecli/proxy#dev": {
+      "cache": false,
+      "persistent": true
+    },
+    "@onecli/proxy#check": {
+      "inputs": ["src/**", "Cargo.toml"]
+    },
     "lint": {
       "dependsOn": ["^lint"]
     },
@@ -34,6 +45,14 @@
     },
     "check-types": {
       "dependsOn": ["^build", "^check-types"]
+    },
+    "test": {
+      "dependsOn": ["build"],
+      "cache": false
+    },
+    "@onecli/proxy#test": {
+      "inputs": ["src/**", "tests/**", "Cargo.toml", "Cargo.lock"],
+      "dependsOn": ["@onecli/proxy#build"]
     },
     "dev": {
       "cache": false,

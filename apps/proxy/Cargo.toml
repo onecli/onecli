@@ -1,0 +1,68 @@
+[package]
+name = "onecli-proxy"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "onecli-proxy"
+path = "src/main.rs"
+
+[dependencies]
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+
+# HTTP
+hyper = { version = "1", features = ["http1", "server"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
+http-body = "1"
+http-body-util = "0.1"
+
+# TLS
+tokio-rustls = "0.26"
+rustls = { version = "0.23", features = ["ring"] }
+rustls-pemfile = "2"
+
+# Certificate generation
+rcgen = "0.13"
+
+# HTTP client (for credential fetching)
+reqwest = { version = "0.12", features = ["json", "rustls-tls", "stream"], default-features = false }
+
+# CLI
+clap = { version = "4", features = ["derive"] }
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Concurrent cache
+dashmap = "6"
+
+# Base64 (for proxy auth)
+base64 = "0.22"
+
+# Stream combinators
+futures-util = "0.3"
+
+# Error handling
+anyhow = "1"
+
+# Time (for certificate validity)
+time = "0.3"
+
+[dev-dependencies]
+tempfile = "3"
+
+[profile.release]
+opt-level = 3
+strip = true
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+
+[profile.dev.package."*"]
+opt-level = 3

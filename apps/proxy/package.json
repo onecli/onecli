@@ -1,0 +1,14 @@
+{
+  "name": "@onecli/proxy",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "build": "cargo build --release",
+    "dev": "cargo run",
+    "check": "cargo clippy -- -D warnings && cargo fmt --check",
+    "lint": "cargo fmt --check",
+    "format:check": "cargo fmt --check",
+    "check-types": "cargo clippy -- -D warnings",
+    "test": "cargo test"
+  }
+}
