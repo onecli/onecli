@@ -22,6 +22,7 @@ const nextConfig = {
           "@/lib/auth/auth-provider": "@/cloud/auth/cognito-provider",
           "@/lib/auth/auth-server": "@/cloud/auth/cognito-server",
           "@/lib/nav-items": "@/cloud/nav-items",
+          "@/lib/crypto": "@/cloud/crypto",
         }
       : {},
   },

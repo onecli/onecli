@@ -1,5 +1,4 @@
 import Link from "next/link";
-import { CopyCommand } from "@/app/_components/copy-command";
 import { Badge } from "@onecli/ui/components/badge";
 import {
   Card,
@@ -45,7 +44,7 @@ const sourceStyle = (source: string) => {
 const sourceLabel = (source: string) => {
   switch (source) {
     case "cli":
-      return "CLI";
+      return "Agent";
     default:
       return "App";
   }
@@ -80,7 +79,7 @@ export function RecentAuditTable({ logs }: RecentAuditTableProps) {
         <div className="flex items-center justify-between">
           <div>
             <CardTitle>Recent Activity</CardTitle>
-            <CardDescription>Latest actions from your CLI.</CardDescription>
+            <CardDescription>Latest actions from your agents.</CardDescription>
           </div>
           <Button variant="ghost" size="sm" asChild>
             <Link href="/audit">View all</Link>
@@ -89,10 +88,8 @@ export function RecentAuditTable({ logs }: RecentAuditTableProps) {
       </CardHeader>
       <CardContent>
         {logs.length === 0 ? (
-          <p className="text-muted-foreground flex items-center justify-center gap-1.5 py-8 text-sm">
-            No activity yet. Run
-            <CopyCommand command="oc run" />
-            to get started.
+          <p className="text-muted-foreground py-8 text-center text-sm">
+            No activity yet. Connect an agent to get started.
           </p>
         ) : (
           <Table>

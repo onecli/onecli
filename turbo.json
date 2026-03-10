@@ -15,9 +15,12 @@
     "STRIPE_PRICE_ID",
     "GOOGLE_CLIENT_ID",
     "GOOGLE_CLIENT_SECRET",
-    "GITHUB_CLIENT_ID",
-    "GITHUB_CLIENT_SECRET",
-    "OAUTH_STATE_SECRET"
+    "SECRET_ENCRYPTION_KEY",
+    "HOME",
+    "PROXY_SECRET",
+    "PROXY_SECRET_FILE",
+    "PROXY_CA_PEM_FILE",
+    "PROXY_CA_CERT"
   ],
   "tasks": {
     "build": {

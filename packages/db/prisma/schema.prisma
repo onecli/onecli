@@ -12,31 +12,15 @@ model User {
   email     String   @unique
   name      String?
   cognitoId String   @unique
-  apiKey             String   @unique @default(cuid())
   stripeCustomerId   String?  @unique
   subscriptionStatus String   @default("free")
   createdAt          DateTime @default(now())
   updatedAt          DateTime @updatedAt
 
-  connectedServices ConnectedService[]
   auditLogs         AuditLog[]
-}
-
-model ConnectedService {
-  id           String    @id @default(cuid())
-  userId       String
-  provider     String
-  status       String    @default("connected")
-  accessToken  String?
-  refreshToken String?
-  tokenExpiry  DateTime?
-  scopes       String[]  @default([])
-  metadata     Json?
-  connectedAt  DateTime  @default(now())
-  updatedAt    DateTime  @updatedAt
-  user         User      @relation(fields: [userId], references: [id])
-
-  @@unique([userId, provider])
+  agents            Agent[]
+  secrets           Secret[]
+  policies          Policy[]
 }
 
 model AuditLog {
@@ -53,13 +37,49 @@ model AuditLog {
   @@index([userId, createdAt])
 }
 
-model CliAuthSession {
+model Agent {
+  id          String   @id @default(cuid())
+  userId      String
+  name        String
+  accessToken String   @unique // "oat_..." prefix, used for proxy auth
+  isDefault   Boolean  @default(false)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  user        User     @relation(fields: [userId], references: [id])
+  policies    Policy[]
+
+  @@index([userId])
+}
+
+model Secret {
+  id              String   @id @default(cuid())
+  userId          String
+  name            String
+  type            String // "anthropic", "generic"
+  encryptedValue  String // AES-256-GCM encrypted via CryptoService
+  hostPattern     String // "api.anthropic.com" or "*.example.com"
+  pathPattern     String? // "/v1/*", null = all paths
+  injectionConfig Json? // type-specific config (generic: { headerName, valueFormat })
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+  user            User     @relation(fields: [userId], references: [id])
+  policies        Policy[]
+
+  @@index([userId])
+}
+
+model Policy {
   id        String   @id @default(cuid())
-  code      String   @unique
-  userId    String?
-  apiKey    String?
-  email     String?
-  status    String   @default("pending") // pending | confirmed | expired
+  userId    String
+  agentId   String
+  secretId  String
   createdAt DateTime @default(now())
-  expiresAt DateTime
+  updatedAt DateTime @updatedAt
+  agent     Agent    @relation(fields: [agentId], references: [id], onDelete: Cascade)
+  secret    Secret   @relation(fields: [secretId], references: [id], onDelete: Cascade)
+  user      User     @relation(fields: [userId], references: [id])
+
+  @@unique([agentId, secretId])
+  @@index([agentId])
+  @@index([userId])
 }

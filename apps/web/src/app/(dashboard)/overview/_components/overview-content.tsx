@@ -2,9 +2,12 @@
 
 import { useEffect, useState } from "react";
 import { useAuth } from "@/providers/auth-provider";
-import { getRecentAuditLogs, getAuditStats } from "@/lib/actions/audit";
-import { getConnectedServices } from "@/lib/actions/services";
-import { ApiKeyCard } from "./api-key-card";
+import {
+  getRecentAuditLogs,
+  getAuditStats,
+  getProxyCounts,
+} from "@/lib/actions/audit";
+import { DefaultAgentCard } from "./default-agent-card";
 import { StatsCards } from "./stats-cards";
 import { RecentAuditTable } from "./recent-audit-table";
 
@@ -27,7 +30,11 @@ export function OverviewContent() {
   const { user } = useAuth();
   const [logs, setLogs] = useState<AuditLogEntry[]>([]);
   const [stats, setStats] = useState<AuditStats | null>(null);
-  const [connectedCount, setConnectedCount] = useState(0);
+  const [proxyCounts, setProxyCounts] = useState({
+    agents: 0,
+    secrets: 0,
+    policies: 0,
+  });
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
@@ -37,13 +44,11 @@ export function OverviewContent() {
     Promise.all([
       getRecentAuditLogs(5, user.id),
       getAuditStats(user.id),
-      getConnectedServices(user.id),
-    ]).then(([logsData, statsData, services]) => {
+      getProxyCounts(user.id),
+    ]).then(([logsData, statsData, proxy]) => {
       setLogs(logsData);
       setStats(statsData);
-      setConnectedCount(
-        services.filter((s) => s.status === "connected").length,
-      );
+      setProxyCounts(proxy);
       setLoading(false);
     });
   }, [user?.id]);
@@ -57,13 +62,15 @@ export function OverviewContent() {
         </p>
       </div>
 
-      <ApiKeyCard />
+      <DefaultAgentCard />
 
       <StatsCards
         totalActions={stats?.totalActions ?? 0}
         recentActions={stats?.recentActions ?? 0}
         serviceCount={stats?.serviceCount ?? 0}
-        connectedServices={connectedCount}
+        agentCount={proxyCounts.agents}
+        secretCount={proxyCounts.secrets}
+        policyCount={proxyCounts.policies}
         loading={loading}
       />
 

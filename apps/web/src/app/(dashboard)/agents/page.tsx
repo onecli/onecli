@@ -1,23 +1,24 @@
 import { Suspense } from "react";
 import type { Metadata } from "next";
-import { AuditContent } from "./_components/audit-content";
+import { AgentsContent } from "./_components/agents-content";
 
 export const metadata: Metadata = {
-  title: "Audit Log",
+  title: "Agents",
 };
 
-export default function AuditPage() {
+export default function AgentsPage() {
   return (
     <div className="flex flex-1 flex-col gap-6 p-6 max-w-5xl">
       <div>
-        <h1 className="text-2xl font-semibold tracking-tight">Audit Log</h1>
+        <h1 className="text-2xl font-semibold tracking-tight">Agents</h1>
         <p className="text-muted-foreground text-sm">
-          A full history of actions performed by your agents.
+          Manage agents that connect to the proxy and receive injected
+          credentials.
         </p>
       </div>
 
       <Suspense>
-        <AuditContent />
+        <AgentsContent />
       </Suspense>
     </div>
   );

@@ -14,22 +14,25 @@ const auditLogSchema = z.object({
 
 export async function POST(request: NextRequest) {
   try {
-    const apiKey = request.headers.get("x-api-key");
+    const token = request.headers.get("x-agent-token");
 
-    if (!apiKey) {
+    if (!token) {
       return NextResponse.json(
-        { error: "Missing x-api-key header" },
+        { error: "Missing x-agent-token header" },
         { status: 401 },
       );
     }
 
-    const user = await db.user.findUnique({
-      where: { apiKey },
-      select: { id: true },
+    const agent = await db.agent.findUnique({
+      where: { accessToken: token },
+      select: { userId: true },
     });
 
-    if (!user) {
-      return NextResponse.json({ error: "Invalid API key" }, { status: 401 });
+    if (!agent) {
+      return NextResponse.json(
+        { error: "Invalid agent token" },
+        { status: 401 },
+      );
     }
 
     const body = await request.json();
@@ -51,7 +54,7 @@ export async function POST(request: NextRequest) {
 
     const log = await db.auditLog.create({
       data: {
-        userId: user.id,
+        userId: agent.userId,
         action,
         service,
         status,

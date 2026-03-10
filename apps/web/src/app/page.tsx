@@ -11,14 +11,6 @@ export default function Home() {
   useEffect(() => {
     if (isLoading) return;
 
-    // After OAuth redirect, check if this was a CLI auth flow
-    const cliCode = sessionStorage.getItem("cli_auth_code");
-    if (cliCode) {
-      sessionStorage.removeItem("cli_auth_code");
-      router.replace(`/auth/cli?code=${encodeURIComponent(cliCode)}`);
-      return;
-    }
-
     if (isAuthenticated) {
       router.replace("/overview");
     } else {

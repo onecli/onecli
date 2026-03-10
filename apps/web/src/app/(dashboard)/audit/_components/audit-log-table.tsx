@@ -60,7 +60,7 @@ const sourceStyle = (source: string) => {
 const sourceLabel = (source: string) => {
   switch (source) {
     case "cli":
-      return "CLI";
+      return "Agent";
     default:
       return "App";
   }

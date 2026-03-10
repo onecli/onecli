@@ -240,3 +240,16 @@ export async function getAuditStats(authId?: string) {
     serviceCount,
   };
 }
+
+export async function getProxyCounts(authId?: string) {
+  const userId = await resolveUserId(authId);
+  if (!userId) return { agents: 0, secrets: 0, policies: 0 };
+
+  const [agents, secrets, policies] = await Promise.all([
+    db.agent.count({ where: { userId } }),
+    db.secret.count({ where: { userId } }),
+    db.policy.count({ where: { userId } }),
+  ]);
+
+  return { agents, secrets, policies };
+}

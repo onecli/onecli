@@ -28,7 +28,7 @@ export interface AuditFilterBarProps {
 }
 
 const SOURCE_LABELS: Record<string, string> = {
-  cli: "CLI",
+  cli: "Agent",
   app: "App",
 };
 

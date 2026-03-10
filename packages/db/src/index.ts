@@ -45,9 +45,4 @@ async function initDb(): Promise<PrismaClient> {
 export const db = await initDb();
 
 export type { PrismaClient } from "@prisma/client";
-export {
-  Prisma,
-  type User,
-  type ConnectedService,
-  type AuditLog,
-} from "@prisma/client";
+export { Prisma, type User, type AuditLog } from "@prisma/client";
