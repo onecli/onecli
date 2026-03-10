@@ -30,8 +30,9 @@ async function initDb(): Promise<PrismaClient> {
   if (globalForPrisma.prisma) return globalForPrisma.prisma;
 
   const isCloud = process.env.NEXT_PUBLIC_EDITION === "cloud";
+  const isBuild = process.env.NEXT_PHASE === "phase-production-build";
   const client =
-    isCloud || process.env.DATABASE_URL
+    isCloud || process.env.DATABASE_URL || isBuild
       ? new PrismaClient()
       : await createPGliteClient();
 
