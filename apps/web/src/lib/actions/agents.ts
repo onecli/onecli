@@ -54,7 +54,6 @@ export async function getAgents(authId?: string) {
       accessToken: true,
       isDefault: true,
       createdAt: true,
-      _count: { select: { policies: true } },
     },
     orderBy: [{ isDefault: "desc" }, { createdAt: "desc" }],
   });

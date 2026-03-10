@@ -36,7 +36,6 @@ interface SecretCardProps {
     pathPattern: string | null;
     injectionConfig: unknown;
     createdAt: Date;
-    _count: { policies: number };
   };
   onUpdate: () => void;
 }
@@ -60,7 +59,6 @@ export const SecretCard = ({ secret, onUpdate }: SecretCardProps) => {
     }
   };
 
-  const policyCount = secret._count.policies;
   const config = secret.injectionConfig as InjectionConfig | null;
 
   return (
@@ -72,9 +70,6 @@ export const SecretCard = ({ secret, onUpdate }: SecretCardProps) => {
               <h3 className="text-sm font-medium">{secret.name}</h3>
               <Badge variant="secondary" className="text-xs">
                 {secret.typeLabel}
-              </Badge>
-              <Badge variant="outline" className="text-xs">
-                {policyCount} {policyCount === 1 ? "policy" : "policies"}
               </Badge>
             </div>
 
@@ -129,8 +124,7 @@ export const SecretCard = ({ secret, onUpdate }: SecretCardProps) => {
                   <AlertDialogTitle>Delete secret?</AlertDialogTitle>
                   <AlertDialogDescription>
                     This will permanently delete <strong>{secret.name}</strong>{" "}
-                    and remove it from all policies. This action cannot be
-                    undone.
+                    and its encrypted value. This action cannot be undone.
                   </AlertDialogDescription>
                 </AlertDialogHeader>
                 <AlertDialogFooter>

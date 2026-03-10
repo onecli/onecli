@@ -28,7 +28,6 @@ interface AgentCardProps {
     accessToken: string;
     isDefault: boolean;
     createdAt: Date;
-    _count: { policies: number };
   };
   onUpdate: () => void;
 }
@@ -71,8 +70,6 @@ export const AgentCard = ({ agent, onUpdate }: AgentCardProps) => {
     }
   };
 
-  const policyCount = agent._count.policies;
-
   return (
     <Card className="p-5">
       <div className="flex items-start justify-between gap-4">
@@ -84,9 +81,6 @@ export const AgentCard = ({ agent, onUpdate }: AgentCardProps) => {
                 Default
               </Badge>
             )}
-            <Badge variant="secondary" className="text-xs">
-              {policyCount} {policyCount === 1 ? "policy" : "policies"}
-            </Badge>
           </div>
 
           <div className="flex items-center gap-2">
@@ -166,7 +160,7 @@ export const AgentCard = ({ agent, onUpdate }: AgentCardProps) => {
                   <AlertDialogTitle>Delete agent?</AlertDialogTitle>
                   <AlertDialogDescription>
                     This will permanently delete <strong>{agent.name}</strong>{" "}
-                    and all its policies. This action cannot be undone.
+                    and its access token. This action cannot be undone.
                   </AlertDialogDescription>
                 </AlertDialogHeader>
                 <AlertDialogFooter>

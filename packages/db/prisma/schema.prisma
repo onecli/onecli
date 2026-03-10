@@ -18,24 +18,8 @@ model User {
   createdAt          DateTime @default(now())
   updatedAt          DateTime @updatedAt
 
-  auditLogs         AuditLog[]
   agents            Agent[]
   secrets           Secret[]
-  policies          Policy[]
-}
-
-model AuditLog {
-  id        String   @id @default(cuid())
-  userId    String
-  action    String
-  service   String
-  status    String
-  source    String   @default("app")
-  metadata  Json?
-  createdAt DateTime @default(now())
-  user      User     @relation(fields: [userId], references: [id])
-
-  @@index([userId, createdAt])
 }
 
 model Agent {
@@ -47,7 +31,6 @@ model Agent {
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
   user        User     @relation(fields: [userId], references: [id])
-  policies    Policy[]
 
   @@index([userId])
 }
@@ -64,23 +47,6 @@ model Secret {
   createdAt       DateTime @default(now())
   updatedAt       DateTime @updatedAt
   user            User     @relation(fields: [userId], references: [id])
-  policies        Policy[]
 
-  @@index([userId])
-}
-
-model Policy {
-  id        String   @id @default(cuid())
-  userId    String
-  agentId   String
-  secretId  String
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
-  agent     Agent    @relation(fields: [agentId], references: [id], onDelete: Cascade)
-  secret    Secret   @relation(fields: [secretId], references: [id], onDelete: Cascade)
-  user      User     @relation(fields: [userId], references: [id])
-
-  @@unique([agentId, secretId])
-  @@index([agentId])
   @@index([userId])
 }

@@ -16,7 +16,6 @@ interface Agent {
   accessToken: string;
   isDefault: boolean;
   createdAt: Date;
-  _count: { policies: number };
 }
 
 export const AgentsContent = () => {

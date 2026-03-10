@@ -48,7 +48,6 @@ export async function getSecrets(authId?: string) {
       pathPattern: true,
       injectionConfig: true,
       createdAt: true,
-      _count: { select: { policies: true } },
     },
     orderBy: { createdAt: "desc" },
   });

@@ -19,7 +19,6 @@ interface Secret {
   pathPattern: string | null;
   injectionConfig: unknown;
   createdAt: Date;
-  _count: { policies: number };
 }
 
 export const SecretsContent = () => {

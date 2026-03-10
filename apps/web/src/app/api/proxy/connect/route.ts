@@ -47,25 +47,10 @@ export async function POST(request: NextRequest) {
 
     const { agent_token, host } = parsed.data;
 
-    // Look up agent by access token, include policies with their secrets
+    // Look up agent by access token to identify the user
     const agent = await db.agent.findUnique({
       where: { accessToken: agent_token },
-      select: {
-        id: true,
-        policies: {
-          select: {
-            secret: {
-              select: {
-                type: true,
-                encryptedValue: true,
-                hostPattern: true,
-                pathPattern: true,
-                injectionConfig: true,
-              },
-            },
-          },
-        },
-      },
+      select: { id: true, userId: true },
     });
 
     if (!agent) {
@@ -75,10 +60,21 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    // Filter secrets whose hostPattern matches the requested host
-    const matchingSecrets = agent.policies
-      .map((p) => p.secret)
-      .filter((secret) => hostMatches(host, secret.hostPattern));
+    // Find all user's secrets that match the requested host
+    const secrets = await db.secret.findMany({
+      where: { userId: agent.userId },
+      select: {
+        type: true,
+        encryptedValue: true,
+        hostPattern: true,
+        pathPattern: true,
+        injectionConfig: true,
+      },
+    });
+
+    const matchingSecrets = secrets.filter((secret) =>
+      hostMatches(host, secret.hostPattern),
+    );
 
     // No matching secrets → tunnel (don't intercept)
     if (matchingSecrets.length === 0) {
