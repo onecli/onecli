@@ -24,7 +24,7 @@ async function resolveUserId(authId?: string): Promise<string | null> {
   }
 
   const user = await db.user.findUnique({
-    where: { cognitoId: authId },
+    where: { externalAuthId: authId },
     select: { id: true },
   });
 

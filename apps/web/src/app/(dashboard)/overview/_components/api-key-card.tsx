@@ -24,12 +24,11 @@ import {
 } from "@onecli/ui/components/alert-dialog";
 import { useCopyToClipboard } from "@/hooks/use-copy-to-clipboard";
 import { useAuth } from "@/providers/auth-provider";
-import { getDefaultAgent, regenerateAgentToken } from "@/lib/actions/agents";
+import { getOrCreateApiKey, regenerateApiKey } from "@/lib/actions/api-key";
 
-export const DefaultAgentCard = () => {
+export const ApiKeyCard = () => {
   const { user: authUser } = useAuth();
-  const [token, setToken] = useState("");
-  const [agentId, setAgentId] = useState("");
+  const [apiKey, setApiKey] = useState("");
   const [loading, setLoading] = useState(true);
   const [revealed, setRevealed] = useState(false);
   const [regenerating, setRegenerating] = useState(false);
@@ -37,29 +36,26 @@ export const DefaultAgentCard = () => {
 
   useEffect(() => {
     if (!authUser?.id) return;
-    getDefaultAgent(authUser.id).then((agent) => {
-      if (agent) {
-        setToken(agent.accessToken);
-        setAgentId(agent.id);
-      }
+    getOrCreateApiKey(authUser.id).then((result) => {
+      setApiKey(result.apiKey);
       setLoading(false);
     });
   }, [authUser?.id]);
 
-  const truncatedToken = token
-    ? `${token.slice(0, 8)}${"•".repeat(12)}${token.slice(-4)}`
+  const truncatedKey = apiKey
+    ? `${apiKey.slice(0, 6)}${"•".repeat(12)}${apiKey.slice(-4)}`
     : "";
 
   const handleRegenerate = async () => {
-    if (!authUser?.id || !agentId) return;
+    if (!authUser?.id) return;
     setRegenerating(true);
     try {
-      const result = await regenerateAgentToken(agentId, authUser.id);
-      setToken(result.accessToken);
+      const result = await regenerateApiKey(authUser.id);
+      setApiKey(result.apiKey);
       setRevealed(true);
-      toast.success("Agent token regenerated");
+      toast.success("API key regenerated");
     } catch {
-      toast.error("Failed to regenerate token");
+      toast.error("Failed to regenerate API key");
     } finally {
       setRegenerating(false);
     }
@@ -68,9 +64,9 @@ export const DefaultAgentCard = () => {
   return (
     <Card>
       <CardHeader>
-        <CardTitle>Agent Token</CardTitle>
+        <CardTitle>API Key</CardTitle>
         <CardDescription>
-          Use this token to authenticate your agent with the proxy.
+          Your personal API key for OneCLI services.
         </CardDescription>
       </CardHeader>
       <CardContent>
@@ -78,19 +74,19 @@ export const DefaultAgentCard = () => {
           <code className="bg-muted flex-1 rounded-md border px-3 py-2 font-mono text-sm select-none">
             {loading ? (
               <span className="text-muted-foreground">Loading...</span>
-            ) : !token ? (
-              <span className="text-muted-foreground">No token yet</span>
+            ) : !apiKey ? (
+              <span className="text-muted-foreground">No API key yet</span>
             ) : revealed ? (
-              token
+              apiKey
             ) : (
-              truncatedToken
+              truncatedKey
             )}
           </code>
           <Button
             variant="ghost"
             size="icon"
             onClick={() => setRevealed(!revealed)}
-            disabled={!token}
+            disabled={!apiKey}
           >
             {revealed ? (
               <EyeOff className="size-4" />
@@ -101,8 +97,8 @@ export const DefaultAgentCard = () => {
           <Button
             variant="ghost"
             size="icon"
-            onClick={() => copy(token)}
-            disabled={!token}
+            onClick={() => copy(apiKey)}
+            disabled={!apiKey}
           >
             {copied ? (
               <Check className="size-4 text-green-500" />
@@ -115,7 +111,7 @@ export const DefaultAgentCard = () => {
               <Button
                 variant="ghost"
                 size="icon"
-                disabled={regenerating || !token}
+                disabled={regenerating || !apiKey}
               >
                 <RefreshCw
                   className={`size-4 ${regenerating ? "animate-spin" : ""}`}
@@ -124,10 +120,10 @@ export const DefaultAgentCard = () => {
             </AlertDialogTrigger>
             <AlertDialogContent>
               <AlertDialogHeader>
-                <AlertDialogTitle>Regenerate token?</AlertDialogTitle>
+                <AlertDialogTitle>Regenerate API key?</AlertDialogTitle>
                 <AlertDialogDescription>
-                  The current token will be invalidated immediately. Any CLI
-                  sessions or agents using the old token will lose access.
+                  The current API key will be invalidated immediately. Any
+                  services using the old key will lose access.
                 </AlertDialogDescription>
               </AlertDialogHeader>
               <AlertDialogFooter>

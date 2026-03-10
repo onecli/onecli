@@ -7,7 +7,7 @@ import {
   getAuditStats,
   getProxyCounts,
 } from "@/lib/actions/audit";
-import { DefaultAgentCard } from "./default-agent-card";
+import { ApiKeyCard } from "./api-key-card";
 import { StatsCards } from "./stats-cards";
 import { RecentAuditTable } from "./recent-audit-table";
 
@@ -62,7 +62,7 @@ export function OverviewContent() {
         </p>
       </div>
 
-      <DefaultAgentCard />
+      <ApiKeyCard />
 
       <StatsCards
         totalActions={stats?.totalActions ?? 0}

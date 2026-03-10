@@ -219,7 +219,7 @@ mod tests {
     #[test]
     fn cache_hit_returns_cached_response() {
         let cache: DashMap<ConnectCacheKey, CachedConnect> = DashMap::new();
-        let key = ("oat_token1".to_string(), "api.anthropic.com".to_string());
+        let key = ("aoc_token1".to_string(), "api.anthropic.com".to_string());
         let response = ConnectResponse {
             intercept: true,
             rules: vec![],
@@ -241,7 +241,7 @@ mod tests {
     #[test]
     fn cache_expired_entry_is_stale() {
         let cache: DashMap<ConnectCacheKey, CachedConnect> = DashMap::new();
-        let key = ("oat_token1".to_string(), "api.anthropic.com".to_string());
+        let key = ("aoc_token1".to_string(), "api.anthropic.com".to_string());
 
         cache.insert(
             key.clone(),

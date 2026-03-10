@@ -14,9 +14,9 @@ let localUserEnsured = false;
 const ensureLocalUser = async () => {
   if (localUserEnsured) return;
   await db.user.upsert({
-    where: { cognitoId: LOCAL_AUTH_ID },
+    where: { externalAuthId: LOCAL_AUTH_ID },
     create: {
-      cognitoId: LOCAL_AUTH_ID,
+      externalAuthId: LOCAL_AUTH_ID,
       email: LOCAL_USER.email,
       name: LOCAL_USER.name,
     },

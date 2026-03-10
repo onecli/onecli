@@ -4,7 +4,7 @@ import { randomBytes } from "crypto";
 import { db } from "@onecli/db";
 import { getServerSession } from "@/lib/auth/server";
 
-const generateAccessToken = () => `oat_${randomBytes(32).toString("hex")}`;
+const generateAccessToken = () => `aoc_${randomBytes(32).toString("hex")}`;
 const DEFAULT_AGENT_NAME = "Default Agent";
 
 async function ensureDefaultAgent(userId: string) {
@@ -34,7 +34,7 @@ async function resolveUserId(authId?: string): Promise<string> {
   }
 
   const user = await db.user.findUnique({
-    where: { cognitoId: id },
+    where: { externalAuthId: id },
     select: { id: true },
   });
 

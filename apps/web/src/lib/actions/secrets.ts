@@ -27,7 +27,7 @@ const resolveUserId = async (authId?: string) => {
   }
 
   const user = await db.user.findUnique({
-    where: { cognitoId: id },
+    where: { externalAuthId: id },
     select: { id: true },
   });
 

@@ -33,7 +33,8 @@ const migrationsDir = (await exists(monorepoMigrationsDir))
   ? monorepoMigrationsDir
   : dockerMigrationsDir;
 
-const dataDir = (await exists(join(monorepoDataDir, "..")))
+const monorepoWebDir = join(__dirname, "..", "..", "..", "apps", "web");
+const dataDir = (await exists(monorepoWebDir))
   ? monorepoDataDir
   : dockerDataDir;
 
@@ -60,6 +61,19 @@ for (const dir of dirs) {
   } catch {
     console.log(`  Skipped: ${dir} (already applied)`);
   }
+}
+
+// Bootstrap local-mode user so the app works immediately on first start
+const localUser = await pglite.query(
+  `SELECT id FROM "User" WHERE "externalAuthId" = 'local-admin'`,
+);
+if (localUser.rows.length === 0) {
+  const id = `usr_${[...Array(24)].map(() => Math.random().toString(36)[2]).join("")}`;
+  await pglite.exec(`
+    INSERT INTO "User" (id, "externalAuthId", email, name, "createdAt", "updatedAt")
+    VALUES ('${id}', 'local-admin', 'admin@localhost', 'Admin', NOW(), NOW())
+  `);
+  console.log("  Created local-admin user");
 }
 
 await pglite.close();

@@ -1,0 +1,14 @@
+services:
+  onecli:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    ports:
+      - "3000:3000"
+      - "18080:18080"
+    volumes:
+      - onecli-data:/app/data
+    env_file: ../.env
+
+volumes:
+  onecli-data:

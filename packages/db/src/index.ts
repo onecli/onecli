@@ -35,7 +35,11 @@ async function initDb(): Promise<PrismaClient> {
       ? new PrismaClient()
       : await createPGliteClient();
 
-  if (process.env.NODE_ENV !== "production") {
+  // In production with real Postgres, skip caching to match standard Prisma pattern.
+  // PGlite (OSS embedded mode) MUST be cached — multiple instances on the same
+  // directory have inconsistent in-memory state.
+  const usesPGlite = !isCloud && !process.env.DATABASE_URL;
+  if (usesPGlite || process.env.NODE_ENV !== "production") {
     globalForPrisma.prisma = client;
   }
 

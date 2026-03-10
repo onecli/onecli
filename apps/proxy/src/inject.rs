@@ -134,16 +134,16 @@ mod tests {
 
     #[test]
     fn extract_token_valid() {
-        let req = request_with_proxy_auth(Some(&encode_basic_auth("oat_test123")));
-        assert_eq!(extract_agent_token(&req).as_deref(), Some("oat_test123"));
+        let req = request_with_proxy_auth(Some(&encode_basic_auth("aoc_test123")));
+        assert_eq!(extract_agent_token(&req).as_deref(), Some("aoc_test123"));
     }
 
     #[test]
     fn extract_token_without_trailing_colon() {
         // Some clients might send just the token without ":"
-        let encoded = base64::engine::general_purpose::STANDARD.encode("oat_nocolon");
+        let encoded = base64::engine::general_purpose::STANDARD.encode("aoc_nocolon");
         let req = request_with_proxy_auth(Some(&format!("Basic {encoded}")));
-        assert_eq!(extract_agent_token(&req).as_deref(), Some("oat_nocolon"));
+        assert_eq!(extract_agent_token(&req).as_deref(), Some("aoc_nocolon"));
     }
 
     #[test]

@@ -29,5 +29,13 @@ else
   node /app/packages/db/scripts/init-dev-db.ts
 fi
 
-# Start Next.js
+# Start proxy in background
+echo "Starting proxy on port ${PROXY_PORT:-18080}..."
+onecli-proxy --port "${PROXY_PORT:-18080}" --data-dir /app/data &
+PROXY_PID=$!
+
+# Graceful shutdown: stop both processes on SIGTERM
+trap "kill $PROXY_PID 2>/dev/null; wait $PROXY_PID 2>/dev/null; exit 0" TERM INT
+
+# Start Next.js (foreground)
 exec node apps/web/server.js

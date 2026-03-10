@@ -11,7 +11,8 @@ model User {
   id        String   @id @default(cuid())
   email     String   @unique
   name      String?
-  cognitoId String   @unique
+  externalAuthId String   @unique
+  apiKey             String?  @unique // "oc_..." prefix, used for API auth
   stripeCustomerId   String?  @unique
   subscriptionStatus String   @default("free")
   createdAt          DateTime @default(now())
@@ -41,7 +42,7 @@ model Agent {
   id          String   @id @default(cuid())
   userId      String
   name        String
-  accessToken String   @unique // "oat_..." prefix, used for proxy auth
+  accessToken String   @unique // "aoc_..." prefix, used for proxy auth
   isDefault   Boolean  @default(false)
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt

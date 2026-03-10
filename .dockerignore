@@ -1,6 +1,32 @@
+# Dependencies
 node_modules
+
+# Build outputs
 .next
+out
+dist
+cdk.out
+apps/proxy/target
+
+# Local data (prevent leaking local PGlite, CA certs, secrets)
+data
+apps/web/data
+
+# Environment files
+.env
+.env.*
+!.env.example
+
+# Git / tooling
 .git
 .husky
 .turbo
-*.md
+.vscode
+.idea
+.DS_Store
+.claude
+
+# Misc
+coverage
+*.pem
+npm-debug.log*

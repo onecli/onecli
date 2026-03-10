@@ -10,9 +10,9 @@ interface EnsureUserInput {
 
 export async function ensureUser(input: EnsureUserInput) {
   const user = await db.user.upsert({
-    where: { cognitoId: input.authId },
+    where: { externalAuthId: input.authId },
     create: {
-      cognitoId: input.authId,
+      externalAuthId: input.authId,
       email: input.email,
       name: input.name,
     },

@@ -18,7 +18,7 @@ fn basic_auth(token: &str) -> String {
 }
 
 /// Test agent token used across integration tests.
-const TEST_AGENT_TOKEN: &str = "oat_test_token_123";
+const TEST_AGENT_TOKEN: &str = "aoc_test_token_123";
 
 /// Start a mock API server that responds to `POST /api/proxy/connect`.
 /// Returns `{ "intercept": false }` for all requests (tunnel mode).

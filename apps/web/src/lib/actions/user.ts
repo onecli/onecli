@@ -12,7 +12,7 @@ export async function getCurrentUser() {
 
 export async function getUserByAuthId(authId: string) {
   const user = await db.user.findUnique({
-    where: { cognitoId: authId },
+    where: { externalAuthId: authId },
     select: {
       id: true,
       email: true,
@@ -39,7 +39,7 @@ export async function updateProfile(data: { name: string; authId?: string }) {
   }
 
   const user = await db.user.update({
-    where: { cognitoId: id },
+    where: { externalAuthId: id },
     data: { name },
     select: {
       id: true,

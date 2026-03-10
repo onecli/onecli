@@ -20,6 +20,7 @@ import { navItems } from "@/lib/nav-items";
 export const DashboardHeader = () => {
   const pathname = usePathname();
   const { resolvedTheme, setTheme } = useTheme();
+
   const navItem = navItems.find((item) => pathname.startsWith(item.url));
   const title = navItem?.title ?? "Dashboard";
 
@@ -61,12 +62,6 @@ export const DashboardHeader = () => {
         </BreadcrumbList>
       </Breadcrumb>
       <div className="ml-auto flex items-center gap-2">
-        {typeof window !== "undefined" &&
-          window.location.hostname !== "app.onecli.sh" && (
-            <span className="rounded-md bg-brand/15 px-2 py-0.5 text-xs font-medium text-brand">
-              DEV
-            </span>
-          )}
         <Button
           variant="ghost"
           size="icon"
