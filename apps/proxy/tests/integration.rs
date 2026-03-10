@@ -13,7 +13,8 @@ use std::time::{Duration, Instant};
 
 /// Encode an agent token as a Basic auth header value: `Basic base64({token}:)`.
 fn basic_auth(token: &str) -> String {
-    let encoded = base64::engine::general_purpose::STANDARD.encode(format!("{token}:"));
+    // Convention: dummy username "x", token as password (like GitHub/GitLab)
+    let encoded = base64::engine::general_purpose::STANDARD.encode(format!("x:{token}"));
     format!("Basic {encoded}")
 }
 
@@ -161,14 +162,15 @@ fn non_connect_request_returns_400() {
 }
 
 #[test]
-fn connect_without_auth_returns_407() {
+fn connect_without_auth_tunnels() {
     let tmp = tempfile::tempdir().expect("create temp dir");
     let (port, mut child) = start_proxy(tmp.path(), None);
 
     let mut stream = TcpStream::connect(format!("127.0.0.1:{port}")).expect("connect to proxy");
-    stream.set_read_timeout(Some(Duration::from_secs(2))).ok();
+    stream.set_read_timeout(Some(Duration::from_secs(5))).ok();
 
-    // CONNECT without Proxy-Authorization
+    // CONNECT without Proxy-Authorization — waits briefly for a peer session,
+    // then tunnels (200) since no session will appear in this test.
     let req = "CONNECT api.anthropic.com:443 HTTP/1.1\r\nHost: api.anthropic.com:443\r\n\r\n";
     stream.write_all(req.as_bytes()).expect("send CONNECT");
 
@@ -177,12 +179,8 @@ fn connect_without_auth_returns_407() {
     let resp = String::from_utf8_lossy(&buf[..n]);
 
     assert!(
-        resp.contains("407"),
-        "expected 407 Proxy Authentication Required, got: {resp}"
-    );
-    assert!(
-        resp.contains("Proxy-Authenticate"),
-        "expected Proxy-Authenticate header, got: {resp}"
+        resp.contains("200"),
+        "expected 200 (tunnel), got: {resp}"
     );
 
     child.kill().ok();

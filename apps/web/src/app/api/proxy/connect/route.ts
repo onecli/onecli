@@ -129,11 +129,23 @@ const buildInjections = (
   injectionConfig: unknown,
 ): Injection[] => {
   switch (type) {
-    case "anthropic":
+    case "anthropic": {
+      const isOAuth = decryptedValue.startsWith("sk-ant-oat");
+      if (isOAuth) {
+        return [
+          {
+            action: "set_header",
+            name: "authorization",
+            value: `Bearer ${decryptedValue}`,
+          },
+          { action: "remove_header", name: "x-api-key" },
+        ];
+      }
       return [
         { action: "set_header", name: "x-api-key", value: decryptedValue },
         { action: "remove_header", name: "authorization" },
       ];
+    }
 
     case "generic": {
       const config = injectionConfig as GenericInjectionConfig | null;

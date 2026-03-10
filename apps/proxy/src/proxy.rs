@@ -154,15 +154,6 @@ async fn handle_request(
     connect_cache: Arc<DashMap<ConnectCacheKey, CachedConnect>>,
 ) -> Result<Response<Empty<Bytes>>, anyhow::Error> {
     if req.method() == Method::CONNECT {
-        // Authenticate: extract agent token from Proxy-Authorization header
-        let agent_token = match inject::extract_agent_token(&req) {
-            Some(token) if !token.is_empty() => token,
-            _ => {
-                warn!(peer = %peer_addr, "CONNECT rejected: missing or invalid proxy auth");
-                return Ok(respond_407());
-            }
-        };
-
         let host = req
             .uri()
             .authority()
@@ -171,32 +162,38 @@ async fn handle_request(
 
         let hostname = strip_port(&host).to_string();
 
-        // Resolve via API (or cache) what to do for this agent + host
-        let connect_response = match connect::resolve(
-            &agent_token,
-            &hostname,
-            &http_client,
-            &api_url,
-            proxy_secret.as_deref(),
-            &connect_cache,
-        )
-        .await
-        {
-            Ok(resp) => resp,
-            Err(ConnectError::InvalidToken) => {
-                warn!(peer = %peer_addr, host = %host, "CONNECT rejected: invalid agent token");
-                return Ok(respond_407());
-            }
-            Err(ConnectError::ApiUnreachable(e)) => {
-                warn!(peer = %peer_addr, host = %host, error = %e, "CONNECT rejected: API unreachable");
-                let mut resp = Response::new(Empty::new());
-                *resp.status_mut() = hyper::StatusCode::BAD_GATEWAY;
-                return Ok(resp);
-            }
-        };
+        // Extract agent token from Proxy-Authorization header.
+        // Convention: Basic base64("x:{token}") — token in password field.
+        let agent_token = inject::extract_agent_token(&req)
+            .filter(|t| !t.is_empty());
 
-        let intercept = connect_response.intercept;
-        let rules = connect_response.rules;
+        let (intercept, rules) = if let Some(ref token) = agent_token {
+            match connect::resolve(
+                token,
+                &hostname,
+                &http_client,
+                &api_url,
+                proxy_secret.as_deref(),
+                &connect_cache,
+            )
+            .await
+            {
+                Ok(resp) => (resp.intercept, resp.rules),
+                Err(ConnectError::InvalidToken) => {
+                    warn!(peer = %peer_addr, host = %host, "CONNECT rejected: invalid agent token");
+                    return Ok(respond_407());
+                }
+                Err(ConnectError::ApiUnreachable(e)) => {
+                    warn!(peer = %peer_addr, host = %host, error = %e, "CONNECT rejected: API unreachable");
+                    let mut resp = Response::new(Empty::new());
+                    *resp.status_mut() = hyper::StatusCode::BAD_GATEWAY;
+                    return Ok(resp);
+                }
+            }
+        } else {
+            // No auth — plain tunnel (no MITM, no injection)
+            (false, vec![])
+        };
 
         info!(
             peer = %peer_addr,

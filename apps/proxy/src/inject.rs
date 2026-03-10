@@ -39,8 +39,14 @@ pub(crate) fn extract_agent_token<T>(req: &Request<T>) -> Option<String> {
         .decode(encoded)
         .ok()?;
     let decoded_str = String::from_utf8(decoded).ok()?;
-    // Format is "{token}:" — strip the trailing colon (empty password)
-    let token = decoded_str.strip_suffix(':').unwrap_or(&decoded_str);
+    // Format is "{username}:{token}" — extract the token from the password field.
+    // Follows the convention of GitHub/GitLab/Bitbucket: dummy username, token as password.
+    // Also handles legacy "{token}:" format (token as username, empty password).
+    let token = match decoded_str.split_once(':') {
+        Some((_, pass)) if !pass.is_empty() => pass,
+        Some((user, _)) => user, // empty password → token is the username
+        None => &decoded_str,
+    };
     Some(token.to_string())
 }
 
@@ -128,18 +134,30 @@ mod tests {
     }
 
     fn encode_basic_auth(token: &str) -> String {
-        let encoded = base64::engine::general_purpose::STANDARD.encode(format!("{token}:"));
+        // Convention: dummy username "x", token as password (like GitHub/GitLab)
+        let encoded =
+            base64::engine::general_purpose::STANDARD.encode(format!("x:{token}"));
         format!("Basic {encoded}")
     }
 
     #[test]
     fn extract_token_valid() {
+        // Standard format: x:token (token in password field)
         let req = request_with_proxy_auth(Some(&encode_basic_auth("aoc_test123")));
         assert_eq!(extract_agent_token(&req).as_deref(), Some("aoc_test123"));
     }
 
     #[test]
-    fn extract_token_without_trailing_colon() {
+    fn extract_token_legacy_username_format() {
+        // Legacy format: token: (token in username field, empty password)
+        let encoded =
+            base64::engine::general_purpose::STANDARD.encode("aoc_legacy:");
+        let req = request_with_proxy_auth(Some(&format!("Basic {encoded}")));
+        assert_eq!(extract_agent_token(&req).as_deref(), Some("aoc_legacy"));
+    }
+
+    #[test]
+    fn extract_token_without_colon() {
         // Some clients might send just the token without ":"
         let encoded = base64::engine::general_purpose::STANDARD.encode("aoc_nocolon");
         let req = request_with_proxy_auth(Some(&format!("Basic {encoded}")));
