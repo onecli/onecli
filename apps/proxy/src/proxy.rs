@@ -164,8 +164,7 @@ async fn handle_request(
 
         // Extract agent token from Proxy-Authorization header.
         // Convention: Basic base64("x:{token}") — token in password field.
-        let agent_token = inject::extract_agent_token(&req)
-            .filter(|t| !t.is_empty());
+        let agent_token = inject::extract_agent_token(&req).filter(|t| !t.is_empty());
 
         let (intercept, rules) = if let Some(ref token) = agent_token {
             match connect::resolve(

@@ -135,8 +135,7 @@ mod tests {
 
     fn encode_basic_auth(token: &str) -> String {
         // Convention: dummy username "x", token as password (like GitHub/GitLab)
-        let encoded =
-            base64::engine::general_purpose::STANDARD.encode(format!("x:{token}"));
+        let encoded = base64::engine::general_purpose::STANDARD.encode(format!("x:{token}"));
         format!("Basic {encoded}")
     }
 
@@ -150,8 +149,7 @@ mod tests {
     #[test]
     fn extract_token_legacy_username_format() {
         // Legacy format: token: (token in username field, empty password)
-        let encoded =
-            base64::engine::general_purpose::STANDARD.encode("aoc_legacy:");
+        let encoded = base64::engine::general_purpose::STANDARD.encode("aoc_legacy:");
         let req = request_with_proxy_auth(Some(&format!("Basic {encoded}")));
         assert_eq!(extract_agent_token(&req).as_deref(), Some("aoc_legacy"));
     }

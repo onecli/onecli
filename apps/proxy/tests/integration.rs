@@ -178,10 +178,7 @@ fn connect_without_auth_tunnels() {
     let n = stream.read(&mut buf).expect("read response");
     let resp = String::from_utf8_lossy(&buf[..n]);
 
-    assert!(
-        resp.contains("200"),
-        "expected 200 (tunnel), got: {resp}"
-    );
+    assert!(resp.contains("200"), "expected 200 (tunnel), got: {resp}");
 
     child.kill().ok();
     child.wait().ok();
