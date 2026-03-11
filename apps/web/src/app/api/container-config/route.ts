@@ -83,6 +83,8 @@ export async function GET(request: NextRequest) {
         HTTP_PROXY: proxyUrl,
         NODE_EXTRA_CA_CERTS: CA_CONTAINER_PATH,
         NODE_USE_ENV_PROXY: "1",
+        CLAUDE_CODE_OAUTH_TOKEN: "sk-ant-...",
+        ANTHROPIC_API_KEY: "sk-ant-...",
       },
       caCertificate,
       caCertificateContainerPath: CA_CONTAINER_PATH,
