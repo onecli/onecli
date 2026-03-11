@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.0.1](https://github.com/onecli/onecli/compare/v1.0.0...v1.0.1) (2026-03-11)
+
+
+### Bug Fixes
+
+* add anthropic place holders ([#17](https://github.com/onecli/onecli/issues/17)) ([a359a26](https://github.com/onecli/onecli/commit/a359a26914932251cd44d0c9b8da7edea8a791bb))
+
 ## 1.0.0 (2026-03-11)
 
 
