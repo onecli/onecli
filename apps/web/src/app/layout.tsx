@@ -4,6 +4,7 @@ import { Source_Serif_4 } from "next/font/google";
 import "@onecli/ui/globals.css";
 import "./globals.css";
 import { AuthProvider } from "@/providers/auth-provider";
+import { getAuthMode } from "@/lib/auth/auth-mode";
 import { ThemeProvider } from "@/providers/theme-provider";
 import { Toaster } from "@onecli/ui/components/sonner";
 
@@ -20,6 +21,11 @@ const sourceSerif = Source_Serif_4({
   variable: "--font-serif",
 });
 
+// Auth mode is determined at runtime from /app/data/runtime-config.json
+// (written by the Docker entrypoint). force-dynamic ensures the layout
+// re-renders per request instead of serving prebuilt static pages.
+export const dynamic = "force-dynamic";
+
 export const metadata: Metadata = {
   title: {
     default: "OneCLI",
@@ -33,12 +39,14 @@ export default function RootLayout({
 }: Readonly<{
   children: React.ReactNode;
 }>) {
+  const authMode = getAuthMode();
+
   return (
     <html lang="en" suppressHydrationWarning>
       <body
         className={`${geistSans.variable} ${geistMono.variable} ${sourceSerif.variable}`}
       >
-        <AuthProvider>
+        <AuthProvider authMode={authMode}>
           <ThemeProvider
             attribute="class"
             defaultTheme="dark"

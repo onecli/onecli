@@ -29,6 +29,35 @@ else
   node /app/packages/db/scripts/init-dev-db.ts
 fi
 
+# Auto-generate SECRET_ENCRYPTION_KEY for OSS if not provided.
+# Persisted to /app/data/ so encrypted secrets survive container restarts.
+# Cloud edition uses AWS KMS instead (key provided via env var / Secrets Manager).
+if [ "$NEXT_PUBLIC_EDITION" != "cloud" ] && [ -z "$SECRET_ENCRYPTION_KEY" ]; then
+  SECRET_KEY_FILE="/app/data/secret-encryption-key"
+  if [ ! -f "$SECRET_KEY_FILE" ] || [ ! -s "$SECRET_KEY_FILE" ]; then
+    echo "Generating secret encryption key..."
+    head -c 32 /dev/urandom | base64 > "$SECRET_KEY_FILE"
+    chmod 600 "$SECRET_KEY_FILE"
+  fi
+  export SECRET_ENCRYPTION_KEY
+  SECRET_ENCRYPTION_KEY=$(cat "$SECRET_KEY_FILE")
+fi
+
+# Write runtime config for Next.js (auth mode is determined at container start,
+# not at build time, so the same image works for local and OAuth modes).
+if [ "$NEXT_PUBLIC_EDITION" = "cloud" ]; then
+  AUTH_MODE="cloud"
+elif [ -n "$NEXTAUTH_SECRET" ]; then
+  AUTH_MODE="oauth"
+else
+  AUTH_MODE="local"
+fi
+OAUTH_CONFIGURED="false"
+if [ "$AUTH_MODE" = "cloud" ] || [ -n "$GOOGLE_CLIENT_ID" ]; then
+  OAUTH_CONFIGURED="true"
+fi
+printf '{"authMode":"%s","oauthConfigured":%s}\n' "$AUTH_MODE" "$OAUTH_CONFIGURED" > /app/data/runtime-config.json
+
 # Start proxy in background
 echo "Starting proxy on port ${PROXY_PORT:-18080}..."
 onecli-proxy --port "${PROXY_PORT:-18080}" --data-dir /app/data &

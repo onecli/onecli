@@ -1,5 +1,6 @@
 import { auth } from "@/lib/auth/nextauth-config";
 import { db } from "@onecli/db";
+import { getAuthMode } from "./auth-mode";
 import type { AuthUser } from "./types";
 
 const LOCAL_AUTH_ID = "local-admin";
@@ -26,7 +27,7 @@ const ensureLocalUser = async () => {
 };
 
 export const getServerSessionImpl = async (): Promise<AuthUser | null> => {
-  if (process.env.NEXT_PUBLIC_AUTH_MODE === "local") {
+  if (getAuthMode() === "local") {
     await ensureLocalUser();
     return LOCAL_USER;
   }

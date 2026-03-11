@@ -20,7 +20,9 @@
     "PROXY_SECRET",
     "PROXY_SECRET_FILE",
     "PROXY_CA_PEM_FILE",
-    "PROXY_CA_CERT"
+    "PROXY_CA_CERT",
+    "PROXY_HOST",
+    "PROXY_PORT"
   ],
   "tasks": {
     "build": {
@@ -38,6 +40,14 @@
     },
     "@onecli/proxy#check": {
       "inputs": ["src/**", "Cargo.toml"]
+    },
+    "@onecli/proxy#check-types": {
+      "inputs": ["src/**", "Cargo.toml", "Cargo.lock"],
+      "outputs": []
+    },
+    "@onecli/proxy#lint": {
+      "inputs": ["src/**", "Cargo.toml"],
+      "outputs": []
     },
     "lint": {
       "dependsOn": ["^lint"]
