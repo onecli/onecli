@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.0.2](https://github.com/onecli/onecli/compare/v1.0.1...v1.0.2) (2026-03-11)
+
+
+### Bug Fixes
+
+* improve Docker publish performance with native ARM builds and cargo-chef ([#19](https://github.com/onecli/onecli/issues/19)) ([c7b02c2](https://github.com/onecli/onecli/commit/c7b02c24d6c3141c2ccd761c506d54a0f666353c))
+
 ## [1.0.1](https://github.com/onecli/onecli/compare/v1.0.0...v1.0.1) (2026-03-11)
 
 
