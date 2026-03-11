@@ -41,6 +41,14 @@
     "@onecli/proxy#check": {
       "inputs": ["src/**", "Cargo.toml"]
     },
+    "@onecli/proxy#check-types": {
+      "inputs": ["src/**", "Cargo.toml", "Cargo.lock"],
+      "outputs": []
+    },
+    "@onecli/proxy#lint": {
+      "inputs": ["src/**", "Cargo.toml"],
+      "outputs": []
+    },
     "lint": {
       "dependsOn": ["^lint"]
     },
