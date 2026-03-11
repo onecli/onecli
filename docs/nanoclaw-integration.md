@@ -10,7 +10,7 @@ Integrate OneCLI with [Nanoclaw](https://github.com/nanoclaw/nanoclaw) or any Do
 ## Install
 
 ```bash
-npm install @onecli-sdk/node
+npm install @onecli-sh/sdk
 ```
 
 ## Environment Variables
@@ -27,7 +27,7 @@ For self-hosted: `ONECLI_URL=http://localhost:3000`
 ## Quick Start
 
 ```typescript
-import { OneCLI } from "@onecli-sdk/node";
+import { OneCLI } from "@onecli-sh/sdk";
 
 // Reads ONECLI_API_KEY and ONECLI_URL from environment
 const onecli = new OneCLI();
@@ -41,7 +41,7 @@ await exec("docker", [...args, "agent-image:latest"]);
 ## Usage
 
 ```typescript
-import { OneCLI } from "@onecli-sdk/node";
+import { OneCLI } from "@onecli-sh/sdk";
 
 const onecli = new OneCLI({
   apiKey: process.env.ONECLI_API_KEY, // or omit to read from env
@@ -92,7 +92,7 @@ const config = await onecli.getContainerConfig();
 In Nanoclaw's container runner, add OneCLI config before spawning the container:
 
 ```typescript
-import { OneCLI } from "@onecli-sdk/node";
+import { OneCLI } from "@onecli-sh/sdk";
 
 // Inject OneCLI proxy config (skipped if ONECLI_API_KEY is not set)
 const onecliApiKey = process.env.ONECLI_API_KEY;
