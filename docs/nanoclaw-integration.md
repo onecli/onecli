@@ -17,43 +17,39 @@ npm install @onecli-sdk/node
 
 The orchestrator needs two env vars:
 
-| Variable     | Required | Description                                              |
-| ------------ | -------- | -------------------------------------------------------- |
-| `ONECLI_KEY` | Yes      | User API key from OneCLI dashboard (`oc_...`)            |
-| `ONECLI_URL` | No       | OneCLI instance URL. Defaults to `https://app.onecli.sh` |
+| Variable         | Required | Description                                              |
+| ---------------- | -------- | -------------------------------------------------------- |
+| `ONECLI_API_KEY` | Yes      | User API key from OneCLI dashboard (`oc_...`)            |
+| `ONECLI_URL`     | No       | OneCLI instance URL. Defaults to `https://app.onecli.sh` |
 
 For self-hosted: `ONECLI_URL=http://localhost:3000`
 
-## Minimal Integration (standalone function)
-
-Three lines of code:
-
-```typescript
-import { applyOneCLIConfig } from "@onecli-sdk/node";
-
-// In your container startup logic:
-const args = ["run", "-i", "--rm", "--name", "my-agent"];
-await applyOneCLIConfig(args, process.env.ONECLI_KEY, process.env.ONECLI_URL);
-// args is now mutated with -e HTTPS_PROXY=..., -v ca.pem:..., etc.
-await exec("docker", [...args, "agent-image:latest"]);
-```
-
-`applyOneCLIConfig` returns `true` if the proxy was configured, `false` if OneCLI was unreachable. On failure the container runs without the proxy.
-
-## Class-based Integration
-
-For more control:
+## Quick Start
 
 ```typescript
 import { OneCLI } from "@onecli-sdk/node";
 
-const oc = new OneCLI({
-  apiKey: process.env.ONECLI_KEY!,
+// Reads ONECLI_API_KEY and ONECLI_URL from environment
+const onecli = new OneCLI();
+
+const args = ["run", "-i", "--rm", "--name", "my-agent"];
+await onecli.applyContainerConfig(args);
+// args is now mutated with -e HTTPS_PROXY=..., -v ca.pem:..., etc.
+await exec("docker", [...args, "agent-image:latest"]);
+```
+
+## Usage
+
+```typescript
+import { OneCLI } from "@onecli-sdk/node";
+
+const onecli = new OneCLI({
+  apiKey: process.env.ONECLI_API_KEY, // or omit to read from env
   url: process.env.ONECLI_URL, // omit for cloud (app.onecli.sh)
 });
 
 const args = ["run", "-i", "--rm", "--name", "my-agent"];
-const active = await oc.applyContainerConfig(args, {
+const active = await onecli.applyContainerConfig(args, {
   combineCaBundle: true, // merge system + OneCLI CAs (default: true)
   addHostMapping: true, // --add-host on Linux (default: true)
 });
@@ -83,7 +79,7 @@ Traffic from the container goes through the proxy, which injects credentials on 
 If you need the raw config (e.g. for a non-Docker runtime):
 
 ```typescript
-const config = await oc.getContainerConfig();
+const config = await onecli.getContainerConfig();
 // {
 //   env: { HTTPS_PROXY: "...", HTTP_PROXY: "...", NODE_EXTRA_CA_CERTS: "...", NODE_USE_ENV_PROXY: "1" },
 //   caCertificate: "-----BEGIN CERTIFICATE-----\n...",
@@ -93,26 +89,23 @@ const config = await oc.getContainerConfig();
 
 ## Nanoclaw-specific Example
 
-In Nanoclaw's `AgentRunner`, add OneCLI config before spawning the container:
+In Nanoclaw's container runner, add OneCLI config before spawning the container:
 
 ```typescript
-import { applyOneCLIConfig } from "@onecli-sdk/node";
+import { OneCLI } from "@onecli-sdk/node";
 
-class AgentRunner {
-  async startAgent(image: string, name: string) {
-    const args = ["run", "-i", "--rm", "--name", name];
-
-    // Inject OneCLI proxy config (no-op if ONECLI_KEY is not set)
-    await applyOneCLIConfig(
-      args,
-      process.env.ONECLI_KEY,
-      process.env.ONECLI_URL,
-    );
-
-    args.push(image);
-    return this.exec("docker", args);
+// Inject OneCLI proxy config (skipped if ONECLI_API_KEY is not set)
+const onecliApiKey = process.env.ONECLI_API_KEY;
+if (onecliApiKey) {
+  const onecli = new OneCLI({
+    apiKey: onecliApiKey,
+    url: process.env.ONECLI_URL,
+  });
+  const active = await onecli.applyContainerConfig(args);
+  if (active) {
+    console.log("OneCLI proxy config applied");
   }
 }
 ```
 
-`applyOneCLIConfig` returns `false` when `apiKey` is falsy, so it's safe to always call — users without OneCLI just don't set `ONECLI_KEY`.
+Users without OneCLI simply don't set `ONECLI_API_KEY` — no code changes needed.
