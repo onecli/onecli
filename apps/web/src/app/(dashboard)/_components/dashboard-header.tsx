@@ -6,6 +6,11 @@ import { Moon, Sun } from "lucide-react";
 import { SidebarTrigger } from "@onecli/ui/components/sidebar";
 import { Separator } from "@onecli/ui/components/separator";
 import { Button } from "@onecli/ui/components/button";
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipTrigger,
+} from "@onecli/ui/components/tooltip";
 import Link from "next/link";
 import {
   Breadcrumb,
@@ -24,13 +29,11 @@ export const DashboardHeader = () => {
   const navItem = navItems.find((item) => pathname.startsWith(item.url));
   const title = navItem?.title ?? "Dashboard";
 
-  // Detect sub-pages (e.g. /settings/profile → ["profile"])
   const subPath = navItem
     ? pathname.slice(navItem.url.length).replace(/^\//, "")
     : "";
   const subSegments = subPath ? subPath.split("/") : [];
 
-  // Build a readable sub-page label from the last segment
   const lastSegment = subSegments[subSegments.length - 1];
   const subPageLabel = lastSegment
     ? lastSegment.charAt(0).toUpperCase() + lastSegment.slice(1)
@@ -62,15 +65,22 @@ export const DashboardHeader = () => {
         </BreadcrumbList>
       </Breadcrumb>
       <div className="ml-auto flex items-center gap-2">
-        <Button
-          variant="ghost"
-          size="icon"
-          onClick={() => setTheme(resolvedTheme === "dark" ? "light" : "dark")}
-        >
-          <Sun className="size-4 rotate-0 scale-100 transition-all dark:-rotate-90 dark:scale-0" />
-          <Moon className="absolute size-4 rotate-90 scale-0 transition-all dark:rotate-0 dark:scale-100" />
-          <span className="sr-only">Toggle theme</span>
-        </Button>
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <Button
+              variant="ghost"
+              size="icon"
+              onClick={() =>
+                setTheme(resolvedTheme === "dark" ? "light" : "dark")
+              }
+            >
+              <Sun className="size-4 rotate-0 scale-100 transition-all dark:-rotate-90 dark:scale-0" />
+              <Moon className="absolute size-4 rotate-90 scale-0 transition-all dark:rotate-0 dark:scale-100" />
+              <span className="sr-only">Toggle theme</span>
+            </Button>
+          </TooltipTrigger>
+          <TooltipContent>Toggle theme</TooltipContent>
+        </Tooltip>
       </div>
     </div>
   );

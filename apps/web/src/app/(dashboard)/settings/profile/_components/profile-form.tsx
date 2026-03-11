@@ -1,8 +1,6 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { Loader2 } from "lucide-react";
-import { toast } from "sonner";
 import {
   Card,
   CardContent,
@@ -13,10 +11,12 @@ import {
 import { Button } from "@onecli/ui/components/button";
 import { Input } from "@onecli/ui/components/input";
 import { Label } from "@onecli/ui/components/label";
+import { Skeleton } from "@onecli/ui/components/skeleton";
+import { toast } from "sonner";
 import { useAuth } from "@/providers/auth-provider";
 import { getUserByAuthId, updateProfile } from "@/lib/actions/user";
 
-export function ProfileForm() {
+export const ProfileForm = () => {
   const { user: authUser } = useAuth();
   const [name, setName] = useState("");
   const [initialName, setInitialName] = useState("");
@@ -52,10 +52,23 @@ export function ProfileForm() {
 
   if (loading) {
     return (
-      <div className="flex items-center gap-2 py-8 text-sm text-muted-foreground">
-        <Loader2 className="size-4 animate-spin" />
-        Loading profile...
-      </div>
+      <Card>
+        <CardHeader>
+          <Skeleton className="h-5 w-28" />
+          <Skeleton className="h-4 w-40" />
+        </CardHeader>
+        <CardContent className="flex flex-col gap-4">
+          <div className="grid gap-2">
+            <Skeleton className="h-4 w-12" />
+            <Skeleton className="h-9 w-full" />
+          </div>
+          <div className="grid gap-2">
+            <Skeleton className="h-4 w-12" />
+            <Skeleton className="h-9 w-full" />
+          </div>
+          <Skeleton className="h-9 w-24" />
+        </CardContent>
+      </Card>
     );
   }
 
@@ -84,7 +97,8 @@ export function ProfileForm() {
         </div>
         <Button
           onClick={handleSave}
-          disabled={saving || name === initialName}
+          loading={saving}
+          disabled={name === initialName}
           className="w-fit"
         >
           {saving ? "Saving..." : "Save changes"}
@@ -92,4 +106,4 @@ export function ProfileForm() {
       </CardContent>
     </Card>
   );
-}
+};

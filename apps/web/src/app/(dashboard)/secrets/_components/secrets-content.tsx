@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState, useCallback } from "react";
-import { Plus } from "lucide-react";
+import { Plus, KeyRound } from "lucide-react";
 import { useAuth } from "@/providers/auth-provider";
 import { getSecrets } from "@/lib/actions/secrets";
 import { Button } from "@onecli/ui/components/button";
@@ -70,9 +70,13 @@ export const SecretsContent = () => {
       </div>
 
       {secrets.length === 0 ? (
-        <Card className="flex flex-col items-center justify-center py-12 text-center">
-          <p className="text-muted-foreground text-sm">
-            No secrets yet. Add one to get started.
+        <Card className="flex flex-col items-center justify-center py-16 text-center">
+          <div className="bg-muted mb-4 flex size-12 items-center justify-center rounded-full">
+            <KeyRound className="text-muted-foreground size-6" />
+          </div>
+          <p className="text-sm font-medium">No secrets yet</p>
+          <p className="text-muted-foreground mt-1 max-w-xs text-xs">
+            Add a secret to inject encrypted credentials into proxy requests.
           </p>
         </Card>
       ) : (

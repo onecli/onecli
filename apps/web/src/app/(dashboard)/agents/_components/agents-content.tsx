@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState, useCallback } from "react";
-import { Plus } from "lucide-react";
+import { Plus, Bot } from "lucide-react";
 import { useAuth } from "@/providers/auth-provider";
 import { getAgents } from "@/lib/actions/agents";
 import { Button } from "@onecli/ui/components/button";
@@ -66,9 +66,14 @@ export const AgentsContent = () => {
       </div>
 
       {agents.length === 0 ? (
-        <Card className="flex flex-col items-center justify-center py-12 text-center">
-          <p className="text-muted-foreground text-sm">
-            No agents yet. Create one to get started.
+        <Card className="flex flex-col items-center justify-center py-16 text-center">
+          <div className="bg-muted mb-4 flex size-12 items-center justify-center rounded-full">
+            <Bot className="text-muted-foreground size-6" />
+          </div>
+          <p className="text-sm font-medium">No agents yet</p>
+          <p className="text-muted-foreground mt-1 max-w-xs text-xs">
+            Create an agent to generate an access token for connecting to the
+            proxy.
           </p>
         </Card>
       ) : (

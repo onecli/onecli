@@ -125,7 +125,8 @@ export const CreateAgentDialog = ({
               </Button>
               <Button
                 onClick={handleCreate}
-                disabled={!name.trim() || creating}
+                loading={creating}
+                disabled={!name.trim()}
               >
                 {creating ? "Creating..." : "Create"}
               </Button>

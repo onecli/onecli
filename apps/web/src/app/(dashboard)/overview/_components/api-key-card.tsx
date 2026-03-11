@@ -11,6 +11,7 @@ import {
   CardTitle,
 } from "@onecli/ui/components/card";
 import { Button } from "@onecli/ui/components/button";
+import { Skeleton } from "@onecli/ui/components/skeleton";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -71,22 +72,24 @@ export const ApiKeyCard = () => {
       </CardHeader>
       <CardContent>
         <div className="flex items-center gap-2">
-          <code className="bg-muted flex-1 rounded-md border px-3 py-2 font-mono text-sm select-none">
-            {loading ? (
-              <span className="text-muted-foreground">Loading...</span>
-            ) : !apiKey ? (
-              <span className="text-muted-foreground">No API key yet</span>
-            ) : revealed ? (
-              apiKey
-            ) : (
-              truncatedKey
-            )}
-          </code>
+          {loading ? (
+            <Skeleton className="h-9 flex-1 rounded-md" />
+          ) : (
+            <code className="bg-muted flex-1 rounded-md border px-3 py-2 font-mono text-sm select-none">
+              {!apiKey ? (
+                <span className="text-muted-foreground">No API key yet</span>
+              ) : revealed ? (
+                apiKey
+              ) : (
+                truncatedKey
+              )}
+            </code>
+          )}
           <Button
             variant="ghost"
             size="icon"
             onClick={() => setRevealed(!revealed)}
-            disabled={!apiKey}
+            disabled={loading || !apiKey}
           >
             {revealed ? (
               <EyeOff className="size-4" />
@@ -98,7 +101,7 @@ export const ApiKeyCard = () => {
             variant="ghost"
             size="icon"
             onClick={() => copy(apiKey)}
-            disabled={!apiKey}
+            disabled={loading || !apiKey}
           >
             {copied ? (
               <Check className="size-4 text-green-500" />
@@ -111,7 +114,7 @@ export const ApiKeyCard = () => {
               <Button
                 variant="ghost"
                 size="icon"
-                disabled={regenerating || !apiKey}
+                disabled={loading || regenerating || !apiKey}
               >
                 <RefreshCw
                   className={`size-4 ${regenerating ? "animate-spin" : ""}`}

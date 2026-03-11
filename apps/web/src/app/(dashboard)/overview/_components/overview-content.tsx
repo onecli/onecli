@@ -3,10 +3,11 @@
 import { useEffect, useState } from "react";
 import { useAuth } from "@/providers/auth-provider";
 import { getProxyCounts } from "@/lib/actions/counts";
+import { PageHeader } from "@dashboard/page-header";
 import { ApiKeyCard } from "./api-key-card";
 import { StatsCards } from "./stats-cards";
 
-export function OverviewContent() {
+export const OverviewContent = () => {
   const { user } = useAuth();
   const [proxyCounts, setProxyCounts] = useState({
     agents: 0,
@@ -25,16 +26,12 @@ export function OverviewContent() {
   }, [user?.id]);
 
   return (
-    <div className="flex flex-1 flex-col gap-6 p-6 max-w-5xl">
-      <div>
-        <h1 className="text-2xl font-semibold tracking-tight">Overview</h1>
-        <p className="text-muted-foreground text-sm">
-          Your OneCLI dashboard at a glance.
-        </p>
-      </div>
-
+    <div className="flex flex-1 flex-col gap-6 max-w-5xl">
+      <PageHeader
+        title="Overview"
+        description="Your OneCLI dashboard at a glance."
+      />
       <ApiKeyCard />
-
       <StatsCards
         agentCount={proxyCounts.agents}
         secretCount={proxyCounts.secrets}
@@ -42,4 +39,4 @@ export function OverviewContent() {
       />
     </div>
   );
-}
+};

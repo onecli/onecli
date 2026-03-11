@@ -195,7 +195,8 @@ export const EditSecretDialog = ({
           </Button>
           <Button
             onClick={handleSave}
-            disabled={!hasChanges || !isValid || saving}
+            loading={saving}
+            disabled={!hasChanges || !isValid}
           >
             {saving ? "Saving..." : "Save Changes"}
           </Button>
