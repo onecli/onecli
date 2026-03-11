@@ -58,6 +58,8 @@ ENV NO_COLOR=1
 ENV FORCE_COLOR=0
 ENV PORT=3000
 ENV HOSTNAME="0.0.0.0"
+ENV AUTH_TRUST_HOST=true
+ENV NEXTAUTH_URL=http://localhost:3000
 
 # Proxy binary from Rust build
 COPY --from=proxy-builder /build/target/release/onecli-proxy /usr/local/bin/onecli-proxy

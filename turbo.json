@@ -20,7 +20,9 @@
     "PROXY_SECRET",
     "PROXY_SECRET_FILE",
     "PROXY_CA_PEM_FILE",
-    "PROXY_CA_CERT"
+    "PROXY_CA_CERT",
+    "PROXY_HOST",
+    "PROXY_PORT"
   ],
   "tasks": {
     "build": {

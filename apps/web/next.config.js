@@ -10,11 +10,6 @@ const nextConfig = {
   ],
   env: {
     NEXT_PUBLIC_EDITION: process.env.NEXT_PUBLIC_EDITION || "oss",
-    NEXT_PUBLIC_AUTH_MODE: isCloud
-      ? "cloud"
-      : process.env.NEXTAUTH_SECRET
-        ? "oauth"
-        : "local",
   },
   turbopack: {
     resolveAlias: isCloud

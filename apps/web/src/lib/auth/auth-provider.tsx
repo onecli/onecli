@@ -9,8 +9,7 @@ import {
 } from "next-auth/react";
 import { AuthContext } from "@/providers/auth-provider";
 import type { AuthUser, AuthContextValue } from "@/lib/auth/types";
-
-const authMode = process.env.NEXT_PUBLIC_AUTH_MODE;
+import type { AuthMode } from "@/lib/auth/auth-mode";
 
 const LOCAL_USER: AuthUser = {
   id: "local-admin",
@@ -67,7 +66,13 @@ const OAuthInner = ({ children }: { children: ReactNode }) => {
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;
 };
 
-export const AuthProviderImpl = ({ children }: { children: ReactNode }) => {
+export const AuthProviderImpl = ({
+  children,
+  authMode,
+}: {
+  children: ReactNode;
+  authMode: AuthMode;
+}) => {
   if (authMode === "local") {
     return <LocalAuthProvider>{children}</LocalAuthProvider>;
   }
