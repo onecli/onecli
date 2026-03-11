@@ -2,13 +2,26 @@
 # Build context: repo root (run with `docker build -f docker/Dockerfile .`)
 
 # ──────────────────────────────────────────────
-# Stage 1: Build Rust proxy
+# Stage 1a: Install cargo-chef
 # ──────────────────────────────────────────────
-FROM rust:1-alpine AS proxy-builder
-RUN apk add --no-cache musl-dev
+FROM rust:1-alpine AS chef
+RUN apk add --no-cache musl-dev && cargo install cargo-chef
 WORKDIR /build
-COPY apps/proxy/Cargo.toml apps/proxy/Cargo.lock ./
-COPY apps/proxy/src ./src
+
+# ──────────────────────────────────────────────
+# Stage 1b: Prepare dependency recipe
+# ──────────────────────────────────────────────
+FROM chef AS planner
+COPY apps/proxy/ .
+RUN cargo chef prepare --recipe-path recipe.json
+
+# ──────────────────────────────────────────────
+# Stage 1c: Build Rust proxy
+# ──────────────────────────────────────────────
+FROM chef AS proxy-builder
+COPY --from=planner /build/recipe.json recipe.json
+RUN cargo chef cook --release --recipe-path recipe.json
+COPY apps/proxy/ .
 RUN cargo build --release
 
 # ──────────────────────────────────────────────
