@@ -1,5 +1,17 @@
 # Changelog
 
+## [1.1.0](https://github.com/onecli/onecli/compare/v1.0.3...v1.1.0) (2026-03-12)
+
+
+### Features
+
+* add 'Try it' demo button in dashboard header ([#23](https://github.com/onecli/onecli/issues/23)) ([221cb6c](https://github.com/onecli/onecli/commit/221cb6c25f4dfc9e8852f4cf450d87e0d2a7ae19))
+
+
+### Bug Fixes
+
+* crop excess whitespace from logo animations ([#27](https://github.com/onecli/onecli/issues/27)) ([3d1d39a](https://github.com/onecli/onecli/commit/3d1d39a7c6aa7f9ddb868220f83204afcc977c74))
+
 ## [1.0.3](https://github.com/onecli/onecli/compare/v1.0.2...v1.0.3) (2026-03-12)
 
 
