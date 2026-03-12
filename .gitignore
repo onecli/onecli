@@ -49,3 +49,6 @@ cdk.out
 
 # Rust
 apps/proxy/target/
+
+# Playwright MCP
+.playwright-mcp

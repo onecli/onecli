@@ -1,3 +1,134 @@
-# onecli-cloud
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="assets/onecli-logo-dark.gif">
+  <source media="(prefers-color-scheme: light)" srcset="assets/onecli-logo-light.gif">
+  <img alt="OneCLI" src="assets/onecli-logo-light.gif" width="100%">
+</picture>
 
-The cloud app.
+<p align="center">
+  <b>The secret vault for AI agents.</b><br/>
+  Store once. Inject anywhere. Agents never see the keys.
+</p>
+
+<p align="center">
+  <a href="https://onecli.sh">Website</a> &middot;
+  <a href="https://onecli.sh/docs">Docs</a> &middot;
+  <a href="https://app.onecli.sh">Cloud</a>
+</p>
+
+---
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="assets/onecli-flow-dark.gif">
+  <source media="(prefers-color-scheme: light)" srcset="assets/onecli-flow-light.gif">
+  <img alt="How OneCLI works" src="assets/onecli-flow-light.gif" width="100%">
+</picture>
+
+## What is OneCLI?
+
+OneCLI is an open-source gateway that sits between your AI agents and the services they call. Instead of baking API keys into every agent, you store credentials once in OneCLI and the gateway injects them transparently. Agents never see the secrets.
+
+**Why we built it:** AI agents need to call dozens of APIs, but giving each agent raw credentials is a security nightmare. OneCLI solves this with a single gateway that handles auth, so you get one place to manage access, rotate keys, and see what every agent is doing.
+
+## Architecture
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="assets/onecli-architecture-dark.svg">
+  <source media="(prefers-color-scheme: light)" srcset="assets/onecli-architecture-light.svg">
+  <img alt="OneCLI Architecture" src="assets/onecli-architecture-dark.svg" width="100%">
+</picture>
+
+- **[Rust Gateway](apps/proxy)**: fast HTTP gateway that intercepts outbound requests and injects credentials. Agents authenticate with access tokens via `Proxy-Authorization` headers.
+- **[Web Dashboard](apps/web)**: Next.js app for managing agents, secrets, and permissions. Provides the API the gateway uses to resolve which credentials to inject for each request.
+- **Secret Store**: AES-256-GCM encrypted credential storage. Secrets are decrypted only at request time, matched by host and path patterns, and injected by the gateway as headers.
+
+## Quick Start
+
+The fastest way to run OneCLI locally (no external database or config needed):
+
+```bash
+docker run -p 10254:10254 -p 10255:10255 -v onecli-data:/app/data ghcr.io/onecli/onecli-cloud
+```
+
+Open **http://localhost:10254**, create an agent, add your secrets, and point your agent's HTTP gateway to `localhost:10255`.
+
+### Or with Docker Compose
+
+```bash
+git clone https://github.com/onecli/onecli-cloud.git
+cd onecli-cloud/docker
+docker compose up
+```
+
+## Features
+
+- **Transparent credential injection**: agents make normal HTTP calls, the gateway handles auth
+- **Encrypted secret storage**: AES-256-GCM encryption at rest, decrypted only at request time
+- **Host & path matching**: route secrets to the right API endpoints with pattern matching
+- **Multi-agent support**: each agent gets its own access token with scoped permissions
+- **No external dependencies**: runs with embedded PGlite (or bring your own PostgreSQL)
+- **Two auth modes**: single-user (no login) for local use, or Google OAuth for teams
+- **Rust gateway**: fast, memory-safe HTTP gateway with MITM interception for HTTPS
+
+## Project Structure
+
+```
+apps/
+  web/            # Next.js app — dashboard & API (port 10254)
+  proxy/          # Rust gateway — credential injection (port 10255)
+packages/
+  db/             # Prisma ORM + migrations + PGlite
+  ui/             # Shared UI components (shadcn/ui)
+docker/
+  Dockerfile      # Single-container build (gateway + web + PGlite)
+  docker-compose.yml
+```
+
+## Local Development
+
+### Prerequisites
+
+- **Node.js** >= 18
+- **pnpm** 9+
+- **Rust** (for the gateway)
+
+### Setup
+
+```bash
+pnpm install
+cp .env.example .env
+pnpm db:generate
+pnpm dev
+```
+
+Dashboard at **http://localhost:10254**, gateway at **http://localhost:10255**.
+
+### Commands
+
+| Command            | Description                     |
+| ------------------ | ------------------------------- |
+| `pnpm dev`         | Start web + gateway in dev mode |
+| `pnpm build`       | Production build                |
+| `pnpm check`       | Lint + types + format           |
+| `pnpm db:generate` | Generate Prisma client          |
+| `pnpm db:migrate`  | Run database migrations         |
+| `pnpm db:studio`   | Open Prisma Studio              |
+
+## Configuration
+
+All environment variables are optional for local development:
+
+| Variable                | Description                       | Default          |
+| ----------------------- | --------------------------------- | ---------------- |
+| `DATABASE_URL`          | PostgreSQL connection string      | Embedded PGlite  |
+| `NEXTAUTH_SECRET`       | Enables Google OAuth (multi-user) | Single-user mode |
+| `GOOGLE_CLIENT_ID`      | Google OAuth client ID            | —                |
+| `GOOGLE_CLIENT_SECRET`  | Google OAuth client secret        | —                |
+| `SECRET_ENCRYPTION_KEY` | AES-256-GCM encryption key        | Auto-generated   |
+
+## Contributing
+
+We welcome contributions. Please open an issue first to discuss what you'd like to change.
+
+## License
+
+[Apache-2.0](LICENSE)
