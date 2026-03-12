@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.1.1](https://github.com/onecli/onecli/compare/v1.1.0...v1.1.1) (2026-03-12)
+
+
+### Bug Fixes
+
+* add mise config, page header, and profile page ([#31](https://github.com/onecli/onecli/issues/31)) ([b984043](https://github.com/onecli/onecli/commit/b98404346c82927a7268e46b2dfe7f1be86386e0))
+
 ## [1.1.0](https://github.com/onecli/onecli/compare/v1.0.3...v1.1.0) (2026-03-12)
 
 
