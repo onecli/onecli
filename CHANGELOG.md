@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.0.3](https://github.com/onecli/onecli/compare/v1.0.2...v1.0.3) (2026-03-12)
+
+
+### Bug Fixes
+
+* add setup error page with proxy-based config validation ([#21](https://github.com/onecli/onecli/issues/21)) ([4557579](https://github.com/onecli/onecli/commit/4557579032e650c11950d5c01aa74e4487dc15e4))
+
 ## [1.0.2](https://github.com/onecli/onecli/compare/v1.0.1...v1.0.2) (2026-03-11)
 
 
