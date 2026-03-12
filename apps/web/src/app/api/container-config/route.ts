@@ -4,7 +4,7 @@ import { validateApiKey } from "@/lib/validate-api-key";
 import { getServerSession } from "@/lib/auth/server";
 import { loadCaCertificate } from "@/lib/proxy-ca";
 
-const PROXY_PORT = process.env.PROXY_PORT ?? "18080";
+const PROXY_PORT = process.env.PROXY_PORT ?? "10255";
 const CA_CONTAINER_PATH = "/tmp/onecli-proxy-ca.pem";
 
 const isCloud = process.env.NEXT_PUBLIC_EDITION === "cloud";

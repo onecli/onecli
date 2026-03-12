@@ -4,8 +4,8 @@ services:
       context: ..
       dockerfile: docker/Dockerfile
     ports:
-      - "3000:3000"
-      - "18080:18080"
+      - "10254:10254"
+      - "10255:10255"
     volumes:
       - onecli-data:/app/data
     env_file: ../.env

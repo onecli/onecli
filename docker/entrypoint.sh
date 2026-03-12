@@ -59,8 +59,8 @@ fi
 printf '{"authMode":"%s","oauthConfigured":%s}\n' "$AUTH_MODE" "$OAUTH_CONFIGURED" > /app/data/runtime-config.json
 
 # Start proxy in background
-echo "Starting proxy on port ${PROXY_PORT:-18080}..."
-onecli-proxy --port "${PROXY_PORT:-18080}" --data-dir /app/data &
+echo "Starting proxy on port ${PROXY_PORT:-10255}..."
+onecli-proxy --port "${PROXY_PORT:-10255}" --data-dir /app/data &
 PROXY_PID=$!
 
 # Graceful shutdown: stop both processes on SIGTERM

@@ -20,7 +20,7 @@ use crate::proxy::ProxyServer;
 )]
 struct Cli {
     /// Port to listen on.
-    #[arg(long, default_value = "18080")]
+    #[arg(long, default_value = "10255")]
     port: u16,
 
     /// Data directory for CA certificates and persistent state.
@@ -28,7 +28,7 @@ struct Cli {
     data_dir: PathBuf,
 
     /// OneCLI web API base URL (for credential fetching).
-    #[arg(long, default_value = "http://localhost:3000")]
+    #[arg(long, default_value = "http://localhost:10254")]
     api_url: String,
 
     /// Path to the proxy–API shared secret file.

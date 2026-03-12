@@ -46,7 +46,7 @@ OneCLI is an open-source gateway that sits between your AI agents and the servic
 The fastest way to run OneCLI locally (no external database or config needed):
 
 ```bash
-docker run -p 10254:10254 -p 10255:10255 -v onecli-data:/app/data ghcr.io/onecli/onecli-cloud
+docker run --pull always -p 10254:10254 -p 10255:10255 -v onecli-data:/app/data ghcr.io/onecli/onecli
 ```
 
 Open **http://localhost:10254**, create an agent, add your secrets, and point your agent's HTTP gateway to `localhost:10255`.
@@ -97,6 +97,7 @@ docker/
 pnpm install
 cp .env.example .env
 pnpm db:generate
+pnpm db:init-dev
 pnpm dev
 ```
 
