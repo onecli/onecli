@@ -2,7 +2,7 @@
 
 import { usePathname } from "next/navigation";
 import { useTheme } from "next-themes";
-import { Moon, Sun } from "lucide-react";
+import { Code, Moon, Sun } from "lucide-react";
 import { SidebarTrigger } from "@onecli/ui/components/sidebar";
 import { Separator } from "@onecli/ui/components/separator";
 import { Button } from "@onecli/ui/components/button";
@@ -66,6 +66,23 @@ export const DashboardHeader = () => {
         </BreadcrumbList>
       </Breadcrumb>
       <div className="ml-auto flex items-center gap-2">
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <Button variant="ghost" size="sm" asChild>
+              <a
+                href="https://www.onecli.sh/docs/sdks/overview"
+                target="_blank"
+                rel="noopener noreferrer"
+              >
+                <Code className="size-3.5" />
+                SDKs
+              </a>
+            </Button>
+          </TooltipTrigger>
+          <TooltipContent>
+            Learn how to connect OneCLI to your agent
+          </TooltipContent>
+        </Tooltip>
         <TryDemoButton />
         <Tooltip>
           <TooltipTrigger asChild>
