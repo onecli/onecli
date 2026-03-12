@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.1.2](https://github.com/onecli/onecli/compare/v1.1.1...v1.1.2) (2026-03-12)
+
+
+### Bug Fixes
+
+* correct encryption key generation command for zsh compatibility ([#34](https://github.com/onecli/onecli/issues/34)) ([f5ade32](https://github.com/onecli/onecli/commit/f5ade321fd9f357fb6a9aac4b5a99f83fd57b1af))
+* update README with how-it-works section and copy cleanup ([#35](https://github.com/onecli/onecli/issues/35)) ([e43ca55](https://github.com/onecli/onecli/commit/e43ca55f7153bf69231dacf8507137b4e6194e2b))
+
 ## [1.1.1](https://github.com/onecli/onecli/compare/v1.1.0...v1.1.1) (2026-03-12)
 
 
