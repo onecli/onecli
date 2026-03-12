@@ -26,7 +26,7 @@ const errors: Record<string, { title: string; description: React.ReactNode }> =
             <Code>.env</Code>:
           </p>
           <pre className="bg-muted overflow-x-auto rounded-lg px-3 py-2 text-xs">
-            {`echo "SECRET_ENCRYPTION_KEY=$(node -e \\"console.log(require('crypto').randomBytes(32).toString('base64'))\\")" >> .env`}
+            {`echo "SECRET_ENCRYPTION_KEY=$(node -p "require('crypto').randomBytes(32).toString('base64')")" >> .env`}
           </pre>
           <p className="text-xs">Then restart the dev server.</p>
         </div>
