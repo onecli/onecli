@@ -67,10 +67,10 @@ await exec("docker", [...args, "agent-image:latest"]);
 
 When `applyContainerConfig` succeeds, it mutates the Docker args array with:
 
-1. **Proxy env vars** — `-e HTTPS_PROXY=...`, `-e HTTP_PROXY=...`, `-e NODE_USE_ENV_PROXY=1`
-2. **Node.js CA trust** — `-e NODE_EXTRA_CA_CERTS=/tmp/onecli-proxy-ca.pem` + volume mount
-3. **System-wide CA trust** — `-e SSL_CERT_FILE=/tmp/onecli-combined-ca.pem` + volume mount (covers curl, Python, Go, git)
-4. **Linux host mapping** — `--add-host host.docker.internal:host-gateway` (macOS Docker Desktop provides this automatically)
+1. **Proxy env vars**: `-e HTTPS_PROXY=...`, `-e HTTP_PROXY=...`, `-e NODE_USE_ENV_PROXY=1`
+2. **Node.js CA trust**: `-e NODE_EXTRA_CA_CERTS=/tmp/onecli-proxy-ca.pem` + volume mount
+3. **System-wide CA trust**: `-e SSL_CERT_FILE=/tmp/onecli-combined-ca.pem` + volume mount (covers curl, Python, Go, git)
+4. **Linux host mapping**: `--add-host host.docker.internal:host-gateway` (macOS Docker Desktop provides this automatically)
 
 Traffic from the container goes through the proxy, which injects credentials on matching requests.
 
@@ -108,4 +108,4 @@ if (onecliApiKey) {
 }
 ```
 
-Users without OneCLI simply don't set `ONECLI_API_KEY` — no code changes needed.
+Users without OneCLI simply don't set `ONECLI_API_KEY`. No code changes needed.

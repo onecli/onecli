@@ -29,6 +29,8 @@ OneCLI is an open-source gateway that sits between your AI agents and the servic
 
 **Why we built it:** AI agents need to call dozens of APIs, but giving each agent raw credentials is a security risk. OneCLI solves this with a single gateway that handles auth, so you get one place to manage access, rotate keys, and see what every agent is doing.
 
+**How it works:** You store your real API credentials in OneCLI and give your agents placeholder keys (e.g. `FAKE_KEY`). When an agent makes an HTTP call through the gateway, the OneCLI proxy matches the request to the right credentials, swaps the `FAKE_KEY` for the `REAL_KEY`, decrypts them, and injects them into the outbound request. The agent never touches the real secrets. It just makes normal HTTP calls and the proxy handles the swap.
+
 ## Architecture
 
 <picture>
@@ -73,8 +75,8 @@ docker compose up
 
 ```
 apps/
-  web/            # Next.js app — dashboard & API (port 10254)
-  proxy/          # Rust gateway — credential injection (port 10255)
+  web/            # Next.js app (dashboard + API, port 10254)
+  proxy/          # Rust gateway (credential injection, port 10255)
 packages/
   db/             # Prisma ORM + migrations + PGlite
   ui/             # Shared UI components (shadcn/ui)
