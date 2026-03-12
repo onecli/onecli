@@ -22,7 +22,7 @@ The orchestrator needs two env vars:
 | `ONECLI_API_KEY` | Yes      | User API key from OneCLI dashboard (`oc_...`)            |
 | `ONECLI_URL`     | No       | OneCLI instance URL. Defaults to `https://app.onecli.sh` |
 
-For self-hosted: `ONECLI_URL=http://localhost:3000`
+For self-hosted: `ONECLI_URL=http://localhost:10254`
 
 ## Quick Start
 

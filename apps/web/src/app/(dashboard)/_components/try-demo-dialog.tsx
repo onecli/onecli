@@ -22,7 +22,7 @@ export const TryDemoDialog = ({
   onOpenChange,
   agentToken,
 }: TryDemoDialogProps) => {
-  const command = `curl -k -x http://x:${agentToken}@localhost:18080 -H "Authorization: Bearer FAKE_TOKEN" https://httpbin.org/anything`;
+  const command = `curl -k -x http://x:${agentToken}@localhost:10255 -H "Authorization: Bearer FAKE_TOKEN" https://httpbin.org/anything`;
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>

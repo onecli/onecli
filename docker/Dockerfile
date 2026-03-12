@@ -69,10 +69,10 @@ ENV NODE_ENV=production
 ENV NEXT_TELEMETRY_DISABLED=1
 ENV NO_COLOR=1
 ENV FORCE_COLOR=0
-ENV PORT=3000
+ENV PORT=10254
 ENV HOSTNAME="0.0.0.0"
 ENV AUTH_TRUST_HOST=true
-ENV NEXTAUTH_URL=http://localhost:3000
+ENV NEXTAUTH_URL=http://localhost:10254
 
 # Proxy binary from Rust build
 COPY --from=proxy-builder /build/target/release/onecli-proxy /usr/local/bin/onecli-proxy
@@ -103,9 +103,9 @@ VOLUME ["/app/data"]
 
 USER node
 
-EXPOSE 3000 18080
+EXPOSE 10254 10255
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-  CMD wget -qO- http://localhost:3000/api/health && wget -qO- http://localhost:18080/healthz || exit 1
+  CMD wget -qO- http://localhost:10254/api/health && wget -qO- http://localhost:10255/healthz || exit 1
 
 CMD ["./entrypoint.sh"]
