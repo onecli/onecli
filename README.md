@@ -54,8 +54,8 @@ Open **http://localhost:10254**, create an agent, add your secrets, and point yo
 ### Or with Docker Compose
 
 ```bash
-git clone https://github.com/onecli/onecli-cloud.git
-cd onecli-cloud/docker
+git clone https://github.com/onecli/onecli.git
+cd onecli/docker
 docker compose up
 ```
 
@@ -127,7 +127,7 @@ All environment variables are optional for local development:
 
 ## Contributing
 
-We welcome contributions. Please open an issue first to discuss what you'd like to change.
+We welcome contributions! Please read our [Contributing Guide](CONTRIBUTING.md) and [Code of Conduct](CODE_OF_CONDUCT.md) before getting started.
 
 ## License
 
