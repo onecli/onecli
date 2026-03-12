@@ -7,11 +7,7 @@ import { Button } from "@onecli/ui/components/button";
 import { useAuth } from "@/providers/auth-provider";
 import { ensureUser } from "@/lib/actions/auth";
 
-export const LoginContent = ({
-  oauthConfigured,
-}: {
-  oauthConfigured: boolean;
-}) => {
+export const LoginContent = () => {
   const router = useRouter();
   const { isAuthenticated, isLoading, user, signIn } = useAuth();
 
@@ -60,28 +56,6 @@ export const LoginContent = ({
           <div className="text-brand h-8 w-8 animate-spin rounded-full border-2 border-current border-t-transparent" />
           <p className="text-muted-foreground text-sm">
             {isAuthenticated ? "Signing you in..." : "Loading..."}
-          </p>
-        </div>
-      ) : !oauthConfigured ? (
-        <div className="w-full max-w-sm rounded-2xl border border-destructive/50 bg-card p-8 text-center">
-          <p className="text-sm font-medium">OAuth not configured</p>
-          <p className="text-muted-foreground mt-2 text-xs leading-relaxed">
-            <code className="bg-muted rounded px-1 py-0.5">
-              NEXTAUTH_SECRET
-            </code>{" "}
-            is set but{" "}
-            <code className="bg-muted rounded px-1 py-0.5">
-              GOOGLE_CLIENT_ID
-            </code>{" "}
-            and{" "}
-            <code className="bg-muted rounded px-1 py-0.5">
-              GOOGLE_CLIENT_SECRET
-            </code>{" "}
-            are missing. Either provide all three or remove{" "}
-            <code className="bg-muted rounded px-1 py-0.5">
-              NEXTAUTH_SECRET
-            </code>{" "}
-            to use local mode.
           </p>
         </div>
       ) : (
