@@ -18,6 +18,42 @@ const buildPreview = (plaintext: string): string => {
   return `${plaintext.slice(0, 4)}${"•".repeat(8)}${plaintext.slice(-4)}`;
 };
 
+const DEMO_SECRET_NAME = "Demo Secret (httpbin)";
+
+const ensureDemoSecret = async (userId: string) => {
+  const user = await db.user.findUniqueOrThrow({
+    where: { id: userId },
+    select: { demoSeeded: true },
+  });
+
+  if (user.demoSeeded) return;
+
+  const encryptedValue = cryptoService.encrypt(
+    "WELCOME-TO-ONECLI-SECRETS-ARE-WORKING",
+  );
+
+  await db.$transaction([
+    db.secret.create({
+      data: {
+        name: DEMO_SECRET_NAME,
+        type: "generic",
+        encryptedValue,
+        hostPattern: "httpbin.org",
+        pathPattern: "/anything/*",
+        injectionConfig: {
+          headerName: "Authorization",
+          valueFormat: "Bearer {value}",
+        },
+        userId,
+      },
+    }),
+    db.user.update({
+      where: { id: userId },
+      data: { demoSeeded: true },
+    }),
+  ]);
+};
+
 const resolveUserId = async (authId?: string) => {
   let id = authId;
   if (!id) {
@@ -37,6 +73,7 @@ const resolveUserId = async (authId?: string) => {
 
 export async function getSecrets(authId?: string) {
   const userId = await resolveUserId(authId);
+  await ensureDemoSecret(userId);
 
   const secrets = await db.secret.findMany({
     where: { userId },
@@ -139,6 +176,23 @@ interface UpdateSecretInput {
   hostPattern?: string;
   pathPattern?: string | null;
   injectionConfig?: { headerName: string; valueFormat: string } | null;
+}
+
+export async function getDemoInfo(authId?: string) {
+  const userId = await resolveUserId(authId);
+
+  const demoSecret = await db.secret.findFirst({
+    where: { userId, name: DEMO_SECRET_NAME },
+    select: { id: true },
+  });
+  if (!demoSecret) return null;
+
+  const agent = await db.agent.findFirst({
+    where: { userId, isDefault: true },
+    select: { accessToken: true },
+  });
+
+  return { agentToken: agent?.accessToken ?? null };
 }
 
 export async function updateSecret(

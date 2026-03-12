@@ -15,6 +15,7 @@ model User {
   apiKey             String?  @unique // "oc_..." prefix, used for API auth
   stripeCustomerId   String?  @unique
   subscriptionStatus String   @default("free")
+  demoSeeded         Boolean  @default(false)
   createdAt          DateTime @default(now())
   updatedAt          DateTime @updatedAt
 
