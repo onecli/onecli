@@ -180,6 +180,7 @@ interface UpdateSecretInput {
 
 export async function getDemoInfo(authId?: string) {
   const userId = await resolveUserId(authId);
+  await ensureDemoSecret(userId);
 
   const demoSecret = await db.secret.findFirst({
     where: { userId, name: DEMO_SECRET_NAME },

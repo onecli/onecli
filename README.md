@@ -87,13 +87,13 @@ docker/
 
 ### Prerequisites
 
-- **Node.js** >= 18
-- **pnpm** 9+
+- **[mise](https://mise.jdx.dev)** (installs Node.js, pnpm, and other tools)
 - **Rust** (for the gateway)
 
 ### Setup
 
 ```bash
+mise install
 pnpm install
 cp .env.example .env
 pnpm db:generate

@@ -305,20 +305,22 @@ const FormStep = ({
           </div>
         </div>
 
-        <div className="space-y-2">
-          <Label htmlFor="secret-host">Host pattern</Label>
-          <Input
-            id="secret-host"
-            placeholder="e.g. api.example.com or *.example.com"
-            value={hostPattern}
-            onChange={(e) => onHostPatternChange(e.target.value)}
-          />
-          <p className="text-muted-foreground text-xs">
-            The host this secret applies to. Use{" "}
-            <code className="text-xs">*.example.com</code> for wildcard
-            subdomains.
-          </p>
-        </div>
+        {type === "generic" && (
+          <div className="space-y-2">
+            <Label htmlFor="secret-host">Host pattern</Label>
+            <Input
+              id="secret-host"
+              placeholder="e.g. api.example.com or *.example.com"
+              value={hostPattern}
+              onChange={(e) => onHostPatternChange(e.target.value)}
+            />
+            <p className="text-muted-foreground text-xs">
+              The host this secret applies to. Use{" "}
+              <code className="text-xs">*.example.com</code> for wildcard
+              subdomains.
+            </p>
+          </div>
+        )}
 
         <Accordion type="single" collapsible className="border-none">
           <AccordionItem value="advanced" className="border-t border-b-0">
@@ -330,6 +332,23 @@ const FormStep = ({
             </AccordionTrigger>
             <AccordionContent className="pb-0">
               <div className="space-y-4">
+                {type === "anthropic" && (
+                  <div className="space-y-2">
+                    <Label htmlFor="secret-host">Host pattern</Label>
+                    <Input
+                      id="secret-host"
+                      placeholder="e.g. api.example.com or *.example.com"
+                      value={hostPattern}
+                      onChange={(e) => onHostPatternChange(e.target.value)}
+                    />
+                    <p className="text-muted-foreground text-xs">
+                      The host this secret applies to. Use{" "}
+                      <code className="text-xs">*.example.com</code> for
+                      wildcard subdomains.
+                    </p>
+                  </div>
+                )}
+
                 <div className="space-y-2">
                   <Label htmlFor="secret-path">
                     Path pattern{" "}
