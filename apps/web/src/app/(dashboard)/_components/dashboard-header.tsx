@@ -21,6 +21,7 @@ import {
   BreadcrumbSeparator,
 } from "@onecli/ui/components/breadcrumb";
 import { navItems } from "@/lib/nav-items";
+import { TryDemoButton } from "./try-demo-button";
 
 export const DashboardHeader = () => {
   const pathname = usePathname();
@@ -65,6 +66,7 @@ export const DashboardHeader = () => {
         </BreadcrumbList>
       </Breadcrumb>
       <div className="ml-auto flex items-center gap-2">
+        <TryDemoButton />
         <Tooltip>
           <TooltipTrigger asChild>
             <Button
