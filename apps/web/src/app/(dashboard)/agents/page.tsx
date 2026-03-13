@@ -12,7 +12,7 @@ export default function AgentsPage() {
     <div className="flex flex-1 flex-col gap-6 max-w-5xl">
       <PageHeader
         title="Agents"
-        description="Manage agents that connect to the proxy and receive injected credentials."
+        description="Manage agents that connect to the gateway and receive injected credentials."
       />
       <Suspense>
         <AgentsContent />

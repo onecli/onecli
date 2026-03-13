@@ -6,7 +6,7 @@ node_modules
 out
 dist
 cdk.out
-apps/proxy/target
+apps/gateway/target
 
 # Local data (prevent leaking local PGlite, CA certs, secrets)
 data

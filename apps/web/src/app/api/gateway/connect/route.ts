@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { db } from "@onecli/db";
 import { z } from "zod";
-import { validateProxySecret } from "@/lib/proxy-secret";
+import { validateGatewaySecret } from "@/lib/gateway-secret";
 import { cryptoService } from "@/lib/crypto";
 
 const connectSchema = z.object({
@@ -27,10 +27,10 @@ interface GenericInjectionConfig {
 
 export async function POST(request: NextRequest) {
   try {
-    // Validate proxy secret
-    if (!validateProxySecret(request.headers.get("x-proxy-secret"))) {
+    // Validate gateway secret
+    if (!validateGatewaySecret(request.headers.get("x-gateway-secret"))) {
       return NextResponse.json(
-        { error: "Invalid or missing proxy secret" },
+        { error: "Invalid or missing gateway secret" },
         { status: 403 },
       );
     }

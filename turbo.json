@@ -17,12 +17,12 @@
     "GOOGLE_CLIENT_SECRET",
     "SECRET_ENCRYPTION_KEY",
     "HOME",
-    "PROXY_SECRET",
-    "PROXY_SECRET_FILE",
-    "PROXY_CA_PEM_FILE",
-    "PROXY_CA_CERT",
-    "PROXY_HOST",
-    "PROXY_PORT"
+    "GATEWAY_SECRET",
+    "GATEWAY_SECRET_FILE",
+    "GATEWAY_CA_PEM_FILE",
+    "GATEWAY_CA_CERT",
+    "GATEWAY_HOST",
+    "GATEWAY_PORT"
   ],
   "tasks": {
     "build": {
@@ -30,22 +30,22 @@
       "inputs": ["$TURBO_DEFAULT$", ".env*"],
       "outputs": [".next/**", "!.next/cache/**", "dist/**"]
     },
-    "@onecli/proxy#build": {
+    "@onecli/gateway#build": {
       "inputs": ["src/**", "Cargo.toml", "Cargo.lock"],
       "outputs": ["target/release/**"]
     },
-    "@onecli/proxy#dev": {
+    "@onecli/gateway#dev": {
       "cache": false,
       "persistent": true
     },
-    "@onecli/proxy#check": {
+    "@onecli/gateway#check": {
       "inputs": ["src/**", "Cargo.toml"]
     },
-    "@onecli/proxy#check-types": {
+    "@onecli/gateway#check-types": {
       "inputs": ["src/**", "Cargo.toml", "Cargo.lock"],
       "outputs": []
     },
-    "@onecli/proxy#lint": {
+    "@onecli/gateway#lint": {
       "inputs": ["src/**", "Cargo.toml"],
       "outputs": []
     },
@@ -63,9 +63,9 @@
       "dependsOn": ["build"],
       "cache": false
     },
-    "@onecli/proxy#test": {
+    "@onecli/gateway#test": {
       "inputs": ["src/**", "tests/**", "Cargo.toml", "Cargo.lock"],
-      "dependsOn": ["@onecli/proxy#build"]
+      "dependsOn": ["@onecli/gateway#build"]
     },
     "dev": {
       "cache": false,

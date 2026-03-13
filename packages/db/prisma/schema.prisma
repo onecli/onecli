@@ -27,7 +27,7 @@ model Agent {
   id          String   @id @default(cuid())
   userId      String
   name        String
-  accessToken String   @unique // "aoc_..." prefix, used for proxy auth
+  accessToken String   @unique // "aoc_..." prefix, used for gateway auth
   isDefault   Boolean  @default(false)
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt

@@ -48,7 +48,7 @@ data/
 cdk.out
 
 # Rust
-apps/proxy/target/
+apps/gateway/target/
 
 # Playwright MCP
 .playwright-mcp

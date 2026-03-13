@@ -28,7 +28,7 @@ OneCLI is an open-source gateway that sits between your AI agents and the servic
 
 **Why we built it:** AI agents need to call dozens of APIs, but giving each agent raw credentials is a security risk. OneCLI solves this with a single gateway that handles auth, so you get one place to manage access, rotate keys, and see what every agent is doing.
 
-**How it works:** You store your real API credentials in OneCLI and give your agents placeholder keys (e.g. `FAKE_KEY`). When an agent makes an HTTP call through the gateway, the OneCLI proxy matches the request to the right credentials, swaps the `FAKE_KEY` for the `REAL_KEY`, decrypts them, and injects them into the outbound request. The agent never touches the real secrets. It just makes normal HTTP calls and the proxy handles the swap.
+**How it works:** You store your real API credentials in OneCLI and give your agents placeholder keys (e.g. `FAKE_KEY`). When an agent makes an HTTP call through the gateway, the OneCLI gateway matches the request to the right credentials, swaps the `FAKE_KEY` for the `REAL_KEY`, decrypts them, and injects them into the outbound request. The agent never touches the real secrets. It just makes normal HTTP calls and the gateway handles the swap.
 
 ## Architecture
 
@@ -38,7 +38,7 @@ OneCLI is an open-source gateway that sits between your AI agents and the servic
   <img alt="OneCLI Architecture" src="assets/onecli-architecture-dark.svg" width="100%">
 </picture>
 
-- **[Rust Gateway](apps/proxy)**: fast HTTP gateway that intercepts outbound requests and injects credentials. Agents authenticate with access tokens via `Proxy-Authorization` headers.
+- **[Rust Gateway](apps/gateway)**: fast HTTP gateway that intercepts outbound requests and injects credentials. Agents authenticate with access tokens via `Proxy-Authorization` headers.
 - **[Web Dashboard](apps/web)**: Next.js app for managing agents, secrets, and permissions. Provides the API the gateway uses to resolve which credentials to inject for each request.
 - **Secret Store**: AES-256-GCM encrypted credential storage. Secrets are decrypted only at request time, matched by host and path patterns, and injected by the gateway as headers.
 
@@ -75,7 +75,7 @@ docker compose up
 ```
 apps/
   web/            # Next.js app (dashboard + API, port 10254)
-  proxy/          # Rust gateway (credential injection, port 10255)
+  gateway/        # Rust gateway (credential injection, port 10255)
 packages/
   db/             # Prisma ORM + migrations + PGlite
   ui/             # Shared UI components (shadcn/ui)

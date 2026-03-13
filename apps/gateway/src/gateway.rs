@@ -1,6 +1,6 @@
-//! HTTP proxy server: connection handling, MITM interception, and tunneling.
+//! HTTP gateway server: connection handling, MITM interception, and tunneling.
 //!
-//! This module owns the `ProxyServer` struct and the core request flow:
+//! This module owns the `GatewayServer` struct and the core request flow:
 //! accept → authenticate → resolve (via [`connect`]) → MITM or tunnel.
 
 use std::net::SocketAddr;
@@ -25,9 +25,9 @@ use crate::ca::CertificateAuthority;
 use crate::connect::{self, CachedConnect, ConnectCacheKey, ConnectError};
 use crate::inject::{self, ConnectRule};
 
-// ── ProxyServer ─────────────────────────────────────────────────────────
+// ── GatewayServer ───────────────────────────────────────────────────────
 
-pub struct ProxyServer {
+pub struct GatewayServer {
     ca: Arc<CertificateAuthority>,
     http_client: reqwest::Client,
     port: u16,
@@ -35,34 +35,34 @@ pub struct ProxyServer {
     api_url: Arc<str>,
     /// Shared secret for authenticating requests to the web API.
     /// `None` if no secret is configured (credential fetching disabled).
-    proxy_secret: Option<Arc<str>>,
+    gateway_secret: Option<Arc<str>>,
     /// Cache of resolved connect responses per (agent_token, host).
     connect_cache: Arc<DashMap<ConnectCacheKey, CachedConnect>>,
 }
 
-impl ProxyServer {
+impl GatewayServer {
     pub fn new(
         ca: CertificateAuthority,
         port: u16,
         api_url: String,
-        proxy_secret: Option<String>,
+        gateway_secret: Option<String>,
     ) -> Self {
         Self {
             ca: Arc::new(ca),
             http_client: reqwest::Client::builder()
                 .danger_accept_invalid_certs(
-                    std::env::var("PROXY_DANGER_ACCEPT_INVALID_CERTS").is_ok(),
+                    std::env::var("GATEWAY_DANGER_ACCEPT_INVALID_CERTS").is_ok(),
                 )
                 .build()
                 .expect("build HTTP client"),
             port,
             api_url: Arc::from(api_url.as_str()),
-            proxy_secret: proxy_secret.map(|s| Arc::from(s.as_str())),
+            gateway_secret: gateway_secret.map(|s| Arc::from(s.as_str())),
             connect_cache: Arc::new(DashMap::new()),
         }
     }
 
-    /// Start the proxy TCP listener. Runs forever.
+    /// Start the gateway TCP listener. Runs forever.
     pub async fn run(&self) -> Result<()> {
         let addr = SocketAddr::from(([0, 0, 0, 0], self.port));
         let listener = TcpListener::bind(addr)
@@ -76,7 +76,7 @@ impl ProxyServer {
             let ca = Arc::clone(&self.ca);
             let http_client = self.http_client.clone();
             let api_url = Arc::clone(&self.api_url);
-            let proxy_secret = self.proxy_secret.clone();
+            let gateway_secret = self.gateway_secret.clone();
             let connect_cache = Arc::clone(&self.connect_cache);
 
             tokio::spawn(async move {
@@ -86,7 +86,7 @@ impl ProxyServer {
                     ca,
                     http_client,
                     api_url,
-                    proxy_secret,
+                    gateway_secret,
                     connect_cache,
                 )
                 .await
@@ -108,7 +108,7 @@ async fn handle_connection(
     ca: Arc<CertificateAuthority>,
     http_client: reqwest::Client,
     api_url: Arc<str>,
-    proxy_secret: Option<Arc<str>>,
+    gateway_secret: Option<Arc<str>>,
     connect_cache: Arc<DashMap<ConnectCacheKey, CachedConnect>>,
 ) -> Result<()> {
     let io = TokioIo::new(stream);
@@ -122,7 +122,7 @@ async fn handle_connection(
                 let ca = Arc::clone(&ca);
                 let http_client = http_client.clone();
                 let api_url = Arc::clone(&api_url);
-                let proxy_secret = proxy_secret.clone();
+                let gateway_secret = gateway_secret.clone();
                 let connect_cache = Arc::clone(&connect_cache);
                 async move {
                     handle_request(
@@ -131,7 +131,7 @@ async fn handle_connection(
                         ca,
                         http_client,
                         api_url,
-                        proxy_secret,
+                        gateway_secret,
                         connect_cache,
                     )
                     .await
@@ -150,7 +150,7 @@ async fn handle_request(
     ca: Arc<CertificateAuthority>,
     http_client: reqwest::Client,
     api_url: Arc<str>,
-    proxy_secret: Option<Arc<str>>,
+    gateway_secret: Option<Arc<str>>,
     connect_cache: Arc<DashMap<ConnectCacheKey, CachedConnect>>,
 ) -> Result<Response<Empty<Bytes>>, anyhow::Error> {
     if req.method() == Method::CONNECT {
@@ -172,7 +172,7 @@ async fn handle_request(
                 &hostname,
                 &http_client,
                 &api_url,
-                proxy_secret.as_deref(),
+                gateway_secret.as_deref(),
                 &connect_cache,
             )
             .await
@@ -226,7 +226,7 @@ async fn handle_request(
     } else if req.method() == Method::GET && req.uri().path() == "/healthz" {
         Ok(Response::new(Empty::new()))
     } else {
-        // Plain HTTP proxy requests are not supported — only CONNECT (HTTPS).
+        // Plain HTTP requests are not supported — only CONNECT (HTTPS).
         warn!(
             peer = %peer_addr,
             method = %req.method(),
@@ -398,7 +398,7 @@ fn respond_407() -> Response<Empty<Bytes>> {
     *resp.status_mut() = hyper::StatusCode::PROXY_AUTHENTICATION_REQUIRED;
     resp.headers_mut().insert(
         "proxy-authenticate",
-        HeaderValue::from_static("Basic realm=\"OneCLI Proxy\""),
+        HeaderValue::from_static("Basic realm=\"OneCLI Gateway\""),
     );
     resp
 }
@@ -518,6 +518,6 @@ mod tests {
             .headers()
             .get("proxy-authenticate")
             .expect("should have Proxy-Authenticate header");
-        assert_eq!(auth_header, "Basic realm=\"OneCLI Proxy\"");
+        assert_eq!(auth_header, "Basic realm=\"OneCLI Gateway\"");
     }
 }

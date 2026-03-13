@@ -4,46 +4,46 @@ import { dirname } from "path";
 import { timingSafeEqual } from "crypto";
 
 /**
- * Proxy–API shared secret management.
+ * Gateway–API shared secret management.
  *
- * The proxy authenticates requests to `/api/proxy/*` with an `X-Proxy-Secret` header.
- * This prevents agents from calling proxy API endpoints directly.
+ * The gateway authenticates requests to `/api/gateway/*` with an `X-Gateway-Secret` header.
+ * This prevents agents from calling gateway API endpoints directly.
  *
- * - **Cloud**: Both proxy and web API read `PROXY_SECRET` env var (from Secrets Manager).
- * - **OSS**: Web API generates the secret file on startup; proxy reads from the same file.
+ * - **Cloud**: Both gateway and web API read `GATEWAY_SECRET` env var (from Secrets Manager).
+ * - **OSS**: Web API generates the secret file on startup; gateway reads from the same file.
  */
 
-const PROXY_SECRET_FILE_DOCKER = "/app/data/proxy-secret";
-const PROXY_SECRET_FILE_LOCAL = `${process.env.HOME}/.onecli/proxy-secret`;
+const GATEWAY_SECRET_FILE_DOCKER = "/app/data/gateway-secret";
+const GATEWAY_SECRET_FILE_LOCAL = `${process.env.HOME}/.onecli/gateway-secret`;
 const SECRET_LENGTH_BYTES = 32; // 256-bit, rendered as 64 hex chars
 
 /**
- * Determine the proxy secret file path.
- * Matches the proxy's default: `/app/data/proxy-secret` in Docker, `~/.onecli/proxy-secret` locally.
+ * Determine the gateway secret file path.
+ * Matches the gateway's default: `/app/data/gateway-secret` in Docker, `~/.onecli/gateway-secret` locally.
  */
 const getSecretFilePath = (): string => {
-  if (process.env.PROXY_SECRET_FILE) return process.env.PROXY_SECRET_FILE;
+  if (process.env.GATEWAY_SECRET_FILE) return process.env.GATEWAY_SECRET_FILE;
   return existsSync("/app/data")
-    ? PROXY_SECRET_FILE_DOCKER
-    : PROXY_SECRET_FILE_LOCAL;
+    ? GATEWAY_SECRET_FILE_DOCKER
+    : GATEWAY_SECRET_FILE_LOCAL;
 };
 
 let cachedSecret: string | null | undefined;
 
 /**
- * Load the proxy secret.
- * Checks `PROXY_SECRET` env var first (cloud), then reads from file (OSS).
+ * Load the gateway secret.
+ * Checks `GATEWAY_SECRET` env var first (cloud), then reads from file (OSS).
  */
 const isCloud = process.env.NEXT_PUBLIC_EDITION === "cloud";
 
 const loadSecret = (): string | null => {
-  // Cloud: PROXY_SECRET env var is required
-  const envSecret = process.env.PROXY_SECRET?.trim();
+  // Cloud: GATEWAY_SECRET env var is required
+  const envSecret = process.env.GATEWAY_SECRET?.trim();
   if (envSecret) return envSecret;
 
   if (isCloud) {
     throw new Error(
-      "PROXY_SECRET env var is required in cloud edition but not set",
+      "GATEWAY_SECRET env var is required in cloud edition but not set",
     );
   }
 
@@ -58,15 +58,15 @@ const loadSecret = (): string | null => {
 };
 
 /**
- * Get the proxy secret, loading and caching on first call.
+ * Get the gateway secret, loading and caching on first call.
  * Returns null if no secret is configured.
  */
-export const getProxySecret = (): string | null => {
+export const getGatewaySecret = (): string | null => {
   if (cachedSecret === undefined) {
     cachedSecret = loadSecret();
     // OSS: auto-generate the secret file if it doesn't exist yet
     if (!cachedSecret && !isCloud) {
-      ensureProxySecretFile();
+      ensureGatewaySecretFile();
       cachedSecret = loadSecret();
     }
   }
@@ -74,12 +74,12 @@ export const getProxySecret = (): string | null => {
 };
 
 /**
- * Validate the `X-Proxy-Secret` header from an incoming request.
+ * Validate the `X-Gateway-Secret` header from an incoming request.
  * Uses constant-time comparison to prevent timing attacks.
  * Returns true if the secret matches, false otherwise.
  */
-export const validateProxySecret = (headerValue: string | null): boolean => {
-  const secret = getProxySecret();
+export const validateGatewaySecret = (headerValue: string | null): boolean => {
+  const secret = getGatewaySecret();
   if (!secret || !headerValue) return false;
 
   try {
@@ -93,13 +93,13 @@ export const validateProxySecret = (headerValue: string | null): boolean => {
 };
 
 /**
- * Ensure the proxy secret file exists. If not, generate a random secret and write it.
- * Called during OSS startup (entrypoint.sh) so the proxy can read it.
- * No-op if `PROXY_SECRET` env var is set (cloud mode).
+ * Ensure the gateway secret file exists. If not, generate a random secret and write it.
+ * Called during OSS startup (entrypoint.sh) so the gateway can read it.
+ * No-op if `GATEWAY_SECRET` env var is set (cloud mode).
  */
-export const ensureProxySecretFile = (): void => {
+export const ensureGatewaySecretFile = (): void => {
   // Cloud: env var is used, no file needed
-  if (process.env.PROXY_SECRET?.trim()) return;
+  if (process.env.GATEWAY_SECRET?.trim()) return;
 
   const path = getSecretFilePath();
 

@@ -1,4 +1,4 @@
-# OneCLI — all-in-one Docker image (proxy + web + PGlite)
+# OneCLI — all-in-one Docker image (gateway + web + PGlite)
 # Build context: repo root (run with `docker build -f docker/Dockerfile .`)
 
 # ──────────────────────────────────────────────
@@ -12,16 +12,16 @@ WORKDIR /build
 # Stage 1b: Prepare dependency recipe
 # ──────────────────────────────────────────────
 FROM chef AS planner
-COPY apps/proxy/ .
+COPY apps/gateway/ .
 RUN cargo chef prepare --recipe-path recipe.json
 
 # ──────────────────────────────────────────────
-# Stage 1c: Build Rust proxy
+# Stage 1c: Build Rust gateway
 # ──────────────────────────────────────────────
-FROM chef AS proxy-builder
+FROM chef AS gateway-builder
 COPY --from=planner /build/recipe.json recipe.json
 RUN cargo chef cook --release --recipe-path recipe.json
-COPY apps/proxy/ .
+COPY apps/gateway/ .
 RUN cargo build --release
 
 # ──────────────────────────────────────────────
@@ -74,8 +74,8 @@ ENV HOSTNAME="0.0.0.0"
 ENV AUTH_TRUST_HOST=true
 ENV NEXTAUTH_URL=http://localhost:10254
 
-# Proxy binary from Rust build
-COPY --from=proxy-builder /build/target/release/onecli-proxy /usr/local/bin/onecli-proxy
+# Gateway binary from Rust build
+COPY --from=gateway-builder /build/target/release/onecli-gateway /usr/local/bin/onecli-gateway
 
 # Next.js standalone output
 COPY --from=builder --chown=node:node /app/apps/web/.next/standalone ./
@@ -94,7 +94,7 @@ RUN cd packages/db && npm init -y > /dev/null 2>&1 && \
 COPY --chown=node:node docker/entrypoint.sh ./entrypoint.sh
 RUN chmod +x ./entrypoint.sh
 
-# Data directory for CA certs, proxy secret, PGlite data
+# Data directory for CA certs, gateway secret, PGlite data
 RUN mkdir -p /app/data && chown node:node /app/data
 # PGlite uses relative "./data/pglite" from server.js at apps/web/server.js,
 # which resolves to /app/apps/web/data/. Symlink it to the volume mount.

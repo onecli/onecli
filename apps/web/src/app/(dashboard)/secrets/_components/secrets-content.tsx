@@ -76,7 +76,7 @@ export const SecretsContent = () => {
           </div>
           <p className="text-sm font-medium">No secrets yet</p>
           <p className="text-muted-foreground mt-1 max-w-xs text-xs">
-            Add a secret to inject encrypted credentials into proxy requests.
+            Add a secret to inject encrypted credentials into gateway requests.
           </p>
         </Card>
       ) : (
