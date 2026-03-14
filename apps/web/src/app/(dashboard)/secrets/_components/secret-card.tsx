@@ -17,7 +17,6 @@ import {
   AlertDialogTitle,
   AlertDialogTrigger,
 } from "@onecli/ui/components/alert-dialog";
-import { useAuth } from "@/providers/auth-provider";
 import { deleteSecret } from "@/lib/actions/secrets";
 import { EditSecretDialog } from "./edit-secret-dialog";
 
@@ -41,15 +40,13 @@ interface SecretCardProps {
 }
 
 export const SecretCard = ({ secret, onUpdate }: SecretCardProps) => {
-  const { user } = useAuth();
   const [deleting, setDeleting] = useState(false);
   const [editOpen, setEditOpen] = useState(false);
 
   const handleDelete = async () => {
-    if (!user?.id) return;
     setDeleting(true);
     try {
-      await deleteSecret(secret.id, user.id);
+      await deleteSecret(secret.id);
       onUpdate();
       toast.success("Secret deleted");
     } catch {

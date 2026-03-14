@@ -22,7 +22,6 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from "@onecli/ui/components/alert-dialog";
-import { useAuth } from "@/providers/auth-provider";
 import { deleteAgent, regenerateAgentToken } from "@/lib/actions/agents";
 import { ManageAgentSecretsDialog } from "./manage-agent-secrets-dialog";
 
@@ -39,7 +38,6 @@ interface AgentCardProps {
 }
 
 export const AgentCard = ({ agent, onUpdate }: AgentCardProps) => {
-  const { user } = useAuth();
   const [deleting, setDeleting] = useState(false);
   const [regenerating, setRegenerating] = useState(false);
   const [rotateDialogOpen, setRotateDialogOpen] = useState(false);
@@ -47,10 +45,9 @@ export const AgentCard = ({ agent, onUpdate }: AgentCardProps) => {
   const [manageSecretsOpen, setManageSecretsOpen] = useState(false);
 
   const handleRegenerate = async () => {
-    if (!user?.id) return;
     setRegenerating(true);
     try {
-      await regenerateAgentToken(agent.id, user.id);
+      await regenerateAgentToken(agent.id);
       onUpdate();
       toast.success("Token regenerated");
     } catch {
@@ -61,10 +58,9 @@ export const AgentCard = ({ agent, onUpdate }: AgentCardProps) => {
   };
 
   const handleDelete = async () => {
-    if (!user?.id) return;
     setDeleting(true);
     try {
-      await deleteAgent(agent.id, user.id);
+      await deleteAgent(agent.id);
       onUpdate();
       toast.success("Agent deleted");
     } catch {

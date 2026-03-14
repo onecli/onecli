@@ -2,7 +2,6 @@
 
 import { useEffect, useState, useCallback } from "react";
 import { Plus, Bot } from "lucide-react";
-import { useAuth } from "@/providers/auth-provider";
 import { getAgents } from "@/lib/actions/agents";
 import { Button } from "@onecli/ui/components/button";
 import { Card } from "@onecli/ui/components/card";
@@ -20,17 +19,15 @@ interface Agent {
 }
 
 export const AgentsContent = () => {
-  const { user } = useAuth();
   const [agents, setAgents] = useState<Agent[]>([]);
   const [loading, setLoading] = useState(true);
   const [createOpen, setCreateOpen] = useState(false);
 
   const fetchAgents = useCallback(async () => {
-    if (!user?.id) return;
-    const result = await getAgents(user.id);
+    const result = await getAgents();
     setAgents(result);
     setLoading(false);
-  }, [user?.id]);
+  }, []);
 
   useEffect(() => {
     fetchAgents();
