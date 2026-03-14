@@ -14,7 +14,6 @@ import {
 import { Button } from "@onecli/ui/components/button";
 import { Input } from "@onecli/ui/components/input";
 import { Label } from "@onecli/ui/components/label";
-import { useAuth } from "@/providers/auth-provider";
 import { useCopyToClipboard } from "@/hooks/use-copy-to-clipboard";
 import { createAgent } from "@/lib/actions/agents";
 
@@ -29,17 +28,16 @@ export const CreateAgentDialog = ({
   onOpenChange,
   onCreated,
 }: CreateAgentDialogProps) => {
-  const { user } = useAuth();
   const [name, setName] = useState("");
   const [creating, setCreating] = useState(false);
   const [newToken, setNewToken] = useState<string | null>(null);
   const { copied, copy } = useCopyToClipboard();
 
   const handleCreate = async () => {
-    if (!user?.id || !name.trim()) return;
+    if (!name.trim()) return;
     setCreating(true);
     try {
-      const agent = await createAgent(name, user.id);
+      const agent = await createAgent(name);
       setNewToken(agent.accessToken);
       onCreated();
       toast.success("Agent created");

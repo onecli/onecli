@@ -24,11 +24,9 @@ import {
   AlertDialogTrigger,
 } from "@onecli/ui/components/alert-dialog";
 import { useCopyToClipboard } from "@/hooks/use-copy-to-clipboard";
-import { useAuth } from "@/providers/auth-provider";
 import { getOrCreateApiKey, regenerateApiKey } from "@/lib/actions/api-key";
 
 export const ApiKeyCard = () => {
-  const { user: authUser } = useAuth();
   const [apiKey, setApiKey] = useState("");
   const [loading, setLoading] = useState(true);
   const [revealed, setRevealed] = useState(false);
@@ -36,22 +34,20 @@ export const ApiKeyCard = () => {
   const { copied, copy } = useCopyToClipboard();
 
   useEffect(() => {
-    if (!authUser?.id) return;
-    getOrCreateApiKey(authUser.id).then((result) => {
+    getOrCreateApiKey().then((result) => {
       setApiKey(result.apiKey);
       setLoading(false);
     });
-  }, [authUser?.id]);
+  }, []);
 
   const truncatedKey = apiKey
     ? `${apiKey.slice(0, 6)}${"•".repeat(12)}${apiKey.slice(-4)}`
     : "";
 
   const handleRegenerate = async () => {
-    if (!authUser?.id) return;
     setRegenerating(true);
     try {
-      const result = await regenerateApiKey(authUser.id);
+      const result = await regenerateApiKey();
       setApiKey(result.apiKey);
       setRevealed(true);
       toast.success("API key regenerated");

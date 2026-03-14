@@ -13,11 +13,9 @@ import { Input } from "@onecli/ui/components/input";
 import { Label } from "@onecli/ui/components/label";
 import { Skeleton } from "@onecli/ui/components/skeleton";
 import { toast } from "sonner";
-import { useAuth } from "@/providers/auth-provider";
-import { getUserByAuthId, updateProfile } from "@/lib/actions/user";
+import { getCurrentUser, updateProfile } from "@/lib/actions/user";
 
 export const ProfileForm = () => {
-  const { user: authUser } = useAuth();
   const [name, setName] = useState("");
   const [initialName, setInitialName] = useState("");
   const [email, setEmail] = useState("");
@@ -25,8 +23,7 @@ export const ProfileForm = () => {
   const [saving, setSaving] = useState(false);
 
   useEffect(() => {
-    if (!authUser?.id) return;
-    getUserByAuthId(authUser.id).then((user) => {
+    getCurrentUser().then((user) => {
       if (user) {
         setName(user.name ?? "");
         setInitialName(user.name ?? "");
@@ -34,13 +31,12 @@ export const ProfileForm = () => {
       }
       setLoading(false);
     });
-  }, [authUser?.id]);
+  }, []);
 
   const handleSave = async () => {
-    if (!authUser?.id) return;
     setSaving(true);
     try {
-      await updateProfile({ name, authId: authUser.id });
+      await updateProfile({ name });
       setInitialName(name);
       toast.success("Profile updated");
     } catch {

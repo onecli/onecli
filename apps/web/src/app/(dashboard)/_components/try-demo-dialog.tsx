@@ -11,7 +11,6 @@ import {
   DialogTitle,
 } from "@onecli/ui/components/dialog";
 import { Button } from "@onecli/ui/components/button";
-import { useAuth } from "@/providers/auth-provider";
 import { getDemoInfo } from "@/lib/actions/secrets";
 import { TryDemoCommand } from "./try-demo-command";
 
@@ -21,17 +20,16 @@ interface TryDemoDialogProps {
 }
 
 export const TryDemoDialog = ({ open, onOpenChange }: TryDemoDialogProps) => {
-  const { user: authUser } = useAuth();
   const [agentToken, setAgentToken] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
 
   useEffect(() => {
-    if (!open || !authUser?.id) return;
+    if (!open) return;
     setLoading(true);
-    getDemoInfo(authUser.id)
+    getDemoInfo()
       .then((info) => setAgentToken(info?.agentToken ?? null))
       .finally(() => setLoading(false));
-  }, [open, authUser?.id]);
+  }, [open]);
 
   const command = agentToken
     ? `curl -k -x http://x:${agentToken}@localhost:10255 -H "Authorization: Bearer FAKE_TOKEN" https://httpbin.org/anything`
