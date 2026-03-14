@@ -10,6 +10,8 @@
     "/overview/_components/overview-content.tsx": true,
     "/overview/_components/stats-cards.tsx": true,
     "/activity/page.tsx": true,
-    "/activity/_components/activity-content.tsx": true
+    "/activity/_components/activity-content.tsx": true,
+    "git checkout": true,
+    "git add": true
   }
 }
