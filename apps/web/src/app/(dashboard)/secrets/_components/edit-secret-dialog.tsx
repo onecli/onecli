@@ -13,7 +13,6 @@ import {
 import { Button } from "@onecli/ui/components/button";
 import { Input } from "@onecli/ui/components/input";
 import { Label } from "@onecli/ui/components/label";
-import { useAuth } from "@/providers/auth-provider";
 import { updateSecret } from "@/lib/actions/secrets";
 
 interface InjectionConfig {
@@ -41,7 +40,6 @@ export const EditSecretDialog = ({
   secret,
   onUpdated,
 }: EditSecretDialogProps) => {
-  const { user } = useAuth();
   const [saving, setSaving] = useState(false);
 
   const config = secret.injectionConfig as InjectionConfig | null;
@@ -64,22 +62,18 @@ export const EditSecretDialog = ({
     hostPattern.trim() && (secret.type !== "generic" || headerName.trim());
 
   const handleSave = async () => {
-    if (!user?.id || !isValid) return;
+    if (!isValid) return;
     setSaving(true);
     try {
-      await updateSecret(
-        secret.id,
-        {
-          value: newValue.trim() || undefined,
-          hostPattern,
-          pathPattern: pathPattern || null,
-          injectionConfig:
-            secret.type === "generic"
-              ? { headerName, valueFormat: valueFormat || "{value}" }
-              : undefined,
-        },
-        user.id,
-      );
+      await updateSecret(secret.id, {
+        value: newValue.trim() || undefined,
+        hostPattern,
+        pathPattern: pathPattern || null,
+        injectionConfig:
+          secret.type === "generic"
+            ? { headerName, valueFormat: valueFormat || "{value}" }
+            : undefined,
+      });
       onUpdated();
       toast.success("Secret updated");
       onOpenChange(false);

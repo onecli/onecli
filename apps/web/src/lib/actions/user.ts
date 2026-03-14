@@ -5,14 +5,10 @@ import { getServerSession } from "@/lib/auth/server";
 
 export async function getCurrentUser() {
   const session = await getServerSession();
-  if (!session) return null;
+  if (!session) throw new Error("Not authenticated");
 
-  return getUserByAuthId(session.id);
-}
-
-export async function getUserByAuthId(authId: string) {
   const user = await db.user.findUnique({
-    where: { externalAuthId: authId },
+    where: { externalAuthId: session.id },
     select: {
       id: true,
       email: true,
@@ -24,22 +20,18 @@ export async function getUserByAuthId(authId: string) {
   return user;
 }
 
-export async function updateProfile(data: { name: string; authId?: string }) {
+export async function updateProfile(data: { name: string }) {
   const name = data.name.trim();
 
   if (name.length === 0 || name.length > 255) {
     throw new Error("Name must be between 1 and 255 characters");
   }
 
-  let id = data.authId;
-  if (!id) {
-    const session = await getServerSession();
-    if (!session) throw new Error("Not authenticated");
-    id = session.id;
-  }
+  const session = await getServerSession();
+  if (!session) throw new Error("Not authenticated");
 
   const user = await db.user.update({
-    where: { externalAuthId: id },
+    where: { externalAuthId: session.id },
     data: { name },
     select: {
       id: true,

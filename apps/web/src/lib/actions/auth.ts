@@ -1,24 +1,22 @@
 "use server";
 
 import { db } from "@onecli/db";
+import { getServerSession } from "@/lib/auth/server";
 
-interface EnsureUserInput {
-  authId: string;
-  email: string;
-  name?: string;
-}
+export async function ensureUser() {
+  const session = await getServerSession();
+  if (!session) throw new Error("Not authenticated");
 
-export async function ensureUser(input: EnsureUserInput) {
   const user = await db.user.upsert({
-    where: { externalAuthId: input.authId },
+    where: { externalAuthId: session.id },
     create: {
-      externalAuthId: input.authId,
-      email: input.email,
-      name: input.name,
+      externalAuthId: session.id,
+      email: session.email ?? "",
+      name: session.name,
     },
     update: {
-      email: input.email,
-      name: input.name,
+      email: session.email ?? "",
+      name: session.name,
     },
     select: { id: true },
   });
