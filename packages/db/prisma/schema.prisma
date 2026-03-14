@@ -21,6 +21,8 @@ model User {
 
   agents            Agent[]
   secrets           Secret[]
+  runtimeEvents     RuntimeEvent[]
+  runtimeStatBuckets RuntimeStatBucket[]
 }
 
 model Agent {
@@ -32,6 +34,8 @@ model Agent {
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
   user        User     @relation(fields: [userId], references: [id])
+  secretBindings AgentSecretBinding[]
+  runtimeEvents RuntimeEvent[]
 
   @@index([userId])
 }
@@ -41,13 +45,72 @@ model Secret {
   userId          String
   name            String
   type            String // "anthropic", "generic"
-  encryptedValue  String // AES-256-GCM encrypted via CryptoService
+  providerType    String   @default("local_db") // "local_db", "vault_hcp"
+  providerRef     String? // provider-specific reference (Vault path, key ARN, etc.)
+  encryptedValue  String? // local_db only: AES-256-GCM encrypted via CryptoService
   hostPattern     String // "api.anthropic.com" or "*.example.com"
   pathPattern     String? // "/v1/*", null = all paths
   injectionConfig Json? // type-specific config (generic: { headerName, valueFormat })
   createdAt       DateTime @default(now())
   updatedAt       DateTime @updatedAt
   user            User     @relation(fields: [userId], references: [id])
+  agentBindings   AgentSecretBinding[]
 
   @@index([userId])
+  @@index([providerType])
+}
+
+model AgentSecretBinding {
+  agentId    String
+  secretId   String
+  createdAt  DateTime @default(now())
+  agent      Agent    @relation(fields: [agentId], references: [id], onDelete: Cascade)
+  secret     Secret   @relation(fields: [secretId], references: [id], onDelete: Cascade)
+
+  @@id([agentId, secretId])
+  @@index([secretId])
+}
+
+model RuntimeEvent {
+  id             String   @id @default(cuid())
+  userId         String
+  agentId        String
+  host           String
+  path           String
+  method         String
+  intercept      Boolean  @default(true)
+  injectionCount Int      @default(0)
+  statusCode     Int?
+  durationMs     Int
+  cacheHit       Boolean  @default(false)
+  errorCode      String?
+  createdAt      DateTime @default(now())
+  user           User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  agent          Agent    @relation(fields: [agentId], references: [id], onDelete: Cascade)
+
+  @@index([userId, createdAt])
+  @@index([agentId, createdAt])
+  @@index([host, createdAt])
+}
+
+model RuntimeStatBucket {
+  id                String   @id @default(cuid())
+  userId            String
+  bucketStart       DateTime
+  bucketGranularity String   @default("hour")
+  requestCount      Int      @default(0)
+  injectedRequests  Int      @default(0)
+  injectionCount    Int      @default(0)
+  errorCount        Int      @default(0)
+  cacheHitCount     Int      @default(0)
+  totalDurationMs   BigInt   @default(0)
+  minDurationMs     Int      @default(0)
+  maxDurationMs     Int      @default(0)
+  lastActivityAt    DateTime?
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+  user              User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, bucketStart, bucketGranularity])
+  @@index([userId, bucketStart])
 }

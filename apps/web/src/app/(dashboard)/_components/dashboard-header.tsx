@@ -1,11 +1,13 @@
 "use client";
 
+import { useEffect, useState } from "react";
 import { usePathname } from "next/navigation";
 import { useTheme } from "next-themes";
 import { Code, Moon, Sun } from "lucide-react";
 import { SidebarTrigger } from "@onecli/ui/components/sidebar";
 import { Separator } from "@onecli/ui/components/separator";
 import { Button } from "@onecli/ui/components/button";
+import { Badge } from "@onecli/ui/components/badge";
 import {
   Tooltip,
   TooltipContent,
@@ -21,11 +23,23 @@ import {
   BreadcrumbSeparator,
 } from "@onecli/ui/components/breadcrumb";
 import { navItems } from "@/lib/nav-items";
+import { getSecretsMode } from "@/lib/actions/secrets";
+import { useAuth } from "@/providers/auth-provider";
 import { TryDemoButton } from "./try-demo-button";
+
+interface SecretsModeStatus {
+  mode: "local_db" | "vault_hcp";
+  label: string;
+  details: string;
+  connectionStatus: "connected" | "degraded" | "disconnected" | "not-applicable";
+  connectionMessage: string;
+}
 
 export const DashboardHeader = () => {
   const pathname = usePathname();
   const { resolvedTheme, setTheme } = useTheme();
+  const { user } = useAuth();
+  const [secretsMode, setSecretsMode] = useState<SecretsModeStatus | null>(null);
 
   const navItem = navItems.find((item) => pathname.startsWith(item.url));
   const title = navItem?.title ?? "Dashboard";
@@ -39,6 +53,45 @@ export const DashboardHeader = () => {
   const subPageLabel = lastSegment
     ? lastSegment.charAt(0).toUpperCase() + lastSegment.slice(1)
     : null;
+
+  useEffect(() => {
+    let cancelled = false;
+
+    const loadSecretsMode = async () => {
+      if (!user?.id) return;
+      try {
+        const result = await getSecretsMode(user.id);
+        if (!cancelled) {
+          setSecretsMode(result);
+        }
+      } catch {
+        if (!cancelled) {
+          setSecretsMode(null);
+        }
+      }
+    };
+
+    loadSecretsMode();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [user?.id]);
+
+  const statusDotClass =
+    secretsMode?.connectionStatus === "connected"
+      ? "bg-emerald-500"
+      : secretsMode?.connectionStatus === "degraded"
+        ? "bg-amber-500"
+        : secretsMode?.connectionStatus === "disconnected"
+          ? "bg-destructive"
+          : "bg-muted-foreground";
+
+  const modeLabel = secretsMode
+    ? secretsMode.mode === "vault_hcp"
+      ? "Vault"
+      : "Local DB"
+    : "Secrets";
 
   return (
     <div className="flex w-full items-center gap-2 px-4">
@@ -66,6 +119,21 @@ export const DashboardHeader = () => {
         </BreadcrumbList>
       </Breadcrumb>
       <div className="ml-auto flex items-center gap-2">
+        {secretsMode && (
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Badge variant="secondary" className="hidden gap-1.5 px-2 py-1 text-xs md:inline-flex">
+                <span className={`inline-block size-1.5 rounded-full ${statusDotClass}`} />
+                {modeLabel}
+              </Badge>
+            </TooltipTrigger>
+            <TooltipContent>
+              <p>
+                Secrets mode: {secretsMode.label} · {secretsMode.connectionMessage}
+              </p>
+            </TooltipContent>
+          </Tooltip>
+        )}
         <Tooltip>
           <TooltipTrigger asChild>
             <Button variant="ghost" size="sm" asChild>

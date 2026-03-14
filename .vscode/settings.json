@@ -1,3 +1,15 @@
 {
-  "rust-analyzer.linkedProjects": ["apps/gateway/Cargo.toml"]
+  "rust-analyzer.linkedProjects": [
+    "apps/gateway/Cargo.toml"
+  ],
+  "chat.tools.terminal.autoApprove": {
+    "docker compose": true,
+    "docker run": true,
+    "cargo check": true,
+    "dashboard": true,
+    "/overview/_components/overview-content.tsx": true,
+    "/overview/_components/stats-cards.tsx": true,
+    "/activity/page.tsx": true,
+    "/activity/_components/activity-content.tsx": true
+  }
 }

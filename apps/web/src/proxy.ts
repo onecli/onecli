@@ -14,8 +14,9 @@ const getSetupError = (): SetupErrorCode | null => {
     return "oauth-misconfigured";
   }
 
-  // SECRET_ENCRYPTION_KEY is required for encrypting secrets
-  if (!process.env.SECRET_ENCRYPTION_KEY) {
+  // SECRET_ENCRYPTION_KEY is only required when local_db provider stores encrypted values.
+  const secretProvider = process.env.SECRET_PROVIDER?.trim() || "local_db";
+  if (secretProvider === "local_db" && !process.env.SECRET_ENCRYPTION_KEY) {
     return "missing-encryption-key";
   }
 

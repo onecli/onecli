@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { db } from "@onecli/db";
 import { z } from "zod";
 import { validateGatewaySecret } from "@/lib/gateway-secret";
-import { cryptoService } from "@/lib/crypto";
+import { resolveSecretValue } from "@/lib/secrets/secret-backend";
 
 const connectSchema = z.object({
   agent_token: z.string().min(1),
@@ -60,10 +60,21 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    // Find all user's secrets that match the requested host
+    // Find secrets explicitly assigned to this agent.
     const secrets = await db.secret.findMany({
-      where: { userId: agent.userId },
+      where: {
+        userId: agent.userId,
+        agentBindings: {
+          some: {
+            agentId: agent.id,
+          },
+        },
+      },
       select: {
+        id: true,
+        userId: true,
+        providerType: true,
+        providerRef: true,
         type: true,
         encryptedValue: true,
         hostPattern: true,
@@ -82,19 +93,26 @@ export async function POST(request: NextRequest) {
     }
 
     // Build injection rules from matching secrets
-    const rules: ConnectRule[] = [];
+    const rules: ConnectRule[] = await Promise.all(
+      matchingSecrets.map(async (secret) => {
+        const decryptedValue = await resolveSecretValue({
+          id: secret.id,
+          userId: secret.userId,
+          providerType: secret.providerType,
+          providerRef: secret.providerRef,
+          encryptedValue: secret.encryptedValue,
+        });
 
-    for (const secret of matchingSecrets) {
-      const decryptedValue = cryptoService.decrypt(secret.encryptedValue);
-      const pathPattern = secret.pathPattern ?? "*";
-      const injections = buildInjections(
-        secret.type,
-        decryptedValue,
-        secret.injectionConfig,
-      );
+        const pathPattern = secret.pathPattern ?? "*";
+        const injections = buildInjections(
+          secret.type,
+          decryptedValue,
+          secret.injectionConfig,
+        );
 
-      rules.push({ path_pattern: pathPattern, injections });
-    }
+        return { path_pattern: pathPattern, injections };
+      }),
+    );
 
     return NextResponse.json({ intercept: true, rules });
   } catch {

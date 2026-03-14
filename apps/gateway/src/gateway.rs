@@ -17,13 +17,39 @@ use hyper::server::conn::http1;
 use hyper::service::service_fn;
 use hyper::{Method, Request, Response};
 use hyper_util::rt::TokioIo;
+use serde::Serialize;
 use tokio::net::{TcpListener, TcpStream};
+use tokio::time::Instant;
 use tokio_rustls::TlsAcceptor;
 use tracing::{info, warn};
 
 use crate::ca::CertificateAuthority;
 use crate::connect::{self, CachedConnect, ConnectCacheKey, ConnectError};
 use crate::inject::{self, ConnectRule};
+
+const STATS_ENDPOINT: &str = "/api/gateway/stats";
+
+#[derive(Clone)]
+struct RuntimeTelemetryContext {
+    agent_token: String,
+    api_url: Arc<str>,
+    gateway_secret: Option<Arc<str>>,
+    cache_hit: bool,
+}
+
+#[derive(Serialize)]
+struct RuntimeEventPayload {
+    agent_token: String,
+    host: String,
+    path: String,
+    method: String,
+    intercept: bool,
+    injection_count: u32,
+    status_code: Option<u16>,
+    duration_ms: u64,
+    cache_hit: bool,
+    error_code: Option<String>,
+}
 
 // ── GatewayServer ───────────────────────────────────────────────────────
 
@@ -166,7 +192,7 @@ async fn handle_request(
         // Convention: Basic base64("x:{token}") — token in password field.
         let agent_token = inject::extract_agent_token(&req).filter(|t| !t.is_empty());
 
-        let (intercept, rules) = if let Some(ref token) = agent_token {
+        let (intercept, rules, cache_hit) = if let Some(ref token) = agent_token {
             match connect::resolve(
                 token,
                 &hostname,
@@ -177,7 +203,11 @@ async fn handle_request(
             )
             .await
             {
-                Ok(resp) => (resp.intercept, resp.rules),
+                Ok(result) => (
+                    result.response.intercept,
+                    result.response.rules,
+                    result.cache_hit,
+                ),
                 Err(ConnectError::InvalidToken) => {
                     warn!(peer = %peer_addr, host = %host, "CONNECT rejected: invalid agent token");
                     return Ok(respond_407());
@@ -191,7 +221,7 @@ async fn handle_request(
             }
         } else {
             // No auth — plain tunnel (no MITM, no injection)
-            (false, vec![])
+            (false, vec![], false)
         };
 
         info!(
@@ -199,14 +229,28 @@ async fn handle_request(
             host = %host,
             mode = if intercept { "mitm" } else { "tunnel" },
             rule_count = rules.len(),
+            cache_hit,
             "CONNECT"
         );
 
         tokio::spawn(async move {
             match hyper::upgrade::on(req).await {
                 Ok(upgraded) => {
+                    let telemetry_context = if intercept {
+                        agent_token.as_ref().map(|token| {
+                            Arc::new(RuntimeTelemetryContext {
+                                agent_token: token.clone(),
+                                api_url: Arc::clone(&api_url),
+                                gateway_secret: gateway_secret.clone(),
+                                cache_hit,
+                            })
+                        })
+                    } else {
+                        None
+                    };
+
                     let result = if intercept {
-                        mitm(upgraded, &host, &ca, http_client, rules).await
+                        mitm(upgraded, &host, &ca, http_client, rules, telemetry_context).await
                     } else {
                         tunnel(upgraded, &host).await
                     };
@@ -249,6 +293,7 @@ async fn mitm(
     ca: &CertificateAuthority,
     http_client: reqwest::Client,
     rules: Vec<ConnectRule>,
+    telemetry_context: Option<Arc<RuntimeTelemetryContext>>,
 ) -> Result<()> {
     let hostname = strip_port(host);
 
@@ -278,7 +323,10 @@ async fn mitm(
                 let host = host_owned.clone();
                 let client = http_client.clone();
                 let rules = Arc::clone(&rules);
-                async move { forward_request(req, &host, client, &rules).await }
+                let telemetry_context = telemetry_context.clone();
+                async move {
+                    forward_request(req, &host, client, &rules, telemetry_context).await
+                }
             }),
         )
         .await
@@ -294,6 +342,7 @@ async fn forward_request(
     host: &str,
     http_client: reqwest::Client,
     rules: &[ConnectRule],
+    telemetry_context: Option<Arc<RuntimeTelemetryContext>>,
 ) -> anyhow::Result<Response<impl HttpBody<Data = Bytes, Error = reqwest::Error>>> {
     let method = req.method().clone();
     let path = req
@@ -302,6 +351,7 @@ async fn forward_request(
         .map(|pq| pq.as_str().to_string())
         .unwrap_or_else(|| "/".to_string());
     let url = format!("https://{host}{path}");
+    let started_at = Instant::now();
 
     let (parts, body) = req.into_parts();
 
@@ -326,10 +376,31 @@ async fn forward_request(
     upstream = upstream.body(reqwest::Body::wrap(body));
 
     // Send to real server
-    let upstream_resp = upstream
-        .send()
-        .await
-        .with_context(|| format!("forwarding to {url}"))?;
+    let upstream_resp = match upstream.send().await {
+        Ok(response) => response,
+        Err(error) => {
+            if let Some(context) = telemetry_context.as_ref().cloned() {
+                emit_runtime_event(
+                    http_client.clone(),
+                    context,
+                    RuntimeEventPayload {
+                        agent_token: String::new(),
+                        host: host.to_string(),
+                        path: path.clone(),
+                        method: method.to_string(),
+                        intercept: true,
+                        injection_count: injection_count as u32,
+                        status_code: None,
+                        duration_ms: started_at.elapsed().as_millis() as u64,
+                        cache_hit: false,
+                        error_code: Some("upstream_unreachable".to_string()),
+                    },
+                );
+            }
+
+            return Err(error).with_context(|| format!("forwarding to {url}"));
+        }
+    };
 
     let status = upstream_resp.status();
     let resp_headers = upstream_resp.headers().clone();
@@ -349,6 +420,25 @@ async fn forward_request(
         "MITM"
     );
 
+    if let Some(context) = telemetry_context.as_ref().cloned() {
+        emit_runtime_event(
+            http_client,
+            context,
+            RuntimeEventPayload {
+                agent_token: String::new(),
+                host: host.to_string(),
+                path: path.clone(),
+                method: method.to_string(),
+                intercept: true,
+                injection_count: injection_count as u32,
+                status_code: Some(status.as_u16()),
+                duration_ms: started_at.elapsed().as_millis() as u64,
+                cache_hit: false,
+                error_code: None,
+            },
+        );
+    }
+
     // Stream response body to client (no buffering — critical for SSE)
     let resp_stream = upstream_resp.bytes_stream().map_ok(Frame::data);
     let body = StreamBody::new(resp_stream);
@@ -364,6 +454,45 @@ async fn forward_request(
     }
 
     Ok(response)
+}
+
+fn emit_runtime_event(
+    http_client: reqwest::Client,
+    context: Arc<RuntimeTelemetryContext>,
+    mut payload: RuntimeEventPayload,
+) {
+    payload.agent_token = context.agent_token.clone();
+    payload.cache_hit = context.cache_hit;
+
+    let url = format!("{}{}", context.api_url, STATS_ENDPOINT);
+    tokio::spawn(async move {
+        let mut request = http_client.post(&url).json(&payload);
+
+        if let Some(secret) = context.gateway_secret.as_deref() {
+            request = request.header("x-gateway-secret", secret);
+        }
+
+        match request.send().await {
+            Ok(response) => {
+                if !response.status().is_success() {
+                    warn!(
+                        status = %response.status().as_u16(),
+                        host = %payload.host,
+                        path = %payload.path,
+                        "runtime stats ingestion rejected"
+                    );
+                }
+            }
+            Err(error) => {
+                warn!(
+                    error = %error,
+                    host = %payload.host,
+                    path = %payload.path,
+                    "runtime stats ingestion failed"
+                );
+            }
+        }
+    });
 }
 
 /// Tunnel: connect to the target server and splice bytes in both directions

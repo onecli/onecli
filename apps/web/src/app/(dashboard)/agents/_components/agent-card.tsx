@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import { MoreHorizontal, RotateCw, Trash2 } from "lucide-react";
+import { KeyRound, MoreHorizontal, RotateCw, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 import { Card } from "@onecli/ui/components/card";
 import { Button } from "@onecli/ui/components/button";
@@ -24,6 +24,7 @@ import {
 } from "@onecli/ui/components/alert-dialog";
 import { useAuth } from "@/providers/auth-provider";
 import { deleteAgent, regenerateAgentToken } from "@/lib/actions/agents";
+import { ManageAgentSecretsDialog } from "./manage-agent-secrets-dialog";
 
 interface AgentCardProps {
   agent: {
@@ -32,6 +33,7 @@ interface AgentCardProps {
     accessToken: string;
     isDefault: boolean;
     createdAt: Date;
+    secretCount: number;
   };
   onUpdate: () => void;
 }
@@ -42,6 +44,7 @@ export const AgentCard = ({ agent, onUpdate }: AgentCardProps) => {
   const [regenerating, setRegenerating] = useState(false);
   const [rotateDialogOpen, setRotateDialogOpen] = useState(false);
   const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
+  const [manageSecretsOpen, setManageSecretsOpen] = useState(false);
 
   const handleRegenerate = async () => {
     if (!user?.id) return;
@@ -87,6 +90,19 @@ export const AgentCard = ({ agent, onUpdate }: AgentCardProps) => {
           <p className="text-muted-foreground text-xs">
             Created {new Date(agent.createdAt).toLocaleDateString()}
           </p>
+          <p className="text-muted-foreground text-xs">
+            {agent.secretCount} {agent.secretCount === 1 ? "secret" : "secrets"} assigned
+          </p>
+
+          <Button
+            variant="secondary"
+            size="sm"
+            className="h-7 px-2 text-xs"
+            onClick={() => setManageSecretsOpen(true)}
+          >
+            <KeyRound className="size-3.5" />
+            Manage secrets
+          </Button>
         </div>
 
         <DropdownMenu>
@@ -96,6 +112,10 @@ export const AgentCard = ({ agent, onUpdate }: AgentCardProps) => {
             </Button>
           </DropdownMenuTrigger>
           <DropdownMenuContent align="end">
+            <DropdownMenuItem onSelect={() => setManageSecretsOpen(true)}>
+              <KeyRound className="size-4" />
+              Manage secrets
+            </DropdownMenuItem>
             <DropdownMenuItem onSelect={() => setRotateDialogOpen(true)}>
               <RotateCw className="size-4" />
               Rotate token
@@ -156,6 +176,14 @@ export const AgentCard = ({ agent, onUpdate }: AgentCardProps) => {
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
+
+      <ManageAgentSecretsDialog
+        agentId={agent.id}
+        agentName={agent.name}
+        open={manageSecretsOpen}
+        onOpenChange={setManageSecretsOpen}
+        onSaved={onUpdate}
+      />
     </Card>
   );
 };

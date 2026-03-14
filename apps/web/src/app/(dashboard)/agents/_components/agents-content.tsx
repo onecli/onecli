@@ -16,6 +16,7 @@ interface Agent {
   accessToken: string;
   isDefault: boolean;
   createdAt: Date;
+  secretCount: number;
 }
 
 export const AgentsContent = () => {
@@ -59,13 +60,10 @@ export const AgentsContent = () => {
   return (
     <div className="space-y-4">
       <div className="flex justify-end">
-        <div className="flex items-center gap-2">
-          <span className="text-muted-foreground text-xs">Coming soon</span>
-          <Button size="sm" disabled>
-            <Plus className="size-3.5" />
-            Create Agent
-          </Button>
-        </div>
+        <Button size="sm" onClick={() => setCreateOpen(true)}>
+          <Plus className="size-3.5" />
+          Create Agent
+        </Button>
       </div>
 
       {agents.length === 0 ? (

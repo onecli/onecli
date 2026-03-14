@@ -61,6 +61,60 @@ cd onecli/docker
 docker compose up
 ```
 
+Compose starts three services:
+- `onecli`: web dashboard + gateway
+- `vault`: HashiCorp Vault (dev mode) on `http://localhost:8200`
+- `vault-init`: one-shot initializer that validates the KV v2 mount and writes a bootstrap secret
+
+The compose stack configures OneCLI to use Vault as the secrets provider by default.
+
+### Quick Docker agent smoke test
+
+After creating an agent and secret in the dashboard, you can run a one-shot test
+container that calls `https://httpbin.org/bearer` and `https://httpbin.org/anything`
+through the OneCLI gateway.
+
+1. Copy your agent token into `.env` as `ONECLI_AGENT_TOKEN=...`
+2. Run:
+
+```bash
+cd docker
+docker compose --profile quick-agent run --rm quick-agent
+```
+
+The test container uses proxy auth (`Proxy-Authorization`) with your agent token,
+trusts the gateway CA from the shared Docker volume, and prints both HTTPBin JSON responses.
+
+### Vault production-like profile
+
+For a non-dev Vault setup with persistent raft storage, init, and unseal automation:
+
+```bash
+cd docker
+docker compose --profile vault-prod up vault-prod vault-prod-init
+```
+
+This profile uses:
+- `vault-prod` on `http://localhost:18200`
+- persistent volume `vault-prod-data` for raft storage
+- persistent volume `vault-prod-bootstrap` for init output (`init.txt`, `unseal_key`, `root_token`)
+
+To start OneCLI against this profile, set `VAULT_ADDR=http://vault-prod:8200` and `VAULT_TOKEN` to the value in `vault-prod-bootstrap/root_token` within the compose project, then start `onecli`.
+
+Or run the prewired service that auto-loads the Vault token from the bootstrap volume:
+
+```bash
+cd docker
+docker compose --profile vault-prod up -d vault-prod vault-prod-init onecli-vault-prod
+```
+
+Run the matching smoke test container against `onecli-vault-prod` automatically:
+
+```bash
+cd docker
+docker compose --profile vault-prod run --rm quick-agent-vault-prod
+```
+
 ## Features
 
 - **Transparent credential injection**: agents make normal HTTP calls, the gateway handles auth
@@ -127,6 +181,11 @@ All environment variables are optional for local development:
 | `GOOGLE_CLIENT_ID`      | Google OAuth client ID            | —                |
 | `GOOGLE_CLIENT_SECRET`  | Google OAuth client secret        | —                |
 | `SECRET_ENCRYPTION_KEY` | AES-256-GCM encryption key        | Auto-generated   |
+| `SECRET_PROVIDER`       | Secret backend (`local_db`/`vault_hcp`) | `local_db` |
+| `VAULT_ADDR`            | Vault API URL                     | —                |
+| `VAULT_TOKEN`           | Vault token for secret operations | —                |
+| `VAULT_KV_MOUNT`        | Vault KV v2 mount name            | `secret`         |
+| `VAULT_KV_PREFIX`       | Vault path prefix                 | `onecli`         |
 
 ## Contributing
 

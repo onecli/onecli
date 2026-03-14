@@ -25,6 +25,12 @@ pub(crate) struct ConnectResponse {
     pub rules: Vec<ConnectRule>,
 }
 
+/// Result of a connect resolution, including cache telemetry.
+pub(crate) struct ResolveResult {
+    pub response: ConnectResponse,
+    pub cache_hit: bool,
+}
+
 /// Request body sent to `POST /api/gateway/connect`.
 #[derive(Serialize)]
 struct ConnectRequest<'a> {
@@ -63,13 +69,16 @@ pub(crate) async fn resolve(
     api_url: &str,
     gateway_secret: Option<&str>,
     cache: &DashMap<ConnectCacheKey, CachedConnect>,
-) -> Result<ConnectResponse, ConnectError> {
+) -> Result<ResolveResult, ConnectError> {
     let cache_key = (agent_token.to_string(), hostname.to_string());
 
     // Check cache
     if let Some(entry) = cache.get(&cache_key) {
         if entry.expires_at > Instant::now() {
-            return Ok(entry.response.clone());
+            return Ok(ResolveResult {
+                response: entry.response.clone(),
+                cache_hit: true,
+            });
         }
     }
     // Drop the ref before the await (entry borrows from DashMap)
@@ -87,7 +96,10 @@ pub(crate) async fn resolve(
         },
     );
 
-    Ok(response)
+    Ok(ResolveResult {
+        response,
+        cache_hit: false,
+    })
 }
 
 /// Call `POST /api/gateway/connect` to resolve agent + host → intercept decision + rules.

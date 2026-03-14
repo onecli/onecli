@@ -1,8 +1,15 @@
 "use server";
 
+import { randomBytes } from "crypto";
 import { db, Prisma } from "@onecli/db";
 import { getServerSession } from "@/lib/auth/server";
-import { cryptoService } from "@/lib/crypto";
+import {
+  deleteSecretMaterial,
+  getConfiguredSecretProviderType,
+  getSecretBackendStatus,
+  parseSecretProviderType,
+  persistSecretValue,
+} from "@/lib/secrets/secret-backend";
 
 const SECRET_TYPE_LABELS: Record<string, string> = {
   anthropic: "Anthropic API Key",
@@ -19,6 +26,26 @@ const buildPreview = (plaintext: string): string => {
 };
 
 const DEMO_SECRET_NAME = "Demo Secret (httpbin)";
+const DEFAULT_AGENT_NAME = "Default Agent";
+
+const ensureDefaultAgentForUser = async (userId: string) => {
+  const existing = await db.agent.findFirst({
+    where: { userId, isDefault: true },
+    select: { id: true },
+  });
+
+  if (existing) return existing;
+
+  return db.agent.create({
+    data: {
+      userId,
+      name: DEFAULT_AGENT_NAME,
+      isDefault: true,
+      accessToken: `aoc_${randomBytes(32).toString("hex")}`,
+    },
+    select: { id: true },
+  });
+};
 
 const ensureDemoSecret = async (userId: string) => {
   const user = await db.user.findUniqueOrThrow({
@@ -28,30 +55,59 @@ const ensureDemoSecret = async (userId: string) => {
 
   if (user.demoSeeded) return;
 
-  const encryptedValue = cryptoService.encrypt(
-    "WELCOME-TO-ONECLI-SECRETS-ARE-WORKING",
-  );
+  const providerType = getConfiguredSecretProviderType();
+  const defaultAgent = await ensureDefaultAgentForUser(userId);
 
-  await db.$transaction([
-    db.secret.create({
-      data: {
-        name: DEMO_SECRET_NAME,
-        type: "generic",
-        encryptedValue,
-        hostPattern: "httpbin.org",
-        pathPattern: "/anything/*",
-        injectionConfig: {
-          headerName: "Authorization",
-          valueFormat: "Bearer {value}",
-        },
-        userId,
+  const secret = await db.secret.create({
+    data: {
+      name: DEMO_SECRET_NAME,
+      type: "generic",
+      providerType,
+      providerRef: null,
+      encryptedValue: null,
+      hostPattern: "httpbin.org",
+      pathPattern: "/anything/*",
+      injectionConfig: {
+        headerName: "Authorization",
+        valueFormat: "Bearer {value}",
       },
-    }),
-    db.user.update({
-      where: { id: userId },
-      data: { demoSeeded: true },
-    }),
-  ]);
+      userId,
+    },
+    select: { id: true },
+  });
+
+  try {
+    const material = await persistSecretValue({
+      providerType,
+      userId,
+      secretId: secret.id,
+      value: "WELCOME-TO-ONECLI-SECRETS-ARE-WORKING",
+    });
+
+    await db.$transaction([
+      db.secret.update({
+        where: { id: secret.id },
+        data: {
+          providerType: material.providerType,
+          providerRef: material.providerRef,
+          encryptedValue: material.encryptedValue,
+        },
+      }),
+      db.agentSecretBinding.create({
+        data: {
+          agentId: defaultAgent.id,
+          secretId: secret.id,
+        },
+      }),
+      db.user.update({
+        where: { id: userId },
+        data: { demoSeeded: true },
+      }),
+    ]);
+  } catch (error) {
+    await db.secret.delete({ where: { id: secret.id } }).catch(() => undefined);
+    throw error;
+  }
 };
 
 const resolveUserId = async (authId?: string) => {
@@ -95,6 +151,12 @@ export async function getSecrets(authId?: string) {
   }));
 }
 
+export async function getSecretsMode(authId?: string) {
+  // Enforce auth and user ownership semantics like other secret actions.
+  await resolveUserId(authId);
+  return getSecretBackendStatus();
+}
+
 interface CreateSecretInput {
   name: string;
   type: "anthropic" | "generic";
@@ -124,7 +186,6 @@ export async function createSecret(input: CreateSecretInput, authId?: string) {
     }
   }
 
-  const encryptedValue = cryptoService.encrypt(value);
   const preview = buildPreview(value);
   const pathPattern = input.pathPattern?.trim() || null;
   const injectionConfig =
@@ -135,15 +196,45 @@ export async function createSecret(input: CreateSecretInput, authId?: string) {
         } as Prisma.InputJsonValue)
       : Prisma.JsonNull;
 
-  const secret = await db.secret.create({
+  const providerType = getConfiguredSecretProviderType();
+  const defaultAgent = await ensureDefaultAgentForUser(userId);
+
+  const createdSecret = await db.secret.create({
     data: {
       name,
       type: input.type,
-      encryptedValue,
+      providerType,
+      providerRef: null,
+      encryptedValue: null,
       hostPattern,
       pathPattern,
       injectionConfig,
       userId,
+    },
+    select: { id: true },
+  });
+
+  let material;
+  try {
+    material = await persistSecretValue({
+      providerType,
+      userId,
+      secretId: createdSecret.id,
+      value,
+    });
+  } catch (error) {
+    await db.secret
+      .delete({ where: { id: createdSecret.id } })
+      .catch(() => undefined);
+    throw error;
+  }
+
+  const secret = await db.secret.update({
+    where: { id: createdSecret.id },
+    data: {
+      providerType: material.providerType,
+      providerRef: material.providerRef,
+      encryptedValue: material.encryptedValue,
     },
     select: {
       id: true,
@@ -155,6 +246,13 @@ export async function createSecret(input: CreateSecretInput, authId?: string) {
     },
   });
 
+  await db.agentSecretBinding.create({
+    data: {
+      agentId: defaultAgent.id,
+      secretId: secret.id,
+    },
+  });
+
   return { ...secret, preview };
 }
 
@@ -163,10 +261,24 @@ export async function deleteSecret(secretId: string, authId?: string) {
 
   const secret = await db.secret.findFirst({
     where: { id: secretId, userId },
-    select: { id: true },
+    select: {
+      id: true,
+      userId: true,
+      providerType: true,
+      providerRef: true,
+      encryptedValue: true,
+    },
   });
 
   if (!secret) throw new Error("Secret not found");
+
+  await deleteSecretMaterial({
+    id: secret.id,
+    userId: secret.userId,
+    providerType: parseSecretProviderType(secret.providerType),
+    providerRef: secret.providerRef,
+    encryptedValue: secret.encryptedValue,
+  });
 
   await db.secret.delete({ where: { id: secretId } });
 }
@@ -205,7 +317,13 @@ export async function updateSecret(
 
   const secret = await db.secret.findFirst({
     where: { id: secretId, userId },
-    select: { id: true, type: true },
+    select: {
+      id: true,
+      userId: true,
+      type: true,
+      providerType: true,
+      providerRef: true,
+    },
   });
 
   if (!secret) throw new Error("Secret not found");
@@ -215,7 +333,16 @@ export async function updateSecret(
   if (input.value !== undefined) {
     const value = input.value.trim();
     if (!value) throw new Error("Secret value is required");
-    data.encryptedValue = cryptoService.encrypt(value);
+    const material = await persistSecretValue({
+      providerType: parseSecretProviderType(secret.providerType),
+      userId: secret.userId,
+      secretId: secret.id,
+      value,
+      providerRef: secret.providerRef,
+    });
+    data.providerType = material.providerType;
+    data.providerRef = material.providerRef;
+    data.encryptedValue = material.encryptedValue;
   }
 
   if (input.hostPattern !== undefined) {
