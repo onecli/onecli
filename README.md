@@ -45,21 +45,15 @@ OneCLI is an open-source gateway that sits between your AI agents and the servic
 
 ## Quick Start
 
-The fastest way to run OneCLI locally (no external database or config needed):
-
-```bash
-docker run --pull always -p 10254:10254 -p 10255:10255 -v onecli-data:/app/data ghcr.io/onecli/onecli
-```
-
-Open **http://localhost:10254**, create an agent, add your secrets, and point your agent's HTTP gateway to `localhost:10255`.
-
-### Or with Docker Compose
+The fastest way to run OneCLI locally:
 
 ```bash
 git clone https://github.com/onecli/onecli.git
-cd onecli/docker
-docker compose up
+cd onecli
+docker compose -f docker/docker-compose.yml up
 ```
+
+Open **http://localhost:10254**, create an agent, add your secrets, and point your agent's HTTP gateway to `localhost:10255`.
 
 ## Features
 
@@ -67,7 +61,7 @@ docker compose up
 - **Encrypted secret storage**: AES-256-GCM encryption at rest, decrypted only at request time
 - **Host & path matching**: route secrets to the right API endpoints with pattern matching
 - **Multi-agent support**: each agent gets its own access token with scoped permissions
-- **No external dependencies**: runs with embedded PGlite (or bring your own PostgreSQL)
+- **Easy setup**: `docker compose -f docker/docker-compose.yml up` starts everything (app + PostgreSQL)
 - **Two auth modes**: single-user (no login) for local use, or Google OAuth for teams
 - **Rust gateway**: fast, memory-safe HTTP gateway with MITM interception for HTTPS
 
@@ -78,10 +72,10 @@ apps/
   web/            # Next.js app (dashboard + API, port 10254)
   gateway/        # Rust gateway (credential injection, port 10255)
 packages/
-  db/             # Prisma ORM + migrations + PGlite
+  db/             # Prisma ORM + migrations
   ui/             # Shared UI components (shadcn/ui)
 docker/
-  Dockerfile      # Single-container build (gateway + web + PGlite)
+  Dockerfile      # App image (gateway + web)
   docker-compose.yml
 ```
 
@@ -91,6 +85,7 @@ docker/
 
 - **[mise](https://mise.jdx.dev)** (installs Node.js, pnpm, and other tools)
 - **Rust** (for the gateway)
+- **Docker** (for PostgreSQL)
 
 ### Setup
 
@@ -99,7 +94,8 @@ mise install
 pnpm install
 cp .env.example .env
 pnpm db:generate
-pnpm db:init-dev
+pnpm db:up          # Start PostgreSQL
+pnpm db:migrate     # Apply migrations
 pnpm dev
 ```
 
@@ -112,6 +108,8 @@ Dashboard at **http://localhost:10254**, gateway at **http://localhost:10255**.
 | `pnpm dev`         | Start web + gateway in dev mode |
 | `pnpm build`       | Production build                |
 | `pnpm check`       | Lint + types + format           |
+| `pnpm db:up`       | Start PostgreSQL (Docker)       |
+| `pnpm db:down`     | Stop PostgreSQL                 |
 | `pnpm db:generate` | Generate Prisma client          |
 | `pnpm db:migrate`  | Run database migrations         |
 | `pnpm db:studio`   | Open Prisma Studio              |
@@ -120,13 +118,13 @@ Dashboard at **http://localhost:10254**, gateway at **http://localhost:10255**.
 
 All environment variables are optional for local development:
 
-| Variable                | Description                       | Default          |
-| ----------------------- | --------------------------------- | ---------------- |
-| `DATABASE_URL`          | PostgreSQL connection string      | Embedded PGlite  |
-| `NEXTAUTH_SECRET`       | Enables Google OAuth (multi-user) | Single-user mode |
-| `GOOGLE_CLIENT_ID`      | Google OAuth client ID            | —                |
-| `GOOGLE_CLIENT_SECRET`  | Google OAuth client secret        | —                |
-| `SECRET_ENCRYPTION_KEY` | AES-256-GCM encryption key        | Auto-generated   |
+| Variable                | Description                       | Default            |
+| ----------------------- | --------------------------------- | ------------------ |
+| `DATABASE_URL`          | PostgreSQL connection string      | See `.env.example` |
+| `NEXTAUTH_SECRET`       | Enables Google OAuth (multi-user) | Single-user mode   |
+| `GOOGLE_CLIENT_ID`      | Google OAuth client ID            | —                  |
+| `GOOGLE_CLIENT_SECRET`  | Google OAuth client secret        | —                  |
+| `SECRET_ENCRYPTION_KEY` | AES-256-GCM encryption key        | Auto-generated     |
 
 ## Contributing
 

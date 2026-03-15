@@ -12,10 +12,11 @@
     "check-types": "turbo run check-types",
     "check": "turbo run lint check-types && pnpm run format:check",
     "fix": "turbo run lint:fix && pnpm run format",
+    "db:up": "docker compose -f docker/docker-compose.yml up postgres -d",
+    "db:down": "docker compose -f docker/docker-compose.yml down postgres",
     "db:generate": "pnpm --filter @onecli/db prisma generate",
     "db:push": "dotenv -e .env -- pnpm --filter @onecli/db prisma db push",
     "db:migrate": "dotenv -e .env -- pnpm --filter @onecli/db db:migrate",
-    "db:init-dev": "pnpm --filter @onecli/db db:init-dev",
     "db:studio": "dotenv -e .env -- pnpm --filter @onecli/db prisma studio",
     "test": "turbo run test",
     "prepare": "husky"

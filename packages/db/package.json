@@ -14,13 +14,10 @@
     "db:migrate": "prisma migrate dev",
     "db:migrate:deploy": "prisma migrate deploy",
     "db:studio": "prisma studio",
-    "db:init-dev": "node scripts/init-dev-db.ts",
     "check-types": "tsc --noEmit"
   },
   "dependencies": {
-    "@electric-sql/pglite": "^0.3.15",
-    "@prisma/client": "^6.9.0",
-    "pglite-prisma-adapter": "0.6.1"
+    "@prisma/client": "^6.9.0"
   },
   "devDependencies": {
     "@onecli/typescript-config": "workspace:*",

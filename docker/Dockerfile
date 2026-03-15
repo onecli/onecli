@@ -1,4 +1,4 @@
-# OneCLI — all-in-one Docker image (gateway + web + PGlite)
+# OneCLI — all-in-one Docker image (gateway + web)
 # Build context: repo root (run with `docker build -f docker/Dockerfile .`)
 
 # ──────────────────────────────────────────────
@@ -54,7 +54,7 @@ ENV NEXT_TELEMETRY_DISABLED=1
 COPY --from=deps /app/ .
 COPY --from=pruner /app/out/full/ .
 RUN pnpm --filter @onecli/db generate
-# Dummy DATABASE_URL prevents PGlite from initializing during static page generation
+# Dummy DATABASE_URL satisfies Prisma during static page generation
 RUN --mount=type=cache,target=/app/apps/web/.next/cache \
     DATABASE_URL="postgresql://build:build@localhost/build" \
     pnpm build --filter=@onecli/web
@@ -82,23 +82,19 @@ COPY --from=builder --chown=node:node /app/apps/web/.next/standalone ./
 COPY --from=builder --chown=node:node /app/apps/web/.next/static ./apps/web/.next/static
 COPY --from=builder --chown=node:node /app/apps/web/public ./apps/web/public
 
-# Prisma migrations and init script for PGlite mode
+# Prisma migrations (for `prisma migrate deploy` at startup)
 COPY --from=builder --chown=node:node /app/packages/db/prisma ./packages/db/prisma
-COPY --from=builder --chown=node:node /app/packages/db/scripts ./packages/db/scripts
 
-# PGlite dependencies for embedded DB mode
+# Prisma CLI (for running migrations)
 RUN cd packages/db && npm init -y > /dev/null 2>&1 && \
-    npm install @electric-sql/pglite@0.3.15 prisma@6
+    npm install prisma@6
 
 # Entrypoint
 COPY --chown=node:node docker/entrypoint.sh ./entrypoint.sh
 RUN chmod +x ./entrypoint.sh
 
-# Data directory for CA certs, gateway secret, PGlite data
+# Data directory for CA certs and persistent state
 RUN mkdir -p /app/data && chown node:node /app/data
-# PGlite uses relative "./data/pglite" from server.js at apps/web/server.js,
-# which resolves to /app/apps/web/data/. Symlink it to the volume mount.
-RUN mkdir -p /app/apps/web && ln -s /app/data /app/apps/web/data
 VOLUME ["/app/data"]
 
 USER node

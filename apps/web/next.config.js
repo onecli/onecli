@@ -3,11 +3,7 @@ const isCloud = process.env.NEXT_PUBLIC_EDITION === "cloud";
 /** @type {import('next').NextConfig} */
 const nextConfig = {
   output: "standalone",
-  serverExternalPackages: [
-    "@onecli/db",
-    "@electric-sql/pglite",
-    "pglite-prisma-adapter",
-  ],
+  serverExternalPackages: ["@onecli/db"],
   env: {
     NEXT_PUBLIC_EDITION: process.env.NEXT_PUBLIC_EDITION || "oss",
   },

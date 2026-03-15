@@ -17,16 +17,12 @@ if [ -z "$GATEWAY_SECRET" ]; then
   fi
 fi
 
-if [ -n "$DATABASE_URL" ]; then
-  echo "External database detected, running Prisma migrations..."
-  if ! $PRISMA migrate deploy $SCHEMA 2>&1; then
-    echo "migrate deploy failed — bootstrapping baseline migration..."
-    $PRISMA migrate resolve --applied 0_init $SCHEMA
-    $PRISMA migrate deploy $SCHEMA
-  fi
-else
-  echo "No DATABASE_URL set, initializing embedded PGlite database..."
-  node /app/packages/db/scripts/init-dev-db.ts
+# Run database migrations
+echo "Running database migrations..."
+if ! $PRISMA migrate deploy $SCHEMA 2>&1; then
+  echo "migrate deploy failed — bootstrapping baseline migration..."
+  $PRISMA migrate resolve --applied 0_init $SCHEMA
+  $PRISMA migrate deploy $SCHEMA
 fi
 
 # Auto-generate SECRET_ENCRYPTION_KEY for OSS if not provided.
