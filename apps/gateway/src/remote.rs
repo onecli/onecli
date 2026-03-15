@@ -1,7 +1,7 @@
 //! Remote Access Manager — lifecycle, event loop, and credential requests.
 //!
 //! Wraps `RemoteClient` from `bw-rat-client` to provide a high-level interface
-//! for the proxy to fetch credentials from a paired Bitwarden vault.
+//! for the gateway to fetch credentials from a paired Bitwarden vault.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;

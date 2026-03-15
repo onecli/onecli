@@ -12,7 +12,7 @@ export default function SecretsPage() {
     <div className="flex flex-1 flex-col gap-6 max-w-5xl">
       <PageHeader
         title="Secrets"
-        description="Manage encrypted credentials that the proxy injects into requests."
+        description="Manage encrypted credentials that the gateway injects into requests."
       />
       <Suspense>
         <SecretsContent />

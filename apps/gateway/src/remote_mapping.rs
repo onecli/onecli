@@ -1,7 +1,7 @@
 //! Conversion from remote-access credentials to proxy injection rules.
 //!
 //! Maps `CredentialData` from the Bitwarden vault into `ConnectRule` instructions
-//! that the proxy can apply during MITM interception.
+//! that the gateway can apply during MITM interception.
 
 use bw_rat_client::CredentialData;
 

@@ -76,7 +76,7 @@ export const AgentsContent = () => {
           <p className="text-sm font-medium">No agents yet</p>
           <p className="text-muted-foreground mt-1 max-w-xs text-xs">
             Create an agent to generate an access token for connecting to the
-            proxy.
+            gateway.
           </p>
         </Card>
       ) : (

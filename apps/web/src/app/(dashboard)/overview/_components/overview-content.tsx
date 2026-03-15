@@ -2,14 +2,14 @@
 
 import { useEffect, useState } from "react";
 import { useAuth } from "@/providers/auth-provider";
-import { getProxyCounts } from "@/lib/actions/counts";
+import { getGatewayCounts } from "@/lib/actions/counts";
 import { PageHeader } from "@dashboard/page-header";
 import { ApiKeyCard } from "./api-key-card";
 import { StatsCards } from "./stats-cards";
 
 export const OverviewContent = () => {
   const { user } = useAuth();
-  const [proxyCounts, setProxyCounts] = useState({
+  const [gatewayCounts, setGatewayCounts] = useState({
     agents: 0,
     secrets: 0,
   });
@@ -19,8 +19,8 @@ export const OverviewContent = () => {
     if (!user?.id) return;
 
     setLoading(true);
-    getProxyCounts(user.id).then((proxy) => {
-      setProxyCounts(proxy);
+    getGatewayCounts(user.id).then((counts) => {
+      setGatewayCounts(counts);
       setLoading(false);
     });
   }, [user?.id]);
@@ -33,8 +33,8 @@ export const OverviewContent = () => {
       />
       <ApiKeyCard />
       <StatsCards
-        agentCount={proxyCounts.agents}
-        secretCount={proxyCounts.secrets}
+        agentCount={gatewayCounts.agents}
+        secretCount={gatewayCounts.secrets}
         loading={loading}
       />
     </div>

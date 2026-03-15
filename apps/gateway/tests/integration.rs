@@ -1,8 +1,8 @@
-//! Integration tests for the onecli-proxy.
+//! Integration tests for the onecli-gateway.
 //!
-//! These tests start a real proxy on a random port and make actual TCP connections
+//! These tests start a real gateway on a random port and make actual TCP connections
 //! to verify CONNECT handling, health checks, and request rejection.
-//! A mock API server provides policy resolution for the proxy.
+//! A mock API server provides policy resolution for the gateway.
 
 use base64::Engine;
 use std::io::{Read, Write};
@@ -21,7 +21,7 @@ fn basic_auth(token: &str) -> String {
 /// Test agent token used across integration tests.
 const TEST_AGENT_TOKEN: &str = "aoc_test_token_123";
 
-/// Start a mock API server that responds to `POST /api/proxy/connect`.
+/// Start a mock API server that responds to `POST /api/gateway/connect`.
 /// Returns `{ "intercept": false }` for all requests (tunnel mode).
 /// Returns the port and a join handle.
 fn start_mock_api(response_body: &str) -> (u16, std::thread::JoinHandle<()>) {
@@ -53,15 +53,15 @@ fn start_mock_api(response_body: &str) -> (u16, std::thread::JoinHandle<()>) {
     (port, handle)
 }
 
-/// Start the proxy binary on a random available port, returning the port and child process.
+/// Start the gateway binary on a random available port, returning the port and child process.
 /// Uses a temp dir for CA storage so tests don't interfere with each other.
-/// `api_url` controls where the proxy calls for policy resolution.
-fn start_proxy(tmp_dir: &Path, api_url: Option<&str>) -> (u16, std::process::Child) {
-    start_proxy_with_envs(tmp_dir, api_url, &[])
+/// `api_url` controls where the gateway calls for policy resolution.
+fn start_gateway(tmp_dir: &Path, api_url: Option<&str>) -> (u16, std::process::Child) {
+    start_gateway_with_envs(tmp_dir, api_url, &[])
 }
 
-/// Like `start_proxy` but allows setting extra environment variables on the proxy process.
-fn start_proxy_with_envs(
+/// Like `start_gateway` but allows setting extra environment variables on the gateway process.
+fn start_gateway_with_envs(
     tmp_dir: &Path,
     api_url: Option<&str>,
     envs: &[(&str, &str)],
@@ -71,7 +71,7 @@ fn start_proxy_with_envs(
     let port = listener.local_addr().expect("local addr").port();
     drop(listener);
 
-    let bin = env!("CARGO_BIN_EXE_onecli-proxy");
+    let bin = env!("CARGO_BIN_EXE_onecli-gateway");
 
     let mut cmd = std::process::Command::new(bin);
     cmd.arg("--port")
@@ -92,13 +92,13 @@ fn start_proxy_with_envs(
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .spawn()
-        .expect("start proxy process");
+        .expect("start gateway process");
 
-    // Wait for proxy to be ready (poll health check)
+    // Wait for gateway to be ready (poll health check)
     let deadline = std::time::Instant::now() + Duration::from_secs(5);
     loop {
         if std::time::Instant::now() > deadline {
-            panic!("proxy failed to start within 5 seconds");
+            panic!("gateway failed to start within 5 seconds");
         }
         if let Ok(mut stream) = TcpStream::connect(format!("127.0.0.1:{port}")) {
             let req = format!("GET /healthz HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n\r\n");
@@ -122,9 +122,9 @@ fn start_proxy_with_envs(
 #[test]
 fn health_check_returns_200() {
     let tmp = tempfile::tempdir().expect("create temp dir");
-    let (port, mut child) = start_proxy(tmp.path(), None);
+    let (port, mut child) = start_gateway(tmp.path(), None);
 
-    let mut stream = TcpStream::connect(format!("127.0.0.1:{port}")).expect("connect to proxy");
+    let mut stream = TcpStream::connect(format!("127.0.0.1:{port}")).expect("connect to gateway");
     stream.set_read_timeout(Some(Duration::from_secs(2))).ok();
 
     let req = format!("GET /healthz HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n\r\n");
@@ -143,9 +143,9 @@ fn health_check_returns_200() {
 #[test]
 fn non_connect_request_returns_400() {
     let tmp = tempfile::tempdir().expect("create temp dir");
-    let (port, mut child) = start_proxy(tmp.path(), None);
+    let (port, mut child) = start_gateway(tmp.path(), None);
 
-    let mut stream = TcpStream::connect(format!("127.0.0.1:{port}")).expect("connect to proxy");
+    let mut stream = TcpStream::connect(format!("127.0.0.1:{port}")).expect("connect to gateway");
     stream.set_read_timeout(Some(Duration::from_secs(2))).ok();
 
     let req = format!("GET http://example.com/ HTTP/1.1\r\nHost: example.com\r\n\r\n");
@@ -164,9 +164,9 @@ fn non_connect_request_returns_400() {
 #[test]
 fn connect_without_auth_tunnels() {
     let tmp = tempfile::tempdir().expect("create temp dir");
-    let (port, mut child) = start_proxy(tmp.path(), None);
+    let (port, mut child) = start_gateway(tmp.path(), None);
 
-    let mut stream = TcpStream::connect(format!("127.0.0.1:{port}")).expect("connect to proxy");
+    let mut stream = TcpStream::connect(format!("127.0.0.1:{port}")).expect("connect to gateway");
     stream.set_read_timeout(Some(Duration::from_secs(5))).ok();
 
     // CONNECT without Proxy-Authorization — waits briefly for a peer session,
@@ -187,10 +187,10 @@ fn connect_without_auth_tunnels() {
 #[test]
 fn connect_without_api_returns_502() {
     let tmp = tempfile::tempdir().expect("create temp dir");
-    // Point proxy at a non-existent API server
-    let (port, mut child) = start_proxy(tmp.path(), Some("http://127.0.0.1:1"));
+    // Point gateway at a non-existent API server
+    let (port, mut child) = start_gateway(tmp.path(), Some("http://127.0.0.1:1"));
 
-    let mut stream = TcpStream::connect(format!("127.0.0.1:{port}")).expect("connect to proxy");
+    let mut stream = TcpStream::connect(format!("127.0.0.1:{port}")).expect("connect to gateway");
     stream.set_read_timeout(Some(Duration::from_secs(5))).ok();
 
     let auth = basic_auth(TEST_AGENT_TOKEN);
@@ -219,9 +219,9 @@ fn connect_with_tunnel_api_returns_200() {
 
     let tmp = tempfile::tempdir().expect("create temp dir");
     let api_url = format!("http://127.0.0.1:{api_port}");
-    let (port, mut child) = start_proxy(tmp.path(), Some(&api_url));
+    let (port, mut child) = start_gateway(tmp.path(), Some(&api_url));
 
-    let mut stream = TcpStream::connect(format!("127.0.0.1:{port}")).expect("connect to proxy");
+    let mut stream = TcpStream::connect(format!("127.0.0.1:{port}")).expect("connect to gateway");
     stream.set_read_timeout(Some(Duration::from_secs(2))).ok();
 
     let auth = basic_auth(TEST_AGENT_TOKEN);
@@ -248,20 +248,20 @@ fn ca_persists_across_restarts() {
     let tmp = tempfile::tempdir().expect("create temp dir");
 
     // First start — generates CA
-    let (_, mut child1) = start_proxy(tmp.path(), None);
+    let (_, mut child1) = start_gateway(tmp.path(), None);
     child1.kill().ok();
     child1.wait().ok();
 
     // Verify CA files exist
-    let ca_key = tmp.path().join("proxy").join("ca.key");
-    let ca_cert = tmp.path().join("proxy").join("ca.pem");
+    let ca_key = tmp.path().join("gateway").join("ca.key");
+    let ca_cert = tmp.path().join("gateway").join("ca.pem");
     assert!(ca_key.exists(), "ca.key should exist after first run");
     assert!(ca_cert.exists(), "ca.pem should exist after first run");
 
     let cert_content_1 = std::fs::read_to_string(&ca_cert).expect("read ca.pem");
 
     // Second start — should load existing CA
-    let (_, mut child2) = start_proxy(tmp.path(), None);
+    let (_, mut child2) = start_gateway(tmp.path(), None);
     child2.kill().ok();
     child2.wait().ok();
 
@@ -310,14 +310,14 @@ fn sse_streaming_passes_through_tunnel() {
     // Mock API — tunnel mode for localhost
     let (api_port, _api_handle) = start_mock_api(r#"{ "intercept": false }"#);
 
-    // Start proxy pointing at mock API
+    // Start gateway pointing at mock API
     let tmp = tempfile::tempdir().expect("create temp dir");
     let api_url = format!("http://127.0.0.1:{api_port}");
-    let (proxy_port, mut child) = start_proxy(tmp.path(), Some(&api_url));
+    let (gateway_port, mut child) = start_gateway(tmp.path(), Some(&api_url));
 
-    // CONNECT to our SSE server through the proxy (tunnel mode)
+    // CONNECT to our SSE server through the gateway (tunnel mode)
     let mut stream =
-        TcpStream::connect(format!("127.0.0.1:{proxy_port}")).expect("connect to proxy");
+        TcpStream::connect(format!("127.0.0.1:{gateway_port}")).expect("connect to gateway");
     stream.set_read_timeout(Some(Duration::from_secs(5))).ok();
     stream.set_nodelay(true).expect("set nodelay");
 
@@ -453,18 +453,18 @@ fn connect_with_intercept_injects_headers() {
     let api_body = r#"{"intercept":true,"rules":[{"path_pattern":"*","injections":[{"action":"set_header","name":"x-api-key","value":"sk-ant-test-key"},{"action":"remove_header","name":"x-remove-me"}]}]}"#;
     let (api_port, _api_handle) = start_mock_api(api_body);
 
-    // ── 3. Start proxy with invalid-cert acceptance (for self-signed upstream) ──
+    // ── 3. Start gateway with invalid-cert acceptance (for self-signed upstream) ──
     let tmp = tempfile::tempdir().expect("create temp dir");
     let api_url = format!("http://127.0.0.1:{api_port}");
-    let (proxy_port, mut child) = start_proxy_with_envs(
+    let (gateway_port, mut child) = start_gateway_with_envs(
         tmp.path(),
         Some(&api_url),
-        &[("PROXY_DANGER_ACCEPT_INVALID_CERTS", "1")],
+        &[("GATEWAY_DANGER_ACCEPT_INVALID_CERTS", "1")],
     );
 
-    // ── 4. CONNECT to upstream through the proxy ──
+    // ── 4. CONNECT to upstream through the gateway ──
     let mut stream =
-        TcpStream::connect(format!("127.0.0.1:{proxy_port}")).expect("connect to proxy");
+        TcpStream::connect(format!("127.0.0.1:{gateway_port}")).expect("connect to gateway");
     stream.set_read_timeout(Some(Duration::from_secs(5))).ok();
     stream.set_nodelay(true).expect("set nodelay");
 
@@ -485,9 +485,9 @@ fn connect_with_intercept_injects_headers() {
         "expected 200 for CONNECT, got: {resp}"
     );
 
-    // ── 5. TLS handshake with the proxy (MITM), trusting the proxy CA ──
-    let ca_pem_path = tmp.path().join("proxy").join("ca.pem");
-    let ca_pem = std::fs::read(&ca_pem_path).expect("read proxy CA cert");
+    // ── 5. TLS handshake with the gateway (MITM), trusting the gateway CA ──
+    let ca_pem_path = tmp.path().join("gateway").join("ca.pem");
+    let ca_pem = std::fs::read(&ca_pem_path).expect("read gateway CA cert");
 
     let mut root_store = rustls::RootCertStore::empty();
     let certs: Vec<_> = rustls_pemfile::certs(&mut &ca_pem[..])
@@ -527,7 +527,7 @@ fn connect_with_intercept_injects_headers() {
     let response = String::from_utf8_lossy(&response_buf[..n]).to_string();
 
     // The upstream echoed the full HTTP request it received.
-    // The response body contains the request line + headers as the proxy forwarded them.
+    // The response body contains the request line + headers as the gateway forwarded them.
 
     // Verify: injected header is present
     assert!(

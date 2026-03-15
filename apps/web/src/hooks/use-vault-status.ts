@@ -11,7 +11,7 @@ export interface VaultStatus {
     lastConnectedAt: string | null;
     createdAt: string;
   } | null;
-  proxy: {
+  gateway: {
     paired: boolean;
     ready: boolean;
     fingerprint: string;
@@ -41,8 +41,8 @@ export const useVaultStatus = () => {
     fetchStatus();
   }, [fetchStatus]);
 
-  const isPaired = status?.connection != null || status?.proxy?.paired;
-  const isReady = status?.proxy?.ready ?? false;
+  const isPaired = status?.connection != null || status?.gateway?.paired;
+  const isReady = status?.gateway?.ready ?? false;
 
   return { status, loading, isPaired, isReady, fetchStatus };
 };

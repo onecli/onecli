@@ -89,7 +89,7 @@ export const CreateAgentDialog = ({
               </div>
               <p className="text-muted-foreground text-xs">
                 Use this token to configure your agent&apos;s connection to the
-                proxy.
+                gateway.
               </p>
             </div>
             <DialogFooter>

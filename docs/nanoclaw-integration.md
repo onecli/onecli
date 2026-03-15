@@ -1,6 +1,6 @@
 # Nanoclaw Integration
 
-Integrate OneCLI with [Nanoclaw](https://github.com/nanoclaw/nanoclaw) or any Docker-based agent orchestrator to route agent traffic through the OneCLI proxy.
+Integrate OneCLI with [Nanoclaw](https://github.com/nanoclaw/nanoclaw) or any Docker-based agent orchestrator to route agent traffic through the OneCLI gateway.
 
 ## Prerequisites
 
@@ -55,9 +55,9 @@ const active = await onecli.applyContainerConfig(args, {
 });
 
 if (active) {
-  console.log("Proxy configured — credentials will be injected");
+  console.log("Gateway configured — credentials will be injected");
 } else {
-  console.log("OneCLI not reachable — running without proxy");
+  console.log("OneCLI not reachable — running without gateway");
 }
 
 await exec("docker", [...args, "agent-image:latest"]);
@@ -67,12 +67,12 @@ await exec("docker", [...args, "agent-image:latest"]);
 
 When `applyContainerConfig` succeeds, it mutates the Docker args array with:
 
-1. **Proxy env vars**: `-e HTTPS_PROXY=...`, `-e HTTP_PROXY=...`, `-e NODE_USE_ENV_PROXY=1`
-2. **Node.js CA trust**: `-e NODE_EXTRA_CA_CERTS=/tmp/onecli-proxy-ca.pem` + volume mount
+1. **Gateway env vars**: `-e HTTPS_PROXY=...`, `-e HTTP_PROXY=...`, `-e NODE_USE_ENV_PROXY=1`
+2. **Node.js CA trust**: `-e NODE_EXTRA_CA_CERTS=/tmp/onecli-gateway-ca.pem` + volume mount
 3. **System-wide CA trust**: `-e SSL_CERT_FILE=/tmp/onecli-combined-ca.pem` + volume mount (covers curl, Python, Go, git)
 4. **Linux host mapping**: `--add-host host.docker.internal:host-gateway` (macOS Docker Desktop provides this automatically)
 
-Traffic from the container goes through the proxy, which injects credentials on matching requests.
+Traffic from the container goes through the gateway, which injects credentials on matching requests.
 
 ## Advanced: Raw Config
 
@@ -83,7 +83,7 @@ const config = await onecli.getContainerConfig();
 // {
 //   env: { HTTPS_PROXY: "...", HTTP_PROXY: "...", NODE_EXTRA_CA_CERTS: "...", NODE_USE_ENV_PROXY: "1" },
 //   caCertificate: "-----BEGIN CERTIFICATE-----\n...",
-//   caCertificateContainerPath: "/tmp/onecli-proxy-ca.pem"
+//   caCertificateContainerPath: "/tmp/onecli-gateway-ca.pem"
 // }
 ```
 
@@ -94,7 +94,7 @@ In Nanoclaw's container runner, add OneCLI config before spawning the container:
 ```typescript
 import { OneCLI } from "@onecli-sh/sdk";
 
-// Inject OneCLI proxy config (skipped if ONECLI_API_KEY is not set)
+// Inject OneCLI gateway config (skipped if ONECLI_API_KEY is not set)
 const onecliApiKey = process.env.ONECLI_API_KEY;
 if (onecliApiKey) {
   const onecli = new OneCLI({
@@ -103,7 +103,7 @@ if (onecliApiKey) {
   });
   const active = await onecli.applyContainerConfig(args);
   if (active) {
-    console.log("OneCLI proxy config applied");
+    console.log("OneCLI gateway config applied");
   }
 }
 ```

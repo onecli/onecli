@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { db } from "@onecli/db";
 import { getServerSession } from "@/lib/auth/server";
-import { getProxyBaseUrl, getProxySecret } from "@/lib/proxy-secret";
+import { getGatewayBaseUrl, getGatewaySecret } from "@/lib/gateway-secret";
 
 export async function GET() {
   try {
@@ -31,25 +31,25 @@ export async function GET() {
       },
     });
 
-    // Get live status from proxy
-    const proxySecret = getProxySecret();
-    const proxyUrl = `${getProxyBaseUrl()}/api/remote/status`;
+    // Get live status from gateway
+    const gatewaySecret = getGatewaySecret();
+    const gatewayUrl = `${getGatewayBaseUrl()}/api/remote/status`;
 
-    let proxyStatus = null;
+    let gatewayStatus = null;
     try {
-      const proxyResp = await fetch(proxyUrl, {
-        headers: proxySecret ? { "x-proxy-secret": proxySecret } : {},
+      const gatewayResp = await fetch(gatewayUrl, {
+        headers: gatewaySecret ? { "x-gateway-secret": gatewaySecret } : {},
       });
-      if (proxyResp.ok) {
-        proxyStatus = await proxyResp.json();
+      if (gatewayResp.ok) {
+        gatewayStatus = await gatewayResp.json();
       }
     } catch {
-      // Proxy unreachable — return DB-only status
+      // Gateway unreachable — return DB-only status
     }
 
     return NextResponse.json({
       connection,
-      proxy: proxyStatus,
+      gateway: gatewayStatus,
     });
   } catch {
     return NextResponse.json(

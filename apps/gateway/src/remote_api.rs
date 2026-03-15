@@ -1,6 +1,6 @@
-//! HTTP endpoints for managing remote access pairing on the proxy.
+//! HTTP endpoints for managing remote access pairing on the gateway.
 //!
-//! These endpoints are protected by the proxy secret and called by the web API
+//! These endpoints are protected by the gateway secret and called by the web API
 //! to initiate pairing, check status, and disconnect.
 
 use std::sync::Arc;
@@ -36,18 +36,18 @@ pub(crate) async fn handle_remote_api<T>(
     req: &Request<T>,
     body_bytes: &[u8],
     manager: &Arc<RemoteAccessManager>,
-    proxy_secret: Option<&str>,
+    gateway_secret: Option<&str>,
 ) -> Option<Response<Full<Bytes>>> {
     let path = req.uri().path();
     if !path.starts_with("/api/remote/") {
         return None;
     }
 
-    // Validate proxy secret
-    if !validate_secret(req, proxy_secret) {
+    // Validate gateway secret
+    if !validate_secret(req, gateway_secret) {
         return Some(json_response(
             StatusCode::FORBIDDEN,
-            r#"{"error":"invalid proxy secret"}"#,
+            r#"{"error":"invalid gateway secret"}"#,
         ));
     }
 
@@ -158,13 +158,13 @@ async fn handle_disconnect(manager: &Arc<RemoteAccessManager>) -> Response<Full<
 
 // ── Helpers ─────────────────────────────────────────────────────────────
 
-fn validate_secret<T>(req: &Request<T>, proxy_secret: Option<&str>) -> bool {
-    let Some(expected) = proxy_secret else {
+fn validate_secret<T>(req: &Request<T>, gateway_secret: Option<&str>) -> bool {
+    let Some(expected) = gateway_secret else {
         // No secret configured — allow (OSS without secret)
         return true;
     };
     req.headers()
-        .get("x-proxy-secret")
+        .get("x-gateway-secret")
         .and_then(|v| v.to_str().ok())
         == Some(expected)
 }

@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { db } from "@onecli/db";
 import { z } from "zod";
 import { getServerSession } from "@/lib/auth/server";
-import { getProxyBaseUrl, getProxySecret } from "@/lib/proxy-secret";
+import { getGatewayBaseUrl, getGatewaySecret } from "@/lib/gateway-secret";
 
 const pairSchema = z.object({
   psk_hex: z.string().length(64, "PSK must be 64 hex characters"),
@@ -27,15 +27,15 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    // Forward to proxy's remote access pairing endpoint
-    const proxySecret = getProxySecret();
-    const proxyUrl = `${getProxyBaseUrl()}/api/remote/pair/psk`;
+    // Forward to gateway's remote access pairing endpoint
+    const gatewaySecret = getGatewaySecret();
+    const gatewayUrl = `${getGatewayBaseUrl()}/api/remote/pair/psk`;
 
-    const proxyResp = await fetch(proxyUrl, {
+    const gatewayResp = await fetch(gatewayUrl, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        ...(proxySecret ? { "x-proxy-secret": proxySecret } : {}),
+        ...(gatewaySecret ? { "x-gateway-secret": gatewaySecret } : {}),
       },
       body: JSON.stringify({
         psk_hex: parsed.data.psk_hex,
@@ -43,11 +43,11 @@ export async function POST(request: NextRequest) {
       }),
     });
 
-    if (!proxyResp.ok) {
-      const error = await proxyResp.text();
+    if (!gatewayResp.ok) {
+      const error = await gatewayResp.text();
       return NextResponse.json(
-        { error: `Proxy pairing failed: ${error}` },
-        { status: proxyResp.status },
+        { error: `Gateway pairing failed: ${error}` },
+        { status: gatewayResp.status },
       );
     }
 

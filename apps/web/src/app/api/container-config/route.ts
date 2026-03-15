@@ -2,17 +2,17 @@ import { NextRequest, NextResponse } from "next/server";
 import { db } from "@onecli/db";
 import { validateApiKey } from "@/lib/validate-api-key";
 import { getServerSession } from "@/lib/auth/server";
-import { loadCaCertificate } from "@/lib/proxy-ca";
-import { getProxyHost } from "@/lib/proxy-secret";
+import { loadCaCertificate } from "@/lib/gateway-ca";
+import { getGatewayHost } from "@/lib/gateway-secret";
 
-const PROXY_PORT = process.env.PROXY_PORT ?? "10255";
-const CA_CONTAINER_PATH = "/tmp/onecli-proxy-ca.pem";
+const GATEWAY_PORT = process.env.GATEWAY_PORT ?? "10255";
+const CA_CONTAINER_PATH = "/tmp/onecli-gateway-ca.pem";
 
 /**
  * GET /api/container-config
  *
  * Returns the configuration an agent orchestrator needs to set up containers
- * for the proxy. The server controls all env var names, values, and paths —
+ * for the gateway. The server controls all env var names, values, and paths —
  * the SDK just applies them without domain knowledge.
  *
  * Auth: `Authorization: Bearer oc_...` (user API key) or JWT session.
@@ -41,7 +41,7 @@ export async function GET(request: NextRequest) {
       return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
     }
 
-    // Look up the user's default agent to embed its token in the proxy URL
+    // Look up the user's default agent to embed its token in the gateway URL
     const defaultAgent = await db.agent.findFirst({
       where: { userId, isDefault: true },
       select: { accessToken: true },
@@ -54,15 +54,15 @@ export async function GET(request: NextRequest) {
       );
     }
 
-    const proxyHost = getProxyHost();
-    const proxyUrl = `http://x:${defaultAgent.accessToken}@${proxyHost}:${PROXY_PORT}`;
+    const gatewayHost = getGatewayHost();
+    const gatewayUrl = `http://x:${defaultAgent.accessToken}@${gatewayHost}:${GATEWAY_PORT}`;
 
     const caCertificate = loadCaCertificate();
     if (!caCertificate) {
       return NextResponse.json(
         {
           error:
-            "CA certificate not available. Start the proxy first to generate it.",
+            "CA certificate not available. Start the gateway first to generate it.",
         },
         { status: 503 },
       );
@@ -70,8 +70,8 @@ export async function GET(request: NextRequest) {
 
     return NextResponse.json({
       env: {
-        HTTPS_PROXY: proxyUrl,
-        HTTP_PROXY: proxyUrl,
+        HTTPS_PROXY: gatewayUrl,
+        HTTP_PROXY: gatewayUrl,
         NODE_EXTRA_CA_CERTS: CA_CONTAINER_PATH,
         NODE_USE_ENV_PROXY: "1",
         CLAUDE_CODE_OAUTH_TOKEN: "sk-ant-...",

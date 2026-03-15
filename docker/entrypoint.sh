@@ -4,16 +4,16 @@ set -e
 PRISMA="node /app/packages/db/node_modules/prisma/build/index.js"
 SCHEMA="--schema /app/packages/db/prisma/schema.prisma"
 
-# Generate proxy–API shared secret if not already present.
-# The proxy reads this file to authenticate requests to /api/proxy/* endpoints.
-# In cloud mode, PROXY_SECRET env var is used instead (from Secrets Manager).
-if [ -z "$PROXY_SECRET" ]; then
-  PROXY_SECRET_FILE="${PROXY_SECRET_FILE:-/app/data/proxy-secret}"
-  if [ ! -f "$PROXY_SECRET_FILE" ] || [ ! -s "$PROXY_SECRET_FILE" ]; then
-    echo "Generating proxy–API shared secret..."
-    mkdir -p "$(dirname "$PROXY_SECRET_FILE")"
-    head -c 32 /dev/urandom | xxd -p -c 64 > "$PROXY_SECRET_FILE"
-    chmod 600 "$PROXY_SECRET_FILE"
+# Generate gateway–API shared secret if not already present.
+# The gateway reads this file to authenticate requests to /api/gateway/* endpoints.
+# In cloud mode, GATEWAY_SECRET env var is used instead (from Secrets Manager).
+if [ -z "$GATEWAY_SECRET" ]; then
+  GATEWAY_SECRET_FILE="${GATEWAY_SECRET_FILE:-/app/data/gateway-secret}"
+  if [ ! -f "$GATEWAY_SECRET_FILE" ] || [ ! -s "$GATEWAY_SECRET_FILE" ]; then
+    echo "Generating gateway–API shared secret..."
+    mkdir -p "$(dirname "$GATEWAY_SECRET_FILE")"
+    head -c 32 /dev/urandom | xxd -p -c 64 > "$GATEWAY_SECRET_FILE"
+    chmod 600 "$GATEWAY_SECRET_FILE"
   fi
 fi
 
@@ -58,13 +58,13 @@ if [ "$AUTH_MODE" = "cloud" ] || [ -n "$GOOGLE_CLIENT_ID" ]; then
 fi
 printf '{"authMode":"%s","oauthConfigured":%s}\n' "$AUTH_MODE" "$OAUTH_CONFIGURED" > /app/data/runtime-config.json
 
-# Start proxy in background
-echo "Starting proxy on port ${PROXY_PORT:-10255}..."
-onecli-proxy --port "${PROXY_PORT:-10255}" --data-dir /app/data &
-PROXY_PID=$!
+# Start gateway in background
+echo "Starting gateway on port ${GATEWAY_PORT:-10255}..."
+onecli-gateway --port "${GATEWAY_PORT:-10255}" --data-dir /app/data &
+GATEWAY_PID=$!
 
 # Graceful shutdown: stop both processes on SIGTERM
-trap "kill $PROXY_PID 2>/dev/null; wait $PROXY_PID 2>/dev/null; exit 0" TERM INT
+trap "kill $GATEWAY_PID 2>/dev/null; wait $GATEWAY_PID 2>/dev/null; exit 0" TERM INT
 
 # Start Next.js (foreground)
 exec node apps/web/server.js

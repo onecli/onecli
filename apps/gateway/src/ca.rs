@@ -1,7 +1,7 @@
 //! Certificate Authority management for MITM TLS interception.
 //!
 //! Handles generation, persistence, and caching of CA and leaf certificates.
-//! The CA signs per-hostname leaf certs on the fly so the proxy can terminate
+//! The CA signs per-hostname leaf certs on the fly so the gateway can terminate
 //! TLS with clients while forwarding to the real upstream server.
 
 use std::path::Path;
@@ -31,7 +31,7 @@ const LEAF_VALIDITY_HOURS: i64 = 24;
 const LEAF_REFRESH_BUFFER: Duration = Duration::from_secs(3600);
 
 /// Default CN for the self-hosted/OSS CA.
-const LOCAL_CA_CN: &str = "OneCLI Local Proxy CA";
+const LOCAL_CA_CN: &str = "OneCLI Local Gateway CA";
 
 struct CachedCert {
     server_config: Arc<ServerConfig>,
@@ -55,20 +55,20 @@ pub struct CertificateAuthority {
 impl CertificateAuthority {
     /// Load an existing CA from disk or generate a new one.
     ///
-    /// CA files are stored at `{data_dir}/proxy/ca.key` and `{data_dir}/proxy/ca.pem`.
+    /// CA files are stored at `{data_dir}/gateway/ca.key` and `{data_dir}/gateway/ca.pem`.
     pub async fn load_or_generate(data_dir: &Path) -> Result<Self> {
-        let proxy_dir = data_dir.join("proxy");
-        let key_path = proxy_dir.join("ca.key");
-        let cert_path = proxy_dir.join("ca.pem");
+        let gateway_dir = data_dir.join("gateway");
+        let key_path = gateway_dir.join("ca.key");
+        let cert_path = gateway_dir.join("ca.pem");
 
         if key_path.exists() && cert_path.exists() {
             info!(key = %key_path.display(), cert = %cert_path.display(), "loading existing CA");
             Self::load_from_disk(&key_path, &cert_path).await
         } else {
-            info!(dir = %proxy_dir.display(), "generating new CA");
-            fs::create_dir_all(&proxy_dir)
+            info!(dir = %gateway_dir.display(), "generating new CA");
+            fs::create_dir_all(&gateway_dir)
                 .await
-                .context("creating proxy data directory")?;
+                .context("creating gateway data directory")?;
             Self::generate_and_persist(&key_path, &cert_path).await
         }
     }
@@ -104,7 +104,7 @@ impl CertificateAuthority {
     }
 
     /// Return the CA certificate as PEM.
-    /// Used by the web API (`GET /api/proxy/ca`) for agents to download.
+    /// Used by the web API (`GET /api/gateway/ca`) for agents to download.
     #[allow(dead_code)]
     pub fn ca_cert_pem(&self) -> String {
         der_to_pem(self.ca_cert_der.as_ref())
@@ -438,7 +438,7 @@ mod tests {
             .await
             .expect("generate CA");
 
-        let key_path = data_dir.join("proxy").join("ca.key");
+        let key_path = data_dir.join("gateway").join("ca.key");
         assert!(key_path.exists());
 
         #[cfg(unix)]

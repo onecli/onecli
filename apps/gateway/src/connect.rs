@@ -1,6 +1,6 @@
 //! API resolution and caching for CONNECT decisions.
 //!
-//! When the proxy receives a CONNECT request, it calls `POST /api/proxy/connect`
+//! When the gateway receives a CONNECT request, it calls `POST /api/gateway/connect`
 //! to determine whether to intercept (MITM) or tunnel the connection, and what
 //! injection rules to apply. Responses are cached per (agent_token, host) with
 //! a configurable TTL.
@@ -17,7 +17,7 @@ const CACHE_TTL: Duration = Duration::from_secs(60);
 
 // ── Data types ──────────────────────────────────────────────────────────
 
-/// Response from `POST /api/proxy/connect`.
+/// Response from `POST /api/gateway/connect`.
 #[derive(Debug, Clone, Deserialize, PartialEq)]
 pub(crate) struct ConnectResponse {
     pub intercept: bool,
@@ -25,7 +25,7 @@ pub(crate) struct ConnectResponse {
     pub rules: Vec<ConnectRule>,
 }
 
-/// Request body sent to `POST /api/proxy/connect`.
+/// Request body sent to `POST /api/gateway/connect`.
 #[derive(Serialize)]
 struct ConnectRequest<'a> {
     agent_token: &'a str,
@@ -55,13 +55,13 @@ pub(crate) type ConnectCacheKey = (String, String);
 // ── Resolution ──────────────────────────────────────────────────────────
 
 /// Resolve what to do for an agent + host combination.
-/// Checks the cache first, then calls `POST /api/proxy/connect` if needed.
+/// Checks the cache first, then calls `POST /api/gateway/connect` if needed.
 pub(crate) async fn resolve(
     agent_token: &str,
     hostname: &str,
     http_client: &reqwest::Client,
     api_url: &str,
-    proxy_secret: Option<&str>,
+    gateway_secret: Option<&str>,
     cache: &DashMap<ConnectCacheKey, CachedConnect>,
 ) -> Result<ConnectResponse, ConnectError> {
     let cache_key = (agent_token.to_string(), hostname.to_string());
@@ -76,7 +76,7 @@ pub(crate) async fn resolve(
     cache.remove(&cache_key);
 
     // Call the API
-    let response = call_api(agent_token, hostname, http_client, api_url, proxy_secret).await?;
+    let response = call_api(agent_token, hostname, http_client, api_url, gateway_secret).await?;
 
     // Cache the response
     cache.insert(
@@ -90,24 +90,24 @@ pub(crate) async fn resolve(
     Ok(response)
 }
 
-/// Call `POST /api/proxy/connect` to resolve agent + host → intercept decision + rules.
+/// Call `POST /api/gateway/connect` to resolve agent + host → intercept decision + rules.
 async fn call_api(
     agent_token: &str,
     hostname: &str,
     http_client: &reqwest::Client,
     api_url: &str,
-    proxy_secret: Option<&str>,
+    gateway_secret: Option<&str>,
 ) -> Result<ConnectResponse, ConnectError> {
-    let url = format!("{api_url}/api/proxy/connect");
+    let url = format!("{api_url}/api/gateway/connect");
 
     let mut request = http_client.post(&url).json(&ConnectRequest {
         agent_token,
         host: hostname,
     });
 
-    // Attach proxy secret if available
-    if let Some(secret) = proxy_secret {
-        request = request.header("x-proxy-secret", secret);
+    // Attach gateway secret if available
+    if let Some(secret) = gateway_secret {
+        request = request.header("x-gateway-secret", secret);
     }
 
     let resp = request
@@ -125,7 +125,7 @@ async fn call_api(
         }
         status if status == reqwest::StatusCode::UNAUTHORIZED => Err(ConnectError::InvalidToken),
         status if status == reqwest::StatusCode::FORBIDDEN => Err(ConnectError::ApiUnreachable(
-            "proxy secret rejected (403)".to_string(),
+            "gateway secret rejected (403)".to_string(),
         )),
         status => Err(ConnectError::ApiUnreachable(format!(
             "unexpected status: {status}"

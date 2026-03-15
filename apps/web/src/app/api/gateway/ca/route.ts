@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { loadCaCertificate } from "@/lib/proxy-ca";
+import { loadCaCertificate } from "@/lib/gateway-ca";
 
 export async function GET() {
   const pem = loadCaCertificate();
@@ -8,7 +8,7 @@ export async function GET() {
     return NextResponse.json(
       {
         error:
-          "CA certificate not available. Start the proxy first to generate it.",
+          "CA certificate not available. Start the gateway first to generate it.",
       },
       { status: 503 },
     );
@@ -18,7 +18,7 @@ export async function GET() {
     status: 200,
     headers: {
       "content-type": "application/x-pem-file",
-      "content-disposition": 'attachment; filename="onecli-proxy-ca.pem"',
+      "content-disposition": 'attachment; filename="onecli-gateway-ca.pem"',
     },
   });
 }

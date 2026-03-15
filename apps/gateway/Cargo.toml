@@ -1,11 +1,11 @@
 [package]
-name = "onecli-proxy"
+name = "onecli-gateway"
 version = "0.1.0"
 edition = "2021"
 license = "Apache-2.0"
 
 [[bin]]
-name = "onecli-proxy"
+name = "onecli-gateway"
 path = "src/main.rs"
 
 [dependencies]
@@ -43,7 +43,7 @@ serde_json = "1"
 # Concurrent cache
 dashmap = "6"
 
-# Base64 (for proxy auth)
+# Base64 (for gateway auth)
 base64 = "0.22"
 
 # Stream combinators

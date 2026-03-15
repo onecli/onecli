@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { db } from "@onecli/db";
 import { getServerSession } from "@/lib/auth/server";
-import { getProxyBaseUrl, getProxySecret } from "@/lib/proxy-secret";
+import { getGatewayBaseUrl, getGatewaySecret } from "@/lib/gateway-secret";
 
 export async function DELETE() {
   try {
@@ -19,17 +19,17 @@ export async function DELETE() {
       return NextResponse.json({ error: "User not found" }, { status: 404 });
     }
 
-    // Forward disconnect to proxy
-    const proxySecret = getProxySecret();
-    const proxyUrl = `${getProxyBaseUrl()}/api/remote/pair`;
+    // Forward disconnect to gateway
+    const gatewaySecret = getGatewaySecret();
+    const gatewayUrl = `${getGatewayBaseUrl()}/api/remote/pair`;
 
     try {
-      await fetch(proxyUrl, {
+      await fetch(gatewayUrl, {
         method: "DELETE",
-        headers: proxySecret ? { "x-proxy-secret": proxySecret } : {},
+        headers: gatewaySecret ? { "x-gateway-secret": gatewaySecret } : {},
       });
     } catch {
-      // Proxy unreachable — still remove DB record
+      // Gateway unreachable — still remove DB record
     }
 
     // Remove DB record

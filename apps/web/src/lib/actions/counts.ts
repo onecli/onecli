@@ -18,7 +18,7 @@ async function resolveUserId(authId?: string): Promise<string | null> {
   return user?.id ?? null;
 }
 
-export async function getProxyCounts(authId?: string) {
+export async function getGatewayCounts(authId?: string) {
   const userId = await resolveUserId(authId);
   if (!userId) return { agents: 0, secrets: 0 };
 

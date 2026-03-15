@@ -26,7 +26,7 @@ jobs:
       - name: Cache Rust
         uses: Swatinem/rust-cache@v2
         with:
-          workspaces: apps/proxy -> target
+          workspaces: apps/gateway -> target
 
       - name: Setup pnpm
         uses: pnpm/action-setup@v4
