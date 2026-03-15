@@ -2,52 +2,56 @@
 //!
 //! This module owns the `GatewayServer` struct and the core request flow:
 //! accept → authenticate → resolve (via [`connect`]) → MITM or tunnel.
+//!
+//! Axum handles normal HTTP routes (/healthz). CONNECT requests are intercepted
+//! before reaching the router via a `tower::service_fn` wrapper, following the
+//! official Axum http-proxy example pattern.
 
 use std::net::SocketAddr;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
+use axum::Router;
 use dashmap::DashMap;
 use futures_util::TryStreamExt;
 use http_body::Body as HttpBody;
-use http_body_util::{Empty, StreamBody};
+use http_body_util::StreamBody;
 use hyper::body::{Bytes, Frame, Incoming};
 use hyper::header::{HeaderName, HeaderValue};
 use hyper::server::conn::http1;
 use hyper::service::service_fn;
-use hyper::{Method, Request, Response};
+use hyper::{Method, Request, Response, StatusCode};
 use hyper_util::rt::TokioIo;
 use tokio::net::{TcpListener, TcpStream};
 use tokio_rustls::TlsAcceptor;
+use tower::ServiceExt;
 use tracing::{info, warn};
 
 use crate::ca::CertificateAuthority;
-use crate::connect::{self, CachedConnect, ConnectCacheKey, ConnectError};
+use crate::connect::{self, CachedConnect, ConnectCacheKey, ConnectError, PolicyEngine};
 use crate::inject::{self, ConnectRule};
+
+// ── GatewayState ───────────────────────────────────────────────────────
+
+/// Shared state for the gateway, passed to all request handlers.
+#[derive(Clone)]
+pub(crate) struct GatewayState {
+    pub ca: Arc<CertificateAuthority>,
+    pub http_client: reqwest::Client,
+    pub policy_engine: Arc<PolicyEngine>,
+    pub connect_cache: Arc<DashMap<ConnectCacheKey, CachedConnect>>,
+}
 
 // ── GatewayServer ───────────────────────────────────────────────────────
 
 pub struct GatewayServer {
-    ca: Arc<CertificateAuthority>,
-    http_client: reqwest::Client,
+    state: GatewayState,
     port: u16,
-    /// OneCLI web API base URL (for credential fetching).
-    api_url: Arc<str>,
-    /// Shared secret for authenticating requests to the web API.
-    /// `None` if no secret is configured (credential fetching disabled).
-    gateway_secret: Option<Arc<str>>,
-    /// Cache of resolved connect responses per (agent_token, host).
-    connect_cache: Arc<DashMap<ConnectCacheKey, CachedConnect>>,
 }
 
 impl GatewayServer {
-    pub fn new(
-        ca: CertificateAuthority,
-        port: u16,
-        api_url: String,
-        gateway_secret: Option<String>,
-    ) -> Self {
-        Self {
+    pub fn new(ca: CertificateAuthority, port: u16, policy_engine: Arc<PolicyEngine>) -> Self {
+        let state = GatewayState {
             ca: Arc::new(ca),
             http_client: reqwest::Client::builder()
                 .danger_accept_invalid_certs(
@@ -55,11 +59,11 @@ impl GatewayServer {
                 )
                 .build()
                 .expect("build HTTP client"),
-            port,
-            api_url: Arc::from(api_url.as_str()),
-            gateway_secret: gateway_secret.map(|s| Arc::from(s.as_str())),
+            policy_engine,
             connect_cache: Arc::new(DashMap::new()),
-        }
+        };
+
+        Self { state, port }
     }
 
     /// Start the gateway TCP listener. Runs forever.
@@ -71,26 +75,19 @@ impl GatewayServer {
 
         info!(addr = %addr, "listening for connections");
 
+        // Build the Axum router for non-CONNECT routes.
+        // The fallback returns 400 Bad Request for anything other than defined routes.
+        let axum_router = Router::new()
+            .route("/healthz", axum::routing::get(healthz))
+            .fallback(fallback);
+
         loop {
             let (stream, peer_addr) = listener.accept().await?;
-            let ca = Arc::clone(&self.ca);
-            let http_client = self.http_client.clone();
-            let api_url = Arc::clone(&self.api_url);
-            let gateway_secret = self.gateway_secret.clone();
-            let connect_cache = Arc::clone(&self.connect_cache);
+            let state = self.state.clone();
+            let router = axum_router.clone();
 
             tokio::spawn(async move {
-                if let Err(e) = handle_connection(
-                    stream,
-                    peer_addr,
-                    ca,
-                    http_client,
-                    api_url,
-                    gateway_secret,
-                    connect_cache,
-                )
-                .await
-                {
+                if let Err(e) = handle_connection(stream, peer_addr, state, router).await {
                     warn!(peer = %peer_addr, error = %e, "connection error");
                 }
             });
@@ -98,18 +95,29 @@ impl GatewayServer {
     }
 }
 
+// ── Axum route handlers ─────────────────────────────────────────────────
+
+async fn healthz() -> StatusCode {
+    StatusCode::OK
+}
+
+/// Reject non-CONNECT requests to unknown routes with 400 Bad Request.
+async fn fallback() -> StatusCode {
+    StatusCode::BAD_REQUEST
+}
+
 // ── Connection handling ─────────────────────────────────────────────────
 
-/// Handle a single client connection. Parses the HTTP request and dispatches
-/// CONNECT requests to the MITM or tunnel handler.
+/// Handle a single client connection.
+///
+/// Uses a `service_fn` wrapper that intercepts CONNECT requests before they
+/// reach the Axum router (CONNECT URIs like `host:port` don't match Axum's
+/// path-based routing).
 async fn handle_connection(
     stream: TcpStream,
     peer_addr: SocketAddr,
-    ca: Arc<CertificateAuthority>,
-    http_client: reqwest::Client,
-    api_url: Arc<str>,
-    gateway_secret: Option<Arc<str>>,
-    connect_cache: Arc<DashMap<ConnectCacheKey, CachedConnect>>,
+    state: GatewayState,
+    router: Router,
 ) -> Result<()> {
     let io = TokioIo::new(stream);
 
@@ -118,23 +126,20 @@ async fn handle_connection(
         .title_case_headers(true)
         .serve_connection(
             io,
-            service_fn(move |req| {
-                let ca = Arc::clone(&ca);
-                let http_client = http_client.clone();
-                let api_url = Arc::clone(&api_url);
-                let gateway_secret = gateway_secret.clone();
-                let connect_cache = Arc::clone(&connect_cache);
+            service_fn(move |req: Request<Incoming>| {
+                let state = state.clone();
+                let router = router.clone();
                 async move {
-                    handle_request(
-                        req,
-                        peer_addr,
-                        ca,
-                        http_client,
-                        api_url,
-                        gateway_secret,
-                        connect_cache,
-                    )
-                    .await
+                    if req.method() == Method::CONNECT {
+                        handle_connect(req, peer_addr, state).await
+                    } else {
+                        // Delegate to the Axum router for all non-CONNECT requests.
+                        let resp: Response<axum::body::Body> = router
+                            .oneshot(req)
+                            .await
+                            .expect("axum router is infallible");
+                        Ok(resp)
+                    }
                 }
             }),
         )
@@ -143,100 +148,75 @@ async fn handle_connection(
         .context("serving HTTP connection")
 }
 
-/// Route incoming requests: CONNECT → MITM (or tunnel), everything else → reject.
-async fn handle_request(
+// ── CONNECT handling ────────────────────────────────────────────────────
+
+/// Handle a CONNECT request: authenticate, resolve policy, then MITM or tunnel.
+async fn handle_connect(
     req: Request<Incoming>,
     peer_addr: SocketAddr,
-    ca: Arc<CertificateAuthority>,
-    http_client: reqwest::Client,
-    api_url: Arc<str>,
-    gateway_secret: Option<Arc<str>>,
-    connect_cache: Arc<DashMap<ConnectCacheKey, CachedConnect>>,
-) -> Result<Response<Empty<Bytes>>, anyhow::Error> {
-    if req.method() == Method::CONNECT {
-        let host = req
-            .uri()
-            .authority()
-            .context("CONNECT request missing host:port")?
-            .to_string();
+    state: GatewayState,
+) -> Result<Response<axum::body::Body>, anyhow::Error> {
+    let host = req
+        .uri()
+        .authority()
+        .context("CONNECT request missing host:port")?
+        .to_string();
 
-        let hostname = strip_port(&host).to_string();
+    let hostname = strip_port(&host).to_string();
 
-        // Extract agent token from Proxy-Authorization header.
-        // Convention: Basic base64("x:{token}") — token in password field.
-        let agent_token = inject::extract_agent_token(&req).filter(|t| !t.is_empty());
+    // Extract agent token from Proxy-Authorization header.
+    let agent_token = inject::extract_agent_token(&req).filter(|t| !t.is_empty());
 
-        let (intercept, rules) = if let Some(ref token) = agent_token {
-            match connect::resolve(
-                token,
-                &hostname,
-                &http_client,
-                &api_url,
-                gateway_secret.as_deref(),
-                &connect_cache,
-            )
-            .await
-            {
-                Ok(resp) => (resp.intercept, resp.rules),
-                Err(ConnectError::InvalidToken) => {
-                    warn!(peer = %peer_addr, host = %host, "CONNECT rejected: invalid agent token");
-                    return Ok(respond_407());
-                }
-                Err(ConnectError::ApiUnreachable(e)) => {
-                    warn!(peer = %peer_addr, host = %host, error = %e, "CONNECT rejected: API unreachable");
-                    let mut resp = Response::new(Empty::new());
-                    *resp.status_mut() = hyper::StatusCode::BAD_GATEWAY;
-                    return Ok(resp);
-                }
+    let (intercept, rules) = if let Some(ref token) = agent_token {
+        match connect::resolve(token, &hostname, &state.policy_engine, &state.connect_cache).await {
+            Ok(resp) => (resp.intercept, resp.rules),
+            Err(ConnectError::InvalidToken) => {
+                warn!(peer = %peer_addr, host = %host, "CONNECT rejected: invalid agent token");
+                return Ok(respond_407());
             }
-        } else {
-            // No auth — plain tunnel (no MITM, no injection)
-            (false, vec![])
-        };
-
-        info!(
-            peer = %peer_addr,
-            host = %host,
-            mode = if intercept { "mitm" } else { "tunnel" },
-            rule_count = rules.len(),
-            "CONNECT"
-        );
-
-        tokio::spawn(async move {
-            match hyper::upgrade::on(req).await {
-                Ok(upgraded) => {
-                    let result = if intercept {
-                        mitm(upgraded, &host, &ca, http_client, rules).await
-                    } else {
-                        tunnel(upgraded, &host).await
-                    };
-                    if let Err(e) = result {
-                        warn!(host = %host, error = %e, "connection error");
-                    }
-                }
-                Err(e) => {
-                    warn!(host = %host, error = %e, "upgrade failed");
-                }
+            Err(ConnectError::Internal(e)) => {
+                warn!(peer = %peer_addr, host = %host, error = %e, "CONNECT rejected: internal error");
+                let mut resp = Response::new(axum::body::Body::empty());
+                *resp.status_mut() = StatusCode::BAD_GATEWAY;
+                return Ok(resp);
             }
-        });
-
-        // 200 tells the client the tunnel is established.
-        // hyper will then upgrade the connection, handing raw IO to our task above.
-        Ok(Response::new(Empty::new()))
-    } else if req.method() == Method::GET && req.uri().path() == "/healthz" {
-        Ok(Response::new(Empty::new()))
+        }
     } else {
-        // Plain HTTP requests are not supported — only CONNECT (HTTPS).
-        warn!(
-            peer = %peer_addr,
-            method = %req.method(),
-            uri = %req.uri(),
-            "rejected non-CONNECT request"
-        );
-        let mut resp = Response::new(Empty::new());
-        *resp.status_mut() = hyper::StatusCode::BAD_REQUEST;
-        Ok(resp)
-    }
+        // No auth — plain tunnel (no MITM, no injection)
+        (false, vec![])
+    };
+
+    info!(
+        peer = %peer_addr,
+        host = %host,
+        mode = if intercept { "mitm" } else { "tunnel" },
+        rule_count = rules.len(),
+        "CONNECT"
+    );
+
+    let ca = Arc::clone(&state.ca);
+    let http_client = state.http_client.clone();
+
+    tokio::spawn(async move {
+        match hyper::upgrade::on(req).await {
+            Ok(upgraded) => {
+                let result = if intercept {
+                    mitm(upgraded, &host, &ca, http_client, rules).await
+                } else {
+                    tunnel(upgraded, &host).await
+                };
+                if let Err(e) = result {
+                    warn!(host = %host, error = %e, "connection error");
+                }
+            }
+            Err(e) => {
+                warn!(host = %host, error = %e, "upgrade failed");
+            }
+        }
+    });
+
+    // 200 tells the client the tunnel is established.
+    Ok(Response::new(axum::body::Body::empty()))
 }
 
 // ── MITM & tunnel ───────────────────────────────────────────────────────
@@ -393,9 +373,9 @@ async fn tunnel(upgraded: hyper::upgrade::Upgraded, host: &str) -> Result<()> {
 // ── Helpers ─────────────────────────────────────────────────────────────
 
 /// Build a 407 Proxy Authentication Required response.
-fn respond_407() -> Response<Empty<Bytes>> {
-    let mut resp = Response::new(Empty::new());
-    *resp.status_mut() = hyper::StatusCode::PROXY_AUTHENTICATION_REQUIRED;
+fn respond_407() -> Response<axum::body::Body> {
+    let mut resp = Response::new(axum::body::Body::empty());
+    *resp.status_mut() = StatusCode::PROXY_AUTHENTICATION_REQUIRED;
     resp.headers_mut().insert(
         "proxy-authenticate",
         HeaderValue::from_static("Basic realm=\"OneCLI Gateway\""),
@@ -510,10 +490,7 @@ mod tests {
     #[test]
     fn respond_407_has_correct_status_and_header() {
         let resp = respond_407();
-        assert_eq!(
-            resp.status(),
-            hyper::StatusCode::PROXY_AUTHENTICATION_REQUIRED
-        );
+        assert_eq!(resp.status(), StatusCode::PROXY_AUTHENTICATION_REQUIRED);
         let auth_header = resp
             .headers()
             .get("proxy-authenticate")

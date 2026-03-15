@@ -17,6 +17,8 @@ hyper = { version = "1", features = ["http1", "server"] }
 hyper-util = { version = "0.1", features = ["tokio"] }
 http-body = "1"
 http-body-util = "0.1"
+axum = "0.8"
+tower = { version = "0.5", features = ["util"] }
 
 # TLS
 tokio-rustls = "0.26"
@@ -26,7 +28,10 @@ rustls-pemfile = "2"
 # Certificate generation
 rcgen = "0.13"
 
-# HTTP client (for credential fetching)
+# Cryptography (AES-256-GCM for secret decryption)
+ring = "0.17"
+
+# HTTP client (for upstream forwarding in MITM mode)
 reqwest = { version = "0.12", features = ["json", "rustls-tls", "stream"], default-features = false }
 
 # CLI
@@ -54,6 +59,9 @@ anyhow = "1"
 
 # Time (for certificate validity)
 time = "0.3"
+
+# Direct database access
+sqlx = { version = "0.8", features = ["runtime-tokio", "tls-rustls", "postgres"] }
 
 [dev-dependencies]
 tempfile = "3"
