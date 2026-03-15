@@ -1,8 +1,9 @@
 "use server";
 
 import { db, Prisma } from "@onecli/db";
-import { getServerSession } from "@/lib/auth/server";
+import { resolveUserId } from "@/lib/actions/resolve-user";
 import { cryptoService } from "@/lib/crypto";
+import { DEMO_SECRET_NAME } from "@/lib/constants";
 
 const SECRET_TYPE_LABELS: Record<string, string> = {
   anthropic: "Anthropic API Key",
@@ -18,62 +19,8 @@ const buildPreview = (plaintext: string): string => {
   return `${plaintext.slice(0, 4)}${"•".repeat(8)}${plaintext.slice(-4)}`;
 };
 
-const DEMO_SECRET_NAME = "Demo Secret (httpbin)";
-
-const ensureDemoSecret = async (userId: string) => {
-  const user = await db.user.findUniqueOrThrow({
-    where: { id: userId },
-    select: { demoSeeded: true },
-  });
-
-  if (user.demoSeeded) return;
-
-  const encryptedValue = cryptoService.encrypt(
-    "WELCOME-TO-ONECLI-SECRETS-ARE-WORKING",
-  );
-
-  await db.$transaction([
-    db.secret.create({
-      data: {
-        name: DEMO_SECRET_NAME,
-        type: "generic",
-        encryptedValue,
-        hostPattern: "httpbin.org",
-        pathPattern: "/anything/*",
-        injectionConfig: {
-          headerName: "Authorization",
-          valueFormat: "Bearer {value}",
-        },
-        userId,
-      },
-    }),
-    db.user.update({
-      where: { id: userId },
-      data: { demoSeeded: true },
-    }),
-  ]);
-};
-
-const resolveUserId = async (authId?: string) => {
-  let id = authId;
-  if (!id) {
-    const session = await getServerSession();
-    if (!session) throw new Error("Not authenticated");
-    id = session.id;
-  }
-
-  const user = await db.user.findUnique({
-    where: { externalAuthId: id },
-    select: { id: true },
-  });
-
-  if (!user) throw new Error("User not found");
-  return user.id;
-};
-
-export async function getSecrets(authId?: string) {
-  const userId = await resolveUserId(authId);
-  await ensureDemoSecret(userId);
+export async function getSecrets() {
+  const userId = await resolveUserId();
 
   const secrets = await db.secret.findMany({
     where: { userId },
@@ -104,8 +51,8 @@ interface CreateSecretInput {
   injectionConfig?: { headerName: string; valueFormat: string } | null;
 }
 
-export async function createSecret(input: CreateSecretInput, authId?: string) {
-  const userId = await resolveUserId(authId);
+export async function createSecret(input: CreateSecretInput) {
+  const userId = await resolveUserId();
 
   const name = input.name.trim();
   if (!name || name.length > 255) {
@@ -158,8 +105,8 @@ export async function createSecret(input: CreateSecretInput, authId?: string) {
   return { ...secret, preview };
 }
 
-export async function deleteSecret(secretId: string, authId?: string) {
-  const userId = await resolveUserId(authId);
+export async function deleteSecret(secretId: string) {
+  const userId = await resolveUserId();
 
   const secret = await db.secret.findFirst({
     where: { id: secretId, userId },
@@ -178,30 +125,27 @@ interface UpdateSecretInput {
   injectionConfig?: { headerName: string; valueFormat: string } | null;
 }
 
-export async function getDemoInfo(authId?: string) {
-  const userId = await resolveUserId(authId);
-  await ensureDemoSecret(userId);
+export async function getDemoInfo() {
+  const userId = await resolveUserId();
 
-  const demoSecret = await db.secret.findFirst({
-    where: { userId, name: DEMO_SECRET_NAME },
-    select: { id: true },
-  });
-  if (!demoSecret) return null;
+  const [demoSecret, agent] = await Promise.all([
+    db.secret.findFirst({
+      where: { userId, name: DEMO_SECRET_NAME },
+      select: { id: true },
+    }),
+    db.agent.findFirst({
+      where: { userId, isDefault: true },
+      select: { accessToken: true },
+    }),
+  ]);
 
-  const agent = await db.agent.findFirst({
-    where: { userId, isDefault: true },
-    select: { accessToken: true },
-  });
+  if (!demoSecret || !agent) return null;
 
-  return { agentToken: agent?.accessToken ?? null };
+  return { agentToken: agent.accessToken };
 }
 
-export async function updateSecret(
-  secretId: string,
-  input: UpdateSecretInput,
-  authId?: string,
-) {
-  const userId = await resolveUserId(authId);
+export async function updateSecret(secretId: string, input: UpdateSecretInput) {
+  const userId = await resolveUserId();
 
   const secret = await db.secret.findFirst({
     where: { id: secretId, userId },

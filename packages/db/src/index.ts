@@ -14,40 +14,20 @@ const globalForPrisma = globalThis as unknown as {
   prisma: PrismaClient | undefined;
 };
 
-async function createPGliteClient(): Promise<PrismaClient> {
-  const { PGlite } = await import("@electric-sql/pglite");
-  const { PrismaPGlite } = await import("pglite-prisma-adapter");
-
-  const pglite = new PGlite("./data/pglite");
-
-  const adapter = new PrismaPGlite(pglite);
-  // Type assertion needed: pglite-prisma-adapter@0.6.1 pins @prisma/driver-adapter-utils
-  // to a narrower version range than our Prisma version
-  return new PrismaClient({ adapter: adapter as never });
-}
-
-async function initDb(): Promise<PrismaClient> {
+function initDb(): PrismaClient {
   if (globalForPrisma.prisma) return globalForPrisma.prisma;
 
-  const isCloud = process.env.NEXT_PUBLIC_EDITION === "cloud";
-  const isBuild = process.env.NEXT_PHASE === "phase-production-build";
-  const client =
-    isCloud || process.env.DATABASE_URL || isBuild
-      ? new PrismaClient()
-      : await createPGliteClient();
+  const client = new PrismaClient();
 
-  // In production with real Postgres, skip caching to match standard Prisma pattern.
-  // PGlite (OSS embedded mode) MUST be cached — multiple instances on the same
-  // directory have inconsistent in-memory state.
-  const usesPGlite = !isCloud && !process.env.DATABASE_URL;
-  if (usesPGlite || process.env.NODE_ENV !== "production") {
+  // Cache in development to avoid exhausting database connections on hot reload
+  if (process.env.NODE_ENV !== "production") {
     globalForPrisma.prisma = client;
   }
 
   return client;
 }
 
-export const db = await initDb();
+export const db = initDb();
 
 export type { PrismaClient } from "@prisma/client";
 export { Prisma, type User } from "@prisma/client";

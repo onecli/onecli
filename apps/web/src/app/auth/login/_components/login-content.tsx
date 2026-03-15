@@ -16,11 +16,7 @@ export const LoginContent = () => {
 
     const syncUser = async () => {
       try {
-        await ensureUser({
-          authId: user.id,
-          email: user.email,
-          name: user.name,
-        });
+        await ensureUser();
       } catch {
         // Server sync failed — still redirect, dashboard handles gracefully
       }

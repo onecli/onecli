@@ -2,7 +2,6 @@
 
 import { useEffect, useState, useCallback } from "react";
 import { Plus, KeyRound } from "lucide-react";
-import { useAuth } from "@/providers/auth-provider";
 import { getSecrets } from "@/lib/actions/secrets";
 import { Button } from "@onecli/ui/components/button";
 import { Card } from "@onecli/ui/components/card";
@@ -23,17 +22,15 @@ interface Secret {
 }
 
 export const SecretsContent = () => {
-  const { user } = useAuth();
   const [secrets, setSecrets] = useState<Secret[]>([]);
   const [loading, setLoading] = useState(true);
   const [createOpen, setCreateOpen] = useState(false);
 
   const fetchSecrets = useCallback(async () => {
-    if (!user?.id) return;
-    const result = await getSecrets(user.id);
+    const result = await getSecrets();
     setSecrets(result);
     setLoading(false);
-  }, [user?.id]);
+  }, []);
 
   useEffect(() => {
     fetchSecrets();

@@ -3,7 +3,11 @@
 import { db } from "@onecli/db";
 import { getServerSession } from "@/lib/auth/server";
 
-export async function getGatewayCounts() {
+/**
+ * Resolves the current authenticated user's internal database ID.
+ * Always validates the session server-side — never trusts client input.
+ */
+export const resolveUserId = async (): Promise<string> => {
   const session = await getServerSession();
   if (!session) throw new Error("Not authenticated");
 
@@ -13,11 +17,5 @@ export async function getGatewayCounts() {
   });
 
   if (!user) throw new Error("User not found");
-
-  const [agents, secrets] = await Promise.all([
-    db.agent.count({ where: { userId: user.id } }),
-    db.secret.count({ where: { userId: user.id } }),
-  ]);
-
-  return { agents, secrets };
-}
+  return user.id;
+};

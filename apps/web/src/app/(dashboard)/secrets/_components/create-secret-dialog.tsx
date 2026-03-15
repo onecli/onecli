@@ -21,7 +21,6 @@ import {
   AccordionTrigger,
 } from "@onecli/ui/components/accordion";
 import { Badge } from "@onecli/ui/components/badge";
-import { useAuth } from "@/providers/auth-provider";
 import { createSecret } from "@/lib/actions/secrets";
 
 const detectAnthropicKeyType = (
@@ -70,7 +69,6 @@ export const CreateSecretDialog = ({
   onOpenChange,
   onCreated,
 }: CreateSecretDialogProps) => {
-  const { user } = useAuth();
   const [step, setStep] = useState<"type" | "form">("type");
   const [creating, setCreating] = useState(false);
 
@@ -111,23 +109,20 @@ export const CreateSecretDialog = ({
     (type !== "generic" || headerName.trim());
 
   const handleCreate = async () => {
-    if (!user?.id || !isValid) return;
+    if (!isValid) return;
     setCreating(true);
     try {
-      await createSecret(
-        {
-          name,
-          type,
-          value,
-          hostPattern,
-          pathPattern: pathPattern || undefined,
-          injectionConfig:
-            type === "generic"
-              ? { headerName, valueFormat: valueFormat || "{value}" }
-              : null,
-        },
-        user.id,
-      );
+      await createSecret({
+        name,
+        type,
+        value,
+        hostPattern,
+        pathPattern: pathPattern || undefined,
+        injectionConfig:
+          type === "generic"
+            ? { headerName, valueFormat: valueFormat || "{value}" }
+            : null,
+      });
       onCreated();
       toast.success("Secret created");
       handleClose(false);
