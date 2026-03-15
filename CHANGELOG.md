@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.1.4](https://github.com/onecli/onecli/compare/v1.1.3...v1.1.4) (2026-03-15)
+
+
+### Bug Fixes
+
+* seed default agent, demo secret, and API key on first dashboard load ([#44](https://github.com/onecli/onecli/issues/44)) ([0fca413](https://github.com/onecli/onecli/commit/0fca413ccf4d921e41ceb0fde13799c7b4f32be3))
+
 ## [1.1.3](https://github.com/onecli/onecli/compare/v1.1.2...v1.1.3) (2026-03-15)
 
 
