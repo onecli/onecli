@@ -7,6 +7,7 @@ import { SidebarInset, SidebarProvider } from "@onecli/ui/components/sidebar";
 import { DashboardSidebar } from "@dashboard/dashboard-sidebar";
 import { DashboardHeader } from "@dashboard/dashboard-header";
 import { useAuth } from "@/providers/auth-provider";
+import { seedDefaults } from "@/lib/actions/auth";
 
 export default function DashboardLayout({
   children,
@@ -21,6 +22,12 @@ export default function DashboardLayout({
       router.replace("/auth/login");
     }
   }, [isLoading, isAuthenticated, router]);
+
+  useEffect(() => {
+    if (isAuthenticated) {
+      seedDefaults();
+    }
+  }, [isAuthenticated]);
 
   if (isLoading) {
     return (

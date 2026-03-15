@@ -6,26 +6,15 @@ import { resolveUserId } from "@/lib/actions/resolve-user";
 
 const generateApiKey = () => `oc_${randomBytes(32).toString("hex")}`;
 
-export async function getOrCreateApiKey() {
+export async function getApiKey() {
   const userId = await resolveUserId();
 
-  const user = await db.user.findUnique({
+  const user = await db.user.findUniqueOrThrow({
     where: { id: userId },
     select: { apiKey: true },
   });
 
-  if (user?.apiKey) {
-    return { apiKey: user.apiKey };
-  }
-
-  const apiKey = generateApiKey();
-
-  await db.user.update({
-    where: { id: userId },
-    data: { apiKey },
-  });
-
-  return { apiKey };
+  return { apiKey: user.apiKey };
 }
 
 export async function regenerateApiKey() {
