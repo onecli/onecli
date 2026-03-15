@@ -24,7 +24,7 @@ import {
   AlertDialogTrigger,
 } from "@onecli/ui/components/alert-dialog";
 import { useCopyToClipboard } from "@/hooks/use-copy-to-clipboard";
-import { getOrCreateApiKey, regenerateApiKey } from "@/lib/actions/api-key";
+import { getApiKey, regenerateApiKey } from "@/lib/actions/api-key";
 
 export const ApiKeyCard = () => {
   const [apiKey, setApiKey] = useState("");
@@ -34,8 +34,8 @@ export const ApiKeyCard = () => {
   const { copied, copy } = useCopyToClipboard();
 
   useEffect(() => {
-    getOrCreateApiKey().then((result) => {
-      setApiKey(result.apiKey);
+    getApiKey().then((result) => {
+      setApiKey(result.apiKey ?? "");
       setLoading(false);
     });
   }, []);

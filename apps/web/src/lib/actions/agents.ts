@@ -5,29 +5,9 @@ import { db } from "@onecli/db";
 import { resolveUserId } from "@/lib/actions/resolve-user";
 
 const generateAccessToken = () => `aoc_${randomBytes(32).toString("hex")}`;
-const DEFAULT_AGENT_NAME = "Default Agent";
-
-async function ensureDefaultAgent(userId: string) {
-  const existing = await db.agent.findFirst({
-    where: { userId, isDefault: true },
-    select: { id: true },
-  });
-
-  if (!existing) {
-    await db.agent.create({
-      data: {
-        name: DEFAULT_AGENT_NAME,
-        accessToken: generateAccessToken(),
-        isDefault: true,
-        userId,
-      },
-    });
-  }
-}
 
 export async function getAgents() {
   const userId = await resolveUserId();
-  await ensureDefaultAgent(userId);
 
   return db.agent.findMany({
     where: { userId },
@@ -44,7 +24,6 @@ export async function getAgents() {
 
 export async function getDefaultAgent() {
   const userId = await resolveUserId();
-  await ensureDefaultAgent(userId);
 
   return db.agent.findFirst({
     where: { userId, isDefault: true },
