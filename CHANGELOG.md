@@ -1,5 +1,14 @@
 # Changelog
 
+## [1.1.3](https://github.com/onecli/onecli/compare/v1.1.2...v1.1.3) (2026-03-15)
+
+
+### Bug Fixes
+
+* add Discord link to README ([#39](https://github.com/onecli/onecli/issues/39)) ([4bb22ce](https://github.com/onecli/onecli/commit/4bb22ce420cf8b1fccf61a7b96d53715da394e12))
+* enforce server-side session validation in all server actions ([#42](https://github.com/onecli/onecli/issues/42)) ([1232b51](https://github.com/onecli/onecli/commit/1232b51790090adb0abce7942759ac149d39d42d))
+* replace embedded PGlite with PostgreSQL ([#43](https://github.com/onecli/onecli/issues/43)) ([db44f62](https://github.com/onecli/onecli/commit/db44f6215c0836625d568f93917ae36cf0cdf773))
+
 ## [1.1.2](https://github.com/onecli/onecli/compare/v1.1.1...v1.1.2) (2026-03-12)
 
 
