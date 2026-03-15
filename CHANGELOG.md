@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.1.5](https://github.com/onecli/onecli/compare/v1.1.4...v1.1.5) (2026-03-15)
+
+
+### Bug Fixes
+
+* migrate gateway to Axum with direct DB access ([#46](https://github.com/onecli/onecli/issues/46)) ([d76445f](https://github.com/onecli/onecli/commit/d76445f5f7961afe1639c85abcc9fb29373e6475))
+* remove unused gateway connect API route and shared secret ([#48](https://github.com/onecli/onecli/issues/48)) ([ed5e9a3](https://github.com/onecli/onecli/commit/ed5e9a3ebb0373a92dd845b5504f83915f63fbee))
+
 ## [1.1.4](https://github.com/onecli/onecli/compare/v1.1.3...v1.1.4) (2026-03-15)
 
 
