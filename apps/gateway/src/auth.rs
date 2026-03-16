@@ -7,11 +7,11 @@
 use std::sync::OnceLock;
 
 use axum::extract::FromRequestParts;
-use axum::http::StatusCode;
 use axum::http::request::Parts;
+use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use hyper::HeaderMap;
-use jsonwebtoken::{decode, DecodingKey, Validation, Algorithm};
+use jsonwebtoken::{decode, Algorithm, DecodingKey, Validation};
 use serde::Deserialize;
 use sqlx::PgPool;
 use tracing::warn;
@@ -85,10 +85,7 @@ impl FromRequestParts<GatewayState> for AuthUser {
 // ── Validation ───────────────────────────────────────────────────────────
 
 /// Validate an incoming browser request and return the internal user ID.
-async fn validate_request(
-    pool: &PgPool,
-    headers: &HeaderMap,
-) -> Result<String, AuthError> {
+async fn validate_request(pool: &PgPool, headers: &HeaderMap) -> Result<String, AuthError> {
     match auth_mode() {
         "local" => validate_local(pool).await,
         _ => validate_oauth(pool, headers).await,
@@ -140,12 +137,15 @@ async fn validate_oauth(pool: &PgPool, headers: &HeaderMap) -> Result<String, Au
     validation.required_spec_claims.clear();
     validation.validate_exp = false;
 
-    let token_data =
-        decode::<SessionClaims>(token, &DecodingKey::from_secret(secret.as_bytes()), &validation)
-            .map_err(|e| {
-                warn!(error = %e, "oauth auth: JWT decode failed");
-                AuthError("invalid session token".to_string())
-            })?;
+    let token_data = decode::<SessionClaims>(
+        token,
+        &DecodingKey::from_secret(secret.as_bytes()),
+        &validation,
+    )
+    .map_err(|e| {
+        warn!(error = %e, "oauth auth: JWT decode failed");
+        AuthError("invalid session token".to_string())
+    })?;
 
     let sub = &token_data.claims.sub;
 

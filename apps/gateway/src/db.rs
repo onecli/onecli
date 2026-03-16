@@ -56,13 +56,11 @@ pub(crate) async fn find_user_by_external_auth_id(
     pool: &PgPool,
     external_auth_id: &str,
 ) -> Result<Option<UserRow>> {
-    sqlx::query_as::<_, UserRow>(
-        r#"SELECT id FROM "User" WHERE "externalAuthId" = $1 LIMIT 1"#,
-    )
-    .bind(external_auth_id)
-    .fetch_optional(pool)
-    .await
-    .context("querying User by externalAuthId")
+    sqlx::query_as::<_, UserRow>(r#"SELECT id FROM "User" WHERE "externalAuthId" = $1 LIMIT 1"#)
+        .bind(external_auth_id)
+        .fetch_optional(pool)
+        .await
+        .context("querying User by externalAuthId")
 }
 
 /// Look up an agent by its access token.

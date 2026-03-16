@@ -7,10 +7,10 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use dashmap::DashMap;
 use crate::crypto::CryptoService;
 use crate::db;
 use crate::inject::{ConnectRule, Injection};
+use dashmap::DashMap;
 
 /// How long to cache resolved connect responses before re-checking.
 const CACHE_TTL: Duration = Duration::from_secs(60);
