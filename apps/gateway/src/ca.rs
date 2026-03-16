@@ -261,6 +261,7 @@ impl CertificateAuthority {
         let mut params = CertificateParams::new(vec![hostname.to_string()])
             .context("creating leaf cert params")?;
         params.distinguished_name.push(DnType::CommonName, hostname);
+        params.use_authority_key_identifier_extension = true;
         params.key_usages = vec![KeyUsagePurpose::DigitalSignature];
         params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ServerAuth];
         // Small backdate for clock skew
@@ -489,6 +490,31 @@ mod tests {
                 .permissions();
             assert_eq!(perms.mode() & 0o777, 0o600);
         }
+    }
+
+    #[test]
+    fn leaf_cert_contains_authority_key_identifier() {
+        let ca = test_ca();
+        let leaf_key =
+            KeyPair::generate_for(&PKCS_ECDSA_P256_SHA256).expect("generate leaf key pair");
+        let mut params =
+            CertificateParams::new(vec!["aki-test.example.com".to_string()]).expect("leaf params");
+        params.use_authority_key_identifier_extension = true;
+        params.key_usages = vec![KeyUsagePurpose::DigitalSignature];
+        params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ServerAuth];
+        let leaf_cert = params
+            .signed_by(&leaf_key, &ca.ca_cert, &ca.ca_key)
+            .expect("sign leaf");
+        let leaf_der = leaf_cert.der().as_ref();
+
+        // OID 2.5.29.35 (authorityKeyIdentifier) encoded as DER: 55 1d 23
+        let aki_oid = [0x55, 0x1d, 0x23];
+        assert!(
+            leaf_der
+                .windows(aki_oid.len())
+                .any(|w| w == aki_oid),
+            "leaf certificate must contain Authority Key Identifier extension (OID 2.5.29.35)"
+        );
     }
 
     #[tokio::test]
