@@ -14,6 +14,8 @@ services:
       interval: 5s
       timeout: 3s
       retries: 5
+    networks:
+      - onecli
 
   app:
     image: ghcr.io/onecli/onecli:latest
@@ -30,7 +32,13 @@ services:
     env_file:
       - path: ../.env
         required: false
+    networks:
+      - onecli
 
 volumes:
   pgdata:
   app-data:
+
+networks:
+  onecli:
+    driver: bridge
