@@ -25,8 +25,10 @@ use hyper_util::rt::TokioIo;
 use tokio::net::{TcpListener, TcpStream};
 use tokio_rustls::TlsAcceptor;
 use tower::ServiceExt;
+use tower_http::cors::CorsLayer;
 use tracing::{info, warn};
 
+use crate::auth::AuthUser;
 use crate::ca::CertificateAuthority;
 use crate::connect::{self, CachedConnect, ConnectCacheKey, ConnectError, PolicyEngine};
 use crate::inject::{self, ConnectRule};
@@ -75,11 +77,32 @@ impl GatewayServer {
 
         info!(addr = %addr, "listening for connections");
 
+        // CORS configuration for browser → gateway requests.
+        // credentials: true requires explicit headers/methods (not wildcard *).
+        let cors_layer = CorsLayer::new()
+            .allow_origin(tower_http::cors::AllowOrigin::mirror_request())
+            .allow_headers([
+                hyper::header::CONTENT_TYPE,
+                hyper::header::AUTHORIZATION,
+                hyper::header::ACCEPT,
+            ])
+            .allow_methods([
+                Method::GET,
+                Method::POST,
+                Method::PUT,
+                Method::DELETE,
+                Method::OPTIONS,
+            ])
+            .allow_credentials(true);
+
         // Build the Axum router for non-CONNECT routes.
         // The fallback returns 400 Bad Request for anything other than defined routes.
         let axum_router = Router::new()
             .route("/healthz", axum::routing::get(healthz))
-            .fallback(fallback);
+            .route("/me", axum::routing::get(me))
+            .layer(cors_layer)
+            .fallback(fallback)
+            .with_state(self.state.clone());
 
         loop {
             let (stream, peer_addr) = listener.accept().await?;
@@ -99,6 +122,11 @@ impl GatewayServer {
 
 async fn healthz() -> StatusCode {
     StatusCode::OK
+}
+
+/// Protected: returns the authenticated user's ID.
+async fn me(auth: AuthUser) -> String {
+    auth.user_id
 }
 
 /// Reject non-CONNECT requests to unknown routes with 400 Bad Request.
@@ -167,9 +195,9 @@ async fn handle_connect(
     // Extract agent token from Proxy-Authorization header.
     let agent_token = inject::extract_agent_token(&req).filter(|t| !t.is_empty());
 
-    let (intercept, rules) = if let Some(ref token) = agent_token {
+    let (intercept, rules, _user_id) = if let Some(ref token) = agent_token {
         match connect::resolve(token, &hostname, &state.policy_engine, &state.connect_cache).await {
-            Ok(resp) => (resp.intercept, resp.rules),
+            Ok(resp) => (resp.intercept, resp.rules, resp.user_id),
             Err(ConnectError::InvalidToken) => {
                 warn!(peer = %peer_addr, host = %host, "CONNECT rejected: invalid agent token");
                 return Ok(respond_407());
@@ -183,7 +211,7 @@ async fn handle_connect(
         }
     } else {
         // No auth — plain tunnel (no MITM, no injection)
-        (false, vec![])
+        (false, vec![], None)
     };
 
     info!(

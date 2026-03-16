@@ -35,6 +35,7 @@ elif [ -n "$NEXTAUTH_SECRET" ]; then
 else
   AUTH_MODE="local"
 fi
+export AUTH_MODE
 OAUTH_CONFIGURED="false"
 if [ "$AUTH_MODE" = "cloud" ] || [ -n "$GOOGLE_CLIENT_ID" ]; then
   OAUTH_CONFIGURED="true"

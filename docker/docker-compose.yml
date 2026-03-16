@@ -27,6 +27,7 @@ services:
       - "10255:10255"
     environment:
       DATABASE_URL: postgresql://${POSTGRES_USER:-onecli}:${POSTGRES_PASSWORD:-onecli}@postgres:5432/${POSTGRES_DB:-onecli}
+      NEXTAUTH_SECRET: ${NEXTAUTH_SECRET:-}
     volumes:
       - app-data:/app/data
     env_file:
