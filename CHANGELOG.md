@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.1.6](https://github.com/onecli/onecli/compare/v1.1.5...v1.1.6) (2026-03-16)
+
+
+### Bug Fixes
+
+* add gateway auth extractor, CORS, and user_id threading ([#52](https://github.com/onecli/onecli/issues/52)) ([98d071e](https://github.com/onecli/onecli/commit/98d071e8a98996e790e8f2c9f558c3ada10418bd))
+
 ## [1.1.5](https://github.com/onecli/onecli/compare/v1.1.4...v1.1.5) (2026-03-16)
 
 
