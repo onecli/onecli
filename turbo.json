@@ -20,7 +20,8 @@
     "GATEWAY_CA_PEM_FILE",
     "GATEWAY_CA_CERT",
     "GATEWAY_HOST",
-    "GATEWAY_PORT"
+    "GATEWAY_PORT",
+    "AUTH_MODE"
   ],
   "tasks": {
     "build": {

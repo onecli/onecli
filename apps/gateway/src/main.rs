@@ -1,3 +1,10 @@
+#[cfg(not(feature = "cloud"))]
+mod auth;
+
+#[cfg(feature = "cloud")]
+#[path = "cloud/auth.rs"]
+mod auth;
+
 mod ca;
 mod connect;
 mod crypto;

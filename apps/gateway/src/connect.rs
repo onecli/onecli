@@ -7,12 +7,10 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use dashmap::DashMap;
-use serde::Deserialize;
-
 use crate::crypto::CryptoService;
 use crate::db;
 use crate::inject::{ConnectRule, Injection};
+use dashmap::DashMap;
 
 /// How long to cache resolved connect responses before re-checking.
 const CACHE_TTL: Duration = Duration::from_secs(60);
@@ -20,11 +18,11 @@ const CACHE_TTL: Duration = Duration::from_secs(60);
 // ── Data types ──────────────────────────────────────────────────────────
 
 /// Result of policy resolution for a CONNECT request.
-#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub(crate) struct ConnectResponse {
     pub intercept: bool,
-    #[serde(default)]
     pub rules: Vec<ConnectRule>,
+    pub user_id: Option<String>,
 }
 
 /// Errors from the connect resolution.
@@ -84,6 +82,7 @@ impl PolicyEngine {
             return Ok(ConnectResponse {
                 intercept: false,
                 rules: vec![],
+                user_id: Some(agent.user_id.clone()),
             });
         }
 
@@ -108,6 +107,7 @@ impl PolicyEngine {
         Ok(ConnectResponse {
             intercept: true,
             rules,
+            user_id: Some(agent.user_id),
         })
     }
 }
@@ -237,89 +237,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn deserialize_intercept_true() {
-        let json = r#"{
-            "intercept": true,
-            "rules": [
-                {
-                    "path_pattern": "*",
-                    "injections": [
-                        { "action": "set_header", "name": "x-api-key", "value": "sk-ant-123" },
-                        { "action": "remove_header", "name": "authorization" }
-                    ]
-                }
-            ]
-        }"#;
-
-        let resp: ConnectResponse = serde_json::from_str(json).expect("parse");
-        assert!(resp.intercept);
-        assert_eq!(resp.rules.len(), 1);
-        assert_eq!(resp.rules[0].path_pattern, "*");
-        assert_eq!(resp.rules[0].injections.len(), 2);
-        assert_eq!(
-            resp.rules[0].injections[0],
-            crate::inject::Injection::SetHeader {
-                name: "x-api-key".to_string(),
-                value: "sk-ant-123".to_string(),
-            }
-        );
-        assert_eq!(
-            resp.rules[0].injections[1],
-            crate::inject::Injection::RemoveHeader {
-                name: "authorization".to_string(),
-            }
-        );
-    }
-
-    #[test]
-    fn deserialize_intercept_false() {
-        let json = r#"{ "intercept": false }"#;
-        let resp: ConnectResponse = serde_json::from_str(json).expect("parse");
-        assert!(!resp.intercept);
-        assert!(resp.rules.is_empty());
-    }
-
-    #[test]
-    fn deserialize_empty_rules() {
-        let json = r#"{ "intercept": true, "rules": [] }"#;
-        let resp: ConnectResponse = serde_json::from_str(json).expect("parse");
-        assert!(resp.intercept);
-        assert!(resp.rules.is_empty());
-    }
-
-    #[test]
-    fn deserialize_multiple_rules() {
-        let json = r#"{
-            "intercept": true,
-            "rules": [
-                {
-                    "path_pattern": "/v1/*",
-                    "injections": [
-                        { "action": "set_header", "name": "x-api-key", "value": "key1" }
-                    ]
-                },
-                {
-                    "path_pattern": "/v2/*",
-                    "injections": [
-                        { "action": "set_header", "name": "authorization", "value": "Bearer key2" }
-                    ]
-                }
-            ]
-        }"#;
-
-        let resp: ConnectResponse = serde_json::from_str(json).expect("parse");
-        assert_eq!(resp.rules.len(), 2);
-        assert_eq!(resp.rules[0].path_pattern, "/v1/*");
-        assert_eq!(resp.rules[1].path_pattern, "/v2/*");
-    }
-
-    #[test]
     fn cache_hit_returns_cached_response() {
         let cache: DashMap<ConnectCacheKey, CachedConnect> = DashMap::new();
         let key = ("aoc_token1".to_string(), "api.anthropic.com".to_string());
         let response = ConnectResponse {
             intercept: true,
             rules: vec![],
+            user_id: None,
         };
 
         cache.insert(
@@ -346,6 +270,7 @@ mod tests {
                 response: ConnectResponse {
                     intercept: true,
                     rules: vec![],
+                    user_id: None,
                 },
                 expires_at: Instant::now() - Duration::from_secs(1), // expired
             },

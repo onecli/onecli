@@ -43,7 +43,25 @@ pub(crate) struct SecretRow {
     pub injection_config: Option<serde_json::Value>,
 }
 
+/// A user row from the `User` table.
+#[derive(Debug, FromRow)]
+pub(crate) struct UserRow {
+    pub id: String,
+}
+
 // ── Queries ─────────────────────────────────────────────────────────────
+
+/// Look up a user by their external auth ID (e.g. OAuth `sub` claim or "local-admin").
+pub(crate) async fn find_user_by_external_auth_id(
+    pool: &PgPool,
+    external_auth_id: &str,
+) -> Result<Option<UserRow>> {
+    sqlx::query_as::<_, UserRow>(r#"SELECT id FROM "User" WHERE "externalAuthId" = $1 LIMIT 1"#)
+        .bind(external_auth_id)
+        .fetch_optional(pool)
+        .await
+        .context("querying User by externalAuthId")
+}
 
 /// Look up an agent by its access token.
 pub(crate) async fn find_agent_by_token(
