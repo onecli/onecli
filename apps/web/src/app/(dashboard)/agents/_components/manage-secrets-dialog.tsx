@@ -21,8 +21,8 @@ import {
   getAgentSecrets,
   updateAgentSecretMode,
   updateAgentSecrets,
-  type SecretMode,
 } from "@/lib/actions/agents";
+import type { SecretMode } from "@/lib/services/agent-service";
 
 interface ManageSecretsDialogProps {
   agent: {

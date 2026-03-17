@@ -2,7 +2,8 @@
 
 import { useEffect, useState, useCallback } from "react";
 import { Plus, Bot } from "lucide-react";
-import { getAgents, type SecretMode } from "@/lib/actions/agents";
+import { getAgents } from "@/lib/actions/agents";
+import type { SecretMode } from "@/lib/services/agent-service";
 import { Button } from "@onecli/ui/components/button";
 import { Card } from "@onecli/ui/components/card";
 import { Skeleton } from "@onecli/ui/components/skeleton";

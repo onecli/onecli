@@ -41,8 +41,8 @@ import {
   deleteAgent,
   regenerateAgentToken,
   renameAgent,
-  type SecretMode,
 } from "@/lib/actions/agents";
+import type { SecretMode } from "@/lib/services/agent-service";
 import { ManageSecretsDialog } from "./manage-secrets-dialog";
 
 interface AgentCardProps {

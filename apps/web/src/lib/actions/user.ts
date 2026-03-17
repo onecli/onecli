@@ -2,43 +2,35 @@
 
 import { db } from "@onecli/db";
 import { getServerSession } from "@/lib/auth/server";
+import {
+  getUser,
+  updateProfile as updateProfileService,
+} from "@/lib/services/user-service";
 
-export async function getCurrentUser() {
+export const getCurrentUser = async () => {
   const session = await getServerSession();
   if (!session) throw new Error("Not authenticated");
 
   const user = await db.user.findUnique({
     where: { externalAuthId: session.id },
-    select: {
-      id: true,
-      email: true,
-      name: true,
-      createdAt: true,
-    },
+    select: { id: true },
   });
 
-  return user;
-}
+  if (!user) return null;
 
-export async function updateProfile(data: { name: string }) {
-  const name = data.name.trim();
+  return getUser(user.id);
+};
 
-  if (name.length === 0 || name.length > 255) {
-    throw new Error("Name must be between 1 and 255 characters");
-  }
-
+export const updateProfile = async (data: { name: string }) => {
   const session = await getServerSession();
   if (!session) throw new Error("Not authenticated");
 
-  const user = await db.user.update({
+  const user = await db.user.findUnique({
     where: { externalAuthId: session.id },
-    data: { name },
-    select: {
-      id: true,
-      email: true,
-      name: true,
-    },
+    select: { id: true },
   });
 
-  return user;
-}
+  if (!user) throw new Error("User not found");
+
+  return updateProfileService(user.id, data.name);
+};

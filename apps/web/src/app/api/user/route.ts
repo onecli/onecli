@@ -1,28 +1,28 @@
 import { NextRequest, NextResponse } from "next/server";
 import { resolveApiAuth } from "@/lib/api-auth";
 import { handleServiceError, unauthorized } from "@/lib/api-utils";
-import { listAgents, createAgent } from "@/lib/services/agent-service";
-import { createAgentSchema } from "@/lib/validations/agent";
+import { getUser, updateProfile } from "@/lib/services/user-service";
+import { updateProfileSchema } from "@/lib/validations/user";
 
 export const GET = async (request: NextRequest) => {
   try {
     const auth = await resolveApiAuth(request);
     if (!auth) return unauthorized();
 
-    const agents = await listAgents(auth.userId);
-    return NextResponse.json(agents);
+    const user = await getUser(auth.userId);
+    return NextResponse.json(user);
   } catch (err) {
     return handleServiceError(err);
   }
 };
 
-export const POST = async (request: NextRequest) => {
+export const PATCH = async (request: NextRequest) => {
   try {
     const auth = await resolveApiAuth(request);
     if (!auth) return unauthorized();
 
     const body = await request.json().catch(() => null);
-    const parsed = createAgentSchema.safeParse(body);
+    const parsed = updateProfileSchema.safeParse(body);
     if (!parsed.success) {
       return NextResponse.json(
         { error: parsed.error.issues[0]?.message ?? "Invalid request body" },
@@ -30,12 +30,8 @@ export const POST = async (request: NextRequest) => {
       );
     }
 
-    const agent = await createAgent(
-      auth.userId,
-      parsed.data.name,
-      parsed.data.identifier,
-    );
-    return NextResponse.json(agent, { status: 201 });
+    const user = await updateProfile(auth.userId, parsed.data.name);
+    return NextResponse.json(user);
   } catch (err) {
     return handleServiceError(err);
   }

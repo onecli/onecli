@@ -2,8 +2,9 @@
 
 import { db } from "@onecli/db";
 import { getServerSession } from "@/lib/auth/server";
+import { getGatewayCounts as getGatewayCountsService } from "@/lib/services/counts-service";
 
-export async function getGatewayCounts() {
+export const getGatewayCounts = async () => {
   const session = await getServerSession();
   if (!session) throw new Error("Not authenticated");
 
@@ -14,10 +15,5 @@ export async function getGatewayCounts() {
 
   if (!user) throw new Error("User not found");
 
-  const [agents, secrets] = await Promise.all([
-    db.agent.count({ where: { userId: user.id } }),
-    db.secret.count({ where: { userId: user.id } }),
-  ]);
-
-  return { agents, secrets };
-}
+  return getGatewayCountsService(user.id);
+};
