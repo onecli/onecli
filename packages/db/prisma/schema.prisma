@@ -27,6 +27,7 @@ model Agent {
   id          String   @id @default(cuid())
   userId      String
   name        String
+  identifier  String?  // user-provided machine-readable ID, unique per user
   accessToken String   @unique // "aoc_..." prefix, used for gateway auth
   isDefault   Boolean  @default(false)
   secretMode  String   @default("all") // "all" or "selective"
@@ -36,6 +37,7 @@ model Agent {
 
   agentSecrets AgentSecret[]
 
+  @@unique([userId, identifier])
   @@index([userId])
 }
 

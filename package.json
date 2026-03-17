@@ -14,6 +14,7 @@
     "fix": "turbo run lint:fix && pnpm run format",
     "db:up": "docker compose -f docker/docker-compose.yml up postgres -d",
     "db:down": "docker compose -f docker/docker-compose.yml down postgres",
+    "db:nuke": "docker compose -f docker/docker-compose.yml down postgres -v",
     "db:generate": "pnpm --filter @onecli/db prisma generate",
     "db:push": "dotenv -e .env -- pnpm --filter @onecli/db prisma db push",
     "db:migrate": "dotenv -e .env -- pnpm --filter @onecli/db db:migrate",

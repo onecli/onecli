@@ -50,21 +50,32 @@ export async function GET(request: NextRequest) {
       return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
     }
 
-    // Look up the user's default agent to embed its token in the gateway URL
-    const defaultAgent = await db.agent.findFirst({
-      where: { userId, isDefault: true },
-      select: { accessToken: true },
-    });
+    // Look up agent: by identifier if provided, otherwise default
+    const agentIdentifier = request.nextUrl.searchParams.get("agent");
 
-    if (!defaultAgent) {
+    const agent = agentIdentifier
+      ? await db.agent.findFirst({
+          where: { userId, identifier: agentIdentifier },
+          select: { accessToken: true },
+        })
+      : await db.agent.findFirst({
+          where: { userId, isDefault: true },
+          select: { accessToken: true },
+        });
+
+    if (!agent) {
       return NextResponse.json(
-        { error: "No default agent found. Please create one first." },
+        {
+          error: agentIdentifier
+            ? "Agent with the given identifier not found."
+            : "No default agent found. Please create one first.",
+        },
         { status: 404 },
       );
     }
 
     const gatewayHost = getGatewayHost();
-    const gatewayUrl = `http://x:${defaultAgent.accessToken}@${gatewayHost}:${GATEWAY_PORT}`;
+    const gatewayUrl = `http://x:${agent.accessToken}@${gatewayHost}:${GATEWAY_PORT}`;
 
     const caCertificate = loadCaCertificate();
     if (!caCertificate) {

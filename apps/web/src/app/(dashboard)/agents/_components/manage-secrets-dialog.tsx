@@ -1,14 +1,7 @@
 "use client";
 
 import { useEffect, useState, useCallback, useMemo } from "react";
-import {
-  KeyRound,
-  Loader2,
-  Search,
-  ShieldCheck,
-  Globe,
-  ListChecks,
-} from "lucide-react";
+import { KeyRound, Loader2, Search, Globe, ListChecks } from "lucide-react";
 import { toast } from "sonner";
 import {
   Dialog,
@@ -28,13 +21,14 @@ import {
   getAgentSecrets,
   updateAgentSecretMode,
   updateAgentSecrets,
+  type SecretMode,
 } from "@/lib/actions/agents";
 
 interface ManageSecretsDialogProps {
   agent: {
     id: string;
     name: string;
-    secretMode: string;
+    secretMode: SecretMode;
   };
   open: boolean;
   onOpenChange: (open: boolean) => void;
@@ -49,7 +43,7 @@ export const ManageSecretsDialog = ({
   onOpenChange,
   onUpdated,
 }: ManageSecretsDialogProps) => {
-  const [mode, setMode] = useState<"all" | "selective">(
+  const [mode, setMode] = useState<SecretMode>(
     agent.secretMode === "selective" ? "selective" : "all",
   );
   const [secrets, setSecrets] = useState<Secret[]>([]);
@@ -128,84 +122,66 @@ export const ManageSecretsDialog = ({
       <DialogContent className="gap-0 p-0 sm:max-w-lg">
         <DialogHeader className="p-6 pb-4">
           <DialogTitle>Secret access for {agent.name}</DialogTitle>
+          <p className="text-muted-foreground text-xs leading-relaxed">
+            Secrets are injected by the gateway at request time. The agent never
+            sees raw values.
+          </p>
         </DialogHeader>
 
-        {/* Security callout — always visible */}
-        <div className="border-border/50 mx-6 flex items-start gap-2.5 rounded-md border px-3 py-2.5">
-          <ShieldCheck className="text-muted-foreground mt-px size-3.5 shrink-0" />
-          <p className="text-muted-foreground text-xs leading-relaxed">
-            Secrets are injected by the OneCLI gateway at request time. The
-            agent never sees raw secret values.
-          </p>
-        </div>
-
-        {/* Mode selection — radio card pattern */}
-        <div className="space-y-2 px-6 pt-4 pb-2">
+        {/* Mode selection */}
+        <div className="space-y-2 px-6 pb-2">
           <p className="text-muted-foreground text-xs font-medium uppercase tracking-wider">
             Access mode
           </p>
           <div className="grid grid-cols-2 gap-2">
-            <button
-              type="button"
-              onClick={() => setMode("all")}
-              className={cn(
-                "flex flex-col items-start gap-1.5 rounded-lg border p-3 text-left transition-colors",
-                !isSelective
-                  ? "border-foreground/30 bg-muted/60"
-                  : "border-border hover:border-border hover:bg-muted/30",
-              )}
-            >
-              <Globe
+            {(
+              [
+                {
+                  value: "all",
+                  icon: Globe,
+                  label: "All secrets",
+                  desc: "Every secret in your account",
+                },
+                {
+                  value: "selective",
+                  icon: ListChecks,
+                  label: "Selective",
+                  desc: "Choose specific secrets",
+                },
+              ] as const
+            ).map(({ value, icon: Icon, label, desc }) => (
+              <button
+                key={value}
+                type="button"
+                onClick={() => setMode(value)}
                 className={cn(
-                  "size-4",
-                  !isSelective ? "text-foreground" : "text-muted-foreground/60",
+                  "flex flex-col gap-2 rounded-lg border p-3 text-left transition-colors",
+                  mode === value
+                    ? "border-foreground/30 bg-muted/60"
+                    : "border-border hover:bg-muted/30",
                 )}
-              />
-              <div>
-                <p
-                  className={cn(
-                    "text-sm font-medium",
-                    isSelective && "text-muted-foreground",
-                  )}
-                >
-                  All secrets
-                </p>
-                <p className="text-muted-foreground mt-0.5 text-xs">
-                  Access every secret in your account
-                </p>
-              </div>
-            </button>
-
-            <button
-              type="button"
-              onClick={() => setMode("selective")}
-              className={cn(
-                "flex flex-col items-start gap-1.5 rounded-lg border p-3 text-left transition-colors",
-                isSelective
-                  ? "border-foreground/30 bg-muted/60"
-                  : "border-border hover:border-border hover:bg-muted/30",
-              )}
-            >
-              <ListChecks
-                className={cn(
-                  "size-4",
-                  isSelective ? "text-foreground" : "text-muted-foreground/60",
-                )}
-              />
-              <div>
-                <p
-                  className={cn(
-                    "text-sm font-medium",
-                    !isSelective && "text-muted-foreground",
-                  )}
-                >
-                  Specific secrets
-                </p>
-                <p className="text-muted-foreground mt-0.5 text-xs">
-                  Choose which secrets to allow
-                </p>
-              </div>
-            </button>
+              >
+                <div className="flex items-center gap-2">
+                  <Icon
+                    className={cn(
+                      "size-3.5",
+                      mode === value
+                        ? "text-foreground"
+                        : "text-muted-foreground/60",
+                    )}
+                  />
+                  <p
+                    className={cn(
+                      "text-sm font-medium",
+                      mode !== value && "text-muted-foreground",
+                    )}
+                  >
+                    {label}
+                  </p>
+                </div>
+                <p className="text-muted-foreground text-xs">{desc}</p>
+              </button>
+            ))}
           </div>
         </div>
 

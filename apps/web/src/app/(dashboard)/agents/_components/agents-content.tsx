@@ -2,7 +2,7 @@
 
 import { useEffect, useState, useCallback } from "react";
 import { Plus, Bot } from "lucide-react";
-import { getAgents } from "@/lib/actions/agents";
+import { getAgents, type SecretMode } from "@/lib/actions/agents";
 import { Button } from "@onecli/ui/components/button";
 import { Card } from "@onecli/ui/components/card";
 import { Skeleton } from "@onecli/ui/components/skeleton";
@@ -12,9 +12,10 @@ import { CreateAgentDialog } from "./create-agent-dialog";
 interface Agent {
   id: string;
   name: string;
+  identifier: string | null;
   accessToken: string;
   isDefault: boolean;
-  secretMode: string;
+  secretMode: SecretMode;
   createdAt: Date;
   _count: { agentSecrets: number };
 }
@@ -58,13 +59,10 @@ export const AgentsContent = () => {
   return (
     <div className="space-y-4">
       <div className="flex justify-end">
-        <div className="flex items-center gap-2">
-          <span className="text-muted-foreground text-xs">Coming soon</span>
-          <Button size="sm" disabled>
-            <Plus className="size-3.5" />
-            Create Agent
-          </Button>
-        </div>
+        <Button size="sm" onClick={() => setCreateOpen(true)}>
+          <Plus className="size-3.5" />
+          Create Agent
+        </Button>
       </div>
 
       {agents.length === 0 ? (
