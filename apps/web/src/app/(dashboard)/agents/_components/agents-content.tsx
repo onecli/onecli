@@ -14,7 +14,9 @@ interface Agent {
   name: string;
   accessToken: string;
   isDefault: boolean;
+  secretMode: string;
   createdAt: Date;
+  _count: { agentSecrets: number };
 }
 
 export const AgentsContent = () => {

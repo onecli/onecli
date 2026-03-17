@@ -67,10 +67,13 @@ impl PolicyEngine {
             .map_err(|e| ConnectError::Internal(format!("db error: {e}")))?
             .ok_or(ConnectError::InvalidToken)?;
 
-        // 2. Secret lookup
-        let secrets = db::find_secrets_by_user(&self.pool, &agent.user_id)
-            .await
-            .map_err(|e| ConnectError::Internal(format!("db error: {e}")))?;
+        // 2. Secret lookup — branch on agent's secret mode
+        let secrets = if agent.secret_mode == "selective" {
+            db::find_secrets_by_agent(&self.pool, &agent.id).await
+        } else {
+            db::find_secrets_by_user(&self.pool, &agent.user_id).await
+        }
+        .map_err(|e| ConnectError::Internal(format!("db error: {e}")))?;
 
         // 3. Filter by host pattern
         let matching: Vec<_> = secrets
