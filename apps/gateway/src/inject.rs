@@ -16,13 +16,22 @@ use tracing::warn;
 /// A single injection instruction returned by the API.
 #[derive(Debug, Clone, Deserialize, PartialEq)]
 #[serde(tag = "action", rename_all = "snake_case")]
+#[allow(clippy::enum_variant_names)] // all variants operate on headers — the suffix is intentional
 pub(crate) enum Injection {
-    SetHeader { name: String, value: String },
+    SetHeader {
+        name: String,
+        value: String,
+    },
     /// Replace a header only if it already exists in the request.
     /// Used for OAuth: replace Authorization when the SDK sends the exchange
     /// request, but leave x-api-key untouched on subsequent requests.
-    ReplaceHeader { name: String, value: String },
-    RemoveHeader { name: String },
+    ReplaceHeader {
+        name: String,
+        value: String,
+    },
+    RemoveHeader {
+        name: String,
+    },
 }
 
 /// A rule matching a path pattern with its injection instructions.

@@ -20,7 +20,11 @@ export const DashboardSidebar = ({
   return (
     <Sidebar collapsible="icon" variant="inset" {...props}>
       <SidebarHeader className="h-12 justify-center group-data-[collapsible=icon]:px-0">
-        <Link href="/overview" className="flex items-center px-2">
+        <Link
+          href="https://onecli.sh"
+          target="_blank"
+          className="flex items-center px-2"
+        >
           <Image
             src="/logo.svg"
             alt="OneCLI"
