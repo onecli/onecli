@@ -31,3 +31,33 @@ export const updateSecretSchema = z
   });
 
 export type UpdateSecretInput = z.infer<typeof updateSecretSchema>;
+
+// ── Secret metadata ────────────────────────────────────────────────────
+
+export const anthropicAuthModes = ["api-key", "oauth"] as const;
+export type AnthropicAuthMode = (typeof anthropicAuthModes)[number];
+
+export interface AnthropicSecretMetadata {
+  authMode: AnthropicAuthMode;
+}
+
+/** Detect the auth mode from a plaintext Anthropic secret value. */
+export const detectAnthropicAuthMode = (value: string): AnthropicAuthMode =>
+  value.startsWith("sk-ant-oat") ? "oauth" : "api-key";
+
+/** Type-safe accessor for Anthropic metadata from a Prisma Json field. */
+export const parseAnthropicMetadata = (
+  metadata: unknown,
+): AnthropicSecretMetadata | null => {
+  if (
+    metadata &&
+    typeof metadata === "object" &&
+    "authMode" in metadata &&
+    anthropicAuthModes.includes(
+      (metadata as { authMode: string }).authMode as AnthropicAuthMode,
+    )
+  ) {
+    return metadata as AnthropicSecretMetadata;
+  }
+  return null;
+};
