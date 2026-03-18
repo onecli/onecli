@@ -1,5 +1,19 @@
 # Changelog
 
+## [1.2.0](https://github.com/onecli/onecli/compare/v1.1.6...v1.2.0) (2026-03-18)
+
+
+### Features
+
+* add per-agent secret permissions with selective mode ([#56](https://github.com/onecli/onecli/issues/56)) ([7d47647](https://github.com/onecli/onecli/commit/7d47647a832b1ee933e7c62b5e90b7dd207996db))
+* default new agents to selective mode with anthropic secret ([#58](https://github.com/onecli/onecli/issues/58)) ([f7dbe7d](https://github.com/onecli/onecli/commit/f7dbe7de6cae7ab27d2a1de00c6708b07000f17e))
+
+
+### Bug Fixes
+
+* detect Anthropic auth mode from secret metadata for correct container env vars ([#61](https://github.com/onecli/onecli/issues/61)) ([2e42480](https://github.com/onecli/onecli/commit/2e42480597fd54c43f6214f69ade08f8317dac08))
+* scope container-config anthropic secret lookup to agent's secret mode ([#62](https://github.com/onecli/onecli/issues/62)) ([1a794b7](https://github.com/onecli/onecli/commit/1a794b707a21f48b0efa6a7d5c2a3fcb9c406a39))
+
 ## [1.1.6](https://github.com/onecli/onecli/compare/v1.1.5...v1.1.6) (2026-03-16)
 
 
