@@ -3,6 +3,7 @@ import { db } from "@onecli/db";
 import { resolveApiAuth } from "@/lib/api-auth";
 import { unauthorized } from "@/lib/api-utils";
 import { loadCaCertificate } from "@/lib/gateway-ca";
+import { parseAnthropicMetadata } from "@/lib/validations/secret";
 
 const GATEWAY_PORT = process.env.GATEWAY_PORT ?? "10255";
 const CA_CONTAINER_PATH = "/tmp/onecli-gateway-ca.pem";
@@ -69,14 +70,29 @@ export async function GET(request: NextRequest) {
       );
     }
 
+    // Detect auth mode from the user's Anthropic secret metadata.
+    // OAuth tokens need CLAUDE_CODE_OAUTH_TOKEN so the SDK does the token
+    // exchange. API keys need ANTHROPIC_API_KEY. Defaults to api-key for
+    // legacy secrets without metadata.
+    const anthropicSecret = await db.secret.findFirst({
+      where: { userId: auth.userId, type: "anthropic" },
+      select: { metadata: true },
+    });
+
+    const meta = parseAnthropicMetadata(anthropicSecret?.metadata);
+
+    const authEnv: Record<string, string> =
+      meta?.authMode === "oauth"
+        ? { CLAUDE_CODE_OAUTH_TOKEN: "placeholder" }
+        : { ANTHROPIC_API_KEY: "placeholder" };
+
     return NextResponse.json({
       env: {
         HTTPS_PROXY: gatewayUrl,
         HTTP_PROXY: gatewayUrl,
         NODE_EXTRA_CA_CERTS: CA_CONTAINER_PATH,
         NODE_USE_ENV_PROXY: "1",
-        CLAUDE_CODE_OAUTH_TOKEN: "sk-ant-...",
-        ANTHROPIC_API_KEY: "sk-ant-...",
+        ...authEnv,
       },
       caCertificate,
       caCertificateContainerPath: CA_CONTAINER_PATH,

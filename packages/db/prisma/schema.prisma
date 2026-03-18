@@ -50,6 +50,7 @@ model Secret {
   hostPattern     String // "api.anthropic.com" or "*.example.com"
   pathPattern     String? // "/v1/*", null = all paths
   injectionConfig Json? // type-specific config (generic: { headerName, valueFormat })
+  metadata        Json? // type-specific metadata (anthropic: { authMode: "api-key" | "oauth" })
   createdAt       DateTime @default(now())
   updatedAt       DateTime @updatedAt
   user            User     @relation(fields: [userId], references: [id])

@@ -1,9 +1,10 @@
 import { db, Prisma } from "@onecli/db";
 import { cryptoService } from "@/lib/crypto";
 import { ServiceError } from "@/lib/services/errors";
-import type {
-  CreateSecretInput,
-  UpdateSecretInput,
+import {
+  detectAnthropicAuthMode,
+  type CreateSecretInput,
+  type UpdateSecretInput,
 } from "@/lib/validations/secret";
 
 const SECRET_TYPE_LABELS: Record<string, string> = {
@@ -82,6 +83,11 @@ export const createSecret = async (
         } as Prisma.InputJsonValue)
       : Prisma.JsonNull;
 
+  const metadata =
+    input.type === "anthropic"
+      ? ({ authMode: detectAnthropicAuthMode(value) } as Prisma.InputJsonValue)
+      : Prisma.JsonNull;
+
   const secret = await db.secret.create({
     data: {
       name,
@@ -90,6 +96,7 @@ export const createSecret = async (
       hostPattern,
       pathPattern,
       injectionConfig,
+      metadata,
       userId,
     },
     select: {
@@ -135,6 +142,13 @@ export const updateSecret = async (
     if (!value)
       throw new ServiceError("BAD_REQUEST", "Secret value is required");
     data.encryptedValue = cryptoService.encrypt(value);
+
+    // Re-detect auth mode when value changes for Anthropic secrets
+    if (secret.type === "anthropic") {
+      data.metadata = {
+        authMode: detectAnthropicAuthMode(value),
+      } as Prisma.InputJsonValue;
+    }
   }
 
   if (input.hostPattern !== undefined) {

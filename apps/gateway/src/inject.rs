@@ -18,6 +18,10 @@ use tracing::warn;
 #[serde(tag = "action", rename_all = "snake_case")]
 pub(crate) enum Injection {
     SetHeader { name: String, value: String },
+    /// Replace a header only if it already exists in the request.
+    /// Used for OAuth: replace Authorization when the SDK sends the exchange
+    /// request, but leave x-api-key untouched on subsequent requests.
+    ReplaceHeader { name: String, value: String },
     RemoveHeader { name: String },
 }
 
@@ -80,6 +84,16 @@ pub(crate) fn apply_injections(
                             header = %name,
                             "injection skipped: invalid header name or value"
                         );
+                    }
+                }
+                Injection::ReplaceHeader { name, value } => {
+                    if let Ok(header_name) = HeaderName::from_bytes(name.as_bytes()) {
+                        if headers.contains_key(&header_name) {
+                            if let Ok(header_value) = HeaderValue::from_str(value) {
+                                headers.insert(header_name, header_value);
+                                count += 1;
+                            }
+                        }
                     }
                 }
                 Injection::RemoveHeader { name } => {
@@ -272,6 +286,47 @@ mod tests {
         let count = apply_injections(&mut headers, "/", &rules);
         assert_eq!(count, 1);
         assert_eq!(headers.get("authorization").unwrap(), "Bearer new-token");
+    }
+
+    #[test]
+    fn inject_replace_header_when_present() {
+        let mut headers = hyper::HeaderMap::new();
+        headers.insert(
+            "authorization",
+            HeaderValue::from_static("Bearer placeholder"),
+        );
+
+        let rules = vec![make_rule(
+            "*",
+            vec![Injection::ReplaceHeader {
+                name: "authorization".to_string(),
+                value: "Bearer real-token".to_string(),
+            }],
+        )];
+
+        let count = apply_injections(&mut headers, "/", &rules);
+        assert_eq!(count, 1);
+        assert_eq!(headers.get("authorization").unwrap(), "Bearer real-token");
+    }
+
+    #[test]
+    fn inject_replace_header_skips_when_absent() {
+        let mut headers = hyper::HeaderMap::new();
+        headers.insert("x-api-key", HeaderValue::from_static("temp-key"));
+
+        let rules = vec![make_rule(
+            "*",
+            vec![Injection::ReplaceHeader {
+                name: "authorization".to_string(),
+                value: "Bearer real-token".to_string(),
+            }],
+        )];
+
+        let count = apply_injections(&mut headers, "/", &rules);
+        assert_eq!(count, 0);
+        assert!(headers.get("authorization").is_none());
+        // x-api-key untouched
+        assert_eq!(headers.get("x-api-key").unwrap(), "temp-key");
     }
 
     #[test]
