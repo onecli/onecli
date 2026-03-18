@@ -38,11 +38,11 @@ export async function GET(request: NextRequest) {
     const agent = agentIdentifier
       ? await db.agent.findFirst({
           where: { userId: auth.userId, identifier: agentIdentifier },
-          select: { accessToken: true },
+          select: { id: true, accessToken: true, secretMode: true },
         })
       : await db.agent.findFirst({
           where: { userId: auth.userId, isDefault: true },
-          select: { accessToken: true },
+          select: { id: true, accessToken: true, secretMode: true },
         });
 
     if (!agent) {
@@ -70,14 +70,24 @@ export async function GET(request: NextRequest) {
       );
     }
 
-    // Detect auth mode from the user's Anthropic secret metadata.
+    // Detect auth mode from the agent's Anthropic secret metadata.
+    // In selective mode, only check secrets assigned to this agent.
     // OAuth tokens need CLAUDE_CODE_OAUTH_TOKEN so the SDK does the token
     // exchange. API keys need ANTHROPIC_API_KEY. Defaults to api-key for
     // legacy secrets without metadata.
-    const anthropicSecret = await db.secret.findFirst({
-      where: { userId: auth.userId, type: "anthropic" },
-      select: { metadata: true },
-    });
+    const anthropicSecret =
+      agent.secretMode === "selective"
+        ? await db.secret.findFirst({
+            where: {
+              type: "anthropic",
+              agentSecrets: { some: { agentId: agent.id } },
+            },
+            select: { metadata: true },
+          })
+        : await db.secret.findFirst({
+            where: { userId: auth.userId, type: "anthropic" },
+            select: { metadata: true },
+          });
 
     const meta = parseAnthropicMetadata(anthropicSecret?.metadata);
 
