@@ -7,7 +7,7 @@ import { Button } from "@onecli/ui/components/button";
 import { Card } from "@onecli/ui/components/card";
 import { Skeleton } from "@onecli/ui/components/skeleton";
 import { SecretCard } from "./secret-card";
-import { CreateSecretDialog } from "./create-secret-dialog";
+import { SecretDialog } from "./secret-dialog";
 import { VaultAccessCard } from "./vault-access-card";
 
 interface Secret {
@@ -90,11 +90,11 @@ export const SecretsContent = () => {
           ))
         )}
 
-        <CreateSecretDialog
-          open={createOpen}
-          onOpenChange={setCreateOpen}
-          onCreated={fetchSecrets}
-        />
+      <SecretDialog
+        open={createOpen}
+        onOpenChange={setCreateOpen}
+        onSaved={fetchSecrets}
+      />
       </section>
 
       <section className="space-y-4">

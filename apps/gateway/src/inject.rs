@@ -36,9 +36,9 @@ pub(crate) enum Injection {
     },
 }
 
-/// A rule matching a path pattern with its injection instructions.
+/// A rule matching a path pattern with header injection instructions.
 #[derive(Debug, Clone, Deserialize, PartialEq)]
-pub(crate) struct ConnectRule {
+pub(crate) struct InjectionRule {
     pub path_pattern: String,
     pub injections: Vec<Injection>,
 }
@@ -72,7 +72,7 @@ pub(crate) fn extract_agent_token<T>(req: &Request<T>) -> Option<String> {
 pub(crate) fn apply_injections(
     headers: &mut hyper::HeaderMap,
     request_path: &str,
-    rules: &[ConnectRule],
+    rules: &[InjectionRule],
 ) -> usize {
     let mut count = 0;
 
@@ -144,7 +144,7 @@ pub(crate) fn path_matches(request_path: &str, pattern: &str) -> bool {
 pub(crate) fn vault_credential_to_rules(
     hostname: &str,
     cred: &VaultCredential,
-) -> Vec<ConnectRule> {
+) -> Vec<InjectionRule> {
     let password = match cred.password.as_deref() {
         Some(p) if !p.is_empty() => p,
         _ => return vec![],
@@ -166,7 +166,7 @@ pub(crate) fn vault_credential_to_rules(
         }],
     };
 
-    vec![ConnectRule {
+    vec![InjectionRule {
         path_pattern: "*".to_string(),
         injections,
     }]
@@ -282,8 +282,8 @@ mod tests {
 
     // ── apply_injections ────────────────────────────────────────────────
 
-    fn make_rule(path_pattern: &str, injections: Vec<Injection>) -> ConnectRule {
-        ConnectRule {
+    fn make_rule(path_pattern: &str, injections: Vec<Injection>) -> InjectionRule {
+        InjectionRule {
             path_pattern: path_pattern.to_string(),
             injections,
         }
