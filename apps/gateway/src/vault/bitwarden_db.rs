@@ -6,7 +6,7 @@
 //! The `SessionStore` and `IdentityProvider` traits are async (as of ap-client 0.5),
 //! so we can await DB calls directly — no sync→async bridging needed.
 
-use ap_client::{IdentityFingerprint, IdentityProvider, RemoteClientError, SessionStore};
+use ap_client::{IdentityFingerprint, IdentityProvider, ClientError, SessionStore};
 use ap_noise::MultiDeviceTransport;
 use ap_proxy_protocol::IdentityKeyPair;
 use async_trait::async_trait;
@@ -174,7 +174,7 @@ impl SessionStore for BitwardenSessionStore {
     async fn cache_session(
         &mut self,
         fingerprint: IdentityFingerprint,
-    ) -> Result<(), RemoteClientError> {
+    ) -> Result<(), ClientError> {
         if self.has_session(&fingerprint).await {
             return Ok(());
         }
@@ -193,7 +193,7 @@ impl SessionStore for BitwardenSessionStore {
     async fn remove_session(
         &mut self,
         fingerprint: &IdentityFingerprint,
-    ) -> Result<(), RemoteClientError> {
+    ) -> Result<(), ClientError> {
         if self
             .session
             .as_ref()
@@ -204,7 +204,7 @@ impl SessionStore for BitwardenSessionStore {
         Ok(())
     }
 
-    async fn clear(&mut self) -> Result<(), RemoteClientError> {
+    async fn clear(&mut self) -> Result<(), ClientError> {
         self.session = None;
         Ok(())
     }
@@ -213,7 +213,7 @@ impl SessionStore for BitwardenSessionStore {
         &mut self,
         fingerprint: &IdentityFingerprint,
         name: String,
-    ) -> Result<(), RemoteClientError> {
+    ) -> Result<(), ClientError> {
         if let Some(ref mut s) = self.session {
             if s.fingerprint == *fingerprint {
                 s.name = Some(name);
@@ -225,7 +225,7 @@ impl SessionStore for BitwardenSessionStore {
     async fn update_last_connected(
         &mut self,
         fingerprint: &IdentityFingerprint,
-    ) -> Result<(), RemoteClientError> {
+    ) -> Result<(), ClientError> {
         if let Some(ref mut s) = self.session {
             if s.fingerprint == *fingerprint {
                 s.last_connected_at = now_timestamp();
@@ -238,11 +238,11 @@ impl SessionStore for BitwardenSessionStore {
         &mut self,
         fingerprint: &IdentityFingerprint,
         transport: MultiDeviceTransport,
-    ) -> Result<(), RemoteClientError> {
+    ) -> Result<(), ClientError> {
         if let Some(ref mut s) = self.session {
             if s.fingerprint == *fingerprint {
                 let bytes = transport.save_state().map_err(|e| {
-                    RemoteClientError::SessionCache(format!("failed to serialize transport: {e}"))
+                    ClientError::SessionCache(format!("failed to serialize transport: {e}"))
                 })?;
                 s.transport_state = Some(bytes);
 
@@ -257,7 +257,7 @@ impl SessionStore for BitwardenSessionStore {
     async fn load_transport_state(
         &self,
         fingerprint: &IdentityFingerprint,
-    ) -> Result<Option<MultiDeviceTransport>, RemoteClientError> {
+    ) -> Result<Option<MultiDeviceTransport>, ClientError> {
         let Some(ref s) = self.session else {
             return Ok(None);
         };
@@ -269,7 +269,7 @@ impl SessionStore for BitwardenSessionStore {
         };
 
         let transport = MultiDeviceTransport::restore_state(bytes).map_err(|e| {
-            RemoteClientError::SessionCache(format!("failed to restore transport: {e}"))
+            ClientError::SessionCache(format!("failed to restore transport: {e}"))
         })?;
 
         Ok(Some(transport))

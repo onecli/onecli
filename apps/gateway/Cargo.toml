@@ -68,10 +68,10 @@ time = "0.3"
 sqlx = { version = "0.8", features = ["runtime-tokio", "tls-rustls", "postgres"] }
 
 # Agent Access (Bitwarden vault credential injection)
-ap-client = { path = "../../../remote-access/crates/ap-client" }
-ap-proxy-client = { path = "../../../remote-access/crates/ap-proxy-client" }
-ap-proxy-protocol = { path = "../../../remote-access/crates/ap-proxy-protocol" }
-ap-noise = { path = "../../../remote-access/crates/ap-noise" }
+ap-client = "0.6.1"
+ap-proxy-client = "0.6.1"
+ap-proxy-protocol = "0.6.1"
+ap-noise = "0.6.1"
 async-trait = "0.1"
 hex = "0.4"
 
