@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.2.1](https://github.com/onecli/onecli/compare/v1.2.0...v1.2.1) (2026-03-19)
+
+
+### Bug Fixes
+
+* add start_period and increase retries for postgres health check ([#63](https://github.com/onecli/onecli/issues/63)) ([789d285](https://github.com/onecli/onecli/commit/789d285e032dfe1b0dc69666613feee4133a6722))
+* increase health check start_period for migrations ([#65](https://github.com/onecli/onecli/issues/65)) ([077fe84](https://github.com/onecli/onecli/commit/077fe84c84be14ab601a5d219103de3eb90bb05d))
+
 ## [1.2.0](https://github.com/onecli/onecli/compare/v1.1.6...v1.2.0) (2026-03-18)
 
 
