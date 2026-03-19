@@ -21,6 +21,7 @@ model User {
 
   agents            Agent[]
   secrets           Secret[]
+  policyRules       PolicyRule[]
 }
 
 model Agent {
@@ -36,6 +37,7 @@ model Agent {
   user        User     @relation(fields: [userId], references: [id])
 
   agentSecrets AgentSecret[]
+  policyRules  PolicyRule[]
 
   @@unique([userId, identifier])
   @@index([userId])
@@ -56,6 +58,24 @@ model Secret {
   user            User     @relation(fields: [userId], references: [id])
 
   agentSecrets AgentSecret[]
+
+  @@index([userId])
+}
+
+model PolicyRule {
+  id          String   @id @default(cuid())
+  userId      String
+  name        String
+  hostPattern String   // "gmail.googleapis.com" or "*.googleapis.com"
+  pathPattern String?  // "/gmail/v1/users/me/messages/send" or "/gmail/*"
+  method      String?  // "POST", null = all methods
+  action      String   // "block"
+  enabled     Boolean
+  agentId     String?  // null = all agents, set = one agent only
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  user        User     @relation(fields: [userId], references: [id])
+  agent       Agent?   @relation(fields: [agentId], references: [id], onDelete: Cascade)
 
   @@index([userId])
 }

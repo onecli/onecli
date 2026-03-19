@@ -1,39 +1,53 @@
 "use client";
 
 import { useEffect, useState, useCallback } from "react";
-import { Plus, KeyRound } from "lucide-react";
-import { getSecrets } from "@/lib/actions/secrets";
+import { Plus, ShieldOff } from "lucide-react";
+import { getRules } from "@/lib/actions/rules";
+import { getAgents } from "@/lib/actions/agents";
 import { Button } from "@onecli/ui/components/button";
 import { Card } from "@onecli/ui/components/card";
 import { Skeleton } from "@onecli/ui/components/skeleton";
-import { SecretCard } from "./secret-card";
-import { SecretDialog } from "./secret-dialog";
+import { RuleCard } from "./rule-card";
+import { RuleDialog } from "./rule-dialog";
 
-interface Secret {
+export interface PolicyRuleItem {
   id: string;
   name: string;
-  type: string;
-  typeLabel: string;
   hostPattern: string;
   pathPattern: string | null;
-  injectionConfig: unknown;
+  method: string | null;
+  action: string;
+  enabled: boolean;
+  agentId: string | null;
   createdAt: Date;
 }
 
-export const SecretsContent = () => {
-  const [secrets, setSecrets] = useState<Secret[]>([]);
+export interface AgentOption {
+  id: string;
+  name: string;
+}
+
+export const RulesContent = () => {
+  const [rules, setRules] = useState<PolicyRuleItem[]>([]);
+  const [agents, setAgents] = useState<AgentOption[]>([]);
   const [loading, setLoading] = useState(true);
   const [createOpen, setCreateOpen] = useState(false);
 
-  const fetchSecrets = useCallback(async () => {
-    const result = await getSecrets();
-    setSecrets(result);
+  const fetchRules = useCallback(async () => {
+    const result = await getRules();
+    setRules(result);
     setLoading(false);
   }, []);
 
+  const fetchAgents = useCallback(async () => {
+    const result = await getAgents();
+    setAgents(result.map((a) => ({ id: a.id, name: a.name })));
+  }, []);
+
   useEffect(() => {
-    fetchSecrets();
-  }, [fetchSecrets]);
+    fetchRules();
+    fetchAgents();
+  }, [fetchRules, fetchAgents]);
 
   if (loading) {
     return (
@@ -47,7 +61,7 @@ export const SecretsContent = () => {
                 <Skeleton className="h-4 w-32" />
               </div>
               <div className="flex gap-2">
-                <Skeleton className="size-8 rounded-md" />
+                <Skeleton className="h-5 w-9 rounded-full" />
                 <Skeleton className="size-8 rounded-md" />
               </div>
             </div>
@@ -62,30 +76,37 @@ export const SecretsContent = () => {
       <div className="flex justify-end">
         <Button size="sm" onClick={() => setCreateOpen(true)}>
           <Plus className="size-3.5" />
-          Add Secret
+          New Rule
         </Button>
       </div>
 
-      {secrets.length === 0 ? (
+      {rules.length === 0 ? (
         <Card className="flex flex-col items-center justify-center py-16 text-center">
-          <div className="bg-muted mb-4 flex size-12 items-center justify-center rounded-full">
-            <KeyRound className="text-muted-foreground size-6" />
+          <div className="mb-4 flex size-12 items-center justify-center rounded-full bg-amber-500/10">
+            <ShieldOff className="size-6 text-amber-500" />
           </div>
-          <p className="text-sm font-medium">No secrets yet</p>
+          <p className="text-sm font-medium">YOLO mode</p>
           <p className="text-muted-foreground mt-1 max-w-xs text-xs">
-            Add a secret to inject encrypted credentials into gateway requests.
+            Your agents have unrestricted access to all assigned secrets. Add a
+            rule to block specific endpoints or set boundaries.
           </p>
         </Card>
       ) : (
-        secrets.map((secret) => (
-          <SecretCard key={secret.id} secret={secret} onUpdate={fetchSecrets} />
+        rules.map((rule) => (
+          <RuleCard
+            key={rule.id}
+            rule={rule}
+            agents={agents}
+            onUpdate={fetchRules}
+          />
         ))
       )}
 
-      <SecretDialog
+      <RuleDialog
         open={createOpen}
         onOpenChange={setCreateOpen}
-        onSaved={fetchSecrets}
+        onSaved={fetchRules}
+        agents={agents}
       />
     </div>
   );

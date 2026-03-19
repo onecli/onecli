@@ -6,6 +6,7 @@ import { toast } from "sonner";
 import { Card } from "@onecli/ui/components/card";
 import { Button } from "@onecli/ui/components/button";
 import { Badge } from "@onecli/ui/components/badge";
+import { Switch } from "@onecli/ui/components/switch";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -17,90 +18,103 @@ import {
   AlertDialogTitle,
   AlertDialogTrigger,
 } from "@onecli/ui/components/alert-dialog";
-import { deleteSecret } from "@/lib/actions/secrets";
-import { SecretDialog } from "./secret-dialog";
+import { deleteRule, updateRule } from "@/lib/actions/rules";
+import { RuleDialog } from "./rule-dialog";
+import type { AgentOption, PolicyRuleItem } from "./rules-content";
 
-interface InjectionConfig {
-  headerName: string;
-  valueFormat: string;
-}
-
-interface SecretCardProps {
-  secret: {
-    id: string;
-    name: string;
-    type: string;
-    typeLabel: string;
-    hostPattern: string;
-    pathPattern: string | null;
-    injectionConfig: unknown;
-    createdAt: Date;
-  };
+interface RuleCardProps {
+  rule: PolicyRuleItem;
+  agents: AgentOption[];
   onUpdate: () => void;
 }
 
-export const SecretCard = ({ secret, onUpdate }: SecretCardProps) => {
+export const RuleCard = ({ rule, agents, onUpdate }: RuleCardProps) => {
   const [deleting, setDeleting] = useState(false);
   const [editOpen, setEditOpen] = useState(false);
+  const [toggling, setToggling] = useState(false);
+
+  const agentName = rule.agentId
+    ? agents.find((a) => a.id === rule.agentId)?.name
+    : null;
 
   const handleDelete = async () => {
     setDeleting(true);
     try {
-      await deleteSecret(secret.id);
+      await deleteRule(rule.id);
       onUpdate();
-      toast.success("Secret deleted");
+      toast.success("Rule deleted");
     } catch {
-      toast.error("Failed to delete secret");
+      toast.error("Failed to delete rule");
     } finally {
       setDeleting(false);
     }
   };
 
-  const config = secret.injectionConfig as InjectionConfig | null;
+  const handleToggle = async (enabled: boolean) => {
+    setToggling(true);
+    try {
+      await updateRule(rule.id, { enabled });
+      onUpdate();
+    } catch {
+      toast.error("Failed to update rule");
+    } finally {
+      setToggling(false);
+    }
+  };
 
   return (
     <>
-      <Card className="p-5">
+      <Card
+        className={`p-5 transition-opacity ${!rule.enabled ? "opacity-50" : ""}`}
+      >
         <div className="flex items-start justify-between gap-4">
           <div className="min-w-0 flex-1 space-y-3">
             <div className="flex items-center gap-2">
-              <h3 className="text-sm font-medium">{secret.name}</h3>
-              <Badge variant="secondary" className="text-xs">
-                {secret.typeLabel}
+              <h3 className="text-sm font-medium">{rule.name}</h3>
+              <Badge variant="destructive" className="text-xs">
+                {rule.action}
               </Badge>
+              {rule.method && (
+                <Badge variant="outline" className="font-mono text-xs">
+                  {rule.method}
+                </Badge>
+              )}
             </div>
 
             <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs">
               <span className="text-muted-foreground">
                 Host:{" "}
                 <code className="bg-muted rounded px-1 py-0.5 font-mono">
-                  {secret.hostPattern}
+                  {rule.hostPattern}
                 </code>
               </span>
-              {secret.pathPattern && (
+              {rule.pathPattern && (
                 <span className="text-muted-foreground">
                   Path:{" "}
                   <code className="bg-muted rounded px-1 py-0.5 font-mono">
-                    {secret.pathPattern}
+                    {rule.pathPattern}
                   </code>
                 </span>
               )}
-              {secret.type === "generic" && config?.headerName && (
-                <span className="text-muted-foreground">
-                  Header:{" "}
-                  <code className="bg-muted rounded px-1 py-0.5 font-mono">
-                    {config.headerName}
-                  </code>
-                </span>
-              )}
+              <span className="text-muted-foreground">
+                Scope:{" "}
+                {agentName ? (
+                  <span className="text-foreground">{agentName}</span>
+                ) : (
+                  "All agents"
+                )}
+              </span>
             </div>
-
-            <p className="text-muted-foreground text-xs">
-              Created {new Date(secret.createdAt).toLocaleDateString()}
-            </p>
           </div>
 
-          <div className="flex items-center gap-1">
+          <div className="flex items-center gap-2">
+            <Switch
+              checked={rule.enabled}
+              onCheckedChange={handleToggle}
+              disabled={toggling}
+              aria-label={rule.enabled ? "Disable rule" : "Enable rule"}
+            />
+
             <Button
               variant="ghost"
               size="icon"
@@ -118,10 +132,10 @@ export const SecretCard = ({ secret, onUpdate }: SecretCardProps) => {
               </AlertDialogTrigger>
               <AlertDialogContent>
                 <AlertDialogHeader>
-                  <AlertDialogTitle>Delete secret?</AlertDialogTitle>
+                  <AlertDialogTitle>Delete rule?</AlertDialogTitle>
                   <AlertDialogDescription>
-                    This will permanently delete <strong>{secret.name}</strong>{" "}
-                    and its encrypted value. This action cannot be undone.
+                    This will permanently delete <strong>{rule.name}</strong>.
+                    This action cannot be undone.
                   </AlertDialogDescription>
                 </AlertDialogHeader>
                 <AlertDialogFooter>
@@ -140,10 +154,11 @@ export const SecretCard = ({ secret, onUpdate }: SecretCardProps) => {
         </div>
       </Card>
 
-      <SecretDialog
+      <RuleDialog
         open={editOpen}
         onOpenChange={setEditOpen}
-        secret={secret}
+        rule={rule}
+        agents={agents}
         onSaved={onUpdate}
       />
     </>

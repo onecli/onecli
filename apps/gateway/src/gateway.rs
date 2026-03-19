@@ -14,8 +14,7 @@ use anyhow::{Context, Result};
 use axum::Router;
 use dashmap::DashMap;
 use futures_util::TryStreamExt;
-use http_body::Body as HttpBody;
-use http_body_util::StreamBody;
+use http_body_util::{Either, Full, StreamBody};
 use hyper::body::{Bytes, Frame, Incoming};
 use hyper::header::{HeaderName, HeaderValue};
 use hyper::server::conn::http1;
@@ -31,7 +30,8 @@ use tracing::{info, warn};
 use crate::auth::AuthUser;
 use crate::ca::CertificateAuthority;
 use crate::connect::{self, CachedConnect, ConnectCacheKey, ConnectError, PolicyEngine};
-use crate::inject::{self, ConnectRule};
+use crate::inject::{self, InjectionRule};
+use crate::policy::{self, PolicyRule};
 
 // ── GatewayState ───────────────────────────────────────────────────────
 
@@ -195,9 +195,15 @@ async fn handle_connect(
     // Extract agent token from Proxy-Authorization header.
     let agent_token = inject::extract_agent_token(&req).filter(|t| !t.is_empty());
 
-    let (intercept, rules, _user_id) = if let Some(ref token) = agent_token {
+    let (intercept, injection_rules, policy_rules, _user_id) = if let Some(ref token) = agent_token
+    {
         match connect::resolve(token, &hostname, &state.policy_engine, &state.connect_cache).await {
-            Ok(resp) => (resp.intercept, resp.rules, resp.user_id),
+            Ok(resp) => (
+                resp.intercept,
+                resp.injection_rules,
+                resp.policy_rules,
+                resp.user_id,
+            ),
             Err(ConnectError::InvalidToken) => {
                 warn!(peer = %peer_addr, host = %host, "CONNECT rejected: invalid agent token");
                 return Ok(respond_407());
@@ -211,14 +217,15 @@ async fn handle_connect(
         }
     } else {
         // No auth — plain tunnel (no MITM, no injection)
-        (false, vec![], None)
+        (false, vec![], vec![], None)
     };
 
     info!(
         peer = %peer_addr,
         host = %host,
         mode = if intercept { "mitm" } else { "tunnel" },
-        rule_count = rules.len(),
+        injection_count = injection_rules.len(),
+        policy_count = policy_rules.len(),
         "CONNECT"
     );
 
@@ -229,7 +236,15 @@ async fn handle_connect(
         match hyper::upgrade::on(req).await {
             Ok(upgraded) => {
                 let result = if intercept {
-                    mitm(upgraded, &host, &ca, http_client, rules).await
+                    mitm(
+                        upgraded,
+                        &host,
+                        &ca,
+                        http_client,
+                        injection_rules,
+                        policy_rules,
+                    )
+                    .await
                 } else {
                     tunnel(upgraded, &host).await
                 };
@@ -256,7 +271,8 @@ async fn mitm(
     host: &str,
     ca: &CertificateAuthority,
     http_client: reqwest::Client,
-    rules: Vec<ConnectRule>,
+    injection_rules: Vec<InjectionRule>,
+    policy_rules: Vec<PolicyRule>,
 ) -> Result<()> {
     let hostname = strip_port(host);
 
@@ -274,7 +290,8 @@ async fn mitm(
     // Serve HTTP/1.1 on the decrypted TLS stream.
     // The client thinks it's talking to the real server.
     let host_owned = host.to_string();
-    let rules = Arc::new(rules);
+    let injection_rules = Arc::new(injection_rules);
+    let policy_rules = Arc::new(policy_rules);
     let io = TokioIo::new(tls_stream);
 
     http1::Builder::new()
@@ -285,8 +302,9 @@ async fn mitm(
             service_fn(move |req| {
                 let host = host_owned.clone();
                 let client = http_client.clone();
-                let rules = Arc::clone(&rules);
-                async move { forward_request(req, &host, client, &rules).await }
+                let inj_rules = Arc::clone(&injection_rules);
+                let pol_rules = Arc::clone(&policy_rules);
+                async move { forward_request(req, &host, client, &inj_rules, &pol_rules).await }
             }),
         )
         .await
@@ -296,13 +314,21 @@ async fn mitm(
 /// Forward a single HTTP request to the real upstream server and stream the response back.
 /// Both request and response bodies are streamed — no full buffering in memory.
 /// This is critical for SSE (Server-Sent Events) and large payloads.
-/// Applies injection rules (set_header, remove_header) before forwarding.
+/// Checks policy rules first (returns 403 if blocked), then applies injection rules.
 async fn forward_request(
     req: Request<Incoming>,
     host: &str,
     http_client: reqwest::Client,
-    rules: &[ConnectRule],
-) -> anyhow::Result<Response<impl HttpBody<Data = Bytes, Error = reqwest::Error>>> {
+    injection_rules: &[InjectionRule],
+    policy_rules: &[PolicyRule],
+) -> anyhow::Result<
+    Response<
+        Either<
+            Full<Bytes>,
+            StreamBody<impl futures_util::Stream<Item = Result<Frame<Bytes>, reqwest::Error>>>,
+        >,
+    >,
+> {
     let method = req.method().clone();
     let path = req
         .uri()
@@ -310,6 +336,28 @@ async fn forward_request(
         .map(|pq| pq.as_str().to_string())
         .unwrap_or_else(|| "/".to_string());
     let url = format!("https://{host}{path}");
+
+    // Check policy rules before forwarding
+    if policy::is_blocked(method.as_str(), &path, policy_rules) {
+        warn!(
+            method = %method,
+            url = %url,
+            "BLOCKED by policy rule"
+        );
+        let body = serde_json::json!({
+            "error": "blocked_by_policy",
+            "message": "This request was blocked by an OneCLI policy rule. Check your rules at https://onecli.sh or your OneCLI dashboard.",
+            "method": method.as_str(),
+            "path": path,
+        })
+        .to_string();
+        let mut response = Response::new(Either::Left(Full::new(Bytes::from(body))));
+        *response.status_mut() = StatusCode::FORBIDDEN;
+        response
+            .headers_mut()
+            .insert("content-type", HeaderValue::from_static("application/json"));
+        return Ok(response);
+    }
 
     let (parts, body) = req.into_parts();
 
@@ -322,7 +370,7 @@ async fn forward_request(
     }
 
     // Apply injection rules matching this request path
-    let injection_count = inject::apply_injections(&mut headers, &path, rules);
+    let injection_count = inject::apply_injections(&mut headers, &path, injection_rules);
 
     // Build upstream request with (possibly modified) headers
     let mut upstream = http_client.request(method.clone(), &url);
@@ -361,7 +409,7 @@ async fn forward_request(
     let resp_stream = upstream_resp.bytes_stream().map_ok(Frame::data);
     let body = StreamBody::new(resp_stream);
 
-    let mut response = Response::new(body);
+    let mut response = Response::new(Either::Right(body));
     *response.status_mut() = status;
 
     // Forward response headers, skipping hop-by-hop

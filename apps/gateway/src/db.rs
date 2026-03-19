@@ -44,6 +44,18 @@ pub(crate) struct SecretRow {
     pub injection_config: Option<serde_json::Value>,
 }
 
+/// A policy rule row from the `PolicyRule` table.
+#[derive(Debug, FromRow)]
+pub(crate) struct PolicyRuleRow {
+    #[sqlx(rename = "hostPattern")]
+    pub host_pattern: String,
+    #[sqlx(rename = "pathPattern")]
+    pub path_pattern: Option<String>,
+    pub method: Option<String>,
+    #[sqlx(rename = "agentId")]
+    pub agent_id: Option<String>,
+}
+
 /// A user row from the `User` table.
 #[derive(Debug, FromRow)]
 pub(crate) struct UserRow {
@@ -101,4 +113,20 @@ pub(crate) async fn find_secrets_by_agent(pool: &PgPool, agent_id: &str) -> Resu
     .fetch_all(pool)
     .await
     .context("querying Secrets by agentId")
+}
+
+/// Find all enabled policy rules for a given user.
+pub(crate) async fn find_policy_rules_by_user(
+    pool: &PgPool,
+    user_id: &str,
+) -> Result<Vec<PolicyRuleRow>> {
+    sqlx::query_as::<_, PolicyRuleRow>(
+        r#"SELECT "hostPattern", "pathPattern", method, "agentId"
+           FROM "PolicyRule"
+           WHERE "userId" = $1 AND enabled = true AND action = 'block'"#,
+    )
+    .bind(user_id)
+    .fetch_all(pool)
+    .await
+    .context("querying PolicyRules by userId")
 }

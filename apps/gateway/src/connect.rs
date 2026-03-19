@@ -9,7 +9,8 @@ use std::time::{Duration, Instant};
 
 use crate::crypto::CryptoService;
 use crate::db;
-use crate::inject::{ConnectRule, Injection};
+use crate::inject::{Injection, InjectionRule};
+use crate::policy::PolicyRule;
 use dashmap::DashMap;
 
 /// How long to cache resolved connect responses before re-checking.
@@ -21,7 +22,8 @@ const CACHE_TTL: Duration = Duration::from_secs(60);
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct ConnectResponse {
     pub intercept: bool,
-    pub rules: Vec<ConnectRule>,
+    pub injection_rules: Vec<InjectionRule>,
+    pub policy_rules: Vec<PolicyRule>,
     pub user_id: Option<String>,
 }
 
@@ -75,23 +77,41 @@ impl PolicyEngine {
         }
         .map_err(|e| ConnectError::Internal(format!("db error: {e}")))?;
 
-        // 3. Filter by host pattern
-        let matching: Vec<_> = secrets
+        // 3. Filter secrets by host pattern
+        let matching_secrets: Vec<_> = secrets
             .into_iter()
             .filter(|s| host_matches(hostname, &s.host_pattern))
             .collect();
 
-        if matching.is_empty() {
+        // 4. Policy rule lookup — global (agentId IS NULL) + agent-specific
+        let all_rules = db::find_policy_rules_by_user(&self.pool, &agent.user_id)
+            .await
+            .map_err(|e| ConnectError::Internal(format!("db error: {e}")))?;
+
+        let matching_policy_rules: Vec<PolicyRule> = all_rules
+            .into_iter()
+            .filter(|r| {
+                host_matches(hostname, &r.host_pattern)
+                    && (r.agent_id.is_none() || r.agent_id.as_deref() == Some(&agent.id))
+            })
+            .map(|r| PolicyRule {
+                path_pattern: r.path_pattern.unwrap_or_else(|| "*".to_string()),
+                method: r.method,
+            })
+            .collect();
+
+        if matching_secrets.is_empty() && matching_policy_rules.is_empty() {
             return Ok(ConnectResponse {
                 intercept: false,
-                rules: vec![],
+                injection_rules: vec![],
+                policy_rules: vec![],
                 user_id: Some(agent.user_id.clone()),
             });
         }
 
-        // 4. Decrypt and build injection rules
-        let mut rules = Vec::with_capacity(matching.len());
-        for secret in matching {
+        // 5. Decrypt and build injection rules
+        let mut injection_rules = Vec::with_capacity(matching_secrets.len());
+        for secret in matching_secrets {
             let decrypted = self
                 .crypto
                 .decrypt(&secret.encrypted_value)
@@ -101,7 +121,7 @@ impl PolicyEngine {
             let injections =
                 build_injections(&secret.type_, &decrypted, secret.injection_config.as_ref());
 
-            rules.push(ConnectRule {
+            injection_rules.push(InjectionRule {
                 path_pattern,
                 injections,
             });
@@ -109,7 +129,8 @@ impl PolicyEngine {
 
         Ok(ConnectResponse {
             intercept: true,
-            rules,
+            injection_rules,
+            policy_rules: matching_policy_rules,
             user_id: Some(agent.user_id),
         })
     }
@@ -243,7 +264,8 @@ mod tests {
         let key = ("aoc_token1".to_string(), "api.anthropic.com".to_string());
         let response = ConnectResponse {
             intercept: true,
-            rules: vec![],
+            injection_rules: vec![],
+            policy_rules: vec![],
             user_id: None,
         };
 
@@ -270,7 +292,8 @@ mod tests {
             CachedConnect {
                 response: ConnectResponse {
                     intercept: true,
-                    rules: vec![],
+                    injection_rules: vec![],
+                    policy_rules: vec![],
                     user_id: None,
                 },
                 expires_at: Instant::now() - Duration::from_secs(1), // expired

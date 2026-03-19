@@ -11,6 +11,7 @@ mod crypto;
 mod db;
 mod gateway;
 mod inject;
+mod policy;
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
