@@ -87,7 +87,8 @@ COPY --from=builder --chown=node:node /app/packages/db/prisma ./packages/db/pris
 
 # Prisma CLI (for running migrations)
 RUN cd packages/db && npm init -y > /dev/null 2>&1 && \
-    npm install prisma@6
+    npm install prisma@6 && \
+    rm -rf /root/.npm /tmp/*
 
 # Entrypoint
 COPY --chown=node:node docker/entrypoint.sh ./entrypoint.sh
@@ -102,6 +103,6 @@ USER node
 EXPOSE 10254 10255
 
 HEALTHCHECK --interval=10s --timeout=5s --start-period=60s --retries=3 \
-  CMD wget -qO- http://localhost:10254/api/health && wget -qO- http://localhost:10255/healthz || exit 1
+  CMD wget -qO- http://127.0.0.1:10254/api/health && wget -qO- http://127.0.0.1:10255/healthz || exit 1
 
 CMD ["./entrypoint.sh"]
