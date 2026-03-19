@@ -101,7 +101,7 @@ USER node
 
 EXPOSE 10254 10255
 
-HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+HEALTHCHECK --interval=10s --timeout=5s --start-period=60s --retries=3 \
   CMD wget -qO- http://localhost:10254/api/health && wget -qO- http://localhost:10255/healthz || exit 1
 
 CMD ["./entrypoint.sh"]
