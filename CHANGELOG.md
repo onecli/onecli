@@ -1,5 +1,17 @@
 # Changelog
 
+## [1.3.0](https://github.com/onecli/onecli/compare/v1.2.1...v1.3.0) (2026-03-19)
+
+
+### Features
+
+* add policy rules for gateway access control ([#66](https://github.com/onecli/onecli/issues/66)) ([2bfe568](https://github.com/onecli/onecli/commit/2bfe568886bd5334ec1811845024482cca552fbe))
+
+
+### Bug Fixes
+
+* use 127.0.0.1 in health check and reduce image size ([#68](https://github.com/onecli/onecli/issues/68)) ([aa0ca78](https://github.com/onecli/onecli/commit/aa0ca78748badd59351dbdbc443f7fe0d8c38e02))
+
 ## [1.2.1](https://github.com/onecli/onecli/compare/v1.2.0...v1.2.1) (2026-03-19)
 
 
