@@ -85,9 +85,7 @@ checksum = "7f202df86484c868dbad7eaa557ef785d5c66295e41b460ef922eca0723b842c"
 
 [[package]]
 name = "ap-client"
-version = "0.5.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3142747016fc72fc73712449e26ac4e4b43997261dc2c107b9301f461f430f71"
+version = "0.6.0"
 dependencies = [
  "ap-error",
  "ap-noise",
@@ -95,8 +93,8 @@ dependencies = [
  "ap-proxy-protocol",
  "async-trait",
  "base64",
- "dirs",
  "futures-util",
+ "gloo-timers",
  "hex",
  "rand 0.8.5",
  "serde",
@@ -104,22 +102,20 @@ dependencies = [
  "thiserror 1.0.69",
  "tokio",
  "tracing",
+ "wasm-bindgen-futures",
+ "web-time",
 ]
 
 [[package]]
 name = "ap-error"
-version = "0.5.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "71114cd04eecb5661100b8b435b7e2cf068803786b627b001f7516134dc67d07"
+version = "0.6.0"
 dependencies = [
  "ap-error-macro",
 ]
 
 [[package]]
 name = "ap-error-macro"
-version = "0.5.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "859914e6182474dda316e2c07e7f95a22d2a0662ae2108b54b2a881088697b7c"
+version = "0.6.0"
 dependencies = [
  "darling",
  "proc-macro2",
@@ -129,9 +125,7 @@ dependencies = [
 
 [[package]]
 name = "ap-noise"
-version = "0.5.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "71455160682aafafced3b8272f0f53d6dceb7376a86ae8c1368b3e76bd6bc917"
+version = "0.6.0"
 dependencies = [
  "ap-error",
  "base64",
@@ -151,9 +145,7 @@ dependencies = [
 
 [[package]]
 name = "ap-proxy-client"
-version = "0.5.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1cbf5f5a3cf908e5022b963119db8fc6395df0385a4d0298ec434172947ba5c3"
+version = "0.6.0"
 dependencies = [
  "ap-proxy-protocol",
  "futures-util",
@@ -165,9 +157,7 @@ dependencies = [
 
 [[package]]
 name = "ap-proxy-protocol"
-version = "0.5.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e0cf836fec1baf259a078efda82c0a53839413236d71ba9c86413e35b2ae5000"
+version = "0.6.0"
 dependencies = [
  "ap-error",
  "coset",
@@ -715,27 +705,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "dirs"
-version = "5.0.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "44c45a9d03d6676652bcb5e724c7e988de1acad23a711b5217ab9cbecbec2225"
-dependencies = [
- "dirs-sys",
-]
-
-[[package]]
-name = "dirs-sys"
-version = "0.4.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "520f05a5cbd335fae5a99ff7a6ab8627577660ee5cfd6a94a6a929b52ff0321c"
-dependencies = [
- "libc",
- "option-ext",
- "redox_users",
- "windows-sys 0.48.0",
-]
-
-[[package]]
 name = "displaydoc"
 version = "0.2.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1017,6 +986,18 @@ dependencies = [
  "libc",
  "r-efi",
  "wasip2",
+ "wasm-bindgen",
+]
+
+[[package]]
+name = "gloo-timers"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bbb143cf96099802033e0d4f4963b19fd2e0b728bcf076cd9cf7f6634f092994"
+dependencies = [
+ "futures-channel",
+ "futures-core",
+ "js-sys",
  "wasm-bindgen",
 ]
 
@@ -1778,12 +1759,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "option-ext"
-version = "0.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "04744f49eae99ab78e0d5c0b603ab218f515ea8cfe5a456d7629ad883a3b6e7d"
-
-[[package]]
 name = "parking"
 version = "2.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2084,17 +2059,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6ce70a74e890531977d37e532c34d45e9055d2409ed08ddba14529471ed0be16"
 dependencies = [
  "bitflags",
-]
-
-[[package]]
-name = "redox_users"
-version = "0.4.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ba009ff324d1fc1b900bd1fdb31564febe58a8ccc8a6fdbb93b543d33b13ca43"
-dependencies = [
- "getrandom 0.2.17",
- "libredox",
- "thiserror 1.0.69",
 ]
 
 [[package]]

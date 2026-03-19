@@ -4,13 +4,14 @@
 //! Noise protocol, credential caching, and session restore. Per-user sessions are
 //! stored in a `DashMap<user_id, Arc<BitwardenUserSession>>`.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, Result};
 use ap_client::{
     CredentialData, CredentialQuery, DefaultProxyClient, IdentityFingerprint, IdentityProvider,
-    Psk, RemoteClient, RemoteClientEvent,
+    Psk, RemoteClient, RemoteClientNotification, RemoteClientRequest,
 };
 use ap_proxy_client::ProxyClientConfig;
 use async_trait::async_trait;
@@ -119,12 +120,14 @@ struct BitwardenUserSession {
     /// Last time this session was used (for eviction). Uses std::sync::Mutex since
     /// the update is instant (no .await while holding it).
     last_used: std::sync::Mutex<Instant>,
-    /// Last error from the event loop, lazy restore, or credential request.
-    /// Cleared on successful connect. Shared with the event loop task via Arc.
+    /// Last error from the notification listener, lazy restore, or credential request.
+    /// Cleared on successful connect. Shared with the notification listener via Arc.
     last_error: Arc<std::sync::Mutex<Option<String>>>,
     /// Skip credential requests until this time (after a failure).
     /// Prevents repeated 15s timeouts when the vault is down.
     error_until: std::sync::Mutex<Option<Instant>>,
+    /// Set by the notification listener when `Ready { can_request_credentials: true }` is received.
+    is_ready: Arc<AtomicBool>,
 }
 
 // ── Config ──────────────────────────────────────────────────────────────
@@ -177,12 +180,11 @@ impl BitwardenVaultProvider {
                 for user_id in to_evict {
                     // Remove from map first — new requests will re-create from DB
                     if let Some((_, session)) = sessions.remove(&user_id) {
-                        // Acquire lock to ensure no in-flight credential request
+                        // Acquire lock to ensure no in-flight credential request, then drop the handle
                         let mut guard = session.client.lock().await;
-                        if let Some(mut client) = guard.take() {
-                            client.close().await;
-                        }
+                        guard.take(); // dropping the handle disconnects
                         session.credential_cache.clear();
+                        session.is_ready.store(false, Ordering::Relaxed);
                         info!(user_id = %user_id, "bitwarden: evicted idle session");
                     }
                 }
@@ -222,6 +224,7 @@ impl BitwardenVaultProvider {
             last_used: std::sync::Mutex::new(Instant::now()),
             last_error: Arc::new(std::sync::Mutex::new(None)),
             error_until: std::sync::Mutex::new(None),
+            is_ready: Arc::new(AtomicBool::new(false)),
         });
 
         self.sessions
@@ -239,6 +242,7 @@ impl BitwardenVaultProvider {
             last_used: std::sync::Mutex::new(Instant::now()),
             last_error: Arc::new(std::sync::Mutex::new(None)),
             error_until: std::sync::Mutex::new(None),
+            is_ready: Arc::new(AtomicBool::new(false)),
         });
 
         self.sessions
@@ -254,14 +258,8 @@ impl BitwardenVaultProvider {
         user_id: &str,
         session: &BitwardenUserSession,
     ) -> Result<RemoteClient> {
-        let (event_tx, event_rx) = mpsc::channel(64);
-        let (_response_tx, response_rx) = mpsc::channel(16);
-
-        Self::spawn_event_loop(
-            user_id.to_string(),
-            event_rx,
-            Arc::clone(&session.last_error),
-        );
+        let (notification_tx, notification_rx) = mpsc::channel(64);
+        let (_request_tx, _request_rx) = mpsc::channel::<RemoteClientRequest>(16);
 
         let proxy_config = ProxyClientConfig {
             proxy_url: self.config.proxy_url.clone(),
@@ -278,31 +276,41 @@ impl BitwardenVaultProvider {
             session.connection_data.as_ref(),
         );
 
-        let client = RemoteClient::new(
+        // connect() spawns the event loop internally — no manual spawning needed
+        let client = RemoteClient::connect(
             Box::new(identity_provider),
             Box::new(session_store),
-            event_tx,
-            response_rx,
             Box::new(proxy_client),
+            notification_tx,
+            _request_tx,
         )
         .await
         .map_err(|e| anyhow!("failed to create remote client: {e}"))?;
 
+        Self::spawn_notification_listener(
+            user_id.to_string(),
+            notification_rx,
+            Arc::clone(&session.last_error),
+            Arc::clone(&session.is_ready),
+        );
+
         Ok(client)
     }
 
-    fn spawn_event_loop(
+    /// Consumes notifications from the `RemoteClient` for logging and readiness tracking.
+    fn spawn_notification_listener(
         user_id: String,
-        mut event_rx: mpsc::Receiver<RemoteClientEvent>,
+        mut notification_rx: mpsc::Receiver<RemoteClientNotification>,
         last_error: Arc<std::sync::Mutex<Option<String>>>,
+        is_ready: Arc<AtomicBool>,
     ) {
         tokio::spawn(async move {
-            while let Some(event) = event_rx.recv().await {
-                match &event {
-                    RemoteClientEvent::Connecting { proxy_url } => {
-                        info!(user_id = %user_id, url = %proxy_url, "bitwarden: connecting");
+            while let Some(notif) = notification_rx.recv().await {
+                match &notif {
+                    RemoteClientNotification::Connecting => {
+                        info!(user_id = %user_id, "bitwarden: connecting");
                     }
-                    RemoteClientEvent::Connected { fingerprint } => {
+                    RemoteClientNotification::Connected { fingerprint } => {
                         info!(
                             user_id = %user_id,
                             fingerprint = %hex::encode(fingerprint.0),
@@ -313,19 +321,20 @@ impl BitwardenVaultProvider {
                             *err = None;
                         }
                     }
-                    RemoteClientEvent::Ready {
+                    RemoteClientNotification::Ready {
                         can_request_credentials,
                     } => {
+                        is_ready.store(*can_request_credentials, Ordering::Relaxed);
                         info!(
                             user_id = %user_id,
                             can_request = can_request_credentials,
                             "bitwarden: ready"
                         );
                     }
-                    RemoteClientEvent::CredentialReceived { credential, .. } => {
+                    RemoteClientNotification::CredentialReceived { credential, .. } => {
                         info!(user_id = %user_id, credential = ?credential, "bitwarden: credential received");
                     }
-                    RemoteClientEvent::Error { message, context } => {
+                    RemoteClientNotification::Error { message, context } => {
                         let detail = match context {
                             Some(ctx) => format!("{message} ({ctx})"),
                             None => message.clone(),
@@ -335,7 +344,8 @@ impl BitwardenVaultProvider {
                             *err = Some(detail);
                         }
                     }
-                    RemoteClientEvent::Disconnected { reason } => {
+                    RemoteClientNotification::Disconnected { reason } => {
+                        is_ready.store(false, Ordering::Relaxed);
                         let detail = reason.as_deref().unwrap_or("unknown reason").to_string();
                         warn!(user_id = %user_id, reason = %detail, "bitwarden: disconnected");
                         if let Ok(mut err) = last_error.lock() {
@@ -343,10 +353,12 @@ impl BitwardenVaultProvider {
                         }
                     }
                     _ => {
-                        info!(user_id = %user_id, event = ?event, "bitwarden: event");
+                        info!(user_id = %user_id, notif = ?notif, "bitwarden: notification");
                     }
                 }
             }
+            // Channel closed — client handle was dropped
+            is_ready.store(false, Ordering::Relaxed);
         });
     }
 }
@@ -394,7 +406,7 @@ impl VaultProvider for BitwardenVaultProvider {
         )
         .await?;
 
-        let mut client = self.create_and_connect_client(user_id, &session).await?;
+        let client = self.create_and_connect_client(user_id, &session).await?;
 
         client
             .pair_with_psk(psk, remote_fingerprint)
@@ -464,7 +476,7 @@ impl VaultProvider for BitwardenVaultProvider {
                 let fp = fingerprint?;
 
                 match self.create_and_connect_client(user_id, &session).await {
-                    Ok(mut client) => match client.load_cached_session(fp).await {
+                    Ok(client) => match client.load_cached_session(fp).await {
                         Ok(()) => {
                             info!(user_id = %user_id, "bitwarden: lazy session restored");
                             *client_guard = Some(client);
@@ -478,7 +490,7 @@ impl VaultProvider for BitwardenVaultProvider {
                             if let Ok(mut eu) = session.error_until.lock() {
                                 *eu = Some(Instant::now() + ERROR_COOLDOWN);
                             }
-                            let _ = client.close().await;
+                            drop(client); // dropping the handle disconnects
                             return None;
                         }
                     },
@@ -497,12 +509,12 @@ impl VaultProvider for BitwardenVaultProvider {
             }
         }
 
-        let mut client_guard = session.client.lock().await;
-        let client = client_guard.as_mut()?;
-
-        if !client.is_ready() {
+        if !session.is_ready.load(Ordering::Relaxed) {
             return None;
         }
+
+        let client_guard = session.client.lock().await;
+        let client = client_guard.as_ref()?;
 
         let query = CredentialQuery::Domain(hostname.to_string());
         let result = tokio::time::timeout(REQUEST_TIMEOUT, client.request_credential(&query)).await;
@@ -579,8 +591,7 @@ impl VaultProvider for BitwardenVaultProvider {
             }
         };
 
-        let guard = session.client.lock().await;
-        let connected = guard.as_ref().is_some_and(|c| c.is_ready());
+        let connected = session.is_ready.load(Ordering::Relaxed);
         let fingerprint = hex::encode(session.identity.fingerprint().0);
         let last_error = session.last_error.lock().ok().and_then(|e| e.clone());
 
@@ -597,10 +608,9 @@ impl VaultProvider for BitwardenVaultProvider {
     async fn disconnect(&self, user_id: &str) -> Result<()> {
         if let Some((_, session)) = self.sessions.remove(user_id) {
             let mut guard = session.client.lock().await;
-            if let Some(mut client) = guard.take() {
-                client.close().await;
-            }
+            guard.take(); // dropping the handle disconnects
             session.credential_cache.clear();
+            session.is_ready.store(false, Ordering::Relaxed);
         }
 
         info!(user_id = %user_id, "bitwarden: disconnected");
