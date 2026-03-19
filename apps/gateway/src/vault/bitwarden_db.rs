@@ -6,7 +6,7 @@
 //! The `SessionStore` and `IdentityProvider` traits are async (as of ap-client 0.5),
 //! so we can await DB calls directly — no sync→async bridging needed.
 
-use ap_client::{IdentityFingerprint, IdentityProvider, ClientError, SessionStore};
+use ap_client::{ClientError, IdentityFingerprint, IdentityProvider, SessionStore};
 use ap_noise::MultiDeviceTransport;
 use ap_proxy_protocol::IdentityKeyPair;
 use async_trait::async_trait;
@@ -171,10 +171,7 @@ impl SessionStore for BitwardenSessionStore {
             .collect()
     }
 
-    async fn cache_session(
-        &mut self,
-        fingerprint: IdentityFingerprint,
-    ) -> Result<(), ClientError> {
+    async fn cache_session(&mut self, fingerprint: IdentityFingerprint) -> Result<(), ClientError> {
         if self.has_session(&fingerprint).await {
             return Ok(());
         }
@@ -268,9 +265,8 @@ impl SessionStore for BitwardenSessionStore {
             return Ok(None);
         };
 
-        let transport = MultiDeviceTransport::restore_state(bytes).map_err(|e| {
-            ClientError::SessionCache(format!("failed to restore transport: {e}"))
-        })?;
+        let transport = MultiDeviceTransport::restore_state(bytes)
+            .map_err(|e| ClientError::SessionCache(format!("failed to restore transport: {e}")))?;
 
         Ok(Some(transport))
     }
