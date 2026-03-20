@@ -110,6 +110,12 @@ export const VaultAccessCard = () => {
             <div className="flex items-center gap-2">
               <Shield className="text-muted-foreground size-4" />
               <CardTitle>Bitwarden Vault</CardTitle>
+              <Badge
+                variant="secondary"
+                className="text-[10px] font-normal px-1.5 py-0"
+              >
+                Beta
+              </Badge>
             </div>
             <Badge variant="outline" className={badge.className}>
               <span
@@ -208,6 +214,12 @@ export const VaultAccessCard = () => {
         <div className="flex items-center gap-2">
           <Shield className="text-muted-foreground size-4" />
           <CardTitle>Bitwarden Vault</CardTitle>
+          <Badge
+            variant="secondary"
+            className="text-[10px] font-normal px-1.5 py-0"
+          >
+            Beta
+          </Badge>
         </div>
         <CardDescription>
           Connect your Bitwarden vault to inject credentials on-demand without
