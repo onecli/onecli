@@ -46,8 +46,10 @@ jobs:
       - name: Lint, format & type check
         run: pnpm check
 
+      # Gateway is excluded — clippy (check) and cargo test already compile it.
+      # Release builds only happen in publish.yml for Docker images.
       - name: Build
-        run: pnpm build
+        run: pnpm build --filter='!@onecli/gateway'
 
       - name: Test
         run: pnpm test
