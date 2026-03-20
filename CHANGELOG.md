@@ -1,5 +1,17 @@
 # Changelog
 
+## [1.4.0](https://github.com/onecli/onecli/compare/v1.3.0...v1.4.0) (2026-03-20)
+
+
+### Features
+
+* Bitwarden vault support ([#60](https://github.com/onecli/onecli/issues/60)) ([8bdc9e2](https://github.com/onecli/onecli/commit/8bdc9e2095383d6f32c22bb5c55b55220ce86d9f))
+
+
+### Bug Fixes
+
+* add /api/auth/session endpoint for reliable user provisioning ([#71](https://github.com/onecli/onecli/issues/71)) ([0b8591e](https://github.com/onecli/onecli/commit/0b8591ed519576fa9d720951f0ece609213b1a72))
+
 ## [1.3.0](https://github.com/onecli/onecli/compare/v1.2.1...v1.3.0) (2026-03-19)
 
 
