@@ -59,12 +59,10 @@
       "dependsOn": ["^build", "^check-types"]
     },
     "test": {
-      "dependsOn": ["build"],
       "cache": false
     },
     "@onecli/gateway#test": {
-      "inputs": ["src/**", "tests/**", "Cargo.toml", "Cargo.lock"],
-      "dependsOn": ["@onecli/gateway#build"]
+      "inputs": ["src/**", "tests/**", "Cargo.toml", "Cargo.lock"]
     },
     "dev": {
       "cache": false,

@@ -43,14 +43,8 @@ jobs:
       - name: Generate Prisma client
         run: pnpm --filter @onecli/db generate
 
-      - name: Lint
-        run: pnpm lint
-
-      - name: Format check
-        run: pnpm format:check
-
-      - name: Type check
-        run: pnpm check-types
+      - name: Lint, format & type check
+        run: pnpm check
 
       - name: Build
         run: pnpm build
