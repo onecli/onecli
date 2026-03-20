@@ -5,7 +5,7 @@
 # Stage 1a: Install cargo-chef
 # ──────────────────────────────────────────────
 FROM rust:1-alpine AS chef
-RUN apk add --no-cache musl-dev && cargo install cargo-chef
+RUN apk add --no-cache musl-dev pkgconfig openssl-dev openssl-libs-static && cargo install cargo-chef
 WORKDIR /build
 
 # ──────────────────────────────────────────────
