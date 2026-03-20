@@ -56,9 +56,9 @@ To use this with Anthropic, store your API key as the password in a Bitwarden lo
 
 ## Environment Variables
 
-| Variable              | Default                       | Description                                              |
-| --------------------- | ----------------------------- | -------------------------------------------------------- |
-| `BITWARDEN_PROXY_URL` | `wss://rat1.lesspassword.dev` | WebSocket relay for the Bitwarden Remote Access protocol |
+| Variable              | Default                     | Description                                              |
+| --------------------- | --------------------------- | -------------------------------------------------------- |
+| `BITWARDEN_PROXY_URL` | `wss://ap.lesspassword.dev` | WebSocket relay for the Bitwarden Remote Access protocol |
 
 ## Session Behavior
 

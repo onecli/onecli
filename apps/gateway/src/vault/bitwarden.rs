@@ -10,10 +10,9 @@ use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, Result};
 use ap_client::{
-    CredentialData, CredentialQuery, DefaultProxyClient, IdentityFingerprint, IdentityProvider,
-    Psk, RemoteClient, RemoteClientNotification, RemoteClientRequest,
+    CredentialData, CredentialQuery, DefaultProxyClient, IdentityFingerprint, Psk, RemoteClient,
+    RemoteClientHandle, RemoteClientNotification,
 };
-use ap_proxy_client::ProxyClientConfig;
 use async_trait::async_trait;
 use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
@@ -21,7 +20,7 @@ use sqlx::PgPool;
 use tokio::sync::{mpsc, Mutex};
 use tracing::{info, warn};
 
-use super::bitwarden_db::{BitwardenIdentityProvider, BitwardenSessionStore};
+use super::bitwarden_db::{BitwardenConnectionStore, BitwardenIdentityProvider};
 use super::{PairResult, ProviderStatus, VaultCredential, VaultProvider};
 use crate::db;
 
@@ -251,45 +250,39 @@ impl BitwardenVaultProvider {
     }
 
     /// Create a connected `RemoteClient` for a user session.
-    /// Always passes the identity's key_data to the session store so write-throughs
+    /// Always passes the identity's key_data to the connection store so write-throughs
     /// never null it out — even for fresh pairings where connection_data is None.
     async fn create_and_connect_client(
         &self,
         user_id: &str,
         session: &BitwardenUserSession,
     ) -> Result<RemoteClient> {
-        let (notification_tx, notification_rx) = mpsc::channel(64);
-        let (_request_tx, _request_rx) = mpsc::channel::<RemoteClientRequest>(16);
-
-        let proxy_config = ProxyClientConfig {
-            proxy_url: self.config.proxy_url.clone(),
-            identity_keypair: Some(session.identity.identity().await),
-        };
-        let proxy_client = DefaultProxyClient::new(proxy_config);
+        let proxy_client = DefaultProxyClient::from_url(self.config.proxy_url.clone());
 
         let key_data = Some(session.identity.to_cose());
         let identity_provider = session.identity.clone_provider();
-        let session_store = BitwardenSessionStore::new(
+        let connection_store = BitwardenConnectionStore::new(
             self.pool.clone(),
             user_id.to_string(),
             key_data,
             session.connection_data.as_ref(),
         );
 
-        // connect() spawns the event loop internally — no manual spawning needed
-        let client = RemoteClient::connect(
+        let RemoteClientHandle {
+            client,
+            notifications,
+            requests: _,
+        } = RemoteClient::connect(
             Box::new(identity_provider),
-            Box::new(session_store),
+            Box::new(connection_store),
             Box::new(proxy_client),
-            notification_tx,
-            _request_tx,
         )
         .await
-        .map_err(|e| anyhow!("failed to create remote client: {e}"))?;
+        .map_err(|e| anyhow!("failed to connect remote client: {e}"))?;
 
         Self::spawn_notification_listener(
             user_id.to_string(),
-            notification_rx,
+            notifications,
             Arc::clone(&session.last_error),
             Arc::clone(&session.is_ready),
         );
@@ -300,12 +293,12 @@ impl BitwardenVaultProvider {
     /// Consumes notifications from the `RemoteClient` for logging and readiness tracking.
     fn spawn_notification_listener(
         user_id: String,
-        mut notification_rx: mpsc::Receiver<RemoteClientNotification>,
+        mut notifications: mpsc::Receiver<RemoteClientNotification>,
         last_error: Arc<std::sync::Mutex<Option<String>>>,
         is_ready: Arc<AtomicBool>,
     ) {
         tokio::spawn(async move {
-            while let Some(notif) = notification_rx.recv().await {
+            while let Some(notif) = notifications.recv().await {
                 match &notif {
                     RemoteClientNotification::Connecting => {
                         info!(user_id = %user_id, "bitwarden: connecting");
@@ -389,9 +382,9 @@ impl VaultProvider for BitwardenVaultProvider {
             None => self.create_pairing_session(user_id),
         };
 
-        // Create the DB row BEFORE pairing so that save_transport_state's
-        // UPDATE has a row to write to. key_data + fingerprint go in now;
-        // transport_state will be added by save_transport_state during pair_with_psk.
+        // Create the DB row BEFORE pairing so that ConnectionStore::save()'s
+        // write-through has a row to update. key_data + fingerprint go in now;
+        // transport_state will be added by save() during pair_with_psk.
         let initial_cd = BitwardenConnectionData {
             fingerprint: Some(fingerprint_hex.to_string()),
             key_data: Some(session.identity.to_cose()),
@@ -476,7 +469,7 @@ impl VaultProvider for BitwardenVaultProvider {
                 let fp = fingerprint?;
 
                 match self.create_and_connect_client(user_id, &session).await {
-                    Ok(client) => match client.load_cached_session(fp).await {
+                    Ok(client) => match client.load_cached_connection(fp).await {
                         Ok(()) => {
                             info!(user_id = %user_id, "bitwarden: lazy session restored");
                             *client_guard = Some(client);

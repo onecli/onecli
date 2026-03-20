@@ -86,7 +86,7 @@ async fn main() -> Result<()> {
 
     // Initialize vault service with Bitwarden provider
     let proxy_url = std::env::var("BITWARDEN_PROXY_URL")
-        .unwrap_or_else(|_| "wss://rat1.lesspassword.dev".to_string());
+        .unwrap_or_else(|_| "wss://ap.lesspassword.dev".to_string());
     let bitwarden =
         BitwardenVaultProvider::new(BitwardenConfig { proxy_url }, policy_engine.pool.clone());
     let vault_service = Arc::new(VaultService::new(
