@@ -1,0 +1,8 @@
+<svg width="48" height="52" viewBox="0 0 48 52" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <!-- First chevron (rounded thick strokes) -->
+  <path d="M4 8L18 24L4 40" stroke="#19BA5D" stroke-width="8" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+  <!-- Second chevron -->
+  <path d="M20 8L34 24L20 40" stroke="#19BA5D" stroke-width="8" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+  <!-- Underline bar -->
+  <rect x="4" y="46" width="30" height="5" rx="2.5" fill="#19BA5D"/>
+</svg>

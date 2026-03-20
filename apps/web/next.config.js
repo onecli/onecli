@@ -3,6 +3,7 @@ const isCloud = process.env.NEXT_PUBLIC_EDITION === "cloud";
 /** @type {import('next').NextConfig} */
 const nextConfig = {
   output: "standalone",
+  compress: !isCloud, // Cloud: CloudFront handles compression at the edge; OSS: Next.js compresses
   serverExternalPackages: ["@onecli/db"],
   env: {
     NEXT_PUBLIC_EDITION: process.env.NEXT_PUBLIC_EDITION || "oss",
