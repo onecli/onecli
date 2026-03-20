@@ -24,6 +24,7 @@ model User {
   policyRules       PolicyRule[]
   connectedServices ConnectedService[]
   auditLogs         AuditLog[]
+  vaultConnections  VaultConnection[]
 }
 
 model Agent {
@@ -120,4 +121,19 @@ model AuditLog {
   user      User     @relation(fields: [userId], references: [id])
 
   @@index([userId, createdAt])
+}
+
+model VaultConnection {
+  id              String    @id @default(cuid())
+  userId          String
+  provider        String
+  name            String?
+  status          String
+  connectionData  Json?
+  lastConnectedAt DateTime?
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+  user            User      @relation(fields: [userId], references: [id])
+
+  @@unique([userId, provider])
 }

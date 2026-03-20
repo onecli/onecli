@@ -32,6 +32,7 @@ use crate::ca::CertificateAuthority;
 use crate::connect::{self, CachedConnect, ConnectCacheKey, ConnectError, PolicyEngine};
 use crate::inject::{self, InjectionRule};
 use crate::policy::{self, PolicyRule};
+use crate::vault;
 
 // ── GatewayState ───────────────────────────────────────────────────────
 
@@ -42,6 +43,8 @@ pub(crate) struct GatewayState {
     pub http_client: reqwest::Client,
     pub policy_engine: Arc<PolicyEngine>,
     pub connect_cache: Arc<DashMap<ConnectCacheKey, CachedConnect>>,
+    /// Provider-agnostic vault service for credential fetching.
+    pub vault_service: Arc<vault::VaultService>,
 }
 
 // ── GatewayServer ───────────────────────────────────────────────────────
@@ -52,7 +55,12 @@ pub struct GatewayServer {
 }
 
 impl GatewayServer {
-    pub fn new(ca: CertificateAuthority, port: u16, policy_engine: Arc<PolicyEngine>) -> Self {
+    pub fn new(
+        ca: CertificateAuthority,
+        port: u16,
+        policy_engine: Arc<PolicyEngine>,
+        vault_service: Arc<vault::VaultService>,
+    ) -> Self {
         let state = GatewayState {
             ca: Arc::new(ca),
             http_client: reqwest::Client::builder()
@@ -63,6 +71,7 @@ impl GatewayServer {
                 .expect("build HTTP client"),
             policy_engine,
             connect_cache: Arc::new(DashMap::new()),
+            vault_service,
         };
 
         Self { state, port }
@@ -100,6 +109,18 @@ impl GatewayServer {
         let axum_router = Router::new()
             .route("/healthz", axum::routing::get(healthz))
             .route("/me", axum::routing::get(me))
+            .route(
+                "/api/vault/{provider}/pair",
+                axum::routing::post(vault::api::vault_pair),
+            )
+            .route(
+                "/api/vault/{provider}/status",
+                axum::routing::get(vault::api::vault_status),
+            )
+            .route(
+                "/api/vault/{provider}/pair",
+                axum::routing::delete(vault::api::vault_disconnect),
+            )
             .layer(cors_layer)
             .fallback(fallback)
             .with_state(self.state.clone());
@@ -138,9 +159,9 @@ async fn fallback() -> StatusCode {
 
 /// Handle a single client connection.
 ///
-/// Uses a `service_fn` wrapper that intercepts CONNECT requests before they
-/// reach the Axum router (CONNECT URIs like `host:port` don't match Axum's
-/// path-based routing).
+/// Uses a `service_fn` wrapper that intercepts CONNECT requests before they reach
+/// the Axum router (CONNECT URIs like `host:port` don't match Axum's path-based routing).
+/// All other HTTP routes (vault API, healthz, etc.) go through the Axum router.
 async fn handle_connection(
     stream: TcpStream,
     peer_addr: SocketAddr,
@@ -161,7 +182,7 @@ async fn handle_connection(
                     if req.method() == Method::CONNECT {
                         handle_connect(req, peer_addr, state).await
                     } else {
-                        // Delegate to the Axum router for all non-CONNECT requests.
+                        // Axum handles all non-CONNECT routes (healthz, vault API, fallback)
                         let resp: Response<axum::body::Body> = router
                             .oneshot(req)
                             .await
@@ -195,7 +216,8 @@ async fn handle_connect(
     // Extract agent token from Proxy-Authorization header.
     let agent_token = inject::extract_agent_token(&req).filter(|t| !t.is_empty());
 
-    let (intercept, injection_rules, policy_rules, _user_id) = if let Some(ref token) = agent_token
+    let (mut intercept, mut injection_rules, policy_rules, user_id) = if let Some(ref token) =
+        agent_token
     {
         match connect::resolve(token, &hostname, &state.policy_engine, &state.connect_cache).await {
             Ok(resp) => (
@@ -219,6 +241,24 @@ async fn handle_connect(
         // No auth — plain tunnel (no MITM, no injection)
         (false, vec![], vec![], None)
     };
+
+    // Vault fallback: if no DB secrets matched, try vault providers for this user.
+    if !intercept {
+        if let Some(ref uid) = user_id {
+            if let Some(cred) = state.vault_service.request_credential(uid, &hostname).await {
+                let vault_rules = inject::vault_credential_to_rules(&hostname, &cred);
+                if !vault_rules.is_empty() {
+                    intercept = true;
+                    injection_rules = vault_rules;
+                    info!(
+                        host = %hostname,
+                        user_id = %uid,
+                        "using vault credential"
+                    );
+                }
+            }
+        }
+    }
 
     info!(
         peer = %peer_addr,

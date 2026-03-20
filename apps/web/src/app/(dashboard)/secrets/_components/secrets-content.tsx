@@ -8,6 +8,7 @@ import { Card } from "@onecli/ui/components/card";
 import { Skeleton } from "@onecli/ui/components/skeleton";
 import { SecretCard } from "./secret-card";
 import { SecretDialog } from "./secret-dialog";
+import { VaultAccessCard } from "./vault-access-card";
 
 interface Secret {
   id: string;
@@ -58,35 +59,48 @@ export const SecretsContent = () => {
   }
 
   return (
-    <div className="space-y-4">
-      <div className="flex justify-end">
-        <Button size="sm" onClick={() => setCreateOpen(true)}>
-          <Plus className="size-3.5" />
-          Add Secret
-        </Button>
-      </div>
+    <div className="space-y-8">
+      <section className="space-y-4">
+        <div className="flex items-center justify-between">
+          <h3 className="text-sm font-medium">Local Secrets</h3>
+          <Button size="sm" onClick={() => setCreateOpen(true)}>
+            <Plus className="size-3.5" />
+            Add Secret
+          </Button>
+        </div>
 
-      {secrets.length === 0 ? (
-        <Card className="flex flex-col items-center justify-center py-16 text-center">
-          <div className="bg-muted mb-4 flex size-12 items-center justify-center rounded-full">
-            <KeyRound className="text-muted-foreground size-6" />
-          </div>
-          <p className="text-sm font-medium">No secrets yet</p>
-          <p className="text-muted-foreground mt-1 max-w-xs text-xs">
-            Add a secret to inject encrypted credentials into gateway requests.
-          </p>
-        </Card>
-      ) : (
-        secrets.map((secret) => (
-          <SecretCard key={secret.id} secret={secret} onUpdate={fetchSecrets} />
-        ))
-      )}
+        {secrets.length === 0 ? (
+          <Card className="flex flex-col items-center justify-center py-16 text-center">
+            <div className="bg-muted mb-4 flex size-12 items-center justify-center rounded-full">
+              <KeyRound className="text-muted-foreground size-6" />
+            </div>
+            <p className="text-sm font-medium">No secrets yet</p>
+            <p className="text-muted-foreground mt-1 max-w-xs text-xs">
+              Add a secret to inject encrypted credentials into gateway
+              requests.
+            </p>
+          </Card>
+        ) : (
+          secrets.map((secret) => (
+            <SecretCard
+              key={secret.id}
+              secret={secret}
+              onUpdate={fetchSecrets}
+            />
+          ))
+        )}
 
-      <SecretDialog
-        open={createOpen}
-        onOpenChange={setCreateOpen}
-        onSaved={fetchSecrets}
-      />
+        <SecretDialog
+          open={createOpen}
+          onOpenChange={setCreateOpen}
+          onSaved={fetchSecrets}
+        />
+      </section>
+
+      <section className="space-y-4">
+        <h3 className="text-sm font-medium">Bitwarden Vault</h3>
+        <VaultAccessCard />
+      </section>
     </div>
   );
 };

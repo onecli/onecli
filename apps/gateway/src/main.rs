@@ -12,6 +12,7 @@ mod db;
 mod gateway;
 mod inject;
 mod policy;
+mod vault;
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -24,6 +25,8 @@ use tracing_subscriber::EnvFilter;
 use crate::ca::CertificateAuthority;
 use crate::connect::PolicyEngine;
 use crate::gateway::GatewayServer;
+use crate::vault::bitwarden::{BitwardenConfig, BitwardenVaultProvider};
+use crate::vault::VaultService;
 
 #[derive(Parser)]
 #[command(
@@ -81,10 +84,20 @@ async fn main() -> Result<()> {
 
     let policy_engine = Arc::new(PolicyEngine { pool, crypto });
 
+    // Initialize vault service with Bitwarden provider
+    let proxy_url = std::env::var("BITWARDEN_PROXY_URL")
+        .unwrap_or_else(|_| "wss://ap.lesspassword.dev".to_string());
+    let bitwarden =
+        BitwardenVaultProvider::new(BitwardenConfig { proxy_url }, policy_engine.pool.clone());
+    let vault_service = Arc::new(VaultService::new(
+        vec![Box::new(bitwarden)],
+        policy_engine.pool.clone(),
+    ));
+
     info!(port = cli.port, "gateway ready");
 
     // Start the gateway server (blocks forever)
-    let server = GatewayServer::new(ca, cli.port, policy_engine);
+    let server = GatewayServer::new(ca, cli.port, policy_engine, vault_service);
     server.run().await
 }
 

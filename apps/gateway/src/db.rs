@@ -1,8 +1,8 @@
 //! Direct database access via SQLx.
 //!
 //! Used when `DATABASE_URL` is set to query the PostgreSQL database directly,
-//! bypassing the Next.js API. The gateway is read-only — Prisma (Next.js)
-//! remains the sole writer.
+//! bypassing the Next.js API. Vault connection state is managed by the gateway;
+//! all other tables are read-only (Prisma / Next.js remains the writer).
 
 use anyhow::{Context, Result};
 use sqlx::postgres::PgPoolOptions;
@@ -60,6 +60,20 @@ pub(crate) struct PolicyRuleRow {
 #[derive(Debug, FromRow)]
 pub(crate) struct UserRow {
     pub id: String,
+}
+
+/// A vault connection row from the `VaultConnection` table.
+#[derive(Debug, FromRow)]
+#[allow(dead_code)]
+pub(crate) struct VaultConnectionRow {
+    pub id: String,
+    #[sqlx(rename = "userId")]
+    pub user_id: String,
+    pub provider: String,
+    pub name: Option<String>,
+    pub status: String,
+    #[sqlx(rename = "connectionData")]
+    pub connection_data: Option<serde_json::Value>,
 }
 
 // ── Queries ─────────────────────────────────────────────────────────────
@@ -129,4 +143,80 @@ pub(crate) async fn find_policy_rules_by_user(
     .fetch_all(pool)
     .await
     .context("querying PolicyRules by userId")
+}
+
+// ── Vault connection queries ────────────────────────────────────────────
+
+/// Find a vault connection for a user + provider pair.
+pub(crate) async fn find_vault_connection(
+    pool: &PgPool,
+    user_id: &str,
+    provider: &str,
+) -> Result<Option<VaultConnectionRow>> {
+    sqlx::query_as::<_, VaultConnectionRow>(
+        r#"SELECT id, "userId", provider, name, status, "connectionData" FROM "VaultConnection" WHERE "userId" = $1 AND provider = $2 LIMIT 1"#,
+    )
+    .bind(user_id)
+    .bind(provider)
+    .fetch_optional(pool)
+    .await
+    .context("querying VaultConnection by userId + provider")
+}
+
+/// Upsert a vault connection (insert or update on userId + provider conflict).
+pub(crate) async fn upsert_vault_connection(
+    pool: &PgPool,
+    user_id: &str,
+    provider: &str,
+    status: &str,
+    connection_data: Option<&serde_json::Value>,
+) -> Result<()> {
+    sqlx::query(
+        r#"INSERT INTO "VaultConnection" (id, "userId", provider, status, "connectionData", "createdAt", "updatedAt")
+           VALUES (gen_random_uuid()::text, $1, $2, $3, $4, NOW(), NOW())
+           ON CONFLICT ("userId", provider)
+           DO UPDATE SET status = $3, "connectionData" = $4, "updatedAt" = NOW()"#,
+    )
+    .bind(user_id)
+    .bind(provider)
+    .bind(status)
+    .bind(connection_data)
+    .execute(pool)
+    .await
+    .context("upserting VaultConnection")?;
+    Ok(())
+}
+
+/// Update only the connectionData JSON for an existing vault connection.
+pub(crate) async fn update_vault_connection_data(
+    pool: &PgPool,
+    user_id: &str,
+    provider: &str,
+    connection_data: &serde_json::Value,
+) -> Result<()> {
+    sqlx::query(
+        r#"UPDATE "VaultConnection" SET "connectionData" = $3, "updatedAt" = NOW() WHERE "userId" = $1 AND provider = $2"#,
+    )
+    .bind(user_id)
+    .bind(provider)
+    .bind(connection_data)
+    .execute(pool)
+    .await
+    .context("updating VaultConnection connectionData")?;
+    Ok(())
+}
+
+/// Delete a vault connection for a user + provider pair.
+pub(crate) async fn delete_vault_connection(
+    pool: &PgPool,
+    user_id: &str,
+    provider: &str,
+) -> Result<()> {
+    sqlx::query(r#"DELETE FROM "VaultConnection" WHERE "userId" = $1 AND provider = $2"#)
+        .bind(user_id)
+        .bind(provider)
+        .execute(pool)
+        .await
+        .context("deleting VaultConnection")?;
+    Ok(())
 }

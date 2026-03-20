@@ -64,6 +64,7 @@ Open **http://localhost:10254**, create an agent, add your secrets, and point yo
 - **Easy setup**: `docker compose -f docker/docker-compose.yml up` starts everything (app + PostgreSQL)
 - **Two auth modes**: single-user (no login) for local use, or Google OAuth for teams
 - **Rust gateway**: fast, memory-safe HTTP gateway with MITM interception for HTTPS
+- **[Vault integration](docs/vault-integration.md)**: connect Bitwarden (or other password managers) for on-demand credential injection without storing secrets on the server
 
 ## Project Structure
 
