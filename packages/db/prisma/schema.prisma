@@ -22,6 +22,8 @@ model User {
   agents            Agent[]
   secrets           Secret[]
   policyRules       PolicyRule[]
+  connectedServices ConnectedService[]
+  auditLogs         AuditLog[]
 }
 
 model Agent {
@@ -87,4 +89,35 @@ model AgentSecret {
   secret   Secret @relation(fields: [secretId], references: [id], onDelete: Cascade)
 
   @@id([agentId, secretId])
+}
+
+model ConnectedService {
+  id           String    @id @default(cuid())
+  userId       String
+  provider     String
+  status       String    @default("connected")
+  accessToken  String?
+  refreshToken String?
+  tokenExpiry  DateTime?
+  scopes       String[]  @default([])
+  metadata     Json?
+  connectedAt  DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+  user         User      @relation(fields: [userId], references: [id])
+
+  @@unique([userId, provider])
+}
+
+model AuditLog {
+  id        String   @id @default(cuid())
+  userId    String
+  action    String
+  service   String
+  status    String
+  source    String   @default("app")
+  metadata  Json?
+  createdAt DateTime @default(now())
+  user      User     @relation(fields: [userId], references: [id])
+
+  @@index([userId, createdAt])
 }
