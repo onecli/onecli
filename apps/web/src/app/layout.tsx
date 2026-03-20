@@ -32,6 +32,9 @@ export const metadata: Metadata = {
     template: "%s — OneCLI",
   },
   description: "Universal CLI gateway for AI agents.",
+  icons: {
+    icon: "/favicon.svg",
+  },
 };
 
 export default function RootLayout({
