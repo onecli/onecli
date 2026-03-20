@@ -5,26 +5,31 @@ import { useRouter } from "next/navigation";
 import Image from "next/image";
 import { Button } from "@onecli/ui/components/button";
 import { useAuth } from "@/providers/auth-provider";
-import { ensureUser } from "@/lib/actions/auth";
 
 export const LoginContent = () => {
   const router = useRouter();
-  const { isAuthenticated, isLoading, user, signIn } = useAuth();
+  const { isAuthenticated, isLoading, user, signIn, signOut } = useAuth();
 
   useEffect(() => {
     if (!isAuthenticated || !user) return;
 
     const syncUser = async () => {
       try {
-        await ensureUser();
-      } catch {
-        // Server sync failed — still redirect, dashboard handles gracefully
+        const res = await fetch("/api/auth/session");
+        if (res.ok) {
+          router.replace("/overview");
+        } else {
+          console.error("Session sync failed:", res.status);
+          await signOut();
+        }
+      } catch (err) {
+        console.error("Session sync error:", err);
+        await signOut();
       }
-      router.replace("/overview");
     };
 
     syncUser();
-  }, [isAuthenticated, user, router]);
+  }, [isAuthenticated, user, router, signOut]);
 
   return (
     <div className="bg-background flex min-h-svh flex-col items-center justify-center px-6 pb-24">

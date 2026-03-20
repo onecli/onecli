@@ -5,7 +5,8 @@ import { IDENTIFIER_REGEX } from "@/lib/validations/agent";
 
 export type SecretMode = "all" | "selective";
 
-const generateAccessToken = () => `aoc_${randomBytes(32).toString("hex")}`;
+export const generateAccessToken = () =>
+  `aoc_${randomBytes(32).toString("hex")}`;
 
 export const listAgents = async (userId: string) => {
   const agents = await db.agent.findMany({

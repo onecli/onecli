@@ -2,7 +2,7 @@ import { randomBytes } from "crypto";
 import { db } from "@onecli/db";
 import { ServiceError } from "@/lib/services/errors";
 
-const generateApiKey = () => `oc_${randomBytes(32).toString("hex")}`;
+export const generateApiKey = () => `oc_${randomBytes(32).toString("hex")}`;
 
 export const getApiKey = async (userId: string) => {
   const user = await db.user.findUnique({
