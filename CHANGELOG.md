@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.4.1](https://github.com/onecli/onecli/compare/v1.4.0...v1.4.1) (2026-03-20)
+
+
+### Bug Fixes
+
+* install OpenSSL dev headers in Docker build for ap-* crates ([#74](https://github.com/onecli/onecli/issues/74)) ([ebaf1e1](https://github.com/onecli/onecli/commit/ebaf1e17a2750f19dc12f04326ae08f5d580a6c6))
+
 ## [1.4.0](https://github.com/onecli/onecli/compare/v1.3.0...v1.4.0) (2026-03-20)
 
 
