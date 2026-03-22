@@ -1,5 +1,17 @@
 # Changelog
 
+## [1.5.0](https://github.com/onecli/onecli/compare/v1.4.2...v1.5.0) (2026-03-22)
+
+
+### Features
+
+* add rate limit policy rules ([#84](https://github.com/onecli/onecli/issues/84)) ([f2109c2](https://github.com/onecli/onecli/commit/f2109c21ec4b6ffa629d81ae9cc16ae74d1e25e4))
+
+
+### Bug Fixes
+
+* add loading states to sign-in, sign-out, and demo dialog ([#82](https://github.com/onecli/onecli/issues/82)) ([2fc30b4](https://github.com/onecli/onecli/commit/2fc30b402700285828b353eaf82209241337016a))
+
 ## [1.4.2](https://github.com/onecli/onecli/compare/v1.4.1...v1.4.2) (2026-03-22)
 
 
