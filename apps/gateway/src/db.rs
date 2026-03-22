@@ -19,60 +19,49 @@ pub(crate) async fn create_pool(database_url: &str) -> Result<PgPool> {
 
 // ── Row types ───────────────────────────────────────────────────────────
 
-/// An agent row from the `Agent` table.
+/// An agent row from the `agent` table.
 #[derive(Debug, FromRow)]
 pub(crate) struct AgentRow {
     pub id: String,
-    #[sqlx(rename = "userId")]
     pub user_id: String,
-    #[sqlx(rename = "secretMode")]
     pub secret_mode: String,
 }
 
-/// A secret row from the `Secret` table.
+/// A secret row from the `secret` table.
 #[derive(Debug, FromRow)]
 pub(crate) struct SecretRow {
     #[sqlx(rename = "type")]
     pub type_: String,
-    #[sqlx(rename = "encryptedValue")]
     pub encrypted_value: String,
-    #[sqlx(rename = "hostPattern")]
     pub host_pattern: String,
-    #[sqlx(rename = "pathPattern")]
     pub path_pattern: Option<String>,
-    #[sqlx(rename = "injectionConfig")]
     pub injection_config: Option<serde_json::Value>,
 }
 
-/// A policy rule row from the `PolicyRule` table.
+/// A policy rule row from the `policy_rule` table.
 #[derive(Debug, FromRow)]
 pub(crate) struct PolicyRuleRow {
-    #[sqlx(rename = "hostPattern")]
     pub host_pattern: String,
-    #[sqlx(rename = "pathPattern")]
     pub path_pattern: Option<String>,
     pub method: Option<String>,
-    #[sqlx(rename = "agentId")]
     pub agent_id: Option<String>,
 }
 
-/// A user row from the `User` table.
+/// A user row from the `user` table.
 #[derive(Debug, FromRow)]
 pub(crate) struct UserRow {
     pub id: String,
 }
 
-/// A vault connection row from the `VaultConnection` table.
+/// A vault connection row from the `vault_connection` table.
 #[derive(Debug, FromRow)]
 #[allow(dead_code)]
 pub(crate) struct VaultConnectionRow {
     pub id: String,
-    #[sqlx(rename = "userId")]
     pub user_id: String,
     pub provider: String,
     pub name: Option<String>,
     pub status: String,
-    #[sqlx(rename = "connectionData")]
     pub connection_data: Option<serde_json::Value>,
 }
 
@@ -83,11 +72,11 @@ pub(crate) async fn find_user_by_external_auth_id(
     pool: &PgPool,
     external_auth_id: &str,
 ) -> Result<Option<UserRow>> {
-    sqlx::query_as::<_, UserRow>(r#"SELECT id FROM "User" WHERE "externalAuthId" = $1 LIMIT 1"#)
+    sqlx::query_as::<_, UserRow>(r#"SELECT id FROM "user" WHERE external_auth_id = $1 LIMIT 1"#)
         .bind(external_auth_id)
         .fetch_optional(pool)
         .await
-        .context("querying User by externalAuthId")
+        .context("querying user by external_auth_id")
 }
 
 /// Look up an agent by its access token.
@@ -96,37 +85,37 @@ pub(crate) async fn find_agent_by_token(
     access_token: &str,
 ) -> Result<Option<AgentRow>> {
     sqlx::query_as::<_, AgentRow>(
-        r#"SELECT id, "userId", "secretMode" FROM "Agent" WHERE "accessToken" = $1 LIMIT 1"#,
+        r#"SELECT id, user_id, secret_mode FROM agent WHERE access_token = $1 LIMIT 1"#,
     )
     .bind(access_token)
     .fetch_optional(pool)
     .await
-    .context("querying Agent by accessToken")
+    .context("querying agent by access_token")
 }
 
 /// Find all secrets for a given user.
 pub(crate) async fn find_secrets_by_user(pool: &PgPool, user_id: &str) -> Result<Vec<SecretRow>> {
     sqlx::query_as::<_, SecretRow>(
-        r#"SELECT "type", "encryptedValue", "hostPattern", "pathPattern", "injectionConfig" FROM "Secret" WHERE "userId" = $1"#,
+        r#"SELECT type, encrypted_value, host_pattern, path_pattern, injection_config FROM secret WHERE user_id = $1"#,
     )
     .bind(user_id)
     .fetch_all(pool)
     .await
-    .context("querying Secrets by userId")
+    .context("querying secrets by user_id")
 }
 
 /// Find secrets assigned to a specific agent (selective mode).
 pub(crate) async fn find_secrets_by_agent(pool: &PgPool, agent_id: &str) -> Result<Vec<SecretRow>> {
     sqlx::query_as::<_, SecretRow>(
-        r#"SELECT s."type", s."encryptedValue", s."hostPattern", s."pathPattern", s."injectionConfig"
-           FROM "Secret" s
-           INNER JOIN "AgentSecret" as_ ON s.id = as_."secretId"
-           WHERE as_."agentId" = $1"#,
+        r#"SELECT s.type, s.encrypted_value, s.host_pattern, s.path_pattern, s.injection_config
+           FROM secret s
+           INNER JOIN agent_secret as_ ON s.id = as_.secret_id
+           WHERE as_.agent_id = $1"#,
     )
     .bind(agent_id)
     .fetch_all(pool)
     .await
-    .context("querying Secrets by agentId")
+    .context("querying secrets by agent_id")
 }
 
 /// Find all enabled policy rules for a given user.
@@ -135,14 +124,14 @@ pub(crate) async fn find_policy_rules_by_user(
     user_id: &str,
 ) -> Result<Vec<PolicyRuleRow>> {
     sqlx::query_as::<_, PolicyRuleRow>(
-        r#"SELECT "hostPattern", "pathPattern", method, "agentId"
-           FROM "PolicyRule"
-           WHERE "userId" = $1 AND enabled = true AND action = 'block'"#,
+        r#"SELECT host_pattern, path_pattern, method, agent_id
+           FROM policy_rule
+           WHERE user_id = $1 AND enabled = true AND action = 'block'"#,
     )
     .bind(user_id)
     .fetch_all(pool)
     .await
-    .context("querying PolicyRules by userId")
+    .context("querying policy_rules by user_id")
 }
 
 // ── Vault connection queries ────────────────────────────────────────────
@@ -154,16 +143,16 @@ pub(crate) async fn find_vault_connection(
     provider: &str,
 ) -> Result<Option<VaultConnectionRow>> {
     sqlx::query_as::<_, VaultConnectionRow>(
-        r#"SELECT id, "userId", provider, name, status, "connectionData" FROM "VaultConnection" WHERE "userId" = $1 AND provider = $2 LIMIT 1"#,
+        r#"SELECT id, user_id, provider, name, status, connection_data FROM vault_connection WHERE user_id = $1 AND provider = $2 LIMIT 1"#,
     )
     .bind(user_id)
     .bind(provider)
     .fetch_optional(pool)
     .await
-    .context("querying VaultConnection by userId + provider")
+    .context("querying vault_connection by user_id + provider")
 }
 
-/// Upsert a vault connection (insert or update on userId + provider conflict).
+/// Upsert a vault connection (insert or update on user_id + provider conflict).
 pub(crate) async fn upsert_vault_connection(
     pool: &PgPool,
     user_id: &str,
@@ -172,10 +161,10 @@ pub(crate) async fn upsert_vault_connection(
     connection_data: Option<&serde_json::Value>,
 ) -> Result<()> {
     sqlx::query(
-        r#"INSERT INTO "VaultConnection" (id, "userId", provider, status, "connectionData", "createdAt", "updatedAt")
+        r#"INSERT INTO vault_connection (id, user_id, provider, status, connection_data, created_at, updated_at)
            VALUES (gen_random_uuid()::text, $1, $2, $3, $4, NOW(), NOW())
-           ON CONFLICT ("userId", provider)
-           DO UPDATE SET status = $3, "connectionData" = $4, "updatedAt" = NOW()"#,
+           ON CONFLICT (user_id, provider)
+           DO UPDATE SET status = $3, connection_data = $4, updated_at = NOW()"#,
     )
     .bind(user_id)
     .bind(provider)
@@ -183,11 +172,11 @@ pub(crate) async fn upsert_vault_connection(
     .bind(connection_data)
     .execute(pool)
     .await
-    .context("upserting VaultConnection")?;
+    .context("upserting vault_connection")?;
     Ok(())
 }
 
-/// Update only the connectionData JSON for an existing vault connection.
+/// Update only the connection_data JSON for an existing vault connection.
 pub(crate) async fn update_vault_connection_data(
     pool: &PgPool,
     user_id: &str,
@@ -195,14 +184,14 @@ pub(crate) async fn update_vault_connection_data(
     connection_data: &serde_json::Value,
 ) -> Result<()> {
     sqlx::query(
-        r#"UPDATE "VaultConnection" SET "connectionData" = $3, "updatedAt" = NOW() WHERE "userId" = $1 AND provider = $2"#,
+        r#"UPDATE vault_connection SET connection_data = $3, updated_at = NOW() WHERE user_id = $1 AND provider = $2"#,
     )
     .bind(user_id)
     .bind(provider)
     .bind(connection_data)
     .execute(pool)
     .await
-    .context("updating VaultConnection connectionData")?;
+    .context("updating vault_connection connection_data")?;
     Ok(())
 }
 
@@ -212,11 +201,11 @@ pub(crate) async fn delete_vault_connection(
     user_id: &str,
     provider: &str,
 ) -> Result<()> {
-    sqlx::query(r#"DELETE FROM "VaultConnection" WHERE "userId" = $1 AND provider = $2"#)
+    sqlx::query(r#"DELETE FROM vault_connection WHERE user_id = $1 AND provider = $2"#)
         .bind(user_id)
         .bind(provider)
         .execute(pool)
         .await
-        .context("deleting VaultConnection")?;
+        .context("deleting vault_connection")?;
     Ok(())
 }
