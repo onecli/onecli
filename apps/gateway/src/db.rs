@@ -41,10 +41,14 @@ pub(crate) struct SecretRow {
 /// A policy rule row from the `policy_rule` table.
 #[derive(Debug, FromRow)]
 pub(crate) struct PolicyRuleRow {
+    pub id: String,
     pub host_pattern: String,
     pub path_pattern: Option<String>,
     pub method: Option<String>,
     pub agent_id: Option<String>,
+    pub action: String,
+    pub rate_limit: Option<i32>,
+    pub rate_limit_window: Option<String>,
 }
 
 /// A user row from the `user` table.
@@ -124,9 +128,11 @@ pub(crate) async fn find_policy_rules_by_user(
     user_id: &str,
 ) -> Result<Vec<PolicyRuleRow>> {
     sqlx::query_as::<_, PolicyRuleRow>(
-        r#"SELECT host_pattern, path_pattern, method, agent_id
+        r#"SELECT id, host_pattern, path_pattern, method, agent_id,
+                  action, rate_limit, rate_limit_window
            FROM policy_rule
-           WHERE user_id = $1 AND enabled = true AND action = 'block'"#,
+           WHERE user_id = $1 AND enabled = true
+             AND action IN ('block', 'rate_limit')"#,
     )
     .bind(user_id)
     .fetch_all(pool)

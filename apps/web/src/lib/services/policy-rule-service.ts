@@ -19,6 +19,8 @@ export const listPolicyRules = async (userId: string) => {
       action: true,
       enabled: true,
       agentId: true,
+      rateLimit: true,
+      rateLimitWindow: true,
       createdAt: true,
     },
     orderBy: { createdAt: "desc" },
@@ -49,6 +51,10 @@ export const createPolicyRule = async (
       action: input.action,
       enabled: input.enabled,
       agentId: input.agentId || null,
+      rateLimit:
+        input.action === "rate_limit" ? (input.rateLimit ?? null) : null,
+      rateLimitWindow:
+        input.action === "rate_limit" ? (input.rateLimitWindow ?? null) : null,
       userId,
     },
     select: {
@@ -60,6 +66,8 @@ export const createPolicyRule = async (
       action: true,
       enabled: true,
       agentId: true,
+      rateLimit: true,
+      rateLimitWindow: true,
       createdAt: true,
     },
   });
@@ -94,9 +102,19 @@ export const updatePolicyRule = async (
   if (input.pathPattern !== undefined)
     data.pathPattern = input.pathPattern?.trim() || null;
   if (input.method !== undefined) data.method = input.method || null;
-  if (input.action !== undefined) data.action = input.action;
+  if (input.action !== undefined) {
+    data.action = input.action;
+    // Clear rate limit fields when switching to block
+    if (input.action === "block") {
+      data.rateLimit = null;
+      data.rateLimitWindow = null;
+    }
+  }
   if (input.enabled !== undefined) data.enabled = input.enabled;
   if (input.agentId !== undefined) data.agentId = input.agentId || null;
+  if (input.rateLimit !== undefined) data.rateLimit = input.rateLimit;
+  if (input.rateLimitWindow !== undefined)
+    data.rateLimitWindow = input.rateLimitWindow;
 
   await db.policyRule.update({
     where: { id: ruleId },

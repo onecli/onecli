@@ -41,7 +41,18 @@
     },
     "@onecli/gateway#dev": {
       "cache": false,
-      "persistent": true
+      "persistent": true,
+      "passThroughEnv": [
+        "EDITION",
+        "DATABASE_URL",
+        "SECRET_ENCRYPTION_KEY",
+        "KMS_KEY_ARN",
+        "AWS_REGION",
+        "REDIS_HOST",
+        "REDIS_PORT",
+        "REDIS_PASSWORD",
+        "REDIS_TLS"
+      ]
     },
     "@onecli/gateway#check": {
       "inputs": ["src/**", "Cargo.toml"]

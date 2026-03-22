@@ -8,7 +8,7 @@
 use base64::Engine;
 use hyper::header::{HeaderName, HeaderValue};
 use hyper::Request;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use tracing::warn;
 
 use crate::vault::VaultCredential;
@@ -16,7 +16,7 @@ use crate::vault::VaultCredential;
 // ── Data types ──────────────────────────────────────────────────────────
 
 /// A single injection instruction returned by the API.
-#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "action", rename_all = "snake_case")]
 #[allow(clippy::enum_variant_names)] // all variants operate on headers — the suffix is intentional
 pub(crate) enum Injection {
@@ -37,7 +37,7 @@ pub(crate) enum Injection {
 }
 
 /// A rule matching a path pattern with header injection instructions.
-#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub(crate) struct InjectionRule {
     pub path_pattern: String,
     pub injections: Vec<Injection>,

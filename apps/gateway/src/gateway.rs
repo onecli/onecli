@@ -12,7 +12,6 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use axum::Router;
-use dashmap::DashMap;
 use futures_util::TryStreamExt;
 use http_body_util::{Either, Full, StreamBody};
 use hyper::body::{Bytes, Frame, Incoming};
@@ -29,9 +28,10 @@ use tracing::{info, warn};
 
 use crate::auth::AuthUser;
 use crate::ca::CertificateAuthority;
-use crate::connect::{self, CachedConnect, ConnectCacheKey, ConnectError, PolicyEngine};
+use crate::cache::CacheStore;
+use crate::connect::{self, ConnectError, PolicyEngine};
 use crate::inject::{self, InjectionRule};
-use crate::policy::{self, PolicyRule};
+use crate::policy::{self, PolicyDecision, PolicyRule};
 use crate::vault;
 
 // ── GatewayState ───────────────────────────────────────────────────────
@@ -42,7 +42,7 @@ pub(crate) struct GatewayState {
     pub ca: Arc<CertificateAuthority>,
     pub http_client: reqwest::Client,
     pub policy_engine: Arc<PolicyEngine>,
-    pub connect_cache: Arc<DashMap<ConnectCacheKey, CachedConnect>>,
+    pub cache: Arc<dyn CacheStore>,
     /// Provider-agnostic vault service for credential fetching.
     pub vault_service: Arc<vault::VaultService>,
 }
@@ -60,6 +60,7 @@ impl GatewayServer {
         port: u16,
         policy_engine: Arc<PolicyEngine>,
         vault_service: Arc<vault::VaultService>,
+        cache: Arc<dyn CacheStore>,
     ) -> Self {
         let state = GatewayState {
             ca: Arc::new(ca),
@@ -70,7 +71,7 @@ impl GatewayServer {
                 .build()
                 .expect("build HTTP client"),
             policy_engine,
-            connect_cache: Arc::new(DashMap::new()),
+            cache,
             vault_service,
         };
 
@@ -219,7 +220,7 @@ async fn handle_connect(
     let (mut intercept, mut injection_rules, policy_rules, user_id) = if let Some(ref token) =
         agent_token
     {
-        match connect::resolve(token, &hostname, &state.policy_engine, &state.connect_cache).await {
+        match connect::resolve(token, &hostname, &state.policy_engine, &*state.cache).await {
             Ok(resp) => (
                 resp.intercept,
                 resp.injection_rules,
@@ -271,6 +272,8 @@ async fn handle_connect(
 
     let ca = Arc::clone(&state.ca);
     let http_client = state.http_client.clone();
+    let cache = Arc::clone(&state.cache);
+    let agent_token_owned = agent_token.clone().unwrap_or_default();
 
     tokio::spawn(async move {
         match hyper::upgrade::on(req).await {
@@ -283,6 +286,8 @@ async fn handle_connect(
                         http_client,
                         injection_rules,
                         policy_rules,
+                        cache,
+                        agent_token_owned,
                     )
                     .await
                 } else {
@@ -306,6 +311,7 @@ async fn handle_connect(
 
 /// MITM: terminate TLS with the client using a generated leaf cert,
 /// then forward HTTP requests to the real server.
+#[allow(clippy::too_many_arguments)]
 async fn mitm(
     upgraded: hyper::upgrade::Upgraded,
     host: &str,
@@ -313,6 +319,8 @@ async fn mitm(
     http_client: reqwest::Client,
     injection_rules: Vec<InjectionRule>,
     policy_rules: Vec<PolicyRule>,
+    cache: Arc<dyn CacheStore>,
+    agent_token: String,
 ) -> Result<()> {
     let hostname = strip_port(host);
 
@@ -332,6 +340,7 @@ async fn mitm(
     let host_owned = host.to_string();
     let injection_rules = Arc::new(injection_rules);
     let policy_rules = Arc::new(policy_rules);
+    let agent_token = Arc::new(agent_token);
     let io = TokioIo::new(tls_stream);
 
     http1::Builder::new()
@@ -344,7 +353,12 @@ async fn mitm(
                 let client = http_client.clone();
                 let inj_rules = Arc::clone(&injection_rules);
                 let pol_rules = Arc::clone(&policy_rules);
-                async move { forward_request(req, &host, client, &inj_rules, &pol_rules).await }
+                let cache = Arc::clone(&cache);
+                let token = Arc::clone(&agent_token);
+                async move {
+                    forward_request(req, &host, client, &inj_rules, &pol_rules, &*cache, &token)
+                        .await
+                }
             }),
         )
         .await
@@ -354,13 +368,15 @@ async fn mitm(
 /// Forward a single HTTP request to the real upstream server and stream the response back.
 /// Both request and response bodies are streamed — no full buffering in memory.
 /// This is critical for SSE (Server-Sent Events) and large payloads.
-/// Checks policy rules first (returns 403 if blocked), then applies injection rules.
+/// Checks policy rules first (returns 403/429), then applies injection rules.
 async fn forward_request(
     req: Request<Incoming>,
     host: &str,
     http_client: reqwest::Client,
     injection_rules: &[InjectionRule],
     policy_rules: &[PolicyRule],
+    cache: &dyn CacheStore,
+    agent_token: &str,
 ) -> anyhow::Result<
     Response<
         Either<
@@ -378,25 +394,50 @@ async fn forward_request(
     let url = format!("https://{host}{path}");
 
     // Check policy rules before forwarding
-    if policy::is_blocked(method.as_str(), &path, policy_rules) {
-        warn!(
-            method = %method,
-            url = %url,
-            "BLOCKED by policy rule"
-        );
-        let body = serde_json::json!({
-            "error": "blocked_by_policy",
-            "message": "This request was blocked by an OneCLI policy rule. Check your rules at https://onecli.sh or your OneCLI dashboard.",
-            "method": method.as_str(),
-            "path": path,
-        })
-        .to_string();
-        let mut response = Response::new(Either::Left(Full::new(Bytes::from(body))));
-        *response.status_mut() = StatusCode::FORBIDDEN;
-        response
-            .headers_mut()
-            .insert("content-type", HeaderValue::from_static("application/json"));
-        return Ok(response);
+    match policy::evaluate(method.as_str(), &path, policy_rules, agent_token, cache).await {
+        PolicyDecision::Blocked => {
+            warn!(method = %method, url = %url, "BLOCKED by policy rule");
+            let body = serde_json::json!({
+                "error": "blocked_by_policy",
+                "message": "This request was blocked by an OneCLI policy rule. Check your rules at https://onecli.sh or your OneCLI dashboard.",
+                "method": method.as_str(),
+                "path": path,
+            })
+            .to_string();
+            let mut response = Response::new(Either::Left(Full::new(Bytes::from(body))));
+            *response.status_mut() = StatusCode::FORBIDDEN;
+            response
+                .headers_mut()
+                .insert("content-type", HeaderValue::from_static("application/json"));
+            return Ok(response);
+        }
+        PolicyDecision::RateLimited {
+            limit,
+            window,
+            retry_after_secs,
+        } => {
+            warn!(method = %method, url = %url, limit, window, "RATE LIMITED by policy rule");
+            let body = serde_json::json!({
+                "error": "rate_limited",
+                "message": "Rate limit exceeded. This request was throttled by an OneCLI policy rule. Check your rules at https://onecli.sh or your OneCLI dashboard.",
+                "method": method.as_str(),
+                "path": path,
+                "limit": limit,
+                "window": window,
+                "retry_after_seconds": retry_after_secs,
+            })
+            .to_string();
+            let mut response = Response::new(Either::Left(Full::new(Bytes::from(body))));
+            *response.status_mut() = StatusCode::TOO_MANY_REQUESTS;
+            response
+                .headers_mut()
+                .insert("content-type", HeaderValue::from_static("application/json"));
+            if let Ok(val) = HeaderValue::from_str(&retry_after_secs.to_string()) {
+                response.headers_mut().insert("retry-after", val);
+            }
+            return Ok(response);
+        }
+        PolicyDecision::Allow => {}
     }
 
     let (parts, body) = req.into_parts();

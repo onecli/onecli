@@ -6,6 +6,14 @@ mod auth;
 mod auth;
 
 mod ca;
+
+#[cfg(not(feature = "cloud"))]
+mod cache;
+
+#[cfg(feature = "cloud")]
+#[path = "cloud/cache.rs"]
+mod cache;
+
 mod connect;
 
 #[cfg(not(feature = "cloud"))]
@@ -122,10 +130,14 @@ async fn main() -> Result<()> {
         policy_engine.pool.clone(),
     ));
 
+    // Initialize cache store
+    // OSS: in-memory DashMap. Cloud: Redis (ElastiCache with TLS + AUTH).
+    let cache = cache::create_store().await?;
+
     info!(port = cli.port, "gateway ready");
 
     // Start the gateway server (blocks forever)
-    let server = GatewayServer::new(ca, cli.port, policy_engine, vault_service);
+    let server = GatewayServer::new(ca, cli.port, policy_engine, vault_service, cache);
     server.run().await
 }
 

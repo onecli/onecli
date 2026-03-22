@@ -37,6 +37,16 @@ export const RuleCard = ({ rule, agents, onUpdate }: RuleCardProps) => {
     ? agents.find((a) => a.id === rule.agentId)?.name
     : null;
 
+  const actionLabel = rule.action === "rate_limit" ? "rate limit" : rule.action;
+
+  const rateLimitLabel =
+    rule.action === "rate_limit" && rule.rateLimit && rule.rateLimitWindow
+      ? `${rule.rateLimit}/${
+          { minute: "min", hour: "hr", day: "day" }[rule.rateLimitWindow] ??
+          rule.rateLimitWindow
+        }`
+      : null;
+
   const handleDelete = async () => {
     setDeleting(true);
     try {
@@ -71,12 +81,25 @@ export const RuleCard = ({ rule, agents, onUpdate }: RuleCardProps) => {
           <div className="min-w-0 flex-1 space-y-3">
             <div className="flex items-center gap-2">
               <h3 className="text-sm font-medium">{rule.name}</h3>
-              <Badge variant="destructive" className="text-xs">
-                {rule.action}
+              <Badge
+                variant={
+                  rule.action === "rate_limit" ? "secondary" : "destructive"
+                }
+                className={`text-xs ${rule.action === "rate_limit" ? "bg-amber-500/15 text-amber-600 dark:text-amber-400" : ""}`}
+              >
+                {actionLabel}
               </Badge>
               {rule.method && (
                 <Badge variant="outline" className="font-mono text-xs">
                   {rule.method}
+                </Badge>
+              )}
+              {rateLimitLabel && (
+                <Badge
+                  variant="outline"
+                  className="text-muted-foreground text-xs"
+                >
+                  {rateLimitLabel}
                 </Badge>
               )}
             </div>

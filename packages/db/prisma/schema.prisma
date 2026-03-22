@@ -70,19 +70,21 @@ model Secret {
 }
 
 model PolicyRule {
-  id          String   @id @default(cuid())
-  userId      String   @map("user_id")
-  name        String
-  hostPattern String   @map("host_pattern") // "gmail.googleapis.com" or "*.googleapis.com"
-  pathPattern String?  @map("path_pattern") // "/gmail/v1/users/me/messages/send" or "/gmail/*"
-  method      String? // "POST", null = all methods
-  action      String // "block"
-  enabled     Boolean
-  agentId     String?  @map("agent_id") // null = all agents, set = one agent only
-  createdAt   DateTime @default(now()) @map("created_at")
-  updatedAt   DateTime @updatedAt @map("updated_at")
-  user        User     @relation(fields: [userId], references: [id])
-  agent       Agent?   @relation(fields: [agentId], references: [id], onDelete: Cascade)
+  id              String   @id @default(cuid())
+  userId          String   @map("user_id")
+  name            String
+  hostPattern     String   @map("host_pattern") // "gmail.googleapis.com" or "*.googleapis.com"
+  pathPattern     String?  @map("path_pattern") // "/gmail/v1/users/me/messages/send" or "/gmail/*"
+  method          String? // "POST", null = all methods
+  action          String // "block" | "rate_limit"
+  enabled         Boolean
+  agentId         String?  @map("agent_id") // null = all agents, set = one agent only
+  rateLimit       Int?     @map("rate_limit") // max requests per window (only for rate_limit action)
+  rateLimitWindow String?  @map("rate_limit_window") // "minute" | "hour" | "day"
+  createdAt       DateTime @default(now()) @map("created_at")
+  updatedAt       DateTime @updatedAt @map("updated_at")
+  user            User     @relation(fields: [userId], references: [id])
+  agent           Agent?   @relation(fields: [agentId], references: [id], onDelete: Cascade)
 
   @@index([userId])
   @@map("policy_rule")

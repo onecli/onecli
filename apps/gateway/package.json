@@ -4,7 +4,7 @@
   "private": true,
   "scripts": {
     "build": "cargo build --release",
-    "dev": "cargo run",
+    "dev": "cargo run --features \"${EDITION:-}\"",
     "check": "cargo clippy -- -D warnings && cargo fmt --check",
     "lint": "cargo fmt --check",
     "format:check": "cargo fmt --check",

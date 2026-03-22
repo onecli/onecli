@@ -5,21 +5,20 @@
 //! with a configurable TTL.
 
 use std::sync::Arc;
-use std::time::{Duration, Instant};
 
+use crate::cache::CacheStore;
 use crate::crypto::CryptoService;
 use crate::db;
 use crate::inject::{Injection, InjectionRule};
-use crate::policy::PolicyRule;
-use dashmap::DashMap;
+use crate::policy::{PolicyAction, PolicyRule};
 
 /// How long to cache resolved connect responses before re-checking.
-const CACHE_TTL: Duration = Duration::from_secs(60);
+const CACHE_TTL_SECS: u64 = 60;
 
 // ── Data types ──────────────────────────────────────────────────────────
 
 /// Result of policy resolution for a CONNECT request.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub(crate) struct ConnectResponse {
     pub intercept: bool,
     pub injection_rules: Vec<InjectionRule>,
@@ -35,17 +34,6 @@ pub(crate) enum ConnectError {
     /// An internal error occurred (DB query, decryption, etc.).
     Internal(String),
 }
-
-// ── Cache ───────────────────────────────────────────────────────────────
-
-/// Cached connect response with expiry.
-pub(crate) struct CachedConnect {
-    response: ConnectResponse,
-    expires_at: Instant,
-}
-
-/// Cache key: (agent_token, host).
-pub(crate) type ConnectCacheKey = (String, String);
 
 // ── PolicyEngine ───────────────────────────────────────────────────
 
@@ -94,9 +82,31 @@ impl PolicyEngine {
                 host_matches(hostname, &r.host_pattern)
                     && (r.agent_id.is_none() || r.agent_id.as_deref() == Some(&agent.id))
             })
-            .map(|r| PolicyRule {
-                path_pattern: r.path_pattern.unwrap_or_else(|| "*".to_string()),
-                method: r.method,
+            .filter_map(|r| {
+                let action = match r.action.as_str() {
+                    "block" => PolicyAction::Block,
+                    "rate_limit" => {
+                        let max_requests = r.rate_limit.filter(|&v| v > 0)? as u64;
+                        let window = r.rate_limit_window.as_deref()?;
+                        let window_secs = match window {
+                            "minute" => 60,
+                            "hour" => 3600,
+                            "day" => 86400,
+                            _ => return None,
+                        };
+                        PolicyAction::RateLimit {
+                            rule_id: r.id.clone(),
+                            max_requests,
+                            window_secs,
+                        }
+                    }
+                    _ => return None,
+                };
+                Some(PolicyRule {
+                    path_pattern: r.path_pattern.unwrap_or_else(|| "*".to_string()),
+                    method: r.method,
+                    action,
+                })
             })
             .collect();
 
@@ -139,23 +149,21 @@ impl PolicyEngine {
 
 // ── Cached resolution ───────────────────────────────────────────────────
 
-/// Resolve with caching. Checks the cache first, then queries the DB if needed.
+/// Resolve with caching. Checks the generic `CacheStore` first, then
+/// queries the DB if needed. The cache key is namespaced as
+/// `connect:{agent_token}:{hostname}`.
 pub(crate) async fn resolve(
     agent_token: &str,
     hostname: &str,
     policy_engine: &PolicyEngine,
-    cache: &DashMap<ConnectCacheKey, CachedConnect>,
+    cache: &dyn CacheStore,
 ) -> Result<ConnectResponse, ConnectError> {
-    let cache_key = (agent_token.to_string(), hostname.to_string());
+    let cache_key = format!("connect:{agent_token}:{hostname}");
 
     // Check cache
-    if let Some(entry) = cache.get(&cache_key) {
-        if entry.expires_at > Instant::now() {
-            return Ok(entry.response.clone());
-        }
+    if let Some(response) = cache.get::<ConnectResponse>(&cache_key).await {
+        return Ok(response);
     }
-    // Drop the ref before the await (entry borrows from DashMap)
-    cache.remove(&cache_key);
 
     // Query the database
     let response = policy_engine
@@ -163,13 +171,7 @@ pub(crate) async fn resolve(
         .await?;
 
     // Cache the response
-    cache.insert(
-        cache_key,
-        CachedConnect {
-            response: response.clone(),
-            expires_at: Instant::now() + CACHE_TTL,
-        },
-    );
+    cache.set(&cache_key, &response, CACHE_TTL_SECS).await;
 
     Ok(response)
 }
@@ -258,11 +260,13 @@ fn build_injections(
 #[cfg(test)]
 mod tests {
     use super::*;
+    async fn new_store() -> std::sync::Arc<dyn crate::cache::CacheStore> {
+        crate::cache::create_store().await.unwrap()
+    }
 
-    #[test]
-    fn cache_hit_returns_cached_response() {
-        let cache: DashMap<ConnectCacheKey, CachedConnect> = DashMap::new();
-        let key = ("aoc_token1".to_string(), "api.anthropic.com".to_string());
+    #[tokio::test]
+    async fn cache_hit_returns_cached_response() {
+        let store = new_store().await;
         let response = ConnectResponse {
             intercept: true,
             injection_rules: vec![],
@@ -270,39 +274,20 @@ mod tests {
             user_id: None,
         };
 
-        cache.insert(
-            key.clone(),
-            CachedConnect {
-                response: response.clone(),
-                expires_at: Instant::now() + Duration::from_secs(30),
-            },
-        );
+        store
+            .set("connect:aoc_token1:api.anthropic.com", &response, 60)
+            .await;
 
-        let entry = cache.get(&key).expect("cache hit");
-        assert!(entry.expires_at > Instant::now());
-        assert_eq!(entry.response, response);
+        let cached: Option<ConnectResponse> =
+            store.get("connect:aoc_token1:api.anthropic.com").await;
+        assert_eq!(cached, Some(response));
     }
 
-    #[test]
-    fn cache_expired_entry_is_stale() {
-        let cache: DashMap<ConnectCacheKey, CachedConnect> = DashMap::new();
-        let key = ("aoc_token1".to_string(), "api.anthropic.com".to_string());
-
-        cache.insert(
-            key.clone(),
-            CachedConnect {
-                response: ConnectResponse {
-                    intercept: true,
-                    injection_rules: vec![],
-                    policy_rules: vec![],
-                    user_id: None,
-                },
-                expires_at: Instant::now() - Duration::from_secs(1), // expired
-            },
-        );
-
-        let entry = cache.get(&key).expect("cache has entry");
-        assert!(entry.expires_at < Instant::now(), "entry should be expired");
+    #[tokio::test]
+    async fn cache_miss_returns_none() {
+        let store = new_store().await;
+        let cached: Option<ConnectResponse> = store.get("connect:missing:host").await;
+        assert!(cached.is_none());
     }
 
     // ── host_matches ────────────────────────────────────────────────────

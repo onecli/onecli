@@ -19,6 +19,8 @@ export interface PolicyRuleItem {
   action: string;
   enabled: boolean;
   agentId: string | null;
+  rateLimit: number | null;
+  rateLimitWindow: string | null;
   createdAt: Date;
 }
 
