@@ -1,6 +1,7 @@
 "use client";
 
-import { ChevronsUpDown, LogOut } from "lucide-react";
+import { useState } from "react";
+import { ChevronsUpDown, Loader2, LogOut } from "lucide-react";
 
 import { useAuth } from "@/providers/auth-provider";
 import { Avatar, AvatarFallback } from "@onecli/ui/components/avatar";
@@ -22,6 +23,7 @@ import {
 export const NavUser = () => {
   const { isMobile } = useSidebar();
   const { user, signOut } = useAuth();
+  const [signingOut, setSigningOut] = useState(false);
 
   const displayName = user?.name ?? user?.email ?? "User";
   const initials = displayName
@@ -67,9 +69,15 @@ export const NavUser = () => {
               </div>
             </DropdownMenuLabel>
             <DropdownMenuSeparator />
-            <DropdownMenuItem onClick={() => signOut()}>
-              <LogOut />
-              Sign out
+            <DropdownMenuItem
+              disabled={signingOut}
+              onClick={async () => {
+                setSigningOut(true);
+                await signOut();
+              }}
+            >
+              {signingOut ? <Loader2 className="animate-spin" /> : <LogOut />}
+              {signingOut ? "Signing out..." : "Sign out"}
             </DropdownMenuItem>
           </DropdownMenuContent>
         </DropdownMenu>

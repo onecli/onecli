@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import Image from "next/image";
 import { Button } from "@onecli/ui/components/button";
@@ -9,6 +9,7 @@ import { useAuth } from "@/providers/auth-provider";
 export const LoginContent = () => {
   const router = useRouter();
   const { isAuthenticated, isLoading, user, signIn, signOut } = useAuth();
+  const [signingIn, setSigningIn] = useState(false);
 
   useEffect(() => {
     if (!isAuthenticated || !user) return;
@@ -77,10 +78,14 @@ export const LoginContent = () => {
               size="lg"
               variant="outline"
               className="w-full gap-2 text-base bg-white text-black hover:bg-gray-100 dark:bg-white dark:text-black dark:hover:bg-gray-100"
-              onClick={() => signIn()}
+              loading={signingIn}
+              onClick={() => {
+                setSigningIn(true);
+                signIn();
+              }}
             >
               <GoogleIcon />
-              Continue with Google
+              {signingIn ? "Redirecting..." : "Continue with Google"}
             </Button>
             <p className="text-muted-foreground mt-4 text-center text-xs whitespace-nowrap">
               By continuing, you acknowledge OneCLI&apos;s{" "}

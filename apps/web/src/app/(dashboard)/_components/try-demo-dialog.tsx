@@ -20,19 +20,22 @@ interface TryDemoDialogProps {
 }
 
 export const TryDemoDialog = ({ open, onOpenChange }: TryDemoDialogProps) => {
-  const [agentToken, setAgentToken] = useState<string | null>(null);
+  const [demoInfo, setDemoInfo] = useState<{
+    agentToken: string;
+    gatewayUrl: string;
+  } | null>(null);
   const [loading, setLoading] = useState(false);
 
   useEffect(() => {
     if (!open) return;
     setLoading(true);
     getDemoInfo()
-      .then((info) => setAgentToken(info?.agentToken ?? null))
+      .then((info) => setDemoInfo(info))
       .finally(() => setLoading(false));
   }, [open]);
 
-  const command = agentToken
-    ? `curl -k -x http://x:${agentToken}@localhost:10255 -H "Authorization: Bearer FAKE_TOKEN" https://httpbin.org/anything`
+  const command = demoInfo
+    ? `curl -k -x http://x:${demoInfo.agentToken}@${demoInfo.gatewayUrl} -H "Authorization: Bearer FAKE_TOKEN" https://httpbin.org/anything`
     : "";
 
   return (
