@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.4.2](https://github.com/onecli/onecli/compare/v1.4.1...v1.4.2) (2026-03-22)
+
+
+### Bug Fixes
+
+* rename indexes and foreign keys to snake_case ([#81](https://github.com/onecli/onecli/issues/81)) ([bc9705c](https://github.com/onecli/onecli/commit/bc9705c1d362537d124ab99d7d45cc88db4f9f7c))
+* route all server output through pino JSON in production ([#79](https://github.com/onecli/onecli/issues/79)) ([1d91ad1](https://github.com/onecli/onecli/commit/1d91ad110c4009a3c5a85a7a918e727079521ea7))
+
 ## [1.4.1](https://github.com/onecli/onecli/compare/v1.4.0...v1.4.1) (2026-03-20)
 
 
