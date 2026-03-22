@@ -21,7 +21,7 @@ pub(crate) struct CryptoService {
 
 impl CryptoService {
     /// Create a CryptoService from the `SECRET_ENCRYPTION_KEY` environment variable.
-    pub fn from_env() -> Result<Self> {
+    pub async fn from_env() -> Result<Self> {
         let key_b64 = std::env::var("SECRET_ENCRYPTION_KEY")
             .context("SECRET_ENCRYPTION_KEY env var not set")?;
         Self::from_base64_key(&key_b64)
@@ -51,7 +51,7 @@ impl CryptoService {
     ///
     /// Note: `ring` expects ciphertext || tag concatenated (not separate).
     /// Node.js outputs them separately, so we concatenate before decrypting.
-    pub fn decrypt(&self, encrypted: &str) -> Result<String> {
+    pub async fn decrypt(&self, encrypted: &str) -> Result<String> {
         let parts: Vec<&str> = encrypted.splitn(3, ':').collect();
         if parts.len() != 3 {
             bail!("invalid encrypted format: expected iv:authTag:ciphertext");
@@ -139,49 +139,49 @@ mod tests {
         )
     }
 
-    #[test]
-    fn decrypt_round_trip() {
+    #[tokio::test]
+    async fn decrypt_round_trip() {
         let key_b64 = random_key_b64();
         let plaintext = "sk-ant-api03-test-key-1234567890";
 
         let encrypted = encrypt_like_nodejs(&key_b64, plaintext);
         let service = CryptoService::from_base64_key(&key_b64).expect("create service");
-        let decrypted = service.decrypt(&encrypted).expect("decrypt");
+        let decrypted = service.decrypt(&encrypted).await.expect("decrypt");
 
         assert_eq!(decrypted, plaintext);
     }
 
-    #[test]
-    fn decrypt_empty_plaintext() {
+    #[tokio::test]
+    async fn decrypt_empty_plaintext() {
         let key_b64 = random_key_b64();
         let encrypted = encrypt_like_nodejs(&key_b64, "");
         let service = CryptoService::from_base64_key(&key_b64).expect("create service");
-        let decrypted = service.decrypt(&encrypted).expect("decrypt");
+        let decrypted = service.decrypt(&encrypted).await.expect("decrypt");
         assert_eq!(decrypted, "");
     }
 
-    #[test]
-    fn decrypt_unicode() {
+    #[tokio::test]
+    async fn decrypt_unicode() {
         let key_b64 = random_key_b64();
         let plaintext = "héllo wörld 🔑";
         let encrypted = encrypt_like_nodejs(&key_b64, plaintext);
         let service = CryptoService::from_base64_key(&key_b64).expect("create service");
-        let decrypted = service.decrypt(&encrypted).expect("decrypt");
+        let decrypted = service.decrypt(&encrypted).await.expect("decrypt");
         assert_eq!(decrypted, plaintext);
     }
 
-    #[test]
-    fn decrypt_wrong_key_fails() {
+    #[tokio::test]
+    async fn decrypt_wrong_key_fails() {
         let key1 = random_key_b64();
         let key2 = random_key_b64();
 
         let encrypted = encrypt_like_nodejs(&key1, "secret");
         let service = CryptoService::from_base64_key(&key2).expect("create service");
-        assert!(service.decrypt(&encrypted).is_err());
+        assert!(service.decrypt(&encrypted).await.is_err());
     }
 
-    #[test]
-    fn decrypt_corrupted_ciphertext_fails() {
+    #[tokio::test]
+    async fn decrypt_corrupted_ciphertext_fails() {
         let key_b64 = random_key_b64();
         let encrypted = encrypt_like_nodejs(&key_b64, "secret");
 
@@ -197,15 +197,15 @@ mod tests {
         let corrupted_encrypted = format!("{}:{}:{}", parts[0], parts[1], corrupted);
 
         let service = CryptoService::from_base64_key(&key_b64).expect("create service");
-        assert!(service.decrypt(&corrupted_encrypted).is_err());
+        assert!(service.decrypt(&corrupted_encrypted).await.is_err());
     }
 
-    #[test]
-    fn invalid_format_missing_parts() {
+    #[tokio::test]
+    async fn invalid_format_missing_parts() {
         let key_b64 = random_key_b64();
         let service = CryptoService::from_base64_key(&key_b64).expect("create service");
-        assert!(service.decrypt("only_one_part").is_err());
-        assert!(service.decrypt("two:parts").is_err());
+        assert!(service.decrypt("only_one_part").await.is_err());
+        assert!(service.decrypt("two:parts").await.is_err());
     }
 
     #[test]

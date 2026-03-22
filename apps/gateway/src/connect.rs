@@ -115,6 +115,7 @@ impl PolicyEngine {
             let decrypted = self
                 .crypto
                 .decrypt(&secret.encrypted_value)
+                .await
                 .map_err(|e| ConnectError::Internal(format!("decrypt error: {e}")))?;
 
             let path_pattern = secret.path_pattern.unwrap_or_else(|| "*".to_string());

@@ -98,6 +98,18 @@ export const SecretDialog = ({
   const [headerName, setHeaderName] = useState("Authorization");
   const [valueFormat, setValueFormat] = useState("Bearer {value}");
 
+  // Inline validation for host pattern
+  const hostPatternError = (() => {
+    const v = hostPattern.trim();
+    if (!v) return null;
+    if (v.includes("://"))
+      return "Enter a hostname, not a URL (remove http:// or https://)";
+    if (v.includes("/"))
+      return "Enter a hostname only (use the path pattern field for paths)";
+    if (v.includes(" ")) return "Hostname must not contain spaces";
+    return null;
+  })();
+
   // When opening, populate from secret (edit) or reset (create)
   useEffect(() => {
     if (open) {
@@ -132,10 +144,13 @@ export const SecretDialog = ({
   };
 
   const isValid = isEdit
-    ? hostPattern.trim() && (type !== "generic" || headerName.trim())
+    ? hostPattern.trim() &&
+      !hostPatternError &&
+      (type !== "generic" || headerName.trim())
     : name.trim() &&
       value.trim() &&
       hostPattern.trim() &&
+      !hostPatternError &&
       (type !== "generic" || headerName.trim());
 
   const handleSave = async () => {
@@ -265,11 +280,15 @@ export const SecretDialog = ({
                     value={hostPattern}
                     onChange={(e) => setHostPattern(e.target.value)}
                   />
-                  <p className="text-muted-foreground text-xs">
-                    The host this secret applies to. Use{" "}
-                    <code className="text-xs">*.example.com</code> for wildcard
-                    subdomains.
-                  </p>
+                  {hostPatternError ? (
+                    <p className="text-xs text-red-500">{hostPatternError}</p>
+                  ) : (
+                    <p className="text-muted-foreground text-xs">
+                      The host this secret applies to. Use{" "}
+                      <code className="text-xs">*.example.com</code> for
+                      wildcard subdomains.
+                    </p>
+                  )}
                 </div>
               )}
 
@@ -292,11 +311,17 @@ export const SecretDialog = ({
                             value={hostPattern}
                             onChange={(e) => setHostPattern(e.target.value)}
                           />
-                          <p className="text-muted-foreground text-xs">
-                            The host this secret applies to. Use{" "}
-                            <code className="text-xs">*.example.com</code> for
-                            wildcard subdomains.
-                          </p>
+                          {hostPatternError ? (
+                            <p className="text-xs text-red-500">
+                              {hostPatternError}
+                            </p>
+                          ) : (
+                            <p className="text-muted-foreground text-xs">
+                              The host this secret applies to. Use{" "}
+                              <code className="text-xs">*.example.com</code> for
+                              wildcard subdomains.
+                            </p>
+                          )}
                         </div>
                       )}
 

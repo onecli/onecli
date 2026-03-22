@@ -21,8 +21,12 @@
     "HOME",
     "GATEWAY_CA_PEM_FILE",
     "GATEWAY_CA_CERT",
+    "KMS_KEY_ARN",
     "GATEWAY_HOST",
     "GATEWAY_PORT",
+    "NEXT_PUBLIC_GATEWAY_URL",
+    "LOG_LEVEL",
+    "LOG_FORMAT",
     "AUTH_MODE"
   ],
   "tasks": {

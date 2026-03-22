@@ -14,6 +14,7 @@
   },
   "dependencies": {
     "@aws-amplify/adapter-nextjs": "^1.7.2",
+    "@aws-sdk/client-kms": "^3.1014.0",
     "@onecli/db": "workspace:*",
     "@onecli/ui": "workspace:*",
     "aws-amplify": "^6.16.2",
@@ -21,6 +22,7 @@
     "next": "16.1.0",
     "next-auth": "5.0.0-beta.30",
     "next-themes": "^0.4.6",
+    "pino": "^10.3.1",
     "react": "^19.2.0",
     "react-dom": "^19.2.0",
     "sonner": "^2.0.7",
@@ -35,6 +37,7 @@
     "@types/react": "19.2.2",
     "@types/react-dom": "19.2.2",
     "eslint": "^9.39.1",
+    "pino-pretty": "^13.1.3",
     "tailwindcss": "^4.1.18",
     "typescript": "5.9.2"
   }

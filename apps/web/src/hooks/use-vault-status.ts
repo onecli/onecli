@@ -21,10 +21,11 @@ export const useVaultStatus = <T = unknown>(provider: string = "bitwarden") => {
 
   const fetchStatus = useCallback(async () => {
     try {
-      const resp = await fetch(
-        `${GATEWAY_URL}/api/vault/${provider}/status`,
-        getGatewayFetchOptions(),
-      );
+      const { headers, credentials } = await getGatewayFetchOptions();
+      const resp = await fetch(`${GATEWAY_URL}/api/vault/${provider}/status`, {
+        headers,
+        credentials,
+      });
       if (resp.ok) {
         setStatus(await resp.json());
       }
@@ -60,14 +61,15 @@ export const useVaultPair = (
 
       setPairing(true);
       try {
+        const { headers, credentials } = await getGatewayFetchOptions();
         const resp = await fetch(`${GATEWAY_URL}/api/vault/${provider}/pair`, {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
+          headers: { "Content-Type": "application/json", ...headers },
+          credentials,
           body: JSON.stringify({
             psk_hex: pskHex,
             fingerprint_hex: fingerprintHex,
           }),
-          ...getGatewayFetchOptions(),
         });
 
         if (resp.ok) {
@@ -101,9 +103,11 @@ export const useVaultDisconnect = (
   const disconnect = useCallback(async () => {
     setDisconnecting(true);
     try {
+      const { headers, credentials } = await getGatewayFetchOptions();
       const resp = await fetch(`${GATEWAY_URL}/api/vault/${provider}/pair`, {
         method: "DELETE",
-        ...getGatewayFetchOptions(),
+        headers,
+        credentials,
       });
       if (resp.ok) {
         toast.success("Vault disconnected");

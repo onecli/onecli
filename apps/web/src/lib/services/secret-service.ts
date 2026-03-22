@@ -72,7 +72,7 @@ export const createSecret = async (
     }
   }
 
-  const encryptedValue = cryptoService.encrypt(value);
+  const encryptedValue = await cryptoService.encrypt(value);
   const preview = buildPreview(value);
   const pathPattern = input.pathPattern?.trim() || null;
   const injectionConfig =
@@ -141,7 +141,7 @@ export const updateSecret = async (
     const value = input.value.trim();
     if (!value)
       throw new ServiceError("BAD_REQUEST", "Secret value is required");
-    data.encryptedValue = cryptoService.encrypt(value);
+    data.encryptedValue = await cryptoService.encrypt(value);
 
     // Re-detect auth mode when value changes for Anthropic secrets
     if (secret.type === "anthropic") {

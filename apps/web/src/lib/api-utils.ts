@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { ServiceError, type ServiceErrorCode } from "@/lib/services/errors";
+import { logger } from "@/lib/logger";
 
 const STATUS_MAP: Record<ServiceErrorCode, number> = {
   NOT_FOUND: 404,
@@ -15,6 +16,7 @@ export const handleServiceError = (err: unknown): NextResponse => {
       { status: STATUS_MAP[err.code] },
     );
   }
+  logger.error({ err }, "unhandled api error");
   return NextResponse.json({ error: "Internal server error" }, { status: 500 });
 };
 

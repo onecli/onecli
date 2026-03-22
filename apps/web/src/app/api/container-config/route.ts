@@ -4,6 +4,7 @@ import { resolveApiAuth } from "@/lib/api-auth";
 import { unauthorized } from "@/lib/api-utils";
 import { loadCaCertificate } from "@/lib/gateway-ca";
 import { parseAnthropicMetadata } from "@/lib/validations/secret";
+import { logger } from "@/lib/logger";
 
 const GATEWAY_PORT = process.env.GATEWAY_PORT ?? "10255";
 const CA_CONTAINER_PATH = "/tmp/onecli-gateway-ca.pem";
@@ -107,7 +108,11 @@ export async function GET(request: NextRequest) {
       caCertificate,
       caCertificateContainerPath: CA_CONTAINER_PATH,
     });
-  } catch {
+  } catch (err) {
+    logger.error(
+      { err, route: "GET /api/container-config" },
+      "container config failed",
+    );
     return NextResponse.json(
       { error: "Internal server error" },
       { status: 500 },

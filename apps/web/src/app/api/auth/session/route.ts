@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { db } from "@onecli/db";
 import { getServerSession } from "@/lib/auth/server";
 import { cryptoService } from "@/lib/crypto";
+import { logger } from "@/lib/logger";
 import {
   DEFAULT_AGENT_NAME,
   DEMO_SECRET_NAME,
@@ -86,7 +87,7 @@ export const GET = async () => {
           data: {
             name: DEMO_SECRET_NAME,
             type: "generic",
-            encryptedValue: cryptoService.encrypt(DEMO_SECRET_VALUE),
+            encryptedValue: await cryptoService.encrypt(DEMO_SECRET_VALUE),
             hostPattern: "httpbin.org",
             pathPattern: "/anything/*",
             injectionConfig: {
@@ -113,7 +114,10 @@ export const GET = async () => {
       name: user.name,
     });
   } catch (err) {
-    console.error("[auth/session] Error:", err);
+    logger.error(
+      { err, route: "GET /api/auth/session" },
+      "session sync failed",
+    );
     return NextResponse.json(
       { error: "Internal server error" },
       { status: 500 },

@@ -1,15 +1,7 @@
 import { createCipheriv, createDecipheriv, randomBytes } from "crypto";
+import type { CryptoService } from "@/lib/crypto-types";
 
-/**
- * CryptoService interface for encrypting and decrypting secrets.
- *
- * OSS uses AES-256-GCM with a local key from SECRET_ENCRYPTION_KEY env var.
- * Cloud swaps this module via turbopack alias to use AWS KMS envelope encryption.
- */
-export interface CryptoService {
-  encrypt: (plaintext: string) => string;
-  decrypt: (encrypted: string) => string;
-}
+export type { CryptoService };
 
 const ALGORITHM = "aes-256-gcm";
 const IV_LENGTH = 12;
@@ -54,7 +46,7 @@ const getKey = (): Buffer => {
  * Encrypt a plaintext string using AES-256-GCM.
  * Returns a string in the format: {iv}:{authTag}:{ciphertext} (all base64-encoded).
  */
-const encrypt = (plaintext: string): string => {
+const encrypt = async (plaintext: string): Promise<string> => {
   const key = getKey();
   const iv = randomBytes(IV_LENGTH);
 
@@ -80,7 +72,7 @@ const encrypt = (plaintext: string): string => {
  * Decrypt a string produced by encrypt().
  * Expects format: {iv}:{authTag}:{ciphertext} (all base64-encoded).
  */
-const decrypt = (encrypted: string): string => {
+const decrypt = async (encrypted: string): Promise<string> => {
   const key = getKey();
   const [ivB64, authTagB64, ciphertextB64] = encrypted.split(":");
 

@@ -40,7 +40,7 @@ clap = { version = "4", features = ["derive"] }
 
 # Logging
 tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 
 # JWT validation
 jsonwebtoken = "9"
@@ -76,7 +76,16 @@ async-trait = "0.1"
 hex = "0.4"
 
 [features]
-cloud = []
+cloud = ["dep:aws-sdk-kms", "dep:aws-config"]
+
+[dependencies.aws-sdk-kms]
+version = "1"
+optional = true
+
+[dependencies.aws-config]
+version = "1"
+features = ["behavior-version-latest"]
+optional = true
 
 [dev-dependencies]
 tempfile = "3"

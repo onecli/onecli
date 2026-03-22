@@ -8,11 +8,27 @@ const injectionConfigSchema = z
   .nullable()
   .optional();
 
+/** Validates a host pattern is a hostname, not a URL or path. */
+const hostPatternSchema = z
+  .string()
+  .min(1, "Host pattern is required")
+  .max(1000)
+  .refine((v) => !v.includes("://"), {
+    message: "Enter a hostname, not a URL (remove http:// or https://)",
+  })
+  .refine((v) => !v.includes("/"), {
+    message:
+      "Enter a hostname only, not a path (use the path pattern field for paths)",
+  })
+  .refine((v) => !v.includes(" "), {
+    message: "Host pattern must not contain spaces",
+  });
+
 export const createSecretSchema = z.object({
   name: z.string().trim().min(1).max(255),
   type: z.enum(["anthropic", "generic"]),
   value: z.string().min(1).max(10000),
-  hostPattern: z.string().min(1).max(1000),
+  hostPattern: hostPatternSchema,
   pathPattern: z.string().max(1000).optional(),
   injectionConfig: injectionConfigSchema,
 });
@@ -22,7 +38,7 @@ export type CreateSecretInput = z.infer<typeof createSecretSchema>;
 export const updateSecretSchema = z
   .object({
     value: z.string().min(1).max(10000).optional(),
-    hostPattern: z.string().min(1).max(1000).optional(),
+    hostPattern: hostPatternSchema.optional(),
     pathPattern: z.string().max(1000).nullable().optional(),
     injectionConfig: injectionConfigSchema,
   })

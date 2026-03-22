@@ -53,10 +53,25 @@ pub struct CertificateAuthority {
 }
 
 impl CertificateAuthority {
-    /// Load an existing CA from disk or generate a new one.
+    /// Load an existing CA from environment variables, disk, or generate a new one.
     ///
-    /// CA files are stored at `{data_dir}/gateway/ca.key` and `{data_dir}/gateway/ca.pem`.
+    /// Priority:
+    /// 1. `GATEWAY_CA_KEY` + `GATEWAY_CA_CERT` env vars (cloud: injected from Secrets Manager)
+    /// 2. Files at `{data_dir}/gateway/ca.key` and `ca.pem` (OSS: persisted on disk)
+    /// 3. Generate a new CA and persist to disk (OSS: first startup)
     pub async fn load_or_generate(data_dir: &Path) -> Result<Self> {
+        // Check env vars first (cloud mode — CA injected by ECS from Secrets Manager)
+        if let (Ok(key_pem), Ok(cert_pem)) = (
+            std::env::var("GATEWAY_CA_KEY"),
+            std::env::var("GATEWAY_CA_CERT"),
+        ) {
+            if !key_pem.is_empty() && !cert_pem.is_empty() {
+                info!("loading CA from environment variables");
+                return Self::load_from_pem(&key_pem, &cert_pem);
+            }
+        }
+
+        // Fall back to disk (OSS mode)
         let gateway_dir = data_dir.join("gateway");
         let key_path = gateway_dir.join("ca.key");
         let cert_path = gateway_dir.join("ca.pem");
@@ -108,6 +123,31 @@ impl CertificateAuthority {
     #[allow(dead_code)]
     pub fn ca_cert_pem(&self) -> String {
         der_to_pem(self.ca_cert_der.as_ref())
+    }
+
+    /// Load CA from PEM strings (key + certificate).
+    /// Used when CA is provided via environment variables (cloud mode).
+    fn load_from_pem(key_pem: &str, cert_pem: &str) -> Result<Self> {
+        let key_pem = key_pem.trim();
+        let cert_pem = cert_pem.trim();
+        let ca_key = KeyPair::from_pem(key_pem).context("parsing CA private key from env var")?;
+
+        let mut reader = cert_pem.as_bytes();
+        let ca_cert_der = rustls_pemfile::certs(&mut reader)
+            .next()
+            .context("no certificate found in GATEWAY_CA_CERT env var")?
+            .context("parsing CA certificate PEM from env var")?;
+
+        let ca_cert = Self::build_ca_params()
+            .self_signed(&ca_key)
+            .context("re-creating CA certificate for signing")?;
+
+        Ok(Self {
+            ca_cert,
+            ca_key,
+            ca_cert_der,
+            leaf_cache: DashMap::new(),
+        })
     }
 
     // ── Private ──────────────────────────────────────────────────────────

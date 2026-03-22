@@ -7,7 +7,14 @@ mod auth;
 
 mod ca;
 mod connect;
+
+#[cfg(not(feature = "cloud"))]
 mod crypto;
+
+#[cfg(feature = "cloud")]
+#[path = "cloud/crypto.rs"]
+mod crypto;
+
 mod db;
 mod gateway;
 mod inject;
@@ -58,12 +65,19 @@ async fn main() -> Result<()> {
         .install_default()
         .expect("failed to install rustls CryptoProvider");
 
-    // Initialize logging
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
-        )
-        .init();
+    // Initialize logging — JSON for production (CloudWatch), text for dev
+    let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+
+    if std::env::var("LOG_FORMAT").as_deref() == Ok("json") {
+        tracing_subscriber::fmt()
+            .json()
+            .with_env_filter(env_filter)
+            .with_target(true)
+            .flatten_event(true)
+            .init();
+    } else {
+        tracing_subscriber::fmt().with_env_filter(env_filter).init();
+    }
 
     let cli = Cli::parse();
 
@@ -76,11 +90,25 @@ async fn main() -> Result<()> {
     let ca = CertificateAuthority::load_or_generate(&data_dir).await?;
 
     // Connect to PostgreSQL
-    let database_url = std::env::var("DATABASE_URL").context("DATABASE_URL env var is required")?;
+    // Support both DATABASE_URL (OSS) and individual DB_* vars (cloud ECS from Secrets Manager)
+    let database_url = match std::env::var("DATABASE_URL") {
+        Ok(url) => url,
+        Err(_) => {
+            let host =
+                std::env::var("DB_HOST").context("DATABASE_URL or DB_HOST env var must be set")?;
+            let port = std::env::var("DB_PORT").unwrap_or_else(|_| "5432".to_string());
+            let user = std::env::var("DB_USERNAME").context("DB_USERNAME env var must be set")?;
+            let pass = std::env::var("DB_PASSWORD").context("DB_PASSWORD env var must be set")?;
+            let name = std::env::var("DB_NAME").unwrap_or_else(|_| "onecli".to_string());
+            format!("postgresql://{user}:{pass}@{host}:{port}/{name}")
+        }
+    };
     let pool = db::create_pool(&database_url).await?;
 
-    // Load encryption key for secret decryption
-    let crypto = Arc::new(crypto::CryptoService::from_env()?);
+    // Load crypto service for secret decryption
+    // OSS: AES-256-GCM with local key from SECRET_ENCRYPTION_KEY
+    // Cloud: KMS envelope decryption (calls KMS Decrypt for each data key)
+    let crypto = Arc::new(crypto::CryptoService::from_env().await?);
 
     let policy_engine = Arc::new(PolicyEngine { pool, crypto });
 
