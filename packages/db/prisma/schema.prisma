@@ -26,7 +26,7 @@ model User {
   auditLogs         AuditLog[]
   vaultConnections  VaultConnection[]
 
-  @@map("user")
+  @@map("users")
 }
 
 model Agent {
@@ -46,7 +46,7 @@ model Agent {
 
   @@unique([userId, identifier])
   @@index([userId])
-  @@map("agent")
+  @@map("agents")
 }
 
 model Secret {
@@ -66,7 +66,7 @@ model Secret {
   agentSecrets AgentSecret[]
 
   @@index([userId])
-  @@map("secret")
+  @@map("secrets")
 }
 
 model PolicyRule {
@@ -87,7 +87,7 @@ model PolicyRule {
   agent           Agent?   @relation(fields: [agentId], references: [id], onDelete: Cascade)
 
   @@index([userId])
-  @@map("policy_rule")
+  @@map("policy_rules")
 }
 
 model AgentSecret {
@@ -97,7 +97,7 @@ model AgentSecret {
   secret   Secret @relation(fields: [secretId], references: [id], onDelete: Cascade)
 
   @@id([agentId, secretId])
-  @@map("agent_secret")
+  @@map("agent_secrets")
 }
 
 model ConnectedService {
@@ -115,7 +115,7 @@ model ConnectedService {
   user         User      @relation(fields: [userId], references: [id])
 
   @@unique([userId, provider])
-  @@map("connected_service")
+  @@map("connected_services")
 }
 
 model AuditLog {
@@ -130,7 +130,7 @@ model AuditLog {
   user      User     @relation(fields: [userId], references: [id])
 
   @@index([userId, createdAt])
-  @@map("audit_log")
+  @@map("audit_logs")
 }
 
 model VaultConnection {
@@ -146,5 +146,27 @@ model VaultConnection {
   user            User      @relation(fields: [userId], references: [id])
 
   @@unique([userId, provider])
-  @@map("vault_connection")
+  @@map("vault_connections")
+}
+
+model ResendBadEmail {
+  id        String   @id @default(cuid())
+  email     String
+  eventType String   @map("event_type") // "email.bounced" or "email.complained"
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@index([email])
+  @@map("resend_bad_emails")
+}
+
+model ResendWebhook {
+  id           String   @id @default(cuid())
+  eventType    String   @map("event_type") // "email.sent", "email.bounced", "email.complained", etc.
+  emailSubject String?  @map("email_subject")
+  emailFrom    String?  @map("email_from")
+  emailTo      String?  @map("email_to")
+  eventData    Json?    @map("event_data")
+  createdAt    DateTime @default(now()) @map("created_at")
+
+  @@map("resend_webhooks")
 }

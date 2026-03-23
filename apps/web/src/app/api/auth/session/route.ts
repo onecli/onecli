@@ -26,21 +26,23 @@ import { generateAccessToken } from "@/lib/services/agent-service";
 export const GET = async () => {
   try {
     const session = await getServerSession();
-    if (!session) {
+    if (!session || !session.email) {
       return NextResponse.json({ error: "Not authenticated" }, { status: 401 });
     }
 
-    // Upsert user — creates on first login, updates email/name on subsequent
+    // Upsert user by email — creates on first login, updates on subsequent.
+    // Also updates externalAuthId in case the user re-registered with a
+    // different auth provider (e.g., switched from Google to email OTP).
     const user = await db.user.upsert({
-      where: { externalAuthId: session.id },
+      where: { email: session.email },
       create: {
         externalAuthId: session.id,
-        email: session.email ?? "",
+        email: session.email,
         name: session.name,
         apiKey: generateApiKey(),
       },
       update: {
-        email: session.email ?? "",
+        externalAuthId: session.id,
         name: session.name,
       },
       select: {

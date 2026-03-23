@@ -27,7 +27,8 @@
     "NEXT_PUBLIC_GATEWAY_URL",
     "LOG_LEVEL",
     "LOG_FORMAT",
-    "AUTH_MODE"
+    "AUTH_MODE",
+    "MAILERCHECK_API_KEY"
   ],
   "tasks": {
     "build": {
