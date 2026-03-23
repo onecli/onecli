@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.5.4](https://github.com/onecli/onecli/compare/v1.5.3...v1.5.4) (2026-03-23)
+
+
+### Bug Fixes
+
+* auto-create default agent on first container-config call ([#92](https://github.com/onecli/onecli/issues/92)) ([e690665](https://github.com/onecli/onecli/commit/e690665d2c54912d2db92a3fa90eb3af2edfdd69))
+
 ## [1.5.3](https://github.com/onecli/onecli/compare/v1.5.2...v1.5.3) (2026-03-23)
 
 
