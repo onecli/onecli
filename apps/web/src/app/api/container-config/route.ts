@@ -4,6 +4,8 @@ import { resolveApiAuth } from "@/lib/api-auth";
 import { unauthorized } from "@/lib/api-utils";
 import { loadCaCertificate } from "@/lib/gateway-ca";
 import { parseAnthropicMetadata } from "@/lib/validations/secret";
+import { DEFAULT_AGENT_NAME } from "@/lib/constants";
+import { generateAccessToken } from "@/lib/services/agent-service";
 import { logger } from "@/lib/logger";
 
 const GATEWAY_PORT = process.env.GATEWAY_PORT ?? "10255";
@@ -33,10 +35,12 @@ export async function GET(request: NextRequest) {
     const auth = await resolveApiAuth(request);
     if (!auth) return unauthorized();
 
-    // Look up agent: by identifier if provided, otherwise default
+    // Look up agent: by identifier if provided, otherwise default.
+    // Auto-creates the default agent on first call so `docker run` works
+    // without needing to open the dashboard first.
     const agentIdentifier = request.nextUrl.searchParams.get("agent");
 
-    const agent = agentIdentifier
+    let agent = agentIdentifier
       ? await db.agent.findFirst({
           where: { userId: auth.userId, identifier: agentIdentifier },
           select: { id: true, accessToken: true, secretMode: true },
@@ -46,15 +50,23 @@ export async function GET(request: NextRequest) {
           select: { id: true, accessToken: true, secretMode: true },
         });
 
-    if (!agent) {
+    if (!agent && agentIdentifier) {
       return NextResponse.json(
-        {
-          error: agentIdentifier
-            ? "Agent with the given identifier not found."
-            : "No default agent found. Please create one first.",
-        },
+        { error: "Agent with the given identifier not found." },
         { status: 404 },
       );
+    }
+
+    if (!agent) {
+      agent = await db.agent.create({
+        data: {
+          name: DEFAULT_AGENT_NAME,
+          accessToken: generateAccessToken(),
+          isDefault: true,
+          userId: auth.userId,
+        },
+        select: { id: true, accessToken: true, secretMode: true },
+      });
     }
 
     const gatewayHost = getGatewayHost();
