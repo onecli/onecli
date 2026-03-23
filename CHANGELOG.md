@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.5.1](https://github.com/onecli/onecli/compare/v1.5.0...v1.5.1) (2026-03-23)
+
+
+### Bug Fixes
+
+* redesign rule dialog with two-step flow and brand colors ([#85](https://github.com/onecli/onecli/issues/85)) ([296d878](https://github.com/onecli/onecli/commit/296d878b11d1f055e1e2971d9ef256c856390a5a))
+* restructure settings with sub-navigation and reorder main nav ([#87](https://github.com/onecli/onecli/issues/87)) ([a1e6f3a](https://github.com/onecli/onecli/commit/a1e6f3af0b01b756a9fd097deeeeab08f486a21b))
+
 ## [1.5.0](https://github.com/onecli/onecli/compare/v1.4.2...v1.5.0) (2026-03-22)
 
 
