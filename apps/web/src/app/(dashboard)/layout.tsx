@@ -1,11 +1,12 @@
 "use client";
 
 import { useEffect, useState, useRef, useCallback } from "react";
-import { useRouter } from "next/navigation";
+import { useRouter, usePathname } from "next/navigation";
 import { ScrollArea } from "@onecli/ui/components/scroll-area";
 import { SidebarInset, SidebarProvider } from "@onecli/ui/components/sidebar";
 import { DashboardSidebar } from "@dashboard/dashboard-sidebar";
 import { DashboardHeader } from "@dashboard/dashboard-header";
+import { SettingsNav } from "@/app/(dashboard)/settings/_components/settings-nav";
 import { useAuth } from "@/providers/auth-provider";
 
 export default function DashboardLayout({
@@ -15,9 +16,12 @@ export default function DashboardLayout({
 }) {
   const { isAuthenticated, isLoading, signOut } = useAuth();
   const router = useRouter();
+  const pathname = usePathname();
   const [ready, setReady] = useState(false);
   const signOutRef = useRef(signOut);
   signOutRef.current = signOut;
+
+  const isSettings = pathname.startsWith("/settings");
 
   useEffect(() => {
     if (!isLoading && !isAuthenticated) {
@@ -66,9 +70,16 @@ export default function DashboardLayout({
         <header className="flex h-12 shrink-0 items-center border-b">
           <DashboardHeader />
         </header>
-        <ScrollArea className="h-full min-h-0 flex-1">
-          <main className="p-6">{children}</main>
-        </ScrollArea>
+        <div className="flex min-h-0 flex-1">
+          {isSettings && (
+            <aside className="hidden w-56 shrink-0 overflow-y-auto border-r px-6 pt-6 md:block">
+              <SettingsNav />
+            </aside>
+          )}
+          <ScrollArea className="h-full min-h-0 flex-1">
+            <main className="p-6">{children}</main>
+          </ScrollArea>
+        </div>
       </SidebarInset>
     </SidebarProvider>
   );

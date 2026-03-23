@@ -17,6 +17,7 @@ const nextConfig = {
           "@/lib/nav-items": "@/cloud/nav-items",
           "@/lib/crypto": "@/cloud/kms-crypto",
           "@/lib/gateway-auth": "@/cloud/gateway-auth",
+          "@/lib/settings-nav-items": "@/cloud/settings-nav-items",
         }
       : {},
   },
