@@ -77,7 +77,7 @@ export const TryDemoDialog = ({ open, onOpenChange }: TryDemoDialogProps) => {
                   {'"Authorization": "Bearer FAKE_TOKEN"'}
                 </span>
                 {"\n    "}
-                <span className="text-green-600 dark:text-green-400 font-semibold">
+                <span className="text-brand font-semibold">
                   {
                     '"Authorization": "Bearer WELCOME-TO-ONECLI-SECRETS-ARE-WORKING"'
                   }

@@ -443,7 +443,7 @@ const AnthropicKeyBadge = ({ value }: { value: string }) => {
       <span
         className={
           detected === "api_key"
-            ? "bg-emerald-500 size-1.5 rounded-full"
+            ? "bg-brand size-1.5 rounded-full"
             : "bg-blue-500 size-1.5 rounded-full"
         }
       />

@@ -55,8 +55,8 @@ const statusBadge = (
   }
   return {
     className:
-      "border-green-200 bg-green-50 text-green-700 dark:border-green-800 dark:bg-green-950 dark:text-green-400",
-    dotClassName: "bg-green-500",
+      "border-brand/20 bg-brand/5 text-brand dark:border-brand/30 dark:bg-brand/10 dark:text-brand",
+    dotClassName: "bg-brand",
     label: isReady ? "Connected" : "Paired",
   };
 };

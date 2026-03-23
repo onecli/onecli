@@ -100,7 +100,7 @@ export const ApiKeyCard = () => {
             disabled={loading || !apiKey}
           >
             {copied ? (
-              <Check className="size-4 text-green-500" />
+              <Check className="size-4 text-brand" />
             ) : (
               <Copy className="size-4" />
             )}

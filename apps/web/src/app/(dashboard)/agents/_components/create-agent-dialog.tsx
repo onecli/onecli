@@ -92,8 +92,8 @@ export const CreateAgentDialog = ({
         {createdIdentifier ? (
           <>
             <div className="flex flex-col items-center pt-2 text-center">
-              <div className="bg-emerald-500/10 mb-3 flex size-10 items-center justify-center rounded-full">
-                <CircleCheck className="size-5 text-emerald-500" />
+              <div className="bg-brand/10 mb-3 flex size-10 items-center justify-center rounded-full">
+                <CircleCheck className="size-5 text-brand" />
               </div>
               <DialogHeader className="items-center">
                 <DialogTitle>Agent created</DialogTitle>
@@ -114,7 +114,7 @@ export const CreateAgentDialog = ({
                   onClick={() => copy(createdIdentifier)}
                 >
                   {copied ? (
-                    <Check className="size-3.5 text-emerald-500" />
+                    <Check className="size-3.5 text-brand" />
                   ) : (
                     <Copy className="size-3.5" />
                   )}

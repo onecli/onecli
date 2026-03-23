@@ -19,9 +19,7 @@ export const TryDemoCommand = ({ command, highlight }: TryDemoCommandProps) => {
     return (
       <>
         {command.slice(0, idx)}
-        <span className="text-green-600 font-semibold dark:text-green-400">
-          {highlight}
-        </span>
+        <span className="text-brand font-semibold">{highlight}</span>
         {command.slice(idx + highlight.length)}
       </>
     );
@@ -39,7 +37,7 @@ export const TryDemoCommand = ({ command, highlight }: TryDemoCommandProps) => {
         onClick={() => copy(command)}
       >
         {copied ? (
-          <Check className="size-4 text-green-500" />
+          <Check className="size-4 text-brand" />
         ) : (
           <Copy className="size-4" />
         )}
