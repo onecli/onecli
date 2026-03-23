@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.5.3](https://github.com/onecli/onecli/compare/v1.5.2...v1.5.3) (2026-03-23)
+
+
+### Bug Fixes
+
+* update gateway SQL queries to use pluralized table names ([#90](https://github.com/onecli/onecli/issues/90)) ([191ac57](https://github.com/onecli/onecli/commit/191ac57400bd0f8c417420ef6208684dfa8fe380))
+
 ## [1.5.2](https://github.com/onecli/onecli/compare/v1.5.1...v1.5.2) (2026-03-23)
 
 
