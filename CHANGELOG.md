@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.5.2](https://github.com/onecli/onecli/compare/v1.5.1...v1.5.2) (2026-03-23)
+
+
+### Bug Fixes
+
+* auth login flow, schema migrations, and UI updates ([#88](https://github.com/onecli/onecli/issues/88)) ([a05fedd](https://github.com/onecli/onecli/commit/a05feddc8b40e66eb00344e0896d787e42d89130))
+
 ## [1.5.1](https://github.com/onecli/onecli/compare/v1.5.0...v1.5.1) (2026-03-23)
 
 
