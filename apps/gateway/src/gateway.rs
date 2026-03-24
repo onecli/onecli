@@ -217,7 +217,7 @@ async fn handle_connect(
     // Extract agent token from Proxy-Authorization header.
     let agent_token = inject::extract_agent_token(&req).filter(|t| !t.is_empty());
 
-    let (mut intercept, mut injection_rules, policy_rules, user_id) = if let Some(ref token) =
+    let (mut intercept, mut injection_rules, policy_rules, account_id) = if let Some(ref token) =
         agent_token
     {
         match connect::resolve(token, &hostname, &state.policy_engine, &*state.cache).await {
@@ -225,7 +225,7 @@ async fn handle_connect(
                 resp.intercept,
                 resp.injection_rules,
                 resp.policy_rules,
-                resp.user_id,
+                resp.account_id,
             ),
             Err(ConnectError::InvalidToken) => {
                 warn!(peer = %peer_addr, host = %host, "CONNECT rejected: invalid agent token");
@@ -245,15 +245,15 @@ async fn handle_connect(
 
     // Vault fallback: if no DB secrets matched, try vault providers for this user.
     if !intercept {
-        if let Some(ref uid) = user_id {
-            if let Some(cred) = state.vault_service.request_credential(uid, &hostname).await {
+        if let Some(ref aid) = account_id {
+            if let Some(cred) = state.vault_service.request_credential(aid, &hostname).await {
                 let vault_rules = inject::vault_credential_to_rules(&hostname, &cred);
                 if !vault_rules.is_empty() {
                     intercept = true;
                     injection_rules = vault_rules;
                     info!(
                         host = %hostname,
-                        user_id = %uid,
+                        account_id = %aid,
                         "using vault credential"
                     );
                 }

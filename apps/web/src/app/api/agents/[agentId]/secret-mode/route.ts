@@ -21,7 +21,7 @@ export const PATCH = async (request: NextRequest, { params }: Params) => {
       );
     }
 
-    await updateAgentSecretMode(auth.userId, agentId, parsed.data.mode);
+    await updateAgentSecretMode(auth.accountId, agentId, parsed.data.mode);
     return NextResponse.json({ success: true });
   } catch (err) {
     return handleServiceError(err);

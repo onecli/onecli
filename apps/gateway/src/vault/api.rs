@@ -21,7 +21,7 @@ pub(crate) async fn vault_pair(
 ) -> impl IntoResponse {
     match state
         .vault_service
-        .pair(&auth.user_id, &provider, &params)
+        .pair(&auth.account_id, &provider, &params)
         .await
     {
         Ok(result) => (
@@ -44,7 +44,11 @@ pub(crate) async fn vault_status(
     State(state): State<GatewayState>,
     Path(provider): Path<String>,
 ) -> impl IntoResponse {
-    match state.vault_service.status(&auth.user_id, &provider).await {
+    match state
+        .vault_service
+        .status(&auth.account_id, &provider)
+        .await
+    {
         Some(status) => (
             StatusCode::OK,
             Json(serde_json::json!({
@@ -72,7 +76,7 @@ pub(crate) async fn vault_disconnect(
 ) -> impl IntoResponse {
     match state
         .vault_service
-        .disconnect(&auth.user_id, &provider)
+        .disconnect(&auth.account_id, &provider)
         .await
     {
         Ok(()) => (

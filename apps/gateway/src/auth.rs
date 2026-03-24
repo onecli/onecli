@@ -68,6 +68,7 @@ fn nextauth_secret() -> Option<&'static str> {
 /// ```
 pub(crate) struct AuthUser {
     pub user_id: String,
+    pub account_id: String,
 }
 
 impl FromRequestParts<GatewayState> for AuthUser {
@@ -78,13 +79,30 @@ impl FromRequestParts<GatewayState> for AuthUser {
         state: &GatewayState,
     ) -> Result<Self, Self::Rejection> {
         let user_id = validate_request(&state.policy_engine.pool, &parts.headers).await?;
-        Ok(Self { user_id })
+
+        // Resolve account from membership
+        let account_id = db::find_account_id_by_user(&state.policy_engine.pool, &user_id)
+            .await
+            .map_err(|e| {
+                warn!(error = %e, "auth: failed to resolve account");
+                AuthError("internal error".to_string())
+            })?
+            .ok_or_else(|| {
+                warn!(user_id = %user_id, "auth: no account found for user");
+                AuthError("no account found".to_string())
+            })?;
+
+        Ok(Self {
+            user_id,
+            account_id,
+        })
     }
 }
 
 // ── Validation ───────────────────────────────────────────────────────────
 
 /// Validate an incoming browser request and return the internal user ID.
+/// The caller resolves the account ID from the user's membership.
 async fn validate_request(pool: &PgPool, headers: &HeaderMap) -> Result<String, AuthError> {
     match auth_mode() {
         "local" => validate_local(pool).await,

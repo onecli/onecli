@@ -1,8 +1,8 @@
 //! Bitwarden vault provider — `BitwardenVaultProvider` implementing `VaultProvider`.
 //!
 //! Contains all Bitwarden-specific logic: `RemoteClient` lifecycle, PSK pairing,
-//! Noise protocol, credential caching, and session restore. Per-user sessions are
-//! stored in a `DashMap<user_id, Arc<BitwardenUserSession>>`.
+//! Noise protocol, credential caching, and session restore. Per-account sessions are
+//! stored in a `DashMap<account_id, Arc<BitwardenUserSession>>`.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -103,7 +103,7 @@ fn deserialize_bytes_opt<'de, D: serde::Deserializer<'de>>(
     }
 }
 
-// ── Per-user session ────────────────────────────────────────────────────
+// ── Per-account session ────────────────────────────────────────────────────
 
 struct CachedCredential {
     data: Option<CredentialData>,
@@ -163,7 +163,7 @@ impl BitwardenVaultProvider {
             loop {
                 interval.tick().await;
 
-                // Collect user_ids to evict (don't hold DashMap iter across await)
+                // Collect account_ids to evict (don't hold DashMap iter across await)
                 let to_evict: Vec<String> = sessions
                     .iter()
                     .filter_map(|entry| {
@@ -176,30 +176,30 @@ impl BitwardenVaultProvider {
                     })
                     .collect();
 
-                for user_id in to_evict {
+                for account_id in to_evict {
                     // Remove from map first — new requests will re-create from DB
-                    if let Some((_, session)) = sessions.remove(&user_id) {
+                    if let Some((_, session)) = sessions.remove(&account_id) {
                         // Acquire lock to ensure no in-flight credential request, then drop the handle
                         let mut guard = session.client.lock().await;
                         guard.take(); // dropping the handle disconnects
                         session.credential_cache.clear();
                         session.is_ready.store(false, Ordering::Relaxed);
-                        info!(user_id = %user_id, "bitwarden: evicted idle session");
+                        info!(account_id = %account_id, "bitwarden: evicted idle session");
                     }
                 }
             }
         });
     }
 
-    /// Load an existing session from memory or DB. Returns `None` if the user
+    /// Load an existing session from memory or DB. Returns `None` if the account
     /// has never paired (no VaultConnection row). Does NOT generate a new identity.
-    async fn load_session(&self, user_id: &str) -> Result<Option<Arc<BitwardenUserSession>>> {
-        if let Some(session) = self.sessions.get(user_id) {
+    async fn load_session(&self, account_id: &str) -> Result<Option<Arc<BitwardenUserSession>>> {
+        if let Some(session) = self.sessions.get(account_id) {
             return Ok(Some(Arc::clone(session.value())));
         }
 
-        // Load from DB — if no row, user has never paired
-        let row = match db::find_vault_connection(&self.pool, user_id, "bitwarden").await? {
+        // Load from DB — if no row, account has never paired
+        let row = match db::find_vault_connection(&self.pool, account_id, "bitwarden").await? {
             Some(r) => r,
             None => return Ok(None),
         };
@@ -227,12 +227,12 @@ impl BitwardenVaultProvider {
         });
 
         self.sessions
-            .insert(user_id.to_string(), Arc::clone(&session));
+            .insert(account_id.to_string(), Arc::clone(&session));
         Ok(Some(session))
     }
 
     /// Create a new session with a fresh identity for pairing.
-    fn create_pairing_session(&self, user_id: &str) -> Arc<BitwardenUserSession> {
+    fn create_pairing_session(&self, account_id: &str) -> Arc<BitwardenUserSession> {
         let session = Arc::new(BitwardenUserSession {
             client: Mutex::new(None),
             identity: BitwardenIdentityProvider::generate(),
@@ -245,16 +245,16 @@ impl BitwardenVaultProvider {
         });
 
         self.sessions
-            .insert(user_id.to_string(), Arc::clone(&session));
+            .insert(account_id.to_string(), Arc::clone(&session));
         session
     }
 
-    /// Create a connected `RemoteClient` for a user session.
+    /// Create a connected `RemoteClient` for an account session.
     /// Always passes the identity's key_data to the connection store so write-throughs
     /// never null it out — even for fresh pairings where connection_data is None.
     async fn create_and_connect_client(
         &self,
-        user_id: &str,
+        account_id: &str,
         session: &BitwardenUserSession,
     ) -> Result<RemoteClient> {
         let proxy_client = DefaultProxyClient::from_url(self.config.proxy_url.clone());
@@ -263,7 +263,7 @@ impl BitwardenVaultProvider {
         let identity_provider = session.identity.clone_provider();
         let connection_store = BitwardenConnectionStore::new(
             self.pool.clone(),
-            user_id.to_string(),
+            account_id.to_string(),
             key_data,
             session.connection_data.as_ref(),
         );
@@ -281,7 +281,7 @@ impl BitwardenVaultProvider {
         .map_err(|e| anyhow!("failed to connect remote client: {e}"))?;
 
         Self::spawn_notification_listener(
-            user_id.to_string(),
+            account_id.to_string(),
             notifications,
             Arc::clone(&session.last_error),
             Arc::clone(&session.is_ready),
@@ -292,7 +292,7 @@ impl BitwardenVaultProvider {
 
     /// Consumes notifications from the `RemoteClient` for logging and readiness tracking.
     fn spawn_notification_listener(
-        user_id: String,
+        account_id: String,
         mut notifications: mpsc::Receiver<RemoteClientNotification>,
         last_error: Arc<std::sync::Mutex<Option<String>>>,
         is_ready: Arc<AtomicBool>,
@@ -301,11 +301,11 @@ impl BitwardenVaultProvider {
             while let Some(notif) = notifications.recv().await {
                 match &notif {
                     RemoteClientNotification::Connecting => {
-                        info!(user_id = %user_id, "bitwarden: connecting");
+                        info!(account_id = %account_id, "bitwarden: connecting");
                     }
                     RemoteClientNotification::Connected { fingerprint } => {
                         info!(
-                            user_id = %user_id,
+                            account_id = %account_id,
                             fingerprint = %hex::encode(fingerprint.0),
                             "bitwarden: connected"
                         );
@@ -319,20 +319,20 @@ impl BitwardenVaultProvider {
                     } => {
                         is_ready.store(*can_request_credentials, Ordering::Relaxed);
                         info!(
-                            user_id = %user_id,
+                            account_id = %account_id,
                             can_request = can_request_credentials,
                             "bitwarden: ready"
                         );
                     }
                     RemoteClientNotification::CredentialReceived { credential, .. } => {
-                        info!(user_id = %user_id, credential = ?credential, "bitwarden: credential received");
+                        info!(account_id = %account_id, credential = ?credential, "bitwarden: credential received");
                     }
                     RemoteClientNotification::Error { message, context } => {
                         let detail = match context {
                             Some(ctx) => format!("{message} ({ctx})"),
                             None => message.clone(),
                         };
-                        warn!(user_id = %user_id, error = %detail, "bitwarden: error");
+                        warn!(account_id = %account_id, error = %detail, "bitwarden: error");
                         if let Ok(mut err) = last_error.lock() {
                             *err = Some(detail);
                         }
@@ -340,13 +340,13 @@ impl BitwardenVaultProvider {
                     RemoteClientNotification::Disconnected { reason } => {
                         is_ready.store(false, Ordering::Relaxed);
                         let detail = reason.as_deref().unwrap_or("unknown reason").to_string();
-                        warn!(user_id = %user_id, reason = %detail, "bitwarden: disconnected");
+                        warn!(account_id = %account_id, reason = %detail, "bitwarden: disconnected");
                         if let Ok(mut err) = last_error.lock() {
                             *err = Some(format!("Disconnected: {detail}"));
                         }
                     }
                     _ => {
-                        info!(user_id = %user_id, notif = ?notif, "bitwarden: notification");
+                        info!(account_id = %account_id, notif = ?notif, "bitwarden: notification");
                     }
                 }
             }
@@ -362,7 +362,7 @@ impl VaultProvider for BitwardenVaultProvider {
         "bitwarden"
     }
 
-    async fn pair(&self, user_id: &str, params: &serde_json::Value) -> Result<PairResult> {
+    async fn pair(&self, account_id: &str, params: &serde_json::Value) -> Result<PairResult> {
         let psk_hex = params
             .get("psk_hex")
             .and_then(|v| v.as_str())
@@ -377,9 +377,9 @@ impl VaultProvider for BitwardenVaultProvider {
         let remote_fingerprint = parse_fingerprint(fingerprint_hex)
             .ok_or_else(|| anyhow!("invalid fingerprint: must be 32 hex-encoded bytes"))?;
 
-        let session = match self.load_session(user_id).await? {
+        let session = match self.load_session(account_id).await? {
             Some(s) => s,
-            None => self.create_pairing_session(user_id),
+            None => self.create_pairing_session(account_id),
         };
 
         // Create the DB row BEFORE pairing so that ConnectionStore::save()'s
@@ -392,14 +392,14 @@ impl VaultProvider for BitwardenVaultProvider {
         };
         db::upsert_vault_connection(
             &self.pool,
-            user_id,
+            account_id,
             "bitwarden",
             "paired",
             Some(&serde_json::to_value(&initial_cd)?),
         )
         .await?;
 
-        let client = self.create_and_connect_client(user_id, &session).await?;
+        let client = self.create_and_connect_client(account_id, &session).await?;
 
         client
             .pair_with_psk(psk, remote_fingerprint)
@@ -407,7 +407,7 @@ impl VaultProvider for BitwardenVaultProvider {
             .map_err(|e| anyhow!("PSK pairing failed: {e}"))?;
 
         info!(
-            user_id = %user_id,
+            account_id = %account_id,
             fingerprint = %fingerprint_hex,
             "bitwarden: paired via PSK"
         );
@@ -425,9 +425,13 @@ impl VaultProvider for BitwardenVaultProvider {
         Ok(PairResult { display_name: None })
     }
 
-    async fn request_credential(&self, user_id: &str, hostname: &str) -> Option<VaultCredential> {
-        // Load existing session — returns None if user never paired
-        let session = match self.load_session(user_id).await {
+    async fn request_credential(
+        &self,
+        account_id: &str,
+        hostname: &str,
+    ) -> Option<VaultCredential> {
+        // Load existing session — returns None if account never paired
+        let session = match self.load_session(account_id).await {
             Ok(Some(s)) => s,
             _ => return None,
         };
@@ -468,15 +472,15 @@ impl VaultProvider for BitwardenVaultProvider {
 
                 let fp = fingerprint?;
 
-                match self.create_and_connect_client(user_id, &session).await {
+                match self.create_and_connect_client(account_id, &session).await {
                     Ok(client) => match client.load_cached_connection(fp).await {
                         Ok(()) => {
-                            info!(user_id = %user_id, "bitwarden: lazy session restored");
+                            info!(account_id = %account_id, "bitwarden: lazy session restored");
                             *client_guard = Some(client);
                         }
                         Err(e) => {
                             let msg = format!("Session restore failed: {e}");
-                            warn!(user_id = %user_id, error = %msg, "bitwarden: lazy restore failed");
+                            warn!(account_id = %account_id, error = %msg, "bitwarden: lazy restore failed");
                             if let Ok(mut err) = session.last_error.lock() {
                                 *err = Some(msg);
                             }
@@ -489,7 +493,7 @@ impl VaultProvider for BitwardenVaultProvider {
                     },
                     Err(e) => {
                         let msg = format!("Connection failed: {e}");
-                        warn!(user_id = %user_id, error = %msg, "bitwarden: failed to create client for lazy restore");
+                        warn!(account_id = %account_id, error = %msg, "bitwarden: failed to create client for lazy restore");
                         if let Ok(mut err) = session.last_error.lock() {
                             *err = Some(msg);
                         }
@@ -525,7 +529,7 @@ impl VaultProvider for BitwardenVaultProvider {
             }
             Ok(Err(e)) => {
                 let msg = e.to_string();
-                warn!(user_id = %user_id, hostname = %hostname, error = %msg, "bitwarden: credential request failed");
+                warn!(account_id = %account_id, hostname = %hostname, error = %msg, "bitwarden: credential request failed");
                 if let Ok(mut err) = session.last_error.lock() {
                     if err.is_none() {
                         *err = Some(msg);
@@ -537,7 +541,7 @@ impl VaultProvider for BitwardenVaultProvider {
                 None
             }
             Err(_) => {
-                warn!(user_id = %user_id, hostname = %hostname, "bitwarden: credential request timed out");
+                warn!(account_id = %account_id, hostname = %hostname, "bitwarden: credential request timed out");
                 if let Ok(mut err) = session.last_error.lock() {
                     if err.is_none() {
                         *err = Some(
@@ -572,8 +576,8 @@ impl VaultProvider for BitwardenVaultProvider {
         })
     }
 
-    async fn status(&self, user_id: &str) -> ProviderStatus {
-        let session = match self.load_session(user_id).await {
+    async fn status(&self, account_id: &str) -> ProviderStatus {
+        let session = match self.load_session(account_id).await {
             Ok(Some(s)) => s,
             _ => {
                 return ProviderStatus {
@@ -598,15 +602,15 @@ impl VaultProvider for BitwardenVaultProvider {
         }
     }
 
-    async fn disconnect(&self, user_id: &str) -> Result<()> {
-        if let Some((_, session)) = self.sessions.remove(user_id) {
+    async fn disconnect(&self, account_id: &str) -> Result<()> {
+        if let Some((_, session)) = self.sessions.remove(account_id) {
             let mut guard = session.client.lock().await;
             guard.take(); // dropping the handle disconnects
             session.credential_cache.clear();
             session.is_ready.store(false, Ordering::Relaxed);
         }
 
-        info!(user_id = %user_id, "bitwarden: disconnected");
+        info!(account_id = %account_id, "bitwarden: disconnected");
         Ok(())
     }
 

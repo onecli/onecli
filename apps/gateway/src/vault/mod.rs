@@ -48,16 +48,17 @@ pub(crate) trait VaultProvider: Send + Sync {
     fn provider_name(&self) -> &'static str;
 
     /// Pair with the vault using provider-specific credentials.
-    async fn pair(&self, user_id: &str, params: &serde_json::Value) -> Result<PairResult>;
+    async fn pair(&self, account_id: &str, params: &serde_json::Value) -> Result<PairResult>;
 
-    /// Request a credential for a hostname from this user's vault.
-    async fn request_credential(&self, user_id: &str, hostname: &str) -> Option<VaultCredential>;
+    /// Request a credential for a hostname from this account's vault.
+    async fn request_credential(&self, account_id: &str, hostname: &str)
+        -> Option<VaultCredential>;
 
-    /// Get connection status for this user.
-    async fn status(&self, user_id: &str) -> ProviderStatus;
+    /// Get connection status for this account.
+    async fn status(&self, account_id: &str) -> ProviderStatus;
 
     /// Disconnect and clean up.
-    async fn disconnect(&self, user_id: &str) -> Result<()>;
+    async fn disconnect(&self, account_id: &str) -> Result<()>;
 }
 
 // ── Orchestrator ────────────────────────────────────────────────────────
@@ -77,11 +78,11 @@ impl VaultService {
     /// Try each provider in order until one returns a credential.
     pub async fn request_credential(
         &self,
-        user_id: &str,
+        account_id: &str,
         hostname: &str,
     ) -> Option<VaultCredential> {
         for provider in &self.providers {
-            if let Some(cred) = provider.request_credential(user_id, hostname).await {
+            if let Some(cred) = provider.request_credential(account_id, hostname).await {
                 return Some(cred);
             }
         }
@@ -91,25 +92,25 @@ impl VaultService {
     /// Pair with a specific provider. The provider owns DB persistence.
     pub async fn pair(
         &self,
-        user_id: &str,
+        account_id: &str,
         provider: &str,
         params: &serde_json::Value,
     ) -> Result<PairResult> {
         let p = self.find_provider(provider)?;
-        p.pair(user_id, params).await
+        p.pair(account_id, params).await
     }
 
     /// Get status for a specific provider.
-    pub async fn status(&self, user_id: &str, provider: &str) -> Option<ProviderStatus> {
+    pub async fn status(&self, account_id: &str, provider: &str) -> Option<ProviderStatus> {
         let p = self.find_provider(provider).ok()?;
-        Some(p.status(user_id).await)
+        Some(p.status(account_id).await)
     }
 
     /// Disconnect a specific provider.
-    pub async fn disconnect(&self, user_id: &str, provider: &str) -> Result<()> {
+    pub async fn disconnect(&self, account_id: &str, provider: &str) -> Result<()> {
         let p = self.find_provider(provider)?;
-        p.disconnect(user_id).await?;
-        db::delete_vault_connection(&self.pool, user_id, provider).await?;
+        p.disconnect(account_id).await?;
+        db::delete_vault_connection(&self.pool, account_id, provider).await?;
         Ok(())
     }
 

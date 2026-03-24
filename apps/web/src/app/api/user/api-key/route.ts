@@ -8,7 +8,7 @@ export const GET = async (request: NextRequest) => {
     const auth = await resolveApiAuth(request);
     if (!auth) return unauthorized();
 
-    const result = await getApiKey(auth.userId);
+    const result = await getApiKey(auth.userId, auth.accountId);
     return NextResponse.json(result);
   } catch (err) {
     return handleServiceError(err);

@@ -23,7 +23,7 @@ pub(crate) struct ConnectResponse {
     pub intercept: bool,
     pub injection_rules: Vec<InjectionRule>,
     pub policy_rules: Vec<PolicyRule>,
-    pub user_id: Option<String>,
+    pub account_id: Option<String>,
 }
 
 /// Errors from the connect resolution.
@@ -61,7 +61,7 @@ impl PolicyEngine {
         let secrets = if agent.secret_mode == "selective" {
             db::find_secrets_by_agent(&self.pool, &agent.id).await
         } else {
-            db::find_secrets_by_user(&self.pool, &agent.user_id).await
+            db::find_secrets_by_account(&self.pool, &agent.account_id).await
         }
         .map_err(|e| ConnectError::Internal(format!("db error: {e}")))?;
 
@@ -72,7 +72,7 @@ impl PolicyEngine {
             .collect();
 
         // 4. Policy rule lookup — global (agentId IS NULL) + agent-specific
-        let all_rules = db::find_policy_rules_by_user(&self.pool, &agent.user_id)
+        let all_rules = db::find_policy_rules_by_account(&self.pool, &agent.account_id)
             .await
             .map_err(|e| ConnectError::Internal(format!("db error: {e}")))?;
 
@@ -115,7 +115,7 @@ impl PolicyEngine {
                 intercept: false,
                 injection_rules: vec![],
                 policy_rules: vec![],
-                user_id: Some(agent.user_id.clone()),
+                account_id: Some(agent.account_id.clone()),
             });
         }
 
@@ -142,7 +142,7 @@ impl PolicyEngine {
             intercept: true,
             injection_rules,
             policy_rules: matching_policy_rules,
-            user_id: Some(agent.user_id),
+            account_id: Some(agent.account_id),
         })
     }
 }
@@ -271,7 +271,7 @@ mod tests {
             intercept: true,
             injection_rules: vec![],
             policy_rules: vec![],
-            user_id: None,
+            account_id: None,
         };
 
         store

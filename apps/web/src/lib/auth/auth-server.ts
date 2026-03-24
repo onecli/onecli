@@ -1,5 +1,6 @@
 import { auth } from "@/lib/auth/nextauth-config";
 import { db } from "@onecli/db";
+import { generateApiKey } from "@/lib/services/api-key-service";
 import { getAuthMode } from "./auth-mode";
 import type { AuthUser } from "./types";
 
@@ -14,7 +15,8 @@ let localUserEnsured = false;
 
 const ensureLocalUser = async () => {
   if (localUserEnsured) return;
-  await db.user.upsert({
+
+  const user = await db.user.upsert({
     where: { externalAuthId: LOCAL_AUTH_ID },
     create: {
       externalAuthId: LOCAL_AUTH_ID,
@@ -22,7 +24,34 @@ const ensureLocalUser = async () => {
       name: LOCAL_USER.name,
     },
     update: {},
+    select: { id: true },
   });
+
+  // Ensure the local user has an Account + AccountMember + ApiKey
+  const membership = await db.accountMember.findFirst({
+    where: { userId: user.id },
+    select: { accountId: true },
+  });
+
+  if (!membership) {
+    const account = await db.account.create({
+      data: { name: LOCAL_USER.name },
+      select: { id: true },
+    });
+
+    await db.accountMember.create({
+      data: { accountId: account.id, userId: user.id, role: "owner" },
+    });
+
+    await db.apiKey.create({
+      data: {
+        key: generateApiKey(),
+        userId: user.id,
+        accountId: account.id,
+      },
+    });
+  }
+
   localUserEnsured = true;
 };
 

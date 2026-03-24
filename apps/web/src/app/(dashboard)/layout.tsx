@@ -8,6 +8,7 @@ import { DashboardSidebar } from "@dashboard/dashboard-sidebar";
 import { DashboardHeader } from "@dashboard/dashboard-header";
 import { SettingsNav } from "@/app/(dashboard)/settings/_components/settings-nav";
 import { useAuth } from "@/providers/auth-provider";
+import { checkDashboardRedirect } from "@/lib/user-plan";
 
 export default function DashboardLayout({
   children,
@@ -32,15 +33,23 @@ export default function DashboardLayout({
   const initSession = useCallback(async () => {
     try {
       const res = await fetch("/api/auth/session");
-      if (res.ok) {
-        setReady(true);
-      } else {
+      if (!res.ok) {
         signOutRef.current();
+        return;
       }
+
+      // Check if a redirect is needed (e.g. onboarding in cloud)
+      const redirectTo = await checkDashboardRedirect();
+      if (redirectTo) {
+        router.replace(redirectTo);
+        return;
+      }
+
+      setReady(true);
     } catch {
       signOutRef.current();
     }
-  }, []);
+  }, [router]);
 
   useEffect(() => {
     if (isAuthenticated) {

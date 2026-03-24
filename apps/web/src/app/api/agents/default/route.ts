@@ -8,7 +8,7 @@ export const GET = async (request: NextRequest) => {
     const auth = await resolveApiAuth(request);
     if (!auth) return unauthorized();
 
-    const agent = await getDefaultAgent(auth.userId);
+    const agent = await getDefaultAgent(auth.accountId);
     if (!agent) {
       return NextResponse.json(
         { error: "No default agent found" },

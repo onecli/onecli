@@ -21,9 +21,9 @@ const buildPreview = (plaintext: string): string => {
   return `${plaintext.slice(0, 4)}${"\u2022".repeat(8)}${plaintext.slice(-4)}`;
 };
 
-export const listSecrets = async (userId: string) => {
+export const listSecrets = async (accountId: string) => {
   const secrets = await db.secret.findMany({
-    where: { userId },
+    where: { accountId },
     select: {
       id: true,
       name: true,
@@ -45,7 +45,7 @@ export const listSecrets = async (userId: string) => {
 export type { CreateSecretInput, UpdateSecretInput };
 
 export const createSecret = async (
-  userId: string,
+  accountId: string,
   input: CreateSecretInput,
 ) => {
   const name = input.name.trim();
@@ -97,7 +97,7 @@ export const createSecret = async (
       pathPattern,
       injectionConfig,
       metadata,
-      userId,
+      accountId,
     },
     select: {
       id: true,
@@ -112,9 +112,9 @@ export const createSecret = async (
   return { ...secret, preview };
 };
 
-export const deleteSecret = async (userId: string, secretId: string) => {
+export const deleteSecret = async (accountId: string, secretId: string) => {
   const secret = await db.secret.findFirst({
-    where: { id: secretId, userId },
+    where: { id: secretId, accountId },
     select: { id: true },
   });
 
@@ -124,12 +124,12 @@ export const deleteSecret = async (userId: string, secretId: string) => {
 };
 
 export const updateSecret = async (
-  userId: string,
+  accountId: string,
   secretId: string,
   input: UpdateSecretInput,
 ) => {
   const secret = await db.secret.findFirst({
-    where: { id: secretId, userId },
+    where: { id: secretId, accountId },
     select: { id: true, type: true },
   });
 

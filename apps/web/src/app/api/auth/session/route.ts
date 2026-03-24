@@ -17,8 +17,9 @@ import { generateAccessToken } from "@/lib/services/agent-service";
  * Single endpoint that handles the full auth → DB sync flow:
  * 1. Reads the auth session (cookie/token)
  * 2. Upserts the user in the database
- * 3. Seeds defaults (agent, demo secret, API key)
- * 4. Returns the user profile
+ * 3. Ensures the user has an Account + AccountMember + ApiKey
+ * 4. Seeds defaults (agent, demo secret) into the account
+ * 5. Returns the user profile
  *
  * Called by the login page after auth and by the dashboard layout on mount.
  * Returns 401 if no valid session exists.
@@ -31,15 +32,12 @@ export const GET = async () => {
     }
 
     // Upsert user by email — creates on first login, updates on subsequent.
-    // Also updates externalAuthId in case the user re-registered with a
-    // different auth provider (e.g., switched from Google to email OTP).
     const user = await db.user.upsert({
       where: { email: session.email },
       create: {
         externalAuthId: session.id,
         email: session.email,
         name: session.name,
-        apiKey: generateApiKey(),
       },
       update: {
         externalAuthId: session.id,
@@ -49,24 +47,51 @@ export const GET = async () => {
         id: true,
         email: true,
         name: true,
-        apiKey: true,
-        demoSeeded: true,
       },
     });
 
-    // Ensure API key exists (backfill for users created before this field)
-    if (!user.apiKey) {
-      await db.user.update({
-        where: { id: user.id },
-        data: { apiKey: generateApiKey() },
+    // Ensure the user has an Account. Create one if this is their first login.
+    let membership = await db.accountMember.findFirst({
+      where: { userId: user.id },
+      select: {
+        accountId: true,
+        account: { select: { demoSeeded: true } },
+      },
+    });
+
+    if (!membership) {
+      const account = await db.account.create({
+        data: { name: user.name },
+        select: { id: true, demoSeeded: true },
       });
+
+      await db.accountMember.create({
+        data: { accountId: account.id, userId: user.id, role: "owner" },
+      });
+
+      // Create API key for this user in the new account
+      await db.apiKey.create({
+        data: {
+          key: generateApiKey(),
+          userId: user.id,
+          accountId: account.id,
+        },
+      });
+
+      membership = {
+        accountId: account.id,
+        account: { demoSeeded: account.demoSeeded },
+      };
     }
 
-    // Seed defaults — idempotent, skips anything that already exists
+    const accountId = membership.accountId;
+    const demoSeeded = membership.account.demoSeeded;
+
+    // Seed defaults into the account — idempotent, skips anything that already exists
     const ops = [];
 
     const hasDefaultAgent = await db.agent.findFirst({
-      where: { userId: user.id, isDefault: true },
+      where: { accountId, isDefault: true },
       select: { id: true },
     });
 
@@ -77,13 +102,13 @@ export const GET = async () => {
             name: DEFAULT_AGENT_NAME,
             accessToken: generateAccessToken(),
             isDefault: true,
-            userId: user.id,
+            accountId,
           },
         }),
       );
     }
 
-    if (!user.demoSeeded) {
+    if (!demoSeeded) {
       ops.push(
         db.secret.create({
           data: {
@@ -96,11 +121,11 @@ export const GET = async () => {
               headerName: "Authorization",
               valueFormat: "Bearer {value}",
             },
-            userId: user.id,
+            accountId,
           },
         }),
-        db.user.update({
-          where: { id: user.id },
+        db.account.update({
+          where: { id: accountId },
           data: { demoSeeded: true },
         }),
       );

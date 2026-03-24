@@ -7,9 +7,9 @@ import {
 
 export type { CreatePolicyRuleInput, UpdatePolicyRuleInput };
 
-export const listPolicyRules = async (userId: string) => {
+export const listPolicyRules = async (accountId: string) => {
   return db.policyRule.findMany({
-    where: { userId },
+    where: { accountId },
     select: {
       id: true,
       name: true,
@@ -28,15 +28,15 @@ export const listPolicyRules = async (userId: string) => {
 };
 
 export const createPolicyRule = async (
-  userId: string,
+  accountId: string,
   input: CreatePolicyRuleInput,
 ) => {
   const name = input.name.trim();
 
-  // Validate agent belongs to user if specified
+  // Validate agent belongs to account if specified
   if (input.agentId) {
     const agent = await db.agent.findFirst({
-      where: { id: input.agentId, userId },
+      where: { id: input.agentId, accountId },
       select: { id: true },
     });
     if (!agent) throw new ServiceError("NOT_FOUND", "Agent not found");
@@ -55,7 +55,7 @@ export const createPolicyRule = async (
         input.action === "rate_limit" ? (input.rateLimit ?? null) : null,
       rateLimitWindow:
         input.action === "rate_limit" ? (input.rateLimitWindow ?? null) : null,
-      userId,
+      accountId,
     },
     select: {
       id: true,
@@ -74,21 +74,21 @@ export const createPolicyRule = async (
 };
 
 export const updatePolicyRule = async (
-  userId: string,
+  accountId: string,
   ruleId: string,
   input: UpdatePolicyRuleInput,
 ) => {
   const rule = await db.policyRule.findFirst({
-    where: { id: ruleId, userId },
+    where: { id: ruleId, accountId },
     select: { id: true },
   });
 
   if (!rule) throw new ServiceError("NOT_FOUND", "Policy rule not found");
 
-  // Validate agent belongs to user if changing agentId
+  // Validate agent belongs to account if changing agentId
   if (input.agentId) {
     const agent = await db.agent.findFirst({
-      where: { id: input.agentId, userId },
+      where: { id: input.agentId, accountId },
       select: { id: true },
     });
     if (!agent) throw new ServiceError("NOT_FOUND", "Agent not found");
@@ -104,7 +104,6 @@ export const updatePolicyRule = async (
   if (input.method !== undefined) data.method = input.method || null;
   if (input.action !== undefined) {
     data.action = input.action;
-    // Clear rate limit fields when switching to block
     if (input.action === "block") {
       data.rateLimit = null;
       data.rateLimitWindow = null;
@@ -122,9 +121,9 @@ export const updatePolicyRule = async (
   });
 };
 
-export const deletePolicyRule = async (userId: string, ruleId: string) => {
+export const deletePolicyRule = async (accountId: string, ruleId: string) => {
   const rule = await db.policyRule.findFirst({
-    where: { id: ruleId, userId },
+    where: { id: ruleId, accountId },
     select: { id: true },
   });
 

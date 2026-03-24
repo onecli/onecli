@@ -42,11 +42,11 @@ export async function GET(request: NextRequest) {
 
     let agent = agentIdentifier
       ? await db.agent.findFirst({
-          where: { userId: auth.userId, identifier: agentIdentifier },
+          where: { accountId: auth.accountId, identifier: agentIdentifier },
           select: { id: true, accessToken: true, secretMode: true },
         })
       : await db.agent.findFirst({
-          where: { userId: auth.userId, isDefault: true },
+          where: { accountId: auth.accountId, isDefault: true },
           select: { id: true, accessToken: true, secretMode: true },
         });
 
@@ -63,7 +63,7 @@ export async function GET(request: NextRequest) {
           name: DEFAULT_AGENT_NAME,
           accessToken: generateAccessToken(),
           isDefault: true,
-          userId: auth.userId,
+          accountId: auth.accountId,
         },
         select: { id: true, accessToken: true, secretMode: true },
       });
@@ -98,7 +98,7 @@ export async function GET(request: NextRequest) {
             select: { metadata: true },
           })
         : await db.secret.findFirst({
-            where: { userId: auth.userId, type: "anthropic" },
+            where: { accountId: auth.accountId, type: "anthropic" },
             select: { metadata: true },
           });
 

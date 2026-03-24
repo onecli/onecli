@@ -1,6 +1,6 @@
 "use server";
 
-import { resolveUserId } from "@/lib/actions/resolve-user";
+import { resolveUser } from "@/lib/actions/resolve-user";
 import {
   listPolicyRules,
   createPolicyRule as createPolicyRuleService,
@@ -11,24 +11,24 @@ import {
 } from "@/lib/services/policy-rule-service";
 
 export const getRules = async () => {
-  const userId = await resolveUserId();
-  return listPolicyRules(userId);
+  const { accountId } = await resolveUser();
+  return listPolicyRules(accountId);
 };
 
 export const createRule = async (input: CreatePolicyRuleInput) => {
-  const userId = await resolveUserId();
-  return createPolicyRuleService(userId, input);
+  const { accountId } = await resolveUser();
+  return createPolicyRuleService(accountId, input);
 };
 
 export const updateRule = async (
   ruleId: string,
   input: UpdatePolicyRuleInput,
 ) => {
-  const userId = await resolveUserId();
-  return updatePolicyRuleService(userId, ruleId, input);
+  const { accountId } = await resolveUser();
+  return updatePolicyRuleService(accountId, ruleId, input);
 };
 
 export const deleteRule = async (ruleId: string) => {
-  const userId = await resolveUserId();
-  return deletePolicyRuleService(userId, ruleId);
+  const { accountId } = await resolveUser();
+  return deletePolicyRuleService(accountId, ruleId);
 };

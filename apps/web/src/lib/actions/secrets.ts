@@ -1,7 +1,7 @@
 "use server";
 
 import { db } from "@onecli/db";
-import { resolveUserId } from "@/lib/actions/resolve-user";
+import { resolveUser } from "@/lib/actions/resolve-user";
 import { DEMO_SECRET_NAME } from "@/lib/constants";
 import {
   listSecrets,
@@ -13,30 +13,30 @@ import {
 } from "@/lib/services/secret-service";
 
 export const getSecrets = async () => {
-  const userId = await resolveUserId();
-  return listSecrets(userId);
+  const { accountId } = await resolveUser();
+  return listSecrets(accountId);
 };
 
 export const createSecret = async (input: CreateSecretInput) => {
-  const userId = await resolveUserId();
-  return createSecretService(userId, input);
+  const { accountId } = await resolveUser();
+  return createSecretService(accountId, input);
 };
 
 export const deleteSecret = async (secretId: string) => {
-  const userId = await resolveUserId();
-  return deleteSecretService(userId, secretId);
+  const { accountId } = await resolveUser();
+  return deleteSecretService(accountId, secretId);
 };
 
 export const getDemoInfo = async () => {
-  const userId = await resolveUserId();
+  const { accountId } = await resolveUser();
 
   const [demoSecret, agent] = await Promise.all([
     db.secret.findFirst({
-      where: { userId, name: DEMO_SECRET_NAME },
+      where: { accountId, name: DEMO_SECRET_NAME },
       select: { id: true },
     }),
     db.agent.findFirst({
-      where: { userId, isDefault: true },
+      where: { accountId, isDefault: true },
       select: { accessToken: true },
     }),
   ]);
@@ -56,6 +56,6 @@ export const updateSecret = async (
   secretId: string,
   input: UpdateSecretInput,
 ) => {
-  const userId = await resolveUserId();
-  return updateSecretService(userId, secretId, input);
+  const { accountId } = await resolveUser();
+  return updateSecretService(accountId, secretId, input);
 };

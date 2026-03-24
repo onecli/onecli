@@ -1,6 +1,6 @@
 "use server";
 
-import { resolveUserId } from "@/lib/actions/resolve-user";
+import { resolveUser } from "@/lib/actions/resolve-user";
 import type { SecretMode } from "@/lib/services/agent-service";
 import {
   listAgents,
@@ -15,52 +15,52 @@ import {
 } from "@/lib/services/agent-service";
 
 export const getAgents = async () => {
-  const userId = await resolveUserId();
-  return listAgents(userId);
+  const { accountId } = await resolveUser();
+  return listAgents(accountId);
 };
 
 export const getDefaultAgent = async () => {
-  const userId = await resolveUserId();
-  return getDefaultAgentService(userId);
+  const { accountId } = await resolveUser();
+  return getDefaultAgentService(accountId);
 };
 
 export const createAgent = async (name: string, identifier: string) => {
-  const userId = await resolveUserId();
-  return createAgentService(userId, name, identifier);
+  const { accountId } = await resolveUser();
+  return createAgentService(accountId, name, identifier);
 };
 
 export const deleteAgent = async (agentId: string) => {
-  const userId = await resolveUserId();
-  return deleteAgentService(userId, agentId);
+  const { accountId } = await resolveUser();
+  return deleteAgentService(accountId, agentId);
 };
 
 export const renameAgent = async (agentId: string, name: string) => {
-  const userId = await resolveUserId();
-  return renameAgentService(userId, agentId, name);
+  const { accountId } = await resolveUser();
+  return renameAgentService(accountId, agentId, name);
 };
 
 export const regenerateAgentToken = async (agentId: string) => {
-  const userId = await resolveUserId();
-  return regenerateAgentTokenService(userId, agentId);
+  const { accountId } = await resolveUser();
+  return regenerateAgentTokenService(accountId, agentId);
 };
 
 export const getAgentSecrets = async (agentId: string) => {
-  const userId = await resolveUserId();
-  return getAgentSecretsService(userId, agentId);
+  const { accountId } = await resolveUser();
+  return getAgentSecretsService(accountId, agentId);
 };
 
 export const updateAgentSecretMode = async (
   agentId: string,
   mode: SecretMode,
 ) => {
-  const userId = await resolveUserId();
-  return updateAgentSecretModeService(userId, agentId, mode);
+  const { accountId } = await resolveUser();
+  return updateAgentSecretModeService(accountId, agentId, mode);
 };
 
 export const updateAgentSecrets = async (
   agentId: string,
   secretIds: string[],
 ) => {
-  const userId = await resolveUserId();
-  return updateAgentSecretsService(userId, agentId, secretIds);
+  const { accountId } = await resolveUser();
+  return updateAgentSecretsService(accountId, agentId, secretIds);
 };

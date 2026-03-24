@@ -7,51 +7,99 @@ datasource db {
   url      = env("DATABASE_URL")
 }
 
-model User {
+// ── Account & User ──────────────────────────────────────────────────────
+
+model Account {
   id                 String   @id @default(cuid())
-  email              String   @unique
   name               String?
-  externalAuthId     String   @unique @map("external_auth_id")
-  apiKey             String?  @unique @map("api_key") // "oc_..." prefix, used for API auth
   stripeCustomerId   String?  @unique @map("stripe_customer_id")
   subscriptionStatus String   @default("free") @map("subscription_status")
   demoSeeded         Boolean  @default(false) @map("demo_seeded")
   createdAt          DateTime @default(now()) @map("created_at")
   updatedAt          DateTime @updatedAt @map("updated_at")
 
+  members           AccountMember[]
+  apiKeys           ApiKey[]
   agents            Agent[]
   secrets           Secret[]
   policyRules       PolicyRule[]
   connectedServices ConnectedService[]
   auditLogs         AuditLog[]
   vaultConnections  VaultConnection[]
+  onboardingSurvey  OnboardingSurvey?
+
+  @@map("accounts")
+}
+
+model AccountMember {
+  accountId String   @map("account_id")
+  userId    String   @map("user_id")
+  role      String // "owner" | "admin" | "member"
+  createdAt DateTime @default(now()) @map("created_at")
+
+  account Account @relation(fields: [accountId], references: [id])
+  user    User    @relation(fields: [userId], references: [id])
+
+  @@id([accountId, userId])
+  @@index([userId])
+  @@map("account_members")
+}
+
+model User {
+  id             String   @id @default(cuid())
+  email          String   @unique
+  name           String?
+  externalAuthId String   @unique @map("external_auth_id")
+  createdAt      DateTime @default(now()) @map("created_at")
+  updatedAt      DateTime @updatedAt @map("updated_at")
+
+  memberships AccountMember[]
+  apiKeys     ApiKey[]
+  auditLogs   AuditLog[]
 
   @@map("users")
 }
 
+model ApiKey {
+  id        String   @id @default(cuid())
+  key       String   @unique // "oc_..." prefix, used for API auth
+  userId    String   @map("user_id")
+  accountId String   @map("account_id")
+  name      String? // "My CLI key", "CI/CD key", etc.
+  createdAt DateTime @default(now()) @map("created_at")
+
+  user    User    @relation(fields: [userId], references: [id])
+  account Account @relation(fields: [accountId], references: [id])
+
+  @@index([userId])
+  @@map("api_keys")
+}
+
+// ── Workspace data (scoped by accountId) ────────────────────────────────
+
 model Agent {
   id          String   @id @default(cuid())
-  userId      String   @map("user_id")
+  accountId   String   @map("account_id")
   name        String
-  identifier  String? // user-provided machine-readable ID, unique per user
+  identifier  String? // user-provided machine-readable ID, unique per account
   accessToken String   @unique @map("access_token") // "aoc_..." prefix, used for gateway auth
   isDefault   Boolean  @default(false) @map("is_default")
   secretMode  String   @default("all") @map("secret_mode") // "all" or "selective"
   createdAt   DateTime @default(now()) @map("created_at")
   updatedAt   DateTime @updatedAt @map("updated_at")
-  user        User     @relation(fields: [userId], references: [id])
+  account     Account  @relation(fields: [accountId], references: [id])
 
   agentSecrets AgentSecret[]
   policyRules  PolicyRule[]
 
-  @@unique([userId, identifier])
-  @@index([userId])
+  @@unique([accountId, identifier])
+  @@index([accountId])
   @@map("agents")
 }
 
 model Secret {
   id              String   @id @default(cuid())
-  userId          String   @map("user_id")
+  accountId       String   @map("account_id")
   name            String
   type            String // "anthropic", "generic"
   encryptedValue  String   @map("encrypted_value") // AES-256-GCM encrypted via CryptoService
@@ -61,17 +109,17 @@ model Secret {
   metadata        Json? // type-specific metadata (anthropic: { authMode: "api-key" | "oauth" })
   createdAt       DateTime @default(now()) @map("created_at")
   updatedAt       DateTime @updatedAt @map("updated_at")
-  user            User     @relation(fields: [userId], references: [id])
+  account         Account  @relation(fields: [accountId], references: [id])
 
   agentSecrets AgentSecret[]
 
-  @@index([userId])
+  @@index([accountId])
   @@map("secrets")
 }
 
 model PolicyRule {
   id              String   @id @default(cuid())
-  userId          String   @map("user_id")
+  accountId       String   @map("account_id")
   name            String
   hostPattern     String   @map("host_pattern") // "gmail.googleapis.com" or "*.googleapis.com"
   pathPattern     String?  @map("path_pattern") // "/gmail/v1/users/me/messages/send" or "/gmail/*"
@@ -83,10 +131,10 @@ model PolicyRule {
   rateLimitWindow String?  @map("rate_limit_window") // "minute" | "hour" | "day"
   createdAt       DateTime @default(now()) @map("created_at")
   updatedAt       DateTime @updatedAt @map("updated_at")
-  user            User     @relation(fields: [userId], references: [id])
+  account         Account  @relation(fields: [accountId], references: [id])
   agent           Agent?   @relation(fields: [agentId], references: [id], onDelete: Cascade)
 
-  @@index([userId])
+  @@index([accountId])
   @@map("policy_rules")
 }
 
@@ -102,7 +150,7 @@ model AgentSecret {
 
 model ConnectedService {
   id           String    @id @default(cuid())
-  userId       String    @map("user_id")
+  accountId    String    @map("account_id")
   provider     String
   status       String    @default("connected")
   accessToken  String?   @map("access_token")
@@ -112,30 +160,32 @@ model ConnectedService {
   metadata     Json?
   connectedAt  DateTime  @default(now()) @map("connected_at")
   updatedAt    DateTime  @updatedAt @map("updated_at")
-  user         User      @relation(fields: [userId], references: [id])
+  account      Account   @relation(fields: [accountId], references: [id])
 
-  @@unique([userId, provider])
+  @@unique([accountId, provider])
   @@map("connected_services")
 }
 
 model AuditLog {
   id        String   @id @default(cuid())
-  userId    String   @map("user_id")
+  accountId String   @map("account_id")
+  userId    String   @map("user_id") // who performed the action (kept permanently)
   action    String
   service   String
   status    String
   source    String   @default("app")
   metadata  Json?
   createdAt DateTime @default(now()) @map("created_at")
+  account   Account  @relation(fields: [accountId], references: [id])
   user      User     @relation(fields: [userId], references: [id])
 
-  @@index([userId, createdAt])
+  @@index([accountId, createdAt])
   @@map("audit_logs")
 }
 
 model VaultConnection {
   id              String    @id @default(cuid())
-  userId          String    @map("user_id")
+  accountId       String    @map("account_id")
   provider        String
   name            String?
   status          String
@@ -143,11 +193,24 @@ model VaultConnection {
   lastConnectedAt DateTime? @map("last_connected_at")
   createdAt       DateTime  @default(now()) @map("created_at")
   updatedAt       DateTime  @updatedAt @map("updated_at")
-  user            User      @relation(fields: [userId], references: [id])
+  account         Account   @relation(fields: [accountId], references: [id])
 
-  @@unique([userId, provider])
+  @@unique([accountId, provider])
   @@map("vault_connections")
 }
+
+model OnboardingSurvey {
+  id        String   @id @default(cuid())
+  accountId String   @unique @map("account_id")
+  useCase   String?  @map("use_case")
+  discovery String[] @default([])
+  createdAt DateTime @default(now()) @map("created_at")
+  account   Account  @relation(fields: [accountId], references: [id])
+
+  @@map("onboarding_surveys")
+}
+
+// ── Standalone (no account scoping) ─────────────────────────────────────
 
 model ResendBadEmail {
   id        String   @id @default(cuid())

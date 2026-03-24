@@ -8,9 +8,9 @@ export type SecretMode = "all" | "selective";
 export const generateAccessToken = () =>
   `aoc_${randomBytes(32).toString("hex")}`;
 
-export const listAgents = async (userId: string) => {
+export const listAgents = async (accountId: string) => {
   const agents = await db.agent.findMany({
-    where: { userId },
+    where: { accountId },
     select: {
       id: true,
       name: true,
@@ -30,9 +30,9 @@ export const listAgents = async (userId: string) => {
   }));
 };
 
-export const getDefaultAgent = async (userId: string) => {
+export const getDefaultAgent = async (accountId: string) => {
   return db.agent.findFirst({
-    where: { userId, isDefault: true },
+    where: { accountId, isDefault: true },
     select: {
       id: true,
       name: true,
@@ -44,7 +44,7 @@ export const getDefaultAgent = async (userId: string) => {
 };
 
 export const createAgent = async (
-  userId: string,
+  accountId: string,
   name: string,
   identifier: string,
 ) => {
@@ -65,7 +65,7 @@ export const createAgent = async (
   }
 
   const existing = await db.agent.findFirst({
-    where: { userId, identifier: trimmedIdentifier },
+    where: { accountId, identifier: trimmedIdentifier },
     select: { id: true },
   });
   if (existing) {
@@ -84,7 +84,7 @@ export const createAgent = async (
         identifier: trimmedIdentifier,
         accessToken,
         secretMode: "selective",
-        userId,
+        accountId,
       },
       select: {
         id: true,
@@ -96,7 +96,7 @@ export const createAgent = async (
 
     // Auto-assign the first anthropic secret if one exists
     const anthropicSecret = await db.secret.findFirst({
-      where: { userId, type: "anthropic" },
+      where: { accountId, type: "anthropic" },
       select: { id: true },
       orderBy: { createdAt: "asc" },
     });
@@ -122,9 +122,9 @@ export const createAgent = async (
   }
 };
 
-export const deleteAgent = async (userId: string, agentId: string) => {
+export const deleteAgent = async (accountId: string, agentId: string) => {
   const agent = await db.agent.findFirst({
-    where: { id: agentId, userId },
+    where: { id: agentId, accountId },
     select: { id: true, isDefault: true },
   });
 
@@ -136,7 +136,7 @@ export const deleteAgent = async (userId: string, agentId: string) => {
 };
 
 export const renameAgent = async (
-  userId: string,
+  accountId: string,
   agentId: string,
   name: string,
 ) => {
@@ -149,7 +149,7 @@ export const renameAgent = async (
   }
 
   const agent = await db.agent.findFirst({
-    where: { id: agentId, userId },
+    where: { id: agentId, accountId },
     select: { id: true },
   });
 
@@ -161,9 +161,12 @@ export const renameAgent = async (
   });
 };
 
-export const regenerateAgentToken = async (userId: string, agentId: string) => {
+export const regenerateAgentToken = async (
+  accountId: string,
+  agentId: string,
+) => {
   const agent = await db.agent.findFirst({
-    where: { id: agentId, userId },
+    where: { id: agentId, accountId },
     select: { id: true },
   });
 
@@ -180,9 +183,9 @@ export const regenerateAgentToken = async (userId: string, agentId: string) => {
   return { accessToken: updated.accessToken };
 };
 
-export const getAgentSecrets = async (userId: string, agentId: string) => {
+export const getAgentSecrets = async (accountId: string, agentId: string) => {
   const agent = await db.agent.findFirst({
-    where: { id: agentId, userId },
+    where: { id: agentId, accountId },
     select: { id: true },
   });
 
@@ -197,12 +200,12 @@ export const getAgentSecrets = async (userId: string, agentId: string) => {
 };
 
 export const updateAgentSecretMode = async (
-  userId: string,
+  accountId: string,
   agentId: string,
   mode: SecretMode,
 ) => {
   const agent = await db.agent.findFirst({
-    where: { id: agentId, userId },
+    where: { id: agentId, accountId },
     select: { id: true },
   });
 
@@ -215,20 +218,20 @@ export const updateAgentSecretMode = async (
 };
 
 export const updateAgentSecrets = async (
-  userId: string,
+  accountId: string,
   agentId: string,
   secretIds: string[],
 ) => {
   const agent = await db.agent.findFirst({
-    where: { id: agentId, userId },
+    where: { id: agentId, accountId },
     select: { id: true },
   });
 
   if (!agent) throw new ServiceError("NOT_FOUND", "Agent not found");
 
-  // Validate all secrets belong to this user
+  // Validate all secrets belong to this account
   const secrets = await db.secret.findMany({
-    where: { id: { in: secretIds }, userId },
+    where: { id: { in: secretIds }, accountId },
     select: { id: true },
   });
 

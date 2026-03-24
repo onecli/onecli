@@ -8,7 +8,7 @@ export const POST = async (request: NextRequest) => {
     const auth = await resolveApiAuth(request);
     if (!auth) return unauthorized();
 
-    const result = await regenerateApiKey(auth.userId);
+    const result = await regenerateApiKey(auth.userId, auth.accountId);
     return NextResponse.json(result);
   } catch (err) {
     return handleServiceError(err);

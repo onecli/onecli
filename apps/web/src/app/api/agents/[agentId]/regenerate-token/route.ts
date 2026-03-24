@@ -11,7 +11,7 @@ export const POST = async (request: NextRequest, { params }: Params) => {
     if (!auth) return unauthorized();
 
     const { agentId } = await params;
-    const result = await regenerateAgentToken(auth.userId, agentId);
+    const result = await regenerateAgentToken(auth.accountId, agentId);
     return NextResponse.json(result);
   } catch (err) {
     return handleServiceError(err);

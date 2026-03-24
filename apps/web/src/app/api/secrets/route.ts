@@ -9,7 +9,7 @@ export const GET = async (request: NextRequest) => {
     const auth = await resolveApiAuth(request);
     if (!auth) return unauthorized();
 
-    const secrets = await listSecrets(auth.userId);
+    const secrets = await listSecrets(auth.accountId);
     return NextResponse.json(secrets);
   } catch (err) {
     return handleServiceError(err);
@@ -30,7 +30,7 @@ export const POST = async (request: NextRequest) => {
       );
     }
 
-    const secret = await createSecret(auth.userId, parsed.data);
+    const secret = await createSecret(auth.accountId, parsed.data);
     return NextResponse.json(secret, { status: 201 });
   } catch (err) {
     return handleServiceError(err);
