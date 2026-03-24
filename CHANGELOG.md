@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.5.5](https://github.com/onecli/onecli/compare/v1.5.4...v1.5.5) (2026-03-24)
+
+
+### Bug Fixes
+
+* prisma migration ([#94](https://github.com/onecli/onecli/issues/94)) ([ea56564](https://github.com/onecli/onecli/commit/ea5656416eb2a47b68fa6c158f6d083c43c4ce92))
+
 ## [1.5.4](https://github.com/onecli/onecli/compare/v1.5.3...v1.5.4) (2026-03-23)
 
 
