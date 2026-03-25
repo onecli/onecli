@@ -445,7 +445,7 @@ async fn forward_request(
     // Collect forwarded headers into a mutable map for injection
     let mut headers = hyper::HeaderMap::new();
     for (name, value) in parts.headers.iter() {
-        if is_forwarded_header(name) {
+        if is_forwarded_request_header(name) {
             headers.append(name.clone(), value.clone());
         }
     }
@@ -495,7 +495,7 @@ async fn forward_request(
 
     // Forward response headers, skipping hop-by-hop
     for (name, value) in resp_headers.iter() {
-        if is_forwarded_header(name) {
+        if is_forwarded_response_header(name) {
             response.headers_mut().append(name.clone(), value.clone());
         }
     }
@@ -540,23 +540,37 @@ fn respond_407() -> Response<axum::body::Body> {
     resp
 }
 
-/// Returns true if a header should be forwarded between client and upstream.
-/// Filters out hop-by-hop headers and headers managed by the transport layer.
-fn is_forwarded_header(name: &HeaderName) -> bool {
-    !matches!(
-        name.as_str(),
-        "connection"
-            | "keep-alive"
-            | "proxy-authenticate"
-            | "proxy-authorization"
-            | "proxy-connection"
-            | "te"
-            | "trailers"
-            | "transfer-encoding"
-            | "upgrade"
-            | "host"
-            | "content-length"
-    )
+/// Hop-by-hop headers that should never be forwarded in either direction.
+const HOP_BY_HOP_HEADERS: &[&str] = &[
+    "connection",
+    "keep-alive",
+    "proxy-authenticate",
+    "proxy-authorization",
+    "proxy-connection",
+    "te",
+    "trailers",
+    "transfer-encoding",
+    "upgrade",
+];
+
+/// Returns true if a request header should be forwarded to the upstream server.
+///
+/// Strips hop-by-hop headers plus `host` (set by the upstream URL) and
+/// `content-length` (recalculated by reqwest from the body).
+fn is_forwarded_request_header(name: &HeaderName) -> bool {
+    let s = name.as_str();
+    if s == "host" || s == "content-length" {
+        return false;
+    }
+    !HOP_BY_HOP_HEADERS.contains(&s)
+}
+
+/// Returns true if a response header should be forwarded back to the client.
+///
+/// Strips hop-by-hop headers only. `content-length` is preserved — it is
+/// required for HEAD responses and correct HTTP/1.1 framing.
+fn is_forwarded_response_header(name: &HeaderName) -> bool {
+    !HOP_BY_HOP_HEADERS.contains(&name.as_str())
 }
 
 /// Strip port from a `host:port` string, returning just the hostname.
@@ -597,48 +611,85 @@ mod tests {
         assert_eq!(strip_port(""), "");
     }
 
-    // ── is_forwarded_header ─────────────────────────────────────────────
+    // ── is_forwarded_request_header ──────────────────────────────────────
 
     #[test]
-    fn is_forwarded_header_strips_hop_by_hop() {
-        let hop_by_hop = [
-            "connection",
-            "keep-alive",
-            "proxy-authenticate",
-            "proxy-authorization",
-            "proxy-connection",
-            "te",
-            "trailers",
-            "transfer-encoding",
-            "upgrade",
-            "host",
-            "content-length",
-        ];
-
-        for name in hop_by_hop {
+    fn request_header_strips_hop_by_hop() {
+        for &name in HOP_BY_HOP_HEADERS {
             let header = HeaderName::from_static(name);
             assert!(
-                !is_forwarded_header(&header),
-                "{name} should be filtered out"
+                !is_forwarded_request_header(&header),
+                "{name} should be stripped from requests"
             );
         }
     }
 
     #[test]
-    fn is_forwarded_header_passes_content_headers() {
+    fn request_header_strips_host_and_content_length() {
+        assert!(!is_forwarded_request_header(&HeaderName::from_static(
+            "host"
+        )));
+        assert!(!is_forwarded_request_header(&HeaderName::from_static(
+            "content-length"
+        )));
+    }
+
+    #[test]
+    fn request_header_passes_application_headers() {
         let forwarded = [
             "content-type",
             "authorization",
             "accept",
             "user-agent",
             "x-api-key",
-            "x-custom-header",
             "cache-control",
         ];
-
         for name in forwarded {
             let header = HeaderName::from_static(name);
-            assert!(is_forwarded_header(&header), "{name} should be forwarded");
+            assert!(
+                is_forwarded_request_header(&header),
+                "{name} should be forwarded in requests"
+            );
+        }
+    }
+
+    // ── is_forwarded_response_header ─────────────────────────────────────
+
+    #[test]
+    fn response_header_strips_hop_by_hop() {
+        for &name in HOP_BY_HOP_HEADERS {
+            let header = HeaderName::from_static(name);
+            assert!(
+                !is_forwarded_response_header(&header),
+                "{name} should be stripped from responses"
+            );
+        }
+    }
+
+    #[test]
+    fn response_header_preserves_content_length() {
+        assert!(is_forwarded_response_header(&HeaderName::from_static(
+            "content-length"
+        )));
+    }
+
+    #[test]
+    fn response_header_passes_application_headers() {
+        let forwarded = [
+            "content-type",
+            "content-length",
+            "authorization",
+            "accept",
+            "user-agent",
+            "x-api-key",
+            "cache-control",
+        ];
+        for name in forwarded {
+            let header = HeaderName::from_static(name);
+            assert!(
+                is_forwarded_response_header(&header),
+                "{name} should be forwarded in responses"
+            );
         }
     }
 
