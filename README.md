@@ -12,7 +12,7 @@
 <p align="center">
   <a href="https://onecli.sh">Website</a> &middot;
   <a href="https://onecli.sh/docs">Docs</a> &middot;
-  <a href="https://discord.gg/txVbnfHZCd">Discord</a>
+  <a href="https://discord.gg/PSztzsQB3g">Discord</a>
 </p>
 
 ---
