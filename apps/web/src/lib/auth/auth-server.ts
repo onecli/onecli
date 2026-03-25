@@ -35,18 +35,28 @@ const ensureLocalUser = async () => {
 
   if (!membership) {
     const account = await db.account.create({
-      data: { name: LOCAL_USER.name },
+      data: {
+        name: LOCAL_USER.name,
+        createdByUserId: user.id,
+        createdByUserEmail: LOCAL_USER.email,
+      },
       select: { id: true },
     });
 
     await db.accountMember.create({
-      data: { accountId: account.id, userId: user.id, role: "owner" },
+      data: {
+        accountId: account.id,
+        userId: user.id,
+        userEmail: LOCAL_USER.email,
+        role: "owner",
+      },
     });
 
     await db.apiKey.create({
       data: {
         key: generateApiKey(),
         userId: user.id,
+        userEmail: LOCAL_USER.email,
         accountId: account.id,
       },
     });

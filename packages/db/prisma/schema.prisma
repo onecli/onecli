@@ -10,14 +10,17 @@ datasource db {
 // ── Account & User ──────────────────────────────────────────────────────
 
 model Account {
-  id                 String   @id @default(cuid())
+  id                 String   @id @default(uuid())
   name               String?
   stripeCustomerId   String?  @unique @map("stripe_customer_id")
   subscriptionStatus String   @default("free") @map("subscription_status")
   demoSeeded         Boolean  @default(false) @map("demo_seeded")
+  createdByUserId    String?  @map("created_by_user_id")
+  createdByUserEmail String?  @map("created_by_user_email")
   createdAt          DateTime @default(now()) @map("created_at")
   updatedAt          DateTime @updatedAt @map("updated_at")
 
+  createdByUser     User?              @relation("AccountCreator", fields: [createdByUserId], references: [id])
   members           AccountMember[]
   apiKeys           ApiKey[]
   agents            Agent[]
@@ -34,6 +37,7 @@ model Account {
 model AccountMember {
   accountId String   @map("account_id")
   userId    String   @map("user_id")
+  userEmail String   @map("user_email")
   role      String // "owner" | "admin" | "member"
   createdAt DateTime @default(now()) @map("created_at")
 
@@ -46,27 +50,33 @@ model AccountMember {
 }
 
 model User {
-  id             String   @id @default(cuid())
+  id             String   @id @default(uuid())
   email          String   @unique
   name           String?
   externalAuthId String   @unique @map("external_auth_id")
   createdAt      DateTime @default(now()) @map("created_at")
   updatedAt      DateTime @updatedAt @map("updated_at")
 
-  memberships AccountMember[]
-  apiKeys     ApiKey[]
-  auditLogs   AuditLog[]
+  memberships         AccountMember[]
+  apiKeys             ApiKey[]
+  auditLogs           AuditLog[]
+  createdAccounts     Account[]          @relation("AccountCreator")
+  onboardingSurveys   OnboardingSurvey[]
+  createdAgentSecrets AgentSecret[]      @relation("AgentSecretCreator")
+  updatedAgentSecrets AgentSecret[]      @relation("AgentSecretUpdater")
 
   @@map("users")
 }
 
 model ApiKey {
-  id        String   @id @default(cuid())
-  key       String   @unique // "oc_..." prefix, used for API auth
-  userId    String   @map("user_id")
+  id        String   @id @default(uuid())
   accountId String   @map("account_id")
+  userId    String   @map("user_id")
+  userEmail String   @map("user_email")
+  key       String   @unique // "oc_..." prefix, used for API auth
   name      String? // "My CLI key", "CI/CD key", etc.
   createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
 
   user    User    @relation(fields: [userId], references: [id])
   account Account @relation(fields: [accountId], references: [id])
@@ -78,7 +88,7 @@ model ApiKey {
 // ── Workspace data (scoped by accountId) ────────────────────────────────
 
 model Agent {
-  id          String   @id @default(cuid())
+  id          String   @id @default(uuid())
   accountId   String   @map("account_id")
   name        String
   identifier  String? // user-provided machine-readable ID, unique per account
@@ -98,7 +108,7 @@ model Agent {
 }
 
 model Secret {
-  id              String   @id @default(cuid())
+  id              String   @id @default(uuid())
   accountId       String   @map("account_id")
   name            String
   type            String // "anthropic", "generic"
@@ -118,15 +128,15 @@ model Secret {
 }
 
 model PolicyRule {
-  id              String   @id @default(cuid())
+  id              String   @id @default(uuid())
   accountId       String   @map("account_id")
+  agentId         String?  @map("agent_id") // null = all agents, set = one agent only
   name            String
   hostPattern     String   @map("host_pattern") // "gmail.googleapis.com" or "*.googleapis.com"
   pathPattern     String?  @map("path_pattern") // "/gmail/v1/users/me/messages/send" or "/gmail/*"
   method          String? // "POST", null = all methods
   action          String // "block" | "rate_limit"
   enabled         Boolean
-  agentId         String?  @map("agent_id") // null = all agents, set = one agent only
   rateLimit       Int?     @map("rate_limit") // max requests per window (only for rate_limit action)
   rateLimitWindow String?  @map("rate_limit_window") // "minute" | "hour" | "day"
   createdAt       DateTime @default(now()) @map("created_at")
@@ -139,17 +149,23 @@ model PolicyRule {
 }
 
 model AgentSecret {
-  agentId  String @map("agent_id")
-  secretId String @map("secret_id")
-  agent    Agent  @relation(fields: [agentId], references: [id], onDelete: Cascade)
-  secret   Secret @relation(fields: [secretId], references: [id], onDelete: Cascade)
+  agentId         String   @map("agent_id")
+  secretId        String   @map("secret_id")
+  createdByUserId String?  @map("created_by_user_id")
+  updatedByUserId String?  @map("updated_by_user_id")
+  createdAt       DateTime @default(now()) @map("created_at")
+  updatedAt       DateTime @updatedAt @map("updated_at")
+  agent           Agent    @relation(fields: [agentId], references: [id], onDelete: Cascade)
+  secret          Secret   @relation(fields: [secretId], references: [id], onDelete: Cascade)
+  createdByUser   User?    @relation("AgentSecretCreator", fields: [createdByUserId], references: [id])
+  updatedByUser   User?    @relation("AgentSecretUpdater", fields: [updatedByUserId], references: [id])
 
   @@id([agentId, secretId])
   @@map("agent_secrets")
 }
 
 model ConnectedService {
-  id           String    @id @default(cuid())
+  id           String    @id @default(uuid())
   accountId    String    @map("account_id")
   provider     String
   status       String    @default("connected")
@@ -167,9 +183,10 @@ model ConnectedService {
 }
 
 model AuditLog {
-  id        String   @id @default(cuid())
+  id        String   @id @default(uuid())
   accountId String   @map("account_id")
   userId    String   @map("user_id") // who performed the action (kept permanently)
+  userEmail String   @map("user_email")
   action    String
   service   String
   status    String
@@ -184,7 +201,7 @@ model AuditLog {
 }
 
 model VaultConnection {
-  id              String    @id @default(cuid())
+  id              String    @id @default(uuid())
   accountId       String    @map("account_id")
   provider        String
   name            String?
@@ -200,12 +217,16 @@ model VaultConnection {
 }
 
 model OnboardingSurvey {
-  id        String   @id @default(cuid())
+  id        String   @id @default(uuid())
   accountId String   @unique @map("account_id")
+  userId    String   @map("user_id")
+  userEmail String   @map("user_email")
   useCase   String?  @map("use_case")
   discovery String[] @default([])
   createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
   account   Account  @relation(fields: [accountId], references: [id])
+  user      User     @relation(fields: [userId], references: [id])
 
   @@map("onboarding_surveys")
 }
@@ -213,7 +234,7 @@ model OnboardingSurvey {
 // ── Standalone (no account scoping) ─────────────────────────────────────
 
 model ResendBadEmail {
-  id        String   @id @default(cuid())
+  id        String   @id @default(uuid())
   email     String
   eventType String   @map("event_type") // "email.bounced" or "email.complained"
   createdAt DateTime @default(now()) @map("created_at")
@@ -223,7 +244,7 @@ model ResendBadEmail {
 }
 
 model ResendWebhook {
-  id           String   @id @default(cuid())
+  id           String   @id @default(uuid())
   eventType    String   @map("event_type") // "email.sent", "email.bounced", "email.complained", etc.
   emailSubject String?  @map("email_subject")
   emailFrom    String?  @map("email_from")

@@ -35,8 +35,12 @@ export const regenerateApiKey = async (userId: string, accountId: string) => {
       data: { key },
     });
   } else {
+    const user = await db.user.findUniqueOrThrow({
+      where: { id: userId },
+      select: { email: true },
+    });
     await db.apiKey.create({
-      data: { key, userId, accountId },
+      data: { key, userId, userEmail: user.email, accountId },
     });
   }
 

@@ -61,12 +61,21 @@ export const GET = async () => {
 
     if (!membership) {
       const account = await db.account.create({
-        data: { name: user.name },
+        data: {
+          name: user.name,
+          createdByUserId: user.id,
+          createdByUserEmail: user.email,
+        },
         select: { id: true, demoSeeded: true },
       });
 
       await db.accountMember.create({
-        data: { accountId: account.id, userId: user.id, role: "owner" },
+        data: {
+          accountId: account.id,
+          userId: user.id,
+          userEmail: user.email,
+          role: "owner",
+        },
       });
 
       // Create API key for this user in the new account
@@ -74,6 +83,7 @@ export const GET = async () => {
         data: {
           key: generateApiKey(),
           userId: user.id,
+          userEmail: user.email,
           accountId: account.id,
         },
       });
