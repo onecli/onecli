@@ -67,7 +67,7 @@ jobs:
       - name: Check migration drift
         if: steps.prisma-changes.outputs.changed != '0'
         run: |
-          docker run -d --name shadow-db -e POSTGRES_USER=ci -e POSTGRES_PASSWORD=ci -e POSTGRES_DB=shadow -p 5433:5432 postgres:17-alpine
+          docker run -d --name shadow-db -e POSTGRES_USER=ci -e POSTGRES_PASSWORD=ci -e POSTGRES_DB=shadow -p 5433:5432 postgres:18-alpine
           until docker exec shadow-db pg_isready; do sleep 1; done
           pnpm --filter @onecli/db exec prisma migrate diff \
             --from-migrations ./prisma/migrations \
