@@ -1,5 +1,18 @@
 # Changelog
 
+## [1.6.0](https://github.com/onecli/onecli/compare/v1.5.5...v1.6.0) (2026-03-25)
+
+
+### Features
+
+* add account layer for multi-tenant workspace scoping ([#98](https://github.com/onecli/onecli/issues/98)) ([4057a3f](https://github.com/onecli/onecli/commit/4057a3f899baa544004fbeba7ff485e1ed421877))
+
+
+### Bug Fixes
+
+* missing Authority Key Identifier in MITM leaf certificates ([#100](https://github.com/onecli/onecli/issues/100)) ([3d26e8d](https://github.com/onecli/onecli/commit/3d26e8db76314bbeb6206a42f1a879d23dc32db2))
+* preserve Content-Length header in MITM responses ([#102](https://github.com/onecli/onecli/issues/102)) ([21ee091](https://github.com/onecli/onecli/commit/21ee09165f36e62d8e5d152bf822c7852cf77a46))
+
 ## [1.5.5](https://github.com/onecli/onecli/compare/v1.5.4...v1.5.5) (2026-03-24)
 
 
