@@ -5,6 +5,7 @@ import { getServerSession } from "@/lib/auth/server";
 
 export interface UserContext {
   userId: string;
+  userEmail: string;
   accountId: string;
 }
 
@@ -20,6 +21,7 @@ export const resolveUser = async (): Promise<UserContext> => {
     where: { externalAuthId: session.id },
     select: {
       id: true,
+      email: true,
       memberships: { select: { accountId: true }, take: 1 },
     },
   });
@@ -27,5 +29,9 @@ export const resolveUser = async (): Promise<UserContext> => {
   if (!user) throw new Error("User not found");
   if (user.memberships.length === 0) throw new Error("No account found");
 
-  return { userId: user.id, accountId: user.memberships[0]!.accountId };
+  return {
+    userId: user.id,
+    userEmail: user.email,
+    accountId: user.memberships[0]!.accountId,
+  };
 };

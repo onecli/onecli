@@ -17,12 +17,13 @@ export const getApiKey = async () => {
 };
 
 export const regenerateApiKey = async () => {
-  const { userId, accountId } = await resolveUser();
+  const { userId, userEmail, accountId } = await resolveUser();
   return withAudit(
     () => regenerateApiKeyService(userId, accountId),
     () => ({
       accountId,
       userId,
+      userEmail,
       action: AUDIT_ACTIONS.REGENERATE,
       service: AUDIT_SERVICES.API_KEY,
     }),

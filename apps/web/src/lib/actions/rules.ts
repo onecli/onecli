@@ -21,12 +21,13 @@ export const getRules = async () => {
 };
 
 export const createRule = async (input: CreatePolicyRuleInput) => {
-  const { userId, accountId } = await resolveUser();
+  const { userId, userEmail, accountId } = await resolveUser();
   return withAudit(
     () => createPolicyRuleService(accountId, input),
     (rule) => ({
       accountId,
       userId,
+      userEmail,
       action: AUDIT_ACTIONS.CREATE,
       service: AUDIT_SERVICES.RULE,
       metadata: { ruleId: rule.id, name: input.name, action: input.action },
@@ -38,12 +39,13 @@ export const updateRule = async (
   ruleId: string,
   input: UpdatePolicyRuleInput,
 ): Promise<void> => {
-  const { userId, accountId } = await resolveUser();
+  const { userId, userEmail, accountId } = await resolveUser();
   return withAudit(
     () => updatePolicyRuleService(accountId, ruleId, input),
     () => ({
       accountId,
       userId,
+      userEmail,
       action: AUDIT_ACTIONS.UPDATE,
       service: AUDIT_SERVICES.RULE,
       metadata: { ruleId },
@@ -52,12 +54,13 @@ export const updateRule = async (
 };
 
 export const deleteRule = async (ruleId: string): Promise<void> => {
-  const { userId, accountId } = await resolveUser();
+  const { userId, userEmail, accountId } = await resolveUser();
   return withAudit(
     () => deletePolicyRuleService(accountId, ruleId),
     () => ({
       accountId,
       userId,
+      userEmail,
       action: AUDIT_ACTIONS.DELETE,
       service: AUDIT_SERVICES.RULE,
       metadata: { ruleId },

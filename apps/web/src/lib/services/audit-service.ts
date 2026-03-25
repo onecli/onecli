@@ -39,6 +39,7 @@ export type AuditSource = (typeof AUDIT_SOURCE)[keyof typeof AUDIT_SOURCE];
 export interface AuditEventParams {
   accountId: string;
   userId: string;
+  userEmail: string;
   action: AuditAction;
   service: AuditService;
   status: AuditStatus;

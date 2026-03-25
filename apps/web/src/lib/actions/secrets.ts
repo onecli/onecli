@@ -23,12 +23,13 @@ export const getSecrets = async () => {
 };
 
 export const createSecret = async (input: CreateSecretInput) => {
-  const { userId, accountId } = await resolveUser();
+  const { userId, userEmail, accountId } = await resolveUser();
   return withAudit(
     () => createSecretService(accountId, input),
     (secret) => ({
       accountId,
       userId,
+      userEmail,
       action: AUDIT_ACTIONS.CREATE,
       service: AUDIT_SERVICES.SECRET,
       metadata: { secretId: secret.id, name: input.name, type: input.type },
@@ -37,12 +38,13 @@ export const createSecret = async (input: CreateSecretInput) => {
 };
 
 export const deleteSecret = async (secretId: string): Promise<void> => {
-  const { userId, accountId } = await resolveUser();
+  const { userId, userEmail, accountId } = await resolveUser();
   return withAudit(
     () => deleteSecretService(accountId, secretId),
     () => ({
       accountId,
       userId,
+      userEmail,
       action: AUDIT_ACTIONS.DELETE,
       service: AUDIT_SERVICES.SECRET,
       metadata: { secretId },
@@ -79,12 +81,13 @@ export const updateSecret = async (
   secretId: string,
   input: UpdateSecretInput,
 ): Promise<void> => {
-  const { userId, accountId } = await resolveUser();
+  const { userId, userEmail, accountId } = await resolveUser();
   return withAudit(
     () => updateSecretService(accountId, secretId, input),
     () => ({
       accountId,
       userId,
+      userEmail,
       action: AUDIT_ACTIONS.UPDATE,
       service: AUDIT_SERVICES.SECRET,
       metadata: { secretId },
