@@ -5,6 +5,11 @@ import {
   getApiKey as getApiKeyService,
   regenerateApiKey as regenerateApiKeyService,
 } from "@/lib/services/api-key-service";
+import {
+  withAudit,
+  AUDIT_ACTIONS,
+  AUDIT_SERVICES,
+} from "@/lib/services/audit-service";
 
 export const getApiKey = async () => {
   const { userId, accountId } = await resolveUser();
@@ -13,5 +18,13 @@ export const getApiKey = async () => {
 
 export const regenerateApiKey = async () => {
   const { userId, accountId } = await resolveUser();
-  return regenerateApiKeyService(userId, accountId);
+  return withAudit(
+    () => regenerateApiKeyService(userId, accountId),
+    () => ({
+      accountId,
+      userId,
+      action: AUDIT_ACTIONS.REGENERATE,
+      service: AUDIT_SERVICES.API_KEY,
+    }),
+  );
 };

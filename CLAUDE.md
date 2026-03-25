@@ -100,6 +100,51 @@ When adding components, use shadcn CLI or copy from ui.shadcn.com.
 - **Button loading states** - replace icon with spinner, update text (e.g., "Connecting..."), and disable
 - **Verify library APIs are current** - check official docs for deprecated/legacy patterns before implementing
 
+## Audit Logging
+
+All state-changing operations (create, update, delete, regenerate) must be audited. Use the `withAudit` wrapper from `@/lib/services/audit-service`.
+
+**Pattern:**
+
+```typescript
+import {
+  withAudit,
+  AUDIT_ACTIONS,
+  AUDIT_SERVICES,
+} from "@/lib/services/audit-service";
+
+export const createAgent = async (name: string) => {
+  const { userId, accountId } = await resolveUser();
+  return withAudit(
+    () => createAgentService(accountId, name),
+    (agent) => ({
+      accountId,
+      userId,
+      action: AUDIT_ACTIONS.CREATE,
+      service: AUDIT_SERVICES.AGENT,
+      metadata: { agentId: agent.id, name },
+    }),
+  );
+};
+```
+
+**Available constants:**
+
+- `AUDIT_ACTIONS`: `CREATE`, `UPDATE`, `DELETE`, `REGENERATE`
+- `AUDIT_SERVICES`: `AGENT`, `SECRET`, `RULE`, `API_KEY`
+
+**Metadata guidelines:**
+
+- Include resource IDs (agentId, secretId, ruleId)
+- Include relevant identifiers (name, type)
+- Never include sensitive values (tokens, secrets, passwords)
+
+**When to audit:**
+
+- Actions layer (`lib/actions/`) - always use `withAudit`
+- API routes (`app/api/`) - call audit service directly with `source: AUDIT_SOURCE.API` (when implemented)
+- Read operations - do not audit
+
 ## Database (Prisma)
 
 - Schema at `packages/db/prisma/schema.prisma`

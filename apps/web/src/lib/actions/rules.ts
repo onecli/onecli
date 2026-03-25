@@ -9,6 +9,11 @@ import {
   type CreatePolicyRuleInput,
   type UpdatePolicyRuleInput,
 } from "@/lib/services/policy-rule-service";
+import {
+  withAudit,
+  AUDIT_ACTIONS,
+  AUDIT_SERVICES,
+} from "@/lib/services/audit-service";
 
 export const getRules = async () => {
   const { accountId } = await resolveUser();
@@ -16,19 +21,46 @@ export const getRules = async () => {
 };
 
 export const createRule = async (input: CreatePolicyRuleInput) => {
-  const { accountId } = await resolveUser();
-  return createPolicyRuleService(accountId, input);
+  const { userId, accountId } = await resolveUser();
+  return withAudit(
+    () => createPolicyRuleService(accountId, input),
+    (rule) => ({
+      accountId,
+      userId,
+      action: AUDIT_ACTIONS.CREATE,
+      service: AUDIT_SERVICES.RULE,
+      metadata: { ruleId: rule.id, name: input.name, action: input.action },
+    }),
+  );
 };
 
 export const updateRule = async (
   ruleId: string,
   input: UpdatePolicyRuleInput,
-) => {
-  const { accountId } = await resolveUser();
-  return updatePolicyRuleService(accountId, ruleId, input);
+): Promise<void> => {
+  const { userId, accountId } = await resolveUser();
+  return withAudit(
+    () => updatePolicyRuleService(accountId, ruleId, input),
+    () => ({
+      accountId,
+      userId,
+      action: AUDIT_ACTIONS.UPDATE,
+      service: AUDIT_SERVICES.RULE,
+      metadata: { ruleId },
+    }),
+  );
 };
 
-export const deleteRule = async (ruleId: string) => {
-  const { accountId } = await resolveUser();
-  return deletePolicyRuleService(accountId, ruleId);
+export const deleteRule = async (ruleId: string): Promise<void> => {
+  const { userId, accountId } = await resolveUser();
+  return withAudit(
+    () => deletePolicyRuleService(accountId, ruleId),
+    () => ({
+      accountId,
+      userId,
+      action: AUDIT_ACTIONS.DELETE,
+      service: AUDIT_SERVICES.RULE,
+      metadata: { ruleId },
+    }),
+  );
 };

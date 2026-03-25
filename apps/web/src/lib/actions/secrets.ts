@@ -11,6 +11,11 @@ import {
   type CreateSecretInput,
   type UpdateSecretInput,
 } from "@/lib/services/secret-service";
+import {
+  withAudit,
+  AUDIT_ACTIONS,
+  AUDIT_SERVICES,
+} from "@/lib/services/audit-service";
 
 export const getSecrets = async () => {
   const { accountId } = await resolveUser();
@@ -18,13 +23,31 @@ export const getSecrets = async () => {
 };
 
 export const createSecret = async (input: CreateSecretInput) => {
-  const { accountId } = await resolveUser();
-  return createSecretService(accountId, input);
+  const { userId, accountId } = await resolveUser();
+  return withAudit(
+    () => createSecretService(accountId, input),
+    (secret) => ({
+      accountId,
+      userId,
+      action: AUDIT_ACTIONS.CREATE,
+      service: AUDIT_SERVICES.SECRET,
+      metadata: { secretId: secret.id, name: input.name, type: input.type },
+    }),
+  );
 };
 
-export const deleteSecret = async (secretId: string) => {
-  const { accountId } = await resolveUser();
-  return deleteSecretService(accountId, secretId);
+export const deleteSecret = async (secretId: string): Promise<void> => {
+  const { userId, accountId } = await resolveUser();
+  return withAudit(
+    () => deleteSecretService(accountId, secretId),
+    () => ({
+      accountId,
+      userId,
+      action: AUDIT_ACTIONS.DELETE,
+      service: AUDIT_SERVICES.SECRET,
+      metadata: { secretId },
+    }),
+  );
 };
 
 export const getDemoInfo = async () => {
@@ -55,7 +78,16 @@ export const getDemoInfo = async () => {
 export const updateSecret = async (
   secretId: string,
   input: UpdateSecretInput,
-) => {
-  const { accountId } = await resolveUser();
-  return updateSecretService(accountId, secretId, input);
+): Promise<void> => {
+  const { userId, accountId } = await resolveUser();
+  return withAudit(
+    () => updateSecretService(accountId, secretId, input),
+    () => ({
+      accountId,
+      userId,
+      action: AUDIT_ACTIONS.UPDATE,
+      service: AUDIT_SERVICES.SECRET,
+      metadata: { secretId },
+    }),
+  );
 };

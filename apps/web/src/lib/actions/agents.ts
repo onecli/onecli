@@ -13,6 +13,11 @@ import {
   updateAgentSecretMode as updateAgentSecretModeService,
   updateAgentSecrets as updateAgentSecretsService,
 } from "@/lib/services/agent-service";
+import {
+  withAudit,
+  AUDIT_ACTIONS,
+  AUDIT_SERVICES,
+} from "@/lib/services/audit-service";
 
 export const getAgents = async () => {
   const { accountId } = await resolveUser();
@@ -25,23 +30,62 @@ export const getDefaultAgent = async () => {
 };
 
 export const createAgent = async (name: string, identifier: string) => {
-  const { accountId } = await resolveUser();
-  return createAgentService(accountId, name, identifier);
+  const { userId, accountId } = await resolveUser();
+  return withAudit(
+    () => createAgentService(accountId, name, identifier),
+    (agent) => ({
+      accountId,
+      userId,
+      action: AUDIT_ACTIONS.CREATE,
+      service: AUDIT_SERVICES.AGENT,
+      metadata: { agentId: agent.id, name, identifier },
+    }),
+  );
 };
 
-export const deleteAgent = async (agentId: string) => {
-  const { accountId } = await resolveUser();
-  return deleteAgentService(accountId, agentId);
+export const deleteAgent = async (agentId: string): Promise<void> => {
+  const { userId, accountId } = await resolveUser();
+  return withAudit(
+    () => deleteAgentService(accountId, agentId),
+    () => ({
+      accountId,
+      userId,
+      action: AUDIT_ACTIONS.DELETE,
+      service: AUDIT_SERVICES.AGENT,
+      metadata: { agentId },
+    }),
+  );
 };
 
-export const renameAgent = async (agentId: string, name: string) => {
-  const { accountId } = await resolveUser();
-  return renameAgentService(accountId, agentId, name);
+export const renameAgent = async (
+  agentId: string,
+  name: string,
+): Promise<void> => {
+  const { userId, accountId } = await resolveUser();
+  return withAudit(
+    () => renameAgentService(accountId, agentId, name),
+    () => ({
+      accountId,
+      userId,
+      action: AUDIT_ACTIONS.UPDATE,
+      service: AUDIT_SERVICES.AGENT,
+      metadata: { agentId, name },
+    }),
+  );
 };
 
 export const regenerateAgentToken = async (agentId: string) => {
-  const { accountId } = await resolveUser();
-  return regenerateAgentTokenService(accountId, agentId);
+  const { userId, accountId } = await resolveUser();
+  return withAudit(
+    () => regenerateAgentTokenService(accountId, agentId),
+    () => ({
+      accountId,
+      userId,
+      action: AUDIT_ACTIONS.REGENERATE,
+      service: AUDIT_SERVICES.AGENT,
+      metadata: { agentId },
+    }),
+  );
 };
 
 export const getAgentSecrets = async (agentId: string) => {
@@ -52,15 +96,33 @@ export const getAgentSecrets = async (agentId: string) => {
 export const updateAgentSecretMode = async (
   agentId: string,
   mode: SecretMode,
-) => {
-  const { accountId } = await resolveUser();
-  return updateAgentSecretModeService(accountId, agentId, mode);
+): Promise<void> => {
+  const { userId, accountId } = await resolveUser();
+  return withAudit(
+    () => updateAgentSecretModeService(accountId, agentId, mode),
+    () => ({
+      accountId,
+      userId,
+      action: AUDIT_ACTIONS.UPDATE,
+      service: AUDIT_SERVICES.AGENT,
+      metadata: { agentId, secretMode: mode },
+    }),
+  );
 };
 
 export const updateAgentSecrets = async (
   agentId: string,
   secretIds: string[],
-) => {
-  const { accountId } = await resolveUser();
-  return updateAgentSecretsService(accountId, agentId, secretIds);
+): Promise<void> => {
+  const { userId, accountId } = await resolveUser();
+  return withAudit(
+    () => updateAgentSecretsService(accountId, agentId, secretIds),
+    () => ({
+      accountId,
+      userId,
+      action: AUDIT_ACTIONS.UPDATE,
+      service: AUDIT_SERVICES.AGENT,
+      metadata: { agentId, secretCount: secretIds.length },
+    }),
+  );
 };
