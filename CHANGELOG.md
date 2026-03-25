@@ -1,5 +1,18 @@
 # Changelog
 
+## [1.7.0](https://github.com/onecli/onecli/compare/v1.6.0...v1.7.0) (2026-03-25)
+
+
+### Features
+
+* add audit logging for sensitive operations ([#103](https://github.com/onecli/onecli/issues/103)) ([4429e1f](https://github.com/onecli/onecli/commit/4429e1fcedfc90b849ddcc8121ce249a31b8f368))
+
+
+### Bug Fixes
+
+* don't follow redirects server-side in MITM proxy ([#108](https://github.com/onecli/onecli/issues/108)) ([bdab279](https://github.com/onecli/onecli/commit/bdab279d71843af61318b22d64941b97e9f3dde2))
+* rewrite denormalize migration to handle non-empty tables ([#106](https://github.com/onecli/onecli/issues/106)) ([a6e75b7](https://github.com/onecli/onecli/commit/a6e75b7816a58eb8d06e42ab24ab4135a46c2811))
+
 ## [1.6.0](https://github.com/onecli/onecli/compare/v1.5.5...v1.6.0) (2026-03-25)
 
 
