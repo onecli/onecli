@@ -65,6 +65,7 @@ impl GatewayServer {
         let state = GatewayState {
             ca: Arc::new(ca),
             http_client: reqwest::Client::builder()
+                .redirect(reqwest::redirect::Policy::none())
                 .danger_accept_invalid_certs(
                     std::env::var("GATEWAY_DANGER_ACCEPT_INVALID_CERTS").is_ok(),
                 )
@@ -583,6 +584,45 @@ fn strip_port(host: &str) -> &str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::net::TcpListener;
+
+    /// Verify that the HTTP client does not follow redirects.
+    /// A proxy must forward 3xx responses to the client so the client's HTTP
+    /// library can see the full redirect chain (intermediate headers, etc.).
+    #[tokio::test]
+    async fn http_client_does_not_follow_redirects() {
+        // Spin up a tiny server that always returns 302.
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        std::thread::spawn(move || {
+            if let Ok((mut stream, _)) = listener.accept() {
+                use std::io::{Read, Write};
+                let mut buf = [0u8; 1024];
+                let _ = stream.read(&mut buf);
+                let resp = "HTTP/1.1 302 Found\r\nLocation: http://example.com/other\r\nContent-Length: 0\r\n\r\n";
+                let _ = stream.write_all(resp.as_bytes());
+            }
+        });
+
+        // Build the client the same way GatewayServer::new does.
+        let client = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .unwrap();
+
+        let resp = client
+            .get(format!("http://{addr}/test"))
+            .send()
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), 302, "proxy client must not follow redirects");
+        assert_eq!(
+            resp.headers().get("location").unwrap(),
+            "http://example.com/other"
+        );
+    }
 
     // ── strip_port ──────────────────────────────────────────────────────
 
