@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useEffect } from "react";
+import { useInvalidateGatewayCache } from "@/hooks/use-invalidate-cache";
 import { toast } from "sonner";
 import { ShieldBan, Gauge, Check, Settings2 } from "lucide-react";
 import {
@@ -72,6 +73,7 @@ export const RuleDialog = ({
   rule,
 }: RuleDialogProps) => {
   const isEdit = !!rule;
+  const invalidateCache = useInvalidateGatewayCache();
   const [saving, setSaving] = useState(false);
   const [step, setStep] = useState<Step>("endpoint");
   const [name, setName] = useState("");
@@ -157,6 +159,7 @@ export const RuleDialog = ({
       }
       onSaved();
       handleClose(false);
+      invalidateCache();
     } catch {
       toast.error(isEdit ? "Failed to update rule" : "Failed to create rule");
     } finally {

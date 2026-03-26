@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from "react";
+import { useInvalidateGatewayCache } from "@/hooks/use-invalidate-cache";
 import {
   MoreHorizontal,
   RotateCw,
@@ -60,6 +61,7 @@ interface AgentCardProps {
 }
 
 export const AgentCard = ({ agent, onUpdate }: AgentCardProps) => {
+  const invalidateCache = useInvalidateGatewayCache();
   const [deleting, setDeleting] = useState(false);
   const [regenerating, setRegenerating] = useState(false);
   const [renaming, setRenaming] = useState(false);
@@ -74,6 +76,7 @@ export const AgentCard = ({ agent, onUpdate }: AgentCardProps) => {
     try {
       await regenerateAgentToken(agent.id);
       onUpdate();
+      invalidateCache();
       toast.success("Token regenerated");
     } catch {
       toast.error("Failed to regenerate token");
@@ -87,6 +90,7 @@ export const AgentCard = ({ agent, onUpdate }: AgentCardProps) => {
     try {
       await deleteAgent(agent.id);
       onUpdate();
+      invalidateCache();
       toast.success("Agent deleted");
     } catch {
       toast.error("Failed to delete agent");

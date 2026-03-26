@@ -11,6 +11,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
+use axum::extract::State;
 use axum::Router;
 use futures_util::TryStreamExt;
 use http_body_util::{Either, Full, StreamBody};
@@ -129,6 +130,10 @@ impl GatewayServer {
                 "/api/vault/{provider}/pair",
                 axum::routing::delete(vault::api::vault_disconnect),
             )
+            .route(
+                "/api/cache/invalidate",
+                axum::routing::post(invalidate_cache),
+            )
             .layer(cors_layer)
             .fallback(fallback)
             .with_state(self.state.clone());
@@ -156,6 +161,21 @@ async fn healthz() -> StatusCode {
 /// Protected: returns the authenticated user's ID.
 async fn me(auth: AuthUser) -> String {
     auth.user_id
+}
+
+/// Invalidate all cached CONNECT responses for the authenticated account.
+/// Called by the web app after secret/rule mutations so agents pick up
+/// changes immediately instead of waiting for the 60-second TTL.
+async fn invalidate_cache(
+    auth: AuthUser,
+    State(state): State<GatewayState>,
+) -> impl axum::response::IntoResponse {
+    let prefix = format!("connect:{}:", auth.account_id);
+    state.cache.del_by_prefix(&prefix).await;
+    (
+        StatusCode::OK,
+        axum::Json(serde_json::json!({ "invalidated": true })),
+    )
 }
 
 /// Reject non-CONNECT requests to unknown routes with 400 Bad Request.

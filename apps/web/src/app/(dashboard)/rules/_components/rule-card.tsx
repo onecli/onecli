@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from "react";
+import { useInvalidateGatewayCache } from "@/hooks/use-invalidate-cache";
 import { Pencil, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 import { Card } from "@onecli/ui/components/card";
@@ -29,6 +30,7 @@ interface RuleCardProps {
 }
 
 export const RuleCard = ({ rule, agents, onUpdate }: RuleCardProps) => {
+  const invalidateCache = useInvalidateGatewayCache();
   const [deleting, setDeleting] = useState(false);
   const [editOpen, setEditOpen] = useState(false);
   const [toggling, setToggling] = useState(false);
@@ -52,6 +54,7 @@ export const RuleCard = ({ rule, agents, onUpdate }: RuleCardProps) => {
     try {
       await deleteRule(rule.id);
       onUpdate();
+      invalidateCache();
       toast.success("Rule deleted");
     } catch {
       toast.error("Failed to delete rule");
@@ -65,6 +68,7 @@ export const RuleCard = ({ rule, agents, onUpdate }: RuleCardProps) => {
     try {
       await updateRule(rule.id, { enabled });
       onUpdate();
+      invalidateCache();
     } catch {
       toast.error("Failed to update rule");
     } finally {

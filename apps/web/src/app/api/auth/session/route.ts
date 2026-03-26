@@ -100,7 +100,7 @@ export const GET = async (request: NextRequest) => {
         account: { demoSeeded: account.demoSeeded },
       };
 
-      onUserCreated({ email: user.email, name: user.name });
+      onUserCreated({ email: user.email, name: user.name }, extra);
     }
 
     const accountId = membership.accountId;

@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from "react";
+import { useInvalidateGatewayCache } from "@/hooks/use-invalidate-cache";
 import { Pencil, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 import { Card } from "@onecli/ui/components/card";
@@ -40,6 +41,7 @@ interface SecretCardProps {
 }
 
 export const SecretCard = ({ secret, onUpdate }: SecretCardProps) => {
+  const invalidateCache = useInvalidateGatewayCache();
   const [deleting, setDeleting] = useState(false);
   const [editOpen, setEditOpen] = useState(false);
 
@@ -48,6 +50,7 @@ export const SecretCard = ({ secret, onUpdate }: SecretCardProps) => {
     try {
       await deleteSecret(secret.id);
       onUpdate();
+      invalidateCache();
       toast.success("Secret deleted");
     } catch {
       toast.error("Failed to delete secret");

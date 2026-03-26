@@ -45,19 +45,21 @@ pub(crate) struct PolicyEngine {
 }
 
 impl PolicyEngine {
+    /// Look up agent by access token.
+    async fn find_agent(&self, agent_token: &str) -> Result<db::AgentRow, ConnectError> {
+        db::find_agent_by_token(&self.pool, agent_token)
+            .await
+            .map_err(|e| ConnectError::Internal(format!("db error: {e}")))?
+            .ok_or(ConnectError::InvalidToken)
+    }
+
     /// Resolve what to do for an agent + host combination (without caching).
     async fn resolve_uncached(
         &self,
-        agent_token: &str,
+        agent: &db::AgentRow,
         hostname: &str,
     ) -> Result<ConnectResponse, ConnectError> {
-        // 1. Agent lookup
-        let agent = db::find_agent_by_token(&self.pool, agent_token)
-            .await
-            .map_err(|e| ConnectError::Internal(format!("db error: {e}")))?
-            .ok_or(ConnectError::InvalidToken)?;
-
-        // 2. Secret lookup — branch on agent's secret mode
+        // 1. Secret lookup — branch on agent's secret mode
         let secrets = if agent.secret_mode == "selective" {
             db::find_secrets_by_agent(&self.pool, &agent.id).await
         } else {
@@ -142,7 +144,7 @@ impl PolicyEngine {
             intercept: true,
             injection_rules,
             policy_rules: matching_policy_rules,
-            account_id: Some(agent.account_id),
+            account_id: Some(agent.account_id.clone()),
         })
     }
 }
@@ -151,24 +153,26 @@ impl PolicyEngine {
 
 /// Resolve with caching. Checks the generic `CacheStore` first, then
 /// queries the DB if needed. The cache key is namespaced as
-/// `connect:{agent_token}:{hostname}`.
+/// `connect:{account_id}:{agent_token}:{hostname}` so that cache
+/// invalidation can target all entries for an account by prefix.
 pub(crate) async fn resolve(
     agent_token: &str,
     hostname: &str,
     policy_engine: &PolicyEngine,
     cache: &dyn CacheStore,
 ) -> Result<ConnectResponse, ConnectError> {
-    let cache_key = format!("connect:{agent_token}:{hostname}");
+    // Look up agent first — needed for account_id in cache key.
+    let agent = policy_engine.find_agent(agent_token).await?;
+
+    let cache_key = format!("connect:{}:{agent_token}:{hostname}", agent.account_id);
 
     // Check cache
     if let Some(response) = cache.get::<ConnectResponse>(&cache_key).await {
         return Ok(response);
     }
 
-    // Query the database
-    let response = policy_engine
-        .resolve_uncached(agent_token, hostname)
-        .await?;
+    // Query the database (agent already resolved, avoids re-querying)
+    let response = policy_engine.resolve_uncached(&agent, hostname).await?;
 
     // Cache the response
     cache.set(&cache_key, &response, CACHE_TTL_SECS).await;
@@ -275,11 +279,16 @@ mod tests {
         };
 
         store
-            .set("connect:aoc_token1:api.anthropic.com", &response, 60)
+            .set(
+                "connect:acc_123:aoc_token1:api.anthropic.com",
+                &response,
+                60,
+            )
             .await;
 
-        let cached: Option<ConnectResponse> =
-            store.get("connect:aoc_token1:api.anthropic.com").await;
+        let cached: Option<ConnectResponse> = store
+            .get("connect:acc_123:aoc_token1:api.anthropic.com")
+            .await;
         assert_eq!(cached, Some(response));
     }
 

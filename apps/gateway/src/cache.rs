@@ -34,6 +34,9 @@ pub(crate) trait CacheStore: Send + Sync {
     #[allow(dead_code)]
     async fn del(&self, key: &str);
 
+    /// Delete all keys matching a prefix.
+    async fn del_by_prefix(&self, prefix: &str);
+
     /// Atomically increment a counter at `key`.
     /// Sets TTL only on first increment (new key / expired key).
     /// Returns the new count, or `None` on error (graceful fallback).
@@ -125,6 +128,10 @@ impl CacheStore for InMemoryCacheStore {
         self.map.remove(key);
     }
 
+    async fn del_by_prefix(&self, prefix: &str) {
+        self.map.retain(|key, _| !key.starts_with(prefix));
+    }
+
     async fn incr(&self, key: &str, ttl_secs: u64) -> Option<u64> {
         let now = Instant::now();
         let ttl = Duration::from_secs(ttl_secs);
@@ -189,6 +196,37 @@ mod tests {
         store.del("key1").await;
         let result: Option<String> = store.get("key1").await;
         assert!(result.is_none());
+    }
+
+    #[tokio::test]
+    async fn del_by_prefix_removes_matching_entries() {
+        let store = new_store();
+        store.set("connect:acc1:tok1:host1", &"v1", 60).await;
+        store.set("connect:acc1:tok2:host2", &"v2", 60).await;
+        store.set("connect:acc2:tok3:host3", &"v3", 60).await;
+        store.set("rate:rule1:tok1:123", &"1", 60).await;
+
+        store.del_by_prefix("connect:acc1:").await;
+
+        assert!(store
+            .get::<String>("connect:acc1:tok1:host1")
+            .await
+            .is_none());
+        assert!(store
+            .get::<String>("connect:acc1:tok2:host2")
+            .await
+            .is_none());
+        assert_eq!(
+            store
+                .get::<String>("connect:acc2:tok3:host3")
+                .await
+                .as_deref(),
+            Some("v3")
+        );
+        assert_eq!(
+            store.get::<String>("rate:rule1:tok1:123").await.as_deref(),
+            Some("1")
+        );
     }
 
     #[tokio::test]

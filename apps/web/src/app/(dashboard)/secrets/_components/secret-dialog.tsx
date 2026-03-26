@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useEffect } from "react";
+import { useInvalidateGatewayCache } from "@/hooks/use-invalidate-cache";
 import { toast } from "sonner";
 import { ArrowLeft, Bot, Key, Settings2 } from "lucide-react";
 import {
@@ -87,6 +88,7 @@ export const SecretDialog = ({
   secret,
 }: SecretDialogProps) => {
   const isEdit = !!secret;
+  const invalidateCache = useInvalidateGatewayCache();
   const [step, setStep] = useState<"type" | "form">("type");
   const [saving, setSaving] = useState(false);
 
@@ -184,6 +186,7 @@ export const SecretDialog = ({
       }
       onSaved();
       onOpenChange(false);
+      invalidateCache();
     } catch {
       toast.error(
         isEdit ? "Failed to update secret" : "Failed to create secret",

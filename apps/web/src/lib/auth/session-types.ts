@@ -10,4 +10,7 @@ export type SessionAttributes = Record<string, unknown>;
 
 export type GetSessionAttributes = (request: NextRequest) => SessionAttributes;
 
-export type OnUserCreated = (user: SessionUser) => void;
+export type OnUserCreated = (
+  user: SessionUser,
+  attributes: SessionAttributes,
+) => void;

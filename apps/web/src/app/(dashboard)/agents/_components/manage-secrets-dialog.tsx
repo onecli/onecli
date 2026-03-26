@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState, useCallback, useMemo } from "react";
+import { useInvalidateGatewayCache } from "@/hooks/use-invalidate-cache";
 import { KeyRound, Loader2, Search, Globe, ListChecks } from "lucide-react";
 import { toast } from "sonner";
 import {
@@ -43,6 +44,7 @@ export const ManageSecretsDialog = ({
   onOpenChange,
   onUpdated,
 }: ManageSecretsDialogProps) => {
+  const invalidateCache = useInvalidateGatewayCache();
   const [mode, setMode] = useState<SecretMode>(
     agent.secretMode === "selective" ? "selective" : "all",
   );
@@ -107,6 +109,7 @@ export const ManageSecretsDialog = ({
       }
       onUpdated();
       onOpenChange(false);
+      invalidateCache();
       toast.success("Secret permissions updated");
     } catch {
       toast.error("Failed to update secret permissions");
