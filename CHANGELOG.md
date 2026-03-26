@@ -1,5 +1,14 @@
 # Changelog
 
+## [1.7.1](https://github.com/onecli/onecli/compare/v1.7.0...v1.7.1) (2026-03-26)
+
+
+### Bug Fixes
+
+* enable automatic container restart on failure or system reboot ([#112](https://github.com/onecli/onecli/issues/112)) ([c933ad9](https://github.com/onecli/onecli/commit/c933ad91efa1b65e92df7a1d34fefbcc7b01d4eb))
+* invalidate gateway cache on secret and rule mutations ([#117](https://github.com/onecli/onecli/issues/117)) ([9966c98](https://github.com/onecli/onecli/commit/9966c981beb2035a7587b48bb9ebb36e72ccdf61)), closes [#116](https://github.com/onecli/onecli/issues/116)
+* postgres18 data mount ([#111](https://github.com/onecli/onecli/issues/111)) ([dee1206](https://github.com/onecli/onecli/commit/dee120660e2616f2b45fe28c79af8be71d3644ac))
+
 ## [1.7.0](https://github.com/onecli/onecli/compare/v1.6.0...v1.7.0) (2026-03-25)
 
 
