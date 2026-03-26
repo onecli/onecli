@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { resolveApiAuth } from "@/lib/api-auth";
 import { handleServiceError, unauthorized } from "@/lib/api-utils";
+import { invalidateGatewayCache } from "@/lib/gateway-invalidate";
 import { renameAgent, deleteAgent } from "@/lib/services/agent-service";
 import { renameAgentSchema } from "@/lib/validations/agent";
 
@@ -35,6 +36,7 @@ export const DELETE = async (request: NextRequest, { params }: Params) => {
 
     const { agentId } = await params;
     await deleteAgent(auth.accountId, agentId);
+    invalidateGatewayCache(request);
     return new NextResponse(null, { status: 204 });
   } catch (err) {
     return handleServiceError(err);

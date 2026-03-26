@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { resolveApiAuth } from "@/lib/api-auth";
 import { handleServiceError, unauthorized } from "@/lib/api-utils";
+import { invalidateGatewayCache } from "@/lib/gateway-invalidate";
 import { updateAgentSecretMode } from "@/lib/services/agent-service";
 import { secretModeSchema } from "@/lib/validations/agent";
 
@@ -22,6 +23,7 @@ export const PATCH = async (request: NextRequest, { params }: Params) => {
     }
 
     await updateAgentSecretMode(auth.accountId, agentId, parsed.data.mode);
+    invalidateGatewayCache(request);
     return NextResponse.json({ success: true });
   } catch (err) {
     return handleServiceError(err);

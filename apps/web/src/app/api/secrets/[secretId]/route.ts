@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { resolveApiAuth } from "@/lib/api-auth";
 import { handleServiceError, unauthorized } from "@/lib/api-utils";
+import { invalidateGatewayCache } from "@/lib/gateway-invalidate";
 import { updateSecret, deleteSecret } from "@/lib/services/secret-service";
 import { updateSecretSchema } from "@/lib/validations/secret";
 
@@ -22,6 +23,7 @@ export const PATCH = async (request: NextRequest, { params }: Params) => {
     }
 
     await updateSecret(auth.accountId, secretId, parsed.data);
+    invalidateGatewayCache(request);
     return NextResponse.json({ success: true });
   } catch (err) {
     return handleServiceError(err);
@@ -35,6 +37,7 @@ export const DELETE = async (request: NextRequest, { params }: Params) => {
 
     const { secretId } = await params;
     await deleteSecret(auth.accountId, secretId);
+    invalidateGatewayCache(request);
     return new NextResponse(null, { status: 204 });
   } catch (err) {
     return handleServiceError(err);

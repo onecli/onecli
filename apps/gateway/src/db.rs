@@ -57,6 +57,13 @@ pub(crate) struct UserRow {
     pub id: String,
 }
 
+/// An API key row from the `api_keys` table.
+#[derive(Debug, FromRow)]
+pub(crate) struct ApiKeyRow {
+    pub user_id: String,
+    pub account_id: String,
+}
+
 /// A vault connection row from the `vault_connections` table.
 #[derive(Debug, FromRow)]
 #[allow(dead_code)]
@@ -95,6 +102,17 @@ pub(crate) async fn find_account_id_by_user(
             .context("querying account_members by user_id")?;
 
     Ok(row.map(|(id,)| id))
+}
+
+/// Look up an API key (`oc_...`) and return its user_id and account_id.
+pub(crate) async fn find_api_key(pool: &PgPool, key: &str) -> Result<Option<ApiKeyRow>> {
+    sqlx::query_as::<_, ApiKeyRow>(
+        r#"SELECT user_id, account_id FROM api_keys WHERE key = $1 LIMIT 1"#,
+    )
+    .bind(key)
+    .fetch_optional(pool)
+    .await
+    .context("querying api_keys by key")
 }
 
 /// Look up an agent by its access token.

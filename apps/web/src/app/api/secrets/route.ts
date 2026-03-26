@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { resolveApiAuth } from "@/lib/api-auth";
 import { handleServiceError, unauthorized } from "@/lib/api-utils";
+import { invalidateGatewayCache } from "@/lib/gateway-invalidate";
 import { listSecrets, createSecret } from "@/lib/services/secret-service";
 import { createSecretSchema } from "@/lib/validations/secret";
 
@@ -31,6 +32,7 @@ export const POST = async (request: NextRequest) => {
     }
 
     const secret = await createSecret(auth.accountId, parsed.data);
+    invalidateGatewayCache(request);
     return NextResponse.json(secret, { status: 201 });
   } catch (err) {
     return handleServiceError(err);

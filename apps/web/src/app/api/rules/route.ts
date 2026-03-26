@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { resolveApiAuth } from "@/lib/api-auth";
 import { handleServiceError, unauthorized } from "@/lib/api-utils";
+import { invalidateGatewayCache } from "@/lib/gateway-invalidate";
 import {
   listPolicyRules,
   createPolicyRule,
@@ -34,6 +35,7 @@ export const POST = async (request: NextRequest) => {
     }
 
     const rule = await createPolicyRule(auth.accountId, parsed.data);
+    invalidateGatewayCache(request);
     return NextResponse.json(rule, { status: 201 });
   } catch (err) {
     return handleServiceError(err);

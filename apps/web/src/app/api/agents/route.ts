@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { resolveApiAuth } from "@/lib/api-auth";
 import { handleServiceError, unauthorized } from "@/lib/api-utils";
+import { invalidateGatewayCache } from "@/lib/gateway-invalidate";
 import { listAgents, createAgent } from "@/lib/services/agent-service";
 import { createAgentSchema } from "@/lib/validations/agent";
 
@@ -35,6 +36,7 @@ export const POST = async (request: NextRequest) => {
       parsed.data.name,
       parsed.data.identifier,
     );
+    invalidateGatewayCache(request);
     return NextResponse.json(agent, { status: 201 });
   } catch (err) {
     return handleServiceError(err);
