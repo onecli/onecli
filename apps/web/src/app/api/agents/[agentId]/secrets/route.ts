@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { resolveApiAuth } from "@/lib/api-auth";
 import { handleServiceError, unauthorized } from "@/lib/api-utils";
+import { invalidateGatewayCache } from "@/lib/gateway-invalidate";
 import {
   getAgentSecrets,
   updateAgentSecrets,
@@ -38,6 +39,7 @@ export const PUT = async (request: NextRequest, { params }: Params) => {
     }
 
     await updateAgentSecrets(auth.accountId, agentId, parsed.data.secretIds);
+    invalidateGatewayCache(request);
     return NextResponse.json({ success: true });
   } catch (err) {
     return handleServiceError(err);

@@ -78,6 +78,14 @@ impl FromRequestParts<GatewayState> for AuthUser {
         parts: &mut Parts,
         state: &GatewayState,
     ) -> Result<Self, Self::Rejection> {
+        // Try API key auth first (Authorization: Bearer oc_...)
+        if let Some(api_key_user) =
+            validate_api_key(&state.policy_engine.pool, &parts.headers).await
+        {
+            return Ok(api_key_user);
+        }
+
+        // Fall back to session auth (cookies / JWT)
         let user_id = validate_request(&state.policy_engine.pool, &parts.headers).await?;
 
         // Resolve account from membership
@@ -99,7 +107,32 @@ impl FromRequestParts<GatewayState> for AuthUser {
     }
 }
 
-// ── Validation ───────────────────────────────────────────────────────────
+// ── API key auth ─────────────────────────────────────────────────────────
+
+/// Try to authenticate via `Authorization: Bearer oc_...` API key.
+/// Returns `None` if no API key is present (falls through to session auth).
+async fn validate_api_key(pool: &PgPool, headers: &HeaderMap) -> Option<AuthUser> {
+    let auth_header = headers.get(hyper::header::AUTHORIZATION)?.to_str().ok()?;
+    let token = auth_header
+        .strip_prefix("Bearer ")
+        .or_else(|| auth_header.strip_prefix("bearer "))?;
+
+    if !token.starts_with("oc_") {
+        return None;
+    }
+
+    let api_key = db::find_api_key(pool, token)
+        .await
+        .map_err(|e| warn!(error = %e, "api key auth: db error"))
+        .ok()??;
+
+    Some(AuthUser {
+        user_id: api_key.user_id,
+        account_id: api_key.account_id,
+    })
+}
+
+// ── Session auth ─────────────────────────────────────────────────────────
 
 /// Validate an incoming browser request and return the internal user ID.
 /// The caller resolves the account ID from the user's membership.
