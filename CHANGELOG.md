@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.7.2](https://github.com/onecli/onecli/compare/v1.7.1...v1.7.2) (2026-03-26)
+
+
+### Bug Fixes
+
+* add API key auth to gateway and server-side cache invalidation ([#118](https://github.com/onecli/onecli/issues/118)) ([70fdfa8](https://github.com/onecli/onecli/commit/70fdfa84c1650ed52f869b996fc73b2b9e808acb))
+
 ## [1.7.1](https://github.com/onecli/onecli/compare/v1.7.0...v1.7.1) (2026-03-26)
 
 
