@@ -1,4 +1,4 @@
-import { NextResponse } from "next/server";
+import { type NextRequest, NextResponse } from "next/server";
 import { db } from "@onecli/db";
 import { getServerSession } from "@/lib/auth/server";
 import { cryptoService } from "@/lib/crypto";
@@ -10,6 +10,7 @@ import {
 } from "@/lib/constants";
 import { generateApiKey } from "@/lib/services/api-key-service";
 import { generateAccessToken } from "@/lib/services/agent-service";
+import { getSessionAttributes, onUserCreated } from "@/lib/auth/session-hooks";
 
 /**
  * GET /api/auth/session
@@ -24,12 +25,14 @@ import { generateAccessToken } from "@/lib/services/agent-service";
  * Called by the login page after auth and by the dashboard layout on mount.
  * Returns 401 if no valid session exists.
  */
-export const GET = async () => {
+export const GET = async (request: NextRequest) => {
   try {
     const session = await getServerSession();
     if (!session || !session.email) {
       return NextResponse.json({ error: "Not authenticated" }, { status: 401 });
     }
+
+    const extra = getSessionAttributes(request);
 
     // Upsert user by email — creates on first login, updates on subsequent.
     const user = await db.user.upsert({
@@ -38,10 +41,14 @@ export const GET = async () => {
         externalAuthId: session.id,
         email: session.email,
         name: session.name,
+        lastLoginAt: new Date(),
+        ...extra,
       },
       update: {
         externalAuthId: session.id,
         name: session.name,
+        lastLoginAt: new Date(),
+        ...extra,
       },
       select: {
         id: true,
@@ -92,6 +99,8 @@ export const GET = async () => {
         accountId: account.id,
         account: { demoSeeded: account.demoSeeded },
       };
+
+      onUserCreated({ email: user.email, name: user.name });
     }
 
     const accountId = membership.accountId;

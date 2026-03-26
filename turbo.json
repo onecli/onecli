@@ -29,7 +29,9 @@
     "LOG_LEVEL",
     "LOG_FORMAT",
     "AUTH_MODE",
-    "MAILERCHECK_API_KEY"
+    "MAILERCHECK_API_KEY",
+    "DISCORD_WEBHOOK_URL",
+    "ENVIRONMENT"
   ],
   "tasks": {
     "build": {

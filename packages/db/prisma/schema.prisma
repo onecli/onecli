@@ -50,12 +50,15 @@ model AccountMember {
 }
 
 model User {
-  id             String   @id @default(uuid())
-  email          String   @unique
+  id             String    @id @default(uuid())
+  email          String    @unique
   name           String?
-  externalAuthId String   @unique @map("external_auth_id")
-  createdAt      DateTime @default(now()) @map("created_at")
-  updatedAt      DateTime @updatedAt @map("updated_at")
+  externalAuthId String    @unique @map("external_auth_id")
+  countryCode    String?   @map("country_code")
+  country        String?   @map("country")
+  lastLoginAt    DateTime? @map("last_login_at")
+  createdAt      DateTime  @default(now()) @map("created_at")
+  updatedAt      DateTime  @updatedAt @map("updated_at")
 
   memberships         AccountMember[]
   apiKeys             ApiKey[]
