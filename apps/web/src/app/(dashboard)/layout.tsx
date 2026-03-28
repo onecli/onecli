@@ -20,7 +20,9 @@ export default function DashboardLayout({
   const pathname = usePathname();
   const [ready, setReady] = useState(false);
   const signOutRef = useRef(signOut);
-  signOutRef.current = signOut;
+  useEffect(() => {
+    signOutRef.current = signOut;
+  }, [signOut]);
 
   const isSettings = pathname.startsWith("/settings");
 
