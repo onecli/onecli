@@ -10,6 +10,7 @@ import {
 const SECRET_TYPE_LABELS: Record<string, string> = {
   anthropic: "Anthropic API Key",
   generic: "Generic Secret",
+  google_oauth: "Google OAuth",
 };
 
 /**
@@ -72,13 +73,49 @@ export const createSecret = async (
     }
   }
 
+  if (input.type === "google_oauth") {
+    // Composite value: wrap refresh token + optional client credentials into JSON
+    // so the gateway can extract each field for form-body injection.
+    const composite: Record<string, string> = { refresh_token: value };
+    const config = input.injectionConfig as { clientId?: string; clientSecret?: string } | null;
+    if (config?.clientId?.trim()) composite.client_id = config.clientId.trim();
+    if (config?.clientSecret?.trim()) composite.client_secret = config.clientSecret.trim();
+    // Re-assign for encryption below
+    const compositeValue = JSON.stringify(composite);
+    const encryptedValue = await cryptoService.encrypt(compositeValue);
+    const preview = buildPreview(value); // Preview shows the refresh token, not the JSON
+
+    const secret = await db.secret.create({
+      data: {
+        name,
+        type: input.type,
+        encryptedValue,
+        hostPattern: hostPattern || "oauth2.googleapis.com",
+        pathPattern: input.pathPattern?.trim() || "/token",
+        injectionConfig: Prisma.JsonNull,
+        metadata: Prisma.JsonNull,
+        accountId,
+      },
+      select: {
+        id: true,
+        name: true,
+        type: true,
+        hostPattern: true,
+        pathPattern: true,
+        createdAt: true,
+      },
+    });
+
+    return { ...secret, preview };
+  }
+
   const encryptedValue = await cryptoService.encrypt(value);
   const preview = buildPreview(value);
   const pathPattern = input.pathPattern?.trim() || null;
   const injectionConfig =
     input.type === "generic" && input.injectionConfig
       ? ({
-          headerName: input.injectionConfig.headerName.trim(),
+          headerName: input.injectionConfig.headerName!.trim(),
           valueFormat: input.injectionConfig.valueFormat?.trim() || "{value}",
         } as Prisma.InputJsonValue)
       : Prisma.JsonNull;
@@ -141,7 +178,23 @@ export const updateSecret = async (
     const value = input.value.trim();
     if (!value)
       throw new ServiceError("BAD_REQUEST", "Secret value is required");
-    data.encryptedValue = await cryptoService.encrypt(value);
+
+    if (secret.type === "google_oauth") {
+      // Re-wrap refresh token + optional client credentials into composite JSON
+      const composite: Record<string, string> = { refresh_token: value };
+      const config = input.injectionConfig as {
+        clientId?: string;
+        clientSecret?: string;
+      } | null;
+      if (config?.clientId?.trim()) composite.client_id = config.clientId.trim();
+      if (config?.clientSecret?.trim())
+        composite.client_secret = config.clientSecret.trim();
+      data.encryptedValue = await cryptoService.encrypt(
+        JSON.stringify(composite),
+      );
+    } else {
+      data.encryptedValue = await cryptoService.encrypt(value);
+    }
 
     // Re-detect auth mode when value changes for Anthropic secrets
     if (secret.type === "anthropic") {
@@ -165,7 +218,7 @@ export const updateSecret = async (
   if (input.injectionConfig !== undefined && secret.type === "generic") {
     data.injectionConfig = input.injectionConfig
       ? ({
-          headerName: input.injectionConfig.headerName.trim(),
+          headerName: input.injectionConfig.headerName!.trim(),
           valueFormat: input.injectionConfig.valueFormat?.trim() || "{value}",
         } as Prisma.InputJsonValue)
       : Prisma.JsonNull;

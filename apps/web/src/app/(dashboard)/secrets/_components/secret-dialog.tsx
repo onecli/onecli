@@ -3,7 +3,7 @@
 import { useState, useEffect } from "react";
 import { useInvalidateGatewayCache } from "@/hooks/use-invalidate-cache";
 import { toast } from "sonner";
-import { ArrowLeft, Bot, Key, Settings2 } from "lucide-react";
+import { ArrowLeft, Bot, Key, Settings2, Shield } from "lucide-react";
 import {
   Dialog,
   DialogContent,
@@ -32,7 +32,7 @@ const detectAnthropicKeyType = (
   return null;
 };
 
-type SecretType = "anthropic" | "generic";
+type SecretType = "anthropic" | "generic" | "google_oauth";
 
 interface SecretTypeOption {
   value: SecretType;
@@ -56,6 +56,13 @@ const SECRET_TYPE_OPTIONS: SecretTypeOption[] = [
     description: "Inject a custom header into requests matching any host",
     icon: <Key className="size-5" />,
     hostDefault: "",
+  },
+  {
+    value: "google_oauth",
+    label: "Google OAuth",
+    description: "Proxy OAuth refresh tokens so containers never see long-lived credentials",
+    icon: <Shield className="size-5" />,
+    hostDefault: "oauth2.googleapis.com",
   },
 ];
 
@@ -99,6 +106,8 @@ export const SecretDialog = ({
   const [pathPattern, setPathPattern] = useState("");
   const [headerName, setHeaderName] = useState("Authorization");
   const [valueFormat, setValueFormat] = useState("Bearer {value}");
+  const [clientId, setClientId] = useState("");
+  const [clientSecret, setClientSecret] = useState("");
 
   // Inline validation for host pattern
   const hostPatternError = (() => {
@@ -134,6 +143,8 @@ export const SecretDialog = ({
         setPathPattern("");
         setHeaderName("Authorization");
         setValueFormat("Bearer {value}");
+        setClientId("");
+        setClientSecret("");
       }
     }
   }, [open, secret]);
@@ -148,12 +159,12 @@ export const SecretDialog = ({
   const isValid = isEdit
     ? hostPattern.trim() &&
       !hostPatternError &&
-      (type !== "generic" || headerName.trim())
+      (type === "anthropic" || type === "google_oauth" || headerName.trim())
     : name.trim() &&
       value.trim() &&
       hostPattern.trim() &&
       !hostPatternError &&
-      (type !== "generic" || headerName.trim());
+      (type === "anthropic" || type === "google_oauth" || headerName.trim());
 
   const handleSave = async () => {
     if (!isValid) return;
@@ -180,7 +191,9 @@ export const SecretDialog = ({
           injectionConfig:
             type === "generic"
               ? { headerName, valueFormat: valueFormat || "{value}" }
-              : null,
+              : type === "google_oauth"
+                ? { clientId: clientId || undefined, clientSecret: clientSecret || undefined }
+                : null,
         });
         toast.success("Secret created");
       }
@@ -224,7 +237,9 @@ export const SecretDialog = ({
                   ? "Update the secret\u2019s configuration. Leave the value field empty to keep the current value."
                   : type === "anthropic"
                     ? "Your key will be encrypted and injected into requests to api.anthropic.com."
-                    : "Configure a custom secret to inject as a header into matching requests."}
+                    : type === "google_oauth"
+                      ? "Your refresh token will be encrypted. The gateway injects it into OAuth token exchange requests so containers only receive short-lived access tokens."
+                      : "Configure a custom secret to inject as a header into matching requests."}
               </DialogDescription>
             </DialogHeader>
 
@@ -236,7 +251,9 @@ export const SecretDialog = ({
                   placeholder={
                     type === "anthropic"
                       ? "e.g. Anthropic Production Key"
-                      : "e.g. GitHub Token"
+                      : type === "google_oauth"
+                        ? "e.g. Gmail OAuth"
+                        : "e.g. GitHub Token"
                   }
                   value={name}
                   onChange={(e) => setName(e.target.value)}
@@ -259,7 +276,9 @@ export const SecretDialog = ({
                   placeholder={
                     type === "anthropic"
                       ? "sk-ant-api03-..."
-                      : "Enter secret value"
+                      : type === "google_oauth"
+                        ? "1//0..."
+                        : "Enter secret value"
                   }
                   value={value}
                   onChange={(e) => setValue(e.target.value)}
@@ -268,7 +287,9 @@ export const SecretDialog = ({
                   <p className="text-muted-foreground text-xs">
                     {type === "anthropic"
                       ? "Paste your API key or OAuth token from the Anthropic Console."
-                      : "Encrypted at rest. You won\u2019t be able to view this value again."}
+                      : type === "google_oauth"
+                        ? "Paste your Google OAuth refresh token. It will be encrypted and never shared with containers."
+                        : "Encrypted at rest. You won\u2019t be able to view this value again."}
                   </p>
                   {type === "anthropic" && <AnthropicKeyBadge value={value} />}
                 </div>
@@ -293,6 +314,48 @@ export const SecretDialog = ({
                     </p>
                   )}
                 </div>
+              )}
+
+              {type === "google_oauth" && (
+                <>
+                  <div className="space-y-2">
+                    <Label htmlFor="google-client-id">
+                      Client ID{" "}
+                      <span className="text-muted-foreground font-normal">
+                        (optional)
+                      </span>
+                    </Label>
+                    <Input
+                      id="google-client-id"
+                      placeholder="e.g. 123456789.apps.googleusercontent.com"
+                      value={clientId}
+                      onChange={(e) => setClientId(e.target.value)}
+                    />
+                    <p className="text-muted-foreground text-xs">
+                      If omitted, the container&apos;s client_id passes through
+                      unchanged.
+                    </p>
+                  </div>
+                  <div className="space-y-2">
+                    <Label htmlFor="google-client-secret">
+                      Client Secret{" "}
+                      <span className="text-muted-foreground font-normal">
+                        (optional)
+                      </span>
+                    </Label>
+                    <Input
+                      id="google-client-secret"
+                      type="password"
+                      placeholder="GOCSPX-..."
+                      value={clientSecret}
+                      onChange={(e) => setClientSecret(e.target.value)}
+                    />
+                    <p className="text-muted-foreground text-xs">
+                      If omitted, the container&apos;s client_secret passes
+                      through unchanged.
+                    </p>
+                  </div>
+                </>
               )}
 
               <Accordion type="single" collapsible className="border-none">

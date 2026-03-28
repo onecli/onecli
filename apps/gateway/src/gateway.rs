@@ -14,7 +14,7 @@ use anyhow::{Context, Result};
 use axum::extract::State;
 use axum::Router;
 use futures_util::TryStreamExt;
-use http_body_util::{Either, Full, StreamBody};
+use http_body_util::{BodyExt, Either, Full, StreamBody};
 use hyper::body::{Bytes, Frame, Incoming};
 use hyper::header::{HeaderName, HeaderValue};
 use hyper::server::conn::http1;
@@ -486,8 +486,34 @@ async fn forward_request(
         upstream = upstream.header(name.clone(), value.clone());
     }
 
-    // Stream request body to upstream via HttpBody wrapper
-    upstream = upstream.body(reqwest::Body::wrap(body));
+    // Body injection: if rules contain ReplaceFormField for this path, buffer
+    // and mutate the body. Otherwise stream it directly (zero-copy).
+    let needs_body_injection = inject::has_body_injections(&path, injection_rules);
+    if needs_body_injection {
+        info!(path = %path, "buffering request body for injection");
+        // Buffer the body — safe because OAuth token requests are tiny (<1 KB)
+        let body_bytes = BodyExt::collect(body)
+            .await
+            .context("buffering request body for injection")?
+            .to_bytes();
+
+        let content_type = headers
+            .get("content-type")
+            .and_then(|v| v.to_str().ok());
+
+        let final_body = match inject::apply_body_injections(
+            &body_bytes,
+            content_type,
+            &path,
+            injection_rules,
+        ) {
+            Some(modified) => reqwest::Body::from(modified),
+            None => reqwest::Body::from(body_bytes),
+        };
+        upstream = upstream.body(final_body);
+    } else {
+        upstream = upstream.body(reqwest::Body::wrap(body));
+    }
 
     // Send to real server
     let upstream_resp = upstream

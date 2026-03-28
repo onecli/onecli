@@ -9,7 +9,7 @@ use base64::Engine;
 use hyper::header::{HeaderName, HeaderValue};
 use hyper::Request;
 use serde::{Deserialize, Serialize};
-use tracing::warn;
+use tracing::{debug, info, warn};
 
 use crate::vault::VaultCredential;
 
@@ -18,7 +18,7 @@ use crate::vault::VaultCredential;
 /// A single injection instruction returned by the API.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "action", rename_all = "snake_case")]
-#[allow(clippy::enum_variant_names)] // all variants operate on headers — the suffix is intentional
+#[allow(clippy::enum_variant_names)] // variants share naming pattern for consistency
 pub(crate) enum Injection {
     SetHeader {
         name: String,
@@ -33,6 +33,13 @@ pub(crate) enum Injection {
     },
     RemoveHeader {
         name: String,
+    },
+    /// Replace (or add) a field in a form-urlencoded POST body.
+    /// Used for OAuth: inject the real refresh_token into token exchange requests
+    /// so the container never sees the long-lived credential.
+    ReplaceFormField {
+        field: String,
+        value: String,
     },
 }
 
@@ -114,6 +121,9 @@ pub(crate) fn apply_injections(
                         }
                     }
                 }
+                Injection::ReplaceFormField { .. } => {
+                    // Handled by apply_body_injections — not a header operation
+                }
             }
         }
     }
@@ -170,6 +180,96 @@ pub(crate) fn vault_credential_to_rules(
         path_pattern: "*".to_string(),
         injections,
     }]
+}
+
+// ── Body injection ─────────────────────────────────────────────────────
+
+/// Check whether any injection rules contain body-level mutations for the given path.
+pub(crate) fn has_body_injections(request_path: &str, rules: &[InjectionRule]) -> bool {
+    rules.iter().any(|r| {
+        path_matches(request_path, &r.path_pattern)
+            && r.injections
+                .iter()
+                .any(|i| matches!(i, Injection::ReplaceFormField { .. }))
+    })
+}
+
+/// Apply body-level injection rules to a form-urlencoded request body.
+/// Returns `Some(modified_body)` if any fields were replaced, `None` otherwise.
+///
+/// Only processes `application/x-www-form-urlencoded` bodies.
+/// JSON bodies are not supported (the Google OAuth token endpoint uses form encoding).
+pub(crate) fn apply_body_injections(
+    body: &[u8],
+    content_type: Option<&str>,
+    request_path: &str,
+    rules: &[InjectionRule],
+) -> Option<Vec<u8>> {
+    // Only handle form-urlencoded bodies
+    let ct = content_type?;
+    if !ct.starts_with("application/x-www-form-urlencoded") {
+        debug!(
+            content_type = ct,
+            "body injection skipped: expected application/x-www-form-urlencoded"
+        );
+        return None;
+    }
+
+    // Collect all ReplaceFormField injections matching this path
+    let mut replacements: Vec<(&str, &str)> = Vec::new();
+    for rule in rules {
+        if !path_matches(request_path, &rule.path_pattern) {
+            continue;
+        }
+        for injection in &rule.injections {
+            if let Injection::ReplaceFormField { field, value } = injection {
+                replacements.push((field.as_str(), value.as_str()));
+            }
+        }
+    }
+
+    if replacements.is_empty() {
+        return None;
+    }
+
+    info!(
+        field_count = replacements.len(),
+        "applying body field replacements"
+    );
+
+    // Parse the existing form body
+    let parsed: Vec<(String, String)> = form_urlencoded::parse(body)
+        .map(|(k, v)| (k.into_owned(), v.into_owned()))
+        .collect();
+
+    // Build the new body with replacements applied
+    let mut serializer = form_urlencoded::Serializer::new(String::new());
+    let mut replaced_fields: std::collections::HashSet<&str> = std::collections::HashSet::new();
+    let mut count = 0;
+
+    for (key, original_value) in &parsed {
+        if let Some((_, new_value)) = replacements.iter().find(|(f, _)| *f == key.as_str()) {
+            serializer.append_pair(key, new_value);
+            replaced_fields.insert(key);
+            count += 1;
+        } else {
+            serializer.append_pair(key, original_value);
+        }
+    }
+
+    // Add any replacement fields that weren't in the original body
+    for (field, value) in &replacements {
+        if !replaced_fields.contains(*field) {
+            serializer.append_pair(field, value);
+            count += 1;
+        }
+    }
+
+    if count == 0 {
+        return None;
+    }
+
+    Some(serializer.finish().into_bytes())
 }
 
 // ── Tests ───────────────────────────────────────────────────────────────
@@ -508,5 +608,154 @@ mod tests {
     #[test]
     fn vault_cred_empty_password_returns_empty() {
         assert!(vault_credential_to_rules("api.openai.com", &cred(Some(""))).is_empty());
+    }
+
+    // ── apply_body_injections ──────────────────────────────────────────
+
+    #[test]
+    fn body_inject_replaces_form_field() {
+        let body = b"grant_type=refresh_token&client_id=xxx&refresh_token=placeholder";
+        let rules = vec![make_rule(
+            "/token",
+            vec![Injection::ReplaceFormField {
+                field: "refresh_token".to_string(),
+                value: "real-refresh-token".to_string(),
+            }],
+        )];
+
+        let result = apply_body_injections(
+            body,
+            Some("application/x-www-form-urlencoded"),
+            "/token",
+            &rules,
+        );
+        assert!(result.is_some());
+        let modified = String::from_utf8(result.unwrap()).unwrap();
+        assert!(modified.contains("refresh_token=real-refresh-token"));
+        assert!(modified.contains("grant_type=refresh_token"));
+        assert!(modified.contains("client_id=xxx"));
+        assert!(!modified.contains("placeholder"));
+    }
+
+    #[test]
+    fn body_inject_adds_missing_field() {
+        let body = b"grant_type=refresh_token&client_id=xxx";
+        let rules = vec![make_rule(
+            "/token",
+            vec![Injection::ReplaceFormField {
+                field: "refresh_token".to_string(),
+                value: "injected-token".to_string(),
+            }],
+        )];
+
+        let result = apply_body_injections(
+            body,
+            Some("application/x-www-form-urlencoded"),
+            "/token",
+            &rules,
+        );
+        assert!(result.is_some());
+        let modified = String::from_utf8(result.unwrap()).unwrap();
+        assert!(modified.contains("refresh_token=injected-token"));
+        assert!(modified.contains("grant_type=refresh_token"));
+    }
+
+    #[test]
+    fn body_inject_multiple_fields() {
+        let body = b"grant_type=refresh_token&client_id=old-id&refresh_token=old&client_secret=old-secret";
+        let rules = vec![make_rule(
+            "/token",
+            vec![
+                Injection::ReplaceFormField {
+                    field: "refresh_token".to_string(),
+                    value: "new-refresh".to_string(),
+                },
+                Injection::ReplaceFormField {
+                    field: "client_secret".to_string(),
+                    value: "new-secret".to_string(),
+                },
+            ],
+        )];
+
+        let result = apply_body_injections(
+            body,
+            Some("application/x-www-form-urlencoded"),
+            "/token",
+            &rules,
+        );
+        assert!(result.is_some());
+        let modified = String::from_utf8(result.unwrap()).unwrap();
+        assert!(modified.contains("refresh_token=new-refresh"));
+        assert!(modified.contains("client_secret=new-secret"));
+        assert!(modified.contains("client_id=old-id"));
+    }
+
+    #[test]
+    fn body_inject_skips_json_content_type() {
+        let body = b"grant_type=refresh_token&refresh_token=placeholder";
+        let rules = vec![make_rule(
+            "/token",
+            vec![Injection::ReplaceFormField {
+                field: "refresh_token".to_string(),
+                value: "real-token".to_string(),
+            }],
+        )];
+
+        let result = apply_body_injections(body, Some("application/json"), "/token", &rules);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn body_inject_skips_path_mismatch() {
+        let body = b"refresh_token=placeholder";
+        let rules = vec![make_rule(
+            "/token",
+            vec![Injection::ReplaceFormField {
+                field: "refresh_token".to_string(),
+                value: "real-token".to_string(),
+            }],
+        )];
+
+        let result = apply_body_injections(
+            body,
+            Some("application/x-www-form-urlencoded"),
+            "/v1/messages",
+            &rules,
+        );
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn body_inject_no_content_type_returns_none() {
+        let body = b"refresh_token=placeholder";
+        let rules = vec![make_rule(
+            "/token",
+            vec![Injection::ReplaceFormField {
+                field: "refresh_token".to_string(),
+                value: "real-token".to_string(),
+            }],
+        )];
+
+        let result = apply_body_injections(body, None, "/token", &rules);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn has_body_injections_detects_correctly() {
+        let rules_with = vec![make_rule(
+            "/token",
+            vec![Injection::ReplaceFormField {
+                field: "refresh_token".to_string(),
+                value: "x".to_string(),
+            }],
+        )];
+        assert!(has_body_injections("/token", &rules_with));
+        assert!(!has_body_injections("/v1/messages", &rules_with));
+
+        let rules_without = vec![make_rule(
+            "*",
+            vec![set_header("x-api-key", "sk-ant-123")],
+        )];
+        assert!(!has_body_injections("/token", &rules_without));
     }
 }

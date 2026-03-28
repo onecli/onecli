@@ -255,6 +255,42 @@ fn build_injections(
             }]
         }
 
+        "google_oauth" => {
+            // Value is JSON: {"refresh_token": "...", "client_id": "...", "client_secret": "..."}
+            // Only refresh_token is required; client_id and client_secret are optional
+            // (if omitted, the container's values pass through unchanged).
+            let mut injections = Vec::new();
+
+            if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(decrypted_value) {
+                if let Some(rt) = parsed.get("refresh_token").and_then(|v| v.as_str()) {
+                    injections.push(Injection::ReplaceFormField {
+                        field: "refresh_token".to_string(),
+                        value: rt.to_string(),
+                    });
+                }
+                if let Some(cs) = parsed.get("client_secret").and_then(|v| v.as_str()) {
+                    injections.push(Injection::ReplaceFormField {
+                        field: "client_secret".to_string(),
+                        value: cs.to_string(),
+                    });
+                }
+                if let Some(cid) = parsed.get("client_id").and_then(|v| v.as_str()) {
+                    injections.push(Injection::ReplaceFormField {
+                        field: "client_id".to_string(),
+                        value: cid.to_string(),
+                    });
+                }
+            } else {
+                // Legacy: plain refresh token string (no JSON wrapper)
+                injections.push(Injection::ReplaceFormField {
+                    field: "refresh_token".to_string(),
+                    value: decrypted_value.to_string(),
+                });
+            }
+
+            injections
+        }
+
         _ => vec![],
     }
 }
@@ -404,5 +440,53 @@ mod tests {
     fn build_injections_unknown_type() {
         let injections = build_injections("unknown", "value", None);
         assert!(injections.is_empty());
+    }
+
+    #[test]
+    fn build_injections_google_oauth_json() {
+        let value = r#"{"refresh_token":"1//real-token","client_secret":"secret123"}"#;
+        let injections = build_injections("google_oauth", value, None);
+        assert_eq!(injections.len(), 2);
+        assert_eq!(
+            injections[0],
+            Injection::ReplaceFormField {
+                field: "refresh_token".to_string(),
+                value: "1//real-token".to_string(),
+            }
+        );
+        assert_eq!(
+            injections[1],
+            Injection::ReplaceFormField {
+                field: "client_secret".to_string(),
+                value: "secret123".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn build_injections_google_oauth_refresh_only() {
+        let value = r#"{"refresh_token":"1//my-token"}"#;
+        let injections = build_injections("google_oauth", value, None);
+        assert_eq!(injections.len(), 1);
+        assert_eq!(
+            injections[0],
+            Injection::ReplaceFormField {
+                field: "refresh_token".to_string(),
+                value: "1//my-token".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn build_injections_google_oauth_plain_string() {
+        let injections = build_injections("google_oauth", "1//plain-refresh-token", None);
+        assert_eq!(injections.len(), 1);
+        assert_eq!(
+            injections[0],
+            Injection::ReplaceFormField {
+                field: "refresh_token".to_string(),
+                value: "1//plain-refresh-token".to_string(),
+            }
+        );
     }
 }
