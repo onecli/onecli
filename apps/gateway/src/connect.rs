@@ -461,7 +461,11 @@ mod tests {
 
     // ── resolve_encrypted_value ────────────────────────────────────────
 
-    fn make_secret(type_: &str, encrypted_value: &str, access_token: Option<&str>) -> db::SecretRow {
+    fn make_secret(
+        type_: &str,
+        encrypted_value: &str,
+        access_token: Option<&str>,
+    ) -> db::SecretRow {
         db::SecretRow {
             type_: type_.to_string(),
             encrypted_value: encrypted_value.to_string(),
@@ -486,7 +490,11 @@ mod tests {
 
     #[test]
     fn resolve_value_oauth2_uses_access_token_when_present() {
-        let secret = make_secret("oauth2", "enc_service_account_key", Some("enc_access_token"));
+        let secret = make_secret(
+            "oauth2",
+            "enc_service_account_key",
+            Some("enc_access_token"),
+        );
         assert_eq!(resolve_encrypted_value(&secret), Some("enc_access_token"));
     }
 
