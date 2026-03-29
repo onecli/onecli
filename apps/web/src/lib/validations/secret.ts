@@ -24,13 +24,24 @@ const hostPatternSchema = z
     message: "Host pattern must not contain spaces",
   });
 
+const oauth2ConfigSchema = z
+  .object({
+    provider: z.enum(["google", "generic"]),
+    scopes: z.array(z.string()).optional(),
+    tokenEndpoint: z.string().url().optional(),
+    refreshIntervalSecs: z.number().int().min(60).max(86400).optional(),
+  })
+  .nullable()
+  .optional();
+
 export const createSecretSchema = z.object({
   name: z.string().trim().min(1).max(255),
-  type: z.enum(["anthropic", "generic"]),
-  value: z.string().min(1).max(10000),
+  type: z.enum(["anthropic", "generic", "oauth2"]),
+  value: z.string().min(1).max(100000), // oauth2 service account keys can be large
   hostPattern: hostPatternSchema,
   pathPattern: z.string().max(1000).optional(),
   injectionConfig: injectionConfigSchema,
+  oauth2Config: oauth2ConfigSchema,
 });
 
 export type CreateSecretInput = z.infer<typeof createSecretSchema>;
@@ -60,6 +71,34 @@ export interface AnthropicSecretMetadata {
 /** Detect the auth mode from a plaintext Anthropic secret value. */
 export const detectAnthropicAuthMode = (value: string): AnthropicAuthMode =>
   value.startsWith("sk-ant-oat") ? "oauth" : "api-key";
+
+// ── OAuth2 metadata ───────────────────────────────────────────────────
+
+export const oauth2Providers = ["google", "generic"] as const;
+export type OAuth2Provider = (typeof oauth2Providers)[number];
+
+export interface OAuth2SecretMetadata {
+  provider: OAuth2Provider;
+  scopes?: string[];
+  tokenEndpoint?: string;
+  refreshIntervalSecs: number;
+}
+
+export const parseOAuth2Metadata = (
+  metadata: unknown,
+): OAuth2SecretMetadata | null => {
+  if (
+    metadata &&
+    typeof metadata === "object" &&
+    "provider" in metadata &&
+    oauth2Providers.includes(
+      (metadata as { provider: string }).provider as OAuth2Provider,
+    )
+  ) {
+    return metadata as OAuth2SecretMetadata;
+  }
+  return null;
+};
 
 /** Type-safe accessor for Anthropic metadata from a Prisma Json field. */
 export const parseAnthropicMetadata = (

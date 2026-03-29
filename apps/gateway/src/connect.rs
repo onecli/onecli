@@ -124,9 +124,14 @@ impl PolicyEngine {
         // 5. Decrypt and build injection rules
         let mut injection_rules = Vec::with_capacity(matching_secrets.len());
         for secret in matching_secrets {
+            let Some(encrypted_value) = resolve_encrypted_value(&secret) else {
+                tracing::warn!(secret_type = %secret.type_, "secret has no resolved value, skipping");
+                continue;
+            };
+
             let decrypted = self
                 .crypto
-                .decrypt(&secret.encrypted_value)
+                .decrypt(&encrypted_value)
                 .await
                 .map_err(|e| ConnectError::Internal(format!("decrypt error: {e}")))?;
 
@@ -197,6 +202,21 @@ fn host_matches(request_host: &str, pattern: &str) -> bool {
     false
 }
 
+// ── Credential resolution ──────────────────────────────────────────────
+
+/// Select which encrypted value to decrypt for a given secret.
+/// For oauth2 secrets, returns the auto-refreshed access token.
+/// For all other types, returns the stored credential value.
+/// Returns `None` if the secret should be skipped (e.g. oauth2 with no
+/// access token yet).
+fn resolve_encrypted_value(secret: &db::SecretRow) -> Option<&str> {
+    if secret.type_ == "oauth2" {
+        secret.encrypted_access_token.as_deref()
+    } else {
+        Some(&secret.encrypted_value)
+    }
+}
+
 // ── Injection building ──────────────────────────────────────────────────
 
 /// Build injection instructions for a secret based on its type.
@@ -228,6 +248,13 @@ fn build_injections(
                     },
                 ]
             }
+        }
+
+        "oauth2" => {
+            vec![Injection::SetHeader {
+                name: "authorization".to_string(),
+                value: format!("Bearer {decrypted_value}"),
+            }]
         }
 
         "generic" => {
@@ -398,6 +425,83 @@ mod tests {
     fn build_injections_generic_no_config() {
         let injections = build_injections("generic", "value", None);
         assert!(injections.is_empty());
+    }
+
+    #[test]
+    fn build_injections_oauth2() {
+        // The decrypted value for oauth2 is the auto-refreshed access token
+        let injections = build_injections("oauth2", "ya29.a0ARrdaM...", None);
+        assert_eq!(injections.len(), 1);
+        assert_eq!(
+            injections[0],
+            Injection::SetHeader {
+                name: "authorization".to_string(),
+                value: "Bearer ya29.a0ARrdaM...".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn build_injections_oauth2_ignores_injection_config() {
+        // oauth2 always injects Bearer, ignoring any injection_config
+        let config = serde_json::json!({
+            "headerName": "x-custom",
+            "valueFormat": "Token {value}"
+        });
+        let injections = build_injections("oauth2", "ya29.token", Some(&config));
+        assert_eq!(injections.len(), 1);
+        assert_eq!(
+            injections[0],
+            Injection::SetHeader {
+                name: "authorization".to_string(),
+                value: "Bearer ya29.token".to_string(),
+            }
+        );
+    }
+
+    // ── resolve_encrypted_value ────────────────────────────────────────
+
+    fn make_secret(type_: &str, encrypted_value: &str, access_token: Option<&str>) -> db::SecretRow {
+        db::SecretRow {
+            type_: type_.to_string(),
+            encrypted_value: encrypted_value.to_string(),
+            host_pattern: "*.example.com".to_string(),
+            path_pattern: None,
+            injection_config: None,
+            encrypted_access_token: access_token.map(|s| s.to_string()),
+        }
+    }
+
+    #[test]
+    fn resolve_value_anthropic_uses_encrypted_value() {
+        let secret = make_secret("anthropic", "enc_api_key", None);
+        assert_eq!(resolve_encrypted_value(&secret), Some("enc_api_key"));
+    }
+
+    #[test]
+    fn resolve_value_generic_uses_encrypted_value() {
+        let secret = make_secret("generic", "enc_generic", None);
+        assert_eq!(resolve_encrypted_value(&secret), Some("enc_generic"));
+    }
+
+    #[test]
+    fn resolve_value_oauth2_uses_access_token_when_present() {
+        let secret = make_secret("oauth2", "enc_service_account_key", Some("enc_access_token"));
+        assert_eq!(resolve_encrypted_value(&secret), Some("enc_access_token"));
+    }
+
+    #[test]
+    fn resolve_value_oauth2_returns_none_when_no_access_token() {
+        let secret = make_secret("oauth2", "enc_service_account_key", None);
+        assert_eq!(resolve_encrypted_value(&secret), None);
+    }
+
+    #[test]
+    fn resolve_value_anthropic_ignores_access_token_field() {
+        // Non-oauth2 types should always use encrypted_value, even if
+        // encrypted_access_token is somehow set
+        let secret = make_secret("anthropic", "enc_api_key", Some("stale_token"));
+        assert_eq!(resolve_encrypted_value(&secret), Some("enc_api_key"));
     }
 
     #[test]

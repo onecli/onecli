@@ -36,6 +36,10 @@ pub(crate) struct SecretRow {
     pub host_pattern: String,
     pub path_pattern: Option<String>,
     pub injection_config: Option<serde_json::Value>,
+    /// oauth2: auto-refreshed access token (encrypted). The web app's
+    /// background worker refreshes this periodically. The gateway injects
+    /// this value instead of `encrypted_value` for oauth2 secrets.
+    pub encrypted_access_token: Option<String>,
 }
 
 /// A policy rule row from the `policy_rules` table.
@@ -135,7 +139,7 @@ pub(crate) async fn find_secrets_by_account(
     account_id: &str,
 ) -> Result<Vec<SecretRow>> {
     sqlx::query_as::<_, SecretRow>(
-        r#"SELECT type, encrypted_value, host_pattern, path_pattern, injection_config FROM secrets WHERE account_id = $1"#,
+        r#"SELECT type, encrypted_value, host_pattern, path_pattern, injection_config, encrypted_access_token FROM secrets WHERE account_id = $1"#,
     )
     .bind(account_id)
     .fetch_all(pool)
@@ -146,7 +150,7 @@ pub(crate) async fn find_secrets_by_account(
 /// Find secrets assigned to a specific agent (selective mode).
 pub(crate) async fn find_secrets_by_agent(pool: &PgPool, agent_id: &str) -> Result<Vec<SecretRow>> {
     sqlx::query_as::<_, SecretRow>(
-        r#"SELECT s.type, s.encrypted_value, s.host_pattern, s.path_pattern, s.injection_config
+        r#"SELECT s.type, s.encrypted_value, s.host_pattern, s.path_pattern, s.injection_config, s.encrypted_access_token
            FROM secrets s
            INNER JOIN agent_secrets as_ ON s.id = as_.secret_id
            WHERE as_.agent_id = $1"#,

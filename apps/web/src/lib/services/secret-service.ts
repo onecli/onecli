@@ -6,10 +6,12 @@ import {
   type CreateSecretInput,
   type UpdateSecretInput,
 } from "@/lib/validations/secret";
+import { refreshOAuth2Secret } from "@/lib/services/oauth2-service";
 
 const SECRET_TYPE_LABELS: Record<string, string> = {
   anthropic: "Anthropic API Key",
   generic: "Generic Secret",
+  oauth2: "OAuth2 (auto-refreshed)",
 };
 
 /**
@@ -83,10 +85,20 @@ export const createSecret = async (
         } as Prisma.InputJsonValue)
       : Prisma.JsonNull;
 
-  const metadata =
-    input.type === "anthropic"
-      ? ({ authMode: detectAnthropicAuthMode(value) } as Prisma.InputJsonValue)
-      : Prisma.JsonNull;
+  let metadata: Prisma.InputJsonValue | typeof Prisma.JsonNull =
+    Prisma.JsonNull;
+  if (input.type === "anthropic") {
+    metadata = {
+      authMode: detectAnthropicAuthMode(value),
+    } as Prisma.InputJsonValue;
+  } else if (input.type === "oauth2" && input.oauth2Config) {
+    metadata = {
+      provider: input.oauth2Config.provider,
+      scopes: input.oauth2Config.scopes || [],
+      tokenEndpoint: input.oauth2Config.tokenEndpoint || null,
+      refreshIntervalSecs: input.oauth2Config.refreshIntervalSecs || 2700,
+    } as Prisma.InputJsonValue;
+  }
 
   const secret = await db.secret.create({
     data: {
@@ -108,6 +120,13 @@ export const createSecret = async (
       createdAt: true,
     },
   });
+
+  // Trigger initial token fetch for oauth2 secrets (non-blocking)
+  if (input.type === "oauth2") {
+    refreshOAuth2Secret(secret.id).catch((err) =>
+      console.error(`[oauth2] Initial refresh failed for ${secret.id}:`, err),
+    );
+  }
 
   return { ...secret, preview };
 };

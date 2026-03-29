@@ -10,6 +10,13 @@
  * our explicit logger calls, and Next.js dev output stays readable).
  */
 export async function register() {
+  // Start the OAuth2 token refresh worker on server startup
+  if (process.env.NEXT_RUNTIME === "nodejs") {
+    const { startOAuth2RefreshWorker } =
+      await import("@/lib/services/oauth2-service");
+    startOAuth2RefreshWorker();
+  }
+
   if (
     process.env.NEXT_RUNTIME === "nodejs" &&
     process.env.NODE_ENV === "production"
