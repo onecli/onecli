@@ -1,5 +1,18 @@
 # Changelog
 
+## [1.8.0](https://github.com/onecli/onecli/compare/v1.7.2...v1.8.0) (2026-03-29)
+
+
+### Features
+
+* add google_oauth secret type with form-body injection ([#123](https://github.com/onecli/onecli/issues/123)) ([b99798b](https://github.com/onecli/onecli/commit/b99798b2f3ef1c7299135dead715a5b2d10dbb64))
+* app connections with OAuth flow and gateway credential injection ([#127](https://github.com/onecli/onecli/issues/127)) ([aa8ec62](https://github.com/onecli/onecli/commit/aa8ec62ac4c11e1805ba77c7c60620769cf1d995))
+
+
+### Bug Fixes
+
+* handle app-configure postMessage and suppress body hydration warning ([#128](https://github.com/onecli/onecli/issues/128)) ([6c22837](https://github.com/onecli/onecli/commit/6c228371b6f5f42fc1b3f3875a8ebfd2a345378c))
+
 ## [1.7.2](https://github.com/onecli/onecli/compare/v1.7.1...v1.7.2) (2026-03-26)
 
 
