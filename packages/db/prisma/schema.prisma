@@ -111,21 +111,21 @@ model Agent {
 }
 
 model Secret {
-  id                    String    @id @default(uuid())
-  accountId             String    @map("account_id")
-  name                  String
-  type                  String // "anthropic", "generic", "oauth2"
-  encryptedValue        String    @map("encrypted_value") // AES-256-GCM encrypted via CryptoService
-  hostPattern           String    @map("host_pattern") // "api.anthropic.com" or "*.example.com"
-  pathPattern           String?   @map("path_pattern") // "/v1/*", null = all paths
-  injectionConfig       Json?     @map("injection_config") // type-specific config (generic: { headerName, valueFormat })
-  metadata              Json? // type-specific metadata (anthropic: { authMode }, oauth2: { provider, scopes, tokenEndpoint })
-  encryptedAccessToken  String?   @map("encrypted_access_token") // oauth2: current access token (auto-refreshed)
-  accessTokenExpiresAt  DateTime? @map("access_token_expires_at") // oauth2: when the access token expires
-  lastRefreshError      String?   @map("last_refresh_error") // oauth2: last refresh error message
-  createdAt             DateTime  @default(now()) @map("created_at")
-  updatedAt             DateTime  @updatedAt @map("updated_at")
-  account               Account   @relation(fields: [accountId], references: [id])
+  id                   String    @id @default(uuid())
+  accountId            String    @map("account_id")
+  name                 String
+  type                 String // "anthropic", "generic", "oauth2"
+  encryptedValue       String    @map("encrypted_value") // AES-256-GCM encrypted via CryptoService
+  hostPattern          String    @map("host_pattern") // "api.anthropic.com" or "*.example.com"
+  pathPattern          String?   @map("path_pattern") // "/v1/*", null = all paths
+  injectionConfig      Json?     @map("injection_config") // type-specific config (generic: { headerName, valueFormat })
+  metadata             Json? // type-specific metadata (anthropic: { authMode }, oauth2: { provider, scopes, tokenEndpoint })
+  encryptedAccessToken String?   @map("encrypted_access_token") // oauth2: current access token (auto-refreshed)
+  accessTokenExpiresAt DateTime? @map("access_token_expires_at") // oauth2: when the access token expires
+  lastRefreshError     String?   @map("last_refresh_error") // oauth2: last refresh error message
+  createdAt            DateTime  @default(now()) @map("created_at")
+  updatedAt            DateTime  @updatedAt @map("updated_at")
+  account              Account   @relation(fields: [accountId], references: [id])
 
   agentSecrets AgentSecret[]
 
