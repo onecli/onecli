@@ -662,7 +662,8 @@ mod tests {
 
     #[test]
     fn body_inject_multiple_fields() {
-        let body = b"grant_type=refresh_token&client_id=old-id&refresh_token=old&client_secret=old-secret";
+        let body =
+            b"grant_type=refresh_token&client_id=old-id&refresh_token=old&client_secret=old-secret";
         let rules = vec![make_rule(
             "/token",
             vec![
@@ -752,10 +753,7 @@ mod tests {
         assert!(has_body_injections("/token", &rules_with));
         assert!(!has_body_injections("/v1/messages", &rules_with));
 
-        let rules_without = vec![make_rule(
-            "*",
-            vec![set_header("x-api-key", "sk-ant-123")],
-        )];
+        let rules_without = vec![make_rule("*", vec![set_header("x-api-key", "sk-ant-123")])];
         assert!(!has_body_injections("/token", &rules_without));
     }
 }

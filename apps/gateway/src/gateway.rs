@@ -497,9 +497,7 @@ async fn forward_request(
             .context("buffering request body for injection")?
             .to_bytes();
 
-        let content_type = headers
-            .get("content-type")
-            .and_then(|v| v.to_str().ok());
+        let content_type = headers.get("content-type").and_then(|v| v.to_str().ok());
 
         let final_body = match inject::apply_body_injections(
             &body_bytes,
