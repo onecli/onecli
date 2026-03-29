@@ -18,7 +18,7 @@ import {
   AlertDialogTrigger,
 } from "@onecli/ui/components/alert-dialog";
 import { getAppConnections, disconnectApp } from "@/lib/actions/connections";
-import { useAppConnected } from "@/hooks/use-app-connected";
+import { useAppMessages } from "@/hooks/use-app-connected";
 import { AppIcon } from "./app-icon";
 import { AppConfigForm } from "./app-config-form";
 
@@ -89,7 +89,7 @@ export const AppDetail = ({
     fetchConnection();
   }, [fetchConnection]);
 
-  useAppConnected(fetchConnection);
+  useAppMessages({ onConnected: fetchConnection });
 
   const handleConnect = () => {
     const w = 520;

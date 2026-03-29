@@ -7,7 +7,7 @@ import { Button } from "@onecli/ui/components/button";
 import { cn } from "@onecli/ui/lib/utils";
 import { apps } from "@/lib/apps/registry";
 import { getAppConnections } from "@/lib/actions/connections";
-import { useAppConnected } from "@/hooks/use-app-connected";
+import { useAppMessages } from "@/hooks/use-app-connected";
 import { AppIcon } from "./app-icon";
 
 export const AppsTab = () => {
@@ -35,7 +35,7 @@ export const AppsTab = () => {
     fetchConnections();
   }, [fetchConnections]);
 
-  useAppConnected(fetchConnections);
+  useAppMessages({ onConnected: fetchConnections, onConfigure: router.push });
 
   const handleConnect = (e: React.MouseEvent, provider: string) => {
     e.stopPropagation();

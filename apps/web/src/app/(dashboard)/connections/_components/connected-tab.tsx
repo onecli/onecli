@@ -10,7 +10,7 @@ import {
 } from "@/lib/actions/connections";
 import { getSecrets } from "@/lib/actions/secrets";
 import { getApp } from "@/lib/apps/registry";
-import { useAppConnected } from "@/hooks/use-app-connected";
+import { useAppMessages } from "@/hooks/use-app-connected";
 import { AppIcon } from "./app-icon";
 import { SecretDialog } from "./secret-dialog";
 
@@ -104,7 +104,7 @@ export const ConnectedTab = () => {
     fetchItems();
   }, [fetchItems]);
 
-  useAppConnected(fetchItems);
+  useAppMessages({ onConnected: fetchItems, onConfigure: router.push });
 
   const handleItemClick = (item: ConnectedItem) => {
     if (item.secretData) {

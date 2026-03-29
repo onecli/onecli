@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { usePathname, useRouter } from "next/navigation";
-import { useAppConnected } from "@/hooks/use-app-connected";
+import { useAppMessages } from "@/hooks/use-app-connected";
 import {
   AnimatedTabs,
   AnimatedTabList,
@@ -56,7 +56,7 @@ export const ConnectionsTabs = () => {
     fetchCount();
   }, [fetchCount]);
 
-  useAppConnected(fetchCount);
+  useAppMessages({ onConnected: fetchCount, onConfigure: router.push });
 
   const handleTabChange = (value: string) => {
     const href = TAB_ROUTES[value];
