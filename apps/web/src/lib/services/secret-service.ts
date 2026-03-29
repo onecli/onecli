@@ -77,9 +77,13 @@ export const createSecret = async (
     // Composite value: wrap refresh token + optional client credentials into JSON
     // so the gateway can extract each field for form-body injection.
     const composite: Record<string, string> = { refresh_token: value };
-    const config = input.injectionConfig as { clientId?: string; clientSecret?: string } | null;
+    const config = input.injectionConfig as {
+      clientId?: string;
+      clientSecret?: string;
+    } | null;
     if (config?.clientId?.trim()) composite.client_id = config.clientId.trim();
-    if (config?.clientSecret?.trim()) composite.client_secret = config.clientSecret.trim();
+    if (config?.clientSecret?.trim())
+      composite.client_secret = config.clientSecret.trim();
     // Re-assign for encryption below
     const compositeValue = JSON.stringify(composite);
     const encryptedValue = await cryptoService.encrypt(compositeValue);
@@ -186,7 +190,8 @@ export const updateSecret = async (
         clientId?: string;
         clientSecret?: string;
       } | null;
-      if (config?.clientId?.trim()) composite.client_id = config.clientId.trim();
+      if (config?.clientId?.trim())
+        composite.client_id = config.clientId.trim();
       if (config?.clientSecret?.trim())
         composite.client_secret = config.clientSecret.trim();
       data.encryptedValue = await cryptoService.encrypt(

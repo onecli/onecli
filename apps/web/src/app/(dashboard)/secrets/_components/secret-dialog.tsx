@@ -60,7 +60,8 @@ const SECRET_TYPE_OPTIONS: SecretTypeOption[] = [
   {
     value: "google_oauth",
     label: "Google OAuth",
-    description: "Proxy OAuth refresh tokens so containers never see long-lived credentials",
+    description:
+      "Proxy OAuth refresh tokens so containers never see long-lived credentials",
     icon: <Shield className="size-5" />,
     hostDefault: "oauth2.googleapis.com",
   },
@@ -192,7 +193,10 @@ export const SecretDialog = ({
             type === "generic"
               ? { headerName, valueFormat: valueFormat || "{value}" }
               : type === "google_oauth"
-                ? { clientId: clientId || undefined, clientSecret: clientSecret || undefined }
+                ? {
+                    clientId: clientId || undefined,
+                    clientSecret: clientSecret || undefined,
+                  }
                 : null,
         });
         toast.success("Secret created");
