@@ -131,7 +131,7 @@ impl PolicyEngine {
 
             let decrypted = self
                 .crypto
-                .decrypt(&encrypted_value)
+                .decrypt(encrypted_value)
                 .await
                 .map_err(|e| ConnectError::Internal(format!("decrypt error: {e}")))?;
 
