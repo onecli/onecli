@@ -35,10 +35,8 @@ export const DashboardHeader = () => {
     : "";
   const subSegments = subPath ? subPath.split("/") : [];
 
-  const lastSegment = subSegments[subSegments.length - 1];
-  const subPageLabel = lastSegment
-    ? lastSegment.charAt(0).toUpperCase() + lastSegment.slice(1)
-    : null;
+  const formatSegment = (s: string) =>
+    s.charAt(0).toUpperCase() + s.slice(1).replace(/-/g, " ");
 
   return (
     <div className="flex w-full items-center gap-2 px-4">
@@ -46,17 +44,34 @@ export const DashboardHeader = () => {
       <Separator orientation="vertical" className="mr-2 h-4" />
       <Breadcrumb>
         <BreadcrumbList>
-          {subPageLabel ? (
+          {subSegments.length > 0 ? (
             <>
               <BreadcrumbItem>
                 <BreadcrumbLink asChild>
                   <Link href={navItem!.url}>{title}</Link>
                 </BreadcrumbLink>
               </BreadcrumbItem>
-              <BreadcrumbSeparator />
-              <BreadcrumbItem>
-                <BreadcrumbPage>{subPageLabel}</BreadcrumbPage>
-              </BreadcrumbItem>
+              {subSegments.map((segment, i) => {
+                const isLast = i === subSegments.length - 1;
+                const href =
+                  navItem!.url + "/" + subSegments.slice(0, i + 1).join("/");
+                return (
+                  <span key={segment} className="contents">
+                    <BreadcrumbSeparator />
+                    <BreadcrumbItem>
+                      {isLast ? (
+                        <BreadcrumbPage>
+                          {formatSegment(segment)}
+                        </BreadcrumbPage>
+                      ) : (
+                        <BreadcrumbLink asChild>
+                          <Link href={href}>{formatSegment(segment)}</Link>
+                        </BreadcrumbLink>
+                      )}
+                    </BreadcrumbItem>
+                  </span>
+                );
+              })}
             </>
           ) : (
             <BreadcrumbItem>

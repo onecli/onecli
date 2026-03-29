@@ -8,18 +8,7 @@ import { DEFAULT_AGENT_NAME } from "@/lib/constants";
 import { generateAccessToken } from "@/lib/services/agent-service";
 import { logger } from "@/lib/logger";
 
-const GATEWAY_PORT = process.env.GATEWAY_PORT ?? "10255";
 const CA_CONTAINER_PATH = "/tmp/onecli-gateway-ca.pem";
-
-const isCloud = process.env.NEXT_PUBLIC_EDITION === "cloud";
-
-const getGatewayHost = (): string => {
-  if (process.env.GATEWAY_HOST) return process.env.GATEWAY_HOST;
-  if (isCloud) {
-    throw new Error("GATEWAY_HOST env var is required in cloud edition");
-  }
-  return "host.docker.internal";
-};
 
 /**
  * GET /api/container-config
@@ -69,8 +58,9 @@ export async function GET(request: NextRequest) {
       });
     }
 
-    const gatewayHost = getGatewayHost();
-    const gatewayUrl = `http://x:${agent.accessToken}@${gatewayHost}:${GATEWAY_PORT}`;
+    const gatewayBase =
+      process.env.GATEWAY_BASE_URL ?? "host.docker.internal:10255";
+    const gatewayUrl = `http://x:${agent.accessToken}@${gatewayBase}`;
 
     const caCertificate = loadCaCertificate();
     if (!caCertificate) {
@@ -111,10 +101,17 @@ export async function GET(request: NextRequest) {
 
     return NextResponse.json({
       env: {
+        // Proxy — uppercase + lowercase (some tools only check one)
         HTTPS_PROXY: gatewayUrl,
         HTTP_PROXY: gatewayUrl,
+        https_proxy: gatewayUrl,
+        http_proxy: gatewayUrl,
+        // Node.js
         NODE_EXTRA_CA_CERTS: CA_CONTAINER_PATH,
         NODE_USE_ENV_PROXY: "1",
+        // Git
+        GIT_TERMINAL_PROMPT: "0",
+        GIT_HTTP_PROXY_AUTHMETHOD: "basic",
         ...authEnv,
       },
       caCertificate,

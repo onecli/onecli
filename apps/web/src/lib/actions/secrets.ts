@@ -68,12 +68,9 @@ export const getDemoInfo = async () => {
 
   if (!demoSecret || !agent) return null;
 
-  const gatewayHost = process.env.GATEWAY_HOST ?? "localhost";
-  const gatewayPort = process.env.GATEWAY_PORT ?? "10255";
-
   return {
     agentToken: agent.accessToken,
-    gatewayUrl: `${gatewayHost}:${gatewayPort}`,
+    gatewayUrl: process.env.API_BASE_URL ?? "localhost:10255",
   };
 };
 

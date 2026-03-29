@@ -137,6 +137,12 @@ export const updateSecret = async (
 
   const data: Record<string, unknown> = {};
 
+  if (input.name !== undefined) {
+    const name = input.name.trim();
+    if (!name) throw new ServiceError("BAD_REQUEST", "Name is required");
+    data.name = name;
+  }
+
   if (input.value !== undefined) {
     const value = input.value.trim();
     if (!value)

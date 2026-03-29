@@ -30,6 +30,8 @@ model Account {
   auditLogs         AuditLog[]
   vaultConnections  VaultConnection[]
   onboardingSurvey  OnboardingSurvey?
+  appConnections    AppConnection[]
+  appConfigs        AppConfig[]
 
   @@map("accounts")
 }
@@ -102,8 +104,9 @@ model Agent {
   updatedAt   DateTime @updatedAt @map("updated_at")
   account     Account  @relation(fields: [accountId], references: [id])
 
-  agentSecrets AgentSecret[]
-  policyRules  PolicyRule[]
+  agentSecrets        AgentSecret[]
+  agentAppConnections AgentAppConnection[]
+  policyRules         PolicyRule[]
 
   @@unique([accountId, identifier])
   @@index([accountId])
@@ -232,6 +235,52 @@ model OnboardingSurvey {
   user      User     @relation(fields: [userId], references: [id])
 
   @@map("onboarding_surveys")
+}
+
+// ── App connections ──────────────────────────────────────────────────────
+
+model AppConnection {
+  id                  String               @id @default(uuid())
+  accountId           String               @map("account_id")
+  provider            String // "github", "google", "slack", etc.
+  status              String               @default("connected")
+  credentials         String?              @map("credentials") // encrypted JSON (access_token, refresh_token, etc.)
+  scopes              String[]             @default([])
+  metadata            Json? // non-secret info (username, org, email)
+  connectedAt         DateTime             @default(now()) @map("connected_at")
+  updatedAt           DateTime             @updatedAt @map("updated_at")
+  account             Account              @relation(fields: [accountId], references: [id])
+  agentAppConnections AgentAppConnection[]
+
+  @@unique([accountId, provider])
+  @@map("app_connections")
+}
+
+model AgentAppConnection {
+  agentId         String        @map("agent_id")
+  appConnectionId String        @map("app_connection_id")
+  createdAt       DateTime      @default(now()) @map("created_at")
+  updatedAt       DateTime      @updatedAt @map("updated_at")
+  agent           Agent         @relation(fields: [agentId], references: [id], onDelete: Cascade)
+  appConnection   AppConnection @relation(fields: [appConnectionId], references: [id], onDelete: Cascade)
+
+  @@id([agentId, appConnectionId])
+  @@map("agent_app_connections")
+}
+
+model AppConfig {
+  id          String   @id @default(uuid())
+  accountId   String   @map("account_id")
+  provider    String // "github", "google"
+  enabled     Boolean  @default(false)
+  credentials String?  @map("credentials") // encrypted (clientSecret)
+  settings    Json? // plain (clientId, scopes)
+  createdAt   DateTime @default(now()) @map("created_at")
+  updatedAt   DateTime @updatedAt @map("updated_at")
+  account     Account  @relation(fields: [accountId], references: [id])
+
+  @@unique([accountId, provider])
+  @@map("app_configs")
 }
 
 // ── Standalone (no account scoping) ─────────────────────────────────────

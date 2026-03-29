@@ -1,7 +1,6 @@
 import type { NextRequest } from "next/server";
 
-const GATEWAY_URL =
-  process.env.NEXT_PUBLIC_GATEWAY_URL ?? "http://localhost:10255";
+const GATEWAY_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:10255";
 
 /**
  * Invalidate the gateway's CONNECT response cache for the current user's

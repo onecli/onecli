@@ -6,6 +6,9 @@
 
 use std::sync::Arc;
 
+use tracing::debug;
+
+use crate::apps;
 use crate::cache::CacheStore;
 use crate::crypto::CryptoService;
 use crate::db;
@@ -49,7 +52,7 @@ impl PolicyEngine {
     async fn find_agent(&self, agent_token: &str) -> Result<db::AgentRow, ConnectError> {
         db::find_agent_by_token(&self.pool, agent_token)
             .await
-            .map_err(|e| ConnectError::Internal(format!("db error: {e}")))?
+            .map_err(db_err)?
             .ok_or(ConnectError::InvalidToken)
     }
 
@@ -59,26 +62,139 @@ impl PolicyEngine {
         agent: &db::AgentRow,
         hostname: &str,
     ) -> Result<ConnectResponse, ConnectError> {
-        // 1. Secret lookup — branch on agent's secret mode
+        let injection_rules = self.resolve_injections(agent, hostname).await?;
+        let policy_rules = self.resolve_policy_rules(agent, hostname).await?;
+        let has_rules = !injection_rules.is_empty() || !policy_rules.is_empty();
+
+        Ok(ConnectResponse {
+            intercept: has_rules,
+            injection_rules,
+            policy_rules,
+            account_id: Some(agent.account_id.clone()),
+        })
+    }
+
+    /// Resolve all injection rules: secrets first, then app connections as fallback.
+    async fn resolve_injections(
+        &self,
+        agent: &db::AgentRow,
+        hostname: &str,
+    ) -> Result<Vec<InjectionRule>, ConnectError> {
+        let secret_rules = self.resolve_secret_injections(agent, hostname).await?;
+        if !secret_rules.is_empty() {
+            debug!(host = %hostname, count = secret_rules.len(), "resolve: using secrets");
+            return Ok(secret_rules);
+        }
+
+        // Secrets take priority — only try app connections when no secret matched.
+        let app_rules = self.resolve_app_injections(agent, hostname).await?;
+        debug!(host = %hostname, count = app_rules.len(), "resolve: using app connections");
+        Ok(app_rules)
+    }
+
+    /// Build injection rules from secrets matching this host.
+    async fn resolve_secret_injections(
+        &self,
+        agent: &db::AgentRow,
+        hostname: &str,
+    ) -> Result<Vec<InjectionRule>, ConnectError> {
         let secrets = if agent.secret_mode == "selective" {
             db::find_secrets_by_agent(&self.pool, &agent.id).await
         } else {
             db::find_secrets_by_account(&self.pool, &agent.account_id).await
         }
-        .map_err(|e| ConnectError::Internal(format!("db error: {e}")))?;
+        .map_err(db_err)?;
 
-        // 3. Filter secrets by host pattern
-        let matching_secrets: Vec<_> = secrets
+        let matching: Vec<_> = secrets
             .into_iter()
             .filter(|s| host_matches(hostname, &s.host_pattern))
             .collect();
 
-        // 4. Policy rule lookup — global (agentId IS NULL) + agent-specific
+        let mut rules = Vec::with_capacity(matching.len());
+        for secret in &matching {
+            let decrypted = self
+                .crypto
+                .decrypt(&secret.encrypted_value)
+                .await
+                .map_err(decrypt_err)?;
+
+            let injections =
+                build_injections(&secret.type_, &decrypted, secret.injection_config.as_ref());
+
+            rules.push(InjectionRule {
+                path_pattern: secret
+                    .path_pattern
+                    .clone()
+                    .unwrap_or_else(|| "*".to_string()),
+                injections,
+            });
+        }
+
+        Ok(rules)
+    }
+
+    /// Build injection rules from app connections for this host.
+    /// Only called when no secret matched (secrets take priority).
+    async fn resolve_app_injections(
+        &self,
+        agent: &db::AgentRow,
+        hostname: &str,
+    ) -> Result<Vec<InjectionRule>, ConnectError> {
+        let Some(provider) = apps::provider_for_host(hostname) else {
+            debug!(host = %hostname, "app_connections: no provider for host");
+            return Ok(vec![]);
+        };
+        debug!(host = %hostname, provider = %provider, "app_connections: matched provider");
+
+        let connections = if agent.secret_mode == "selective" {
+            db::find_app_connections_by_agent(&self.pool, &agent.id).await
+        } else {
+            db::find_app_connections_by_account(&self.pool, &agent.account_id).await
+        }
+        .map_err(db_err)?;
+
+        let Some(conn) = connections.iter().find(|c| c.provider == provider) else {
+            return Ok(vec![]);
+        };
+
+        let Some(ref encrypted_creds) = conn.credentials else {
+            return Ok(vec![]);
+        };
+
+        let decrypted_json = self
+            .crypto
+            .decrypt(encrypted_creds)
+            .await
+            .map_err(decrypt_err)?;
+
+        let token = extract_access_token(&decrypted_json);
+
+        let Some(token) = token else {
+            return Ok(vec![]);
+        };
+
+        let injections = apps::build_app_injections(provider, hostname, &token);
+        if injections.is_empty() {
+            return Ok(vec![]);
+        }
+
+        Ok(vec![InjectionRule {
+            path_pattern: "*".to_string(),
+            injections,
+        }])
+    }
+
+    /// Resolve policy rules (block / rate-limit) for this agent + host.
+    async fn resolve_policy_rules(
+        &self,
+        agent: &db::AgentRow,
+        hostname: &str,
+    ) -> Result<Vec<PolicyRule>, ConnectError> {
         let all_rules = db::find_policy_rules_by_account(&self.pool, &agent.account_id)
             .await
-            .map_err(|e| ConnectError::Internal(format!("db error: {e}")))?;
+            .map_err(db_err)?;
 
-        let matching_policy_rules: Vec<PolicyRule> = all_rules
+        let rules = all_rules
             .into_iter()
             .filter(|r| {
                 host_matches(hostname, &r.host_pattern)
@@ -112,41 +228,28 @@ impl PolicyEngine {
             })
             .collect();
 
-        if matching_secrets.is_empty() && matching_policy_rules.is_empty() {
-            return Ok(ConnectResponse {
-                intercept: false,
-                injection_rules: vec![],
-                policy_rules: vec![],
-                account_id: Some(agent.account_id.clone()),
-            });
-        }
-
-        // 5. Decrypt and build injection rules
-        let mut injection_rules = Vec::with_capacity(matching_secrets.len());
-        for secret in matching_secrets {
-            let decrypted = self
-                .crypto
-                .decrypt(&secret.encrypted_value)
-                .await
-                .map_err(|e| ConnectError::Internal(format!("decrypt error: {e}")))?;
-
-            let path_pattern = secret.path_pattern.unwrap_or_else(|| "*".to_string());
-            let injections =
-                build_injections(&secret.type_, &decrypted, secret.injection_config.as_ref());
-
-            injection_rules.push(InjectionRule {
-                path_pattern,
-                injections,
-            });
-        }
-
-        Ok(ConnectResponse {
-            intercept: true,
-            injection_rules,
-            policy_rules: matching_policy_rules,
-            account_id: Some(agent.account_id.clone()),
-        })
+        Ok(rules)
     }
+}
+
+// ── Credential extraction ──────────────────────────────────────────────
+
+/// Extract the `access_token` field from a decrypted credentials JSON string.
+/// Returns `None` for malformed JSON, missing field, or non-string values.
+fn extract_access_token(json: &str) -> Option<String> {
+    serde_json::from_str::<serde_json::Value>(json)
+        .ok()
+        .and_then(|v| v.get("access_token")?.as_str().map(String::from))
+}
+
+// ── Error helpers ──────────────────────────────────────────────────────
+
+fn db_err(e: anyhow::Error) -> ConnectError {
+    ConnectError::Internal(format!("db error: {e}"))
+}
+
+fn decrypt_err(e: anyhow::Error) -> ConnectError {
+    ConnectError::Internal(format!("decrypt error: {e}"))
 }
 
 // ── Cached resolution ───────────────────────────────────────────────────
@@ -168,8 +271,11 @@ pub(crate) async fn resolve(
 
     // Check cache
     if let Some(response) = cache.get::<ConnectResponse>(&cache_key).await {
+        debug!(host = %hostname, intercept = response.intercept, "resolve: cache hit");
         return Ok(response);
     }
+
+    debug!(host = %hostname, "resolve: cache miss, querying DB");
 
     // Query the database (agent already resolved, avoids re-querying)
     let response = policy_engine.resolve_uncached(&agent, hostname).await?;
@@ -404,5 +510,42 @@ mod tests {
     fn build_injections_unknown_type() {
         let injections = build_injections("unknown", "value", None);
         assert!(injections.is_empty());
+    }
+
+    // ── extract_access_token ─────────────────────────────────────────
+
+    #[test]
+    fn extract_token_from_valid_json() {
+        let json = r#"{"access_token":"ghp_abc123","token_type":"bearer"}"#;
+        assert_eq!(extract_access_token(json), Some("ghp_abc123".to_string()));
+    }
+
+    #[test]
+    fn extract_token_missing_field() {
+        let json = r#"{"token_type":"bearer"}"#;
+        assert_eq!(extract_access_token(json), None);
+    }
+
+    #[test]
+    fn extract_token_null_value() {
+        let json = r#"{"access_token":null}"#;
+        assert_eq!(extract_access_token(json), None);
+    }
+
+    #[test]
+    fn extract_token_non_string_value() {
+        let json = r#"{"access_token":12345}"#;
+        assert_eq!(extract_access_token(json), None);
+    }
+
+    #[test]
+    fn extract_token_malformed_json() {
+        assert_eq!(extract_access_token("not json"), None);
+    }
+
+    #[test]
+    fn extract_token_empty_string() {
+        let json = r#"{"access_token":""}"#;
+        assert_eq!(extract_access_token(json), Some(String::new()));
     }
 }

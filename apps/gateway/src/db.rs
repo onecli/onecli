@@ -175,6 +175,46 @@ pub(crate) async fn find_policy_rules_by_account(
     .context("querying policy_rules by account_id")
 }
 
+// ── App connection queries ─────────────────────────────────────────────
+
+/// An app connection row from the `app_connections` table.
+#[derive(Debug, FromRow)]
+pub(crate) struct AppConnectionRow {
+    pub provider: String,
+    pub credentials: Option<String>,
+}
+
+/// Find all connected app connections for a given account.
+pub(crate) async fn find_app_connections_by_account(
+    pool: &PgPool,
+    account_id: &str,
+) -> Result<Vec<AppConnectionRow>> {
+    sqlx::query_as::<_, AppConnectionRow>(
+        r#"SELECT provider, credentials FROM app_connections WHERE account_id = $1 AND status = 'connected'"#,
+    )
+    .bind(account_id)
+    .fetch_all(pool)
+    .await
+    .context("querying app_connections by account_id")
+}
+
+/// Find app connections assigned to a specific agent (selective mode).
+pub(crate) async fn find_app_connections_by_agent(
+    pool: &PgPool,
+    agent_id: &str,
+) -> Result<Vec<AppConnectionRow>> {
+    sqlx::query_as::<_, AppConnectionRow>(
+        r#"SELECT ac.provider, ac.credentials
+           FROM app_connections ac
+           INNER JOIN agent_app_connections aac ON ac.id = aac.app_connection_id
+           WHERE aac.agent_id = $1 AND ac.status = 'connected'"#,
+    )
+    .bind(agent_id)
+    .fetch_all(pool)
+    .await
+    .context("querying app_connections by agent_id")
+}
+
 // ── Vault connection queries ────────────────────────────────────────────
 
 /// Find a vault connection for an account + provider pair.

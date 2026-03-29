@@ -14,6 +14,7 @@ mod cache;
 #[path = "cloud/cache.rs"]
 mod cache;
 
+mod apps;
 mod connect;
 
 #[cfg(not(feature = "cloud"))]

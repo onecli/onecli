@@ -37,6 +37,7 @@ export type CreateSecretInput = z.infer<typeof createSecretSchema>;
 
 export const updateSecretSchema = z
   .object({
+    name: z.string().trim().min(1).max(255).optional(),
     value: z.string().min(1).max(10000).optional(),
     hostPattern: hostPatternSchema.optional(),
     pathPattern: z.string().max(1000).nullable().optional(),

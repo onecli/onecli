@@ -8,6 +8,8 @@ export const AUDIT_ACTIONS = {
   UPDATE: "update",
   DELETE: "delete",
   REGENERATE: "regenerate",
+  CONNECT: "connect",
+  DISCONNECT: "disconnect",
 } as const;
 
 export const AUDIT_SERVICES = {
@@ -15,6 +17,8 @@ export const AUDIT_SERVICES = {
   SECRET: "secret",
   RULE: "rule",
   API_KEY: "api-key",
+  APP_CONNECTION: "app-connection",
+  APP_CONFIG: "app-config",
 } as const;
 
 export const AUDIT_STATUS = {

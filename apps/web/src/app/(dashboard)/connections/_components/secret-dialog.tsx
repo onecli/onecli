@@ -161,6 +161,7 @@ export const SecretDialog = ({
     try {
       if (isEdit) {
         await updateSecret(secret.id, {
+          name: name !== secret.name ? name : undefined,
           value: value.trim() || undefined,
           hostPattern,
           pathPattern: pathPattern || null,

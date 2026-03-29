@@ -33,6 +33,16 @@ export const loadCaCertificate = (): string | null => {
   const envCert = process.env.GATEWAY_CA_CERT?.trim();
   if (envCert) return envCert;
 
+  // Explicit file path override — works in any edition
+  if (process.env.GATEWAY_CA_PEM_FILE) {
+    try {
+      const pem = readFileSync(process.env.GATEWAY_CA_PEM_FILE, "utf-8").trim();
+      return pem || null;
+    } catch {
+      return null;
+    }
+  }
+
   if (isCloud) return null;
 
   const path = getCaPemFilePath();
