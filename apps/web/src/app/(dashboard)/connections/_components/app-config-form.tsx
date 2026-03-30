@@ -44,6 +44,9 @@ interface AppConfigFormProps {
     secret?: boolean;
   }[];
   hasEnvDefaults: boolean;
+  isConnected: boolean;
+  /** Called after any config change that invalidates the connection (save, toggle, delete). */
+  onConfigChange?: () => void;
 }
 
 export const AppConfigForm = ({
@@ -51,12 +54,17 @@ export const AppConfigForm = ({
   appName,
   fields,
   hasEnvDefaults,
+  isConnected,
+  onConfigChange,
 }: AppConfigFormProps) => {
   const [values, setValues] = useState<Record<string, string>>({});
   const [hasCredentials, setHasCredentials] = useState(false);
   const [enabled, setEnabled] = useState(false);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
+  const [pendingAction, setPendingAction] = useState<
+    "save" | "toggle-on" | "toggle-off" | null
+  >(null);
 
   const fetchConfig = useCallback(async () => {
     try {
@@ -81,12 +89,13 @@ export const AppConfigForm = ({
     fetchConfig();
   }, [fetchConfig]);
 
-  const handleSave = async () => {
+  const doSave = async () => {
     setSaving(true);
     try {
       await saveAppConfig(provider, values);
       toast.success("Credentials saved");
       await fetchConfig();
+      onConfigChange?.();
     } catch {
       toast.error("Failed to save credentials");
     } finally {
@@ -94,40 +103,58 @@ export const AppConfigForm = ({
     }
   };
 
-  const handleToggle = async (checked: boolean) => {
-    if (checked && !hasCredentials) {
-      // No credentials yet — just expand, don't persist
-      setEnabled(false);
-      return;
+  const handleSave = () => {
+    if (isConnected) {
+      setPendingAction("save");
+    } else {
+      doSave();
     }
+  };
 
-    // Persist toggle to DB
+  const doToggle = async (checked: boolean) => {
     setEnabled(checked);
     try {
       await setAppConfigEnabled(provider, checked);
       toast.success(
         checked ? "Custom credentials enabled" : "Custom credentials disabled",
       );
+      onConfigChange?.();
     } catch {
       setEnabled(!checked);
       toast.error("Failed to update");
     }
   };
 
-  const handleDelete = async () => {
+  const handleToggle = (checked: boolean) => {
+    if (checked && !hasCredentials) {
+      setEnabled(false);
+      return;
+    }
+    if (isConnected) {
+      setPendingAction(checked ? "toggle-on" : "toggle-off");
+    } else {
+      doToggle(checked);
+    }
+  };
+
+  const doDelete = async () => {
     try {
       await deleteAppConfigAction(provider);
       setValues({});
       setHasCredentials(false);
       setEnabled(false);
-      toast.success(
-        hasEnvDefaults
-          ? "Credentials removed. Using platform defaults."
-          : "Credentials removed",
-      );
+      toast.success("Credentials removed");
+      onConfigChange?.();
     } catch {
       toast.error("Failed to remove credentials");
     }
+  };
+
+  const handleConfirmAction = async () => {
+    if (pendingAction === "save") await doSave();
+    else if (pendingAction === "toggle-on") await doToggle(true);
+    else if (pendingAction === "toggle-off") await doToggle(false);
+    setPendingAction(null);
   };
 
   const hasInput = fields.some((f) => !!values[f.name]);
@@ -238,7 +265,7 @@ export const AppConfigForm = ({
                     <AlertDialogFooter>
                       <AlertDialogCancel>Cancel</AlertDialogCancel>
                       <AlertDialogAction
-                        onClick={handleDelete}
+                        onClick={doDelete}
                         className="bg-destructive text-white hover:bg-destructive/90"
                       >
                         Remove
@@ -251,6 +278,30 @@ export const AppConfigForm = ({
           </Card>
         </AccordionContent>
       </AccordionItem>
+
+      {/* Confirmation dialog when config change would disconnect an active connection */}
+      <AlertDialog
+        open={!!pendingAction}
+        onOpenChange={(open) => {
+          if (!open) setPendingAction(null);
+        }}
+      >
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>This will disconnect {appName}</AlertDialogTitle>
+            <AlertDialogDescription>
+              Changing credentials will disconnect your current {appName}{" "}
+              connection. You&apos;ll need to reconnect afterward.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogAction onClick={handleConfirmAction}>
+              Continue
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </Accordion>
   );
 };

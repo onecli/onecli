@@ -231,6 +231,8 @@ export const AppDetail = ({
           appName={app.name}
           fields={configurable.fields}
           hasEnvDefaults={hasEnvDefaults}
+          isConnected={isConnected}
+          onConfigChange={fetchConnection}
         />
       )}
     </div>

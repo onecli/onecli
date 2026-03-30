@@ -6,6 +6,18 @@ import { ServiceError } from "@/lib/services/errors";
 import type { OAuthConfigField } from "@/lib/apps/types";
 
 /**
+ * Disconnect the app connection for a provider if one exists.
+ * Called when BYOC config changes (save, disable, delete) because
+ * refresh tokens are bound to the client ID that issued them —
+ * changing the OAuth app invalidates existing tokens.
+ */
+const disconnectIfConnected = async (accountId: string, provider: string) => {
+  await db.appConnection.deleteMany({
+    where: { accountId, provider },
+  });
+};
+
+/**
  * Get the non-secret config and whether encrypted credentials exist.
  * Never returns decrypted secrets — use `getAppConfigCredentials` for that.
  */
@@ -89,6 +101,9 @@ export const upsertAppConfig = async (
     }
   }
 
+  // Disconnect existing connection — refresh tokens are bound to the client ID
+  await disconnectIfConnected(accountId, provider);
+
   return db.appConfig.upsert({
     where: { accountId_provider: { accountId, provider } },
     create: {
@@ -125,6 +140,9 @@ export const deleteAppConfig = async (accountId: string, provider: string) => {
   await db.appConfig.delete({
     where: { accountId_provider: { accountId, provider } },
   });
+
+  // Disconnect existing connection — tokens issued with deleted credentials are invalid
+  await disconnectIfConnected(accountId, provider);
 };
 
 /**
@@ -160,6 +178,11 @@ export const toggleAppConfigEnabled = async (
   if (!config) {
     throw new ServiceError("NOT_FOUND", "App config not found");
   }
+
+  // Disconnect on any toggle — tokens are bound to the client ID that issued them.
+  // Enabling switches from platform → BYOC client, disabling switches back.
+  // Either way the existing token is invalid.
+  await disconnectIfConnected(accountId, provider);
 
   return db.appConfig.update({
     where: { accountId_provider: { accountId, provider } },
