@@ -39,6 +39,10 @@ export default async function ConnectPage({ params, searchParams }: Props) {
         icon: app.icon,
         darkIcon: app.darkIcon,
         connectionType: app.connectionMethod.type,
+        fields:
+          app.connectionMethod.type === "api_key"
+            ? app.connectionMethod.fields
+            : undefined,
       }}
       hasDefaults={hasEnvDefaults || hasAppConfig}
       status={status as "success" | "error" | undefined}

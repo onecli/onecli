@@ -3,6 +3,8 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Loader2 } from "lucide-react";
 import { Button } from "@onecli/ui/components/button";
+import { Input } from "@onecli/ui/components/input";
+import { Label } from "@onecli/ui/components/label";
 import { ConnectLayout } from "./connect-layout";
 import { ConnectSuccess } from "./connect-success";
 
@@ -15,6 +17,12 @@ interface ConnectFlowProps {
     icon: string;
     darkIcon?: string;
     connectionType: string;
+    fields?: {
+      name: string;
+      label: string;
+      description?: string;
+      placeholder: string;
+    }[];
   };
   hasDefaults: boolean;
   status?: "success" | "error";
@@ -75,6 +83,21 @@ export const ConnectFlow = ({
           provider={app.id}
         />
       </ConnectLayout>
+    );
+  }
+
+  // API key flow — render form instead of OAuth redirect
+  if (app.connectionType === "api_key" && app.fields && state !== "error") {
+    return (
+      <ApiKeyFlow
+        app={app}
+        fields={app.fields}
+        onSuccess={() => setState("success")}
+        onError={(msg) => {
+          setError(msg);
+          setState("error");
+        }}
+      />
     );
   }
 
@@ -196,6 +219,94 @@ export const ConnectFlow = ({
             )}
           </div>
         )}
+      </div>
+    </ConnectLayout>
+  );
+};
+
+// ── API Key Flow ───────────────────────────────────────────────────────
+
+interface ApiKeyFlowProps {
+  app: ConnectFlowProps["app"];
+  fields: {
+    name: string;
+    label: string;
+    description?: string;
+    placeholder: string;
+  }[];
+  onSuccess: () => void;
+  onError: (message: string) => void;
+}
+
+const ApiKeyFlow = ({ app, fields, onSuccess, onError }: ApiKeyFlowProps) => {
+  const [values, setValues] = useState<Record<string, string>>({});
+  const [submitting, setSubmitting] = useState(false);
+
+  const hasInput = fields.every((f) => !!values[f.name]?.trim());
+
+  const handleSubmit = async () => {
+    if (!hasInput) return;
+    setSubmitting(true);
+    try {
+      const resp = await fetch(`/api/connections/${app.id}/connect`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ fields: values }),
+      });
+      if (!resp.ok) {
+        const data = (await resp.json()) as { error?: string };
+        throw new Error(data.error ?? "Failed to connect");
+      }
+      onSuccess();
+    } catch (err) {
+      onError(err instanceof Error ? err.message : "Failed to connect");
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  return (
+    <ConnectLayout
+      appName={app.name}
+      appIcon={app.icon}
+      appDarkIcon={app.darkIcon}
+    >
+      <div className="space-y-5 py-2">
+        {fields.map((field) => (
+          <div key={field.name} className="grid gap-1.5">
+            <Label htmlFor={`connect-${field.name}`}>
+              {field.label}
+              <span className="text-destructive ml-0.5">*</span>
+            </Label>
+            {field.description && (
+              <p className="text-xs text-muted-foreground">
+                {field.description}
+              </p>
+            )}
+            <Input
+              id={`connect-${field.name}`}
+              type="password"
+              value={values[field.name] ?? ""}
+              onChange={(e) =>
+                setValues((prev) => ({
+                  ...prev,
+                  [field.name]: e.target.value,
+                }))
+              }
+              placeholder={field.placeholder}
+              className="font-mono text-sm"
+              autoFocus={fields.indexOf(field) === 0}
+            />
+          </div>
+        ))}
+        <Button
+          className="w-full"
+          onClick={handleSubmit}
+          loading={submitting}
+          disabled={!hasInput}
+        >
+          {submitting ? "Connecting..." : `Connect ${app.name}`}
+        </Button>
       </div>
     </ConnectLayout>
   );

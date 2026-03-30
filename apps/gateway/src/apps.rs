@@ -86,6 +86,14 @@ static APP_PROVIDERS: &[AppProvider] = &[
             client_secret_env: "GOOGLE_CLIENT_SECRET",
         }),
     },
+    AppProvider {
+        provider: "resend",
+        host_rules: &[HostRule {
+            host: "api.resend.com",
+            strategy: AuthStrategy::Bearer,
+        }],
+        refresh: None,
+    },
 ];
 
 // ── Public API ─────────────────────────────────────────────────────────
@@ -296,6 +304,26 @@ mod tests {
             Injection::SetHeader {
                 name: "authorization".to_string(),
                 value: "Bearer ya29.test".to_string(),
+            }
+        );
+    }
+
+    // ── Resend ────────────────────────────────────────────────────────
+
+    #[test]
+    fn provider_for_resend_host() {
+        assert_eq!(provider_for_host("api.resend.com"), Some("resend"));
+    }
+
+    #[test]
+    fn resend_api_uses_bearer() {
+        let injections = build_app_injections("resend", "api.resend.com", "re_test123");
+        assert_eq!(injections.len(), 1);
+        assert_eq!(
+            injections[0],
+            Injection::SetHeader {
+                name: "authorization".to_string(),
+                value: "Bearer re_test123".to_string(),
             }
         );
     }
