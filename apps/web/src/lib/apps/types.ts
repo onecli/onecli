@@ -18,10 +18,24 @@ export interface OAuthExchangeResult {
   metadata?: Record<string, unknown>;
 }
 
+/** Human-friendly description of an OAuth permission/scope. */
+export interface OAuthPermission {
+  /** The OAuth scope string (e.g., "repo", "user"). */
+  scope: string;
+  /** User-facing name (e.g., "Repositories"). */
+  name: string;
+  /** Short description (e.g., "Public and private repos, issues, PRs"). */
+  description: string;
+  /** Access level indicator. */
+  access: "read" | "write";
+}
+
 export type ConnectionMethod =
   | {
       type: "oauth";
       defaultScopes?: string[];
+      /** Human-friendly permission descriptions. Drives the permissions UI. */
+      permissions?: OAuthPermission[];
       buildAuthUrl: (params: OAuthBuildAuthUrlParams) => string;
       exchangeCode: (
         params: OAuthExchangeCodeParams,

@@ -167,9 +167,10 @@ impl PolicyEngine {
             .await
             .map_err(decrypt_err)?;
 
-        let token = extract_access_token(&decrypted_json);
-
-        let Some(token) = token else {
+        let Some(token) = self
+            .resolve_access_token(&decrypted_json, provider, &agent.account_id)
+            .await
+        else {
             return Ok(vec![]);
         };
 
@@ -230,16 +231,94 @@ impl PolicyEngine {
 
         Ok(rules)
     }
-}
 
-// ── Credential extraction ──────────────────────────────────────────────
+    /// Extract access token from decrypted credentials JSON, refreshing if expired.
+    /// Resolves BYOC client credentials from AppConfig if available, falls back to env vars.
+    async fn resolve_access_token(
+        &self,
+        json: &str,
+        provider: &str,
+        account_id: &str,
+    ) -> Option<String> {
+        let creds: serde_json::Value = serde_json::from_str(json).ok()?;
 
-/// Extract the `access_token` field from a decrypted credentials JSON string.
-/// Returns `None` for malformed JSON, missing field, or non-string values.
-fn extract_access_token(json: &str) -> Option<String> {
-    serde_json::from_str::<serde_json::Value>(json)
-        .ok()
-        .and_then(|v| v.get("access_token")?.as_str().map(String::from))
+        let mut token = creds
+            .get("access_token")
+            .and_then(|v| v.as_str())
+            .map(String::from);
+
+        // Check if token is expired and needs refresh
+        if let Some(expires_at) = creds.get("expires_at").and_then(|v| v.as_i64()) {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("system clock before UNIX epoch")
+                .as_secs() as i64;
+
+            if expires_at < now {
+                if let Some(refresh_token) = creds.get("refresh_token").and_then(|v| v.as_str()) {
+                    if let Some(config) = apps::refresh_config(provider) {
+                        // Resolve client credentials: BYOC AppConfig first, env vars as fallback
+                        let byoc = self.resolve_byoc_credentials(account_id, provider).await;
+                        let (byoc_id, byoc_secret) = match &byoc {
+                            Some((id, secret)) => (Some(id.as_str()), Some(secret.as_str())),
+                            None => (None, None),
+                        };
+
+                        match apps::refresh_access_token(
+                            config,
+                            refresh_token,
+                            byoc_id,
+                            byoc_secret,
+                        )
+                        .await
+                        {
+                            Ok((new_token, _)) => {
+                                debug!(provider = %provider, "refreshed expired token");
+                                token = Some(new_token);
+                            }
+                            Err(e) => {
+                                debug!(provider = %provider, error = %e, "token refresh failed");
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        token
+    }
+
+    /// Resolve BYOC client credentials from AppConfig for a given account + provider.
+    /// Returns `Some((client_id, client_secret))` if an enabled config exists, `None` otherwise.
+    async fn resolve_byoc_credentials(
+        &self,
+        account_id: &str,
+        provider: &str,
+    ) -> Option<(String, String)> {
+        let config = db::find_app_config(&self.pool, account_id, provider)
+            .await
+            .ok()
+            .flatten()?;
+
+        // clientId is in settings (plain JSON)
+        let client_id = config
+            .settings
+            .as_ref()
+            .and_then(|s| s.get("clientId"))
+            .and_then(|v| v.as_str())
+            .map(String::from)?;
+
+        // clientSecret is in credentials (encrypted)
+        let encrypted = config.credentials.as_deref()?;
+        let decrypted = self.crypto.decrypt(encrypted).await.ok()?;
+        let secrets: serde_json::Value = serde_json::from_str(&decrypted).ok()?;
+        let client_secret = secrets
+            .get("clientSecret")
+            .and_then(|v| v.as_str())
+            .map(String::from)?;
+
+        Some((client_id, client_secret))
+    }
 }
 
 // ── Error helpers ──────────────────────────────────────────────────────
@@ -510,42 +589,5 @@ mod tests {
     fn build_injections_unknown_type() {
         let injections = build_injections("unknown", "value", None);
         assert!(injections.is_empty());
-    }
-
-    // ── extract_access_token ─────────────────────────────────────────
-
-    #[test]
-    fn extract_token_from_valid_json() {
-        let json = r#"{"access_token":"ghp_abc123","token_type":"bearer"}"#;
-        assert_eq!(extract_access_token(json), Some("ghp_abc123".to_string()));
-    }
-
-    #[test]
-    fn extract_token_missing_field() {
-        let json = r#"{"token_type":"bearer"}"#;
-        assert_eq!(extract_access_token(json), None);
-    }
-
-    #[test]
-    fn extract_token_null_value() {
-        let json = r#"{"access_token":null}"#;
-        assert_eq!(extract_access_token(json), None);
-    }
-
-    #[test]
-    fn extract_token_non_string_value() {
-        let json = r#"{"access_token":12345}"#;
-        assert_eq!(extract_access_token(json), None);
-    }
-
-    #[test]
-    fn extract_token_malformed_json() {
-        assert_eq!(extract_access_token("not json"), None);
-    }
-
-    #[test]
-    fn extract_token_empty_string() {
-        let json = r#"{"access_token":""}"#;
-        assert_eq!(extract_access_token(json), Some(String::new()));
     }
 }

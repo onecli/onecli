@@ -44,6 +44,10 @@ export default async function AppDetailPage({ params }: Props) {
           app.connectionMethod.type === "oauth"
             ? (app.connectionMethod.defaultScopes ?? [])
             : [],
+        permissions:
+          app.connectionMethod.type === "oauth"
+            ? (app.connectionMethod.permissions ?? [])
+            : [],
       }}
       hasDefaults={hasCredentials}
       configurable={app.configurable}

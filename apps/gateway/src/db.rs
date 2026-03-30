@@ -175,6 +175,33 @@ pub(crate) async fn find_policy_rules_by_account(
     .context("querying policy_rules by account_id")
 }
 
+// ── App config queries (BYOC credentials) ─────────────────────────────
+
+/// An app config row from the `app_configs` table.
+#[derive(Debug, FromRow)]
+pub(crate) struct AppConfigRow {
+    pub settings: Option<serde_json::Value>,
+    pub credentials: Option<String>,
+}
+
+/// Find an enabled BYOC app config for an account + provider.
+pub(crate) async fn find_app_config(
+    pool: &PgPool,
+    account_id: &str,
+    provider: &str,
+) -> Result<Option<AppConfigRow>> {
+    sqlx::query_as::<_, AppConfigRow>(
+        r#"SELECT settings, credentials FROM app_configs
+           WHERE account_id = $1 AND provider = $2 AND enabled = true
+           LIMIT 1"#,
+    )
+    .bind(account_id)
+    .bind(provider)
+    .fetch_optional(pool)
+    .await
+    .context("querying app_config by account_id + provider")
+}
+
 // ── App connection queries ─────────────────────────────────────────────
 
 /// An app connection row from the `app_connections` table.

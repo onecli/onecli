@@ -17,6 +17,50 @@ export const github: AppDefinition = {
       "codespace",
       "workflow",
     ],
+    permissions: [
+      {
+        scope: "repo",
+        name: "Repositories",
+        description: "Code, issues, and pull requests",
+        access: "write",
+      },
+      {
+        scope: "user",
+        name: "Profile",
+        description: "Email, name, and avatar",
+        access: "read",
+      },
+      {
+        scope: "gist",
+        name: "Gists",
+        description: "Create and manage gists",
+        access: "write",
+      },
+      {
+        scope: "notifications",
+        name: "Notifications",
+        description: "View notifications",
+        access: "read",
+      },
+      {
+        scope: "project",
+        name: "Projects",
+        description: "Manage project boards",
+        access: "write",
+      },
+      {
+        scope: "codespace",
+        name: "Codespaces",
+        description: "Create and manage",
+        access: "write",
+      },
+      {
+        scope: "workflow",
+        name: "Actions",
+        description: "Update workflow files",
+        access: "write",
+      },
+    ],
     buildAuthUrl: ({ clientId, redirectUri, scopes, state }) => {
       const url = new URL("https://github.com/login/oauth/authorize");
       url.searchParams.set("client_id", clientId);

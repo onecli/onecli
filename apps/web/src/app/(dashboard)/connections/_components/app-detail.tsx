@@ -4,7 +4,6 @@ import { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
 import { ArrowLeft, Loader2 } from "lucide-react";
 import { toast } from "sonner";
-import { Badge } from "@onecli/ui/components/badge";
 import { Button } from "@onecli/ui/components/button";
 import {
   AlertDialog,
@@ -19,8 +18,10 @@ import {
 } from "@onecli/ui/components/alert-dialog";
 import { getAppConnections, disconnectApp } from "@/lib/actions/connections";
 import { useAppMessages } from "@/hooks/use-app-connected";
+import type { OAuthPermission } from "@/lib/apps/types";
 import { AppIcon } from "./app-icon";
 import { AppConfigForm } from "./app-config-form";
+import { PermissionsList } from "./permissions-list";
 
 interface AppDetailProps {
   app: {
@@ -31,6 +32,7 @@ interface AppDetailProps {
     description: string;
     connectionType: string;
     defaultScopes: string[];
+    permissions: OAuthPermission[];
   };
   hasDefaults: boolean;
   configurable?: {
@@ -211,27 +213,17 @@ export const AppDetail = ({
         <div className="flex items-center justify-center py-12">
           <Loader2 className="size-5 animate-spin text-muted-foreground" />
         </div>
-      ) : isConnected ? (
-        <ConnectionInfo connection={connection} />
-      ) : app.defaultScopes.length > 0 ? (
-        <div className="space-y-2">
-          <p className="text-sm text-muted-foreground">
-            Connecting will request {app.defaultScopes.length} permission
-            {app.defaultScopes.length !== 1 ? "s" : ""}
-          </p>
-          <div className="flex flex-wrap gap-1.5">
-            {app.defaultScopes.map((scope) => (
-              <Badge
-                key={scope}
-                variant="outline"
-                className="text-[11px] font-mono text-muted-foreground"
-              >
-                {scope}
-              </Badge>
-            ))}
-          </div>
-        </div>
-      ) : null}
+      ) : (
+        <>
+          {isConnected && <ConnectionInfo connection={connection} />}
+          {app.permissions.length > 0 && (
+            <PermissionsList
+              permissions={app.permissions}
+              grantedScopes={isConnected ? connection.scopes : undefined}
+            />
+          )}
+        </>
+      )}
 
       {configurable && (
         <AppConfigForm
@@ -268,22 +260,6 @@ const ConnectionInfo = ({ connection }: { connection: ConnectionData }) => {
             year: "numeric",
           })}
         </span>
-        {connection.scopes.length > 0 && (
-          <>
-            <span className="text-muted-foreground pt-0.5">Scopes</span>
-            <div className="flex flex-wrap gap-1.5">
-              {connection.scopes.map((scope) => (
-                <Badge
-                  key={scope}
-                  variant="outline"
-                  className="text-[11px] font-mono text-muted-foreground"
-                >
-                  {scope}
-                </Badge>
-              ))}
-            </div>
-          </>
-        )}
       </div>
     </div>
   );
