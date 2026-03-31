@@ -1,6 +1,5 @@
 import { notFound } from "next/navigation";
 import { getApp } from "@/lib/apps/registry";
-import { checkAppConfigExists } from "@/lib/actions/app-config";
 import { AppDetail } from "../../_components/app-detail";
 
 interface Props {
@@ -21,16 +20,6 @@ export default async function AppDetailPage({ params }: Props) {
     );
   }
 
-  // Check if user has custom AppConfig
-  let hasAppConfig = false;
-  try {
-    hasAppConfig = await checkAppConfigExists(provider);
-  } catch {
-    // Auth may not be resolved; treat as false
-  }
-
-  const hasCredentials = hasEnvDefaults || hasAppConfig;
-
   return (
     <AppDetail
       app={{
@@ -49,7 +38,6 @@ export default async function AppDetailPage({ params }: Props) {
             ? (app.connectionMethod.permissions ?? [])
             : [],
       }}
-      hasDefaults={hasCredentials}
       configurable={app.configurable}
       hasEnvDefaults={hasEnvDefaults}
     />

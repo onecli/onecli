@@ -19,7 +19,7 @@ export const listAgents = async (accountId: string) => {
       isDefault: true,
       secretMode: true,
       createdAt: true,
-      _count: { select: { agentSecrets: true } },
+      _count: { select: { agentSecrets: true, agentAppConnections: true } },
     },
     orderBy: [{ isDefault: "desc" }, { createdAt: "desc" }],
   });
@@ -245,6 +245,60 @@ export const updateAgentSecrets = async (
     db.agentSecret.deleteMany({ where: { agentId } }),
     ...secretIds.map((secretId) =>
       db.agentSecret.create({ data: { agentId, secretId } }),
+    ),
+  ]);
+};
+
+export const getAgentAppConnections = async (
+  accountId: string,
+  agentId: string,
+) => {
+  const agent = await db.agent.findFirst({
+    where: { id: agentId, accountId },
+    select: { id: true },
+  });
+
+  if (!agent) throw new ServiceError("NOT_FOUND", "Agent not found");
+
+  const rows = await db.agentAppConnection.findMany({
+    where: { agentId },
+    select: { appConnectionId: true },
+  });
+
+  return rows.map((r) => r.appConnectionId);
+};
+
+export const updateAgentAppConnections = async (
+  accountId: string,
+  agentId: string,
+  appConnectionIds: string[],
+) => {
+  const agent = await db.agent.findFirst({
+    where: { id: agentId, accountId },
+    select: { id: true },
+  });
+
+  if (!agent) throw new ServiceError("NOT_FOUND", "Agent not found");
+
+  // Validate all app connections belong to this account
+  const connections = await db.appConnection.findMany({
+    where: { id: { in: appConnectionIds }, accountId },
+    select: { id: true },
+  });
+
+  const validIds = new Set(connections.map((c) => c.id));
+  const invalid = appConnectionIds.filter((id) => !validIds.has(id));
+  if (invalid.length > 0) {
+    throw new ServiceError(
+      "BAD_REQUEST",
+      "One or more app connections not found",
+    );
+  }
+
+  await db.$transaction([
+    db.agentAppConnection.deleteMany({ where: { agentId } }),
+    ...appConnectionIds.map((appConnectionId) =>
+      db.agentAppConnection.create({ data: { agentId, appConnectionId } }),
     ),
   ]);
 };

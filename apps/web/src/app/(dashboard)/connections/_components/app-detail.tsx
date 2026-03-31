@@ -34,7 +34,6 @@ interface AppDetailProps {
     defaultScopes: string[];
     permissions: OAuthPermission[];
   };
-  hasDefaults: boolean;
   configurable?: {
     fields: {
       name: string;
@@ -59,7 +58,6 @@ interface ConnectionData {
 
 export const AppDetail = ({
   app,
-  hasDefaults,
   configurable,
   hasEnvDefaults,
 }: AppDetailProps) => {
@@ -200,11 +198,11 @@ export const AppDetail = ({
                   </AlertDialogContent>
                 </AlertDialog>
               </>
-            ) : hasDefaults ? (
+            ) : (
               <Button size="sm" onClick={handleConnect}>
                 Connect {app.name}
               </Button>
-            ) : null}
+            )}
           </div>
         )}
       </div>

@@ -40,7 +40,7 @@ export const StatsCards = ({
       </Card>
     </Link>
 
-    <Link href="/secrets" className="group">
+    <Link href="/connections/secrets" className="group">
       <Card className="py-4 gap-3 transition-colors hover:border-foreground/20 cursor-pointer">
         <CardHeader className="flex flex-row items-center justify-between pb-2">
           <CardTitle className="text-sm font-medium">Secrets</CardTitle>

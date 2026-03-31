@@ -18,7 +18,7 @@ interface Agent {
   isDefault: boolean;
   secretMode: SecretMode;
   createdAt: Date;
-  _count: { agentSecrets: number };
+  _count: { agentSecrets: number; agentAppConnections: number };
 }
 
 export const AgentsContent = () => {
