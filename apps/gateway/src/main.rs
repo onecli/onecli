@@ -42,6 +42,7 @@ use crate::ca::CertificateAuthority;
 use crate::connect::PolicyEngine;
 use crate::gateway::GatewayServer;
 use crate::vault::bitwarden::{BitwardenConfig, BitwardenVaultProvider};
+use crate::vault::onepassword::OnePasswordVaultProvider;
 use crate::vault::VaultService;
 
 #[derive(Parser)]
@@ -119,15 +120,19 @@ async fn main() -> Result<()> {
     // Cloud: KMS envelope decryption (calls KMS Decrypt for each data key)
     let crypto = Arc::new(crypto::CryptoService::from_env().await?);
 
-    let policy_engine = Arc::new(PolicyEngine { pool, crypto });
+    let policy_engine = Arc::new(PolicyEngine {
+        pool,
+        crypto: crypto.clone(),
+    });
 
     // Initialize vault service with Bitwarden provider
     let proxy_url = std::env::var("BITWARDEN_PROXY_URL")
         .unwrap_or_else(|_| "wss://ap.lesspassword.dev".to_string());
     let bitwarden =
         BitwardenVaultProvider::new(BitwardenConfig { proxy_url }, policy_engine.pool.clone());
+    let onepassword = OnePasswordVaultProvider::new(policy_engine.pool.clone(), crypto.clone());
     let vault_service = Arc::new(VaultService::new(
-        vec![Box::new(bitwarden)],
+        vec![Arc::new(bitwarden), Arc::new(onepassword)],
         policy_engine.pool.clone(),
     ));
 

@@ -21,7 +21,7 @@ use tokio::sync::{mpsc, Mutex};
 use tracing::{info, warn};
 
 use super::bitwarden_db::{BitwardenConnectionStore, BitwardenIdentityProvider};
-use super::{PairResult, ProviderStatus, VaultCredential, VaultProvider};
+use super::{PairResult, ProviderStatus, VaultCredential, VaultError, VaultProvider};
 use crate::db;
 
 /// Parse a hex-encoded fingerprint string into an `IdentityFingerprint`.
@@ -362,22 +362,34 @@ impl VaultProvider for BitwardenVaultProvider {
         "bitwarden"
     }
 
-    async fn pair(&self, account_id: &str, params: &serde_json::Value) -> Result<PairResult> {
+    async fn pair(
+        &self,
+        account_id: &str,
+        params: &serde_json::Value,
+    ) -> Result<PairResult, VaultError> {
         let psk_hex = params
             .get("psk_hex")
             .and_then(|v| v.as_str())
-            .ok_or_else(|| anyhow!("missing psk_hex in pair params"))?;
+            .ok_or_else(|| VaultError::BadRequest("missing psk_hex in pair params".into()))?;
         let fingerprint_hex = params
             .get("fingerprint_hex")
             .and_then(|v| v.as_str())
-            .ok_or_else(|| anyhow!("missing fingerprint_hex in pair params"))?;
+            .ok_or_else(|| {
+                VaultError::BadRequest("missing fingerprint_hex in pair params".into())
+            })?;
 
-        let psk = Psk::from_hex(psk_hex).map_err(|e| anyhow!("invalid PSK: {e}"))?;
+        let psk = Psk::from_hex(psk_hex)
+            .map_err(|e| VaultError::BadRequest(format!("invalid PSK: {e}")))?;
 
-        let remote_fingerprint = parse_fingerprint(fingerprint_hex)
-            .ok_or_else(|| anyhow!("invalid fingerprint: must be 32 hex-encoded bytes"))?;
+        let remote_fingerprint = parse_fingerprint(fingerprint_hex).ok_or_else(|| {
+            VaultError::BadRequest("invalid fingerprint: must be 32 hex-encoded bytes".into())
+        })?;
 
-        let session = match self.load_session(account_id).await? {
+        let session = match self
+            .load_session(account_id)
+            .await
+            .map_err(VaultError::from)?
+        {
             Some(s) => s,
             None => self.create_pairing_session(account_id),
         };
@@ -395,16 +407,23 @@ impl VaultProvider for BitwardenVaultProvider {
             account_id,
             "bitwarden",
             "paired",
-            Some(&serde_json::to_value(&initial_cd)?),
+            Some(
+                &serde_json::to_value(&initial_cd)
+                    .map_err(|e| VaultError::Internal(e.to_string()))?,
+            ),
         )
-        .await?;
+        .await
+        .map_err(|e| VaultError::Internal(e.to_string()))?;
 
-        let client = self.create_and_connect_client(account_id, &session).await?;
+        let client = self
+            .create_and_connect_client(account_id, &session)
+            .await
+            .map_err(VaultError::from)?;
 
         client
             .pair_with_psk(psk, remote_fingerprint)
             .await
-            .map_err(|e| anyhow!("PSK pairing failed: {e}"))?;
+            .map_err(|e| VaultError::Internal(format!("PSK pairing failed: {e}")))?;
 
         info!(
             account_id = %account_id,
@@ -602,7 +621,7 @@ impl VaultProvider for BitwardenVaultProvider {
         }
     }
 
-    async fn disconnect(&self, account_id: &str) -> Result<()> {
+    async fn disconnect(&self, account_id: &str) -> Result<(), VaultError> {
         if let Some((_, session)) = self.sessions.remove(account_id) {
             let mut guard = session.client.lock().await;
             guard.take(); // dropping the handle disconnects

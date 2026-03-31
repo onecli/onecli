@@ -8,6 +8,7 @@ use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::Json;
 
+use super::VaultError;
 use crate::auth::AuthUser;
 use crate::gateway::GatewayState;
 
@@ -18,24 +19,18 @@ pub(crate) async fn vault_pair(
     State(state): State<GatewayState>,
     Path(provider): Path<String>,
     Json(params): Json<serde_json::Value>,
-) -> impl IntoResponse {
-    match state
+) -> Result<impl IntoResponse, VaultError> {
+    let result = state
         .vault_service
         .pair(&auth.account_id, &provider, &params)
-        .await
-    {
-        Ok(result) => (
-            StatusCode::OK,
-            Json(serde_json::json!({
-                "status": "paired",
-                "display_name": result.display_name,
-            })),
-        ),
-        Err(e) => (
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({"error": e.to_string()})),
-        ),
-    }
+        .await?;
+    Ok((
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "status": "paired",
+            "display_name": result.display_name,
+        })),
+    ))
 }
 
 /// GET /api/vault/:provider/status
@@ -43,29 +38,19 @@ pub(crate) async fn vault_status(
     auth: AuthUser,
     State(state): State<GatewayState>,
     Path(provider): Path<String>,
-) -> impl IntoResponse {
-    match state
+) -> Result<impl IntoResponse, VaultError> {
+    let status = state
         .vault_service
         .status(&auth.account_id, &provider)
-        .await
-    {
-        Some(status) => (
-            StatusCode::OK,
-            Json(serde_json::json!({
-                "connected": status.connected,
-                "name": status.name,
-                "status_data": status.status_data,
-            })),
-        ),
-        None => (
-            StatusCode::OK,
-            Json(serde_json::json!({
-                "connected": false,
-                "name": null,
-                "status_data": null,
-            })),
-        ),
-    }
+        .await?;
+    Ok((
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "connected": status.connected,
+            "name": status.name,
+            "status_data": status.status_data,
+        })),
+    ))
 }
 
 /// DELETE /api/vault/:provider/pair
@@ -73,19 +58,70 @@ pub(crate) async fn vault_disconnect(
     auth: AuthUser,
     State(state): State<GatewayState>,
     Path(provider): Path<String>,
-) -> impl IntoResponse {
-    match state
+) -> Result<impl IntoResponse, VaultError> {
+    state
         .vault_service
         .disconnect(&auth.account_id, &provider)
-        .await
-    {
-        Ok(()) => (
-            StatusCode::OK,
-            Json(serde_json::json!({"status": "disconnected"})),
-        ),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({"error": e.to_string()})),
-        ),
-    }
+        .await?;
+    Ok((
+        StatusCode::OK,
+        Json(serde_json::json!({"status": "disconnected"})),
+    ))
+}
+
+// ── 1Password-specific info endpoint ───────────────────────────────────
+
+/// GET /api/vault/onepassword/info — unauthenticated, static response.
+pub(crate) async fn vault_info() -> impl IntoResponse {
+    Json(serde_json::json!({
+        "capabilities": { "url_search": false, "explicit_mappings": true },
+        "auth": "service_account_token",
+        "mapping_format": "op://vault/item/field",
+    }))
+}
+
+// ── Provider-generic mapping endpoints ─────────────────────────────────
+
+/// GET /api/vault/{provider}/mappings
+pub(crate) async fn vault_list_mappings(
+    auth: AuthUser,
+    State(state): State<GatewayState>,
+    Path(provider): Path<String>,
+) -> Result<impl IntoResponse, VaultError> {
+    let mappings = state
+        .vault_service
+        .list_mappings(&auth.account_id, &provider)
+        .await?;
+    Ok(Json(mappings))
+}
+
+/// PUT /api/vault/{provider}/mappings
+pub(crate) async fn vault_upsert_mapping(
+    auth: AuthUser,
+    State(state): State<GatewayState>,
+    Path(provider): Path<String>,
+    Json(body): Json<serde_json::Value>,
+) -> Result<impl IntoResponse, VaultError> {
+    let hostname = body
+        .get("hostname")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| VaultError::BadRequest("missing hostname".into()))?;
+    state
+        .vault_service
+        .update_mapping(&auth.account_id, &provider, hostname, &body)
+        .await?;
+    Ok(Json(serde_json::json!({"status": "ok"})))
+}
+
+/// DELETE /api/vault/{provider}/mappings/{hostname}
+pub(crate) async fn vault_delete_mapping(
+    auth: AuthUser,
+    State(state): State<GatewayState>,
+    Path((provider, hostname)): Path<(String, String)>,
+) -> Result<impl IntoResponse, VaultError> {
+    state
+        .vault_service
+        .delete_mapping(&auth.account_id, &provider, &hostname)
+        .await?;
+    Ok(Json(serde_json::json!({"status": "ok"})))
 }
