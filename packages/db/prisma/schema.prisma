@@ -242,7 +242,7 @@ model OnboardingSurvey {
 model AppConnection {
   id                  String               @id @default(uuid())
   accountId           String               @map("account_id")
-  provider            String // "github", "google", "slack", etc.
+  provider            String // "github", "gmail", "google-calendar", etc.
   status              String               @default("connected")
   credentials         String?              @map("credentials") // encrypted JSON (access_token, refresh_token, etc.)
   scopes              String[]             @default([])
@@ -271,7 +271,7 @@ model AgentAppConnection {
 model AppConfig {
   id          String   @id @default(uuid())
   accountId   String   @map("account_id")
-  provider    String // "github", "google"
+  provider    String // "github", "gmail", "google-calendar"
   enabled     Boolean  @default(false)
   credentials String?  @map("credentials") // encrypted (clientSecret)
   settings    Json? // plain (clientId, scopes)

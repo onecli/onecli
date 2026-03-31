@@ -1,7 +1,7 @@
 import type { AppDefinition } from "./types";
 
-export const google: AppDefinition = {
-  id: "google",
+export const gmail: AppDefinition = {
+  id: "gmail",
   name: "Gmail",
   icon: "/icons/gmail.svg",
   description: "Read, compose, and send emails via Gmail.",

@@ -135,16 +135,21 @@ impl PolicyEngine {
 
     /// Build injection rules from app connections for this host.
     /// Only called when no secret matched (secrets take priority).
+    ///
+    /// Multiple providers can share a host with different path prefixes
+    /// (e.g., Gmail on `/gmail/*` and Calendar on `/calendar/*`). Returns one
+    /// `InjectionRule` per matching connection, each scoped to its path pattern.
     async fn resolve_app_injections(
         &self,
         agent: &db::AgentRow,
         hostname: &str,
     ) -> Result<Vec<InjectionRule>, ConnectError> {
-        let Some(provider) = apps::provider_for_host(hostname) else {
+        let providers = apps::providers_for_host(hostname);
+        if providers.is_empty() {
             debug!(host = %hostname, "app_connections: no provider for host");
             return Ok(vec![]);
-        };
-        debug!(host = %hostname, provider = %provider, "app_connections: matched provider");
+        }
+        debug!(host = %hostname, providers = ?providers, "app_connections: matched providers");
 
         let connections = if agent.secret_mode == "selective" {
             db::find_app_connections_by_agent(&self.pool, &agent.id).await
@@ -153,36 +158,40 @@ impl PolicyEngine {
         }
         .map_err(db_err)?;
 
-        let Some(conn) = connections.iter().find(|c| c.provider == provider) else {
-            return Ok(vec![]);
-        };
+        let mut rules = Vec::new();
+        for provider in &providers {
+            let Some(conn) = connections.iter().find(|c| c.provider == *provider) else {
+                continue;
+            };
+            let Some(ref encrypted_creds) = conn.credentials else {
+                continue;
+            };
 
-        let Some(ref encrypted_creds) = conn.credentials else {
-            return Ok(vec![]);
-        };
+            let decrypted_json = self
+                .crypto
+                .decrypt(encrypted_creds)
+                .await
+                .map_err(decrypt_err)?;
 
-        let decrypted_json = self
-            .crypto
-            .decrypt(encrypted_creds)
-            .await
-            .map_err(decrypt_err)?;
+            let Some(token) = self
+                .resolve_access_token(&decrypted_json, provider, &agent.account_id, &conn.id)
+                .await
+            else {
+                continue;
+            };
 
-        let Some(token) = self
-            .resolve_access_token(&decrypted_json, provider, &agent.account_id)
-            .await
-        else {
-            return Ok(vec![]);
-        };
+            let injections = apps::build_app_injections(provider, hostname, &token);
+            if injections.is_empty() {
+                continue;
+            }
 
-        let injections = apps::build_app_injections(provider, hostname, &token);
-        if injections.is_empty() {
-            return Ok(vec![]);
+            rules.push(InjectionRule {
+                path_pattern: apps::path_pattern_for(provider, hostname),
+                injections,
+            });
         }
 
-        Ok(vec![InjectionRule {
-            path_pattern: "*".to_string(),
-            injections,
-        }])
+        Ok(rules)
     }
 
     /// Resolve policy rules (block / rate-limit) for this agent + host.
@@ -234,13 +243,15 @@ impl PolicyEngine {
 
     /// Extract access token from decrypted credentials JSON, refreshing if expired.
     /// Resolves BYOC client credentials from AppConfig if available, falls back to env vars.
+    /// On successful refresh, persists the new credentials back to the database.
     async fn resolve_access_token(
         &self,
         json: &str,
         provider: &str,
         account_id: &str,
+        connection_id: &str,
     ) -> Option<String> {
-        let creds: serde_json::Value = serde_json::from_str(json).ok()?;
+        let mut creds: serde_json::Value = serde_json::from_str(json).ok()?;
 
         let mut token = creds
             .get("access_token")
@@ -272,9 +283,16 @@ impl PolicyEngine {
                         )
                         .await
                         {
-                            Ok((new_token, _)) => {
+                            Ok((new_token, new_expires_at)) => {
                                 debug!(provider = %provider, "refreshed expired token");
-                                token = Some(new_token);
+                                token = Some(new_token.clone());
+
+                                // Persist refreshed credentials to DB so subsequent
+                                // requests don't re-refresh until the new token expires.
+                                creds["access_token"] = serde_json::Value::String(new_token);
+                                creds["expires_at"] = serde_json::json!(new_expires_at);
+                                self.persist_refreshed_credentials(connection_id, provider, &creds)
+                                    .await;
                             }
                             Err(e) => {
                                 debug!(provider = %provider, error = %e, "token refresh failed");
@@ -286,6 +304,38 @@ impl PolicyEngine {
         }
 
         token
+    }
+
+    /// Encrypt and persist refreshed credentials back to the database.
+    /// Failures are logged but do not prevent the current request from succeeding —
+    /// the refreshed token is already available in memory.
+    async fn persist_refreshed_credentials(
+        &self,
+        connection_id: &str,
+        provider: &str,
+        creds: &serde_json::Value,
+    ) {
+        let Ok(json) = serde_json::to_string(creds) else {
+            debug!(provider = %provider, "failed to serialize refreshed credentials");
+            return;
+        };
+        match self.crypto.encrypt(&json).await {
+            Ok(encrypted) => {
+                match db::update_app_connection_credentials(&self.pool, connection_id, &encrypted)
+                    .await
+                {
+                    Ok(()) => {
+                        debug!(provider = %provider, "persisted refreshed credentials");
+                    }
+                    Err(e) => {
+                        debug!(provider = %provider, error = %e, "failed to persist refreshed credentials");
+                    }
+                }
+            }
+            Err(e) => {
+                debug!(provider = %provider, error = %e, "failed to encrypt refreshed credentials");
+            }
+        }
     }
 
     /// Resolve BYOC client credentials from AppConfig for a given account + provider.

@@ -9,6 +9,7 @@
 use anyhow::{bail, Context, Result};
 use base64::Engine;
 use ring::aead;
+use ring::rand::{SecureRandom, SystemRandom};
 
 const KEY_LEN: usize = 32;
 const IV_LEN: usize = 12;
@@ -88,6 +89,36 @@ impl CryptoService {
 
         String::from_utf8(plaintext.to_vec()).context("decrypted value is not valid UTF-8")
     }
+
+    /// Encrypt a plaintext string using AES-256-GCM.
+    /// Returns a string in the format `{iv_b64}:{authTag_b64}:{ciphertext_b64}`,
+    /// compatible with the Node.js `CryptoService` and this struct's `decrypt`.
+    pub async fn encrypt(&self, plaintext: &str) -> Result<String> {
+        let rng = SystemRandom::new();
+        let mut iv = [0u8; IV_LEN];
+        rng.fill(&mut iv)
+            .map_err(|_| anyhow::anyhow!("failed to generate random IV"))?;
+
+        let nonce = aead::Nonce::try_assume_unique_for_key(&iv)
+            .map_err(|_| anyhow::anyhow!("invalid nonce"))?;
+
+        let mut in_out = plaintext.as_bytes().to_vec();
+        self.key
+            .seal_in_place_append_tag(nonce, aead::Aad::empty(), &mut in_out)
+            .map_err(|_| anyhow::anyhow!("encryption failed"))?;
+
+        // ring appends the 16-byte auth tag after the ciphertext
+        let ciphertext = &in_out[..plaintext.len()];
+        let auth_tag = &in_out[plaintext.len()..];
+
+        let b64 = &base64::engine::general_purpose::STANDARD;
+        Ok(format!(
+            "{}:{}:{}",
+            b64.encode(iv),
+            b64.encode(auth_tag),
+            b64.encode(ciphertext),
+        ))
+    }
 }
 
 // ── Tests ───────────────────────────────────────────────────────────────
@@ -137,6 +168,22 @@ mod tests {
             b64.encode(auth_tag),
             b64.encode(ciphertext),
         )
+    }
+
+    #[tokio::test]
+    async fn encrypt_decrypt_round_trip() {
+        let key_b64 = random_key_b64();
+        let service = CryptoService::from_base64_key(&key_b64).expect("create service");
+
+        let plaintext =
+            r#"{"access_token":"ya29.new","refresh_token":"1//0e","expires_at":1700000000}"#;
+        let encrypted = service.encrypt(plaintext).await.expect("encrypt");
+
+        // Verify format: 3 base64 parts separated by colons
+        assert_eq!(encrypted.split(':').count(), 3);
+
+        let decrypted = service.decrypt(&encrypted).await.expect("decrypt");
+        assert_eq!(decrypted, plaintext);
     }
 
     #[tokio::test]

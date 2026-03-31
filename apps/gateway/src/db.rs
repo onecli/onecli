@@ -207,6 +207,7 @@ pub(crate) async fn find_app_config(
 /// An app connection row from the `app_connections` table.
 #[derive(Debug, FromRow)]
 pub(crate) struct AppConnectionRow {
+    pub id: String,
     pub provider: String,
     pub credentials: Option<String>,
 }
@@ -217,7 +218,7 @@ pub(crate) async fn find_app_connections_by_account(
     account_id: &str,
 ) -> Result<Vec<AppConnectionRow>> {
     sqlx::query_as::<_, AppConnectionRow>(
-        r#"SELECT provider, credentials FROM app_connections WHERE account_id = $1 AND status = 'connected'"#,
+        r#"SELECT id, provider, credentials FROM app_connections WHERE account_id = $1 AND status = 'connected'"#,
     )
     .bind(account_id)
     .fetch_all(pool)
@@ -231,7 +232,7 @@ pub(crate) async fn find_app_connections_by_agent(
     agent_id: &str,
 ) -> Result<Vec<AppConnectionRow>> {
     sqlx::query_as::<_, AppConnectionRow>(
-        r#"SELECT ac.provider, ac.credentials
+        r#"SELECT ac.id, ac.provider, ac.credentials
            FROM app_connections ac
            INNER JOIN agent_app_connections aac ON ac.id = aac.app_connection_id
            WHERE aac.agent_id = $1 AND ac.status = 'connected'"#,
@@ -240,6 +241,21 @@ pub(crate) async fn find_app_connections_by_agent(
     .fetch_all(pool)
     .await
     .context("querying app_connections by agent_id")
+}
+
+/// Update the encrypted credentials for an app connection (e.g., after token refresh).
+pub(crate) async fn update_app_connection_credentials(
+    pool: &PgPool,
+    connection_id: &str,
+    encrypted_credentials: &str,
+) -> Result<()> {
+    sqlx::query(r#"UPDATE app_connections SET credentials = $1 WHERE id = $2"#)
+        .bind(encrypted_credentials)
+        .bind(connection_id)
+        .execute(pool)
+        .await
+        .context("updating app_connection credentials")?;
+    Ok(())
 }
 
 // ── Vault connection queries ────────────────────────────────────────────

@@ -22,6 +22,10 @@ enum AuthStrategy {
 /// A host pattern and its injection strategy for an app provider.
 struct HostRule {
     host: &'static str,
+    /// Optional path prefix to scope this rule (e.g., `"/calendar/"` for Google Calendar).
+    /// When set, only requests whose path starts with this prefix match this provider.
+    /// When `None`, all paths on the host match (used for providers with dedicated subdomains).
+    path_prefix: Option<&'static str>,
     strategy: AuthStrategy,
 }
 
@@ -48,35 +52,36 @@ static APP_PROVIDERS: &[AppProvider] = &[
     AppProvider {
         provider: "github",
         host_rules: &[
-            // REST + GraphQL API
             HostRule {
                 host: "api.github.com",
+                path_prefix: None,
                 strategy: AuthStrategy::Bearer,
             },
-            // Git HTTPS operations (push, pull, clone, fetch)
             HostRule {
                 host: "github.com",
+                path_prefix: None,
                 strategy: AuthStrategy::BasicXAccessToken,
             },
-            // Raw content for private repos
             HostRule {
                 host: "raw.githubusercontent.com",
+                path_prefix: None,
                 strategy: AuthStrategy::Bearer,
             },
         ],
-        refresh: None, // GitHub tokens don't expire
+        refresh: None,
     },
     AppProvider {
-        provider: "google",
+        provider: "gmail",
         host_rules: &[
-            // Gmail REST API
             HostRule {
                 host: "gmail.googleapis.com",
+                path_prefix: None,
                 strategy: AuthStrategy::Bearer,
             },
-            // Google APIs (userinfo, etc.)
+            // Legacy endpoint — some clients still use www.googleapis.com/gmail/
             HostRule {
                 host: "www.googleapis.com",
+                path_prefix: Some("/gmail/"),
                 strategy: AuthStrategy::Bearer,
             },
         ],
@@ -87,9 +92,23 @@ static APP_PROVIDERS: &[AppProvider] = &[
         }),
     },
     AppProvider {
+        provider: "google-calendar",
+        host_rules: &[HostRule {
+            host: "www.googleapis.com",
+            path_prefix: Some("/calendar/"),
+            strategy: AuthStrategy::Bearer,
+        }],
+        refresh: Some(RefreshConfig {
+            token_url: "https://oauth2.googleapis.com/token",
+            client_id_env: "GOOGLE_CLIENT_ID",
+            client_secret_env: "GOOGLE_CLIENT_SECRET",
+        }),
+    },
+    AppProvider {
         provider: "resend",
         host_rules: &[HostRule {
             host: "api.resend.com",
+            path_prefix: None,
             strategy: AuthStrategy::Bearer,
         }],
         refresh: None,
@@ -98,16 +117,32 @@ static APP_PROVIDERS: &[AppProvider] = &[
 
 // ── Public API ─────────────────────────────────────────────────────────
 
-/// Given a hostname, return the provider name if it matches any registered app.
-pub(crate) fn provider_for_host(hostname: &str) -> Option<&'static str> {
+/// Given a hostname, return all provider names that have at least one host rule
+/// matching it. Multiple providers can share the same host with different path
+/// prefixes (e.g., Gmail on `/gmail/` and Calendar on `/calendar/`).
+pub(crate) fn providers_for_host(hostname: &str) -> Vec<&'static str> {
+    let mut providers = Vec::new();
     for provider in APP_PROVIDERS {
         for rule in provider.host_rules {
             if rule.host == hostname {
-                return Some(provider.provider);
+                providers.push(provider.provider);
+                break;
             }
         }
     }
-    None
+    providers
+}
+
+/// Return the path pattern an injection rule should use for a given provider + host.
+/// If the matching host rule has a `path_prefix`, returns `"{prefix}*"` (e.g., `"/calendar/*"`).
+/// Otherwise returns `"*"` (match all paths).
+pub(crate) fn path_pattern_for(provider: &str, hostname: &str) -> String {
+    APP_PROVIDERS
+        .iter()
+        .find(|p| p.provider == provider)
+        .and_then(|app| app.host_rules.iter().find(|r| r.host == hostname))
+        .and_then(|rule| rule.path_prefix)
+        .map_or_else(|| "*".to_string(), |prefix| format!("{prefix}*"))
 }
 
 /// Build injection rules for an app connection's access token on a given host.
@@ -215,19 +250,41 @@ mod tests {
     use super::*;
 
     #[test]
-    fn provider_for_known_hosts() {
-        assert_eq!(provider_for_host("api.github.com"), Some("github"));
-        assert_eq!(provider_for_host("github.com"), Some("github"));
+    fn providers_for_known_hosts() {
+        assert_eq!(providers_for_host("api.github.com"), vec!["github"]);
+        assert_eq!(providers_for_host("github.com"), vec!["github"]);
         assert_eq!(
-            provider_for_host("raw.githubusercontent.com"),
-            Some("github")
+            providers_for_host("raw.githubusercontent.com"),
+            vec!["github"]
         );
     }
 
     #[test]
-    fn provider_for_unknown_host() {
-        assert_eq!(provider_for_host("api.openai.com"), None);
-        assert_eq!(provider_for_host("example.com"), None);
+    fn providers_for_unknown_host() {
+        assert!(providers_for_host("api.openai.com").is_empty());
+        assert!(providers_for_host("example.com").is_empty());
+    }
+
+    #[test]
+    fn providers_for_googleapis_hosts() {
+        assert_eq!(providers_for_host("gmail.googleapis.com"), vec!["gmail"]);
+        // www.googleapis.com is shared — both Gmail (/gmail/) and Calendar (/calendar/)
+        let www = providers_for_host("www.googleapis.com");
+        assert!(www.contains(&"gmail"));
+        assert!(www.contains(&"google-calendar"));
+    }
+
+    #[test]
+    fn path_pattern_scopes_shared_host() {
+        // Providers on www.googleapis.com get path-scoped patterns
+        assert_eq!(path_pattern_for("gmail", "www.googleapis.com"), "/gmail/*");
+        assert_eq!(
+            path_pattern_for("google-calendar", "www.googleapis.com"),
+            "/calendar/*"
+        );
+        // Dedicated subdomains use wildcard
+        assert_eq!(path_pattern_for("gmail", "gmail.googleapis.com"), "*");
+        assert_eq!(path_pattern_for("github", "api.github.com"), "*");
     }
 
     #[test]
@@ -274,17 +331,11 @@ mod tests {
         );
     }
 
-    // ── Google ────────────────────────────────────────────────────────
+    // ── Gmail ─────────────────────────────────────────────────────────
 
     #[test]
-    fn provider_for_google_hosts() {
-        assert_eq!(provider_for_host("gmail.googleapis.com"), Some("google"));
-        assert_eq!(provider_for_host("www.googleapis.com"), Some("google"));
-    }
-
-    #[test]
-    fn google_gmail_api_uses_bearer() {
-        let injections = build_app_injections("google", "gmail.googleapis.com", "ya29.test");
+    fn gmail_api_uses_bearer() {
+        let injections = build_app_injections("gmail", "gmail.googleapis.com", "ya29.test");
         assert_eq!(injections.len(), 1);
         assert_eq!(
             injections[0],
@@ -296,14 +347,24 @@ mod tests {
     }
 
     #[test]
-    fn google_www_api_uses_bearer() {
-        let injections = build_app_injections("google", "www.googleapis.com", "ya29.test");
+    fn gmail_matches_www_googleapis() {
+        // Gmail claims www.googleapis.com (with /gmail/ path prefix)
+        let injections = build_app_injections("gmail", "www.googleapis.com", "ya29.test");
+        assert_eq!(injections.len(), 1);
+    }
+
+    // ── Google Calendar ──────────────────────────────────────────────
+
+    #[test]
+    fn google_calendar_www_api_uses_bearer() {
+        let injections =
+            build_app_injections("google-calendar", "www.googleapis.com", "ya29.cal_test");
         assert_eq!(injections.len(), 1);
         assert_eq!(
             injections[0],
             Injection::SetHeader {
                 name: "authorization".to_string(),
-                value: "Bearer ya29.test".to_string(),
+                value: "Bearer ya29.cal_test".to_string(),
             }
         );
     }
@@ -311,8 +372,8 @@ mod tests {
     // ── Resend ────────────────────────────────────────────────────────
 
     #[test]
-    fn provider_for_resend_host() {
-        assert_eq!(provider_for_host("api.resend.com"), Some("resend"));
+    fn providers_for_resend_host() {
+        assert_eq!(providers_for_host("api.resend.com"), vec!["resend"]);
     }
 
     #[test]
@@ -340,5 +401,34 @@ mod tests {
     fn unknown_host_for_provider_returns_empty() {
         let injections = build_app_injections("github", "unknown.com", "token");
         assert!(injections.is_empty());
+    }
+
+    #[test]
+    fn path_pattern_unknown_provider_returns_wildcard() {
+        assert_eq!(path_pattern_for("nonexistent", "any.host.com"), "*");
+    }
+
+    /// Shared hosts must not mix `None` and `Some` path prefixes — that would
+    /// cause ambiguous injection (catch-all vs path-scoped rules on the same host).
+    #[test]
+    fn no_mixed_path_prefix_on_shared_hosts() {
+        use std::collections::HashMap;
+        let mut hosts: HashMap<&str, (bool, bool)> = HashMap::new();
+        for provider in APP_PROVIDERS {
+            for rule in provider.host_rules {
+                let entry = hosts.entry(rule.host).or_default();
+                if rule.path_prefix.is_some() {
+                    entry.0 = true; // has prefix
+                } else {
+                    entry.1 = true; // has catch-all
+                }
+            }
+        }
+        for (host, (has_prefix, has_catchall)) in &hosts {
+            assert!(
+                !(*has_prefix && *has_catchall),
+                "host {host} mixes path-prefix and catch-all rules — this causes ambiguous injection"
+            );
+        }
     }
 }
