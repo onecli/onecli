@@ -105,6 +105,26 @@ static APP_PROVIDERS: &[AppProvider] = &[
         }),
     },
     AppProvider {
+        provider: "google-drive",
+        host_rules: &[
+            HostRule {
+                host: "www.googleapis.com",
+                path_prefix: Some("/drive/"),
+                strategy: AuthStrategy::Bearer,
+            },
+            HostRule {
+                host: "www.googleapis.com",
+                path_prefix: Some("/upload/drive/"),
+                strategy: AuthStrategy::Bearer,
+            },
+        ],
+        refresh: Some(RefreshConfig {
+            token_url: "https://oauth2.googleapis.com/token",
+            client_id_env: "GOOGLE_CLIENT_ID",
+            client_secret_env: "GOOGLE_CLIENT_SECRET",
+        }),
+    },
+    AppProvider {
         provider: "resend",
         host_rules: &[HostRule {
             host: "api.resend.com",
@@ -268,10 +288,11 @@ mod tests {
     #[test]
     fn providers_for_googleapis_hosts() {
         assert_eq!(providers_for_host("gmail.googleapis.com"), vec!["gmail"]);
-        // www.googleapis.com is shared — both Gmail (/gmail/) and Calendar (/calendar/)
+        // www.googleapis.com is shared — Gmail, Calendar, and Drive use path prefixes
         let www = providers_for_host("www.googleapis.com");
         assert!(www.contains(&"gmail"));
         assert!(www.contains(&"google-calendar"));
+        assert!(www.contains(&"google-drive"));
     }
 
     #[test]
@@ -281,6 +302,10 @@ mod tests {
         assert_eq!(
             path_pattern_for("google-calendar", "www.googleapis.com"),
             "/calendar/*"
+        );
+        assert_eq!(
+            path_pattern_for("google-drive", "www.googleapis.com"),
+            "/drive/*"
         );
         // Dedicated subdomains use wildcard
         assert_eq!(path_pattern_for("gmail", "gmail.googleapis.com"), "*");
@@ -366,6 +391,45 @@ mod tests {
                 name: "authorization".to_string(),
                 value: "Bearer ya29.cal_test".to_string(),
             }
+        );
+    }
+
+    // ── Google Drive ──────────────────────────────────────────────────
+
+    #[test]
+    fn google_drive_www_api_uses_bearer() {
+        let injections =
+            build_app_injections("google-drive", "www.googleapis.com", "ya29.drive_test");
+        assert_eq!(injections.len(), 1);
+        assert_eq!(
+            injections[0],
+            Injection::SetHeader {
+                name: "authorization".to_string(),
+                value: "Bearer ya29.drive_test".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn google_drive_upload_uses_bearer() {
+        // Drive uploads use /upload/drive/ path prefix on the same host
+        let injections =
+            build_app_injections("google-drive", "www.googleapis.com", "ya29.drive_test");
+        assert_eq!(injections.len(), 1);
+        assert_eq!(
+            injections[0],
+            Injection::SetHeader {
+                name: "authorization".to_string(),
+                value: "Bearer ya29.drive_test".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn google_drive_path_patterns() {
+        assert_eq!(
+            path_pattern_for("google-drive", "www.googleapis.com"),
+            "/drive/*"
         );
     }
 
