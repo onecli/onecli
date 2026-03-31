@@ -166,6 +166,28 @@ export const ConnectFlow = ({
           >
             Configure credentials
           </Button>
+          {process.env.NEXT_PUBLIC_EDITION !== "cloud" && (
+            <div className="flex items-center gap-3 pt-1">
+              <div className="bg-border h-px flex-1" />
+              <span className="text-muted-foreground/60 text-[10px] uppercase tracking-widest">
+                or
+              </span>
+              <div className="bg-border h-px flex-1" />
+            </div>
+          )}
+          {process.env.NEXT_PUBLIC_EDITION !== "cloud" && (
+            <p className="text-muted-foreground text-xs">
+              Skip setup with{" "}
+              <a
+                href="https://app.onecli.sh"
+                target="_blank"
+                rel="noopener noreferrer"
+                className="text-foreground underline decoration-foreground/20 underline-offset-2 transition-colors hover:decoration-foreground/60"
+              >
+                OneCLI Cloud
+              </a>
+            </p>
+          )}
         </div>
       </ConnectLayout>
     );

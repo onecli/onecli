@@ -12,6 +12,8 @@ import {
   getAgentSecrets as getAgentSecretsService,
   updateAgentSecretMode as updateAgentSecretModeService,
   updateAgentSecrets as updateAgentSecretsService,
+  getAgentAppConnections as getAgentAppConnectionsService,
+  updateAgentAppConnections as updateAgentAppConnectionsService,
 } from "@/lib/services/agent-service";
 import {
   withAudit,
@@ -129,6 +131,30 @@ export const updateAgentSecrets = async (
       action: AUDIT_ACTIONS.UPDATE,
       service: AUDIT_SERVICES.AGENT,
       metadata: { agentId, secretCount: secretIds.length },
+    }),
+  );
+};
+
+export const getAgentAppConnections = async (agentId: string) => {
+  const { accountId } = await resolveUser();
+  return getAgentAppConnectionsService(accountId, agentId);
+};
+
+export const updateAgentAppConnections = async (
+  agentId: string,
+  appConnectionIds: string[],
+): Promise<void> => {
+  const { userId, userEmail, accountId } = await resolveUser();
+  return withAudit(
+    () =>
+      updateAgentAppConnectionsService(accountId, agentId, appConnectionIds),
+    () => ({
+      accountId,
+      userId,
+      userEmail,
+      action: AUDIT_ACTIONS.UPDATE,
+      service: AUDIT_SERVICES.AGENT,
+      metadata: { agentId, appConnectionCount: appConnectionIds.length },
     }),
   );
 };

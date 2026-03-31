@@ -44,7 +44,7 @@ import {
   renameAgent,
 } from "@/lib/actions/agents";
 import type { SecretMode } from "@/lib/services/agent-service";
-import { ManageSecretsDialog } from "./manage-secrets-dialog";
+import { ManageAccessDialog } from "./manage-access-dialog";
 
 interface AgentCardProps {
   agent: {
@@ -55,7 +55,7 @@ interface AgentCardProps {
     isDefault: boolean;
     secretMode: SecretMode;
     createdAt: Date;
-    _count: { agentSecrets: number };
+    _count: { agentSecrets: number; agentAppConnections: number };
   };
   onUpdate: () => void;
 }
@@ -114,10 +114,15 @@ export const AgentCard = ({ agent, onUpdate }: AgentCardProps) => {
     }
   };
 
-  const secretsLabel =
-    agent.secretMode === "selective"
-      ? `${agent._count.agentSecrets} ${agent._count.agentSecrets === 1 ? "secret" : "secrets"}`
-      : "All secrets";
+  const accessLabel = (() => {
+    if (agent.secretMode !== "selective") return "All credentials";
+    const s = agent._count.agentSecrets;
+    const a = agent._count.agentAppConnections;
+    const parts: string[] = [];
+    if (s > 0) parts.push(`${s} ${s === 1 ? "secret" : "secrets"}`);
+    if (a > 0) parts.push(`${a} ${a === 1 ? "app" : "apps"}`);
+    return parts.length > 0 ? parts.join(", ") : "No credentials";
+  })();
 
   return (
     <Card className="p-5">
@@ -147,7 +152,7 @@ export const AgentCard = ({ agent, onUpdate }: AgentCardProps) => {
               className="text-muted-foreground hover:text-foreground inline-flex items-center gap-1.5 transition-colors"
             >
               <KeyRound className="size-3" />
-              {secretsLabel}
+              {accessLabel}
             </button>
           </div>
         </div>
@@ -170,7 +175,7 @@ export const AgentCard = ({ agent, onUpdate }: AgentCardProps) => {
             </DropdownMenuItem>
             <DropdownMenuItem onSelect={() => setSecretsDialogOpen(true)}>
               <KeyRound className="size-4" />
-              Manage secrets
+              Manage access
             </DropdownMenuItem>
             <DropdownMenuItem onSelect={() => setRotateDialogOpen(true)}>
               <RotateCw className="size-4" />
@@ -265,7 +270,7 @@ export const AgentCard = ({ agent, onUpdate }: AgentCardProps) => {
         </DialogContent>
       </Dialog>
 
-      <ManageSecretsDialog
+      <ManageAccessDialog
         agent={agent}
         open={secretsDialogOpen}
         onOpenChange={setSecretsDialogOpen}

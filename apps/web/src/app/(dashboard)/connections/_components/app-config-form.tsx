@@ -197,6 +197,23 @@ export const AppConfigForm = ({
                         ? "Override platform defaults with your own."
                         : `Required to connect ${appName}.`}
                 </p>
+                {!hasEnvDefaults &&
+                  !hasCredentials &&
+                  !enabled &&
+                  process.env.NEXT_PUBLIC_EDITION !== "cloud" && (
+                    <p className="text-xs text-muted-foreground mt-1.5">
+                      Or connect instantly with{" "}
+                      <a
+                        href="https://app.onecli.sh"
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="text-foreground font-medium underline underline-offset-2 transition-colors hover:text-foreground/80"
+                      >
+                        OneCLI Cloud
+                      </a>{" "}
+                      - no credentials needed.
+                    </p>
+                  )}
               </div>
               <Switch checked={enabled} onCheckedChange={handleToggle} />
             </div>
