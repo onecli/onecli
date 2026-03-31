@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.10.0](https://github.com/onecli/onecli/compare/v1.9.0...v1.10.0) (2026-03-31)
+
+
+### Features
+
+* add Google Drive app integration with path-prefix routing ([#136](https://github.com/onecli/onecli/issues/136)) ([4745147](https://github.com/onecli/onecli/commit/4745147f7fd7ceb86035ac712675a22ba9ed742b))
+* unified credential access dialog and always-visible connect button ([#138](https://github.com/onecli/onecli/issues/138)) ([0b20830](https://github.com/onecli/onecli/commit/0b2083068ea6910786ac91f4d91afb5b10665ce4))
+
 ## [1.9.0](https://github.com/onecli/onecli/compare/v1.8.0...v1.9.0) (2026-03-31)
 
 
