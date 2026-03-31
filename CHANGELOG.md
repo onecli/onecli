@@ -1,5 +1,14 @@
 # Changelog
 
+## [1.9.0](https://github.com/onecli/onecli/compare/v1.8.0...v1.9.0) (2026-03-31)
+
+
+### Features
+
+* add Gmail app with OAuth token refresh and BYOC support ([#130](https://github.com/onecli/onecli/issues/130)) ([41c2a83](https://github.com/onecli/onecli/commit/41c2a833a09b14fb2073f93e9fb8fdc2ca83bf2b))
+* add Google Calendar app integration and rename google to gmail ([#135](https://github.com/onecli/onecli/issues/135)) ([64e080c](https://github.com/onecli/onecli/commit/64e080c46c16796d354ed667c62f49cf5e420431))
+* add Resend integration and API key connection type ([#133](https://github.com/onecli/onecli/issues/133)) ([86010ef](https://github.com/onecli/onecli/commit/86010ef5ca262f982b4011b209d037fd59971275))
+
 ## [1.8.0](https://github.com/onecli/onecli/compare/v1.7.2...v1.8.0) (2026-03-29)
 
 
