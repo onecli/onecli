@@ -3,34 +3,26 @@ import {
   buildGoogleAuthUrl,
   exchangeGoogleCode,
   googleConfigFields,
-  googleEnvDefaults,
 } from "./google-oauth";
 
-export const googleDrive: AppDefinition = {
-  id: "google-drive",
-  name: "Google Drive",
-  icon: "/icons/google-drive.svg",
-  description: "Read, create, and manage files and folders.",
+export const googlePhotos: AppDefinition = {
+  id: "google-photos",
+  name: "Google Photos",
+  icon: "/icons/google-photos.svg",
+  description: "Manage photos, videos, and albums.",
   connectionMethod: {
     type: "oauth",
     defaultScopes: [
       "openid",
       "email",
       "profile",
-      "https://www.googleapis.com/auth/drive.readonly",
-      "https://www.googleapis.com/auth/drive.file",
+      "https://www.googleapis.com/auth/photoslibrary",
     ],
     permissions: [
       {
-        scope: "https://www.googleapis.com/auth/drive.readonly",
-        name: "Read files",
-        description: "View and download all your Drive files",
-        access: "read",
-      },
-      {
-        scope: "https://www.googleapis.com/auth/drive.file",
-        name: "Manage app files",
-        description: "Create and edit files opened or created by OneCLI",
+        scope: "https://www.googleapis.com/auth/photoslibrary",
+        name: "Photos",
+        description: "Manage photos, videos, and albums",
         access: "write",
       },
       {
@@ -52,6 +44,5 @@ export const googleDrive: AppDefinition = {
   available: true,
   configurable: {
     fields: googleConfigFields,
-    envDefaults: googleEnvDefaults,
   },
 };

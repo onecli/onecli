@@ -17,10 +17,12 @@ import {
   AlertDialogTrigger,
 } from "@onecli/ui/components/alert-dialog";
 import { getAppConnections, disconnectApp } from "@/lib/actions/connections";
+import { checkAppConfigExists } from "@/lib/actions/app-config";
 import { useAppMessages } from "@/hooks/use-app-connected";
 import type { OAuthPermission } from "@/lib/apps/types";
 import { AppIcon } from "./app-icon";
 import { AppConfigForm } from "./app-config-form";
+import { ConfigureCredentialsDialog } from "./configure-credentials-dialog";
 import { PermissionsList } from "./permissions-list";
 
 interface AppDetailProps {
@@ -42,9 +44,10 @@ interface AppDetailProps {
       placeholder: string;
       secret?: boolean;
     }[];
-    envDefaults: Record<string, string>;
+    envDefaults?: Record<string, string>;
   };
   hasEnvDefaults: boolean;
+  hasAppConfig: boolean;
 }
 
 interface ConnectionData {
@@ -60,9 +63,13 @@ export const AppDetail = ({
   app,
   configurable,
   hasEnvDefaults,
+  hasAppConfig,
 }: AppDetailProps) => {
   const [connection, setConnection] = useState<ConnectionData | null>(null);
   const [loading, setLoading] = useState(true);
+  const [configDialogOpen, setConfigDialogOpen] = useState(false);
+  const [configVersion, setConfigVersion] = useState(0);
+  const [appConfigured, setAppConfigured] = useState(hasAppConfig);
 
   const fetchConnection = useCallback(async () => {
     try {
@@ -91,7 +98,19 @@ export const AppDetail = ({
 
   useAppMessages({ onConnected: fetchConnection });
 
-  const handleConnect = () => {
+  const refreshConfigStatus = useCallback(async () => {
+    fetchConnection();
+    try {
+      const exists = await checkAppConfigExists(app.id);
+      setAppConfigured(exists);
+    } catch {
+      // ignore
+    }
+  }, [app.id, fetchConnection]);
+
+  const hasCredentials = hasEnvDefaults || appConfigured;
+
+  const openConnectPopup = () => {
     const w = 520;
     const h = 700;
     const left = Math.round(window.screenX + (window.outerWidth - w) / 2);
@@ -101,6 +120,14 @@ export const AppDetail = ({
       `connect-${app.id}`,
       `width=${w},height=${h},left=${left},top=${top},scrollbars=yes,resizable=yes`,
     );
+  };
+
+  const handleConnect = () => {
+    if (!hasCredentials && configurable?.fields) {
+      setConfigDialogOpen(true);
+      return;
+    }
+    openConnectPopup();
   };
 
   const handleDisconnect = async () => {
@@ -225,12 +252,31 @@ export const AppDetail = ({
 
       {configurable && (
         <AppConfigForm
+          key={configVersion}
           provider={app.id}
           appName={app.name}
           fields={configurable.fields}
           hasEnvDefaults={hasEnvDefaults}
           isConnected={isConnected}
-          onConfigChange={fetchConnection}
+          onConfigChange={refreshConfigStatus}
+        />
+      )}
+
+      {configurable?.fields && (
+        <ConfigureCredentialsDialog
+          provider={app.id}
+          appName={app.name}
+          appIcon={app.icon}
+          appDarkIcon={app.darkIcon}
+          fields={configurable.fields}
+          open={configDialogOpen}
+          onOpenChange={setConfigDialogOpen}
+          onConfigured={() => {
+            setConfigDialogOpen(false);
+            setConfigVersion((v) => v + 1);
+            setAppConfigured(true);
+            openConnectPopup();
+          }}
         />
       )}
     </div>

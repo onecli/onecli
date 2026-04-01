@@ -43,8 +43,15 @@ pub(crate) struct RefreshConfig {
 struct AppProvider {
     provider: &'static str,
     host_rules: &'static [HostRule],
-    refresh: Option<RefreshConfig>,
+    refresh: Option<&'static RefreshConfig>,
 }
+
+/// Shared refresh config for all Google OAuth APIs.
+static GOOGLE_REFRESH: RefreshConfig = RefreshConfig {
+    token_url: "https://oauth2.googleapis.com/token",
+    client_id_env: "GOOGLE_CLIENT_ID",
+    client_secret_env: "GOOGLE_CLIENT_SECRET",
+};
 
 // ── Provider registry ──────────────────────────────────────────────────
 
@@ -85,11 +92,7 @@ static APP_PROVIDERS: &[AppProvider] = &[
                 strategy: AuthStrategy::Bearer,
             },
         ],
-        refresh: Some(RefreshConfig {
-            token_url: "https://oauth2.googleapis.com/token",
-            client_id_env: "GOOGLE_CLIENT_ID",
-            client_secret_env: "GOOGLE_CLIENT_SECRET",
-        }),
+        refresh: Some(&GOOGLE_REFRESH),
     },
     AppProvider {
         provider: "google-calendar",
@@ -98,11 +101,7 @@ static APP_PROVIDERS: &[AppProvider] = &[
             path_prefix: Some("/calendar/"),
             strategy: AuthStrategy::Bearer,
         }],
-        refresh: Some(RefreshConfig {
-            token_url: "https://oauth2.googleapis.com/token",
-            client_id_env: "GOOGLE_CLIENT_ID",
-            client_secret_env: "GOOGLE_CLIENT_SECRET",
-        }),
+        refresh: Some(&GOOGLE_REFRESH),
     },
     AppProvider {
         provider: "google-drive",
@@ -118,11 +117,106 @@ static APP_PROVIDERS: &[AppProvider] = &[
                 strategy: AuthStrategy::Bearer,
             },
         ],
-        refresh: Some(RefreshConfig {
-            token_url: "https://oauth2.googleapis.com/token",
-            client_id_env: "GOOGLE_CLIENT_ID",
-            client_secret_env: "GOOGLE_CLIENT_SECRET",
-        }),
+        refresh: Some(&GOOGLE_REFRESH),
+    },
+    AppProvider {
+        provider: "google-docs",
+        host_rules: &[HostRule {
+            host: "docs.googleapis.com",
+            path_prefix: None,
+            strategy: AuthStrategy::Bearer,
+        }],
+        refresh: Some(&GOOGLE_REFRESH),
+    },
+    AppProvider {
+        provider: "google-sheets",
+        host_rules: &[HostRule {
+            host: "sheets.googleapis.com",
+            path_prefix: None,
+            strategy: AuthStrategy::Bearer,
+        }],
+        refresh: Some(&GOOGLE_REFRESH),
+    },
+    AppProvider {
+        provider: "google-slides",
+        host_rules: &[HostRule {
+            host: "slides.googleapis.com",
+            path_prefix: None,
+            strategy: AuthStrategy::Bearer,
+        }],
+        refresh: Some(&GOOGLE_REFRESH),
+    },
+    AppProvider {
+        provider: "google-tasks",
+        host_rules: &[HostRule {
+            host: "tasks.googleapis.com",
+            path_prefix: None,
+            strategy: AuthStrategy::Bearer,
+        }],
+        refresh: Some(&GOOGLE_REFRESH),
+    },
+    AppProvider {
+        provider: "google-forms",
+        host_rules: &[HostRule {
+            host: "forms.googleapis.com",
+            path_prefix: None,
+            strategy: AuthStrategy::Bearer,
+        }],
+        refresh: Some(&GOOGLE_REFRESH),
+    },
+    AppProvider {
+        provider: "google-classroom",
+        host_rules: &[HostRule {
+            host: "classroom.googleapis.com",
+            path_prefix: None,
+            strategy: AuthStrategy::Bearer,
+        }],
+        refresh: Some(&GOOGLE_REFRESH),
+    },
+    AppProvider {
+        provider: "google-admin",
+        host_rules: &[HostRule {
+            host: "admin.googleapis.com",
+            path_prefix: None,
+            strategy: AuthStrategy::Bearer,
+        }],
+        refresh: Some(&GOOGLE_REFRESH),
+    },
+    AppProvider {
+        provider: "google-analytics",
+        host_rules: &[HostRule {
+            host: "analyticsdata.googleapis.com",
+            path_prefix: None,
+            strategy: AuthStrategy::Bearer,
+        }],
+        refresh: Some(&GOOGLE_REFRESH),
+    },
+    AppProvider {
+        provider: "google-search-console",
+        host_rules: &[HostRule {
+            host: "searchconsole.googleapis.com",
+            path_prefix: None,
+            strategy: AuthStrategy::Bearer,
+        }],
+        refresh: Some(&GOOGLE_REFRESH),
+    },
+    AppProvider {
+        provider: "google-meet",
+        host_rules: &[HostRule {
+            host: "meet.googleapis.com",
+            path_prefix: None,
+            strategy: AuthStrategy::Bearer,
+        }],
+        refresh: Some(&GOOGLE_REFRESH),
+    },
+    AppProvider {
+        provider: "google-photos",
+        host_rules: &[HostRule {
+            host: "photoslibrary.googleapis.com",
+            path_prefix: None,
+            strategy: AuthStrategy::Bearer,
+        }],
+        refresh: Some(&GOOGLE_REFRESH),
     },
     AppProvider {
         provider: "resend",
@@ -153,10 +247,10 @@ pub(crate) fn providers_for_host(hostname: &str) -> Vec<&'static str> {
     providers
 }
 
-/// Return the path pattern an injection rule should use for a given provider + host.
-/// If the matching host rule has a `path_prefix`, returns `"{prefix}*"` (e.g., `"/calendar/*"`).
-/// Otherwise returns `"*"` (match all paths).
-pub(crate) fn path_pattern_for(provider: &str, hostname: &str) -> String {
+/// Return the path pattern for the first matching host rule of a provider.
+/// For providers with multiple rules on the same host, use `build_app_injection_rules` instead.
+#[cfg(test)]
+fn path_pattern_for(provider: &str, hostname: &str) -> String {
     APP_PROVIDERS
         .iter()
         .find(|p| p.provider == provider)
@@ -165,9 +259,10 @@ pub(crate) fn path_pattern_for(provider: &str, hostname: &str) -> String {
         .map_or_else(|| "*".to_string(), |prefix| format!("{prefix}*"))
 }
 
-/// Build injection rules for an app connection's access token on a given host.
-/// Returns an empty vec if the hostname doesn't match the provider.
-pub(crate) fn build_app_injections(provider: &str, hostname: &str, token: &str) -> Vec<Injection> {
+/// Build injections for the first matching host rule (single-rule providers).
+/// For multi-rule providers (e.g., Google Drive), use `build_app_injection_rules`.
+#[cfg(test)]
+fn build_app_injections(provider: &str, hostname: &str, token: &str) -> Vec<Injection> {
     let app = APP_PROVIDERS.iter().find(|p| p.provider == provider);
     let Some(app) = app else { return vec![] };
 
@@ -190,12 +285,51 @@ pub(crate) fn build_app_injections(provider: &str, hostname: &str, token: &str) 
     }
 }
 
+/// Build injection rules for all matching host rules of a provider on a given host.
+/// Returns one `(path_pattern, injections)` pair per matching rule. This handles
+/// providers with multiple rules on the same host (e.g., Google Drive has `/drive/`
+/// and `/upload/drive/` on `www.googleapis.com`).
+pub(crate) fn build_app_injection_rules(
+    provider: &str,
+    hostname: &str,
+    token: &str,
+) -> Vec<(String, Vec<Injection>)> {
+    let Some(app) = APP_PROVIDERS.iter().find(|p| p.provider == provider) else {
+        return vec![];
+    };
+
+    app.host_rules
+        .iter()
+        .filter(|r| r.host == hostname)
+        .map(|rule| {
+            let pattern = rule
+                .path_prefix
+                .map_or_else(|| "*".to_string(), |prefix| format!("{prefix}*"));
+            let injections = match rule.strategy {
+                AuthStrategy::Bearer => vec![Injection::SetHeader {
+                    name: "authorization".to_string(),
+                    value: format!("Bearer {token}"),
+                }],
+                AuthStrategy::BasicXAccessToken => {
+                    let b64 = base64::engine::general_purpose::STANDARD;
+                    let encoded = b64.encode(format!("x-access-token:{token}"));
+                    vec![Injection::SetHeader {
+                        name: "authorization".to_string(),
+                        value: format!("Basic {encoded}"),
+                    }]
+                }
+            };
+            (pattern, injections)
+        })
+        .collect()
+}
+
 /// Get the refresh config for a provider, if it supports token refresh.
 pub(crate) fn refresh_config(provider: &str) -> Option<&'static RefreshConfig> {
     APP_PROVIDERS
         .iter()
         .find(|p| p.provider == provider)
-        .and_then(|p| p.refresh.as_ref())
+        .and_then(|p| p.refresh)
 }
 
 /// Refresh an expired access token using the provider's token endpoint.
@@ -397,40 +531,114 @@ mod tests {
     // ── Google Drive ──────────────────────────────────────────────────
 
     #[test]
-    fn google_drive_www_api_uses_bearer() {
-        let injections =
-            build_app_injections("google-drive", "www.googleapis.com", "ya29.drive_test");
-        assert_eq!(injections.len(), 1);
+    fn google_drive_produces_two_injection_rules() {
+        // Drive has two host rules on www.googleapis.com: /drive/ and /upload/drive/
+        let rules =
+            build_app_injection_rules("google-drive", "www.googleapis.com", "ya29.drive_test");
         assert_eq!(
-            injections[0],
-            Injection::SetHeader {
-                name: "authorization".to_string(),
-                value: "Bearer ya29.drive_test".to_string(),
-            }
+            rules.len(),
+            2,
+            "expected two rules for Drive on www.googleapis.com"
+        );
+
+        let patterns: Vec<&str> = rules.iter().map(|(p, _)| p.as_str()).collect();
+        assert!(patterns.contains(&"/drive/*"));
+        assert!(patterns.contains(&"/upload/drive/*"));
+
+        // Both should use Bearer auth
+        for (_, injections) in &rules {
+            assert_eq!(injections.len(), 1);
+            assert_eq!(
+                injections[0],
+                Injection::SetHeader {
+                    name: "authorization".to_string(),
+                    value: "Bearer ya29.drive_test".to_string(),
+                }
+            );
+        }
+    }
+
+    // ── Google Workspace apps (dedicated subdomains) ──────────────────
+
+    #[test]
+    fn providers_for_google_workspace_hosts() {
+        assert_eq!(
+            providers_for_host("docs.googleapis.com"),
+            vec!["google-docs"]
+        );
+        assert_eq!(
+            providers_for_host("sheets.googleapis.com"),
+            vec!["google-sheets"]
+        );
+        assert_eq!(
+            providers_for_host("slides.googleapis.com"),
+            vec!["google-slides"]
+        );
+        assert_eq!(
+            providers_for_host("tasks.googleapis.com"),
+            vec!["google-tasks"]
+        );
+        assert_eq!(
+            providers_for_host("forms.googleapis.com"),
+            vec!["google-forms"]
+        );
+        assert_eq!(
+            providers_for_host("classroom.googleapis.com"),
+            vec!["google-classroom"]
+        );
+        assert_eq!(
+            providers_for_host("admin.googleapis.com"),
+            vec!["google-admin"]
+        );
+        assert_eq!(
+            providers_for_host("analyticsdata.googleapis.com"),
+            vec!["google-analytics"]
+        );
+        assert_eq!(
+            providers_for_host("searchconsole.googleapis.com"),
+            vec!["google-search-console"]
+        );
+        assert_eq!(
+            providers_for_host("meet.googleapis.com"),
+            vec!["google-meet"]
+        );
+        assert_eq!(
+            providers_for_host("photoslibrary.googleapis.com"),
+            vec!["google-photos"]
         );
     }
 
     #[test]
-    fn google_drive_upload_uses_bearer() {
-        // Drive uploads use /upload/drive/ path prefix on the same host
-        let injections =
-            build_app_injections("google-drive", "www.googleapis.com", "ya29.drive_test");
-        assert_eq!(injections.len(), 1);
-        assert_eq!(
-            injections[0],
-            Injection::SetHeader {
-                name: "authorization".to_string(),
-                value: "Bearer ya29.drive_test".to_string(),
-            }
-        );
-    }
-
-    #[test]
-    fn google_drive_path_patterns() {
-        assert_eq!(
-            path_pattern_for("google-drive", "www.googleapis.com"),
-            "/drive/*"
-        );
+    fn google_workspace_apps_use_bearer() {
+        let hosts = [
+            ("google-docs", "docs.googleapis.com"),
+            ("google-sheets", "sheets.googleapis.com"),
+            ("google-slides", "slides.googleapis.com"),
+            ("google-tasks", "tasks.googleapis.com"),
+            ("google-forms", "forms.googleapis.com"),
+            ("google-classroom", "classroom.googleapis.com"),
+            ("google-admin", "admin.googleapis.com"),
+            ("google-analytics", "analyticsdata.googleapis.com"),
+            ("google-search-console", "searchconsole.googleapis.com"),
+            ("google-meet", "meet.googleapis.com"),
+            ("google-photos", "photoslibrary.googleapis.com"),
+        ];
+        for (provider, host) in &hosts {
+            let injections = build_app_injections(provider, host, "ya29.test");
+            assert_eq!(
+                injections.len(),
+                1,
+                "{provider} on {host} should produce one injection"
+            );
+            assert_eq!(
+                injections[0],
+                Injection::SetHeader {
+                    name: "authorization".to_string(),
+                    value: "Bearer ya29.test".to_string(),
+                },
+                "{provider} on {host} should use Bearer auth"
+            );
+        }
     }
 
     // ── Resend ────────────────────────────────────────────────────────

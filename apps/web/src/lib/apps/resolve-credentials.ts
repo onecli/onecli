@@ -28,11 +28,11 @@ export const resolveOAuthCredentials = async (
   }
 
   // 2. Fall back to platform env vars
-  const { envDefaults } = app.configurable;
-  const clientId = envDefaults.clientId
+  const envDefaults = app.configurable.envDefaults;
+  const clientId = envDefaults?.clientId
     ? process.env[envDefaults.clientId]
     : undefined;
-  const clientSecret = envDefaults.clientSecret
+  const clientSecret = envDefaults?.clientSecret
     ? process.env[envDefaults.clientSecret]
     : undefined;
 

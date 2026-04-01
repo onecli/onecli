@@ -72,7 +72,7 @@ export interface AppDefinition {
   /** OAuth apps can be configured with custom credentials (BYOC). */
   configurable?: {
     fields: OAuthConfigField[];
-    /** Maps field names to env var names for platform defaults. */
-    envDefaults: Record<string, string>;
+    /** Maps field names to env var names for platform defaults. Omit if no defaults exist. */
+    envDefaults?: Record<string, string>;
   };
 }

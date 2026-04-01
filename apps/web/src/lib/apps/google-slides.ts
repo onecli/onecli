@@ -6,11 +6,11 @@ import {
   googleEnvDefaults,
 } from "./google-oauth";
 
-export const googleDrive: AppDefinition = {
-  id: "google-drive",
-  name: "Google Drive",
-  icon: "/icons/google-drive.svg",
-  description: "Read, create, and manage files and folders.",
+export const googleSlides: AppDefinition = {
+  id: "google-slides",
+  name: "Google Slides",
+  icon: "/icons/google-slides.svg",
+  description: "Read, create, and edit presentations.",
   connectionMethod: {
     type: "oauth",
     defaultScopes: [
@@ -23,14 +23,15 @@ export const googleDrive: AppDefinition = {
     permissions: [
       {
         scope: "https://www.googleapis.com/auth/drive.readonly",
-        name: "Read files",
-        description: "View and download all your Drive files",
+        name: "Read presentations",
+        description: "View all your Google Slides",
         access: "read",
       },
       {
         scope: "https://www.googleapis.com/auth/drive.file",
-        name: "Manage app files",
-        description: "Create and edit files opened or created by OneCLI",
+        name: "Manage app presentations",
+        description:
+          "Create and edit presentations opened or created by OneCLI",
         access: "write",
       },
       {

@@ -18,9 +18,9 @@ export default async function ConnectPage({ params, searchParams }: Props) {
   // Check if platform defaults are available (server-only env var check)
   let hasEnvDefaults = false;
   if (app.configurable) {
-    hasEnvDefaults = Object.values(app.configurable.envDefaults).every(
-      (envVar) => !!process.env[envVar],
-    );
+    const defaults = Object.values(app.configurable.envDefaults ?? {});
+    hasEnvDefaults =
+      defaults.length > 0 && defaults.every((envVar) => !!process.env[envVar]);
   }
 
   // Check if user has custom AppConfig
