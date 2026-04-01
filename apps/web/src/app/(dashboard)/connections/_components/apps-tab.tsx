@@ -6,15 +6,22 @@ import { ChevronRight } from "lucide-react";
 import { Button } from "@onecli/ui/components/button";
 import { cn } from "@onecli/ui/lib/utils";
 import { apps } from "@/lib/apps/registry";
+import type { AppDefinition } from "@/lib/apps/types";
 import { getAppConnections } from "@/lib/actions/connections";
+import { checkAppConfigExists } from "@/lib/actions/app-config";
 import { useAppMessages } from "@/hooks/use-app-connected";
 import { AppIcon } from "./app-icon";
+import { ConfigureCredentialsDialog } from "./configure-credentials-dialog";
 
 export const AppsTab = () => {
   const router = useRouter();
   const [connectedProviders, setConnectedProviders] = useState<Set<string>>(
-    new Set(),
+    () => new Set(),
   );
+  const [configuredProviders, setConfiguredProviders] = useState<Set<string>>(
+    () => new Set(),
+  );
+  const [configApp, setConfigApp] = useState<AppDefinition | null>(null);
 
   const fetchConnections = useCallback(async () => {
     try {
@@ -25,6 +32,19 @@ export const AppsTab = () => {
             .filter((c) => c.status === "connected")
             .map((c) => c.provider),
         ),
+      );
+      // Check which BYOC-only apps already have saved credentials
+      const byocApps = apps.filter(
+        (a) => a.configurable && !a.configurable.envDefaults,
+      );
+      const configured = await Promise.all(
+        byocApps.map(async (a) => {
+          const exists = await checkAppConfigExists(a.id).catch(() => false);
+          return exists ? a.id : null;
+        }),
+      );
+      setConfiguredProviders(
+        new Set(configured.filter((id): id is string => id !== null)),
       );
     } catch {
       // Silently fail — grid still works without connection status
@@ -37,8 +57,7 @@ export const AppsTab = () => {
 
   useAppMessages({ onConnected: fetchConnections, onConfigure: router.push });
 
-  const handleConnect = (e: React.MouseEvent, provider: string) => {
-    e.stopPropagation();
+  const openConnectPopup = (provider: string) => {
     const w = 520;
     const h = 700;
     const left = Math.round(window.screenX + (window.outerWidth - w) / 2);
@@ -50,23 +69,60 @@ export const AppsTab = () => {
     );
   };
 
+  const handleConnect = (e: React.MouseEvent, app: AppDefinition) => {
+    e.stopPropagation();
+    // Apps without envDefaults need BYOC — show config dialog if no credentials saved
+    const needsConfig = app.configurable && !app.configurable.envDefaults;
+    if (
+      needsConfig &&
+      !connectedProviders.has(app.id) &&
+      !configuredProviders.has(app.id)
+    ) {
+      setConfigApp(app);
+      return;
+    }
+    openConnectPopup(app.id);
+  };
+
   return (
-    <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
-      {apps.map((app) => {
-        const isConnected = connectedProviders.has(app.id);
-        return (
-          <AppRow
-            key={app.id}
-            name={app.name}
-            icon={app.icon}
-            darkIcon={app.darkIcon}
-            connected={isConnected}
-            onConnect={(e) => handleConnect(e, app.id)}
-            onClick={() => router.push(`/connections/apps/${app.id}`)}
-          />
-        );
-      })}
-    </div>
+    <>
+      <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+        {apps.map((app) => {
+          const isConnected = connectedProviders.has(app.id);
+          return (
+            <AppRow
+              key={app.id}
+              name={app.name}
+              icon={app.icon}
+              darkIcon={app.darkIcon}
+              connected={isConnected}
+              onConnect={(e) => handleConnect(e, app)}
+              onClick={() => router.push(`/connections/apps/${app.id}`)}
+            />
+          );
+        })}
+      </div>
+
+      {configApp?.configurable && (
+        <ConfigureCredentialsDialog
+          provider={configApp.id}
+          appName={configApp.name}
+          appIcon={configApp.icon}
+          appDarkIcon={configApp.darkIcon}
+          fields={configApp.configurable.fields}
+          open={!!configApp}
+          onOpenChange={(open) => {
+            if (!open) setConfigApp(null);
+          }}
+          onConfigured={() => {
+            const provider = configApp.id;
+            setConfiguredProviders((prev) => new Set([...prev, provider]));
+            setConfigApp(null);
+            openConnectPopup(provider);
+          }}
+        />
+      )}
+    </>
   );
 };
 

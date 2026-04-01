@@ -180,15 +180,14 @@ impl PolicyEngine {
                 continue;
             };
 
-            let injections = apps::build_app_injections(provider, hostname, &token);
-            if injections.is_empty() {
-                continue;
+            for (path_pattern, injections) in
+                apps::build_app_injection_rules(provider, hostname, &token)
+            {
+                rules.push(InjectionRule {
+                    path_pattern,
+                    injections,
+                });
             }
-
-            rules.push(InjectionRule {
-                path_pattern: apps::path_pattern_for(provider, hostname),
-                injections,
-            });
         }
 
         Ok(rules)
