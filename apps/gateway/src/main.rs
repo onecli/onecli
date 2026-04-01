@@ -119,13 +119,19 @@ async fn main() -> Result<()> {
     // Cloud: KMS envelope decryption (calls KMS Decrypt for each data key)
     let crypto = Arc::new(crypto::CryptoService::from_env().await?);
 
-    let policy_engine = Arc::new(PolicyEngine { pool, crypto });
+    let policy_engine = Arc::new(PolicyEngine {
+        pool,
+        crypto: Arc::clone(&crypto),
+    });
 
     // Initialize vault service with Bitwarden provider
     let proxy_url = std::env::var("BITWARDEN_PROXY_URL")
         .unwrap_or_else(|_| "wss://ap.lesspassword.dev".to_string());
-    let bitwarden =
-        BitwardenVaultProvider::new(BitwardenConfig { proxy_url }, policy_engine.pool.clone());
+    let bitwarden = BitwardenVaultProvider::new(
+        BitwardenConfig { proxy_url },
+        policy_engine.pool.clone(),
+        Arc::clone(&crypto),
+    );
     let vault_service = Arc::new(VaultService::new(
         vec![Box::new(bitwarden)],
         policy_engine.pool.clone(),

@@ -20,8 +20,12 @@ use sqlx::PgPool;
 use tokio::sync::{mpsc, Mutex};
 use tracing::{info, warn};
 
-use super::bitwarden_db::{BitwardenConnectionStore, BitwardenIdentityProvider};
+use super::bitwarden_db::{
+    decrypt_connection_data, encrypt_connection_data, BitwardenConnectionStore,
+    BitwardenIdentityProvider,
+};
 use super::{PairResult, ProviderStatus, VaultCredential, VaultProvider};
+use crate::crypto::CryptoService;
 use crate::db;
 
 /// Parse a hex-encoded fingerprint string into an `IdentityFingerprint`.
@@ -140,16 +144,18 @@ pub(crate) struct BitwardenConfig {
 pub(crate) struct BitwardenVaultProvider {
     config: BitwardenConfig,
     pool: PgPool,
+    crypto: Arc<CryptoService>,
     sessions: Arc<DashMap<String, Arc<BitwardenUserSession>>>,
 }
 
 impl BitwardenVaultProvider {
-    pub fn new(config: BitwardenConfig, pool: PgPool) -> Self {
+    pub fn new(config: BitwardenConfig, pool: PgPool, crypto: Arc<CryptoService>) -> Self {
         let sessions = Arc::new(DashMap::new());
         Self::spawn_eviction_task(Arc::clone(&sessions));
         Self {
             config,
             pool,
+            crypto,
             sessions,
         }
     }
@@ -204,10 +210,10 @@ impl BitwardenVaultProvider {
             None => return Ok(None),
         };
 
-        let cd: Option<BitwardenConnectionData> = row
-            .connection_data
-            .as_ref()
-            .and_then(|v| serde_json::from_value(v.clone()).ok());
+        let cd: Option<BitwardenConnectionData> = match row.connection_data.as_ref() {
+            Some(v) => decrypt_connection_data(&self.crypto, v).await.ok(),
+            None => None,
+        };
 
         let key_data = cd.as_ref().and_then(|c| c.key_data.as_ref());
         let identity = match key_data {
@@ -265,6 +271,7 @@ impl BitwardenVaultProvider {
             self.pool.clone(),
             account_id.to_string(),
             key_data,
+            Arc::clone(&self.crypto),
             session.connection_data.as_ref(),
         );
 
@@ -390,12 +397,13 @@ impl VaultProvider for BitwardenVaultProvider {
             key_data: Some(session.identity.to_cose()),
             transport_state: None,
         };
+        let encrypted_cd = encrypt_connection_data(&self.crypto, &initial_cd).await?;
         db::upsert_vault_connection(
             &self.pool,
             account_id,
             "bitwarden",
             "paired",
-            Some(&serde_json::to_value(&initial_cd)?),
+            Some(&encrypted_cd),
         )
         .await?;
 
