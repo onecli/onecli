@@ -48,9 +48,15 @@ OneCLI is an open-source gateway that sits between your AI agents and the servic
 The fastest way to run OneCLI locally:
 
 ```bash
+curl -fsSL https://onecli.sh/install | sh
+```
+
+Or, if you prefer to run it manually:
+
+```bash
 git clone https://github.com/onecli/onecli.git
 cd onecli
-docker compose -f docker/docker-compose.yml up
+docker compose -f docker/docker-compose.yml up -d --wait
 ```
 
 Open **http://localhost:10254**, create an agent, add your secrets, and point your agent's HTTP gateway to `localhost:10255`.
@@ -61,7 +67,7 @@ Open **http://localhost:10254**, create an agent, add your secrets, and point yo
 - **Encrypted secret storage**: AES-256-GCM encryption at rest, decrypted only at request time
 - **Host & path matching**: route secrets to the right API endpoints with pattern matching
 - **Multi-agent support**: each agent gets its own access token with scoped permissions
-- **Easy setup**: `docker compose -f docker/docker-compose.yml up` starts everything (app + PostgreSQL)
+- **Easy setup**: `curl -fsSL https://onecli.sh/install | sh` starts everything (app + PostgreSQL)
 - **Two auth modes**: single-user (no login) for local use, or Google OAuth for teams
 - **Rust gateway**: fast, memory-safe HTTP gateway with MITM interception for HTTPS
 - **[Vault integration](docs/vault-integration.md)**: connect Bitwarden (or other password managers) for on-demand credential injection without storing secrets on the server
