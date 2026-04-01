@@ -41,7 +41,15 @@ use crate::vault;
 #[derive(Clone)]
 pub(crate) struct GatewayState {
     pub ca: Arc<CertificateAuthority>,
+    /// Standard upstream client — validates TLS certificates.
     pub http_client: reqwest::Client,
+    /// No-verify upstream client — skips TLS certificate validation.
+    /// Selected for hosts matched by `skip_verify_hosts`.
+    pub http_client_no_verify: reqwest::Client,
+    /// Hostname patterns for which TLS certificate validation is skipped.
+    /// Supports exact match (`internal.corp`) and wildcard prefix (`*.internal.corp`).
+    /// Populated from `GATEWAY_SKIP_VERIFY_HOSTS` (comma-separated).
+    pub skip_verify_hosts: Arc<Vec<String>>,
     pub policy_engine: Arc<PolicyEngine>,
     pub cache: Arc<dyn CacheStore>,
     /// Provider-agnostic vault service for credential fetching.
@@ -58,13 +66,45 @@ pub struct GatewayServer {
 /// Build the HTTP client used for upstream requests.
 ///
 /// - Redirects are disabled so 3xx responses are forwarded to the client as-is.
-/// - Invalid certs are optionally accepted via `GATEWAY_DANGER_ACCEPT_INVALID_CERTS`.
-fn build_http_client() -> reqwest::Client {
+/// - `accept_invalid_certs` skips TLS certificate validation for upstream connections.
+fn build_http_client(accept_invalid_certs: bool) -> reqwest::Client {
     reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
-        .danger_accept_invalid_certs(std::env::var("GATEWAY_DANGER_ACCEPT_INVALID_CERTS").is_ok())
+        .danger_accept_invalid_certs(accept_invalid_certs)
         .build()
         .expect("build HTTP client")
+}
+
+/// Parse `GATEWAY_SKIP_VERIFY_HOSTS` into a list of hostname patterns.
+///
+/// Patterns support:
+/// - Exact match: `internal.corp`
+/// - Wildcard subdomain prefix: `*.internal.corp`
+///
+/// Falls back to empty (no hosts skip verification) if the variable is unset.
+fn parse_skip_verify_hosts() -> Vec<String> {
+    std::env::var("GATEWAY_SKIP_VERIFY_HOSTS")
+        .unwrap_or_default()
+        .split(',')
+        .map(|s| s.trim().to_lowercase())
+        .filter(|s| !s.is_empty())
+        .collect()
+}
+
+/// Returns true if `host` matches `pattern`.
+///
+/// - `*.example.com` matches `foo.example.com` and `example.com` itself.
+/// - `example.com` matches only `example.com`.
+fn host_matches_skip_verify(host: &str, patterns: &[String]) -> bool {
+    let host = host.to_lowercase();
+    patterns.iter().any(|pattern| {
+        let pattern = pattern.to_lowercase();
+        if let Some(suffix) = pattern.strip_prefix("*.") {
+            host == suffix || host.ends_with(&format!(".{suffix}"))
+        } else {
+            host == pattern
+        }
+    })
 }
 
 impl GatewayServer {
@@ -75,9 +115,20 @@ impl GatewayServer {
         vault_service: Arc<vault::VaultService>,
         cache: Arc<dyn CacheStore>,
     ) -> Self {
+        let global_skip = std::env::var("GATEWAY_DANGER_ACCEPT_INVALID_CERTS").is_ok();
+        let skip_verify_hosts = Arc::new(parse_skip_verify_hosts());
+
+        if global_skip {
+            warn!("GATEWAY_DANGER_ACCEPT_INVALID_CERTS is set: TLS verification disabled for ALL upstream hosts");
+        } else if !skip_verify_hosts.is_empty() {
+            info!(hosts = ?skip_verify_hosts.as_ref(), "TLS verification disabled for matched hosts (GATEWAY_SKIP_VERIFY_HOSTS)");
+        }
+
         let state = GatewayState {
             ca: Arc::new(ca),
-            http_client: build_http_client(),
+            http_client: build_http_client(global_skip),
+            http_client_no_verify: build_http_client(true),
+            skip_verify_hosts,
             policy_engine,
             cache,
             vault_service,
@@ -298,7 +349,13 @@ async fn handle_connect(
     );
 
     let ca = Arc::clone(&state.ca);
-    let http_client = state.http_client.clone();
+    let skip_verify = host_matches_skip_verify(&hostname, &state.skip_verify_hosts);
+    let http_client = if skip_verify {
+        info!(host = %hostname, "TLS verification skipped (GATEWAY_SKIP_VERIFY_HOSTS)");
+        state.http_client_no_verify.clone()
+    } else {
+        state.http_client.clone()
+    };
     let cache = Arc::clone(&state.cache);
     let agent_token_owned = agent_token.clone().unwrap_or_default();
 
@@ -635,7 +692,7 @@ mod tests {
         });
 
         // Act: use the same client the gateway uses in production.
-        let client = build_http_client();
+        let client = build_http_client(false);
         let resp = client
             .get(format!("http://{addr}/test"))
             .send()
@@ -764,6 +821,57 @@ mod tests {
                 "{name} should be forwarded in responses"
             );
         }
+    }
+
+    // ── host_matches_skip_verify ─────────────────────────────────────────
+
+    #[test]
+    fn skip_verify_exact_match() {
+        let patterns = vec!["internal.corp".to_string()];
+        assert!(host_matches_skip_verify("internal.corp", &patterns));
+        assert!(!host_matches_skip_verify("other.corp", &patterns));
+        assert!(!host_matches_skip_verify("sub.internal.corp", &patterns));
+    }
+
+    #[test]
+    fn skip_verify_wildcard_matches_subdomain_and_apex() {
+        let patterns = vec!["*.internal.corp".to_string()];
+        assert!(host_matches_skip_verify("foo.internal.corp", &patterns));
+        assert!(host_matches_skip_verify("a.b.internal.corp", &patterns));
+        assert!(host_matches_skip_verify("internal.corp", &patterns));
+        assert!(!host_matches_skip_verify("notinternal.corp", &patterns));
+        assert!(!host_matches_skip_verify("evil-internal.corp", &patterns));
+    }
+
+    #[test]
+    fn skip_verify_case_insensitive() {
+        let patterns = vec!["Internal.Corp".to_string()];
+        assert!(host_matches_skip_verify("INTERNAL.CORP", &patterns));
+        assert!(host_matches_skip_verify("internal.corp", &patterns));
+    }
+
+    #[test]
+    fn skip_verify_empty_patterns_never_matches() {
+        assert!(!host_matches_skip_verify("anything.com", &[]));
+    }
+
+    // ── parse_skip_verify_hosts ──────────────────────────────────────────
+
+    #[test]
+    fn parse_skip_verify_hosts_splits_and_trims() {
+        std::env::set_var(
+            "GATEWAY_SKIP_VERIFY_HOSTS",
+            " foo.com , *.bar.com , baz.io ",
+        );
+        let hosts = parse_skip_verify_hosts();
+        assert_eq!(hosts, vec!["foo.com", "*.bar.com", "baz.io"]);
+        std::env::remove_var("GATEWAY_SKIP_VERIFY_HOSTS");
+    }
+
+    #[test]
+    fn parse_skip_verify_hosts_empty_when_unset() {
+        std::env::remove_var("GATEWAY_SKIP_VERIFY_HOSTS");
+        assert!(parse_skip_verify_hosts().is_empty());
     }
 
     // ── respond_407 ─────────────────────────────────────────────────────
