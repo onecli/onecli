@@ -88,6 +88,12 @@ export const github: AppDefinition = {
         },
       );
 
+      if (!tokenRes.ok) {
+        throw new Error(
+          `GitHub token exchange failed: HTTP ${tokenRes.status} ${tokenRes.statusText}`,
+        );
+      }
+
       const tokenData = (await tokenRes.json()) as {
         access_token?: string;
         scope?: string;
