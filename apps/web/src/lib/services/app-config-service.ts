@@ -55,9 +55,15 @@ export const getAppConfigCredentials = async (
 
   if (!config.credentials) return settings;
 
-  const decrypted = JSON.parse(
-    await cryptoService.decrypt(config.credentials),
-  ) as Record<string, string>;
+  let decrypted: Record<string, string>;
+  try {
+    decrypted = JSON.parse(
+      await cryptoService.decrypt(config.credentials),
+    ) as Record<string, string>;
+  } catch {
+    // Corrupted or invalid encrypted credentials — return settings only
+    return settings;
+  }
 
   return { ...settings, ...decrypted };
 };

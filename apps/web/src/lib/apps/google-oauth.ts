@@ -48,6 +48,12 @@ export const exchangeGoogleCode = async ({
     }),
   });
 
+  if (!tokenRes.ok) {
+    throw new Error(
+      `Google token exchange failed: ${tokenRes.status} ${tokenRes.statusText}`,
+    );
+  }
+
   const tokenData = (await tokenRes.json()) as {
     access_token?: string;
     refresh_token?: string;
