@@ -98,6 +98,23 @@ RUN chmod +x ./entrypoint.sh
 RUN mkdir -p /app/data && chown node:node /app/data
 VOLUME ["/app/data"]
 
+# 1Password CLI (opt-in for service-account mode)
+ARG INSTALL_OP_CLI=false
+ARG OP_CLI_VERSION=2.30.3
+ARG TARGETARCH
+RUN if [ "$INSTALL_OP_CLI" = "true" ]; then \
+      apk add --no-cache unzip && \
+      case "$TARGETARCH" in \
+        amd64) OP_ARCH="amd64" ;; \
+        arm64) OP_ARCH="arm64" ;; \
+        *) echo "Unsupported arch: $TARGETARCH" && exit 1 ;; \
+      esac && \
+      wget -qO /tmp/op.zip "https://cache.agilebits.com/dist/1P/op2/pkg/v${OP_CLI_VERSION}/op_linux_${OP_ARCH}_v${OP_CLI_VERSION}.zip" && \
+      unzip /tmp/op.zip -d /usr/local/bin/ && \
+      rm /tmp/op.zip && \
+      chmod +x /usr/local/bin/op; \
+    fi
+
 USER node
 
 EXPOSE 10254 10255

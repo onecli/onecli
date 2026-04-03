@@ -151,8 +151,14 @@ impl GatewayServer {
 
         // CORS configuration for browser → gateway requests.
         // credentials: true requires explicit headers/methods (not wildcard *).
+        let allowed_origins: Vec<HeaderValue> = std::env::var("ALLOWED_ORIGINS")
+            .unwrap_or_else(|_| "http://localhost:10254".to_string())
+            .split(',')
+            .filter_map(|s| s.trim().parse().ok())
+            .collect();
+
         let cors_layer = CorsLayer::new()
-            .allow_origin(tower_http::cors::AllowOrigin::mirror_request())
+            .allow_origin(allowed_origins)
             .allow_headers([
                 hyper::header::CONTENT_TYPE,
                 hyper::header::AUTHORIZATION,
@@ -172,6 +178,12 @@ impl GatewayServer {
         let axum_router = Router::new()
             .route("/healthz", axum::routing::get(healthz))
             .route("/me", axum::routing::get(me))
+            // 1Password-specific discovery (must precede generic {provider} routes)
+            .route(
+                "/api/vault/onepassword/info",
+                axum::routing::get(vault::api::vault_info),
+            )
+            // Provider-generic vault routes
             .route(
                 "/api/vault/{provider}/pair",
                 axum::routing::post(vault::api::vault_pair),
@@ -183,6 +195,15 @@ impl GatewayServer {
             .route(
                 "/api/vault/{provider}/pair",
                 axum::routing::delete(vault::api::vault_disconnect),
+            )
+            .route(
+                "/api/vault/{provider}/mappings",
+                axum::routing::get(vault::api::vault_list_mappings)
+                    .put(vault::api::vault_upsert_mapping),
+            )
+            .route(
+                "/api/vault/{provider}/mappings/{hostname}",
+                axum::routing::delete(vault::api::vault_delete_mapping),
             )
             .route(
                 "/api/cache/invalidate",
@@ -301,7 +322,7 @@ async fn handle_connect(
         .context("CONNECT request missing host:port")?
         .to_string();
 
-    let hostname = strip_port(&host).to_string();
+    let hostname = strip_port(&host).to_ascii_lowercase();
 
     // Extract agent token from Proxy-Authorization header.
     let agent_token = inject::extract_agent_token(&req).filter(|t| !t.is_empty());

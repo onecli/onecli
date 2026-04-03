@@ -15,7 +15,7 @@ const KEY_LEN: usize = 32;
 const IV_LEN: usize = 12;
 const TAG_LEN: usize = 16;
 
-/// Service for decrypting AES-256-GCM encrypted secrets.
+/// Service for encrypting and decrypting AES-256-GCM secrets.
 pub(crate) struct CryptoService {
     key: aead::LessSafeKey,
 }
@@ -264,5 +264,26 @@ mod tests {
     #[test]
     fn invalid_base64_key() {
         assert!(CryptoService::from_base64_key("not-valid-base64!!!").is_err());
+    }
+
+    #[tokio::test]
+    async fn encrypt_round_trip() {
+        let key_b64 = random_key_b64();
+        let service = CryptoService::from_base64_key(&key_b64).expect("create service");
+        let plaintext = "ops_test-service-account-token-1234567890";
+        let encrypted = service.encrypt(plaintext).await.expect("encrypt");
+        // Verify format: iv:tag:ciphertext (3 base64 parts)
+        assert_eq!(encrypted.matches(':').count(), 2);
+        let decrypted = service.decrypt(&encrypted).await.expect("decrypt");
+        assert_eq!(decrypted, plaintext);
+    }
+
+    #[tokio::test]
+    async fn encrypt_produces_different_ciphertext_each_time() {
+        let key_b64 = random_key_b64();
+        let service = CryptoService::from_base64_key(&key_b64).expect("create service");
+        let e1 = service.encrypt("same").await.expect("e1");
+        let e2 = service.encrypt("same").await.expect("e2");
+        assert_ne!(e1, e2, "random IV should produce different ciphertext");
     }
 }

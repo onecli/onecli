@@ -2337,6 +2337,7 @@ dependencies = [
  "ap-noise",
  "ap-proxy-client",
  "ap-proxy-protocol",
+ "arc-swap",
  "async-trait",
  "aws-config",
  "aws-sdk-kms",
