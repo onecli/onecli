@@ -2,6 +2,7 @@
 
 import { db, Prisma } from "@onecli/db";
 import { cryptoService } from "@/lib/crypto";
+import { logger } from "@/lib/logger";
 import { ServiceError } from "@/lib/services/errors";
 import type { OAuthConfigField } from "@/lib/apps/types";
 
@@ -60,8 +61,11 @@ export const getAppConfigCredentials = async (
     decrypted = JSON.parse(
       await cryptoService.decrypt(config.credentials),
     ) as Record<string, string>;
-  } catch {
-    // Corrupted or invalid encrypted credentials — return settings only
+  } catch (err) {
+    logger.warn(
+      { err, accountId, provider },
+      "failed to decrypt app config credentials",
+    );
     return settings;
   }
 
