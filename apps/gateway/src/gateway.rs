@@ -178,9 +178,15 @@ async fn invalidate_cache(
     )
 }
 
-/// Reject non-CONNECT requests to unknown routes with 400 Bad Request.
+/// Reject non-proxy, non-CONNECT requests to unknown routes with 400 Bad Request.
 async fn fallback() -> StatusCode {
     StatusCode::BAD_REQUEST
+}
+
+/// An HTTP proxy request has an absolute URI with `http://` scheme
+/// (RFC 7230 §5.3.2). Direct requests use origin-form (`/path`).
+fn is_http_proxy_request<T>(req: &Request<T>) -> bool {
+    req.uri().scheme_str() == Some("http")
 }
 
 // ── Connection handling ─────────────────────────────────────────────────
@@ -209,8 +215,10 @@ async fn handle_connection(
                 async move {
                     if req.method() == Method::CONNECT {
                         handle_connect(req, peer_addr, state).await
+                    } else if is_http_proxy_request(&req) {
+                        handle_http_proxy(req, peer_addr, state).await
                     } else {
-                        // Axum handles all non-CONNECT routes (healthz, vault API, fallback)
+                        // Axum handles all non-proxy routes (healthz, vault API, fallback)
                         let resp: Response<axum::body::Body> = router
                             .oneshot(req)
                             .await
@@ -334,6 +342,81 @@ async fn handle_connect(
     Ok(Response::new(axum::body::Body::empty()))
 }
 
+// ── HTTP proxy handling ─────────────────────────────────────────────────
+
+/// Handle a plain HTTP proxy request (absolute URI like `GET http://host/path`).
+///
+/// Unlike CONNECT, there is no tunnel upgrade or TLS — the gateway reads the
+/// request directly, applies credential injection, and forwards upstream over HTTP.
+async fn handle_http_proxy(
+    req: Request<Incoming>,
+    peer_addr: SocketAddr,
+    state: GatewayState,
+) -> Result<Response<axum::body::Body>, anyhow::Error> {
+    let authority = req
+        .uri()
+        .authority()
+        .context("HTTP proxy request missing authority")?
+        .to_string();
+    let hostname = strip_port(&authority).to_string();
+
+    let agent_token = inject::extract_agent_token(&req).filter(|t| !t.is_empty());
+
+    let (mut injection_rules, policy_rules, account_id) = if let Some(ref token) = agent_token {
+        match connect::resolve(token, &hostname, &state.policy_engine, &*state.cache).await {
+            Ok(resp) => (resp.injection_rules, resp.policy_rules, resp.account_id),
+            Err(ConnectError::InvalidToken) => {
+                warn!(peer = %peer_addr, host = %authority, "HTTP proxy rejected: invalid agent token");
+                return Ok(respond_407());
+            }
+            Err(ConnectError::Internal(e)) => {
+                warn!(peer = %peer_addr, host = %authority, error = %e, "HTTP proxy rejected: internal error");
+                let mut resp = Response::new(axum::body::Body::empty());
+                *resp.status_mut() = StatusCode::BAD_GATEWAY;
+                return Ok(resp);
+            }
+        }
+    } else {
+        (vec![], vec![], None)
+    };
+
+    // Vault fallback
+    if injection_rules.is_empty() {
+        if let Some(ref aid) = account_id {
+            if let Some(cred) = state.vault_service.request_credential(aid, &hostname).await {
+                let vault_rules = inject::vault_credential_to_rules(&hostname, &cred);
+                if !vault_rules.is_empty() {
+                    injection_rules = vault_rules;
+                    info!(host = %hostname, account_id = %aid, "http_proxy: using vault credential");
+                }
+            }
+        }
+    }
+
+    info!(
+        peer = %peer_addr,
+        host = %authority,
+        injection_count = injection_rules.len(),
+        policy_count = policy_rules.len(),
+        "HTTP_PROXY"
+    );
+
+    let resp = forward_request(
+        req,
+        &authority,
+        "http",
+        state.http_client.clone(),
+        &injection_rules,
+        &policy_rules,
+        &*state.cache,
+        &agent_token.unwrap_or_default(),
+    )
+    .await?;
+
+    // Convert the response body type to match the axum::body::Body return type
+    Ok(resp.map(axum::body::Body::new))
+}
+
 // ── MITM & tunnel ───────────────────────────────────────────────────────
 
 /// MITM: terminate TLS with the client using a generated leaf cert,
@@ -383,8 +466,10 @@ async fn mitm(
                 let cache = Arc::clone(&cache);
                 let token = Arc::clone(&agent_token);
                 async move {
-                    forward_request(req, &host, client, &inj_rules, &pol_rules, &*cache, &token)
-                        .await
+                    forward_request(
+                        req, &host, "https", client, &inj_rules, &pol_rules, &*cache, &token,
+                    )
+                    .await
                 }
             }),
         )
@@ -396,9 +481,11 @@ async fn mitm(
 /// Both request and response bodies are streamed — no full buffering in memory.
 /// This is critical for SSE (Server-Sent Events) and large payloads.
 /// Checks policy rules first (returns 403/429), then applies injection rules.
+#[allow(clippy::too_many_arguments)]
 async fn forward_request(
     req: Request<Incoming>,
     host: &str,
+    scheme: &str,
     http_client: reqwest::Client,
     injection_rules: &[InjectionRule],
     policy_rules: &[PolicyRule],
@@ -418,7 +505,7 @@ async fn forward_request(
         .path_and_query()
         .map(|pq| pq.as_str().to_string())
         .unwrap_or_else(|| "/".to_string());
-    let url = format!("https://{host}{path}");
+    let url = format!("{scheme}://{host}{path}");
 
     // Check policy rules before forwarding
     match policy::evaluate(method.as_str(), &path, policy_rules, agent_token, cache).await {
@@ -764,6 +851,33 @@ mod tests {
                 "{name} should be forwarded in responses"
             );
         }
+    }
+
+    // ── is_http_proxy_request ──────────────────────────────────────────
+
+    #[test]
+    fn http_proxy_detected_for_absolute_uri() {
+        let req = Request::builder()
+            .uri("http://api.local:8080/v1/data")
+            .body(())
+            .unwrap();
+        assert!(is_http_proxy_request(&req));
+    }
+
+    #[test]
+    fn http_proxy_not_detected_for_relative_uri() {
+        let req = Request::builder().uri("/healthz").body(()).unwrap();
+        assert!(!is_http_proxy_request(&req));
+    }
+
+    #[test]
+    fn http_proxy_not_detected_for_https_uri() {
+        // HTTPS absolute URIs shouldn't match — those use CONNECT
+        let req = Request::builder()
+            .uri("https://api.example.com/data")
+            .body(())
+            .unwrap();
+        assert!(!is_http_proxy_request(&req));
     }
 
     // ── respond_407 ─────────────────────────────────────────────────────
