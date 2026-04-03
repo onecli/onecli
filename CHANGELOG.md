@@ -1,5 +1,18 @@
 # Changelog
 
+## [1.12.0](https://github.com/onecli/onecli/compare/v1.11.0...v1.12.0) (2026-04-03)
+
+
+### Features
+
+* add HTTP proxy support alongside HTTPS ([#150](https://github.com/onecli/onecli/issues/150)) ([ec24fba](https://github.com/onecli/onecli/commit/ec24fbade5527671480c0b0c4541c90736f278fa))
+
+
+### Bug Fixes
+
+* add missing error handling in OAuth token exchange and credential decryption ([#148](https://github.com/onecli/onecli/issues/148)) ([d9e70c6](https://github.com/onecli/onecli/commit/d9e70c69bba6b42d086e27b00f2de28da91235d5))
+* **gateway:** add GATEWAY_SKIP_VERIFY_HOSTS for selective TLS skip ([#145](https://github.com/onecli/onecli/issues/145)) ([962d948](https://github.com/onecli/onecli/commit/962d948b54cc061d50a956f18b5c810c2c221f24))
+
 ## [1.11.0](https://github.com/onecli/onecli/compare/v1.10.0...v1.11.0) (2026-04-02)
 
 
