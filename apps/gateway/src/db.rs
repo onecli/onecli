@@ -23,6 +23,7 @@ pub(crate) async fn create_pool(database_url: &str) -> Result<PgPool> {
 #[derive(Debug, FromRow)]
 pub(crate) struct AgentRow {
     pub id: String,
+    pub name: String,
     pub account_id: String,
     pub secret_mode: String,
 }
@@ -30,6 +31,7 @@ pub(crate) struct AgentRow {
 /// A secret row from the `secrets` table.
 #[derive(Debug, FromRow)]
 pub(crate) struct SecretRow {
+    pub name: String,
     #[sqlx(rename = "type")]
     pub type_: String,
     pub encrypted_value: String,
@@ -121,7 +123,7 @@ pub(crate) async fn find_agent_by_token(
     access_token: &str,
 ) -> Result<Option<AgentRow>> {
     sqlx::query_as::<_, AgentRow>(
-        r#"SELECT id, account_id, secret_mode FROM agents WHERE access_token = $1 LIMIT 1"#,
+        r#"SELECT id, name, account_id, secret_mode FROM agents WHERE access_token = $1 LIMIT 1"#,
     )
     .bind(access_token)
     .fetch_optional(pool)
@@ -135,7 +137,7 @@ pub(crate) async fn find_secrets_by_account(
     account_id: &str,
 ) -> Result<Vec<SecretRow>> {
     sqlx::query_as::<_, SecretRow>(
-        r#"SELECT type, encrypted_value, host_pattern, path_pattern, injection_config FROM secrets WHERE account_id = $1"#,
+        r#"SELECT name, type, encrypted_value, host_pattern, path_pattern, injection_config FROM secrets WHERE account_id = $1"#,
     )
     .bind(account_id)
     .fetch_all(pool)
@@ -146,7 +148,7 @@ pub(crate) async fn find_secrets_by_account(
 /// Find secrets assigned to a specific agent (selective mode).
 pub(crate) async fn find_secrets_by_agent(pool: &PgPool, agent_id: &str) -> Result<Vec<SecretRow>> {
     sqlx::query_as::<_, SecretRow>(
-        r#"SELECT s.type, s.encrypted_value, s.host_pattern, s.path_pattern, s.injection_config
+        r#"SELECT s.name, s.type, s.encrypted_value, s.host_pattern, s.path_pattern, s.injection_config
            FROM secrets s
            INNER JOIN agent_secrets as_ ON s.id = as_.secret_id
            WHERE as_.agent_id = $1"#,

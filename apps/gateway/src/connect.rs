@@ -27,6 +27,8 @@ pub(crate) struct ConnectResponse {
     pub injection_rules: Vec<InjectionRule>,
     pub policy_rules: Vec<PolicyRule>,
     pub account_id: Option<String>,
+    /// Agent name for audit logging.
+    pub agent_name: Option<String>,
 }
 
 /// Errors from the connect resolution.
@@ -71,6 +73,7 @@ impl PolicyEngine {
             injection_rules,
             policy_rules,
             account_id: Some(agent.account_id.clone()),
+            agent_name: Some(agent.name.clone()),
         })
     }
 
@@ -127,6 +130,7 @@ impl PolicyEngine {
                     .clone()
                     .unwrap_or_else(|| "*".to_string()),
                 injections,
+                source_name: Some(secret.name.clone()),
             });
         }
 
@@ -186,6 +190,7 @@ impl PolicyEngine {
                 rules.push(InjectionRule {
                     path_pattern,
                     injections,
+                    source_name: Some(format!("app:{}", provider)),
                 });
             }
         }
@@ -510,6 +515,7 @@ mod tests {
             injection_rules: vec![],
             policy_rules: vec![],
             account_id: None,
+            agent_name: None,
         };
 
         store

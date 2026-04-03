@@ -244,7 +244,7 @@ async fn handle_connect(
     // Extract agent token from Proxy-Authorization header.
     let agent_token = inject::extract_agent_token(&req).filter(|t| !t.is_empty());
 
-    let (mut intercept, mut injection_rules, policy_rules, account_id) = if let Some(ref token) =
+    let (mut intercept, mut injection_rules, policy_rules, account_id, agent_name) = if let Some(ref token) =
         agent_token
     {
         match connect::resolve(token, &hostname, &state.policy_engine, &*state.cache).await {
@@ -253,6 +253,7 @@ async fn handle_connect(
                 resp.injection_rules,
                 resp.policy_rules,
                 resp.account_id,
+                resp.agent_name,
             ),
             Err(ConnectError::InvalidToken) => {
                 warn!(peer = %peer_addr, host = %host, "CONNECT rejected: invalid agent token");
@@ -267,7 +268,7 @@ async fn handle_connect(
         }
     } else {
         // No auth — plain tunnel (no MITM, no injection)
-        (false, vec![], vec![], None)
+        (false, vec![], vec![], None, None)
     };
 
     // Vault fallback: if no DB secrets matched, try vault providers for this user.
@@ -301,6 +302,7 @@ async fn handle_connect(
     let http_client = state.http_client.clone();
     let cache = Arc::clone(&state.cache);
     let agent_token_owned = agent_token.clone().unwrap_or_default();
+    let agent_name_owned = agent_name.clone();
 
     tokio::spawn(async move {
         match hyper::upgrade::on(req).await {
@@ -315,6 +317,7 @@ async fn handle_connect(
                         policy_rules,
                         cache,
                         agent_token_owned,
+                        agent_name_owned,
                     )
                     .await
                 } else {
@@ -348,6 +351,7 @@ async fn mitm(
     policy_rules: Vec<PolicyRule>,
     cache: Arc<dyn CacheStore>,
     agent_token: String,
+    agent_name: Option<String>,
 ) -> Result<()> {
     let hostname = strip_port(host);
 
@@ -368,6 +372,7 @@ async fn mitm(
     let injection_rules = Arc::new(injection_rules);
     let policy_rules = Arc::new(policy_rules);
     let agent_token = Arc::new(agent_token);
+    let agent_name = Arc::new(agent_name.unwrap_or_default());
     let io = TokioIo::new(tls_stream);
 
     http1::Builder::new()
@@ -382,8 +387,9 @@ async fn mitm(
                 let pol_rules = Arc::clone(&policy_rules);
                 let cache = Arc::clone(&cache);
                 let token = Arc::clone(&agent_token);
+                let name = Arc::clone(&agent_name);
                 async move {
-                    forward_request(req, &host, client, &inj_rules, &pol_rules, &*cache, &token)
+                    forward_request(req, &host, client, &inj_rules, &pol_rules, &*cache, &token, &name)
                         .await
                 }
             }),
@@ -404,6 +410,7 @@ async fn forward_request(
     policy_rules: &[PolicyRule],
     cache: &dyn CacheStore,
     agent_token: &str,
+    agent_name: &str,
 ) -> anyhow::Result<
     Response<
         Either<
@@ -423,7 +430,7 @@ async fn forward_request(
     // Check policy rules before forwarding
     match policy::evaluate(method.as_str(), &path, policy_rules, agent_token, cache).await {
         PolicyDecision::Blocked => {
-            warn!(method = %method, url = %url, "BLOCKED by policy rule");
+            warn!(agent = %agent_name, method = %method, host = %strip_port(host), path = %path, status = 403, result = "blocked", "AUDIT");
             let body = serde_json::json!({
                 "error": "blocked_by_policy",
                 "message": "This request was blocked by an OneCLI policy rule. Check your rules at https://onecli.sh or your OneCLI dashboard.",
@@ -443,7 +450,7 @@ async fn forward_request(
             window,
             retry_after_secs,
         } => {
-            warn!(method = %method, url = %url, limit, window, "RATE LIMITED by policy rule");
+            warn!(agent = %agent_name, method = %method, host = %strip_port(host), path = %path, status = 429, limit, window, result = "rate_limited", "AUDIT");
             let body = serde_json::json!({
                 "error": "rate_limited",
                 "message": "Rate limit exceeded. This request was throttled by an OneCLI policy rule. Check your rules at https://onecli.sh or your OneCLI dashboard.",
@@ -480,6 +487,12 @@ async fn forward_request(
     // Apply injection rules matching this request path
     let injection_count = inject::apply_injections(&mut headers, &path, injection_rules);
 
+    // Collect secret names used for audit logging
+    let secret_names: Vec<&str> = injection_rules
+        .iter()
+        .filter_map(|r| r.source_name.as_deref())
+        .collect();
+
     // Build upstream request with (possibly modified) headers
     let mut upstream = http_client.request(method.clone(), &url);
     for (name, value) in headers.iter() {
@@ -490,10 +503,29 @@ async fn forward_request(
     upstream = upstream.body(reqwest::Body::wrap(body));
 
     // Send to real server
-    let upstream_resp = upstream
-        .send()
-        .await
-        .with_context(|| format!("forwarding to {url}"))?;
+    let upstream_resp = match upstream.send().await {
+        Ok(resp) => resp,
+        Err(e) => {
+            let error_type = if e.is_timeout() {
+                "timeout"
+            } else if e.is_connect() {
+                "connection_refused"
+            } else {
+                "upstream_error"
+            };
+            warn!(
+                agent = %agent_name,
+                method = %method,
+                host = %strip_port(host),
+                path = %path,
+                secrets = ?secret_names,
+                error = %e,
+                result = %error_type,
+                "AUDIT"
+            );
+            return Err(e).with_context(|| format!("forwarding to {url}"));
+        }
+    };
 
     let status = upstream_resp.status();
     let resp_headers = upstream_resp.headers().clone();
@@ -504,14 +536,42 @@ async fn forward_request(
         .and_then(|v| v.to_str().ok())
         .unwrap_or("-");
 
-    info!(
-        method = %method,
-        url = %url,
-        status = %status.as_u16(),
-        content_type = %content_type,
-        injections_applied = injection_count,
-        "MITM"
-    );
+    // Audit log levels:
+    //   AUDIT_LOG=basic  → agent, host, method, status, secrets used
+    //   AUDIT_LOG=full   → also includes path (may contain sensitive data)
+    //   (unset)          → minimal logging (existing behavior)
+    let audit_level = std::env::var("AUDIT_LOG").unwrap_or_default();
+    if audit_level == "full" {
+        info!(
+            agent = %agent_name,
+            method = %method,
+            host = %strip_port(host),
+            path = %path,
+            status = %status.as_u16(),
+            secrets = ?secret_names,
+            result = "allowed",
+            "AUDIT"
+        );
+    } else if audit_level == "basic" {
+        info!(
+            agent = %agent_name,
+            method = %method,
+            host = %strip_port(host),
+            status = %status.as_u16(),
+            secrets = ?secret_names,
+            result = "allowed",
+            "AUDIT"
+        );
+    } else {
+        info!(
+            method = %method,
+            url = %url,
+            status = %status.as_u16(),
+            content_type = %content_type,
+            injections_applied = injection_count,
+            "MITM"
+        );
+    }
 
     // Stream response body to client (no buffering — critical for SSE)
     let resp_stream = upstream_resp.bytes_stream().map_ok(Frame::data);

@@ -41,6 +41,9 @@ pub(crate) enum Injection {
 pub(crate) struct InjectionRule {
     pub path_pattern: String,
     pub injections: Vec<Injection>,
+    /// Name of the secret or app connection that produced this rule (for audit logging).
+    #[serde(default)]
+    pub source_name: Option<String>,
 }
 
 // ── Agent token extraction ──────────────────────────────────────────────
@@ -169,6 +172,7 @@ pub(crate) fn vault_credential_to_rules(
     vec![InjectionRule {
         path_pattern: "*".to_string(),
         injections,
+        source_name: Some(format!("vault:{}", hostname)),
     }]
 }
 
@@ -286,6 +290,7 @@ mod tests {
         InjectionRule {
             path_pattern: path_pattern.to_string(),
             injections,
+            source_name: None,
         }
     }
 
