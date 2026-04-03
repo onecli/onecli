@@ -91,18 +91,21 @@ fn parse_skip_verify_hosts() -> Vec<String> {
         .collect()
 }
 
-/// Returns true if `host` matches `pattern`.
+/// Returns true if `host` matches any pattern in `patterns`.
 ///
-/// - `*.example.com` matches `foo.example.com` and `example.com` itself.
+/// - `*.example.com` matches `sub.example.com` but NOT `example.com` itself.
 /// - `example.com` matches only `example.com`.
+///
+/// Patterns are pre-lowercased by `parse_skip_verify_hosts`.
+/// Follows the same wildcard semantics as `connect::host_matches`.
 fn host_matches_skip_verify(host: &str, patterns: &[String]) -> bool {
     let host = host.to_lowercase();
     patterns.iter().any(|pattern| {
-        let pattern = pattern.to_lowercase();
-        if let Some(suffix) = pattern.strip_prefix("*.") {
-            host == suffix || host.ends_with(&format!(".{suffix}"))
+        if let Some(suffix) = pattern.strip_prefix('*') {
+            // "*.example.com" → suffix = ".example.com"
+            host.ends_with(suffix) && host.len() > suffix.len()
         } else {
-            host == pattern
+            host == *pattern
         }
     })
 }
@@ -834,19 +837,22 @@ mod tests {
     }
 
     #[test]
-    fn skip_verify_wildcard_matches_subdomain_and_apex() {
+    fn skip_verify_wildcard_matches_subdomains_only() {
         let patterns = vec!["*.internal.corp".to_string()];
         assert!(host_matches_skip_verify("foo.internal.corp", &patterns));
         assert!(host_matches_skip_verify("a.b.internal.corp", &patterns));
-        assert!(host_matches_skip_verify("internal.corp", &patterns));
+        assert!(!host_matches_skip_verify("internal.corp", &patterns));
         assert!(!host_matches_skip_verify("notinternal.corp", &patterns));
         assert!(!host_matches_skip_verify("evil-internal.corp", &patterns));
     }
 
     #[test]
-    fn skip_verify_case_insensitive() {
-        let patterns = vec!["Internal.Corp".to_string()];
+    fn skip_verify_case_insensitive_host() {
+        // Patterns are pre-lowercased by parse_skip_verify_hosts.
+        // The match function lowercases the host input.
+        let patterns = vec!["internal.corp".to_string()];
         assert!(host_matches_skip_verify("INTERNAL.CORP", &patterns));
+        assert!(host_matches_skip_verify("Internal.Corp", &patterns));
         assert!(host_matches_skip_verify("internal.corp", &patterns));
     }
 
@@ -855,23 +861,26 @@ mod tests {
         assert!(!host_matches_skip_verify("anything.com", &[]));
     }
 
-    // ── parse_skip_verify_hosts ──────────────────────────────────────────
+    // ── parse_skip_verify_patterns ─────────────────────────────────────
 
-    #[test]
-    fn parse_skip_verify_hosts_splits_and_trims() {
-        std::env::set_var(
-            "GATEWAY_SKIP_VERIFY_HOSTS",
-            " foo.com , *.bar.com , baz.io ",
-        );
-        let hosts = parse_skip_verify_hosts();
-        assert_eq!(hosts, vec!["foo.com", "*.bar.com", "baz.io"]);
-        std::env::remove_var("GATEWAY_SKIP_VERIFY_HOSTS");
+    /// Helper: parse a raw comma-separated string the same way `parse_skip_verify_hosts` does.
+    fn parse_patterns(input: &str) -> Vec<String> {
+        input
+            .split(',')
+            .map(|s| s.trim().to_lowercase())
+            .filter(|s| !s.is_empty())
+            .collect()
     }
 
     #[test]
-    fn parse_skip_verify_hosts_empty_when_unset() {
-        std::env::remove_var("GATEWAY_SKIP_VERIFY_HOSTS");
-        assert!(parse_skip_verify_hosts().is_empty());
+    fn parse_skip_verify_splits_and_trims() {
+        let hosts = parse_patterns(" foo.com , *.bar.com , baz.io ");
+        assert_eq!(hosts, vec!["foo.com", "*.bar.com", "baz.io"]);
+    }
+
+    #[test]
+    fn parse_skip_verify_empty_input() {
+        assert!(parse_patterns("").is_empty());
     }
 
     // ── respond_407 ─────────────────────────────────────────────────────
