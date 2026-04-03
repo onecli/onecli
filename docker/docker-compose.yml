@@ -9,7 +9,7 @@ services:
     volumes:
       - pgdata:/var/lib/postgresql
     ports:
-      - "${POSTGRES_PORT:-5432}:5432"
+      - "127.0.0.1:${POSTGRES_PORT:-5432}:5432"
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-onecli}"]
       interval: 5s
@@ -26,8 +26,8 @@ services:
       postgres:
         condition: service_healthy
     ports:
-      - "10254:10254"
-      - "10255:10255"
+      - "127.0.0.1:10254:10254"
+      - "127.0.0.1:10255:10255"
     environment:
       DATABASE_URL: postgresql://${POSTGRES_USER:-onecli}:${POSTGRES_PASSWORD:-onecli}@postgres:5432/${POSTGRES_DB:-onecli}
       NEXTAUTH_SECRET: ${NEXTAUTH_SECRET:-}
