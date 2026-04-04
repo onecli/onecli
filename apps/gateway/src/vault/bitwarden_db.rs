@@ -5,6 +5,7 @@
 
 use std::sync::Arc;
 
+use anyhow::Context;
 use ap_client::{
     ClientError, ConnectionInfo, ConnectionStore, ConnectionUpdate, IdentityFingerprint,
     IdentityProvider,
@@ -195,8 +196,11 @@ pub(super) async fn encrypt_connection_data(
     crypto: &CryptoService,
     cd: &BitwardenConnectionData,
 ) -> anyhow::Result<serde_json::Value> {
-    let json_str = serde_json::to_string(cd)?;
-    let encrypted = crypto.encrypt(&json_str).await?;
+    let json_str = serde_json::to_string(cd).context("serializing connection data")?;
+    let encrypted = crypto
+        .encrypt(&json_str)
+        .await
+        .context("encrypting connection data")?;
     Ok(serde_json::json!({ "encrypted": encrypted }))
 }
 
@@ -208,11 +212,14 @@ pub(super) async fn decrypt_connection_data(
     value: &serde_json::Value,
 ) -> anyhow::Result<BitwardenConnectionData> {
     if let Some(encrypted_str) = value.get("encrypted").and_then(|v| v.as_str()) {
-        let json_str = crypto.decrypt(encrypted_str).await?;
-        Ok(serde_json::from_str(&json_str)?)
+        let json_str = crypto
+            .decrypt(encrypted_str)
+            .await
+            .context("decrypting connection data")?;
+        serde_json::from_str(&json_str).context("deserializing decrypted connection data")
     } else {
         // Legacy: unencrypted connection data — will be encrypted on next write-through
-        Ok(serde_json::from_value(value.clone())?)
+        serde_json::from_value(value.clone()).context("deserializing legacy connection data")
     }
 }
 

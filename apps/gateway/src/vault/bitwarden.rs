@@ -211,7 +211,13 @@ impl BitwardenVaultProvider {
         };
 
         let cd: Option<BitwardenConnectionData> = match row.connection_data.as_ref() {
-            Some(v) => decrypt_connection_data(&self.crypto, v).await.ok(),
+            Some(v) => match decrypt_connection_data(&self.crypto, v).await {
+                Ok(cd) => Some(cd),
+                Err(e) => {
+                    warn!(error = %e, account_id, "failed to decrypt vault connection data");
+                    None
+                }
+            },
             None => None,
         };
 
