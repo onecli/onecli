@@ -306,3 +306,14 @@ model ResendWebhook {
 
   @@map("resend_webhooks")
 }
+
+model CliAuthSession {
+  id        String   @id @default(uuid())
+  code      String   @unique
+  status    String   @default("pending") // "pending" | "confirmed" | "expired"
+  apiKey    String?  @map("api_key")
+  expiresAt DateTime @map("expires_at")
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@map("cli_auth_sessions")
+}

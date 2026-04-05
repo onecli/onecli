@@ -9,7 +9,7 @@ const nextConfig = {
   env: {
     NEXT_PUBLIC_EDITION: process.env.NEXT_PUBLIC_EDITION || "oss",
     NEXT_PUBLIC_API_URL: process.env.API_BASE_URL
-      ? `${isCloud ? "https" : "http"}://${process.env.API_BASE_URL}`
+      ? `${isCloud && process.env.NODE_ENV !== "development" ? "https" : "http"}://${process.env.API_BASE_URL}`
       : "http://localhost:10255",
   },
   turbopack: {

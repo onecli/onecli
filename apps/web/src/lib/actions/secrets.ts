@@ -3,6 +3,7 @@
 import { db } from "@onecli/db";
 import { resolveUser } from "@/lib/actions/resolve-user";
 import { DEMO_SECRET_NAME } from "@/lib/constants";
+import { seedDemoSecret as seedDemoSecretService } from "@/lib/services/secret-service";
 import {
   listSecrets,
   createSecret as createSecretService,
@@ -50,6 +51,33 @@ export const deleteSecret = async (secretId: string): Promise<void> => {
       metadata: { secretId },
     }),
   );
+};
+
+export const getInstallInfo = async () => {
+  const { accountId, userId } = await resolveUser();
+
+  const [apiKey, agent] = await Promise.all([
+    db.apiKey.findFirst({
+      where: { userId, accountId },
+      select: { key: true },
+    }),
+    db.agent.findFirst({
+      where: { accountId, isDefault: true },
+      select: { accessToken: true },
+    }),
+  ]);
+
+  return {
+    apiKey: apiKey?.key ?? null,
+    agentToken: agent?.accessToken ?? null,
+    gatewayUrl: process.env.API_BASE_URL ?? "localhost:10255",
+    appUrl: process.env.NEXT_PUBLIC_APP_URL ?? "http://localhost:10254",
+  };
+};
+
+export const seedDemoSecret = async () => {
+  const { accountId } = await resolveUser();
+  await seedDemoSecretService(accountId);
 };
 
 export const getDemoInfo = async () => {

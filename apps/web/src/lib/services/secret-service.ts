@@ -1,6 +1,7 @@
 import { db, Prisma } from "@onecli/db";
 import { cryptoService } from "@/lib/crypto";
 import { ServiceError } from "@/lib/services/errors";
+import { DEMO_SECRET_NAME, DEMO_SECRET_VALUE } from "@/lib/constants";
 import {
   detectAnthropicAuthMode,
   type CreateSecretInput,
@@ -184,5 +185,32 @@ export const updateSecret = async (
   await db.secret.update({
     where: { id: secretId },
     data,
+  });
+};
+
+/**
+ * Create the demo secret for an account if it doesn't already exist.
+ */
+export const seedDemoSecret = async (accountId: string) => {
+  const existing = await db.secret.findFirst({
+    where: { accountId, name: DEMO_SECRET_NAME },
+    select: { id: true },
+  });
+
+  if (existing) return;
+
+  await db.secret.create({
+    data: {
+      name: DEMO_SECRET_NAME,
+      type: "generic",
+      encryptedValue: await cryptoService.encrypt(DEMO_SECRET_VALUE),
+      hostPattern: "httpbin.org",
+      pathPattern: "/anything/*",
+      injectionConfig: {
+        headerName: "Authorization",
+        valueFormat: "Bearer {value}",
+      },
+      accountId,
+    },
   });
 };

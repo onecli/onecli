@@ -1,13 +1,9 @@
 import { type NextRequest, NextResponse } from "next/server";
 import { db } from "@onecli/db";
 import { getServerSession } from "@/lib/auth/server";
-import { cryptoService } from "@/lib/crypto";
 import { logger } from "@/lib/logger";
-import {
-  DEFAULT_AGENT_NAME,
-  DEMO_SECRET_NAME,
-  DEMO_SECRET_VALUE,
-} from "@/lib/constants";
+import { DEFAULT_AGENT_NAME } from "@/lib/constants";
+import { seedDemoSecret } from "@/lib/services/secret-service";
 import { generateApiKey } from "@/lib/services/api-key-service";
 import { generateAccessToken } from "@/lib/services/agent-service";
 import { getSessionAttributes, onUserCreated } from "@/lib/auth/session-hooks";
@@ -127,31 +123,16 @@ export const GET = async (request: NextRequest) => {
       );
     }
 
-    if (!demoSeeded) {
-      ops.push(
-        db.secret.create({
-          data: {
-            name: DEMO_SECRET_NAME,
-            type: "generic",
-            encryptedValue: await cryptoService.encrypt(DEMO_SECRET_VALUE),
-            hostPattern: "httpbin.org",
-            pathPattern: "/anything/*",
-            injectionConfig: {
-              headerName: "Authorization",
-              valueFormat: "Bearer {value}",
-            },
-            accountId,
-          },
-        }),
-        db.account.update({
-          where: { id: accountId },
-          data: { demoSeeded: true },
-        }),
-      );
-    }
-
     if (ops.length > 0) {
       await db.$transaction(ops);
+    }
+
+    if (!demoSeeded) {
+      await seedDemoSecret(accountId);
+      await db.account.update({
+        where: { id: accountId },
+        data: { demoSeeded: true },
+      });
     }
 
     return NextResponse.json({
