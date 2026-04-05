@@ -40,6 +40,7 @@ interface SecretTypeOption {
   description: string;
   icon: React.ReactNode;
   hostDefault: string;
+  nameDefault: string;
 }
 
 const SECRET_TYPE_OPTIONS: SecretTypeOption[] = [
@@ -49,6 +50,7 @@ const SECRET_TYPE_OPTIONS: SecretTypeOption[] = [
     description: "Inject your Anthropic key into requests to api.anthropic.com",
     icon: <Bot className="size-5" />,
     hostDefault: "api.anthropic.com",
+    nameDefault: "Anthropic Token",
   },
   {
     value: "generic",
@@ -56,6 +58,7 @@ const SECRET_TYPE_OPTIONS: SecretTypeOption[] = [
     description: "Inject a custom header into requests matching any host",
     icon: <Key className="size-5" />,
     hostDefault: "",
+    nameDefault: "",
   },
 ];
 
@@ -142,6 +145,7 @@ export const SecretDialog = ({
     setType(selected);
     const option = SECRET_TYPE_OPTIONS.find((o) => o.value === selected);
     setHostPattern(option?.hostDefault ?? "");
+    setName(option?.nameDefault ?? "");
     setStep("form");
   };
 
