@@ -1,3 +1,5 @@
+name: onecli
+
 services:
   postgres:
     image: postgres:18-alpine
@@ -19,8 +21,9 @@ services:
     networks:
       - onecli
 
-  app:
+  onecli:
     image: ghcr.io/onecli/onecli:latest
+    container_name: onecli
     restart: unless-stopped
     depends_on:
       postgres:
