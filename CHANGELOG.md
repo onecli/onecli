@@ -1,5 +1,14 @@
 # Changelog
 
+## [1.12.1](https://github.com/onecli/onecli/compare/v1.12.0...v1.12.1) (2026-04-05)
+
+
+### Bug Fixes
+
+* configurable bind host for Docker port bindings ([#153](https://github.com/onecli/onecli/issues/153)) ([97a36d1](https://github.com/onecli/onecli/commit/97a36d174054403df6322fc009a849cd4538c593))
+* encrypt Bitwarden vault session state at rest in connection_data ([#146](https://github.com/onecli/onecli/issues/146)) ([e6de1e6](https://github.com/onecli/onecli/commit/e6de1e6a654c08cba8995c68986b81af5860849c))
+* pre-fill secret name with "Anthropic Token" for anthropic type ([#157](https://github.com/onecli/onecli/issues/157)) ([86444e0](https://github.com/onecli/onecli/commit/86444e006e74eb0a94d42229518d2c2285ebeae4))
+
 ## [1.12.0](https://github.com/onecli/onecli/compare/v1.11.0...v1.12.0) (2026-04-03)
 
 
