@@ -143,6 +143,7 @@ main() {
 
   echo ""
   echo "  OneCLI is running!"
+  echo "  ONECLI_URL:  http://$ONECLI_BIND_HOST:10254"
   echo ""
   echo "  Dashboard:  http://$ONECLI_BIND_HOST:10254"
   echo "  Gateway:    http://$ONECLI_BIND_HOST:10255"
