@@ -3,7 +3,7 @@
 import { useState, useEffect } from "react";
 import { useInvalidateGatewayCache } from "@/hooks/use-invalidate-cache";
 import { toast } from "sonner";
-import { ArrowLeft, Bot, Key, Settings2 } from "lucide-react";
+import { ArrowLeft, Bot, Key, Settings2, TriangleAlert } from "lucide-react";
 import {
   Dialog,
   DialogContent,
@@ -23,14 +23,10 @@ import {
 } from "@onecli/ui/components/accordion";
 import { Badge } from "@onecli/ui/components/badge";
 import { createSecret, updateSecret } from "@/lib/actions/secrets";
-
-const detectAnthropicKeyType = (
-  val: string,
-): "api_key" | "oauth_token" | null => {
-  if (val.startsWith("sk-ant-api")) return "api_key";
-  if (val.startsWith("sk-ant-oat")) return "oauth_token";
-  return null;
-};
+import {
+  detectAnthropicAuthMode,
+  looksLikeAnthropicKey,
+} from "@/lib/validations/secret";
 
 type SecretType = "anthropic" | "generic";
 
@@ -267,7 +263,16 @@ export const SecretDialog = ({
                       : "Enter secret value"
                   }
                   value={value}
-                  onChange={(e) => setValue(e.target.value)}
+                  onChange={(e) => {
+                    const val = e.target.value;
+                    setValue(val);
+                    if (type === "anthropic" && !name.trim()) {
+                      const detected = detectAnthropicAuthMode(val);
+                      if (detected === "api-key") setName("Anthropic API Key");
+                      else if (detected === "oauth")
+                        setName("Anthropic OAuth Token");
+                    }
+                  }}
                 />
                 <div className="flex items-center gap-2">
                   <p className="text-muted-foreground text-xs">
@@ -277,6 +282,21 @@ export const SecretDialog = ({
                   </p>
                   {type === "anthropic" && <AnthropicKeyBadge value={value} />}
                 </div>
+                {type === "anthropic" &&
+                  value.trim() &&
+                  !looksLikeAnthropicKey(value) && (
+                    <div className="flex items-start gap-1.5 text-xs text-yellow-600 dark:text-yellow-500">
+                      <TriangleAlert className="mt-0.5 size-3 shrink-0" />
+                      <div>
+                        <p>
+                          This doesn&apos;t look like a complete Anthropic key.
+                        </p>
+                        <p>
+                          Keys typically start with sk-ant-api or sk-ant-oat.
+                        </p>
+                      </div>
+                    </div>
+                  )}
               </div>
 
               {type === "generic" && (
@@ -440,7 +460,7 @@ const TypeStep = ({ onSelect }: { onSelect: (type: SecretType) => void }) => (
 );
 
 const AnthropicKeyBadge = ({ value }: { value: string }) => {
-  const detected = detectAnthropicKeyType(value);
+  const detected = detectAnthropicAuthMode(value);
   if (!detected) return null;
 
   return (
@@ -450,12 +470,12 @@ const AnthropicKeyBadge = ({ value }: { value: string }) => {
     >
       <span
         className={
-          detected === "api_key"
+          detected === "api-key"
             ? "bg-brand size-1.5 rounded-full"
             : "bg-blue-500 size-1.5 rounded-full"
         }
       />
-      {detected === "api_key" ? "API Key" : "OAuth Token"}
+      {detected === "api-key" ? "API Key" : "OAuth Token"}
     </Badge>
   );
 };

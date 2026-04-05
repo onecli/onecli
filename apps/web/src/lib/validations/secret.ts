@@ -49,7 +49,9 @@ export const updateSecretSchema = z
 
 export type UpdateSecretInput = z.infer<typeof updateSecretSchema>;
 
-// ── Secret metadata ────────────────────────────────────────────────────
+// ── Anthropic key helpers ──────────────────────────────────────────────
+
+export const ANTHROPIC_KEY_MIN_LENGTH = 40;
 
 export const anthropicAuthModes = ["api-key", "oauth"] as const;
 export type AnthropicAuthMode = (typeof anthropicAuthModes)[number];
@@ -59,8 +61,18 @@ export interface AnthropicSecretMetadata {
 }
 
 /** Detect the auth mode from a plaintext Anthropic secret value. */
-export const detectAnthropicAuthMode = (value: string): AnthropicAuthMode =>
-  value.startsWith("sk-ant-oat") ? "oauth" : "api-key";
+export const detectAnthropicAuthMode = (
+  value: string,
+): AnthropicAuthMode | null => {
+  if (value.startsWith("sk-ant-api")) return "api-key";
+  if (value.startsWith("sk-ant-oat")) return "oauth";
+  return null;
+};
+
+/** Returns true if the value has a known Anthropic prefix and meets the minimum length. */
+export const looksLikeAnthropicKey = (value: string): boolean =>
+  detectAnthropicAuthMode(value) !== null &&
+  value.length >= ANTHROPIC_KEY_MIN_LENGTH;
 
 /** Type-safe accessor for Anthropic metadata from a Prisma Json field. */
 export const parseAnthropicMetadata = (

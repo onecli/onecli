@@ -86,7 +86,9 @@ export const createSecret = async (
 
   const metadata =
     input.type === "anthropic"
-      ? ({ authMode: detectAnthropicAuthMode(value) } as Prisma.InputJsonValue)
+      ? ({
+          authMode: detectAnthropicAuthMode(value) ?? "api-key",
+        } as Prisma.InputJsonValue)
       : Prisma.JsonNull;
 
   const secret = await db.secret.create({
@@ -153,7 +155,7 @@ export const updateSecret = async (
     // Re-detect auth mode when value changes for Anthropic secrets
     if (secret.type === "anthropic") {
       data.metadata = {
-        authMode: detectAnthropicAuthMode(value),
+        authMode: detectAnthropicAuthMode(value) ?? "api-key",
       } as Prisma.InputJsonValue;
     }
   }
