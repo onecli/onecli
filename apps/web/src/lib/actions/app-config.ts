@@ -60,6 +60,23 @@ export const deleteAppConfigAction = async (provider: string) => {
   );
 };
 
+/**
+ * Returns the set of provider IDs that have their envDefaults env vars set.
+ * Only checks apps that define envDefaults in their app definition.
+ */
+export const getAvailableEnvDefaults = async (): Promise<string[]> => {
+  const { apps } = await import("@/lib/apps/registry");
+  return apps
+    .filter((app) => {
+      const envDefaults = app.configurable?.envDefaults;
+      if (!envDefaults) return false;
+      return Object.values(envDefaults).every(
+        (envVar) => !!process.env[envVar],
+      );
+    })
+    .map((app) => app.id);
+};
+
 export const checkAppConfigExists = async (
   provider: string,
 ): Promise<boolean> => {

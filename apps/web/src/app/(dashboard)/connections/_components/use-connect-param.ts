@@ -7,22 +7,27 @@ import type { AppDefinition } from "@/lib/apps/types";
 
 interface UseConnectParamOptions {
   loading: boolean;
+  connectedProviders: Set<string>;
   configuredProviders: Set<string>;
+  envDefaultProviders: Set<string>;
   onConnect: (app: AppDefinition) => void;
   onConfigure: (app: AppDefinition) => void;
 }
 
 /**
  * Reads `?connect=<provider>` from the URL and triggers the appropriate action:
- * - If credentials exist (envDefaults or BYOC): calls `onConnect` (show connect dialog)
- * - If no credentials: calls `onConfigure` (show config dialog)
+ * - Has credentials (env defaults available or BYOC configured): `onConnect`
+ * - No credentials and not already connected: `onConfigure`
  *
+ * Mirrors the same logic as the manual Connect button click handler.
  * Removes the search param from the URL after handling.
  * Only fires once per mount (guarded by ref).
  */
 export const useConnectParam = ({
   loading,
+  connectedProviders,
   configuredProviders,
+  envDefaultProviders,
   onConnect,
   onConfigure,
 }: UseConnectParamOptions) => {
@@ -45,17 +50,23 @@ export const useConnectParam = ({
     router.replace("/connections");
 
     const hasCredentials =
-      !!app.configurable?.envDefaults || configuredProviders.has(app.id);
+      envDefaultProviders.has(app.id) || configuredProviders.has(app.id);
 
-    if (hasCredentials || !app.configurable?.fields) {
-      onConnect(app);
-    } else {
+    if (
+      app.configurable?.fields &&
+      !hasCredentials &&
+      !connectedProviders.has(app.id)
+    ) {
       onConfigure(app);
+    } else {
+      onConnect(app);
     }
   }, [
     loading,
     searchParams,
+    connectedProviders,
     configuredProviders,
+    envDefaultProviders,
     router,
     onConnect,
     onConfigure,

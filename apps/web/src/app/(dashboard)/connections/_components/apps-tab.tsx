@@ -9,7 +9,10 @@ import { cn } from "@onecli/ui/lib/utils";
 import { apps } from "@/lib/apps/registry";
 import type { AppDefinition } from "@/lib/apps/types";
 import { getAppConnections } from "@/lib/actions/connections";
-import { checkAppConfigExists } from "@/lib/actions/app-config";
+import {
+  checkAppConfigExists,
+  getAvailableEnvDefaults,
+} from "@/lib/actions/app-config";
 import { useAppMessages } from "@/hooks/use-app-connected";
 import { AppIcon } from "./app-icon";
 import { ConnectAppDialog } from "./connect-app-dialog";
@@ -24,13 +27,19 @@ export const AppsTab = () => {
   const [configuredProviders, setConfiguredProviders] = useState<Set<string>>(
     () => new Set(),
   );
+  const [envDefaultProviders, setEnvDefaultProviders] = useState<Set<string>>(
+    () => new Set(),
+  );
   const [configApp, setConfigApp] = useState<AppDefinition | null>(null);
   const [connectApp, setConnectApp] = useState<AppDefinition | null>(null);
   const [loading, setLoading] = useState(true);
 
   const fetchConnections = useCallback(async () => {
     try {
-      const connections = await getAppConnections();
+      const [connections, availableDefaults] = await Promise.all([
+        getAppConnections(),
+        getAvailableEnvDefaults(),
+      ]);
       setConnectedProviders(
         new Set(
           connections
@@ -38,6 +47,7 @@ export const AppsTab = () => {
             .map((c) => c.provider),
         ),
       );
+      setEnvDefaultProviders(new Set(availableDefaults));
       const byocApps = apps.filter(
         (a) => a.configurable && !a.configurable.envDefaults,
       );
@@ -78,18 +88,21 @@ export const AppsTab = () => {
   // Handle ?connect=<provider> URL param
   useConnectParam({
     loading,
+    connectedProviders,
     configuredProviders,
+    envDefaultProviders,
     onConnect: setConnectApp,
     onConfigure: setConfigApp,
   });
 
   const handleConnect = (e: React.MouseEvent, app: AppDefinition) => {
     e.stopPropagation();
-    const needsConfig = app.configurable && !app.configurable.envDefaults;
+    const hasCredentials =
+      envDefaultProviders.has(app.id) || configuredProviders.has(app.id);
     if (
-      needsConfig &&
-      !connectedProviders.has(app.id) &&
-      !configuredProviders.has(app.id)
+      app.configurable?.fields &&
+      !hasCredentials &&
+      !connectedProviders.has(app.id)
     ) {
       setConfigApp(app);
       return;
