@@ -5,6 +5,7 @@ import { invalidateGatewayCache } from "@/lib/gateway-invalidate";
 import { getApp } from "@/lib/apps/registry";
 import { db } from "@onecli/db";
 import { upsertAppConfig } from "@/lib/services/app-config-service";
+import { connectAppSchema } from "@/lib/validations/app-config";
 
 export const GET = async (request: NextRequest) => {
   try {
@@ -34,56 +35,40 @@ export const POST = async (request: NextRequest) => {
     const auth = await resolveApiAuth(request);
     if (!auth) return unauthorized();
 
-    const body = (await request.json().catch(() => null)) as {
-      provider?: string;
-      clientId?: string;
-      clientSecret?: string;
-    } | null;
-
-    if (!body?.provider) {
+    const body = await request.json().catch(() => null);
+    const parsed = connectAppSchema.safeParse(body);
+    if (!parsed.success) {
       return NextResponse.json(
-        { error: "provider is required" },
+        { error: parsed.error.issues[0]?.message ?? "Invalid request body" },
         { status: 400 },
       );
     }
 
-    const app = getApp(body.provider);
+    const { provider, clientId, clientSecret } = parsed.data;
+
+    const app = getApp(provider);
     if (!app?.configurable) {
       return NextResponse.json(
-        {
-          error: `Provider "${body.provider}" does not support app configuration`,
-        },
-        { status: 400 },
-      );
-    }
-
-    if (!body.clientId || !body.clientSecret) {
-      return NextResponse.json(
-        { error: "clientId and clientSecret are required" },
+        { error: `Provider "${provider}" does not support app configuration` },
         { status: 400 },
       );
     }
 
     const result = await upsertAppConfig(
       auth.accountId,
-      body.provider,
-      { clientId: body.clientId, clientSecret: body.clientSecret },
+      provider,
+      { clientId, clientSecret },
       app.configurable.fields,
     );
 
     invalidateGatewayCache(request);
 
-    const config = await db.appConfig.findUnique({
-      where: { id: result.id },
-      select: { id: true, provider: true, enabled: true, createdAt: true },
-    });
-
     return NextResponse.json(
       {
-        id: config!.id,
-        provider: config!.provider,
-        status: config!.enabled ? "connected" : "disconnected",
-        createdAt: config!.createdAt.toISOString(),
+        id: result.id,
+        provider: result.provider,
+        status: "connected",
+        createdAt: new Date().toISOString(),
       },
       { status: 201 },
     );
