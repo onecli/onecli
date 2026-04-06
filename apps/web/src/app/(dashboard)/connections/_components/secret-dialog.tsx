@@ -3,7 +3,7 @@
 import { useState, useEffect } from "react";
 import { useInvalidateGatewayCache } from "@/hooks/use-invalidate-cache";
 import { toast } from "sonner";
-import { ArrowLeft, Bot, Key, Settings2, TriangleAlert } from "lucide-react";
+import { ArrowLeft, Bot, Key, Settings2 } from "lucide-react";
 import {
   Dialog,
   DialogContent,
@@ -275,28 +275,29 @@ export const SecretDialog = ({
                   }}
                 />
                 <div className="flex items-center gap-2">
-                  <p className="text-muted-foreground text-xs">
-                    {type === "anthropic"
-                      ? "Paste your API key or OAuth token from the Anthropic Console."
-                      : "Encrypted at rest. You won\u2019t be able to view this value again."}
-                  </p>
+                  {type === "anthropic" &&
+                  value.trim() &&
+                  !looksLikeAnthropicKey(value) ? (
+                    <p className="text-xs text-amber-600 dark:text-amber-400">
+                      {detectAnthropicAuthMode(value) !== null ? (
+                        "This key looks incomplete. Make sure you copied the full value."
+                      ) : (
+                        <>
+                          Keys typically start with{" "}
+                          <code className="text-[11px]">sk-ant-api</code> or{" "}
+                          <code className="text-[11px]">sk-ant-oat</code>
+                        </>
+                      )}
+                    </p>
+                  ) : (
+                    <p className="text-muted-foreground text-xs">
+                      {type === "anthropic"
+                        ? "Paste your API key or OAuth token from the Anthropic Console."
+                        : "Encrypted at rest. You won\u2019t be able to view this value again."}
+                    </p>
+                  )}
                   {type === "anthropic" && <AnthropicKeyBadge value={value} />}
                 </div>
-                {type === "anthropic" &&
-                  value.trim() &&
-                  !looksLikeAnthropicKey(value) && (
-                    <div className="flex items-start gap-1.5 text-xs text-yellow-600 dark:text-yellow-500">
-                      <TriangleAlert className="mt-0.5 size-3 shrink-0" />
-                      <div>
-                        <p>
-                          This doesn&apos;t look like a complete Anthropic key.
-                        </p>
-                        <p>
-                          Keys typically start with sk-ant-api or sk-ant-oat.
-                        </p>
-                      </div>
-                    </div>
-                  )}
               </div>
 
               {type === "generic" && (
