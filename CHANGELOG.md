@@ -1,5 +1,18 @@
 # Changelog
 
+## [1.14.0](https://github.com/onecli/onecli/compare/v1.13.0...v1.14.0) (2026-04-06)
+
+
+### Features
+
+* add loading skeletons, fix content flash, and URL-driven connect ([#166](https://github.com/onecli/onecli/issues/166)) ([dc7e607](https://github.com/onecli/onecli/commit/dc7e6076a711670a57ad492b36a37c36a976e15c))
+
+
+### Bug Fixes
+
+* add GET /api/apps/[provider] route with setup hint ([#167](https://github.com/onecli/onecli/issues/167)) ([28db4c3](https://github.com/onecli/onecli/commit/28db4c3851dc382d4a301edc805e2a622972c284))
+* add loading skeletons and prefetch tab routes for instant navigation ([#164](https://github.com/onecli/onecli/issues/164)) ([aa00bce](https://github.com/onecli/onecli/commit/aa00bce51d22d8fff2e7adc6a4f089fd0e39e0c4))
+
 ## [1.13.0](https://github.com/onecli/onecli/compare/v1.12.1...v1.13.0) (2026-04-06)
 
 
