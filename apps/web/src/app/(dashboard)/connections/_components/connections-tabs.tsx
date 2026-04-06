@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useState, useTransition } from "react";
 import { usePathname, useRouter } from "next/navigation";
 import { useAppMessages } from "@/hooks/use-app-connected";
 import {
@@ -35,6 +35,7 @@ export const ConnectionsTabs = () => {
   const router = useRouter();
   const activeTab = pathToTab(pathname);
   const [connectedCount, setConnectedCount] = useState(0);
+  const [, startTransition] = useTransition();
 
   const fetchCount = useCallback(async () => {
     try {
@@ -56,11 +57,16 @@ export const ConnectionsTabs = () => {
     fetchCount();
   }, [fetchCount]);
 
+  // Prefetch all tab routes so navigation is instant
+  useEffect(() => {
+    Object.values(TAB_ROUTES).forEach((route) => router.prefetch(route));
+  }, [router]);
+
   useAppMessages({ onConnected: fetchCount, onConfigure: router.push });
 
   const handleTabChange = (value: string) => {
     const href = TAB_ROUTES[value];
-    if (href) router.push(href);
+    if (href) startTransition(() => router.push(href));
   };
 
   return (
