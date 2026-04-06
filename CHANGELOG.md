@@ -1,5 +1,17 @@
 # Changelog
 
+## [1.13.0](https://github.com/onecli/onecli/compare/v1.12.1...v1.13.0) (2026-04-06)
+
+
+### Features
+
+* add /api/apps REST routes for CLI app connections ([#160](https://github.com/onecli/onecli/issues/160)) ([8e68d35](https://github.com/onecli/onecli/commit/8e68d35d70fb72291590d1c83bbf438cbc4ffedb))
+
+
+### Bug Fixes
+
+* autofill secret name from Anthropic key type ([#156](https://github.com/onecli/onecli/issues/156)) ([8c4e2a3](https://github.com/onecli/onecli/commit/8c4e2a32bb8dda1f9b71df8c66e787b13b22da19))
+
 ## [1.12.1](https://github.com/onecli/onecli/compare/v1.12.0...v1.12.1) (2026-04-05)
 
 
