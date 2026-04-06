@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.14.1](https://github.com/onecli/onecli/compare/v1.14.0...v1.14.1) (2026-04-06)
+
+
+### Bug Fixes
+
+* add env defaults check and loading skeletons for connect URL param ([#168](https://github.com/onecli/onecli/issues/168)) ([9e84f3e](https://github.com/onecli/onecli/commit/9e84f3e5fdea843871e922ac0ec86f0f903a61e0))
+
 ## [1.14.0](https://github.com/onecli/onecli/compare/v1.13.0...v1.14.0) (2026-04-06)
 
 
