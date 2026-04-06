@@ -4,6 +4,7 @@ import { useCallback, useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { ChevronRight } from "lucide-react";
 import { Button } from "@onecli/ui/components/button";
+import { Skeleton } from "@onecli/ui/components/skeleton";
 import { cn } from "@onecli/ui/lib/utils";
 import { apps } from "@/lib/apps/registry";
 import type { AppDefinition } from "@/lib/apps/types";
@@ -11,7 +12,9 @@ import { getAppConnections } from "@/lib/actions/connections";
 import { checkAppConfigExists } from "@/lib/actions/app-config";
 import { useAppMessages } from "@/hooks/use-app-connected";
 import { AppIcon } from "./app-icon";
+import { ConnectAppDialog } from "./connect-app-dialog";
 import { ConfigureCredentialsDialog } from "./configure-credentials-dialog";
+import { useConnectParam } from "./use-connect-param";
 
 export const AppsTab = () => {
   const router = useRouter();
@@ -22,6 +25,8 @@ export const AppsTab = () => {
     () => new Set(),
   );
   const [configApp, setConfigApp] = useState<AppDefinition | null>(null);
+  const [connectApp, setConnectApp] = useState<AppDefinition | null>(null);
+  const [loading, setLoading] = useState(true);
 
   const fetchConnections = useCallback(async () => {
     try {
@@ -33,7 +38,6 @@ export const AppsTab = () => {
             .map((c) => c.provider),
         ),
       );
-      // Check which BYOC-only apps already have saved credentials
       const byocApps = apps.filter(
         (a) => a.configurable && !a.configurable.envDefaults,
       );
@@ -48,6 +52,8 @@ export const AppsTab = () => {
       );
     } catch {
       // Silently fail — grid still works without connection status
+    } finally {
+      setLoading(false);
     }
   }, []);
 
@@ -69,9 +75,16 @@ export const AppsTab = () => {
     );
   };
 
+  // Handle ?connect=<provider> URL param
+  useConnectParam({
+    loading,
+    configuredProviders,
+    onConnect: setConnectApp,
+    onConfigure: setConfigApp,
+  });
+
   const handleConnect = (e: React.MouseEvent, app: AppDefinition) => {
     e.stopPropagation();
-    // Apps without envDefaults need BYOC — show config dialog if no credentials saved
     const needsConfig = app.configurable && !app.configurable.envDefaults;
     if (
       needsConfig &&
@@ -96,12 +109,31 @@ export const AppsTab = () => {
               icon={app.icon}
               darkIcon={app.darkIcon}
               connected={isConnected}
+              loading={loading}
               onConnect={(e) => handleConnect(e, app)}
               onClick={() => router.push(`/connections/apps/${app.id}`)}
             />
           );
         })}
       </div>
+
+      {connectApp && (
+        <ConnectAppDialog
+          provider={connectApp.id}
+          appName={connectApp.name}
+          appIcon={connectApp.icon}
+          appDarkIcon={connectApp.darkIcon}
+          open={!!connectApp}
+          onOpenChange={(open) => {
+            if (!open) setConnectApp(null);
+          }}
+          onConnect={() => {
+            const provider = connectApp.id;
+            setConnectApp(null);
+            openConnectPopup(provider);
+          }}
+        />
+      )}
 
       {configApp?.configurable && (
         <ConfigureCredentialsDialog
@@ -131,6 +163,7 @@ interface AppRowProps {
   icon: string;
   darkIcon?: string;
   connected: boolean;
+  loading: boolean;
   onConnect: (e: React.MouseEvent) => void;
   onClick: () => void;
 }
@@ -140,6 +173,7 @@ const AppRow = ({
   icon,
   darkIcon,
   connected,
+  loading,
   onConnect,
   onClick,
 }: AppRowProps) => {
@@ -159,7 +193,9 @@ const AppRow = ({
       </div>
 
       <div className="flex items-center gap-2">
-        {connected ? (
+        {loading ? (
+          <Skeleton className="h-6 w-16 rounded-md" />
+        ) : connected ? (
           <div className="flex items-center gap-1.5">
             <span className="size-2 rounded-full bg-brand" />
             <span className="text-xs font-medium text-brand">Connected</span>

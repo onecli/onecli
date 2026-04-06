@@ -16,6 +16,7 @@ import {
   AlertDialogTitle,
   AlertDialogTrigger,
 } from "@onecli/ui/components/alert-dialog";
+import { Skeleton } from "@onecli/ui/components/skeleton";
 import { getAppConnections, disconnectApp } from "@/lib/actions/connections";
 import { checkAppConfigExists } from "@/lib/actions/app-config";
 import { useAppMessages } from "@/hooks/use-app-connected";
@@ -185,7 +186,9 @@ export const AppDetail = ({
         </div>
 
         {/* Actions in header */}
-        {!loading && (
+        {loading ? (
+          <Skeleton className="h-9 w-32 shrink-0 rounded-md" />
+        ) : (
           <div className="flex items-center gap-2 shrink-0">
             {isConnected ? (
               <>
