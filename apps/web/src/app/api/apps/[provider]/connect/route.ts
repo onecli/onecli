@@ -1,14 +1,13 @@
 import { NextRequest, NextResponse } from "next/server";
 import { resolveApiAuth } from "@/lib/api-auth";
-import { unauthorized } from "@/lib/api-utils";
+import { handleServiceError, unauthorized } from "@/lib/api-utils";
 import { getApp } from "@/lib/apps/registry";
 import { upsertConnection } from "@/lib/services/connection-service";
-import { logger } from "@/lib/logger";
 
 type Params = { params: Promise<{ provider: string }> };
 
 /**
- * POST /api/connections/{provider}/connect
+ * POST /api/apps/{provider}/connect
  *
  * Submit API key credentials for an api_key type connection.
  * Stores the first field value as `access_token` so the gateway picks it up.
@@ -38,7 +37,6 @@ export const POST = async (request: NextRequest, { params }: Params) => {
       );
     }
 
-    // Validate required fields
     for (const field of app.connectionMethod.fields) {
       if (!body.fields[field.name]?.trim()) {
         return NextResponse.json(
@@ -48,7 +46,6 @@ export const POST = async (request: NextRequest, { params }: Params) => {
       }
     }
 
-    // Store the first field as access_token (gateway convention)
     const primaryField = app.connectionMethod.fields[0];
     const credentials: Record<string, unknown> = {
       access_token: body.fields[primaryField!.name],
@@ -58,13 +55,6 @@ export const POST = async (request: NextRequest, { params }: Params) => {
 
     return NextResponse.json({ success: true });
   } catch (err) {
-    logger.error(
-      { err, route: "POST /api/connections/[provider]/connect" },
-      "API key connection failed",
-    );
-    return NextResponse.json(
-      { error: "Internal server error" },
-      { status: 500 },
-    );
+    return handleServiceError(err);
   }
 };

@@ -46,7 +46,7 @@ export const ConnectFlow = ({
     if (redirectedRef.current) return;
     redirectedRef.current = true;
     setState("redirecting");
-    window.location.href = `/api/connections/${app.id}/authorize`;
+    window.location.href = `/api/apps/${app.id}/authorize`;
   }, [app.id]);
 
   // Countdown timer for auto-redirect
@@ -270,7 +270,7 @@ const ApiKeyFlow = ({ app, fields, onSuccess, onError }: ApiKeyFlowProps) => {
     if (!hasInput) return;
     setSubmitting(true);
     try {
-      const resp = await fetch(`/api/connections/${app.id}/connect`, {
+      const resp = await fetch(`/api/apps/${app.id}/connect`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ fields: values }),

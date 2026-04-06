@@ -30,7 +30,7 @@ export const GET = async (request: NextRequest, { params }: Params) => {
   }
 
   const appUrl = process.env.NEXT_PUBLIC_APP_URL ?? "http://localhost:10254";
-  const redirectUri = `${appUrl}/api/connections/${provider}/callback`;
+  const redirectUri = `${appUrl}/api/apps/${provider}/callback`;
   const scopes = app.connectionMethod.defaultScopes ?? [];
 
   const state = signOAuthState({

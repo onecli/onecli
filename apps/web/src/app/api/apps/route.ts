@@ -1,77 +1,58 @@
 import { NextRequest, NextResponse } from "next/server";
 import { resolveApiAuth } from "@/lib/api-auth";
 import { handleServiceError, unauthorized } from "@/lib/api-utils";
-import { invalidateGatewayCache } from "@/lib/gateway-invalidate";
-import { getApp } from "@/lib/apps/registry";
+import { apps } from "@/lib/apps/registry";
+import { listConnections } from "@/lib/services/connection-service";
 import { db } from "@onecli/db";
-import { upsertAppConfig } from "@/lib/services/app-config-service";
-import { connectAppSchema } from "@/lib/validations/app-config";
 
 export const GET = async (request: NextRequest) => {
   try {
     const auth = await resolveApiAuth(request);
     if (!auth) return unauthorized();
 
-    const configs = await db.appConfig.findMany({
-      where: { accountId: auth.accountId, enabled: true },
-      select: { id: true, provider: true, enabled: true, createdAt: true },
+    const [configs, connections] = await Promise.all([
+      db.appConfig.findMany({
+        where: { accountId: auth.accountId },
+        select: {
+          provider: true,
+          enabled: true,
+          credentials: true,
+          createdAt: true,
+        },
+      }),
+      listConnections(auth.accountId),
+    ]);
+
+    const configMap = new Map(configs.map((c) => [c.provider, c]));
+    const connectionMap = new Map(connections.map((c) => [c.provider, c]));
+
+    const result = apps.map((app) => {
+      const config = configMap.get(app.id);
+      const connection = connectionMap.get(app.id);
+
+      return {
+        id: app.id,
+        name: app.name,
+        available: app.available,
+        connectionType: app.connectionMethod.type,
+        configurable: !!app.configurable,
+        config: config
+          ? {
+              hasCredentials: !!config.credentials,
+              enabled: config.enabled,
+            }
+          : null,
+        connection: connection
+          ? {
+              status: connection.status,
+              scopes: connection.scopes,
+              connectedAt: connection.connectedAt,
+            }
+          : null,
+      };
     });
 
-    return NextResponse.json(
-      configs.map((c) => ({
-        id: c.id,
-        provider: c.provider,
-        status: c.enabled ? "connected" : "disconnected",
-        createdAt: c.createdAt.toISOString(),
-      })),
-    );
-  } catch (err) {
-    return handleServiceError(err);
-  }
-};
-
-export const POST = async (request: NextRequest) => {
-  try {
-    const auth = await resolveApiAuth(request);
-    if (!auth) return unauthorized();
-
-    const body = await request.json().catch(() => null);
-    const parsed = connectAppSchema.safeParse(body);
-    if (!parsed.success) {
-      return NextResponse.json(
-        { error: parsed.error.issues[0]?.message ?? "Invalid request body" },
-        { status: 400 },
-      );
-    }
-
-    const { provider, clientId, clientSecret } = parsed.data;
-
-    const app = getApp(provider);
-    if (!app?.configurable) {
-      return NextResponse.json(
-        { error: `Provider "${provider}" does not support app configuration` },
-        { status: 400 },
-      );
-    }
-
-    const result = await upsertAppConfig(
-      auth.accountId,
-      provider,
-      { clientId, clientSecret },
-      app.configurable.fields,
-    );
-
-    invalidateGatewayCache(request);
-
-    return NextResponse.json(
-      {
-        id: result.id,
-        provider: result.provider,
-        status: "connected",
-        createdAt: new Date().toISOString(),
-      },
-      { status: 201 },
-    );
+    return NextResponse.json(result);
   } catch (err) {
     return handleServiceError(err);
   }

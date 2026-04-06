@@ -28,21 +28,18 @@ export const GET = async (request: NextRequest, { params }: Params) => {
       return errorRedirect("Missing code or state parameter");
     }
 
-    // Verify CSRF state
     const state = verifyOAuthState(stateParam);
     if (!state || state.provider !== provider) {
       return errorRedirect("Invalid state parameter");
     }
 
-    // Resolve client credentials (AppConfig → env vars)
     const resolved = await resolveOAuthCredentials(state.accountId, app);
     if (!resolved) {
       return errorRedirect("Provider not configured");
     }
 
-    const redirectUri = `${appUrl}/api/connections/${provider}/callback`;
+    const redirectUri = `${appUrl}/api/apps/${provider}/callback`;
 
-    // Exchange code for tokens using the provider's implementation
     const { credentials, scopes, metadata } =
       await app.connectionMethod.exchangeCode({
         code,
@@ -51,7 +48,6 @@ export const GET = async (request: NextRequest, { params }: Params) => {
         redirectUri,
       });
 
-    // Store the connection
     await upsertConnection(state.accountId, provider, credentials, {
       scopes,
       metadata,
