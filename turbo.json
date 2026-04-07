@@ -30,7 +30,8 @@
     "AUTH_MODE",
     "MAILERCHECK_API_KEY",
     "DISCORD_WEBHOOK_URL",
-    "ENVIRONMENT"
+    "ENVIRONMENT",
+    "DO_NOT_TRACK"
   ],
   "tasks": {
     "build": {

@@ -8,7 +8,7 @@ dist
 cdk.out
 apps/gateway/target
 
-# Local data (prevent leaking local PGlite, CA certs, secrets)
+# Local data (prevent leaking CA certs, secrets)
 data
 apps/web/data
 

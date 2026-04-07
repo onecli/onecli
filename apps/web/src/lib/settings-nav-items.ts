@@ -1,4 +1,4 @@
-import { User, KeyRound, ShieldCheck } from "lucide-react";
+import { User, KeyRound, ShieldCheck, Settings } from "lucide-react";
 
 export interface SettingsNavItem {
   title: string;
@@ -24,5 +24,9 @@ export const settingsSections: SettingsNavSection[] = [
     items: [
       { title: "Encryption", url: "/settings/encryption", icon: ShieldCheck },
     ],
+  },
+  {
+    label: "Instance",
+    items: [{ title: "General", url: "/settings/general", icon: Settings }],
   },
 ];

@@ -41,7 +41,7 @@ yarn-error.log*
 # Prisma
 packages/db/prisma/*.db
 
-# PGlite local data
+# Local data
 data/
 
 # CDK

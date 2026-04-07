@@ -42,6 +42,33 @@ if [ "$AUTH_MODE" = "cloud" ] || [ -n "$GOOGLE_CLIENT_ID" ]; then
 fi
 printf '{"authMode":"%s","oauthConfigured":%s}\n' "$AUTH_MODE" "$OAUTH_CONFIGURED" > /app/data/runtime-config.json
 
+# Anonymous telemetry — install/update events only.
+# Disable: DO_NOT_TRACK=1 or Settings → General. Docs: https://onecli.sh/docs/reference/telemetry
+ONECLI_VERSION=$(node -p "require('./apps/web/package.json').version" 2>/dev/null || echo "unknown")
+VERSION_FILE="/app/data/.onecli-version"
+PREF_FILE="/app/data/telemetry-preference"
+PREV_VERSION=$(cat "$VERSION_FILE" 2>/dev/null || echo "")
+
+send_telemetry() {
+  UUID=$(cat /proc/sys/kernel/random/uuid 2>/dev/null || od -x /dev/urandom | head -1 | awk '{print $2$3"-"$4"-"$5"-"$6"-"$7$8$9}')
+  PROPS="\"version\":\"$ONECLI_VERSION\",\"edition\":\"${NEXT_PUBLIC_EDITION:-oss}\",\"auth_mode\":\"$AUTH_MODE\",\"arch\":\"$(uname -m)\""
+  [ -n "$2" ] && PROPS="$PROPS,\"old_version\":\"$2\""
+  curl -sf --max-time 5 -X POST https://t.1cli.sh/capture/ \
+    -H 'Content-Type: application/json' \
+    -d "{\"api_key\":\"phc_lXPPe71vyF7OWTxnMBhVPIQtdRLkvpZQ9ve7NhANxLN\",\"event\":\"$1\",\"distinct_id\":\"$UUID\",\"properties\":{$PROPS}}" \
+    > /dev/null 2>&1 &
+  echo "Telemetry: $1 (anonymous). Disable: DO_NOT_TRACK=1"
+}
+
+echo "$ONECLI_VERSION" > "$VERSION_FILE"
+if [ "${DO_NOT_TRACK:-}" != "1" ] && { [ ! -f "$PREF_FILE" ] || [ "$(cat "$PREF_FILE")" != "off" ]; }; then
+  if [ -z "$PREV_VERSION" ]; then
+    send_telemetry "install_complete"
+  elif [ "$PREV_VERSION" != "$ONECLI_VERSION" ]; then
+    send_telemetry "update_complete" "$PREV_VERSION"
+  fi
+fi
+
 # Start gateway in background
 echo "Starting gateway on port ${GATEWAY_PORT:-10255}..."
 onecli-gateway --port "${GATEWAY_PORT:-10255}" --data-dir /app/data &

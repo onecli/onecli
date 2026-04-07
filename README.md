@@ -133,6 +133,10 @@ All environment variables are optional for local development:
 | `GOOGLE_CLIENT_SECRET`  | Google OAuth client secret        | —                  |
 | `SECRET_ENCRYPTION_KEY` | AES-256-GCM encryption key        | Auto-generated     |
 
+## Telemetry
+
+OneCLI collects anonymous install and update events (version, architecture, edition only). No personal data is collected. Disable with `DO_NOT_TRACK=1` or in **Settings → General**. [Full details](https://onecli.sh/docs/reference/telemetry).
+
 ## Contributing
 
 We welcome contributions! Please read our [Contributing Guide](CONTRIBUTING.md) and [Code of Conduct](CODE_OF_CONDUCT.md) before getting started.

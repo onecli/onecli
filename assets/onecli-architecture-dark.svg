@@ -52,7 +52,7 @@
   <!-- Secret Store -->
   <rect x="625" y="190" width="230" height="80" rx="10" fill="#161b22" stroke="#30363d" stroke-width="1" filter="url(#shadow)"/>
   <text x="740" y="224" text-anchor="middle" fill="#e6edf3" font-size="14" font-weight="600">Secret Store</text>
-  <text x="740" y="244" text-anchor="middle" fill="#8b949e" font-size="11">AES-256-GCM · PGlite / Postgres</text>
+  <text x="740" y="244" text-anchor="middle" fill="#8b949e" font-size="11">AES-256-GCM · PostgreSQL</text>
 
   <!-- Dashed connections between components -->
   <line x1="335" y1="230" x2="365" y2="230" stroke="#8b949e" stroke-width="1" stroke-dasharray="4 3" stroke-opacity="0.4"/>
