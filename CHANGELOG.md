@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.14.2](https://github.com/onecli/onecli/compare/v1.14.1...v1.14.2) (2026-04-08)
+
+
+### Bug Fixes
+
+* refactor gateway, add unconnected app response, centralize env vars ([#170](https://github.com/onecli/onecli/issues/170)) ([2290c50](https://github.com/onecli/onecli/commit/2290c500a3756abca3bc7d3f0805a88aca7ced8b))
+
 ## [1.14.1](https://github.com/onecli/onecli/compare/v1.14.0...v1.14.1) (2026-04-06)
 
 
