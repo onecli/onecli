@@ -1,4 +1,5 @@
 import { createHmac, randomBytes, timingSafeEqual } from "crypto";
+import { IS_CLOUD, OAUTH_STATE_SECRET, SECRET_ENCRYPTION_KEY } from "@/lib/env";
 
 export interface OAuthStatePayload {
   accountId: string;
@@ -8,16 +9,13 @@ export interface OAuthStatePayload {
 }
 
 const getSigningKey = (): string => {
-  const isCloud = process.env.NEXT_PUBLIC_EDITION === "cloud";
-
-  if (isCloud) {
-    const key = process.env.OAUTH_STATE_SECRET;
-    if (!key) throw new Error("OAUTH_STATE_SECRET is required in cloud");
-    return key;
+  if (IS_CLOUD) {
+    if (!OAUTH_STATE_SECRET)
+      throw new Error("OAUTH_STATE_SECRET is required in cloud");
+    return OAUTH_STATE_SECRET;
   }
 
-  const key =
-    process.env.OAUTH_STATE_SECRET ?? process.env.SECRET_ENCRYPTION_KEY;
+  const key = OAUTH_STATE_SECRET || SECRET_ENCRYPTION_KEY;
   if (!key)
     throw new Error("OAUTH_STATE_SECRET or SECRET_ENCRYPTION_KEY must be set");
   return key;

@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getApp } from "@/lib/apps/registry";
 import { resolveOAuthCredentials } from "@/lib/apps/resolve-credentials";
+import { APP_URL } from "@/lib/env";
 import { verifyOAuthState } from "@/lib/oauth-state";
 import { upsertConnection } from "@/lib/services/connection-service";
 import { logger } from "@/lib/logger";
@@ -9,10 +10,9 @@ type Params = { params: Promise<{ provider: string }> };
 
 export const GET = async (request: NextRequest, { params }: Params) => {
   const { provider } = await params;
-  const appUrl = process.env.NEXT_PUBLIC_APP_URL ?? "http://localhost:10254";
   const errorRedirect = (msg: string) =>
     NextResponse.redirect(
-      `${appUrl}/app-connect/${provider}?status=error&message=${encodeURIComponent(msg)}`,
+      `${APP_URL}/app-connect/${provider}?status=error&message=${encodeURIComponent(msg)}`,
     );
 
   try {
@@ -38,7 +38,7 @@ export const GET = async (request: NextRequest, { params }: Params) => {
       return errorRedirect("Provider not configured");
     }
 
-    const redirectUri = `${appUrl}/api/apps/${provider}/callback`;
+    const redirectUri = `${APP_URL}/api/apps/${provider}/callback`;
 
     const { credentials, scopes, metadata } =
       await app.connectionMethod.exchangeCode({
@@ -52,9 +52,14 @@ export const GET = async (request: NextRequest, { params }: Params) => {
       scopes,
       metadata,
     });
+    // Cache invalidation happens client-side: the success page sends
+    // postMessage("app-connected") to the parent window, which calls
+    // invalidateCache() via useInvalidateGatewayCache. We can't do it
+    // here because this request is a cross-origin redirect from the
+    // OAuth provider and doesn't carry the user's auth cookie.
 
     return NextResponse.redirect(
-      `${appUrl}/app-connect/${provider}?status=success`,
+      `${APP_URL}/app-connect/${provider}?status=success`,
     );
   } catch (err) {
     logger.error({ err, provider }, "OAuth callback failed");

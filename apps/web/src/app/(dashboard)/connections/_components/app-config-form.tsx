@@ -31,6 +31,7 @@ import {
   deleteAppConfigAction,
   setAppConfigEnabled,
 } from "@/lib/actions/app-config";
+import { APP_URL, IS_CLOUD } from "@/lib/env";
 import { useCopyToClipboard } from "@/hooks/use-copy-to-clipboard";
 
 interface AppConfigFormProps {
@@ -200,7 +201,7 @@ export const AppConfigForm = ({
                 {!hasEnvDefaults &&
                   !hasCredentials &&
                   !enabled &&
-                  process.env.NEXT_PUBLIC_EDITION !== "cloud" && (
+                  !IS_CLOUD && (
                     <p className="text-xs text-muted-foreground mt-1.5">
                       Or connect instantly with{" "}
                       <a
@@ -324,8 +325,7 @@ export const AppConfigForm = ({
 };
 
 const RedirectUri = ({ provider }: { provider: string }) => {
-  const appUrl = process.env.NEXT_PUBLIC_APP_URL ?? "http://localhost:10254";
-  const redirectUri = `${appUrl}/api/apps/${provider}/callback`;
+  const redirectUri = `${APP_URL}/api/apps/${provider}/callback`;
   const { copied, copy } = useCopyToClipboard();
 
   return (

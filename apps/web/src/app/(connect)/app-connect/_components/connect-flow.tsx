@@ -5,6 +5,7 @@ import { Loader2 } from "lucide-react";
 import { Button } from "@onecli/ui/components/button";
 import { Input } from "@onecli/ui/components/input";
 import { Label } from "@onecli/ui/components/label";
+import { IS_CLOUD } from "@/lib/env";
 import { ConnectLayout } from "./connect-layout";
 import { ConnectSuccess } from "./connect-success";
 
@@ -166,7 +167,7 @@ export const ConnectFlow = ({
           >
             Configure credentials
           </Button>
-          {process.env.NEXT_PUBLIC_EDITION !== "cloud" && (
+          {!IS_CLOUD && (
             <>
               <div className="flex items-center gap-3 pt-1">
                 <div className="bg-border h-px flex-1" />

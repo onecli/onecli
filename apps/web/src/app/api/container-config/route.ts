@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { db } from "@onecli/db";
 import { resolveApiAuth } from "@/lib/api-auth";
 import { unauthorized } from "@/lib/api-utils";
+import { GATEWAY_BASE_URL } from "@/lib/env";
 import { loadCaCertificate } from "@/lib/gateway-ca";
 import { parseAnthropicMetadata } from "@/lib/validations/secret";
 import { DEFAULT_AGENT_NAME } from "@/lib/constants";
@@ -58,9 +59,7 @@ export async function GET(request: NextRequest) {
       });
     }
 
-    const gatewayBase =
-      process.env.GATEWAY_BASE_URL ?? "host.docker.internal:10255";
-    const gatewayUrl = `http://x:${agent.accessToken}@${gatewayBase}`;
+    const gatewayUrl = `http://x:${agent.accessToken}@${GATEWAY_BASE_URL}`;
 
     const caCertificate = loadCaCertificate();
     if (!caCertificate) {

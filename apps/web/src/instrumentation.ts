@@ -1,3 +1,5 @@
+import { NEXT_RUNTIME, NODE_ENV, LOG_LEVEL } from "@/lib/env";
+
 /**
  * Next.js instrumentation hook — runs once when the server starts.
  *
@@ -10,13 +12,10 @@
  * our explicit logger calls, and Next.js dev output stays readable).
  */
 export async function register() {
-  if (
-    process.env.NEXT_RUNTIME === "nodejs" &&
-    process.env.NODE_ENV === "production"
-  ) {
+  if (NEXT_RUNTIME === "nodejs" && NODE_ENV === "production") {
     const pino = (await import("pino")).default;
     const logger = pino({
-      level: process.env.LOG_LEVEL ?? "info",
+      level: LOG_LEVEL,
       formatters: {
         level: (label: string) => ({ level: label }),
       },

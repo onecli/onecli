@@ -30,7 +30,9 @@
     "AUTH_MODE",
     "MAILERCHECK_API_KEY",
     "DISCORD_WEBHOOK_URL",
-    "ENVIRONMENT"
+    "ENVIRONMENT",
+    "RESEND_API_KEY",
+    "NEXT_PUBLIC_API_URL"
   ],
   "tasks": {
     "build": {

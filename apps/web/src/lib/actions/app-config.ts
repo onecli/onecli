@@ -12,6 +12,7 @@ import {
   upsertAppConfig,
   deleteAppConfig,
   hasAppConfig as hasAppConfigService,
+  listConfiguredProviders,
   toggleAppConfigEnabled,
 } from "@/lib/services/app-config-service";
 
@@ -82,6 +83,15 @@ export const checkAppConfigExists = async (
 ): Promise<boolean> => {
   const { accountId } = await resolveUser();
   return hasAppConfigService(accountId, provider);
+};
+
+/**
+ * Returns all provider IDs that have an enabled AppConfig for the current account.
+ * Use this instead of calling checkAppConfigExists in a loop.
+ */
+export const getConfiguredProviders = async (): Promise<string[]> => {
+  const { accountId } = await resolveUser();
+  return listConfiguredProviders(accountId);
 };
 
 export const setAppConfigEnabled = async (

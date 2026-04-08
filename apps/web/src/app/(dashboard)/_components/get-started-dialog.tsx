@@ -16,14 +16,13 @@ import {
   getDemoInfo,
   seedDemoSecret,
 } from "@/lib/actions/secrets";
+import { IS_CLOUD } from "@/lib/env";
 import { TryDemoCommand } from "./try-demo-command";
 
 interface GetStartedDialogProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
 }
-
-const isCloud = process.env.NEXT_PUBLIC_EDITION === "cloud";
 
 export const GetStartedDialog = ({
   open,
@@ -58,7 +57,7 @@ export const GetStartedDialog = ({
   }, [open]);
 
   const installCommand = (() => {
-    if (!installInfo?.apiKey || !isCloud) return null;
+    if (!installInfo?.apiKey || !IS_CLOUD) return null;
     const params = [`key=${installInfo.apiKey}`];
     if (installInfo.appUrl !== "https://app.onecli.sh") {
       params.push(`url=${encodeURIComponent(installInfo.appUrl)}`);
@@ -148,7 +147,7 @@ export const GetStartedDialog = ({
                         </ol>
                       </div>
                     </>
-                  ) : isCloud ? (
+                  ) : IS_CLOUD ? (
                     <div className="flex items-center justify-center py-6">
                       <Loader2 className="text-muted-foreground size-4 animate-spin" />
                     </div>

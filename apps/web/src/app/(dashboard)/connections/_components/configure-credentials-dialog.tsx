@@ -13,6 +13,7 @@ import { Input } from "@onecli/ui/components/input";
 import { Label } from "@onecli/ui/components/label";
 import { saveAppConfig, setAppConfigEnabled } from "@/lib/actions/app-config";
 import type { OAuthConfigField } from "@/lib/apps/types";
+import { IS_CLOUD } from "@/lib/env";
 import { AppIcon } from "./app-icon";
 
 interface ConfigureCredentialsDialogProps {
@@ -111,7 +112,7 @@ export const ConfigureCredentialsDialog = ({
             {saving ? "Saving..." : "Save & Connect"}
           </Button>
 
-          {process.env.NEXT_PUBLIC_EDITION !== "cloud" && (
+          {!IS_CLOUD && (
             <p className="text-muted-foreground text-center text-xs">
               Or use{" "}
               <a

@@ -20,6 +20,7 @@ import { Skeleton } from "@onecli/ui/components/skeleton";
 import { getAppConnections, disconnectApp } from "@/lib/actions/connections";
 import { checkAppConfigExists } from "@/lib/actions/app-config";
 import { useAppMessages } from "@/hooks/use-app-connected";
+import { useInvalidateGatewayCache } from "@/hooks/use-invalidate-cache";
 import type { OAuthPermission } from "@/lib/apps/types";
 import { AppIcon } from "./app-icon";
 import { AppConfigForm } from "./app-config-form";
@@ -97,7 +98,14 @@ export const AppDetail = ({
     fetchConnection();
   }, [fetchConnection]);
 
-  useAppMessages({ onConnected: fetchConnection });
+  const invalidateCache = useInvalidateGatewayCache();
+
+  const handleConnected = useCallback(() => {
+    fetchConnection();
+    invalidateCache();
+  }, [fetchConnection, invalidateCache]);
+
+  useAppMessages({ onConnected: handleConnected });
 
   const refreshConfigStatus = useCallback(async () => {
     fetchConnection();
@@ -135,6 +143,7 @@ export const AppDetail = ({
     try {
       await disconnectApp(app.id);
       setConnection(null);
+      invalidateCache();
       toast.success(`${app.name} disconnected`);
     } catch {
       toast.error("Failed to disconnect");

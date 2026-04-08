@@ -1,4 +1,5 @@
 import { readFileSync } from "fs";
+import { EDITION, GOOGLE_CLIENT_ID, NEXTAUTH_SECRET } from "@/lib/env";
 
 interface RuntimeConfig {
   authMode: "cloud" | "oauth" | "local";
@@ -20,7 +21,7 @@ let cached: RuntimeConfig | null = null;
  * Falls back to direct env-var checks for local development (no Docker).
  */
 export const getRuntimeConfig = (): RuntimeConfig => {
-  if (process.env.NEXT_PUBLIC_EDITION === "cloud") return CLOUD_CONFIG;
+  if (EDITION === "cloud") return CLOUD_CONFIG;
   if (cached) return cached;
 
   try {
@@ -31,8 +32,8 @@ export const getRuntimeConfig = (): RuntimeConfig => {
     // During Next.js build prerendering this also runs, but since all pages
     // are client-rendered behind auth anyway, the fallback value is fine.
     cached = {
-      authMode: process.env.NEXTAUTH_SECRET ? "oauth" : "local",
-      oauthConfigured: !!process.env.GOOGLE_CLIENT_ID,
+      authMode: NEXTAUTH_SECRET ? "oauth" : "local",
+      oauthConfigured: !!GOOGLE_CLIENT_ID,
     };
     return cached;
   }

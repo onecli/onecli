@@ -3,6 +3,7 @@ import { resolveApiAuth } from "@/lib/api-auth";
 import { unauthorized } from "@/lib/api-utils";
 import { getApp } from "@/lib/apps/registry";
 import { resolveOAuthCredentials } from "@/lib/apps/resolve-credentials";
+import { APP_URL } from "@/lib/env";
 import { signOAuthState, generateNonce } from "@/lib/oauth-state";
 
 type Params = { params: Promise<{ provider: string }> };
@@ -29,8 +30,7 @@ export const GET = async (request: NextRequest, { params }: Params) => {
     );
   }
 
-  const appUrl = process.env.NEXT_PUBLIC_APP_URL ?? "http://localhost:10254";
-  const redirectUri = `${appUrl}/api/apps/${provider}/callback`;
+  const redirectUri = `${APP_URL}/api/apps/${provider}/callback`;
   const scopes = app.connectionMethod.defaultScopes ?? [];
 
   const state = signOAuthState({

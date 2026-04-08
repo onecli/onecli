@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { resolveApiAuth } from "@/lib/api-auth";
 import { handleServiceError, unauthorized } from "@/lib/api-utils";
+import { invalidateGatewayCache } from "@/lib/gateway-invalidate";
 import { getApp } from "@/lib/apps/registry";
 import { upsertConnection } from "@/lib/services/connection-service";
 
@@ -52,6 +53,7 @@ export const POST = async (request: NextRequest, { params }: Params) => {
     };
 
     await upsertConnection(auth.accountId, provider, credentials);
+    invalidateGatewayCache(request);
 
     return NextResponse.json({ success: true });
   } catch (err) {

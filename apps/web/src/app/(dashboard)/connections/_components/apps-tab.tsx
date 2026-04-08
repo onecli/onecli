@@ -6,14 +6,15 @@ import { ChevronRight } from "lucide-react";
 import { Button } from "@onecli/ui/components/button";
 import { Skeleton } from "@onecli/ui/components/skeleton";
 import { cn } from "@onecli/ui/lib/utils";
-import { apps } from "@/lib/apps/registry";
 import type { AppDefinition } from "@/lib/apps/types";
 import { getAppConnections } from "@/lib/actions/connections";
 import {
-  checkAppConfigExists,
+  getConfiguredProviders,
   getAvailableEnvDefaults,
 } from "@/lib/actions/app-config";
+import { apps } from "@/lib/apps/registry";
 import { useAppMessages } from "@/hooks/use-app-connected";
+import { useInvalidateGatewayCache } from "@/hooks/use-invalidate-cache";
 import { AppIcon } from "./app-icon";
 import { ConnectAppDialog } from "./connect-app-dialog";
 import { ConfigureCredentialsDialog } from "./configure-credentials-dialog";
@@ -36,9 +37,10 @@ export const AppsTab = () => {
 
   const fetchConnections = useCallback(async () => {
     try {
-      const [connections, availableDefaults] = await Promise.all([
+      const [connections, availableDefaults, configured] = await Promise.all([
         getAppConnections(),
         getAvailableEnvDefaults(),
+        getConfiguredProviders().catch(() => [] as string[]),
       ]);
       setConnectedProviders(
         new Set(
@@ -48,18 +50,7 @@ export const AppsTab = () => {
         ),
       );
       setEnvDefaultProviders(new Set(availableDefaults));
-      const byocApps = apps.filter(
-        (a) => a.configurable && !a.configurable.envDefaults,
-      );
-      const configured = await Promise.all(
-        byocApps.map(async (a) => {
-          const exists = await checkAppConfigExists(a.id).catch(() => false);
-          return exists ? a.id : null;
-        }),
-      );
-      setConfiguredProviders(
-        new Set(configured.filter((id): id is string => id !== null)),
-      );
+      setConfiguredProviders(new Set(configured));
     } catch {
       // Silently fail — grid still works without connection status
     } finally {
@@ -71,7 +62,14 @@ export const AppsTab = () => {
     fetchConnections();
   }, [fetchConnections]);
 
-  useAppMessages({ onConnected: fetchConnections, onConfigure: router.push });
+  const invalidateCache = useInvalidateGatewayCache();
+
+  const handleConnected = useCallback(() => {
+    fetchConnections();
+    invalidateCache();
+  }, [fetchConnections, invalidateCache]);
+
+  useAppMessages({ onConnected: handleConnected, onConfigure: router.push });
 
   const openConnectPopup = (provider: string) => {
     const w = 520;

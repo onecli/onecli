@@ -1,4 +1,10 @@
 import { existsSync, readFileSync } from "fs";
+import {
+  GATEWAY_CA_CERT,
+  GATEWAY_CA_PEM_FILE,
+  HOME,
+  IS_CLOUD,
+} from "@/lib/env";
 
 /**
  * Gateway CA certificate loading.
@@ -12,16 +18,14 @@ import { existsSync, readFileSync } from "fs";
  */
 
 const CA_PEM_FILE_DOCKER = "/app/data/gateway/ca.pem";
-const CA_PEM_FILE_LOCAL = `${process.env.HOME}/.onecli/gateway/ca.pem`;
-
-const isCloud = process.env.NEXT_PUBLIC_EDITION === "cloud";
+const CA_PEM_FILE_LOCAL = `${HOME}/.onecli/gateway/ca.pem`;
 
 /**
  * Determine the CA PEM file path.
  * Matches the gateway's default: `/app/data/gateway/ca.pem` in Docker, `~/.onecli/gateway/ca.pem` locally.
  */
 const getCaPemFilePath = (): string => {
-  if (process.env.GATEWAY_CA_PEM_FILE) return process.env.GATEWAY_CA_PEM_FILE;
+  if (GATEWAY_CA_PEM_FILE) return GATEWAY_CA_PEM_FILE;
   return existsSync("/app/data") ? CA_PEM_FILE_DOCKER : CA_PEM_FILE_LOCAL;
 };
 
@@ -30,20 +34,20 @@ const getCaPemFilePath = (): string => {
  * Returns null if the certificate is not available.
  */
 export const loadCaCertificate = (): string | null => {
-  const envCert = process.env.GATEWAY_CA_CERT?.trim();
+  const envCert = GATEWAY_CA_CERT.trim();
   if (envCert) return envCert;
 
   // Explicit file path override — works in any edition
-  if (process.env.GATEWAY_CA_PEM_FILE) {
+  if (GATEWAY_CA_PEM_FILE) {
     try {
-      const pem = readFileSync(process.env.GATEWAY_CA_PEM_FILE, "utf-8").trim();
+      const pem = readFileSync(GATEWAY_CA_PEM_FILE, "utf-8").trim();
       return pem || null;
     } catch {
       return null;
     }
   }
 
-  if (isCloud) return null;
+  if (IS_CLOUD) return null;
 
   const path = getCaPemFilePath();
   try {

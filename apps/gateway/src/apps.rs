@@ -42,6 +42,7 @@ pub(crate) struct RefreshConfig {
 /// An app provider definition with its host rules.
 struct AppProvider {
     provider: &'static str,
+    display_name: &'static str,
     host_rules: &'static [HostRule],
     refresh: Option<&'static RefreshConfig>,
 }
@@ -58,6 +59,7 @@ static GOOGLE_REFRESH: RefreshConfig = RefreshConfig {
 static APP_PROVIDERS: &[AppProvider] = &[
     AppProvider {
         provider: "github",
+        display_name: "GitHub",
         host_rules: &[
             HostRule {
                 host: "api.github.com",
@@ -79,6 +81,7 @@ static APP_PROVIDERS: &[AppProvider] = &[
     },
     AppProvider {
         provider: "gmail",
+        display_name: "Gmail",
         host_rules: &[
             HostRule {
                 host: "gmail.googleapis.com",
@@ -96,6 +99,7 @@ static APP_PROVIDERS: &[AppProvider] = &[
     },
     AppProvider {
         provider: "google-calendar",
+        display_name: "Google Calendar",
         host_rules: &[HostRule {
             host: "www.googleapis.com",
             path_prefix: Some("/calendar/"),
@@ -105,6 +109,7 @@ static APP_PROVIDERS: &[AppProvider] = &[
     },
     AppProvider {
         provider: "google-drive",
+        display_name: "Google Drive",
         host_rules: &[
             HostRule {
                 host: "www.googleapis.com",
@@ -121,6 +126,7 @@ static APP_PROVIDERS: &[AppProvider] = &[
     },
     AppProvider {
         provider: "google-docs",
+        display_name: "Google Docs",
         host_rules: &[HostRule {
             host: "docs.googleapis.com",
             path_prefix: None,
@@ -130,6 +136,7 @@ static APP_PROVIDERS: &[AppProvider] = &[
     },
     AppProvider {
         provider: "google-sheets",
+        display_name: "Google Sheets",
         host_rules: &[HostRule {
             host: "sheets.googleapis.com",
             path_prefix: None,
@@ -139,6 +146,7 @@ static APP_PROVIDERS: &[AppProvider] = &[
     },
     AppProvider {
         provider: "google-slides",
+        display_name: "Google Slides",
         host_rules: &[HostRule {
             host: "slides.googleapis.com",
             path_prefix: None,
@@ -148,6 +156,7 @@ static APP_PROVIDERS: &[AppProvider] = &[
     },
     AppProvider {
         provider: "google-tasks",
+        display_name: "Google Tasks",
         host_rules: &[HostRule {
             host: "tasks.googleapis.com",
             path_prefix: None,
@@ -157,6 +166,7 @@ static APP_PROVIDERS: &[AppProvider] = &[
     },
     AppProvider {
         provider: "google-forms",
+        display_name: "Google Forms",
         host_rules: &[HostRule {
             host: "forms.googleapis.com",
             path_prefix: None,
@@ -166,6 +176,7 @@ static APP_PROVIDERS: &[AppProvider] = &[
     },
     AppProvider {
         provider: "google-classroom",
+        display_name: "Google Classroom",
         host_rules: &[HostRule {
             host: "classroom.googleapis.com",
             path_prefix: None,
@@ -175,6 +186,7 @@ static APP_PROVIDERS: &[AppProvider] = &[
     },
     AppProvider {
         provider: "google-admin",
+        display_name: "Google Admin",
         host_rules: &[HostRule {
             host: "admin.googleapis.com",
             path_prefix: None,
@@ -184,6 +196,7 @@ static APP_PROVIDERS: &[AppProvider] = &[
     },
     AppProvider {
         provider: "google-analytics",
+        display_name: "Google Analytics",
         host_rules: &[HostRule {
             host: "analyticsdata.googleapis.com",
             path_prefix: None,
@@ -193,6 +206,7 @@ static APP_PROVIDERS: &[AppProvider] = &[
     },
     AppProvider {
         provider: "google-search-console",
+        display_name: "Google Search Console",
         host_rules: &[HostRule {
             host: "searchconsole.googleapis.com",
             path_prefix: None,
@@ -202,6 +216,7 @@ static APP_PROVIDERS: &[AppProvider] = &[
     },
     AppProvider {
         provider: "google-meet",
+        display_name: "Google Meet",
         host_rules: &[HostRule {
             host: "meet.googleapis.com",
             path_prefix: None,
@@ -211,6 +226,7 @@ static APP_PROVIDERS: &[AppProvider] = &[
     },
     AppProvider {
         provider: "google-photos",
+        display_name: "Google Photos",
         host_rules: &[HostRule {
             host: "photoslibrary.googleapis.com",
             path_prefix: None,
@@ -220,6 +236,7 @@ static APP_PROVIDERS: &[AppProvider] = &[
     },
     AppProvider {
         provider: "resend",
+        display_name: "Resend",
         host_rules: &[HostRule {
             host: "api.resend.com",
             path_prefix: None,
@@ -230,6 +247,41 @@ static APP_PROVIDERS: &[AppProvider] = &[
 ];
 
 // ── Public API ─────────────────────────────────────────────────────────
+
+/// Given a hostname, return the first matching provider's (id, display_name).
+/// Returns `None` if no provider matches.
+pub(crate) fn provider_for_host(hostname: &str) -> Option<(&'static str, &'static str)> {
+    APP_PROVIDERS.iter().find_map(|p| {
+        p.host_rules
+            .iter()
+            .any(|r| r.host == hostname)
+            .then_some((p.provider, p.display_name))
+    })
+}
+
+/// Given a hostname and request path, return the best matching provider's (id, display_name).
+///
+/// For shared hosts (e.g., `www.googleapis.com`), uses the path prefix to disambiguate
+/// between providers (Gmail on `/gmail/*`, Calendar on `/calendar/*`, etc.).
+/// Falls back to the first host-only match if no path prefix matches.
+pub(crate) fn provider_for_host_and_path(
+    hostname: &str,
+    path: &str,
+) -> Option<(&'static str, &'static str)> {
+    // First try: match both host and path prefix
+    let path_match = APP_PROVIDERS.iter().find_map(|p| {
+        p.host_rules
+            .iter()
+            .any(|r| r.host == hostname && r.path_prefix.is_some_and(|pfx| path.starts_with(pfx)))
+            .then_some((p.provider, p.display_name))
+    });
+    if path_match.is_some() {
+        return path_match;
+    }
+
+    // Fallback: host-only match (for providers with dedicated subdomains)
+    provider_for_host(hostname)
+}
 
 /// Given a hostname, return all provider names that have at least one host rule
 /// matching it. Multiple providers can share the same host with different path
@@ -678,6 +730,71 @@ mod tests {
     #[test]
     fn path_pattern_unknown_provider_returns_wildcard() {
         assert_eq!(path_pattern_for("nonexistent", "any.host.com"), "*");
+    }
+
+    // ── provider_for_host ─────────────────────────────────────────────
+
+    #[test]
+    fn provider_for_host_returns_known_provider() {
+        let result = provider_for_host("api.github.com");
+        assert_eq!(result, Some(("github", "GitHub")));
+    }
+
+    #[test]
+    fn provider_for_host_returns_none_for_unknown() {
+        assert_eq!(provider_for_host("unknown.example.com"), None);
+    }
+
+    #[test]
+    fn provider_for_host_returns_first_match_for_shared_host() {
+        // www.googleapis.com is shared by Gmail, Calendar, Drive, etc.
+        // provider_for_host returns the first match in registry order.
+        let result = provider_for_host("www.googleapis.com");
+        assert!(result.is_some());
+        let (provider, _) = result.unwrap();
+        // Gmail comes before Calendar in the registry
+        assert_eq!(provider, "gmail");
+    }
+
+    // ── provider_for_host_and_path ─────────────────────────────────────
+
+    #[test]
+    fn provider_for_host_and_path_disambiguates_shared_host() {
+        let result = provider_for_host_and_path("www.googleapis.com", "/calendar/v3/calendars");
+        assert_eq!(result, Some(("google-calendar", "Google Calendar")));
+
+        let result = provider_for_host_and_path("www.googleapis.com", "/gmail/v1/users/me");
+        assert_eq!(result, Some(("gmail", "Gmail")));
+
+        let result = provider_for_host_and_path("www.googleapis.com", "/drive/v3/files");
+        assert_eq!(result, Some(("google-drive", "Google Drive")));
+    }
+
+    #[test]
+    fn provider_for_host_and_path_falls_back_to_host_only() {
+        // Dedicated subdomain — no path prefix needed
+        let result = provider_for_host_and_path("gmail.googleapis.com", "/gmail/v1/users/me");
+        assert_eq!(result, Some(("gmail", "Gmail")));
+
+        let result = provider_for_host_and_path("api.github.com", "/user");
+        assert_eq!(result, Some(("github", "GitHub")));
+    }
+
+    #[test]
+    fn provider_for_host_and_path_returns_none_for_unknown() {
+        assert_eq!(
+            provider_for_host_and_path("unknown.example.com", "/foo"),
+            None
+        );
+    }
+
+    #[test]
+    fn provider_for_host_includes_display_name() {
+        let result = provider_for_host("gmail.googleapis.com");
+        assert_eq!(result, Some(("gmail", "Gmail")));
+
+        let result = provider_for_host("sheets.googleapis.com");
+        assert_eq!(result, Some(("google-sheets", "Google Sheets")));
     }
 
     /// Shared hosts must not mix `None` and `Some` path prefixes — that would

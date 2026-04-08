@@ -1,5 +1,6 @@
 import { createCipheriv, createDecipheriv, randomBytes } from "crypto";
 import type { CryptoService } from "@/lib/crypto-types";
+import { SECRET_ENCRYPTION_KEY } from "@/lib/env";
 
 export type { CryptoService };
 
@@ -12,7 +13,7 @@ const AUTH_TAG_LENGTH = 16;
  * Returns a 32-byte Buffer or null if not configured.
  */
 const loadKey = (): Buffer | null => {
-  const keyBase64 = process.env.SECRET_ENCRYPTION_KEY;
+  const keyBase64 = SECRET_ENCRYPTION_KEY;
   if (!keyBase64) return null;
 
   const key = Buffer.from(keyBase64, "base64");

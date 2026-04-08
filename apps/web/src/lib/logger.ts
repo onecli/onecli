@@ -1,4 +1,5 @@
 import pino from "pino";
+import { LOG_LEVEL, NODE_ENV } from "@/lib/env";
 
 /**
  * Structured logger for the web app.
@@ -13,8 +14,8 @@ import pino from "pino";
  *   log.error({ err }, "failed to sync user");
  */
 export const logger = pino({
-  level: process.env.LOG_LEVEL ?? "info",
-  ...(process.env.NODE_ENV === "production"
+  level: LOG_LEVEL,
+  ...(NODE_ENV === "production"
     ? {
         formatters: {
           level: (label: string) => ({ level: label }),

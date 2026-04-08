@@ -1,8 +1,9 @@
 import { redirect } from "next/navigation";
 import Image from "next/image";
 import { AlertTriangle } from "lucide-react";
+import { NODE_ENV } from "@/lib/env";
 
-const isDev = process.env.NODE_ENV === "development";
+const isDev = NODE_ENV === "development";
 
 const errors: Record<string, { title: string; description: React.ReactNode }> =
   {

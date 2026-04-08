@@ -1,7 +1,8 @@
 import { useCallback } from "react";
 import { getGatewayFetchOptions } from "@/lib/gateway-auth";
+import { API_URL } from "@/lib/env";
 
-const GATEWAY_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:10255";
+const GATEWAY_URL = API_URL;
 
 /**
  * Returns a fire-and-forget function that invalidates the gateway's

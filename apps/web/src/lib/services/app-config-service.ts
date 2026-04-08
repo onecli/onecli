@@ -173,6 +173,20 @@ export const hasAppConfig = async (
 };
 
 /**
+ * Return all provider IDs with an enabled AppConfig for this account.
+ * Single query alternative to calling hasAppConfig in a loop.
+ */
+export const listConfiguredProviders = async (
+  accountId: string,
+): Promise<string[]> => {
+  const configs = await db.appConfig.findMany({
+    where: { accountId, enabled: true },
+    select: { provider: true },
+  });
+  return configs.map((c) => c.provider);
+};
+
+/**
  * Toggle the enabled state of an AppConfig.
  */
 export const toggleAppConfigEnabled = async (

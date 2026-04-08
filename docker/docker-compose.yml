@@ -34,6 +34,8 @@ services:
     environment:
       DATABASE_URL: postgresql://${POSTGRES_USER:-onecli}:${POSTGRES_PASSWORD:-onecli}@postgres:5432/${POSTGRES_DB:-onecli}
       NEXTAUTH_SECRET: ${NEXTAUTH_SECRET:-}
+      NEXT_PUBLIC_APP_URL: http://${ONECLI_BIND_HOST:-127.0.0.1}:10254
+      APP_URL: http://${ONECLI_BIND_HOST:-127.0.0.1}:10254
     volumes:
       - app-data:/app/data
     env_file:

@@ -3,6 +3,7 @@
 import { db } from "@onecli/db";
 import { resolveUser } from "@/lib/actions/resolve-user";
 import { DEMO_SECRET_NAME } from "@/lib/constants";
+import { API_BASE_URL, APP_URL } from "@/lib/env";
 import { seedDemoSecret as seedDemoSecretService } from "@/lib/services/secret-service";
 import {
   listSecrets,
@@ -70,8 +71,8 @@ export const getInstallInfo = async () => {
   return {
     apiKey: apiKey?.key ?? null,
     agentToken: agent?.accessToken ?? null,
-    gatewayUrl: process.env.API_BASE_URL ?? "localhost:10255",
-    appUrl: process.env.NEXT_PUBLIC_APP_URL ?? "http://localhost:10254",
+    gatewayUrl: API_BASE_URL,
+    appUrl: APP_URL,
   };
 };
 
@@ -98,7 +99,7 @@ export const getDemoInfo = async () => {
 
   return {
     agentToken: agent.accessToken,
-    gatewayUrl: process.env.API_BASE_URL ?? "localhost:10255",
+    gatewayUrl: API_BASE_URL,
   };
 };
 
