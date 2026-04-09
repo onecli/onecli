@@ -1,0 +1,26 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 120 120" width="120" height="120" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+  <!-- Agent head — rounded square -->
+  <rect x="32" y="35" width="56" height="52" rx="14" />
+
+  <!-- Eyes -->
+  <circle cx="50" cy="58" r="4" />
+  <circle cx="70" cy="58" r="4" />
+
+  <!-- Mouth — subtle smile -->
+  <path d="M52 72 Q60 78 68 72" />
+
+  <!-- Antenna -->
+  <line x1="60" y1="35" x2="60" y2="24" />
+  <circle cx="60" cy="21" r="3" />
+
+  <!-- Sparkle top-right -->
+  <line x1="96" y1="18" x2="96" y2="30" />
+  <line x1="90" y1="24" x2="102" y2="24" />
+
+  <!-- Sparkle small left -->
+  <line x1="18" y1="42" x2="18" y2="50" />
+  <line x1="14" y1="46" x2="22" y2="46" />
+
+  <!-- Sparkle dot bottom-right -->
+  <circle cx="100" cy="72" r="1.5" fill="currentColor" stroke="none" />
+</svg>

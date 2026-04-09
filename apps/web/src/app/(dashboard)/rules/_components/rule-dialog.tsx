@@ -3,7 +3,7 @@
 import { useState, useEffect } from "react";
 import { useInvalidateGatewayCache } from "@/hooks/use-invalidate-cache";
 import { toast } from "sonner";
-import { ShieldBan, Gauge, Check, Settings2 } from "lucide-react";
+import { ShieldBan, Gauge, Hand, Check, Settings2 } from "lucide-react";
 import {
   Dialog,
   DialogContent,
@@ -81,7 +81,9 @@ export const RuleDialog = ({
   const [pathPattern, setPathPattern] = useState("");
   const [method, setMethod] = useState("");
   const [agentId, setAgentId] = useState("");
-  const [action, setAction] = useState<"block" | "rate_limit">("block");
+  const [action, setAction] = useState<
+    "block" | "rate_limit" | "manual_approval"
+  >("block");
   const [rateLimit, setRateLimit] = useState(100);
   const [rateLimitWindow, setRateLimitWindow] = useState<
     "minute" | "hour" | "day"
@@ -97,7 +99,9 @@ export const RuleDialog = ({
       setPathPattern(rule?.pathPattern ?? "");
       setMethod(rule?.method ?? "");
       setAgentId(rule?.agentId ?? "");
-      setAction((rule?.action as "block" | "rate_limit") ?? "block");
+      setAction(
+        (rule?.action as "block" | "rate_limit" | "manual_approval") ?? "block",
+      );
       setRateLimit(rule?.rateLimit ?? 100);
       setRateLimitWindow(
         (rule?.rateLimitWindow as "minute" | "hour" | "day") ?? "hour",
@@ -329,7 +333,7 @@ export const RuleDialog = ({
         {/* ── Step 2: Action ───────────────────────────────────── */}
         {step === "action" && (
           <div className="space-y-4 pt-1">
-            <div className="grid grid-cols-2 gap-2">
+            <div className="grid grid-cols-3 gap-2">
               <button
                 type="button"
                 onClick={() => setAction("block")}
@@ -368,10 +372,26 @@ export const RuleDialog = ({
                   Allow up to N requests, then block
                 </span>
               </button>
+              <button
+                type="button"
+                onClick={() => setAction("manual_approval")}
+                className={`flex flex-col gap-1.5 rounded-md border p-3.5 text-left transition-colors ${
+                  action === "manual_approval"
+                    ? "border-brand bg-brand/5"
+                    : "hover:bg-muted/50"
+                }`}
+              >
+                <span className="flex items-center gap-2 text-sm font-medium">
+                  <Hand
+                    className={`size-4 ${action === "manual_approval" ? "text-brand" : ""}`}
+                  />
+                  Manual Approval
+                </span>
+                <span className="text-muted-foreground text-xs">
+                  Require human approval before proceeding
+                </span>
+              </button>
             </div>
-            <p className="text-muted-foreground text-[11px]">
-              Monitor and Approval actions coming soon.
-            </p>
 
             {action === "rate_limit" && (
               <div className="space-y-2.5 rounded-md border p-3">

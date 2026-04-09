@@ -229,6 +229,7 @@ model OnboardingSurvey {
   userEmail String   @map("user_email")
   useCase   String?  @map("use_case")
   discovery String[] @default([])
+  responses Json     @default("{}")
   createdAt DateTime @default(now()) @map("created_at")
   updatedAt DateTime @updatedAt @map("updated_at")
   account   Account  @relation(fields: [accountId], references: [id])

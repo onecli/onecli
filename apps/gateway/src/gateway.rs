@@ -34,6 +34,7 @@ use tower::ServiceExt;
 use tower_http::cors::CorsLayer;
 use tracing::{info, warn};
 
+use crate::approval::{ApprovalDecision, ApprovalStore, APPROVAL_TIMEOUT_SECS};
 use crate::apps;
 use crate::auth::AuthUser;
 use crate::ca::CertificateAuthority;
@@ -43,6 +44,16 @@ use crate::inject;
 use crate::vault;
 
 // ── GatewayState ───────────────────────────────────────────────────────
+
+/// Context for a proxied request, resolved at CONNECT time.
+/// Wrapped in `Arc` and shared across all requests within a MITM session.
+#[derive(Debug)]
+pub(crate) struct ProxyContext {
+    pub account_id: Option<String>,
+    pub agent_id: Option<String>,
+    pub agent_name: Option<String>,
+    pub agent_token: Option<String>,
+}
 
 /// Shared state for the gateway, passed to all request handlers.
 #[derive(Clone)]
@@ -61,6 +72,8 @@ pub(crate) struct GatewayState {
     pub cache: Arc<dyn CacheStore>,
     /// Provider-agnostic vault service for credential fetching.
     pub vault_service: Arc<vault::VaultService>,
+    /// Manual approval store for held requests.
+    pub approval_store: Arc<dyn ApprovalStore>,
 }
 
 // ── GatewayServer ───────────────────────────────────────────────────────
@@ -123,6 +136,7 @@ impl GatewayServer {
         policy_engine: Arc<PolicyEngine>,
         vault_service: Arc<vault::VaultService>,
         cache: Arc<dyn CacheStore>,
+        approval_store: Arc<dyn ApprovalStore>,
     ) -> Self {
         let global_skip = std::env::var("GATEWAY_DANGER_ACCEPT_INVALID_CERTS").is_ok();
         let skip_verify_hosts = Arc::new(parse_skip_verify_hosts());
@@ -141,6 +155,7 @@ impl GatewayServer {
             policy_engine,
             cache,
             vault_service,
+            approval_store,
         };
 
         Self { state, port }
@@ -194,6 +209,14 @@ impl GatewayServer {
                 "/api/cache/invalidate",
                 axum::routing::post(invalidate_cache),
             )
+            .route(
+                "/api/approvals/pending",
+                axum::routing::get(get_pending_approvals),
+            )
+            .route(
+                "/api/approvals/{id}/decision",
+                axum::routing::post(submit_approval_decision),
+            )
             .layer(cors_layer)
             .fallback(fallback)
             .with_state(self.state.clone());
@@ -236,6 +259,104 @@ async fn invalidate_cache(
         StatusCode::OK,
         axum::Json(serde_json::json!({ "invalidated": true })),
     )
+}
+
+/// Query parameters for the pending approvals endpoint.
+#[derive(serde::Deserialize)]
+struct PendingParams {
+    /// Comma-separated approval IDs to exclude (already being processed by the SDK).
+    /// Allows the server to enter long-poll when all pending approvals are in-flight.
+    #[serde(default)]
+    exclude: String,
+}
+
+/// Long-poll for pending manual approval requests.
+/// Returns immediately if new (non-excluded) approvals exist, otherwise waits up to 30s.
+async fn get_pending_approvals(
+    auth: AuthUser,
+    State(state): State<GatewayState>,
+    axum::extract::Query(params): axum::extract::Query<PendingParams>,
+) -> impl axum::response::IntoResponse {
+    let exclude: std::collections::HashSet<&str> = params
+        .exclude
+        .split(',')
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .collect();
+
+    let mut pending = state.approval_store.list_pending(&auth.account_id).await;
+    pending.retain(|a| !exclude.contains(a.id.as_str()));
+
+    if pending.is_empty() {
+        let got_new = state
+            .approval_store
+            .wait_for_new(&auth.account_id, std::time::Duration::from_secs(30))
+            .await;
+        if got_new {
+            let mut fresh = state.approval_store.list_pending(&auth.account_id).await;
+            fresh.retain(|a| !exclude.contains(a.id.as_str()));
+            pending = fresh;
+        }
+    }
+
+    axum::Json(serde_json::json!({
+        "requests": pending.iter().map(|a| serde_json::json!({
+            "id": a.id,
+            "method": a.method,
+            "url": format!("{}://{}{}", a.scheme, a.host, a.path),
+            "host": a.host,
+            "path": a.path,
+            "headers": a.headers,
+            "bodyPreview": a.body_preview,
+            "agent": { "id": a.agent_id, "name": a.agent_name },
+            "createdAt": format_unix_ts(a.created_at),
+            "expiresAt": format_unix_ts(a.expires_at),
+        })).collect::<Vec<_>>(),
+        "timeoutSeconds": APPROVAL_TIMEOUT_SECS,
+    }))
+}
+
+/// Submit a decision for a pending manual approval request.
+async fn submit_approval_decision(
+    auth: AuthUser,
+    State(state): State<GatewayState>,
+    axum::extract::Path(approval_id): axum::extract::Path<String>,
+    axum::Json(body): axum::Json<DecisionBody>,
+) -> impl axum::response::IntoResponse {
+    // O(1) lookup — verify approval exists and belongs to this account.
+    match state.approval_store.get_pending(&approval_id).await {
+        Some(a) if a.account_id == auth.account_id => {}
+        _ => {
+            return (
+                StatusCode::NOT_FOUND,
+                axum::Json(serde_json::json!({ "error": "approval_not_found" })),
+            );
+        }
+    }
+
+    let delivered = state
+        .approval_store
+        .submit_decision(&approval_id, body.decision)
+        .await;
+
+    if delivered {
+        (
+            StatusCode::OK,
+            axum::Json(serde_json::json!({ "success": true })),
+        )
+    } else {
+        (
+            StatusCode::GONE,
+            axum::Json(serde_json::json!({ "error": "approval_expired" })),
+        )
+    }
+}
+
+/// Request body for the approval decision endpoint.
+/// Deserializes directly into the enum — Axum returns 422 on invalid values.
+#[derive(serde::Deserialize)]
+struct DecisionBody {
+    decision: ApprovalDecision,
 }
 
 /// Reject non-proxy, non-CONNECT requests to unknown routes with 400 Bad Request.
@@ -312,31 +433,32 @@ async fn handle_connect(
     // Extract agent token from Proxy-Authorization header.
     let agent_token = inject::extract_agent_token(&req).filter(|t| !t.is_empty());
 
-    let (mut intercept, mut injection_rules, policy_rules, account_id) = if let Some(ref token) =
-        agent_token
-    {
-        match connect::resolve(token, &hostname, &state.policy_engine, &*state.cache).await {
-            Ok(resp) => (
-                resp.intercept,
-                resp.injection_rules,
-                resp.policy_rules,
-                resp.account_id,
-            ),
-            Err(ConnectError::InvalidToken) => {
-                warn!(peer = %peer_addr, host = %host, "CONNECT rejected: invalid agent token");
-                return Ok(response::proxy_auth_required());
+    let (mut intercept, mut injection_rules, policy_rules, account_id, agent_id, agent_name) =
+        if let Some(ref token) = agent_token {
+            match connect::resolve(token, &hostname, &state.policy_engine, &*state.cache).await {
+                Ok(resp) => (
+                    resp.intercept,
+                    resp.injection_rules,
+                    resp.policy_rules,
+                    resp.account_id,
+                    resp.agent_id,
+                    resp.agent_name,
+                ),
+                Err(ConnectError::InvalidToken) => {
+                    warn!(peer = %peer_addr, host = %host, "CONNECT rejected: invalid agent token");
+                    return Ok(response::proxy_auth_required());
+                }
+                Err(ConnectError::Internal(e)) => {
+                    warn!(peer = %peer_addr, host = %host, error = %e, "CONNECT rejected: internal error");
+                    let mut resp = Response::new(axum::body::Body::empty());
+                    *resp.status_mut() = StatusCode::BAD_GATEWAY;
+                    return Ok(resp);
+                }
             }
-            Err(ConnectError::Internal(e)) => {
-                warn!(peer = %peer_addr, host = %host, error = %e, "CONNECT rejected: internal error");
-                let mut resp = Response::new(axum::body::Body::empty());
-                *resp.status_mut() = StatusCode::BAD_GATEWAY;
-                return Ok(resp);
-            }
-        }
-    } else {
-        // No auth — plain tunnel (no MITM, no injection)
-        (false, vec![], vec![], None)
-    };
+        } else {
+            // No auth — plain tunnel (no MITM, no injection)
+            (false, vec![], vec![], None, None, None)
+        };
 
     // Vault fallback: if no DB secrets matched, try vault providers for this user.
     if !intercept {
@@ -382,7 +504,13 @@ async fn handle_connect(
         state.http_client.clone()
     };
     let cache = Arc::clone(&state.cache);
-    let agent_token_owned = agent_token.clone().unwrap_or_default();
+    let approval_store = Arc::clone(&state.approval_store);
+    let proxy_ctx = Arc::new(ProxyContext {
+        account_id,
+        agent_id,
+        agent_name,
+        agent_token: agent_token.clone(),
+    });
 
     tokio::spawn(async move {
         match hyper::upgrade::on(req).await {
@@ -396,7 +524,8 @@ async fn handle_connect(
                         injection_rules,
                         policy_rules,
                         cache,
-                        agent_token_owned,
+                        proxy_ctx,
+                        approval_store,
                     )
                     .await
                 } else {
@@ -436,9 +565,18 @@ async fn handle_http_proxy(
 
     let agent_token = inject::extract_agent_token(&req).filter(|t| !t.is_empty());
 
-    let (mut injection_rules, policy_rules, account_id) = if let Some(ref token) = agent_token {
+    let (mut injection_rules, policy_rules, account_id, agent_id, agent_name) = if let Some(
+        ref token,
+    ) = agent_token
+    {
         match connect::resolve(token, &hostname, &state.policy_engine, &*state.cache).await {
-            Ok(resp) => (resp.injection_rules, resp.policy_rules, resp.account_id),
+            Ok(resp) => (
+                resp.injection_rules,
+                resp.policy_rules,
+                resp.account_id,
+                resp.agent_id,
+                resp.agent_name,
+            ),
             Err(ConnectError::InvalidToken) => {
                 warn!(peer = %peer_addr, host = %authority, "HTTP proxy rejected: invalid agent token");
                 return Ok(response::proxy_auth_required());
@@ -451,7 +589,7 @@ async fn handle_http_proxy(
             }
         }
     } else {
-        (vec![], vec![], None)
+        (vec![], vec![], None, None, None)
     };
 
     // Vault fallback
@@ -475,6 +613,13 @@ async fn handle_http_proxy(
         "HTTP_PROXY"
     );
 
+    let proxy_ctx = ProxyContext {
+        account_id,
+        agent_id,
+        agent_name,
+        agent_token: agent_token.clone(),
+    };
+
     let resp = forward::forward_request(
         req,
         &authority,
@@ -483,7 +628,8 @@ async fn handle_http_proxy(
         &injection_rules,
         &policy_rules,
         &*state.cache,
-        &agent_token.unwrap_or_default(),
+        &proxy_ctx,
+        &state.approval_store,
     )
     .await?;
 
@@ -492,6 +638,17 @@ async fn handle_http_proxy(
 }
 
 // ── Helpers ─────────────────────────────────────────────────────────────
+
+/// Format a unix timestamp (seconds) as an ISO 8601 UTC string.
+/// Falls back to epoch if the timestamp is invalid.
+fn format_unix_ts(secs: u64) -> String {
+    use std::time::{Duration, UNIX_EPOCH};
+    let dt = UNIX_EPOCH + Duration::from_secs(secs);
+    // time crate is already a dependency (for certificate validity)
+    let odt = time::OffsetDateTime::from(dt);
+    odt.format(&time::format_description::well_known::Rfc3339)
+        .unwrap_or_else(|_| "1970-01-01T00:00:00Z".to_string())
+}
 
 /// Strip port from a `host:port` string, returning just the hostname.
 pub(crate) fn strip_port(host: &str) -> &str {

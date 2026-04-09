@@ -104,7 +104,7 @@ export const updatePolicyRule = async (
   if (input.method !== undefined) data.method = input.method || null;
   if (input.action !== undefined) {
     data.action = input.action;
-    if (input.action === "block") {
+    if (input.action !== "rate_limit") {
       data.rateLimit = null;
       data.rateLimitWindow = null;
     }

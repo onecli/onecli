@@ -39,7 +39,12 @@ export const RuleCard = ({ rule, agents, onUpdate }: RuleCardProps) => {
     ? agents.find((a) => a.id === rule.agentId)?.name
     : null;
 
-  const actionLabel = rule.action === "rate_limit" ? "rate limit" : rule.action;
+  const actionLabel =
+    rule.action === "rate_limit"
+      ? "rate limit"
+      : rule.action === "manual_approval"
+        ? "manual approval"
+        : rule.action;
 
   const rateLimitLabel =
     rule.action === "rate_limit" && rule.rateLimit && rule.rateLimitWindow
@@ -87,9 +92,12 @@ export const RuleCard = ({ rule, agents, onUpdate }: RuleCardProps) => {
               <h3 className="text-sm font-medium">{rule.name}</h3>
               <Badge
                 variant={
-                  rule.action === "rate_limit" ? "secondary" : "destructive"
+                  rule.action === "rate_limit" ||
+                  rule.action === "manual_approval"
+                    ? "secondary"
+                    : "destructive"
                 }
-                className={`text-xs ${rule.action === "rate_limit" ? "bg-amber-500/15 text-amber-600 dark:text-amber-400" : ""}`}
+                className={`text-xs ${rule.action === "rate_limit" ? "bg-amber-500/15 text-amber-600 dark:text-amber-400" : rule.action === "manual_approval" ? "bg-blue-500/15 text-blue-600 dark:text-blue-400" : ""}`}
               >
                 {actionLabel}
               </Badge>

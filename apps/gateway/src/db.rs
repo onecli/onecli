@@ -23,6 +23,7 @@ pub(crate) async fn create_pool(database_url: &str) -> Result<PgPool> {
 #[derive(Debug, FromRow)]
 pub(crate) struct AgentRow {
     pub id: String,
+    pub name: String,
     pub account_id: String,
     pub secret_mode: String,
 }
@@ -121,7 +122,7 @@ pub(crate) async fn find_agent_by_token(
     access_token: &str,
 ) -> Result<Option<AgentRow>> {
     sqlx::query_as::<_, AgentRow>(
-        r#"SELECT id, account_id, secret_mode FROM agents WHERE access_token = $1 LIMIT 1"#,
+        r#"SELECT id, name, account_id, secret_mode FROM agents WHERE access_token = $1 LIMIT 1"#,
     )
     .bind(access_token)
     .fetch_optional(pool)
@@ -167,7 +168,7 @@ pub(crate) async fn find_policy_rules_by_account(
                   action, rate_limit, rate_limit_window
            FROM policy_rules
            WHERE account_id = $1 AND enabled = true
-             AND action IN ('block', 'rate_limit')"#,
+             AND action IN ('block', 'rate_limit', 'manual_approval')"#,
     )
     .bind(account_id)
     .fetch_all(pool)

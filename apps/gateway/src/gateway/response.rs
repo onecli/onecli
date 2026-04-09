@@ -51,6 +51,42 @@ pub(crate) fn app_not_connected<S>(
     response
 }
 
+/// 403 Forbidden — manual approval denied or timed out.
+pub(crate) fn manual_approval_denied<S>(
+    approval_id: &str,
+    reason: &str,
+) -> Response<ForwardBody<S>> {
+    let body = serde_json::json!({
+        "error": "manual_approval_denied",
+        "message": format!("This request was {reason} by an OneCLI manual approval policy."),
+        "approval_id": approval_id,
+    })
+    .to_string();
+
+    let mut response = Response::new(Either::Left(Full::new(Bytes::from(body))));
+    *response.status_mut() = StatusCode::FORBIDDEN;
+    response
+        .headers_mut()
+        .insert("content-type", HeaderValue::from_static("application/json"));
+    response
+}
+
+/// 502 Bad Gateway — approval store unavailable.
+pub(crate) fn approval_store_unavailable<S>() -> Response<ForwardBody<S>> {
+    let body = serde_json::json!({
+        "error": "approval_store_unavailable",
+        "message": "OneCLI manual approval service is temporarily unavailable.",
+    })
+    .to_string();
+
+    let mut response = Response::new(Either::Left(Full::new(Bytes::from(body))));
+    *response.status_mut() = StatusCode::BAD_GATEWAY;
+    response
+        .headers_mut()
+        .insert("content-type", HeaderValue::from_static("application/json"));
+    response
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -1,0 +1,42 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64">
+  <defs>
+    <linearGradient id="hermes-gold" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#FBBF24" />
+      <stop offset="50%" stop-color="#F59E0B" />
+      <stop offset="100%" stop-color="#D97706" />
+    </linearGradient>
+  </defs>
+
+  <!-- Helmet dome (petasos) -->
+  <path
+    d="M16 36 Q16 18 32 14 Q48 18 48 36 Z"
+    fill="url(#hermes-gold)"
+  />
+
+  <!-- Helmet brim -->
+  <ellipse cx="32" cy="36" rx="20" ry="6" fill="url(#hermes-gold)" />
+
+  <!-- Left wing -->
+  <path
+    d="M12 32 Q4 26 6 18 Q8 22 12 24 Q8 24 4 28 Q8 28 12 28 Q10 30 12 32"
+    fill="url(#hermes-gold)"
+    opacity="0.85"
+  />
+
+  <!-- Right wing -->
+  <path
+    d="M52 32 Q60 26 58 18 Q56 22 52 24 Q56 24 60 28 Q56 28 52 28 Q54 30 52 32"
+    fill="url(#hermes-gold)"
+    opacity="0.85"
+  />
+
+  <!-- Face visor line -->
+  <path
+    d="M22 36 L22 44 Q27 48 32 48 Q37 48 42 44 L42 36"
+    fill="#D97706"
+    opacity="0.3"
+  />
+
+  <!-- Helmet center ridge -->
+  <line x1="32" y1="14" x2="32" y2="36" stroke="#D97706" stroke-width="1.5" opacity="0.3" />
+</svg>

@@ -14,6 +14,13 @@ mod cache;
 #[path = "cloud/cache.rs"]
 mod cache;
 
+#[cfg(not(feature = "cloud"))]
+mod approval;
+
+#[cfg(feature = "cloud")]
+#[path = "cloud/approval.rs"]
+mod approval;
+
 mod apps;
 mod connect;
 
@@ -141,10 +148,21 @@ async fn main() -> Result<()> {
     // OSS: in-memory DashMap. Cloud: Redis (ElastiCache with TLS + AUTH).
     let cache = cache::create_store().await?;
 
+    // Initialize approval store for manual approval policy action
+    // OSS: in-memory DashMap + tokio channels. Cloud: Redis + BLPOP.
+    let approval_store = approval::create_store().await?;
+
     info!(port = cli.port, "gateway ready");
 
     // Start the gateway server (blocks forever)
-    let server = GatewayServer::new(ca, cli.port, policy_engine, vault_service, cache);
+    let server = GatewayServer::new(
+        ca,
+        cli.port,
+        policy_engine,
+        vault_service,
+        cache,
+        approval_store,
+    );
     server.run().await
 }
 

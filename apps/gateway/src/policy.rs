@@ -18,6 +18,9 @@ pub(crate) enum PolicyAction {
         max_requests: u64,
         window_secs: u64,
     },
+    ManualApproval {
+        rule_id: String,
+    },
 }
 
 /// A resolved policy rule ready for evaluation.
@@ -41,12 +44,16 @@ pub(crate) enum PolicyDecision {
         window: &'static str,
         retry_after_secs: u64,
     },
+    /// Request requires manual approval before proceeding.
+    ManualApproval { rule_id: String },
 }
 
 // ── Evaluation ──────────────────────────────────────────────────────────
 
 /// Evaluate all policy rules against a request.
-/// Checks block rules first (instant deny), then rate limits (cache lookup).
+///
+/// Priority: Block > ManualApproval > RateLimit > Allow.
+/// Each pass checks only one action type to enforce strict ordering.
 pub(crate) async fn evaluate(
     request_method: &str,
     request_path: &str,
@@ -54,54 +61,77 @@ pub(crate) async fn evaluate(
     agent_token: &str,
     cache: &dyn CacheStore,
 ) -> PolicyDecision {
+    // Pass 1: block rules (absolute deny, highest priority)
     for rule in rules {
-        if !path_matches(request_path, &rule.path_pattern) {
+        if !matches_request(rule, request_method, request_path) {
             continue;
         }
-        if rule
-            .method
-            .as_ref()
-            .is_some_and(|m| !m.eq_ignore_ascii_case(request_method))
-        {
-            continue;
-        }
-
-        match &rule.action {
-            PolicyAction::Block => return PolicyDecision::Blocked,
-            PolicyAction::RateLimit {
-                rule_id,
-                max_requests,
-                window_secs,
-            } => {
-                let now = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_secs();
-                let window_id = now / (*window_secs).max(1);
-                let key = format!("rate:{rule_id}:{agent_token}:{window_id}");
-
-                if let Some(count) = cache.incr(&key, *window_secs).await {
-                    if count > *max_requests {
-                        let window_end = (window_id + 1) * window_secs;
-                        let retry_after = window_end.saturating_sub(now);
-                        let window_name = match *window_secs {
-                            60 => "minute",
-                            3600 => "hour",
-                            86400 => "day",
-                            _ => "window",
-                        };
-                        return PolicyDecision::RateLimited {
-                            limit: *max_requests,
-                            window: window_name,
-                            retry_after_secs: retry_after,
-                        };
-                    }
-                }
-                // If incr failed (cache unavailable), allow through — graceful fallback
-            }
+        if matches!(rule.action, PolicyAction::Block) {
+            return PolicyDecision::Blocked;
         }
     }
+
+    // Pass 2: manual approval rules
+    for rule in rules {
+        if !matches_request(rule, request_method, request_path) {
+            continue;
+        }
+        if let PolicyAction::ManualApproval { rule_id } = &rule.action {
+            return PolicyDecision::ManualApproval {
+                rule_id: rule_id.clone(),
+            };
+        }
+    }
+
+    // Pass 3: rate limit rules
+    for rule in rules {
+        if !matches_request(rule, request_method, request_path) {
+            continue;
+        }
+        if let PolicyAction::RateLimit {
+            rule_id,
+            max_requests,
+            window_secs,
+        } = &rule.action
+        {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+            let window_id = now / (*window_secs).max(1);
+            let key = format!("rate:{rule_id}:{agent_token}:{window_id}");
+
+            if let Some(count) = cache.incr(&key, *window_secs).await {
+                if count > *max_requests {
+                    let window_end = (window_id + 1) * window_secs;
+                    let retry_after = window_end.saturating_sub(now);
+                    let window_name = match *window_secs {
+                        60 => "minute",
+                        3600 => "hour",
+                        86400 => "day",
+                        _ => "window",
+                    };
+                    return PolicyDecision::RateLimited {
+                        limit: *max_requests,
+                        window: window_name,
+                        retry_after_secs: retry_after,
+                    };
+                }
+            }
+            // If incr failed (cache unavailable), allow through — graceful fallback
+        }
+    }
+
     PolicyDecision::Allow
+}
+
+/// Check if a rule matches the request method and path.
+fn matches_request(rule: &PolicyRule, method: &str, path: &str) -> bool {
+    path_matches(path, &rule.path_pattern)
+        && rule
+            .method
+            .as_ref()
+            .is_none_or(|m| m.eq_ignore_ascii_case(method))
 }
 
 /// Check if a request should be blocked by any policy rule (sync, block-only).
@@ -285,5 +315,55 @@ mod tests {
         let rules = vec![block_rule("/blocked/*", Some("POST"))];
         let d = evaluate("GET", "/safe/path", &rules, "agent1", &*store).await;
         assert!(matches!(d, PolicyDecision::Allow));
+    }
+
+    // ── Manual approval tests ────────────────────────────────────────
+
+    fn approval_rule(path: &str, method: Option<&str>) -> PolicyRule {
+        PolicyRule {
+            path_pattern: path.to_string(),
+            method: method.map(|m| m.to_string()),
+            action: PolicyAction::ManualApproval {
+                rule_id: "test-approval".to_string(),
+            },
+        }
+    }
+
+    #[tokio::test]
+    async fn manual_approval_matches_path_and_method() {
+        let store = crate::cache::create_store().await.unwrap();
+        let rules = vec![approval_rule("/send/*", Some("POST"))];
+        let d = evaluate("POST", "/send/email", &rules, "agent1", &*store).await;
+        assert!(matches!(d, PolicyDecision::ManualApproval { .. }));
+    }
+
+    #[tokio::test]
+    async fn manual_approval_no_match_different_method() {
+        let store = crate::cache::create_store().await.unwrap();
+        let rules = vec![approval_rule("/send/*", Some("POST"))];
+        let d = evaluate("GET", "/send/email", &rules, "agent1", &*store).await;
+        assert!(matches!(d, PolicyDecision::Allow));
+    }
+
+    #[tokio::test]
+    async fn block_takes_precedence_over_manual_approval() {
+        let store = crate::cache::create_store().await.unwrap();
+        let rules = vec![
+            approval_rule("/danger/*", Some("POST")),
+            block_rule("/danger/*", Some("POST")),
+        ];
+        let d = evaluate("POST", "/danger/path", &rules, "agent1", &*store).await;
+        assert!(matches!(d, PolicyDecision::Blocked));
+    }
+
+    #[tokio::test]
+    async fn manual_approval_takes_precedence_over_rate_limit() {
+        let store = crate::cache::create_store().await.unwrap();
+        let rules = vec![
+            rate_rule("/api/*", Some("POST"), 100, 3600),
+            approval_rule("/api/*", Some("POST")),
+        ];
+        let d = evaluate("POST", "/api/send", &rules, "agent1", &*store).await;
+        assert!(matches!(d, PolicyDecision::ManualApproval { .. }));
     }
 }

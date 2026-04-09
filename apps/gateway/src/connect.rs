@@ -27,6 +27,8 @@ pub(crate) struct ConnectResponse {
     pub injection_rules: Vec<InjectionRule>,
     pub policy_rules: Vec<PolicyRule>,
     pub account_id: Option<String>,
+    pub agent_id: Option<String>,
+    pub agent_name: Option<String>,
 }
 
 /// Errors from the connect resolution.
@@ -71,6 +73,8 @@ impl PolicyEngine {
             injection_rules,
             policy_rules,
             account_id: Some(agent.account_id.clone()),
+            agent_id: Some(agent.id.clone()),
+            agent_name: Some(agent.name.clone()),
         })
     }
 
@@ -227,6 +231,9 @@ impl PolicyEngine {
                             window_secs,
                         }
                     }
+                    "manual_approval" => PolicyAction::ManualApproval {
+                        rule_id: r.id.clone(),
+                    },
                     _ => return None,
                 };
                 Some(PolicyRule {
@@ -510,6 +517,8 @@ mod tests {
             injection_rules: vec![],
             policy_rules: vec![],
             account_id: None,
+            agent_id: None,
+            agent_name: None,
         };
 
         store

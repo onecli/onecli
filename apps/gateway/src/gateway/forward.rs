@@ -1,20 +1,28 @@
 //! HTTP request forwarding: send requests upstream, apply injection/policy rules,
 //! stream responses back, and intercept auth failures for unconnected apps.
 
+use std::collections::HashMap;
+use std::sync::Arc;
+use std::time::Duration;
+
 use anyhow::{Context, Result};
-use futures_util::TryStreamExt;
+use futures_util::{StreamExt, TryStreamExt};
 use http_body_util::{Either, Full, StreamBody};
 use hyper::body::{Bytes, Frame, Incoming};
 use hyper::header::HeaderName;
 use hyper::{Request, Response, StatusCode};
 use tracing::{info, warn};
 
+use crate::approval::{
+    ApprovalDecision, ApprovalGuard, ApprovalStore, PendingApproval, APPROVAL_TIMEOUT_SECS,
+};
 use crate::apps;
 use crate::cache::CacheStore;
 use crate::inject::{self, InjectionRule};
 use crate::policy::{self, PolicyDecision, PolicyRule};
 
 use super::response;
+use super::ProxyContext;
 
 // ── Header filtering ────────────────────────────────────────────────────
 
@@ -65,6 +73,13 @@ fn is_forwarded_response_header(name: &HeaderName) -> bool {
 /// 4. If no credentials were injected and upstream returns 401/403, check if the
 ///    host belongs to a known app → return an actionable error for the agent
 /// 5. Stream response back to client
+///
+/// For `ManualApproval`, the gateway peeks the first 4KB of the body for a
+/// preview (shown to the approver), then chains it back with the remaining
+/// stream for forwarding. No full-body buffering — the body stays in the
+/// TCP pipe during the approval wait.
+const BODY_PREVIEW_BYTES: usize = 4096;
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn forward_request(
     req: Request<Incoming>,
@@ -74,7 +89,8 @@ pub(crate) async fn forward_request(
     injection_rules: &[InjectionRule],
     policy_rules: &[PolicyRule],
     cache: &dyn CacheStore,
-    agent_token: &str,
+    proxy_ctx: &ProxyContext,
+    approval_store: &Arc<dyn ApprovalStore>,
 ) -> Result<
     Response<
         Either<
@@ -90,9 +106,13 @@ pub(crate) async fn forward_request(
         .map(|pq| pq.as_str().to_string())
         .unwrap_or_else(|| "/".to_string());
     let url = format!("{scheme}://{host}{path}");
+    let agent_token = proxy_ctx.agent_token.as_deref().unwrap_or("");
 
     // Check policy rules before forwarding
-    match policy::evaluate(method.as_str(), &path, policy_rules, agent_token, cache).await {
+    let decision = policy::evaluate(method.as_str(), &path, policy_rules, agent_token, cache).await;
+
+    // ── Early return for block / rate-limit (no body needed) ─────
+    match &decision {
         PolicyDecision::Blocked => {
             warn!(method = %method, url = %url, "BLOCKED by policy rule");
             let body = serde_json::json!({
@@ -132,12 +152,12 @@ pub(crate) async fn forward_request(
                 .insert("retry-after", retry_after_secs.to_string().parse().unwrap());
             return Ok(response);
         }
-        PolicyDecision::Allow => {}
+        _ => {}
     }
 
+    // ── Consume request (both ManualApproval and Allow) ────────────
     let (parts, body) = req.into_parts();
 
-    // Collect forwarded headers into a mutable map for injection
     let mut headers = hyper::HeaderMap::new();
     for (name, value) in parts.headers.iter() {
         if is_forwarded_request_header(name) {
@@ -145,19 +165,156 @@ pub(crate) async fn forward_request(
         }
     }
 
+    // Sanitize headers for approval metadata (BEFORE injection, so the
+    // approver never sees real credentials). Only built for ManualApproval.
+    let sanitized_headers = if matches!(&decision, PolicyDecision::ManualApproval { .. }) {
+        Some(
+            headers
+                .iter()
+                .filter(|(name, _)| {
+                    name.as_str() != "authorization" && name.as_str() != "x-api-key"
+                })
+                .map(|(n, v)| (n.to_string(), v.to_str().unwrap_or_default().to_string()))
+                .collect::<HashMap<String, String>>(),
+        )
+    } else {
+        None
+    };
+
     // Apply injection rules matching this request path
     let injection_count = inject::apply_injections(&mut headers, &path, injection_rules);
 
-    // Build upstream request with (possibly modified) headers
+    // ── ManualApproval: prepare body, store, wait for decision ─────
+    let forward_body = if let PolicyDecision::ManualApproval { rule_id } = &decision {
+        info!(method = %method, url = %url, rule_id = %rule_id, "MANUAL APPROVAL required");
+
+        let account_id = match proxy_ctx.account_id.as_deref() {
+            Some(id) => id,
+            None => {
+                warn!(url = %url, "manual approval requires authenticated agent");
+                return Ok(response::approval_store_unavailable());
+            }
+        };
+        let agent_id = proxy_ctx.agent_id.as_deref().unwrap_or("unknown");
+        let agent_name = proxy_ctx.agent_name.as_deref().unwrap_or("Unknown Agent");
+
+        // Peek the first 4KB of the body for a preview (shown to the approver),
+        // then chain the peeked bytes back with the remaining stream for forwarding.
+        // Only the preview (~4KB) lives in gateway RAM — the rest stays in the TCP pipe.
+        let mut body_stream = Box::pin(http_body_util::BodyDataStream::new(body));
+        let mut peeked: Vec<Bytes> = Vec::new();
+        let mut peeked_len: usize = 0;
+
+        while peeked_len < BODY_PREVIEW_BYTES {
+            match body_stream.next().await {
+                Some(Ok(data)) => {
+                    peeked_len += data.len();
+                    peeked.push(data);
+                }
+                Some(Err(e)) => {
+                    return Err(anyhow::anyhow!("reading request body for preview: {e}"));
+                }
+                None => break,
+            }
+        }
+
+        let body_preview = if peeked.is_empty() {
+            None
+        } else {
+            let mut buf = Vec::with_capacity(peeked_len.min(BODY_PREVIEW_BYTES));
+            for chunk in &peeked {
+                let take = (BODY_PREVIEW_BYTES - buf.len()).min(chunk.len());
+                buf.extend_from_slice(&chunk[..take]);
+                if buf.len() >= BODY_PREVIEW_BYTES {
+                    break;
+                }
+            }
+            Some(String::from_utf8_lossy(&buf).into_owned())
+        };
+
+        // Chain peeked bytes + remaining body into a single stream for forwarding.
+        let peeked_stream =
+            futures_util::stream::iter(peeked.into_iter().map(Ok::<_, std::io::Error>));
+        let remaining_stream =
+            body_stream.map(|r| r.map_err(|e| std::io::Error::other(e.to_string())));
+        let fwd_body = reqwest::Body::wrap_stream(peeked_stream.chain(remaining_stream));
+
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        let approval_id = uuid::Uuid::new_v4().to_string();
+
+        let approval = PendingApproval {
+            id: approval_id.clone(),
+            account_id: account_id.to_string(),
+            agent_id: agent_id.to_string(),
+            agent_name: agent_name.to_string(),
+            method: method.to_string(),
+            scheme: scheme.to_string(),
+            host: host.to_string(),
+            path: path.clone(),
+            headers: sanitized_headers.unwrap_or_default(),
+            body_preview,
+            created_at: now,
+            expires_at: now + APPROVAL_TIMEOUT_SECS,
+        };
+
+        let decision_rx = approval_store.prepare_wait(&approval_id).await;
+
+        // Guard cleans up the approval if the agent disconnects (future cancelled).
+        // Created BEFORE store() so there's no window where cancellation misses cleanup.
+        let mut guard = ApprovalGuard::new(approval_id.clone(), Arc::clone(approval_store));
+
+        if let Err(e) = approval_store.store(&approval).await {
+            warn!(url = %url, error = %e, "failed to store pending approval");
+            guard.defuse(); // we'll clean up explicitly
+            approval_store.remove(&approval_id).await;
+            return Ok(response::approval_store_unavailable());
+        }
+
+        info!(
+            url = %url,
+            approval_id = %approval_id,
+            agent = %agent_name,
+            injections = injection_count,
+            "holding request for approval"
+        );
+
+        let approval_decision = decision_rx
+            .wait(Duration::from_secs(APPROVAL_TIMEOUT_SECS))
+            .await;
+
+        // Decision received (or timed out) — defuse guard, handle explicitly.
+        guard.defuse();
+
+        match approval_decision {
+            Some(ApprovalDecision::Approve) => {
+                info!(url = %url, approval_id = %approval_id, "APPROVED — forwarding request");
+                approval_store.remove(&approval_id).await;
+                fwd_body
+            }
+            other => {
+                let reason = match other {
+                    Some(ApprovalDecision::Deny) => "denied",
+                    _ => "timed out",
+                };
+                warn!(url = %url, approval_id = %approval_id, reason, "MANUAL APPROVAL rejected");
+                approval_store.remove(&approval_id).await;
+                return Ok(response::manual_approval_denied(&approval_id, reason));
+            }
+        }
+    } else {
+        reqwest::Body::wrap(body)
+    };
+
+    // ── Shared: forward to upstream and stream response back ──────
     let mut upstream = http_client.request(method.clone(), &url);
     for (name, value) in headers.iter() {
         upstream = upstream.header(name.clone(), value.clone());
     }
+    upstream = upstream.body(forward_body);
 
-    // Stream request body to upstream via HttpBody wrapper
-    upstream = upstream.body(reqwest::Body::wrap(body));
-
-    // Send to real server
     let upstream_resp = upstream
         .send()
         .await
@@ -184,7 +341,6 @@ pub(crate) async fn forward_request(
         }
     }
 
-    // Log before streaming response body
     let content_type = resp_headers
         .get("content-type")
         .and_then(|v| v.to_str().ok())
@@ -206,7 +362,6 @@ pub(crate) async fn forward_request(
     let mut response = Response::new(Either::Right(body));
     *response.status_mut() = status;
 
-    // Forward response headers, skipping hop-by-hop
     for (name, value) in resp_headers.iter() {
         if is_forwarded_response_header(name) {
             response.headers_mut().append(name.clone(), value.clone());

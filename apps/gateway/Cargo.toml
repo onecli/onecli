@@ -55,6 +55,9 @@ dashmap = "6"
 # Base64 (for gateway auth)
 base64 = "0.22"
 
+# UUID (for approval IDs)
+uuid = { version = "1", features = ["v4"] }
+
 # Stream combinators
 futures-util = "0.3"
 
