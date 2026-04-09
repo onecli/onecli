@@ -1,5 +1,17 @@
 # Changelog
 
+## [1.15.0](https://github.com/onecli/onecli/compare/v1.14.2...v1.15.0) (2026-04-09)
+
+
+### Features
+
+* add manual approval policy action for gateway requests ([#172](https://github.com/onecli/onecli/issues/172)) ([632ccab](https://github.com/onecli/onecli/commit/632ccab84c79eadec43cf4b16597e6afc8663510))
+
+
+### Bug Fixes
+
+* remove NEXTAUTH_SECRET fallback that forced OAuth mode ([#173](https://github.com/onecli/onecli/issues/173)) ([b602f1b](https://github.com/onecli/onecli/commit/b602f1b887143f03e0d6650d1170d97fcbdc4f4b))
+
 ## [1.14.2](https://github.com/onecli/onecli/compare/v1.14.1...v1.14.2) (2026-04-08)
 
 
