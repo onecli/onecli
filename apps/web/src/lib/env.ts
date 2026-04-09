@@ -42,8 +42,7 @@ export const IS_CLOUD = EDITION === "cloud";
 
 // ── Auth & Encryption ───────────────────────────────────────────────────
 
-export const NEXTAUTH_SECRET =
-  process.env.NEXTAUTH_SECRET ?? "local-mode-fallback-unused";
+export const NEXTAUTH_SECRET = process.env.NEXTAUTH_SECRET ?? "";
 
 export const SECRET_ENCRYPTION_KEY = process.env.SECRET_ENCRYPTION_KEY ?? "";
 
