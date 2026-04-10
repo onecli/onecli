@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.15.1](https://github.com/onecli/onecli/compare/v1.15.0...v1.15.1) (2026-04-10)
+
+
+### Bug Fixes
+
+* approval refinements — agent identifier, body streaming, guard cleanup ([#175](https://github.com/onecli/onecli/issues/175)) ([a468bb6](https://github.com/onecli/onecli/commit/a468bb6ccea82061aaf7e4d37b97a6bf8480b7b6))
+
 ## [1.15.0](https://github.com/onecli/onecli/compare/v1.14.2...v1.15.0) (2026-04-09)
 
 
