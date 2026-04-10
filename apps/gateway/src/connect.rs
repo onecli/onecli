@@ -29,6 +29,7 @@ pub(crate) struct ConnectResponse {
     pub account_id: Option<String>,
     pub agent_id: Option<String>,
     pub agent_name: Option<String>,
+    pub agent_identifier: Option<String>,
 }
 
 /// Errors from the connect resolution.
@@ -75,6 +76,7 @@ impl PolicyEngine {
             account_id: Some(agent.account_id.clone()),
             agent_id: Some(agent.id.clone()),
             agent_name: Some(agent.name.clone()),
+            agent_identifier: agent.identifier.clone(),
         })
     }
 
@@ -519,6 +521,7 @@ mod tests {
             account_id: None,
             agent_id: None,
             agent_name: None,
+            agent_identifier: None,
         };
 
         store

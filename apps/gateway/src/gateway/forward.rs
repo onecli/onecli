@@ -250,6 +250,7 @@ pub(crate) async fn forward_request(
             account_id: account_id.to_string(),
             agent_id: agent_id.to_string(),
             agent_name: agent_name.to_string(),
+            agent_identifier: proxy_ctx.agent_identifier.clone(),
             method: method.to_string(),
             scheme: scheme.to_string(),
             host: host.to_string(),

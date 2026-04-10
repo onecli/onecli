@@ -52,6 +52,7 @@ pub(crate) struct ProxyContext {
     pub account_id: Option<String>,
     pub agent_id: Option<String>,
     pub agent_name: Option<String>,
+    pub agent_identifier: Option<String>,
     pub agent_token: Option<String>,
 }
 
@@ -308,7 +309,7 @@ async fn get_pending_approvals(
             "path": a.path,
             "headers": a.headers,
             "bodyPreview": a.body_preview,
-            "agent": { "id": a.agent_id, "name": a.agent_name },
+            "agent": { "id": a.agent_id, "name": a.agent_name, "externalId": a.agent_identifier },
             "createdAt": format_unix_ts(a.created_at),
             "expiresAt": format_unix_ts(a.expires_at),
         })).collect::<Vec<_>>(),
@@ -433,32 +434,40 @@ async fn handle_connect(
     // Extract agent token from Proxy-Authorization header.
     let agent_token = inject::extract_agent_token(&req).filter(|t| !t.is_empty());
 
-    let (mut intercept, mut injection_rules, policy_rules, account_id, agent_id, agent_name) =
-        if let Some(ref token) = agent_token {
-            match connect::resolve(token, &hostname, &state.policy_engine, &*state.cache).await {
-                Ok(resp) => (
-                    resp.intercept,
-                    resp.injection_rules,
-                    resp.policy_rules,
-                    resp.account_id,
-                    resp.agent_id,
-                    resp.agent_name,
-                ),
-                Err(ConnectError::InvalidToken) => {
-                    warn!(peer = %peer_addr, host = %host, "CONNECT rejected: invalid agent token");
-                    return Ok(response::proxy_auth_required());
-                }
-                Err(ConnectError::Internal(e)) => {
-                    warn!(peer = %peer_addr, host = %host, error = %e, "CONNECT rejected: internal error");
-                    let mut resp = Response::new(axum::body::Body::empty());
-                    *resp.status_mut() = StatusCode::BAD_GATEWAY;
-                    return Ok(resp);
-                }
+    let (
+        mut intercept,
+        mut injection_rules,
+        policy_rules,
+        account_id,
+        agent_id,
+        agent_name,
+        agent_identifier,
+    ) = if let Some(ref token) = agent_token {
+        match connect::resolve(token, &hostname, &state.policy_engine, &*state.cache).await {
+            Ok(resp) => (
+                resp.intercept,
+                resp.injection_rules,
+                resp.policy_rules,
+                resp.account_id,
+                resp.agent_id,
+                resp.agent_name,
+                resp.agent_identifier,
+            ),
+            Err(ConnectError::InvalidToken) => {
+                warn!(peer = %peer_addr, host = %host, "CONNECT rejected: invalid agent token");
+                return Ok(response::proxy_auth_required());
             }
-        } else {
-            // No auth — plain tunnel (no MITM, no injection)
-            (false, vec![], vec![], None, None, None)
-        };
+            Err(ConnectError::Internal(e)) => {
+                warn!(peer = %peer_addr, host = %host, error = %e, "CONNECT rejected: internal error");
+                let mut resp = Response::new(axum::body::Body::empty());
+                *resp.status_mut() = StatusCode::BAD_GATEWAY;
+                return Ok(resp);
+            }
+        }
+    } else {
+        // No auth — plain tunnel (no MITM, no injection)
+        (false, vec![], vec![], None, None, None, None)
+    };
 
     // Vault fallback: if no DB secrets matched, try vault providers for this user.
     if !intercept {
@@ -509,6 +518,7 @@ async fn handle_connect(
         account_id,
         agent_id,
         agent_name,
+        agent_identifier,
         agent_token: agent_token.clone(),
     });
 
@@ -565,32 +575,31 @@ async fn handle_http_proxy(
 
     let agent_token = inject::extract_agent_token(&req).filter(|t| !t.is_empty());
 
-    let (mut injection_rules, policy_rules, account_id, agent_id, agent_name) = if let Some(
-        ref token,
-    ) = agent_token
-    {
-        match connect::resolve(token, &hostname, &state.policy_engine, &*state.cache).await {
-            Ok(resp) => (
-                resp.injection_rules,
-                resp.policy_rules,
-                resp.account_id,
-                resp.agent_id,
-                resp.agent_name,
-            ),
-            Err(ConnectError::InvalidToken) => {
-                warn!(peer = %peer_addr, host = %authority, "HTTP proxy rejected: invalid agent token");
-                return Ok(response::proxy_auth_required());
+    let (mut injection_rules, policy_rules, account_id, agent_id, agent_name, agent_identifier) =
+        if let Some(ref token) = agent_token {
+            match connect::resolve(token, &hostname, &state.policy_engine, &*state.cache).await {
+                Ok(resp) => (
+                    resp.injection_rules,
+                    resp.policy_rules,
+                    resp.account_id,
+                    resp.agent_id,
+                    resp.agent_name,
+                    resp.agent_identifier,
+                ),
+                Err(ConnectError::InvalidToken) => {
+                    warn!(peer = %peer_addr, host = %authority, "HTTP proxy rejected: invalid agent token");
+                    return Ok(response::proxy_auth_required());
+                }
+                Err(ConnectError::Internal(e)) => {
+                    warn!(peer = %peer_addr, host = %authority, error = %e, "HTTP proxy rejected: internal error");
+                    let mut resp = Response::new(axum::body::Body::empty());
+                    *resp.status_mut() = StatusCode::BAD_GATEWAY;
+                    return Ok(resp);
+                }
             }
-            Err(ConnectError::Internal(e)) => {
-                warn!(peer = %peer_addr, host = %authority, error = %e, "HTTP proxy rejected: internal error");
-                let mut resp = Response::new(axum::body::Body::empty());
-                *resp.status_mut() = StatusCode::BAD_GATEWAY;
-                return Ok(resp);
-            }
-        }
-    } else {
-        (vec![], vec![], None, None, None)
-    };
+        } else {
+            (vec![], vec![], None, None, None, None)
+        };
 
     // Vault fallback
     if injection_rules.is_empty() {
@@ -617,6 +626,7 @@ async fn handle_http_proxy(
         account_id,
         agent_id,
         agent_name,
+        agent_identifier,
         agent_token: agent_token.clone(),
     };
 
