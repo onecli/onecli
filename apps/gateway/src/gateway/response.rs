@@ -51,6 +51,22 @@ pub(crate) fn app_not_connected<S>(
     response
 }
 
+/// 502 Bad Gateway — rule resolution failed mid-session.
+pub(crate) fn resolution_failed<S>() -> Response<ForwardBody<S>> {
+    let body = serde_json::json!({
+        "error": "resolution_failed",
+        "message": "OneCLI gateway failed to resolve rules for this request.",
+    })
+    .to_string();
+
+    let mut response = Response::new(Either::Left(Full::new(Bytes::from(body))));
+    *response.status_mut() = StatusCode::BAD_GATEWAY;
+    response
+        .headers_mut()
+        .insert("content-type", HeaderValue::from_static("application/json"));
+    response
+}
+
 /// 403 Forbidden — manual approval denied or timed out.
 pub(crate) fn manual_approval_denied<S>(
     approval_id: &str,
