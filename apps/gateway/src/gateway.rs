@@ -434,20 +434,16 @@ async fn handle_connect(
     // Extract agent token from Proxy-Authorization header.
     let agent_token = inject::extract_agent_token(&req).filter(|t| !t.is_empty());
 
-    let (
-        mut intercept,
-        mut injection_rules,
-        policy_rules,
-        account_id,
-        agent_id,
-        agent_name,
-        agent_identifier,
-    ) = if let Some(ref token) = agent_token {
+    // Resolve at CONNECT time for the intercept decision and agent identity.
+    // DB injection/policy rules are NOT frozen here — they're re-resolved
+    // per request inside the MITM tunnel from cache (see mitm.rs).
+    let (mut intercept, account_id, agent_id, agent_name, agent_identifier) = if let Some(
+        ref token,
+    ) = agent_token
+    {
         match connect::resolve(token, &hostname, &state.policy_engine, &*state.cache).await {
             Ok(resp) => (
                 resp.intercept,
-                resp.injection_rules,
-                resp.policy_rules,
                 resp.account_id,
                 resp.agent_id,
                 resp.agent_name,
@@ -465,18 +461,21 @@ async fn handle_connect(
             }
         }
     } else {
-        // No auth — plain tunnel (no MITM, no injection)
-        (false, vec![], vec![], None, None, None, None)
+        (false, None, None, None, None)
     };
 
-    // Vault fallback: if no DB secrets matched, try vault providers for this user.
+    // Vault fallback: resolved at CONNECT time and passed to mitm as a frozen
+    // fallback. Vault queries are expensive (network calls to Bitwarden), so
+    // they're not repeated per request. DB secrets (re-resolved per request
+    // from cache) take precedence when available.
+    let mut vault_injection_rules = vec![];
     if !intercept {
         if let Some(ref aid) = account_id {
             if let Some(cred) = state.vault_service.request_credential(aid, &hostname).await {
                 let vault_rules = inject::vault_credential_to_rules(&hostname, &cred);
                 if !vault_rules.is_empty() {
                     intercept = true;
-                    injection_rules = vault_rules;
+                    vault_injection_rules = vault_rules;
                     info!(
                         host = %hostname,
                         account_id = %aid,
@@ -499,8 +498,6 @@ async fn handle_connect(
         peer = %peer_addr,
         host = %host,
         mode = if intercept { "mitm" } else { "tunnel" },
-        injection_count = injection_rules.len(),
-        policy_count = policy_rules.len(),
         "CONNECT"
     );
 
@@ -531,11 +528,11 @@ async fn handle_connect(
                         &host,
                         &ca,
                         http_client,
-                        injection_rules,
-                        policy_rules,
+                        vault_injection_rules,
                         cache,
                         proxy_ctx,
                         approval_store,
+                        Arc::clone(&state.policy_engine),
                     )
                     .await
                 } else {
