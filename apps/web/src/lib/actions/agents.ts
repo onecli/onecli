@@ -2,7 +2,7 @@
 
 import { randomBytes } from "crypto";
 import { db } from "@onecli/db";
-import { getServerSession } from "@/lib/auth/server";
+import { resolveUserId } from "./resolve-user";
 
 const generateAccessToken = () => `aoc_${randomBytes(32).toString("hex")}`;
 const DEFAULT_AGENT_NAME = "Default Agent";
@@ -25,25 +25,8 @@ async function ensureDefaultAgent(userId: string) {
   }
 }
 
-async function resolveUserId(authId?: string): Promise<string> {
-  let id = authId;
-  if (!id) {
-    const session = await getServerSession();
-    if (!session) throw new Error("Not authenticated");
-    id = session.id;
-  }
-
-  const user = await db.user.findUnique({
-    where: { externalAuthId: id },
-    select: { id: true },
-  });
-
-  if (!user) throw new Error("User not found");
-  return user.id;
-}
-
-export async function getAgents(authId?: string) {
-  const userId = await resolveUserId(authId);
+export async function getAgents() {
+  const userId = await resolveUserId();
   await ensureDefaultAgent(userId);
 
   const agents = await db.agent.findMany({
@@ -73,8 +56,8 @@ export async function getAgents(authId?: string) {
   }));
 }
 
-export async function getDefaultAgent(authId?: string) {
-  const userId = await resolveUserId(authId);
+export async function getDefaultAgent() {
+  const userId = await resolveUserId();
   await ensureDefaultAgent(userId);
 
   return db.agent.findFirst({
@@ -89,13 +72,13 @@ export async function getDefaultAgent(authId?: string) {
   });
 }
 
-export async function createAgent(name: string, authId?: string) {
+export async function createAgent(name: string) {
   const trimmed = name.trim();
   if (!trimmed || trimmed.length > 255) {
     throw new Error("Name must be between 1 and 255 characters");
   }
 
-  const userId = await resolveUserId(authId);
+  const userId = await resolveUserId();
   const accessToken = generateAccessToken();
 
   const agent = await db.agent.create({
@@ -115,8 +98,8 @@ export async function createAgent(name: string, authId?: string) {
   return agent;
 }
 
-export async function getAgentSecretAssignments(agentId: string, authId?: string) {
-  const userId = await resolveUserId(authId);
+export async function getAgentSecretAssignments(agentId: string) {
+  const userId = await resolveUserId();
 
   const agent = await db.agent.findFirst({
     where: { id: agentId, userId },
@@ -154,9 +137,8 @@ export async function getAgentSecretAssignments(agentId: string, authId?: string
 export async function setAgentSecretAssignments(
   agentId: string,
   secretIds: string[],
-  authId?: string,
 ) {
-  const userId = await resolveUserId(authId);
+  const userId = await resolveUserId();
 
   const agent = await db.agent.findFirst({
     where: { id: agentId, userId },
@@ -193,8 +175,8 @@ export async function setAgentSecretAssignments(
   });
 }
 
-export async function deleteAgent(agentId: string, authId?: string) {
-  const userId = await resolveUserId(authId);
+export async function deleteAgent(agentId: string) {
+  const userId = await resolveUserId();
 
   const agent = await db.agent.findFirst({
     where: { id: agentId, userId },
@@ -207,8 +189,8 @@ export async function deleteAgent(agentId: string, authId?: string) {
   await db.agent.delete({ where: { id: agentId } });
 }
 
-export async function regenerateAgentToken(agentId: string, authId?: string) {
-  const userId = await resolveUserId(authId);
+export async function regenerateAgentToken(agentId: string) {
+  const userId = await resolveUserId();
 
   const agent = await db.agent.findFirst({
     where: { id: agentId, userId },

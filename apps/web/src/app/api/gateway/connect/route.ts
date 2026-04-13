@@ -170,7 +170,7 @@ const buildInjections = (
       if (!config?.headerName) return [];
 
       const value = config.valueFormat
-        ? config.valueFormat.replace("{value}", decryptedValue)
+        ? config.valueFormat.replaceAll("{value}", decryptedValue)
         : decryptedValue;
 
       return [{ action: "set_header", name: config.headerName, value }];

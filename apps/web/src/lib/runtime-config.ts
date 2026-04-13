@@ -30,8 +30,15 @@ export const getRuntimeConfig = (): RuntimeConfig => {
     // Local dev (no Docker) — read env vars directly.
     // During Next.js build prerendering this also runs, but since all pages
     // are client-rendered behind auth anyway, the fallback value is fine.
+    const isLocalAuthEnabled = process.env.ALLOW_LOCAL_AUTH === "true";
+    const authMode = process.env.NEXTAUTH_SECRET
+      ? "oauth"
+      : isLocalAuthEnabled
+        ? "local"
+        : "oauth"; // Fail closed: if not local and no secret, treat as unconfigured oauth
+
     cached = {
-      authMode: process.env.NEXTAUTH_SECRET ? "oauth" : "local",
+      authMode,
       oauthConfigured: !!process.env.GOOGLE_CLIENT_ID,
     };
     return cached;

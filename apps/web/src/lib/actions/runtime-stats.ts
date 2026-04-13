@@ -1,26 +1,11 @@
 "use server";
 
 import { db } from "@onecli/db";
-import { getServerSession } from "@/lib/auth/server";
+import { resolveUserId } from "./resolve-user";
 
 const HOURS_24_MS = 24 * 60 * 60 * 1000;
 
 const getWindowStart = () => new Date(Date.now() - HOURS_24_MS);
-
-async function resolveUserId(authId?: string): Promise<string | null> {
-  if (!authId) {
-    const session = await getServerSession();
-    if (!session) return null;
-    authId = session.id;
-  }
-
-  const user = await db.user.findUnique({
-    where: { externalAuthId: authId },
-    select: { id: true },
-  });
-
-  return user?.id ?? null;
-}
 
 export interface RuntimeStats {
   injections24h: number;
@@ -48,21 +33,8 @@ export interface RuntimeActivityItem {
   errorCode: string | null;
 }
 
-export async function getRuntimeStats(authId?: string): Promise<RuntimeStats> {
-  const userId = await resolveUserId(authId);
-  if (!userId) {
-    return {
-      injections24h: 0,
-      destinations24h: 0,
-      activeAgents24h: 0,
-      requests24h: 0,
-      successRate24h: 0,
-      avgLatencyMs24h: 0,
-      p95LatencyMs24h: 0,
-      lastActivityAt: null,
-    };
-  }
-
+export async function getRuntimeStats(): Promise<RuntimeStats> {
+  const userId = await resolveUserId();
   const windowStart = getWindowStart();
 
   const [aggregate, destinations, activeAgents, durations] = await Promise.all([
@@ -125,11 +97,9 @@ export async function getRuntimeStats(authId?: string): Promise<RuntimeStats> {
 }
 
 export async function getRuntimeActivity(
-  authId?: string,
   limit = 50,
 ): Promise<RuntimeActivityItem[]> {
-  const userId = await resolveUserId(authId);
-  if (!userId) return [];
+  const userId = await resolveUserId();
 
   const windowStart = getWindowStart();
   const safeLimit = Math.max(1, Math.min(limit, 200));
