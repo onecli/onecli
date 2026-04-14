@@ -1,5 +1,18 @@
 # Changelog
 
+## [1.16.0](https://github.com/onecli/onecli/compare/v1.15.1...v1.16.0) (2026-04-14)
+
+
+### Features
+
+* broaden access_restricted to cover secrets and app connections, add ResolvedRules struct, improve gateway cache auth ([#185](https://github.com/onecli/onecli/issues/185)) ([b6492a4](https://github.com/onecli/onecli/commit/b6492a4b91c5653d4eeb0a98991406e7fdee0f3e))
+* credential_not_found for unknown hosts, MITM all authenticated traffic, auth-related 400 handling ([#186](https://github.com/onecli/onecli/issues/186)) ([8cd44ce](https://github.com/onecli/onecli/commit/8cd44ce6bc31c136b7d21b6ba26279fe295db8cf))
+
+
+### Bug Fixes
+
+* resolve injection and policy rules per request instead of freezing at CONNECT time ([#178](https://github.com/onecli/onecli/issues/178)) ([19d159f](https://github.com/onecli/onecli/commit/19d159f5f324ebaf1d4aaa103389fead74af96cc))
+
 ## [1.15.1](https://github.com/onecli/onecli/compare/v1.15.0...v1.15.1) (2026-04-10)
 
 
