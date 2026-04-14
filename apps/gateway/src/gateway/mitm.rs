@@ -70,16 +70,10 @@ pub(super) async fn mitm(
                     // Re-resolve rules from cache on each request so that
                     // secret/rule changes take effect without a reconnect.
                     let hostname = super::strip_port(&host);
-                    let (inj_rules, pol_rules) = match resolve_rules(
-                        &ctx,
-                        hostname,
-                        &engine,
-                        &*cache,
-                        &vault_rules,
-                    )
-                    .await
+                    let rules = match resolve_rules(&ctx, hostname, &engine, &*cache, &vault_rules)
+                        .await
                     {
-                        Ok(rules) => rules,
+                        Ok(r) => r,
                         Err(e) => {
                             warn!(host = %host, error = ?e, "rule resolution failed mid-session");
                             return Ok(response::resolution_failed());
@@ -87,8 +81,7 @@ pub(super) async fn mitm(
                     };
 
                     forward::forward_request(
-                        req, &host, "https", client, &inj_rules, &pol_rules, &*cache, &ctx,
-                        &approvals,
+                        req, &host, "https", client, &rules, &*cache, &ctx, &approvals,
                     )
                     .await
                 }
@@ -96,6 +89,13 @@ pub(super) async fn mitm(
         )
         .await
         .context("serving MITM connection")
+}
+
+/// Per-request resolved rules, bundled for passing to `forward_request`.
+pub(crate) struct ResolvedRules {
+    pub injection_rules: Vec<InjectionRule>,
+    pub policy_rules: Vec<crate::policy::PolicyRule>,
+    pub access_restricted: bool,
 }
 
 /// Resolve injection + policy rules from cache, falling back to vault rules
@@ -106,7 +106,7 @@ async fn resolve_rules(
     engine: &PolicyEngine,
     cache: &dyn CacheStore,
     vault_rules: &[InjectionRule],
-) -> Result<(Vec<InjectionRule>, Vec<crate::policy::PolicyRule>), crate::connect::ConnectError> {
+) -> Result<ResolvedRules, crate::connect::ConnectError> {
     let account_id = ctx.account_id.as_deref().unwrap_or("");
     let agent_token = ctx.agent_token.as_deref().unwrap_or("");
 
@@ -119,5 +119,9 @@ async fn resolve_rules(
         resp.injection_rules
     };
 
-    Ok((injection_rules, resp.policy_rules))
+    Ok(ResolvedRules {
+        injection_rules,
+        policy_rules: resp.policy_rules,
+        access_restricted: resp.access_restricted,
+    })
 }
