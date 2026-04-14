@@ -21,7 +21,7 @@ const CACHE_TTL_SECS: u64 = 60;
 // ── Data types ──────────────────────────────────────────────────────────
 
 /// Result of policy resolution for a CONNECT request.
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub(crate) struct ConnectResponse {
     pub intercept: bool,
     pub injection_rules: Vec<InjectionRule>,
@@ -30,6 +30,11 @@ pub(crate) struct ConnectResponse {
     pub agent_id: Option<String>,
     pub agent_name: Option<String>,
     pub agent_identifier: Option<String>,
+    /// True when the account has credentials (secrets or app connections) for
+    /// this host but the agent can't access them (selective mode). Used to show
+    /// a more helpful error ("grant access") instead of "connect the app".
+    #[serde(default)]
+    pub access_restricted: bool,
 }
 
 /// Errors from the connect resolution.
@@ -69,14 +74,21 @@ impl PolicyEngine {
         let policy_rules = self.resolve_policy_rules(agent, hostname).await?;
         let has_rules = !injection_rules.is_empty() || !policy_rules.is_empty();
 
+        // Check if the account has credentials (secrets or app connections) for this
+        // host that the agent can't access (selective mode).
+        let access_restricted = injection_rules.is_empty()
+            && agent.secret_mode == "selective"
+            && self.has_account_credentials(agent, hostname).await;
+
         Ok(ConnectResponse {
-            intercept: has_rules,
+            intercept: has_rules || access_restricted,
             injection_rules,
             policy_rules,
             account_id: Some(agent.account_id.clone()),
             agent_id: Some(agent.id.clone()),
             agent_name: Some(agent.name.clone()),
             agent_identifier: agent.identifier.clone(),
+            access_restricted,
         })
     }
 
@@ -197,6 +209,41 @@ impl PolicyEngine {
         }
 
         Ok(rules)
+    }
+
+    /// Check if the account has any credentials (secrets or app connections) for this
+    /// host that the agent can't access. Used to distinguish "not connected" from
+    /// "connected but agent lacks access" in selective mode.
+    async fn has_account_credentials(&self, agent: &db::AgentRow, hostname: &str) -> bool {
+        // Check 1: account has manual secrets matching this host
+        match db::find_secrets_by_account(&self.pool, &agent.account_id).await {
+            Ok(secrets) => {
+                if secrets
+                    .iter()
+                    .any(|s| host_matches(hostname, &s.host_pattern))
+                {
+                    return true;
+                }
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "has_account_credentials: secrets query failed");
+            }
+        }
+
+        // Check 2: account has app connections for this host
+        let providers = apps::providers_for_host(hostname);
+        if providers.is_empty() {
+            return false;
+        }
+        match db::find_app_connections_by_account(&self.pool, &agent.account_id).await {
+            Ok(connections) => connections
+                .iter()
+                .any(|c| providers.contains(&c.provider.as_str())),
+            Err(e) => {
+                tracing::warn!(error = %e, "has_account_credentials: app connections query failed");
+                false
+            }
+        }
     }
 
     /// Resolve policy rules (block / rate-limit) for this agent + host.
@@ -550,6 +597,7 @@ mod tests {
             agent_id: None,
             agent_name: None,
             agent_identifier: None,
+            access_restricted: false,
         };
 
         store
@@ -589,6 +637,7 @@ mod tests {
             agent_id: Some("agent_1".to_string()),
             agent_name: Some("Test".to_string()),
             agent_identifier: None,
+            access_restricted: false,
         };
 
         // Pre-populate cache with the key format that resolve() uses
@@ -607,6 +656,32 @@ mod tests {
             .await;
         assert!(cached.is_some());
         assert_eq!(cached.unwrap().injection_rules.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn cache_round_trip_with_access_restricted() {
+        let store = new_store().await;
+        let response = ConnectResponse {
+            intercept: true,
+            injection_rules: vec![],
+            policy_rules: vec![],
+            account_id: Some("acc_restricted".to_string()),
+            agent_id: Some("agent_selective".to_string()),
+            agent_name: Some("Selective Agent".to_string()),
+            agent_identifier: None,
+            access_restricted: true,
+        };
+
+        store
+            .set("connect:acc_restricted:aoc_t:api.resend.com", &response, 60)
+            .await;
+
+        let cached: Option<ConnectResponse> = store
+            .get("connect:acc_restricted:aoc_t:api.resend.com")
+            .await;
+        let cached = cached.expect("should be cached");
+        assert!(cached.access_restricted);
+        assert_eq!(cached.account_id.as_deref(), Some("acc_restricted"));
     }
 
     // ── host_matches ────────────────────────────────────────────────────

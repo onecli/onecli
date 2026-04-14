@@ -572,39 +572,31 @@ async fn handle_http_proxy(
 
     let agent_token = inject::extract_agent_token(&req).filter(|t| !t.is_empty());
 
-    let (mut injection_rules, policy_rules, account_id, agent_id, agent_name, agent_identifier) =
-        if let Some(ref token) = agent_token {
-            match connect::resolve(token, &hostname, &state.policy_engine, &*state.cache).await {
-                Ok(resp) => (
-                    resp.injection_rules,
-                    resp.policy_rules,
-                    resp.account_id,
-                    resp.agent_id,
-                    resp.agent_name,
-                    resp.agent_identifier,
-                ),
-                Err(ConnectError::InvalidToken) => {
-                    warn!(peer = %peer_addr, host = %authority, "HTTP proxy rejected: invalid agent token");
-                    return Ok(response::proxy_auth_required());
-                }
-                Err(ConnectError::Internal(e)) => {
-                    warn!(peer = %peer_addr, host = %authority, error = %e, "HTTP proxy rejected: internal error");
-                    let mut resp = Response::new(axum::body::Body::empty());
-                    *resp.status_mut() = StatusCode::BAD_GATEWAY;
-                    return Ok(resp);
-                }
+    let mut resolved = if let Some(ref token) = agent_token {
+        match connect::resolve(token, &hostname, &state.policy_engine, &*state.cache).await {
+            Ok(resp) => resp,
+            Err(ConnectError::InvalidToken) => {
+                warn!(peer = %peer_addr, host = %authority, "HTTP proxy rejected: invalid agent token");
+                return Ok(response::proxy_auth_required());
             }
-        } else {
-            (vec![], vec![], None, None, None, None)
-        };
+            Err(ConnectError::Internal(e)) => {
+                warn!(peer = %peer_addr, host = %authority, error = %e, "HTTP proxy rejected: internal error");
+                let mut resp = Response::new(axum::body::Body::empty());
+                *resp.status_mut() = StatusCode::BAD_GATEWAY;
+                return Ok(resp);
+            }
+        }
+    } else {
+        connect::ConnectResponse::default()
+    };
 
     // Vault fallback
-    if injection_rules.is_empty() {
-        if let Some(ref aid) = account_id {
+    if resolved.injection_rules.is_empty() {
+        if let Some(ref aid) = resolved.account_id {
             if let Some(cred) = state.vault_service.request_credential(aid, &hostname).await {
                 let vault_rules = inject::vault_credential_to_rules(&hostname, &cred);
                 if !vault_rules.is_empty() {
-                    injection_rules = vault_rules;
+                    resolved.injection_rules = vault_rules;
                     info!(host = %hostname, account_id = %aid, "http_proxy: using vault credential");
                 }
             }
@@ -614,17 +606,23 @@ async fn handle_http_proxy(
     info!(
         peer = %peer_addr,
         host = %authority,
-        injection_count = injection_rules.len(),
-        policy_count = policy_rules.len(),
+        injection_count = resolved.injection_rules.len(),
+        policy_count = resolved.policy_rules.len(),
         "HTTP_PROXY"
     );
 
     let proxy_ctx = ProxyContext {
-        account_id,
-        agent_id,
-        agent_name,
-        agent_identifier,
+        account_id: resolved.account_id,
+        agent_id: resolved.agent_id,
+        agent_name: resolved.agent_name,
+        agent_identifier: resolved.agent_identifier,
         agent_token: agent_token.clone(),
+    };
+
+    let rules = mitm::ResolvedRules {
+        injection_rules: resolved.injection_rules,
+        policy_rules: resolved.policy_rules,
+        access_restricted: resolved.access_restricted,
     };
 
     let resp = forward::forward_request(
@@ -632,8 +630,7 @@ async fn handle_http_proxy(
         &authority,
         "http",
         state.http_client.clone(),
-        &injection_rules,
-        &policy_rules,
+        &rules,
         &*state.cache,
         &proxy_ctx,
         &state.approval_store,

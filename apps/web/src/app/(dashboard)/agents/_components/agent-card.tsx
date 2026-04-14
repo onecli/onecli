@@ -58,9 +58,14 @@ interface AgentCardProps {
     _count: { agentSecrets: number; agentAppConnections: number };
   };
   onUpdate: () => void;
+  autoOpenAccess?: boolean;
 }
 
-export const AgentCard = ({ agent, onUpdate }: AgentCardProps) => {
+export const AgentCard = ({
+  agent,
+  onUpdate,
+  autoOpenAccess,
+}: AgentCardProps) => {
   const invalidateCache = useInvalidateGatewayCache();
   const [deleting, setDeleting] = useState(false);
   const [regenerating, setRegenerating] = useState(false);
@@ -69,7 +74,9 @@ export const AgentCard = ({ agent, onUpdate }: AgentCardProps) => {
   const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
   const [renameDialogOpen, setRenameDialogOpen] = useState(false);
   const [newName, setNewName] = useState("");
-  const [secretsDialogOpen, setSecretsDialogOpen] = useState(false);
+  const [secretsDialogOpen, setSecretsDialogOpen] = useState(
+    autoOpenAccess ?? false,
+  );
 
   const handleRegenerate = async () => {
     setRegenerating(true);

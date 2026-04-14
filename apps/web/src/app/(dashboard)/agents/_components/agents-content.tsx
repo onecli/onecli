@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState, useCallback } from "react";
+import { useSearchParams } from "next/navigation";
 import { Plus, Bot } from "lucide-react";
 import { getAgents } from "@/lib/actions/agents";
 import type { SecretMode } from "@/lib/services/agent-service";
@@ -22,6 +23,8 @@ interface Agent {
 }
 
 export const AgentsContent = () => {
+  const searchParams = useSearchParams();
+  const manageAgentId = searchParams.get("manage");
   const [agents, setAgents] = useState<Agent[]>([]);
   const [loading, setLoading] = useState(true);
   const [createOpen, setCreateOpen] = useState(false);
@@ -79,7 +82,14 @@ export const AgentsContent = () => {
         </Card>
       ) : (
         agents.map((agent) => (
-          <AgentCard key={agent.id} agent={agent} onUpdate={fetchAgents} />
+          <AgentCard
+            key={agent.id}
+            agent={agent}
+            onUpdate={fetchAgents}
+            autoOpenAccess={
+              !!manageAgentId && agent.id.startsWith(manageAgentId)
+            }
+          />
         ))
       )}
 

@@ -18,9 +18,10 @@ use crate::approval::{
 };
 use crate::apps;
 use crate::cache::CacheStore;
-use crate::inject::{self, InjectionRule};
-use crate::policy::{self, PolicyDecision, PolicyRule};
+use crate::inject;
+use crate::policy::{self, PolicyDecision};
 
+use super::mitm::ResolvedRules;
 use super::response;
 use super::ProxyContext;
 
@@ -86,8 +87,7 @@ pub(crate) async fn forward_request(
     host: &str,
     scheme: &str,
     http_client: reqwest::Client,
-    injection_rules: &[InjectionRule],
-    policy_rules: &[PolicyRule],
+    rules: &ResolvedRules,
     cache: &dyn CacheStore,
     proxy_ctx: &ProxyContext,
     approval_store: &Arc<dyn ApprovalStore>,
@@ -109,7 +109,14 @@ pub(crate) async fn forward_request(
     let agent_token = proxy_ctx.agent_token.as_deref().unwrap_or("");
 
     // Check policy rules before forwarding
-    let decision = policy::evaluate(method.as_str(), &path, policy_rules, agent_token, cache).await;
+    let decision = policy::evaluate(
+        method.as_str(),
+        &path,
+        &rules.policy_rules,
+        agent_token,
+        cache,
+    )
+    .await;
 
     // ── Early return for block / rate-limit (no body needed) ─────
     match &decision {
@@ -182,7 +189,7 @@ pub(crate) async fn forward_request(
     };
 
     // Apply injection rules matching this request path
-    let injection_count = inject::apply_injections(&mut headers, &path, injection_rules);
+    let injection_count = inject::apply_injections(&mut headers, &path, &rules.injection_rules);
 
     // ── ManualApproval: prepare body, store, wait for decision ─────
     let forward_body = if let PolicyDecision::ManualApproval { rule_id } = &decision {
@@ -325,12 +332,27 @@ pub(crate) async fn forward_request(
     let resp_headers = upstream_resp.headers().clone();
 
     // If no credentials were injected and upstream returned 401/403,
-    // check if this host belongs to a known app that needs connecting.
+    // check if this host belongs to a known app that needs connecting or access granting.
     if injection_count == 0
         && (status == StatusCode::UNAUTHORIZED || status == StatusCode::FORBIDDEN)
     {
         let hostname = super::strip_port(host);
         if let Some((provider, display_name)) = apps::provider_for_host_and_path(hostname, &path) {
+            if rules.access_restricted {
+                info!(
+                    method = %method,
+                    url = %url,
+                    status = %status.as_u16(),
+                    provider = %provider,
+                    "access restricted - agent lacks permission"
+                );
+                return Ok(response::access_restricted(
+                    status,
+                    provider,
+                    display_name,
+                    proxy_ctx.agent_id.as_deref(),
+                ));
+            }
             info!(
                 method = %method,
                 url = %url,

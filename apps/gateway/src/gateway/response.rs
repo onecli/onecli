@@ -25,6 +25,16 @@ fn dashboard_url() -> String {
     std::env::var("APP_URL").unwrap_or_else(|_| "http://localhost:10254".to_string())
 }
 
+/// Build a JSON error response with the given status code and body.
+fn json_error<S>(status: StatusCode, body: serde_json::Value) -> Response<ForwardBody<S>> {
+    let mut response = Response::new(Either::Left(Full::new(Bytes::from(body.to_string()))));
+    *response.status_mut() = status;
+    response
+        .headers_mut()
+        .insert("content-type", HeaderValue::from_static("application/json"));
+    response
+}
+
 /// JSON error response for requests to a known app that has no credentials configured.
 ///
 /// Returned when `injection_count == 0` and the upstream returns 401/403 for a host
@@ -35,36 +45,51 @@ pub(crate) fn app_not_connected<S>(
     display_name: &str,
 ) -> Response<ForwardBody<S>> {
     let base = dashboard_url();
-    let body = serde_json::json!({
-        "error": "app_not_connected",
-        "message": format!("{display_name} is not connected in OneCLI. Ask the user to connect it."),
-        "provider": provider,
-        "connect_url": format!("{base}/connections?connect={provider}"),
-    })
-    .to_string();
+    let connect_url = format!("{base}/connections?connect={provider}");
+    json_error(
+        status,
+        serde_json::json!({
+            "error": "app_not_connected",
+            "message": format!("{display_name} is not connected in OneCLI. Ask the user to open this URL to connect it: {connect_url}"),
+            "provider": provider,
+            "connect_url": connect_url,
+        }),
+    )
+}
 
-    let mut response = Response::new(Either::Left(Full::new(Bytes::from(body))));
-    *response.status_mut() = status;
-    response
-        .headers_mut()
-        .insert("content-type", HeaderValue::from_static("application/json"));
-    response
+/// JSON error response when credentials exist for a host but the agent lacks access (selective mode).
+/// Covers both manual secrets and app connections.
+pub(crate) fn access_restricted<S>(
+    status: StatusCode,
+    provider: &str,
+    display_name: &str,
+    agent_id: Option<&str>,
+) -> Response<ForwardBody<S>> {
+    let base = dashboard_url();
+    let manage_url = match agent_id {
+        Some(id) => format!("{base}/agents?manage={}", id.get(..8).unwrap_or(id)),
+        None => format!("{base}/agents"),
+    };
+    json_error(
+        status,
+        serde_json::json!({
+            "error": "access_restricted",
+            "message": format!("{display_name} credentials exist in OneCLI but this agent does not have access. Ask the user to grant access: {manage_url}"),
+            "provider": provider,
+            "manage_url": manage_url,
+        }),
+    )
 }
 
 /// 502 Bad Gateway — rule resolution failed mid-session.
 pub(crate) fn resolution_failed<S>() -> Response<ForwardBody<S>> {
-    let body = serde_json::json!({
-        "error": "resolution_failed",
-        "message": "OneCLI gateway failed to resolve rules for this request.",
-    })
-    .to_string();
-
-    let mut response = Response::new(Either::Left(Full::new(Bytes::from(body))));
-    *response.status_mut() = StatusCode::BAD_GATEWAY;
-    response
-        .headers_mut()
-        .insert("content-type", HeaderValue::from_static("application/json"));
-    response
+    json_error(
+        StatusCode::BAD_GATEWAY,
+        serde_json::json!({
+            "error": "resolution_failed",
+            "message": "OneCLI gateway failed to resolve rules for this request.",
+        }),
+    )
 }
 
 /// 403 Forbidden — manual approval denied or timed out.
@@ -72,35 +97,25 @@ pub(crate) fn manual_approval_denied<S>(
     approval_id: &str,
     reason: &str,
 ) -> Response<ForwardBody<S>> {
-    let body = serde_json::json!({
-        "error": "manual_approval_denied",
-        "message": format!("This request was {reason} by an OneCLI manual approval policy."),
-        "approval_id": approval_id,
-    })
-    .to_string();
-
-    let mut response = Response::new(Either::Left(Full::new(Bytes::from(body))));
-    *response.status_mut() = StatusCode::FORBIDDEN;
-    response
-        .headers_mut()
-        .insert("content-type", HeaderValue::from_static("application/json"));
-    response
+    json_error(
+        StatusCode::FORBIDDEN,
+        serde_json::json!({
+            "error": "manual_approval_denied",
+            "message": format!("This request was {reason} by an OneCLI manual approval policy."),
+            "approval_id": approval_id,
+        }),
+    )
 }
 
 /// 502 Bad Gateway — approval store unavailable.
 pub(crate) fn approval_store_unavailable<S>() -> Response<ForwardBody<S>> {
-    let body = serde_json::json!({
-        "error": "approval_store_unavailable",
-        "message": "OneCLI manual approval service is temporarily unavailable.",
-    })
-    .to_string();
-
-    let mut response = Response::new(Either::Left(Full::new(Bytes::from(body))));
-    *response.status_mut() = StatusCode::BAD_GATEWAY;
-    response
-        .headers_mut()
-        .insert("content-type", HeaderValue::from_static("application/json"));
-    response
+    json_error(
+        StatusCode::BAD_GATEWAY,
+        serde_json::json!({
+            "error": "approval_store_unavailable",
+            "message": "OneCLI manual approval service is temporarily unavailable.",
+        }),
+    )
 }
 
 #[cfg(test)]
@@ -161,5 +176,89 @@ mod tests {
             .as_str()
             .unwrap()
             .ends_with("/connections?connect=github"),);
+    }
+
+    #[test]
+    fn access_restricted_preserves_status() {
+        let resp: Response<
+            ForwardBody<
+                futures_util::stream::Empty<Result<hyper::body::Frame<Bytes>, reqwest::Error>>,
+            >,
+        > = access_restricted(
+            StatusCode::FORBIDDEN,
+            "resend",
+            "Resend",
+            Some("abc12345-def"),
+        );
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+        assert_eq!(
+            resp.headers().get("content-type").unwrap(),
+            "application/json"
+        );
+    }
+
+    #[tokio::test]
+    async fn access_restricted_body_with_agent_id() {
+        type TestBody = ForwardBody<
+            futures_util::stream::Empty<Result<hyper::body::Frame<Bytes>, reqwest::Error>>,
+        >;
+        let resp: Response<TestBody> = access_restricted(
+            StatusCode::UNAUTHORIZED,
+            "resend",
+            "Resend",
+            Some("abc12345-long-id"),
+        );
+        use http_body_util::BodyExt;
+        let body = match resp.into_body() {
+            Either::Left(full) => full.collect().await.expect("collect full body").to_bytes(),
+            Either::Right(_) => panic!("expected Left"),
+        };
+        let json: serde_json::Value = serde_json::from_slice(&body).expect("valid JSON");
+        assert_eq!(json["error"], "access_restricted");
+        assert_eq!(json["provider"], "resend");
+        assert!(json["message"]
+            .as_str()
+            .unwrap()
+            .contains("does not have access"));
+        assert!(json["manage_url"]
+            .as_str()
+            .unwrap()
+            .contains("/agents?manage=abc12345"));
+    }
+
+    #[tokio::test]
+    async fn access_restricted_body_without_agent_id() {
+        type TestBody = ForwardBody<
+            futures_util::stream::Empty<Result<hyper::body::Frame<Bytes>, reqwest::Error>>,
+        >;
+        let resp: Response<TestBody> =
+            access_restricted(StatusCode::FORBIDDEN, "github", "GitHub", None);
+        use http_body_util::BodyExt;
+        let body = match resp.into_body() {
+            Either::Left(full) => full.collect().await.expect("collect full body").to_bytes(),
+            Either::Right(_) => panic!("expected Left"),
+        };
+        let json: serde_json::Value = serde_json::from_slice(&body).expect("valid JSON");
+        assert_eq!(json["error"], "access_restricted");
+        assert!(json["manage_url"].as_str().unwrap().ends_with("/agents"));
+    }
+
+    #[tokio::test]
+    async fn access_restricted_short_agent_id() {
+        type TestBody = ForwardBody<
+            futures_util::stream::Empty<Result<hyper::body::Frame<Bytes>, reqwest::Error>>,
+        >;
+        let resp: Response<TestBody> =
+            access_restricted(StatusCode::FORBIDDEN, "resend", "Resend", Some("abc"));
+        use http_body_util::BodyExt;
+        let body = match resp.into_body() {
+            Either::Left(full) => full.collect().await.expect("collect full body").to_bytes(),
+            Either::Right(_) => panic!("expected Left"),
+        };
+        let json: serde_json::Value = serde_json::from_slice(&body).expect("valid JSON");
+        assert!(json["manage_url"]
+            .as_str()
+            .unwrap()
+            .contains("/agents?manage=abc"));
     }
 }

@@ -1,8 +1,5 @@
 import { useCallback } from "react";
-import { getGatewayFetchOptions } from "@/lib/gateway-auth";
-import { API_URL } from "@/lib/env";
-
-const GATEWAY_URL = API_URL;
+import { invalidateGatewayCache } from "@/lib/actions/gateway-cache";
 
 /**
  * Returns a fire-and-forget function that invalidates the gateway's
@@ -14,12 +11,7 @@ const GATEWAY_URL = API_URL;
 export const useInvalidateGatewayCache = () => {
   return useCallback(async () => {
     try {
-      const { headers, credentials } = await getGatewayFetchOptions();
-      await fetch(`${GATEWAY_URL}/api/cache/invalidate`, {
-        method: "POST",
-        headers,
-        credentials,
-      });
+      await invalidateGatewayCache();
     } catch {
       // Fire-and-forget — don't break UI if gateway is unreachable
     }
