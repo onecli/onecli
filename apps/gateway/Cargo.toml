@@ -79,7 +79,7 @@ async-trait = "0.1"
 hex = "0.4"
 
 [features]
-cloud = ["dep:aws-sdk-kms", "dep:aws-config", "dep:redis", "dep:percent-encoding"]
+cloud = ["dep:aws-sdk-kms", "dep:aws-config", "dep:redis"]
 
 [dependencies.aws-sdk-kms]
 version = "1"
@@ -97,7 +97,6 @@ optional = true
 
 [dependencies.percent-encoding]
 version = "2"
-optional = true
 
 [dev-dependencies]
 tempfile = "3"

@@ -35,7 +35,6 @@ use tower_http::cors::CorsLayer;
 use tracing::{info, warn};
 
 use crate::approval::{ApprovalDecision, ApprovalStore, APPROVAL_TIMEOUT_SECS};
-use crate::apps;
 use crate::auth::AuthUser;
 use crate::ca::CertificateAuthority;
 use crate::cache::CacheStore;
@@ -486,12 +485,11 @@ async fn handle_connect(
         }
     }
 
-    // App-not-connected fallback: if an authenticated agent has no credentials
-    // for a known app host, force MITM so forward_request can detect 401/403
-    // and return an actionable error instead of tunneling blindly.
-    if !intercept && agent_token.is_some() && apps::provider_for_host(&hostname).is_some() {
+    // Force MITM for all authenticated agent requests so the gateway can
+    // intercept auth errors (401/403/400) and provide actionable guidance
+    // (credential_not_found, app_not_connected, access_restricted).
+    if !intercept && agent_token.is_some() {
         intercept = true;
-        info!(host = %hostname, "forcing MITM for known app (no credentials)");
     }
 
     info!(
@@ -616,7 +614,7 @@ async fn handle_http_proxy(
         agent_id: resolved.agent_id,
         agent_name: resolved.agent_name,
         agent_identifier: resolved.agent_identifier,
-        agent_token: agent_token.clone(),
+        agent_token,
     };
 
     let rules = mitm::ResolvedRules {

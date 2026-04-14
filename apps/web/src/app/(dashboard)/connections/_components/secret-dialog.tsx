@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { useInvalidateGatewayCache } from "@/hooks/use-invalidate-cache";
 import { toast } from "sonner";
 import { ArrowLeft, Bot, Key, Settings2 } from "lucide-react";
@@ -72,12 +72,23 @@ export interface SecretItem {
   injectionConfig: unknown;
 }
 
+export interface SecretPrefill {
+  type: SecretType;
+  hostPattern: string;
+  name: string;
+  pathPattern?: string;
+  headerName?: string;
+  valueFormat?: string;
+}
+
 interface SecretDialogProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   onSaved: () => void;
   /** Pass an existing secret to edit. Omit for create mode. */
   secret?: SecretItem;
+  /** Pre-populate fields and skip type selection step. */
+  prefill?: SecretPrefill;
 }
 
 export const SecretDialog = ({
@@ -85,9 +96,11 @@ export const SecretDialog = ({
   onOpenChange,
   onSaved,
   secret,
+  prefill,
 }: SecretDialogProps) => {
   const isEdit = !!secret;
   const invalidateCache = useInvalidateGatewayCache();
+  const valueInputRef = useRef<HTMLInputElement>(null);
   const [step, setStep] = useState<"type" | "form">("type");
   const [saving, setSaving] = useState(false);
 
@@ -111,7 +124,7 @@ export const SecretDialog = ({
     return null;
   })();
 
-  // When opening, populate from secret (edit) or reset (create)
+  // When opening, populate from secret (edit), prefill (create with defaults), or reset (create)
   useEffect(() => {
     if (open) {
       if (secret) {
@@ -124,6 +137,16 @@ export const SecretDialog = ({
         setPathPattern(secret.pathPattern ?? "");
         setHeaderName(config?.headerName ?? "Authorization");
         setValueFormat(config?.valueFormat ?? "Bearer {value}");
+      } else if (prefill) {
+        setStep("form");
+        setType(prefill.type);
+        setName(prefill.name);
+        setValue("");
+        setHostPattern(prefill.hostPattern);
+        setPathPattern(prefill.pathPattern ?? "");
+        setHeaderName(prefill.headerName ?? "Authorization");
+        setValueFormat(prefill.valueFormat ?? "Bearer {value}");
+        setTimeout(() => valueInputRef.current?.focus(), 100);
       } else {
         setStep("type");
         setType("anthropic");
@@ -135,7 +158,7 @@ export const SecretDialog = ({
         setValueFormat("Bearer {value}");
       }
     }
-  }, [open, secret]);
+  }, [open, secret, prefill]);
 
   const handleSelectType = (selected: SecretType) => {
     setType(selected);
@@ -255,6 +278,7 @@ export const SecretDialog = ({
                   )}
                 </Label>
                 <Input
+                  ref={valueInputRef}
                   id="secret-value"
                   type="password"
                   placeholder={

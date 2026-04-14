@@ -1,13 +1,14 @@
 "use client";
 
-import { useEffect, useState, useCallback } from "react";
+import { useEffect, useState, useCallback, useRef } from "react";
+import { useSearchParams, useRouter } from "next/navigation";
 import { Plus, KeyRound } from "lucide-react";
 import { getSecrets } from "@/lib/actions/secrets";
 import { Button } from "@onecli/ui/components/button";
 import { Card } from "@onecli/ui/components/card";
 import { Skeleton } from "@onecli/ui/components/skeleton";
 import { SecretCard } from "./secret-card";
-import { SecretDialog } from "./secret-dialog";
+import { SecretDialog, type SecretPrefill } from "./secret-dialog";
 
 interface Secret {
   id: string;
@@ -21,9 +22,13 @@ interface Secret {
 }
 
 export const SecretsContent = () => {
+  const router = useRouter();
+  const searchParams = useSearchParams();
   const [secrets, setSecrets] = useState<Secret[]>([]);
   const [loading, setLoading] = useState(true);
   const [createOpen, setCreateOpen] = useState(false);
+  const [prefill, setPrefill] = useState<SecretPrefill | undefined>();
+  const paramHandled = useRef(false);
 
   const fetchSecrets = useCallback(async () => {
     const result = await getSecrets();
@@ -34,6 +39,26 @@ export const SecretsContent = () => {
   useEffect(() => {
     fetchSecrets();
   }, [fetchSecrets]);
+
+  // Auto-open create dialog from URL params (e.g., ?create=generic&host=api.example.com)
+  useEffect(() => {
+    if (paramHandled.current || loading) return;
+    const createType = searchParams.get("create");
+    const host = searchParams.get("host");
+    if (createType === "generic" && host) {
+      paramHandled.current = true;
+      setPrefill({
+        type: "generic",
+        hostPattern: host,
+        pathPattern: searchParams.get("path") ?? undefined,
+        name: searchParams.get("name") ?? `${host} Secret`,
+        headerName: searchParams.get("header") ?? undefined,
+        valueFormat: searchParams.get("format") ?? undefined,
+      });
+      setCreateOpen(true);
+      router.replace(window.location.pathname, { scroll: false });
+    }
+  }, [searchParams, loading, router]);
 
   if (loading) {
     return (
@@ -84,8 +109,12 @@ export const SecretsContent = () => {
 
       <SecretDialog
         open={createOpen}
-        onOpenChange={setCreateOpen}
+        onOpenChange={(open) => {
+          setCreateOpen(open);
+          if (!open) setPrefill(undefined);
+        }}
         onSaved={fetchSecrets}
+        prefill={prefill}
       />
     </div>
   );

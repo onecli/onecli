@@ -81,6 +81,10 @@ fn is_forwarded_response_header(name: &HeaderName) -> bool {
 /// TCP pipe during the approval wait.
 const BODY_PREVIEW_BYTES: usize = 4096;
 
+/// Maximum response body to buffer when checking if a 400 is auth-related.
+/// Auth error messages are small JSON; no need to scan large bodies.
+const AUTH_CHECK_BODY_LIMIT: usize = 8192;
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn forward_request(
     req: Request<Incoming>,
@@ -122,19 +126,7 @@ pub(crate) async fn forward_request(
     match &decision {
         PolicyDecision::Blocked => {
             warn!(method = %method, url = %url, "BLOCKED by policy rule");
-            let body = serde_json::json!({
-                "error": "blocked_by_policy",
-                "message": "This request was blocked by an OneCLI policy rule. Check your rules at https://onecli.sh or your OneCLI dashboard.",
-                "method": method.as_str(),
-                "path": path,
-            })
-            .to_string();
-            let mut response = Response::new(Either::Left(Full::new(Bytes::from(body))));
-            *response.status_mut() = StatusCode::FORBIDDEN;
-            response
-                .headers_mut()
-                .insert("content-type", "application/json".parse().unwrap());
-            return Ok(response);
+            return Ok(response::blocked_by_policy(method.as_str(), &path));
         }
         PolicyDecision::RateLimited {
             limit,
@@ -142,22 +134,7 @@ pub(crate) async fn forward_request(
             retry_after_secs,
         } => {
             warn!(method = %method, url = %url, limit, window, "RATE LIMITED by policy rule");
-            let body = serde_json::json!({
-                "error": "rate_limited",
-                "message": "This request was rate-limited by an OneCLI policy rule.",
-                "limit": limit,
-                "window": window,
-            })
-            .to_string();
-            let mut response = Response::new(Either::Left(Full::new(Bytes::from(body))));
-            *response.status_mut() = StatusCode::TOO_MANY_REQUESTS;
-            response
-                .headers_mut()
-                .insert("content-type", "application/json".parse().unwrap());
-            response
-                .headers_mut()
-                .insert("retry-after", retry_after_secs.to_string().parse().unwrap());
-            return Ok(response);
+            return Ok(response::rate_limited(*limit, window, *retry_after_secs));
         }
         _ => {}
     }
@@ -332,36 +309,68 @@ pub(crate) async fn forward_request(
     let resp_headers = upstream_resp.headers().clone();
 
     // If no credentials were injected and upstream returned 401/403,
-    // check if this host belongs to a known app that needs connecting or access granting.
+    // guide the agent to connect/configure credentials in OneCLI.
     if injection_count == 0
         && (status == StatusCode::UNAUTHORIZED || status == StatusCode::FORBIDDEN)
+        && proxy_ctx.agent_token.is_some()
     {
         let hostname = super::strip_port(host);
+
+        // 1. Access restricted — agent in selective mode, credentials exist but not assigned.
+        //    Applies to ANY host (known apps AND manual secrets).
+        if rules.access_restricted {
+            let (provider, display_name) =
+                apps::provider_for_host_and_path(hostname, &path).unwrap_or((hostname, hostname));
+            info!(method = %method, url = %url, status = %status.as_u16(), "access restricted");
+            return Ok(response::access_restricted(
+                status,
+                provider,
+                display_name,
+                proxy_ctx.agent_id.as_deref(),
+            ));
+        }
+
+        // 2. Known app host — not connected.
         if let Some((provider, display_name)) = apps::provider_for_host_and_path(hostname, &path) {
-            if rules.access_restricted {
-                info!(
-                    method = %method,
-                    url = %url,
-                    status = %status.as_u16(),
-                    provider = %provider,
-                    "access restricted - agent lacks permission"
-                );
-                return Ok(response::access_restricted(
-                    status,
-                    provider,
-                    display_name,
-                    proxy_ctx.agent_id.as_deref(),
-                ));
-            }
-            info!(
-                method = %method,
-                url = %url,
-                status = %status.as_u16(),
-                provider = %provider,
-                "app not connected"
-            );
+            info!(method = %method, url = %url, status = %status.as_u16(), provider = %provider, "app not connected");
             return Ok(response::app_not_connected(status, provider, display_name));
         }
+
+        // 3. Unknown host — no credentials at all, guide user to create a secret.
+        info!(method = %method, url = %url, status = %status.as_u16(), "credential not found");
+        return Ok(response::credential_not_found(status, hostname, &path));
+    }
+
+    // Some APIs (e.g. Google) return 400 instead of 401 for invalid/missing API keys.
+    // Buffer the body and check for auth-related keywords before deciding.
+    if injection_count == 0 && status == StatusCode::BAD_REQUEST && proxy_ctx.agent_token.is_some()
+    {
+        let body_bytes = upstream_resp
+            .bytes()
+            .await
+            .context("reading 400 response body for auth check")?;
+
+        let check_slice = &body_bytes[..body_bytes.len().min(AUTH_CHECK_BODY_LIMIT)];
+
+        if body_indicates_auth_error(check_slice) {
+            let hostname = super::strip_port(host);
+            info!(method = %method, url = %url, status = 400, "auth-related 400");
+            return Ok(response::credential_not_found(
+                StatusCode::BAD_REQUEST,
+                hostname,
+                &path,
+            ));
+        }
+
+        // Not auth-related: forward the buffered 400 as-is.
+        let mut response = Response::new(Either::Left(Full::new(body_bytes)));
+        *response.status_mut() = status;
+        for (name, value) in resp_headers.iter() {
+            if is_forwarded_response_header(name) {
+                response.headers_mut().append(name.clone(), value.clone());
+            }
+        }
+        return Ok(response);
     }
 
     let content_type = resp_headers
@@ -392,6 +401,24 @@ pub(crate) async fn forward_request(
     }
 
     Ok(response)
+}
+
+/// Check if a response body contains auth-related error keywords,
+/// indicating a 400 is actually an authentication failure.
+fn body_indicates_auth_error(body: &[u8]) -> bool {
+    let text = String::from_utf8_lossy(body);
+    let lower = text.to_ascii_lowercase();
+    const AUTH_KEYWORDS: &[&str] = &[
+        "api key",
+        "api_key",
+        "apikey",
+        "unauthorized",
+        "unauthenticated",
+        "authentication",
+        "credentials",
+        "access denied",
+    ];
+    AUTH_KEYWORDS.iter().any(|kw| lower.contains(kw))
 }
 
 // ── Tests ────────────────────────────────────────────────────────────────
@@ -480,5 +507,43 @@ mod tests {
                 "{name} should be forwarded in responses"
             );
         }
+    }
+
+    // ── body_indicates_auth_error ───────────────────────────────────────
+
+    #[test]
+    fn auth_error_detects_api_key() {
+        let body = br#"{"error": {"message": "API key not valid"}}"#;
+        assert!(body_indicates_auth_error(body));
+    }
+
+    #[test]
+    fn auth_error_detects_unauthenticated() {
+        let body = br#"{"error": "Request is missing required authentication credential."}"#;
+        assert!(body_indicates_auth_error(body));
+    }
+
+    #[test]
+    fn auth_error_case_insensitive() {
+        let body = br#"{"error": "UNAUTHORIZED access"}"#;
+        assert!(body_indicates_auth_error(body));
+    }
+
+    #[test]
+    fn auth_error_rejects_unrelated_400() {
+        let body = br#"{"error": "invalid_argument", "message": "Field 'email' is required"}"#;
+        assert!(!body_indicates_auth_error(body));
+    }
+
+    #[test]
+    fn auth_error_handles_empty_body() {
+        assert!(!body_indicates_auth_error(b""));
+    }
+
+    #[test]
+    fn auth_error_handles_non_utf8() {
+        // Invalid UTF-8 prefix + "api key"
+        let body = &[0xFF, 0xFE, 0x61, 0x70, 0x69, 0x20, 0x6B, 0x65, 0x79];
+        assert!(body_indicates_auth_error(body));
     }
 }
