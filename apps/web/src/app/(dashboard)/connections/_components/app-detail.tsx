@@ -229,7 +229,7 @@ export const AppDetail = ({
                       <AlertDialogCancel>Cancel</AlertDialogCancel>
                       <AlertDialogAction
                         onClick={handleDisconnect}
-                        className="bg-destructive text-white hover:bg-destructive/90"
+                        variant="destructive"
                       >
                         Disconnect
                       </AlertDialogAction>

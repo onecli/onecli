@@ -4,6 +4,7 @@ use http_body_util::{Either, Full};
 use hyper::body::Bytes;
 use hyper::header::HeaderValue;
 use hyper::{Response, StatusCode};
+use percent_encoding::{utf8_percent_encode, NON_ALPHANUMERIC};
 
 /// 407 Proxy Authentication Required — agent token is missing or invalid.
 pub(super) fn proxy_auth_required() -> Response<axum::body::Body> {
@@ -22,7 +23,10 @@ pub(crate) type ForwardBody<S> = Either<Full<Bytes>, S>;
 /// Resolve the OneCLI dashboard base URL from `APP_URL`,
 /// falling back to `http://localhost:10254`.
 fn dashboard_url() -> String {
-    std::env::var("APP_URL").unwrap_or_else(|_| "http://localhost:10254".to_string())
+    std::env::var("APP_URL")
+        .unwrap_or_else(|_| "http://localhost:10254".to_string())
+        .trim_end_matches('/')
+        .to_string()
 }
 
 /// Build a JSON error response with the given status code and body.
@@ -81,6 +85,54 @@ pub(crate) fn access_restricted<S>(
     )
 }
 
+/// JSON error response when no credentials are configured for an unknown host.
+///
+/// Returned when `injection_count == 0`, upstream returns 401/403, the host is NOT a known
+/// app provider, and the agent is authenticated. Provides a link to create a generic secret
+/// with pre-populated host and path.
+pub(crate) fn credential_not_found<S>(
+    status: StatusCode,
+    hostname: &str,
+    path: &str,
+) -> Response<ForwardBody<S>> {
+    let base = dashboard_url();
+    let encoded_host = utf8_percent_encode(hostname, NON_ALPHANUMERIC);
+    let encoded_path = utf8_percent_encode(path, NON_ALPHANUMERIC);
+    let secret_url = format!(
+        "{base}/connections/secrets?create=generic&host={encoded_host}&path={encoded_path}"
+    );
+    json_error(
+        status,
+        serde_json::json!({
+            "error": "credential_not_found",
+            "message": format!(
+                "No credentials configured for {hostname} in OneCLI.\n\n\
+                 A pre-built link is provided in the `secret_url` field, pre-filled with:\n\
+                 - host: {hostname}\n\
+                 - path: {path}\n\n\
+                 Before sending this link to the user, consider whether to adjust it. \
+                 You can build a custom URL with any of these query parameters:\n\
+                 {base}/connections/secrets?create=generic&host=<host>&path=<path>&name=<name>&header=<header>&format=<format>\n\n\
+                 Available parameters:\n\
+                 - `host` (required): hostname to match (e.g., api.example.com or *.example.com)\n\
+                 - `path`: path pattern (e.g., /v1/* or /*). Defaults to the exact request path.\n\
+                 - `name`: display name for the secret (e.g., 'Example API Key')\n\
+                 - `header`: HTTP header name to inject (default: Authorization)\n\
+                 - `format`: value format with {{value}} placeholder (default: Bearer {{value}})\n\n\
+                 Examples of when to customize:\n\
+                 - Change path to `/*` if the credential covers all endpoints on the host\n\
+                 - Change header to `X-API-Key` if the API uses a custom header\n\
+                 - Change format to `{{value}}` (raw) if the API expects the token without a prefix\n\n\
+                 Once you've decided on the right link, ask the user to open it. \
+                 They will see a pre-filled form where they paste their API key or token."
+            ),
+            "hostname": hostname,
+            "path": path,
+            "secret_url": secret_url,
+        }),
+    )
+}
+
 /// 502 Bad Gateway — rule resolution failed mid-session.
 pub(crate) fn resolution_failed<S>() -> Response<ForwardBody<S>> {
     json_error(
@@ -105,6 +157,40 @@ pub(crate) fn manual_approval_denied<S>(
             "approval_id": approval_id,
         }),
     )
+}
+
+/// 403 Forbidden — request blocked by a policy rule.
+pub(crate) fn blocked_by_policy<S>(method: &str, path: &str) -> Response<ForwardBody<S>> {
+    json_error(
+        StatusCode::FORBIDDEN,
+        serde_json::json!({
+            "error": "blocked_by_policy",
+            "message": "This request was blocked by an OneCLI policy rule. Check your rules at https://onecli.sh or your OneCLI dashboard.",
+            "method": method,
+            "path": path,
+        }),
+    )
+}
+
+/// 429 Too Many Requests — request rate-limited by a policy rule.
+pub(crate) fn rate_limited<S>(
+    limit: u64,
+    window: &str,
+    retry_after_secs: u64,
+) -> Response<ForwardBody<S>> {
+    let mut resp = json_error(
+        StatusCode::TOO_MANY_REQUESTS,
+        serde_json::json!({
+            "error": "rate_limited",
+            "message": "This request was rate-limited by an OneCLI policy rule.",
+            "limit": limit,
+            "window": window,
+        }),
+    );
+    if let Ok(val) = HeaderValue::try_from(retry_after_secs.to_string()) {
+        resp.headers_mut().insert("retry-after", val);
+    }
+    resp
 }
 
 /// 502 Bad Gateway — approval store unavailable.
@@ -260,5 +346,65 @@ mod tests {
             .as_str()
             .unwrap()
             .contains("/agents?manage=abc"));
+    }
+
+    #[tokio::test]
+    async fn credential_not_found_includes_host_and_secret_url() {
+        type TestBody = ForwardBody<
+            futures_util::stream::Empty<Result<hyper::body::Frame<Bytes>, reqwest::Error>>,
+        >;
+        let resp: Response<TestBody> = credential_not_found(
+            StatusCode::UNAUTHORIZED,
+            "api.custom-service.com",
+            "/v1/send",
+        );
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+
+        use http_body_util::BodyExt;
+        let body = match resp.into_body() {
+            Either::Left(full) => full.collect().await.expect("collect full body").to_bytes(),
+            Either::Right(_) => panic!("expected Left"),
+        };
+        let json: serde_json::Value = serde_json::from_slice(&body).expect("valid JSON");
+        assert_eq!(json["error"], "credential_not_found");
+        assert_eq!(json["hostname"], "api.custom-service.com");
+        assert_eq!(json["path"], "/v1/send");
+        assert!(json["secret_url"]
+            .as_str()
+            .unwrap()
+            .contains("create=generic"));
+        assert!(json["message"]
+            .as_str()
+            .unwrap()
+            .contains("api.custom-service.com"));
+    }
+
+    #[tokio::test]
+    async fn credential_not_found_encodes_special_characters() {
+        type TestBody = ForwardBody<
+            futures_util::stream::Empty<Result<hyper::body::Frame<Bytes>, reqwest::Error>>,
+        >;
+        let resp: Response<TestBody> = credential_not_found(
+            StatusCode::FORBIDDEN,
+            "api.example.com",
+            "/v1/send?to=user@test.com&subject=hello",
+        );
+        use http_body_util::BodyExt;
+        let body = match resp.into_body() {
+            Either::Left(full) => full.collect().await.expect("collect").to_bytes(),
+            Either::Right(_) => panic!("expected Left"),
+        };
+        let json: serde_json::Value = serde_json::from_slice(&body).expect("valid JSON");
+        let secret_url = json["secret_url"].as_str().unwrap();
+        // The & and = in the path should be encoded so they don't break the query string
+        assert!(
+            !secret_url.contains("&subject="),
+            "path params must be encoded"
+        );
+        assert!(secret_url.contains("create=generic"));
+        assert!(
+            !secret_url.contains("method="),
+            "method should not be in URL"
+        );
     }
 }

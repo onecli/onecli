@@ -70,7 +70,7 @@ export const ConnectionsTabs = () => {
   };
 
   return (
-    <AnimatedTabs defaultValue={activeTab} onValueChange={handleTabChange}>
+    <AnimatedTabs value={activeTab} onValueChange={handleTabChange}>
       <AnimatedTabList className="justify-between">
         <div className="flex">
           <AnimatedTabTrigger value="apps">Apps</AnimatedTabTrigger>

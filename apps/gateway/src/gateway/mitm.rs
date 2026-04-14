@@ -11,6 +11,7 @@ use anyhow::{Context, Result};
 use hyper::server::conn::http1;
 use hyper::service::service_fn;
 use hyper_util::rt::TokioIo;
+use std::fmt;
 use tokio_rustls::TlsAcceptor;
 use tracing::warn;
 
@@ -23,6 +24,18 @@ use crate::inject::InjectionRule;
 use super::forward;
 use super::response;
 use super::ProxyContext;
+
+/// Typed error context for TLS handshake failures with the client.
+#[derive(Debug)]
+struct TlsHandshakeWithClient;
+
+impl fmt::Display for TlsHandshakeWithClient {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("TLS handshake with client")
+    }
+}
+
+impl std::error::Error for TlsHandshakeWithClient {}
 
 /// Terminate TLS with the client, then forward each HTTP request through
 /// [`forward::forward_request`] with freshly resolved rules from cache.
@@ -47,7 +60,7 @@ pub(super) async fn mitm(
     let tls_stream = acceptor
         .accept(client_io)
         .await
-        .context("TLS handshake with client")?;
+        .context(TlsHandshakeWithClient)?;
 
     let host_owned = host.to_string();
     let vault_injection_rules = Arc::new(vault_injection_rules);
@@ -92,6 +105,7 @@ pub(super) async fn mitm(
 }
 
 /// Per-request resolved rules, bundled for passing to `forward_request`.
+#[derive(Debug)]
 pub(crate) struct ResolvedRules {
     pub injection_rules: Vec<InjectionRule>,
     pub policy_rules: Vec<crate::policy::PolicyRule>,

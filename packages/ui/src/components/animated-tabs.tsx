@@ -33,7 +33,8 @@ const useTabsContext = () => {
 // ── Root ─────────────────────────────────────────────────────────────────
 
 interface AnimatedTabsProps {
-  defaultValue: string;
+  defaultValue?: string;
+  value?: string;
   onValueChange?: (value: string) => void;
   children: ReactNode;
   className?: string;
@@ -41,16 +42,18 @@ interface AnimatedTabsProps {
 
 export const AnimatedTabs = ({
   defaultValue,
+  value,
   onValueChange,
   children,
   className,
 }: AnimatedTabsProps) => {
-  const [activeTab, setActiveTabState] = useState(defaultValue);
+  const [internalTab, setInternalTab] = useState(value ?? defaultValue ?? "");
+  const activeTab = value ?? internalTab;
   const tabsRef = useRef<Map<string, HTMLButtonElement>>(new Map());
 
   const setActiveTab = useCallback(
     (id: string) => {
-      setActiveTabState(id);
+      setInternalTab(id);
       onValueChange?.(id);
     },
     [onValueChange],
