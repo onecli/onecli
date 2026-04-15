@@ -18,7 +18,8 @@ use tracing::warn;
 use crate::approval::ApprovalStore;
 use crate::ca::CertificateAuthority;
 use crate::cache::CacheStore;
-use crate::connect::{self, PolicyEngine};
+use crate::connect::{self, AppConnectionResult, ConnectionChoice, PolicyEngine};
+use crate::db;
 use crate::inject::InjectionRule;
 
 use super::forward;
@@ -80,23 +81,49 @@ pub(super) async fn mitm(
                 let engine = Arc::clone(&policy_engine);
                 let vault_rules = Arc::clone(&vault_injection_rules);
                 async move {
+                    let connection_id = connect::extract_connection_id(req.headers());
+
                     // Re-resolve rules from cache on each request so that
                     // secret/rule changes take effect without a reconnect.
                     let hostname = super::strip_port(&host);
-                    let rules = match resolve_rules(&ctx, hostname, &engine, &*cache, &vault_rules)
-                        .await
-                    {
-                        Ok(r) => r,
-                        Err(e) => {
-                            warn!(host = %host, error = ?e, "rule resolution failed mid-session");
-                            return Ok(response::resolution_failed());
-                        }
-                    };
-
-                    forward::forward_request(
-                        req, &host, "https", client, &rules, &*cache, &ctx, &approvals,
+                    match resolve_rules(
+                        &ctx,
+                        hostname,
+                        &engine,
+                        &*cache,
+                        &vault_rules,
+                        connection_id.as_deref(),
                     )
                     .await
+                    {
+                        Ok(ResolveResult::Resolved {
+                            rules,
+                            app_connections,
+                        }) => {
+                            match forward::forward_request(
+                                req, &host, "https", client, &rules, &*cache, &ctx, &approvals,
+                            )
+                            .await
+                            {
+                                Ok(mut resp) => {
+                                    connect::inject_connections_header(&mut resp, &app_connections);
+                                    Ok(resp)
+                                }
+                                Err(e) => Err(e),
+                            }
+                        }
+                        Ok(ResolveResult::Ambiguous(connections)) => {
+                            Ok(response::multiple_connections(&connections))
+                        }
+                        Ok(ResolveResult::NotFound {
+                            connection_id: cid,
+                            connections,
+                        }) => Ok(response::connection_not_found(&cid, &connections)),
+                        Err(e) => {
+                            warn!(host = %host, error = ?e, "rule resolution failed mid-session");
+                            Ok(response::resolution_failed())
+                        }
+                    }
                 }
             }),
         )
@@ -112,30 +139,78 @@ pub(crate) struct ResolvedRules {
     pub access_restricted: bool,
 }
 
-/// Resolve injection + policy rules from cache, falling back to vault rules
-/// if no DB secrets or app connections are configured for this host.
+/// Result of per-request rule resolution including app connection disambiguation.
+enum ResolveResult {
+    /// Rules resolved successfully, with the raw app connections for the response header.
+    Resolved {
+        rules: ResolvedRules,
+        app_connections: Vec<db::AppConnectionRow>,
+    },
+    /// Multiple connections exist and no header was provided.
+    Ambiguous(Vec<ConnectionChoice>),
+    /// The requested connection ID was not found.
+    NotFound {
+        connection_id: String,
+        connections: Vec<ConnectionChoice>,
+    },
+}
+
+/// Resolve injection + policy rules from cache, with per-request app connection
+/// disambiguation. Falls back to vault rules if no DB secrets or app connections
+/// are configured for this host.
 async fn resolve_rules(
     ctx: &ProxyContext,
     hostname: &str,
     engine: &PolicyEngine,
     cache: &dyn CacheStore,
     vault_rules: &[InjectionRule],
-) -> Result<ResolvedRules, crate::connect::ConnectError> {
+    connection_id: Option<&str>,
+) -> Result<ResolveResult, crate::connect::ConnectError> {
     let account_id = ctx.account_id.as_deref().unwrap_or("");
     let agent_token = ctx.agent_token.as_deref().unwrap_or("");
 
     let resp =
         connect::resolve_from_cache(account_id, agent_token, hostname, engine, cache).await?;
 
-    let injection_rules = if resp.injection_rules.is_empty() && !vault_rules.is_empty() {
-        vault_rules.to_vec()
-    } else {
-        resp.injection_rules
-    };
+    let mut injection_rules = resp.injection_rules; // from secrets
 
-    Ok(ResolvedRules {
-        injection_rules,
-        policy_rules: resp.policy_rules,
-        access_restricted: resp.access_restricted,
+    // If no secret rules, try app connections (per-request disambiguation)
+    if injection_rules.is_empty() && !resp.app_connections.is_empty() {
+        match engine
+            .resolve_app_injection_for_request(
+                &resp.app_connections,
+                hostname,
+                connection_id,
+                account_id,
+                cache,
+            )
+            .await?
+        {
+            AppConnectionResult::Rules(rules) => injection_rules = rules,
+            AppConnectionResult::Ambiguous { connections } => {
+                return Ok(ResolveResult::Ambiguous(connections));
+            }
+            AppConnectionResult::NotFound { connections } => {
+                return Ok(ResolveResult::NotFound {
+                    connection_id: connection_id.unwrap_or("").to_string(),
+                    connections,
+                });
+            }
+            AppConnectionResult::NoConnections => {}
+        }
+    }
+
+    // Vault fallback
+    if injection_rules.is_empty() && !vault_rules.is_empty() {
+        injection_rules = vault_rules.to_vec();
+    }
+
+    Ok(ResolveResult::Resolved {
+        rules: ResolvedRules {
+            injection_rules,
+            policy_rules: resp.policy_rules,
+            access_restricted: resp.access_restricted,
+        },
+        app_connections: resp.app_connections,
     })
 }

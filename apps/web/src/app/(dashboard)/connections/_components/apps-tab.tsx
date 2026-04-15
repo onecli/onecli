@@ -22,8 +22,8 @@ import { useConnectParam } from "./use-connect-param";
 
 export const AppsTab = () => {
   const router = useRouter();
-  const [connectedProviders, setConnectedProviders] = useState<Set<string>>(
-    () => new Set(),
+  const [connectionCounts, setConnectionCounts] = useState<Map<string, number>>(
+    () => new Map(),
   );
   const [configuredProviders, setConfiguredProviders] = useState<Set<string>>(
     () => new Set(),
@@ -42,13 +42,11 @@ export const AppsTab = () => {
         getAvailableEnvDefaults(),
         getConfiguredProviders().catch(() => [] as string[]),
       ]);
-      setConnectedProviders(
-        new Set(
-          connections
-            .filter((c) => c.status === "connected")
-            .map((c) => c.provider),
-        ),
-      );
+      const counts = new Map<string, number>();
+      for (const c of connections.filter((c) => c.status === "connected")) {
+        counts.set(c.provider, (counts.get(c.provider) ?? 0) + 1);
+      }
+      setConnectionCounts(counts);
       setEnvDefaultProviders(new Set(availableDefaults));
       setConfiguredProviders(new Set(configured));
     } catch {
@@ -83,6 +81,13 @@ export const AppsTab = () => {
     );
   };
 
+  // Derived set for backward-compat with useConnectParam
+  const connectedProviders = new Set(
+    [...connectionCounts.entries()]
+      .filter(([, count]) => count > 0)
+      .map(([provider]) => provider),
+  );
+
   // Handle ?connect=<provider> URL param
   useConnectParam({
     loading,
@@ -100,7 +105,7 @@ export const AppsTab = () => {
     if (
       app.configurable?.fields &&
       !hasCredentials &&
-      !connectedProviders.has(app.id)
+      (connectionCounts.get(app.id) ?? 0) === 0
     ) {
       setConfigApp(app);
       return;
@@ -112,14 +117,14 @@ export const AppsTab = () => {
     <>
       <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
         {apps.map((app) => {
-          const isConnected = connectedProviders.has(app.id);
+          const count = connectionCounts.get(app.id) ?? 0;
           return (
             <AppRow
               key={app.id}
               name={app.name}
               icon={app.icon}
               darkIcon={app.darkIcon}
-              connected={isConnected}
+              connectionCount={count}
               loading={loading}
               onConnect={(e) => handleConnect(e, app)}
               onClick={() => router.push(`/connections/apps/${app.id}`)}
@@ -173,7 +178,7 @@ interface AppRowProps {
   name: string;
   icon: string;
   darkIcon?: string;
-  connected: boolean;
+  connectionCount: number;
   loading: boolean;
   onConnect: (e: React.MouseEvent) => void;
   onClick: () => void;
@@ -183,11 +188,12 @@ const AppRow = ({
   name,
   icon,
   darkIcon,
-  connected,
+  connectionCount,
   loading,
   onConnect,
   onClick,
 }: AppRowProps) => {
+  const connected = connectionCount > 0;
   return (
     <div
       className={cn(
@@ -209,7 +215,9 @@ const AppRow = ({
         ) : connected ? (
           <div className="flex items-center gap-1.5">
             <span className="size-2 rounded-full bg-brand" />
-            <span className="text-xs font-medium text-brand">Connected</span>
+            <span className="text-xs font-medium text-brand">
+              Connected{connectionCount > 1 ? ` (${connectionCount})` : ""}
+            </span>
           </div>
         ) : (
           <Button size="xs" onClick={onConnect}>

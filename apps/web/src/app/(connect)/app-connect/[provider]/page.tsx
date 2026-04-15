@@ -5,12 +5,16 @@ import { ConnectFlow } from "../_components/connect-flow";
 
 interface Props {
   params: Promise<{ provider: string }>;
-  searchParams: Promise<{ status?: string; message?: string }>;
+  searchParams: Promise<{
+    status?: string;
+    message?: string;
+    connectionId?: string;
+  }>;
 }
 
 export default async function ConnectPage({ params, searchParams }: Props) {
   const { provider } = await params;
-  const { status, message } = await searchParams;
+  const { status, message, connectionId } = await searchParams;
 
   const app = getApp(provider);
   if (!app || !app.available) notFound();
@@ -45,8 +49,9 @@ export default async function ConnectPage({ params, searchParams }: Props) {
             : undefined,
       }}
       hasDefaults={hasEnvDefaults || hasAppConfig}
-      status={status as "success" | "error" | undefined}
+      status={status === "success" || status === "error" ? status : undefined}
       errorMessage={message}
+      connectionId={connectionId}
     />
   );
 }

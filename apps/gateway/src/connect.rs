@@ -18,6 +18,13 @@ use crate::policy::{PolicyAction, PolicyRule};
 /// How long to cache resolved connect responses before re-checking.
 const CACHE_TTL_SECS: u64 = 60;
 
+/// Header name for per-request app connection disambiguation (request).
+pub(crate) const CONNECTION_ID_HEADER: &str = "x-onecli-connection-id";
+/// Header name for listing available connections (response).
+pub(crate) const CONNECTIONS_HEADER: &str = "x-onecli-connections";
+/// Agent secret mode that restricts access to explicitly assigned credentials.
+pub(crate) const SECRET_MODE_SELECTIVE: &str = "selective";
+
 // ── Data types ──────────────────────────────────────────────────────────
 
 /// Result of policy resolution for a CONNECT request.
@@ -25,6 +32,8 @@ const CACHE_TTL_SECS: u64 = 60;
 pub(crate) struct ConnectResponse {
     pub intercept: bool,
     pub injection_rules: Vec<InjectionRule>,
+    #[serde(default)]
+    pub app_connections: Vec<db::AppConnectionRow>,
     pub policy_rules: Vec<PolicyRule>,
     pub account_id: Option<String>,
     pub agent_id: Option<String>,
@@ -35,6 +44,68 @@ pub(crate) struct ConnectResponse {
     /// a more helpful error ("grant access") instead of "connect the app".
     #[serde(default)]
     pub access_restricted: bool,
+}
+
+/// Result of per-request app connection resolution.
+pub(crate) enum AppConnectionResult {
+    /// Injection rules resolved from a single connection.
+    Rules(Vec<InjectionRule>),
+    /// No app connections available for this provider.
+    NoConnections,
+    /// Multiple connections exist and no header was provided — agent must pick.
+    Ambiguous { connections: Vec<ConnectionChoice> },
+    /// The requested connection ID was not found — return the valid options.
+    NotFound { connections: Vec<ConnectionChoice> },
+}
+
+/// A single app connection option returned in disambiguation responses.
+#[derive(Debug, Clone, serde::Serialize)]
+pub(crate) struct ConnectionChoice {
+    pub id: String,
+    pub label: Option<String>,
+    pub provider: String,
+}
+
+impl ConnectionChoice {
+    pub fn from_row(row: &db::AppConnectionRow) -> Self {
+        Self {
+            id: row.id.clone(),
+            label: row.label.clone(),
+            provider: row.provider.clone(),
+        }
+    }
+}
+
+/// Extract the connection ID from request headers.
+pub(crate) fn extract_connection_id(headers: &hyper::HeaderMap) -> Option<String> {
+    headers
+        .get(CONNECTION_ID_HEADER)
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string())
+}
+
+/// Inject the `x-onecli-connections` response header listing available connections.
+pub(crate) fn inject_connections_header<B>(
+    resp: &mut hyper::Response<B>,
+    app_connections: &[db::AppConnectionRow],
+) {
+    if app_connections.is_empty() {
+        return;
+    }
+    let choices: Vec<ConnectionChoice> = app_connections
+        .iter()
+        .map(ConnectionChoice::from_row)
+        .collect();
+    if let Ok(json) = serde_json::to_string(&choices) {
+        match hyper::header::HeaderValue::from_str(&json) {
+            Ok(val) => {
+                resp.headers_mut().insert(CONNECTIONS_HEADER, val);
+            }
+            Err(e) => {
+                tracing::debug!(error = %e, "failed to encode connections header");
+            }
+        }
+    }
 }
 
 /// Errors from the connect resolution.
@@ -70,19 +141,22 @@ impl PolicyEngine {
         agent: &db::AgentRow,
         hostname: &str,
     ) -> Result<ConnectResponse, ConnectError> {
-        let injection_rules = self.resolve_injections(agent, hostname).await?;
+        let injection_rules = self.resolve_secret_injections(agent, hostname).await?;
+        let app_connections = self.resolve_app_connections(agent, hostname).await?;
         let policy_rules = self.resolve_policy_rules(agent, hostname).await?;
-        let has_rules = !injection_rules.is_empty() || !policy_rules.is_empty();
+        let has_rules =
+            !injection_rules.is_empty() || !app_connections.is_empty() || !policy_rules.is_empty();
 
         // Check if the account has credentials (secrets or app connections) for this
         // host that the agent can't access (selective mode).
         let access_restricted = injection_rules.is_empty()
-            && agent.secret_mode == "selective"
+            && agent.secret_mode == SECRET_MODE_SELECTIVE
             && self.has_account_credentials(agent, hostname).await;
 
         Ok(ConnectResponse {
             intercept: has_rules || access_restricted,
             injection_rules,
+            app_connections,
             policy_rules,
             account_id: Some(agent.account_id.clone()),
             agent_id: Some(agent.id.clone()),
@@ -92,31 +166,13 @@ impl PolicyEngine {
         })
     }
 
-    /// Resolve all injection rules: secrets first, then app connections as fallback.
-    async fn resolve_injections(
-        &self,
-        agent: &db::AgentRow,
-        hostname: &str,
-    ) -> Result<Vec<InjectionRule>, ConnectError> {
-        let secret_rules = self.resolve_secret_injections(agent, hostname).await?;
-        if !secret_rules.is_empty() {
-            debug!(host = %hostname, count = secret_rules.len(), "resolve: using secrets");
-            return Ok(secret_rules);
-        }
-
-        // Secrets take priority — only try app connections when no secret matched.
-        let app_rules = self.resolve_app_injections(agent, hostname).await?;
-        debug!(host = %hostname, count = app_rules.len(), "resolve: using app connections");
-        Ok(app_rules)
-    }
-
     /// Build injection rules from secrets matching this host.
     async fn resolve_secret_injections(
         &self,
         agent: &db::AgentRow,
         hostname: &str,
     ) -> Result<Vec<InjectionRule>, ConnectError> {
-        let secrets = if agent.secret_mode == "selective" {
+        let secrets = if agent.secret_mode == SECRET_MODE_SELECTIVE {
             db::find_secrets_by_agent(&self.pool, &agent.id).await
         } else {
             db::find_secrets_by_account(&self.pool, &agent.account_id).await
@@ -151,17 +207,17 @@ impl PolicyEngine {
         Ok(rules)
     }
 
-    /// Build injection rules from app connections for this host.
-    /// Only called when no secret matched (secrets take priority).
+    /// Fetch app connections matching providers for this host (deferred resolution).
     ///
-    /// Multiple providers can share a host with different path prefixes
-    /// (e.g., Gmail on `/gmail/*` and Calendar on `/calendar/*`). Returns one
-    /// `InjectionRule` per matching connection, each scoped to its path pattern.
-    async fn resolve_app_injections(
+    /// Returns the raw `AppConnectionRow` values filtered to providers that match
+    /// the hostname. Decryption and injection rule building are deferred to
+    /// per-request time via [`resolve_app_injection_for_request`] so that
+    /// multi-account disambiguation can happen with the `x-onecli-connection-id` header.
+    async fn resolve_app_connections(
         &self,
         agent: &db::AgentRow,
         hostname: &str,
-    ) -> Result<Vec<InjectionRule>, ConnectError> {
+    ) -> Result<Vec<db::AppConnectionRow>, ConnectError> {
         let providers = apps::providers_for_host(hostname);
         if providers.is_empty() {
             debug!(host = %hostname, "app_connections: no provider for host");
@@ -169,46 +225,156 @@ impl PolicyEngine {
         }
         debug!(host = %hostname, providers = ?providers, "app_connections: matched providers");
 
-        let connections = if agent.secret_mode == "selective" {
+        let connections = if agent.secret_mode == SECRET_MODE_SELECTIVE {
             db::find_app_connections_by_agent(&self.pool, &agent.id).await
         } else {
             db::find_app_connections_by_account(&self.pool, &agent.account_id).await
         }
         .map_err(db_err)?;
 
-        let mut rules = Vec::new();
-        for provider in &providers {
-            let Some(conn) = connections.iter().find(|c| c.provider == *provider) else {
-                continue;
-            };
-            let Some(ref encrypted_creds) = conn.credentials else {
-                continue;
-            };
+        let matching: Vec<db::AppConnectionRow> = connections
+            .into_iter()
+            .filter(|c| providers.contains(&c.provider.as_str()))
+            .collect();
 
-            let decrypted_json = self
-                .crypto
-                .decrypt(encrypted_creds)
-                .await
-                .map_err(decrypt_err)?;
+        debug!(host = %hostname, count = matching.len(), "app_connections: deferred connections");
+        Ok(matching)
+    }
 
-            let Some(token) = self
-                .resolve_access_token(&decrypted_json, provider, &agent.account_id, &conn.id)
-                .await
-            else {
-                continue;
-            };
-
-            for (path_pattern, injections) in
-                apps::build_app_injection_rules(provider, hostname, &token)
-            {
-                rules.push(InjectionRule {
-                    path_pattern,
-                    injections,
-                });
-            }
+    /// Resolve app connection injection rules for a single request.
+    /// Called per-request with the cached `app_connections` (already filtered to
+    /// providers matching the hostname at cache time by `resolve_app_connections`).
+    pub(crate) async fn resolve_app_injection_for_request(
+        &self,
+        app_connections: &[db::AppConnectionRow],
+        hostname: &str,
+        connection_id: Option<&str>,
+        account_id: &str,
+        cache: &dyn CacheStore,
+    ) -> Result<AppConnectionResult, ConnectError> {
+        if app_connections.is_empty() {
+            return Ok(AppConnectionResult::NoConnections);
         }
 
-        Ok(rules)
+        // If a specific connection ID is requested, use that one
+        if let Some(conn_id) = connection_id {
+            let Some(conn) = app_connections.iter().find(|c| c.id == conn_id) else {
+                // Connection was removed or access revoked — return the valid options
+                return Ok(AppConnectionResult::NotFound {
+                    connections: app_connections
+                        .iter()
+                        .map(ConnectionChoice::from_row)
+                        .collect(),
+                });
+            };
+            return self
+                .resolve_connection_injections(conn, hostname, account_id, cache)
+                .await;
+        }
+
+        // Single connection — use it directly
+        if app_connections.len() == 1 {
+            return self
+                .resolve_connection_injections(&app_connections[0], hostname, account_id, cache)
+                .await;
+        }
+
+        // Multiple connections — check for ambiguity per provider
+        // Group by provider; if each provider has exactly 1 connection, no ambiguity
+        let mut by_provider: std::collections::HashMap<&str, Vec<&db::AppConnectionRow>> =
+            std::collections::HashMap::new();
+        for conn in app_connections {
+            by_provider
+                .entry(conn.provider.as_str())
+                .or_default()
+                .push(conn);
+        }
+
+        if by_provider.values().all(|conns| conns.len() == 1) {
+            // Each provider has exactly one connection — no ambiguity, resolve all
+            let mut rules = Vec::new();
+            for conn in app_connections {
+                if let AppConnectionResult::Rules(r) = self
+                    .resolve_connection_injections(conn, hostname, account_id, cache)
+                    .await?
+                {
+                    rules.extend(r);
+                }
+            }
+            return Ok(AppConnectionResult::Rules(rules));
+        }
+
+        // Truly ambiguous — return all connections for the caller to report
+        Ok(AppConnectionResult::Ambiguous {
+            connections: app_connections
+                .iter()
+                .map(ConnectionChoice::from_row)
+                .collect(),
+        })
+    }
+
+    /// Resolve injection rules from a single app connection, with caching.
+    /// Decrypts credentials, resolves/refreshes the access token, and builds
+    /// injection rules. Results are cached per-connection to avoid redundant
+    /// decryption on subsequent requests.
+    async fn resolve_connection_injections(
+        &self,
+        conn: &db::AppConnectionRow,
+        hostname: &str,
+        account_id: &str,
+        cache: &dyn CacheStore,
+    ) -> Result<AppConnectionResult, ConnectError> {
+        let cache_key = format!("app_injection:{account_id}:{}", conn.id);
+
+        // Check injection cache — skip decryption if we have cached rules
+        if let Some(cached) = cache.get::<Vec<InjectionRule>>(&cache_key).await {
+            debug!(connection_id = %conn.id, "app injection: cache hit");
+            return Ok(AppConnectionResult::Rules(cached));
+        }
+
+        let Some(ref encrypted_creds) = conn.credentials else {
+            return Ok(AppConnectionResult::NoConnections);
+        };
+
+        let decrypted_json = self
+            .crypto
+            .decrypt(encrypted_creds)
+            .await
+            .map_err(decrypt_err)?;
+        let Some((token, expires_at)) = self
+            .resolve_access_token(&decrypted_json, &conn.provider, account_id, &conn.id)
+            .await
+        else {
+            return Ok(AppConnectionResult::NoConnections);
+        };
+
+        let mut rules = Vec::new();
+        for (path_pattern, injections) in
+            apps::build_app_injection_rules(&conn.provider, hostname, &token)
+        {
+            rules.push(InjectionRule {
+                path_pattern,
+                injections,
+            });
+        }
+
+        // Cache with TTL = min(CACHE_TTL, token remaining lifetime).
+        // Skip caching if token is already expired — the stale token would cause
+        // upstream 401s, and re-resolving gives a chance to refresh.
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock")
+            .as_secs() as i64;
+        let ttl = match expires_at {
+            Some(exp) if exp > now => ((exp - now) as u64).min(CACHE_TTL_SECS),
+            Some(_) => 0, // expired — don't cache
+            None => CACHE_TTL_SECS,
+        };
+        if ttl > 0 {
+            cache.set(&cache_key, &rules, ttl).await;
+        }
+
+        Ok(AppConnectionResult::Rules(rules))
     }
 
     /// Check if the account has any credentials (secrets or app connections) for this
@@ -299,13 +465,15 @@ impl PolicyEngine {
     /// Extract access token from decrypted credentials JSON, refreshing if expired.
     /// Resolves BYOC client credentials from AppConfig if available, falls back to env vars.
     /// On successful refresh, persists the new credentials back to the database.
+    /// Extract the access token from decrypted credentials, refreshing if expired.
+    /// Returns `(token, expires_at)` — the effective token and its expiry timestamp.
     async fn resolve_access_token(
         &self,
         json: &str,
         provider: &str,
         account_id: &str,
         connection_id: &str,
-    ) -> Option<String> {
+    ) -> Option<(String, Option<i64>)> {
         let mut creds: serde_json::Value = serde_json::from_str(json).ok()?;
 
         let mut token = creds
@@ -313,8 +481,10 @@ impl PolicyEngine {
             .and_then(|v| v.as_str())
             .map(String::from);
 
+        let mut effective_expires_at = creds.get("expires_at").and_then(|v| v.as_i64());
+
         // Check if token is expired and needs refresh
-        if let Some(expires_at) = creds.get("expires_at").and_then(|v| v.as_i64()) {
+        if let Some(expires_at) = effective_expires_at {
             let now = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .expect("system clock before UNIX epoch")
@@ -323,7 +493,6 @@ impl PolicyEngine {
             if expires_at < now {
                 if let Some(refresh_token) = creds.get("refresh_token").and_then(|v| v.as_str()) {
                     if let Some(config) = apps::refresh_config(provider) {
-                        // Resolve client credentials: BYOC AppConfig first, env vars as fallback
                         let byoc = self.resolve_byoc_credentials(account_id, provider).await;
                         let (byoc_id, byoc_secret) = match &byoc {
                             Some((id, secret)) => (Some(id.as_str()), Some(secret.as_str())),
@@ -341,9 +510,8 @@ impl PolicyEngine {
                             Ok((new_token, new_expires_at)) => {
                                 debug!(provider = %provider, "refreshed expired token");
                                 token = Some(new_token.clone());
+                                effective_expires_at = Some(new_expires_at);
 
-                                // Persist refreshed credentials to DB so subsequent
-                                // requests don't re-refresh until the new token expires.
                                 creds["access_token"] = serde_json::Value::String(new_token);
                                 creds["expires_at"] = serde_json::json!(new_expires_at);
                                 self.persist_refreshed_credentials(connection_id, provider, &creds)
@@ -358,7 +526,7 @@ impl PolicyEngine {
             }
         }
 
-        token
+        token.map(|t| (t, effective_expires_at))
     }
 
     /// Encrypt and persist refreshed credentials back to the database.
@@ -429,11 +597,11 @@ impl PolicyEngine {
 // ── Error helpers ──────────────────────────────────────────────────────
 
 fn db_err(e: anyhow::Error) -> ConnectError {
-    ConnectError::Internal(format!("db error: {e}"))
+    ConnectError::Internal(format!("db error: {e:#}"))
 }
 
 fn decrypt_err(e: anyhow::Error) -> ConnectError {
-    ConnectError::Internal(format!("decrypt error: {e}"))
+    ConnectError::Internal(format!("decrypt error: {e:#}"))
 }
 
 // ── Cached resolution ───────────────────────────────────────────────────
@@ -592,6 +760,7 @@ mod tests {
         let response = ConnectResponse {
             intercept: true,
             injection_rules: vec![],
+            app_connections: vec![],
             policy_rules: vec![],
             account_id: None,
             agent_id: None,
@@ -632,6 +801,7 @@ mod tests {
                 path_pattern: "*".to_string(),
                 injections: vec![],
             }],
+            app_connections: vec![],
             policy_rules: vec![],
             account_id: Some("acc_1".to_string()),
             agent_id: Some("agent_1".to_string()),
@@ -664,6 +834,7 @@ mod tests {
         let response = ConnectResponse {
             intercept: true,
             injection_rules: vec![],
+            app_connections: vec![],
             policy_rules: vec![],
             account_id: Some("acc_restricted".to_string()),
             agent_id: Some("agent_selective".to_string()),

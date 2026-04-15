@@ -1,8 +1,8 @@
 "use client";
 
 import { useEffect, useState, useCallback, useMemo } from "react";
-import Image from "next/image";
 import { useInvalidateGatewayCache } from "@/hooks/use-invalidate-cache";
+import { AppIcon } from "@/app/(dashboard)/connections/_components/app-icon";
 import {
   KeyRound,
   Loader2,
@@ -35,6 +35,7 @@ import {
   updateAgentAppConnections,
 } from "@/lib/actions/agents";
 import { getApp } from "@/lib/apps/registry";
+import { extractLabel } from "@/lib/services/connection-service";
 import type { SecretMode } from "@/lib/services/agent-service";
 
 interface ManageAccessDialogProps {
@@ -119,14 +120,29 @@ export const ManageAccessDialog = ({
     return appConnections.filter((c) => {
       const app = getApp(c.provider);
       const name = app?.name ?? c.provider;
-      const meta = c.metadata as { username?: string } | null;
+      const meta = c.metadata as {
+        username?: string;
+        email?: string;
+        name?: string;
+      } | null;
       return (
         name.toLowerCase().includes(q) ||
         c.provider.toLowerCase().includes(q) ||
-        (meta?.username?.toLowerCase().includes(q) ?? false)
+        (c.label?.toLowerCase().includes(q) ?? false) ||
+        (meta?.email?.toLowerCase().includes(q) ?? false) ||
+        (meta?.username?.toLowerCase().includes(q) ?? false) ||
+        (meta?.name?.toLowerCase().includes(q) ?? false)
       );
     });
   }, [appConnections, search]);
+
+  const providerCounts = useMemo(() => {
+    const counts = new Map<string, number>();
+    appConnections.forEach((c) =>
+      counts.set(c.provider, (counts.get(c.provider) ?? 0) + 1),
+    );
+    return counts;
+  }, [appConnections]);
 
   const toggleSecret = (secretId: string) => {
     setSelectedSecretIds((prev) => {
@@ -362,9 +378,19 @@ export const ManageAccessDialog = ({
                         </div>
                         {filteredAppConnections.map((conn) => {
                           const app = getApp(conn.provider);
-                          const meta = conn.metadata as {
-                            username?: string;
-                          } | null;
+                          const meta = conn.metadata as Record<
+                            string,
+                            unknown
+                          > | null;
+                          const label =
+                            conn.label ?? extractLabel(meta ?? undefined);
+                          const baseName = app?.name ?? conn.provider;
+                          const hasMultiple =
+                            (providerCounts.get(conn.provider) ?? 0) > 1;
+                          const displayName =
+                            hasMultiple && label
+                              ? `${baseName} - ${label}`
+                              : baseName;
                           return (
                             <label
                               key={conn.id}
@@ -378,21 +404,20 @@ export const ManageAccessDialog = ({
                               />
                               <div className="flex min-w-0 flex-1 items-center gap-2.5">
                                 {app?.icon && (
-                                  <Image
-                                    src={app.icon}
-                                    alt=""
-                                    width={16}
-                                    height={16}
-                                    className="size-4 shrink-0"
+                                  <AppIcon
+                                    icon={app.icon}
+                                    darkIcon={app.darkIcon}
+                                    name={baseName}
+                                    size={16}
                                   />
                                 )}
                                 <div className="min-w-0">
                                   <p className="truncate text-sm font-medium">
-                                    {app?.name ?? conn.provider}
+                                    {displayName}
                                   </p>
-                                  {meta?.username && (
+                                  {!hasMultiple && label && (
                                     <p className="text-muted-foreground truncate text-xs">
-                                      {meta.username}
+                                      {label}
                                     </p>
                                   )}
                                 </div>
@@ -401,7 +426,7 @@ export const ManageAccessDialog = ({
                                 variant="secondary"
                                 className="shrink-0 text-xs"
                               >
-                                {conn.provider}
+                                {app?.name ?? conn.provider}
                               </Badge>
                             </label>
                           );

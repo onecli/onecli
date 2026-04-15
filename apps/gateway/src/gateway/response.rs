@@ -21,22 +21,71 @@ pub(super) fn proxy_auth_required() -> Response<axum::body::Body> {
 pub(crate) type ForwardBody<S> = Either<Full<Bytes>, S>;
 
 /// Resolve the OneCLI dashboard base URL from `APP_URL`,
-/// falling back to `http://localhost:10254`.
-fn dashboard_url() -> String {
-    std::env::var("APP_URL")
-        .unwrap_or_else(|_| "http://localhost:10254".to_string())
-        .trim_end_matches('/')
-        .to_string()
+/// falling back to `http://localhost:10254`. Cached after first call.
+fn dashboard_url() -> &'static str {
+    static URL: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    URL.get_or_init(|| {
+        std::env::var("APP_URL")
+            .unwrap_or_else(|_| "http://localhost:10254".to_string())
+            .trim_end_matches('/')
+            .to_string()
+    })
 }
 
 /// Build a JSON error response with the given status code and body.
+/// Used by `forward_request` (MITM and HTTP proxy forwarding path).
 fn json_error<S>(status: StatusCode, body: serde_json::Value) -> Response<ForwardBody<S>> {
-    let mut response = Response::new(Either::Left(Full::new(Bytes::from(body.to_string()))));
+    let json = body.to_string();
+    let mut response = Response::new(Either::Left(Full::new(Bytes::from(json))));
     *response.status_mut() = status;
     response
         .headers_mut()
         .insert("content-type", HeaderValue::from_static("application/json"));
     response
+}
+
+/// Build a JSON error response with `axum::body::Body`.
+/// Used by `handle_connect` and `handle_http_proxy` (before forwarding).
+fn json_error_axum(status: StatusCode, body: serde_json::Value) -> Response<axum::body::Body> {
+    let json = body.to_string();
+    let mut response = Response::new(axum::body::Body::from(json));
+    *response.status_mut() = status;
+    response
+        .headers_mut()
+        .insert("content-type", HeaderValue::from_static("application/json"));
+    response
+}
+
+/// 502 Bad Gateway — generic internal error (axum body).
+pub(super) fn bad_gateway() -> Response<axum::body::Body> {
+    json_error_axum(
+        StatusCode::BAD_GATEWAY,
+        serde_json::json!({
+            "error": "bad_gateway",
+            "message": "OneCLI gateway internal error.",
+        }),
+    )
+}
+
+/// Build the shared JSON body for multiple-connections responses.
+fn multiple_connections_json(
+    connections: &[crate::connect::ConnectionChoice],
+) -> serde_json::Value {
+    let hdr = crate::connect::CONNECTION_ID_HEADER;
+    serde_json::json!({
+        "error": "multiple_connections",
+        "message": format!("Multiple connections exist for this provider. Specify which one to use with the {hdr} header."),
+        "connections": connections,
+        "header": hdr,
+        "example": format!("{hdr}: {}", connections.first().map(|c| c.id.as_str()).unwrap_or("CONNECTION_ID")),
+    })
+}
+
+/// 409 Conflict — multiple connections, agent must specify which one (axum body).
+pub(super) fn multiple_connections_axum(
+    connections: &[crate::connect::ConnectionChoice],
+) -> Response<axum::body::Body> {
+    json_error_axum(StatusCode::CONFLICT, multiple_connections_json(connections))
 }
 
 /// JSON error response for requests to a known app that has no credentials configured.
@@ -129,6 +178,47 @@ pub(crate) fn credential_not_found<S>(
             "hostname": hostname,
             "path": path,
             "secret_url": secret_url,
+        }),
+    )
+}
+
+/// 409 Conflict — multiple connections exist for the same provider, agent must specify which one.
+pub(crate) fn multiple_connections<S>(
+    connections: &[crate::connect::ConnectionChoice],
+) -> Response<ForwardBody<S>> {
+    json_error(StatusCode::CONFLICT, multiple_connections_json(connections))
+}
+
+/// 404 Not Found — the requested connection ID does not exist.
+pub(crate) fn connection_not_found<S>(
+    connection_id: &str,
+    connections: &[crate::connect::ConnectionChoice],
+) -> Response<ForwardBody<S>> {
+    let hdr = crate::connect::CONNECTION_ID_HEADER;
+    json_error(
+        StatusCode::NOT_FOUND,
+        serde_json::json!({
+            "error": "connection_not_found",
+            "message": format!("Connection '{connection_id}' was not found or has been removed. Choose from the available connections."),
+            "connections": connections,
+            "header": hdr,
+        }),
+    )
+}
+
+/// 404 Not Found — the requested connection ID does not exist (axum body).
+pub(super) fn connection_not_found_axum(
+    connection_id: &str,
+    connections: &[crate::connect::ConnectionChoice],
+) -> Response<axum::body::Body> {
+    let hdr = crate::connect::CONNECTION_ID_HEADER;
+    json_error_axum(
+        StatusCode::NOT_FOUND,
+        serde_json::json!({
+            "error": "connection_not_found",
+            "message": format!("Connection '{connection_id}' was not found or has been removed. Choose from the available connections."),
+            "connections": connections,
+            "header": hdr,
         }),
     )
 }
@@ -405,6 +495,58 @@ mod tests {
         assert!(
             !secret_url.contains("method="),
             "method should not be in URL"
+        );
+    }
+
+    #[tokio::test]
+    async fn multiple_connections_returns_409_with_choices() {
+        type TestBody = ForwardBody<
+            futures_util::stream::Empty<Result<hyper::body::Frame<Bytes>, reqwest::Error>>,
+        >;
+        let connections = vec![
+            crate::connect::ConnectionChoice {
+                id: "conn_1".to_string(),
+                label: Some("alice@gmail.com".to_string()),
+                provider: "gmail".to_string(),
+            },
+            crate::connect::ConnectionChoice {
+                id: "conn_2".to_string(),
+                label: Some("alice.work@company.com".to_string()),
+                provider: "gmail".to_string(),
+            },
+        ];
+        let resp: Response<TestBody> = multiple_connections(&connections);
+        assert_eq!(resp.status(), StatusCode::CONFLICT);
+
+        use http_body_util::BodyExt;
+        let body = match resp.into_body() {
+            Either::Left(full) => full.collect().await.expect("collect").to_bytes(),
+            Either::Right(_) => panic!("expected Left"),
+        };
+        let json: serde_json::Value = serde_json::from_slice(&body).expect("valid JSON");
+        assert_eq!(json["error"], "multiple_connections");
+        assert_eq!(json["header"], crate::connect::CONNECTION_ID_HEADER);
+        let conns = json["connections"].as_array().unwrap();
+        assert_eq!(conns.len(), 2);
+        assert_eq!(conns[0]["id"], "conn_1");
+        assert_eq!(conns[0]["label"], "alice@gmail.com");
+        assert_eq!(conns[1]["id"], "conn_2");
+        let example = json["example"].as_str().unwrap();
+        assert!(example.contains(crate::connect::CONNECTION_ID_HEADER));
+        assert!(example.contains("conn_1"));
+    }
+
+    #[test]
+    fn multiple_connections_empty_list() {
+        let resp: Response<
+            ForwardBody<
+                futures_util::stream::Empty<Result<hyper::body::Frame<Bytes>, reqwest::Error>>,
+            >,
+        > = multiple_connections(&[]);
+        assert_eq!(resp.status(), StatusCode::CONFLICT);
+        assert_eq!(
+            resp.headers().get("content-type").unwrap(),
+            "application/json"
         );
     }
 }

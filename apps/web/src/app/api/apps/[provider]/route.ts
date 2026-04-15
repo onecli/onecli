@@ -26,13 +26,14 @@ export const GET = async (request: NextRequest, { params }: Params) => {
 
     const [config, connection] = await Promise.all([
       getAppConfig(auth.accountId, provider),
-      db.appConnection.findUnique({
-        where: { accountId_provider: { accountId: auth.accountId, provider } },
+      db.appConnection.findFirst({
+        where: { accountId: auth.accountId, provider },
         select: {
           status: true,
           scopes: true,
           connectedAt: true,
         },
+        orderBy: { connectedAt: "desc" },
       }),
     ]);
 

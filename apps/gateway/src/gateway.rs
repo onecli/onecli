@@ -38,7 +38,7 @@ use crate::approval::{ApprovalDecision, ApprovalStore, APPROVAL_TIMEOUT_SECS};
 use crate::auth::AuthUser;
 use crate::ca::CertificateAuthority;
 use crate::cache::CacheStore;
-use crate::connect::{self, ConnectError, PolicyEngine};
+use crate::connect::{self, AppConnectionResult, ConnectError, PolicyEngine};
 use crate::inject;
 use crate::vault;
 
@@ -253,6 +253,11 @@ async fn invalidate_cache(
     auth: AuthUser,
     State(state): State<GatewayState>,
 ) -> impl axum::response::IntoResponse {
+    // Clear injection cache first, then connect cache. This ordering ensures
+    // a concurrent request that re-resolves the connect cache also re-resolves
+    // injections (since injection cache is already cleared).
+    let injection_prefix = format!("app_injection:{}:", auth.account_id);
+    state.cache.del_by_prefix(&injection_prefix).await;
     let prefix = format!("connect:{}:", auth.account_id);
     state.cache.del_by_prefix(&prefix).await;
     (
@@ -454,9 +459,7 @@ async fn handle_connect(
             }
             Err(ConnectError::Internal(e)) => {
                 warn!(peer = %peer_addr, host = %host, error = %e, "CONNECT rejected: internal error");
-                let mut resp = Response::new(axum::body::Body::empty());
-                *resp.status_mut() = StatusCode::BAD_GATEWAY;
-                return Ok(resp);
+                return Ok(response::bad_gateway());
             }
         }
     } else {
@@ -570,6 +573,8 @@ async fn handle_http_proxy(
 
     let agent_token = inject::extract_agent_token(&req).filter(|t| !t.is_empty());
 
+    let connection_id = connect::extract_connection_id(req.headers());
+
     let mut resolved = if let Some(ref token) = agent_token {
         match connect::resolve(token, &hostname, &state.policy_engine, &*state.cache).await {
             Ok(resp) => resp,
@@ -579,14 +584,42 @@ async fn handle_http_proxy(
             }
             Err(ConnectError::Internal(e)) => {
                 warn!(peer = %peer_addr, host = %authority, error = %e, "HTTP proxy rejected: internal error");
-                let mut resp = Response::new(axum::body::Body::empty());
-                *resp.status_mut() = StatusCode::BAD_GATEWAY;
-                return Ok(resp);
+                return Ok(response::bad_gateway());
             }
         }
     } else {
         connect::ConnectResponse::default()
     };
+
+    // Per-request app connection disambiguation
+    if resolved.injection_rules.is_empty() && !resolved.app_connections.is_empty() {
+        let aid = resolved.account_id.as_deref().unwrap_or("");
+        match state
+            .policy_engine
+            .resolve_app_injection_for_request(
+                &resolved.app_connections,
+                &hostname,
+                connection_id.as_deref(),
+                aid,
+                &*state.cache,
+            )
+            .await
+        {
+            Ok(AppConnectionResult::Rules(rules)) => resolved.injection_rules = rules,
+            Ok(AppConnectionResult::Ambiguous { connections }) => {
+                return Ok(response::multiple_connections_axum(&connections));
+            }
+            Ok(AppConnectionResult::NotFound { connections }) => {
+                let cid = connection_id.as_deref().unwrap_or("");
+                return Ok(response::connection_not_found_axum(cid, &connections));
+            }
+            Ok(AppConnectionResult::NoConnections) => {}
+            Err(e) => {
+                warn!(peer = %peer_addr, host = %authority, error = ?e, "HTTP proxy: app connection resolution failed");
+                return Ok(response::bad_gateway());
+            }
+        }
+    }
 
     // Vault fallback
     if resolved.injection_rules.is_empty() {
@@ -623,7 +656,7 @@ async fn handle_http_proxy(
         access_restricted: resolved.access_restricted,
     };
 
-    let resp = forward::forward_request(
+    let mut resp = forward::forward_request(
         req,
         &authority,
         "http",
@@ -634,6 +667,8 @@ async fn handle_http_proxy(
         &state.approval_store,
     )
     .await?;
+
+    connect::inject_connections_header(&mut resp, &resolved.app_connections);
 
     // Convert the response body type to match the axum::body::Body return type
     Ok(resp.map(axum::body::Body::new))

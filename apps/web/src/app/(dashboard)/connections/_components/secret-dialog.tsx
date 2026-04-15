@@ -324,7 +324,7 @@ export const SecretDialog = ({
                 </div>
               </div>
 
-              {type === "generic" && (
+              {type === "generic" && !prefill && (
                 <div className="space-y-2">
                   <Label htmlFor="secret-host">Host pattern</Label>
                   <Input
@@ -345,7 +345,12 @@ export const SecretDialog = ({
                 </div>
               )}
 
-              <Accordion type="single" collapsible className="border-none">
+              <Accordion
+                type="single"
+                collapsible
+                className="border-none"
+                defaultValue={undefined}
+              >
                 <AccordionItem value="advanced" className="border-t border-b-0">
                   <AccordionTrigger className="py-3 hover:no-underline">
                     <span className="text-muted-foreground flex items-center gap-2 text-xs font-normal">
@@ -355,7 +360,8 @@ export const SecretDialog = ({
                   </AccordionTrigger>
                   <AccordionContent className="pb-0">
                     <div className="space-y-4">
-                      {type === "anthropic" && (
+                      {(type === "anthropic" ||
+                        (type === "generic" && !!prefill)) && (
                         <div className="space-y-2">
                           <Label htmlFor="secret-host">Host pattern</Label>
                           <Input
@@ -363,6 +369,7 @@ export const SecretDialog = ({
                             placeholder="e.g. api.example.com or *.example.com"
                             value={hostPattern}
                             onChange={(e) => setHostPattern(e.target.value)}
+                            disabled={!!prefill}
                           />
                           {hostPatternError ? (
                             <p className="text-xs text-red-500">

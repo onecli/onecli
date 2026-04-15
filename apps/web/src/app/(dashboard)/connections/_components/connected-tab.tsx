@@ -12,17 +12,20 @@ import {
 import { getSecrets } from "@/lib/actions/secrets";
 import { getApp } from "@/lib/apps/registry";
 import { useAppMessages } from "@/hooks/use-app-connected";
+import { extractLabel } from "@/lib/services/connection-service";
 import { AppIcon } from "./app-icon";
 import { SecretDialog } from "./secret-dialog";
 
 interface ConnectedItem {
   id: string;
   name: string;
+  label?: string | null;
   icon: string | null;
   darkIcon?: string;
   type: "app" | "secret" | "vault";
   typeLabel: string;
   detail: string;
+  providerCount?: number;
   href?: string;
   secretData?: {
     id: string;
@@ -52,25 +55,39 @@ export const ConnectedTab = () => {
         getVaultConnections(),
       ]);
 
-      const appItems: ConnectedItem[] = connections
-        .filter((c) => c.status === "connected")
-        .map((c) => {
-          const appDef = getApp(c.provider);
-          const metadata = c.metadata as Record<string, unknown> | null;
-          return {
-            id: `app-${c.provider}`,
-            name: appDef?.name ?? c.provider,
-            icon: appDef?.icon ?? null,
-            darkIcon: appDef?.darkIcon,
-            type: "app" as const,
-            typeLabel:
-              appDef?.connectionMethod.type === "oauth" ? "OAuth" : "API Key",
-            detail: metadata?.username
-              ? `Connected as ${metadata.username}`
-              : `${c.scopes.length} scope${c.scopes.length !== 1 ? "s" : ""} granted`,
-            href: `/connections/apps/${c.provider}`,
-          };
-        });
+      const connectedApps = connections.filter((c) => c.status === "connected");
+      const providerCounts = new Map<string, number>();
+      connectedApps.forEach((c) =>
+        providerCounts.set(
+          c.provider,
+          (providerCounts.get(c.provider) ?? 0) + 1,
+        ),
+      );
+
+      const appItems: ConnectedItem[] = connectedApps.map((c) => {
+        const appDef = getApp(c.provider);
+        const metadata = c.metadata as Record<string, unknown> | null;
+        const label = c.label ?? extractLabel(metadata ?? undefined);
+        const baseName = appDef?.name ?? c.provider;
+        const hasMultiple = (providerCounts.get(c.provider) ?? 0) > 1;
+        return {
+          id: `app-${c.id}`,
+          name: hasMultiple && label ? `${baseName} - ${label}` : baseName,
+          label,
+          icon: appDef?.icon ?? null,
+          darkIcon: appDef?.darkIcon,
+          type: "app" as const,
+          typeLabel:
+            appDef?.connectionMethod.type === "oauth" ? "OAuth" : "API Key",
+          detail: label
+            ? `Connected as ${label}`
+            : `${c.scopes.length} scope${c.scopes.length !== 1 ? "s" : ""} granted`,
+          href: `/connections/apps/${c.provider}`,
+          providerCount: hasMultiple
+            ? providerCounts.get(c.provider)
+            : undefined,
+        };
+      });
 
       const secretItems: ConnectedItem[] = secrets.map((s) => ({
         id: `secret-${s.id}`,
@@ -191,7 +208,11 @@ export const ConnectedTab = () => {
                 <div className="flex items-center gap-1.5">
                   <span className="size-2 rounded-full bg-brand" />
                   <span className="text-xs text-brand font-medium">
-                    {item.type === "secret" ? "Active" : "Connected"}
+                    {item.type === "secret"
+                      ? "Active"
+                      : item.providerCount
+                        ? `Connected (${item.providerCount})`
+                        : "Connected"}
                   </span>
                 </div>
                 <ChevronRight className="size-3.5 text-muted-foreground/40 transition-colors group-hover:text-muted-foreground" />

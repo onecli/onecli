@@ -3,21 +3,9 @@
 import { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
 import { ArrowLeft, Loader2 } from "lucide-react";
-import { toast } from "sonner";
 import { Button } from "@onecli/ui/components/button";
-import {
-  AlertDialog,
-  AlertDialogAction,
-  AlertDialogCancel,
-  AlertDialogContent,
-  AlertDialogDescription,
-  AlertDialogFooter,
-  AlertDialogHeader,
-  AlertDialogTitle,
-  AlertDialogTrigger,
-} from "@onecli/ui/components/alert-dialog";
 import { Skeleton } from "@onecli/ui/components/skeleton";
-import { getAppConnections, disconnectApp } from "@/lib/actions/connections";
+import { getAppConnections } from "@/lib/actions/connections";
 import { checkAppConfigExists } from "@/lib/actions/app-config";
 import { useAppMessages } from "@/hooks/use-app-connected";
 import { useInvalidateGatewayCache } from "@/hooks/use-invalidate-cache";
@@ -25,6 +13,7 @@ import type { OAuthPermission } from "@/lib/apps/types";
 import { AppIcon } from "./app-icon";
 import { AppConfigForm } from "./app-config-form";
 import { ConfigureCredentialsDialog } from "./configure-credentials-dialog";
+import { ConnectionCard } from "./connection-card";
 import { PermissionsList } from "./permissions-list";
 
 interface AppDetailProps {
@@ -54,6 +43,7 @@ interface AppDetailProps {
 
 interface ConnectionData {
   id: string;
+  label: string | null;
   provider: string;
   status: string;
   scopes: string[];
@@ -67,26 +57,22 @@ export const AppDetail = ({
   hasEnvDefaults,
   hasAppConfig,
 }: AppDetailProps) => {
-  const [connection, setConnection] = useState<ConnectionData | null>(null);
+  const [connections, setConnections] = useState<ConnectionData[]>([]);
   const [loading, setLoading] = useState(true);
   const [configDialogOpen, setConfigDialogOpen] = useState(false);
   const [configVersion, setConfigVersion] = useState(0);
   const [appConfigured, setAppConfigured] = useState(hasAppConfig);
 
-  const fetchConnection = useCallback(async () => {
+  const fetchConnections = useCallback(async () => {
     try {
-      const connections = await getAppConnections();
-      const match = connections.find(
-        (c) => c.provider === app.id && c.status === "connected",
-      );
-      setConnection(
-        match
-          ? {
-              ...match,
-              metadata: match.metadata as Record<string, unknown> | null,
-            }
-          : null,
-      );
+      const allConnections = await getAppConnections();
+      const matches = allConnections
+        .filter((c) => c.provider === app.id && c.status === "connected")
+        .map((c) => ({
+          ...c,
+          metadata: c.metadata as Record<string, unknown> | null,
+        }));
+      setConnections(matches);
     } catch {
       // Connection fetch failed — show as disconnected
     } finally {
@@ -95,38 +81,41 @@ export const AppDetail = ({
   }, [app.id]);
 
   useEffect(() => {
-    fetchConnection();
-  }, [fetchConnection]);
+    fetchConnections();
+  }, [fetchConnections]);
 
   const invalidateCache = useInvalidateGatewayCache();
 
   const handleConnected = useCallback(() => {
-    fetchConnection();
+    fetchConnections();
     invalidateCache();
-  }, [fetchConnection, invalidateCache]);
+  }, [fetchConnections, invalidateCache]);
 
   useAppMessages({ onConnected: handleConnected });
 
   const refreshConfigStatus = useCallback(async () => {
-    fetchConnection();
+    fetchConnections();
     try {
       const exists = await checkAppConfigExists(app.id);
       setAppConfigured(exists);
     } catch {
       // ignore
     }
-  }, [app.id, fetchConnection]);
+  }, [app.id, fetchConnections]);
 
   const hasCredentials = hasEnvDefaults || appConfigured;
 
-  const openConnectPopup = () => {
+  const openConnectPopup = (connectionId?: string) => {
     const w = 520;
     const h = 700;
     const left = Math.round(window.screenX + (window.outerWidth - w) / 2);
     const top = Math.round(window.screenY + (window.outerHeight - h) / 2);
+    const url = connectionId
+      ? `/app-connect/${app.id}?connectionId=${connectionId}`
+      : `/app-connect/${app.id}`;
     window.open(
-      `/app-connect/${app.id}`,
-      `connect-${app.id}`,
+      url,
+      `connect-${app.id}-${connectionId ?? "new"}`,
       `width=${w},height=${h},left=${left},top=${top},scrollbars=yes,resizable=yes`,
     );
   };
@@ -139,18 +128,8 @@ export const AppDetail = ({
     openConnectPopup();
   };
 
-  const handleDisconnect = async () => {
-    try {
-      await disconnectApp(app.id);
-      setConnection(null);
-      invalidateCache();
-      toast.success(`${app.name} disconnected`);
-    } catch {
-      toast.error("Failed to disconnect");
-    }
-  };
-
-  const isConnected = !!connection;
+  const connectionCount = connections.length;
+  const isConnected = connectionCount > 0;
 
   return (
     <div className="space-y-6">
@@ -183,7 +162,9 @@ export const AppDetail = ({
                 <div className="flex items-center gap-1.5">
                   <span className="size-2 rounded-full bg-brand" />
                   <span className="text-xs font-medium text-brand">
-                    Connected
+                    {connectionCount > 1
+                      ? `${connectionCount} accounts connected`
+                      : "Connected"}
                   </span>
                 </div>
               )}
@@ -200,43 +181,9 @@ export const AppDetail = ({
         ) : (
           <div className="flex items-center gap-2 shrink-0">
             {isConnected ? (
-              <>
-                <Button variant="outline" size="sm" onClick={handleConnect}>
-                  Reconnect
-                </Button>
-                <AlertDialog>
-                  <AlertDialogTrigger asChild>
-                    <Button
-                      variant="ghost"
-                      size="sm"
-                      className="text-destructive hover:text-destructive hover:bg-destructive/10"
-                    >
-                      Disconnect
-                    </Button>
-                  </AlertDialogTrigger>
-                  <AlertDialogContent>
-                    <AlertDialogHeader>
-                      <AlertDialogTitle>
-                        Disconnect {app.name}?
-                      </AlertDialogTitle>
-                      <AlertDialogDescription>
-                        This will revoke access and remove the stored
-                        credentials. Agents using this connection will no longer
-                        be able to authenticate with {app.name}.
-                      </AlertDialogDescription>
-                    </AlertDialogHeader>
-                    <AlertDialogFooter>
-                      <AlertDialogCancel>Cancel</AlertDialogCancel>
-                      <AlertDialogAction
-                        onClick={handleDisconnect}
-                        variant="destructive"
-                      >
-                        Disconnect
-                      </AlertDialogAction>
-                    </AlertDialogFooter>
-                  </AlertDialogContent>
-                </AlertDialog>
-              </>
+              <Button variant="outline" size="sm" onClick={handleConnect}>
+                Connect Another Account
+              </Button>
             ) : (
               <Button size="sm" onClick={handleConnect}>
                 Connect {app.name}
@@ -252,11 +199,27 @@ export const AppDetail = ({
         </div>
       ) : (
         <>
-          {isConnected && <ConnectionInfo connection={connection} />}
+          {isConnected && (
+            <div className="space-y-2">
+              {connections.map((conn) => (
+                <ConnectionCard
+                  key={conn.id}
+                  connection={conn}
+                  appName={app.name}
+                  onReconnect={openConnectPopup}
+                  onDisconnected={fetchConnections}
+                />
+              ))}
+            </div>
+          )}
           {app.permissions.length > 0 && (
             <PermissionsList
               permissions={app.permissions}
-              grantedScopes={isConnected ? connection.scopes : undefined}
+              grantedScopes={
+                isConnected
+                  ? [...new Set(connections.flatMap((c) => c.scopes))]
+                  : undefined
+              }
             />
           )}
         </>
@@ -291,34 +254,6 @@ export const AppDetail = ({
           }}
         />
       )}
-    </div>
-  );
-};
-
-const ConnectionInfo = ({ connection }: { connection: ConnectionData }) => {
-  const username =
-    (connection.metadata?.username as string) ??
-    (connection.metadata?.name as string);
-
-  return (
-    <div className="space-y-5">
-      {/* Key-value metadata */}
-      <div className="grid grid-cols-[auto_1fr] gap-x-6 gap-y-2 text-sm">
-        {username && (
-          <>
-            <span className="text-muted-foreground">Account</span>
-            <span className="font-medium">{username}</span>
-          </>
-        )}
-        <span className="text-muted-foreground">Connected</span>
-        <span className="font-medium">
-          {new Date(connection.connectedAt).toLocaleDateString("en-US", {
-            month: "long",
-            day: "numeric",
-            year: "numeric",
-          })}
-        </span>
-      </div>
     </div>
   );
 };
