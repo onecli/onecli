@@ -9,12 +9,18 @@ import {
 } from "@/lib/services/audit-service";
 import {
   listConnections,
+  listConnectionsByProvider,
   deleteConnection,
 } from "@/lib/services/connection-service";
 
 export const getAppConnections = async () => {
   const { accountId } = await resolveUser();
   return listConnections(accountId);
+};
+
+export const getAppConnectionsByProvider = async (provider: string) => {
+  const { accountId } = await resolveUser();
+  return listConnectionsByProvider(accountId, provider);
 };
 
 export const getVaultConnections = async () => {
@@ -32,18 +38,18 @@ export const getVaultConnections = async () => {
   });
 };
 
-export const disconnectApp = async (provider: string) => {
+export const disconnectAppConnection = async (connectionId: string) => {
   const { userId, userEmail, accountId } = await resolveUser();
 
   return withAudit(
-    () => deleteConnection(accountId, provider),
+    () => deleteConnection(accountId, connectionId),
     () => ({
       accountId,
       userId,
       userEmail,
       action: AUDIT_ACTIONS.DISCONNECT,
       service: AUDIT_SERVICES.APP_CONNECTION,
-      metadata: { provider },
+      metadata: { connectionId },
     }),
   );
 };

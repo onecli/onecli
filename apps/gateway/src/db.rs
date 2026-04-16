@@ -207,11 +207,13 @@ pub(crate) async fn find_app_config(
 // ── App connection queries ─────────────────────────────────────────────
 
 /// An app connection row from the `app_connections` table.
-#[derive(Debug, FromRow)]
+#[derive(Debug, Clone, PartialEq, FromRow, serde::Serialize, serde::Deserialize)]
 pub(crate) struct AppConnectionRow {
     pub id: String,
     pub provider: String,
     pub credentials: Option<String>,
+    pub label: Option<String>,
+    pub metadata: Option<serde_json::Value>,
 }
 
 /// Find all connected app connections for a given account.
@@ -220,7 +222,7 @@ pub(crate) async fn find_app_connections_by_account(
     account_id: &str,
 ) -> Result<Vec<AppConnectionRow>> {
     sqlx::query_as::<_, AppConnectionRow>(
-        r#"SELECT id, provider, credentials FROM app_connections WHERE account_id = $1 AND status = 'connected'"#,
+        r#"SELECT id, provider, credentials, label, metadata FROM app_connections WHERE account_id = $1 AND status = 'connected'"#,
     )
     .bind(account_id)
     .fetch_all(pool)
@@ -234,7 +236,7 @@ pub(crate) async fn find_app_connections_by_agent(
     agent_id: &str,
 ) -> Result<Vec<AppConnectionRow>> {
     sqlx::query_as::<_, AppConnectionRow>(
-        r#"SELECT ac.id, ac.provider, ac.credentials
+        r#"SELECT ac.id, ac.provider, ac.credentials, ac.label, ac.metadata
            FROM app_connections ac
            INNER JOIN agent_app_connections aac ON ac.id = aac.app_connection_id
            WHERE aac.agent_id = $1 AND ac.status = 'connected'"#,

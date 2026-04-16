@@ -46,7 +46,7 @@ const HOP_BY_HOP_HEADERS: &[&str] = &[
 /// `content-length` (recalculated by reqwest from the body).
 fn is_forwarded_request_header(name: &HeaderName) -> bool {
     let s = name.as_str();
-    if s == "host" || s == "content-length" {
+    if s == "host" || s == "content-length" || s == crate::connect::CONNECTION_ID_HEADER {
         return false;
     }
     !HOP_BY_HOP_HEADERS.contains(&s)
@@ -354,7 +354,30 @@ pub(crate) async fn forward_request(
 
         if body_indicates_auth_error(check_slice) {
             let hostname = super::strip_port(host);
-            info!(method = %method, url = %url, status = 400, "auth-related 400");
+
+            // Mirror the 401/403 logic: access_restricted → app_not_connected → credential_not_found
+            if rules.access_restricted {
+                let (provider, display_name) = apps::provider_for_host_and_path(hostname, &path)
+                    .unwrap_or((hostname, hostname));
+                info!(method = %method, url = %url, status = 400, "auth-related 400 — access restricted");
+                return Ok(response::access_restricted(
+                    StatusCode::BAD_REQUEST,
+                    provider,
+                    display_name,
+                    proxy_ctx.agent_id.as_deref(),
+                ));
+            }
+            if let Some((provider, display_name)) =
+                apps::provider_for_host_and_path(hostname, &path)
+            {
+                info!(method = %method, url = %url, status = 400, provider = %provider, "auth-related 400 — app not connected");
+                return Ok(response::app_not_connected(
+                    StatusCode::BAD_REQUEST,
+                    provider,
+                    display_name,
+                ));
+            }
+            info!(method = %method, url = %url, status = 400, "auth-related 400 — credential not found");
             return Ok(response::credential_not_found(
                 StatusCode::BAD_REQUEST,
                 hostname,
@@ -417,6 +440,10 @@ fn body_indicates_auth_error(body: &[u8]) -> bool {
         "authentication",
         "credentials",
         "access denied",
+        "permission denied",
+        "invalid token",
+        "token expired",
+        "not authenticated",
     ];
     AUTH_KEYWORDS.iter().any(|kw| lower.contains(kw))
 }
@@ -447,6 +474,13 @@ mod tests {
         )));
         assert!(!is_forwarded_request_header(&HeaderName::from_static(
             "content-length"
+        )));
+    }
+
+    #[test]
+    fn request_header_strips_connection_id() {
+        assert!(!is_forwarded_request_header(&HeaderName::from_static(
+            crate::connect::CONNECTION_ID_HEADER
         )));
     }
 

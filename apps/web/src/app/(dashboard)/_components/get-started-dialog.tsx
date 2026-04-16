@@ -43,6 +43,7 @@ export const GetStartedDialog = ({
   const [activeSection, setActiveSection] = useState<
     "install" | "gateway" | null
   >("install");
+  const [installMode, setInstallMode] = useState<"new" | "migrate">("new");
 
   useEffect(() => {
     if (!open) return;
@@ -56,14 +57,17 @@ export const GetStartedDialog = ({
       .finally(() => setLoading(false));
   }, [open]);
 
-  const installCommand = (() => {
+  const buildCurlCommand = (path: string) => {
     if (!installInfo?.apiKey || !IS_CLOUD) return null;
     const params = [`key=${installInfo.apiKey}`];
     if (installInfo.appUrl !== "https://app.onecli.sh") {
       params.push(`url=${encodeURIComponent(installInfo.appUrl)}`);
     }
-    return `curl -fsSL ${installInfo.appUrl}/api/install/nanoclaw?${params.join("&")} | sh`;
-  })();
+    return `curl -fsSL ${installInfo.appUrl}/api/install/${path}?${params.join("&")} | sh`;
+  };
+
+  const installCommand = buildCurlCommand("nanoclaw");
+  const migrateCommand = buildCurlCommand("cloud");
 
   const demoCommand = demoInfo
     ? `curl -k -x http://x:${demoInfo.agentToken}@${demoInfo.gatewayUrl} -H "Authorization: Bearer FAKE_TOKEN" https://httpbin.org/anything`
@@ -118,34 +122,79 @@ export const GetStartedDialog = ({
             <div className="mt-4">
               {activeSection === "install" && (
                 <div className="space-y-3">
-                  {installCommand ? (
+                  {IS_CLOUD && (installCommand || migrateCommand) ? (
                     <>
-                      <p className="text-muted-foreground text-xs">
-                        Run this in your terminal:
-                      </p>
-                      <TryDemoCommand command={installCommand} />
-                      <div className="text-muted-foreground space-y-1 text-xs">
-                        <p>Then complete setup:</p>
-                        <ol className="list-inside list-decimal space-y-0.5 pl-1">
-                          <li>
-                            <code className="bg-muted rounded px-1 py-0.5 text-[10px]">
-                              cd nanoclaw
-                            </code>
-                          </li>
-                          <li>
-                            <code className="bg-muted rounded px-1 py-0.5 text-[10px]">
-                              claude
-                            </code>
-                          </li>
-                          <li>
-                            Type{" "}
-                            <code className="bg-muted rounded px-1 py-0.5 text-[10px]">
-                              /setup
-                            </code>{" "}
-                            and follow the prompts
-                          </li>
-                        </ol>
+                      <div className="flex gap-1 rounded-md border p-0.5">
+                        <button
+                          type="button"
+                          onClick={() => setInstallMode("new")}
+                          className={cn(
+                            "flex-1 rounded-sm px-2 py-1 text-xs font-medium transition-colors",
+                            installMode === "new"
+                              ? "bg-muted text-foreground"
+                              : "text-muted-foreground hover:text-foreground",
+                          )}
+                        >
+                          New install
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setInstallMode("migrate")}
+                          className={cn(
+                            "flex-1 rounded-sm px-2 py-1 text-xs font-medium transition-colors",
+                            installMode === "migrate"
+                              ? "bg-muted text-foreground"
+                              : "text-muted-foreground hover:text-foreground",
+                          )}
+                        >
+                          Migrate from local
+                        </button>
                       </div>
+
+                      {installMode === "new" && installCommand && (
+                        <>
+                          <p className="text-muted-foreground text-xs">
+                            Run this in your terminal:
+                          </p>
+                          <TryDemoCommand command={installCommand} />
+                          <div className="text-muted-foreground space-y-1 text-xs">
+                            <p>Then complete setup:</p>
+                            <ol className="list-inside list-decimal space-y-0.5 pl-1">
+                              <li>
+                                <code className="bg-muted rounded px-1 py-0.5 text-[10px]">
+                                  cd nanoclaw
+                                </code>
+                              </li>
+                              <li>
+                                <code className="bg-muted rounded px-1 py-0.5 text-[10px]">
+                                  claude
+                                </code>
+                              </li>
+                              <li>
+                                Type{" "}
+                                <code className="bg-muted rounded px-1 py-0.5 text-[10px]">
+                                  /setup
+                                </code>{" "}
+                                and follow the prompts
+                              </li>
+                            </ol>
+                          </div>
+                        </>
+                      )}
+
+                      {installMode === "migrate" && migrateCommand && (
+                        <>
+                          <p className="text-muted-foreground text-xs">
+                            Already running OneCLI locally? Migrate to cloud:
+                          </p>
+                          <TryDemoCommand command={migrateCommand} />
+                          <p className="text-muted-foreground text-xs">
+                            This updates your CLI config, NanoClaw .env, and
+                            restarts the service. Secrets and app connections
+                            need to be re-added in the dashboard.
+                          </p>
+                        </>
+                      )}
                     </>
                   ) : IS_CLOUD ? (
                     <div className="flex items-center justify-center py-6">

@@ -28,6 +28,7 @@ interface ConnectFlowProps {
   hasDefaults: boolean;
   status?: "success" | "error";
   errorMessage?: string;
+  connectionId?: string;
 }
 
 export const ConnectFlow = ({
@@ -35,6 +36,7 @@ export const ConnectFlow = ({
   hasDefaults,
   status,
   errorMessage,
+  connectionId,
 }: ConnectFlowProps) => {
   const [state, setState] = useState<FlowState>(
     status === "success" ? "success" : status === "error" ? "error" : "ready",
@@ -47,8 +49,11 @@ export const ConnectFlow = ({
     if (redirectedRef.current) return;
     redirectedRef.current = true;
     setState("redirecting");
-    window.location.href = `/api/apps/${app.id}/authorize`;
-  }, [app.id]);
+    const authorizeUrl = connectionId
+      ? `/api/apps/${app.id}/authorize?connectionId=${connectionId}`
+      : `/api/apps/${app.id}/authorize`;
+    window.location.href = authorizeUrl;
+  }, [app.id, connectionId]);
 
   // Countdown timer for auto-redirect
   useEffect(() => {
@@ -93,6 +98,7 @@ export const ConnectFlow = ({
       <ApiKeyFlow
         app={app}
         fields={app.fields}
+        connectionId={connectionId}
         onSuccess={() => setState("success")}
         onError={(msg) => {
           setError(msg);
@@ -220,7 +226,9 @@ export const ConnectFlow = ({
           </p>
           {isRedirecting ? null : (
             <p className="text-sm text-muted-foreground mt-0.5">
-              Please authenticate to continue
+              {connectionId
+                ? "Re-authenticate to refresh your credentials"
+                : "Please authenticate to continue"}
             </p>
           )}
         </div>
@@ -257,11 +265,18 @@ interface ApiKeyFlowProps {
     description?: string;
     placeholder: string;
   }[];
+  connectionId?: string;
   onSuccess: () => void;
   onError: (message: string) => void;
 }
 
-const ApiKeyFlow = ({ app, fields, onSuccess, onError }: ApiKeyFlowProps) => {
+const ApiKeyFlow = ({
+  app,
+  fields,
+  connectionId,
+  onSuccess,
+  onError,
+}: ApiKeyFlowProps) => {
   const [values, setValues] = useState<Record<string, string>>({});
   const [submitting, setSubmitting] = useState(false);
 
@@ -274,7 +289,7 @@ const ApiKeyFlow = ({ app, fields, onSuccess, onError }: ApiKeyFlowProps) => {
       const resp = await fetch(`/api/apps/${app.id}/connect`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ fields: values }),
+        body: JSON.stringify({ fields: values, connectionId }),
       });
       if (!resp.ok) {
         const data = (await resp.json()) as { error?: string };

@@ -3,7 +3,12 @@ import { getApp } from "@/lib/apps/registry";
 import { resolveOAuthCredentials } from "@/lib/apps/resolve-credentials";
 import { APP_URL } from "@/lib/env";
 import { verifyOAuthState } from "@/lib/oauth-state";
-import { upsertConnection } from "@/lib/services/connection-service";
+import {
+  createConnection,
+  reconnectConnection,
+  listConnectionsByProvider,
+  extractLabel,
+} from "@/lib/services/connection-service";
 import { logger } from "@/lib/logger";
 
 type Params = { params: Promise<{ provider: string }> };
@@ -48,10 +53,46 @@ export const GET = async (request: NextRequest, { params }: Params) => {
         redirectUri,
       });
 
-    await upsertConnection(state.accountId, provider, credentials, {
-      scopes,
-      metadata,
-    });
+    // Determine if we should reconnect an existing connection:
+    // 1. Explicit reconnect via connectionId in state (user clicked Reconnect)
+    // 2. Duplicate detection: same identity already connected for this provider
+    let reconnectId = state.connectionId as string | undefined;
+
+    if (!reconnectId) {
+      const identity = extractLabel(metadata)?.toLowerCase().trim();
+      if (identity) {
+        const existing = await listConnectionsByProvider(
+          state.accountId,
+          provider,
+        );
+        const duplicate = existing.find((c) => {
+          if (
+            !c.metadata ||
+            typeof c.metadata !== "object" ||
+            Array.isArray(c.metadata)
+          )
+            return false;
+          const existingIdentity = extractLabel(
+            c.metadata as Record<string, unknown>,
+          );
+          return existingIdentity?.toLowerCase().trim() === identity;
+        });
+        if (duplicate) reconnectId = duplicate.id;
+      }
+    }
+
+    if (reconnectId) {
+      await reconnectConnection(state.accountId, reconnectId, credentials, {
+        scopes,
+        metadata,
+      });
+    } else {
+      await createConnection(state.accountId, provider, credentials, {
+        scopes,
+        metadata,
+      });
+    }
+
     // Cache invalidation happens client-side: the success page sends
     // postMessage("app-connected") to the parent window, which calls
     // invalidateCache() via useInvalidateGatewayCache. We can't do it

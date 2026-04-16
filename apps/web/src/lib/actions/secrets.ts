@@ -3,7 +3,7 @@
 import { db } from "@onecli/db";
 import { resolveUser } from "@/lib/actions/resolve-user";
 import { DEMO_SECRET_NAME } from "@/lib/constants";
-import { API_BASE_URL, APP_URL } from "@/lib/env";
+import { APP_URL, GATEWAY_BASE_URL } from "@/lib/env";
 import { seedDemoSecret as seedDemoSecretService } from "@/lib/services/secret-service";
 import {
   listSecrets,
@@ -71,7 +71,7 @@ export const getInstallInfo = async () => {
   return {
     apiKey: apiKey?.key ?? null,
     agentToken: agent?.accessToken ?? null,
-    gatewayUrl: API_BASE_URL,
+    gatewayUrl: GATEWAY_BASE_URL,
     appUrl: APP_URL,
   };
 };
@@ -99,7 +99,7 @@ export const getDemoInfo = async () => {
 
   return {
     agentToken: agent.accessToken,
-    gatewayUrl: API_BASE_URL,
+    gatewayUrl: GATEWAY_BASE_URL,
   };
 };
 

@@ -45,7 +45,21 @@ export const SecretsContent = () => {
     if (paramHandled.current || loading) return;
     const createType = searchParams.get("create");
     const host = searchParams.get("host");
-    if (createType === "generic" && host) {
+    const action = searchParams.get("action");
+    if (action === "new") {
+      paramHandled.current = true;
+      setCreateOpen(true);
+      router.replace(window.location.pathname, { scroll: false });
+    } else if (createType === "anthropic") {
+      paramHandled.current = true;
+      setPrefill({
+        type: "anthropic",
+        hostPattern: "api.anthropic.com",
+        name: "Anthropic Token",
+      });
+      setCreateOpen(true);
+      router.replace(window.location.pathname, { scroll: false });
+    } else if (createType === "generic" && host) {
       paramHandled.current = true;
       setPrefill({
         type: "generic",

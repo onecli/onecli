@@ -3,7 +3,11 @@ import { resolveApiAuth } from "@/lib/api-auth";
 import { handleServiceError, unauthorized } from "@/lib/api-utils";
 import { invalidateGatewayCache } from "@/lib/gateway-invalidate";
 import { getApp } from "@/lib/apps/registry";
-import { upsertConnection } from "@/lib/services/connection-service";
+import {
+  createConnection,
+  listConnectionsByProvider,
+  reconnectConnection,
+} from "@/lib/services/connection-service";
 
 type Params = { params: Promise<{ provider: string }> };
 
@@ -30,7 +34,10 @@ export const POST = async (request: NextRequest, { params }: Params) => {
       );
     }
 
-    const body = (await request.json()) as { fields?: Record<string, string> };
+    const body = (await request.json()) as {
+      fields?: Record<string, string>;
+      connectionId?: string;
+    };
     if (!body.fields) {
       return NextResponse.json(
         { error: "Missing fields in request body" },
@@ -52,7 +59,19 @@ export const POST = async (request: NextRequest, { params }: Params) => {
       access_token: body.fields[primaryField!.name],
     };
 
-    await upsertConnection(auth.accountId, provider, credentials);
+    if (body.connectionId) {
+      await reconnectConnection(auth.accountId, body.connectionId, credentials);
+    } else {
+      const existing = await listConnectionsByProvider(
+        auth.accountId,
+        provider,
+      );
+      if (existing.length > 0) {
+        await reconnectConnection(auth.accountId, existing[0]!.id, credentials);
+      } else {
+        await createConnection(auth.accountId, provider, credentials);
+      }
+    }
     invalidateGatewayCache(request);
 
     return NextResponse.json({ success: true });

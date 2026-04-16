@@ -11,8 +11,17 @@ export const DELETE = async (request: NextRequest, { params }: Params) => {
     const auth = await resolveApiAuth(request);
     if (!auth) return unauthorized();
 
-    const { provider } = await params;
-    await deleteConnection(auth.accountId, provider);
+    await params; // consume params (required by Next.js)
+    const connectionId = request.nextUrl.searchParams.get("connectionId");
+
+    if (!connectionId) {
+      return NextResponse.json(
+        { error: "connectionId query parameter is required" },
+        { status: 400 },
+      );
+    }
+
+    await deleteConnection(auth.accountId, connectionId);
     invalidateGatewayCache(request);
     return new NextResponse(null, { status: 204 });
   } catch (err) {
