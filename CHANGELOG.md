@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.18.0](https://github.com/onecli/onecli/compare/v1.17.0...v1.18.0) (2026-04-16)
+
+
+### Features
+
+* add "Request an app" card to apps grid ([#189](https://github.com/onecli/onecli/issues/189)) ([0137ea4](https://github.com/onecli/onecli/commit/0137ea4e57960852e5c5ac044bd8fa7eb0af53df))
+
 ## [1.17.0](https://github.com/onecli/onecli/compare/v1.16.0...v1.17.0) (2026-04-16)
 
 
