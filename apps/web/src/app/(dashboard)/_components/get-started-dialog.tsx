@@ -63,7 +63,7 @@ export const GetStartedDialog = ({
     if (installInfo.appUrl !== "https://app.onecli.sh") {
       params.push(`url=${encodeURIComponent(installInfo.appUrl)}`);
     }
-    return `curl -fsSL ${installInfo.appUrl}/api/install/${path}?${params.join("&")} | sh`;
+    return `curl -fsSL "${installInfo.appUrl}/api/install/${path}?${params.join("&")}" | sh`;
   };
 
   const installCommand = buildCurlCommand("nanoclaw");

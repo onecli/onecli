@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import { ChevronRight } from "lucide-react";
 import { Button } from "@onecli/ui/components/button";
@@ -13,6 +13,7 @@ import {
   getAvailableEnvDefaults,
 } from "@/lib/actions/app-config";
 import { apps } from "@/lib/apps/registry";
+import { RequestAppSlot } from "@/lib/components/request-app-slot";
 import { useAppMessages } from "@/hooks/use-app-connected";
 import { useInvalidateGatewayCache } from "@/hooks/use-invalidate-cache";
 import { AppIcon } from "./app-icon";
@@ -82,10 +83,14 @@ export const AppsTab = () => {
   };
 
   // Derived set for backward-compat with useConnectParam
-  const connectedProviders = new Set(
-    [...connectionCounts.entries()]
-      .filter(([, count]) => count > 0)
-      .map(([provider]) => provider),
+  const connectedProviders = useMemo(
+    () =>
+      new Set(
+        [...connectionCounts.entries()]
+          .filter(([, count]) => count > 0)
+          .map(([provider]) => provider),
+      ),
+    [connectionCounts],
   );
 
   // Handle ?connect=<provider> URL param
@@ -116,6 +121,7 @@ export const AppsTab = () => {
   return (
     <>
       <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+        <RequestAppSlot />
         {apps.map((app) => {
           const count = connectionCounts.get(app.id) ?? 0;
           return (

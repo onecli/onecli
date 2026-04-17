@@ -1,5 +1,19 @@
 # Changelog
 
+## [1.18.0](https://github.com/onecli/onecli/compare/v1.17.0...v1.18.0) (2026-04-16)
+
+
+### Features
+
+* add "Request an app" card to apps grid ([#189](https://github.com/onecli/onecli/issues/189)) ([0137ea4](https://github.com/onecli/onecli/commit/0137ea4e57960852e5c5ac044bd8fa7eb0af53df))
+
+## [1.17.0](https://github.com/onecli/onecli/compare/v1.16.0...v1.17.0) (2026-04-16)
+
+
+### Features
+
+* multi-account connections, credential_not_found and access_restricted responses ([#187](https://github.com/onecli/onecli/issues/187)) ([8624335](https://github.com/onecli/onecli/commit/86243351641332f04fd12f00484bc40a95b66a56))
+
 ## [1.16.0](https://github.com/onecli/onecli/compare/v1.15.1...v1.16.0) (2026-04-14)
 
 
