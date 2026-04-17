@@ -105,7 +105,7 @@ pub(crate) async fn forward_request(
 > {
     let start = std::time::Instant::now();
     let method = req.method().clone();
-    let path = req
+    let mut path = req
         .uri()
         .path_and_query()
         .map(|pq| pq.as_str().to_string())
@@ -166,9 +166,10 @@ pub(crate) async fn forward_request(
         None
     };
 
-    // Apply injection rules matching this request path
-    let injection_count = inject::apply_injections(&mut headers, &path, &rules.injection_rules);
+    // Apply injection rules matching this request path (may mutate path for SetParam)
+    let injection_count = inject::apply_injections(&mut headers, &mut path, &rules.injection_rules);
 
+    let url = format!("{scheme}://{host}{path}");
     // ── ManualApproval: prepare body, store, wait for decision ─────
     let forward_body = if let PolicyDecision::ManualApproval { rule_id } = &decision {
         info!(method = %method, url = %url, rule_id = %rule_id, "MANUAL APPROVAL required");

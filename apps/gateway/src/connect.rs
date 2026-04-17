@@ -718,27 +718,48 @@ fn build_injections(
 
         "generic" => {
             let config = injection_config.and_then(|v| v.as_object());
+
+            // Check for header injection
             let header_name = config
                 .and_then(|c| c.get("headerName"))
                 .and_then(|v| v.as_str());
 
-            let Some(header_name) = header_name else {
-                return vec![];
-            };
-
-            let value_format = config
-                .and_then(|c| c.get("valueFormat"))
+            // Check for parameter injection
+            let param_name = config
+                .and_then(|c| c.get("paramName"))
                 .and_then(|v| v.as_str());
 
-            let value = match value_format {
-                Some(fmt) => fmt.replace("{value}", decrypted_value),
-                None => decrypted_value.to_string(),
-            };
+            if let Some(header_name) = header_name {
+                let value_format = config
+                    .and_then(|c| c.get("valueFormat"))
+                    .and_then(|v| v.as_str());
 
-            vec![Injection::SetHeader {
-                name: header_name.to_string(),
-                value,
-            }]
+                let value = match value_format {
+                    Some(fmt) => fmt.replace("{value}", decrypted_value),
+                    None => decrypted_value.to_string(),
+                };
+
+                vec![Injection::SetHeader {
+                    name: header_name.to_string(),
+                    value,
+                }]
+            } else if let Some(param_name) = param_name {
+                let param_format = config
+                    .and_then(|c| c.get("paramFormat"))
+                    .and_then(|v| v.as_str());
+
+                let value = match param_format {
+                    Some(fmt) => fmt.replace("{value}", decrypted_value),
+                    None => decrypted_value.to_string(),
+                };
+
+                vec![Injection::SetParam {
+                    name: param_name.to_string(),
+                    value,
+                }]
+            } else {
+                vec![]
+            }
         }
 
         _ => vec![],
@@ -960,5 +981,47 @@ mod tests {
     fn build_injections_unknown_type() {
         let injections = build_injections("unknown", "value", None);
         assert!(injections.is_empty());
+    }
+
+    // ── build_injections: paramName ─────────────────────────────────────
+
+    #[test]
+    fn build_injections_generic_param_name() {
+        let config = serde_json::json!({ "paramName": "api_key" });
+        let injections = build_injections("generic", "my-secret", Some(&config));
+        assert_eq!(injections.len(), 1);
+        assert_eq!(
+            injections[0],
+            Injection::SetParam {
+                name: "api_key".to_string(),
+                value: "my-secret".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn build_injections_generic_param_name_with_format() {
+        let config = serde_json::json!({ "paramName": "token", "paramFormat": "Bearer-{value}" });
+        let injections = build_injections("generic", "my-secret", Some(&config));
+        assert_eq!(injections.len(), 1);
+        assert_eq!(
+            injections[0],
+            Injection::SetParam {
+                name: "token".to_string(),
+                value: "Bearer-my-secret".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn build_injections_generic_header_takes_precedence_over_param() {
+        // If both headerName and paramName are present, headerName wins
+        let config = serde_json::json!({
+            "headerName": "Authorization",
+            "paramName": "api_key"
+        });
+        let injections = build_injections("generic", "my-secret", Some(&config));
+        assert_eq!(injections.len(), 1);
+        assert!(matches!(injections[0], Injection::SetHeader { .. }));
     }
 }

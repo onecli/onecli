@@ -4,6 +4,8 @@ import { ServiceError } from "@/lib/services/errors";
 import { DEMO_SECRET_NAME, DEMO_SECRET_VALUE } from "@/lib/constants";
 import {
   detectAnthropicAuthMode,
+  isHeaderInjection,
+  isParamInjection,
   type CreateSecretInput,
   type UpdateSecretInput,
 } from "@/lib/validations/secret";
@@ -65,10 +67,13 @@ export const createSecret = async (
     throw new ServiceError("BAD_REQUEST", "Host pattern is required");
 
   if (input.type === "generic") {
-    if (!input.injectionConfig?.headerName?.trim()) {
+    const config = input.injectionConfig;
+    const hasHeader = isHeaderInjection(config) && config.headerName.trim();
+    const hasParam = isParamInjection(config) && config.paramName.trim();
+    if (!hasHeader && !hasParam) {
       throw new ServiceError(
         "BAD_REQUEST",
-        "Header name is required for generic secrets",
+        "Header name or parameter name is required for generic secrets",
       );
     }
   }
@@ -78,10 +83,18 @@ export const createSecret = async (
   const pathPattern = input.pathPattern?.trim() || null;
   const injectionConfig =
     input.type === "generic" && input.injectionConfig
-      ? ({
-          headerName: input.injectionConfig.headerName.trim(),
-          valueFormat: input.injectionConfig.valueFormat?.trim() || "{value}",
-        } as Prisma.InputJsonValue)
+      ? isParamInjection(input.injectionConfig)
+        ? ({
+            paramName: input.injectionConfig.paramName.trim(),
+            paramFormat: input.injectionConfig.paramFormat?.trim() || "{value}",
+          } as Prisma.InputJsonValue)
+        : isHeaderInjection(input.injectionConfig)
+          ? ({
+              headerName: input.injectionConfig.headerName.trim(),
+              valueFormat:
+                input.injectionConfig.valueFormat?.trim() || "{value}",
+            } as Prisma.InputJsonValue)
+          : Prisma.JsonNull
       : Prisma.JsonNull;
 
   const metadata =
@@ -172,12 +185,21 @@ export const updateSecret = async (
   }
 
   if (input.injectionConfig !== undefined && secret.type === "generic") {
-    data.injectionConfig = input.injectionConfig
-      ? ({
-          headerName: input.injectionConfig.headerName.trim(),
-          valueFormat: input.injectionConfig.valueFormat?.trim() || "{value}",
-        } as Prisma.InputJsonValue)
-      : Prisma.JsonNull;
+    if (!input.injectionConfig) {
+      data.injectionConfig = Prisma.JsonNull;
+    } else if (isParamInjection(input.injectionConfig)) {
+      data.injectionConfig = {
+        paramName: input.injectionConfig.paramName.trim(),
+        paramFormat: input.injectionConfig.paramFormat?.trim() || "{value}",
+      } as Prisma.InputJsonValue;
+    } else if (isHeaderInjection(input.injectionConfig)) {
+      data.injectionConfig = {
+        headerName: input.injectionConfig.headerName.trim(),
+        valueFormat: input.injectionConfig.valueFormat?.trim() || "{value}",
+      } as Prisma.InputJsonValue;
+    } else {
+      data.injectionConfig = Prisma.JsonNull;
+    }
   }
 
   if (Object.keys(data).length === 0) {

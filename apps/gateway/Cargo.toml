@@ -98,6 +98,9 @@ optional = true
 [dependencies.percent-encoding]
 version = "2"
 
+[dependencies.form_urlencoded]
+version = "1"
+
 [dev-dependencies]
 tempfile = "3"
 

@@ -34,6 +34,11 @@ pub(crate) enum Injection {
     RemoveHeader {
         name: String,
     },
+    /// Add or replace a URL query parameter.
+    SetParam {
+        name: String,
+        value: String,
+    },
 }
 
 /// A rule matching a path pattern with header injection instructions.
@@ -67,11 +72,12 @@ pub(crate) fn extract_agent_token<T>(req: &Request<T>) -> Option<String> {
 
 // ── Injection application ───────────────────────────────────────────────
 
-/// Apply injection rules to the request headers.
+/// Apply injection rules to the request headers and URL path.
+/// `request_path` may be mutated when `SetParam` injections add query parameters.
 /// Returns the number of injection actions applied.
 pub(crate) fn apply_injections(
     headers: &mut hyper::HeaderMap,
-    request_path: &str,
+    request_path: &mut String,
     rules: &[InjectionRule],
 ) -> usize {
     let mut count = 0;
@@ -114,11 +120,43 @@ pub(crate) fn apply_injections(
                         }
                     }
                 }
+                Injection::SetParam { name, value } => {
+                    apply_set_param(request_path, name, value);
+                    count += 1;
+                }
             }
         }
     }
 
     count
+}
+
+/// Add or replace a URL query parameter in a path+query string.
+fn apply_set_param(request_path: &mut String, name: &str, value: &str) {
+    let (path_part, query_part) = match request_path.split_once('?') {
+        Some((p, q)) => (p.to_string(), Some(q.to_string())),
+        None => (request_path.clone(), None),
+    };
+
+    let mut params: Vec<(String, String)> = query_part
+        .as_deref()
+        .map(|q| {
+            form_urlencoded::parse(q.as_bytes())
+                .map(|(k, v)| (k.into_owned(), v.into_owned()))
+                .collect()
+        })
+        .unwrap_or_default();
+
+    if let Some(existing) = params.iter_mut().find(|(k, _)| k == name) {
+        existing.1 = value.to_string();
+    } else {
+        params.push((name.to_string(), value.to_string()));
+    }
+
+    let new_query = form_urlencoded::Serializer::new(String::new())
+        .extend_pairs(&params)
+        .finish();
+    *request_path = format!("{path_part}?{new_query}");
 }
 
 /// Check if a request path matches a rule's path pattern.
@@ -309,7 +347,7 @@ mod tests {
 
         let rules = vec![make_rule("*", vec![set_header("x-api-key", "sk-ant-123")])];
 
-        let count = apply_injections(&mut headers, "/v1/messages", &rules);
+        let count = apply_injections(&mut headers, &mut "/v1/messages".to_string(), &rules);
         assert_eq!(count, 1);
         assert_eq!(headers.get("x-api-key").unwrap(), "sk-ant-123");
         // Original header preserved
@@ -329,7 +367,7 @@ mod tests {
             vec![set_header("authorization", "Bearer new-token")],
         )];
 
-        let count = apply_injections(&mut headers, "/", &rules);
+        let count = apply_injections(&mut headers, &mut "/".to_string(), &rules);
         assert_eq!(count, 1);
         assert_eq!(headers.get("authorization").unwrap(), "Bearer new-token");
     }
@@ -350,7 +388,7 @@ mod tests {
             }],
         )];
 
-        let count = apply_injections(&mut headers, "/", &rules);
+        let count = apply_injections(&mut headers, &mut "/".to_string(), &rules);
         assert_eq!(count, 1);
         assert_eq!(headers.get("authorization").unwrap(), "Bearer real-token");
     }
@@ -368,7 +406,7 @@ mod tests {
             }],
         )];
 
-        let count = apply_injections(&mut headers, "/", &rules);
+        let count = apply_injections(&mut headers, &mut "/".to_string(), &rules);
         assert_eq!(count, 0);
         assert!(headers.get("authorization").is_none());
         // x-api-key untouched
@@ -383,7 +421,7 @@ mod tests {
 
         let rules = vec![make_rule("*", vec![remove_header("authorization")])];
 
-        let count = apply_injections(&mut headers, "/", &rules);
+        let count = apply_injections(&mut headers, &mut "/".to_string(), &rules);
         assert_eq!(count, 1);
         assert!(headers.get("authorization").is_none());
         // Other headers preserved
@@ -397,7 +435,7 @@ mod tests {
 
         let rules = vec![make_rule("*", vec![remove_header("x-not-present")])];
 
-        let count = apply_injections(&mut headers, "/", &rules);
+        let count = apply_injections(&mut headers, &mut "/".to_string(), &rules);
         assert_eq!(count, 0);
     }
 
@@ -414,7 +452,7 @@ mod tests {
             ],
         )];
 
-        let count = apply_injections(&mut headers, "/v1/messages", &rules);
+        let count = apply_injections(&mut headers, &mut "/v1/messages".to_string(), &rules);
         assert_eq!(count, 2);
         assert_eq!(headers.get("x-api-key").unwrap(), "sk-ant-123");
         assert!(headers.get("authorization").is_none());
@@ -429,7 +467,7 @@ mod tests {
             vec![set_header("x-api-key", "sk-ant-123")],
         )];
 
-        let count = apply_injections(&mut headers, "/v2/messages", &rules);
+        let count = apply_injections(&mut headers, &mut "/v2/messages".to_string(), &rules);
         assert_eq!(count, 0);
         assert!(headers.get("x-api-key").is_none());
     }
@@ -444,7 +482,7 @@ mod tests {
         ];
 
         // Only the /v1 rule should match
-        let count = apply_injections(&mut headers, "/v1/messages", &rules);
+        let count = apply_injections(&mut headers, &mut "/v1/messages".to_string(), &rules);
         assert_eq!(count, 1);
         assert_eq!(headers.get("x-api-key").unwrap(), "key-v1");
     }
@@ -454,7 +492,7 @@ mod tests {
         let mut headers = hyper::HeaderMap::new();
         headers.insert("accept", HeaderValue::from_static("*/*"));
 
-        let count = apply_injections(&mut headers, "/anything", &[]);
+        let count = apply_injections(&mut headers, &mut "/anything".to_string(), &[]);
         assert_eq!(count, 0);
     }
 
@@ -508,5 +546,85 @@ mod tests {
     #[test]
     fn vault_cred_empty_password_returns_empty() {
         assert!(vault_credential_to_rules("api.openai.com", &cred(Some(""))).is_empty());
+    }
+
+    // ── SetParam ───────────────────────────────────────────────────────
+
+    fn set_param(name: &str, value: &str) -> Injection {
+        Injection::SetParam {
+            name: name.to_string(),
+            value: value.to_string(),
+        }
+    }
+
+    #[test]
+    fn inject_set_param_no_existing_query() {
+        let mut headers = hyper::HeaderMap::new();
+        let mut path = "/v1/search".to_string();
+
+        let rules = vec![make_rule("*", vec![set_param("api_key", "sk-123")])];
+
+        let count = apply_injections(&mut headers, &mut path, &rules);
+        assert_eq!(count, 1);
+        assert_eq!(path, "/v1/search?api_key=sk-123");
+    }
+
+    #[test]
+    fn inject_set_param_with_existing_query() {
+        let mut headers = hyper::HeaderMap::new();
+        let mut path = "/v1/search?q=hello".to_string();
+
+        let rules = vec![make_rule("*", vec![set_param("api_key", "sk-123")])];
+
+        let count = apply_injections(&mut headers, &mut path, &rules);
+        assert_eq!(count, 1);
+        assert!(path.contains("q=hello"));
+        assert!(path.contains("api_key=sk-123"));
+        assert!(path.starts_with("/v1/search?"));
+    }
+
+    #[test]
+    fn inject_set_param_replaces_existing() {
+        let mut headers = hyper::HeaderMap::new();
+        let mut path = "/v1/search?api_key=old-key&q=hello".to_string();
+
+        let rules = vec![make_rule("*", vec![set_param("api_key", "new-key")])];
+
+        let count = apply_injections(&mut headers, &mut path, &rules);
+        assert_eq!(count, 1);
+        assert!(path.contains("api_key=new-key"));
+        assert!(!path.contains("old-key"));
+        assert!(path.contains("q=hello"));
+    }
+
+    #[test]
+    fn inject_set_param_path_mismatch_skips() {
+        let mut headers = hyper::HeaderMap::new();
+        let mut path = "/v2/search".to_string();
+
+        let rules = vec![make_rule("/v1/*", vec![set_param("api_key", "sk-123")])];
+
+        let count = apply_injections(&mut headers, &mut path, &rules);
+        assert_eq!(count, 0);
+        assert_eq!(path, "/v2/search");
+    }
+
+    #[test]
+    fn inject_set_param_combined_with_header() {
+        let mut headers = hyper::HeaderMap::new();
+        let mut path = "/v1/search".to_string();
+
+        let rules = vec![make_rule(
+            "*",
+            vec![
+                set_header("x-custom", "value"),
+                set_param("api_key", "sk-123"),
+            ],
+        )];
+
+        let count = apply_injections(&mut headers, &mut path, &rules);
+        assert_eq!(count, 2);
+        assert_eq!(headers.get("x-custom").unwrap(), "value");
+        assert_eq!(path, "/v1/search?api_key=sk-123");
     }
 }

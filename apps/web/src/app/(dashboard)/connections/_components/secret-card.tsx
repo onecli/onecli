@@ -22,8 +22,10 @@ import { deleteSecret } from "@/lib/actions/secrets";
 import { SecretDialog } from "./secret-dialog";
 
 interface InjectionConfig {
-  headerName: string;
-  valueFormat: string;
+  headerName?: string;
+  valueFormat?: string;
+  paramName?: string;
+  paramFormat?: string;
 }
 
 interface SecretCardProps {
@@ -93,6 +95,14 @@ export const SecretCard = ({ secret, onUpdate }: SecretCardProps) => {
                   Header:{" "}
                   <code className="bg-muted rounded px-1 py-0.5 font-mono">
                     {config.headerName}
+                  </code>
+                </span>
+              )}
+              {secret.type === "generic" && config?.paramName && (
+                <span className="text-muted-foreground">
+                  Parameter:{" "}
+                  <code className="bg-muted rounded px-1 py-0.5 font-mono">
+                    {config.paramName}
                   </code>
                 </span>
               )}
