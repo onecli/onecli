@@ -7,7 +7,7 @@ import {
   createConnection,
   reconnectConnection,
   listConnectionsByProvider,
-  extractLabel,
+  connectionIdentity,
 } from "@/lib/services/connection-service";
 import { logger } from "@/lib/logger";
 
@@ -51,6 +51,7 @@ export const GET = async (request: NextRequest, { params }: Params) => {
         clientId: resolved.clientId,
         clientSecret: resolved.clientSecret,
         redirectUri,
+        config: resolved.config,
       });
 
     // Determine if we should reconnect an existing connection:
@@ -59,7 +60,7 @@ export const GET = async (request: NextRequest, { params }: Params) => {
     let reconnectId = state.connectionId as string | undefined;
 
     if (!reconnectId) {
-      const identity = extractLabel(metadata)?.toLowerCase().trim();
+      const identity = connectionIdentity(metadata);
       if (identity) {
         const existing = await listConnectionsByProvider(
           state.accountId,
@@ -72,10 +73,10 @@ export const GET = async (request: NextRequest, { params }: Params) => {
             Array.isArray(c.metadata)
           )
             return false;
-          const existingIdentity = extractLabel(
-            c.metadata as Record<string, unknown>,
+          return (
+            connectionIdentity(c.metadata as Record<string, unknown>) ===
+            identity
           );
-          return existingIdentity?.toLowerCase().trim() === identity;
         });
         if (duplicate) reconnectId = duplicate.id;
       }

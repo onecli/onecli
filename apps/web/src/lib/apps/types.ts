@@ -3,6 +3,7 @@ export interface OAuthBuildAuthUrlParams {
   redirectUri: string;
   scopes: string[];
   state: string;
+  config: Record<string, string>;
 }
 
 export interface OAuthExchangeCodeParams {
@@ -10,6 +11,7 @@ export interface OAuthExchangeCodeParams {
   clientId: string;
   clientSecret: string;
   redirectUri: string;
+  config: Record<string, string>;
 }
 
 export interface OAuthExchangeResult {
@@ -58,6 +60,8 @@ export interface OAuthConfigField {
   placeholder: string;
   /** If true, stored encrypted in AppConfig.credentials. Otherwise in AppConfig.settings. */
   secret?: boolean;
+  /** If true, the field must have a value (from AppConfig or env) for the connection to be usable. */
+  required?: boolean;
 }
 
 export interface AppDefinition {

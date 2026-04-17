@@ -5,6 +5,7 @@ import { cryptoService } from "@/lib/crypto";
 import { logger } from "@/lib/logger";
 import { ServiceError } from "@/lib/services/errors";
 import type { OAuthConfigField } from "@/lib/apps/types";
+import { normalizeBaseUrl } from "@/lib/apps/validate-base-url";
 
 /**
  * Disconnect the app connection for a provider if one exists.
@@ -86,11 +87,14 @@ export const upsertAppConfig = async (
   const plainFields: Record<string, string> = {};
 
   for (const field of fieldDefinitions) {
-    const value = values[field.name];
+    const rawValue = values[field.name];
+    if (!rawValue) continue;
+    const value =
+      field.name === "baseUrl" ? normalizeBaseUrl(rawValue) : rawValue;
     if (field.secret) {
-      if (value) secretFields[field.name] = value;
+      secretFields[field.name] = value;
     } else {
-      if (value) plainFields[field.name] = value;
+      plainFields[field.name] = value;
     }
   }
 

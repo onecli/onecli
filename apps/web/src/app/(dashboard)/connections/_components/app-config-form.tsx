@@ -43,6 +43,7 @@ interface AppConfigFormProps {
     description?: string;
     placeholder: string;
     secret?: boolean;
+    required?: boolean;
   }[];
   hasEnvDefaults: boolean;
   isConnected: boolean;
@@ -97,8 +98,10 @@ export const AppConfigForm = ({
       toast.success("Credentials saved");
       await fetchConfig();
       onConfigChange?.();
-    } catch {
-      toast.error("Failed to save credentials");
+    } catch (err) {
+      toast.error(
+        err instanceof Error ? err.message : "Failed to save credentials",
+      );
     } finally {
       setSaving(false);
     }
@@ -158,7 +161,15 @@ export const AppConfigForm = ({
     setPendingAction(null);
   };
 
-  const hasInput = fields.some((f) => !!values[f.name]);
+  const hasAnyInput = fields.some((f) => !!values[f.name]?.trim());
+  const hasRequiredFields = fields.some((f) => f.required);
+  const canSave = hasRequiredFields
+    ? fields.every((f) => {
+        if (!f.required) return true;
+        if (f.secret && hasCredentials) return true;
+        return !!values[f.name]?.trim();
+      })
+    : hasAnyInput;
   const defaultOpen = enabled || !hasEnvDefaults;
 
   if (loading) {
@@ -221,7 +232,14 @@ export const AppConfigForm = ({
 
             {fields.map((field) => (
               <div key={field.name} className="grid gap-1.5">
-                <Label htmlFor={`config-${field.name}`}>{field.label}</Label>
+                <Label htmlFor={`config-${field.name}`}>
+                  {field.label}
+                  {field.required && (
+                    <span className="text-muted-foreground ml-1 text-xs">
+                      (required)
+                    </span>
+                  )}
+                </Label>
                 {field.description && (
                   <p className="text-xs text-muted-foreground">
                     {field.description}
@@ -254,7 +272,7 @@ export const AppConfigForm = ({
                 size="sm"
                 onClick={handleSave}
                 loading={saving}
-                disabled={!hasInput}
+                disabled={!canSave}
               >
                 {saving ? "Saving..." : "Save credentials"}
               </Button>

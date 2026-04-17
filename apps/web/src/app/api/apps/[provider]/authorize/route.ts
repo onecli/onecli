@@ -46,6 +46,7 @@ export const GET = async (request: NextRequest, { params }: Params) => {
     redirectUri,
     scopes,
     state,
+    config: resolved.config,
   });
 
   return NextResponse.redirect(authUrl);
