@@ -1,5 +1,6 @@
 import { db } from "@onecli/db";
 import { validateApiKey } from "@/lib/validate-api-key";
+import { validateJwt } from "@/lib/validate-jwt";
 import { getServerSession } from "@/lib/auth/server";
 
 export interface AuthContext {
@@ -9,7 +10,7 @@ export interface AuthContext {
 
 /**
  * Resolve the authenticated user + account from an API request.
- * Tries API key first (`Authorization: Bearer oc_...`), then falls back to session.
+ * Tries API key first, then OAuth JWT, then falls back to session.
  */
 export const resolveApiAuth = async (
   request: Request,
@@ -17,6 +18,10 @@ export const resolveApiAuth = async (
   // API key auth — returns userId + accountId directly
   const apiKeyAuth = await validateApiKey(request);
   if (apiKeyAuth) return apiKeyAuth;
+
+  // OAuth JWT auth — validate OIDC access token
+  const jwtAuth = await validateJwt(request);
+  if (jwtAuth) return jwtAuth;
 
   // Session auth — resolve from membership
   const session = await getServerSession();

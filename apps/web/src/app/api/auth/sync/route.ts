@@ -1,6 +1,7 @@
 import { type NextRequest, NextResponse } from "next/server";
 import { db } from "@onecli/db";
 import { getServerSession } from "@/lib/auth/server";
+import { verifyAndResolveIdentity } from "@/lib/validate-jwt";
 import { logger } from "@/lib/logger";
 import { DEFAULT_AGENT_NAME } from "@/lib/constants";
 import { seedDemoSecret } from "@/lib/services/secret-service";
@@ -9,40 +10,60 @@ import { generateAccessToken } from "@/lib/services/agent-service";
 import { getSessionAttributes, onUserCreated } from "@/lib/auth/session-hooks";
 
 /**
- * GET /api/auth/session
+ * GET /api/auth/sync
  *
  * Single endpoint that handles the full auth → DB sync flow:
- * 1. Reads the auth session (cookie/token)
+ * 1. Reads the auth session (cookie/token) or validates a JWT Bearer token
  * 2. Upserts the user in the database
  * 3. Ensures the user has an Account + AccountMember + ApiKey
  * 4. Seeds defaults (agent, demo secret) into the account
  * 5. Returns the user profile
  *
- * Called by the login page after auth and by the dashboard layout on mount.
- * Returns 401 if no valid session exists.
+ * Called by the login page after auth, by the dashboard layout on mount,
+ * or by API clients with a JWT access token to provision their account.
+ * Returns 401 if no valid session or token exists.
  */
 export const GET = async (request: NextRequest) => {
   try {
+    // Try session auth first, then JWT Bearer token
     const session = await getServerSession();
-    if (!session || !session.email) {
-      return NextResponse.json({ error: "Not authenticated" }, { status: 401 });
+
+    let authId: string;
+    let email: string;
+    let name: string | null | undefined;
+
+    if (session?.email) {
+      authId = session.id;
+      email = session.email;
+      name = session.name;
+    } else {
+      const identity = await verifyAndResolveIdentity(request);
+      if (!identity) {
+        return NextResponse.json(
+          { error: "Not authenticated" },
+          { status: 401 },
+        );
+      }
+      authId = identity.sub;
+      email = identity.email;
+      name = identity.name;
     }
 
     const extra = getSessionAttributes(request);
 
     // Upsert user by email — creates on first login, updates on subsequent.
     const user = await db.user.upsert({
-      where: { email: session.email },
+      where: { email },
       create: {
-        externalAuthId: session.id,
-        email: session.email,
-        name: session.name,
+        externalAuthId: authId,
+        email,
+        name: name ?? null,
         lastLoginAt: new Date(),
         ...extra,
       },
       update: {
-        externalAuthId: session.id,
-        name: session.name,
+        externalAuthId: authId,
+        name: name ?? null,
         lastLoginAt: new Date(),
         ...extra,
       },
@@ -141,10 +162,7 @@ export const GET = async (request: NextRequest) => {
       name: user.name,
     });
   } catch (err) {
-    logger.error(
-      { err, route: "GET /api/auth/session" },
-      "session sync failed",
-    );
+    logger.error({ err, route: "GET /api/auth/sync" }, "session sync failed");
     return NextResponse.json(
       { error: "Internal server error" },
       { status: 500 },

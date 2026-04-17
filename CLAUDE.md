@@ -29,7 +29,9 @@ packages/typescript-config/
 
 - `DATABASE_URL`: PostgreSQL connection string
 - `NEXT_PUBLIC_COGNITO_*`: AWS Cognito config (injected at build time in CI)
-- `STRIPE_SECRET_KEY`, `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`: Third-party credentials
+- `OAUTH_ISSUER`, `OAUTH_CLIENT_ID`, `OAUTH_CLIENT_SECRET`: OIDC login provider
+- `STRIPE_SECRET_KEY`: Stripe credentials
+- `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`: Google Workspace app connections
 
 ## Code Style
 

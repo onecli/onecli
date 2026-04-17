@@ -1,8 +1,11 @@
-//! Gateway authentication for browser requests.
+//! Gateway authentication for browser and API requests.
 //!
 //! Supports two modes controlled by the `AUTH_MODE` env var:
 //! - `local`: bypasses JWT validation, looks up the "local-admin" user directly.
-//! - `oauth` (default): validates a NextAuth session cookie JWT (HS256).
+//! - `oauth` (default): accepts three auth methods (tried in order):
+//!   1. API key: `Authorization: Bearer oc_...`
+//!   2. OIDC access token: `Authorization: Bearer <jwt>` (validated via JWKS)
+//!   3. NextAuth session cookie: `authjs.session-token` (HS256 via NEXTAUTH_SECRET)
 
 use std::sync::OnceLock;
 
@@ -18,12 +21,13 @@ use tracing::warn;
 
 use crate::db;
 use crate::gateway::GatewayState;
+use crate::jwks::JwksManager;
 
 // ── AuthError ────────────────────────────────────────────────────────────
 
 /// Authentication error — always returns 401 Unauthorized.
 #[derive(Debug)]
-pub(crate) struct AuthError(String);
+pub(crate) struct AuthError(pub(crate) String);
 
 impl std::fmt::Display for AuthError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -37,7 +41,7 @@ impl IntoResponse for AuthError {
     }
 }
 
-// ── JWT claims ───────────────────────────────────────────────────────────
+// ── NextAuth cookie claims ──────────────────────────────────────────────
 
 #[derive(Debug, Deserialize)]
 struct SessionClaims {
@@ -60,7 +64,13 @@ fn nextauth_secret() -> Option<&'static str> {
 
 // ── Extractor ────────────────────────────────────────────────────────────
 
-/// Authenticated user extracted from browser session cookies.
+/// Authenticated user extracted from the request.
+///
+/// Authentication methods (tried in order):
+/// 1. API key: `Authorization: Bearer oc_...` (OneCLI API key)
+/// 2. OIDC access token: `Authorization: Bearer <jwt>` (validated via JWKS)
+/// 3. NextAuth session cookie: `authjs.session-token` (HS256 via NEXTAUTH_SECRET)
+/// 4. Local mode: bypasses auth, returns the "local-admin" user
 ///
 /// Add as an Axum handler parameter to require authentication:
 /// ```ignore
@@ -78,18 +88,18 @@ impl FromRequestParts<GatewayState> for AuthUser {
         parts: &mut Parts,
         state: &GatewayState,
     ) -> Result<Self, Self::Rejection> {
+        let pool = &state.policy_engine.pool;
+
         // Try API key auth first (Authorization: Bearer oc_...)
-        if let Some(api_key_user) =
-            validate_api_key(&state.policy_engine.pool, &parts.headers).await
-        {
+        if let Some(api_key_user) = validate_api_key(pool, &parts.headers).await {
             return Ok(api_key_user);
         }
 
-        // Fall back to session auth (cookies / JWT)
-        let user_id = validate_request(&state.policy_engine.pool, &parts.headers).await?;
+        // Fall back to session auth (OIDC JWT, NextAuth cookie, or local mode)
+        let user_id = validate_request(pool, &parts.headers, state.jwks.as_ref()).await?;
 
         // Resolve account from membership
-        let account_id = db::find_account_id_by_user(&state.policy_engine.pool, &user_id)
+        let account_id = db::find_account_id_by_user(pool, &user_id)
             .await
             .map_err(|e| {
                 warn!(error = %e, "auth: failed to resolve account");
@@ -134,12 +144,15 @@ async fn validate_api_key(pool: &PgPool, headers: &HeaderMap) -> Option<AuthUser
 
 // ── Session auth ─────────────────────────────────────────────────────────
 
-/// Validate an incoming browser request and return the internal user ID.
-/// The caller resolves the account ID from the user's membership.
-async fn validate_request(pool: &PgPool, headers: &HeaderMap) -> Result<String, AuthError> {
+/// Validate an incoming request and return the internal user ID.
+async fn validate_request(
+    pool: &PgPool,
+    headers: &HeaderMap,
+    jwks: Option<&JwksManager>,
+) -> Result<String, AuthError> {
     match auth_mode() {
         "local" => validate_local(pool).await,
-        _ => validate_oauth(pool, headers).await,
+        _ => validate_oauth(pool, headers, jwks).await,
     }
 }
 
@@ -162,14 +175,57 @@ async fn validate_local(pool: &PgPool) -> Result<String, AuthError> {
 
 // ── OAuth mode ───────────────────────────────────────────────────────────
 
-async fn validate_oauth(pool: &PgPool, headers: &HeaderMap) -> Result<String, AuthError> {
-    // 1. Extract session token from cookies
+/// Authenticate via OIDC access token (Bearer header) or NextAuth session cookie.
+///
+/// Tries the Bearer token first (via JWKS validation), then falls back to
+/// the NextAuth session cookie (HS256 with NEXTAUTH_SECRET).
+async fn validate_oauth(
+    pool: &PgPool,
+    headers: &HeaderMap,
+    jwks: Option<&JwksManager>,
+) -> Result<String, AuthError> {
+    // 1. Try OIDC access token from Authorization header
+    if let Some(sub) = try_bearer_jwt(headers, jwks).await {
+        return lookup_user(pool, &sub).await;
+    }
+
+    // 2. Fall back to NextAuth session cookie
+    validate_nextauth_cookie(pool, headers).await
+}
+
+/// Try to validate a non-`oc_` Bearer token as an OIDC access token.
+/// Returns the `sub` claim on success, `None` if no valid token found.
+async fn try_bearer_jwt(headers: &HeaderMap, jwks: Option<&JwksManager>) -> Option<String> {
+    let jwks = jwks?;
+
+    let auth_header = headers.get(hyper::header::AUTHORIZATION)?.to_str().ok()?;
+
+    let token = auth_header
+        .strip_prefix("Bearer ")
+        .or_else(|| auth_header.strip_prefix("bearer "))?;
+
+    // Skip oc_ tokens — those are API keys handled elsewhere
+    if token.starts_with("oc_") {
+        return None;
+    }
+
+    match jwks.validate(token).await {
+        Ok(claims) => Some(claims.sub),
+        Err(e) => {
+            warn!(error = %e, "OIDC bearer auth: JWT validation failed");
+            None
+        }
+    }
+}
+
+/// Validate a NextAuth session cookie (HS256 JWT signed with NEXTAUTH_SECRET).
+async fn validate_nextauth_cookie(pool: &PgPool, headers: &HeaderMap) -> Result<String, AuthError> {
     let cookie_header = headers
         .get(hyper::header::COOKIE)
         .and_then(|v| v.to_str().ok())
         .ok_or_else(|| {
             warn!("oauth auth: no cookie header");
-            AuthError("missing cookie".to_string())
+            AuthError("missing authentication".to_string())
         })?;
 
     let token = parse_cookie(cookie_header, "authjs.session-token").ok_or_else(|| {
@@ -177,13 +233,11 @@ async fn validate_oauth(pool: &PgPool, headers: &HeaderMap) -> Result<String, Au
         AuthError("missing session token".to_string())
     })?;
 
-    // 2. Read NEXTAUTH_SECRET
     let secret = nextauth_secret().ok_or_else(|| {
         warn!("oauth auth: NEXTAUTH_SECRET not set");
         AuthError("server misconfigured".to_string())
     })?;
 
-    // 3. Decode JWT (HS256)
     let mut validation = Validation::new(Algorithm::HS256);
     validation.required_spec_claims.clear();
     validation.validate_exp = false;
@@ -194,28 +248,30 @@ async fn validate_oauth(pool: &PgPool, headers: &HeaderMap) -> Result<String, Au
         &validation,
     )
     .map_err(|e| {
-        warn!(error = %e, "oauth auth: JWT decode failed");
+        warn!(error = %e, "oauth auth: NextAuth JWT decode failed");
         AuthError("invalid session token".to_string())
     })?;
 
-    let sub = &token_data.claims.sub;
+    lookup_user(pool, &token_data.claims.sub).await
+}
 
-    // 4. Look up user by external auth ID
-    let user = db::find_user_by_external_auth_id(pool, sub)
+// ── Helpers ──────────────────────────────────────────────────────────────
+
+/// Look up an internal user ID from an external auth ID (OIDC `sub` or NextAuth subject).
+async fn lookup_user(pool: &PgPool, external_auth_id: &str) -> Result<String, AuthError> {
+    let user = db::find_user_by_external_auth_id(pool, external_auth_id)
         .await
         .map_err(|e| {
             warn!(error = %e, "oauth auth: db error");
             AuthError("internal error".to_string())
         })?
         .ok_or_else(|| {
-            warn!(sub = %sub, "oauth auth: user not found");
+            warn!(sub = %external_auth_id, "oauth auth: user not found");
             AuthError("user not found".to_string())
         })?;
 
     Ok(user.id)
 }
-
-// ── Helpers ──────────────────────────────────────────────────────────────
 
 /// Parse a specific cookie value from a Cookie header string.
 fn parse_cookie<'a>(cookie_header: &'a str, name: &str) -> Option<&'a str> {

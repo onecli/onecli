@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 import type { NextRequest } from "next/server";
 import {
   IS_CLOUD,
-  GOOGLE_CLIENT_ID,
+  OAUTH_CLIENT_ID,
   NEXTAUTH_SECRET,
   SECRET_ENCRYPTION_KEY,
 } from "@/lib/env";
@@ -15,8 +15,8 @@ type SetupErrorCode = "oauth-misconfigured" | "missing-encryption-key";
 const getSetupError = (): SetupErrorCode | null => {
   if (IS_CLOUD) return null;
 
-  // NEXTAUTH_SECRET is set but Google OAuth creds are missing
-  if (NEXTAUTH_SECRET && !GOOGLE_CLIENT_ID) {
+  // NEXTAUTH_SECRET is set but OIDC provider creds are missing
+  if (NEXTAUTH_SECRET && !OAUTH_CLIENT_ID) {
     return "oauth-misconfigured";
   }
 

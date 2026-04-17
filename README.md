@@ -125,13 +125,16 @@ Dashboard at **http://localhost:10254**, gateway at **http://localhost:10255**.
 
 All environment variables are optional for local development:
 
-| Variable                | Description                       | Default            |
-| ----------------------- | --------------------------------- | ------------------ |
-| `DATABASE_URL`          | PostgreSQL connection string      | See `.env.example` |
-| `NEXTAUTH_SECRET`       | Enables Google OAuth (multi-user) | Single-user mode   |
-| `GOOGLE_CLIENT_ID`      | Google OAuth client ID            | —                  |
-| `GOOGLE_CLIENT_SECRET`  | Google OAuth client secret        | —                  |
-| `SECRET_ENCRYPTION_KEY` | AES-256-GCM encryption key        | Auto-generated     |
+| Variable                | Description                                | Default            |
+| ----------------------- | ------------------------------------------ | ------------------ |
+| `DATABASE_URL`          | PostgreSQL connection string               | See `.env.example` |
+| `NEXTAUTH_SECRET`       | Enables OIDC login (multi-user)            | Single-user mode   |
+| `OAUTH_ISSUER`          | OIDC provider issuer URL                   | —                  |
+| `OAUTH_CLIENT_ID`       | OIDC client ID                             | —                  |
+| `OAUTH_CLIENT_SECRET`   | OIDC client secret                         | —                  |
+| `GOOGLE_CLIENT_ID`      | Google Workspace app connections client ID | —                  |
+| `GOOGLE_CLIENT_SECRET`  | Google Workspace app connections secret    | —                  |
+| `SECRET_ENCRYPTION_KEY` | AES-256-GCM encryption key                 | Auto-generated     |
 
 ## Contributing
 

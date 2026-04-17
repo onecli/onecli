@@ -1,5 +1,5 @@
 import { readFileSync } from "fs";
-import { EDITION, GOOGLE_CLIENT_ID, NEXTAUTH_SECRET } from "@/lib/env";
+import { EDITION, OAUTH_CLIENT_ID, NEXTAUTH_SECRET } from "@/lib/env";
 
 interface RuntimeConfig {
   authMode: "cloud" | "oauth" | "local";
@@ -33,7 +33,7 @@ export const getRuntimeConfig = (): RuntimeConfig => {
     // are client-rendered behind auth anyway, the fallback value is fine.
     cached = {
       authMode: NEXTAUTH_SECRET ? "oauth" : "local",
-      oauthConfigured: !!GOOGLE_CLIENT_ID,
+      oauthConfigured: !!OAUTH_CLIENT_ID,
     };
     return cached;
   }

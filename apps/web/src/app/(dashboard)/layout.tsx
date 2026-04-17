@@ -34,7 +34,7 @@ export default function DashboardLayout({
 
   const initSession = useCallback(async () => {
     try {
-      const res = await fetch("/api/auth/session");
+      const res = await fetch("/api/auth/sync");
       if (!res.ok) {
         signOutRef.current();
         return;

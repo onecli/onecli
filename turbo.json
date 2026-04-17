@@ -16,6 +16,14 @@
     "STRIPE_BIZ_PRICE_ID",
     "GOOGLE_CLIENT_ID",
     "GOOGLE_CLIENT_SECRET",
+    "OAUTH_ISSUER",
+    "OAUTH_JWKS_URL",
+    "OAUTH_AUTHORIZATION_URL",
+    "OAUTH_TOKEN_URL",
+    "OAUTH_USERINFO_URL",
+    "OAUTH_CLIENT_ID",
+    "OAUTH_CLIENT_SECRET",
+    "OAUTH_AUDIENCE",
     "OAUTH_STATE_SECRET",
     "NEXT_PUBLIC_APP_URL",
     "SECRET_ENCRYPTION_KEY",
@@ -57,7 +65,10 @@
         "REDIS_PORT",
         "REDIS_PASSWORD",
         "REDIS_TLS",
-        "COGNITO_USER_POOL_ID"
+        "COGNITO_USER_POOL_ID",
+        "AUTH_MODE",
+        "OAUTH_ISSUER",
+        "OAUTH_AUDIENCE"
       ]
     },
     "@onecli/gateway#check": {

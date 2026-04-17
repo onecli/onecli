@@ -34,6 +34,7 @@ mod crypto;
 mod db;
 mod gateway;
 mod inject;
+mod jwks;
 mod policy;
 mod vault;
 
@@ -152,6 +153,21 @@ async fn main() -> Result<()> {
     // OSS: in-memory DashMap + tokio channels. Cloud: Redis + BLPOP.
     let approval_store = approval::create_store().await?;
 
+    // Initialize OIDC JWKS manager for OAuth access token validation.
+    // Optional: enabled when OAUTH_ISSUER is set. The gateway also accepts
+    // NextAuth session cookies (HS256 via NEXTAUTH_SECRET) as a fallback,
+    // so JWKS is not required for browser-based auth to work.
+    let jwks = match std::env::var("OAUTH_ISSUER") {
+        Ok(issuer) => {
+            let audience = std::env::var("OAUTH_AUDIENCE")
+                .context("OAUTH_AUDIENCE must be set when OAUTH_ISSUER is set")?;
+            let jwks_url = std::env::var("OAUTH_JWKS_URL").ok();
+            let manager = jwks::JwksManager::new(&issuer, audience, jwks_url).await?;
+            Some(manager)
+        }
+        Err(_) => None,
+    };
+
     info!(port = cli.port, "gateway ready");
 
     // Start the gateway server (blocks forever)
@@ -162,6 +178,7 @@ async fn main() -> Result<()> {
         vault_service,
         cache,
         approval_store,
+        jwks,
     );
     server.run().await
 }

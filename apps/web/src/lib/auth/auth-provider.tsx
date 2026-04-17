@@ -45,7 +45,7 @@ const OAuthInner = ({ children }: { children: ReactNode }) => {
   }, [session]);
 
   const signIn = useCallback(async () => {
-    await nextAuthSignIn("google");
+    await nextAuthSignIn("oidc");
   }, []);
 
   const signOut = useCallback(async () => {

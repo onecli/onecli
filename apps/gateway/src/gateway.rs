@@ -40,6 +40,7 @@ use crate::ca::CertificateAuthority;
 use crate::cache::CacheStore;
 use crate::connect::{self, AppConnectionResult, ConnectError, PolicyEngine};
 use crate::inject;
+use crate::jwks::JwksManager;
 use crate::vault;
 
 // ── GatewayState ───────────────────────────────────────────────────────
@@ -74,6 +75,9 @@ pub(crate) struct GatewayState {
     pub vault_service: Arc<vault::VaultService>,
     /// Manual approval store for held requests.
     pub approval_store: Arc<dyn ApprovalStore>,
+    /// OIDC JWKS manager for OAuth access token validation.
+    /// `None` in local auth mode (no OIDC provider configured).
+    pub jwks: Option<JwksManager>,
 }
 
 // ── GatewayServer ───────────────────────────────────────────────────────
@@ -137,6 +141,7 @@ impl GatewayServer {
         vault_service: Arc<vault::VaultService>,
         cache: Arc<dyn CacheStore>,
         approval_store: Arc<dyn ApprovalStore>,
+        jwks: Option<JwksManager>,
     ) -> Self {
         let global_skip = std::env::var("GATEWAY_DANGER_ACCEPT_INVALID_CERTS").is_ok();
         let skip_verify_hosts = Arc::new(parse_skip_verify_hosts());
@@ -156,6 +161,7 @@ impl GatewayServer {
             cache,
             vault_service,
             approval_store,
+            jwks,
         };
 
         Self { state, port }
