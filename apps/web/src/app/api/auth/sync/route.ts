@@ -4,7 +4,6 @@ import { getServerSession } from "@/lib/auth/server";
 import { verifyAndResolveIdentity } from "@/lib/validate-jwt";
 import { logger } from "@/lib/logger";
 import { DEFAULT_AGENT_NAME } from "@/lib/constants";
-import { seedDemoSecret } from "@/lib/services/secret-service";
 import { generateApiKey } from "@/lib/services/api-key-service";
 import { generateAccessToken } from "@/lib/services/agent-service";
 import { getSessionAttributes, onUserCreated } from "@/lib/auth/session-hooks";
@@ -16,7 +15,7 @@ import { getSessionAttributes, onUserCreated } from "@/lib/auth/session-hooks";
  * 1. Reads the auth session (cookie/token) or validates a JWT Bearer token
  * 2. Upserts the user in the database
  * 3. Ensures the user has an Account + AccountMember + ApiKey
- * 4. Seeds defaults (agent, demo secret) into the account
+ * 4. Seeds the default agent into the account
  * 5. Returns the user profile
  *
  * Called by the login page after auth, by the dashboard layout on mount,
@@ -77,10 +76,7 @@ export const GET = async (request: NextRequest) => {
     // Ensure the user has an Account. Create one if this is their first login.
     let membership = await db.accountMember.findFirst({
       where: { userId: user.id },
-      select: {
-        accountId: true,
-        account: { select: { demoSeeded: true } },
-      },
+      select: { accountId: true },
     });
 
     if (!membership) {
@@ -90,7 +86,7 @@ export const GET = async (request: NextRequest) => {
           createdByUserId: user.id,
           createdByUserEmail: user.email,
         },
-        select: { id: true, demoSeeded: true },
+        select: { id: true },
       });
 
       await db.accountMember.create({
@@ -112,47 +108,27 @@ export const GET = async (request: NextRequest) => {
         },
       });
 
-      membership = {
-        accountId: account.id,
-        account: { demoSeeded: account.demoSeeded },
-      };
+      membership = { accountId: account.id };
 
       onUserCreated({ email: user.email, name: user.name }, extra);
     }
 
     const accountId = membership.accountId;
-    const demoSeeded = membership.account.demoSeeded;
 
     // Seed defaults into the account — idempotent, skips anything that already exists
-    const ops = [];
-
     const hasDefaultAgent = await db.agent.findFirst({
       where: { accountId, isDefault: true },
       select: { id: true },
     });
 
     if (!hasDefaultAgent) {
-      ops.push(
-        db.agent.create({
-          data: {
-            name: DEFAULT_AGENT_NAME,
-            accessToken: generateAccessToken(),
-            isDefault: true,
-            accountId,
-          },
-        }),
-      );
-    }
-
-    if (ops.length > 0) {
-      await db.$transaction(ops);
-    }
-
-    if (!demoSeeded) {
-      await seedDemoSecret(accountId);
-      await db.account.update({
-        where: { id: accountId },
-        data: { demoSeeded: true },
+      await db.agent.create({
+        data: {
+          name: DEFAULT_AGENT_NAME,
+          accessToken: generateAccessToken(),
+          isDefault: true,
+          accountId,
+        },
       });
     }
 
