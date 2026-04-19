@@ -10,28 +10,30 @@ datasource db {
 // ── Account & User ──────────────────────────────────────────────────────
 
 model Account {
-  id                 String   @id @default(uuid())
-  name               String?
-  stripeCustomerId   String?  @unique @map("stripe_customer_id")
-  subscriptionStatus String   @default("free") @map("subscription_status")
-  demoSeeded         Boolean  @default(false) @map("demo_seeded")
-  createdByUserId    String?  @map("created_by_user_id")
-  createdByUserEmail String?  @map("created_by_user_email")
-  createdAt          DateTime @default(now()) @map("created_at")
-  updatedAt          DateTime @updatedAt @map("updated_at")
+  id                    String    @id @default(uuid())
+  name                  String?
+  stripeCustomerId      String?   @unique @map("stripe_customer_id")
+  subscriptionStatus    String    @default("free") @map("subscription_status")
+  demoSeeded            Boolean   @default(false) @map("demo_seeded")
+  onboardingCompletedAt DateTime? @map("onboarding_completed_at")
+  createdByUserId       String?   @map("created_by_user_id")
+  createdByUserEmail    String?   @map("created_by_user_email")
+  createdAt             DateTime  @default(now()) @map("created_at")
+  updatedAt             DateTime  @updatedAt @map("updated_at")
 
-  createdByUser     User?              @relation("AccountCreator", fields: [createdByUserId], references: [id])
-  members           AccountMember[]
-  apiKeys           ApiKey[]
-  agents            Agent[]
-  secrets           Secret[]
-  policyRules       PolicyRule[]
-  connectedServices ConnectedService[]
-  auditLogs         AuditLog[]
-  vaultConnections  VaultConnection[]
-  onboardingSurvey  OnboardingSurvey?
-  appConnections    AppConnection[]
-  appConfigs        AppConfig[]
+  createdByUser       User?                @relation("AccountCreator", fields: [createdByUserId], references: [id])
+  members             AccountMember[]
+  apiKeys             ApiKey[]
+  agents              Agent[]
+  secrets             Secret[]
+  policyRules         PolicyRule[]
+  connectedServices   ConnectedService[]
+  auditLogs           AuditLog[]
+  vaultConnections    VaultConnection[]
+  onboardingSurvey    OnboardingSurvey?
+  appConnections      AppConnection[]
+  appConfigs          AppConfig[]
+  platformDeployments PlatformDeployment[]
 
   @@map("accounts")
 }
@@ -223,17 +225,18 @@ model VaultConnection {
 }
 
 model OnboardingSurvey {
-  id        String   @id @default(uuid())
-  accountId String   @unique @map("account_id")
-  userId    String   @map("user_id")
-  userEmail String   @map("user_email")
-  useCase   String?  @map("use_case")
-  discovery String[] @default([])
-  responses Json     @default("{}")
-  createdAt DateTime @default(now()) @map("created_at")
-  updatedAt DateTime @updatedAt @map("updated_at")
-  account   Account  @relation(fields: [accountId], references: [id])
-  user      User     @relation(fields: [userId], references: [id])
+  id         String   @id @default(uuid())
+  accountId  String   @unique @map("account_id")
+  userId     String   @map("user_id")
+  userEmail  String   @map("user_email")
+  useCase    String?  @map("use_case")
+  discovery  String[] @default([])
+  responses  Json     @default("{}")
+  setupState Json?    @map("setup_state")
+  createdAt  DateTime @default(now()) @map("created_at")
+  updatedAt  DateTime @updatedAt @map("updated_at")
+  account    Account  @relation(fields: [accountId], references: [id])
+  user       User     @relation(fields: [userId], references: [id])
 
   @@map("onboarding_surveys")
 }
@@ -318,4 +321,22 @@ model CliAuthSession {
   createdAt DateTime @default(now()) @map("created_at")
 
   @@map("cli_auth_sessions")
+}
+
+model PlatformDeployment {
+  id         String   @id @default(uuid())
+  accountId  String   @map("account_id")
+  vmName     String   @unique @map("vm_name")
+  vmUrl      String   @map("vm_url")
+  proxyToken String?  @map("proxy_token")
+  imageTag   String?  @map("image_tag")
+  status     String   @default("provisioning") @map("status")
+  name       String   @default("Andy") @map("name")
+  channels   Json     @default("[]")
+  createdAt  DateTime @default(now()) @map("created_at")
+  updatedAt  DateTime @updatedAt @map("updated_at")
+  account    Account  @relation(fields: [accountId], references: [id])
+
+  @@index([accountId])
+  @@map("platform_deployments")
 }

@@ -24,6 +24,9 @@ const nextConfig = {
           "@/lib/auth/login-content": "@/cloud/auth/login-content",
           "@/lib/user-plan": "@/cloud/user-plan",
           "@/lib/auth/session-hooks": "@/cloud/auth/session-hooks",
+          "@/lib/deploy/nav-deploy": "@/cloud/deploy/nav-deploy",
+          "@/lib/deploy/deploy-page": "@/cloud/deploy/deploy-page",
+          "@/lib/deploy/deploy-new-page": "@/cloud/deploy/deploy-new-page",
           "@/lib/components/request-app-slot": "@/cloud/apps/request-app-slot",
         }
       : {},

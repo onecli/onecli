@@ -78,6 +78,10 @@ export const DISCORD_WEBHOOK_URL = process.env.DISCORD_WEBHOOK_URL ?? "";
 
 export const ENVIRONMENT = process.env.ENVIRONMENT ?? "dev";
 
+// ── Cloud: exe.dev (NanoClaw deploy) ────────────────────────────────────
+
+export const EXE_DEV_TOKEN = process.env.EXE_DEV_TOKEN ?? "";
+
 // ── Cloud: KMS ──────────────────────────────────────────────────────────
 
 export const KMS_KEY_ARN = process.env.KMS_KEY_ARN ?? "";

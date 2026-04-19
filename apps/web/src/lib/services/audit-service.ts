@@ -19,6 +19,7 @@ export const AUDIT_SERVICES = {
   API_KEY: "api-key",
   APP_CONNECTION: "app-connection",
   APP_CONFIG: "app-config",
+  DEPLOYMENT: "deployment",
 } as const;
 
 export const AUDIT_STATUS = {

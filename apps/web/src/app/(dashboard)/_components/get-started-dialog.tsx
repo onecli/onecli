@@ -63,11 +63,11 @@ export const GetStartedDialog = ({
     if (installInfo.appUrl !== "https://app.onecli.sh") {
       params.push(`url=${encodeURIComponent(installInfo.appUrl)}`);
     }
-    return `curl -fsSL "${installInfo.appUrl}/api/install/${path}?${params.join("&")}" | sh`;
+    return `curl -fsSL "${installInfo.appUrl}/api/${path}?${params.join("&")}" | sh`;
   };
 
-  const installCommand = buildCurlCommand("nanoclaw");
-  const migrateCommand = buildCurlCommand("cloud");
+  const installCommand = buildCurlCommand("install/nanoclaw");
+  const migrateCommand = buildCurlCommand("migrate/nanoclaw");
 
   const demoCommand = demoInfo
     ? `curl -k -x http://x:${demoInfo.agentToken}@${demoInfo.gatewayUrl} -H "Authorization: Bearer FAKE_TOKEN" https://httpbin.org/anything`

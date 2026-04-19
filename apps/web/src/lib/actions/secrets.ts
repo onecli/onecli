@@ -81,6 +81,15 @@ export const seedDemoSecret = async () => {
   await seedDemoSecretService(accountId);
 };
 
+export const hasAnthropicSecret = async (): Promise<boolean> => {
+  const { accountId } = await resolveUser();
+  const secret = await db.secret.findFirst({
+    where: { accountId, type: "anthropic" },
+    select: { id: true },
+  });
+  return !!secret;
+};
+
 export const getDemoInfo = async () => {
   const { accountId } = await resolveUser();
 
@@ -101,6 +110,48 @@ export const getDemoInfo = async () => {
     agentToken: agent.accessToken,
     gatewayUrl: GATEWAY_BASE_URL,
   };
+};
+
+export const validateAnthropicKey = async (
+  key: string,
+): Promise<{ valid: boolean; error?: string }> => {
+  // OAuth subscription tokens can't be validated against /v1/models,
+  // so we only do format validation for those.
+  if (key.startsWith("sk-ant-oat")) {
+    return { valid: true };
+  }
+
+  try {
+    const res = await fetch("https://api.anthropic.com/v1/models", {
+      method: "GET",
+      headers: {
+        "x-api-key": key,
+        "anthropic-version": "2023-06-01",
+      },
+    });
+
+    if (res.ok) return { valid: true };
+
+    if (res.status === 401) {
+      return { valid: false, error: "Invalid API key." };
+    }
+    if (res.status === 403) {
+      return {
+        valid: false,
+        error: "This key doesn't have permission to access the API.",
+      };
+    }
+
+    return {
+      valid: false,
+      error: `Anthropic API returned an unexpected status (${res.status}).`,
+    };
+  } catch {
+    return {
+      valid: false,
+      error: "Could not reach Anthropic API to validate the key.",
+    };
+  }
 };
 
 export const updateSecret = async (

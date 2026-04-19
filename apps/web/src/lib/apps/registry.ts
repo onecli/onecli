@@ -17,14 +17,15 @@ import { googleTasks } from "./google-tasks";
 import { resend } from "./resend";
 
 export const apps: AppDefinition[] = [
-  github,
   gmail,
+  github,
+  googleDrive,
+  googleCalendar,
+  resend,
   googleAdmin,
   googleAnalytics,
-  googleCalendar,
   googleClassroom,
   googleDocs,
-  googleDrive,
   googleForms,
   googleMeet,
   googlePhotos,
@@ -32,7 +33,6 @@ export const apps: AppDefinition[] = [
   googleSheets,
   googleSlides,
   googleTasks,
-  resend,
 ];
 
 export const getApp = (id: string): AppDefinition | undefined =>

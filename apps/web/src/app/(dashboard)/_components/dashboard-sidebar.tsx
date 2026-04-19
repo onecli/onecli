@@ -5,6 +5,7 @@ import Image from "next/image";
 import Link from "next/link";
 import { NavMain } from "./nav-main";
 import { NavUser } from "./nav-user";
+import { NavDeploy } from "@/lib/deploy/nav-deploy";
 import { navItems } from "@/lib/nav-items";
 import {
   Sidebar,
@@ -53,6 +54,7 @@ export const DashboardSidebar = ({
       <SidebarContent>
         <NavMain items={navItems} />
       </SidebarContent>
+      <NavDeploy />
       <SidebarFooter className="justify-center group-data-[collapsible=icon]:px-0">
         <NavUser />
       </SidebarFooter>

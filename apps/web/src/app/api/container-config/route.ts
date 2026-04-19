@@ -1,4 +1,4 @@
-import { NextRequest, NextResponse } from "next/server";
+import { NextRequest, NextResponse, after } from "next/server";
 import { db } from "@onecli/db";
 import { resolveApiAuth } from "@/lib/api-auth";
 import { unauthorized } from "@/lib/api-utils";
@@ -98,6 +98,9 @@ export async function GET(request: NextRequest) {
         ? { CLAUDE_CODE_OAUTH_TOKEN: "placeholder" }
         : { ANTHROPIC_API_KEY: "placeholder" };
 
+    // Mark agent as connected after the response is sent
+    after(() => markAgentConnected(auth.accountId));
+
     return NextResponse.json({
       env: {
         // Proxy — uppercase + lowercase (some tools only check one)
@@ -127,3 +130,33 @@ export async function GET(request: NextRequest) {
     );
   }
 }
+
+/**
+ * Update the onboarding survey to record that the agent container is up.
+ * Skips the write if already marked to avoid repeated DB calls.
+ */
+const markAgentConnected = async (accountId: string) => {
+  const survey = await db.onboardingSurvey.findUnique({
+    where: { accountId },
+    select: { setupState: true },
+  });
+
+  if (!survey) return; // no onboarding in progress
+
+  const state =
+    survey.setupState && typeof survey.setupState === "object"
+      ? (survey.setupState as Record<string, unknown>)
+      : {};
+
+  if (state.connectedAt) return; // already marked
+
+  await db.onboardingSurvey.update({
+    where: { accountId },
+    data: {
+      setupState: {
+        ...state,
+        connectedAt: new Date().toISOString(),
+      },
+    },
+  });
+};
