@@ -32,7 +32,8 @@
     "DISCORD_WEBHOOK_URL",
     "ENVIRONMENT",
     "RESEND_API_KEY",
-    "NEXT_PUBLIC_API_URL"
+    "NEXT_PUBLIC_API_URL",
+    "EXE_DEV_TOKEN"
   ],
   "tasks": {
     "build": {
