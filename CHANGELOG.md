@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.18.1](https://github.com/onecli/onecli/compare/v1.18.0...v1.18.1) (2026-04-20)
+
+
+### Bug Fixes
+
+* sync shared changes - deploy pages, migration export, schema updates ([#196](https://github.com/onecli/onecli/issues/196)) ([1747791](https://github.com/onecli/onecli/commit/1747791016bc2bf8f8445682ab51e2d72eee1abb))
+
 ## [1.18.0](https://github.com/onecli/onecli/compare/v1.17.0...v1.18.0) (2026-04-16)
 
 
