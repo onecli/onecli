@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
 import { resolveApiAuth } from "@/lib/api-auth";
 import { handleServiceError, unauthorized } from "@/lib/api-utils";
+import { IS_CLOUD } from "@/lib/env";
 import { exportToCloud } from "@/lib/services/migrate-export-service";
 import { logger } from "@/lib/logger";
 
@@ -17,6 +18,10 @@ const exportSchema = z.object({
  * never appear in the response.
  */
 export const POST = async (request: NextRequest) => {
+  if (IS_CLOUD) {
+    return NextResponse.json({ error: "Not found" }, { status: 404 });
+  }
+
   try {
     const auth = await resolveApiAuth(request);
     if (!auth) return unauthorized();
