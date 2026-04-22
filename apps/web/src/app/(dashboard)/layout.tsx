@@ -7,6 +7,7 @@ import { SidebarInset, SidebarProvider } from "@onecli/ui/components/sidebar";
 import { DashboardSidebar } from "@dashboard/dashboard-sidebar";
 import { DashboardHeader } from "@dashboard/dashboard-header";
 import { SettingsNav } from "@/app/(dashboard)/settings/_components/settings-nav";
+import { SettingsMobileNav } from "@/app/(dashboard)/settings/_components/settings-mobile-nav";
 import { useAuth } from "@/providers/auth-provider";
 import { checkDashboardRedirect } from "@/lib/user-plan";
 
@@ -88,7 +89,8 @@ export default function DashboardLayout({
             </aside>
           )}
           <ScrollArea className="h-full min-h-0 flex-1">
-            <main className="p-6">{children}</main>
+            {isSettings && <SettingsMobileNav />}
+            <main className="p-4 sm:p-6">{children}</main>
           </ScrollArea>
         </div>
       </SidebarInset>

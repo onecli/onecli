@@ -83,7 +83,7 @@ export const createAgent = async (
         name: trimmed,
         identifier: trimmedIdentifier,
         accessToken,
-        secretMode: "selective",
+        secretMode: "all",
         accountId,
       },
       select: {

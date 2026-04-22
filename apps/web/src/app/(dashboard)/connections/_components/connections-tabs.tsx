@@ -71,12 +71,13 @@ export const ConnectionsTabs = () => {
 
   return (
     <AnimatedTabs value={activeTab} onValueChange={handleTabChange}>
-      <AnimatedTabList className="justify-between">
+      <AnimatedTabList className="sm:justify-between">
         <div className="flex">
           <AnimatedTabTrigger value="apps">Apps</AnimatedTabTrigger>
           <AnimatedTabTrigger value="secrets">Secrets</AnimatedTabTrigger>
           <AnimatedTabTrigger value="vaults">
-            External Vaults
+            <span className="sm:hidden">Vaults</span>
+            <span className="hidden sm:inline">External Vaults</span>
           </AnimatedTabTrigger>
         </div>
         <AnimatedTabTrigger

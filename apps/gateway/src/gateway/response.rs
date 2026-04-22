@@ -56,6 +56,13 @@ fn json_error_axum(status: StatusCode, body: serde_json::Value) -> Response<axum
     response
 }
 
+/// Mark a response as non-transient so clients know not to retry.
+fn with_no_retry<B>(mut resp: Response<B>) -> Response<B> {
+    resp.headers_mut()
+        .insert("x-should-retry", HeaderValue::from_static("false"));
+    resp
+}
+
 /// 502 Bad Gateway — generic internal error (axum body).
 pub(super) fn bad_gateway() -> Response<axum::body::Body> {
     json_error_axum(
@@ -85,7 +92,10 @@ fn multiple_connections_json(
 pub(super) fn multiple_connections_axum(
     connections: &[crate::connect::ConnectionChoice],
 ) -> Response<axum::body::Body> {
-    json_error_axum(StatusCode::CONFLICT, multiple_connections_json(connections))
+    with_no_retry(json_error_axum(
+        StatusCode::CONFLICT,
+        multiple_connections_json(connections),
+    ))
 }
 
 /// JSON error response for requests to a known app that has no credentials configured.
@@ -99,7 +109,7 @@ pub(crate) fn app_not_connected<S>(
 ) -> Response<ForwardBody<S>> {
     let base = dashboard_url();
     let connect_url = format!("{base}/connections?connect={provider}");
-    json_error(
+    with_no_retry(json_error(
         status,
         serde_json::json!({
             "error": "app_not_connected",
@@ -107,7 +117,7 @@ pub(crate) fn app_not_connected<S>(
             "provider": provider,
             "connect_url": connect_url,
         }),
-    )
+    ))
 }
 
 /// JSON error response when credentials exist for a host but the agent lacks access (selective mode).
@@ -123,7 +133,7 @@ pub(crate) fn access_restricted<S>(
         Some(id) => format!("{base}/agents?manage={}", id.get(..8).unwrap_or(id)),
         None => format!("{base}/agents"),
     };
-    json_error(
+    with_no_retry(json_error(
         status,
         serde_json::json!({
             "error": "access_restricted",
@@ -131,7 +141,7 @@ pub(crate) fn access_restricted<S>(
             "provider": provider,
             "manage_url": manage_url,
         }),
-    )
+    ))
 }
 
 /// JSON error response when no credentials are configured for an unknown host.
@@ -150,7 +160,7 @@ pub(crate) fn credential_not_found<S>(
     let secret_url = format!(
         "{base}/connections/secrets?create=generic&host={encoded_host}&path={encoded_path}"
     );
-    json_error(
+    with_no_retry(json_error(
         status,
         serde_json::json!({
             "error": "credential_not_found",
@@ -179,14 +189,17 @@ pub(crate) fn credential_not_found<S>(
             "path": path,
             "secret_url": secret_url,
         }),
-    )
+    ))
 }
 
 /// 409 Conflict — multiple connections exist for the same provider, agent must specify which one.
 pub(crate) fn multiple_connections<S>(
     connections: &[crate::connect::ConnectionChoice],
 ) -> Response<ForwardBody<S>> {
-    json_error(StatusCode::CONFLICT, multiple_connections_json(connections))
+    with_no_retry(json_error(
+        StatusCode::CONFLICT,
+        multiple_connections_json(connections),
+    ))
 }
 
 /// 404 Not Found — the requested connection ID does not exist.
@@ -195,7 +208,7 @@ pub(crate) fn connection_not_found<S>(
     connections: &[crate::connect::ConnectionChoice],
 ) -> Response<ForwardBody<S>> {
     let hdr = crate::connect::CONNECTION_ID_HEADER;
-    json_error(
+    with_no_retry(json_error(
         StatusCode::NOT_FOUND,
         serde_json::json!({
             "error": "connection_not_found",
@@ -203,7 +216,7 @@ pub(crate) fn connection_not_found<S>(
             "connections": connections,
             "header": hdr,
         }),
-    )
+    ))
 }
 
 /// 404 Not Found — the requested connection ID does not exist (axum body).
@@ -212,7 +225,7 @@ pub(super) fn connection_not_found_axum(
     connections: &[crate::connect::ConnectionChoice],
 ) -> Response<axum::body::Body> {
     let hdr = crate::connect::CONNECTION_ID_HEADER;
-    json_error_axum(
+    with_no_retry(json_error_axum(
         StatusCode::NOT_FOUND,
         serde_json::json!({
             "error": "connection_not_found",
@@ -220,7 +233,7 @@ pub(super) fn connection_not_found_axum(
             "connections": connections,
             "header": hdr,
         }),
-    )
+    ))
 }
 
 /// 502 Bad Gateway — rule resolution failed mid-session.
@@ -239,19 +252,19 @@ pub(crate) fn manual_approval_denied<S>(
     approval_id: &str,
     reason: &str,
 ) -> Response<ForwardBody<S>> {
-    json_error(
+    with_no_retry(json_error(
         StatusCode::FORBIDDEN,
         serde_json::json!({
             "error": "manual_approval_denied",
             "message": format!("This request was {reason} by an OneCLI manual approval policy."),
             "approval_id": approval_id,
         }),
-    )
+    ))
 }
 
 /// 403 Forbidden — request blocked by a policy rule.
 pub(crate) fn blocked_by_policy<S>(method: &str, path: &str) -> Response<ForwardBody<S>> {
-    json_error(
+    with_no_retry(json_error(
         StatusCode::FORBIDDEN,
         serde_json::json!({
             "error": "blocked_by_policy",
@@ -259,7 +272,7 @@ pub(crate) fn blocked_by_policy<S>(method: &str, path: &str) -> Response<Forward
             "method": method,
             "path": path,
         }),
-    )
+    ))
 }
 
 /// 429 Too Many Requests — request rate-limited by a policy rule.
@@ -298,6 +311,9 @@ pub(crate) fn approval_store_unavailable<S>() -> Response<ForwardBody<S>> {
 mod tests {
     use super::*;
 
+    type TestBody =
+        ForwardBody<futures_util::stream::Empty<Result<hyper::body::Frame<Bytes>, reqwest::Error>>>;
+
     #[test]
     fn proxy_auth_required_has_correct_status_and_header() {
         let resp = proxy_auth_required();
@@ -311,23 +327,18 @@ mod tests {
 
     #[test]
     fn app_not_connected_preserves_status() {
-        let resp: Response<
-            ForwardBody<
-                futures_util::stream::Empty<Result<hyper::body::Frame<Bytes>, reqwest::Error>>,
-            >,
-        > = app_not_connected(StatusCode::UNAUTHORIZED, "gmail", "Gmail");
+        let resp: Response<TestBody> =
+            app_not_connected(StatusCode::UNAUTHORIZED, "gmail", "Gmail");
         assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
         assert_eq!(
             resp.headers().get("content-type").unwrap(),
             "application/json"
         );
+        assert_eq!(resp.headers().get("x-should-retry").unwrap(), "false");
     }
 
     #[tokio::test]
     async fn app_not_connected_body_contains_provider_and_connect_url() {
-        type TestBody = ForwardBody<
-            futures_util::stream::Empty<Result<hyper::body::Frame<Bytes>, reqwest::Error>>,
-        >;
         let resp: Response<TestBody> = app_not_connected(StatusCode::FORBIDDEN, "github", "GitHub");
         assert_eq!(resp.status(), StatusCode::FORBIDDEN);
 
@@ -356,11 +367,7 @@ mod tests {
 
     #[test]
     fn access_restricted_preserves_status() {
-        let resp: Response<
-            ForwardBody<
-                futures_util::stream::Empty<Result<hyper::body::Frame<Bytes>, reqwest::Error>>,
-            >,
-        > = access_restricted(
+        let resp: Response<TestBody> = access_restricted(
             StatusCode::FORBIDDEN,
             "resend",
             "Resend",
@@ -371,13 +378,11 @@ mod tests {
             resp.headers().get("content-type").unwrap(),
             "application/json"
         );
+        assert_eq!(resp.headers().get("x-should-retry").unwrap(), "false");
     }
 
     #[tokio::test]
     async fn access_restricted_body_with_agent_id() {
-        type TestBody = ForwardBody<
-            futures_util::stream::Empty<Result<hyper::body::Frame<Bytes>, reqwest::Error>>,
-        >;
         let resp: Response<TestBody> = access_restricted(
             StatusCode::UNAUTHORIZED,
             "resend",
@@ -404,9 +409,6 @@ mod tests {
 
     #[tokio::test]
     async fn access_restricted_body_without_agent_id() {
-        type TestBody = ForwardBody<
-            futures_util::stream::Empty<Result<hyper::body::Frame<Bytes>, reqwest::Error>>,
-        >;
         let resp: Response<TestBody> =
             access_restricted(StatusCode::FORBIDDEN, "github", "GitHub", None);
         use http_body_util::BodyExt;
@@ -421,9 +423,6 @@ mod tests {
 
     #[tokio::test]
     async fn access_restricted_short_agent_id() {
-        type TestBody = ForwardBody<
-            futures_util::stream::Empty<Result<hyper::body::Frame<Bytes>, reqwest::Error>>,
-        >;
         let resp: Response<TestBody> =
             access_restricted(StatusCode::FORBIDDEN, "resend", "Resend", Some("abc"));
         use http_body_util::BodyExt;
@@ -440,15 +439,13 @@ mod tests {
 
     #[tokio::test]
     async fn credential_not_found_includes_host_and_secret_url() {
-        type TestBody = ForwardBody<
-            futures_util::stream::Empty<Result<hyper::body::Frame<Bytes>, reqwest::Error>>,
-        >;
         let resp: Response<TestBody> = credential_not_found(
             StatusCode::UNAUTHORIZED,
             "api.custom-service.com",
             "/v1/send",
         );
         assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(resp.headers().get("x-should-retry").unwrap(), "false");
 
         use http_body_util::BodyExt;
         let body = match resp.into_body() {
@@ -471,9 +468,6 @@ mod tests {
 
     #[tokio::test]
     async fn credential_not_found_encodes_special_characters() {
-        type TestBody = ForwardBody<
-            futures_util::stream::Empty<Result<hyper::body::Frame<Bytes>, reqwest::Error>>,
-        >;
         let resp: Response<TestBody> = credential_not_found(
             StatusCode::FORBIDDEN,
             "api.example.com",
@@ -500,9 +494,6 @@ mod tests {
 
     #[tokio::test]
     async fn multiple_connections_returns_409_with_choices() {
-        type TestBody = ForwardBody<
-            futures_util::stream::Empty<Result<hyper::body::Frame<Bytes>, reqwest::Error>>,
-        >;
         let connections = vec![
             crate::connect::ConnectionChoice {
                 id: "conn_1".to_string(),
@@ -517,6 +508,7 @@ mod tests {
         ];
         let resp: Response<TestBody> = multiple_connections(&connections);
         assert_eq!(resp.status(), StatusCode::CONFLICT);
+        assert_eq!(resp.headers().get("x-should-retry").unwrap(), "false");
 
         use http_body_util::BodyExt;
         let body = match resp.into_body() {
@@ -538,15 +530,45 @@ mod tests {
 
     #[test]
     fn multiple_connections_empty_list() {
-        let resp: Response<
-            ForwardBody<
-                futures_util::stream::Empty<Result<hyper::body::Frame<Bytes>, reqwest::Error>>,
-            >,
-        > = multiple_connections(&[]);
+        let resp: Response<TestBody> = multiple_connections(&[]);
         assert_eq!(resp.status(), StatusCode::CONFLICT);
         assert_eq!(
             resp.headers().get("content-type").unwrap(),
             "application/json"
         );
+        assert_eq!(resp.headers().get("x-should-retry").unwrap(), "false");
+    }
+
+    #[test]
+    fn connection_not_found_has_correct_status_and_headers() {
+        let resp: Response<TestBody> = connection_not_found("conn-xyz", &[]);
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+        assert_eq!(
+            resp.headers().get("content-type").unwrap(),
+            "application/json"
+        );
+        assert_eq!(resp.headers().get("x-should-retry").unwrap(), "false");
+    }
+
+    #[test]
+    fn manual_approval_denied_has_correct_status_and_headers() {
+        let resp: Response<TestBody> = manual_approval_denied("approval-123", "denied");
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+        assert_eq!(
+            resp.headers().get("content-type").unwrap(),
+            "application/json"
+        );
+        assert_eq!(resp.headers().get("x-should-retry").unwrap(), "false");
+    }
+
+    #[test]
+    fn blocked_by_policy_has_correct_status_and_headers() {
+        let resp: Response<TestBody> = blocked_by_policy("POST", "/api/v1/send");
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+        assert_eq!(
+            resp.headers().get("content-type").unwrap(),
+            "application/json"
+        );
+        assert_eq!(resp.headers().get("x-should-retry").unwrap(), "false");
     }
 }

@@ -66,6 +66,9 @@ export const COGNITO_USER_POOL_ID =
 
 export const STRIPE_SECRET_KEY = process.env.STRIPE_SECRET_KEY ?? "";
 
+export const STRIPE_STARTER_PRICE_ID =
+  process.env.STRIPE_STARTER_PRICE_ID ?? "";
+
 export const STRIPE_PRO_PRICE_ID = process.env.STRIPE_PRO_PRICE_ID ?? "";
 
 export const STRIPE_BIZ_PRICE_ID = process.env.STRIPE_BIZ_PRICE_ID ?? "";
@@ -86,6 +89,16 @@ export const EXE_DEV_TOKEN = process.env.EXE_DEV_TOKEN ?? "";
 
 export const KMS_KEY_ARN = process.env.KMS_KEY_ARN ?? "";
 
+// ── Cloud: Redis ────────────────────────────────────────────────────────
+
+export const REDIS_HOST = process.env.REDIS_HOST ?? "";
+
+export const REDIS_PORT = process.env.REDIS_PORT ?? "6379";
+
+export const REDIS_USERNAME = process.env.REDIS_USERNAME ?? "";
+
+export const REDIS_PASSWORD = process.env.REDIS_PASSWORD ?? "";
+
 // ── Gateway TLS ─────────────────────────────────────────────────────────
 
 export const GATEWAY_CA_CERT = process.env.GATEWAY_CA_CERT ?? "";
@@ -102,3 +115,14 @@ export const NEXT_RUNTIME = process.env.NEXT_RUNTIME ?? "";
 
 /** User home directory (system). */
 export const HOME = process.env.HOME ?? "";
+
+// ── Cloud: Telegram Managed Bots ───────────────────────────────────
+
+export const TELEGRAM_MANAGER_BOT_TOKEN =
+  process.env.TELEGRAM_MANAGER_BOT_TOKEN ?? "";
+
+export const TELEGRAM_MANAGER_BOT_USERNAME =
+  process.env.TELEGRAM_MANAGER_BOT_USERNAME ?? "";
+
+export const TELEGRAM_WEBHOOK_SECRET =
+  process.env.TELEGRAM_WEBHOOK_SECRET ?? "";
