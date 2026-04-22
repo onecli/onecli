@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.18.2](https://github.com/onecli/onecli/compare/v1.18.1...v1.18.2) (2026-04-22)
+
+
+### Bug Fixes
+
+* mobile layout fixes, Slack channel support, and deploy UX improvements ([#199](https://github.com/onecli/onecli/issues/199)) ([8054787](https://github.com/onecli/onecli/commit/80547874745ec3803dd30176aba27f07ffd2747f))
+
 ## [1.18.1](https://github.com/onecli/onecli/compare/v1.18.0...v1.18.1) (2026-04-20)
 
 
