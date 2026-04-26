@@ -34,6 +34,9 @@ export const AppsTab = () => {
   );
   const [configApp, setConfigApp] = useState<AppDefinition | null>(null);
   const [connectApp, setConnectApp] = useState<AppDefinition | null>(null);
+  const [connectAgentName, setConnectAgentName] = useState<
+    string | undefined
+  >();
   const [loading, setLoading] = useState(true);
 
   const fetchConnections = useCallback(async () => {
@@ -70,13 +73,16 @@ export const AppsTab = () => {
 
   useAppMessages({ onConnected: handleConnected, onConfigure: router.push });
 
-  const openConnectPopup = (provider: string) => {
+  const openConnectPopup = (provider: string, agentName?: string) => {
     const w = 520;
     const h = 700;
     const left = Math.round(window.screenX + (window.outerWidth - w) / 2);
     const top = Math.round(window.screenY + (window.outerHeight - h) / 2);
+    const params = agentName
+      ? `?agent_name=${encodeURIComponent(agentName)}`
+      : "";
     window.open(
-      `/app-connect/${provider}`,
+      `/app-connect/${provider}${params}`,
       `connect-${provider}`,
       `width=${w},height=${h},left=${left},top=${top},scrollbars=yes,resizable=yes`,
     );
@@ -99,7 +105,10 @@ export const AppsTab = () => {
     connectedProviders,
     configuredProviders,
     envDefaultProviders,
-    onConnect: setConnectApp,
+    onConnect: useCallback((app: AppDefinition, agentName?: string) => {
+      setConnectApp(app);
+      setConnectAgentName(agentName);
+    }, []),
     onConfigure: setConfigApp,
   });
 
@@ -141,18 +150,23 @@ export const AppsTab = () => {
 
       {connectApp && (
         <ConnectAppDialog
-          provider={connectApp.id}
           appName={connectApp.name}
           appIcon={connectApp.icon}
           appDarkIcon={connectApp.darkIcon}
+          agentName={connectAgentName}
           open={!!connectApp}
           onOpenChange={(open) => {
-            if (!open) setConnectApp(null);
+            if (!open) {
+              setConnectApp(null);
+              setConnectAgentName(undefined);
+            }
           }}
           onConnect={() => {
             const provider = connectApp.id;
+            const agent = connectAgentName;
             setConnectApp(null);
-            openConnectPopup(provider);
+            setConnectAgentName(undefined);
+            openConnectPopup(provider, agent);
           }}
         />
       )}

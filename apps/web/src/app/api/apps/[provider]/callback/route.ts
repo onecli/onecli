@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { getApp } from "@/lib/apps/registry";
 import { resolveOAuthCredentials } from "@/lib/apps/resolve-credentials";
 import { APP_URL } from "@/lib/env";
+import { invalidateGatewayCacheForAccount } from "@/lib/gateway-invalidate";
 import { verifyOAuthState } from "@/lib/oauth-state";
 import {
   createConnection,
@@ -93,14 +94,17 @@ export const GET = async (request: NextRequest, { params }: Params) => {
       });
     }
 
-    // Cache invalidation happens client-side: the success page sends
-    // postMessage("app-connected") to the parent window, which calls
-    // invalidateCache() via useInvalidateGatewayCache. We can't do it
-    // here because this request is a cross-origin redirect from the
-    // OAuth provider and doesn't carry the user's auth cookie.
+    // Invalidate gateway cache server-side so agents see the new
+    // connection immediately. Fire-and-forget — the client-side
+    // postMessage chain in the success page acts as a backup.
+    invalidateGatewayCacheForAccount(state.accountId);
 
+    const successParams = new URLSearchParams({ status: "success" });
+    if (state.agentName) {
+      successParams.set("agent_name", state.agentName as string);
+    }
     return NextResponse.redirect(
-      `${APP_URL}/app-connect/${provider}?status=success`,
+      `${APP_URL}/app-connect/${provider}?${successParams}`,
     );
   } catch (err) {
     logger.error({ err, provider }, "OAuth callback failed");

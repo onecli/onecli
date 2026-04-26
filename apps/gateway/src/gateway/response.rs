@@ -106,9 +106,16 @@ pub(crate) fn app_not_connected<S>(
     status: StatusCode,
     provider: &str,
     display_name: &str,
+    agent_name: Option<&str>,
 ) -> Response<ForwardBody<S>> {
     let base = dashboard_url();
-    let connect_url = format!("{base}/connections?connect={provider}");
+    let connect_url = match agent_name {
+        Some(name) => format!(
+            "{base}/connections?connect={provider}&source=agent&agent_name={}",
+            utf8_percent_encode(name, NON_ALPHANUMERIC)
+        ),
+        None => format!("{base}/connections?connect={provider}"),
+    };
     with_no_retry(json_error(
         status,
         serde_json::json!({
@@ -328,7 +335,7 @@ mod tests {
     #[test]
     fn app_not_connected_preserves_status() {
         let resp: Response<TestBody> =
-            app_not_connected(StatusCode::UNAUTHORIZED, "gmail", "Gmail");
+            app_not_connected(StatusCode::UNAUTHORIZED, "gmail", "Gmail", None);
         assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
         assert_eq!(
             resp.headers().get("content-type").unwrap(),
@@ -339,7 +346,8 @@ mod tests {
 
     #[tokio::test]
     async fn app_not_connected_body_contains_provider_and_connect_url() {
-        let resp: Response<TestBody> = app_not_connected(StatusCode::FORBIDDEN, "github", "GitHub");
+        let resp: Response<TestBody> =
+            app_not_connected(StatusCode::FORBIDDEN, "github", "GitHub", None);
         assert_eq!(resp.status(), StatusCode::FORBIDDEN);
 
         // Extract body bytes from Either::Left(Full<Bytes>)
@@ -363,6 +371,53 @@ mod tests {
             .as_str()
             .unwrap()
             .ends_with("/connections?connect=github"),);
+    }
+
+    #[tokio::test]
+    async fn app_not_connected_includes_agent_name_in_url() {
+        let resp: Response<TestBody> = app_not_connected(
+            StatusCode::UNAUTHORIZED,
+            "gmail",
+            "Gmail",
+            Some("ChartDB Assistant"),
+        );
+        use http_body_util::BodyExt;
+        let body = match resp.into_body() {
+            Either::Left(full) => full.collect().await.expect("collect full body").to_bytes(),
+            Either::Right(_) => panic!("expected Left"),
+        };
+        let json: serde_json::Value = serde_json::from_slice(&body).expect("valid JSON");
+        let url = json["connect_url"].as_str().unwrap();
+        assert!(
+            url.contains("&source=agent&agent_name=ChartDB%20Assistant"),
+            "connect_url should include encoded agent_name, got: {url}"
+        );
+    }
+
+    #[tokio::test]
+    async fn app_not_connected_encodes_special_chars_in_agent_name() {
+        let resp: Response<TestBody> = app_not_connected(
+            StatusCode::UNAUTHORIZED,
+            "gmail",
+            "Gmail",
+            Some("Agent & Co=1"),
+        );
+        use http_body_util::BodyExt;
+        let body = match resp.into_body() {
+            Either::Left(full) => full.collect().await.expect("collect full body").to_bytes(),
+            Either::Right(_) => panic!("expected Left"),
+        };
+        let json: serde_json::Value = serde_json::from_slice(&body).expect("valid JSON");
+        let url = json["connect_url"].as_str().unwrap();
+        // & and = must be encoded so they don't break the query string structure
+        assert!(
+            !url.contains("& Co"),
+            "raw & in agent_name would inject extra query params, got: {url}"
+        );
+        assert!(
+            url.contains("agent_name=Agent%20%26%20Co%3D1"),
+            "connect_url should percent-encode & and = in agent_name, got: {url}"
+        );
     }
 
     #[test]

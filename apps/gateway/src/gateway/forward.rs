@@ -103,6 +103,7 @@ pub(crate) async fn forward_request(
         >,
     >,
 > {
+    let start = std::time::Instant::now();
     let method = req.method().clone();
     let path = req
         .uri()
@@ -308,6 +309,46 @@ pub(crate) async fn forward_request(
     let status = upstream_resp.status();
     let resp_headers = upstream_resp.headers().clone();
 
+    // Track credential-injected requests (Postgres + PostHog + Redis)
+    if injection_count > 0 {
+        if let (Some(aid), Some(gid)) = (
+            proxy_ctx.account_id.as_deref(),
+            proxy_ctx.agent_id.as_deref(),
+        ) {
+            let hostname = super::strip_port(host);
+            let (provider, _) = crate::apps::provider_for_host_and_path(hostname, &path)
+                .unwrap_or((hostname, hostname));
+
+            let ts = time::OffsetDateTime::now_utc()
+                .format(&time::format_description::well_known::Iso8601::DEFAULT)
+                .unwrap_or_default();
+
+            // Strip query params to avoid logging sensitive data (API keys, tokens)
+            let telemetry_path = match path.find('?') {
+                Some(i) => &path[..i],
+                None => &path,
+            };
+
+            crate::telemetry::on_request(crate::telemetry::RequestEvent {
+                account_id: aid.to_string(),
+                agent_id: gid.to_string(),
+                agent_name: proxy_ctx
+                    .agent_name
+                    .as_deref()
+                    .unwrap_or("unknown")
+                    .to_string(),
+                method: method.to_string(),
+                host: host.to_string(),
+                path: telemetry_path.to_string(),
+                provider: provider.to_string(),
+                status: status.as_u16(),
+                latency_ms: start.elapsed().as_millis() as u32,
+                injection_count: injection_count as u16,
+                timestamp: ts,
+            });
+        }
+    }
+
     // If no credentials were injected and upstream returned 401/403,
     // guide the agent to connect/configure credentials in OneCLI.
     if injection_count == 0
@@ -333,7 +374,12 @@ pub(crate) async fn forward_request(
         // 2. Known app host — not connected.
         if let Some((provider, display_name)) = apps::provider_for_host_and_path(hostname, &path) {
             info!(method = %method, url = %url, status = %status.as_u16(), provider = %provider, "app not connected");
-            return Ok(response::app_not_connected(status, provider, display_name));
+            return Ok(response::app_not_connected(
+                status,
+                provider,
+                display_name,
+                proxy_ctx.agent_name.as_deref(),
+            ));
         }
 
         // 3. Unknown host — no credentials at all, guide user to create a secret.
@@ -375,6 +421,7 @@ pub(crate) async fn forward_request(
                     StatusCode::BAD_REQUEST,
                     provider,
                     display_name,
+                    proxy_ctx.agent_name.as_deref(),
                 ));
             }
             info!(method = %method, url = %url, status = 400, "auth-related 400 — credential not found");
