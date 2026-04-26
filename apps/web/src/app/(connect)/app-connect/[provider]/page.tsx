@@ -9,12 +9,13 @@ interface Props {
     status?: string;
     message?: string;
     connectionId?: string;
+    agent_name?: string;
   }>;
 }
 
 export default async function ConnectPage({ params, searchParams }: Props) {
   const { provider } = await params;
-  const { status, message, connectionId } = await searchParams;
+  const { status, message, connectionId, agent_name } = await searchParams;
 
   const app = getApp(provider);
   if (!app || !app.available) notFound();
@@ -52,6 +53,7 @@ export default async function ConnectPage({ params, searchParams }: Props) {
       status={status === "success" || status === "error" ? status : undefined}
       errorMessage={message}
       connectionId={connectionId}
+      agentName={agent_name}
     />
   );
 }

@@ -208,6 +208,23 @@ model AuditLog {
   @@map("audit_logs")
 }
 
+model RequestLog {
+  id             String   @id @default(uuid())
+  accountId      String   @map("account_id")
+  agentId        String   @map("agent_id")
+  method         String
+  host           String
+  path           String
+  provider       String
+  status         Int
+  latencyMs      Int      @map("latency_ms")
+  injectionCount Int      @map("injection_count")
+  createdAt      DateTime @default(now()) @map("created_at")
+
+  @@index([accountId, createdAt])
+  @@map("request_logs")
+}
+
 model VaultConnection {
   id              String    @id @default(uuid())
   accountId       String    @map("account_id")

@@ -35,6 +35,15 @@ mod db;
 mod gateway;
 mod inject;
 mod policy;
+mod telemetry_core;
+
+#[cfg(not(feature = "cloud"))]
+mod telemetry;
+
+#[cfg(feature = "cloud")]
+#[path = "cloud/telemetry.rs"]
+mod telemetry;
+
 mod vault;
 
 use std::path::{Path, PathBuf};
@@ -120,6 +129,7 @@ async fn main() -> Result<()> {
         }
     };
     let pool = db::create_pool(&database_url).await?;
+    let telemetry_pool = pool.clone();
 
     // Load crypto service for secret decryption
     // OSS: AES-256-GCM with local key from SECRET_ENCRYPTION_KEY
@@ -151,6 +161,8 @@ async fn main() -> Result<()> {
     // Initialize approval store for manual approval policy action
     // OSS: in-memory DashMap + tokio channels. Cloud: Redis + BLPOP.
     let approval_store = approval::create_store().await?;
+
+    telemetry::init(telemetry_pool, Arc::clone(&cache));
 
     info!(port = cli.port, "gateway ready");
 

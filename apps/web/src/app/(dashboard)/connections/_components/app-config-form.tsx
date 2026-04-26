@@ -264,7 +264,7 @@ export const AppConfigForm = ({
                     <Button
                       variant="ghost"
                       size="sm"
-                      className="text-destructive hover:text-destructive hover:bg-destructive/10"
+                      className="text-red-400 hover:text-red-300 hover:bg-red-400/10"
                     >
                       Remove
                     </Button>

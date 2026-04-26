@@ -10,7 +10,7 @@ interface UseConnectParamOptions {
   connectedProviders: Set<string>;
   configuredProviders: Set<string>;
   envDefaultProviders: Set<string>;
-  onConnect: (app: AppDefinition) => void;
+  onConnect: (app: AppDefinition, agentName?: string) => void;
   onConfigure: (app: AppDefinition) => void;
 }
 
@@ -18,6 +18,9 @@ interface UseConnectParamOptions {
  * Reads `?connect=<provider>` from the URL and triggers the appropriate action:
  * - Has credentials (env defaults available or BYOC configured): `onConnect`
  * - No credentials and not already connected: `onConfigure`
+ *
+ * When `?source=agent&agent_name=<name>` is also present, the agent name is
+ * passed to `onConnect` so the dialog and popup can show agent-specific context.
  *
  * Mirrors the same logic as the manual Connect button click handler.
  * Removes the search param from the URL after handling.
@@ -47,6 +50,11 @@ export const useConnectParam = ({
       return;
     }
 
+    const agentName =
+      searchParams.get("source") === "agent"
+        ? (searchParams.get("agent_name") ?? "your agent")
+        : undefined;
+
     router.replace("/connections");
 
     const hasCredentials =
@@ -59,7 +67,7 @@ export const useConnectParam = ({
     ) {
       onConfigure(app);
     } else {
-      onConnect(app);
+      onConnect(app, agentName);
     }
   }, [
     loading,

@@ -1,4 +1,5 @@
 import type { NextRequest } from "next/server";
+import { db } from "@onecli/db";
 import { API_URL } from "@/lib/env";
 
 const GATEWAY_URL = API_URL;
@@ -23,4 +24,26 @@ export const invalidateGatewayCache = (request: NextRequest) => {
     method: "POST",
     headers,
   }).catch(() => {});
+};
+
+/**
+ * Invalidate the gateway cache using an account ID directly.
+ *
+ * Looks up an API key for the account to authenticate with the gateway.
+ * Useful in contexts where the request doesn't carry user auth headers
+ * (e.g., OAuth callback redirects from external providers).
+ *
+ * Fire-and-forget — failures are silently ignored.
+ */
+export const invalidateGatewayCacheForAccount = (accountId: string) => {
+  db.apiKey
+    .findFirst({ where: { accountId }, select: { key: true } })
+    .then((apiKey) => {
+      if (!apiKey) return;
+      fetch(`${GATEWAY_URL}/api/cache/invalidate`, {
+        method: "POST",
+        headers: { authorization: `Bearer ${apiKey.key}` },
+      }).catch(() => {});
+    })
+    .catch(() => {});
 };

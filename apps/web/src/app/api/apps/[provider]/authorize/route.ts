@@ -33,12 +33,15 @@ export const GET = async (request: NextRequest, { params }: Params) => {
   const redirectUri = `${APP_URL}/api/apps/${provider}/callback`;
   const scopes = app.connectionMethod.defaultScopes ?? [];
   const connectionId = request.nextUrl.searchParams.get("connectionId");
+  const rawAgentName = request.nextUrl.searchParams.get("agent_name");
+  const agentName = rawAgentName ? rawAgentName.slice(0, 128) : undefined;
 
   const state = signOAuthState({
     accountId: auth.accountId,
     provider,
     nonce: generateNonce(),
     ...(connectionId ? { connectionId } : {}),
+    ...(agentName ? { agentName } : {}),
   });
 
   const authUrl = app.connectionMethod.buildAuthUrl({
