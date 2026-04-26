@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.18.3](https://github.com/onecli/onecli/compare/v1.18.2...v1.18.3) (2026-04-26)
+
+
+### Bug Fixes
+
+* improve gateway telemetry, app connections, and dashboard header ([#204](https://github.com/onecli/onecli/issues/204)) ([7a374eb](https://github.com/onecli/onecli/commit/7a374eb7f036518c132a504b9f4b593bc6e4fcb0))
+* restrict local mode session auth to loopback requests ([#201](https://github.com/onecli/onecli/issues/201)) ([81d4352](https://github.com/onecli/onecli/commit/81d4352e23b7414a03b2a5eb8821aee499d01d48))
+
 ## [1.18.2](https://github.com/onecli/onecli/compare/v1.18.1...v1.18.2) (2026-04-22)
 
 
