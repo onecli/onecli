@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.18.4](https://github.com/onecli/onecli/compare/v1.18.3...v1.18.4) (2026-04-27)
+
+
+### Bug Fixes
+
+* bind installer API to loopback so fresh bare-metal installs can auth ([#206](https://github.com/onecli/onecli/issues/206)) ([6bde3d4](https://github.com/onecli/onecli/commit/6bde3d40b5ad8eae0fb0a4a67ef8e3a8a2a2735f))
+
 ## [1.18.3](https://github.com/onecli/onecli/compare/v1.18.2...v1.18.3) (2026-04-26)
 
 
