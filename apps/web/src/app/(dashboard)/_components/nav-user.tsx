@@ -3,6 +3,7 @@
 import { useState } from "react";
 import { ChevronsUpDown, Loader2, LogOut } from "lucide-react";
 
+import pkg from "../../../../../../package.json";
 import { useAuth } from "@/providers/auth-provider";
 import { Avatar, AvatarFallback } from "@onecli/ui/components/avatar";
 import {
@@ -60,9 +61,14 @@ export const NavUser = () => {
           >
             <DropdownMenuLabel className="font-normal">
               <div className="flex flex-col space-y-1">
-                <p className="text-sm font-medium leading-none">
-                  {displayName}
-                </p>
+                <div className="flex items-center justify-between">
+                  <p className="text-sm font-medium leading-none">
+                    {displayName}
+                  </p>
+                  <span className="text-muted-foreground text-[10px]">
+                    v{pkg.version}
+                  </span>
+                </div>
                 <p className="text-muted-foreground text-xs leading-none">
                   {user?.email}
                 </p>
