@@ -258,7 +258,7 @@ export const SecretDialog = ({
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="sm:max-w-lg">
+      <DialogContent className="sm:max-w-lg max-h-[calc(100dvh-2rem)] grid-rows-[auto_1fr_auto]">
         {step === "type" && !isEdit ? (
           <TypeStep onSelect={handleSelectType} />
         ) : (
@@ -284,9 +284,43 @@ export const SecretDialog = ({
                     ? "Your key will be encrypted and injected into requests to api.anthropic.com."
                     : "Configure a custom secret to inject as a header or URL parameter into matching requests."}
               </DialogDescription>
+              {type === "generic" && !isEdit && !prefill && (
+                <div className="flex items-center gap-2 pt-1">
+                  <span className="text-muted-foreground text-xs">
+                    Try an example:
+                  </span>
+                  <button
+                    type="button"
+                    className="text-xs text-green-600 hover:text-green-500 underline underline-offset-2 transition-colors dark:text-green-400 dark:hover:text-green-300"
+                    onClick={() => {
+                      setName("GitHub Token");
+                      setHostPattern("api.github.com");
+                      setInjectionTarget("header");
+                      setHeaderName("Authorization");
+                      setValueFormat("Bearer {value}");
+                    }}
+                  >
+                    Header injection
+                  </button>
+                  <span className="text-muted-foreground text-xs">|</span>
+                  <button
+                    type="button"
+                    className="text-xs text-green-600 hover:text-green-500 underline underline-offset-2 transition-colors dark:text-green-400 dark:hover:text-green-300"
+                    onClick={() => {
+                      setName("Google Maps Key");
+                      setHostPattern("maps.googleapis.com");
+                      setInjectionTarget("param");
+                      setParamName("key");
+                      setParamFormat("{value}");
+                    }}
+                  >
+                    URL parameter
+                  </button>
+                </div>
+              )}
             </DialogHeader>
 
-            <div className="space-y-4 py-2">
+            <div className="min-h-0 space-y-4 overflow-y-auto py-2">
               <div className="space-y-2">
                 <Label htmlFor="secret-name">Name</Label>
                 <Input
