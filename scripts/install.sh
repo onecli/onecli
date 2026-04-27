@@ -10,6 +10,10 @@
 #   export ONECLI_BIND_HOST=192.168.1.50
 #   curl -fsSL https://onecli.sh/install | sh
 #
+# Custom PostgreSQL port (if 5432 is already in use):
+#   export POSTGRES_PORT=5433
+#   curl -fsSL https://onecli.sh/install | sh
+#
 # This script checks for Docker, downloads the docker-compose.yml,
 # and starts OneCLI (app + PostgreSQL) on ports 10254 and 10255.
 
@@ -120,6 +124,29 @@ main() {
     echo "  Stopping existing OneCLI services..."
     if ! docker compose -p "$PROJECT_NAME" -f "$COMPOSE_FILE" down; then
       echo "Error: Failed to stop existing OneCLI services." >&2
+      exit 1
+    fi
+  fi
+
+  # ── Check for port conflicts ──
+
+  PG_PORT="${POSTGRES_PORT:-5432}"
+  if command -v lsof >/dev/null 2>&1; then
+    if lsof -iTCP:"$PG_PORT" -sTCP:LISTEN -P -n >/dev/null 2>&1; then
+      echo "Error: Port $PG_PORT is already in use (probably a local PostgreSQL)." >&2
+      echo "" >&2
+      echo "Pick a free port for OneCLI's database:" >&2
+      echo "  export POSTGRES_PORT=5433" >&2
+      echo "  curl -fsSL https://onecli.sh/install | sh" >&2
+      exit 1
+    fi
+  elif command -v ss >/dev/null 2>&1; then
+    if ss -tlnp "sport = :$PG_PORT" 2>/dev/null | grep -q LISTEN; then
+      echo "Error: Port $PG_PORT is already in use (probably a local PostgreSQL)." >&2
+      echo "" >&2
+      echo "Pick a free port for OneCLI's database:" >&2
+      echo "  export POSTGRES_PORT=5433" >&2
+      echo "  curl -fsSL https://onecli.sh/install | sh" >&2
       exit 1
     fi
   fi
