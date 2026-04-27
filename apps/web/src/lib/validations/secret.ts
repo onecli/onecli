@@ -1,14 +1,18 @@
 import { z } from "zod";
 
-const headerInjectionSchema = z.object({
-  headerName: z.string().min(1),
-  valueFormat: z.string().optional(),
-});
+const headerInjectionSchema = z
+  .object({
+    headerName: z.string().min(1),
+    valueFormat: z.string().optional(),
+  })
+  .strict();
 
-const paramInjectionSchema = z.object({
-  paramName: z.string().min(1),
-  paramFormat: z.string().optional(),
-});
+const paramInjectionSchema = z
+  .object({
+    paramName: z.string().min(1),
+    paramFormat: z.string().optional(),
+  })
+  .strict();
 
 const injectionConfigSchema = z
   .union([headerInjectionSchema, paramInjectionSchema])

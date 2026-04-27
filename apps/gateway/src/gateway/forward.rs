@@ -105,7 +105,7 @@ pub(crate) async fn forward_request(
 > {
     let start = std::time::Instant::now();
     let method = req.method().clone();
-    let mut path = req
+    let path = req
         .uri()
         .path_and_query()
         .map(|pq| pq.as_str().to_string())
@@ -166,10 +166,12 @@ pub(crate) async fn forward_request(
         None
     };
 
-    // Apply injection rules matching this request path (may mutate path for SetParam)
-    let injection_count = inject::apply_injections(&mut headers, &mut path, &rules.injection_rules);
-
-    let url = format!("{scheme}://{host}{path}");
+    // Apply injection rules — upstream_path may gain query-param secrets;
+    // the original `path`/`url` stays clean for logging and approval metadata.
+    let mut upstream_path = path.clone();
+    let injection_count =
+        inject::apply_injections(&mut headers, &mut upstream_path, &rules.injection_rules);
+    let upstream_url = format!("{scheme}://{host}{upstream_path}");
     // ── ManualApproval: prepare body, store, wait for decision ─────
     let forward_body = if let PolicyDecision::ManualApproval { rule_id } = &decision {
         info!(method = %method, url = %url, rule_id = %rule_id, "MANUAL APPROVAL required");
@@ -296,7 +298,7 @@ pub(crate) async fn forward_request(
     };
 
     // ── Shared: forward to upstream and stream response back ──────
-    let mut upstream = http_client.request(method.clone(), &url);
+    let mut upstream = http_client.request(method.clone(), &upstream_url);
     for (name, value) in headers.iter() {
         upstream = upstream.header(name.clone(), value.clone());
     }
@@ -305,7 +307,7 @@ pub(crate) async fn forward_request(
     let upstream_resp = upstream
         .send()
         .await
-        .with_context(|| format!("forwarding to {url}"))?;
+        .with_context(|| format!("forwarding to {upstream_url}"))?;
 
     let status = upstream_resp.status();
     let resp_headers = upstream_resp.headers().clone();

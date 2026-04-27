@@ -132,31 +132,53 @@ pub(crate) fn apply_injections(
 }
 
 /// Add or replace a URL query parameter in a path+query string.
+///
+/// Only the injected parameter is encoded via `form_urlencoded`; existing
+/// query segments are preserved byte-for-byte so their on-the-wire encoding
+/// is never altered (important for signature-based auth like AWS SigV4).
 fn apply_set_param(request_path: &mut String, name: &str, value: &str) {
-    let (path_part, query_part) = match request_path.split_once('?') {
-        Some((p, q)) => (p.to_string(), Some(q.to_string())),
-        None => (request_path.clone(), None),
+    let encoded_pair = form_urlencoded::Serializer::new(String::new())
+        .append_pair(name, value)
+        .finish();
+    let encoded_name = &encoded_pair[..encoded_pair.find('=').unwrap()];
+
+    let Some(qmark) = request_path.find('?') else {
+        request_path.push('?');
+        request_path.push_str(&encoded_pair);
+        return;
     };
 
-    let mut params: Vec<(String, String)> = query_part
-        .as_deref()
-        .map(|q| {
-            form_urlencoded::parse(q.as_bytes())
-                .map(|(k, v)| (k.into_owned(), v.into_owned()))
-                .collect()
-        })
-        .unwrap_or_default();
+    let query_start = qmark + 1;
+    let query = request_path[query_start..].to_string();
 
-    if let Some(existing) = params.iter_mut().find(|(k, _)| k == name) {
-        existing.1 = value.to_string();
-    } else {
-        params.push((name.to_string(), value.to_string()));
+    if query.is_empty() {
+        request_path.push_str(&encoded_pair);
+        return;
     }
 
-    let new_query = form_urlencoded::Serializer::new(String::new())
-        .extend_pairs(&params)
-        .finish();
-    *request_path = format!("{path_part}?{new_query}");
+    let mut result = String::with_capacity(query_start + query.len() + encoded_pair.len());
+    result.push_str(&request_path[..query_start]);
+
+    let mut replaced = false;
+    for (i, segment) in query.split('&').enumerate() {
+        if i > 0 {
+            result.push('&');
+        }
+        let seg_name = segment.split_once('=').map_or(segment, |(n, _)| n);
+        if seg_name == encoded_name && !replaced {
+            result.push_str(&encoded_pair);
+            replaced = true;
+        } else {
+            result.push_str(segment);
+        }
+    }
+
+    if !replaced {
+        result.push('&');
+        result.push_str(&encoded_pair);
+    }
+
+    *request_path = result;
 }
 
 /// Check if a request path matches a rule's path pattern.

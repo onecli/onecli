@@ -24,7 +24,9 @@ import {
 import { Badge } from "@onecli/ui/components/badge";
 import { createSecret, updateSecret } from "@/lib/actions/secrets";
 import {
+  type InjectionConfig,
   detectAnthropicAuthMode,
+  isHeaderInjection,
   isParamInjection,
   looksLikeAnthropicKey,
 } from "@/lib/validations/secret";
@@ -59,13 +61,6 @@ const SECRET_TYPE_OPTIONS: SecretTypeOption[] = [
     nameDefault: "",
   },
 ];
-
-interface InjectionConfig {
-  headerName?: string;
-  valueFormat?: string;
-  paramName?: string;
-  paramFormat?: string;
-}
 
 export interface SecretItem {
   id: string;
@@ -140,18 +135,31 @@ export const SecretDialog = ({
     if (open) {
       if (secret) {
         const config = secret.injectionConfig as InjectionConfig | null;
-        const isParam = isParamInjection(config);
         setStep("form");
         setType(secret.type as SecretType);
         setName(secret.name);
         setValue("");
         setHostPattern(secret.hostPattern);
         setPathPattern(secret.pathPattern ?? "");
-        setInjectionTarget(isParam ? "param" : "header");
-        setHeaderName(config?.headerName ?? "Authorization");
-        setValueFormat(config?.valueFormat ?? "Bearer {value}");
-        setParamName(config?.paramName ?? "");
-        setParamFormat(config?.paramFormat ?? "");
+        if (isParamInjection(config)) {
+          setInjectionTarget("param");
+          setParamName(config.paramName);
+          setParamFormat(config.paramFormat ?? "");
+          setHeaderName("Authorization");
+          setValueFormat("Bearer {value}");
+        } else if (isHeaderInjection(config)) {
+          setInjectionTarget("header");
+          setHeaderName(config.headerName);
+          setValueFormat(config.valueFormat ?? "Bearer {value}");
+          setParamName("");
+          setParamFormat("");
+        } else {
+          setInjectionTarget("header");
+          setHeaderName("Authorization");
+          setValueFormat("Bearer {value}");
+          setParamName("");
+          setParamFormat("");
+        }
       } else if (prefill) {
         const isParam = !!prefill.paramName;
         setStep("form");
@@ -429,10 +437,16 @@ export const SecretDialog = ({
                       {type === "generic" && (
                         <>
                           <div className="space-y-2">
-                            <Label>Inject as</Label>
-                            <div className="flex gap-2">
+                            <Label id="inject-as-label">Inject as</Label>
+                            <div
+                              className="flex gap-2"
+                              role="radiogroup"
+                              aria-labelledby="inject-as-label"
+                            >
                               <Button
                                 type="button"
+                                role="radio"
+                                aria-checked={injectionTarget === "header"}
                                 variant={
                                   injectionTarget === "header"
                                     ? "default"
@@ -445,6 +459,8 @@ export const SecretDialog = ({
                               </Button>
                               <Button
                                 type="button"
+                                role="radio"
+                                aria-checked={injectionTarget === "param"}
                                 variant={
                                   injectionTarget === "param"
                                     ? "default"

@@ -729,6 +729,12 @@ fn build_injections(
                 .and_then(|c| c.get("paramName"))
                 .and_then(|v| v.as_str());
 
+            if header_name.is_some() && param_name.is_some() {
+                tracing::warn!(
+                    "generic secret has both headerName and paramName; using headerName"
+                );
+            }
+
             if let Some(header_name) = header_name {
                 let value_format = config
                     .and_then(|c| c.get("valueFormat"))
