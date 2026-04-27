@@ -92,7 +92,7 @@ export const SecretCard = ({ secret, onUpdate }: SecretCardProps) => {
                 config &&
                 isHeaderInjection(config) && (
                   <span className="text-muted-foreground">
-                    Header:{" "}
+                    Header{" "}
                     <code className="bg-muted rounded px-1 py-0.5 font-mono">
                       {config.headerName}
                     </code>
@@ -102,9 +102,9 @@ export const SecretCard = ({ secret, onUpdate }: SecretCardProps) => {
                 config &&
                 isParamInjection(config) && (
                   <span className="text-muted-foreground">
-                    Parameter:{" "}
+                    Query param{" "}
                     <code className="bg-muted rounded px-1 py-0.5 font-mono">
-                      {config.paramName}
+                      ?{config.paramName}
                     </code>
                   </span>
                 )}

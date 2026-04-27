@@ -1,8 +1,8 @@
-//! Header injection and agent authentication.
+//! Request injection and agent authentication.
 //!
 //! This module handles:
 //! - Extracting agent tokens from `Proxy-Authorization` headers
-//! - Applying injection rules (set_header, remove_header) to forwarded requests
+//! - Applying injection rules (set_header, remove_header, set_param) to forwarded requests
 //! - Path pattern matching for injection rules
 
 use base64::Engine;
@@ -18,7 +18,7 @@ use crate::vault::VaultCredential;
 /// A single injection instruction returned by the API.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "action", rename_all = "snake_case")]
-#[allow(clippy::enum_variant_names)] // all variants operate on headers — the suffix is intentional
+#[allow(clippy::enum_variant_names)]
 pub(crate) enum Injection {
     SetHeader {
         name: String,
@@ -41,7 +41,7 @@ pub(crate) enum Injection {
     },
 }
 
-/// A rule matching a path pattern with header injection instructions.
+/// A rule matching a path pattern with injection instructions.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub(crate) struct InjectionRule {
     pub path_pattern: String,
@@ -136,65 +136,84 @@ pub(crate) fn apply_injections(
 /// Only the injected parameter is encoded via `form_urlencoded`; existing
 /// query segments are preserved byte-for-byte so their on-the-wire encoding
 /// is never altered (important for signature-based auth like AWS SigV4).
+///
+/// Fragments (`#…`) are preserved and kept after the query string.
 fn apply_set_param(request_path: &mut String, name: &str, value: &str) {
     let encoded_pair = form_urlencoded::Serializer::new(String::new())
         .append_pair(name, value)
         .finish();
-    let encoded_name = &encoded_pair[..encoded_pair.find('=').unwrap()];
+    let encoded_name = &encoded_pair[..encoded_pair
+        .find('=')
+        .expect("BUG: form_urlencoded always produces name=value")];
 
-    let Some(qmark) = request_path.find('?') else {
-        request_path.push('?');
-        request_path.push_str(&encoded_pair);
-        return;
-    };
+    // Strip fragment — query params must appear before it.
+    let fragment = request_path.find('#').map(|pos| {
+        let frag = request_path[pos..].to_string();
+        request_path.truncate(pos);
+        frag
+    });
 
-    let query_start = qmark + 1;
-    let query = request_path[query_start..].to_string();
-
-    if query.is_empty() {
-        request_path.push_str(&encoded_pair);
-        return;
-    }
-
-    let mut result = String::with_capacity(query_start + query.len() + encoded_pair.len());
-    result.push_str(&request_path[..query_start]);
-
-    let mut replaced = false;
-    for (i, segment) in query.split('&').enumerate() {
-        if i > 0 {
-            result.push('&');
+    match request_path.find('?') {
+        None => {
+            request_path.push('?');
+            request_path.push_str(&encoded_pair);
         }
-        let seg_name = segment.split_once('=').map_or(segment, |(n, _)| n);
-        if seg_name == encoded_name && !replaced {
-            result.push_str(&encoded_pair);
-            replaced = true;
-        } else {
-            result.push_str(segment);
+        Some(qmark) => {
+            let query_start = qmark + 1;
+            let query = request_path[query_start..].to_string();
+
+            if query.is_empty() {
+                request_path.push_str(&encoded_pair);
+            } else {
+                let mut result =
+                    String::with_capacity(query_start + query.len() + 1 + encoded_pair.len());
+                result.push_str(&request_path[..query_start]);
+
+                let mut replaced = false;
+                for (i, segment) in query.split('&').enumerate() {
+                    if i > 0 {
+                        result.push('&');
+                    }
+                    let seg_name = segment.split_once('=').map_or(segment, |(n, _)| n);
+                    if seg_name == encoded_name && !replaced {
+                        result.push_str(&encoded_pair);
+                        replaced = true;
+                    } else {
+                        result.push_str(segment);
+                    }
+                }
+
+                if !replaced {
+                    result.push('&');
+                    result.push_str(&encoded_pair);
+                }
+
+                *request_path = result;
+            }
         }
     }
 
-    if !replaced {
-        result.push('&');
-        result.push_str(&encoded_pair);
+    if let Some(frag) = fragment {
+        request_path.push_str(&frag);
     }
-
-    *request_path = result;
 }
 
 /// Check if a request path matches a rule's path pattern.
 /// Supports: `"*"` (matches everything), `"/prefix/*"` (prefix match), exact match.
+/// Query strings in `request_path` are stripped before comparison so that
+/// SetParam-mutated paths still match subsequent rules correctly.
 pub(crate) fn path_matches(request_path: &str, pattern: &str) -> bool {
+    let path = request_path.split('?').next().unwrap_or(request_path);
     if pattern == "*" {
         return true;
     }
     if let Some(prefix) = pattern.strip_suffix("/*") {
         // "/v1/*" matches "/v1/messages", "/v1/", but not "/v2/foo"
-        return request_path == prefix
-            || (request_path.starts_with(prefix)
-                && request_path.as_bytes().get(prefix.len()) == Some(&b'/'));
+        return path == prefix
+            || (path.starts_with(prefix) && path.as_bytes().get(prefix.len()) == Some(&b'/'));
     }
     // Exact match
-    request_path == pattern
+    path == pattern
 }
 
 // ── Vault credential → injection rules ──────────────────────────────
@@ -338,6 +357,15 @@ mod tests {
         assert!(path_matches("/v1/messages", "/v1/messages"));
         assert!(!path_matches("/v1/messages/", "/v1/messages"));
         assert!(!path_matches("/v1/other", "/v1/messages"));
+    }
+
+    #[test]
+    fn path_matches_ignores_query_string() {
+        assert!(path_matches("/v1/messages?api_key=sk-123", "/v1/messages"));
+        assert!(path_matches("/v1/messages?api_key=sk-123", "/v1/*"));
+        assert!(path_matches("/v1/messages?api_key=sk-123", "*"));
+        assert!(!path_matches("/v2/messages?api_key=sk-123", "/v1/*"));
+        assert!(!path_matches("/v1/messages?api_key=sk-123", "/v1/other"));
     }
 
     // ── apply_injections ────────────────────────────────────────────────
@@ -648,5 +676,83 @@ mod tests {
         assert_eq!(count, 2);
         assert_eq!(headers.get("x-custom").unwrap(), "value");
         assert_eq!(path, "/v1/search?api_key=sk-123");
+    }
+
+    #[test]
+    fn inject_set_param_empty_query_after_qmark() {
+        let mut headers = hyper::HeaderMap::new();
+        let mut path = "/v1/search?".to_string();
+
+        let rules = vec![make_rule("*", vec![set_param("api_key", "sk-123")])];
+
+        let count = apply_injections(&mut headers, &mut path, &rules);
+        assert_eq!(count, 1);
+        assert_eq!(path, "/v1/search?api_key=sk-123");
+    }
+
+    #[test]
+    fn inject_set_param_special_chars_in_value() {
+        let mut headers = hyper::HeaderMap::new();
+        let mut path = "/v1/search".to_string();
+
+        let rules = vec![make_rule("*", vec![set_param("token", "a=b&c=d")])];
+
+        let count = apply_injections(&mut headers, &mut path, &rules);
+        assert_eq!(count, 1);
+        assert_eq!(path, "/v1/search?token=a%3Db%26c%3Dd");
+    }
+
+    #[test]
+    fn inject_set_param_special_chars_in_name() {
+        let mut headers = hyper::HeaderMap::new();
+        let mut path = "/v1/search".to_string();
+
+        let rules = vec![make_rule("*", vec![set_param("my key", "value")])];
+
+        let count = apply_injections(&mut headers, &mut path, &rules);
+        assert_eq!(count, 1);
+        assert_eq!(path, "/v1/search?my+key=value");
+    }
+
+    #[test]
+    fn inject_set_param_preserves_fragment() {
+        let mut headers = hyper::HeaderMap::new();
+        let mut path = "/v1/search#section".to_string();
+
+        let rules = vec![make_rule("*", vec![set_param("api_key", "sk-123")])];
+
+        let count = apply_injections(&mut headers, &mut path, &rules);
+        assert_eq!(count, 1);
+        assert_eq!(path, "/v1/search?api_key=sk-123#section");
+    }
+
+    #[test]
+    fn inject_set_param_with_query_and_fragment() {
+        let mut headers = hyper::HeaderMap::new();
+        let mut path = "/v1/search?q=hello#section".to_string();
+
+        let rules = vec![make_rule("*", vec![set_param("api_key", "sk-123")])];
+
+        let count = apply_injections(&mut headers, &mut path, &rules);
+        assert_eq!(count, 1);
+        assert!(path.contains("q=hello"));
+        assert!(path.contains("api_key=sk-123"));
+        assert!(path.ends_with("#section"));
+    }
+
+    #[test]
+    fn inject_set_param_second_rule_exact_match_after_mutation() {
+        let mut headers = hyper::HeaderMap::new();
+        let mut path = "/v1/messages".to_string();
+
+        let rules = vec![
+            make_rule("*", vec![set_param("api_key", "sk-123")]),
+            make_rule("/v1/messages", vec![set_header("x-custom", "value")]),
+        ];
+
+        let count = apply_injections(&mut headers, &mut path, &rules);
+        assert_eq!(count, 2);
+        assert!(path.contains("api_key=sk-123"));
+        assert_eq!(headers.get("x-custom").unwrap(), "value");
     }
 }

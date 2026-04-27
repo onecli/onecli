@@ -28,14 +28,16 @@ export const isHeaderInjection = (
 ): config is HeaderInjectionConfig =>
   config !== null &&
   typeof config === "object" &&
-  "headerName" in (config as Record<string, unknown>);
+  "headerName" in config &&
+  typeof (config as Record<string, unknown>).headerName === "string";
 
 export const isParamInjection = (
   config: unknown,
 ): config is ParamInjectionConfig =>
   config !== null &&
   typeof config === "object" &&
-  "paramName" in (config as Record<string, unknown>);
+  "paramName" in config &&
+  typeof (config as Record<string, unknown>).paramName === "string";
 
 /** Validates a host pattern is a hostname, not a URL or path. */
 const hostPatternSchema = z
