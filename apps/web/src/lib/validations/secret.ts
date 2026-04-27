@@ -1,12 +1,41 @@
 import { z } from "zod";
 
-const injectionConfigSchema = z
+const headerInjectionSchema = z
   .object({
     headerName: z.string().min(1),
     valueFormat: z.string().optional(),
   })
+  .strict();
+
+const paramInjectionSchema = z
+  .object({
+    paramName: z.string().min(1),
+    paramFormat: z.string().optional(),
+  })
+  .strict();
+
+const injectionConfigSchema = z
+  .union([headerInjectionSchema, paramInjectionSchema])
   .nullable()
   .optional();
+
+export type HeaderInjectionConfig = z.infer<typeof headerInjectionSchema>;
+export type ParamInjectionConfig = z.infer<typeof paramInjectionSchema>;
+export type InjectionConfig = HeaderInjectionConfig | ParamInjectionConfig;
+
+export const isHeaderInjection = (
+  config: unknown,
+): config is HeaderInjectionConfig =>
+  config !== null &&
+  typeof config === "object" &&
+  "headerName" in (config as Record<string, unknown>);
+
+export const isParamInjection = (
+  config: unknown,
+): config is ParamInjectionConfig =>
+  config !== null &&
+  typeof config === "object" &&
+  "paramName" in (config as Record<string, unknown>);
 
 /** Validates a host pattern is a hostname, not a URL or path. */
 const hostPatternSchema = z

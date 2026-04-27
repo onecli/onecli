@@ -19,12 +19,12 @@ import {
   AlertDialogTrigger,
 } from "@onecli/ui/components/alert-dialog";
 import { deleteSecret } from "@/lib/actions/secrets";
+import {
+  type InjectionConfig,
+  isHeaderInjection,
+  isParamInjection,
+} from "@/lib/validations/secret";
 import { SecretDialog } from "./secret-dialog";
-
-interface InjectionConfig {
-  headerName: string;
-  valueFormat: string;
-}
 
 interface SecretCardProps {
   secret: {
@@ -88,14 +88,26 @@ export const SecretCard = ({ secret, onUpdate }: SecretCardProps) => {
                   </code>
                 </span>
               )}
-              {secret.type === "generic" && config?.headerName && (
-                <span className="text-muted-foreground">
-                  Header:{" "}
-                  <code className="bg-muted rounded px-1 py-0.5 font-mono">
-                    {config.headerName}
-                  </code>
-                </span>
-              )}
+              {secret.type === "generic" &&
+                config &&
+                isHeaderInjection(config) && (
+                  <span className="text-muted-foreground">
+                    Header:{" "}
+                    <code className="bg-muted rounded px-1 py-0.5 font-mono">
+                      {config.headerName}
+                    </code>
+                  </span>
+                )}
+              {secret.type === "generic" &&
+                config &&
+                isParamInjection(config) && (
+                  <span className="text-muted-foreground">
+                    Parameter:{" "}
+                    <code className="bg-muted rounded px-1 py-0.5 font-mono">
+                      {config.paramName}
+                    </code>
+                  </span>
+                )}
             </div>
 
             <p className="text-muted-foreground text-xs">

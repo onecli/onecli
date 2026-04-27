@@ -68,6 +68,8 @@ export const SecretsContent = () => {
         name: searchParams.get("name") ?? `${host} Secret`,
         headerName: searchParams.get("header") ?? undefined,
         valueFormat: searchParams.get("format") ?? undefined,
+        paramName: searchParams.get("param") ?? undefined,
+        paramFormat: searchParams.get("paramFormat") ?? undefined,
       });
       setCreateOpen(true);
       router.replace(window.location.pathname, { scroll: false });

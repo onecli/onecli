@@ -24,7 +24,10 @@ import {
 import { Badge } from "@onecli/ui/components/badge";
 import { createSecret, updateSecret } from "@/lib/actions/secrets";
 import {
+  type InjectionConfig,
   detectAnthropicAuthMode,
+  isHeaderInjection,
+  isParamInjection,
   looksLikeAnthropicKey,
 } from "@/lib/validations/secret";
 
@@ -51,17 +54,13 @@ const SECRET_TYPE_OPTIONS: SecretTypeOption[] = [
   {
     value: "generic",
     label: "Generic Secret",
-    description: "Inject a custom header into requests matching any host",
+    description:
+      "Inject a custom header or URL parameter into matching requests",
     icon: <Key className="size-5" />,
     hostDefault: "",
     nameDefault: "",
   },
 ];
-
-interface InjectionConfig {
-  headerName: string;
-  valueFormat: string;
-}
 
 export interface SecretItem {
   id: string;
@@ -79,6 +78,8 @@ export interface SecretPrefill {
   pathPattern?: string;
   headerName?: string;
   valueFormat?: string;
+  paramName?: string;
+  paramFormat?: string;
 }
 
 interface SecretDialogProps {
@@ -109,8 +110,13 @@ export const SecretDialog = ({
   const [value, setValue] = useState("");
   const [hostPattern, setHostPattern] = useState("api.anthropic.com");
   const [pathPattern, setPathPattern] = useState("");
+  const [injectionTarget, setInjectionTarget] = useState<"header" | "param">(
+    "header",
+  );
   const [headerName, setHeaderName] = useState("Authorization");
   const [valueFormat, setValueFormat] = useState("Bearer {value}");
+  const [paramName, setParamName] = useState("");
+  const [paramFormat, setParamFormat] = useState("");
 
   // Inline validation for host pattern
   const hostPatternError = (() => {
@@ -135,17 +141,38 @@ export const SecretDialog = ({
         setValue("");
         setHostPattern(secret.hostPattern);
         setPathPattern(secret.pathPattern ?? "");
-        setHeaderName(config?.headerName ?? "Authorization");
-        setValueFormat(config?.valueFormat ?? "Bearer {value}");
+        if (isParamInjection(config)) {
+          setInjectionTarget("param");
+          setParamName(config.paramName);
+          setParamFormat(config.paramFormat ?? "");
+          setHeaderName("Authorization");
+          setValueFormat("Bearer {value}");
+        } else if (isHeaderInjection(config)) {
+          setInjectionTarget("header");
+          setHeaderName(config.headerName);
+          setValueFormat(config.valueFormat ?? "Bearer {value}");
+          setParamName("");
+          setParamFormat("");
+        } else {
+          setInjectionTarget("header");
+          setHeaderName("Authorization");
+          setValueFormat("Bearer {value}");
+          setParamName("");
+          setParamFormat("");
+        }
       } else if (prefill) {
+        const isParam = !!prefill.paramName;
         setStep("form");
         setType(prefill.type);
         setName(prefill.name);
         setValue("");
         setHostPattern(prefill.hostPattern);
         setPathPattern(prefill.pathPattern ?? "");
+        setInjectionTarget(isParam ? "param" : "header");
         setHeaderName(prefill.headerName ?? "Authorization");
         setValueFormat(prefill.valueFormat ?? "Bearer {value}");
+        setParamName(prefill.paramName ?? "");
+        setParamFormat(prefill.paramFormat ?? "");
         setTimeout(() => valueInputRef.current?.focus(), 100);
       } else {
         setStep("type");
@@ -154,8 +181,11 @@ export const SecretDialog = ({
         setValue("");
         setHostPattern("api.anthropic.com");
         setPathPattern("");
+        setInjectionTarget("header");
         setHeaderName("Authorization");
         setValueFormat("Bearer {value}");
+        setParamName("");
+        setParamFormat("");
       }
     }
   }, [open, secret, prefill]);
@@ -168,30 +198,37 @@ export const SecretDialog = ({
     setStep("form");
   };
 
+  const hasInjectionTarget =
+    type !== "generic" ||
+    (injectionTarget === "header" ? headerName.trim() : paramName.trim());
+
   const isValid = isEdit
-    ? hostPattern.trim() &&
-      !hostPatternError &&
-      (type !== "generic" || headerName.trim())
+    ? hostPattern.trim() && !hostPatternError && hasInjectionTarget
     : name.trim() &&
       value.trim() &&
       hostPattern.trim() &&
       !hostPatternError &&
-      (type !== "generic" || headerName.trim());
+      hasInjectionTarget;
 
   const handleSave = async () => {
     if (!isValid) return;
     setSaving(true);
     try {
+      const buildInjectionConfig = () => {
+        if (type !== "generic") return undefined;
+        if (injectionTarget === "param") {
+          return { paramName, paramFormat: paramFormat || "{value}" };
+        }
+        return { headerName, valueFormat: valueFormat || "{value}" };
+      };
+
       if (isEdit) {
         await updateSecret(secret.id, {
           name: name !== secret.name ? name : undefined,
           value: value.trim() || undefined,
           hostPattern,
           pathPattern: pathPattern || null,
-          injectionConfig:
-            type === "generic"
-              ? { headerName, valueFormat: valueFormat || "{value}" }
-              : undefined,
+          injectionConfig: buildInjectionConfig() ?? undefined,
         });
         toast.success("Secret updated");
       } else {
@@ -201,10 +238,7 @@ export const SecretDialog = ({
           value,
           hostPattern,
           pathPattern: pathPattern || undefined,
-          injectionConfig:
-            type === "generic"
-              ? { headerName, valueFormat: valueFormat || "{value}" }
-              : null,
+          injectionConfig: buildInjectionConfig() ?? null,
         });
         toast.success("Secret created");
       }
@@ -248,7 +282,7 @@ export const SecretDialog = ({
                   ? "Update the secret\u2019s configuration. Leave the value field empty to keep the current value."
                   : type === "anthropic"
                     ? "Your key will be encrypted and injected into requests to api.anthropic.com."
-                    : "Configure a custom secret to inject as a header into matching requests."}
+                    : "Configure a custom secret to inject as a header or URL parameter into matching requests."}
               </DialogDescription>
             </DialogHeader>
 
@@ -403,34 +437,120 @@ export const SecretDialog = ({
                       {type === "generic" && (
                         <>
                           <div className="space-y-2">
-                            <Label htmlFor="secret-header">Header name</Label>
-                            <Input
-                              id="secret-header"
-                              placeholder="e.g. Authorization"
-                              value={headerName}
-                              onChange={(e) => setHeaderName(e.target.value)}
-                            />
+                            <Label id="inject-as-label">Inject as</Label>
+                            <div
+                              className="flex gap-2"
+                              role="radiogroup"
+                              aria-labelledby="inject-as-label"
+                            >
+                              <Button
+                                type="button"
+                                role="radio"
+                                aria-checked={injectionTarget === "header"}
+                                variant={
+                                  injectionTarget === "header"
+                                    ? "default"
+                                    : "outline"
+                                }
+                                size="sm"
+                                onClick={() => setInjectionTarget("header")}
+                              >
+                                Header
+                              </Button>
+                              <Button
+                                type="button"
+                                role="radio"
+                                aria-checked={injectionTarget === "param"}
+                                variant={
+                                  injectionTarget === "param"
+                                    ? "default"
+                                    : "outline"
+                                }
+                                size="sm"
+                                onClick={() => setInjectionTarget("param")}
+                              >
+                                URL Parameter
+                              </Button>
+                            </div>
                           </div>
 
-                          <div className="space-y-2">
-                            <Label htmlFor="secret-format">
-                              Value format{" "}
-                              <span className="text-muted-foreground font-normal">
-                                (optional)
-                              </span>
-                            </Label>
-                            <Input
-                              id="secret-format"
-                              placeholder="e.g. Bearer {value}"
-                              value={valueFormat}
-                              onChange={(e) => setValueFormat(e.target.value)}
-                            />
-                            <p className="text-muted-foreground text-xs">
-                              Use <code className="text-xs">{"{value}"}</code>{" "}
-                              as a placeholder for the secret. Defaults to the
-                              raw value.
-                            </p>
-                          </div>
+                          {injectionTarget === "header" ? (
+                            <>
+                              <div className="space-y-2">
+                                <Label htmlFor="secret-header">
+                                  Header name
+                                </Label>
+                                <Input
+                                  id="secret-header"
+                                  placeholder="e.g. Authorization"
+                                  value={headerName}
+                                  onChange={(e) =>
+                                    setHeaderName(e.target.value)
+                                  }
+                                />
+                              </div>
+
+                              <div className="space-y-2">
+                                <Label htmlFor="secret-format">
+                                  Value format{" "}
+                                  <span className="text-muted-foreground font-normal">
+                                    (optional)
+                                  </span>
+                                </Label>
+                                <Input
+                                  id="secret-format"
+                                  placeholder="e.g. Bearer {value}"
+                                  value={valueFormat}
+                                  onChange={(e) =>
+                                    setValueFormat(e.target.value)
+                                  }
+                                />
+                                <p className="text-muted-foreground text-xs">
+                                  Use{" "}
+                                  <code className="text-xs">{"{value}"}</code>{" "}
+                                  as a placeholder for the secret. Defaults to
+                                  the raw value.
+                                </p>
+                              </div>
+                            </>
+                          ) : (
+                            <>
+                              <div className="space-y-2">
+                                <Label htmlFor="secret-param">
+                                  Parameter name
+                                </Label>
+                                <Input
+                                  id="secret-param"
+                                  placeholder="e.g. api_key"
+                                  value={paramName}
+                                  onChange={(e) => setParamName(e.target.value)}
+                                />
+                              </div>
+
+                              <div className="space-y-2">
+                                <Label htmlFor="secret-param-format">
+                                  Value format{" "}
+                                  <span className="text-muted-foreground font-normal">
+                                    (optional)
+                                  </span>
+                                </Label>
+                                <Input
+                                  id="secret-param-format"
+                                  placeholder="e.g. {value}"
+                                  value={paramFormat}
+                                  onChange={(e) =>
+                                    setParamFormat(e.target.value)
+                                  }
+                                />
+                                <p className="text-muted-foreground text-xs">
+                                  Use{" "}
+                                  <code className="text-xs">{"{value}"}</code>{" "}
+                                  as a placeholder for the secret. Defaults to
+                                  the raw value.
+                                </p>
+                              </div>
+                            </>
+                          )}
                         </>
                       )}
                     </div>
