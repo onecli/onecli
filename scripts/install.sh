@@ -6,9 +6,8 @@
 #
 # Usage: curl -fsSL https://onecli.sh/install | sh
 #
-# Custom bind hosts:
-#   export ONECLI_API_BIND_HOST=127.0.0.1    # dashboard/API (default: 127.0.0.1)
-#   export ONECLI_GATEWAY_BIND_HOST=<ip>     # gateway (default: docker0 on bare-metal Linux)
+# Custom bind host:
+#   export ONECLI_BIND_HOST=192.168.1.50
 #   curl -fsSL https://onecli.sh/install | sh
 #
 # This script checks for Docker, downloads the docker-compose.yml,
@@ -19,35 +18,28 @@ COMPOSE_FILE="$INSTALL_DIR/docker-compose.yml"
 COMPOSE_URL="https://raw.githubusercontent.com/onecli/onecli/main/docker/docker-compose.yml"
 PROJECT_NAME="onecli"
 
-# Detect the bind host for the gateway (port 10255).
-# Containers and host processes use this IP to reach the gateway.
+# Detect the correct bind host for Docker port bindings.
 # Never 0.0.0.0 — that would expose services to the network.
-detect_gateway_bind_host() {
+detect_bind_host() {
   # 1. Explicit env var — user knows best
-  if [ -n "$ONECLI_GATEWAY_BIND_HOST" ]; then
-    echo "$ONECLI_GATEWAY_BIND_HOST"
-    return
-  fi
-
-  # 2. Legacy ONECLI_BIND_HOST — pre-1.18.4 compat, treated as gateway-only
   if [ -n "$ONECLI_BIND_HOST" ]; then
     echo "$ONECLI_BIND_HOST"
     return
   fi
 
-  # 3. macOS — Docker Desktop, loopback works
+  # 2. macOS — Docker Desktop, loopback works
   if [ "$(uname -s)" = "Darwin" ]; then
     echo "127.0.0.1"
     return
   fi
 
-  # 4. WSL — same VM routing as macOS (check /proc, not env vars)
+  # 3. WSL — same VM routing as macOS (check /proc, not env vars)
   if [ -f /proc/sys/fs/binfmt_misc/WSLInterop ]; then
     echo "127.0.0.1"
     return
   fi
 
-  # 5. Bare-metal Linux — bind to docker0 bridge IP
+  # 4. Bare-metal Linux — bind to docker0 bridge IP
   if command -v ip >/dev/null 2>&1; then
     DOCKER0_IP=$(ip -4 addr show docker0 2>/dev/null | awk '/inet / {split($2, a, "/"); print a[1]; exit}')
     if [ -n "$DOCKER0_IP" ]; then
@@ -56,7 +48,7 @@ detect_gateway_bind_host() {
     fi
   fi
 
-  # 6. Cannot determine safely
+  # 5. Cannot determine safely
   echo ""
 }
 
@@ -86,27 +78,19 @@ main() {
     exit 1
   fi
 
-  # ── Detect bind hosts ──
-  #
-  # API (10254): always loopback unless explicitly overridden — local-mode
-  # session auth requires it. Gateway (10255): reachable by containers.
+  # ── Detect bind host ──
 
-  ONECLI_API_BIND_HOST="${ONECLI_API_BIND_HOST:-127.0.0.1}"
-  ONECLI_GATEWAY_BIND_HOST=$(detect_gateway_bind_host)
-  if [ -z "$ONECLI_GATEWAY_BIND_HOST" ]; then
-    echo "Error: Could not safely determine a gateway bind address." >&2
+  ONECLI_BIND_HOST=$(detect_bind_host)
+  if [ -z "$ONECLI_BIND_HOST" ]; then
+    echo "Error: Could not safely determine a bind address for OneCLI." >&2
     echo "" >&2
-    echo "Please set ONECLI_GATEWAY_BIND_HOST and try again:" >&2
-    echo "  export ONECLI_GATEWAY_BIND_HOST=<your-ip>" >&2
+    echo "Please set ONECLI_BIND_HOST and try again:" >&2
+    echo "  export ONECLI_BIND_HOST=<your-ip>" >&2
     echo "  curl -fsSL https://onecli.sh/install | sh" >&2
     exit 1
   fi
-  export ONECLI_API_BIND_HOST
-  export ONECLI_GATEWAY_BIND_HOST
-  unset ONECLI_BIND_HOST
-
-  echo "  API bind:     $ONECLI_API_BIND_HOST"
-  echo "  Gateway bind: $ONECLI_GATEWAY_BIND_HOST"
+  export ONECLI_BIND_HOST
+  echo "  Bind host: $ONECLI_BIND_HOST"
 
   # ── Download docker-compose.yml ──
 
@@ -159,10 +143,10 @@ main() {
 
   echo ""
   echo "  OneCLI is running!"
-  echo "  ONECLI_URL:  http://$ONECLI_API_BIND_HOST:10254"
+  echo "  ONECLI_URL:  http://$ONECLI_BIND_HOST:10254"
   echo ""
-  echo "  Dashboard:  http://$ONECLI_API_BIND_HOST:10254"
-  echo "  Gateway:    http://$ONECLI_GATEWAY_BIND_HOST:10255"
+  echo "  Dashboard:  http://$ONECLI_BIND_HOST:10254"
+  echo "  Gateway:    http://$ONECLI_BIND_HOST:10255"
   echo ""
   echo "  Compose file: $COMPOSE_FILE"
   echo ""
