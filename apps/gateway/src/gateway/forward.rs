@@ -307,7 +307,7 @@ pub(crate) async fn forward_request(
     let upstream_resp = upstream
         .send()
         .await
-        .with_context(|| format!("forwarding to {upstream_url}"))?;
+        .with_context(|| format!("forwarding to {url}"))?;
 
     let status = upstream_resp.status();
     let resp_headers = upstream_resp.headers().clone();

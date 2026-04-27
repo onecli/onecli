@@ -4,6 +4,7 @@ import { useState, useEffect, useRef } from "react";
 import { useInvalidateGatewayCache } from "@/hooks/use-invalidate-cache";
 import { toast } from "sonner";
 import { ArrowLeft, Bot, Key, Settings2 } from "lucide-react";
+import { cn } from "@onecli/ui/lib/utils";
 import {
   Dialog,
   DialogContent,
@@ -413,6 +414,110 @@ export const SecretDialog = ({
                 </div>
               )}
 
+              {type === "generic" && (
+                <div className="flex items-center gap-3">
+                  <Label
+                    id="inject-as-label"
+                    className="text-muted-foreground shrink-0 text-xs"
+                  >
+                    Inject as
+                  </Label>
+                  <div
+                    className="border-input inline-flex overflow-hidden rounded-md border"
+                    role="radiogroup"
+                    aria-labelledby="inject-as-label"
+                    onKeyDown={(e) => {
+                      if (
+                        ![
+                          "ArrowRight",
+                          "ArrowDown",
+                          "ArrowLeft",
+                          "ArrowUp",
+                        ].includes(e.key)
+                      )
+                        return;
+                      e.preventDefault();
+                      const next =
+                        injectionTarget === "header" ? "param" : "header";
+                      setInjectionTarget(next);
+                      e.currentTarget
+                        .querySelectorAll<HTMLButtonElement>('[role="radio"]')
+                        [next === "header" ? 0 : 1]?.focus();
+                    }}
+                  >
+                    <button
+                      type="button"
+                      role="radio"
+                      aria-checked={injectionTarget === "header"}
+                      tabIndex={injectionTarget === "header" ? 0 : -1}
+                      className={cn(
+                        "border-input px-3 py-1.5 text-xs font-medium transition-colors",
+                        injectionTarget === "header"
+                          ? "bg-accent text-foreground"
+                          : "text-muted-foreground hover:bg-muted hover:text-foreground",
+                      )}
+                      onClick={() => setInjectionTarget("header")}
+                    >
+                      Header
+                    </button>
+                    <button
+                      type="button"
+                      role="radio"
+                      aria-checked={injectionTarget === "param"}
+                      tabIndex={injectionTarget === "param" ? 0 : -1}
+                      className={cn(
+                        "border-input border-l px-3 py-1.5 text-xs font-medium transition-colors",
+                        injectionTarget === "param"
+                          ? "bg-accent text-foreground"
+                          : "text-muted-foreground hover:bg-muted hover:text-foreground",
+                      )}
+                      onClick={() => setInjectionTarget("param")}
+                    >
+                      URL Parameter
+                    </button>
+                  </div>
+                </div>
+              )}
+
+              {type === "generic" && (
+                <div
+                  key={`name-${injectionTarget}`}
+                  className="animate-in fade-in duration-150 space-y-2"
+                >
+                  <Label
+                    htmlFor={
+                      injectionTarget === "header"
+                        ? "secret-header"
+                        : "secret-param"
+                    }
+                  >
+                    {injectionTarget === "header"
+                      ? "Header name"
+                      : "Parameter name"}
+                  </Label>
+                  <Input
+                    id={
+                      injectionTarget === "header"
+                        ? "secret-header"
+                        : "secret-param"
+                    }
+                    placeholder={
+                      injectionTarget === "header"
+                        ? "e.g. Authorization"
+                        : "e.g. api_key"
+                    }
+                    value={
+                      injectionTarget === "header" ? headerName : paramName
+                    }
+                    onChange={(e) =>
+                      injectionTarget === "header"
+                        ? setHeaderName(e.target.value)
+                        : setParamName(e.target.value)
+                    }
+                  />
+                </div>
+              )}
+
               <Accordion
                 type="single"
                 collapsible
@@ -423,7 +528,7 @@ export const SecretDialog = ({
                   <AccordionTrigger className="py-3 hover:no-underline">
                     <span className="text-muted-foreground flex items-center gap-2 text-xs font-normal">
                       <Settings2 className="size-3.5" />
-                      Injection settings
+                      Advanced settings
                     </span>
                   </AccordionTrigger>
                   <AccordionContent className="pb-0">
@@ -469,123 +574,50 @@ export const SecretDialog = ({
                       </div>
 
                       {type === "generic" && (
-                        <>
-                          <div className="space-y-2">
-                            <Label id="inject-as-label">Inject as</Label>
-                            <div
-                              className="flex gap-2"
-                              role="radiogroup"
-                              aria-labelledby="inject-as-label"
-                            >
-                              <Button
-                                type="button"
-                                role="radio"
-                                aria-checked={injectionTarget === "header"}
-                                variant={
-                                  injectionTarget === "header"
-                                    ? "default"
-                                    : "outline"
-                                }
-                                size="sm"
-                                onClick={() => setInjectionTarget("header")}
-                              >
-                                Header
-                              </Button>
-                              <Button
-                                type="button"
-                                role="radio"
-                                aria-checked={injectionTarget === "param"}
-                                variant={
-                                  injectionTarget === "param"
-                                    ? "default"
-                                    : "outline"
-                                }
-                                size="sm"
-                                onClick={() => setInjectionTarget("param")}
-                              >
-                                URL Parameter
-                              </Button>
-                            </div>
-                          </div>
-
-                          {injectionTarget === "header" ? (
-                            <>
-                              <div className="space-y-2">
-                                <Label htmlFor="secret-header">
-                                  Header name
-                                </Label>
-                                <Input
-                                  id="secret-header"
-                                  placeholder="e.g. Authorization"
-                                  value={headerName}
-                                  onChange={(e) =>
-                                    setHeaderName(e.target.value)
-                                  }
-                                />
-                              </div>
-
-                              <div className="space-y-2">
-                                <Label htmlFor="secret-format">
-                                  Value format{" "}
-                                  <span className="text-muted-foreground font-normal">
-                                    (optional)
-                                  </span>
-                                </Label>
-                                <Input
-                                  id="secret-format"
-                                  placeholder="e.g. Bearer {value}"
-                                  value={valueFormat}
-                                  onChange={(e) =>
-                                    setValueFormat(e.target.value)
-                                  }
-                                />
-                                <p className="text-muted-foreground text-xs">
-                                  Use{" "}
-                                  <code className="text-xs">{"{value}"}</code>{" "}
-                                  as a placeholder for the secret. Defaults to
-                                  the raw value.
-                                </p>
-                              </div>
-                            </>
-                          ) : (
-                            <>
-                              <div className="space-y-2">
-                                <Label htmlFor="secret-param">
-                                  Parameter name
-                                </Label>
-                                <Input
-                                  id="secret-param"
-                                  placeholder="e.g. api_key"
-                                  value={paramName}
-                                  onChange={(e) => setParamName(e.target.value)}
-                                />
-                              </div>
-
-                              <div className="space-y-2">
-                                <Label htmlFor="secret-param-format">
-                                  Value format{" "}
-                                  <span className="text-muted-foreground font-normal">
-                                    (optional)
-                                  </span>
-                                </Label>
-                                <Input
-                                  id="secret-param-format"
-                                  placeholder="e.g. {value}"
-                                  value={paramFormat}
-                                  onChange={(e) =>
-                                    setParamFormat(e.target.value)
-                                  }
-                                />
-                                <p className="text-muted-foreground text-xs">
-                                  Use{" "}
-                                  <code className="text-xs">{"{value}"}</code>{" "}
-                                  as a placeholder for the secret. Defaults to
-                                  the raw value.
-                                </p>
-                              </div>
-                            </>
-                          )}
-                        </>
+                        <div
+                          key={`format-${injectionTarget}`}
+                          className="animate-in fade-in duration-150 space-y-2"
+                        >
+                          <Label
+                            htmlFor={
+                              injectionTarget === "header"
+                                ? "secret-format"
+                                : "secret-param-format"
+                            }
+                          >
+                            Value format{" "}
+                            <span className="text-muted-foreground font-normal">
+                              (optional)
+                            </span>
+                          </Label>
+                          <Input
+                            id={
+                              injectionTarget === "header"
+                                ? "secret-format"
+                                : "secret-param-format"
+                            }
+                            placeholder={
+                              injectionTarget === "header"
+                                ? "e.g. Bearer {value}"
+                                : "e.g. {value}"
+                            }
+                            value={
+                              injectionTarget === "header"
+                                ? valueFormat
+                                : paramFormat
+                            }
+                            onChange={(e) =>
+                              injectionTarget === "header"
+                                ? setValueFormat(e.target.value)
+                                : setParamFormat(e.target.value)
+                            }
+                          />
+                          <p className="text-muted-foreground text-xs">
+                            Use <code className="text-xs">{"{value}"}</code> as
+                            a placeholder for the secret. Defaults to the raw
+                            value.
+                          </p>
+                        </div>
                       )}
                     </div>
                   </AccordionContent>

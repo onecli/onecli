@@ -81,21 +81,21 @@ export const createSecret = async (
   const encryptedValue = await cryptoService.encrypt(value);
   const preview = buildPreview(value);
   const pathPattern = input.pathPattern?.trim() || null;
-  const injectionConfig =
-    input.type === "generic" && input.injectionConfig
-      ? isParamInjection(input.injectionConfig)
-        ? ({
-            paramName: input.injectionConfig.paramName.trim(),
-            paramFormat: input.injectionConfig.paramFormat?.trim() || "{value}",
-          } as Prisma.InputJsonValue)
-        : isHeaderInjection(input.injectionConfig)
-          ? ({
-              headerName: input.injectionConfig.headerName.trim(),
-              valueFormat:
-                input.injectionConfig.valueFormat?.trim() || "{value}",
-            } as Prisma.InputJsonValue)
-          : Prisma.JsonNull
-      : Prisma.JsonNull;
+  let injectionConfig: Prisma.InputJsonValue | typeof Prisma.JsonNull =
+    Prisma.JsonNull;
+  if (input.type === "generic" && input.injectionConfig) {
+    if (isParamInjection(input.injectionConfig)) {
+      injectionConfig = {
+        paramName: input.injectionConfig.paramName.trim(),
+        paramFormat: input.injectionConfig.paramFormat?.trim() || "{value}",
+      } as Prisma.InputJsonValue;
+    } else if (isHeaderInjection(input.injectionConfig)) {
+      injectionConfig = {
+        headerName: input.injectionConfig.headerName.trim(),
+        valueFormat: input.injectionConfig.valueFormat?.trim() || "{value}",
+      } as Prisma.InputJsonValue;
+    }
+  }
 
   const metadata =
     input.type === "anthropic"
