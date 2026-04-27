@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.18.5](https://github.com/onecli/onecli/compare/v1.18.4...v1.18.5) (2026-04-27)
+
+
+### Bug Fixes
+
+* roll back loopback session auth ([#201](https://github.com/onecli/onecli/issues/201)) and installer bind-host change ([#206](https://github.com/onecli/onecli/issues/206)) ([#209](https://github.com/onecli/onecli/issues/209)) ([e854fe5](https://github.com/onecli/onecli/commit/e854fe52416cf6a07fddef66525a25b4b8aa4335))
+
 ## [1.18.4](https://github.com/onecli/onecli/compare/v1.18.3...v1.18.4) (2026-04-27)
 
 
