@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.18.6](https://github.com/onecli/onecli/compare/v1.18.5...v1.18.6) (2026-04-27)
+
+
+### Bug Fixes
+
+* add version to health endpoint and dashboard user menu ([#211](https://github.com/onecli/onecli/issues/211)) ([126ed12](https://github.com/onecli/onecli/commit/126ed12a92e3784bb5623e1f31f05ad53e804d05))
+
 ## [1.18.5](https://github.com/onecli/onecli/compare/v1.18.4...v1.18.5) (2026-04-27)
 
 
