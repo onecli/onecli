@@ -3,6 +3,7 @@
 import { useEffect } from "react";
 import { useRouter } from "next/navigation";
 import { useAuth } from "@/providers/auth-provider";
+import { IS_CLOUD } from "@/lib/env";
 
 export default function Home() {
   const router = useRouter();
@@ -20,7 +21,9 @@ export default function Home() {
       .then((res) => (res.ok ? res.json() : null))
       .then((data: { projectId?: string } | null) => {
         router.replace(
-          data?.projectId ? `/p/${data.projectId}/overview` : "/overview",
+          IS_CLOUD && data?.projectId
+            ? `/p/${data.projectId}/overview`
+            : "/overview",
         );
       })
       .catch(() => router.replace("/overview"));
