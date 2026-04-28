@@ -49,6 +49,28 @@ export type ConnectionMethod =
         description?: string;
         placeholder: string;
       }[];
+    }
+  | {
+      type: "credentials_import";
+      fields: {
+        name: string;
+        label: string;
+        description?: string;
+        placeholder: string;
+        secret?: boolean;
+      }[];
+      exchangeCredentials: (
+        fields: Record<string, string>,
+      ) => Promise<OAuthExchangeResult>;
+      /** Optional file import to auto-fill fields from a JSON file. */
+      fileImport?: {
+        /** Button label (e.g., "Import from credentials file"). */
+        label: string;
+        /** File input accept filter (e.g., ".json,application/json"). */
+        accept: string;
+        /** Maps JSON keys in the file to field names in the form. */
+        keyMap: Record<string, string>;
+      };
     };
 
 export interface OAuthConfigField {

@@ -135,6 +135,39 @@ export const upsertAppConfig = async (
 };
 
 /**
+ * Save client credentials as BYOC AppConfig without disconnecting existing
+ * connections. Used by credentials_import flow where the connection and
+ * client credentials are created together.
+ */
+export const saveAppConfigWithoutDisconnect = async (
+  projectId: string,
+  provider: string,
+  clientId: string,
+  clientSecret: string,
+) => {
+  const encryptedCredentials = await cryptoService.encrypt(
+    JSON.stringify({ clientSecret }),
+  );
+
+  return db.appConfig.upsert({
+    where: { projectId_provider: { projectId, provider } },
+    create: {
+      projectId,
+      provider,
+      enabled: true,
+      settings: { clientId } as Prisma.InputJsonValue,
+      credentials: encryptedCredentials,
+    },
+    update: {
+      enabled: true,
+      settings: { clientId } as Prisma.InputJsonValue,
+      credentials: encryptedCredentials,
+    },
+    select: { id: true, provider: true },
+  });
+};
+
+/**
  * Delete an app config record.
  */
 export const deleteAppConfig = async (projectId: string, provider: string) => {

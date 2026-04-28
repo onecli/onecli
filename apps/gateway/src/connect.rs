@@ -358,6 +358,20 @@ impl PolicyEngine {
             });
         }
 
+        // Vertex AI: inject x-goog-user-project from connection metadata
+        if conn.provider == "vertex-ai" {
+            if let Some(ref metadata) = conn.metadata {
+                if let Some(project_id) = metadata.get("quotaProjectId").and_then(|v| v.as_str()) {
+                    for rule in &mut rules {
+                        rule.injections.push(Injection::SetHeader {
+                            name: "x-goog-user-project".to_string(),
+                            value: project_id.to_string(),
+                        });
+                    }
+                }
+            }
+        }
+
         // Cache with TTL = min(CACHE_TTL, token remaining lifetime).
         // Skip caching if token is already expired — the stale token would cause
         // upstream 401s, and re-resolving gives a chance to refresh.

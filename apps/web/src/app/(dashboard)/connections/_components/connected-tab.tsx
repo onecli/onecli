@@ -80,7 +80,11 @@ export const ConnectedTab = () => {
           darkIcon: appDef?.darkIcon,
           type: "app" as const,
           typeLabel:
-            appDef?.connectionMethod.type === "oauth" ? "OAuth" : "API Key",
+            appDef?.connectionMethod.type === "oauth"
+              ? "OAuth"
+              : appDef?.connectionMethod.type === "credentials_import"
+                ? "Credentials"
+                : "API Key",
           detail: label
             ? `Connected as ${label}`
             : `${c.scopes.length} scope${c.scopes.length !== 1 ? "s" : ""} granted`,

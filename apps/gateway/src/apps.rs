@@ -22,11 +22,26 @@ enum AuthStrategy {
 /// A host pattern and its injection strategy for an app provider.
 struct HostRule {
     host: &'static str,
+    /// Optional suffix for matching region-prefixed hosts (e.g., `-aiplatform.googleapis.com`
+    /// matches `us-central1-aiplatform.googleapis.com`). When set, `host` is ignored and
+    /// matching uses `hostname.ends_with(suffix)` with a length guard to prevent bare-suffix matches.
+    host_suffix: Option<&'static str>,
     /// Optional path prefix to scope this rule (e.g., `"/calendar/"` for Google Calendar).
     /// When set, only requests whose path starts with this prefix match this provider.
     /// When `None`, all paths on the host match (used for providers with dedicated subdomains).
     path_prefix: Option<&'static str>,
     strategy: AuthStrategy,
+}
+
+/// Check whether a `HostRule` matches a given hostname.
+/// Suffix rules match any hostname that ends with the suffix and is strictly longer
+/// (so the bare suffix itself never matches). Exact rules compare `host` directly.
+fn host_rule_matches(rule: &HostRule, hostname: &str) -> bool {
+    if let Some(suffix) = rule.host_suffix {
+        hostname.ends_with(suffix) && hostname.len() > suffix.len()
+    } else {
+        rule.host == hostname
+    }
 }
 
 /// Body format for token refresh requests.
@@ -83,16 +98,19 @@ static APP_PROVIDERS: &[AppProvider] = &[
         host_rules: &[
             HostRule {
                 host: "api.github.com",
+                host_suffix: None,
                 path_prefix: None,
                 strategy: AuthStrategy::Bearer,
             },
             HostRule {
                 host: "github.com",
+                host_suffix: None,
                 path_prefix: None,
                 strategy: AuthStrategy::BasicXAccessToken,
             },
             HostRule {
                 host: "raw.githubusercontent.com",
+                host_suffix: None,
                 path_prefix: None,
                 strategy: AuthStrategy::Bearer,
             },
@@ -105,12 +123,14 @@ static APP_PROVIDERS: &[AppProvider] = &[
         host_rules: &[
             HostRule {
                 host: "gmail.googleapis.com",
+                host_suffix: None,
                 path_prefix: None,
                 strategy: AuthStrategy::Bearer,
             },
             // Legacy endpoint — some clients still use www.googleapis.com/gmail/
             HostRule {
                 host: "www.googleapis.com",
+                host_suffix: None,
                 path_prefix: Some("/gmail/"),
                 strategy: AuthStrategy::Bearer,
             },
@@ -122,6 +142,7 @@ static APP_PROVIDERS: &[AppProvider] = &[
         display_name: "Google Calendar",
         host_rules: &[HostRule {
             host: "www.googleapis.com",
+            host_suffix: None,
             path_prefix: Some("/calendar/"),
             strategy: AuthStrategy::Bearer,
         }],
@@ -133,11 +154,13 @@ static APP_PROVIDERS: &[AppProvider] = &[
         host_rules: &[
             HostRule {
                 host: "www.googleapis.com",
+                host_suffix: None,
                 path_prefix: Some("/drive/"),
                 strategy: AuthStrategy::Bearer,
             },
             HostRule {
                 host: "www.googleapis.com",
+                host_suffix: None,
                 path_prefix: Some("/upload/drive/"),
                 strategy: AuthStrategy::Bearer,
             },
@@ -149,6 +172,7 @@ static APP_PROVIDERS: &[AppProvider] = &[
         display_name: "Google Docs",
         host_rules: &[HostRule {
             host: "docs.googleapis.com",
+            host_suffix: None,
             path_prefix: None,
             strategy: AuthStrategy::Bearer,
         }],
@@ -159,6 +183,7 @@ static APP_PROVIDERS: &[AppProvider] = &[
         display_name: "Google Sheets",
         host_rules: &[HostRule {
             host: "sheets.googleapis.com",
+            host_suffix: None,
             path_prefix: None,
             strategy: AuthStrategy::Bearer,
         }],
@@ -169,6 +194,7 @@ static APP_PROVIDERS: &[AppProvider] = &[
         display_name: "Google Slides",
         host_rules: &[HostRule {
             host: "slides.googleapis.com",
+            host_suffix: None,
             path_prefix: None,
             strategy: AuthStrategy::Bearer,
         }],
@@ -179,6 +205,7 @@ static APP_PROVIDERS: &[AppProvider] = &[
         display_name: "Google Tasks",
         host_rules: &[HostRule {
             host: "tasks.googleapis.com",
+            host_suffix: None,
             path_prefix: None,
             strategy: AuthStrategy::Bearer,
         }],
@@ -189,6 +216,7 @@ static APP_PROVIDERS: &[AppProvider] = &[
         display_name: "Google Forms",
         host_rules: &[HostRule {
             host: "forms.googleapis.com",
+            host_suffix: None,
             path_prefix: None,
             strategy: AuthStrategy::Bearer,
         }],
@@ -199,6 +227,7 @@ static APP_PROVIDERS: &[AppProvider] = &[
         display_name: "Google Classroom",
         host_rules: &[HostRule {
             host: "classroom.googleapis.com",
+            host_suffix: None,
             path_prefix: None,
             strategy: AuthStrategy::Bearer,
         }],
@@ -209,6 +238,7 @@ static APP_PROVIDERS: &[AppProvider] = &[
         display_name: "Google Admin",
         host_rules: &[HostRule {
             host: "admin.googleapis.com",
+            host_suffix: None,
             path_prefix: None,
             strategy: AuthStrategy::Bearer,
         }],
@@ -219,6 +249,7 @@ static APP_PROVIDERS: &[AppProvider] = &[
         display_name: "Google Analytics",
         host_rules: &[HostRule {
             host: "analyticsdata.googleapis.com",
+            host_suffix: None,
             path_prefix: None,
             strategy: AuthStrategy::Bearer,
         }],
@@ -229,6 +260,7 @@ static APP_PROVIDERS: &[AppProvider] = &[
         display_name: "Google Search Console",
         host_rules: &[HostRule {
             host: "searchconsole.googleapis.com",
+            host_suffix: None,
             path_prefix: None,
             strategy: AuthStrategy::Bearer,
         }],
@@ -239,6 +271,7 @@ static APP_PROVIDERS: &[AppProvider] = &[
         display_name: "Google Meet",
         host_rules: &[HostRule {
             host: "meet.googleapis.com",
+            host_suffix: None,
             path_prefix: None,
             strategy: AuthStrategy::Bearer,
         }],
@@ -249,6 +282,7 @@ static APP_PROVIDERS: &[AppProvider] = &[
         display_name: "Google Photos",
         host_rules: &[HostRule {
             host: "photoslibrary.googleapis.com",
+            host_suffix: None,
             path_prefix: None,
             strategy: AuthStrategy::Bearer,
         }],
@@ -259,6 +293,7 @@ static APP_PROVIDERS: &[AppProvider] = &[
         display_name: "Jira",
         host_rules: &[HostRule {
             host: "api.atlassian.com",
+            host_suffix: None,
             path_prefix: Some("/ex/jira/"),
             strategy: AuthStrategy::Bearer,
         }],
@@ -269,6 +304,7 @@ static APP_PROVIDERS: &[AppProvider] = &[
         display_name: "Confluence",
         host_rules: &[HostRule {
             host: "api.atlassian.com",
+            host_suffix: None,
             path_prefix: Some("/ex/confluence/"),
             strategy: AuthStrategy::Bearer,
         }],
@@ -280,12 +316,33 @@ static APP_PROVIDERS: &[AppProvider] = &[
         host_rules: &[
             HostRule {
                 host: "www.googleapis.com",
+                host_suffix: None,
                 path_prefix: Some("/youtube/"),
                 strategy: AuthStrategy::Bearer,
             },
             HostRule {
                 host: "www.googleapis.com",
+                host_suffix: None,
                 path_prefix: Some("/upload/youtube/"),
+                strategy: AuthStrategy::Bearer,
+            },
+        ],
+        refresh: Some(&GOOGLE_REFRESH),
+    },
+    AppProvider {
+        provider: "vertex-ai",
+        display_name: "Vertex AI",
+        host_rules: &[
+            HostRule {
+                host: "",
+                host_suffix: Some("-aiplatform.googleapis.com"),
+                path_prefix: None,
+                strategy: AuthStrategy::Bearer,
+            },
+            HostRule {
+                host: "oauth2.googleapis.com",
+                host_suffix: None,
+                path_prefix: Some("/token"),
                 strategy: AuthStrategy::Bearer,
             },
         ],
@@ -296,6 +353,7 @@ static APP_PROVIDERS: &[AppProvider] = &[
         display_name: "Resend",
         host_rules: &[HostRule {
             host: "api.resend.com",
+            host_suffix: None,
             path_prefix: None,
             strategy: AuthStrategy::Bearer,
         }],
@@ -311,7 +369,7 @@ pub(crate) fn provider_for_host(hostname: &str) -> Option<(&'static str, &'stati
     APP_PROVIDERS.iter().find_map(|p| {
         p.host_rules
             .iter()
-            .any(|r| r.host == hostname)
+            .any(|r| host_rule_matches(r, hostname))
             .then_some((p.provider, p.display_name))
     })
 }
@@ -329,7 +387,10 @@ pub(crate) fn provider_for_host_and_path(
     let path_match = APP_PROVIDERS.iter().find_map(|p| {
         p.host_rules
             .iter()
-            .any(|r| r.host == hostname && r.path_prefix.is_some_and(|pfx| path.starts_with(pfx)))
+            .any(|r| {
+                host_rule_matches(r, hostname)
+                    && r.path_prefix.is_some_and(|pfx| path.starts_with(pfx))
+            })
             .then_some((p.provider, p.display_name))
     });
     if path_match.is_some() {
@@ -347,7 +408,7 @@ pub(crate) fn providers_for_host(hostname: &str) -> Vec<&'static str> {
     let mut providers = Vec::new();
     for provider in APP_PROVIDERS {
         for rule in provider.host_rules {
-            if rule.host == hostname {
+            if host_rule_matches(rule, hostname) {
                 providers.push(provider.provider);
                 break;
             }
@@ -363,7 +424,11 @@ fn path_pattern_for(provider: &str, hostname: &str) -> String {
     APP_PROVIDERS
         .iter()
         .find(|p| p.provider == provider)
-        .and_then(|app| app.host_rules.iter().find(|r| r.host == hostname))
+        .and_then(|app| {
+            app.host_rules
+                .iter()
+                .find(|r| host_rule_matches(r, hostname))
+        })
         .and_then(|rule| rule.path_prefix)
         .map_or_else(|| "*".to_string(), |prefix| format!("{prefix}*"))
 }
@@ -375,7 +440,10 @@ fn build_app_injections(provider: &str, hostname: &str, token: &str) -> Vec<Inje
     let app = APP_PROVIDERS.iter().find(|p| p.provider == provider);
     let Some(app) = app else { return vec![] };
 
-    let rule = app.host_rules.iter().find(|r| r.host == hostname);
+    let rule = app
+        .host_rules
+        .iter()
+        .find(|r| host_rule_matches(r, hostname));
     let Some(rule) = rule else { return vec![] };
 
     match rule.strategy {
@@ -409,7 +477,7 @@ pub(crate) fn build_app_injection_rules(
 
     app.host_rules
         .iter()
-        .filter(|r| r.host == hostname)
+        .filter(|r| host_rule_matches(r, hostname))
         .map(|rule| {
             let pattern = rule
                 .path_prefix
@@ -976,6 +1044,9 @@ mod tests {
         let mut hosts: HashMap<&str, (bool, bool)> = HashMap::new();
         for provider in APP_PROVIDERS {
             for rule in provider.host_rules {
+                if rule.host.is_empty() {
+                    continue; // suffix-only rules don't share hosts
+                }
                 let entry = hosts.entry(rule.host).or_default();
                 if rule.path_prefix.is_some() {
                     entry.0 = true; // has prefix
@@ -990,5 +1061,62 @@ mod tests {
                 "host {host} mixes path-prefix and catch-all rules — this causes ambiguous injection"
             );
         }
+    }
+
+    // ── Vertex AI ────────────────────────────────────────────────────────
+
+    #[test]
+    fn providers_for_vertex_ai_hosts() {
+        assert_eq!(
+            providers_for_host("us-central1-aiplatform.googleapis.com"),
+            vec!["vertex-ai"]
+        );
+        assert_eq!(
+            providers_for_host("europe-west1-aiplatform.googleapis.com"),
+            vec!["vertex-ai"]
+        );
+        assert_eq!(
+            providers_for_host("asia-east1-aiplatform.googleapis.com"),
+            vec!["vertex-ai"]
+        );
+    }
+
+    #[test]
+    fn vertex_ai_suffix_no_false_positives() {
+        assert!(providers_for_host("aiplatform.googleapis.com").is_empty());
+        assert!(providers_for_host("-aiplatform.googleapis.com").is_empty());
+    }
+
+    #[test]
+    fn vertex_ai_uses_bearer() {
+        let rules = build_app_injection_rules(
+            "vertex-ai",
+            "us-central1-aiplatform.googleapis.com",
+            "ya29.test",
+        );
+        assert_eq!(rules.len(), 1);
+        assert_eq!(rules[0].0, "*");
+        assert_eq!(
+            rules[0].1,
+            vec![Injection::SetHeader {
+                name: "authorization".to_string(),
+                value: "Bearer ya29.test".to_string(),
+            }]
+        );
+    }
+
+    #[test]
+    fn provider_for_host_vertex_ai() {
+        let result = provider_for_host("us-central1-aiplatform.googleapis.com");
+        assert_eq!(result, Some(("vertex-ai", "Vertex AI")));
+    }
+
+    #[test]
+    fn provider_for_host_and_path_vertex_ai() {
+        let result = provider_for_host_and_path(
+            "us-central1-aiplatform.googleapis.com",
+            "/v1/projects/my-proj/locations/us-central1/publishers/anthropic/models/claude:streamRawPredict",
+        );
+        assert_eq!(result, Some(("vertex-ai", "Vertex AI")));
     }
 }
