@@ -13,9 +13,12 @@ env:
   TURBO_TEAM: ${{ secrets.TURBO_TEAM }}
 
 jobs:
-  ci:
-    name: Build & Test
+  rust:
+    name: Rust
     runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: apps/gateway
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -28,34 +31,47 @@ jobs:
         with:
           workspaces: apps/gateway -> target
 
-      - name: Setup pnpm
-        uses: pnpm/action-setup@v5
+      - name: Clippy
+        run: cargo clippy -- -D warnings
+
+      - name: Format
+        run: cargo fmt --check
+
+      - name: Test
+        run: cargo test
+
+  lint:
+    name: Lint & Format
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
 
       - name: Setup Node.js
-        uses: actions/setup-node@v6
-        with:
-          node-version: 22
-          cache: pnpm
+        uses: ./.github/actions/setup-node
 
-      - name: Install dependencies
-        run: pnpm install --frozen-lockfile
+      - name: Lint
+        run: pnpm lint --filter='!@onecli/gateway'
 
-      - name: Generate Prisma client
-        run: pnpm --filter @onecli/db generate
+      - name: Format
+        run: pnpm run format:check
 
-      - name: Lint, format & type check
-        run: pnpm check
+  build:
+    name: Build & Type Check
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
 
-      # Gateway is excluded — clippy (check) and cargo test already compile it.
-      # Release builds only happen in publish.yml for Docker images.
+      - name: Setup Node.js
+        uses: ./.github/actions/setup-node
+
+      - name: Type check
+        run: pnpm check-types --filter='!@onecli/gateway'
+
       - name: Build
         run: pnpm build --filter='!@onecli/gateway'
 
-      - name: Test
-        run: pnpm test
-
-      # Checks that schema.prisma is fully covered by migrations.
-      # Spins up a temporary Postgres only when Prisma files changed.
       - name: Check for Prisma changes
         id: prisma-changes
         run: |
