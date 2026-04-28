@@ -12,9 +12,9 @@ import type { OAuthConfigField } from "@/lib/apps/types";
  * refresh tokens are bound to the client ID that issued them —
  * changing the OAuth app invalidates existing tokens.
  */
-const disconnectIfConnected = async (accountId: string, provider: string) => {
+const disconnectIfConnected = async (projectId: string, provider: string) => {
   await db.appConnection.deleteMany({
-    where: { accountId, provider },
+    where: { projectId, provider },
   });
 };
 
@@ -22,9 +22,9 @@ const disconnectIfConnected = async (accountId: string, provider: string) => {
  * Get the non-secret config and whether encrypted credentials exist.
  * Never returns decrypted secrets — use `getAppConfigCredentials` for that.
  */
-export const getAppConfig = async (accountId: string, provider: string) => {
+export const getAppConfig = async (projectId: string, provider: string) => {
   const config = await db.appConfig.findUnique({
-    where: { accountId_provider: { accountId, provider } },
+    where: { projectId_provider: { projectId, provider } },
     select: { settings: true, credentials: true, enabled: true },
   });
 
@@ -42,11 +42,11 @@ export const getAppConfig = async (accountId: string, provider: string) => {
  * Internal only — used by resolve-credentials, never exposed to client.
  */
 export const getAppConfigCredentials = async (
-  accountId: string,
+  projectId: string,
   provider: string,
 ): Promise<Record<string, string> | null> => {
   const config = await db.appConfig.findUnique({
-    where: { accountId_provider: { accountId, provider } },
+    where: { projectId_provider: { projectId, provider } },
     select: { settings: true, credentials: true, enabled: true },
   });
 
@@ -63,7 +63,7 @@ export const getAppConfigCredentials = async (
     ) as Record<string, string>;
   } catch (err) {
     logger.warn(
-      { err, accountId, provider },
+      { err, projectId, provider },
       "failed to decrypt app config credentials",
     );
     return settings;
@@ -77,7 +77,7 @@ export const getAppConfigCredentials = async (
  * Empty secret values on update are ignored (preserves existing encrypted value).
  */
 export const upsertAppConfig = async (
-  accountId: string,
+  projectId: string,
   provider: string,
   values: Record<string, string>,
   fieldDefinitions: OAuthConfigField[],
@@ -103,7 +103,7 @@ export const upsertAppConfig = async (
   } else {
     // No new secrets provided — check if we should preserve existing
     const existing = await db.appConfig.findUnique({
-      where: { accountId_provider: { accountId, provider } },
+      where: { projectId_provider: { projectId, provider } },
       select: { credentials: true },
     });
     if (existing?.credentials) {
@@ -112,12 +112,12 @@ export const upsertAppConfig = async (
   }
 
   // Disconnect existing connection — refresh tokens are bound to the client ID
-  await disconnectIfConnected(accountId, provider);
+  await disconnectIfConnected(projectId, provider);
 
   return db.appConfig.upsert({
-    where: { accountId_provider: { accountId, provider } },
+    where: { projectId_provider: { projectId, provider } },
     create: {
-      accountId,
+      projectId,
       provider,
       enabled: true,
       settings: plainFields as Prisma.InputJsonValue,
@@ -137,9 +137,9 @@ export const upsertAppConfig = async (
 /**
  * Delete an app config record.
  */
-export const deleteAppConfig = async (accountId: string, provider: string) => {
+export const deleteAppConfig = async (projectId: string, provider: string) => {
   const config = await db.appConfig.findUnique({
-    where: { accountId_provider: { accountId, provider } },
+    where: { projectId_provider: { projectId, provider } },
     select: { id: true },
   });
 
@@ -148,11 +148,11 @@ export const deleteAppConfig = async (accountId: string, provider: string) => {
   }
 
   await db.appConfig.delete({
-    where: { accountId_provider: { accountId, provider } },
+    where: { projectId_provider: { projectId, provider } },
   });
 
   // Disconnect existing connection — tokens issued with deleted credentials are invalid
-  await disconnectIfConnected(accountId, provider);
+  await disconnectIfConnected(projectId, provider);
 };
 
 /**
@@ -162,11 +162,11 @@ export const deleteAppConfig = async (accountId: string, provider: string) => {
  * Check whether an enabled AppConfig exists for this provider.
  */
 export const hasAppConfig = async (
-  accountId: string,
+  projectId: string,
   provider: string,
 ): Promise<boolean> => {
   const config = await db.appConfig.findUnique({
-    where: { accountId_provider: { accountId, provider } },
+    where: { projectId_provider: { projectId, provider } },
     select: { enabled: true },
   });
   return !!config?.enabled;
@@ -177,10 +177,10 @@ export const hasAppConfig = async (
  * Single query alternative to calling hasAppConfig in a loop.
  */
 export const listConfiguredProviders = async (
-  accountId: string,
+  projectId: string,
 ): Promise<string[]> => {
   const configs = await db.appConfig.findMany({
-    where: { accountId, enabled: true },
+    where: { projectId, enabled: true },
     select: { provider: true },
   });
   return configs.map((c) => c.provider);
@@ -190,12 +190,12 @@ export const listConfiguredProviders = async (
  * Toggle the enabled state of an AppConfig.
  */
 export const toggleAppConfigEnabled = async (
-  accountId: string,
+  projectId: string,
   provider: string,
   enabled: boolean,
 ) => {
   const config = await db.appConfig.findUnique({
-    where: { accountId_provider: { accountId, provider } },
+    where: { projectId_provider: { projectId, provider } },
     select: { id: true },
   });
 
@@ -206,10 +206,10 @@ export const toggleAppConfigEnabled = async (
   // Disconnect on any toggle — tokens are bound to the client ID that issued them.
   // Enabling switches from platform → BYOC client, disabling switches back.
   // Either way the existing token is invalid.
-  await disconnectIfConnected(accountId, provider);
+  await disconnectIfConnected(projectId, provider);
 
   return db.appConfig.update({
-    where: { accountId_provider: { accountId, provider } },
+    where: { projectId_provider: { projectId, provider } },
     data: { enabled },
     select: { id: true, enabled: true },
   });

@@ -22,7 +22,7 @@ export const PATCH = async (request: NextRequest, { params }: Params) => {
       );
     }
 
-    await updateSecret(auth.accountId, secretId, parsed.data);
+    await updateSecret(auth.projectId, secretId, parsed.data);
     invalidateGatewayCache(request);
     return NextResponse.json({ success: true });
   } catch (err) {
@@ -36,7 +36,7 @@ export const DELETE = async (request: NextRequest, { params }: Params) => {
     if (!auth) return unauthorized();
 
     const { secretId } = await params;
-    await deleteSecret(auth.accountId, secretId);
+    await deleteSecret(auth.projectId, secretId);
     invalidateGatewayCache(request);
     return new NextResponse(null, { status: 204 });
   } catch (err) {

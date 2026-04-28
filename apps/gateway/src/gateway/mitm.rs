@@ -166,11 +166,15 @@ async fn resolve_rules(
     vault_rules: &[InjectionRule],
     connection_id: Option<&str>,
 ) -> Result<ResolveResult, crate::connect::ConnectError> {
-    let account_id = ctx.account_id.as_deref().unwrap_or("");
-    let agent_token = ctx.agent_token.as_deref().unwrap_or("");
+    let project_id = ctx.project_id.as_deref().ok_or_else(|| {
+        crate::connect::ConnectError::Internal("MITM session missing project_id".to_string())
+    })?;
+    let agent_token = ctx.agent_token.as_deref().ok_or_else(|| {
+        crate::connect::ConnectError::Internal("MITM session missing agent_token".to_string())
+    })?;
 
     let resp =
-        connect::resolve_from_cache(account_id, agent_token, hostname, engine, cache).await?;
+        connect::resolve_from_cache(project_id, agent_token, hostname, engine, cache).await?;
 
     let mut injection_rules = resp.injection_rules; // from secrets
 
@@ -181,7 +185,7 @@ async fn resolve_rules(
                 &resp.app_connections,
                 hostname,
                 connection_id,
-                account_id,
+                project_id,
                 cache,
             )
             .await?

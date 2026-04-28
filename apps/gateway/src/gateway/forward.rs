@@ -176,7 +176,7 @@ pub(crate) async fn forward_request(
     let forward_body = if let PolicyDecision::ManualApproval { rule_id } = &decision {
         info!(method = %method, url = %url, rule_id = %rule_id, "MANUAL APPROVAL required");
 
-        let account_id = match proxy_ctx.account_id.as_deref() {
+        let project_id = match proxy_ctx.project_id.as_deref() {
             Some(id) => id,
             None => {
                 warn!(url = %url, "manual approval requires authenticated agent");
@@ -235,7 +235,7 @@ pub(crate) async fn forward_request(
 
         let approval = PendingApproval {
             id: approval_id.clone(),
-            account_id: account_id.to_string(),
+            project_id: project_id.to_string(),
             agent_id: agent_id.to_string(),
             agent_name: agent_name.to_string(),
             agent_identifier: proxy_ctx.agent_identifier.clone(),
@@ -315,7 +315,7 @@ pub(crate) async fn forward_request(
     // Track credential-injected requests (Postgres + PostHog + Redis)
     if injection_count > 0 {
         if let (Some(aid), Some(gid)) = (
-            proxy_ctx.account_id.as_deref(),
+            proxy_ctx.project_id.as_deref(),
             proxy_ctx.agent_id.as_deref(),
         ) {
             let hostname = super::strip_port(host);
@@ -333,7 +333,7 @@ pub(crate) async fn forward_request(
             };
 
             crate::telemetry::on_request(crate::telemetry::RequestEvent {
-                account_id: aid.to_string(),
+                project_id: aid.to_string(),
                 agent_id: gid.to_string(),
                 agent_name: proxy_ctx
                     .agent_name

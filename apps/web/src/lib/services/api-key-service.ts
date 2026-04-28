@@ -7,9 +7,9 @@ export const generateApiKey = () => `oc_${randomBytes(32).toString("hex")}`;
 /**
  * Get the API key for a user in a specific account.
  */
-export const getApiKey = async (userId: string, accountId: string) => {
+export const getApiKey = async (userId: string, projectId: string) => {
   const apiKey = await db.apiKey.findFirst({
-    where: { userId, accountId },
+    where: { userId, projectId },
     select: { key: true },
   });
 
@@ -21,11 +21,11 @@ export const getApiKey = async (userId: string, accountId: string) => {
 /**
  * Regenerate the API key for a user in a specific account.
  */
-export const regenerateApiKey = async (userId: string, accountId: string) => {
+export const regenerateApiKey = async (userId: string, projectId: string) => {
   const key = generateApiKey();
 
   const existing = await db.apiKey.findFirst({
-    where: { userId, accountId },
+    where: { userId, projectId },
     select: { id: true },
   });
 
@@ -40,7 +40,7 @@ export const regenerateApiKey = async (userId: string, accountId: string) => {
       select: { email: true },
     });
     await db.apiKey.create({
-      data: { key, userId, userEmail: user.email, accountId },
+      data: { key, userId, userEmail: user.email, projectId },
     });
   }
 

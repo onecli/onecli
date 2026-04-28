@@ -7,22 +7,58 @@ datasource db {
   url      = env("DATABASE_URL")
 }
 
-// ── Account & User ──────────────────────────────────────────────────────
+// ── Organization, Project & User ────────────────────────────────────────
 
-model Account {
+// Cloud-only: an Organization is the billing + collaboration entity. Holds
+// subscription state, Stripe customer, and members. A user may belong to
+// multiple organizations (today: one auto-created on signup; future: invited
+// to others, can create more). Projects under an org share its plan/quotas.
+model Organization {
   id                    String    @id @default(uuid())
-  name                  String?
+  name                  String
+  slug                  String    @unique
   stripeCustomerId      String?   @unique @map("stripe_customer_id")
   subscriptionStatus    String    @default("free") @map("subscription_status")
   demoSeeded            Boolean   @default(false) @map("demo_seeded")
   onboardingCompletedAt DateTime? @map("onboarding_completed_at")
-  createdByUserId       String?   @map("created_by_user_id")
-  createdByUserEmail    String?   @map("created_by_user_email")
   createdAt             DateTime  @default(now()) @map("created_at")
   updatedAt             DateTime  @updatedAt @map("updated_at")
 
-  createdByUser       User?                @relation("AccountCreator", fields: [createdByUserId], references: [id])
-  members             AccountMember[]
+  projects Project[]
+  members  OrganizationMember[]
+
+  @@map("organizations")
+}
+
+// Cloud-only: links a User to an Organization with a role.
+model OrganizationMember {
+  organizationId String   @map("organization_id")
+  userId         String   @map("user_id")
+  userEmail      String   @map("user_email")
+  role           String // "owner" | "admin" | "member"
+  createdAt      DateTime @default(now()) @map("created_at")
+
+  organization Organization @relation(fields: [organizationId], references: [id])
+  user         User         @relation(fields: [userId], references: [id])
+
+  @@id([organizationId, userId])
+  @@index([userId])
+  @@map("organization_members")
+}
+
+model Project {
+  id                 String   @id @default(uuid())
+  name               String?
+  organizationId     String   @map("organization_id")
+  // URL-friendly slug, unique within an organization (e.g. "default", "production").
+  slug               String?
+  createdByUserId    String?  @map("created_by_user_id")
+  createdByUserEmail String?  @map("created_by_user_email")
+  createdAt          DateTime @default(now()) @map("created_at")
+  updatedAt          DateTime @updatedAt @map("updated_at")
+
+  createdByUser       User?                @relation("ProjectCreator", fields: [createdByUserId], references: [id])
+  organization        Organization         @relation(fields: [organizationId], references: [id])
   apiKeys             ApiKey[]
   agents              Agent[]
   secrets             Secret[]
@@ -35,22 +71,9 @@ model Account {
   appConfigs          AppConfig[]
   platformDeployments PlatformDeployment[]
 
-  @@map("accounts")
-}
-
-model AccountMember {
-  accountId String   @map("account_id")
-  userId    String   @map("user_id")
-  userEmail String   @map("user_email")
-  role      String // "owner" | "admin" | "member"
-  createdAt DateTime @default(now()) @map("created_at")
-
-  account Account @relation(fields: [accountId], references: [id])
-  user    User    @relation(fields: [userId], references: [id])
-
-  @@id([accountId, userId])
-  @@index([userId])
-  @@map("account_members")
+  @@unique([organizationId, slug])
+  @@index([organizationId])
+  @@map("projects")
 }
 
 model User {
@@ -64,20 +87,20 @@ model User {
   createdAt      DateTime  @default(now()) @map("created_at")
   updatedAt      DateTime  @updatedAt @map("updated_at")
 
-  memberships         AccountMember[]
-  apiKeys             ApiKey[]
-  auditLogs           AuditLog[]
-  createdAccounts     Account[]          @relation("AccountCreator")
-  onboardingSurveys   OnboardingSurvey[]
-  createdAgentSecrets AgentSecret[]      @relation("AgentSecretCreator")
-  updatedAgentSecrets AgentSecret[]      @relation("AgentSecretUpdater")
+  organizationMemberships OrganizationMember[]
+  apiKeys                 ApiKey[]
+  auditLogs               AuditLog[]
+  createdProjects         Project[]            @relation("ProjectCreator")
+  onboardingSurveys       OnboardingSurvey[]
+  createdAgentSecrets     AgentSecret[]        @relation("AgentSecretCreator")
+  updatedAgentSecrets     AgentSecret[]        @relation("AgentSecretUpdater")
 
   @@map("users")
 }
 
 model ApiKey {
   id        String   @id @default(uuid())
-  accountId String   @map("account_id")
+  projectId String   @map("project_id")
   userId    String   @map("user_id")
   userEmail String   @map("user_email")
   key       String   @unique // "oc_..." prefix, used for API auth
@@ -86,38 +109,39 @@ model ApiKey {
   updatedAt DateTime @updatedAt @map("updated_at")
 
   user    User    @relation(fields: [userId], references: [id])
-  account Account @relation(fields: [accountId], references: [id])
+  project Project @relation(fields: [projectId], references: [id])
 
   @@index([userId])
+  @@index([projectId])
   @@map("api_keys")
 }
 
-// ── Workspace data (scoped by accountId) ────────────────────────────────
+// ── Workspace data (scoped by projectId) ────────────────────────────────
 
 model Agent {
   id          String   @id @default(uuid())
-  accountId   String   @map("account_id")
+  projectId   String   @map("project_id")
   name        String
-  identifier  String? // user-provided machine-readable ID, unique per account
+  identifier  String? // user-provided machine-readable ID, unique per project
   accessToken String   @unique @map("access_token") // "aoc_..." prefix, used for gateway auth
   isDefault   Boolean  @default(false) @map("is_default")
   secretMode  String   @default("all") @map("secret_mode") // "all" or "selective"
   createdAt   DateTime @default(now()) @map("created_at")
   updatedAt   DateTime @updatedAt @map("updated_at")
-  account     Account  @relation(fields: [accountId], references: [id])
+  project     Project  @relation(fields: [projectId], references: [id])
 
   agentSecrets        AgentSecret[]
   agentAppConnections AgentAppConnection[]
   policyRules         PolicyRule[]
 
-  @@unique([accountId, identifier])
-  @@index([accountId])
+  @@unique([projectId, identifier])
+  @@index([projectId])
   @@map("agents")
 }
 
 model Secret {
   id              String   @id @default(uuid())
-  accountId       String   @map("account_id")
+  projectId       String   @map("project_id")
   name            String
   type            String // "anthropic", "generic"
   encryptedValue  String   @map("encrypted_value") // AES-256-GCM encrypted via CryptoService
@@ -127,17 +151,17 @@ model Secret {
   metadata        Json? // type-specific metadata (anthropic: { authMode: "api-key" | "oauth" })
   createdAt       DateTime @default(now()) @map("created_at")
   updatedAt       DateTime @updatedAt @map("updated_at")
-  account         Account  @relation(fields: [accountId], references: [id])
+  project         Project  @relation(fields: [projectId], references: [id])
 
   agentSecrets AgentSecret[]
 
-  @@index([accountId])
+  @@index([projectId])
   @@map("secrets")
 }
 
 model PolicyRule {
   id              String   @id @default(uuid())
-  accountId       String   @map("account_id")
+  projectId       String   @map("project_id")
   agentId         String?  @map("agent_id") // null = all agents, set = one agent only
   name            String
   hostPattern     String   @map("host_pattern") // "gmail.googleapis.com" or "*.googleapis.com"
@@ -149,10 +173,10 @@ model PolicyRule {
   rateLimitWindow String?  @map("rate_limit_window") // "minute" | "hour" | "day"
   createdAt       DateTime @default(now()) @map("created_at")
   updatedAt       DateTime @updatedAt @map("updated_at")
-  account         Account  @relation(fields: [accountId], references: [id])
+  project         Project  @relation(fields: [projectId], references: [id])
   agent           Agent?   @relation(fields: [agentId], references: [id], onDelete: Cascade)
 
-  @@index([accountId])
+  @@index([projectId])
   @@map("policy_rules")
 }
 
@@ -174,7 +198,7 @@ model AgentSecret {
 
 model ConnectedService {
   id           String    @id @default(uuid())
-  accountId    String    @map("account_id")
+  projectId    String    @map("project_id")
   provider     String
   status       String    @default("connected")
   accessToken  String?   @map("access_token")
@@ -184,15 +208,15 @@ model ConnectedService {
   metadata     Json?
   connectedAt  DateTime  @default(now()) @map("connected_at")
   updatedAt    DateTime  @updatedAt @map("updated_at")
-  account      Account   @relation(fields: [accountId], references: [id])
+  project      Project   @relation(fields: [projectId], references: [id])
 
-  @@unique([accountId, provider])
+  @@unique([projectId, provider])
   @@map("connected_services")
 }
 
 model AuditLog {
   id        String   @id @default(uuid())
-  accountId String   @map("account_id")
+  projectId String   @map("project_id")
   userId    String   @map("user_id") // who performed the action (kept permanently)
   userEmail String   @map("user_email")
   action    String
@@ -201,16 +225,16 @@ model AuditLog {
   source    String   @default("app")
   metadata  Json?
   createdAt DateTime @default(now()) @map("created_at")
-  account   Account  @relation(fields: [accountId], references: [id])
+  project   Project  @relation(fields: [projectId], references: [id])
   user      User     @relation(fields: [userId], references: [id])
 
-  @@index([accountId, createdAt])
+  @@index([projectId, createdAt])
   @@map("audit_logs")
 }
 
 model RequestLog {
   id             String   @id @default(uuid())
-  accountId      String   @map("account_id")
+  projectId      String   @map("project_id")
   agentId        String   @map("agent_id")
   method         String
   host           String
@@ -221,13 +245,13 @@ model RequestLog {
   injectionCount Int      @map("injection_count")
   createdAt      DateTime @default(now()) @map("created_at")
 
-  @@index([accountId, createdAt])
+  @@index([projectId, createdAt])
   @@map("request_logs")
 }
 
 model VaultConnection {
   id              String    @id @default(uuid())
-  accountId       String    @map("account_id")
+  projectId       String    @map("project_id")
   provider        String
   name            String?
   status          String
@@ -235,15 +259,15 @@ model VaultConnection {
   lastConnectedAt DateTime? @map("last_connected_at")
   createdAt       DateTime  @default(now()) @map("created_at")
   updatedAt       DateTime  @updatedAt @map("updated_at")
-  account         Account   @relation(fields: [accountId], references: [id])
+  project         Project   @relation(fields: [projectId], references: [id])
 
-  @@unique([accountId, provider])
+  @@unique([projectId, provider])
   @@map("vault_connections")
 }
 
 model OnboardingSurvey {
   id         String   @id @default(uuid())
-  accountId  String   @unique @map("account_id")
+  projectId  String   @unique @map("project_id")
   userId     String   @map("user_id")
   userEmail  String   @map("user_email")
   useCase    String?  @map("use_case")
@@ -252,7 +276,7 @@ model OnboardingSurvey {
   setupState Json?    @map("setup_state")
   createdAt  DateTime @default(now()) @map("created_at")
   updatedAt  DateTime @updatedAt @map("updated_at")
-  account    Account  @relation(fields: [accountId], references: [id])
+  project    Project  @relation(fields: [projectId], references: [id])
   user       User     @relation(fields: [userId], references: [id])
 
   @@map("onboarding_surveys")
@@ -262,7 +286,7 @@ model OnboardingSurvey {
 
 model AppConnection {
   id                  String               @id @default(uuid())
-  accountId           String               @map("account_id")
+  projectId           String               @map("project_id")
   provider            String // "github", "gmail", "google-calendar", "google-drive", etc.
   label               String?              @map("label") // auto-populated from metadata (email/username)
   status              String               @default("connected")
@@ -271,10 +295,10 @@ model AppConnection {
   metadata            Json? // non-secret info (username, org, email)
   connectedAt         DateTime             @default(now()) @map("connected_at")
   updatedAt           DateTime             @updatedAt @map("updated_at")
-  account             Account              @relation(fields: [accountId], references: [id])
+  project             Project              @relation(fields: [projectId], references: [id])
   agentAppConnections AgentAppConnection[]
 
-  @@index([accountId, provider])
+  @@index([projectId, provider])
   @@map("app_connections")
 }
 
@@ -292,20 +316,20 @@ model AgentAppConnection {
 
 model AppConfig {
   id          String   @id @default(uuid())
-  accountId   String   @map("account_id")
+  projectId   String   @map("project_id")
   provider    String // "github", "gmail", "google-calendar", "google-drive"
   enabled     Boolean  @default(false)
   credentials String?  @map("credentials") // encrypted (clientSecret)
   settings    Json? // plain (clientId, scopes)
   createdAt   DateTime @default(now()) @map("created_at")
   updatedAt   DateTime @updatedAt @map("updated_at")
-  account     Account  @relation(fields: [accountId], references: [id])
+  project     Project  @relation(fields: [projectId], references: [id])
 
-  @@unique([accountId, provider])
+  @@unique([projectId, provider])
   @@map("app_configs")
 }
 
-// ── Standalone (no account scoping) ─────────────────────────────────────
+// ── Standalone (no project scoping) ─────────────────────────────────────
 
 model ResendBadEmail {
   id        String   @id @default(uuid())
@@ -342,7 +366,7 @@ model CliAuthSession {
 
 model PlatformDeployment {
   id         String   @id @default(uuid())
-  accountId  String   @map("account_id")
+  projectId  String   @map("project_id")
   vmName     String   @unique @map("vm_name")
   vmUrl      String   @map("vm_url")
   proxyToken String?  @map("proxy_token")
@@ -352,8 +376,8 @@ model PlatformDeployment {
   channels   Json     @default("[]")
   createdAt  DateTime @default(now()) @map("created_at")
   updatedAt  DateTime @updatedAt @map("updated_at")
-  account    Account  @relation(fields: [accountId], references: [id])
+  project    Project  @relation(fields: [projectId], references: [id])
 
-  @@index([accountId])
+  @@index([projectId])
   @@map("platform_deployments")
 }

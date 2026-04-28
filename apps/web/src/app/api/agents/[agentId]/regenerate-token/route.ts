@@ -12,7 +12,7 @@ export const POST = async (request: NextRequest, { params }: Params) => {
     if (!auth) return unauthorized();
 
     const { agentId } = await params;
-    const result = await regenerateAgentToken(auth.accountId, agentId);
+    const result = await regenerateAgentToken(auth.projectId, agentId);
     invalidateGatewayCache(request);
     return NextResponse.json(result);
   } catch (err) {

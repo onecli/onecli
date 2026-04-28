@@ -25,7 +25,7 @@ pub(crate) struct AgentRow {
     pub id: String,
     pub name: String,
     pub identifier: Option<String>,
-    pub account_id: String,
+    pub project_id: String,
     pub secret_mode: String,
 }
 
@@ -63,7 +63,7 @@ pub(crate) struct UserRow {
 #[derive(Debug, FromRow)]
 pub(crate) struct ApiKeyRow {
     pub user_id: String,
-    pub account_id: String,
+    pub project_id: String,
 }
 
 /// A vault connection row from the `vault_connections` table.
@@ -91,25 +91,34 @@ pub(crate) async fn find_user_by_external_auth_id(
         .context("querying user by external_auth_id")
 }
 
-/// Find the account ID for a user (from account_members table).
-pub(crate) async fn find_account_id_by_user(
+/// Find the default project ID for a user.
+///
+/// Resolves user → first organization → first project in that organization.
+/// Mirrors the web's `resolveUser()` (apps/web/src/lib/actions/resolve-user.ts).
+pub(crate) async fn find_default_project_id_by_user(
     pool: &PgPool,
     user_id: &str,
 ) -> Result<Option<String>> {
-    let row: Option<(String,)> =
-        sqlx::query_as(r#"SELECT account_id FROM account_members WHERE user_id = $1 LIMIT 1"#)
-            .bind(user_id)
-            .fetch_optional(pool)
-            .await
-            .context("querying account_members by user_id")?;
+    let row: Option<(String,)> = sqlx::query_as(
+        r#"SELECT p.id
+           FROM organization_members om
+           INNER JOIN projects p ON p.organization_id = om.organization_id
+           WHERE om.user_id = $1
+           ORDER BY om.created_at ASC, p.created_at ASC
+           LIMIT 1"#,
+    )
+    .bind(user_id)
+    .fetch_optional(pool)
+    .await
+    .context("querying default project for user via organization_members")?;
 
     Ok(row.map(|(id,)| id))
 }
 
-/// Look up an API key (`oc_...`) and return its user_id and account_id.
+/// Look up an API key (`oc_...`) and return its user_id and project_id.
 pub(crate) async fn find_api_key(pool: &PgPool, key: &str) -> Result<Option<ApiKeyRow>> {
     sqlx::query_as::<_, ApiKeyRow>(
-        r#"SELECT user_id, account_id FROM api_keys WHERE key = $1 LIMIT 1"#,
+        r#"SELECT user_id, project_id FROM api_keys WHERE key = $1 LIMIT 1"#,
     )
     .bind(key)
     .fetch_optional(pool)
@@ -123,7 +132,7 @@ pub(crate) async fn find_agent_by_token(
     access_token: &str,
 ) -> Result<Option<AgentRow>> {
     sqlx::query_as::<_, AgentRow>(
-        r#"SELECT id, name, identifier, account_id, secret_mode FROM agents WHERE access_token = $1 LIMIT 1"#,
+        r#"SELECT id, name, identifier, project_id, secret_mode FROM agents WHERE access_token = $1 LIMIT 1"#,
     )
     .bind(access_token)
     .fetch_optional(pool)
@@ -131,18 +140,18 @@ pub(crate) async fn find_agent_by_token(
     .context("querying agent by access_token")
 }
 
-/// Find all secrets for a given account.
-pub(crate) async fn find_secrets_by_account(
+/// Find all secrets for a given project.
+pub(crate) async fn find_secrets_by_project(
     pool: &PgPool,
-    account_id: &str,
+    project_id: &str,
 ) -> Result<Vec<SecretRow>> {
     sqlx::query_as::<_, SecretRow>(
-        r#"SELECT type, encrypted_value, host_pattern, path_pattern, injection_config FROM secrets WHERE account_id = $1"#,
+        r#"SELECT type, encrypted_value, host_pattern, path_pattern, injection_config FROM secrets WHERE project_id = $1"#,
     )
-    .bind(account_id)
+    .bind(project_id)
     .fetch_all(pool)
     .await
-    .context("querying secrets by account_id")
+    .context("querying secrets by project_id")
 }
 
 /// Find secrets assigned to a specific agent (selective mode).
@@ -159,22 +168,22 @@ pub(crate) async fn find_secrets_by_agent(pool: &PgPool, agent_id: &str) -> Resu
     .context("querying secrets by agent_id")
 }
 
-/// Find all enabled policy rules for a given account.
-pub(crate) async fn find_policy_rules_by_account(
+/// Find all enabled policy rules for a given project.
+pub(crate) async fn find_policy_rules_by_project(
     pool: &PgPool,
-    account_id: &str,
+    project_id: &str,
 ) -> Result<Vec<PolicyRuleRow>> {
     sqlx::query_as::<_, PolicyRuleRow>(
         r#"SELECT id, host_pattern, path_pattern, method, agent_id,
                   action, rate_limit, rate_limit_window
            FROM policy_rules
-           WHERE account_id = $1 AND enabled = true
+           WHERE project_id = $1 AND enabled = true
              AND action IN ('block', 'rate_limit', 'manual_approval')"#,
     )
-    .bind(account_id)
+    .bind(project_id)
     .fetch_all(pool)
     .await
-    .context("querying policy_rules by account_id")
+    .context("querying policy_rules by project_id")
 }
 
 // ── App config queries (BYOC credentials) ─────────────────────────────
@@ -186,22 +195,22 @@ pub(crate) struct AppConfigRow {
     pub credentials: Option<String>,
 }
 
-/// Find an enabled BYOC app config for an account + provider.
+/// Find an enabled BYOC app config for a project + provider.
 pub(crate) async fn find_app_config(
     pool: &PgPool,
-    account_id: &str,
+    project_id: &str,
     provider: &str,
 ) -> Result<Option<AppConfigRow>> {
     sqlx::query_as::<_, AppConfigRow>(
         r#"SELECT settings, credentials FROM app_configs
-           WHERE account_id = $1 AND provider = $2 AND enabled = true
+           WHERE project_id = $1 AND provider = $2 AND enabled = true
            LIMIT 1"#,
     )
-    .bind(account_id)
+    .bind(project_id)
     .bind(provider)
     .fetch_optional(pool)
     .await
-    .context("querying app_config by account_id + provider")
+    .context("querying app_config by project_id + provider")
 }
 
 // ── App connection queries ─────────────────────────────────────────────
@@ -216,18 +225,18 @@ pub(crate) struct AppConnectionRow {
     pub metadata: Option<serde_json::Value>,
 }
 
-/// Find all connected app connections for a given account.
-pub(crate) async fn find_app_connections_by_account(
+/// Find all connected app connections for a given project.
+pub(crate) async fn find_app_connections_by_project(
     pool: &PgPool,
-    account_id: &str,
+    project_id: &str,
 ) -> Result<Vec<AppConnectionRow>> {
     sqlx::query_as::<_, AppConnectionRow>(
-        r#"SELECT id, provider, credentials, label, metadata FROM app_connections WHERE account_id = $1 AND status = 'connected'"#,
+        r#"SELECT id, provider, credentials, label, metadata FROM app_connections WHERE project_id = $1 AND status = 'connected'"#,
     )
-    .bind(account_id)
+    .bind(project_id)
     .fetch_all(pool)
     .await
-    .context("querying app_connections by account_id")
+    .context("querying app_connections by project_id")
 }
 
 /// Find app connections assigned to a specific agent (selective mode).
@@ -264,37 +273,37 @@ pub(crate) async fn update_app_connection_credentials(
 
 // ── Vault connection queries ────────────────────────────────────────────
 
-/// Find a vault connection for an account + provider pair.
+/// Find a vault connection for a project + provider pair.
 pub(crate) async fn find_vault_connection(
     pool: &PgPool,
-    account_id: &str,
+    project_id: &str,
     provider: &str,
 ) -> Result<Option<VaultConnectionRow>> {
     sqlx::query_as::<_, VaultConnectionRow>(
-        r#"SELECT id, provider, name, status, connection_data FROM vault_connections WHERE account_id = $1 AND provider = $2 LIMIT 1"#,
+        r#"SELECT id, provider, name, status, connection_data FROM vault_connections WHERE project_id = $1 AND provider = $2 LIMIT 1"#,
     )
-    .bind(account_id)
+    .bind(project_id)
     .bind(provider)
     .fetch_optional(pool)
     .await
-    .context("querying vault_connection by account_id + provider")
+    .context("querying vault_connection by project_id + provider")
 }
 
-/// Upsert a vault connection (insert or update on account_id + provider conflict).
+/// Upsert a vault connection (insert or update on project_id + provider conflict).
 pub(crate) async fn upsert_vault_connection(
     pool: &PgPool,
-    account_id: &str,
+    project_id: &str,
     provider: &str,
     status: &str,
     connection_data: Option<&serde_json::Value>,
 ) -> Result<()> {
     sqlx::query(
-        r#"INSERT INTO vault_connections (id, account_id, provider, status, connection_data, created_at, updated_at)
+        r#"INSERT INTO vault_connections (id, project_id, provider, status, connection_data, created_at, updated_at)
            VALUES (gen_random_uuid()::text, $1, $2, $3, $4, NOW(), NOW())
-           ON CONFLICT (account_id, provider)
+           ON CONFLICT (project_id, provider)
            DO UPDATE SET status = $3, connection_data = $4, updated_at = NOW()"#,
     )
-    .bind(account_id)
+    .bind(project_id)
     .bind(provider)
     .bind(status)
     .bind(connection_data)
@@ -307,14 +316,14 @@ pub(crate) async fn upsert_vault_connection(
 /// Update only the connection_data JSON for an existing vault connection.
 pub(crate) async fn update_vault_connection_data(
     pool: &PgPool,
-    account_id: &str,
+    project_id: &str,
     provider: &str,
     connection_data: &serde_json::Value,
 ) -> Result<()> {
     sqlx::query(
-        r#"UPDATE vault_connections SET connection_data = $3, updated_at = NOW() WHERE account_id = $1 AND provider = $2"#,
+        r#"UPDATE vault_connections SET connection_data = $3, updated_at = NOW() WHERE project_id = $1 AND provider = $2"#,
     )
-    .bind(account_id)
+    .bind(project_id)
     .bind(provider)
     .bind(connection_data)
     .execute(pool)
@@ -323,14 +332,14 @@ pub(crate) async fn update_vault_connection_data(
     Ok(())
 }
 
-/// Delete a vault connection for an account + provider pair.
+/// Delete a vault connection for a project + provider pair.
 pub(crate) async fn delete_vault_connection(
     pool: &PgPool,
-    account_id: &str,
+    project_id: &str,
     provider: &str,
 ) -> Result<()> {
-    sqlx::query(r#"DELETE FROM vault_connections WHERE account_id = $1 AND provider = $2"#)
-        .bind(account_id)
+    sqlx::query(r#"DELETE FROM vault_connections WHERE project_id = $1 AND provider = $2"#)
+        .bind(project_id)
         .bind(provider)
         .execute(pool)
         .await

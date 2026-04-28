@@ -21,7 +21,7 @@ export const DELETE = async (request: NextRequest, { params }: Params) => {
       );
     }
 
-    await deleteConnection(auth.accountId, connectionId);
+    await deleteConnection(auth.projectId, connectionId);
     invalidateGatewayCache(request);
     return new NextResponse(null, { status: 204 });
   } catch (err) {

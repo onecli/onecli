@@ -15,7 +15,7 @@ pub(crate) const CHANNEL_CAPACITY: usize = 10_000;
 const MAX_PATH_LEN: usize = 2048;
 
 pub(crate) struct RequestEvent {
-    pub account_id: String,
+    pub project_id: String,
     pub agent_id: String,
     #[allow(dead_code)] // read by cloud telemetry (PostHog), unused in OSS
     pub agent_name: String,
@@ -79,7 +79,7 @@ pub(crate) async fn insert_batch(
         .iter()
         .map(|_| uuid::Uuid::new_v4().to_string())
         .collect();
-    let account_ids: Vec<String> = events.iter().map(|e| e.account_id.clone()).collect();
+    let project_ids: Vec<String> = events.iter().map(|e| e.project_id.clone()).collect();
     let agent_ids: Vec<String> = events.iter().map(|e| e.agent_id.clone()).collect();
     let methods: Vec<String> = events.iter().map(|e| e.method.clone()).collect();
     let hosts: Vec<String> = events.iter().map(|e| e.host.clone()).collect();
@@ -90,11 +90,11 @@ pub(crate) async fn insert_batch(
     let injections: Vec<i32> = events.iter().map(|e| e.injection_count as i32).collect();
 
     sqlx::query(
-        "INSERT INTO request_logs (id, account_id, agent_id, method, host, path, provider, status, latency_ms, injection_count)
+        "INSERT INTO request_logs (id, project_id, agent_id, method, host, path, provider, status, latency_ms, injection_count)
          SELECT * FROM UNNEST($1::text[], $2::text[], $3::text[], $4::text[], $5::text[], $6::text[], $7::text[], $8::int4[], $9::int4[], $10::int4[])",
     )
     .bind(&ids)
-    .bind(&account_ids)
+    .bind(&project_ids)
     .bind(&agent_ids)
     .bind(&methods)
     .bind(&hosts)

@@ -13,7 +13,7 @@ export const GET = async (request: NextRequest) => {
     const auth = await resolveApiAuth(request);
     if (!auth) return unauthorized();
 
-    const rules = await listPolicyRules(auth.accountId);
+    const rules = await listPolicyRules(auth.projectId);
     return NextResponse.json(rules);
   } catch (err) {
     return handleServiceError(err);
@@ -34,7 +34,7 @@ export const POST = async (request: NextRequest) => {
       );
     }
 
-    const rule = await createPolicyRule(auth.accountId, parsed.data);
+    const rule = await createPolicyRule(auth.projectId, parsed.data);
     invalidateGatewayCache(request);
     return NextResponse.json(rule, { status: 201 });
   } catch (err) {

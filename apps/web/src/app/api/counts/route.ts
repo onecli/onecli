@@ -8,7 +8,7 @@ export const GET = async (request: NextRequest) => {
     const auth = await resolveApiAuth(request);
     if (!auth) return unauthorized();
 
-    const counts = await getGatewayCounts(auth.accountId);
+    const counts = await getGatewayCounts(auth.projectId);
     return NextResponse.json(counts);
   } catch (err) {
     return handleServiceError(err);

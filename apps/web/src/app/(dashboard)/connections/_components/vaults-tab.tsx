@@ -2,6 +2,7 @@
 
 import Image from "next/image";
 import Link from "next/link";
+import { usePathname } from "next/navigation";
 import {
   Card,
   CardContent,
@@ -17,6 +18,7 @@ import {
   useVaultStatus,
   type BitwardenStatusData,
 } from "@/hooks/use-vault-status";
+import { withProjectPrefix } from "@/lib/navigation";
 
 export const VaultsTab = () => {
   return (
@@ -27,6 +29,7 @@ export const VaultsTab = () => {
 };
 
 const BitwardenCard = () => {
+  const pathname = usePathname();
   const { loading, isPaired, isReady, status } =
     useVaultStatus<BitwardenStatusData>();
 
@@ -122,7 +125,12 @@ const BitwardenCard = () => {
             className="w-full"
             asChild
           >
-            <Link href="/connections/vaults/bitwarden">
+            <Link
+              href={withProjectPrefix(
+                pathname,
+                "/connections/vaults/bitwarden",
+              )}
+            >
               {isPaired ? "Manage" : "Connect"}
             </Link>
           </Button>

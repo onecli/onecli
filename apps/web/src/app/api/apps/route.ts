@@ -12,7 +12,7 @@ export const GET = async (request: NextRequest) => {
 
     const [configs, connections] = await Promise.all([
       db.appConfig.findMany({
-        where: { accountId: auth.accountId },
+        where: { projectId: auth.projectId },
         select: {
           provider: true,
           enabled: true,
@@ -20,7 +20,7 @@ export const GET = async (request: NextRequest) => {
           createdAt: true,
         },
       }),
-      listConnections(auth.accountId),
+      listConnections(auth.projectId),
     ]);
 
     const configMap = new Map(configs.map((c) => [c.provider, c]));

@@ -12,16 +12,16 @@ import {
 } from "@/lib/services/audit-service";
 
 export const getApiKey = async () => {
-  const { userId, accountId } = await resolveUser();
-  return getApiKeyService(userId, accountId);
+  const { userId, projectId } = await resolveUser();
+  return getApiKeyService(userId, projectId);
 };
 
 export const regenerateApiKey = async () => {
-  const { userId, userEmail, accountId } = await resolveUser();
+  const { userId, userEmail, projectId } = await resolveUser();
   return withAudit(
-    () => regenerateApiKeyService(userId, accountId),
+    () => regenerateApiKeyService(userId, projectId),
     () => ({
-      accountId,
+      projectId,
       userId,
       userEmail,
       action: AUDIT_ACTIONS.REGENERATE,

@@ -16,7 +16,7 @@ export const GET = async (request: NextRequest, { params }: Params) => {
     if (!auth) return unauthorized();
 
     const { agentId } = await params;
-    const secretIds = await getAgentSecrets(auth.accountId, agentId);
+    const secretIds = await getAgentSecrets(auth.projectId, agentId);
     return NextResponse.json(secretIds);
   } catch (err) {
     return handleServiceError(err);
@@ -38,7 +38,7 @@ export const PUT = async (request: NextRequest, { params }: Params) => {
       );
     }
 
-    await updateAgentSecrets(auth.accountId, agentId, parsed.data.secretIds);
+    await updateAgentSecrets(auth.projectId, agentId, parsed.data.secretIds);
     invalidateGatewayCache(request);
     return NextResponse.json({ success: true });
   } catch (err) {

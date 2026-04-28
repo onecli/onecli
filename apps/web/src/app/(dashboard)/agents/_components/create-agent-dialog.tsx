@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { Copy, Check, CircleCheck } from "lucide-react";
 import { toast } from "sonner";
 import {
@@ -14,8 +14,10 @@ import {
 import { Button } from "@onecli/ui/components/button";
 import { Input } from "@onecli/ui/components/input";
 import { Label } from "@onecli/ui/components/label";
+import { cn } from "@onecli/ui/lib/utils";
 import { useCopyToClipboard } from "@/hooks/use-copy-to-clipboard";
 import { createAgent } from "@/lib/actions/agents";
+import { validateDisplayName } from "@/lib/validations/display-name";
 
 interface CreateAgentDialogProps {
   open: boolean;
@@ -37,6 +39,7 @@ export const CreateAgentDialog = ({
   onCreated,
 }: CreateAgentDialogProps) => {
   const [name, setName] = useState("");
+  const [nameTouched, setNameTouched] = useState(false);
   const [identifier, setIdentifier] = useState("");
   const [identifierTouched, setIdentifierTouched] = useState(false);
   const [creating, setCreating] = useState(false);
@@ -44,6 +47,10 @@ export const CreateAgentDialog = ({
     null,
   );
   const { copied, copy } = useCopyToClipboard();
+
+  const nameError = useMemo(() => validateDisplayName(name), [name]);
+  const showNameError = nameTouched && nameError !== null;
+  const isNameValid = name.trim().length > 0 && nameError === null;
 
   const handleNameChange = (value: string) => {
     setName(value);
@@ -60,7 +67,7 @@ export const CreateAgentDialog = ({
   const isValidIdentifier = /^[a-z][a-z0-9-]{0,49}$/.test(identifier);
 
   const handleCreate = async () => {
-    if (!name.trim() || !isValidIdentifier) return;
+    if (!isNameValid || !isValidIdentifier) return;
     setCreating(true);
     try {
       const agent = await createAgent(name, identifier);
@@ -79,6 +86,7 @@ export const CreateAgentDialog = ({
   const handleClose = (value: boolean) => {
     if (!value) {
       setName("");
+      setNameTouched(false);
       setIdentifier("");
       setIdentifierTouched(false);
       setCreatedIdentifier(null);
@@ -143,12 +151,17 @@ export const CreateAgentDialog = ({
                   placeholder="e.g. Production Claude"
                   value={name}
                   onChange={(e) => handleNameChange(e.target.value)}
+                  onBlur={() => setNameTouched(true)}
                   onKeyDown={(e) => {
-                    if (e.key === "Enter" && name.trim() && isValidIdentifier)
+                    if (e.key === "Enter" && isNameValid && isValidIdentifier)
                       handleCreate();
                   }}
                   autoFocus
+                  className={cn(showNameError && "border-destructive")}
                 />
+                {showNameError && (
+                  <p className="text-destructive text-xs">{nameError}</p>
+                )}
               </div>
               <div className="space-y-2">
                 <Label htmlFor="agent-identifier">Identifier</Label>
@@ -158,7 +171,7 @@ export const CreateAgentDialog = ({
                   value={identifier}
                   onChange={(e) => handleIdentifierChange(e.target.value)}
                   onKeyDown={(e) => {
-                    if (e.key === "Enter" && name.trim() && isValidIdentifier)
+                    if (e.key === "Enter" && isNameValid && isValidIdentifier)
                       handleCreate();
                   }}
                 />
@@ -180,9 +193,12 @@ export const CreateAgentDialog = ({
                 Cancel
               </Button>
               <Button
-                onClick={handleCreate}
+                onClick={() => {
+                  setNameTouched(true);
+                  if (isNameValid && isValidIdentifier) handleCreate();
+                }}
                 loading={creating}
-                disabled={!name.trim() || !isValidIdentifier}
+                disabled={!isNameValid || !isValidIdentifier || creating}
               >
                 {creating ? "Creating..." : "Create"}
               </Button>

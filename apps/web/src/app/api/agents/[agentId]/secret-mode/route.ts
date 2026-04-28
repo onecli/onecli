@@ -22,7 +22,7 @@ export const PATCH = async (request: NextRequest, { params }: Params) => {
       );
     }
 
-    await updateAgentSecretMode(auth.accountId, agentId, parsed.data.mode);
+    await updateAgentSecretMode(auth.projectId, agentId, parsed.data.mode);
     invalidateGatewayCache(request);
     return NextResponse.json({ success: true });
   } catch (err) {

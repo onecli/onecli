@@ -20,9 +20,9 @@ export const extractLabel = (
 /**
  * List all app connections for an account (no credentials returned).
  */
-export const listConnections = async (accountId: string) => {
+export const listConnections = async (projectId: string) => {
   return db.appConnection.findMany({
-    where: { accountId },
+    where: { projectId },
     select: {
       id: true,
       provider: true,
@@ -40,11 +40,11 @@ export const listConnections = async (accountId: string) => {
  * List all app connections for an account filtered by provider.
  */
 export const listConnectionsByProvider = async (
-  accountId: string,
+  projectId: string,
   provider: string,
 ) => {
   return db.appConnection.findMany({
-    where: { accountId, provider },
+    where: { projectId, provider },
     select: {
       id: true,
       provider: true,
@@ -62,7 +62,7 @@ export const listConnectionsByProvider = async (
  * Create a new app connection with encrypted credentials.
  */
 export const createConnection = async (
-  accountId: string,
+  projectId: string,
   provider: string,
   credentials: Record<string, unknown>,
   options?: { scopes?: string[]; metadata?: Record<string, unknown> },
@@ -73,7 +73,7 @@ export const createConnection = async (
 
   return db.appConnection.create({
     data: {
-      accountId,
+      projectId,
       provider,
       status: "connected",
       label: extractLabel(options?.metadata),
@@ -89,13 +89,13 @@ export const createConnection = async (
  * Reconnect an existing app connection by updating its credentials.
  */
 export const reconnectConnection = async (
-  accountId: string,
+  projectId: string,
   connectionId: string,
   credentials: Record<string, unknown>,
   options?: { scopes?: string[]; metadata?: Record<string, unknown> },
 ) => {
   const existing = await db.appConnection.findFirst({
-    where: { id: connectionId, accountId },
+    where: { id: connectionId, projectId },
     select: { id: true, label: true },
   });
 
@@ -124,11 +124,11 @@ export const reconnectConnection = async (
  * Delete an app connection by id.
  */
 export const deleteConnection = async (
-  accountId: string,
+  projectId: string,
   connectionId: string,
 ) => {
   const connection = await db.appConnection.findFirst({
-    where: { id: connectionId, accountId },
+    where: { id: connectionId, projectId },
     select: { id: true },
   });
 

@@ -35,10 +35,10 @@ export const POST = async (request: NextRequest) => {
       );
     }
 
-    const result = await exportToCloud(auth.accountId, parsed.data.cloudApiKey);
+    const result = await exportToCloud(auth.projectId, parsed.data.cloudApiKey);
 
     logger.info(
-      { accountId: auth.accountId, imported: result.imported },
+      { projectId: auth.projectId, imported: result.imported },
       "migration export completed",
     );
 

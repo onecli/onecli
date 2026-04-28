@@ -8,9 +8,9 @@ export type SecretMode = "all" | "selective";
 export const generateAccessToken = () =>
   `aoc_${randomBytes(32).toString("hex")}`;
 
-export const listAgents = async (accountId: string) => {
+export const listAgents = async (projectId: string) => {
   const agents = await db.agent.findMany({
-    where: { accountId },
+    where: { projectId },
     select: {
       id: true,
       name: true,
@@ -30,9 +30,9 @@ export const listAgents = async (accountId: string) => {
   }));
 };
 
-export const getDefaultAgent = async (accountId: string) => {
+export const getDefaultAgent = async (projectId: string) => {
   return db.agent.findFirst({
-    where: { accountId, isDefault: true },
+    where: { projectId, isDefault: true },
     select: {
       id: true,
       name: true,
@@ -44,7 +44,7 @@ export const getDefaultAgent = async (accountId: string) => {
 };
 
 export const createAgent = async (
-  accountId: string,
+  projectId: string,
   name: string,
   identifier: string,
 ) => {
@@ -65,7 +65,7 @@ export const createAgent = async (
   }
 
   const existing = await db.agent.findFirst({
-    where: { accountId, identifier: trimmedIdentifier },
+    where: { projectId, identifier: trimmedIdentifier },
     select: { id: true },
   });
   if (existing) {
@@ -84,7 +84,7 @@ export const createAgent = async (
         identifier: trimmedIdentifier,
         accessToken,
         secretMode: "all",
-        accountId,
+        projectId,
       },
       select: {
         id: true,
@@ -96,7 +96,7 @@ export const createAgent = async (
 
     // Auto-assign the first anthropic secret if one exists
     const anthropicSecret = await db.secret.findFirst({
-      where: { accountId, type: "anthropic" },
+      where: { projectId, type: "anthropic" },
       select: { id: true },
       orderBy: { createdAt: "asc" },
     });
@@ -122,9 +122,9 @@ export const createAgent = async (
   }
 };
 
-export const deleteAgent = async (accountId: string, agentId: string) => {
+export const deleteAgent = async (projectId: string, agentId: string) => {
   const agent = await db.agent.findFirst({
-    where: { id: agentId, accountId },
+    where: { id: agentId, projectId },
     select: { id: true, isDefault: true },
   });
 
@@ -136,7 +136,7 @@ export const deleteAgent = async (accountId: string, agentId: string) => {
 };
 
 export const renameAgent = async (
-  accountId: string,
+  projectId: string,
   agentId: string,
   name: string,
 ) => {
@@ -149,7 +149,7 @@ export const renameAgent = async (
   }
 
   const agent = await db.agent.findFirst({
-    where: { id: agentId, accountId },
+    where: { id: agentId, projectId },
     select: { id: true },
   });
 
@@ -162,11 +162,11 @@ export const renameAgent = async (
 };
 
 export const regenerateAgentToken = async (
-  accountId: string,
+  projectId: string,
   agentId: string,
 ) => {
   const agent = await db.agent.findFirst({
-    where: { id: agentId, accountId },
+    where: { id: agentId, projectId },
     select: { id: true },
   });
 
@@ -183,9 +183,9 @@ export const regenerateAgentToken = async (
   return { accessToken: updated.accessToken };
 };
 
-export const getAgentSecrets = async (accountId: string, agentId: string) => {
+export const getAgentSecrets = async (projectId: string, agentId: string) => {
   const agent = await db.agent.findFirst({
-    where: { id: agentId, accountId },
+    where: { id: agentId, projectId },
     select: { id: true },
   });
 
@@ -200,12 +200,12 @@ export const getAgentSecrets = async (accountId: string, agentId: string) => {
 };
 
 export const updateAgentSecretMode = async (
-  accountId: string,
+  projectId: string,
   agentId: string,
   mode: SecretMode,
 ) => {
   const agent = await db.agent.findFirst({
-    where: { id: agentId, accountId },
+    where: { id: agentId, projectId },
     select: { id: true },
   });
 
@@ -218,12 +218,12 @@ export const updateAgentSecretMode = async (
 };
 
 export const updateAgentSecrets = async (
-  accountId: string,
+  projectId: string,
   agentId: string,
   secretIds: string[],
 ) => {
   const agent = await db.agent.findFirst({
-    where: { id: agentId, accountId },
+    where: { id: agentId, projectId },
     select: { id: true },
   });
 
@@ -231,7 +231,7 @@ export const updateAgentSecrets = async (
 
   // Validate all secrets belong to this account
   const secrets = await db.secret.findMany({
-    where: { id: { in: secretIds }, accountId },
+    where: { id: { in: secretIds }, projectId },
     select: { id: true },
   });
 
@@ -250,11 +250,11 @@ export const updateAgentSecrets = async (
 };
 
 export const getAgentAppConnections = async (
-  accountId: string,
+  projectId: string,
   agentId: string,
 ) => {
   const agent = await db.agent.findFirst({
-    where: { id: agentId, accountId },
+    where: { id: agentId, projectId },
     select: { id: true },
   });
 
@@ -269,12 +269,12 @@ export const getAgentAppConnections = async (
 };
 
 export const updateAgentAppConnections = async (
-  accountId: string,
+  projectId: string,
   agentId: string,
   appConnectionIds: string[],
 ) => {
   const agent = await db.agent.findFirst({
-    where: { id: agentId, accountId },
+    where: { id: agentId, projectId },
     select: { id: true },
   });
 
@@ -282,7 +282,7 @@ export const updateAgentAppConnections = async (
 
   // Validate all app connections belong to this account
   const connections = await db.appConnection.findMany({
-    where: { id: { in: appConnectionIds }, accountId },
+    where: { id: { in: appConnectionIds }, projectId },
     select: { id: true },
   });
 

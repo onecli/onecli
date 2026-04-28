@@ -2,10 +2,12 @@ import { type NextRequest, NextResponse } from "next/server";
 import { db } from "@onecli/db";
 import { getServerSession } from "@/lib/auth/server";
 import { logger } from "@/lib/logger";
-import { DEFAULT_AGENT_NAME } from "@/lib/constants";
 import { seedDemoSecret } from "@/lib/services/secret-service";
-import { generateApiKey } from "@/lib/services/api-key-service";
-import { generateAccessToken } from "@/lib/services/agent-service";
+import {
+  findUserDefaultProject,
+  bootstrapOrganization,
+  ensureProjectSeeds,
+} from "@/lib/services/organization-service";
 import { getSessionAttributes, onUserCreated } from "@/lib/auth/session-hooks";
 
 /**
@@ -14,9 +16,9 @@ import { getSessionAttributes, onUserCreated } from "@/lib/auth/session-hooks";
  * Single endpoint that handles the full auth → DB sync flow:
  * 1. Reads the auth session (cookie/token)
  * 2. Upserts the user in the database
- * 3. Ensures the user has an Account + AccountMember + ApiKey
- * 4. Seeds defaults (agent, demo secret) into the account
- * 5. Returns the user profile
+ * 3. Ensures the user has an Organization + Project + ApiKey + Agent
+ * 4. Seeds demo secret on first login
+ * 5. Returns the user profile with projectId
  *
  * Called by the login page after auth and by the dashboard layout on mount.
  * Returns 401 if no valid session exists.
@@ -30,7 +32,6 @@ export const GET = async (request: NextRequest) => {
 
     const extra = getSessionAttributes(request);
 
-    // Upsert user by email — creates on first login, updates on subsequent.
     const user = await db.user.upsert({
       where: { email: session.email },
       create: {
@@ -46,99 +47,47 @@ export const GET = async (request: NextRequest) => {
         lastLoginAt: new Date(),
         ...extra,
       },
-      select: {
-        id: true,
-        email: true,
-        name: true,
-      },
+      select: { id: true, email: true, name: true },
     });
 
-    // Ensure the user has an Account. Create one if this is their first login.
-    let membership = await db.accountMember.findFirst({
-      where: { userId: user.id },
-      select: {
-        accountId: true,
-        account: { select: { demoSeeded: true } },
-      },
-    });
+    let defaultProject = await findUserDefaultProject(user.id);
+    let isNewUser = false;
 
-    if (!membership) {
-      const account = await db.account.create({
-        data: {
-          name: user.name,
-          createdByUserId: user.id,
-          createdByUserEmail: user.email,
-        },
-        select: { id: true, demoSeeded: true },
-      });
-
-      await db.accountMember.create({
-        data: {
-          accountId: account.id,
-          userId: user.id,
-          userEmail: user.email,
-          role: "owner",
-        },
-      });
-
-      // Create API key for this user in the new account
-      await db.apiKey.create({
-        data: {
-          key: generateApiKey(),
-          userId: user.id,
-          userEmail: user.email,
-          accountId: account.id,
-        },
-      });
-
-      membership = {
-        accountId: account.id,
-        account: { demoSeeded: account.demoSeeded },
-      };
-
+    if (!defaultProject) {
+      const result = await bootstrapOrganization(
+        user.id,
+        user.email,
+        user.name ?? undefined,
+      );
+      defaultProject = result.project;
+      isNewUser = true;
       onUserCreated({ email: user.email, name: user.name }, extra);
     }
 
-    const accountId = membership.accountId;
-    const demoSeeded = membership.account.demoSeeded;
+    const projectId = defaultProject.id;
+    const organizationId = defaultProject.organizationId;
 
-    // Seed defaults into the account — idempotent, skips anything that already exists
-    const ops = [];
+    await ensureProjectSeeds(projectId, user.id, user.email);
 
-    const hasDefaultAgent = await db.agent.findFirst({
-      where: { accountId, isDefault: true },
-      select: { id: true },
-    });
-
-    if (!hasDefaultAgent) {
-      ops.push(
-        db.agent.create({
-          data: {
-            name: DEFAULT_AGENT_NAME,
-            accessToken: generateAccessToken(),
-            isDefault: true,
-            accountId,
-          },
-        }),
-      );
-    }
-
-    if (ops.length > 0) {
-      await db.$transaction(ops);
-    }
-
-    if (!demoSeeded) {
-      await seedDemoSecret(accountId);
-      await db.account.update({
-        where: { id: accountId },
-        data: { demoSeeded: true },
+    if (isNewUser) {
+      const org = await db.organization.findUnique({
+        where: { id: organizationId },
+        select: { demoSeeded: true },
       });
+      if (org && !org.demoSeeded) {
+        await seedDemoSecret(projectId);
+        await db.organization.update({
+          where: { id: organizationId },
+          data: { demoSeeded: true },
+        });
+      }
     }
 
     return NextResponse.json({
       id: user.id,
       email: user.email,
       name: user.name,
+      projectId,
     });
   } catch (err) {
     logger.error(

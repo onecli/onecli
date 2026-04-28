@@ -10,7 +10,7 @@ export const GET = async (request: NextRequest) => {
     const auth = await resolveApiAuth(request);
     if (!auth) return unauthorized();
 
-    const agents = await listAgents(auth.accountId);
+    const agents = await listAgents(auth.projectId);
     return NextResponse.json(agents);
   } catch (err) {
     return handleServiceError(err);
@@ -32,7 +32,7 @@ export const POST = async (request: NextRequest) => {
     }
 
     const agent = await createAgent(
-      auth.accountId,
+      auth.projectId,
       parsed.data.name,
       parsed.data.identifier,
     );

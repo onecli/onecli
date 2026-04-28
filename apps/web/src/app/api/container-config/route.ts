@@ -32,11 +32,11 @@ export async function GET(request: NextRequest) {
 
     let agent = agentIdentifier
       ? await db.agent.findFirst({
-          where: { accountId: auth.accountId, identifier: agentIdentifier },
+          where: { projectId: auth.projectId, identifier: agentIdentifier },
           select: { id: true, accessToken: true, secretMode: true },
         })
       : await db.agent.findFirst({
-          where: { accountId: auth.accountId, isDefault: true },
+          where: { projectId: auth.projectId, isDefault: true },
           select: { id: true, accessToken: true, secretMode: true },
         });
 
@@ -53,7 +53,7 @@ export async function GET(request: NextRequest) {
           name: DEFAULT_AGENT_NAME,
           accessToken: generateAccessToken(),
           isDefault: true,
-          accountId: auth.accountId,
+          projectId: auth.projectId,
         },
         select: { id: true, accessToken: true, secretMode: true },
       });
@@ -87,7 +87,7 @@ export async function GET(request: NextRequest) {
             select: { metadata: true },
           })
         : await db.secret.findFirst({
-            where: { accountId: auth.accountId, type: "anthropic" },
+            where: { projectId: auth.projectId, type: "anthropic" },
             select: { metadata: true },
           });
 
@@ -99,7 +99,7 @@ export async function GET(request: NextRequest) {
         : { ANTHROPIC_API_KEY: "placeholder" };
 
     // Mark agent as connected after the response is sent
-    after(() => markAgentConnected(auth.accountId));
+    after(() => markAgentConnected(auth.projectId));
 
     return NextResponse.json({
       env: {
@@ -135,9 +135,9 @@ export async function GET(request: NextRequest) {
  * Update the onboarding survey to record that the agent container is up.
  * Skips the write if already marked to avoid repeated DB calls.
  */
-const markAgentConnected = async (accountId: string) => {
+const markAgentConnected = async (projectId: string) => {
   const survey = await db.onboardingSurvey.findUnique({
-    where: { accountId },
+    where: { projectId },
     select: { setupState: true },
   });
 
@@ -151,7 +151,7 @@ const markAgentConnected = async (accountId: string) => {
   if (state.connectedAt) return; // already marked
 
   await db.onboardingSurvey.update({
-    where: { accountId },
+    where: { projectId },
     data: {
       setupState: {
         ...state,

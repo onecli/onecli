@@ -22,7 +22,7 @@ export const PATCH = async (request: NextRequest, { params }: Params) => {
       );
     }
 
-    await renameAgent(auth.accountId, agentId, parsed.data.name);
+    await renameAgent(auth.projectId, agentId, parsed.data.name);
     return NextResponse.json({ success: true });
   } catch (err) {
     return handleServiceError(err);
@@ -35,7 +35,7 @@ export const DELETE = async (request: NextRequest, { params }: Params) => {
     if (!auth) return unauthorized();
 
     const { agentId } = await params;
-    await deleteAgent(auth.accountId, agentId);
+    await deleteAgent(auth.projectId, agentId);
     invalidateGatewayCache(request);
     return new NextResponse(null, { status: 204 });
   } catch (err) {

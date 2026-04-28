@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
+import { usePathname } from "next/navigation";
 import { ArrowLeft, Loader2 } from "lucide-react";
 import { Button } from "@onecli/ui/components/button";
 import { Skeleton } from "@onecli/ui/components/skeleton";
@@ -9,6 +10,7 @@ import { getAppConnections } from "@/lib/actions/connections";
 import { checkAppConfigExists } from "@/lib/actions/app-config";
 import { useAppMessages } from "@/hooks/use-app-connected";
 import { useInvalidateGatewayCache } from "@/hooks/use-invalidate-cache";
+import { withProjectPrefix } from "@/lib/navigation";
 import type { OAuthPermission } from "@/lib/apps/types";
 import { AppIcon } from "./app-icon";
 import { AppConfigForm } from "./app-config-form";
@@ -57,6 +59,7 @@ export const AppDetail = ({
   hasEnvDefaults,
   hasAppConfig,
 }: AppDetailProps) => {
+  const pathname = usePathname();
   const [connections, setConnections] = useState<ConnectionData[]>([]);
   const [loading, setLoading] = useState(true);
   const [configDialogOpen, setConfigDialogOpen] = useState(false);
@@ -135,7 +138,7 @@ export const AppDetail = ({
     <div className="space-y-6">
       {/* Back link */}
       <Link
-        href="/connections"
+        href={withProjectPrefix(pathname, "/connections")}
         className="inline-flex items-center gap-1.5 text-sm text-muted-foreground hover:text-foreground transition-colors"
       >
         <ArrowLeft className="size-4" />

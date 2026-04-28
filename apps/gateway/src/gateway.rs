@@ -48,7 +48,7 @@ use crate::vault;
 /// Wrapped in `Arc` and shared across all requests within a MITM session.
 #[derive(Debug)]
 pub(crate) struct ProxyContext {
-    pub account_id: Option<String>,
+    pub project_id: Option<String>,
     pub agent_id: Option<String>,
     pub agent_name: Option<String>,
     pub agent_identifier: Option<String>,
@@ -246,7 +246,7 @@ async fn me(auth: AuthUser) -> String {
     auth.user_id
 }
 
-/// Invalidate all cached CONNECT responses for the authenticated account.
+/// Invalidate all cached CONNECT responses for the authenticated project.
 /// Called by the web app after secret/rule mutations so agents pick up
 /// changes immediately instead of waiting for the 60-second TTL.
 async fn invalidate_cache(
@@ -256,9 +256,9 @@ async fn invalidate_cache(
     // Clear injection cache first, then connect cache. This ordering ensures
     // a concurrent request that re-resolves the connect cache also re-resolves
     // injections (since injection cache is already cleared).
-    let injection_prefix = format!("app_injection:{}:", auth.account_id);
+    let injection_prefix = format!("app_injection:{}:", auth.project_id);
     state.cache.del_by_prefix(&injection_prefix).await;
-    let prefix = format!("connect:{}:", auth.account_id);
+    let prefix = format!("connect:{}:", auth.project_id);
     state.cache.del_by_prefix(&prefix).await;
     (
         StatusCode::OK,
@@ -289,16 +289,16 @@ async fn get_pending_approvals(
         .filter(|s| !s.is_empty())
         .collect();
 
-    let mut pending = state.approval_store.list_pending(&auth.account_id).await;
+    let mut pending = state.approval_store.list_pending(&auth.project_id).await;
     pending.retain(|a| !exclude.contains(a.id.as_str()));
 
     if pending.is_empty() {
         let got_new = state
             .approval_store
-            .wait_for_new(&auth.account_id, std::time::Duration::from_secs(30))
+            .wait_for_new(&auth.project_id, std::time::Duration::from_secs(30))
             .await;
         if got_new {
-            let mut fresh = state.approval_store.list_pending(&auth.account_id).await;
+            let mut fresh = state.approval_store.list_pending(&auth.project_id).await;
             fresh.retain(|a| !exclude.contains(a.id.as_str()));
             pending = fresh;
         }
@@ -328,9 +328,9 @@ async fn submit_approval_decision(
     axum::extract::Path(approval_id): axum::extract::Path<String>,
     axum::Json(body): axum::Json<DecisionBody>,
 ) -> impl axum::response::IntoResponse {
-    // O(1) lookup — verify approval exists and belongs to this account.
+    // O(1) lookup — verify approval exists and belongs to this project.
     match state.approval_store.get_pending(&approval_id).await {
-        Some(a) if a.account_id == auth.account_id => {}
+        Some(a) if a.project_id == auth.project_id => {}
         _ => {
             return (
                 StatusCode::NOT_FOUND,
@@ -441,14 +441,14 @@ async fn handle_connect(
     // Resolve at CONNECT time for the intercept decision and agent identity.
     // DB injection/policy rules are NOT frozen here — they're re-resolved
     // per request inside the MITM tunnel from cache (see mitm.rs).
-    let (mut intercept, account_id, agent_id, agent_name, agent_identifier) = if let Some(
+    let (mut intercept, project_id, agent_id, agent_name, agent_identifier) = if let Some(
         ref token,
     ) = agent_token
     {
         match connect::resolve(token, &hostname, &state.policy_engine, &*state.cache).await {
             Ok(resp) => (
                 resp.intercept,
-                resp.account_id,
+                resp.project_id,
                 resp.agent_id,
                 resp.agent_name,
                 resp.agent_identifier,
@@ -472,7 +472,7 @@ async fn handle_connect(
     // from cache) take precedence when available.
     let mut vault_injection_rules = vec![];
     if !intercept {
-        if let Some(ref aid) = account_id {
+        if let Some(ref aid) = project_id {
             if let Some(cred) = state.vault_service.request_credential(aid, &hostname).await {
                 let vault_rules = inject::vault_credential_to_rules(&hostname, &cred);
                 if !vault_rules.is_empty() {
@@ -480,7 +480,7 @@ async fn handle_connect(
                     vault_injection_rules = vault_rules;
                     info!(
                         host = %hostname,
-                        account_id = %aid,
+                        project_id = %aid,
                         "using vault credential"
                     );
                 }
@@ -513,7 +513,7 @@ async fn handle_connect(
     let cache = Arc::clone(&state.cache);
     let approval_store = Arc::clone(&state.approval_store);
     let proxy_ctx = Arc::new(ProxyContext {
-        account_id,
+        project_id,
         agent_id,
         agent_name,
         agent_identifier,
@@ -593,7 +593,7 @@ async fn handle_http_proxy(
 
     // Per-request app connection disambiguation
     if resolved.injection_rules.is_empty() && !resolved.app_connections.is_empty() {
-        let aid = resolved.account_id.as_deref().unwrap_or("");
+        let aid = resolved.project_id.as_deref().unwrap_or("");
         match state
             .policy_engine
             .resolve_app_injection_for_request(
@@ -623,12 +623,12 @@ async fn handle_http_proxy(
 
     // Vault fallback
     if resolved.injection_rules.is_empty() {
-        if let Some(ref aid) = resolved.account_id {
+        if let Some(ref aid) = resolved.project_id {
             if let Some(cred) = state.vault_service.request_credential(aid, &hostname).await {
                 let vault_rules = inject::vault_credential_to_rules(&hostname, &cred);
                 if !vault_rules.is_empty() {
                     resolved.injection_rules = vault_rules;
-                    info!(host = %hostname, account_id = %aid, "http_proxy: using vault credential");
+                    info!(host = %hostname, project_id = %aid, "http_proxy: using vault credential");
                 }
             }
         }
@@ -643,7 +643,7 @@ async fn handle_http_proxy(
     );
 
     let proxy_ctx = ProxyContext {
-        account_id: resolved.account_id,
+        project_id: resolved.project_id,
         agent_id: resolved.agent_id,
         agent_name: resolved.agent_name,
         agent_identifier: resolved.agent_identifier,

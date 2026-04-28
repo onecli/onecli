@@ -14,19 +14,19 @@ import {
 } from "@/lib/services/connection-service";
 
 export const getAppConnections = async () => {
-  const { accountId } = await resolveUser();
-  return listConnections(accountId);
+  const { projectId } = await resolveUser();
+  return listConnections(projectId);
 };
 
 export const getAppConnectionsByProvider = async (provider: string) => {
-  const { accountId } = await resolveUser();
-  return listConnectionsByProvider(accountId, provider);
+  const { projectId } = await resolveUser();
+  return listConnectionsByProvider(projectId, provider);
 };
 
 export const getVaultConnections = async () => {
-  const { accountId } = await resolveUser();
+  const { projectId } = await resolveUser();
   return db.vaultConnection.findMany({
-    where: { accountId },
+    where: { projectId },
     select: {
       id: true,
       provider: true,
@@ -39,12 +39,12 @@ export const getVaultConnections = async () => {
 };
 
 export const disconnectAppConnection = async (connectionId: string) => {
-  const { userId, userEmail, accountId } = await resolveUser();
+  const { userId, userEmail, projectId } = await resolveUser();
 
   return withAudit(
-    () => deleteConnection(accountId, connectionId),
+    () => deleteConnection(projectId, connectionId),
     () => ({
-      accountId,
+      projectId,
       userId,
       userEmail,
       action: AUDIT_ACTIONS.DISCONNECT,

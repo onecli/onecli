@@ -25,7 +25,7 @@ export const PATCH = async (request: NextRequest, { params }: Params) => {
       );
     }
 
-    await updatePolicyRule(auth.accountId, ruleId, parsed.data);
+    await updatePolicyRule(auth.projectId, ruleId, parsed.data);
     invalidateGatewayCache(request);
     return NextResponse.json({ success: true });
   } catch (err) {
@@ -39,7 +39,7 @@ export const DELETE = async (request: NextRequest, { params }: Params) => {
     if (!auth) return unauthorized();
 
     const { ruleId } = await params;
-    await deletePolicyRule(auth.accountId, ruleId);
+    await deletePolicyRule(auth.projectId, ruleId);
     invalidateGatewayCache(request);
     return new NextResponse(null, { status: 204 });
   } catch (err) {

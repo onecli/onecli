@@ -10,7 +10,7 @@ export const GET = async (request: NextRequest) => {
     const auth = await resolveApiAuth(request);
     if (!auth) return unauthorized();
 
-    const secrets = await listSecrets(auth.accountId);
+    const secrets = await listSecrets(auth.projectId);
     return NextResponse.json(secrets);
   } catch (err) {
     return handleServiceError(err);
@@ -31,7 +31,7 @@ export const POST = async (request: NextRequest) => {
       );
     }
 
-    const secret = await createSecret(auth.accountId, parsed.data);
+    const secret = await createSecret(auth.projectId, parsed.data);
     invalidateGatewayCache(request);
     return NextResponse.json(secret, { status: 201 });
   } catch (err) {
