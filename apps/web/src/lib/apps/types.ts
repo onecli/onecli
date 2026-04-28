@@ -91,6 +91,13 @@ export interface AppDefinition {
   description: string;
   connectionMethod: ConnectionMethod;
   available: boolean;
+  /** Credential stub for workspace provisioners to write into containers. */
+  credentialStub?: {
+    /** Filename hint (e.g., "application_default_credentials.json"). */
+    filename: string;
+    /** Stub content with "onecli-managed" sentinel values. */
+    content: Record<string, unknown>;
+  };
   /** OAuth apps can be configured with custom credentials (BYOC). */
   configurable?: {
     fields: OAuthConfigField[];
