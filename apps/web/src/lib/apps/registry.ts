@@ -1,6 +1,8 @@
 import type { AppDefinition } from "./types";
+import { confluence } from "./confluence";
 import { github } from "./github";
 import { gmail } from "./gmail";
+import { jira } from "./jira";
 import { googleAdmin } from "./google-admin";
 import { googleAnalytics } from "./google-analytics";
 import { googleCalendar } from "./google-calendar";
@@ -34,6 +36,8 @@ export const apps: AppDefinition[] = [
   googleSheets,
   googleSlides,
   googleTasks,
+  jira,
+  confluence,
   youtube,
 ];
 

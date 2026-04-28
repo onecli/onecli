@@ -29,6 +29,15 @@ struct HostRule {
     strategy: AuthStrategy,
 }
 
+/// Body format for token refresh requests.
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum TokenBodyFormat {
+    /// `application/x-www-form-urlencoded` (OAuth 2.0 default, used by Google).
+    Form,
+    /// `application/json` (required by Atlassian).
+    Json,
+}
+
 /// Configuration for refreshing expired OAuth tokens.
 pub(crate) struct RefreshConfig {
     /// Token endpoint URL (e.g., `https://oauth2.googleapis.com/token`).
@@ -37,6 +46,8 @@ pub(crate) struct RefreshConfig {
     pub client_id_env: &'static str,
     /// Env var for the OAuth client secret.
     pub client_secret_env: &'static str,
+    /// Body format for token requests.
+    pub body_format: TokenBodyFormat,
 }
 
 /// An app provider definition with its host rules.
@@ -47,11 +58,20 @@ struct AppProvider {
     refresh: Option<&'static RefreshConfig>,
 }
 
+/// Shared refresh config for Atlassian OAuth APIs (Jira, Confluence).
+static ATLASSIAN_REFRESH: RefreshConfig = RefreshConfig {
+    token_url: "https://auth.atlassian.com/oauth/token",
+    client_id_env: "ATLASSIAN_CLIENT_ID",
+    client_secret_env: "ATLASSIAN_CLIENT_SECRET",
+    body_format: TokenBodyFormat::Json,
+};
+
 /// Shared refresh config for all Google OAuth APIs.
 static GOOGLE_REFRESH: RefreshConfig = RefreshConfig {
     token_url: "https://oauth2.googleapis.com/token",
     client_id_env: "GOOGLE_CLIENT_ID",
     client_secret_env: "GOOGLE_CLIENT_SECRET",
+    body_format: TokenBodyFormat::Form,
 };
 
 // ── Provider registry ──────────────────────────────────────────────────
@@ -233,6 +253,26 @@ static APP_PROVIDERS: &[AppProvider] = &[
             strategy: AuthStrategy::Bearer,
         }],
         refresh: Some(&GOOGLE_REFRESH),
+    },
+    AppProvider {
+        provider: "jira",
+        display_name: "Jira",
+        host_rules: &[HostRule {
+            host: "api.atlassian.com",
+            path_prefix: Some("/ex/jira/"),
+            strategy: AuthStrategy::Bearer,
+        }],
+        refresh: Some(&ATLASSIAN_REFRESH),
+    },
+    AppProvider {
+        provider: "confluence",
+        display_name: "Confluence",
+        host_rules: &[HostRule {
+            host: "api.atlassian.com",
+            path_prefix: Some("/ex/confluence/"),
+            strategy: AuthStrategy::Bearer,
+        }],
+        refresh: Some(&ATLASSIAN_REFRESH),
     },
     AppProvider {
         provider: "youtube",
@@ -424,14 +464,22 @@ pub(crate) async fn refresh_access_token(
             .map_err(|_| anyhow::anyhow!("{} env var not set", config.client_secret_env))?,
     };
 
-    let resp = reqwest::Client::new()
-        .post(config.token_url)
-        .form(&[
+    let req = reqwest::Client::new().post(config.token_url);
+    let req = match config.body_format {
+        TokenBodyFormat::Form => req.form(&[
             ("client_id", client_id.as_str()),
             ("client_secret", client_secret.as_str()),
             ("refresh_token", refresh_token),
             ("grant_type", "refresh_token"),
-        ])
+        ]),
+        TokenBodyFormat::Json => req.json(&serde_json::json!({
+            "client_id": client_id,
+            "client_secret": client_secret,
+            "refresh_token": refresh_token,
+            "grant_type": "refresh_token",
+        })),
+    };
+    let resp = req
         .send()
         .await
         .map_err(|e| anyhow::anyhow!("refresh request failed: {e}"))?;
@@ -679,6 +727,12 @@ mod tests {
     }
 
     #[test]
+    fn google_refresh_uses_form_body_format() {
+        let config = refresh_config("gmail").expect("gmail should have refresh config");
+        assert!(matches!(config.body_format, TokenBodyFormat::Form));
+    }
+
+    #[test]
     fn google_workspace_apps_use_bearer() {
         let hosts = [
             ("google-docs", "docs.googleapis.com"),
@@ -709,6 +763,66 @@ mod tests {
                 "{provider} on {host} should use Bearer auth"
             );
         }
+    }
+
+    // ── Atlassian (Jira + Confluence) ───────────────────────────────
+
+    #[test]
+    fn providers_for_atlassian_host() {
+        let providers = providers_for_host("api.atlassian.com");
+        assert!(providers.contains(&"jira"));
+        assert!(providers.contains(&"confluence"));
+    }
+
+    #[test]
+    fn jira_path_disambiguation() {
+        let result =
+            provider_for_host_and_path("api.atlassian.com", "/ex/jira/11223344/rest/api/3/issue");
+        assert_eq!(result, Some(("jira", "Jira")));
+    }
+
+    #[test]
+    fn confluence_path_disambiguation() {
+        let result = provider_for_host_and_path(
+            "api.atlassian.com",
+            "/ex/confluence/11223344/rest/api/v3/content",
+        );
+        assert_eq!(result, Some(("confluence", "Confluence")));
+    }
+
+    #[test]
+    fn jira_api_uses_bearer() {
+        let injections = build_app_injections("jira", "api.atlassian.com", "eyJ0eXAi.test");
+        assert_eq!(injections.len(), 1);
+        assert_eq!(
+            injections[0],
+            Injection::SetHeader {
+                name: "authorization".to_string(),
+                value: "Bearer eyJ0eXAi.test".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn confluence_api_uses_bearer() {
+        let injections = build_app_injections("confluence", "api.atlassian.com", "eyJ0eXAi.test");
+        assert_eq!(injections.len(), 1);
+        assert_eq!(
+            injections[0],
+            Injection::SetHeader {
+                name: "authorization".to_string(),
+                value: "Bearer eyJ0eXAi.test".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn atlassian_refresh_uses_json_body_format() {
+        let config = refresh_config("jira").expect("jira should have refresh config");
+        assert!(matches!(config.body_format, TokenBodyFormat::Json));
+
+        let config = refresh_config("confluence").expect("confluence should have refresh config");
+        assert!(matches!(config.body_format, TokenBodyFormat::Json));
     }
 
     // ── YouTube ───────────────────────────────────────────────────────
