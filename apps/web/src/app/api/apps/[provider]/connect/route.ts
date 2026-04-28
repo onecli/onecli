@@ -9,6 +9,7 @@ import {
   listConnectionsByProvider,
   reconnectConnection,
 } from "@/lib/services/connection-service";
+import { saveAppConfigWithoutDisconnect } from "@/lib/services/app-config-service";
 
 type Params = { params: Promise<{ provider: string }> };
 
@@ -128,8 +129,6 @@ export const POST = async (request: NextRequest, { params }: Params) => {
       body.fields.clientId &&
       body.fields.clientSecret
     ) {
-      const { saveAppConfigWithoutDisconnect } =
-        await import("@/lib/services/app-config-service");
       await saveAppConfigWithoutDisconnect(
         auth.projectId,
         provider,

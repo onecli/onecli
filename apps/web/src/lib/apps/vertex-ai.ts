@@ -122,16 +122,18 @@ export const vertexAi: AppDefinition = {
     },
   },
   available: true,
-  credentialStub: {
-    filename: "application_default_credentials.json",
-    content: {
-      account: "",
-      client_id: "onecli-managed",
-      client_secret: "onecli-managed",
-      quota_project_id: "onecli-managed",
-      refresh_token: "onecli-managed",
-      type: "authorized_user",
-      universe_domain: "googleapis.com",
+  credentialStubs: [
+    {
+      path: "~/.config/gcloud/application_default_credentials.json",
+      content: {
+        account: "onecli-managed",
+        client_id: "onecli-managed",
+        client_secret: "onecli-managed",
+        quota_project_id: "onecli-managed",
+        refresh_token: "onecli-managed",
+        type: "authorized_user",
+        universe_domain: "googleapis.com",
+      },
     },
-  },
+  ],
 };

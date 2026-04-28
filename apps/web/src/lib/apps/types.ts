@@ -91,13 +91,13 @@ export interface AppDefinition {
   description: string;
   connectionMethod: ConnectionMethod;
   available: boolean;
-  /** Credential stub for workspace provisioners to write into containers. */
-  credentialStub?: {
-    /** Filename hint (e.g., "application_default_credentials.json"). */
-    filename: string;
+  /** Credential stubs for provisioners to write so MCP servers can boot. */
+  credentialStubs?: {
+    /** Full destination path (e.g., "~/.config/gcloud/application_default_credentials.json"). */
+    path: string;
     /** Stub content with "onecli-managed" sentinel values. */
     content: Record<string, unknown>;
-  };
+  }[];
   /** OAuth apps can be configured with custom credentials (BYOC). */
   configurable?: {
     fields: OAuthConfigField[];
