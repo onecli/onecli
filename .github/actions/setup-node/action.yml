@@ -1,0 +1,22 @@
+name: Setup Node.js
+description: Setup pnpm, Node.js, install dependencies, and generate Prisma client
+
+runs:
+  using: composite
+  steps:
+    - name: Setup pnpm
+      uses: pnpm/action-setup@v5
+
+    - name: Setup Node.js
+      uses: actions/setup-node@v6
+      with:
+        node-version: 22
+        cache: pnpm
+
+    - name: Install dependencies
+      shell: bash
+      run: pnpm install --frozen-lockfile
+
+    - name: Generate Prisma client
+      shell: bash
+      run: pnpm --filter @onecli/db generate
