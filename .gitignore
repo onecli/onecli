@@ -37,6 +37,7 @@ yarn-error.log*
 
 # Claude Code local settings
 .claude/settings.local.json
+.claude/scheduled_tasks.lock
 
 # Prisma
 packages/db/prisma/*.db
