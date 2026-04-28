@@ -23,21 +23,35 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v6
 
+      - name: Check for changes
+        id: changes
+        uses: dorny/paths-filter@v3
+        with:
+          filters: |
+            rust:
+              - 'apps/gateway/**'
+              - '.github/workflows/ci.yml'
+
       - name: Setup Rust
+        if: steps.changes.outputs.rust == 'true'
         uses: dtolnay/rust-toolchain@stable
 
       - name: Cache Rust
+        if: steps.changes.outputs.rust == 'true'
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: apps/gateway -> target
 
       - name: Clippy
+        if: steps.changes.outputs.rust == 'true'
         run: cargo clippy -- -D warnings
 
       - name: Format
+        if: steps.changes.outputs.rust == 'true'
         run: cargo fmt --check
 
       - name: Test
+        if: steps.changes.outputs.rust == 'true'
         run: cargo test
 
   lint:
