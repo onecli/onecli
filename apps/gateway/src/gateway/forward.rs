@@ -3,7 +3,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
 use futures_util::{StreamExt, TryStreamExt};
@@ -139,12 +139,22 @@ pub(crate) async fn forward_request(
                 url = %url,
                 "token endpoint intercepted — serving cached token"
             );
+            let expires_in = rules
+                .token_expires_at
+                .map(|exp| {
+                    let now = SystemTime::now()
+                        .duration_since(UNIX_EPOCH)
+                        .expect("system clock before UNIX epoch")
+                        .as_secs() as i64;
+                    (exp - now).max(0)
+                })
+                .unwrap_or(3600);
             let body = serde_json::json!({
                 "access_token": access_token,
-                "expires_in": 3600,
+                "expires_in": expires_in,
                 "token_type": "Bearer",
             });
-            let bytes = Bytes::from(serde_json::to_vec(&body).unwrap());
+            let bytes = Bytes::from(serde_json::to_vec(&body).expect("serializing JSON literal"));
             let mut resp = Response::new(Either::Left(Full::new(bytes)));
             *resp.status_mut() = StatusCode::OK;
             resp.headers_mut().insert(
