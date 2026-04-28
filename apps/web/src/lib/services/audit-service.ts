@@ -20,6 +20,7 @@ export const AUDIT_SERVICES = {
   APP_CONNECTION: "app-connection",
   APP_CONFIG: "app-config",
   DEPLOYMENT: "deployment",
+  PROJECT: "project",
 } as const;
 
 export const AUDIT_STATUS = {
@@ -42,7 +43,7 @@ export type AuditSource = (typeof AUDIT_SOURCE)[keyof typeof AUDIT_SOURCE];
 // ─── Service ──────────────────────────────────────────────────────────────────
 
 export interface AuditEventParams {
-  accountId: string;
+  projectId: string;
   userId: string;
   userEmail: string;
   action: AuditAction;
@@ -87,9 +88,9 @@ export type AuditParams = Omit<AuditEventParams, "status"> & {
  *
  * @example
  * return withAudit(
- *   () => createSecretService(accountId, input),
+ *   () => createSecretService(projectId, input),
  *   (secret) => ({
- *     accountId, userId,
+ *     projectId, userId,
  *     action: AUDIT_ACTIONS.CREATE,
  *     service: AUDIT_SERVICES.SECRET,
  *     metadata: { secretId: secret.id },

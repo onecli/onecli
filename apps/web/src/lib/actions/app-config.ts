@@ -20,7 +20,7 @@ export const saveAppConfig = async (
   provider: string,
   values: Record<string, string>,
 ) => {
-  const { userId, userEmail, accountId } = await resolveUser();
+  const { userId, userEmail, projectId } = await resolveUser();
   const app = getApp(provider);
   if (!app?.configurable) {
     throw new Error(`Provider "${provider}" is not configurable`);
@@ -28,9 +28,9 @@ export const saveAppConfig = async (
 
   return withAudit(
     () =>
-      upsertAppConfig(accountId, provider, values, app.configurable!.fields),
+      upsertAppConfig(projectId, provider, values, app.configurable!.fields),
     () => ({
-      accountId,
+      projectId,
       userId,
       userEmail,
       action: AUDIT_ACTIONS.UPDATE,
@@ -41,17 +41,17 @@ export const saveAppConfig = async (
 };
 
 export const getAppConfigStatus = async (provider: string) => {
-  const { accountId } = await resolveUser();
-  return getAppConfig(accountId, provider);
+  const { projectId } = await resolveUser();
+  return getAppConfig(projectId, provider);
 };
 
 export const deleteAppConfigAction = async (provider: string) => {
-  const { userId, userEmail, accountId } = await resolveUser();
+  const { userId, userEmail, projectId } = await resolveUser();
 
   return withAudit(
-    () => deleteAppConfig(accountId, provider),
+    () => deleteAppConfig(projectId, provider),
     () => ({
-      accountId,
+      projectId,
       userId,
       userEmail,
       action: AUDIT_ACTIONS.DELETE,
@@ -81,8 +81,8 @@ export const getAvailableEnvDefaults = async (): Promise<string[]> => {
 export const checkAppConfigExists = async (
   provider: string,
 ): Promise<boolean> => {
-  const { accountId } = await resolveUser();
-  return hasAppConfigService(accountId, provider);
+  const { projectId } = await resolveUser();
+  return hasAppConfigService(projectId, provider);
 };
 
 /**
@@ -90,20 +90,20 @@ export const checkAppConfigExists = async (
  * Use this instead of calling checkAppConfigExists in a loop.
  */
 export const getConfiguredProviders = async (): Promise<string[]> => {
-  const { accountId } = await resolveUser();
-  return listConfiguredProviders(accountId);
+  const { projectId } = await resolveUser();
+  return listConfiguredProviders(projectId);
 };
 
 export const setAppConfigEnabled = async (
   provider: string,
   enabled: boolean,
 ) => {
-  const { userId, userEmail, accountId } = await resolveUser();
+  const { userId, userEmail, projectId } = await resolveUser();
 
   return withAudit(
-    () => toggleAppConfigEnabled(accountId, provider, enabled),
+    () => toggleAppConfigEnabled(projectId, provider, enabled),
     () => ({
-      accountId,
+      projectId,
       userId,
       userEmail,
       action: AUDIT_ACTIONS.UPDATE,

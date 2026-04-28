@@ -34,7 +34,7 @@ const BROADCAST_CAPACITY: usize = 16;
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub(crate) struct PendingApproval {
     pub id: String,
-    pub account_id: String,
+    pub project_id: String,
     pub agent_id: String,
     pub agent_name: String,
     pub agent_identifier: Option<String>,
@@ -152,15 +152,15 @@ pub(crate) trait ApprovalStore: Send + Sync {
     /// Get a single pending approval by ID. O(1) lookup.
     async fn get_pending(&self, id: &str) -> Option<PendingApproval>;
 
-    /// List all non-expired pending approvals for an account.
-    async fn list_pending(&self, account_id: &str) -> Vec<PendingApproval>;
+    /// List all non-expired pending approvals for a project.
+    async fn list_pending(&self, project_id: &str) -> Vec<PendingApproval>;
 
     /// Remove a pending approval (after decision or expiry).
     async fn remove(&self, id: &str);
 
-    /// Block until a new approval arrives for this account, or timeout.
+    /// Block until a new approval arrives for this project, or timeout.
     /// Returns `true` if notified, `false` on timeout.
-    async fn wait_for_new(&self, account_id: &str, timeout: Duration) -> bool;
+    async fn wait_for_new(&self, project_id: &str, timeout: Duration) -> bool;
 
     /// Submit a decision for a pending approval. Wakes the held request.
     /// Returns `true` if the approval was found and decision delivered.
@@ -173,7 +173,7 @@ struct InMemoryApprovalStore {
     /// Pending approvals: approval_id → PendingApproval.
     pending: DashMap<String, PendingApproval>,
 
-    /// Long-polling wake-up: account_id → broadcast::Sender<()>.
+    /// Long-polling wake-up: project_id → broadcast::Sender<()>.
     new_notify: DashMap<String, broadcast::Sender<()>>,
 
     /// Decision delivery: approval_id → watch::Sender<Option<ApprovalDecision>>.
@@ -201,8 +201,8 @@ impl ApprovalStore for InMemoryApprovalStore {
     async fn store(&self, approval: &PendingApproval) -> anyhow::Result<()> {
         self.pending.insert(approval.id.clone(), approval.clone());
 
-        // Notify any long-pollers for this account.
-        if let Some(sender) = self.new_notify.get(&approval.account_id) {
+        // Notify any long-pollers for this project.
+        if let Some(sender) = self.new_notify.get(&approval.project_id) {
             let _ = sender.send(()); // ok if no receivers
         }
 
@@ -220,11 +220,11 @@ impl ApprovalStore for InMemoryApprovalStore {
         }
     }
 
-    async fn list_pending(&self, account_id: &str) -> Vec<PendingApproval> {
+    async fn list_pending(&self, project_id: &str) -> Vec<PendingApproval> {
         let now = unix_now();
         self.pending
             .iter()
-            .filter(|e| e.account_id == account_id && e.expires_at > now)
+            .filter(|e| e.project_id == project_id && e.expires_at > now)
             .map(|e| e.value().clone())
             .collect()
     }
@@ -234,13 +234,13 @@ impl ApprovalStore for InMemoryApprovalStore {
         self.decisions.remove(id);
     }
 
-    async fn wait_for_new(&self, account_id: &str, timeout: Duration) -> bool {
+    async fn wait_for_new(&self, project_id: &str, timeout: Duration) -> bool {
         // Get or create broadcast sender, subscribe, then drop the guard
         // before awaiting (critical: never hold DashMap guard across .await).
         let mut rx = {
             let sender = self
                 .new_notify
-                .entry(account_id.to_string())
+                .entry(project_id.to_string())
                 .or_insert_with(|| broadcast::channel(BROADCAST_CAPACITY).0);
             sender.subscribe()
         }; // guard dropped here — safe to await
@@ -294,11 +294,11 @@ fn start_cleanup_task(store: Arc<InMemoryApprovalStore>) {
                 debug!(count = expired.len(), "cleaned up expired approvals");
             }
 
-            // Prune notification channels for accounts with no pending approvals.
+            // Prune notification channels for projects with no pending approvals.
             // Prevents unbounded growth of the new_notify map over time.
             store
                 .new_notify
-                .retain(|account_id, _| store.pending.iter().any(|e| e.account_id == *account_id));
+                .retain(|project_id, _| store.pending.iter().any(|e| e.project_id == *project_id));
         }
     });
 }
@@ -320,11 +320,11 @@ mod tests {
         Arc::new(InMemoryApprovalStore::new())
     }
 
-    fn make_approval(id: &str, account_id: &str) -> PendingApproval {
+    fn make_approval(id: &str, project_id: &str) -> PendingApproval {
         let now = unix_now();
         PendingApproval {
             id: id.to_string(),
-            account_id: account_id.to_string(),
+            project_id: project_id.to_string(),
             agent_id: "agent-1".to_string(),
             agent_name: "Test Agent".to_string(),
             agent_identifier: Some("test-agent".to_string()),
@@ -339,10 +339,10 @@ mod tests {
         }
     }
 
-    fn make_expired_approval(id: &str, account_id: &str) -> PendingApproval {
+    fn make_expired_approval(id: &str, project_id: &str) -> PendingApproval {
         PendingApproval {
             id: id.to_string(),
-            account_id: account_id.to_string(),
+            project_id: project_id.to_string(),
             agent_id: "agent-1".to_string(),
             agent_name: "Test Agent".to_string(),
             agent_identifier: Some("test-agent".to_string()),

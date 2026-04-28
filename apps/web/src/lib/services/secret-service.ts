@@ -24,9 +24,9 @@ const buildPreview = (plaintext: string): string => {
   return `${plaintext.slice(0, 4)}${"\u2022".repeat(8)}${plaintext.slice(-4)}`;
 };
 
-export const listSecrets = async (accountId: string) => {
+export const listSecrets = async (projectId: string) => {
   const secrets = await db.secret.findMany({
-    where: { accountId },
+    where: { projectId },
     select: {
       id: true,
       name: true,
@@ -48,7 +48,7 @@ export const listSecrets = async (accountId: string) => {
 export type { CreateSecretInput, UpdateSecretInput };
 
 export const createSecret = async (
-  accountId: string,
+  projectId: string,
   input: CreateSecretInput,
 ) => {
   const name = input.name.trim();
@@ -113,7 +113,7 @@ export const createSecret = async (
       pathPattern,
       injectionConfig,
       metadata,
-      accountId,
+      projectId,
     },
     select: {
       id: true,
@@ -128,9 +128,9 @@ export const createSecret = async (
   return { ...secret, preview };
 };
 
-export const deleteSecret = async (accountId: string, secretId: string) => {
+export const deleteSecret = async (projectId: string, secretId: string) => {
   const secret = await db.secret.findFirst({
-    where: { id: secretId, accountId },
+    where: { id: secretId, projectId },
     select: { id: true },
   });
 
@@ -140,12 +140,12 @@ export const deleteSecret = async (accountId: string, secretId: string) => {
 };
 
 export const updateSecret = async (
-  accountId: string,
+  projectId: string,
   secretId: string,
   input: UpdateSecretInput,
 ) => {
   const secret = await db.secret.findFirst({
-    where: { id: secretId, accountId },
+    where: { id: secretId, projectId },
     select: { id: true, type: true },
   });
 
@@ -215,9 +215,9 @@ export const updateSecret = async (
 /**
  * Create the demo secret for an account if it doesn't already exist.
  */
-export const seedDemoSecret = async (accountId: string) => {
+export const seedDemoSecret = async (projectId: string) => {
   const existing = await db.secret.findFirst({
-    where: { accountId, name: DEMO_SECRET_NAME },
+    where: { projectId, name: DEMO_SECRET_NAME },
     select: { id: true },
   });
 
@@ -234,7 +234,7 @@ export const seedDemoSecret = async (accountId: string) => {
         headerName: "Authorization",
         valueFormat: "Bearer {value}",
       },
-      accountId,
+      projectId,
     },
   });
 };

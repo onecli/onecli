@@ -35,9 +35,9 @@ export const invalidateGatewayCache = (request: NextRequest) => {
  *
  * Fire-and-forget — failures are silently ignored.
  */
-export const invalidateGatewayCacheForAccount = (accountId: string) => {
+export const invalidateGatewayCacheForAccount = (projectId: string) => {
   db.apiKey
-    .findFirst({ where: { accountId }, select: { key: true } })
+    .findFirst({ where: { projectId }, select: { key: true } })
     .then((apiKey) => {
       if (!apiKey) return;
       fetch(`${GATEWAY_URL}/api/cache/invalidate`, {

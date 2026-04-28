@@ -1,10 +1,11 @@
 import { db } from "@onecli/db";
 import { validateApiKey } from "@/lib/validate-api-key";
 import { getServerSession } from "@/lib/auth/server";
+import { findUserDefaultProject } from "@/lib/services/organization-service";
 
 export interface AuthContext {
   userId: string;
-  accountId: string;
+  projectId: string;
 }
 
 /**
@@ -14,23 +15,20 @@ export interface AuthContext {
 export const resolveApiAuth = async (
   request: Request,
 ): Promise<AuthContext | null> => {
-  // API key auth — returns userId + accountId directly
   const apiKeyAuth = await validateApiKey(request);
   if (apiKeyAuth) return apiKeyAuth;
 
-  // Session auth — resolve from membership
   const session = await getServerSession();
   if (!session) return null;
 
   const user = await db.user.findUnique({
     where: { externalAuthId: session.id },
-    select: {
-      id: true,
-      memberships: { select: { accountId: true }, take: 1 },
-    },
+    select: { id: true },
   });
+  if (!user) return null;
 
-  if (!user || user.memberships.length === 0) return null;
+  const project = await findUserDefaultProject(user.id);
+  if (!project) return null;
 
-  return { userId: user.id, accountId: user.memberships[0]!.accountId };
+  return { userId: user.id, projectId: project.id };
 };

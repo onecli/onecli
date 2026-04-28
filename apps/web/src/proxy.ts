@@ -28,6 +28,39 @@ const getSetupError = (): SetupErrorCode | null => {
   return null;
 };
 
+// Cloud-only: legacy unscoped dashboard routes that should redirect to their
+// project-scoped equivalents. The cookie set by /p/[projectId] navigation or
+// switchProjectAction is the source of truth for "active project". If the
+// cookie is missing (first visit, signed out, etc.) we fall through to the
+// auth flow / projects landing.
+const UNSCOPED_REDIRECTS = new Set([
+  "/overview",
+  "/agents",
+  "/connections",
+  "/rules",
+]);
+
+const ACTIVE_PROJECT_COOKIE = "onecli-project-id";
+
+const cloudUnscopedRedirect = (request: NextRequest): NextResponse | null => {
+  if (!IS_CLOUD) return null;
+  const { pathname } = request.nextUrl;
+
+  // Match exact unscoped paths and their nested subroutes
+  // (e.g. /connections/apps, /connections/secrets/...).
+  const matchedPrefix = [...UNSCOPED_REDIRECTS].find(
+    (p) => pathname === p || pathname.startsWith(`${p}/`),
+  );
+  if (!matchedPrefix) return null;
+
+  const projectId = request.cookies.get(ACTIVE_PROJECT_COOKIE)?.value;
+  if (!projectId) return null;
+
+  const url = request.nextUrl.clone();
+  url.pathname = `/p/${projectId}${pathname}`;
+  return NextResponse.redirect(url);
+};
+
 export const proxy = (request: NextRequest) => {
   const { pathname } = request.nextUrl;
   const error = getSetupError();
@@ -44,6 +77,9 @@ export const proxy = (request: NextRequest) => {
       new URL(`/setup-error?code=${error}`, request.url),
     );
   }
+
+  const cloudRedirect = cloudUnscopedRedirect(request);
+  if (cloudRedirect) return cloudRedirect;
 
   return NextResponse.next();
 };

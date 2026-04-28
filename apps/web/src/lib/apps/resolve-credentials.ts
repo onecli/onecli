@@ -12,13 +12,13 @@ export interface ResolvedCredentials {
  * Resolution chain: AppConfig (user-provided) → env vars (platform defaults) → null.
  */
 export const resolveOAuthCredentials = async (
-  accountId: string,
+  projectId: string,
   app: AppDefinition,
 ): Promise<ResolvedCredentials | null> => {
   if (!app.configurable) return null;
 
   // 1. Try user-provided AppConfig
-  const config = await getAppConfigCredentials(accountId, app.id);
+  const config = await getAppConfigCredentials(projectId, app.id);
   if (config?.clientId && config?.clientSecret) {
     return {
       clientId: config.clientId,

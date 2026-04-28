@@ -1,7 +1,8 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { useRouter } from "next/navigation";
+import { useRouter, usePathname } from "next/navigation";
+import { withProjectPrefix } from "@/lib/navigation";
 import { ChevronRight } from "lucide-react";
 import { Button } from "@onecli/ui/components/button";
 import { Skeleton } from "@onecli/ui/components/skeleton";
@@ -23,6 +24,7 @@ import { useConnectParam } from "./use-connect-param";
 
 export const AppsTab = () => {
   const router = useRouter();
+  const pathname = usePathname();
   const [connectionCounts, setConnectionCounts] = useState<Map<string, number>>(
     () => new Map(),
   );
@@ -142,7 +144,11 @@ export const AppsTab = () => {
               connectionCount={count}
               loading={loading}
               onConnect={(e) => handleConnect(e, app)}
-              onClick={() => router.push(`/connections/apps/${app.id}`)}
+              onClick={() =>
+                router.push(
+                  withProjectPrefix(pathname, `/connections/apps/${app.id}`),
+                )
+              }
             />
           );
         })}

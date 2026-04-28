@@ -70,14 +70,14 @@ impl IdentityProvider for BitwardenIdentityProvider {
 
 // ── BitwardenConnectionStore ────────────────────────────────────────────
 
-/// DB-backed connection store, scoped to a single `account_id` with `provider = "bitwarden"`.
+/// DB-backed connection store, scoped to a single `project_id` with `provider = "bitwarden"`.
 ///
 /// Connections are cached in memory. Writes go through to the DB directly via async calls.
 /// Sensitive fields (`key_data`, `transport_state`) are encrypted with AES-256-GCM before
 /// being written to the `connection_data` JSON column.
 pub(crate) struct BitwardenConnectionStore {
     pool: PgPool,
-    account_id: String,
+    project_id: String,
     /// COSE-encoded keypair — kept here so write-throughs don't null out key_data in DB.
     key_data: Option<Vec<u8>>,
     crypto: Arc<CryptoService>,
@@ -89,7 +89,7 @@ impl BitwardenConnectionStore {
     /// Create a new store, loading existing connection from DB if present.
     pub fn new(
         pool: PgPool,
-        account_id: String,
+        project_id: String,
         key_data: Option<Vec<u8>>,
         crypto: Arc<CryptoService>,
         connection_data: Option<&BitwardenConnectionData>,
@@ -113,7 +113,7 @@ impl BitwardenConnectionStore {
 
         Self {
             pool,
-            account_id,
+            project_id,
             key_data,
             crypto,
             connection,
@@ -131,7 +131,7 @@ impl BitwardenConnectionStore {
         };
 
         if let Err(e) =
-            db::update_vault_connection_data(&self.pool, &self.account_id, "bitwarden", &json).await
+            db::update_vault_connection_data(&self.pool, &self.project_id, "bitwarden", &json).await
         {
             warn!(error = %e, "failed to write-through vault connection data");
         }

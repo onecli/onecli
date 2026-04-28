@@ -17,9 +17,9 @@ export const invalidateGatewayCache = async () => {
     const headers: Record<string, string> = {};
 
     // Prefer API key auth — works regardless of gateway auth mode
-    const { accountId } = await resolveUser();
+    const { projectId } = await resolveUser();
     const apiKey = await db.apiKey.findFirst({
-      where: { accountId },
+      where: { projectId },
       select: { key: true },
     });
 

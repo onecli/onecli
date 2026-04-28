@@ -15,11 +15,23 @@ import {
 } from "@/lib/actions/connections";
 import { getSecrets } from "@/lib/actions/secrets";
 
-const TAB_ROUTES: Record<string, string> = {
-  apps: "/connections",
-  secrets: "/connections/secrets",
-  vaults: "/connections/vaults",
-  connected: "/connections/connected",
+/**
+ * Derive tab URLs from the current pathname so navigation stays inside the
+ * current prefix. In OSS the prefix is `/connections`; in cloud's project
+ * routes it's `/p/<projectId>/connections`. Without this, clicking "Secrets"
+ * inside a project would jump to the OSS `/connections/secrets` URL and lose
+ * the project scope.
+ */
+const getTabRoutes = (pathname: string): Record<string, string> => {
+  const idx = pathname.indexOf("/connections");
+  const base =
+    idx >= 0 ? pathname.slice(0, idx + "/connections".length) : "/connections";
+  return {
+    apps: base,
+    secrets: `${base}/secrets`,
+    vaults: `${base}/vaults`,
+    connected: `${base}/connected`,
+  };
 };
 
 const pathToTab = (pathname: string): string => {
@@ -34,6 +46,7 @@ export const ConnectionsTabs = () => {
   const pathname = usePathname();
   const router = useRouter();
   const activeTab = pathToTab(pathname);
+  const tabRoutes = getTabRoutes(pathname);
   const [connectedCount, setConnectedCount] = useState(0);
   const [, startTransition] = useTransition();
 
@@ -57,15 +70,17 @@ export const ConnectionsTabs = () => {
     fetchCount();
   }, [fetchCount]);
 
-  // Prefetch all tab routes so navigation is instant
+  // Prefetch all tab routes so navigation is instant.
+  // Depend on pathname (primitive) rather than tabRoutes (new object each render).
   useEffect(() => {
-    Object.values(TAB_ROUTES).forEach((route) => router.prefetch(route));
-  }, [router]);
+    Object.values(tabRoutes).forEach((route) => router.prefetch(route));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [router, pathname]);
 
   useAppMessages({ onConnected: fetchCount, onConfigure: router.push });
 
   const handleTabChange = (value: string) => {
-    const href = TAB_ROUTES[value];
+    const href = tabRoutes[value];
     if (href) startTransition(() => router.push(href));
   };
 

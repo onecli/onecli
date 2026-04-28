@@ -1,9 +1,9 @@
 import { db } from "@onecli/db";
 
-export const getGatewayCounts = async (accountId: string) => {
+export const getGatewayCounts = async (projectId: string) => {
   const [agents, secrets] = await Promise.all([
-    db.agent.count({ where: { accountId } }),
-    db.secret.count({ where: { accountId } }),
+    db.agent.count({ where: { projectId } }),
+    db.secret.count({ where: { projectId } }),
   ]);
 
   return { agents, secrets };

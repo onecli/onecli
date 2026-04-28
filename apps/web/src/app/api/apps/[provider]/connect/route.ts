@@ -60,16 +60,16 @@ export const POST = async (request: NextRequest, { params }: Params) => {
     };
 
     if (body.connectionId) {
-      await reconnectConnection(auth.accountId, body.connectionId, credentials);
+      await reconnectConnection(auth.projectId, body.connectionId, credentials);
     } else {
       const existing = await listConnectionsByProvider(
-        auth.accountId,
+        auth.projectId,
         provider,
       );
       if (existing.length > 0) {
-        await reconnectConnection(auth.accountId, existing[0]!.id, credentials);
+        await reconnectConnection(auth.projectId, existing[0]!.id, credentials);
       } else {
-        await createConnection(auth.accountId, provider, credentials);
+        await createConnection(auth.projectId, provider, credentials);
       }
     }
     invalidateGatewayCache(request);

@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef, useMemo } from "react";
 import { useInvalidateGatewayCache } from "@/hooks/use-invalidate-cache";
 import { toast } from "sonner";
 import { ArrowLeft, Bot, Key, Settings2 } from "lucide-react";
@@ -24,6 +24,7 @@ import {
 } from "@onecli/ui/components/accordion";
 import { Badge } from "@onecli/ui/components/badge";
 import { createSecret, updateSecret } from "@/lib/actions/secrets";
+import { validateDisplayName } from "@/lib/validations/display-name";
 import {
   type InjectionConfig,
   detectAnthropicAuthMode,
@@ -108,6 +109,7 @@ export const SecretDialog = ({
 
   const [type, setType] = useState<SecretType>("anthropic");
   const [name, setName] = useState("");
+  const [nameTouched, setNameTouched] = useState(false);
   const [value, setValue] = useState("");
   const [hostPattern, setHostPattern] = useState("api.anthropic.com");
   const [pathPattern, setPathPattern] = useState("");
@@ -118,6 +120,10 @@ export const SecretDialog = ({
   const [valueFormat, setValueFormat] = useState("Bearer {value}");
   const [paramName, setParamName] = useState("");
   const [paramFormat, setParamFormat] = useState("");
+
+  const nameError = useMemo(() => validateDisplayName(name), [name]);
+  const showNameError = nameTouched && nameError !== null;
+  const isNameValid = name.trim().length > 0 && nameError === null;
 
   // Inline validation for host pattern
   const hostPatternError = (() => {
@@ -134,6 +140,7 @@ export const SecretDialog = ({
   // When opening, populate from secret (edit), prefill (create with defaults), or reset (create)
   useEffect(() => {
     if (open) {
+      setNameTouched(false);
       if (secret) {
         const config = secret.injectionConfig as InjectionConfig | null;
         setStep("form");
@@ -205,7 +212,7 @@ export const SecretDialog = ({
 
   const isValid = isEdit
     ? hostPattern.trim() && !hostPatternError && hasInjectionTarget
-    : name.trim() &&
+    : isNameValid &&
       value.trim() &&
       hostPattern.trim() &&
       !hostPatternError &&
@@ -333,8 +340,13 @@ export const SecretDialog = ({
                   }
                   value={name}
                   onChange={(e) => setName(e.target.value)}
+                  onBlur={() => setNameTouched(true)}
                   autoFocus
+                  className={cn(showNameError && "border-destructive")}
                 />
+                {showNameError && (
+                  <p className="text-destructive text-xs">{nameError}</p>
+                )}
               </div>
 
               <div className="space-y-2">

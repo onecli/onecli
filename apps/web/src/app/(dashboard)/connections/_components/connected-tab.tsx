@@ -1,7 +1,8 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-import { useRouter } from "next/navigation";
+import { useRouter, usePathname } from "next/navigation";
+import { withProjectPrefix } from "@/lib/navigation";
 import { ChevronRight, KeyRound } from "lucide-react";
 import { Card } from "@onecli/ui/components/card";
 import { Skeleton } from "@onecli/ui/components/skeleton";
@@ -41,6 +42,7 @@ interface ConnectedItem {
 
 export const ConnectedTab = () => {
   const router = useRouter();
+  const pathname = usePathname();
   const [items, setItems] = useState<ConnectedItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [editingSecret, setEditingSecret] = useState<
@@ -82,7 +84,7 @@ export const ConnectedTab = () => {
           detail: label
             ? `Connected as ${label}`
             : `${c.scopes.length} scope${c.scopes.length !== 1 ? "s" : ""} granted`,
-          href: `/connections/apps/${c.provider}`,
+          href: withProjectPrefix(pathname, `/connections/apps/${c.provider}`),
           providerCount: hasMultiple
             ? providerCounts.get(c.provider)
             : undefined,
@@ -107,7 +109,7 @@ export const ConnectedTab = () => {
         type: "vault" as const,
         typeLabel: "External Vault",
         detail: v.status === "connected" ? "Connected" : "Paired",
-        href: `/connections/vaults/${v.provider}`,
+        href: withProjectPrefix(pathname, `/connections/vaults/${v.provider}`),
       }));
 
       setItems([...appItems, ...secretItems, ...vaultItems]);
@@ -116,7 +118,7 @@ export const ConnectedTab = () => {
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [pathname]);
 
   useEffect(() => {
     fetchItems();
@@ -159,7 +161,9 @@ export const ConnectedTab = () => {
         <p className="text-sm text-muted-foreground">
           No connected services yet. Head to the{" "}
           <button
-            onClick={() => router.push("/connections")}
+            onClick={() =>
+              router.push(withProjectPrefix(pathname, "/connections"))
+            }
             className="text-brand hover:underline font-medium"
           >
             Apps

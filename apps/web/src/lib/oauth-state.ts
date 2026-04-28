@@ -2,7 +2,7 @@ import { createHmac, randomBytes, timingSafeEqual } from "crypto";
 import { IS_CLOUD, OAUTH_STATE_SECRET, SECRET_ENCRYPTION_KEY } from "@/lib/env";
 
 export interface OAuthStatePayload {
-  accountId: string;
+  projectId: string;
   provider: string;
   nonce: string;
   [key: string]: unknown;

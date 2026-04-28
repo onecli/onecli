@@ -2,6 +2,10 @@ export interface AuthUser {
   id: string;
   email: string;
   name?: string;
+  // Active project id, returned by /api/auth/session. Used by client-side
+  // redirects to land on /p/[projectId]/... rather than the unscoped legacy
+  // /overview URL.
+  projectId?: string;
 }
 
 export type EmailOtpStep = "CONFIRM_SIGN_UP" | "CONFIRM_SIGN_IN" | "DONE";

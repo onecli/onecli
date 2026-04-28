@@ -2,16 +2,19 @@
 
 import { db } from "@onecli/db";
 import { getServerSession } from "@/lib/auth/server";
+import { findUserDefaultProject } from "@/lib/services/organization-service";
 
 export interface UserContext {
   userId: string;
   userEmail: string;
-  accountId: string;
+  organizationId: string;
+  projectId: string;
 }
 
 /**
- * Resolves the current authenticated user's ID and their active account ID.
- * Always validates the session server-side — never trusts client input.
+ * Resolves the current authenticated user's ID, their organization, and the
+ * active project. Always validates the session server-side — never trusts
+ * client input.
  */
 export const resolveUser = async (): Promise<UserContext> => {
   const session = await getServerSession();
@@ -19,19 +22,18 @@ export const resolveUser = async (): Promise<UserContext> => {
 
   const user = await db.user.findUnique({
     where: { externalAuthId: session.id },
-    select: {
-      id: true,
-      email: true,
-      memberships: { select: { accountId: true }, take: 1 },
-    },
+    select: { id: true, email: true },
   });
 
   if (!user) throw new Error("User not found");
-  if (user.memberships.length === 0) throw new Error("No account found");
+
+  const project = await findUserDefaultProject(user.id);
+  if (!project) throw new Error("No project found");
 
   return {
     userId: user.id,
     userEmail: user.email,
-    accountId: user.memberships[0]!.accountId,
+    organizationId: project.organizationId,
+    projectId: project.id,
   };
 };

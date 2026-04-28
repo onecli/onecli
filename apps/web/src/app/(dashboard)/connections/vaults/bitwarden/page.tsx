@@ -1,13 +1,18 @@
+"use client";
+
 import Link from "next/link";
+import { usePathname } from "next/navigation";
 import { ArrowLeft } from "lucide-react";
 import { Badge } from "@onecli/ui/components/badge";
 import { BitwardenSetup } from "../../_components/bitwarden-setup";
+import { withProjectPrefix } from "@/lib/navigation";
 
 export default function BitwardenPage() {
+  const pathname = usePathname();
   return (
     <div className="space-y-6">
       <Link
-        href="/connections/vaults"
+        href={withProjectPrefix(pathname, "/connections/vaults")}
         className="inline-flex items-center gap-1.5 text-sm text-muted-foreground hover:text-foreground transition-colors"
       >
         <ArrowLeft className="size-4" />

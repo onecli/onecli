@@ -22,7 +22,7 @@ export const GET = async (request: NextRequest, { params }: Params) => {
     );
   }
 
-  const resolved = await resolveOAuthCredentials(auth.accountId, app);
+  const resolved = await resolveOAuthCredentials(auth.projectId, app);
   if (!resolved) {
     return NextResponse.json(
       { error: `${app.name} is not configured. Missing client credentials.` },
@@ -37,7 +37,7 @@ export const GET = async (request: NextRequest, { params }: Params) => {
   const agentName = rawAgentName ? rawAgentName.slice(0, 128) : undefined;
 
   const state = signOAuthState({
-    accountId: auth.accountId,
+    projectId: auth.projectId,
     provider,
     nonce: generateNonce(),
     ...(connectionId ? { connectionId } : {}),

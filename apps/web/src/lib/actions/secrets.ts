@@ -20,16 +20,16 @@ import {
 } from "@/lib/services/audit-service";
 
 export const getSecrets = async () => {
-  const { accountId } = await resolveUser();
-  return listSecrets(accountId);
+  const { projectId } = await resolveUser();
+  return listSecrets(projectId);
 };
 
 export const createSecret = async (input: CreateSecretInput) => {
-  const { userId, userEmail, accountId } = await resolveUser();
+  const { userId, userEmail, projectId } = await resolveUser();
   return withAudit(
-    () => createSecretService(accountId, input),
+    () => createSecretService(projectId, input),
     (secret) => ({
-      accountId,
+      projectId,
       userId,
       userEmail,
       action: AUDIT_ACTIONS.CREATE,
@@ -40,11 +40,11 @@ export const createSecret = async (input: CreateSecretInput) => {
 };
 
 export const deleteSecret = async (secretId: string): Promise<void> => {
-  const { userId, userEmail, accountId } = await resolveUser();
+  const { userId, userEmail, projectId } = await resolveUser();
   return withAudit(
-    () => deleteSecretService(accountId, secretId),
+    () => deleteSecretService(projectId, secretId),
     () => ({
-      accountId,
+      projectId,
       userId,
       userEmail,
       action: AUDIT_ACTIONS.DELETE,
@@ -55,15 +55,15 @@ export const deleteSecret = async (secretId: string): Promise<void> => {
 };
 
 export const getInstallInfo = async () => {
-  const { accountId, userId } = await resolveUser();
+  const { projectId, userId } = await resolveUser();
 
   const [apiKey, agent] = await Promise.all([
     db.apiKey.findFirst({
-      where: { userId, accountId },
+      where: { userId, projectId },
       select: { key: true },
     }),
     db.agent.findFirst({
-      where: { accountId, isDefault: true },
+      where: { projectId, isDefault: true },
       select: { accessToken: true },
     }),
   ]);
@@ -77,29 +77,29 @@ export const getInstallInfo = async () => {
 };
 
 export const seedDemoSecret = async () => {
-  const { accountId } = await resolveUser();
-  await seedDemoSecretService(accountId);
+  const { projectId } = await resolveUser();
+  await seedDemoSecretService(projectId);
 };
 
 export const hasAnthropicSecret = async (): Promise<boolean> => {
-  const { accountId } = await resolveUser();
+  const { projectId } = await resolveUser();
   const secret = await db.secret.findFirst({
-    where: { accountId, type: "anthropic" },
+    where: { projectId, type: "anthropic" },
     select: { id: true },
   });
   return !!secret;
 };
 
 export const getDemoInfo = async () => {
-  const { accountId } = await resolveUser();
+  const { projectId } = await resolveUser();
 
   const [demoSecret, agent] = await Promise.all([
     db.secret.findFirst({
-      where: { accountId, name: DEMO_SECRET_NAME },
+      where: { projectId, name: DEMO_SECRET_NAME },
       select: { id: true },
     }),
     db.agent.findFirst({
-      where: { accountId, isDefault: true },
+      where: { projectId, isDefault: true },
       select: { accessToken: true },
     }),
   ]);
@@ -158,11 +158,11 @@ export const updateSecret = async (
   secretId: string,
   input: UpdateSecretInput,
 ): Promise<void> => {
-  const { userId, userEmail, accountId } = await resolveUser();
+  const { userId, userEmail, projectId } = await resolveUser();
   return withAudit(
-    () => updateSecretService(accountId, secretId, input),
+    () => updateSecretService(projectId, secretId, input),
     () => ({
-      accountId,
+      projectId,
       userId,
       userEmail,
       action: AUDIT_ACTIONS.UPDATE,

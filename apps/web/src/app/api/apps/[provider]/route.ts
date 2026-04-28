@@ -25,9 +25,9 @@ export const GET = async (request: NextRequest, { params }: Params) => {
     }
 
     const [config, connection] = await Promise.all([
-      getAppConfig(auth.accountId, provider),
+      getAppConfig(auth.projectId, provider),
       db.appConnection.findFirst({
-        where: { accountId: auth.accountId, provider },
+        where: { projectId: auth.projectId, provider },
         select: {
           status: true,
           scopes: true,

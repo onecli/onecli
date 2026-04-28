@@ -17,7 +17,10 @@ const nextConfig = {
       ? {
           "@/lib/auth/auth-provider": "@/cloud/auth/cognito-provider",
           "@/lib/auth/auth-server": "@/cloud/auth/cognito-server",
+          "@/lib/actions/resolve-user": "@/cloud/auth/resolve-user",
           "@/lib/nav-items": "@/cloud/nav-items",
+          "@dashboard/dashboard-sidebar": "@/cloud/dashboard/dashboard-sidebar",
+          "@dashboard/dashboard-header": "@/cloud/dashboard/dashboard-header",
           "@/lib/crypto": "@/cloud/kms-crypto",
           "@/lib/gateway-auth": "@/cloud/gateway-auth",
           "@/lib/settings-nav-items": "@/cloud/settings-nav-items",

@@ -11,11 +11,19 @@ export default function Home() {
   useEffect(() => {
     if (isLoading) return;
 
-    if (isAuthenticated) {
-      router.replace("/overview");
-    } else {
+    if (!isAuthenticated) {
       router.replace("/auth/login");
+      return;
     }
+
+    fetch("/api/auth/session")
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data: { projectId?: string } | null) => {
+        router.replace(
+          data?.projectId ? `/p/${data.projectId}/overview` : "/overview",
+        );
+      })
+      .catch(() => router.replace("/overview"));
   }, [isLoading, isAuthenticated, router]);
 
   return (

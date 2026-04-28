@@ -68,7 +68,7 @@ fn nextauth_secret() -> Option<&'static str> {
 /// ```
 pub(crate) struct AuthUser {
     pub user_id: String,
-    pub account_id: String,
+    pub project_id: String,
 }
 
 impl FromRequestParts<GatewayState> for AuthUser {
@@ -88,21 +88,21 @@ impl FromRequestParts<GatewayState> for AuthUser {
         // Fall back to session auth (cookies / JWT)
         let user_id = validate_request(&state.policy_engine.pool, &parts.headers).await?;
 
-        // Resolve account from membership
-        let account_id = db::find_account_id_by_user(&state.policy_engine.pool, &user_id)
+        // Resolve default project for this user (org → first project).
+        let project_id = db::find_default_project_id_by_user(&state.policy_engine.pool, &user_id)
             .await
             .map_err(|e| {
-                warn!(error = %e, "auth: failed to resolve account");
+                warn!(error = %e, "auth: failed to resolve project");
                 AuthError("internal error".to_string())
             })?
             .ok_or_else(|| {
-                warn!(user_id = %user_id, "auth: no account found for user");
-                AuthError("no account found".to_string())
+                warn!(user_id = %user_id, "auth: no project found for user");
+                AuthError("no project found".to_string())
             })?;
 
         Ok(Self {
             user_id,
-            account_id,
+            project_id,
         })
     }
 }
@@ -128,14 +128,14 @@ async fn validate_api_key(pool: &PgPool, headers: &HeaderMap) -> Option<AuthUser
 
     Some(AuthUser {
         user_id: api_key.user_id,
-        account_id: api_key.account_id,
+        project_id: api_key.project_id,
     })
 }
 
 // ── Session auth ─────────────────────────────────────────────────────────
 
 /// Validate an incoming browser request and return the internal user ID.
-/// The caller resolves the account ID from the user's membership.
+/// The caller resolves the project ID from the user's membership.
 async fn validate_request(pool: &PgPool, headers: &HeaderMap) -> Result<String, AuthError> {
     match auth_mode() {
         "local" => validate_local(pool).await,

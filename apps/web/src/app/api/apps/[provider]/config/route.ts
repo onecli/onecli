@@ -18,7 +18,7 @@ export const GET = async (request: NextRequest, { params }: Params) => {
     if (!auth) return unauthorized();
 
     const { provider } = await params;
-    const config = await getAppConfig(auth.accountId, provider);
+    const config = await getAppConfig(auth.projectId, provider);
 
     return NextResponse.json(
       config ?? { hasCredentials: false, enabled: false },
@@ -54,7 +54,7 @@ export const POST = async (request: NextRequest, { params }: Params) => {
 
     const { clientId, clientSecret } = parsed.data;
     await upsertAppConfig(
-      auth.accountId,
+      auth.projectId,
       provider,
       { clientId, clientSecret },
       app.configurable.fields,
@@ -74,7 +74,7 @@ export const DELETE = async (request: NextRequest, { params }: Params) => {
     if (!auth) return unauthorized();
 
     const { provider } = await params;
-    await deleteAppConfig(auth.accountId, provider);
+    await deleteAppConfig(auth.projectId, provider);
     invalidateGatewayCache(request);
 
     return new NextResponse(null, { status: 204 });

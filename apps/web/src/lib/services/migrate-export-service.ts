@@ -29,14 +29,14 @@ interface MigrateResult {
  * leaves the server process or reaches the caller.
  */
 export const exportToCloud = async (
-  accountId: string,
+  projectId: string,
   cloudApiKey: string,
 ): Promise<MigrateResult> => {
   // ── Gather data ───────────────────────────────────────────────
 
   const [secrets, agents, agentSecrets, rules] = await Promise.all([
     db.secret.findMany({
-      where: { accountId },
+      where: { projectId },
       select: {
         name: true,
         type: true,
@@ -48,7 +48,7 @@ export const exportToCloud = async (
       },
     }),
     db.agent.findMany({
-      where: { accountId },
+      where: { projectId },
       select: {
         id: true,
         name: true,
@@ -58,14 +58,14 @@ export const exportToCloud = async (
       },
     }),
     db.agentSecret.findMany({
-      where: { agent: { accountId } },
+      where: { agent: { projectId } },
       select: {
         agent: { select: { identifier: true } },
         secret: { select: { name: true } },
       },
     }),
     db.policyRule.findMany({
-      where: { accountId },
+      where: { projectId },
       select: {
         name: true,
         hostPattern: true,

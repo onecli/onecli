@@ -22,21 +22,21 @@ import {
 } from "@/lib/services/audit-service";
 
 export const getAgents = async () => {
-  const { accountId } = await resolveUser();
-  return listAgents(accountId);
+  const { projectId } = await resolveUser();
+  return listAgents(projectId);
 };
 
 export const getDefaultAgent = async () => {
-  const { accountId } = await resolveUser();
-  return getDefaultAgentService(accountId);
+  const { projectId } = await resolveUser();
+  return getDefaultAgentService(projectId);
 };
 
 export const createAgent = async (name: string, identifier: string) => {
-  const { userId, userEmail, accountId } = await resolveUser();
+  const { userId, userEmail, projectId } = await resolveUser();
   return withAudit(
-    () => createAgentService(accountId, name, identifier),
+    () => createAgentService(projectId, name, identifier),
     (agent) => ({
-      accountId,
+      projectId,
       userId,
       userEmail,
       action: AUDIT_ACTIONS.CREATE,
@@ -47,11 +47,11 @@ export const createAgent = async (name: string, identifier: string) => {
 };
 
 export const deleteAgent = async (agentId: string): Promise<void> => {
-  const { userId, userEmail, accountId } = await resolveUser();
+  const { userId, userEmail, projectId } = await resolveUser();
   return withAudit(
-    () => deleteAgentService(accountId, agentId),
+    () => deleteAgentService(projectId, agentId),
     () => ({
-      accountId,
+      projectId,
       userId,
       userEmail,
       action: AUDIT_ACTIONS.DELETE,
@@ -65,11 +65,11 @@ export const renameAgent = async (
   agentId: string,
   name: string,
 ): Promise<void> => {
-  const { userId, userEmail, accountId } = await resolveUser();
+  const { userId, userEmail, projectId } = await resolveUser();
   return withAudit(
-    () => renameAgentService(accountId, agentId, name),
+    () => renameAgentService(projectId, agentId, name),
     () => ({
-      accountId,
+      projectId,
       userId,
       userEmail,
       action: AUDIT_ACTIONS.UPDATE,
@@ -80,11 +80,11 @@ export const renameAgent = async (
 };
 
 export const regenerateAgentToken = async (agentId: string) => {
-  const { userId, userEmail, accountId } = await resolveUser();
+  const { userId, userEmail, projectId } = await resolveUser();
   return withAudit(
-    () => regenerateAgentTokenService(accountId, agentId),
+    () => regenerateAgentTokenService(projectId, agentId),
     () => ({
-      accountId,
+      projectId,
       userId,
       userEmail,
       action: AUDIT_ACTIONS.REGENERATE,
@@ -95,19 +95,19 @@ export const regenerateAgentToken = async (agentId: string) => {
 };
 
 export const getAgentSecrets = async (agentId: string) => {
-  const { accountId } = await resolveUser();
-  return getAgentSecretsService(accountId, agentId);
+  const { projectId } = await resolveUser();
+  return getAgentSecretsService(projectId, agentId);
 };
 
 export const updateAgentSecretMode = async (
   agentId: string,
   mode: SecretMode,
 ): Promise<void> => {
-  const { userId, userEmail, accountId } = await resolveUser();
+  const { userId, userEmail, projectId } = await resolveUser();
   return withAudit(
-    () => updateAgentSecretModeService(accountId, agentId, mode),
+    () => updateAgentSecretModeService(projectId, agentId, mode),
     () => ({
-      accountId,
+      projectId,
       userId,
       userEmail,
       action: AUDIT_ACTIONS.UPDATE,
@@ -121,11 +121,11 @@ export const updateAgentSecrets = async (
   agentId: string,
   secretIds: string[],
 ): Promise<void> => {
-  const { userId, userEmail, accountId } = await resolveUser();
+  const { userId, userEmail, projectId } = await resolveUser();
   return withAudit(
-    () => updateAgentSecretsService(accountId, agentId, secretIds),
+    () => updateAgentSecretsService(projectId, agentId, secretIds),
     () => ({
-      accountId,
+      projectId,
       userId,
       userEmail,
       action: AUDIT_ACTIONS.UPDATE,
@@ -136,20 +136,20 @@ export const updateAgentSecrets = async (
 };
 
 export const getAgentAppConnections = async (agentId: string) => {
-  const { accountId } = await resolveUser();
-  return getAgentAppConnectionsService(accountId, agentId);
+  const { projectId } = await resolveUser();
+  return getAgentAppConnectionsService(projectId, agentId);
 };
 
 export const updateAgentAppConnections = async (
   agentId: string,
   appConnectionIds: string[],
 ): Promise<void> => {
-  const { userId, userEmail, accountId } = await resolveUser();
+  const { userId, userEmail, projectId } = await resolveUser();
   return withAudit(
     () =>
-      updateAgentAppConnectionsService(accountId, agentId, appConnectionIds),
+      updateAgentAppConnectionsService(projectId, agentId, appConnectionIds),
     () => ({
-      accountId,
+      projectId,
       userId,
       userEmail,
       action: AUDIT_ACTIONS.UPDATE,

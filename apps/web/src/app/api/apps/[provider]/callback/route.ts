@@ -39,7 +39,7 @@ export const GET = async (request: NextRequest, { params }: Params) => {
       return errorRedirect("Invalid state parameter");
     }
 
-    const resolved = await resolveOAuthCredentials(state.accountId, app);
+    const resolved = await resolveOAuthCredentials(state.projectId, app);
     if (!resolved) {
       return errorRedirect("Provider not configured");
     }
@@ -63,7 +63,7 @@ export const GET = async (request: NextRequest, { params }: Params) => {
       const identity = extractLabel(metadata)?.toLowerCase().trim();
       if (identity) {
         const existing = await listConnectionsByProvider(
-          state.accountId,
+          state.projectId,
           provider,
         );
         const duplicate = existing.find((c) => {
@@ -83,12 +83,12 @@ export const GET = async (request: NextRequest, { params }: Params) => {
     }
 
     if (reconnectId) {
-      await reconnectConnection(state.accountId, reconnectId, credentials, {
+      await reconnectConnection(state.projectId, reconnectId, credentials, {
         scopes,
         metadata,
       });
     } else {
-      await createConnection(state.accountId, provider, credentials, {
+      await createConnection(state.projectId, provider, credentials, {
         scopes,
         metadata,
       });
@@ -97,7 +97,7 @@ export const GET = async (request: NextRequest, { params }: Params) => {
     // Invalidate gateway cache server-side so agents see the new
     // connection immediately. Fire-and-forget — the client-side
     // postMessage chain in the success page acts as a backup.
-    invalidateGatewayCacheForAccount(state.accountId);
+    invalidateGatewayCacheForAccount(state.projectId);
 
     const successParams = new URLSearchParams({ status: "success" });
     if (state.agentName) {

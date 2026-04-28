@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, useMemo } from "react";
 import { useInvalidateGatewayCache } from "@/hooks/use-invalidate-cache";
 import { toast } from "sonner";
 import { ShieldBan, Gauge, Hand, Check, Settings2 } from "lucide-react";
@@ -16,6 +16,8 @@ import { Button } from "@onecli/ui/components/button";
 import { Input } from "@onecli/ui/components/input";
 import { Label } from "@onecli/ui/components/label";
 import { Checkbox } from "@onecli/ui/components/checkbox";
+import { cn } from "@onecli/ui/lib/utils";
+import { validateDisplayName } from "@/lib/validations/display-name";
 import {
   Accordion,
   AccordionContent,
@@ -77,6 +79,7 @@ export const RuleDialog = ({
   const [saving, setSaving] = useState(false);
   const [step, setStep] = useState<Step>("endpoint");
   const [name, setName] = useState("");
+  const [nameTouched, setNameTouched] = useState(false);
   const [hostPattern, setHostPattern] = useState("");
   const [pathPattern, setPathPattern] = useState("");
   const [method, setMethod] = useState("");
@@ -95,6 +98,7 @@ export const RuleDialog = ({
     if (open) {
       setStep("endpoint");
       setName(rule?.name ?? "");
+      setNameTouched(false);
       setHostPattern(rule?.hostPattern ?? "");
       setPathPattern(rule?.pathPattern ?? "");
       setMethod(rule?.method ?? "");
@@ -110,7 +114,10 @@ export const RuleDialog = ({
     }
   }, [open, rule]);
 
-  const isEndpointValid = !!(name.trim() && hostPattern.trim());
+  const nameError = useMemo(() => validateDisplayName(name), [name]);
+  const showNameError = nameTouched && nameError !== null;
+  const isNameValid = name.trim().length > 0 && nameError === null;
+  const isEndpointValid = !!(isNameValid && hostPattern.trim());
   const isActionValid =
     action !== "rate_limit" || (rateLimit > 0 && rateLimitWindow);
   const isValid = isEndpointValid && isActionValid;
@@ -245,8 +252,13 @@ export const RuleDialog = ({
                 placeholder="e.g. Limit Anthropic calls"
                 value={name}
                 onChange={(e) => setName(e.target.value)}
+                onBlur={() => setNameTouched(true)}
                 autoFocus
+                className={cn(showNameError && "border-destructive")}
               />
+              {showNameError && (
+                <p className="text-destructive text-xs">{nameError}</p>
+              )}
             </div>
 
             <div className="grid grid-cols-2 gap-4">

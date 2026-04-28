@@ -2,12 +2,12 @@ import { db } from "@onecli/db";
 
 export interface ApiKeyAuth {
   userId: string;
-  accountId: string;
+  projectId: string;
 }
 
 /**
  * Validate an API key from a request's `Authorization: Bearer oc_...` header.
- * Looks up the ApiKey table, returns { userId, accountId } if valid.
+ * Looks up the ApiKey table, returns { userId, projectId } if valid.
  */
 export const validateApiKey = async (
   request: Request,
@@ -20,10 +20,10 @@ export const validateApiKey = async (
 
   const apiKey = await db.apiKey.findUnique({
     where: { key: token },
-    select: { userId: true, accountId: true },
+    select: { userId: true, projectId: true },
   });
 
   if (!apiKey) return null;
 
-  return { userId: apiKey.userId, accountId: apiKey.accountId };
+  return { userId: apiKey.userId, projectId: apiKey.projectId };
 };

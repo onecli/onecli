@@ -1,6 +1,9 @@
 import { auth } from "@/lib/auth/nextauth-config";
 import { db } from "@onecli/db";
-import { generateApiKey } from "@/lib/services/api-key-service";
+import {
+  findUserDefaultProject,
+  bootstrapOrganization,
+} from "@/lib/services/organization-service";
 import { getAuthMode } from "./auth-mode";
 import type { AuthUser } from "./types";
 
@@ -27,39 +30,9 @@ const ensureLocalUser = async () => {
     select: { id: true },
   });
 
-  // Ensure the local user has an Account + AccountMember + ApiKey
-  const membership = await db.accountMember.findFirst({
-    where: { userId: user.id },
-    select: { accountId: true },
-  });
-
-  if (!membership) {
-    const account = await db.account.create({
-      data: {
-        name: LOCAL_USER.name,
-        createdByUserId: user.id,
-        createdByUserEmail: LOCAL_USER.email,
-      },
-      select: { id: true },
-    });
-
-    await db.accountMember.create({
-      data: {
-        accountId: account.id,
-        userId: user.id,
-        userEmail: LOCAL_USER.email,
-        role: "owner",
-      },
-    });
-
-    await db.apiKey.create({
-      data: {
-        key: generateApiKey(),
-        userId: user.id,
-        userEmail: LOCAL_USER.email,
-        accountId: account.id,
-      },
-    });
+  const existing = await findUserDefaultProject(user.id);
+  if (!existing) {
+    await bootstrapOrganization(user.id, LOCAL_USER.email, LOCAL_USER.name);
   }
 
   localUserEnsured = true;

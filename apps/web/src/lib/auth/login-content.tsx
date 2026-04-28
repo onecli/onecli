@@ -18,7 +18,10 @@ export const LoginContent = () => {
       try {
         const res = await fetch("/api/auth/session");
         if (res.ok) {
-          router.replace("/overview");
+          const data = (await res.json()) as { projectId?: string };
+          router.replace(
+            data.projectId ? `/p/${data.projectId}/overview` : "/overview",
+          );
         } else {
           console.error("Session sync failed:", res.status);
           await signOut();
