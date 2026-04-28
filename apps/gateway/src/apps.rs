@@ -235,6 +235,23 @@ static APP_PROVIDERS: &[AppProvider] = &[
         refresh: Some(&GOOGLE_REFRESH),
     },
     AppProvider {
+        provider: "youtube",
+        display_name: "YouTube",
+        host_rules: &[
+            HostRule {
+                host: "www.googleapis.com",
+                path_prefix: Some("/youtube/"),
+                strategy: AuthStrategy::Bearer,
+            },
+            HostRule {
+                host: "www.googleapis.com",
+                path_prefix: Some("/upload/youtube/"),
+                strategy: AuthStrategy::Bearer,
+            },
+        ],
+        refresh: Some(&GOOGLE_REFRESH),
+    },
+    AppProvider {
         provider: "resend",
         display_name: "Resend",
         host_rules: &[HostRule {
@@ -474,11 +491,12 @@ mod tests {
     #[test]
     fn providers_for_googleapis_hosts() {
         assert_eq!(providers_for_host("gmail.googleapis.com"), vec!["gmail"]);
-        // www.googleapis.com is shared — Gmail, Calendar, and Drive use path prefixes
+        // www.googleapis.com is shared — Gmail, Calendar, Drive, and YouTube use path prefixes
         let www = providers_for_host("www.googleapis.com");
         assert!(www.contains(&"gmail"));
         assert!(www.contains(&"google-calendar"));
         assert!(www.contains(&"google-drive"));
+        assert!(www.contains(&"youtube"));
     }
 
     #[test]
@@ -689,6 +707,45 @@ mod tests {
                     value: "Bearer ya29.test".to_string(),
                 },
                 "{provider} on {host} should use Bearer auth"
+            );
+        }
+    }
+
+    // ── YouTube ───────────────────────────────────────────────────────
+
+    #[test]
+    fn youtube_matches_www_googleapis() {
+        let www = providers_for_host("www.googleapis.com");
+        assert!(www.contains(&"youtube"));
+    }
+
+    #[test]
+    fn youtube_path_disambiguation() {
+        let result = provider_for_host_and_path("www.googleapis.com", "/youtube/v3/playlists");
+        assert_eq!(result, Some(("youtube", "YouTube")));
+    }
+
+    #[test]
+    fn youtube_produces_two_injection_rules() {
+        let rules = build_app_injection_rules("youtube", "www.googleapis.com", "ya29.yt_test");
+        assert_eq!(
+            rules.len(),
+            2,
+            "expected two rules for YouTube on www.googleapis.com"
+        );
+
+        let patterns: Vec<&str> = rules.iter().map(|(p, _)| p.as_str()).collect();
+        assert!(patterns.contains(&"/youtube/*"));
+        assert!(patterns.contains(&"/upload/youtube/*"));
+
+        for (_, injections) in &rules {
+            assert_eq!(injections.len(), 1);
+            assert_eq!(
+                injections[0],
+                Injection::SetHeader {
+                    name: "authorization".to_string(),
+                    value: "Bearer ya29.yt_test".to_string(),
+                }
             );
         }
     }
