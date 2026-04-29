@@ -137,6 +137,8 @@ pub(crate) struct ResolvedRules {
     pub injection_rules: Vec<InjectionRule>,
     pub policy_rules: Vec<crate::policy::PolicyRule>,
     pub access_restricted: bool,
+    /// Token expiry (UNIX timestamp) from the resolved app connection, if known.
+    pub token_expires_at: Option<i64>,
 }
 
 /// Result of per-request rule resolution including app connection disambiguation.
@@ -177,6 +179,7 @@ async fn resolve_rules(
         connect::resolve_from_cache(project_id, agent_token, hostname, engine, cache).await?;
 
     let mut injection_rules = resp.injection_rules; // from secrets
+    let mut token_expires_at: Option<i64> = None;
 
     // If no secret rules, try app connections (per-request disambiguation)
     if injection_rules.is_empty() && !resp.app_connections.is_empty() {
@@ -190,7 +193,13 @@ async fn resolve_rules(
             )
             .await?
         {
-            AppConnectionResult::Rules(rules) => injection_rules = rules,
+            AppConnectionResult::Rules {
+                rules,
+                token_expires_at: exp,
+            } => {
+                injection_rules = rules;
+                token_expires_at = exp;
+            }
             AppConnectionResult::Ambiguous { connections } => {
                 return Ok(ResolveResult::Ambiguous(connections));
             }
@@ -214,6 +223,7 @@ async fn resolve_rules(
             injection_rules,
             policy_rules: resp.policy_rules,
             access_restricted: resp.access_restricted,
+            token_expires_at,
         },
         app_connections: resp.app_connections,
     })

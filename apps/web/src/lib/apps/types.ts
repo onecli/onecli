@@ -49,6 +49,28 @@ export type ConnectionMethod =
         description?: string;
         placeholder: string;
       }[];
+    }
+  | {
+      type: "credentials_import";
+      fields: {
+        name: string;
+        label: string;
+        description?: string;
+        placeholder: string;
+        secret?: boolean;
+      }[];
+      exchangeCredentials: (
+        fields: Record<string, string>,
+      ) => Promise<OAuthExchangeResult>;
+      /** Optional file import to auto-fill fields from a JSON file. */
+      fileImport?: {
+        /** Button label (e.g., "Import from credentials file"). */
+        label: string;
+        /** File input accept filter (e.g., ".json,application/json"). */
+        accept: string;
+        /** Maps JSON keys in the file to field names in the form. */
+        keyMap: Record<string, string>;
+      };
     };
 
 export interface OAuthConfigField {
@@ -69,6 +91,13 @@ export interface AppDefinition {
   description: string;
   connectionMethod: ConnectionMethod;
   available: boolean;
+  /** Credential stubs for provisioners to write so MCP servers can boot. */
+  credentialStubs?: {
+    /** Full destination path (e.g., "~/.config/gcloud/application_default_credentials.json"). */
+    path: string;
+    /** Stub content with "onecli-managed" sentinel values. */
+    content: Record<string, unknown>;
+  }[];
   /** OAuth apps can be configured with custom credentials (BYOC). */
   configurable?: {
     fields: OAuthConfigField[];

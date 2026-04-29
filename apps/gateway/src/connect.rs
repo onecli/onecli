@@ -49,7 +49,11 @@ pub(crate) struct ConnectResponse {
 /// Result of per-request app connection resolution.
 pub(crate) enum AppConnectionResult {
     /// Injection rules resolved from a single connection.
-    Rules(Vec<InjectionRule>),
+    Rules {
+        rules: Vec<InjectionRule>,
+        /// Token expiry (UNIX timestamp) from the resolved app connection, if known.
+        token_expires_at: Option<i64>,
+    },
     /// No app connections available for this provider.
     NoConnections,
     /// Multiple connections exist and no header was provided — agent must pick.
@@ -293,15 +297,28 @@ impl PolicyEngine {
         if by_provider.values().all(|conns| conns.len() == 1) {
             // Each provider has exactly one connection — no ambiguity, resolve all
             let mut rules = Vec::new();
+            let mut earliest_expires_at: Option<i64> = None;
             for conn in app_connections {
-                if let AppConnectionResult::Rules(r) = self
+                if let AppConnectionResult::Rules {
+                    rules: r,
+                    token_expires_at,
+                } = self
                     .resolve_connection_injections(conn, hostname, project_id, cache)
                     .await?
                 {
                     rules.extend(r);
+                    // Track the earliest expiry across all connections
+                    match (earliest_expires_at, token_expires_at) {
+                        (None, exp) => earliest_expires_at = exp,
+                        (Some(cur), Some(exp)) if exp < cur => earliest_expires_at = Some(exp),
+                        _ => {}
+                    }
                 }
             }
-            return Ok(AppConnectionResult::Rules(rules));
+            return Ok(AppConnectionResult::Rules {
+                rules,
+                token_expires_at: earliest_expires_at,
+            });
         }
 
         // Truly ambiguous — return all connections for the caller to report
@@ -329,7 +346,10 @@ impl PolicyEngine {
         // Check injection cache — skip decryption if we have cached rules
         if let Some(cached) = cache.get::<Vec<InjectionRule>>(&cache_key).await {
             debug!(connection_id = %conn.id, "app injection: cache hit");
-            return Ok(AppConnectionResult::Rules(cached));
+            return Ok(AppConnectionResult::Rules {
+                rules: cached,
+                token_expires_at: None, // expiry not tracked in cache
+            });
         }
 
         let Some(ref encrypted_creds) = conn.credentials else {
@@ -358,6 +378,20 @@ impl PolicyEngine {
             });
         }
 
+        // Vertex AI: inject x-goog-user-project from connection metadata
+        if conn.provider == "vertex-ai" {
+            if let Some(ref metadata) = conn.metadata {
+                if let Some(project_id) = metadata.get("quotaProjectId").and_then(|v| v.as_str()) {
+                    for rule in &mut rules {
+                        rule.injections.push(Injection::SetHeader {
+                            name: "x-goog-user-project".to_string(),
+                            value: project_id.to_string(),
+                        });
+                    }
+                }
+            }
+        }
+
         // Cache with TTL = min(CACHE_TTL, token remaining lifetime).
         // Skip caching if token is already expired — the stale token would cause
         // upstream 401s, and re-resolving gives a chance to refresh.
@@ -374,7 +408,10 @@ impl PolicyEngine {
             cache.set(&cache_key, &rules, ttl).await;
         }
 
-        Ok(AppConnectionResult::Rules(rules))
+        Ok(AppConnectionResult::Rules {
+            rules,
+            token_expires_at: expires_at,
+        })
     }
 
     /// Check if the project has any credentials (secrets or app connections) for this

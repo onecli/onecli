@@ -17,6 +17,7 @@ import { googleSheets } from "./google-sheets";
 import { googleSlides } from "./google-slides";
 import { googleTasks } from "./google-tasks";
 import { resend } from "./resend";
+import { vertexAi } from "./vertex-ai";
 import { youtube } from "./youtube";
 
 export const apps: AppDefinition[] = [
@@ -39,6 +40,7 @@ export const apps: AppDefinition[] = [
   jira,
   confluence,
   youtube,
+  vertexAi,
 ];
 
 export const getApp = (id: string): AppDefinition | undefined =>

@@ -3,7 +3,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
 use futures_util::{StreamExt, TryStreamExt};
@@ -112,6 +112,58 @@ pub(crate) async fn forward_request(
         .unwrap_or_else(|| "/".to_string());
     let url = format!("{scheme}://{host}{path}");
     let agent_token = proxy_ctx.agent_token.as_deref().unwrap_or("");
+
+    // Token endpoint interception: when a client SDK tries to refresh its
+    // own Google OAuth token through the proxy, serve the cached access
+    // token from the stored app connection instead of forwarding dummy
+    // credentials to Google.
+    if super::strip_port(host) == "oauth2.googleapis.com"
+        && path.starts_with("/token")
+        && method == hyper::Method::POST
+        && !rules.injection_rules.is_empty()
+    {
+        // Extract the Bearer token from the injection rules — it's the
+        // already-refreshed access token from the app connection.
+        let token = rules.injection_rules.iter().find_map(|rule| {
+            rule.injections.iter().find_map(|inj| match inj {
+                crate::inject::Injection::SetHeader { name, value } if name == "authorization" => {
+                    value.strip_prefix("Bearer ")
+                }
+                _ => None,
+            })
+        });
+
+        if let Some(access_token) = token {
+            info!(
+                method = %method,
+                url = %url,
+                "token endpoint intercepted — serving cached token"
+            );
+            let expires_in = rules
+                .token_expires_at
+                .map(|exp| {
+                    let now = SystemTime::now()
+                        .duration_since(UNIX_EPOCH)
+                        .expect("system clock before UNIX epoch")
+                        .as_secs() as i64;
+                    (exp - now).max(0)
+                })
+                .unwrap_or(3600);
+            let body = serde_json::json!({
+                "access_token": access_token,
+                "expires_in": expires_in,
+                "token_type": "Bearer",
+            });
+            let bytes = Bytes::from(serde_json::to_vec(&body).expect("serializing JSON literal"));
+            let mut resp = Response::new(Either::Left(Full::new(bytes)));
+            *resp.status_mut() = StatusCode::OK;
+            resp.headers_mut().insert(
+                "content-type",
+                hyper::header::HeaderValue::from_static("application/json"),
+            );
+            return Ok(resp);
+        }
+    }
 
     // Check policy rules before forwarding
     let decision = policy::evaluate(

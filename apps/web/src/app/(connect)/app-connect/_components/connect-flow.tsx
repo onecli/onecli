@@ -11,6 +11,12 @@ import { ConnectSuccess } from "./connect-success";
 
 type FlowState = "ready" | "redirecting" | "success" | "error";
 
+interface FileImportConfig {
+  label: string;
+  accept: string;
+  keyMap: Record<string, string>;
+}
+
 interface ConnectFlowProps {
   app: {
     id: string;
@@ -23,7 +29,9 @@ interface ConnectFlowProps {
       label: string;
       description?: string;
       placeholder: string;
+      secret?: boolean;
     }[];
+    fileImport?: FileImportConfig;
   };
   hasDefaults: boolean;
   status?: "success" | "error";
@@ -97,12 +105,18 @@ export const ConnectFlow = ({
     );
   }
 
-  // API key flow — render form instead of OAuth redirect
-  if (app.connectionType === "api_key" && app.fields && state !== "error") {
+  // API key / credentials import flow — render form instead of OAuth redirect
+  if (
+    (app.connectionType === "api_key" ||
+      app.connectionType === "credentials_import") &&
+    app.fields &&
+    state !== "error"
+  ) {
     return (
       <ApiKeyFlow
         app={app}
         fields={app.fields}
+        fileImport={app.fileImport}
         connectionId={connectionId}
         onSuccess={() => setState("success")}
         onError={(msg) => {
@@ -269,7 +283,9 @@ interface ApiKeyFlowProps {
     label: string;
     description?: string;
     placeholder: string;
+    secret?: boolean;
   }[];
+  fileImport?: FileImportConfig;
   connectionId?: string;
   onSuccess: () => void;
   onError: (message: string) => void;
@@ -278,12 +294,41 @@ interface ApiKeyFlowProps {
 const ApiKeyFlow = ({
   app,
   fields,
+  fileImport,
   connectionId,
   onSuccess,
   onError,
 }: ApiKeyFlowProps) => {
   const [values, setValues] = useState<Record<string, string>>({});
   const [submitting, setSubmitting] = useState(false);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+
+  const handleFileImport = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file || !fileImport) return;
+
+    const reader = new FileReader();
+    reader.onload = () => {
+      try {
+        const json = JSON.parse(reader.result as string) as Record<
+          string,
+          unknown
+        >;
+        const mapped: Record<string, string> = {};
+        for (const [jsonKey, fieldName] of Object.entries(fileImport.keyMap)) {
+          const val = json[jsonKey];
+          if (typeof val === "string" && val) {
+            mapped[fieldName] = val;
+          }
+        }
+        setValues((prev) => ({ ...prev, ...mapped }));
+      } catch {
+        onError("Invalid JSON file");
+      }
+    };
+    reader.readAsText(file);
+    e.target.value = "";
+  };
 
   const hasInput = fields.every((f) => !!values[f.name]?.trim());
 
@@ -315,6 +360,33 @@ const ApiKeyFlow = ({
       appDarkIcon={app.darkIcon}
     >
       <div className="space-y-5 py-2">
+        {fileImport && (
+          <>
+            <div>
+              <input
+                ref={fileInputRef}
+                type="file"
+                accept={fileImport.accept}
+                onChange={handleFileImport}
+                className="hidden"
+              />
+              <Button
+                variant="outline"
+                className="w-full"
+                onClick={() => fileInputRef.current?.click()}
+              >
+                {fileImport.label}
+              </Button>
+            </div>
+            <div className="flex items-center gap-3">
+              <div className="bg-border h-px flex-1" />
+              <span className="text-muted-foreground/60 text-[10px] uppercase tracking-widest">
+                or fill manually
+              </span>
+              <div className="bg-border h-px flex-1" />
+            </div>
+          </>
+        )}
         {fields.map((field) => (
           <div key={field.name} className="grid gap-1.5">
             <Label htmlFor={`connect-${field.name}`}>
@@ -328,7 +400,12 @@ const ApiKeyFlow = ({
             )}
             <Input
               id={`connect-${field.name}`}
-              type="password"
+              type={
+                field.secret === true ||
+                (field.secret === undefined && app.connectionType === "api_key")
+                  ? "password"
+                  : "text"
+              }
               value={values[field.name] ?? ""}
               onChange={(e) =>
                 setValues((prev) => ({
