@@ -31,8 +31,14 @@ const exchangeServiceAccount = async (
   fields: Record<string, string>,
 ): Promise<OAuthExchangeResult> => {
   const { privateKey, clientEmail, projectId } = fields;
+  if (!privateKey || !clientEmail) {
+    throw new Error("Service account email and private key are required");
+  }
+  if (!projectId) {
+    throw new Error("GCP Project ID is required");
+  }
 
-  const jwt = signJwt(privateKey!, clientEmail!);
+  const jwt = signJwt(privateKey, clientEmail);
 
   const tokenRes = await fetch(GOOGLE_TOKEN_URL, {
     method: "POST",
@@ -91,14 +97,17 @@ const exchangeAuthorizedUser = async (
   fields: Record<string, string>,
 ): Promise<OAuthExchangeResult> => {
   const { refreshToken, clientId, clientSecret, quotaProjectId } = fields;
+  if (!refreshToken || !clientId || !clientSecret) {
+    throw new Error("Refresh token, client ID, and client secret are required");
+  }
 
   const tokenRes = await fetch(GOOGLE_TOKEN_URL, {
     method: "POST",
     headers: { "Content-Type": "application/x-www-form-urlencoded" },
     body: new URLSearchParams({
-      client_id: clientId!,
-      client_secret: clientSecret!,
-      refresh_token: refreshToken!,
+      client_id: clientId,
+      client_secret: clientSecret,
+      refresh_token: refreshToken,
       grant_type: "refresh_token",
     }),
   });

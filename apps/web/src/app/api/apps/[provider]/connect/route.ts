@@ -46,6 +46,8 @@ export const POST = async (request: NextRequest, { params }: Params) => {
       );
     }
 
+    const { fields } = body;
+
     let requiredFields: { name: string; label: string }[];
     if (
       app.connectionMethod.type === "credentials_import" &&
@@ -53,7 +55,7 @@ export const POST = async (request: NextRequest, { params }: Params) => {
     ) {
       requiredFields = app.connectionMethod.fields.filter((f) => {
         if (!f.group) return true;
-        if (body.fields!.privateKey) return f.group === "service_account";
+        if (fields.privateKey) return f.group === "service_account";
         return f.group === "authorized_user";
       });
     } else {
@@ -61,7 +63,7 @@ export const POST = async (request: NextRequest, { params }: Params) => {
     }
 
     for (const field of requiredFields) {
-      if (!body.fields![field.name]?.trim()) {
+      if (!fields[field.name]?.trim()) {
         return NextResponse.json(
           { error: `${field.label} is required` },
           { status: 400 },
@@ -74,16 +76,14 @@ export const POST = async (request: NextRequest, { params }: Params) => {
     let metadata: Record<string, unknown> | undefined;
 
     if (app.connectionMethod.type === "credentials_import") {
-      const result = await app.connectionMethod.exchangeCredentials(
-        body.fields,
-      );
+      const result = await app.connectionMethod.exchangeCredentials(fields);
       credentials = result.credentials;
       scopes = result.scopes;
       metadata = result.metadata;
     } else {
       const primaryField = app.connectionMethod.fields[0];
       credentials = {
-        access_token: body.fields[primaryField!.name],
+        access_token: fields[primaryField!.name],
       };
     }
 
@@ -140,15 +140,15 @@ export const POST = async (request: NextRequest, { params }: Params) => {
     // self-contained (private key stored in AppConnection) and skip this.
     if (
       app.connectionMethod.type === "credentials_import" &&
-      !body.fields.privateKey &&
-      body.fields.clientId &&
-      body.fields.clientSecret
+      !fields.privateKey &&
+      fields.clientId &&
+      fields.clientSecret
     ) {
       await saveAppConfigWithoutDisconnect(
         auth.projectId,
         provider,
-        body.fields.clientId,
-        body.fields.clientSecret,
+        fields.clientId,
+        fields.clientSecret,
       );
     }
 
