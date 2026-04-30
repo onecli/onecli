@@ -566,7 +566,7 @@ pub(crate) fn is_intercept_target(hostname: &str, path: &str) -> bool {
         p.host_rules.iter().any(|r| {
             r.intercept
                 && host_rule_matches(r, hostname)
-                && r.path_prefix.map_or(true, |pfx| path.starts_with(pfx))
+                && r.path_prefix.is_none_or(|pfx| path.starts_with(pfx))
         })
     })
 }
