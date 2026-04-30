@@ -1,5 +1,22 @@
 # Changelog
 
+## [1.19.0](https://github.com/onecli/onecli/compare/v1.18.6...v1.19.0) (2026-04-30)
+
+
+### Features
+
+* add Jira and Confluence app integrations with Atlassian OAuth ([#222](https://github.com/onecli/onecli/issues/222)) ([0b7cd8e](https://github.com/onecli/onecli/commit/0b7cd8e812763ab6f5bd4487408e6f858871a657))
+* add secret injection in query parameters ([#194](https://github.com/onecli/onecli/issues/194)) ([0956ec6](https://github.com/onecli/onecli/commit/0956ec62f34b593f5ad432027e0c1f2ed7869e72))
+* add Vertex AI integration with ADC import and token endpoint interception ([#224](https://github.com/onecli/onecli/issues/224)) ([3832ac6](https://github.com/onecli/onecli/commit/3832ac6c8ce3862ec1e63a438324bbfdb0c35f7d))
+* add YouTube app integration for playlist management ([#221](https://github.com/onecli/onecli/issues/221)) ([5c43421](https://github.com/onecli/onecli/commit/5c43421c4d38a351502e4afd927feda4a73b8bed))
+
+
+### Bug Fixes
+
+* detect postgres port conflict in installer ([#214](https://github.com/onecli/onecli/issues/214)) ([6c6017c](https://github.com/onecli/onecli/commit/6c6017ce323e5b080f263ce82f89a3f74eb60763))
+* harden secret param injection — security, UX, and correctness ([#218](https://github.com/onecli/onecli/issues/218)) ([aa5941b](https://github.com/onecli/onecli/commit/aa5941b6da93972017f5b10a483fad2758952f7d))
+* secret dialog examples and overflow ([#217](https://github.com/onecli/onecli/issues/217)) ([e3ce339](https://github.com/onecli/onecli/commit/e3ce339431989b21aa68ef069f2e453f5956ec0b))
+
 ## [1.18.6](https://github.com/onecli/onecli/compare/v1.18.5...v1.18.6) (2026-04-27)
 
 
