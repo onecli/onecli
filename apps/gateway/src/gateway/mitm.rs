@@ -226,32 +226,38 @@ async fn resolve_rules(
         injection_rules = vault_rules.to_vec();
     }
 
-    // Build intercept token if a cached Bearer token is available
-    let intercept_token = injection_rules
-        .iter()
-        .find_map(|rule| {
-            rule.injections.iter().find_map(|inj| match inj {
-                crate::inject::Injection::SetHeader { name, value } if name == "authorization" => {
-                    value.strip_prefix("Bearer ").map(|t| t.to_string())
-                }
-                _ => None,
-            })
-        })
-        .map(|access_token| {
-            let expires_in = token_expires_at
-                .map(|exp| {
-                    let now = std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .expect("system clock")
-                        .as_secs() as i64;
-                    (exp - now).max(0)
+    // Build intercept token only for providers that have intercept rules
+    let intercept_token = if crate::apps::host_has_intercept_rules(hostname) {
+        injection_rules
+            .iter()
+            .find_map(|rule| {
+                rule.injections.iter().find_map(|inj| match inj {
+                    crate::inject::Injection::SetHeader { name, value }
+                        if name == "authorization" =>
+                    {
+                        value.strip_prefix("Bearer ").map(|t| t.to_string())
+                    }
+                    _ => None,
                 })
-                .unwrap_or(3600);
-            InterceptToken {
-                access_token,
-                expires_in,
-            }
-        });
+            })
+            .map(|access_token| {
+                let expires_in = token_expires_at
+                    .map(|exp| {
+                        let now = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .expect("system clock")
+                            .as_secs() as i64;
+                        (exp - now).max(0)
+                    })
+                    .unwrap_or(3600);
+                InterceptToken {
+                    access_token,
+                    expires_in,
+                }
+            })
+    } else {
+        None
+    };
 
     Ok(ResolveResult::Resolved {
         rules: ResolvedRules {

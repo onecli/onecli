@@ -558,6 +558,15 @@ pub(crate) fn metadata_headers(provider: &str) -> &'static [MetadataHeader] {
         .unwrap_or(&[])
 }
 
+/// Check whether any provider matching this hostname has intercept rules.
+/// Used to decide whether to pre-compute interception data at resolution time.
+pub(crate) fn host_has_intercept_rules(hostname: &str) -> bool {
+    APP_PROVIDERS.iter().any(|p| {
+        p.host_rules.iter().any(|r| r.intercept)
+            && p.host_rules.iter().any(|r| host_rule_matches(r, hostname))
+    })
+}
+
 /// Check whether a request should be intercepted with a synthetic token response.
 /// Returns true when any provider has a host rule matching the hostname and path
 /// with `intercept: true`.
@@ -644,6 +653,16 @@ pub(crate) async fn refresh_access_token(
     Ok((access_token, now + expires_in))
 }
 
+#[derive(serde::Serialize)]
+struct ServiceAccountClaims<'a> {
+    iss: &'a str,
+    sub: &'a str,
+    aud: &'static str,
+    scope: &'static str,
+    iat: i64,
+    exp: i64,
+}
+
 /// Refresh an access token using a Google service account private key.
 /// Signs a JWT with RS256, then exchanges it at Google's token endpoint
 /// using the `urn:ietf:params:oauth:grant-type:jwt-bearer` grant type.
@@ -656,14 +675,14 @@ pub(crate) async fn refresh_via_service_account(
         .expect("system clock before UNIX epoch")
         .as_secs() as i64;
 
-    let claims = serde_json::json!({
-        "iss": client_email,
-        "sub": client_email,
-        "aud": "https://oauth2.googleapis.com/token",
-        "scope": "https://www.googleapis.com/auth/cloud-platform",
-        "iat": now,
-        "exp": now + 3600,
-    });
+    let claims = ServiceAccountClaims {
+        iss: client_email,
+        sub: client_email,
+        aud: "https://oauth2.googleapis.com/token",
+        scope: "https://www.googleapis.com/auth/cloud-platform",
+        iat: now,
+        exp: now + 3600,
+    };
 
     let key = jsonwebtoken::EncodingKey::from_rsa_pem(private_key_pem.as_bytes())
         .map_err(|e| anyhow::anyhow!("invalid RSA private key: {e}"))?;
@@ -1247,5 +1266,15 @@ mod tests {
             "/v1/projects/my-proj/locations/us-central1/publishers/anthropic/models/claude:streamRawPredict",
         );
         assert_eq!(result, Some(("vertex-ai", "Vertex AI")));
+    }
+
+    #[test]
+    fn oauth2_token_endpoint_maps_to_vertex_ai() {
+        assert_eq!(
+            providers_for_host("oauth2.googleapis.com"),
+            vec!["vertex-ai"]
+        );
+        assert!(is_intercept_target("oauth2.googleapis.com", "/token"));
+        assert!(!is_intercept_target("oauth2.googleapis.com", "/authorize"));
     }
 }

@@ -551,6 +551,13 @@ impl PolicyEngine {
                                 debug!(provider = %provider, error = %e, "service account JWT refresh failed");
                             }
                         }
+                    } else {
+                        debug!(
+                            provider = %provider,
+                            has_private_key = private_key.is_some(),
+                            has_client_email = client_email.is_some(),
+                            "service account credentials incomplete, cannot refresh"
+                        );
                     }
                 } else if let Some(refresh_token) =
                     creds.get("refresh_token").and_then(|v| v.as_str())
