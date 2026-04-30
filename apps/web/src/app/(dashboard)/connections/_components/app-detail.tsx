@@ -108,9 +108,12 @@ export const AppDetail = ({
 
   const hasCredentials = hasEnvDefaults || appConfigured;
 
-  const openConnectPopup = (connectionId?: string) => {
+  const openConnectPopup = (
+    connectionId?: string,
+    options?: { height?: number },
+  ) => {
     const w = 520;
-    const h = 700;
+    const h = options?.height ?? 700;
     const left = Math.round(window.screenX + (window.outerWidth - w) / 2);
     const top = Math.round(window.screenY + (window.outerHeight - h) / 2);
     const url = connectionId
@@ -123,12 +126,15 @@ export const AppDetail = ({
     );
   };
 
+  const popupOpts =
+    app.connectionType === "credentials_import" ? { height: 820 } : undefined;
+
   const handleConnect = () => {
     if (!hasCredentials && configurable?.fields) {
       setConfigDialogOpen(true);
       return;
     }
-    openConnectPopup();
+    openConnectPopup(undefined, popupOpts);
   };
 
   const connectionCount = connections.length;
@@ -209,7 +215,7 @@ export const AppDetail = ({
                   key={conn.id}
                   connection={conn}
                   appName={app.name}
-                  onReconnect={openConnectPopup}
+                  onReconnect={(id) => openConnectPopup(id, popupOpts)}
                   onDisconnected={fetchConnections}
                 />
               ))}
@@ -253,7 +259,7 @@ export const AppDetail = ({
             setConfigDialogOpen(false);
             setConfigVersion((v) => v + 1);
             setAppConfigured(true);
-            openConnectPopup();
+            openConnectPopup(undefined, popupOpts);
           }}
         />
       )}

@@ -75,13 +75,16 @@ export const AppsTab = () => {
 
   useAppMessages({ onConnected: handleConnected, onConfigure: router.push });
 
-  const openConnectPopup = (provider: string, agentName?: string) => {
+  const openConnectPopup = (
+    provider: string,
+    options?: { agentName?: string; height?: number },
+  ) => {
     const w = 520;
-    const h = 700;
+    const h = options?.height ?? 700;
     const left = Math.round(window.screenX + (window.outerWidth - w) / 2);
     const top = Math.round(window.screenY + (window.outerHeight - h) / 2);
-    const params = agentName
-      ? `?agent_name=${encodeURIComponent(agentName)}`
+    const params = options?.agentName
+      ? `?agent_name=${encodeURIComponent(options.agentName)}`
       : "";
     window.open(
       `/app-connect/${provider}${params}`,
@@ -126,7 +129,9 @@ export const AppsTab = () => {
       setConfigApp(app);
       return;
     }
-    openConnectPopup(app.id);
+    const popupHeight =
+      app.connectionMethod.type === "credentials_import" ? 820 : undefined;
+    openConnectPopup(app.id, { height: popupHeight });
   };
 
   return (
@@ -172,7 +177,7 @@ export const AppsTab = () => {
             const agent = connectAgentName;
             setConnectApp(null);
             setConnectAgentName(undefined);
-            openConnectPopup(provider, agent);
+            openConnectPopup(provider, { agentName: agent });
           }}
         />
       )}

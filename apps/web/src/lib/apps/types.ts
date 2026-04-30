@@ -58,6 +58,8 @@ export type ConnectionMethod =
         description?: string;
         placeholder: string;
         secret?: boolean;
+        /** When set, field is only shown when this group is active (e.g., "service_account"). */
+        group?: string;
       }[];
       exchangeCredentials: (
         fields: Record<string, string>,

@@ -3,19 +3,12 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Loader2 } from "lucide-react";
 import { Button } from "@onecli/ui/components/button";
-import { Input } from "@onecli/ui/components/input";
-import { Label } from "@onecli/ui/components/label";
 import { IS_CLOUD } from "@/lib/env";
 import { ConnectLayout } from "./connect-layout";
 import { ConnectSuccess } from "./connect-success";
+import { CredentialsFlow } from "./credentials-flow";
 
 type FlowState = "ready" | "redirecting" | "success" | "error";
-
-interface FileImportConfig {
-  label: string;
-  accept: string;
-  keyMap: Record<string, string>;
-}
 
 interface ConnectFlowProps {
   app: {
@@ -30,8 +23,13 @@ interface ConnectFlowProps {
       description?: string;
       placeholder: string;
       secret?: boolean;
+      group?: string;
     }[];
-    fileImport?: FileImportConfig;
+    fileImport?: {
+      label: string;
+      accept: string;
+      keyMap: Record<string, string>;
+    };
   };
   hasDefaults: boolean;
   status?: "success" | "error";
@@ -105,7 +103,7 @@ export const ConnectFlow = ({
     );
   }
 
-  // API key / credentials import flow — render form instead of OAuth redirect
+  // Credentials flow — render form instead of OAuth redirect
   if (
     (app.connectionType === "api_key" ||
       app.connectionType === "credentials_import") &&
@@ -113,7 +111,7 @@ export const ConnectFlow = ({
     state !== "error"
   ) {
     return (
-      <ApiKeyFlow
+      <CredentialsFlow
         app={app}
         fields={app.fields}
         fileImport={app.fileImport}
@@ -138,7 +136,7 @@ export const ConnectFlow = ({
         <div className="flex flex-col items-center gap-5 py-4">
           <div className="text-center">
             <p className="text-sm font-medium">Connection failed</p>
-            <p className="mt-1.5 text-xs text-muted-foreground leading-relaxed max-w-[280px]">
+            <p className="mt-1.5 max-w-70 text-xs leading-relaxed text-muted-foreground">
               {error || "An unexpected error occurred. Please try again."}
             </p>
           </div>
@@ -167,7 +165,7 @@ export const ConnectFlow = ({
         <div className="flex flex-col items-center gap-5 py-4">
           <div className="text-center">
             <p className="text-sm font-medium">Configuration required</p>
-            <p className="mt-1.5 text-xs text-muted-foreground leading-relaxed">
+            <p className="mt-1.5 text-xs leading-relaxed text-muted-foreground">
               {app.name} needs OAuth credentials before connecting.
             </p>
           </div>
@@ -269,164 +267,6 @@ export const ConnectFlow = ({
             )}
           </div>
         )}
-      </div>
-    </ConnectLayout>
-  );
-};
-
-// ── API Key Flow ───────────────────────────────────────────────────────
-
-interface ApiKeyFlowProps {
-  app: ConnectFlowProps["app"];
-  fields: {
-    name: string;
-    label: string;
-    description?: string;
-    placeholder: string;
-    secret?: boolean;
-  }[];
-  fileImport?: FileImportConfig;
-  connectionId?: string;
-  onSuccess: () => void;
-  onError: (message: string) => void;
-}
-
-const ApiKeyFlow = ({
-  app,
-  fields,
-  fileImport,
-  connectionId,
-  onSuccess,
-  onError,
-}: ApiKeyFlowProps) => {
-  const [values, setValues] = useState<Record<string, string>>({});
-  const [submitting, setSubmitting] = useState(false);
-  const fileInputRef = useRef<HTMLInputElement>(null);
-
-  const handleFileImport = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file || !fileImport) return;
-
-    const reader = new FileReader();
-    reader.onload = () => {
-      try {
-        const json = JSON.parse(reader.result as string) as Record<
-          string,
-          unknown
-        >;
-        const mapped: Record<string, string> = {};
-        for (const [jsonKey, fieldName] of Object.entries(fileImport.keyMap)) {
-          const val = json[jsonKey];
-          if (typeof val === "string" && val) {
-            mapped[fieldName] = val;
-          }
-        }
-        setValues((prev) => ({ ...prev, ...mapped }));
-      } catch {
-        onError("Invalid JSON file");
-      }
-    };
-    reader.readAsText(file);
-    e.target.value = "";
-  };
-
-  const hasInput = fields.every((f) => !!values[f.name]?.trim());
-
-  const handleSubmit = async () => {
-    if (!hasInput) return;
-    setSubmitting(true);
-    try {
-      const resp = await fetch(`/api/apps/${app.id}/connect`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ fields: values, connectionId }),
-      });
-      if (!resp.ok) {
-        const data = (await resp.json()) as { error?: string };
-        throw new Error(data.error ?? "Failed to connect");
-      }
-      onSuccess();
-    } catch (err) {
-      onError(err instanceof Error ? err.message : "Failed to connect");
-    } finally {
-      setSubmitting(false);
-    }
-  };
-
-  return (
-    <ConnectLayout
-      appName={app.name}
-      appIcon={app.icon}
-      appDarkIcon={app.darkIcon}
-    >
-      <div className="space-y-5 py-2">
-        {fileImport && (
-          <>
-            <div>
-              <input
-                ref={fileInputRef}
-                type="file"
-                accept={fileImport.accept}
-                onChange={handleFileImport}
-                className="hidden"
-              />
-              <Button
-                variant="outline"
-                className="w-full"
-                onClick={() => fileInputRef.current?.click()}
-              >
-                {fileImport.label}
-              </Button>
-            </div>
-            <div className="flex items-center gap-3">
-              <div className="bg-border h-px flex-1" />
-              <span className="text-muted-foreground/60 text-[10px] uppercase tracking-widest">
-                or fill manually
-              </span>
-              <div className="bg-border h-px flex-1" />
-            </div>
-          </>
-        )}
-        {fields.map((field) => (
-          <div key={field.name} className="grid gap-1.5">
-            <Label htmlFor={`connect-${field.name}`}>
-              {field.label}
-              <span className="text-destructive ml-0.5">*</span>
-            </Label>
-            {field.description && (
-              <p className="text-xs text-muted-foreground">
-                {field.description}
-              </p>
-            )}
-            <Input
-              id={`connect-${field.name}`}
-              type={
-                field.secret === true ||
-                (field.secret === undefined && app.connectionType === "api_key")
-                  ? "password"
-                  : "text"
-              }
-              value={values[field.name] ?? ""}
-              onChange={(e) =>
-                setValues((prev) => ({
-                  ...prev,
-                  [field.name]: e.target.value,
-                }))
-              }
-              placeholder={field.placeholder}
-              className="font-mono text-sm"
-              autoFocus={fields.indexOf(field) === 0}
-            />
-          </div>
-        ))}
-        <Button
-          className="w-full"
-          onClick={handleSubmit}
-          loading={submitting}
-          disabled={!hasInput}
-        >
-          {submitting ? "Connecting..." : `Connect ${app.name}`}
-        </Button>
       </div>
     </ConnectLayout>
   );

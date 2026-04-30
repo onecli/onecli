@@ -3,7 +3,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 use anyhow::{Context, Result};
 use futures_util::{StreamExt, TryStreamExt};
@@ -114,44 +114,21 @@ pub(crate) async fn forward_request(
     let agent_token = proxy_ctx.agent_token.as_deref().unwrap_or("");
 
     // Token endpoint interception: when a client SDK tries to refresh its
-    // own Google OAuth token through the proxy, serve the cached access
-    // token from the stored app connection instead of forwarding dummy
-    // credentials to Google.
-    if super::strip_port(host) == "oauth2.googleapis.com"
-        && path.starts_with("/token")
-        && method == hyper::Method::POST
-        && !rules.injection_rules.is_empty()
-    {
-        // Extract the Bearer token from the injection rules — it's the
-        // already-refreshed access token from the app connection.
-        let token = rules.injection_rules.iter().find_map(|rule| {
-            rule.injections.iter().find_map(|inj| match inj {
-                crate::inject::Injection::SetHeader { name, value } if name == "authorization" => {
-                    value.strip_prefix("Bearer ")
-                }
-                _ => None,
-            })
-        });
-
-        if let Some(access_token) = token {
+    // own OAuth token through the proxy, serve the cached access token from
+    // the stored app connection instead of forwarding dummy credentials.
+    // Interception targets are defined per-provider in the app registry.
+    if let Some(ref intercept) = rules.intercept_token {
+        if crate::apps::is_intercept_target(super::strip_port(host), &path)
+            && method == hyper::Method::POST
+        {
             info!(
                 method = %method,
                 url = %url,
                 "token endpoint intercepted — serving cached token"
             );
-            let expires_in = rules
-                .token_expires_at
-                .map(|exp| {
-                    let now = SystemTime::now()
-                        .duration_since(UNIX_EPOCH)
-                        .expect("system clock before UNIX epoch")
-                        .as_secs() as i64;
-                    (exp - now).max(0)
-                })
-                .unwrap_or(3600);
             let body = serde_json::json!({
-                "access_token": access_token,
-                "expires_in": expires_in,
+                "access_token": intercept.access_token,
+                "expires_in": intercept.expires_in,
                 "token_type": "Bearer",
             });
             let bytes = Bytes::from(serde_json::to_vec(&body).expect("serializing JSON literal"));

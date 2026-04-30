@@ -37,6 +37,10 @@ struct HostRule {
     /// When `None`, all paths on the host match (used for providers with dedicated subdomains).
     path_prefix: Option<&'static str>,
     strategy: AuthStrategy,
+    /// When true, matching requests return a synthetic OAuth token response with
+    /// the cached access token instead of being forwarded upstream. Used for
+    /// credential stub flows where the SDK tries to refresh dummy credentials.
+    intercept: bool,
 }
 
 /// Check whether a `HostRule` matches a given hostname.
@@ -70,12 +74,20 @@ pub(crate) struct RefreshConfig {
     pub body_format: TokenBodyFormat,
 }
 
+/// Maps a connection metadata key to an HTTP header injected on every request.
+pub(crate) struct MetadataHeader {
+    pub metadata_key: &'static str,
+    pub header_name: &'static str,
+}
+
 /// An app provider definition with its host rules.
 struct AppProvider {
     provider: &'static str,
     display_name: &'static str,
     host_rules: &'static [HostRule],
     refresh: Option<&'static RefreshConfig>,
+    /// Headers injected from connection metadata (e.g., project ID → x-goog-user-project).
+    metadata_headers: &'static [MetadataHeader],
 }
 
 /// Shared refresh config for Atlassian OAuth APIs (Jira, Confluence).
@@ -105,19 +117,23 @@ static APP_PROVIDERS: &[AppProvider] = &[
                 pattern: HostPattern::Exact("api.github.com"),
                 path_prefix: None,
                 strategy: AuthStrategy::Bearer,
+                intercept: false,
             },
             HostRule {
                 pattern: HostPattern::Exact("github.com"),
                 path_prefix: None,
                 strategy: AuthStrategy::BasicXAccessToken,
+                intercept: false,
             },
             HostRule {
                 pattern: HostPattern::Exact("raw.githubusercontent.com"),
                 path_prefix: None,
                 strategy: AuthStrategy::Bearer,
+                intercept: false,
             },
         ],
         refresh: None,
+        metadata_headers: &[],
     },
     AppProvider {
         provider: "gmail",
@@ -127,15 +143,18 @@ static APP_PROVIDERS: &[AppProvider] = &[
                 pattern: HostPattern::Exact("gmail.googleapis.com"),
                 path_prefix: None,
                 strategy: AuthStrategy::Bearer,
+                intercept: false,
             },
             // Legacy endpoint — some clients still use www.googleapis.com/gmail/
             HostRule {
                 pattern: HostPattern::Exact("www.googleapis.com"),
                 path_prefix: Some("/gmail/"),
                 strategy: AuthStrategy::Bearer,
+                intercept: false,
             },
         ],
         refresh: Some(&GOOGLE_REFRESH),
+        metadata_headers: &[],
     },
     AppProvider {
         provider: "google-calendar",
@@ -144,8 +163,10 @@ static APP_PROVIDERS: &[AppProvider] = &[
             pattern: HostPattern::Exact("www.googleapis.com"),
             path_prefix: Some("/calendar/"),
             strategy: AuthStrategy::Bearer,
+            intercept: false,
         }],
         refresh: Some(&GOOGLE_REFRESH),
+        metadata_headers: &[],
     },
     AppProvider {
         provider: "google-drive",
@@ -155,14 +176,17 @@ static APP_PROVIDERS: &[AppProvider] = &[
                 pattern: HostPattern::Exact("www.googleapis.com"),
                 path_prefix: Some("/drive/"),
                 strategy: AuthStrategy::Bearer,
+                intercept: false,
             },
             HostRule {
                 pattern: HostPattern::Exact("www.googleapis.com"),
                 path_prefix: Some("/upload/drive/"),
                 strategy: AuthStrategy::Bearer,
+                intercept: false,
             },
         ],
         refresh: Some(&GOOGLE_REFRESH),
+        metadata_headers: &[],
     },
     AppProvider {
         provider: "google-docs",
@@ -171,8 +195,10 @@ static APP_PROVIDERS: &[AppProvider] = &[
             pattern: HostPattern::Exact("docs.googleapis.com"),
             path_prefix: None,
             strategy: AuthStrategy::Bearer,
+            intercept: false,
         }],
         refresh: Some(&GOOGLE_REFRESH),
+        metadata_headers: &[],
     },
     AppProvider {
         provider: "google-sheets",
@@ -181,8 +207,10 @@ static APP_PROVIDERS: &[AppProvider] = &[
             pattern: HostPattern::Exact("sheets.googleapis.com"),
             path_prefix: None,
             strategy: AuthStrategy::Bearer,
+            intercept: false,
         }],
         refresh: Some(&GOOGLE_REFRESH),
+        metadata_headers: &[],
     },
     AppProvider {
         provider: "google-slides",
@@ -191,8 +219,10 @@ static APP_PROVIDERS: &[AppProvider] = &[
             pattern: HostPattern::Exact("slides.googleapis.com"),
             path_prefix: None,
             strategy: AuthStrategy::Bearer,
+            intercept: false,
         }],
         refresh: Some(&GOOGLE_REFRESH),
+        metadata_headers: &[],
     },
     AppProvider {
         provider: "google-tasks",
@@ -201,8 +231,10 @@ static APP_PROVIDERS: &[AppProvider] = &[
             pattern: HostPattern::Exact("tasks.googleapis.com"),
             path_prefix: None,
             strategy: AuthStrategy::Bearer,
+            intercept: false,
         }],
         refresh: Some(&GOOGLE_REFRESH),
+        metadata_headers: &[],
     },
     AppProvider {
         provider: "google-forms",
@@ -211,8 +243,10 @@ static APP_PROVIDERS: &[AppProvider] = &[
             pattern: HostPattern::Exact("forms.googleapis.com"),
             path_prefix: None,
             strategy: AuthStrategy::Bearer,
+            intercept: false,
         }],
         refresh: Some(&GOOGLE_REFRESH),
+        metadata_headers: &[],
     },
     AppProvider {
         provider: "google-classroom",
@@ -221,8 +255,10 @@ static APP_PROVIDERS: &[AppProvider] = &[
             pattern: HostPattern::Exact("classroom.googleapis.com"),
             path_prefix: None,
             strategy: AuthStrategy::Bearer,
+            intercept: false,
         }],
         refresh: Some(&GOOGLE_REFRESH),
+        metadata_headers: &[],
     },
     AppProvider {
         provider: "google-admin",
@@ -231,8 +267,10 @@ static APP_PROVIDERS: &[AppProvider] = &[
             pattern: HostPattern::Exact("admin.googleapis.com"),
             path_prefix: None,
             strategy: AuthStrategy::Bearer,
+            intercept: false,
         }],
         refresh: Some(&GOOGLE_REFRESH),
+        metadata_headers: &[],
     },
     AppProvider {
         provider: "google-analytics",
@@ -241,8 +279,10 @@ static APP_PROVIDERS: &[AppProvider] = &[
             pattern: HostPattern::Exact("analyticsdata.googleapis.com"),
             path_prefix: None,
             strategy: AuthStrategy::Bearer,
+            intercept: false,
         }],
         refresh: Some(&GOOGLE_REFRESH),
+        metadata_headers: &[],
     },
     AppProvider {
         provider: "google-search-console",
@@ -251,8 +291,10 @@ static APP_PROVIDERS: &[AppProvider] = &[
             pattern: HostPattern::Exact("searchconsole.googleapis.com"),
             path_prefix: None,
             strategy: AuthStrategy::Bearer,
+            intercept: false,
         }],
         refresh: Some(&GOOGLE_REFRESH),
+        metadata_headers: &[],
     },
     AppProvider {
         provider: "google-meet",
@@ -261,8 +303,10 @@ static APP_PROVIDERS: &[AppProvider] = &[
             pattern: HostPattern::Exact("meet.googleapis.com"),
             path_prefix: None,
             strategy: AuthStrategy::Bearer,
+            intercept: false,
         }],
         refresh: Some(&GOOGLE_REFRESH),
+        metadata_headers: &[],
     },
     AppProvider {
         provider: "google-photos",
@@ -271,8 +315,10 @@ static APP_PROVIDERS: &[AppProvider] = &[
             pattern: HostPattern::Exact("photoslibrary.googleapis.com"),
             path_prefix: None,
             strategy: AuthStrategy::Bearer,
+            intercept: false,
         }],
         refresh: Some(&GOOGLE_REFRESH),
+        metadata_headers: &[],
     },
     AppProvider {
         provider: "jira",
@@ -281,8 +327,10 @@ static APP_PROVIDERS: &[AppProvider] = &[
             pattern: HostPattern::Exact("api.atlassian.com"),
             path_prefix: Some("/ex/jira/"),
             strategy: AuthStrategy::Bearer,
+            intercept: false,
         }],
         refresh: Some(&ATLASSIAN_REFRESH),
+        metadata_headers: &[],
     },
     AppProvider {
         provider: "confluence",
@@ -291,8 +339,10 @@ static APP_PROVIDERS: &[AppProvider] = &[
             pattern: HostPattern::Exact("api.atlassian.com"),
             path_prefix: Some("/ex/confluence/"),
             strategy: AuthStrategy::Bearer,
+            intercept: false,
         }],
         refresh: Some(&ATLASSIAN_REFRESH),
+        metadata_headers: &[],
     },
     AppProvider {
         provider: "youtube",
@@ -302,14 +352,17 @@ static APP_PROVIDERS: &[AppProvider] = &[
                 pattern: HostPattern::Exact("www.googleapis.com"),
                 path_prefix: Some("/youtube/"),
                 strategy: AuthStrategy::Bearer,
+                intercept: false,
             },
             HostRule {
                 pattern: HostPattern::Exact("www.googleapis.com"),
                 path_prefix: Some("/upload/youtube/"),
                 strategy: AuthStrategy::Bearer,
+                intercept: false,
             },
         ],
         refresh: Some(&GOOGLE_REFRESH),
+        metadata_headers: &[],
     },
     AppProvider {
         provider: "vertex-ai",
@@ -319,14 +372,20 @@ static APP_PROVIDERS: &[AppProvider] = &[
                 pattern: HostPattern::Suffix("-aiplatform.googleapis.com"),
                 path_prefix: None,
                 strategy: AuthStrategy::Bearer,
+                intercept: false,
             },
             HostRule {
                 pattern: HostPattern::Exact("oauth2.googleapis.com"),
                 path_prefix: Some("/token"),
                 strategy: AuthStrategy::Bearer,
+                intercept: true,
             },
         ],
         refresh: Some(&GOOGLE_REFRESH),
+        metadata_headers: &[MetadataHeader {
+            metadata_key: "quotaProjectId",
+            header_name: "x-goog-user-project",
+        }],
     },
     AppProvider {
         provider: "resend",
@@ -335,8 +394,10 @@ static APP_PROVIDERS: &[AppProvider] = &[
             pattern: HostPattern::Exact("api.resend.com"),
             path_prefix: None,
             strategy: AuthStrategy::Bearer,
+            intercept: false,
         }],
         refresh: None,
+        metadata_headers: &[],
     },
 ];
 
@@ -488,6 +549,28 @@ pub(crate) fn refresh_config(provider: &str) -> Option<&'static RefreshConfig> {
         .and_then(|p| p.refresh)
 }
 
+/// Get metadata-to-header mappings for a provider.
+pub(crate) fn metadata_headers(provider: &str) -> &'static [MetadataHeader] {
+    APP_PROVIDERS
+        .iter()
+        .find(|p| p.provider == provider)
+        .map(|p| p.metadata_headers)
+        .unwrap_or(&[])
+}
+
+/// Check whether a request should be intercepted with a synthetic token response.
+/// Returns true when any provider has a host rule matching the hostname and path
+/// with `intercept: true`.
+pub(crate) fn is_intercept_target(hostname: &str, path: &str) -> bool {
+    APP_PROVIDERS.iter().any(|p| {
+        p.host_rules.iter().any(|r| {
+            r.intercept
+                && host_rule_matches(r, hostname)
+                && r.path_prefix.map_or(true, |pfx| path.starts_with(pfx))
+        })
+    })
+}
+
 /// Refresh an expired access token using the provider's token endpoint.
 /// Returns the new access token and updated expires_at timestamp.
 ///
@@ -557,6 +640,72 @@ pub(crate) async fn refresh_access_token(
         .duration_since(std::time::UNIX_EPOCH)
         .expect("system clock before UNIX epoch")
         .as_secs() as i64;
+
+    Ok((access_token, now + expires_in))
+}
+
+/// Refresh an access token using a Google service account private key.
+/// Signs a JWT with RS256, then exchanges it at Google's token endpoint
+/// using the `urn:ietf:params:oauth:grant-type:jwt-bearer` grant type.
+pub(crate) async fn refresh_via_service_account(
+    private_key_pem: &str,
+    client_email: &str,
+) -> anyhow::Result<(String, i64)> {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("system clock before UNIX epoch")
+        .as_secs() as i64;
+
+    let claims = serde_json::json!({
+        "iss": client_email,
+        "sub": client_email,
+        "aud": "https://oauth2.googleapis.com/token",
+        "scope": "https://www.googleapis.com/auth/cloud-platform",
+        "iat": now,
+        "exp": now + 3600,
+    });
+
+    let key = jsonwebtoken::EncodingKey::from_rsa_pem(private_key_pem.as_bytes())
+        .map_err(|e| anyhow::anyhow!("invalid RSA private key: {e}"))?;
+
+    let assertion = jsonwebtoken::encode(
+        &jsonwebtoken::Header::new(jsonwebtoken::Algorithm::RS256),
+        &claims,
+        &key,
+    )
+    .map_err(|e| anyhow::anyhow!("JWT signing failed: {e}"))?;
+
+    let resp = reqwest::Client::new()
+        .post("https://oauth2.googleapis.com/token")
+        .form(&[
+            ("grant_type", "urn:ietf:params:oauth:grant-type:jwt-bearer"),
+            ("assertion", assertion.as_str()),
+        ])
+        .send()
+        .await
+        .map_err(|e| anyhow::anyhow!("service account token request failed: {e}"))?;
+
+    let body: serde_json::Value = resp
+        .json()
+        .await
+        .map_err(|e| anyhow::anyhow!("service account token response parse failed: {e}"))?;
+
+    let access_token = body
+        .get("access_token")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| {
+            let error = body
+                .get("error")
+                .and_then(|v| v.as_str())
+                .unwrap_or("unknown");
+            anyhow::anyhow!("service account token exchange failed: {error}")
+        })?
+        .to_string();
+
+    let expires_in = body
+        .get("expires_in")
+        .and_then(|v| v.as_i64())
+        .unwrap_or(3600);
 
     Ok((access_token, now + expires_in))
 }

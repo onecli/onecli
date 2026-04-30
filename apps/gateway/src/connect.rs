@@ -378,14 +378,14 @@ impl PolicyEngine {
             });
         }
 
-        // Vertex AI: inject x-goog-user-project from connection metadata
-        if conn.provider == "vertex-ai" {
-            if let Some(ref metadata) = conn.metadata {
-                if let Some(project_id) = metadata.get("quotaProjectId").and_then(|v| v.as_str()) {
+        // Inject metadata-driven headers defined in the provider registry
+        if let Some(ref metadata) = conn.metadata {
+            for mh in apps::metadata_headers(&conn.provider) {
+                if let Some(value) = metadata.get(mh.metadata_key).and_then(|v| v.as_str()) {
                     for rule in &mut rules {
                         rule.injections.push(Injection::SetHeader {
-                            name: "x-goog-user-project".to_string(),
-                            value: project_id.to_string(),
+                            name: mh.header_name.to_string(),
+                            value: value.to_string(),
                         });
                     }
                 }
@@ -528,7 +528,34 @@ impl PolicyEngine {
                 .as_secs() as i64;
 
             if expires_at < now {
-                if let Some(refresh_token) = creds.get("refresh_token").and_then(|v| v.as_str()) {
+                let cred_type = creds.get("type").and_then(|v| v.as_str()).unwrap_or("");
+
+                if cred_type == "service_account" {
+                    // Service account: sign JWT with private key
+                    let private_key = creds.get("private_key").and_then(|v| v.as_str());
+                    let client_email = creds.get("client_email").and_then(|v| v.as_str());
+
+                    if let (Some(pk), Some(email)) = (private_key, client_email) {
+                        match apps::refresh_via_service_account(pk, email).await {
+                            Ok((new_token, new_expires_at)) => {
+                                debug!(provider = %provider, "refreshed service account token via JWT");
+                                token = Some(new_token.clone());
+                                effective_expires_at = Some(new_expires_at);
+
+                                creds["access_token"] = serde_json::Value::String(new_token);
+                                creds["expires_at"] = serde_json::json!(new_expires_at);
+                                self.persist_refreshed_credentials(connection_id, provider, &creds)
+                                    .await;
+                            }
+                            Err(e) => {
+                                debug!(provider = %provider, error = %e, "service account JWT refresh failed");
+                            }
+                        }
+                    }
+                } else if let Some(refresh_token) =
+                    creds.get("refresh_token").and_then(|v| v.as_str())
+                {
+                    // Authorized user / default: refresh via OAuth refresh_token
                     if let Some(config) = apps::refresh_config(provider) {
                         let byoc = self.resolve_byoc_credentials(project_id, provider).await;
                         let (byoc_id, byoc_secret) = match &byoc {

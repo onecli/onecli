@@ -46,8 +46,22 @@ export const POST = async (request: NextRequest, { params }: Params) => {
       );
     }
 
-    for (const field of app.connectionMethod.fields) {
-      if (!body.fields[field.name]?.trim()) {
+    let requiredFields: { name: string; label: string }[];
+    if (
+      app.connectionMethod.type === "credentials_import" &&
+      app.connectionMethod.fields.some((f) => f.group)
+    ) {
+      requiredFields = app.connectionMethod.fields.filter((f) => {
+        if (!f.group) return true;
+        if (body.fields!.privateKey) return f.group === "service_account";
+        return f.group === "authorized_user";
+      });
+    } else {
+      requiredFields = app.connectionMethod.fields;
+    }
+
+    for (const field of requiredFields) {
+      if (!body.fields![field.name]?.trim()) {
         return NextResponse.json(
           { error: `${field.label} is required` },
           { status: 400 },
@@ -121,11 +135,12 @@ export const POST = async (request: NextRequest, { params }: Params) => {
       }
     }
 
-    // For credentials_import: persist client credentials as BYOC AppConfig
-    // so the gateway can refresh tokens. Done after connection creation to
-    // avoid upsertAppConfig's disconnectIfConnected deleting the connection.
+    // For authorized_user credentials_import: persist client credentials as
+    // BYOC AppConfig so the gateway can refresh tokens. Service accounts are
+    // self-contained (private key stored in AppConnection) and skip this.
     if (
       app.connectionMethod.type === "credentials_import" &&
+      !body.fields.privateKey &&
       body.fields.clientId &&
       body.fields.clientSecret
     ) {

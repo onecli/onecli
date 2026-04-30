@@ -654,7 +654,7 @@ async fn handle_http_proxy(
         injection_rules: resolved.injection_rules,
         policy_rules: resolved.policy_rules,
         access_restricted: resolved.access_restricted,
-        token_expires_at: None,
+        intercept_token: None,
     };
 
     let mut resp = forward::forward_request(
