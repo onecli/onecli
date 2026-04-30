@@ -3,11 +3,10 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Loader2 } from "lucide-react";
 import { Button } from "@onecli/ui/components/button";
-import { Input } from "@onecli/ui/components/input";
-import { Label } from "@onecli/ui/components/label";
 import { IS_CLOUD } from "@/lib/env";
 import { ConnectLayout } from "./connect-layout";
 import { ConnectSuccess } from "./connect-success";
+import { CredentialsFlow } from "./credentials-flow";
 
 type FlowState = "ready" | "redirecting" | "success" | "error";
 
@@ -23,7 +22,14 @@ interface ConnectFlowProps {
       label: string;
       description?: string;
       placeholder: string;
+      secret?: boolean;
+      group?: string;
     }[];
+    fileImport?: {
+      label: string;
+      accept: string;
+      keyMap: Record<string, string>;
+    };
   };
   hasDefaults: boolean;
   status?: "success" | "error";
@@ -97,12 +103,18 @@ export const ConnectFlow = ({
     );
   }
 
-  // API key flow — render form instead of OAuth redirect
-  if (app.connectionType === "api_key" && app.fields && state !== "error") {
+  // Credentials flow — render form instead of OAuth redirect
+  if (
+    (app.connectionType === "api_key" ||
+      app.connectionType === "credentials_import") &&
+    app.fields &&
+    state !== "error"
+  ) {
     return (
-      <ApiKeyFlow
+      <CredentialsFlow
         app={app}
         fields={app.fields}
+        fileImport={app.fileImport}
         connectionId={connectionId}
         onSuccess={() => setState("success")}
         onError={(msg) => {
@@ -124,7 +136,7 @@ export const ConnectFlow = ({
         <div className="flex flex-col items-center gap-5 py-4">
           <div className="text-center">
             <p className="text-sm font-medium">Connection failed</p>
-            <p className="mt-1.5 text-xs text-muted-foreground leading-relaxed max-w-[280px]">
+            <p className="mt-1.5 max-w-70 text-xs leading-relaxed text-muted-foreground">
               {error || "An unexpected error occurred. Please try again."}
             </p>
           </div>
@@ -153,7 +165,7 @@ export const ConnectFlow = ({
         <div className="flex flex-col items-center gap-5 py-4">
           <div className="text-center">
             <p className="text-sm font-medium">Configuration required</p>
-            <p className="mt-1.5 text-xs text-muted-foreground leading-relaxed">
+            <p className="mt-1.5 text-xs leading-relaxed text-muted-foreground">
               {app.name} needs OAuth credentials before connecting.
             </p>
           </div>
@@ -255,101 +267,6 @@ export const ConnectFlow = ({
             )}
           </div>
         )}
-      </div>
-    </ConnectLayout>
-  );
-};
-
-// ── API Key Flow ───────────────────────────────────────────────────────
-
-interface ApiKeyFlowProps {
-  app: ConnectFlowProps["app"];
-  fields: {
-    name: string;
-    label: string;
-    description?: string;
-    placeholder: string;
-  }[];
-  connectionId?: string;
-  onSuccess: () => void;
-  onError: (message: string) => void;
-}
-
-const ApiKeyFlow = ({
-  app,
-  fields,
-  connectionId,
-  onSuccess,
-  onError,
-}: ApiKeyFlowProps) => {
-  const [values, setValues] = useState<Record<string, string>>({});
-  const [submitting, setSubmitting] = useState(false);
-
-  const hasInput = fields.every((f) => !!values[f.name]?.trim());
-
-  const handleSubmit = async () => {
-    if (!hasInput) return;
-    setSubmitting(true);
-    try {
-      const resp = await fetch(`/api/apps/${app.id}/connect`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ fields: values, connectionId }),
-      });
-      if (!resp.ok) {
-        const data = (await resp.json()) as { error?: string };
-        throw new Error(data.error ?? "Failed to connect");
-      }
-      onSuccess();
-    } catch (err) {
-      onError(err instanceof Error ? err.message : "Failed to connect");
-    } finally {
-      setSubmitting(false);
-    }
-  };
-
-  return (
-    <ConnectLayout
-      appName={app.name}
-      appIcon={app.icon}
-      appDarkIcon={app.darkIcon}
-    >
-      <div className="space-y-5 py-2">
-        {fields.map((field) => (
-          <div key={field.name} className="grid gap-1.5">
-            <Label htmlFor={`connect-${field.name}`}>
-              {field.label}
-              <span className="text-destructive ml-0.5">*</span>
-            </Label>
-            {field.description && (
-              <p className="text-xs text-muted-foreground">
-                {field.description}
-              </p>
-            )}
-            <Input
-              id={`connect-${field.name}`}
-              type="password"
-              value={values[field.name] ?? ""}
-              onChange={(e) =>
-                setValues((prev) => ({
-                  ...prev,
-                  [field.name]: e.target.value,
-                }))
-              }
-              placeholder={field.placeholder}
-              className="font-mono text-sm"
-              autoFocus={fields.indexOf(field) === 0}
-            />
-          </div>
-        ))}
-        <Button
-          className="w-full"
-          onClick={handleSubmit}
-          loading={submitting}
-          disabled={!hasInput}
-        >
-          {submitting ? "Connecting..." : `Connect ${app.name}`}
-        </Button>
       </div>
     </ConnectLayout>
   );

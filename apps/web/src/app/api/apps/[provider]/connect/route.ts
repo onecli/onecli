@@ -5,17 +5,18 @@ import { invalidateGatewayCache } from "@/lib/gateway-invalidate";
 import { getApp } from "@/lib/apps/registry";
 import {
   createConnection,
+  extractLabel,
   listConnectionsByProvider,
   reconnectConnection,
 } from "@/lib/services/connection-service";
+import { saveAppConfigWithoutDisconnect } from "@/lib/services/app-config-service";
 
 type Params = { params: Promise<{ provider: string }> };
 
 /**
  * POST /api/apps/{provider}/connect
  *
- * Submit API key credentials for an api_key type connection.
- * Stores the first field value as `access_token` so the gateway picks it up.
+ * Submit credentials for an api_key or credentials_import type connection.
  */
 export const POST = async (request: NextRequest, { params }: Params) => {
   try {
@@ -25,10 +26,10 @@ export const POST = async (request: NextRequest, { params }: Params) => {
     const { provider } = await params;
     const app = getApp(provider);
 
-    if (!app || !app.available || app.connectionMethod.type !== "api_key") {
+    if (!app || !app.available || app.connectionMethod.type === "oauth") {
       return NextResponse.json(
         {
-          error: `Provider "${provider}" does not support API key connections`,
+          error: `Provider "${provider}" does not support direct credential connections`,
         },
         { status: 400 },
       );
@@ -45,8 +46,24 @@ export const POST = async (request: NextRequest, { params }: Params) => {
       );
     }
 
-    for (const field of app.connectionMethod.fields) {
-      if (!body.fields[field.name]?.trim()) {
+    const { fields } = body;
+
+    let requiredFields: { name: string; label: string }[];
+    if (
+      app.connectionMethod.type === "credentials_import" &&
+      app.connectionMethod.fields.some((f) => f.group)
+    ) {
+      requiredFields = app.connectionMethod.fields.filter((f) => {
+        if (!f.group) return true;
+        if (fields.privateKey) return f.group === "service_account";
+        return f.group === "authorized_user";
+      });
+    } else {
+      requiredFields = app.connectionMethod.fields;
+    }
+
+    for (const field of requiredFields) {
+      if (!fields[field.name]?.trim()) {
         return NextResponse.json(
           { error: `${field.label} is required` },
           { status: 400 },
@@ -54,24 +71,87 @@ export const POST = async (request: NextRequest, { params }: Params) => {
       }
     }
 
-    const primaryField = app.connectionMethod.fields[0];
-    const credentials: Record<string, unknown> = {
-      access_token: body.fields[primaryField!.name],
+    let credentials: Record<string, unknown>;
+    let scopes: string[] | undefined;
+    let metadata: Record<string, unknown> | undefined;
+
+    if (app.connectionMethod.type === "credentials_import") {
+      const result = await app.connectionMethod.exchangeCredentials(fields);
+      credentials = result.credentials;
+      scopes = result.scopes;
+      metadata = result.metadata;
+    } else {
+      const primaryField = app.connectionMethod.fields[0];
+      credentials = {
+        access_token: fields[primaryField!.name],
+      };
+    }
+
+    const connectionOpts = {
+      scopes,
+      metadata,
     };
 
     if (body.connectionId) {
-      await reconnectConnection(auth.projectId, body.connectionId, credentials);
+      await reconnectConnection(
+        auth.projectId,
+        body.connectionId,
+        credentials,
+        connectionOpts,
+      );
     } else {
       const existing = await listConnectionsByProvider(
         auth.projectId,
         provider,
       );
-      if (existing.length > 0) {
-        await reconnectConnection(auth.projectId, existing[0]!.id, credentials);
+      const duplicate = metadata
+        ? existing.find((c) => {
+            const label = extractLabel(
+              c.metadata as Record<string, unknown> | undefined,
+            );
+            const newLabel = extractLabel(metadata);
+            return (
+              label &&
+              newLabel &&
+              label.toLowerCase().trim() === newLabel.toLowerCase().trim()
+            );
+          })
+        : existing[0];
+
+      if (duplicate) {
+        await reconnectConnection(
+          auth.projectId,
+          duplicate.id,
+          credentials,
+          connectionOpts,
+        );
       } else {
-        await createConnection(auth.projectId, provider, credentials);
+        await createConnection(
+          auth.projectId,
+          provider,
+          credentials,
+          connectionOpts,
+        );
       }
     }
+
+    // For authorized_user credentials_import: persist client credentials as
+    // BYOC AppConfig so the gateway can refresh tokens. Service accounts are
+    // self-contained (private key stored in AppConnection) and skip this.
+    if (
+      app.connectionMethod.type === "credentials_import" &&
+      !fields.privateKey &&
+      fields.clientId &&
+      fields.clientSecret
+    ) {
+      await saveAppConfigWithoutDisconnect(
+        auth.projectId,
+        provider,
+        fields.clientId,
+        fields.clientSecret,
+      );
+    }
+
     invalidateGatewayCache(request);
 
     return NextResponse.json({ success: true });

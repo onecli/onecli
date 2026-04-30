@@ -19,14 +19,38 @@ enum AuthStrategy {
     BasicXAccessToken,
 }
 
+/// How a host rule matches incoming hostnames.
+#[derive(Debug, Clone, Copy)]
+enum HostPattern {
+    /// Match the hostname exactly (e.g., `"api.github.com"`).
+    Exact(&'static str),
+    /// Match any hostname ending with the suffix, strictly longer than the suffix
+    /// (e.g., `"-aiplatform.googleapis.com"` matches `"us-central1-aiplatform.googleapis.com"`).
+    Suffix(&'static str),
+}
+
 /// A host pattern and its injection strategy for an app provider.
 struct HostRule {
-    host: &'static str,
+    pattern: HostPattern,
     /// Optional path prefix to scope this rule (e.g., `"/calendar/"` for Google Calendar).
     /// When set, only requests whose path starts with this prefix match this provider.
     /// When `None`, all paths on the host match (used for providers with dedicated subdomains).
     path_prefix: Option<&'static str>,
     strategy: AuthStrategy,
+    /// When true, matching requests return a synthetic OAuth token response with
+    /// the cached access token instead of being forwarded upstream. Used for
+    /// credential stub flows where the SDK tries to refresh dummy credentials.
+    intercept: bool,
+}
+
+/// Check whether a `HostRule` matches a given hostname.
+/// Suffix rules match any hostname that ends with the suffix and is strictly longer
+/// (so the bare suffix itself never matches). Exact rules compare the host directly.
+fn host_rule_matches(rule: &HostRule, hostname: &str) -> bool {
+    match rule.pattern {
+        HostPattern::Exact(host) => host == hostname,
+        HostPattern::Suffix(suffix) => hostname.ends_with(suffix) && hostname.len() > suffix.len(),
+    }
 }
 
 /// Body format for token refresh requests.
@@ -50,12 +74,20 @@ pub(crate) struct RefreshConfig {
     pub body_format: TokenBodyFormat,
 }
 
+/// Maps a connection metadata key to an HTTP header injected on every request.
+pub(crate) struct MetadataHeader {
+    pub metadata_key: &'static str,
+    pub header_name: &'static str,
+}
+
 /// An app provider definition with its host rules.
 struct AppProvider {
     provider: &'static str,
     display_name: &'static str,
     host_rules: &'static [HostRule],
     refresh: Option<&'static RefreshConfig>,
+    /// Headers injected from connection metadata (e.g., project ID → x-goog-user-project).
+    metadata_headers: &'static [MetadataHeader],
 }
 
 /// Shared refresh config for Atlassian OAuth APIs (Jira, Confluence).
@@ -82,224 +114,290 @@ static APP_PROVIDERS: &[AppProvider] = &[
         display_name: "GitHub",
         host_rules: &[
             HostRule {
-                host: "api.github.com",
+                pattern: HostPattern::Exact("api.github.com"),
                 path_prefix: None,
                 strategy: AuthStrategy::Bearer,
+                intercept: false,
             },
             HostRule {
-                host: "github.com",
+                pattern: HostPattern::Exact("github.com"),
                 path_prefix: None,
                 strategy: AuthStrategy::BasicXAccessToken,
+                intercept: false,
             },
             HostRule {
-                host: "raw.githubusercontent.com",
+                pattern: HostPattern::Exact("raw.githubusercontent.com"),
                 path_prefix: None,
                 strategy: AuthStrategy::Bearer,
+                intercept: false,
             },
         ],
         refresh: None,
+        metadata_headers: &[],
     },
     AppProvider {
         provider: "gmail",
         display_name: "Gmail",
         host_rules: &[
             HostRule {
-                host: "gmail.googleapis.com",
+                pattern: HostPattern::Exact("gmail.googleapis.com"),
                 path_prefix: None,
                 strategy: AuthStrategy::Bearer,
+                intercept: false,
             },
             // Legacy endpoint — some clients still use www.googleapis.com/gmail/
             HostRule {
-                host: "www.googleapis.com",
+                pattern: HostPattern::Exact("www.googleapis.com"),
                 path_prefix: Some("/gmail/"),
                 strategy: AuthStrategy::Bearer,
+                intercept: false,
             },
         ],
         refresh: Some(&GOOGLE_REFRESH),
+        metadata_headers: &[],
     },
     AppProvider {
         provider: "google-calendar",
         display_name: "Google Calendar",
         host_rules: &[HostRule {
-            host: "www.googleapis.com",
+            pattern: HostPattern::Exact("www.googleapis.com"),
             path_prefix: Some("/calendar/"),
             strategy: AuthStrategy::Bearer,
+            intercept: false,
         }],
         refresh: Some(&GOOGLE_REFRESH),
+        metadata_headers: &[],
     },
     AppProvider {
         provider: "google-drive",
         display_name: "Google Drive",
         host_rules: &[
             HostRule {
-                host: "www.googleapis.com",
+                pattern: HostPattern::Exact("www.googleapis.com"),
                 path_prefix: Some("/drive/"),
                 strategy: AuthStrategy::Bearer,
+                intercept: false,
             },
             HostRule {
-                host: "www.googleapis.com",
+                pattern: HostPattern::Exact("www.googleapis.com"),
                 path_prefix: Some("/upload/drive/"),
                 strategy: AuthStrategy::Bearer,
+                intercept: false,
             },
         ],
         refresh: Some(&GOOGLE_REFRESH),
+        metadata_headers: &[],
     },
     AppProvider {
         provider: "google-docs",
         display_name: "Google Docs",
         host_rules: &[HostRule {
-            host: "docs.googleapis.com",
+            pattern: HostPattern::Exact("docs.googleapis.com"),
             path_prefix: None,
             strategy: AuthStrategy::Bearer,
+            intercept: false,
         }],
         refresh: Some(&GOOGLE_REFRESH),
+        metadata_headers: &[],
     },
     AppProvider {
         provider: "google-sheets",
         display_name: "Google Sheets",
         host_rules: &[HostRule {
-            host: "sheets.googleapis.com",
+            pattern: HostPattern::Exact("sheets.googleapis.com"),
             path_prefix: None,
             strategy: AuthStrategy::Bearer,
+            intercept: false,
         }],
         refresh: Some(&GOOGLE_REFRESH),
+        metadata_headers: &[],
     },
     AppProvider {
         provider: "google-slides",
         display_name: "Google Slides",
         host_rules: &[HostRule {
-            host: "slides.googleapis.com",
+            pattern: HostPattern::Exact("slides.googleapis.com"),
             path_prefix: None,
             strategy: AuthStrategy::Bearer,
+            intercept: false,
         }],
         refresh: Some(&GOOGLE_REFRESH),
+        metadata_headers: &[],
     },
     AppProvider {
         provider: "google-tasks",
         display_name: "Google Tasks",
         host_rules: &[HostRule {
-            host: "tasks.googleapis.com",
+            pattern: HostPattern::Exact("tasks.googleapis.com"),
             path_prefix: None,
             strategy: AuthStrategy::Bearer,
+            intercept: false,
         }],
         refresh: Some(&GOOGLE_REFRESH),
+        metadata_headers: &[],
     },
     AppProvider {
         provider: "google-forms",
         display_name: "Google Forms",
         host_rules: &[HostRule {
-            host: "forms.googleapis.com",
+            pattern: HostPattern::Exact("forms.googleapis.com"),
             path_prefix: None,
             strategy: AuthStrategy::Bearer,
+            intercept: false,
         }],
         refresh: Some(&GOOGLE_REFRESH),
+        metadata_headers: &[],
     },
     AppProvider {
         provider: "google-classroom",
         display_name: "Google Classroom",
         host_rules: &[HostRule {
-            host: "classroom.googleapis.com",
+            pattern: HostPattern::Exact("classroom.googleapis.com"),
             path_prefix: None,
             strategy: AuthStrategy::Bearer,
+            intercept: false,
         }],
         refresh: Some(&GOOGLE_REFRESH),
+        metadata_headers: &[],
     },
     AppProvider {
         provider: "google-admin",
         display_name: "Google Admin",
         host_rules: &[HostRule {
-            host: "admin.googleapis.com",
+            pattern: HostPattern::Exact("admin.googleapis.com"),
             path_prefix: None,
             strategy: AuthStrategy::Bearer,
+            intercept: false,
         }],
         refresh: Some(&GOOGLE_REFRESH),
+        metadata_headers: &[],
     },
     AppProvider {
         provider: "google-analytics",
         display_name: "Google Analytics",
         host_rules: &[HostRule {
-            host: "analyticsdata.googleapis.com",
+            pattern: HostPattern::Exact("analyticsdata.googleapis.com"),
             path_prefix: None,
             strategy: AuthStrategy::Bearer,
+            intercept: false,
         }],
         refresh: Some(&GOOGLE_REFRESH),
+        metadata_headers: &[],
     },
     AppProvider {
         provider: "google-search-console",
         display_name: "Google Search Console",
         host_rules: &[HostRule {
-            host: "searchconsole.googleapis.com",
+            pattern: HostPattern::Exact("searchconsole.googleapis.com"),
             path_prefix: None,
             strategy: AuthStrategy::Bearer,
+            intercept: false,
         }],
         refresh: Some(&GOOGLE_REFRESH),
+        metadata_headers: &[],
     },
     AppProvider {
         provider: "google-meet",
         display_name: "Google Meet",
         host_rules: &[HostRule {
-            host: "meet.googleapis.com",
+            pattern: HostPattern::Exact("meet.googleapis.com"),
             path_prefix: None,
             strategy: AuthStrategy::Bearer,
+            intercept: false,
         }],
         refresh: Some(&GOOGLE_REFRESH),
+        metadata_headers: &[],
     },
     AppProvider {
         provider: "google-photos",
         display_name: "Google Photos",
         host_rules: &[HostRule {
-            host: "photoslibrary.googleapis.com",
+            pattern: HostPattern::Exact("photoslibrary.googleapis.com"),
             path_prefix: None,
             strategy: AuthStrategy::Bearer,
+            intercept: false,
         }],
         refresh: Some(&GOOGLE_REFRESH),
+        metadata_headers: &[],
     },
     AppProvider {
         provider: "jira",
         display_name: "Jira",
         host_rules: &[HostRule {
-            host: "api.atlassian.com",
+            pattern: HostPattern::Exact("api.atlassian.com"),
             path_prefix: Some("/ex/jira/"),
             strategy: AuthStrategy::Bearer,
+            intercept: false,
         }],
         refresh: Some(&ATLASSIAN_REFRESH),
+        metadata_headers: &[],
     },
     AppProvider {
         provider: "confluence",
         display_name: "Confluence",
         host_rules: &[HostRule {
-            host: "api.atlassian.com",
+            pattern: HostPattern::Exact("api.atlassian.com"),
             path_prefix: Some("/ex/confluence/"),
             strategy: AuthStrategy::Bearer,
+            intercept: false,
         }],
         refresh: Some(&ATLASSIAN_REFRESH),
+        metadata_headers: &[],
     },
     AppProvider {
         provider: "youtube",
         display_name: "YouTube",
         host_rules: &[
             HostRule {
-                host: "www.googleapis.com",
+                pattern: HostPattern::Exact("www.googleapis.com"),
                 path_prefix: Some("/youtube/"),
                 strategy: AuthStrategy::Bearer,
+                intercept: false,
             },
             HostRule {
-                host: "www.googleapis.com",
+                pattern: HostPattern::Exact("www.googleapis.com"),
                 path_prefix: Some("/upload/youtube/"),
                 strategy: AuthStrategy::Bearer,
+                intercept: false,
             },
         ],
         refresh: Some(&GOOGLE_REFRESH),
+        metadata_headers: &[],
+    },
+    AppProvider {
+        provider: "vertex-ai",
+        display_name: "Vertex AI",
+        host_rules: &[
+            HostRule {
+                pattern: HostPattern::Suffix("-aiplatform.googleapis.com"),
+                path_prefix: None,
+                strategy: AuthStrategy::Bearer,
+                intercept: false,
+            },
+            HostRule {
+                pattern: HostPattern::Exact("oauth2.googleapis.com"),
+                path_prefix: Some("/token"),
+                strategy: AuthStrategy::Bearer,
+                intercept: true,
+            },
+        ],
+        refresh: Some(&GOOGLE_REFRESH),
+        metadata_headers: &[MetadataHeader {
+            metadata_key: "quotaProjectId",
+            header_name: "x-goog-user-project",
+        }],
     },
     AppProvider {
         provider: "resend",
         display_name: "Resend",
         host_rules: &[HostRule {
-            host: "api.resend.com",
+            pattern: HostPattern::Exact("api.resend.com"),
             path_prefix: None,
             strategy: AuthStrategy::Bearer,
+            intercept: false,
         }],
         refresh: None,
+        metadata_headers: &[],
     },
 ];
 
@@ -311,7 +409,7 @@ pub(crate) fn provider_for_host(hostname: &str) -> Option<(&'static str, &'stati
     APP_PROVIDERS.iter().find_map(|p| {
         p.host_rules
             .iter()
-            .any(|r| r.host == hostname)
+            .any(|r| host_rule_matches(r, hostname))
             .then_some((p.provider, p.display_name))
     })
 }
@@ -329,7 +427,10 @@ pub(crate) fn provider_for_host_and_path(
     let path_match = APP_PROVIDERS.iter().find_map(|p| {
         p.host_rules
             .iter()
-            .any(|r| r.host == hostname && r.path_prefix.is_some_and(|pfx| path.starts_with(pfx)))
+            .any(|r| {
+                host_rule_matches(r, hostname)
+                    && r.path_prefix.is_some_and(|pfx| path.starts_with(pfx))
+            })
             .then_some((p.provider, p.display_name))
     });
     if path_match.is_some() {
@@ -347,7 +448,7 @@ pub(crate) fn providers_for_host(hostname: &str) -> Vec<&'static str> {
     let mut providers = Vec::new();
     for provider in APP_PROVIDERS {
         for rule in provider.host_rules {
-            if rule.host == hostname {
+            if host_rule_matches(rule, hostname) {
                 providers.push(provider.provider);
                 break;
             }
@@ -363,7 +464,11 @@ fn path_pattern_for(provider: &str, hostname: &str) -> String {
     APP_PROVIDERS
         .iter()
         .find(|p| p.provider == provider)
-        .and_then(|app| app.host_rules.iter().find(|r| r.host == hostname))
+        .and_then(|app| {
+            app.host_rules
+                .iter()
+                .find(|r| host_rule_matches(r, hostname))
+        })
         .and_then(|rule| rule.path_prefix)
         .map_or_else(|| "*".to_string(), |prefix| format!("{prefix}*"))
 }
@@ -375,7 +480,10 @@ fn build_app_injections(provider: &str, hostname: &str, token: &str) -> Vec<Inje
     let app = APP_PROVIDERS.iter().find(|p| p.provider == provider);
     let Some(app) = app else { return vec![] };
 
-    let rule = app.host_rules.iter().find(|r| r.host == hostname);
+    let rule = app
+        .host_rules
+        .iter()
+        .find(|r| host_rule_matches(r, hostname));
     let Some(rule) = rule else { return vec![] };
 
     match rule.strategy {
@@ -409,7 +517,7 @@ pub(crate) fn build_app_injection_rules(
 
     app.host_rules
         .iter()
-        .filter(|r| r.host == hostname)
+        .filter(|r| host_rule_matches(r, hostname))
         .map(|rule| {
             let pattern = rule
                 .path_prefix
@@ -439,6 +547,37 @@ pub(crate) fn refresh_config(provider: &str) -> Option<&'static RefreshConfig> {
         .iter()
         .find(|p| p.provider == provider)
         .and_then(|p| p.refresh)
+}
+
+/// Get metadata-to-header mappings for a provider.
+pub(crate) fn metadata_headers(provider: &str) -> &'static [MetadataHeader] {
+    APP_PROVIDERS
+        .iter()
+        .find(|p| p.provider == provider)
+        .map(|p| p.metadata_headers)
+        .unwrap_or(&[])
+}
+
+/// Check whether any provider matching this hostname has intercept rules.
+/// Used to decide whether to pre-compute interception data at resolution time.
+pub(crate) fn host_has_intercept_rules(hostname: &str) -> bool {
+    APP_PROVIDERS.iter().any(|p| {
+        p.host_rules.iter().any(|r| r.intercept)
+            && p.host_rules.iter().any(|r| host_rule_matches(r, hostname))
+    })
+}
+
+/// Check whether a request should be intercepted with a synthetic token response.
+/// Returns true when any provider has a host rule matching the hostname and path
+/// with `intercept: true`.
+pub(crate) fn is_intercept_target(hostname: &str, path: &str) -> bool {
+    APP_PROVIDERS.iter().any(|p| {
+        p.host_rules.iter().any(|r| {
+            r.intercept
+                && host_rule_matches(r, hostname)
+                && r.path_prefix.is_none_or(|pfx| path.starts_with(pfx))
+        })
+    })
 }
 
 /// Refresh an expired access token using the provider's token endpoint.
@@ -510,6 +649,82 @@ pub(crate) async fn refresh_access_token(
         .duration_since(std::time::UNIX_EPOCH)
         .expect("system clock before UNIX epoch")
         .as_secs() as i64;
+
+    Ok((access_token, now + expires_in))
+}
+
+#[derive(serde::Serialize)]
+struct ServiceAccountClaims<'a> {
+    iss: &'a str,
+    sub: &'a str,
+    aud: &'static str,
+    scope: &'static str,
+    iat: i64,
+    exp: i64,
+}
+
+/// Refresh an access token using a Google service account private key.
+/// Signs a JWT with RS256, then exchanges it at Google's token endpoint
+/// using the `urn:ietf:params:oauth:grant-type:jwt-bearer` grant type.
+pub(crate) async fn refresh_via_service_account(
+    private_key_pem: &str,
+    client_email: &str,
+) -> anyhow::Result<(String, i64)> {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("system clock before UNIX epoch")
+        .as_secs() as i64;
+
+    let claims = ServiceAccountClaims {
+        iss: client_email,
+        sub: client_email,
+        aud: "https://oauth2.googleapis.com/token",
+        scope: "https://www.googleapis.com/auth/cloud-platform",
+        iat: now,
+        exp: now + 3600,
+    };
+
+    let key = jsonwebtoken::EncodingKey::from_rsa_pem(private_key_pem.as_bytes())
+        .map_err(|e| anyhow::anyhow!("invalid RSA private key: {e}"))?;
+
+    let assertion = jsonwebtoken::encode(
+        &jsonwebtoken::Header::new(jsonwebtoken::Algorithm::RS256),
+        &claims,
+        &key,
+    )
+    .map_err(|e| anyhow::anyhow!("JWT signing failed: {e}"))?;
+
+    let resp = reqwest::Client::new()
+        .post("https://oauth2.googleapis.com/token")
+        .form(&[
+            ("grant_type", "urn:ietf:params:oauth:grant-type:jwt-bearer"),
+            ("assertion", assertion.as_str()),
+        ])
+        .send()
+        .await
+        .map_err(|e| anyhow::anyhow!("service account token request failed: {e}"))?;
+
+    let body: serde_json::Value = resp
+        .json()
+        .await
+        .map_err(|e| anyhow::anyhow!("service account token response parse failed: {e}"))?;
+
+    let access_token = body
+        .get("access_token")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| {
+            let error = body
+                .get("error")
+                .and_then(|v| v.as_str())
+                .unwrap_or("unknown");
+            anyhow::anyhow!("service account token exchange failed: {error}")
+        })?
+        .to_string();
+
+    let expires_in = body
+        .get("expires_in")
+        .and_then(|v| v.as_i64())
+        .unwrap_or(3600);
 
     Ok((access_token, now + expires_in))
 }
@@ -976,7 +1191,11 @@ mod tests {
         let mut hosts: HashMap<&str, (bool, bool)> = HashMap::new();
         for provider in APP_PROVIDERS {
             for rule in provider.host_rules {
-                let entry = hosts.entry(rule.host).or_default();
+                let host = match rule.pattern {
+                    HostPattern::Exact(h) => h,
+                    HostPattern::Suffix(_) => continue, // suffix rules don't share hosts
+                };
+                let entry = hosts.entry(host).or_default();
                 if rule.path_prefix.is_some() {
                     entry.0 = true; // has prefix
                 } else {
@@ -990,5 +1209,72 @@ mod tests {
                 "host {host} mixes path-prefix and catch-all rules — this causes ambiguous injection"
             );
         }
+    }
+
+    // ── Vertex AI ────────────────────────────────────────────────────────
+
+    #[test]
+    fn providers_for_vertex_ai_hosts() {
+        assert_eq!(
+            providers_for_host("us-central1-aiplatform.googleapis.com"),
+            vec!["vertex-ai"]
+        );
+        assert_eq!(
+            providers_for_host("europe-west1-aiplatform.googleapis.com"),
+            vec!["vertex-ai"]
+        );
+        assert_eq!(
+            providers_for_host("asia-east1-aiplatform.googleapis.com"),
+            vec!["vertex-ai"]
+        );
+    }
+
+    #[test]
+    fn vertex_ai_suffix_no_false_positives() {
+        assert!(providers_for_host("aiplatform.googleapis.com").is_empty());
+        assert!(providers_for_host("-aiplatform.googleapis.com").is_empty());
+    }
+
+    #[test]
+    fn vertex_ai_uses_bearer() {
+        let rules = build_app_injection_rules(
+            "vertex-ai",
+            "us-central1-aiplatform.googleapis.com",
+            "ya29.test",
+        );
+        assert_eq!(rules.len(), 1);
+        assert_eq!(rules[0].0, "*");
+        assert_eq!(
+            rules[0].1,
+            vec![Injection::SetHeader {
+                name: "authorization".to_string(),
+                value: "Bearer ya29.test".to_string(),
+            }]
+        );
+    }
+
+    #[test]
+    fn provider_for_host_vertex_ai() {
+        let result = provider_for_host("us-central1-aiplatform.googleapis.com");
+        assert_eq!(result, Some(("vertex-ai", "Vertex AI")));
+    }
+
+    #[test]
+    fn provider_for_host_and_path_vertex_ai() {
+        let result = provider_for_host_and_path(
+            "us-central1-aiplatform.googleapis.com",
+            "/v1/projects/my-proj/locations/us-central1/publishers/anthropic/models/claude:streamRawPredict",
+        );
+        assert_eq!(result, Some(("vertex-ai", "Vertex AI")));
+    }
+
+    #[test]
+    fn oauth2_token_endpoint_maps_to_vertex_ai() {
+        assert_eq!(
+            providers_for_host("oauth2.googleapis.com"),
+            vec!["vertex-ai"]
+        );
+        assert!(is_intercept_target("oauth2.googleapis.com", "/token"));
+        assert!(!is_intercept_target("oauth2.googleapis.com", "/authorize"));
     }
 }

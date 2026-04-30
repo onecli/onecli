@@ -605,7 +605,7 @@ async fn handle_http_proxy(
             )
             .await
         {
-            Ok(AppConnectionResult::Rules(rules)) => resolved.injection_rules = rules,
+            Ok(AppConnectionResult::Rules { rules, .. }) => resolved.injection_rules = rules,
             Ok(AppConnectionResult::Ambiguous { connections }) => {
                 return Ok(response::multiple_connections_axum(&connections));
             }
@@ -654,6 +654,7 @@ async fn handle_http_proxy(
         injection_rules: resolved.injection_rules,
         policy_rules: resolved.policy_rules,
         access_restricted: resolved.access_restricted,
+        intercept_token: None,
     };
 
     let mut resp = forward::forward_request(

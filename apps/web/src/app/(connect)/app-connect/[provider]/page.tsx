@@ -45,8 +45,13 @@ export default async function ConnectPage({ params, searchParams }: Props) {
         darkIcon: app.darkIcon,
         connectionType: app.connectionMethod.type,
         fields:
-          app.connectionMethod.type === "api_key"
+          app.connectionMethod.type === "api_key" ||
+          app.connectionMethod.type === "credentials_import"
             ? app.connectionMethod.fields
+            : undefined,
+        fileImport:
+          app.connectionMethod.type === "credentials_import"
+            ? app.connectionMethod.fileImport
             : undefined,
       }}
       hasDefaults={hasEnvDefaults || hasAppConfig}

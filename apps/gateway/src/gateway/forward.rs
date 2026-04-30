@@ -113,6 +113,35 @@ pub(crate) async fn forward_request(
     let url = format!("{scheme}://{host}{path}");
     let agent_token = proxy_ctx.agent_token.as_deref().unwrap_or("");
 
+    // Token endpoint interception: when a client SDK tries to refresh its
+    // own OAuth token through the proxy, serve the cached access token from
+    // the stored app connection instead of forwarding dummy credentials.
+    // Interception targets are defined per-provider in the app registry.
+    if let Some(ref intercept) = rules.intercept_token {
+        if crate::apps::is_intercept_target(super::strip_port(host), &path)
+            && method == hyper::Method::POST
+        {
+            info!(
+                method = %method,
+                url = %url,
+                "token endpoint intercepted — serving cached token"
+            );
+            let body = serde_json::json!({
+                "access_token": intercept.access_token,
+                "expires_in": intercept.expires_in,
+                "token_type": "Bearer",
+            });
+            let bytes = Bytes::from(serde_json::to_vec(&body).expect("serializing JSON literal"));
+            let mut resp = Response::new(Either::Left(Full::new(bytes)));
+            *resp.status_mut() = StatusCode::OK;
+            resp.headers_mut().insert(
+                "content-type",
+                hyper::header::HeaderValue::from_static("application/json"),
+            );
+            return Ok(resp);
+        }
+    }
+
     // Check policy rules before forwarding
     let decision = policy::evaluate(
         method.as_str(),

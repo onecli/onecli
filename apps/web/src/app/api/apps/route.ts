@@ -49,6 +49,7 @@ export const GET = async (request: NextRequest) => {
               connectedAt: connection.connectedAt,
             }
           : null,
+        credentialStubs: app.credentialStubs ?? [],
       };
     });
 

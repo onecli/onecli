@@ -131,12 +131,22 @@ pub(super) async fn mitm(
         .context("serving MITM connection")
 }
 
+/// Pre-computed data for token endpoint interception responses.
+#[derive(Debug)]
+pub(crate) struct InterceptToken {
+    pub access_token: String,
+    pub expires_in: i64,
+}
+
 /// Per-request resolved rules, bundled for passing to `forward_request`.
 #[derive(Debug)]
 pub(crate) struct ResolvedRules {
     pub injection_rules: Vec<InjectionRule>,
     pub policy_rules: Vec<crate::policy::PolicyRule>,
     pub access_restricted: bool,
+    /// Ready-to-use interception data when the resolved connection has a
+    /// cached token that should be served instead of forwarding.
+    pub intercept_token: Option<InterceptToken>,
 }
 
 /// Result of per-request rule resolution including app connection disambiguation.
@@ -177,6 +187,7 @@ async fn resolve_rules(
         connect::resolve_from_cache(project_id, agent_token, hostname, engine, cache).await?;
 
     let mut injection_rules = resp.injection_rules; // from secrets
+    let mut token_expires_at: Option<i64> = None;
 
     // If no secret rules, try app connections (per-request disambiguation)
     if injection_rules.is_empty() && !resp.app_connections.is_empty() {
@@ -190,7 +201,13 @@ async fn resolve_rules(
             )
             .await?
         {
-            AppConnectionResult::Rules(rules) => injection_rules = rules,
+            AppConnectionResult::Rules {
+                rules,
+                token_expires_at: exp,
+            } => {
+                injection_rules = rules;
+                token_expires_at = exp;
+            }
             AppConnectionResult::Ambiguous { connections } => {
                 return Ok(ResolveResult::Ambiguous(connections));
             }
@@ -209,11 +226,45 @@ async fn resolve_rules(
         injection_rules = vault_rules.to_vec();
     }
 
+    // Build intercept token only for providers that have intercept rules
+    let intercept_token = if crate::apps::host_has_intercept_rules(hostname) {
+        injection_rules
+            .iter()
+            .find_map(|rule| {
+                rule.injections.iter().find_map(|inj| match inj {
+                    crate::inject::Injection::SetHeader { name, value }
+                        if name == "authorization" =>
+                    {
+                        value.strip_prefix("Bearer ").map(|t| t.to_string())
+                    }
+                    _ => None,
+                })
+            })
+            .map(|access_token| {
+                let expires_in = token_expires_at
+                    .map(|exp| {
+                        let now = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .expect("system clock")
+                            .as_secs() as i64;
+                        (exp - now).max(0)
+                    })
+                    .unwrap_or(3600);
+                InterceptToken {
+                    access_token,
+                    expires_in,
+                }
+            })
+    } else {
+        None
+    };
+
     Ok(ResolveResult::Resolved {
         rules: ResolvedRules {
             injection_rules,
             policy_rules: resp.policy_rules,
             access_restricted: resp.access_restricted,
+            intercept_token,
         },
         app_connections: resp.app_connections,
     })
