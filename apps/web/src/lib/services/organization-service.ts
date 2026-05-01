@@ -89,6 +89,14 @@ export const bootstrapOrganization = async (
   return { project, organization: org };
 };
 
+export const validateOrgName = (raw: string): string => {
+  const trimmed = raw.trim();
+  if (!trimmed || trimmed.length > 255) {
+    throw new Error("Organization name must be 1-255 characters");
+  }
+  return trimmed;
+};
+
 /**
  * Ensure a project has an API key for the given user and a default agent.
  * Idempotent — skips creation if they already exist.
