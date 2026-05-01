@@ -14,8 +14,13 @@
 #   export POSTGRES_PORT=5433
 #   curl -fsSL https://onecli.sh/install | sh
 #
+# Custom app/gateway ports (e.g. for multi-user hosts):
+#   export ONECLI_APP_PORT=11254
+#   export ONECLI_GATEWAY_PORT=11255
+#   curl -fsSL https://onecli.sh/install | sh
+#
 # This script checks for Docker, downloads the docker-compose.yml,
-# and starts OneCLI (app + PostgreSQL) on ports 10254 and 10255.
+# and starts OneCLI (app + PostgreSQL) on ports 10254 and 10255 by default.
 
 INSTALL_DIR="$HOME/.onecli"
 COMPOSE_FILE="$INSTALL_DIR/docker-compose.yml"
@@ -170,10 +175,10 @@ main() {
 
   echo ""
   echo "  OneCLI is running!"
-  echo "  ONECLI_URL:  http://$ONECLI_BIND_HOST:10254"
+  echo "  ONECLI_URL:  http://$ONECLI_BIND_HOST:${ONECLI_APP_PORT:-10254}"
   echo ""
-  echo "  Dashboard:  http://$ONECLI_BIND_HOST:10254"
-  echo "  Gateway:    http://$ONECLI_BIND_HOST:10255"
+  echo "  Dashboard:  http://$ONECLI_BIND_HOST:${ONECLI_APP_PORT:-10254}"
+  echo "  Gateway:    http://$ONECLI_BIND_HOST:${ONECLI_GATEWAY_PORT:-10255}"
   echo ""
   echo "  Compose file: $COMPOSE_FILE"
   echo ""

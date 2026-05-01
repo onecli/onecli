@@ -29,13 +29,13 @@ services:
       postgres:
         condition: service_healthy
     ports:
-      - "${ONECLI_BIND_HOST:-127.0.0.1}:10254:10254"
-      - "${ONECLI_BIND_HOST:-127.0.0.1}:10255:10255"
+      - "${ONECLI_BIND_HOST:-127.0.0.1}:${ONECLI_APP_PORT:-10254}:10254"
+      - "${ONECLI_BIND_HOST:-127.0.0.1}:${ONECLI_GATEWAY_PORT:-10255}:10255"
     environment:
       DATABASE_URL: postgresql://${POSTGRES_USER:-onecli}:${POSTGRES_PASSWORD:-onecli}@postgres:5432/${POSTGRES_DB:-onecli}
       NEXTAUTH_SECRET: ${NEXTAUTH_SECRET:-}
-      NEXT_PUBLIC_APP_URL: http://${ONECLI_BIND_HOST:-127.0.0.1}:10254
-      APP_URL: http://${ONECLI_BIND_HOST:-127.0.0.1}:10254
+      NEXT_PUBLIC_APP_URL: http://${ONECLI_BIND_HOST:-127.0.0.1}:${ONECLI_APP_PORT:-10254}
+      APP_URL: http://${ONECLI_BIND_HOST:-127.0.0.1}:${ONECLI_APP_PORT:-10254}
     volumes:
       - app-data:/app/data
     env_file:
