@@ -1,4 +1,4 @@
-import type { Metadata } from "next";
+import type { Metadata, Viewport } from "next";
 import localFont from "next/font/local";
 import { Source_Serif_4 } from "next/font/google";
 import "@onecli/ui/globals.css";
@@ -7,6 +7,7 @@ import { AuthProvider } from "@/providers/auth-provider";
 import { getAuthMode } from "@/lib/auth/auth-mode";
 import { ThemeProvider } from "@/providers/theme-provider";
 import { Toaster } from "@onecli/ui/components/sonner";
+import { ThemeColorSync } from "./_components/theme-color-sync";
 
 const geistSans = localFont({
   src: "./fonts/GeistVF.woff",
@@ -26,10 +27,16 @@ const sourceSerif = Source_Serif_4({
 // re-renders per request instead of serving prebuilt static pages.
 export const dynamic = "force-dynamic";
 
+export const viewport: Viewport = {
+  width: "device-width",
+  initialScale: 1,
+  viewportFit: "cover",
+};
+
 export const metadata: Metadata = {
   title: {
     default: "OneCLI",
-    template: "%s — OneCLI",
+    template: "%s - OneCLI",
   },
   description: "Universal CLI gateway for AI agents.",
   icons: {
@@ -45,7 +52,7 @@ export default function RootLayout({
   const authMode = getAuthMode();
 
   return (
-    <html lang="en" suppressHydrationWarning>
+    <html lang="en" suppressHydrationWarning className="bg-background">
       <body
         className={`${geistSans.variable} ${geistMono.variable} ${sourceSerif.variable}`}
         suppressHydrationWarning
@@ -57,6 +64,7 @@ export default function RootLayout({
             enableSystem
             disableTransitionOnChange
           >
+            <ThemeColorSync />
             {children}
             <Toaster />
           </ThemeProvider>

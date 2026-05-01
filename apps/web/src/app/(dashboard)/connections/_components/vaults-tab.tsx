@@ -116,7 +116,7 @@ const BitwardenCard = () => {
       <CardContent className="flex flex-1 flex-col">
         <CardDescription>
           Access credentials from your Bitwarden vault. The gateway fetches
-          secrets at request time — nothing is stored.
+          secrets at request time. Nothing is stored.
         </CardDescription>
         <div className="mt-auto pt-4">
           <Button

@@ -3,7 +3,7 @@
 import { useEffect } from "react";
 import { useRouter } from "next/navigation";
 import { useAuth } from "@/providers/auth-provider";
-import { IS_CLOUD } from "@/lib/env";
+import { resolveHomeRedirect } from "@/lib/home-redirect";
 
 export default function Home() {
   const router = useRouter();
@@ -17,15 +17,8 @@ export default function Home() {
       return;
     }
 
-    fetch("/api/auth/session")
-      .then((res) => (res.ok ? res.json() : null))
-      .then((data: { projectId?: string } | null) => {
-        router.replace(
-          IS_CLOUD && data?.projectId
-            ? `/p/${data.projectId}/overview`
-            : "/overview",
-        );
-      })
+    resolveHomeRedirect()
+      .then((url) => router.replace(url))
       .catch(() => router.replace("/overview"));
   }, [isLoading, isAuthenticated, router]);
 

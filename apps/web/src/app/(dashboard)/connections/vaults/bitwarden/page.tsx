@@ -29,7 +29,7 @@ export default function BitwardenPage() {
           </Badge>
         </div>
         <p className="text-muted-foreground text-sm">
-          Fetch credentials on-demand from your Bitwarden vault — nothing is
+          Fetch credentials on-demand from your Bitwarden vault. Nothing is
           stored on the server.
         </p>
       </div>

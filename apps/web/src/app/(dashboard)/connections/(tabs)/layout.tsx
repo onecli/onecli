@@ -10,7 +10,7 @@ export default function ConnectionsTabsLayout({
     <>
       <PageHeader
         title="Connections"
-        description="Manage your app integrations, API secrets, and external vaults in one place."
+        description="App integrations, API secrets, and external vaults."
       />
       <div className="space-y-6">
         <ConnectionsTabs />

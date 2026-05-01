@@ -1,42 +1,78 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64">
-  <defs>
-    <linearGradient id="hermes-gold" x1="0%" y1="0%" x2="100%" y2="100%">
-      <stop offset="0%" stop-color="#FBBF24" />
-      <stop offset="50%" stop-color="#F59E0B" />
-      <stop offset="100%" stop-color="#D97706" />
-    </linearGradient>
-  </defs>
+  <!-- Hair + body silhouette -->
+  <path d="
+    M30 2
+    C16 2, 6 16, 6 30
+    C6 40, 7 46, 10 50
+    Q12 48, 14 50
+    L16 58
+    C17 60, 19 61, 21 60
+    L24 54
+    C27 56, 30 57, 33 57
+    C36 57, 39 56, 42 54
+    L44 60
+    C46 61, 48 60, 49 58
+    L50 50
+    Q52 48, 54 50
+    C57 46, 58 40, 58 30
+    C58 16, 48 3, 34 2
+    Z
+  " fill="#111"/>
 
-  <!-- Helmet dome (petasos) -->
-  <path
-    d="M16 36 Q16 18 32 14 Q48 18 48 36 Z"
-    fill="url(#hermes-gold)"
-  />
+  <!-- Face -->
+  <path d="
+    M22 22
+    Q22 18, 32 18
+    Q42 18, 42 22
+    L42 32
+    C42 36, 40 40, 37 42
+    Q34 45, 32 45
+    Q30 45, 27 42
+    C24 40, 22 36, 22 32
+    Z
+  " fill="#f5f0ea"/>
 
-  <!-- Helmet brim -->
-  <ellipse cx="32" cy="36" rx="20" ry="6" fill="url(#hermes-gold)" />
+  <!-- Bangs -->
+  <path d="
+    M12 14
+    C16 6, 24 2, 32 2
+    C40 2, 48 6, 52 14
+    C50 18, 46 22, 42 22
+    C38 24, 26 24, 22 22
+    C18 22, 14 18, 12 14
+    Z
+  " fill="#111"/>
 
-  <!-- Left wing -->
-  <path
-    d="M12 32 Q4 26 6 18 Q8 22 12 24 Q8 24 4 28 Q8 28 12 28 Q10 30 12 32"
-    fill="url(#hermes-gold)"
-    opacity="0.85"
-  />
+  <!-- Bang highlight streaks -->
+  <path d="M30 3 Q29 12, 28 22" stroke="#f5f0ea" stroke-width="1" fill="none" opacity="0.5"/>
+  <path d="M36 3 Q37 12, 38 22" stroke="#f5f0ea" stroke-width="0.7" fill="none" opacity="0.35"/>
 
-  <!-- Right wing -->
-  <path
-    d="M52 32 Q60 26 58 18 Q56 22 52 24 Q56 24 60 28 Q56 28 52 28 Q54 30 52 32"
-    fill="url(#hermes-gold)"
-    opacity="0.85"
-  />
+  <!-- Left eye -->
+  <ellipse cx="28" cy="29" rx="3" ry="2.5" fill="#111"/>
+  <circle cx="27" cy="28" r="1" fill="#f5f0ea" opacity="0.9"/>
 
-  <!-- Face visor line -->
-  <path
-    d="M22 36 L22 44 Q27 48 32 48 Q37 48 42 44 L42 36"
-    fill="#D97706"
-    opacity="0.3"
-  />
+  <!-- Right eye -->
+  <ellipse cx="37" cy="29" rx="2.5" ry="2.2" fill="#111"/>
+  <circle cx="36.2" cy="28.2" r="0.8" fill="#f5f0ea" opacity="0.8"/>
 
-  <!-- Helmet center ridge -->
-  <line x1="32" y1="14" x2="32" y2="36" stroke="#D97706" stroke-width="1.5" opacity="0.3" />
+  <!-- Eyebrow hints -->
+  <path d="M25 25 Q28 23.5 31 25" stroke="#111" stroke-width="0.8" fill="none"/>
+  <path d="M34 25 Q37 24 40 25.5" stroke="#111" stroke-width="0.7" fill="none"/>
+
+  <!-- Nose -->
+  <path d="M32 33 L31 36" stroke="#c8b090" stroke-width="0.7" fill="none" stroke-linecap="round"/>
+
+  <!-- Mouth -->
+  <path d="M29 39 Q32 40.5 35 39" stroke="#c8b090" stroke-width="0.8" fill="none" stroke-linecap="round"/>
+
+  <!-- Neck -->
+  <path d="M28 45 L28 52 Q30 54, 32 54 Q34 54, 36 52 L36 45" fill="#f5f0ea"/>
+
+  <!-- Shoulder/clothing -->
+  <path d="
+    M28 52
+    C24 53, 18 56, 14 60
+    L14 64 L50 64 L50 60
+    C46 56, 40 53, 36 52
+  " fill="#111"/>
 </svg>
