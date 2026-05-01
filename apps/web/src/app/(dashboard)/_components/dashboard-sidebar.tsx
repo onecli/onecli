@@ -6,7 +6,7 @@ import Link from "next/link";
 import { NavMain } from "./nav-main";
 import { NavUser } from "./nav-user";
 import { NavDeploy } from "@/lib/deploy/nav-deploy";
-import { navItems } from "@/lib/nav-items";
+import { navItems } from "@/lib/nav-config";
 import {
   Sidebar,
   SidebarContent,
