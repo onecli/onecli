@@ -8,7 +8,12 @@ import {
   bootstrapOrganization,
   ensureProjectSeeds,
 } from "@/lib/services/organization-service";
-import { getSessionAttributes, onUserCreated } from "@/lib/auth/session-hooks";
+import {
+  getSessionAttributes,
+  onUserCreated,
+  shouldBootstrapOrg,
+  augmentSessionResponse,
+} from "@/lib/auth/session-hooks";
 
 /**
  * GET /api/auth/session
@@ -32,6 +37,11 @@ export const GET = async (request: NextRequest) => {
 
     const extra = getSessionAttributes(request);
 
+    const existingUser = await db.user.findUnique({
+      where: { email: session.email },
+      select: { id: true },
+    });
+
     const user = await db.user.upsert({
       where: { email: session.email },
       create: {
@@ -53,7 +63,7 @@ export const GET = async (request: NextRequest) => {
     let defaultProject = await findUserDefaultProject(user.id);
     let isNewUser = false;
 
-    if (!defaultProject) {
+    if (!defaultProject && !existingUser && shouldBootstrapOrg(request)) {
       const result = await bootstrapOrganization(
         user.id,
         user.email,
@@ -64,30 +74,41 @@ export const GET = async (request: NextRequest) => {
       onUserCreated({ email: user.email, name: user.name }, extra);
     }
 
-    const projectId = defaultProject.id;
-    const organizationId = defaultProject.organizationId;
+    if (defaultProject) {
+      const projectId = defaultProject.id;
+      const organizationId = defaultProject.organizationId;
 
-    await ensureProjectSeeds(projectId, user.id, user.email);
+      await ensureProjectSeeds(projectId, user.id, user.email);
 
-    if (isNewUser) {
-      const org = await db.organization.findUnique({
-        where: { id: organizationId },
-        select: { demoSeeded: true },
-      });
-      if (org && !org.demoSeeded) {
-        await seedDemoSecret(projectId);
-        await db.organization.update({
+      if (isNewUser) {
+        const org = await db.organization.findUnique({
           where: { id: organizationId },
-          data: { demoSeeded: true },
+          select: { demoSeeded: true },
         });
+        if (org && !org.demoSeeded) {
+          await seedDemoSecret(projectId);
+          await db.organization.update({
+            where: { id: organizationId },
+            data: { demoSeeded: true },
+          });
+        }
       }
+
+      return NextResponse.json({
+        id: user.id,
+        email: user.email,
+        name: user.name,
+        projectId,
+      });
     }
+
+    const responseExtra = await augmentSessionResponse(user.id);
 
     return NextResponse.json({
       id: user.id,
       email: user.email,
       name: user.name,
-      projectId,
+      ...responseExtra,
     });
   } catch (err) {
     logger.error(

@@ -66,12 +66,7 @@ export const COGNITO_USER_POOL_ID =
 
 export const STRIPE_SECRET_KEY = process.env.STRIPE_SECRET_KEY ?? "";
 
-export const STRIPE_STARTER_PRICE_ID =
-  process.env.STRIPE_STARTER_PRICE_ID ?? "";
-
 export const STRIPE_PRO_PRICE_ID = process.env.STRIPE_PRO_PRICE_ID ?? "";
-
-export const STRIPE_BIZ_PRICE_ID = process.env.STRIPE_BIZ_PRICE_ID ?? "";
 
 // ── Cloud: Notifications ────────────────────────────────────────────────
 

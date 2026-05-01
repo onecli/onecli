@@ -64,8 +64,8 @@ export const DashboardHeader = () => {
     <div className="flex w-full items-center gap-2 px-4">
       <SidebarTrigger className="-ml-1" />
       <Separator orientation="vertical" className="mr-2 h-4" />
-      <Breadcrumb>
-        <BreadcrumbList>
+      <Breadcrumb className="min-w-0 flex-1 overflow-hidden">
+        <BreadcrumbList className="flex-nowrap overflow-hidden">
           {subSegments.length > 0 ? (
             <>
               <BreadcrumbItem>
@@ -105,7 +105,12 @@ export const DashboardHeader = () => {
       <div className="ml-auto flex items-center gap-1">
         <Tooltip>
           <TooltipTrigger asChild>
-            <Button variant="ghost" size="icon" className="size-8" asChild>
+            <Button
+              variant="ghost"
+              size="icon"
+              className="hidden size-8 md:inline-flex"
+              asChild
+            >
               <a
                 href="https://onecli.sh/docs"
                 target="_blank"
@@ -120,7 +125,12 @@ export const DashboardHeader = () => {
         </Tooltip>
         <Tooltip>
           <TooltipTrigger asChild>
-            <Button variant="ghost" size="icon" className="size-8" asChild>
+            <Button
+              variant="ghost"
+              size="icon"
+              className="hidden size-8 md:inline-flex"
+              asChild
+            >
               <a
                 href="https://github.com/onecli/onecli"
                 target="_blank"
@@ -135,7 +145,12 @@ export const DashboardHeader = () => {
         </Tooltip>
         <Tooltip>
           <TooltipTrigger asChild>
-            <Button variant="ghost" size="icon" className="size-8" asChild>
+            <Button
+              variant="ghost"
+              size="icon"
+              className="hidden size-8 md:inline-flex"
+              asChild
+            >
               <a
                 href="https://discord.gg/PSztzsQB3g"
                 target="_blank"
@@ -148,7 +163,10 @@ export const DashboardHeader = () => {
           </TooltipTrigger>
           <TooltipContent>Discord</TooltipContent>
         </Tooltip>
-        <Separator orientation="vertical" className="mx-1 h-4" />
+        <Separator
+          orientation="vertical"
+          className="mx-1 hidden h-4 md:block"
+        />
         <GetStartedButton />
         <Tooltip>
           <TooltipTrigger asChild>

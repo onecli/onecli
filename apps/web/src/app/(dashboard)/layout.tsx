@@ -10,6 +10,7 @@ import { SettingsNav } from "@/app/(dashboard)/settings/_components/settings-nav
 import { SettingsMobileNav } from "@/app/(dashboard)/settings/_components/settings-mobile-nav";
 import { useAuth } from "@/providers/auth-provider";
 import { checkDashboardRedirect } from "@/lib/user-plan";
+import { getDashboardRedirect } from "@/lib/dashboard/validate-session";
 
 export default function DashboardLayout({
   children,
@@ -41,18 +42,28 @@ export default function DashboardLayout({
         return;
       }
 
-      // Check if a redirect is needed (e.g. onboarding in cloud)
-      const redirectTo = await checkDashboardRedirect();
-      if (redirectTo) {
-        router.replace(redirectTo);
+      const data = await res.json();
+
+      const sessionRedirect = getDashboardRedirect(data, pathname);
+      if (sessionRedirect) {
+        router.replace(sessionRedirect);
         return;
+      }
+
+      // Account pages are always accessible (e.g. from create-org to delete account)
+      if (!pathname.startsWith("/account")) {
+        const redirectTo = await checkDashboardRedirect();
+        if (redirectTo) {
+          router.replace(redirectTo);
+          return;
+        }
       }
 
       setReady(true);
     } catch {
       signOutRef.current();
     }
-  }, [router]);
+  }, [router, pathname]);
 
   useEffect(() => {
     if (isAuthenticated) {
@@ -74,23 +85,23 @@ export default function DashboardLayout({
 
   return (
     <SidebarProvider
-      className="bg-sidebar h-svh overflow-hidden"
+      className="bg-background h-svh overflow-hidden"
       style={{ "--sidebar-width-icon": "2rem" } as React.CSSProperties}
     >
       <DashboardSidebar />
-      <SidebarInset className="bg-background overflow-hidden rounded-none border md:rounded-xl md:peer-data-[variant=inset]:shadow-none md:peer-data-[variant=inset]:peer-data-[state=collapsed]:ml-1">
+      <SidebarInset className="bg-background min-w-0 overflow-hidden rounded-none md:border md:rounded-xl md:peer-data-[variant=inset]:shadow-none md:peer-data-[variant=inset]:peer-data-[state=collapsed]:ml-1">
         <header className="flex h-12 shrink-0 items-center border-b">
           <DashboardHeader />
         </header>
-        <div className="flex min-h-0 flex-1">
+        <div className="flex min-h-0 min-w-0 flex-1 overflow-hidden">
           {isSettings && (
             <aside className="hidden w-56 shrink-0 overflow-y-auto border-r px-6 pt-6 md:block">
               <SettingsNav />
             </aside>
           )}
-          <ScrollArea className="h-full min-h-0 flex-1">
+          <ScrollArea className="h-full min-h-0 min-w-0 flex-1 [&>[data-radix-scroll-area-viewport]]:!overflow-x-hidden">
             {isSettings && <SettingsMobileNav />}
-            <main className="p-4 sm:p-6">{children}</main>
+            <main className="min-w-0 p-4 sm:p-6">{children}</main>
           </ScrollArea>
         </div>
       </SidebarInset>

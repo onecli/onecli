@@ -14,3 +14,9 @@ export type OnUserCreated = (
   user: SessionUser,
   attributes: SessionAttributes,
 ) => void;
+
+export type ShouldBootstrapOrg = (request: NextRequest) => boolean;
+
+export type AugmentSessionResponse = (
+  userId: string,
+) => Promise<Record<string, unknown>>;

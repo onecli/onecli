@@ -14,18 +14,18 @@ datasource db {
 // multiple organizations (today: one auto-created on signup; future: invited
 // to others, can create more). Projects under an org share its plan/quotas.
 model Organization {
-  id                    String    @id @default(uuid())
-  name                  String
-  slug                  String    @unique
-  stripeCustomerId      String?   @unique @map("stripe_customer_id")
-  subscriptionStatus    String    @default("free") @map("subscription_status")
-  demoSeeded            Boolean   @default(false) @map("demo_seeded")
-  onboardingCompletedAt DateTime? @map("onboarding_completed_at")
-  createdAt             DateTime  @default(now()) @map("created_at")
-  updatedAt             DateTime  @updatedAt @map("updated_at")
+  id                 String   @id @default(uuid())
+  name               String
+  slug               String   @unique
+  stripeCustomerId   String?  @unique @map("stripe_customer_id")
+  subscriptionStatus String   @default("free") @map("subscription_status")
+  demoSeeded         Boolean  @default(false) @map("demo_seeded")
+  createdAt          DateTime @default(now()) @map("created_at")
+  updatedAt          DateTime @updatedAt @map("updated_at")
 
-  projects Project[]
-  members  OrganizationMember[]
+  projects    Project[]
+  members     OrganizationMember[]
+  invitations Invitation[]
 
   @@map("organizations")
 }
@@ -44,6 +44,26 @@ model OrganizationMember {
   @@id([organizationId, userId])
   @@index([userId])
   @@map("organization_members")
+}
+
+model Invitation {
+  id             String   @id @default(uuid())
+  organizationId String   @map("organization_id")
+  email          String
+  role           String // "admin" | "member"
+  token          String   @unique
+  status         String   @default("pending") // "pending" | "accepted" | "cancelled" | "expired"
+  invitedById    String   @map("invited_by_id")
+  invitedByEmail String   @map("invited_by_email")
+  expiresAt      DateTime @map("expires_at")
+  createdAt      DateTime @default(now()) @map("created_at")
+
+  organization Organization @relation(fields: [organizationId], references: [id])
+  invitedBy    User         @relation("InvitationCreator", fields: [invitedById], references: [id])
+
+  @@unique([organizationId, email])
+  @@index([token])
+  @@map("invitations")
 }
 
 model Project {
@@ -77,17 +97,19 @@ model Project {
 }
 
 model User {
-  id             String    @id @default(uuid())
-  email          String    @unique
-  name           String?
-  externalAuthId String    @unique @map("external_auth_id")
-  countryCode    String?   @map("country_code")
-  country        String?   @map("country")
-  lastLoginAt    DateTime? @map("last_login_at")
-  createdAt      DateTime  @default(now()) @map("created_at")
-  updatedAt      DateTime  @updatedAt @map("updated_at")
+  id                    String    @id @default(uuid())
+  email                 String    @unique
+  name                  String?
+  externalAuthId        String    @unique @map("external_auth_id")
+  countryCode           String?   @map("country_code")
+  country               String?   @map("country")
+  lastLoginAt           DateTime? @map("last_login_at")
+  onboardingCompletedAt DateTime? @map("onboarding_completed_at")
+  createdAt             DateTime  @default(now()) @map("created_at")
+  updatedAt             DateTime  @updatedAt @map("updated_at")
 
   organizationMemberships OrganizationMember[]
+  sentInvitations         Invitation[]         @relation("InvitationCreator")
   apiKeys                 ApiKey[]
   auditLogs               AuditLog[]
   createdProjects         Project[]            @relation("ProjectCreator")

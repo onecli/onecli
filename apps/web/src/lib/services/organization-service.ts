@@ -28,7 +28,10 @@ export const findUserDefaultProject = async (
   if (!membership) return null;
 
   return db.project.findFirst({
-    where: { organizationId: membership.organizationId },
+    where: {
+      organizationId: membership.organizationId,
+      createdByUserId: userId,
+    },
     select: { id: true, organizationId: true },
     orderBy: { createdAt: "asc" },
   });

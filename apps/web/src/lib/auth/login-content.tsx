@@ -90,7 +90,7 @@ export const LoginContent = () => {
               <GoogleIcon />
               {signingIn ? "Redirecting..." : "Continue with Google"}
             </Button>
-            <p className="text-muted-foreground mt-4 text-center text-xs whitespace-nowrap">
+            <p className="text-muted-foreground mt-4 text-center text-xs">
               By continuing, you acknowledge OneCLI&apos;s{" "}
               <a
                 href="https://onecli.sh/privacy"

@@ -31,6 +31,12 @@ const nextConfig = {
           "@/lib/deploy/deploy-page": "@/cloud/deploy/deploy-page",
           "@/lib/deploy/deploy-new-page": "@/cloud/deploy/deploy-new-page",
           "@/lib/components/request-app-slot": "@/cloud/apps/request-app-slot",
+          "@/lib/actions/agents": "@/cloud/actions/agents",
+          "@/lib/actions/rules": "@/cloud/actions/rules",
+          "@/lib/actions/secrets": "@/cloud/actions/secrets",
+          "@/lib/home-redirect": "@/cloud/home-redirect",
+          "@/lib/dashboard/validate-session":
+            "@/cloud/dashboard/validate-session",
         }
       : {},
   },
