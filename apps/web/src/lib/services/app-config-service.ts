@@ -1,5 +1,3 @@
-"use server";
-
 import { db, Prisma } from "@onecli/db";
 import { cryptoService } from "@/lib/crypto";
 import { logger } from "@/lib/logger";
