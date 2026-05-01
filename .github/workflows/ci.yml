@@ -107,3 +107,24 @@ jobs:
             --exit-code; EXIT_CODE=$?
           docker rm -f shadow-db
           exit $EXIT_CODE
+
+  security:
+    name: SBOM Crypto Audit
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: apps/gateway -> target
+
+      - name: Setup Node.js
+        uses: ./.github/actions/setup-node
+
+      - name: Audit crypto dependencies
+        run: ./scripts/sbom-crypto-audit.sh
