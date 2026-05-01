@@ -1,1 +1,1 @@
-export { default } from "@/lib/deploy/deploy-page";
+export { default } from "@/lib/deploy/deploy-pages";

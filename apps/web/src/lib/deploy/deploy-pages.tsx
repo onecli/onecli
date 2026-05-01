@@ -1,3 +1,4 @@
+import { redirect } from "next/navigation";
 import { Rocket, ExternalLink } from "lucide-react";
 import { Button } from "@onecli/ui/components/button";
 import { Card } from "@onecli/ui/components/card";
@@ -42,4 +43,8 @@ export default function DeployPage() {
       </Card>
     </div>
   );
+}
+
+export function DeployNewPage() {
+  redirect("/deploy");
 }

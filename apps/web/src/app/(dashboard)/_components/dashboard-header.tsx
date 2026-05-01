@@ -20,7 +20,7 @@ import {
   BreadcrumbPage,
   BreadcrumbSeparator,
 } from "@onecli/ui/components/breadcrumb";
-import { navItems } from "@/lib/nav-items";
+import { navItems } from "@/lib/nav-config";
 import { GetStartedButton } from "./get-started-button";
 
 const GitHubIcon = ({ className }: { className?: string }) => (

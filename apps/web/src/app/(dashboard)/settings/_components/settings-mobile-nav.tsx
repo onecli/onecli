@@ -3,7 +3,7 @@
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { cn } from "@onecli/ui/lib/utils";
-import { settingsSections } from "@/lib/settings-nav-items";
+import { settingsSections } from "@/lib/nav-config";
 
 export const SettingsMobileNav = () => {
   const pathname = usePathname();
