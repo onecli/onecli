@@ -115,16 +115,31 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v6
 
+      - name: Check for changes
+        id: changes
+        uses: dorny/paths-filter@v3
+        with:
+          filters: |
+            deps:
+              - 'apps/gateway/Cargo.lock'
+              - 'pnpm-lock.yaml'
+              - 'scripts/sbom-crypto-audit.sh'
+              - '.github/workflows/ci.yml'
+
       - name: Setup Rust
+        if: steps.changes.outputs.deps == 'true'
         uses: dtolnay/rust-toolchain@stable
 
       - name: Cache Rust
+        if: steps.changes.outputs.deps == 'true'
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: apps/gateway -> target
 
       - name: Setup Node.js
+        if: steps.changes.outputs.deps == 'true'
         uses: ./.github/actions/setup-node
 
       - name: Audit crypto dependencies
+        if: steps.changes.outputs.deps == 'true'
         run: ./scripts/sbom-crypto-audit.sh

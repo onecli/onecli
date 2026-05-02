@@ -73,8 +73,3 @@ if [ "$ERRORS" -gt 0 ]; then
 else
   echo "AUDIT PASSED: all crypto components are on the approved list"
 fi
-
-################################################################################
-# Changelog:
-# 2026-03-24  Initial creation — crypto dependency audit for SBOM compliance
-################################################################################
