@@ -90,6 +90,15 @@ export const hasAnthropicSecret = async (): Promise<boolean> => {
   return !!secret;
 };
 
+export const hasOpenaiSecret = async (): Promise<boolean> => {
+  const { projectId } = await resolveUser();
+  const secret = await db.secret.findFirst({
+    where: { projectId, type: "openai" },
+    select: { id: true },
+  });
+  return !!secret;
+};
+
 export const getDemoInfo = async () => {
   const { projectId } = await resolveUser();
 
@@ -150,6 +159,41 @@ export const validateAnthropicKey = async (
     return {
       valid: false,
       error: "Could not reach Anthropic API to validate the key.",
+    };
+  }
+};
+
+export const validateOpenaiKey = async (
+  key: string,
+): Promise<{ valid: boolean; error?: string }> => {
+  try {
+    const res = await fetch("https://api.openai.com/v1/models", {
+      method: "GET",
+      headers: {
+        Authorization: `Bearer ${key}`,
+      },
+    });
+
+    if (res.ok) return { valid: true };
+
+    if (res.status === 401) {
+      return { valid: false, error: "Invalid API key." };
+    }
+    if (res.status === 403) {
+      return {
+        valid: false,
+        error: "This key doesn't have permission to access the API.",
+      };
+    }
+
+    return {
+      valid: false,
+      error: `OpenAI API returned an unexpected status (${res.status}).`,
+    };
+  } catch {
+    return {
+      valid: false,
+      error: "Could not reach OpenAI API to validate the key.",
     };
   }
 };

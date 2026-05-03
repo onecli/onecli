@@ -72,7 +72,7 @@ pub(super) async fn mitm(
         .title_case_headers(true)
         .serve_connection(
             io,
-            service_fn(move |req| {
+            service_fn(move |req: hyper::Request<hyper::body::Incoming>| {
                 let host = host_owned.clone();
                 let client = http_client.clone();
                 let cache = Arc::clone(&cache);
@@ -81,6 +81,7 @@ pub(super) async fn mitm(
                 let engine = Arc::clone(&policy_engine);
                 let vault_rules = Arc::clone(&vault_injection_rules);
                 async move {
+                    let is_ws = super::websocket::is_websocket_upgrade(&req);
                     let connection_id = connect::extract_connection_id(req.headers());
 
                     // Re-resolve rules from cache on each request so that
@@ -100,16 +101,39 @@ pub(super) async fn mitm(
                             rules,
                             app_connections,
                         }) => {
-                            match forward::forward_request(
-                                req, &host, "https", client, &rules, &*cache, &ctx, &approvals,
-                            )
-                            .await
-                            {
-                                Ok(mut resp) => {
-                                    connect::inject_connections_header(&mut resp, &app_connections);
-                                    Ok(resp)
+                            if is_ws {
+                                match super::websocket::handle_websocket(
+                                    req, &host, &rules, &*cache, &ctx,
+                                )
+                                .await
+                                {
+                                    Ok(mut resp) => {
+                                        connect::inject_connections_header(
+                                            &mut resp,
+                                            &app_connections,
+                                        );
+                                        Ok(resp)
+                                    }
+                                    Err(e) => {
+                                        warn!(host = %host, error = %e, "WebSocket handler failed");
+                                        Ok(response::resolution_failed())
+                                    }
                                 }
-                                Err(e) => Err(e),
+                            } else {
+                                match forward::forward_request(
+                                    req, &host, "https", client, &rules, &*cache, &ctx, &approvals,
+                                )
+                                .await
+                                {
+                                    Ok(mut resp) => {
+                                        connect::inject_connections_header(
+                                            &mut resp,
+                                            &app_connections,
+                                        );
+                                        Ok(resp)
+                                    }
+                                    Err(e) => Err(e),
+                                }
                             }
                         }
                         Ok(ResolveResult::Ambiguous(connections)) => {
@@ -127,6 +151,7 @@ pub(super) async fn mitm(
                 }
             }),
         )
+        .with_upgrades()
         .await
         .context("serving MITM connection")
 }

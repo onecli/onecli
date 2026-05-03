@@ -4,6 +4,7 @@ import { useRef, useState } from "react";
 import { Button } from "@onecli/ui/components/button";
 import { Input } from "@onecli/ui/components/input";
 import { Label } from "@onecli/ui/components/label";
+import { SecretInput } from "@/components/secret-input";
 import { ConnectLayout } from "./connect-layout";
 
 interface FileImportConfig {
@@ -179,25 +180,36 @@ export const CredentialsFlow = ({
                 {field.description}
               </p>
             )}
-            <Input
-              id={`connect-${field.name}`}
-              type={
-                field.secret === true ||
-                (field.secret === undefined && app.connectionType === "api_key")
-                  ? "password"
-                  : "text"
-              }
-              value={values[field.name] ?? ""}
-              onChange={(e) =>
-                setValues((prev) => ({
-                  ...prev,
-                  [field.name]: e.target.value,
-                }))
-              }
-              placeholder={field.placeholder}
-              className="font-mono text-sm"
-              autoFocus={i === 0}
-            />
+            {field.secret === true ||
+            (field.secret === undefined && app.connectionType === "api_key") ? (
+              <SecretInput
+                id={`connect-${field.name}`}
+                value={values[field.name] ?? ""}
+                onChange={(e) =>
+                  setValues((prev) => ({
+                    ...prev,
+                    [field.name]: e.target.value,
+                  }))
+                }
+                placeholder={field.placeholder}
+                autoFocus={i === 0}
+              />
+            ) : (
+              <Input
+                id={`connect-${field.name}`}
+                type="text"
+                value={values[field.name] ?? ""}
+                onChange={(e) =>
+                  setValues((prev) => ({
+                    ...prev,
+                    [field.name]: e.target.value,
+                  }))
+                }
+                placeholder={field.placeholder}
+                className="font-mono text-sm"
+                autoFocus={i === 0}
+              />
+            )}
           </div>
         ))}
         <Button

@@ -68,6 +68,15 @@ export const SecretsContent = ({ typeFilter }: SecretsContentProps) => {
       });
       setCreateOpen(true);
       router.replace(window.location.pathname, { scroll: false });
+    } else if (createType === "openai" && typeFilter === "llm") {
+      paramHandled.current = true;
+      setPrefill({
+        type: "openai",
+        hostPattern: "api.openai.com",
+        name: "OpenAI Token",
+      });
+      setCreateOpen(true);
+      router.replace(window.location.pathname, { scroll: false });
     } else if (createType === "generic" && typeFilter === "generic" && host) {
       paramHandled.current = true;
       setPrefill({
@@ -145,7 +154,9 @@ export const SecretsContent = ({ typeFilter }: SecretsContentProps) => {
         onSaved={fetchSecrets}
         prefill={prefill}
         defaultType={typeFilter === "generic" ? "generic" : undefined}
-        allowedTypes={typeFilter === "llm" ? ["anthropic"] : undefined}
+        allowedTypes={
+          typeFilter === "llm" ? ["anthropic", "openai"] : undefined
+        }
       />
     </div>
   );

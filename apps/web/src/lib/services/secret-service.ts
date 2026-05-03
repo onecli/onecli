@@ -12,6 +12,7 @@ import {
 
 const SECRET_TYPE_LABELS: Record<string, string> = {
   anthropic: "Anthropic API Key",
+  openai: "OpenAI API Key",
   generic: "Generic Secret",
 };
 
@@ -103,7 +104,9 @@ export const createSecret = async (
       ? ({
           authMode: detectAnthropicAuthMode(value) ?? "api-key",
         } as Prisma.InputJsonValue)
-      : Prisma.JsonNull;
+      : input.type === "openai"
+        ? ({ authMode: "api-key" } as Prisma.InputJsonValue)
+        : Prisma.JsonNull;
 
   const secret = await db.secret.create({
     data: {
@@ -190,6 +193,8 @@ export const updateSecret = async (
       data.metadata = {
         authMode: detectAnthropicAuthMode(value) ?? "api-key",
       } as Prisma.InputJsonValue;
+    } else if (secret.type === "openai") {
+      data.metadata = { authMode: "api-key" } as Prisma.InputJsonValue;
     }
   }
 

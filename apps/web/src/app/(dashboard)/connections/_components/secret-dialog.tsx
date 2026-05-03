@@ -3,7 +3,7 @@
 import { useState, useEffect, useRef, useMemo } from "react";
 import { useInvalidateGatewayCache } from "@/hooks/use-invalidate-cache";
 import { toast } from "sonner";
-import { ArrowLeft, Bot, Key, Settings2 } from "lucide-react";
+import { ArrowLeft, Key, Settings2 } from "lucide-react";
 import { cn } from "@onecli/ui/lib/utils";
 import {
   Dialog,
@@ -16,6 +16,7 @@ import {
 import { Button } from "@onecli/ui/components/button";
 import { Input } from "@onecli/ui/components/input";
 import { Label } from "@onecli/ui/components/label";
+import { SecretInput } from "@/components/secret-input";
 import {
   Accordion,
   AccordionContent,
@@ -31,9 +32,10 @@ import {
   isHeaderInjection,
   isParamInjection,
   looksLikeAnthropicKey,
+  looksLikeOpenaiKey,
 } from "@/lib/validations/secret";
 
-type SecretType = "anthropic" | "generic";
+type SecretType = "anthropic" | "openai" | "generic";
 
 interface SecretTypeOption {
   value: SecretType;
@@ -44,14 +46,45 @@ interface SecretTypeOption {
   nameDefault: string;
 }
 
+const AnthropicIcon = ({ className }: { className?: string }) => (
+  <svg
+    xmlns="http://www.w3.org/2000/svg"
+    viewBox="0 0 300 300"
+    fill="currentColor"
+    className={className}
+  >
+    <path d="m172.36 49.15 80.42 201.7h44.1L216.46 49.15h-44.1Z" />
+    <path d="m79.07 171.03 27.52-70.88 27.51 70.88H79.07ZM83.53 49.15 3.13 250.85h44.96l16.44-42.36h84.12l16.44 42.36h44.96L129.64 49.15H83.53Z" />
+  </svg>
+);
+
+const OpenAIIcon = ({ className }: { className?: string }) => (
+  <svg
+    xmlns="http://www.w3.org/2000/svg"
+    viewBox="0 0 24 24"
+    fill="currentColor"
+    className={className}
+  >
+    <path d="M22.282 9.821a6 6 0 0 0-.516-4.91 6.05 6.05 0 0 0-6.51-2.9A6.065 6.065 0 0 0 4.981 4.18a6 6 0 0 0-3.998 2.9 6.05 6.05 0 0 0 .743 7.097 5.98 5.98 0 0 0 .51 4.911 6.05 6.05 0 0 0 6.515 2.9A6 6 0 0 0 13.26 24a6.06 6.06 0 0 0 5.772-4.206 6 6 0 0 0 3.997-2.9 6.06 6.06 0 0 0-.747-7.073M13.26 22.43a4.48 4.48 0 0 1-2.876-1.04l.141-.081 4.779-2.758a.8.8 0 0 0 .392-.681v-6.737l2.02 1.168a.07.07 0 0 1 .038.052v5.583a4.504 4.504 0 0 1-4.494 4.494M3.6 18.304a4.47 4.47 0 0 1-.535-3.014l.142.085 4.783 2.759a.77.77 0 0 0 .78 0l5.843-3.369v2.332a.08.08 0 0 1-.033.062L9.74 19.95a4.5 4.5 0 0 1-6.14-1.646M2.34 7.896a4.5 4.5 0 0 1 2.366-1.973V11.6a.77.77 0 0 0 .388.677l5.815 3.354-2.02 1.168a.08.08 0 0 1-.071 0l-4.83-2.786A4.504 4.504 0 0 1 2.34 7.872zm16.597 3.855-5.833-3.387L15.119 7.2a.08.08 0 0 1 .071 0l4.83 2.791a4.494 4.494 0 0 1-.676 8.105v-5.678a.79.79 0 0 0-.407-.667m2.01-3.023-.141-.085-4.774-2.782a.78.78 0 0 0-.785 0L9.409 9.23V6.897a.07.07 0 0 1 .028-.061l4.83-2.787a4.5 4.5 0 0 1 6.68 4.66zm-12.64 4.135-2.02-1.164a.08.08 0 0 1-.038-.057V6.075a4.5 4.5 0 0 1 7.375-3.453l-.142.08L8.704 5.46a.8.8 0 0 0-.393.681zm1.097-2.365 2.602-1.5 2.607 1.5v2.999l-2.597 1.5-2.607-1.5Z" />
+  </svg>
+);
+
 const SECRET_TYPE_OPTIONS: SecretTypeOption[] = [
   {
     value: "anthropic",
     label: "Anthropic API Key",
     description: "Inject your Anthropic key into requests to api.anthropic.com",
-    icon: <Bot className="size-5" />,
+    icon: <AnthropicIcon className="size-5" />,
     hostDefault: "api.anthropic.com",
     nameDefault: "Anthropic Token",
+  },
+  {
+    value: "openai",
+    label: "OpenAI API Key",
+    description: "Inject your OpenAI key into requests to api.openai.com",
+    icon: <OpenAIIcon className="size-5" />,
+    hostDefault: "api.openai.com",
+    nameDefault: "OpenAI Token",
   },
   {
     value: "generic",
@@ -320,7 +353,9 @@ export const SecretDialog = ({
                     ? "Update the secret\u2019s configuration. Leave the value field empty to keep the current value."
                     : type === "anthropic"
                       ? "Your key will be encrypted and injected into requests to api.anthropic.com."
-                      : "Configure a custom secret to inject as a header or URL parameter into matching requests."}
+                      : type === "openai"
+                        ? "Your key will be encrypted and injected into requests to api.openai.com."
+                        : "Configure a custom secret to inject as a header or URL parameter into matching requests."}
               </DialogDescription>
               {type === "generic" && !isEdit && !prefill && (
                 <div className="flex items-center gap-2 pt-1">
@@ -367,7 +402,9 @@ export const SecretDialog = ({
                     placeholder={
                       type === "anthropic"
                         ? "e.g. Anthropic Production Key"
-                        : "e.g. GitHub Token"
+                        : type === "openai"
+                          ? "e.g. OpenAI Production Key"
+                          : "e.g. GitHub Token"
                     }
                     value={name}
                     onChange={(e) => setName(e.target.value)}
@@ -394,14 +431,15 @@ export const SecretDialog = ({
                     </span>
                   )}
                 </Label>
-                <Input
+                <SecretInput
                   ref={valueInputRef}
                   id="secret-value"
-                  type="password"
                   placeholder={
                     type === "anthropic"
                       ? "sk-ant-api03-..."
-                      : "Enter secret value"
+                      : type === "openai"
+                        ? "sk-proj-..."
+                        : "Enter secret value"
                   }
                   value={value}
                   onChange={(e) => {
@@ -412,6 +450,9 @@ export const SecretDialog = ({
                       if (detected === "api-key") setName("Anthropic API Key");
                       else if (detected === "oauth")
                         setName("Anthropic OAuth Token");
+                    }
+                    if (type === "openai" && !name.trim()) {
+                      if (looksLikeOpenaiKey(val)) setName("OpenAI API Key");
                     }
                   }}
                 />
@@ -430,11 +471,29 @@ export const SecretDialog = ({
                         </>
                       )}
                     </p>
+                  ) : type === "openai" &&
+                    value.trim() &&
+                    !looksLikeOpenaiKey(value) ? (
+                    <p className="text-xs text-amber-600 dark:text-amber-400">
+                      {value.startsWith("sk-ant-") ? (
+                        "This looks like an Anthropic key, not an OpenAI key."
+                      ) : value.startsWith("sk-") ? (
+                        "This key looks incomplete. Make sure you copied the full value."
+                      ) : (
+                        <>
+                          Keys typically start with{" "}
+                          <code className="text-[11px]">sk-proj-</code> or{" "}
+                          <code className="text-[11px]">sk-</code>
+                        </>
+                      )}
+                    </p>
                   ) : (
                     <p className="text-muted-foreground text-xs">
                       {type === "anthropic"
                         ? "Paste your API key or OAuth token from the Anthropic Console."
-                        : "Encrypted at rest. You won\u2019t be able to view this value again."}
+                        : type === "openai"
+                          ? "Paste your API key from the OpenAI Dashboard."
+                          : "Encrypted at rest. You won\u2019t be able to view this value again."}
                     </p>
                   )}
                   {type === "anthropic" && <AnthropicKeyBadge value={value} />}
@@ -585,8 +644,7 @@ export const SecretDialog = ({
                     </AccordionTrigger>
                     <AccordionContent className="pb-0">
                       <div className="space-y-4">
-                        {(type === "anthropic" ||
-                          (type === "generic" && !!prefill)) && (
+                        {(type !== "generic" || !!prefill) && (
                           <div className="space-y-2">
                             <Label htmlFor="secret-host">Host pattern</Label>
                             <Input

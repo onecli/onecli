@@ -57,7 +57,7 @@ const hostPatternSchema = z
 
 export const createSecretSchema = z.object({
   name: z.string().trim().min(1).max(255),
-  type: z.enum(["anthropic", "generic"]),
+  type: z.enum(["anthropic", "openai", "generic"]),
   value: z.string().min(1).max(10000),
   hostPattern: hostPatternSchema,
   pathPattern: z.string().max(1000).optional(),
@@ -121,3 +121,16 @@ export const parseAnthropicMetadata = (
   }
   return null;
 };
+
+// ── OpenAI key helpers ──────────────────────────────────────────────────
+
+export const OPENAI_KEY_MIN_LENGTH = 40;
+
+/**
+ * Returns true if the value looks like an OpenAI key.
+ * OpenAI keys start with `sk-` but NOT `sk-ant-` (which is Anthropic).
+ */
+export const looksLikeOpenaiKey = (value: string): boolean =>
+  value.startsWith("sk-") &&
+  !value.startsWith("sk-ant-") &&
+  value.length >= OPENAI_KEY_MIN_LENGTH;

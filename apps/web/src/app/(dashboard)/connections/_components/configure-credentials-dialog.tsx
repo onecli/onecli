@@ -11,6 +11,7 @@ import {
 import { Button } from "@onecli/ui/components/button";
 import { Input } from "@onecli/ui/components/input";
 import { Label } from "@onecli/ui/components/label";
+import { SecretInput } from "@/components/secret-input";
 import { saveAppConfig, setAppConfigEnabled } from "@/lib/actions/app-config";
 import type { OAuthConfigField } from "@/lib/apps/types";
 import { IS_CLOUD } from "@/lib/env";
@@ -86,20 +87,35 @@ export const ConfigureCredentialsDialog = ({
                   {field.description}
                 </p>
               )}
-              <Input
-                id={`config-${field.name}`}
-                type={field.secret ? "password" : "text"}
-                value={values[field.name] ?? ""}
-                onChange={(e) =>
-                  setValues((prev) => ({
-                    ...prev,
-                    [field.name]: e.target.value,
-                  }))
-                }
-                placeholder={field.placeholder}
-                className="font-mono text-sm"
-                autoFocus={i === 0}
-              />
+              {field.secret ? (
+                <SecretInput
+                  id={`config-${field.name}`}
+                  value={values[field.name] ?? ""}
+                  onChange={(e) =>
+                    setValues((prev) => ({
+                      ...prev,
+                      [field.name]: e.target.value,
+                    }))
+                  }
+                  placeholder={field.placeholder}
+                  autoFocus={i === 0}
+                />
+              ) : (
+                <Input
+                  id={`config-${field.name}`}
+                  type="text"
+                  value={values[field.name] ?? ""}
+                  onChange={(e) =>
+                    setValues((prev) => ({
+                      ...prev,
+                      [field.name]: e.target.value,
+                    }))
+                  }
+                  placeholder={field.placeholder}
+                  className="font-mono text-sm"
+                  autoFocus={i === 0}
+                />
+              )}
             </div>
           ))}
 

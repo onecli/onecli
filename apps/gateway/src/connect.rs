@@ -806,6 +806,11 @@ fn build_injections(
             }
         }
 
+        "openai" => vec![Injection::SetHeader {
+            name: "authorization".to_string(),
+            value: format!("Bearer {decrypted_value}"),
+        }],
+
         "generic" => {
             let config = injection_config.and_then(|v| v.as_object());
 
