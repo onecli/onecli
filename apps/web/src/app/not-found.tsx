@@ -5,14 +5,14 @@ export default function NotFound() {
   return (
     <div className="flex h-svh flex-col items-center justify-center gap-4">
       <Image
-        src="/logo.svg"
+        src="/onecli-full-logo.png"
         alt="OneCLI"
         width={120}
         height={34}
         className="dark:hidden"
       />
       <Image
-        src="/logo-dark.svg"
+        src="/onecli-full-logo-dark.png"
         alt="OneCLI"
         width={120}
         height={34}

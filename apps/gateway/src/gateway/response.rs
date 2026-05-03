@@ -164,9 +164,8 @@ pub(crate) fn credential_not_found<S>(
     let base = dashboard_url();
     let encoded_host = utf8_percent_encode(hostname, NON_ALPHANUMERIC);
     let encoded_path = utf8_percent_encode(path, NON_ALPHANUMERIC);
-    let secret_url = format!(
-        "{base}/connections/secrets?create=generic&host={encoded_host}&path={encoded_path}"
-    );
+    let secret_url =
+        format!("{base}/connections/custom?create=generic&host={encoded_host}&path={encoded_path}");
     with_no_retry(json_error(
         status,
         serde_json::json!({
@@ -178,7 +177,7 @@ pub(crate) fn credential_not_found<S>(
                  - path: {path}\n\n\
                  Before sending this link to the user, consider whether to adjust it. \
                  You can build a custom URL with any of these query parameters:\n\
-                 {base}/connections/secrets?create=generic&host=<host>&path=<path>&name=<name>&header=<header>&format=<format>\n\n\
+                 {base}/connections/custom?create=generic&host=<host>&path=<path>&name=<name>&header=<header>&format=<format>\n\n\
                  Available parameters:\n\
                  - `host` (required): hostname to match (e.g., api.example.com or *.example.com)\n\
                  - `path`: path pattern (e.g., /v1/* or /*). Defaults to the exact request path.\n\

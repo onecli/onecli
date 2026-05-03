@@ -93,6 +93,10 @@ interface SecretDialogProps {
   secret?: SecretItem;
   /** Pre-populate fields and skip type selection step. */
   prefill?: SecretPrefill;
+  /** When set, skip type selection and use this type directly for new secrets. */
+  defaultType?: SecretType;
+  /** Filter which types appear in TypeStep. */
+  allowedTypes?: SecretType[];
 }
 
 export const SecretDialog = ({
@@ -101,6 +105,8 @@ export const SecretDialog = ({
   onSaved,
   secret,
   prefill,
+  defaultType,
+  allowedTypes,
 }: SecretDialogProps) => {
   const isEdit = !!secret;
   const invalidateCache = useInvalidateGatewayCache();
@@ -183,6 +189,19 @@ export const SecretDialog = ({
         setParamName(prefill.paramName ?? "");
         setParamFormat(prefill.paramFormat ?? "");
         setTimeout(() => valueInputRef.current?.focus(), 100);
+      } else if (defaultType) {
+        const option = SECRET_TYPE_OPTIONS.find((o) => o.value === defaultType);
+        setStep("form");
+        setType(defaultType);
+        setName(option?.nameDefault ?? "");
+        setValue("");
+        setHostPattern(option?.hostDefault ?? "");
+        setPathPattern("");
+        setInjectionTarget("header");
+        setHeaderName("Authorization");
+        setValueFormat("Bearer {value}");
+        setParamName("");
+        setParamFormat("");
       } else {
         setStep("type");
         setType("anthropic");
@@ -197,7 +216,7 @@ export const SecretDialog = ({
         setParamFormat("");
       }
     }
-  }, [open, secret, prefill]);
+  }, [open, secret, prefill, defaultType]);
 
   const handleSelectType = (selected: SecretType) => {
     setType(selected);
@@ -277,12 +296,12 @@ export const SecretDialog = ({
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="sm:max-w-lg max-h-[calc(100dvh-2rem)] grid-rows-[auto_1fr_auto]">
         {step === "type" && !isEdit ? (
-          <TypeStep onSelect={handleSelectType} />
+          <TypeStep onSelect={handleSelectType} allowedTypes={allowedTypes} />
         ) : (
           <>
             <DialogHeader>
               <div className="flex items-center gap-2">
-                {!isEdit && (
+                {!isEdit && !defaultType && (
                   <button
                     onClick={() => setStep("type")}
                     className="text-muted-foreground hover:text-foreground -ml-1 rounded-md p-1 transition-colors"
@@ -680,36 +699,48 @@ export const SecretDialog = ({
   );
 };
 
-const TypeStep = ({ onSelect }: { onSelect: (type: SecretType) => void }) => (
-  <>
-    <DialogHeader>
-      <DialogTitle>Add secret</DialogTitle>
-      <DialogDescription>
-        Choose the type of credential to store.
-      </DialogDescription>
-    </DialogHeader>
+const TypeStep = ({
+  onSelect,
+  allowedTypes,
+}: {
+  onSelect: (type: SecretType) => void;
+  allowedTypes?: SecretType[];
+}) => {
+  const options = allowedTypes
+    ? SECRET_TYPE_OPTIONS.filter((o) => allowedTypes.includes(o.value))
+    : SECRET_TYPE_OPTIONS;
 
-    <div className="grid gap-3 py-2">
-      {SECRET_TYPE_OPTIONS.map((option) => (
-        <button
-          key={option.value}
-          onClick={() => onSelect(option.value)}
-          className="border-border hover:border-foreground/20 hover:bg-muted/50 flex items-start gap-4 rounded-lg border p-4 text-left transition-colors"
-        >
-          <div className="bg-muted text-muted-foreground mt-0.5 flex size-10 shrink-0 items-center justify-center rounded-md">
-            {option.icon}
-          </div>
-          <div className="space-y-1">
-            <div className="text-sm font-medium">{option.label}</div>
-            <div className="text-muted-foreground text-xs">
-              {option.description}
+  return (
+    <>
+      <DialogHeader>
+        <DialogTitle>Add secret</DialogTitle>
+        <DialogDescription>
+          Choose the type of credential to store.
+        </DialogDescription>
+      </DialogHeader>
+
+      <div className="grid gap-3 py-2">
+        {options.map((option) => (
+          <button
+            key={option.value}
+            onClick={() => onSelect(option.value)}
+            className="border-border hover:border-foreground/20 hover:bg-muted/50 flex items-start gap-4 rounded-lg border p-4 text-left transition-colors"
+          >
+            <div className="bg-muted text-muted-foreground mt-0.5 flex size-10 shrink-0 items-center justify-center rounded-md">
+              {option.icon}
             </div>
-          </div>
-        </button>
-      ))}
-    </div>
-  </>
-);
+            <div className="space-y-1">
+              <div className="text-sm font-medium">{option.label}</div>
+              <div className="text-muted-foreground text-xs">
+                {option.description}
+              </div>
+            </div>
+          </button>
+        ))}
+      </div>
+    </>
+  );
+};
 
 const AnthropicKeyBadge = ({ value }: { value: string }) => {
   const detected = detectAnthropicAuthMode(value);

@@ -19,7 +19,7 @@ import { getSecrets } from "@/lib/actions/secrets";
  * Derive tab URLs from the current pathname so navigation stays inside the
  * current prefix. In OSS the prefix is `/connections`; in cloud's project
  * routes it's `/p/<projectId>/connections`. Without this, clicking "Secrets"
- * inside a project would jump to the OSS `/connections/secrets` URL and lose
+ * inside a project would jump to the OSS `/connections/custom` URL and lose
  * the project scope.
  */
 const getTabRoutes = (pathname: string): Record<string, string> => {
@@ -28,7 +28,8 @@ const getTabRoutes = (pathname: string): Record<string, string> => {
     idx >= 0 ? pathname.slice(0, idx + "/connections".length) : "/connections";
   return {
     apps: base,
-    secrets: `${base}/secrets`,
+    custom: `${base}/custom`,
+    llms: `${base}/llms`,
     vaults: `${base}/vaults`,
     connected: `${base}/connected`,
   };
@@ -36,7 +37,8 @@ const getTabRoutes = (pathname: string): Record<string, string> => {
 
 const pathToTab = (pathname: string): string => {
   const segment = pathname.split("/connections")[1]?.replace(/^\//, "") || "";
-  if (segment === "secrets") return "secrets";
+  if (segment === "custom") return "custom";
+  if (segment === "llms") return "llms";
   if (segment === "vaults") return "vaults";
   if (segment === "connected") return "connected";
   return "apps";
@@ -89,7 +91,8 @@ export const ConnectionsTabs = () => {
       <AnimatedTabList className="sm:justify-between">
         <div className="flex">
           <AnimatedTabTrigger value="apps">Apps</AnimatedTabTrigger>
-          <AnimatedTabTrigger value="secrets">Secrets</AnimatedTabTrigger>
+          <AnimatedTabTrigger value="custom">Custom</AnimatedTabTrigger>
+          <AnimatedTabTrigger value="llms">LLMs</AnimatedTabTrigger>
           <AnimatedTabTrigger value="vaults">
             <span className="sm:hidden">Vaults</span>
             <span className="hidden sm:inline">External Vaults</span>

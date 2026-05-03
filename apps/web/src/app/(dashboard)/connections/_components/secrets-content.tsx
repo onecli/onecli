@@ -22,7 +22,11 @@ interface Secret {
   createdAt: Date;
 }
 
-export const SecretsContent = () => {
+interface SecretsContentProps {
+  typeFilter: "generic" | "llm";
+}
+
+export const SecretsContent = ({ typeFilter }: SecretsContentProps) => {
   const router = useRouter();
   const searchParams = useSearchParams();
   const [secrets, setSecrets] = useState<Secret[]>([]);
@@ -36,6 +40,10 @@ export const SecretsContent = () => {
     setSecrets(result);
     setLoading(false);
   }, []);
+
+  const filteredSecrets = secrets.filter((s) =>
+    typeFilter === "generic" ? s.type === "generic" : s.type !== "generic",
+  );
 
   useEffect(() => {
     fetchSecrets();
@@ -51,7 +59,7 @@ export const SecretsContent = () => {
       paramHandled.current = true;
       setCreateOpen(true);
       router.replace(window.location.pathname, { scroll: false });
-    } else if (createType === "anthropic") {
+    } else if (createType === "anthropic" && typeFilter === "llm") {
       paramHandled.current = true;
       setPrefill({
         type: "anthropic",
@@ -60,7 +68,7 @@ export const SecretsContent = () => {
       });
       setCreateOpen(true);
       router.replace(window.location.pathname, { scroll: false });
-    } else if (createType === "generic" && host) {
+    } else if (createType === "generic" && typeFilter === "generic" && host) {
       paramHandled.current = true;
       setPrefill({
         type: "generic",
@@ -75,7 +83,7 @@ export const SecretsContent = () => {
       setCreateOpen(true);
       router.replace(window.location.pathname, { scroll: false });
     }
-  }, [searchParams, loading, router]);
+  }, [searchParams, loading, router, typeFilter]);
 
   if (loading) {
     return (
@@ -104,22 +112,26 @@ export const SecretsContent = () => {
       <div className="flex justify-end">
         <Button size="sm" onClick={() => setCreateOpen(true)}>
           <Plus className="size-3.5" />
-          Add Secret
+          {typeFilter === "llm" ? "Add LLM Key" : "Add Secret"}
         </Button>
       </div>
 
-      {secrets.length === 0 ? (
+      {filteredSecrets.length === 0 ? (
         <Card className="flex flex-col items-center justify-center py-16 text-center">
           <div className="bg-muted mb-4 flex size-12 items-center justify-center rounded-full">
             <KeyRound className="text-muted-foreground size-6" />
           </div>
-          <p className="text-sm font-medium">No secrets yet</p>
+          <p className="text-sm font-medium">
+            {typeFilter === "llm" ? "No LLM keys yet" : "No custom secrets yet"}
+          </p>
           <p className="text-muted-foreground mt-1 max-w-xs text-xs">
-            Add a secret to inject encrypted credentials into gateway requests.
+            {typeFilter === "llm"
+              ? "Add an LLM API key to route requests through the gateway."
+              : "Add a custom secret to inject encrypted credentials into gateway requests."}
           </p>
         </Card>
       ) : (
-        secrets.map((secret) => (
+        filteredSecrets.map((secret) => (
           <SecretCard key={secret.id} secret={secret} onUpdate={fetchSecrets} />
         ))
       )}
@@ -132,6 +144,8 @@ export const SecretsContent = () => {
         }}
         onSaved={fetchSecrets}
         prefill={prefill}
+        defaultType={typeFilter === "generic" ? "generic" : undefined}
+        allowedTypes={typeFilter === "llm" ? ["anthropic"] : undefined}
       />
     </div>
   );

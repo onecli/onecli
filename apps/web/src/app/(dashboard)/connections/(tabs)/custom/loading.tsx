@@ -1,7 +1,7 @@
 import { Card } from "@onecli/ui/components/card";
 import { Skeleton } from "@onecli/ui/components/skeleton";
 
-export default function SecretsTabLoading() {
+export default function CustomTabLoading() {
   return (
     <div className="space-y-4">
       {[1, 2].map((i) => (
