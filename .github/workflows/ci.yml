@@ -16,9 +16,6 @@ jobs:
   rust:
     name: Rust
     runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: apps/gateway
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -32,6 +29,10 @@ jobs:
               - 'apps/gateway/**'
               - '.github/workflows/ci.yml'
 
+      - name: Setup Node.js
+        if: steps.changes.outputs.rust == 'true'
+        uses: ./.github/actions/setup-node
+
       - name: Setup Rust
         if: steps.changes.outputs.rust == 'true'
         uses: dtolnay/rust-toolchain@stable
@@ -44,15 +45,15 @@ jobs:
 
       - name: Clippy
         if: steps.changes.outputs.rust == 'true'
-        run: cargo clippy -- -D warnings
+        run: pnpm --filter @onecli/gateway check-types
 
       - name: Format
         if: steps.changes.outputs.rust == 'true'
-        run: cargo fmt --check
+        run: pnpm --filter @onecli/gateway lint
 
       - name: Test
         if: steps.changes.outputs.rust == 'true'
-        run: cargo test
+        run: pnpm --filter @onecli/gateway test
 
   lint:
     name: Lint & Format
