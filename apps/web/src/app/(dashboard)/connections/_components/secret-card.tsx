@@ -35,6 +35,7 @@ interface SecretCardProps {
     hostPattern: string;
     pathPattern: string | null;
     injectionConfig: unknown;
+    isPlatform: boolean;
     createdAt: Date;
   };
   onUpdate: () => void;
@@ -71,6 +72,11 @@ export const SecretCard = ({ secret, onUpdate }: SecretCardProps) => {
               <Badge variant="secondary" className="text-xs">
                 {secret.typeLabel}
               </Badge>
+              {secret.isPlatform && (
+                <Badge variant="outline" className="text-xs text-brand">
+                  Trial
+                </Badge>
+              )}
             </div>
 
             <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs">

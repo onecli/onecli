@@ -6,7 +6,6 @@
 
 use std::sync::OnceLock;
 
-use sqlx::PgPool;
 use tokio::sync::mpsc;
 
 pub(crate) const FLUSH_INTERVAL_SECS: u64 = 5;
@@ -28,6 +27,20 @@ pub(crate) struct RequestEvent {
     pub injection_count: u16,
     #[allow(dead_code)] // read by cloud telemetry (PostHog), unused in OSS
     pub timestamp: String,
+    pub injected: bool,
+    #[cfg(feature = "cloud")]
+    pub model: Option<String>,
+    #[cfg(feature = "cloud")]
+    pub input_tokens: Option<i32>,
+    #[cfg(feature = "cloud")]
+    pub output_tokens: Option<i32>,
+    #[cfg(feature = "cloud")]
+    pub cache_creation_input_tokens: Option<i32>,
+    #[cfg(feature = "cloud")]
+    pub cache_read_input_tokens: Option<i32>,
+    #[cfg(feature = "cloud")]
+    #[allow(dead_code)] // read by cloud telemetry (token counters), unused in OSS
+    pub is_trial: bool,
 }
 
 pub(crate) static SENDER: OnceLock<mpsc::Sender<RequestEvent>> = OnceLock::new();
@@ -70,41 +83,80 @@ pub(crate) async fn collect_batch(
     }
 }
 
-/// Batch INSERT events into the `request_logs` table using UNNEST.
-pub(crate) async fn insert_batch(
-    pool: &PgPool,
-    events: &[RequestEvent],
-) -> Result<(), sqlx::Error> {
-    let ids: Vec<String> = events
-        .iter()
-        .map(|_| uuid::Uuid::new_v4().to_string())
-        .collect();
-    let project_ids: Vec<String> = events.iter().map(|e| e.project_id.clone()).collect();
-    let agent_ids: Vec<String> = events.iter().map(|e| e.agent_id.clone()).collect();
-    let methods: Vec<String> = events.iter().map(|e| e.method.clone()).collect();
-    let hosts: Vec<String> = events.iter().map(|e| e.host.clone()).collect();
-    let paths: Vec<String> = events.iter().map(|e| e.path.clone()).collect();
-    let providers: Vec<String> = events.iter().map(|e| e.provider.clone()).collect();
-    let statuses: Vec<i32> = events.iter().map(|e| e.status as i32).collect();
-    let latencies: Vec<i32> = events.iter().map(|e| e.latency_ms as i32).collect();
-    let injections: Vec<i32> = events.iter().map(|e| e.injection_count as i32).collect();
+/// Pre-extracted column vectors for batch INSERT into `request_logs`.
+/// Accepts `&[&RequestEvent]` so callers can filter before extracting.
+pub(crate) struct BatchColumns {
+    pub ids: Vec<String>,
+    pub project_ids: Vec<String>,
+    pub agent_ids: Vec<String>,
+    pub methods: Vec<String>,
+    pub hosts: Vec<String>,
+    pub paths: Vec<String>,
+    pub providers: Vec<String>,
+    pub statuses: Vec<i32>,
+    pub latencies: Vec<i32>,
+    pub injections: Vec<i32>,
+}
 
-    sqlx::query(
-        "INSERT INTO request_logs (id, project_id, agent_id, method, host, path, provider, status, latency_ms, injection_count)
-         SELECT * FROM UNNEST($1::text[], $2::text[], $3::text[], $4::text[], $5::text[], $6::text[], $7::text[], $8::int4[], $9::int4[], $10::int4[])",
-    )
-    .bind(&ids)
-    .bind(&project_ids)
-    .bind(&agent_ids)
-    .bind(&methods)
-    .bind(&hosts)
-    .bind(&paths)
-    .bind(&providers)
-    .bind(&statuses)
-    .bind(&latencies)
-    .bind(&injections)
-    .execute(pool)
-    .await?;
+pub(crate) fn extract_columns(events: &[&RequestEvent]) -> BatchColumns {
+    BatchColumns {
+        ids: events
+            .iter()
+            .map(|_| uuid::Uuid::new_v4().to_string())
+            .collect(),
+        project_ids: events.iter().map(|e| e.project_id.clone()).collect(),
+        agent_ids: events.iter().map(|e| e.agent_id.clone()).collect(),
+        methods: events.iter().map(|e| e.method.clone()).collect(),
+        hosts: events.iter().map(|e| e.host.clone()).collect(),
+        paths: events.iter().map(|e| e.path.clone()).collect(),
+        providers: events.iter().map(|e| e.provider.clone()).collect(),
+        statuses: events.iter().map(|e| e.status as i32).collect(),
+        latencies: events.iter().map(|e| e.latency_ms as i32).collect(),
+        injections: events.iter().map(|e| e.injection_count as i32).collect(),
+    }
+}
 
-    Ok(())
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn base_event() -> RequestEvent {
+        RequestEvent {
+            project_id: "p1".into(),
+            agent_id: "a1".into(),
+            agent_name: "test".into(),
+            method: "POST".into(),
+            host: "api.anthropic.com".into(),
+            path: "/v1/messages".into(),
+            provider: "anthropic".into(),
+            status: 200,
+            latency_ms: 100,
+            injection_count: 1,
+            timestamp: "2026-01-01T00:00:00Z".into(),
+            injected: true,
+            #[cfg(feature = "cloud")]
+            model: None,
+            #[cfg(feature = "cloud")]
+            input_tokens: None,
+            #[cfg(feature = "cloud")]
+            output_tokens: None,
+            #[cfg(feature = "cloud")]
+            cache_creation_input_tokens: None,
+            #[cfg(feature = "cloud")]
+            cache_read_input_tokens: None,
+            #[cfg(feature = "cloud")]
+            is_trial: false,
+        }
+    }
+
+    #[test]
+    fn on_request_truncates_long_paths() {
+        let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+        SENDER.set(tx).ok();
+        let mut ev = base_event();
+        ev.path = "x".repeat(MAX_PATH_LEN + 100);
+        on_request(ev);
+        let received = rx.try_recv().unwrap();
+        assert_eq!(received.path.len(), MAX_PATH_LEN);
+    }
 }

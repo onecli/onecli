@@ -71,6 +71,7 @@ export interface SecretItem {
   hostPattern: string;
   pathPattern: string | null;
   injectionConfig: unknown;
+  isPlatform: boolean;
 }
 
 export interface SecretPrefill {
@@ -210,13 +211,16 @@ export const SecretDialog = ({
     type !== "generic" ||
     (injectionTarget === "header" ? headerName.trim() : paramName.trim());
 
-  const isValid = isEdit
-    ? hostPattern.trim() && !hostPatternError && hasInjectionTarget
-    : isNameValid &&
-      value.trim() &&
-      hostPattern.trim() &&
-      !hostPatternError &&
-      hasInjectionTarget;
+  const isPlatformEdit = isEdit && secret?.isPlatform;
+  const isValid = isPlatformEdit
+    ? !!value.trim()
+    : isEdit
+      ? hostPattern.trim() && !hostPatternError && hasInjectionTarget
+      : isNameValid &&
+        value.trim() &&
+        hostPattern.trim() &&
+        !hostPatternError &&
+        hasInjectionTarget;
 
   const handleSave = async () => {
     if (!isValid) return;
@@ -231,13 +235,18 @@ export const SecretDialog = ({
       };
 
       if (isEdit) {
-        await updateSecret(secret.id, {
-          name: name !== secret.name ? name : undefined,
-          value: value.trim() || undefined,
-          hostPattern,
-          pathPattern: pathPattern || null,
-          injectionConfig: buildInjectionConfig() ?? undefined,
-        });
+        await updateSecret(
+          secret.id,
+          secret.isPlatform
+            ? { value: value.trim() }
+            : {
+                name: name !== secret.name ? name : undefined,
+                value: value.trim() || undefined,
+                hostPattern,
+                pathPattern: pathPattern || null,
+                injectionConfig: buildInjectionConfig() ?? undefined,
+              },
+        );
         toast.success("Secret updated");
       } else {
         await createSecret({
@@ -286,11 +295,13 @@ export const SecretDialog = ({
                 </DialogTitle>
               </div>
               <DialogDescription>
-                {isEdit
-                  ? "Update the secret\u2019s configuration. Leave the value field empty to keep the current value."
-                  : type === "anthropic"
-                    ? "Your key will be encrypted and injected into requests to api.anthropic.com."
-                    : "Configure a custom secret to inject as a header or URL parameter into matching requests."}
+                {isPlatformEdit
+                  ? "Replace the trial key with your own Anthropic key to continue using Claude."
+                  : isEdit
+                    ? "Update the secret\u2019s configuration. Leave the value field empty to keep the current value."
+                    : type === "anthropic"
+                      ? "Your key will be encrypted and injected into requests to api.anthropic.com."
+                      : "Configure a custom secret to inject as a header or URL parameter into matching requests."}
               </DialogDescription>
               {type === "generic" && !isEdit && !prefill && (
                 <div className="flex items-center gap-2 pt-1">
@@ -329,30 +340,36 @@ export const SecretDialog = ({
             </DialogHeader>
 
             <div className="min-h-0 space-y-4 overflow-y-auto py-2">
-              <div className="space-y-2">
-                <Label htmlFor="secret-name">Name</Label>
-                <Input
-                  id="secret-name"
-                  placeholder={
-                    type === "anthropic"
-                      ? "e.g. Anthropic Production Key"
-                      : "e.g. GitHub Token"
-                  }
-                  value={name}
-                  onChange={(e) => setName(e.target.value)}
-                  onBlur={() => setNameTouched(true)}
-                  autoFocus
-                  className={cn(showNameError && "border-destructive")}
-                />
-                {showNameError && (
-                  <p className="text-destructive text-xs">{nameError}</p>
-                )}
-              </div>
+              {!isPlatformEdit && (
+                <div className="space-y-2">
+                  <Label htmlFor="secret-name">Name</Label>
+                  <Input
+                    id="secret-name"
+                    placeholder={
+                      type === "anthropic"
+                        ? "e.g. Anthropic Production Key"
+                        : "e.g. GitHub Token"
+                    }
+                    value={name}
+                    onChange={(e) => setName(e.target.value)}
+                    onBlur={() => setNameTouched(true)}
+                    autoFocus
+                    className={cn(showNameError && "border-destructive")}
+                  />
+                  {showNameError && (
+                    <p className="text-destructive text-xs">{nameError}</p>
+                  )}
+                </div>
+              )}
 
               <div className="space-y-2">
                 <Label htmlFor="secret-value">
-                  {isEdit ? "New value" : "Secret value"}{" "}
-                  {isEdit && (
+                  {isPlatformEdit
+                    ? "Your API key"
+                    : isEdit
+                      ? "New value"
+                      : "Secret value"}{" "}
+                  {isEdit && !isPlatformEdit && (
                     <span className="text-muted-foreground font-normal">
                       (leave empty to keep current)
                     </span>
@@ -530,111 +547,116 @@ export const SecretDialog = ({
                 </div>
               )}
 
-              <Accordion
-                type="single"
-                collapsible
-                className="border-none"
-                defaultValue={undefined}
-              >
-                <AccordionItem value="advanced" className="border-t border-b-0">
-                  <AccordionTrigger className="py-3 hover:no-underline">
-                    <span className="text-muted-foreground flex items-center gap-2 text-xs font-normal">
-                      <Settings2 className="size-3.5" />
-                      Advanced settings
-                    </span>
-                  </AccordionTrigger>
-                  <AccordionContent className="pb-0">
-                    <div className="space-y-4">
-                      {(type === "anthropic" ||
-                        (type === "generic" && !!prefill)) && (
+              {isPlatformEdit ? null : (
+                <Accordion
+                  type="single"
+                  collapsible
+                  className="border-none"
+                  defaultValue={undefined}
+                >
+                  <AccordionItem
+                    value="advanced"
+                    className="border-t border-b-0"
+                  >
+                    <AccordionTrigger className="py-3 hover:no-underline">
+                      <span className="text-muted-foreground flex items-center gap-2 text-xs font-normal">
+                        <Settings2 className="size-3.5" />
+                        Advanced settings
+                      </span>
+                    </AccordionTrigger>
+                    <AccordionContent className="pb-0">
+                      <div className="space-y-4">
+                        {(type === "anthropic" ||
+                          (type === "generic" && !!prefill)) && (
+                          <div className="space-y-2">
+                            <Label htmlFor="secret-host">Host pattern</Label>
+                            <Input
+                              id="secret-host"
+                              placeholder="e.g. api.example.com or *.example.com"
+                              value={hostPattern}
+                              onChange={(e) => setHostPattern(e.target.value)}
+                              disabled={!!prefill}
+                            />
+                            {hostPatternError ? (
+                              <p className="text-xs text-red-500">
+                                {hostPatternError}
+                              </p>
+                            ) : (
+                              <p className="text-muted-foreground text-xs">
+                                The host this secret applies to. Use{" "}
+                                <code className="text-xs">*.example.com</code>{" "}
+                                for wildcard subdomains.
+                              </p>
+                            )}
+                          </div>
+                        )}
+
                         <div className="space-y-2">
-                          <Label htmlFor="secret-host">Host pattern</Label>
-                          <Input
-                            id="secret-host"
-                            placeholder="e.g. api.example.com or *.example.com"
-                            value={hostPattern}
-                            onChange={(e) => setHostPattern(e.target.value)}
-                            disabled={!!prefill}
-                          />
-                          {hostPatternError ? (
-                            <p className="text-xs text-red-500">
-                              {hostPatternError}
-                            </p>
-                          ) : (
-                            <p className="text-muted-foreground text-xs">
-                              The host this secret applies to. Use{" "}
-                              <code className="text-xs">*.example.com</code> for
-                              wildcard subdomains.
-                            </p>
-                          )}
-                        </div>
-                      )}
-
-                      <div className="space-y-2">
-                        <Label htmlFor="secret-path">
-                          Path pattern{" "}
-                          <span className="text-muted-foreground font-normal">
-                            (optional)
-                          </span>
-                        </Label>
-                        <Input
-                          id="secret-path"
-                          placeholder="e.g. /v1/*"
-                          value={pathPattern}
-                          onChange={(e) => setPathPattern(e.target.value)}
-                        />
-                      </div>
-
-                      {type === "generic" && (
-                        <div
-                          key={`format-${injectionTarget}`}
-                          className="animate-in fade-in duration-150 space-y-2"
-                        >
-                          <Label
-                            htmlFor={
-                              injectionTarget === "header"
-                                ? "secret-format"
-                                : "secret-param-format"
-                            }
-                          >
-                            Value format{" "}
+                          <Label htmlFor="secret-path">
+                            Path pattern{" "}
                             <span className="text-muted-foreground font-normal">
                               (optional)
                             </span>
                           </Label>
                           <Input
-                            id={
-                              injectionTarget === "header"
-                                ? "secret-format"
-                                : "secret-param-format"
-                            }
-                            placeholder={
-                              injectionTarget === "header"
-                                ? "e.g. Bearer {value}"
-                                : "e.g. {value}"
-                            }
-                            value={
-                              injectionTarget === "header"
-                                ? valueFormat
-                                : paramFormat
-                            }
-                            onChange={(e) =>
-                              injectionTarget === "header"
-                                ? setValueFormat(e.target.value)
-                                : setParamFormat(e.target.value)
-                            }
+                            id="secret-path"
+                            placeholder="e.g. /v1/*"
+                            value={pathPattern}
+                            onChange={(e) => setPathPattern(e.target.value)}
                           />
-                          <p className="text-muted-foreground text-xs">
-                            Use <code className="text-xs">{"{value}"}</code> as
-                            a placeholder for the secret. Defaults to the raw
-                            value.
-                          </p>
                         </div>
-                      )}
-                    </div>
-                  </AccordionContent>
-                </AccordionItem>
-              </Accordion>
+
+                        {type === "generic" && (
+                          <div
+                            key={`format-${injectionTarget}`}
+                            className="animate-in fade-in duration-150 space-y-2"
+                          >
+                            <Label
+                              htmlFor={
+                                injectionTarget === "header"
+                                  ? "secret-format"
+                                  : "secret-param-format"
+                              }
+                            >
+                              Value format{" "}
+                              <span className="text-muted-foreground font-normal">
+                                (optional)
+                              </span>
+                            </Label>
+                            <Input
+                              id={
+                                injectionTarget === "header"
+                                  ? "secret-format"
+                                  : "secret-param-format"
+                              }
+                              placeholder={
+                                injectionTarget === "header"
+                                  ? "e.g. Bearer {value}"
+                                  : "e.g. {value}"
+                              }
+                              value={
+                                injectionTarget === "header"
+                                  ? valueFormat
+                                  : paramFormat
+                              }
+                              onChange={(e) =>
+                                injectionTarget === "header"
+                                  ? setValueFormat(e.target.value)
+                                  : setParamFormat(e.target.value)
+                              }
+                            />
+                            <p className="text-muted-foreground text-xs">
+                              Use <code className="text-xs">{"{value}"}</code>{" "}
+                              as a placeholder for the secret. Defaults to the
+                              raw value.
+                            </p>
+                          </div>
+                        )}
+                      </div>
+                    </AccordionContent>
+                  </AccordionItem>
+                </Accordion>
+              )}
             </div>
 
             <DialogFooter>
