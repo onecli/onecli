@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use futures_util::{StreamExt, TryStreamExt};
-use http_body_util::{Either, Full, StreamBody};
+use http_body_util::{Either, Full};
 use hyper::body::{Bytes, Frame, Incoming};
 use hyper::header::HeaderName;
 use hyper::{Request, Response, StatusCode};
@@ -21,6 +21,7 @@ use crate::cache::CacheStore;
 use crate::inject;
 use crate::policy::{self, PolicyDecision};
 
+use super::hooks;
 use super::mitm::ResolvedRules;
 use super::response;
 use super::ProxyContext;
@@ -95,14 +96,7 @@ pub(crate) async fn forward_request(
     cache: &dyn CacheStore,
     proxy_ctx: &ProxyContext,
     approval_store: &Arc<dyn ApprovalStore>,
-) -> Result<
-    Response<
-        Either<
-            Full<Bytes>,
-            StreamBody<impl futures_util::Stream<Item = Result<Frame<Bytes>, reqwest::Error>>>,
-        >,
-    >,
-> {
+) -> Result<Response<hooks::ForwardResponseBody>> {
     let start = std::time::Instant::now();
     let method = req.method().clone();
     let path = req
@@ -195,12 +189,19 @@ pub(crate) async fn forward_request(
         None
     };
 
+    hooks::prepare_request(rules, host, &path, &mut headers);
+
     // Apply injection rules — upstream_path may gain query-param secrets;
     // the original `path`/`url` stays clean for logging and approval metadata.
     let mut upstream_path = path.clone();
     let injection_count =
         inject::apply_injections(&mut headers, &mut upstream_path, &rules.injection_rules);
     let upstream_url = format!("{scheme}://{host}{upstream_path}");
+
+    if let Some(resp) = hooks::pre_forward(rules, proxy_ctx) {
+        return Ok(resp);
+    }
+
     // ── ManualApproval: prepare body, store, wait for decision ─────
     let forward_body = if let PolicyDecision::ManualApproval { rule_id } = &decision {
         info!(method = %method, url = %url, rule_id = %rule_id, "MANUAL APPROVAL required");
@@ -326,7 +327,7 @@ pub(crate) async fn forward_request(
         reqwest::Body::wrap(body)
     };
 
-    // ── Shared: forward to upstream and stream response back ──────
+    // ── Forward to upstream ──────────────────────────────────────────
     let mut upstream = http_client.request(method.clone(), &upstream_url);
     for (name, value) in headers.iter() {
         upstream = upstream.header(name.clone(), value.clone());
@@ -340,46 +341,6 @@ pub(crate) async fn forward_request(
 
     let status = upstream_resp.status();
     let resp_headers = upstream_resp.headers().clone();
-
-    // Track credential-injected requests (Postgres + PostHog + Redis)
-    if injection_count > 0 {
-        if let (Some(aid), Some(gid)) = (
-            proxy_ctx.project_id.as_deref(),
-            proxy_ctx.agent_id.as_deref(),
-        ) {
-            let hostname = super::strip_port(host);
-            let (provider, _) = crate::apps::provider_for_host_and_path(hostname, &path)
-                .unwrap_or((hostname, hostname));
-
-            let ts = time::OffsetDateTime::now_utc()
-                .format(&time::format_description::well_known::Iso8601::DEFAULT)
-                .unwrap_or_default();
-
-            // Strip query params to avoid logging sensitive data (API keys, tokens)
-            let telemetry_path = match path.find('?') {
-                Some(i) => &path[..i],
-                None => &path,
-            };
-
-            crate::telemetry::on_request(crate::telemetry::RequestEvent {
-                project_id: aid.to_string(),
-                agent_id: gid.to_string(),
-                agent_name: proxy_ctx
-                    .agent_name
-                    .as_deref()
-                    .unwrap_or("unknown")
-                    .to_string(),
-                method: method.to_string(),
-                host: host.to_string(),
-                path: telemetry_path.to_string(),
-                provider: provider.to_string(),
-                status: status.as_u16(),
-                latency_ms: start.elapsed().as_millis() as u32,
-                injection_count: injection_count as u16,
-                timestamp: ts,
-            });
-        }
-    }
 
     // If no credentials were injected and upstream returned 401/403,
     // guide the agent to connect/configure credentials in OneCLI.
@@ -489,10 +450,50 @@ pub(crate) async fn forward_request(
         "MITM"
     );
 
-    // Stream response body to client (no buffering — critical for SSE)
-    let resp_stream = upstream_resp.bytes_stream().map_ok(Frame::data);
-    let body = StreamBody::new(resp_stream);
+    // Track all authenticated proxied requests and stream response body.
+    // Hooks handle telemetry emission and optional response stream wrapping.
+    let body_stream: hooks::BodyStream = if let (Some(aid), Some(gid)) = (
+        proxy_ctx.project_id.as_deref(),
+        proxy_ctx.agent_id.as_deref(),
+    ) {
+        let hostname = super::strip_port(host);
+        let (provider, _) = crate::apps::provider_for_host_and_path(hostname, &path)
+            .unwrap_or((hostname, hostname));
 
+        let ts = time::OffsetDateTime::now_utc()
+            .format(&time::format_description::well_known::Iso8601::DEFAULT)
+            .unwrap_or_default();
+
+        let telemetry_path = match path.find('?') {
+            Some(i) => &path[..i],
+            None => &path,
+        };
+
+        let meta = hooks::RequestMeta {
+            project_id: aid.to_string(),
+            agent_id: gid.to_string(),
+            agent_name: proxy_ctx
+                .agent_name
+                .as_deref()
+                .unwrap_or("unknown")
+                .to_string(),
+            method: method.to_string(),
+            host: host.to_string(),
+            path: telemetry_path.to_string(),
+            provider: provider.to_string(),
+            status: status.as_u16(),
+            latency_ms: start.elapsed().as_millis() as u32,
+            injection_count: injection_count as u16,
+            timestamp: ts,
+            injected: injection_count > 0,
+        };
+
+        hooks::track_and_wrap(meta, rules, &resp_headers, upstream_resp.bytes_stream())
+    } else {
+        Box::pin(upstream_resp.bytes_stream().map_ok(Frame::data))
+    };
+
+    let body = http_body_util::StreamBody::new(body_stream);
     let mut response = Response::new(Either::Right(body));
     *response.status_mut() = status;
 

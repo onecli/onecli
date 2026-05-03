@@ -18,6 +18,7 @@ interface Secret {
   hostPattern: string;
   pathPattern: string | null;
   injectionConfig: unknown;
+  isPlatform: boolean;
   createdAt: Date;
 }
 

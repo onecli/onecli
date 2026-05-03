@@ -38,6 +38,7 @@ pub(crate) struct SecretRow {
     pub host_pattern: String,
     pub path_pattern: Option<String>,
     pub injection_config: Option<serde_json::Value>,
+    pub is_platform: bool,
 }
 
 /// A policy rule row from the `policy_rules` table.
@@ -146,7 +147,7 @@ pub(crate) async fn find_secrets_by_project(
     project_id: &str,
 ) -> Result<Vec<SecretRow>> {
     sqlx::query_as::<_, SecretRow>(
-        r#"SELECT type, encrypted_value, host_pattern, path_pattern, injection_config FROM secrets WHERE project_id = $1"#,
+        r#"SELECT type, encrypted_value, host_pattern, path_pattern, injection_config, is_platform FROM secrets WHERE project_id = $1"#,
     )
     .bind(project_id)
     .fetch_all(pool)
@@ -157,7 +158,7 @@ pub(crate) async fn find_secrets_by_project(
 /// Find secrets assigned to a specific agent (selective mode).
 pub(crate) async fn find_secrets_by_agent(pool: &PgPool, agent_id: &str) -> Result<Vec<SecretRow>> {
     sqlx::query_as::<_, SecretRow>(
-        r#"SELECT s.type, s.encrypted_value, s.host_pattern, s.path_pattern, s.injection_config
+        r#"SELECT s.type, s.encrypted_value, s.host_pattern, s.path_pattern, s.injection_config, s.is_platform
            FROM secrets s
            INNER JOIN agent_secrets as_ ON s.id = as_.secret_id
            WHERE as_.agent_id = $1"#,
@@ -330,6 +331,23 @@ pub(crate) async fn update_vault_connection_data(
     .await
     .context("updating vault_connection connection_data")?;
     Ok(())
+}
+
+/// Check if the trial budget for the project's owner is exhausted.
+pub(crate) async fn is_trial_budget_blocked(pool: &PgPool, project_id: &str) -> Result<bool> {
+    let row: Option<(String,)> = sqlx::query_as(
+        r#"SELECT tb.status
+           FROM trial_budgets tb
+           INNER JOIN organization_members om ON om.user_id = tb.user_id
+           INNER JOIN projects p ON p.organization_id = om.organization_id
+           WHERE p.id = $1 AND tb.status = 'exhausted'
+           LIMIT 1"#,
+    )
+    .bind(project_id)
+    .fetch_optional(pool)
+    .await
+    .context("checking trial budget status")?;
+    Ok(row.is_some())
 }
 
 /// Delete a vault connection for a project + provider pair.

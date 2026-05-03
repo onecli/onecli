@@ -14,9 +14,18 @@
 //! - [`response`]: pre-built gateway error responses
 
 pub(crate) mod forward;
+#[cfg(not(feature = "cloud"))]
+mod hooks;
+#[cfg(feature = "cloud")]
+#[path = "cloud/hooks.rs"]
+mod hooks;
 mod mitm;
 mod response;
 mod tunnel;
+
+#[cfg(feature = "cloud")]
+#[path = "cloud/trial.rs"]
+mod trial;
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -655,6 +664,8 @@ async fn handle_http_proxy(
         policy_rules: resolved.policy_rules,
         access_restricted: resolved.access_restricted,
         intercept_token: None,
+        is_trial: resolved.is_trial,
+        budget_blocked: resolved.budget_blocked,
     };
 
     let mut resp = forward::forward_request(

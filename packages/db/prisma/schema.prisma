@@ -116,6 +116,7 @@ model User {
   onboardingSurveys       OnboardingSurvey[]
   createdAgentSecrets     AgentSecret[]        @relation("AgentSecretCreator")
   updatedAgentSecrets     AgentSecret[]        @relation("AgentSecretUpdater")
+  trialBudget             TrialBudget?
 
   @@map("users")
 }
@@ -171,6 +172,7 @@ model Secret {
   pathPattern     String?  @map("path_pattern") // "/v1/*", null = all paths
   injectionConfig Json?    @map("injection_config") // type-specific config (generic: { headerName, valueFormat })
   metadata        Json? // type-specific metadata (anthropic: { authMode: "api-key" | "oauth" })
+  isPlatform      Boolean  @default(false) @map("is_platform")
   createdAt       DateTime @default(now()) @map("created_at")
   updatedAt       DateTime @updatedAt @map("updated_at")
   project         Project  @relation(fields: [projectId], references: [id])
@@ -265,6 +267,7 @@ model RequestLog {
   status         Int
   latencyMs      Int      @map("latency_ms")
   injectionCount Int      @map("injection_count")
+  extraData      Json?    @map("extra_data")
   createdAt      DateTime @default(now()) @map("created_at")
 
   @@index([projectId, createdAt])
@@ -402,4 +405,20 @@ model PlatformDeployment {
 
   @@index([projectId])
   @@map("platform_deployments")
+}
+
+// ── Trial budget ────────────────────────────────────────────────────────
+
+model TrialBudget {
+  id           String   @id @default(uuid())
+  userId       String   @unique @map("user_id")
+  budgetCents  Int      @default(500) @map("budget_cents")
+  spentCents   Int      @default(0) @map("spent_cents")
+  status       String   @default("active") // "active" | "exhausted" | "upgraded"
+  lastSyncedAt DateTime @default(now()) @map("last_synced_at")
+  createdAt    DateTime @default(now()) @map("created_at")
+  updatedAt    DateTime @updatedAt @map("updated_at")
+  user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("trial_budgets")
 }

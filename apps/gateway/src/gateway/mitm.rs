@@ -147,6 +147,12 @@ pub(crate) struct ResolvedRules {
     /// Ready-to-use interception data when the resolved connection has a
     /// cached token that should be served instead of forwarding.
     pub intercept_token: Option<InterceptToken>,
+    /// True when credentials come from a platform-provisioned secret (trial mode).
+    #[cfg_attr(not(feature = "cloud"), allow(dead_code))]
+    pub is_trial: bool,
+    /// True when the trial budget is exhausted — requests should be blocked.
+    #[cfg_attr(not(feature = "cloud"), allow(dead_code))]
+    pub budget_blocked: bool,
 }
 
 /// Result of per-request rule resolution including app connection disambiguation.
@@ -265,6 +271,8 @@ async fn resolve_rules(
             policy_rules: resp.policy_rules,
             access_restricted: resp.access_restricted,
             intercept_token,
+            is_trial: resp.is_trial,
+            budget_blocked: resp.budget_blocked,
         },
         app_connections: resp.app_connections,
     })

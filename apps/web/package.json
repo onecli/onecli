@@ -15,6 +15,7 @@
   "dependencies": {
     "@aws-amplify/adapter-nextjs": "^1.7.2",
     "@aws-sdk/client-kms": "^3.1014.0",
+    "@aws-sdk/client-secrets-manager": "^3.1014.0",
     "@onecli/db": "workspace:*",
     "@onecli/ui": "workspace:*",
     "aws-amplify": "^6.16.2",

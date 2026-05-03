@@ -41,7 +41,9 @@
     "REDIS_HOST",
     "REDIS_PORT",
     "REDIS_USERNAME",
-    "REDIS_PASSWORD"
+    "REDIS_PASSWORD",
+    "CRON_SECRET_NAME",
+    "ANTHROPIC_SECRET_NAME"
   ],
   "tasks": {
     "build": {

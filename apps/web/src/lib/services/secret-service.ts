@@ -34,6 +34,7 @@ export const listSecrets = async (projectId: string) => {
       hostPattern: true,
       pathPattern: true,
       injectionConfig: true,
+      isPlatform: true,
       createdAt: true,
     },
     orderBy: { createdAt: "desc" },
@@ -146,10 +147,25 @@ export const updateSecret = async (
 ) => {
   const secret = await db.secret.findFirst({
     where: { id: secretId, projectId },
-    select: { id: true, type: true },
+    select: { id: true, type: true, isPlatform: true },
   });
 
   if (!secret) throw new ServiceError("NOT_FOUND", "Secret not found");
+
+  if (secret.isPlatform) {
+    const hasNonValueFields =
+      input.name !== undefined ||
+      input.hostPattern !== undefined ||
+      input.pathPattern !== undefined ||
+      input.injectionConfig !== undefined;
+    if (hasNonValueFields)
+      throw new ServiceError(
+        "FORBIDDEN",
+        "Only the value can be updated on platform secrets",
+      );
+    if (input.value === undefined)
+      throw new ServiceError("BAD_REQUEST", "Value is required");
+  }
 
   const data: Record<string, unknown> = {};
 
@@ -164,6 +180,10 @@ export const updateSecret = async (
     if (!value)
       throw new ServiceError("BAD_REQUEST", "Secret value is required");
     data.encryptedValue = await cryptoService.encrypt(value);
+
+    if (secret.isPlatform) {
+      data.isPlatform = false;
+    }
 
     // Re-detect auth mode when value changes for Anthropic secrets
     if (secret.type === "anthropic") {
