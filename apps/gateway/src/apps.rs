@@ -98,6 +98,14 @@ static ATLASSIAN_REFRESH: RefreshConfig = RefreshConfig {
     body_format: TokenBodyFormat::Json,
 };
 
+/// Refresh config for Todoist OAuth API.
+static TODOIST_REFRESH: RefreshConfig = RefreshConfig {
+    token_url: "https://api.todoist.com/oauth/access_token",
+    client_id_env: "TODOIST_CLIENT_ID",
+    client_secret_env: "TODOIST_CLIENT_SECRET",
+    body_format: TokenBodyFormat::Form,
+};
+
 /// Shared refresh config for all Google OAuth APIs.
 static GOOGLE_REFRESH: RefreshConfig = RefreshConfig {
     token_url: "https://oauth2.googleapis.com/token",
@@ -412,6 +420,18 @@ static APP_PROVIDERS: &[AppProvider] = &[
             metadata_key: "quotaProjectId",
             header_name: "x-goog-user-project",
         }],
+    },
+    AppProvider {
+        provider: "todoist",
+        display_name: "Todoist",
+        host_rules: &[HostRule {
+            pattern: HostPattern::Exact("api.todoist.com"),
+            path_prefix: None,
+            strategy: AuthStrategy::Bearer,
+            intercept: false,
+        }],
+        refresh: Some(&TODOIST_REFRESH),
+        metadata_headers: &[],
     },
     AppProvider {
         provider: "resend",
@@ -1118,6 +1138,38 @@ mod tests {
                 }
             );
         }
+    }
+
+    // ── Todoist ───────────────────────────────────────────────────────
+
+    #[test]
+    fn providers_for_todoist_host() {
+        assert_eq!(providers_for_host("api.todoist.com"), vec!["todoist"]);
+    }
+
+    #[test]
+    fn provider_for_host_todoist() {
+        let result = provider_for_host("api.todoist.com");
+        assert_eq!(result, Some(("todoist", "Todoist")));
+    }
+
+    #[test]
+    fn todoist_api_uses_bearer() {
+        let injections = build_app_injections("todoist", "api.todoist.com", "test_token_abc");
+        assert_eq!(injections.len(), 1);
+        assert_eq!(
+            injections[0],
+            Injection::SetHeader {
+                name: "authorization".to_string(),
+                value: "Bearer test_token_abc".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn todoist_refresh_uses_form_body_format() {
+        let config = refresh_config("todoist").expect("todoist should have refresh config");
+        assert!(matches!(config.body_format, TokenBodyFormat::Form));
     }
 
     // ── Resend ────────────────────────────────────────────────────────
