@@ -47,7 +47,7 @@ export const StatsCards = ({
       </Link>
 
       <Link
-        href={withProjectPrefix(pathname, "/connections/secrets")}
+        href={withProjectPrefix(pathname, "/connections/custom")}
         className="group"
       >
         <Card className="py-4 gap-3 transition-colors hover:border-foreground/20 cursor-pointer">

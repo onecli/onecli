@@ -27,18 +27,18 @@ export const DashboardSidebar = ({
           className="flex items-center px-2"
         >
           <Image
-            src="/logo.svg"
+            src="/onecli-full-logo.png"
             alt="OneCLI"
-            width={100}
-            height={28}
+            width={80}
+            height={23}
             priority
             className="group-data-[collapsible=icon]:hidden dark:hidden"
           />
           <Image
-            src="/logo-dark.svg"
+            src="/onecli-full-logo-dark.png"
             alt="OneCLI"
-            width={100}
-            height={28}
+            width={80}
+            height={23}
             priority
             className="hidden dark:group-data-[collapsible=icon]:!hidden dark:block"
           />
