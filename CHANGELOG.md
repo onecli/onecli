@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.19.1](https://github.com/onecli/onecli/compare/v1.19.0...v1.19.1) (2026-05-03)
+
+
+### Bug Fixes
+
+* inject OAuth bearer on Google batch endpoints ([#237](https://github.com/onecli/onecli/issues/237)) ([5fa436d](https://github.com/onecli/onecli/commit/5fa436da21e31951f0ba48fa3038b86701d4f23b))
+* resolve mobile layout issues and update session handling ([#230](https://github.com/onecli/onecli/issues/230)) ([bca6873](https://github.com/onecli/onecli/commit/bca68733e914a6a7da19a3e31cf03e8392627143))
+
 ## [1.19.0](https://github.com/onecli/onecli/compare/v1.18.6...v1.19.0) (2026-04-30)
 
 
