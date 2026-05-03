@@ -152,6 +152,12 @@ static APP_PROVIDERS: &[AppProvider] = &[
                 strategy: AuthStrategy::Bearer,
                 intercept: false,
             },
+            HostRule {
+                pattern: HostPattern::Exact("www.googleapis.com"),
+                path_prefix: Some("/batch/gmail/"),
+                strategy: AuthStrategy::Bearer,
+                intercept: false,
+            },
         ],
         refresh: Some(&GOOGLE_REFRESH),
         metadata_headers: &[],
@@ -159,12 +165,20 @@ static APP_PROVIDERS: &[AppProvider] = &[
     AppProvider {
         provider: "google-calendar",
         display_name: "Google Calendar",
-        host_rules: &[HostRule {
-            pattern: HostPattern::Exact("www.googleapis.com"),
-            path_prefix: Some("/calendar/"),
-            strategy: AuthStrategy::Bearer,
-            intercept: false,
-        }],
+        host_rules: &[
+            HostRule {
+                pattern: HostPattern::Exact("www.googleapis.com"),
+                path_prefix: Some("/calendar/"),
+                strategy: AuthStrategy::Bearer,
+                intercept: false,
+            },
+            HostRule {
+                pattern: HostPattern::Exact("www.googleapis.com"),
+                path_prefix: Some("/batch/calendar/"),
+                strategy: AuthStrategy::Bearer,
+                intercept: false,
+            },
+        ],
         refresh: Some(&GOOGLE_REFRESH),
         metadata_headers: &[],
     },
@@ -181,6 +195,12 @@ static APP_PROVIDERS: &[AppProvider] = &[
             HostRule {
                 pattern: HostPattern::Exact("www.googleapis.com"),
                 path_prefix: Some("/upload/drive/"),
+                strategy: AuthStrategy::Bearer,
+                intercept: false,
+            },
+            HostRule {
+                pattern: HostPattern::Exact("www.googleapis.com"),
+                path_prefix: Some("/batch/drive/"),
                 strategy: AuthStrategy::Bearer,
                 intercept: false,
             },
@@ -357,6 +377,12 @@ static APP_PROVIDERS: &[AppProvider] = &[
             HostRule {
                 pattern: HostPattern::Exact("www.googleapis.com"),
                 path_prefix: Some("/upload/youtube/"),
+                strategy: AuthStrategy::Bearer,
+                intercept: false,
+            },
+            HostRule {
+                pattern: HostPattern::Exact("www.googleapis.com"),
+                path_prefix: Some("/batch/youtube/"),
                 strategy: AuthStrategy::Bearer,
                 intercept: false,
             },
@@ -861,24 +887,38 @@ mod tests {
         );
     }
 
+    #[test]
+    fn google_calendar_produces_two_injection_rules() {
+        let rules =
+            build_app_injection_rules("google-calendar", "www.googleapis.com", "ya29.cal_test");
+        assert_eq!(
+            rules.len(),
+            2,
+            "expected two rules for Calendar on www.googleapis.com"
+        );
+
+        let patterns: Vec<&str> = rules.iter().map(|(p, _)| p.as_str()).collect();
+        assert!(patterns.contains(&"/calendar/*"));
+        assert!(patterns.contains(&"/batch/calendar/*"));
+    }
+
     // ── Google Drive ──────────────────────────────────────────────────
 
     #[test]
-    fn google_drive_produces_two_injection_rules() {
-        // Drive has two host rules on www.googleapis.com: /drive/ and /upload/drive/
+    fn google_drive_produces_three_injection_rules() {
         let rules =
             build_app_injection_rules("google-drive", "www.googleapis.com", "ya29.drive_test");
         assert_eq!(
             rules.len(),
-            2,
-            "expected two rules for Drive on www.googleapis.com"
+            3,
+            "expected three rules for Drive on www.googleapis.com"
         );
 
         let patterns: Vec<&str> = rules.iter().map(|(p, _)| p.as_str()).collect();
         assert!(patterns.contains(&"/drive/*"));
         assert!(patterns.contains(&"/upload/drive/*"));
+        assert!(patterns.contains(&"/batch/drive/*"));
 
-        // Both should use Bearer auth
         for (_, injections) in &rules {
             assert_eq!(injections.len(), 1);
             assert_eq!(
@@ -1055,17 +1095,18 @@ mod tests {
     }
 
     #[test]
-    fn youtube_produces_two_injection_rules() {
+    fn youtube_produces_three_injection_rules() {
         let rules = build_app_injection_rules("youtube", "www.googleapis.com", "ya29.yt_test");
         assert_eq!(
             rules.len(),
-            2,
-            "expected two rules for YouTube on www.googleapis.com"
+            3,
+            "expected three rules for YouTube on www.googleapis.com"
         );
 
         let patterns: Vec<&str> = rules.iter().map(|(p, _)| p.as_str()).collect();
         assert!(patterns.contains(&"/youtube/*"));
         assert!(patterns.contains(&"/upload/youtube/*"));
+        assert!(patterns.contains(&"/batch/youtube/*"));
 
         for (_, injections) in &rules {
             assert_eq!(injections.len(), 1);
@@ -1154,6 +1195,21 @@ mod tests {
 
         let result = provider_for_host_and_path("www.googleapis.com", "/drive/v3/files");
         assert_eq!(result, Some(("google-drive", "Google Drive")));
+    }
+
+    #[test]
+    fn provider_for_host_and_path_matches_batch_endpoints() {
+        let result = provider_for_host_and_path("www.googleapis.com", "/batch/calendar/v3");
+        assert_eq!(result, Some(("google-calendar", "Google Calendar")));
+
+        let result = provider_for_host_and_path("www.googleapis.com", "/batch/gmail/v1");
+        assert_eq!(result, Some(("gmail", "Gmail")));
+
+        let result = provider_for_host_and_path("www.googleapis.com", "/batch/drive/v3");
+        assert_eq!(result, Some(("google-drive", "Google Drive")));
+
+        let result = provider_for_host_and_path("www.googleapis.com", "/batch/youtube/v3");
+        assert_eq!(result, Some(("youtube", "YouTube")));
     }
 
     #[test]
