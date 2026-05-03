@@ -13,7 +13,7 @@ path = "src/main.rs"
 tokio = { version = "1", features = ["full"] }
 
 # HTTP
-hyper = { version = "1", features = ["http1", "server"] }
+hyper = { version = "1", features = ["http1", "server", "client"] }
 hyper-util = { version = "0.1", features = ["tokio"] }
 http-body = "1"
 http-body-util = "0.1"
@@ -25,6 +25,9 @@ tower-http = { version = "0.6", features = ["cors"] }
 tokio-rustls = "0.26"
 rustls = { version = "0.23", features = ["ring"] }
 rustls-pemfile = "2"
+
+# WebSocket upstream TLS root certificates
+webpki-roots = "0.26"
 
 # Certificate generation
 rcgen = "0.13"

@@ -25,6 +25,7 @@ import { Card } from "@onecli/ui/components/card";
 import { Input } from "@onecli/ui/components/input";
 import { Label } from "@onecli/ui/components/label";
 import { Switch } from "@onecli/ui/components/switch";
+import { SecretInput } from "@/components/secret-input";
 import {
   saveAppConfig,
   getAppConfigStatus,
@@ -227,23 +228,37 @@ export const AppConfigForm = ({
                     {field.description}
                   </p>
                 )}
-                <Input
-                  id={`config-${field.name}`}
-                  type={field.secret ? "password" : "text"}
-                  value={values[field.name] ?? ""}
-                  onChange={(e) =>
-                    setValues((prev) => ({
-                      ...prev,
-                      [field.name]: e.target.value,
-                    }))
-                  }
-                  placeholder={
-                    field.secret && hasCredentials
-                      ? "Leave empty to keep current"
-                      : field.placeholder
-                  }
-                  className="font-mono text-sm"
-                />
+                {field.secret ? (
+                  <SecretInput
+                    id={`config-${field.name}`}
+                    value={values[field.name] ?? ""}
+                    onChange={(e) =>
+                      setValues((prev) => ({
+                        ...prev,
+                        [field.name]: e.target.value,
+                      }))
+                    }
+                    placeholder={
+                      hasCredentials
+                        ? "Leave empty to keep current"
+                        : field.placeholder
+                    }
+                  />
+                ) : (
+                  <Input
+                    id={`config-${field.name}`}
+                    type="text"
+                    value={values[field.name] ?? ""}
+                    onChange={(e) =>
+                      setValues((prev) => ({
+                        ...prev,
+                        [field.name]: e.target.value,
+                      }))
+                    }
+                    placeholder={field.placeholder}
+                    className="font-mono text-sm"
+                  />
+                )}
               </div>
             ))}
 

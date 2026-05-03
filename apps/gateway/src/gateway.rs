@@ -22,6 +22,7 @@ mod hooks;
 mod mitm;
 mod response;
 mod tunnel;
+mod websocket;
 
 #[cfg(feature = "cloud")]
 #[path = "cloud/trial.rs"]

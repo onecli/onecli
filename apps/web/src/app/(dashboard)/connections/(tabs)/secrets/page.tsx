@@ -13,8 +13,8 @@ export default async function SecretsRedirectPage({
   const prefix = projectId ? `/p/${projectId}` : "";
   const base = `${prefix}/connections`;
 
-  if (sp.create === "anthropic") {
-    redirect(`${base}/llms?create=anthropic`);
+  if (sp.create === "anthropic" || sp.create === "openai") {
+    redirect(`${base}/llms?create=${sp.create}`);
   }
 
   const qs = new URLSearchParams();
