@@ -189,6 +189,7 @@ export const AppsTab = () => {
           appIcon={configApp.icon}
           appDarkIcon={configApp.darkIcon}
           fields={configApp.configurable.fields}
+          hint={configApp.configurable.hint}
           open={!!configApp}
           onOpenChange={(open) => {
             if (!open) setConfigApp(null);

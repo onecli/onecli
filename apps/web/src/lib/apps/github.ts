@@ -137,11 +137,12 @@ export const github: AppDefinition = {
   },
   available: true,
   configurable: {
+    hint: "Create an OAuth App under GitHub Developer Settings.",
     fields: [
       {
         name: "clientId",
         label: "Client ID",
-        placeholder: "Iv1.abc123...",
+        placeholder: "Ov23li...",
       },
       {
         name: "clientSecret",

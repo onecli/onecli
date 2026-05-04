@@ -23,6 +23,7 @@ interface ConfigureCredentialsDialogProps {
   appIcon: string;
   appDarkIcon?: string;
   fields: OAuthConfigField[];
+  hint?: string;
   open: boolean;
   onOpenChange: (open: boolean) => void;
   onConfigured: () => void;
@@ -34,6 +35,7 @@ export const ConfigureCredentialsDialog = ({
   appIcon,
   appDarkIcon,
   fields,
+  hint,
   open,
   onOpenChange,
   onConfigured,
@@ -76,6 +78,7 @@ export const ConfigureCredentialsDialog = ({
         </DialogHeader>
 
         <div className="space-y-4 pt-2">
+          {hint && <p className="text-muted-foreground text-xs">{hint}</p>}
           {fields.map((field, i) => (
             <div key={field.name} className="grid gap-1.5">
               <Label htmlFor={`config-${field.name}`}>

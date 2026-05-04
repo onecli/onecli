@@ -45,6 +45,7 @@ interface AppConfigFormProps {
     placeholder: string;
     secret?: boolean;
   }[];
+  hint?: string;
   hasEnvDefaults: boolean;
   isConnected: boolean;
   /** Called after any config change that invalidates the connection (save, toggle, delete). */
@@ -55,6 +56,7 @@ export const AppConfigForm = ({
   provider,
   appName,
   fields,
+  hint,
   hasEnvDefaults,
   isConnected,
   onConfigChange,
@@ -197,7 +199,7 @@ export const AppConfigForm = ({
                       ? "Your credentials are saved but disabled."
                       : hasEnvDefaults
                         ? "Override platform defaults with your own."
-                        : `Required to connect ${appName}.`}
+                        : (hint ?? `Required to connect ${appName}.`)}
                 </p>
                 {!hasEnvDefaults &&
                   !hasCredentials &&

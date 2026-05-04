@@ -105,5 +105,7 @@ export interface AppDefinition {
     fields: OAuthConfigField[];
     /** Maps field names to env var names for platform defaults. Omit if no defaults exist. */
     envDefaults?: Record<string, string>;
+    /** Short hint shown above the credential fields (e.g., "Use credentials from a GitHub OAuth App"). */
+    hint?: string;
   };
 }
