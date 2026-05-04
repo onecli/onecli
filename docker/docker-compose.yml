@@ -22,7 +22,7 @@ services:
       - onecli
 
   onecli:
-    image: ghcr.io/onecli/onecli:latest
+    image: ghcr.io/onecli/onecli:${ONECLI_VERSION:-latest}
     container_name: onecli
     restart: unless-stopped
     depends_on:
