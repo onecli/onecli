@@ -38,6 +38,7 @@ interface AppDetailProps {
       secret?: boolean;
     }[];
     envDefaults?: Record<string, string>;
+    hint?: string;
   };
   hasEnvDefaults: boolean;
   hasAppConfig: boolean;
@@ -240,6 +241,7 @@ export const AppDetail = ({
           provider={app.id}
           appName={app.name}
           fields={configurable.fields}
+          hint={configurable.hint}
           hasEnvDefaults={hasEnvDefaults}
           isConnected={isConnected}
           onConfigChange={refreshConfigStatus}
@@ -253,6 +255,7 @@ export const AppDetail = ({
           appIcon={app.icon}
           appDarkIcon={app.darkIcon}
           fields={configurable.fields}
+          hint={configurable.hint}
           open={configDialogOpen}
           onOpenChange={setConfigDialogOpen}
           onConfigured={() => {
