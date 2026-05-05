@@ -4,7 +4,7 @@ import { PageHeader } from "@dashboard/page-header";
 
 export default function RulesLoading() {
   return (
-    <div className="flex flex-1 flex-col gap-6 max-w-5xl">
+    <div className="flex flex-1 flex-col gap-6">
       <PageHeader
         title="Rules"
         description="Control what your agents can and cannot access."

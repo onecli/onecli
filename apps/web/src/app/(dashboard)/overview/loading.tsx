@@ -4,7 +4,7 @@ import { PageHeader } from "@dashboard/page-header";
 
 export default function OverviewLoading() {
   return (
-    <div className="flex flex-1 flex-col gap-6 max-w-5xl">
+    <div className="flex flex-1 flex-col gap-6">
       <PageHeader
         title="Overview"
         description="Your OneCLI dashboard at a glance."
