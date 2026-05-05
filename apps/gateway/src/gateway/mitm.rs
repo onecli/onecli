@@ -101,9 +101,14 @@ pub(super) async fn mitm(
                             rules,
                             app_connections,
                         }) => {
+                            let effective_host = rules.rewrite_host.as_deref().unwrap_or(&host);
                             if is_ws {
                                 match super::websocket::handle_websocket(
-                                    req, &host, &rules, &*cache, &ctx,
+                                    req,
+                                    effective_host,
+                                    &rules,
+                                    &*cache,
+                                    &ctx,
                                 )
                                 .await
                                 {
@@ -121,7 +126,14 @@ pub(super) async fn mitm(
                                 }
                             } else {
                                 match forward::forward_request(
-                                    req, &host, "https", client, &rules, &*cache, &ctx, &approvals,
+                                    req,
+                                    effective_host,
+                                    "https",
+                                    client,
+                                    &rules,
+                                    &*cache,
+                                    &ctx,
+                                    &approvals,
                                 )
                                 .await
                                 {
@@ -178,6 +190,8 @@ pub(crate) struct ResolvedRules {
     /// True when the trial budget is exhausted — requests should be blocked.
     #[cfg_attr(not(feature = "cloud"), allow(dead_code))]
     pub budget_blocked: bool,
+    /// Rewritten upstream host (e.g., Datadog us5 → api.us5.datadoghq.com).
+    pub rewrite_host: Option<String>,
 }
 
 /// Result of per-request rule resolution including app connection disambiguation.
@@ -219,6 +233,7 @@ async fn resolve_rules(
 
     let mut injection_rules = resp.injection_rules; // from secrets
     let mut token_expires_at: Option<i64> = None;
+    let mut rewrite_host: Option<String> = None;
 
     // If no secret rules, try app connections (per-request disambiguation)
     if injection_rules.is_empty() && !resp.app_connections.is_empty() {
@@ -235,9 +250,11 @@ async fn resolve_rules(
             AppConnectionResult::Rules {
                 rules,
                 token_expires_at: exp,
+                rewrite_host: rh,
             } => {
                 injection_rules = rules;
                 token_expires_at = exp;
+                rewrite_host = rh;
             }
             AppConnectionResult::Ambiguous { connections } => {
                 return Ok(ResolveResult::Ambiguous(connections));
@@ -298,6 +315,7 @@ async fn resolve_rules(
             intercept_token,
             is_trial: resp.is_trial,
             budget_blocked: resp.budget_blocked,
+            rewrite_host,
         },
         app_connections: resp.app_connections,
     })

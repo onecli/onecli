@@ -1,4 +1,5 @@
 import type { AppDefinition } from "./types";
+import { cloudApps } from "@/lib/apps/cloud-app-registry";
 import { confluence } from "./confluence";
 import { github } from "./github";
 import { gmail } from "./gmail";
@@ -43,6 +44,7 @@ export const apps: AppDefinition[] = [
   youtube,
   vertexAi,
   todoist,
+  ...cloudApps,
 ];
 
 export const getApp = (id: string): AppDefinition | undefined =>

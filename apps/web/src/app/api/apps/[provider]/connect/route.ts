@@ -26,7 +26,12 @@ export const POST = async (request: NextRequest, { params }: Params) => {
     const { provider } = await params;
     const app = getApp(provider);
 
-    if (!app || !app.available || app.connectionMethod.type === "oauth") {
+    if (
+      !app ||
+      !app.available ||
+      app.connectionMethod.type === "oauth" ||
+      app.connectionMethod.type === "cloud_only"
+    ) {
       return NextResponse.json(
         {
           error: `Provider "${provider}" does not support direct credential connections`,
@@ -59,7 +64,9 @@ export const POST = async (request: NextRequest, { params }: Params) => {
         return f.group === "authorized_user";
       });
     } else {
-      requiredFields = app.connectionMethod.fields;
+      requiredFields = app.connectionMethod.fields.filter(
+        (f) => !("optional" in f && f.optional),
+      );
     }
 
     for (const field of requiredFields) {
@@ -84,7 +91,17 @@ export const POST = async (request: NextRequest, { params }: Params) => {
       const primaryField = app.connectionMethod.fields[0];
       credentials = {
         access_token: fields[primaryField!.name],
+        ...fields,
       };
+
+      if (app.connectionMethod.resolveMetadata) {
+        metadata =
+          (await app.connectionMethod.resolveMetadata(fields)) ?? undefined;
+      }
+
+      if (!metadata) {
+        metadata = { name: "API Key" };
+      }
     }
 
     const connectionOpts = {

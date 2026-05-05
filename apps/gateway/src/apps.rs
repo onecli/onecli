@@ -12,16 +12,19 @@ use crate::inject::Injection;
 
 /// Auth injection strategy for a specific host.
 #[derive(Debug, Clone, Copy)]
-enum AuthStrategy {
+pub(crate) enum AuthStrategy {
     /// `Authorization: Bearer {token}`
     Bearer,
     /// `Authorization: Basic base64("x-access-token:{token}")`
     BasicXAccessToken,
+    /// No `Authorization` header — auth injected via `credential_headers` only.
+    #[cfg_attr(not(feature = "cloud"), allow(dead_code))]
+    None,
 }
 
 /// How a host rule matches incoming hostnames.
 #[derive(Debug, Clone, Copy)]
-enum HostPattern {
+pub(crate) enum HostPattern {
     /// Match the hostname exactly (e.g., `"api.github.com"`).
     Exact(&'static str),
     /// Match any hostname ending with the suffix, strictly longer than the suffix
@@ -30,17 +33,17 @@ enum HostPattern {
 }
 
 /// A host pattern and its injection strategy for an app provider.
-struct HostRule {
-    pattern: HostPattern,
+pub(crate) struct HostRule {
+    pub(crate) pattern: HostPattern,
     /// Optional path prefix to scope this rule (e.g., `"/calendar/"` for Google Calendar).
     /// When set, only requests whose path starts with this prefix match this provider.
     /// When `None`, all paths on the host match (used for providers with dedicated subdomains).
-    path_prefix: Option<&'static str>,
-    strategy: AuthStrategy,
+    pub(crate) path_prefix: Option<&'static str>,
+    pub(crate) strategy: AuthStrategy,
     /// When true, matching requests return a synthetic OAuth token response with
     /// the cached access token instead of being forwarded upstream. Used for
     /// credential stub flows where the SDK tries to refresh dummy credentials.
-    intercept: bool,
+    pub(crate) intercept: bool,
 }
 
 /// Check whether a `HostRule` matches a given hostname.
@@ -65,29 +68,47 @@ pub(crate) enum TokenBodyFormat {
 /// Configuration for refreshing expired OAuth tokens.
 pub(crate) struct RefreshConfig {
     /// Token endpoint URL (e.g., `https://oauth2.googleapis.com/token`).
-    pub token_url: &'static str,
+    pub(crate) token_url: &'static str,
     /// Env var for the OAuth client ID.
-    pub client_id_env: &'static str,
+    pub(crate) client_id_env: &'static str,
     /// Env var for the OAuth client secret.
-    pub client_secret_env: &'static str,
+    pub(crate) client_secret_env: &'static str,
     /// Body format for token requests.
-    pub body_format: TokenBodyFormat,
+    pub(crate) body_format: TokenBodyFormat,
+}
+
+/// Maps a credential JSON field to an HTTP header injected on every request.
+/// Used for providers that need custom headers (e.g., Datadog's DD-API-KEY).
+pub(crate) struct CredentialHeader {
+    pub(crate) credential_field: &'static str,
+    pub(crate) header_name: &'static str,
+}
+
+/// Rewrites the upstream host based on a credential field.
+/// Used for providers with regional endpoints (e.g., Datadog us5 → api.us5.datadoghq.com).
+pub(crate) struct HostRewrite {
+    pub(crate) credential_field: &'static str,
+    pub(crate) template: fn(&str) -> String,
 }
 
 /// Maps a connection metadata key to an HTTP header injected on every request.
 pub(crate) struct MetadataHeader {
-    pub metadata_key: &'static str,
-    pub header_name: &'static str,
+    pub(crate) metadata_key: &'static str,
+    pub(crate) header_name: &'static str,
 }
 
 /// An app provider definition with its host rules.
-struct AppProvider {
-    provider: &'static str,
-    display_name: &'static str,
-    host_rules: &'static [HostRule],
-    refresh: Option<&'static RefreshConfig>,
+pub(crate) struct AppProvider {
+    pub(crate) provider: &'static str,
+    pub(crate) display_name: &'static str,
+    pub(crate) host_rules: &'static [HostRule],
+    pub(crate) refresh: Option<&'static RefreshConfig>,
     /// Headers injected from connection metadata (e.g., project ID → x-goog-user-project).
-    metadata_headers: &'static [MetadataHeader],
+    pub(crate) metadata_headers: &'static [MetadataHeader],
+    /// Headers injected from credential fields (e.g., DD-API-KEY from credentials.apiKey).
+    pub(crate) credential_headers: &'static [CredentialHeader],
+    /// Optional host rewrite based on a credential field (e.g., Datadog site → regional endpoint).
+    pub(crate) host_rewrite: Option<&'static HostRewrite>,
 }
 
 /// Shared refresh config for Atlassian OAuth APIs (Jira, Confluence).
@@ -142,6 +163,8 @@ static APP_PROVIDERS: &[AppProvider] = &[
         ],
         refresh: None,
         metadata_headers: &[],
+        credential_headers: &[],
+        host_rewrite: None,
     },
     AppProvider {
         provider: "gmail",
@@ -169,6 +192,8 @@ static APP_PROVIDERS: &[AppProvider] = &[
         ],
         refresh: Some(&GOOGLE_REFRESH),
         metadata_headers: &[],
+        credential_headers: &[],
+        host_rewrite: None,
     },
     AppProvider {
         provider: "google-calendar",
@@ -189,6 +214,8 @@ static APP_PROVIDERS: &[AppProvider] = &[
         ],
         refresh: Some(&GOOGLE_REFRESH),
         metadata_headers: &[],
+        credential_headers: &[],
+        host_rewrite: None,
     },
     AppProvider {
         provider: "google-drive",
@@ -215,6 +242,8 @@ static APP_PROVIDERS: &[AppProvider] = &[
         ],
         refresh: Some(&GOOGLE_REFRESH),
         metadata_headers: &[],
+        credential_headers: &[],
+        host_rewrite: None,
     },
     AppProvider {
         provider: "google-docs",
@@ -227,6 +256,8 @@ static APP_PROVIDERS: &[AppProvider] = &[
         }],
         refresh: Some(&GOOGLE_REFRESH),
         metadata_headers: &[],
+        credential_headers: &[],
+        host_rewrite: None,
     },
     AppProvider {
         provider: "google-sheets",
@@ -239,6 +270,8 @@ static APP_PROVIDERS: &[AppProvider] = &[
         }],
         refresh: Some(&GOOGLE_REFRESH),
         metadata_headers: &[],
+        credential_headers: &[],
+        host_rewrite: None,
     },
     AppProvider {
         provider: "google-slides",
@@ -251,6 +284,8 @@ static APP_PROVIDERS: &[AppProvider] = &[
         }],
         refresh: Some(&GOOGLE_REFRESH),
         metadata_headers: &[],
+        credential_headers: &[],
+        host_rewrite: None,
     },
     AppProvider {
         provider: "google-tasks",
@@ -263,6 +298,8 @@ static APP_PROVIDERS: &[AppProvider] = &[
         }],
         refresh: Some(&GOOGLE_REFRESH),
         metadata_headers: &[],
+        credential_headers: &[],
+        host_rewrite: None,
     },
     AppProvider {
         provider: "google-forms",
@@ -275,6 +312,8 @@ static APP_PROVIDERS: &[AppProvider] = &[
         }],
         refresh: Some(&GOOGLE_REFRESH),
         metadata_headers: &[],
+        credential_headers: &[],
+        host_rewrite: None,
     },
     AppProvider {
         provider: "google-classroom",
@@ -287,6 +326,8 @@ static APP_PROVIDERS: &[AppProvider] = &[
         }],
         refresh: Some(&GOOGLE_REFRESH),
         metadata_headers: &[],
+        credential_headers: &[],
+        host_rewrite: None,
     },
     AppProvider {
         provider: "google-admin",
@@ -299,6 +340,8 @@ static APP_PROVIDERS: &[AppProvider] = &[
         }],
         refresh: Some(&GOOGLE_REFRESH),
         metadata_headers: &[],
+        credential_headers: &[],
+        host_rewrite: None,
     },
     AppProvider {
         provider: "google-analytics",
@@ -311,6 +354,8 @@ static APP_PROVIDERS: &[AppProvider] = &[
         }],
         refresh: Some(&GOOGLE_REFRESH),
         metadata_headers: &[],
+        credential_headers: &[],
+        host_rewrite: None,
     },
     AppProvider {
         provider: "google-search-console",
@@ -323,6 +368,8 @@ static APP_PROVIDERS: &[AppProvider] = &[
         }],
         refresh: Some(&GOOGLE_REFRESH),
         metadata_headers: &[],
+        credential_headers: &[],
+        host_rewrite: None,
     },
     AppProvider {
         provider: "google-meet",
@@ -335,6 +382,8 @@ static APP_PROVIDERS: &[AppProvider] = &[
         }],
         refresh: Some(&GOOGLE_REFRESH),
         metadata_headers: &[],
+        credential_headers: &[],
+        host_rewrite: None,
     },
     AppProvider {
         provider: "google-photos",
@@ -347,6 +396,8 @@ static APP_PROVIDERS: &[AppProvider] = &[
         }],
         refresh: Some(&GOOGLE_REFRESH),
         metadata_headers: &[],
+        credential_headers: &[],
+        host_rewrite: None,
     },
     AppProvider {
         provider: "jira",
@@ -359,6 +410,8 @@ static APP_PROVIDERS: &[AppProvider] = &[
         }],
         refresh: Some(&ATLASSIAN_REFRESH),
         metadata_headers: &[],
+        credential_headers: &[],
+        host_rewrite: None,
     },
     AppProvider {
         provider: "confluence",
@@ -371,6 +424,8 @@ static APP_PROVIDERS: &[AppProvider] = &[
         }],
         refresh: Some(&ATLASSIAN_REFRESH),
         metadata_headers: &[],
+        credential_headers: &[],
+        host_rewrite: None,
     },
     AppProvider {
         provider: "youtube",
@@ -397,6 +452,8 @@ static APP_PROVIDERS: &[AppProvider] = &[
         ],
         refresh: Some(&GOOGLE_REFRESH),
         metadata_headers: &[],
+        credential_headers: &[],
+        host_rewrite: None,
     },
     AppProvider {
         provider: "vertex-ai",
@@ -420,6 +477,8 @@ static APP_PROVIDERS: &[AppProvider] = &[
             metadata_key: "quotaProjectId",
             header_name: "x-goog-user-project",
         }],
+        credential_headers: &[],
+        host_rewrite: None,
     },
     AppProvider {
         provider: "todoist",
@@ -432,6 +491,8 @@ static APP_PROVIDERS: &[AppProvider] = &[
         }],
         refresh: Some(&TODOIST_REFRESH),
         metadata_headers: &[],
+        credential_headers: &[],
+        host_rewrite: None,
     },
     AppProvider {
         provider: "resend",
@@ -444,15 +505,25 @@ static APP_PROVIDERS: &[AppProvider] = &[
         }],
         refresh: None,
         metadata_headers: &[],
+        credential_headers: &[],
+        host_rewrite: None,
     },
 ];
 
 // ── Public API ─────────────────────────────────────────────────────────
 
+/// Iterate over all registered providers, including cloud-only providers
+/// added by the `cloud_apps` module.
+fn all_providers() -> impl Iterator<Item = &'static AppProvider> {
+    APP_PROVIDERS
+        .iter()
+        .chain(crate::cloud_apps::providers().iter())
+}
+
 /// Given a hostname, return the first matching provider's (id, display_name).
 /// Returns `None` if no provider matches.
 pub(crate) fn provider_for_host(hostname: &str) -> Option<(&'static str, &'static str)> {
-    APP_PROVIDERS.iter().find_map(|p| {
+    all_providers().find_map(|p| {
         p.host_rules
             .iter()
             .any(|r| host_rule_matches(r, hostname))
@@ -470,7 +541,7 @@ pub(crate) fn provider_for_host_and_path(
     path: &str,
 ) -> Option<(&'static str, &'static str)> {
     // First try: match both host and path prefix
-    let path_match = APP_PROVIDERS.iter().find_map(|p| {
+    let path_match = all_providers().find_map(|p| {
         p.host_rules
             .iter()
             .any(|r| {
@@ -492,7 +563,7 @@ pub(crate) fn provider_for_host_and_path(
 /// prefixes (e.g., Gmail on `/gmail/` and Calendar on `/calendar/`).
 pub(crate) fn providers_for_host(hostname: &str) -> Vec<&'static str> {
     let mut providers = Vec::new();
-    for provider in APP_PROVIDERS {
+    for provider in all_providers() {
         for rule in provider.host_rules {
             if host_rule_matches(rule, hostname) {
                 providers.push(provider.provider);
@@ -507,8 +578,7 @@ pub(crate) fn providers_for_host(hostname: &str) -> Vec<&'static str> {
 /// For providers with multiple rules on the same host, use `build_app_injection_rules` instead.
 #[cfg(test)]
 fn path_pattern_for(provider: &str, hostname: &str) -> String {
-    APP_PROVIDERS
-        .iter()
+    all_providers()
         .find(|p| p.provider == provider)
         .and_then(|app| {
             app.host_rules
@@ -523,7 +593,7 @@ fn path_pattern_for(provider: &str, hostname: &str) -> String {
 /// For multi-rule providers (e.g., Google Drive), use `build_app_injection_rules`.
 #[cfg(test)]
 fn build_app_injections(provider: &str, hostname: &str, token: &str) -> Vec<Injection> {
-    let app = APP_PROVIDERS.iter().find(|p| p.provider == provider);
+    let app = all_providers().find(|p| p.provider == provider);
     let Some(app) = app else { return vec![] };
 
     let rule = app
@@ -545,6 +615,7 @@ fn build_app_injections(provider: &str, hostname: &str, token: &str) -> Vec<Inje
                 value: format!("Basic {encoded}"),
             }]
         }
+        AuthStrategy::None => vec![],
     }
 }
 
@@ -557,7 +628,7 @@ pub(crate) fn build_app_injection_rules(
     hostname: &str,
     token: &str,
 ) -> Vec<(String, Vec<Injection>)> {
-    let Some(app) = APP_PROVIDERS.iter().find(|p| p.provider == provider) else {
+    let Some(app) = all_providers().find(|p| p.provider == provider) else {
         return vec![];
     };
 
@@ -581,6 +652,7 @@ pub(crate) fn build_app_injection_rules(
                         value: format!("Basic {encoded}"),
                     }]
                 }
+                AuthStrategy::None => vec![],
             };
             (pattern, injections)
         })
@@ -589,25 +661,53 @@ pub(crate) fn build_app_injection_rules(
 
 /// Get the refresh config for a provider, if it supports token refresh.
 pub(crate) fn refresh_config(provider: &str) -> Option<&'static RefreshConfig> {
-    APP_PROVIDERS
-        .iter()
+    all_providers()
         .find(|p| p.provider == provider)
         .and_then(|p| p.refresh)
 }
 
 /// Get metadata-to-header mappings for a provider.
 pub(crate) fn metadata_headers(provider: &str) -> &'static [MetadataHeader] {
-    APP_PROVIDERS
-        .iter()
+    all_providers()
         .find(|p| p.provider == provider)
         .map(|p| p.metadata_headers)
         .unwrap_or(&[])
 }
 
+/// Get credential-to-header mappings for a provider.
+pub(crate) fn credential_headers(provider: &str) -> &'static [CredentialHeader] {
+    all_providers()
+        .find(|p| p.provider == provider)
+        .map(|p| p.credential_headers)
+        .unwrap_or(&[])
+}
+
+/// Compute the rewritten upstream host for a provider based on credential fields.
+/// Returns `None` if the provider has no host rewrite rule or the credential field is missing.
+pub(crate) fn rewrite_host(provider: &str, creds: &serde_json::Value) -> Option<String> {
+    let app = all_providers().find(|p| p.provider == provider)?;
+    let hw = app.host_rewrite?;
+    let field_value = creds.get(hw.credential_field)?.as_str()?;
+    Some((hw.template)(field_value))
+}
+
+/// Returns true if the provider has any host rule that injects an Authorization header.
+/// Providers using only credential_headers (e.g., Datadog) return false.
+pub(crate) fn needs_access_token(provider: &str) -> bool {
+    all_providers()
+        .find(|p| p.provider == provider)
+        .map(|p| {
+            p.host_rules
+                .iter()
+                .any(|r| !matches!(r.strategy, AuthStrategy::None))
+        })
+        .unwrap_or(false)
+}
+
 /// Check whether any provider matching this hostname has intercept rules.
 /// Used to decide whether to pre-compute interception data at resolution time.
 pub(crate) fn host_has_intercept_rules(hostname: &str) -> bool {
-    APP_PROVIDERS.iter().any(|p| {
+    all_providers().any(|p| {
         p.host_rules.iter().any(|r| r.intercept)
             && p.host_rules.iter().any(|r| host_rule_matches(r, hostname))
     })
@@ -617,7 +717,7 @@ pub(crate) fn host_has_intercept_rules(hostname: &str) -> bool {
 /// Returns true when any provider has a host rule matching the hostname and path
 /// with `intercept: true`.
 pub(crate) fn is_intercept_target(hostname: &str, path: &str) -> bool {
-    APP_PROVIDERS.iter().any(|p| {
+    all_providers().any(|p| {
         p.host_rules.iter().any(|r| {
             r.intercept
                 && host_rule_matches(r, hostname)
@@ -1192,6 +1292,57 @@ mod tests {
         );
     }
 
+    // ── Cloud-only providers ─────────────────────────────────────────
+
+    #[cfg(feature = "cloud")]
+    mod cloud_providers {
+        use super::*;
+
+        #[test]
+        fn providers_for_datadog_hosts() {
+            assert_eq!(providers_for_host("api.datadoghq.com"), vec!["datadog"]);
+            assert_eq!(providers_for_host("api.us3.datadoghq.com"), vec!["datadog"]);
+            assert_eq!(providers_for_host("api.us5.datadoghq.com"), vec!["datadog"]);
+            assert_eq!(providers_for_host("api.ap1.datadoghq.com"), vec!["datadog"]);
+            assert_eq!(providers_for_host("api.ap2.datadoghq.com"), vec!["datadog"]);
+            assert_eq!(providers_for_host("api.datadoghq.eu"), vec!["datadog"]);
+            assert_eq!(providers_for_host("api.ddog-gov.com"), vec!["datadog"]);
+            assert_eq!(providers_for_host("api.us2.ddog-gov.com"), vec!["datadog"]);
+        }
+
+        #[test]
+        fn datadog_no_false_positives() {
+            assert!(providers_for_host("datadoghq.com").is_empty());
+            assert!(providers_for_host("datadoghq.eu").is_empty());
+            assert!(providers_for_host("ddog-gov.com").is_empty());
+        }
+
+        #[test]
+        fn provider_for_host_datadog() {
+            let result = provider_for_host("api.datadoghq.com");
+            assert_eq!(result, Some(("datadog", "Datadog")));
+        }
+
+        #[test]
+        fn datadog_no_auth_header_injected() {
+            let injections = build_app_injections("datadog", "api.datadoghq.com", "unused");
+            assert!(
+                injections.is_empty(),
+                "Datadog should not inject Authorization header"
+            );
+        }
+
+        #[test]
+        fn datadog_credential_headers_defined() {
+            let headers = credential_headers("datadog");
+            assert_eq!(headers.len(), 2);
+            assert_eq!(headers[0].credential_field, "apiKey");
+            assert_eq!(headers[0].header_name, "DD-API-KEY");
+            assert_eq!(headers[1].credential_field, "appKey");
+            assert_eq!(headers[1].header_name, "DD-APPLICATION-KEY");
+        }
+    }
+
     // ── Edge cases ───────────────────────────────────────────────────
 
     #[test]
@@ -1297,7 +1448,7 @@ mod tests {
     fn no_mixed_path_prefix_on_shared_hosts() {
         use std::collections::HashMap;
         let mut hosts: HashMap<&str, (bool, bool)> = HashMap::new();
-        for provider in APP_PROVIDERS {
+        for provider in all_providers() {
             for rule in provider.host_rules {
                 let host = match rule.pattern {
                     HostPattern::Exact(h) => h,

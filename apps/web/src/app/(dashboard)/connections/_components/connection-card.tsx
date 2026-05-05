@@ -48,6 +48,11 @@ export const ConnectionCard = ({
     extractLabel(connection.metadata ?? undefined) ??
     "Unknown account";
 
+  const metadataUrl =
+    typeof connection.metadata?.url === "string"
+      ? connection.metadata.url
+      : null;
+
   const handleDisconnect = async () => {
     setDisconnecting(true);
     try {
@@ -65,7 +70,18 @@ export const ConnectionCard = ({
   return (
     <Card className="flex-row items-center justify-between gap-3 px-4 py-3">
       <div className="min-w-0">
-        <p className="text-sm font-medium truncate">{displayName}</p>
+        {metadataUrl ? (
+          <a
+            href={metadataUrl}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="text-sm font-medium truncate block hover:underline"
+          >
+            {displayName}
+          </a>
+        ) : (
+          <p className="text-sm font-medium truncate">{displayName}</p>
+        )}
         <p className="text-xs text-muted-foreground mt-0.5">
           Connected{" "}
           {new Date(connection.connectedAt).toLocaleDateString("en-US", {

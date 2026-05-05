@@ -43,7 +43,9 @@
     "REDIS_USERNAME",
     "REDIS_PASSWORD",
     "CRON_SECRET_NAME",
-    "ANTHROPIC_SECRET_NAME"
+    "ANTHROPIC_SECRET_NAME",
+    "MICROSOFT_CLIENT_ID",
+    "MICROSOFT_CLIENT_SECRET"
   ],
   "tasks": {
     "build": {
@@ -70,7 +72,9 @@
         "REDIS_TLS",
         "COGNITO_USER_POOL_ID",
         "POSTHOG_API_KEY",
-        "POSTHOG_HOST"
+        "POSTHOG_HOST",
+        "MICROSOFT_CLIENT_ID",
+        "MICROSOFT_CLIENT_SECRET"
       ]
     },
     "@onecli/gateway#check": {

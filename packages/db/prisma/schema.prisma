@@ -23,9 +23,10 @@ model Organization {
   createdAt          DateTime @default(now()) @map("created_at")
   updatedAt          DateTime @updatedAt @map("updated_at")
 
-  projects    Project[]
-  members     OrganizationMember[]
-  invitations Invitation[]
+  projects       Project[]
+  members        OrganizationMember[]
+  invitations    Invitation[]
+  userProvisions UserProvision[]
 
   @@map("organizations")
 }
@@ -117,6 +118,8 @@ model User {
   createdAgentSecrets     AgentSecret[]        @relation("AgentSecretCreator")
   updatedAgentSecrets     AgentSecret[]        @relation("AgentSecretUpdater")
   trialBudget             TrialBudget?
+  provisionedAs           UserProvision?       @relation("ProvisionedUser")
+  createdProvisions       UserProvision[]      @relation("ProvisionCreator")
 
   @@map("users")
 }
@@ -352,6 +355,33 @@ model AppConfig {
 
   @@unique([projectId, provider])
   @@map("app_configs")
+}
+
+// ── Provisioned users ───────────────────────────────────────────────────
+
+model UserProvision {
+  id                 String    @id @default(uuid())
+  organizationId     String    @map("organization_id")
+  userId             String    @unique @map("user_id")
+  projectId          String    @unique @map("project_id")
+  role               String // "admin" | "member"
+  token              String    @unique
+  status             String    @default("pending") // "pending" | "claimed" | "expired"
+  skipOnboarding     Boolean   @default(true) @map("skip_onboarding")
+  provisionedById    String    @map("provisioned_by_id")
+  provisionedByEmail String    @map("provisioned_by_email")
+  expiresAt          DateTime  @map("expires_at")
+  claimedAt          DateTime? @map("claimed_at")
+  createdAt          DateTime  @default(now()) @map("created_at")
+
+  organization  Organization @relation(fields: [organizationId], references: [id])
+  user          User         @relation("ProvisionedUser", fields: [userId], references: [id])
+  provisionedBy User         @relation("ProvisionCreator", fields: [provisionedById], references: [id])
+
+  @@index([token])
+  @@index([organizationId])
+  @@index([expiresAt, status])
+  @@map("user_provisions")
 }
 
 // ── Standalone (no project scoping) ─────────────────────────────────────

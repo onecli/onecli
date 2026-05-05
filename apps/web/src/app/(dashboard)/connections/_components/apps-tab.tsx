@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useRouter, usePathname } from "next/navigation";
 import { withProjectPrefix } from "@/lib/navigation";
-import { ChevronRight } from "lucide-react";
+import { ChevronRight, Cloud, ExternalLink } from "lucide-react";
 import { Button } from "@onecli/ui/components/button";
 import { Skeleton } from "@onecli/ui/components/skeleton";
 import { cn } from "@onecli/ui/lib/utils";
@@ -117,6 +117,16 @@ export const AppsTab = () => {
     onConfigure: setConfigApp,
   });
 
+  const sortedApps = useMemo(
+    () =>
+      [...apps].sort((a, b) => {
+        const aConnected = (connectionCounts.get(a.id) ?? 0) > 0 ? 1 : 0;
+        const bConnected = (connectionCounts.get(b.id) ?? 0) > 0 ? 1 : 0;
+        return bConnected - aConnected;
+      }),
+    [connectionCounts],
+  );
+
   const handleConnect = (e: React.MouseEvent, app: AppDefinition) => {
     e.stopPropagation();
     const hasCredentials =
@@ -138,8 +148,9 @@ export const AppsTab = () => {
     <>
       <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
         <RequestAppSlot />
-        {apps.map((app) => {
+        {sortedApps.map((app) => {
           const count = connectionCounts.get(app.id) ?? 0;
+          const isCloudOnly = app.connectionMethod.type === "cloud_only";
           return (
             <AppRow
               key={app.id}
@@ -148,11 +159,23 @@ export const AppsTab = () => {
               darkIcon={app.darkIcon}
               connectionCount={count}
               loading={loading}
+              cloudOnly={isCloudOnly}
               onConnect={(e) => handleConnect(e, app)}
-              onClick={() =>
-                router.push(
-                  withProjectPrefix(pathname, `/connections/apps/${app.id}`),
-                )
+              onClick={
+                isCloudOnly
+                  ? () =>
+                      window.open(
+                        "https://app.onecli.sh/connections",
+                        "_blank",
+                        "noopener,noreferrer",
+                      )
+                  : () =>
+                      router.push(
+                        withProjectPrefix(
+                          pathname,
+                          `/connections/apps/${app.id}`,
+                        ),
+                      )
               }
             />
           );
@@ -212,6 +235,7 @@ interface AppRowProps {
   darkIcon?: string;
   connectionCount: number;
   loading: boolean;
+  cloudOnly?: boolean;
   onConnect: (e: React.MouseEvent) => void;
   onClick: () => void;
 }
@@ -222,6 +246,7 @@ const AppRow = ({
   darkIcon,
   connectionCount,
   loading,
+  cloudOnly,
   onConnect,
   onClick,
 }: AppRowProps) => {
@@ -242,7 +267,12 @@ const AppRow = ({
       </div>
 
       <div className="flex items-center gap-2">
-        {loading ? (
+        {cloudOnly ? (
+          <span className="inline-flex items-center gap-1 rounded-full bg-muted px-2 py-0.5 text-muted-foreground">
+            <Cloud className="size-3" />
+            <span className="text-[11px] font-medium">Cloud</span>
+          </span>
+        ) : loading ? (
           <Skeleton className="h-6 w-16 rounded-md" />
         ) : connected ? (
           <div className="flex items-center gap-1.5">
@@ -256,7 +286,11 @@ const AppRow = ({
             Connect
           </Button>
         )}
-        <ChevronRight className="size-3.5 text-muted-foreground/40 transition-colors group-hover:text-muted-foreground" />
+        {cloudOnly ? (
+          <ExternalLink className="size-3.5 text-muted-foreground/40 transition-colors group-hover:text-muted-foreground" />
+        ) : (
+          <ChevronRight className="size-3.5 text-muted-foreground/40 transition-colors group-hover:text-muted-foreground" />
+        )}
       </div>
     </div>
   );

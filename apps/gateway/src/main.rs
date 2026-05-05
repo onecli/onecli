@@ -22,6 +22,14 @@ mod approval;
 mod approval;
 
 mod apps;
+
+#[cfg(not(feature = "cloud"))]
+mod cloud_apps;
+
+#[cfg(feature = "cloud")]
+#[path = "cloud/cloud_apps.rs"]
+mod cloud_apps;
+
 mod connect;
 
 #[cfg(not(feature = "cloud"))]

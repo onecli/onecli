@@ -667,6 +667,7 @@ async fn handle_http_proxy(
         intercept_token: None,
         is_trial: resolved.is_trial,
         budget_blocked: resolved.budget_blocked,
+        rewrite_host: None,
     };
 
     let mut resp = forward::forward_request(

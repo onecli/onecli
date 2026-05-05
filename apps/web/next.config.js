@@ -29,6 +29,7 @@ const nextConfig = {
           "@/lib/auth/session-hooks": "@/cloud/auth/session-hooks",
           "@/lib/deploy/nav-deploy": "@/cloud/deploy/nav-deploy",
           "@/lib/components/request-app-slot": "@/cloud/apps/request-app-slot",
+          "@/lib/apps/cloud-app-registry": "@/cloud/apps/cloud-app-registry",
           "@/lib/actions/agents": "@/cloud/actions/agents",
           "@/lib/actions/rules": "@/cloud/actions/rules",
           "@/lib/actions/secrets": "@/cloud/actions/secrets",
