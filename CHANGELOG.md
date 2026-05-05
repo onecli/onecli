@@ -1,5 +1,21 @@
 # Changelog
 
+## [1.20.0](https://github.com/onecli/onecli/compare/v1.19.1...v1.20.0) (2026-05-05)
+
+
+### Features
+
+* add OpenAI secret type, WebSocket proxy, and SecretInput component ([#244](https://github.com/onecli/onecli/issues/244)) ([a740187](https://github.com/onecli/onecli/commit/a7401879ee88dcdc7cf3e20ead505d2471febd11))
+* add Todoist app integration ([#242](https://github.com/onecli/onecli/issues/242)) ([8accd63](https://github.com/onecli/onecli/commit/8accd63b7a65bb8a2816536eeec3fdc079a5663b))
+* make app and gateway ports configurable for multi-user hosts ([#227](https://github.com/onecli/onecli/issues/227)) ([ea4118e](https://github.com/onecli/onecli/commit/ea4118e5e3b0349681f2ca07c97b905e8f0d965e))
+* support ONECLI_VERSION env var in install script ([#246](https://github.com/onecli/onecli/issues/246)) ([197d2f9](https://github.com/onecli/onecli/commit/197d2f95d6b485b47cd2d12536cea0484098fb80))
+
+
+### Bug Fixes
+
+* GitHub config to clarify OAuth App credentials ([#245](https://github.com/onecli/onecli/issues/245)) ([6ba8ae3](https://github.com/onecli/onecli/commit/6ba8ae394f7af0f4e4cb4be0acdfc0d5cd5ce084))
+* split Secrets tab into Custom/LLMs, swap logo to PNG, fix settings redirect ([#241](https://github.com/onecli/onecli/issues/241)) ([b73c8a3](https://github.com/onecli/onecli/commit/b73c8a32ef720d2e5853fdc620e1c8f122080d25))
+
 ## [1.19.1](https://github.com/onecli/onecli/compare/v1.19.0...v1.19.1) (2026-05-03)
 
 
