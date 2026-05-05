@@ -1,5 +1,18 @@
 # Changelog
 
+## [1.21.0](https://github.com/onecli/onecli/compare/v1.20.0...v1.21.0) (2026-05-05)
+
+
+### Features
+
+* add cloud-only apps framework, credential header injection, and user provisioning schema ([#247](https://github.com/onecli/onecli/issues/247)) ([16dfe1a](https://github.com/onecli/onecli/commit/16dfe1a1dba49ce8070fbdd979719021b03517bf))
+* generic OAuth interface, pro app badges, and credential resolution ([#249](https://github.com/onecli/onecli/issues/249)) ([ed2474f](https://github.com/onecli/onecli/commit/ed2474fcc6951c8cc552b7f2f4558629f5992b42))
+
+
+### Bug Fixes
+
+* center dashboard content and unify page widths ([#250](https://github.com/onecli/onecli/issues/250)) ([31b78d1](https://github.com/onecli/onecli/commit/31b78d160db78908c512d22f45ccfb4737b9075e))
+
 ## [1.20.0](https://github.com/onecli/onecli/compare/v1.19.1...v1.20.0) (2026-05-05)
 
 
