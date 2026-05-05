@@ -48,7 +48,15 @@ export type ConnectionMethod =
         label: string;
         description?: string;
         placeholder: string;
+        /** When true, the field is not required. */
+        optional?: boolean;
+        /** When false, the field is shown as plain text instead of masked. */
+        secret?: boolean;
       }[];
+      /** Resolve metadata for the connection (e.g., org name, dashboard URL). */
+      resolveMetadata?: (
+        fields: Record<string, string>,
+      ) => Promise<Record<string, unknown> | null>;
     }
   | {
       type: "credentials_import";
@@ -73,6 +81,9 @@ export type ConnectionMethod =
         /** Maps JSON keys in the file to field names in the form. */
         keyMap: Record<string, string>;
       };
+    }
+  | {
+      type: "cloud_only";
     };
 
 export interface OAuthConfigField {

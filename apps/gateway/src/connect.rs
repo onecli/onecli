@@ -59,6 +59,8 @@ pub(crate) enum AppConnectionResult {
         rules: Vec<InjectionRule>,
         /// Token expiry (UNIX timestamp) from the resolved app connection, if known.
         token_expires_at: Option<i64>,
+        /// Rewritten upstream host (e.g., Datadog us5 → api.us5.datadoghq.com).
+        rewrite_host: Option<String>,
     },
     /// No app connections available for this provider.
     NoConnections,
@@ -66,6 +68,13 @@ pub(crate) enum AppConnectionResult {
     Ambiguous { connections: Vec<ConnectionChoice> },
     /// The requested connection ID was not found — return the valid options.
     NotFound { connections: Vec<ConnectionChoice> },
+}
+
+/// Cached injection result including host rewrite, so cache hits preserve routing.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct CachedAppInjection {
+    rules: Vec<InjectionRule>,
+    rewrite_host: Option<String>,
 }
 
 /// A single app connection option returned in disambiguation responses.
@@ -317,16 +326,20 @@ impl PolicyEngine {
             // Each provider has exactly one connection — no ambiguity, resolve all
             let mut rules = Vec::new();
             let mut earliest_expires_at: Option<i64> = None;
+            let mut resolved_rewrite_host: Option<String> = None;
             for conn in app_connections {
                 if let AppConnectionResult::Rules {
                     rules: r,
                     token_expires_at,
+                    rewrite_host,
                 } = self
                     .resolve_connection_injections(conn, hostname, project_id, cache)
                     .await?
                 {
                     rules.extend(r);
-                    // Track the earliest expiry across all connections
+                    if rewrite_host.is_some() {
+                        resolved_rewrite_host = rewrite_host;
+                    }
                     match (earliest_expires_at, token_expires_at) {
                         (None, exp) => earliest_expires_at = exp,
                         (Some(cur), Some(exp)) if exp < cur => earliest_expires_at = Some(exp),
@@ -337,6 +350,7 @@ impl PolicyEngine {
             return Ok(AppConnectionResult::Rules {
                 rules,
                 token_expires_at: earliest_expires_at,
+                rewrite_host: resolved_rewrite_host,
             });
         }
 
@@ -362,12 +376,12 @@ impl PolicyEngine {
     ) -> Result<AppConnectionResult, ConnectError> {
         let cache_key = format!("app_injection:{project_id}:{}", conn.id);
 
-        // Check injection cache — skip decryption if we have cached rules
-        if let Some(cached) = cache.get::<Vec<InjectionRule>>(&cache_key).await {
+        if let Some(cached) = cache.get::<CachedAppInjection>(&cache_key).await {
             debug!(connection_id = %conn.id, "app injection: cache hit");
             return Ok(AppConnectionResult::Rules {
-                rules: cached,
-                token_expires_at: None, // expiry not tracked in cache
+                rules: cached.rules,
+                token_expires_at: None,
+                rewrite_host: cached.rewrite_host,
             });
         }
 
@@ -380,20 +394,35 @@ impl PolicyEngine {
             .decrypt(encrypted_creds)
             .await
             .map_err(decrypt_err)?;
-        let Some((token, expires_at)) = self
-            .resolve_access_token(&decrypted_json, &conn.provider, project_id, &conn.id)
-            .await
-        else {
-            return Ok(AppConnectionResult::NoConnections);
+
+        let needs_token = apps::needs_access_token(&conn.provider);
+        let (token, expires_at) = if needs_token {
+            let Some(resolved) = self
+                .resolve_access_token(&decrypted_json, &conn.provider, project_id, &conn.id)
+                .await
+            else {
+                return Ok(AppConnectionResult::NoConnections);
+            };
+            resolved
+        } else {
+            (String::new(), None)
         };
 
-        let mut rules = Vec::new();
-        for (path_pattern, injections) in
+        let mut rules: Vec<InjectionRule> =
             apps::build_app_injection_rules(&conn.provider, hostname, &token)
-        {
+                .into_iter()
+                .map(|(path_pattern, injections)| InjectionRule {
+                    path_pattern,
+                    injections,
+                })
+                .collect();
+
+        // For credential-only providers (no auth rules), ensure at least one
+        // catch-all rule exists so credential headers have somewhere to attach.
+        if rules.is_empty() && !apps::credential_headers(&conn.provider).is_empty() {
             rules.push(InjectionRule {
-                path_pattern,
-                injections,
+                path_pattern: "*".to_string(),
+                injections: Vec::new(),
             });
         }
 
@@ -411,6 +440,25 @@ impl PolicyEngine {
             }
         }
 
+        // Parse credentials once for credential headers and host rewrite
+        let creds: Option<serde_json::Value> = serde_json::from_str(&decrypted_json).ok();
+
+        // Inject credential-driven headers (e.g., DD-API-KEY from credentials.apiKey)
+        if let Some(ref creds) = creds {
+            for ch in apps::credential_headers(&conn.provider) {
+                if let Some(value) = creds.get(ch.credential_field).and_then(|v| v.as_str()) {
+                    for rule in &mut rules {
+                        rule.injections.push(Injection::SetHeader {
+                            name: ch.header_name.to_string(),
+                            value: value.to_string(),
+                        });
+                    }
+                }
+            }
+        }
+
+        let rewrite_host = creds.and_then(|c| apps::rewrite_host(&conn.provider, &c));
+
         // Cache with TTL = min(CACHE_TTL, token remaining lifetime).
         // Skip caching if token is already expired — the stale token would cause
         // upstream 401s, and re-resolving gives a chance to refresh.
@@ -424,12 +472,22 @@ impl PolicyEngine {
             None => CACHE_TTL_SECS,
         };
         if ttl > 0 {
-            cache.set(&cache_key, &rules, ttl).await;
+            cache
+                .set(
+                    &cache_key,
+                    &CachedAppInjection {
+                        rules: rules.clone(),
+                        rewrite_host: rewrite_host.clone(),
+                    },
+                    ttl,
+                )
+                .await;
         }
 
         Ok(AppConnectionResult::Rules {
             rules,
             token_expires_at: expires_at,
+            rewrite_host,
         })
     }
 

@@ -19,6 +19,7 @@ interface CredentialsFlowField {
   description?: string;
   placeholder: string;
   secret?: boolean;
+  optional?: boolean;
   group?: string;
 }
 
@@ -101,7 +102,9 @@ export const CredentialsFlow = ({
     setValues({});
   };
 
-  const hasInput = visibleFields.every((f) => !!values[f.name]?.trim());
+  const hasInput = visibleFields
+    .filter((f) => !f.optional)
+    .every((f) => !!values[f.name]?.trim());
 
   const handleSubmit = async () => {
     if (!hasInput) return;
@@ -173,7 +176,9 @@ export const CredentialsFlow = ({
           <div key={field.name} className="grid gap-1.5">
             <Label htmlFor={`connect-${field.name}`}>
               {field.label}
-              <span className="text-destructive ml-0.5">*</span>
+              {!field.optional && (
+                <span className="text-destructive ml-0.5">*</span>
+              )}
             </Label>
             {field.description && (
               <p className="text-xs text-muted-foreground">
