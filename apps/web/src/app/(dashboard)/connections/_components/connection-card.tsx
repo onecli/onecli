@@ -31,6 +31,7 @@ interface ConnectionCardProps {
   };
   appName: string;
   onReconnect: (connectionId: string) => void;
+  reconnectLabel?: string;
   onDisconnected: () => void;
 }
 
@@ -38,6 +39,7 @@ export const ConnectionCard = ({
   connection,
   appName,
   onReconnect,
+  reconnectLabel,
   onDisconnected,
 }: ConnectionCardProps) => {
   const [disconnecting, setDisconnecting] = useState(false);
@@ -52,6 +54,10 @@ export const ConnectionCard = ({
     typeof connection.metadata?.url === "string"
       ? connection.metadata.url
       : null;
+
+  const repos = Array.isArray(connection.metadata?.repos)
+    ? (connection.metadata.repos as string[])
+    : [];
 
   const handleDisconnect = async () => {
     setDisconnecting(true);
@@ -82,6 +88,21 @@ export const ConnectionCard = ({
         ) : (
           <p className="text-sm font-medium truncate">{displayName}</p>
         )}
+        {repos.length > 0 && (
+          <div className="flex flex-wrap items-center gap-1 mt-1.5">
+            <span className="text-[11px] font-medium text-muted-foreground/70 mr-0.5">
+              Repos
+            </span>
+            {repos.map((repo) => (
+              <span
+                key={repo}
+                className="inline-flex items-center rounded-md bg-muted px-1.5 py-0.5 text-[11px] text-muted-foreground"
+              >
+                {repo}
+              </span>
+            ))}
+          </div>
+        )}
         <p className="text-xs text-muted-foreground mt-0.5">
           Connected{" "}
           {new Date(connection.connectedAt).toLocaleDateString("en-US", {
@@ -97,7 +118,7 @@ export const ConnectionCard = ({
           size="sm"
           onClick={() => onReconnect(connection.id)}
         >
-          Reconnect
+          {reconnectLabel ?? "Reconnect"}
         </Button>
         <AlertDialog>
           <AlertDialogTrigger asChild>

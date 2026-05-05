@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useRouter, usePathname } from "next/navigation";
 import { withProjectPrefix } from "@/lib/navigation";
-import { ChevronRight, Cloud, ExternalLink } from "lucide-react";
+import { ChevronRight } from "lucide-react";
 import { Button } from "@onecli/ui/components/button";
 import { Skeleton } from "@onecli/ui/components/skeleton";
 import { cn } from "@onecli/ui/lib/utils";
@@ -17,6 +17,8 @@ import { apps } from "@/lib/apps/registry";
 import { RequestAppSlot } from "@/lib/components/request-app-slot";
 import { useAppMessages } from "@/hooks/use-app-connected";
 import { useInvalidateGatewayCache } from "@/hooks/use-invalidate-cache";
+import { getCurrentPlan } from "@/lib/user-plan";
+import { ProAppDialog } from "@/lib/components/pro-app-dialog";
 import { AppIcon } from "./app-icon";
 import { ConnectAppDialog } from "./connect-app-dialog";
 import { ConfigureCredentialsDialog } from "./configure-credentials-dialog";
@@ -39,15 +41,19 @@ export const AppsTab = () => {
   const [connectAgentName, setConnectAgentName] = useState<
     string | undefined
   >();
+  const [premiumApp, setProApp] = useState<AppDefinition | null>(null);
+  const [plan, setPlan] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
 
   const fetchConnections = useCallback(async () => {
     try {
-      const [connections, availableDefaults, configured] = await Promise.all([
-        getAppConnections(),
-        getAvailableEnvDefaults(),
-        getConfiguredProviders().catch(() => [] as string[]),
-      ]);
+      const [connections, availableDefaults, configured, currentPlan] =
+        await Promise.all([
+          getAppConnections(),
+          getAvailableEnvDefaults(),
+          getConfiguredProviders().catch(() => [] as string[]),
+          getCurrentPlan(),
+        ]);
       const counts = new Map<string, number>();
       for (const c of connections.filter((c) => c.status === "connected")) {
         counts.set(c.provider, (counts.get(c.provider) ?? 0) + 1);
@@ -55,6 +61,7 @@ export const AppsTab = () => {
       setConnectionCounts(counts);
       setEnvDefaultProviders(new Set(availableDefaults));
       setConfiguredProviders(new Set(configured));
+      setPlan(currentPlan);
     } catch {
       // Silently fail — grid still works without connection status
     } finally {
@@ -151,6 +158,7 @@ export const AppsTab = () => {
         {sortedApps.map((app) => {
           const count = connectionCounts.get(app.id) ?? 0;
           const isCloudOnly = app.connectionMethod.type === "cloud_only";
+          const isLocked = isCloudOnly || (app.pro && plan !== "team");
           return (
             <AppRow
               key={app.id}
@@ -159,16 +167,11 @@ export const AppsTab = () => {
               darkIcon={app.darkIcon}
               connectionCount={count}
               loading={loading}
-              cloudOnly={isCloudOnly}
+              cloudOnly={isLocked}
               onConnect={(e) => handleConnect(e, app)}
               onClick={
-                isCloudOnly
-                  ? () =>
-                      window.open(
-                        "https://app.onecli.sh/connections",
-                        "_blank",
-                        "noopener,noreferrer",
-                      )
+                isLocked
+                  ? () => setProApp(app)
                   : () =>
                       router.push(
                         withProjectPrefix(
@@ -201,6 +204,19 @@ export const AppsTab = () => {
             setConnectApp(null);
             setConnectAgentName(undefined);
             openConnectPopup(provider, { agentName: agent });
+          }}
+        />
+      )}
+
+      {premiumApp && (
+        <ProAppDialog
+          appName={premiumApp.name}
+          appIcon={premiumApp.icon}
+          appDarkIcon={premiumApp.darkIcon}
+          description={premiumApp.description}
+          open={!!premiumApp}
+          onOpenChange={(open) => {
+            if (!open) setProApp(null);
           }}
         />
       )}
@@ -268,9 +284,34 @@ const AppRow = ({
 
       <div className="flex items-center gap-2">
         {cloudOnly ? (
-          <span className="inline-flex items-center gap-1 rounded-full bg-muted px-2 py-0.5 text-muted-foreground">
-            <Cloud className="size-3" />
-            <span className="text-[11px] font-medium">Cloud</span>
+          <span className="inline-flex items-center gap-1.5 rounded-full border border-brand/20 bg-brand/5 px-2.5 py-0.5">
+            <svg
+              width="11"
+              height="9"
+              viewBox="0 0 44 36"
+              fill="none"
+              className="shrink-0 -mt-px"
+            >
+              <path
+                d="M2 2L16 18L2 34"
+                stroke="currentColor"
+                strokeWidth="5"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                className="text-brand"
+              />
+              <path
+                d="M22 2L36 18L22 34"
+                stroke="currentColor"
+                strokeWidth="5"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                className="text-brand"
+              />
+            </svg>
+            <span className="text-[11px] font-semibold tracking-wide text-brand">
+              Pro
+            </span>
           </span>
         ) : loading ? (
           <Skeleton className="h-6 w-16 rounded-md" />
@@ -286,9 +327,7 @@ const AppRow = ({
             Connect
           </Button>
         )}
-        {cloudOnly ? (
-          <ExternalLink className="size-3.5 text-muted-foreground/40 transition-colors group-hover:text-muted-foreground" />
-        ) : (
+        {cloudOnly ? null : (
           <ChevronRight className="size-3.5 text-muted-foreground/40 transition-colors group-hover:text-muted-foreground" />
         )}
       </div>

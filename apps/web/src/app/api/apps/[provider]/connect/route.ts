@@ -26,16 +26,25 @@ export const POST = async (request: NextRequest, { params }: Params) => {
     const { provider } = await params;
     const app = getApp(provider);
 
-    if (
-      !app ||
-      !app.available ||
-      app.connectionMethod.type === "oauth" ||
-      app.connectionMethod.type === "cloud_only"
-    ) {
+    if (!app || !app.available) {
+      return NextResponse.json(
+        { error: `Provider "${provider}" is not available` },
+        { status: 400 },
+      );
+    }
+
+    if (app.connectionMethod.type === "oauth") {
       return NextResponse.json(
         {
-          error: `Provider "${provider}" does not support direct credential connections`,
+          error: `Provider "${provider}" uses OAuth flow, not direct credentials`,
         },
+        { status: 400 },
+      );
+    }
+
+    if (app.connectionMethod.type === "cloud_only") {
+      return NextResponse.json(
+        { error: `Provider "${provider}" is only available in OneCLI Cloud` },
         { status: 400 },
       );
     }

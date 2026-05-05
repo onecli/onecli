@@ -2,7 +2,8 @@ import { NextRequest, NextResponse } from "next/server";
 import { resolveApiAuth } from "@/lib/api-auth";
 import { unauthorized } from "@/lib/api-utils";
 import { getApp } from "@/lib/apps/registry";
-import { resolveOAuthCredentials } from "@/lib/apps/resolve-credentials";
+import { resolveAppCredentials } from "@/lib/apps/resolve-credentials";
+import { listConnectionsByProvider } from "@/lib/services/connection-service";
 import { APP_URL } from "@/lib/env";
 import { signOAuthState, generateNonce } from "@/lib/oauth-state";
 
@@ -22,16 +23,6 @@ export const GET = async (request: NextRequest, { params }: Params) => {
     );
   }
 
-  const resolved = await resolveOAuthCredentials(auth.projectId, app);
-  if (!resolved) {
-    return NextResponse.json(
-      { error: `${app.name} is not configured. Missing client credentials.` },
-      { status: 400 },
-    );
-  }
-
-  const redirectUri = `${APP_URL}/api/apps/${provider}/callback`;
-  const scopes = app.connectionMethod.defaultScopes ?? [];
   const connectionId = request.nextUrl.searchParams.get("connectionId");
   const rawAgentName = request.nextUrl.searchParams.get("agent_name");
   const agentName = rawAgentName ? rawAgentName.slice(0, 128) : undefined;
@@ -44,8 +35,35 @@ export const GET = async (request: NextRequest, { params }: Params) => {
     ...(agentName ? { agentName } : {}),
   });
 
+  const resolved = await resolveAppCredentials(auth.projectId, app);
+  if (!resolved) {
+    return NextResponse.json(
+      { error: `${app.name} is not configured. Missing required credentials.` },
+      { status: 400 },
+    );
+  }
+
+  const { values: creds } = resolved;
+
+  if (app.connectionMethod.checkExistingInstallations) {
+    try {
+      const redirectUrl = await app.connectionMethod.checkExistingInstallations(
+        creds,
+        async () => listConnectionsByProvider(auth.projectId, provider),
+        `${APP_URL}/api/apps/${provider}/callback`,
+        state,
+      );
+      if (redirectUrl) return NextResponse.redirect(redirectUrl);
+    } catch {
+      // Fall through to normal auth flow
+    }
+  }
+
+  const redirectUri = `${APP_URL}/api/apps/${provider}/callback`;
+  const scopes = app.connectionMethod.defaultScopes ?? [];
+
   const authUrl = app.connectionMethod.buildAuthUrl({
-    clientId: resolved.clientId,
+    appCredentials: creds,
     redirectUri,
     scopes,
     state,

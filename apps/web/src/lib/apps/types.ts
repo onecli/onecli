@@ -1,14 +1,13 @@
 export interface OAuthBuildAuthUrlParams {
-  clientId: string;
+  appCredentials: Record<string, string>;
   redirectUri: string;
   scopes: string[];
   state: string;
 }
 
 export interface OAuthExchangeCodeParams {
-  code: string;
-  clientId: string;
-  clientSecret: string;
+  appCredentials: Record<string, string>;
+  callbackParams: Record<string, string>;
   redirectUri: string;
 }
 
@@ -40,6 +39,13 @@ export type ConnectionMethod =
       exchangeCode: (
         params: OAuthExchangeCodeParams,
       ) => Promise<OAuthExchangeResult>;
+      /** Pre-authorize hook: check for existing installations/connections. Returns redirect URL or null. */
+      checkExistingInstallations?: (
+        credentials: Record<string, string>,
+        listConnections: () => Promise<{ metadata: unknown; id: string }[]>,
+        callbackBaseUrl: string,
+        state: string,
+      ) => Promise<string | null>;
     }
   | {
       type: "api_key";
@@ -104,6 +110,7 @@ export interface AppDefinition {
   description: string;
   connectionMethod: ConnectionMethod;
   available: boolean;
+  pro?: boolean;
   /** Credential stubs for provisioners to write so MCP servers can boot. */
   credentialStubs?: {
     /** Full destination path (e.g., "~/.config/gcloud/application_default_credentials.json"). */

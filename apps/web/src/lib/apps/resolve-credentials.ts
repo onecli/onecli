@@ -1,44 +1,43 @@
 import { getAppConfigCredentials } from "@/lib/services/app-config-service";
 import type { AppDefinition } from "./types";
 
-export interface ResolvedCredentials {
-  clientId: string;
-  clientSecret: string;
+export interface ResolvedAppCredentials {
+  values: Record<string, string>;
   source: "app_config" | "env";
 }
 
 /**
- * Resolve OAuth credentials for a provider.
- * Resolution chain: AppConfig (user-provided) → env vars (platform defaults) → null.
+ * Generic credential resolution for any configurable app.
+ * Uses the app's `configurable.fields` to determine which keys are needed,
+ * then resolves them from AppConfig (user-provided) → env vars (platform defaults) → null.
+ *
+ * Works for all method types: OAuth (clientId/clientSecret), GitHub App (appId/appSlug/privateKey),
+ * and any future configurable provider.
  */
-export const resolveOAuthCredentials = async (
+export const resolveAppCredentials = async (
   projectId: string,
   app: AppDefinition,
-): Promise<ResolvedCredentials | null> => {
+): Promise<ResolvedAppCredentials | null> => {
   if (!app.configurable) return null;
 
-  // 1. Try user-provided AppConfig
+  const requiredFields = app.configurable.fields.map((f) => f.name);
+
   const config = await getAppConfigCredentials(projectId, app.id);
-  if (config?.clientId && config?.clientSecret) {
-    return {
-      clientId: config.clientId,
-      clientSecret: config.clientSecret,
-      source: "app_config",
-    };
+  if (config && requiredFields.every((f) => !!config[f])) {
+    const values: Record<string, string> = {};
+    for (const f of requiredFields) values[f] = config[f]!;
+    return { values, source: "app_config" };
   }
 
-  // 2. Fall back to platform env vars
-  const envDefaults = app.configurable.envDefaults;
-  const clientId = envDefaults?.clientId
-    ? process.env[envDefaults.clientId]
-    : undefined;
-  const clientSecret = envDefaults?.clientSecret
-    ? process.env[envDefaults.clientSecret]
-    : undefined;
-
-  if (clientId && clientSecret) {
-    return { clientId, clientSecret, source: "env" };
+  const envDefaults = app.configurable.envDefaults ?? {};
+  const values: Record<string, string> = {};
+  for (const field of requiredFields) {
+    const envVar = envDefaults[field];
+    if (!envVar) return null;
+    const value = process.env[envVar];
+    if (!value) return null;
+    values[field] = value;
   }
 
-  return null;
+  return { values, source: "env" };
 };
