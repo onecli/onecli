@@ -19,6 +19,10 @@
 #   export ONECLI_GATEWAY_PORT=11255
 #   curl -fsSL https://onecli.sh/install | sh
 #
+# Pin a specific version:
+#   export ONECLI_VERSION=1.2.0
+#   curl -fsSL https://onecli.sh/install | sh
+#
 # This script checks for Docker, downloads the docker-compose.yml,
 # and starts OneCLI (app + PostgreSQL) on ports 10254 and 10255 by default.
 
@@ -100,6 +104,12 @@ main() {
   fi
   export ONECLI_BIND_HOST
   echo "  Bind host: $ONECLI_BIND_HOST"
+
+  # ── Resolve version ──
+
+  ONECLI_VERSION="${ONECLI_VERSION:-latest}"
+  export ONECLI_VERSION
+  echo "  Version:   $ONECLI_VERSION"
 
   # ── Download docker-compose.yml ──
 
