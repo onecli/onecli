@@ -4,7 +4,7 @@ import { PageHeader } from "@dashboard/page-header";
 
 export default function ApiKeysLoading() {
   return (
-    <div className="flex flex-1 flex-col gap-4 max-w-5xl">
+    <div className="flex flex-1 flex-col gap-4">
       <PageHeader
         title="API Keys"
         description="Manage your API keys for OneCLI services."

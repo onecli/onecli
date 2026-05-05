@@ -3,7 +3,7 @@ import { Skeleton } from "@onecli/ui/components/skeleton";
 
 export default function SettingsLoading() {
   return (
-    <div className="flex flex-1 flex-col gap-4 max-w-5xl">
+    <div className="flex flex-1 flex-col gap-4">
       <div className="space-y-2">
         <Skeleton className="h-8 w-32" />
         <Skeleton className="h-4 w-56" />

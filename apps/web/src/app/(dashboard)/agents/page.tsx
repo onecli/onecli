@@ -9,7 +9,7 @@ export const metadata: Metadata = {
 
 export default function AgentsPage() {
   return (
-    <div className="flex flex-1 flex-col gap-6 max-w-5xl">
+    <div className="flex flex-1 flex-col gap-6">
       <PageHeader
         title="Agents"
         description="Manage agents that connect to the gateway and receive injected credentials."

@@ -21,7 +21,7 @@ export const OverviewContent = () => {
   }, []);
 
   return (
-    <div className="flex min-w-0 flex-1 flex-col gap-6 max-w-5xl">
+    <div className="flex min-w-0 flex-1 flex-col gap-6">
       <PageHeader
         title="Overview"
         description="Your OneCLI dashboard at a glance."
