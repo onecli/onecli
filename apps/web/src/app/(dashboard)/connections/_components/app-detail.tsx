@@ -25,7 +25,7 @@ interface AppDetailProps {
     icon: string;
     darkIcon?: string;
     description: string;
-    connectionType: string;
+    connectionType: "oauth" | "api_key" | "credentials_import" | "cloud_only";
     defaultScopes: string[];
     permissions: OAuthPermission[];
   };
@@ -211,15 +211,27 @@ export const AppDetail = ({
         <>
           {isConnected && (
             <div className="space-y-2">
-              {connections.map((conn) => (
-                <ConnectionCard
-                  key={conn.id}
-                  connection={conn}
-                  appName={app.name}
-                  onReconnect={(id) => openConnectPopup(id, popupOpts)}
-                  onDisconnected={fetchConnections}
-                />
-              ))}
+              {connections.map((conn) => {
+                const manageUrl =
+                  typeof conn.metadata?.manageUrl === "string"
+                    ? conn.metadata.manageUrl
+                    : undefined;
+
+                return (
+                  <ConnectionCard
+                    key={conn.id}
+                    connection={conn}
+                    appName={app.name}
+                    onReconnect={
+                      manageUrl
+                        ? () => window.open(manageUrl, "_blank")
+                        : (id) => openConnectPopup(id, popupOpts)
+                    }
+                    reconnectLabel={manageUrl ? "Manage" : undefined}
+                    onDisconnected={fetchConnections}
+                  />
+                );
+              })}
             </div>
           )}
           {app.permissions.length > 0 && (

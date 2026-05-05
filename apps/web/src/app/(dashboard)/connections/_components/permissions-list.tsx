@@ -25,7 +25,11 @@ export const PermissionsList = ({
       </h3>
       <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
         {permissions.map((perm) => {
-          const granted = isConnected ? grantedSet.has(perm.scope) : null;
+          const granted = isConnected
+            ? grantedSet.has(perm.scope) ||
+              grantedSet.has(`${perm.scope}:read`) ||
+              grantedSet.has(`${perm.scope}:write`)
+            : null;
 
           return (
             <Card

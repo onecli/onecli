@@ -2,6 +2,16 @@ import type { AppDefinition } from "./types";
 
 export const cloudApps: AppDefinition[] = [
   {
+    id: "github-app",
+    name: "GitHub App",
+    icon: "/icons/github.svg",
+    darkIcon: "/icons/github-light.svg",
+    description:
+      "Fine-grained, org-approved access to repositories and resources.",
+    connectionMethod: { type: "cloud_only" },
+    available: false,
+  },
+  {
     id: "datadog",
     name: "Datadog",
     icon: "/icons/datadog.svg",

@@ -883,12 +883,14 @@ mod tests {
 
     #[test]
     fn providers_for_known_hosts() {
-        assert_eq!(providers_for_host("api.github.com"), vec!["github"]);
-        assert_eq!(providers_for_host("github.com"), vec!["github"]);
-        assert_eq!(
-            providers_for_host("raw.githubusercontent.com"),
-            vec!["github"]
-        );
+        let github_hosts = ["api.github.com", "github.com", "raw.githubusercontent.com"];
+        for host in github_hosts {
+            let providers = providers_for_host(host);
+            assert!(
+                providers.contains(&"github"),
+                "{host}: expected github provider"
+            );
+        }
     }
 
     #[test]

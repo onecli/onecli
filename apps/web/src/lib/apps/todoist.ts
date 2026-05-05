@@ -22,25 +22,25 @@ export const todoist: AppDefinition = {
         access: "write",
       },
     ],
-    buildAuthUrl: ({ clientId, redirectUri, scopes, state }) => {
+    buildAuthUrl: ({ appCredentials, redirectUri, scopes, state }) => {
       const url = new URL("https://app.todoist.com/oauth/authorize");
-      url.searchParams.set("client_id", clientId);
+      url.searchParams.set("client_id", appCredentials.clientId!);
       url.searchParams.set("redirect_uri", redirectUri);
       // Todoist uses comma-separated scopes (non-standard)
       url.searchParams.set("scope", scopes.join(","));
       url.searchParams.set("state", state);
       return url.toString();
     },
-    exchangeCode: async ({ code, clientId, clientSecret }) => {
+    exchangeCode: async ({ appCredentials, callbackParams }) => {
       const tokenRes = await fetch(
         "https://api.todoist.com/oauth/access_token",
         {
           method: "POST",
           headers: { "Content-Type": "application/x-www-form-urlencoded" },
           body: new URLSearchParams({
-            client_id: clientId,
-            client_secret: clientSecret,
-            code,
+            client_id: appCredentials.clientId!,
+            client_secret: appCredentials.clientSecret!,
+            code: callbackParams.code!,
           }),
         },
       );

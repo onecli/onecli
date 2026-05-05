@@ -34,6 +34,7 @@ const nextConfig = {
           "@/lib/actions/rules": "@/cloud/actions/rules",
           "@/lib/actions/secrets": "@/cloud/actions/secrets",
           "@/lib/home-redirect": "@/cloud/home-redirect",
+          "@/lib/components/pro-app-dialog": "@/cloud/apps/pro-app-dialog",
           "@/lib/dashboard/validate-session":
             "@/cloud/dashboard/validate-session",
         }

@@ -6,7 +6,7 @@
 
 use std::sync::Arc;
 
-use tracing::debug;
+use tracing::{debug, warn};
 
 use crate::apps;
 use crate::cache::CacheStore;
@@ -607,7 +607,26 @@ impl PolicyEngine {
             if expires_at < now {
                 let cred_type = creds.get("type").and_then(|v| v.as_str()).unwrap_or("");
 
-                if cred_type == "service_account" {
+                // Cloud-specific credential refresh (e.g., GitHub App JWT)
+                if let Some(result) =
+                    crate::cloud_apps::try_refresh_credentials(cred_type, &creds).await
+                {
+                    match result {
+                        Ok((new_token, new_expires_at)) => {
+                            debug!(provider = %provider, cred_type, "refreshed cloud credential");
+                            token = Some(new_token.clone());
+                            effective_expires_at = Some(new_expires_at);
+
+                            creds["access_token"] = serde_json::Value::String(new_token);
+                            creds["expires_at"] = serde_json::json!(new_expires_at);
+                            self.persist_refreshed_credentials(connection_id, provider, &creds)
+                                .await;
+                        }
+                        Err(e) => {
+                            warn!(provider = %provider, cred_type, error = %e, "cloud credential refresh failed");
+                        }
+                    }
+                } else if cred_type == "service_account" {
                     // Service account: sign JWT with private key
                     let private_key = creds.get("private_key").and_then(|v| v.as_str());
                     let client_email = creds.get("client_email").and_then(|v| v.as_str());

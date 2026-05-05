@@ -67,8 +67,8 @@ futures-util = "0.3"
 # Error handling
 anyhow = "1"
 
-# Time (for certificate validity)
-time = "0.3"
+# Time (for certificate validity + RFC 3339 parsing)
+time = { version = "0.3", features = ["parsing"] }
 
 # Direct database access
 sqlx = { version = "0.8", features = ["runtime-tokio", "tls-rustls", "postgres"] }

@@ -61,16 +61,16 @@ export const github: AppDefinition = {
         access: "write",
       },
     ],
-    buildAuthUrl: ({ clientId, redirectUri, scopes, state }) => {
+    buildAuthUrl: ({ appCredentials, redirectUri, scopes, state }) => {
       const url = new URL("https://github.com/login/oauth/authorize");
-      url.searchParams.set("client_id", clientId);
+      url.searchParams.set("client_id", appCredentials.clientId!);
       url.searchParams.set("redirect_uri", redirectUri);
       url.searchParams.set("scope", scopes.join(" "));
       url.searchParams.set("state", state);
       url.searchParams.set("prompt", "select_account");
       return url.toString();
     },
-    exchangeCode: async ({ code, clientId, clientSecret, redirectUri }) => {
+    exchangeCode: async ({ appCredentials, callbackParams, redirectUri }) => {
       const tokenRes = await fetch(
         "https://github.com/login/oauth/access_token",
         {
@@ -80,9 +80,9 @@ export const github: AppDefinition = {
             Accept: "application/json",
           },
           body: JSON.stringify({
-            client_id: clientId,
-            client_secret: clientSecret,
-            code,
+            client_id: appCredentials.clientId!,
+            client_secret: appCredentials.clientSecret!,
+            code: callbackParams.code!,
             redirect_uri: redirectUri,
           }),
         },

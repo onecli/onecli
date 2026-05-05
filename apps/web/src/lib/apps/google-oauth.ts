@@ -10,13 +10,13 @@ import type {
  * Shared by all Google Workspace app integrations.
  */
 export const buildGoogleAuthUrl = ({
-  clientId,
+  appCredentials,
   redirectUri,
   scopes,
   state,
 }: OAuthBuildAuthUrlParams): string => {
   const url = new URL("https://accounts.google.com/o/oauth2/v2/auth");
-  url.searchParams.set("client_id", clientId);
+  url.searchParams.set("client_id", appCredentials.clientId!);
   url.searchParams.set("redirect_uri", redirectUri);
   url.searchParams.set("response_type", "code");
   url.searchParams.set("scope", scopes.join(" "));
@@ -31,18 +31,17 @@ export const buildGoogleAuthUrl = ({
  * Shared by all Google Workspace app integrations.
  */
 export const exchangeGoogleCode = async ({
-  code,
-  clientId,
-  clientSecret,
+  appCredentials,
+  callbackParams,
   redirectUri,
 }: OAuthExchangeCodeParams): Promise<OAuthExchangeResult> => {
   const tokenRes = await fetch("https://oauth2.googleapis.com/token", {
     method: "POST",
     headers: { "Content-Type": "application/x-www-form-urlencoded" },
     body: new URLSearchParams({
-      code,
-      client_id: clientId,
-      client_secret: clientSecret,
+      code: callbackParams.code!,
+      client_id: appCredentials.clientId!,
+      client_secret: appCredentials.clientSecret!,
       redirect_uri: redirectUri,
       grant_type: "authorization_code",
     }),

@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getApp } from "@/lib/apps/registry";
-import { resolveOAuthCredentials } from "@/lib/apps/resolve-credentials";
+import { resolveAppCredentials } from "@/lib/apps/resolve-credentials";
 import { APP_URL } from "@/lib/env";
 import { invalidateGatewayCacheForAccount } from "@/lib/gateway-invalidate";
 import { verifyOAuthState } from "@/lib/oauth-state";
@@ -23,15 +23,14 @@ export const GET = async (request: NextRequest, { params }: Params) => {
 
   try {
     const app = getApp(provider);
+
     if (!app || app.connectionMethod.type !== "oauth") {
       return errorRedirect("Invalid provider");
     }
 
-    const code = request.nextUrl.searchParams.get("code");
     const stateParam = request.nextUrl.searchParams.get("state");
-
-    if (!code || !stateParam) {
-      return errorRedirect("Missing code or state parameter");
+    if (!stateParam) {
+      return errorRedirect("Missing state parameter");
     }
 
     const state = verifyOAuthState(stateParam);
@@ -39,24 +38,24 @@ export const GET = async (request: NextRequest, { params }: Params) => {
       return errorRedirect("Invalid state parameter");
     }
 
-    const resolved = await resolveOAuthCredentials(state.projectId, app);
+    const resolved = await resolveAppCredentials(state.projectId, app);
     if (!resolved) {
-      return errorRedirect("Provider not configured");
+      return errorRedirect(`${app.name} is not configured`);
     }
 
     const redirectUri = `${APP_URL}/api/apps/${provider}/callback`;
+    const callbackParams = Object.fromEntries(
+      request.nextUrl.searchParams.entries(),
+    );
 
-    const { credentials, scopes, metadata } =
-      await app.connectionMethod.exchangeCode({
-        code,
-        clientId: resolved.clientId,
-        clientSecret: resolved.clientSecret,
-        redirectUri,
-      });
+    const result = await app.connectionMethod.exchangeCode({
+      appCredentials: resolved.values,
+      callbackParams,
+      redirectUri,
+    });
 
-    // Determine if we should reconnect an existing connection:
-    // 1. Explicit reconnect via connectionId in state (user clicked Reconnect)
-    // 2. Duplicate detection: same identity already connected for this provider
+    const { credentials, scopes, metadata } = result;
+
     let reconnectId = state.connectionId as string | undefined;
 
     if (!reconnectId) {
@@ -94,9 +93,6 @@ export const GET = async (request: NextRequest, { params }: Params) => {
       });
     }
 
-    // Invalidate gateway cache server-side so agents see the new
-    // connection immediately. Fire-and-forget — the client-side
-    // postMessage chain in the success page acts as a backup.
     invalidateGatewayCacheForAccount(state.projectId);
 
     const successParams = new URLSearchParams({ status: "success" });

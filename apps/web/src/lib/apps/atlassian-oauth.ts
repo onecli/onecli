@@ -6,13 +6,13 @@ import type {
 } from "./types";
 
 export const buildAtlassianAuthUrl = ({
-  clientId,
+  appCredentials,
   redirectUri,
   scopes,
   state,
 }: OAuthBuildAuthUrlParams): string => {
   const url = new URL("https://auth.atlassian.com/authorize");
-  url.searchParams.set("client_id", clientId);
+  url.searchParams.set("client_id", appCredentials.clientId!);
   url.searchParams.set("redirect_uri", redirectUri);
   url.searchParams.set("response_type", "code");
   url.searchParams.set("scope", scopes.join(" "));
@@ -23,18 +23,17 @@ export const buildAtlassianAuthUrl = ({
 };
 
 export const exchangeAtlassianCode = async ({
-  code,
-  clientId,
-  clientSecret,
+  appCredentials,
+  callbackParams,
   redirectUri,
 }: OAuthExchangeCodeParams): Promise<OAuthExchangeResult> => {
   const tokenRes = await fetch("https://auth.atlassian.com/oauth/token", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
-      client_id: clientId,
-      client_secret: clientSecret,
-      code,
+      client_id: appCredentials.clientId!,
+      client_secret: appCredentials.clientSecret!,
+      code: callbackParams.code!,
       redirect_uri: redirectUri,
       grant_type: "authorization_code",
     }),
