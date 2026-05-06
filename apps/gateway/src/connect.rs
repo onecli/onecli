@@ -374,7 +374,7 @@ impl PolicyEngine {
         project_id: &str,
         cache: &dyn CacheStore,
     ) -> Result<AppConnectionResult, ConnectError> {
-        let cache_key = format!("app_injection:{project_id}:{}", conn.id);
+        let cache_key = format!("app_injection:{project_id}:{}:{hostname}", conn.id);
 
         if let Some(cached) = cache.get::<CachedAppInjection>(&cache_key).await {
             debug!(connection_id = %conn.id, "app injection: cache hit");
