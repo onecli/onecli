@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.21.1](https://github.com/onecli/onecli/compare/v1.21.0...v1.21.1) (2026-05-06)
+
+
+### Bug Fixes
+
+* include hostname in injection cache key ([#251](https://github.com/onecli/onecli/issues/251)) ([#252](https://github.com/onecli/onecli/issues/252)) ([fa6468e](https://github.com/onecli/onecli/commit/fa6468e4711bc283f26b11e68c0ce8dc6a799010))
+
 ## [1.21.0](https://github.com/onecli/onecli/compare/v1.20.0...v1.21.0) (2026-05-05)
 
 
