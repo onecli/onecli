@@ -224,12 +224,22 @@ async fn resolve_rules(
     let project_id = ctx.project_id.as_deref().ok_or_else(|| {
         crate::connect::ConnectError::Internal("MITM session missing project_id".to_string())
     })?;
+    let organization_id = ctx.organization_id.as_deref().ok_or_else(|| {
+        crate::connect::ConnectError::Internal("MITM session missing organization_id".to_string())
+    })?;
     let agent_token = ctx.agent_token.as_deref().ok_or_else(|| {
         crate::connect::ConnectError::Internal("MITM session missing agent_token".to_string())
     })?;
 
-    let resp =
-        connect::resolve_from_cache(project_id, agent_token, hostname, engine, cache).await?;
+    let resp = connect::resolve_from_cache(
+        organization_id,
+        project_id,
+        agent_token,
+        hostname,
+        engine,
+        cache,
+    )
+    .await?;
 
     let mut injection_rules = resp.injection_rules; // from secrets
     let mut token_expires_at: Option<i64> = None;
@@ -242,6 +252,7 @@ async fn resolve_rules(
                 &resp.app_connections,
                 hostname,
                 connection_id,
+                organization_id,
                 project_id,
                 cache,
             )

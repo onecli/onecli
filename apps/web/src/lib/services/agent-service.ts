@@ -229,9 +229,21 @@ export const updateAgentSecrets = async (
 
   if (!agent) throw new ServiceError("NOT_FOUND", "Agent not found");
 
-  // Validate all secrets belong to this account
+  const project = await db.project.findUnique({
+    where: { id: projectId },
+    select: { organizationId: true },
+  });
+
   const secrets = await db.secret.findMany({
-    where: { id: { in: secretIds }, projectId },
+    where: {
+      id: { in: secretIds },
+      OR: [
+        { projectId },
+        ...(project?.organizationId
+          ? [{ organizationId: project.organizationId, scope: "organization" }]
+          : []),
+      ],
+    },
     select: { id: true },
   });
 
@@ -280,9 +292,21 @@ export const updateAgentAppConnections = async (
 
   if (!agent) throw new ServiceError("NOT_FOUND", "Agent not found");
 
-  // Validate all app connections belong to this account
+  const project = await db.project.findUnique({
+    where: { id: projectId },
+    select: { organizationId: true },
+  });
+
   const connections = await db.appConnection.findMany({
-    where: { id: { in: appConnectionIds }, projectId },
+    where: {
+      id: { in: appConnectionIds },
+      OR: [
+        { projectId },
+        ...(project?.organizationId
+          ? [{ organizationId: project.organizationId, scope: "organization" }]
+          : []),
+      ],
+    },
     select: { id: true },
   });
 

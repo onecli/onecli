@@ -3,8 +3,8 @@
   "private": true,
   "scripts": {
     "build": "dotenv -e .env -- turbo run build",
-    "dev": "dotenv -e .env -- turbo run dev",
-    "dev:web": "dotenv -e .env -- turbo run dev --filter=@onecli/web",
+    "dev": "dotenv -e .env -- turbo run dev --ui stream",
+    "dev:web": "dotenv -e .env -- turbo run dev --filter=@onecli/web --ui stream",
     "lint": "turbo run lint",
     "lint:fix": "turbo run lint:fix",
     "format": "prettier --write \"**/*.{ts,tsx,js,jsx,md,css,json}\" && pnpm --filter @onecli/db prisma format",

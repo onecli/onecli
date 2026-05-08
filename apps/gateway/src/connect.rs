@@ -36,6 +36,7 @@ pub(crate) struct ConnectResponse {
     pub app_connections: Vec<db::AppConnectionRow>,
     pub policy_rules: Vec<PolicyRule>,
     pub project_id: Option<String>,
+    pub organization_id: Option<String>,
     pub agent_id: Option<String>,
     pub agent_name: Option<String>,
     pub agent_identifier: Option<String>,
@@ -170,7 +171,7 @@ impl PolicyEngine {
         // host that the agent can't access (selective mode).
         let access_restricted = injection_rules.is_empty()
             && agent.secret_mode == SECRET_MODE_SELECTIVE
-            && self.has_project_credentials(agent, hostname).await;
+            && self.has_available_credentials(agent, hostname).await;
 
         let budget_blocked = if is_trial {
             db::is_trial_budget_blocked(&self.pool, &agent.project_id)
@@ -186,6 +187,7 @@ impl PolicyEngine {
             app_connections,
             policy_rules,
             project_id: Some(agent.project_id.clone()),
+            organization_id: Some(agent.organization_id.clone()),
             agent_id: Some(agent.id.clone()),
             agent_name: Some(agent.name.clone()),
             agent_identifier: agent.identifier.clone(),
@@ -203,11 +205,20 @@ impl PolicyEngine {
         hostname: &str,
     ) -> Result<(Vec<InjectionRule>, bool), ConnectError> {
         let secrets = if agent.secret_mode == SECRET_MODE_SELECTIVE {
-            db::find_secrets_by_agent(&self.pool, &agent.id).await
+            // Selective: agent_secrets join returns both project + org assigned secrets
+            db::find_secrets_by_agent(&self.pool, &agent.id)
+                .await
+                .map_err(db_err)?
         } else {
-            db::find_secrets_by_project(&self.pool, &agent.project_id).await
-        }
-        .map_err(db_err)?;
+            // All mode: org first, project second (project implicitly overrides same-header)
+            let (org_result, project_result) = tokio::join!(
+                db::find_secrets_by_org(&self.pool, &agent.organization_id),
+                db::find_secrets_by_project(&self.pool, &agent.project_id),
+            );
+            let mut merged = org_result.map_err(db_err)?;
+            merged.extend(project_result.map_err(db_err)?);
+            merged
+        };
 
         let matching: Vec<_> = secrets
             .into_iter()
@@ -258,11 +269,18 @@ impl PolicyEngine {
         debug!(host = %hostname, providers = ?providers, "app_connections: matched providers");
 
         let connections = if agent.secret_mode == SECRET_MODE_SELECTIVE {
-            db::find_app_connections_by_agent(&self.pool, &agent.id).await
+            db::find_app_connections_by_agent(&self.pool, &agent.id)
+                .await
+                .map_err(db_err)?
         } else {
-            db::find_app_connections_by_project(&self.pool, &agent.project_id).await
-        }
-        .map_err(db_err)?;
+            let (org_result, project_result) = tokio::join!(
+                db::find_app_connections_by_org(&self.pool, &agent.organization_id),
+                db::find_app_connections_by_project(&self.pool, &agent.project_id),
+            );
+            let mut merged = org_result.map_err(db_err)?;
+            merged.extend(project_result.map_err(db_err)?);
+            merged
+        };
 
         let matching: Vec<db::AppConnectionRow> = connections
             .into_iter()
@@ -281,6 +299,7 @@ impl PolicyEngine {
         app_connections: &[db::AppConnectionRow],
         hostname: &str,
         connection_id: Option<&str>,
+        organization_id: &str,
         project_id: &str,
         cache: &dyn CacheStore,
     ) -> Result<AppConnectionResult, ConnectError> {
@@ -300,14 +319,20 @@ impl PolicyEngine {
                 });
             };
             return self
-                .resolve_connection_injections(conn, hostname, project_id, cache)
+                .resolve_connection_injections(conn, hostname, organization_id, project_id, cache)
                 .await;
         }
 
         // Single connection — use it directly
         if app_connections.len() == 1 {
             return self
-                .resolve_connection_injections(&app_connections[0], hostname, project_id, cache)
+                .resolve_connection_injections(
+                    &app_connections[0],
+                    hostname,
+                    organization_id,
+                    project_id,
+                    cache,
+                )
                 .await;
         }
 
@@ -333,7 +358,13 @@ impl PolicyEngine {
                     token_expires_at,
                     rewrite_host,
                 } = self
-                    .resolve_connection_injections(conn, hostname, project_id, cache)
+                    .resolve_connection_injections(
+                        conn,
+                        hostname,
+                        organization_id,
+                        project_id,
+                        cache,
+                    )
                     .await?
                 {
                     rules.extend(r);
@@ -371,10 +402,14 @@ impl PolicyEngine {
         &self,
         conn: &db::AppConnectionRow,
         hostname: &str,
+        organization_id: &str,
         project_id: &str,
         cache: &dyn CacheStore,
     ) -> Result<AppConnectionResult, ConnectError> {
-        let cache_key = format!("app_injection:{project_id}:{}:{hostname}", conn.id);
+        let cache_key = format!(
+            "app_injection:{organization_id}:{project_id}:{}:{hostname}",
+            conn.id
+        );
 
         if let Some(cached) = cache.get::<CachedAppInjection>(&cache_key).await {
             debug!(connection_id = %conn.id, "app injection: cache hit");
@@ -491,11 +526,11 @@ impl PolicyEngine {
         })
     }
 
-    /// Check if the project has any credentials (secrets or app connections) for this
+    /// Check if the project or org has any credentials (secrets or app connections) for this
     /// host that the agent can't access. Used to distinguish "not connected" from
     /// "connected but agent lacks access" in selective mode.
-    async fn has_project_credentials(&self, agent: &db::AgentRow, hostname: &str) -> bool {
-        // Check 1: project has manual secrets matching this host
+    async fn has_available_credentials(&self, agent: &db::AgentRow, hostname: &str) -> bool {
+        // Check 1: project or org has manual secrets matching this host
         match db::find_secrets_by_project(&self.pool, &agent.project_id).await {
             Ok(secrets) => {
                 if secrets
@@ -506,35 +541,73 @@ impl PolicyEngine {
                 }
             }
             Err(e) => {
-                tracing::warn!(error = %e, "has_project_credentials: secrets query failed");
+                tracing::warn!(error = %e, "has_available_credentials: secrets query failed");
             }
         }
 
-        // Check 2: project has app connections for this host
+        // Also check org-level secrets
+        match db::find_secrets_by_org(&self.pool, &agent.organization_id).await {
+            Ok(secrets) => {
+                if secrets
+                    .iter()
+                    .any(|s| host_matches(hostname, &s.host_pattern))
+                {
+                    return true;
+                }
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "has_available_credentials: org secrets query failed");
+            }
+        }
+
+        // Check 2: project or org has app connections for this host
         let providers = apps::providers_for_host(hostname);
         if providers.is_empty() {
             return false;
         }
-        match db::find_app_connections_by_project(&self.pool, &agent.project_id).await {
-            Ok(connections) => connections
+
+        let has_project_conns = match db::find_app_connections_by_project(
+            &self.pool,
+            &agent.project_id,
+        )
+        .await
+        {
+            Ok(conns) => conns
                 .iter()
                 .any(|c| providers.contains(&c.provider.as_str())),
             Err(e) => {
-                tracing::warn!(error = %e, "has_project_credentials: app connections query failed");
+                tracing::warn!(error = %e, "has_available_credentials: app connections query failed");
+                false
+            }
+        };
+        if has_project_conns {
+            return true;
+        }
+
+        match db::find_app_connections_by_org(&self.pool, &agent.organization_id).await {
+            Ok(conns) => conns
+                .iter()
+                .any(|c| providers.contains(&c.provider.as_str())),
+            Err(e) => {
+                tracing::warn!(error = %e, "has_available_credentials: org app connections query failed");
                 false
             }
         }
     }
 
     /// Resolve policy rules (block / rate-limit) for this agent + host.
+    /// Merges org rules (enforced, all agents) with project rules (agent-filtered).
     async fn resolve_policy_rules(
         &self,
         agent: &db::AgentRow,
         hostname: &str,
     ) -> Result<Vec<PolicyRule>, ConnectError> {
-        let all_rules = db::find_policy_rules_by_project(&self.pool, &agent.project_id)
-            .await
-            .map_err(db_err)?;
+        let (org_result, project_result) = tokio::join!(
+            db::find_policy_rules_by_org(&self.pool, &agent.organization_id),
+            db::find_policy_rules_by_project(&self.pool, &agent.project_id),
+        );
+        let mut all_rules = org_result.map_err(db_err)?;
+        all_rules.extend(project_result.map_err(db_err)?);
 
         let rules = all_rules
             .into_iter()
@@ -786,7 +859,10 @@ pub(crate) async fn resolve(
     // Look up agent first — needed for project_id in cache key.
     let agent = policy_engine.find_agent(agent_token).await?;
 
-    let cache_key = format!("connect:{}:{agent_token}:{hostname}", agent.project_id);
+    let cache_key = format!(
+        "connect:{}:{}:{agent_token}:{hostname}",
+        agent.organization_id, agent.project_id
+    );
 
     // Check cache
     if let Some(response) = cache.get::<ConnectResponse>(&cache_key).await {
@@ -812,13 +888,14 @@ pub(crate) async fn resolve(
 /// On cache hit: zero DB queries (just a cache lookup).
 /// On cache miss: falls back to full resolution (agent query + DB).
 pub(crate) async fn resolve_from_cache(
+    organization_id: &str,
     project_id: &str,
     agent_token: &str,
     hostname: &str,
     policy_engine: &PolicyEngine,
     cache: &dyn CacheStore,
 ) -> Result<ConnectResponse, ConnectError> {
-    let cache_key = format!("connect:{project_id}:{agent_token}:{hostname}");
+    let cache_key = format!("connect:{organization_id}:{project_id}:{agent_token}:{hostname}");
 
     if let Some(response) = cache.get::<ConnectResponse>(&cache_key).await {
         return Ok(response);
@@ -962,6 +1039,7 @@ mod tests {
             app_connections: vec![],
             policy_rules: vec![],
             project_id: None,
+            organization_id: None,
             agent_id: None,
             agent_name: None,
             agent_identifier: None,
@@ -1005,6 +1083,7 @@ mod tests {
             app_connections: vec![],
             policy_rules: vec![],
             project_id: Some("proj_1".to_string()),
+            organization_id: Some("org_1".to_string()),
             agent_id: Some("agent_1".to_string()),
             agent_name: Some("Test".to_string()),
             agent_identifier: None,
@@ -1015,7 +1094,11 @@ mod tests {
 
         // Pre-populate cache with the key format that resolve() uses
         store
-            .set("connect:proj_1:aoc_token1:api.example.com", &response, 60)
+            .set(
+                "connect:org_1:proj_1:aoc_token1:api.example.com",
+                &response,
+                60,
+            )
             .await;
 
         // resolve_from_cache should hit using the same key format.
@@ -1023,8 +1106,8 @@ mod tests {
         // but we can verify the key is correct by checking the cache directly.
         let cached: Option<ConnectResponse> = store
             .get(&format!(
-                "connect:{}:{}:{}",
-                "proj_1", "aoc_token1", "api.example.com"
+                "connect:{}:{}:{}:{}",
+                "org_1", "proj_1", "aoc_token1", "api.example.com"
             ))
             .await;
         assert!(cached.is_some());
@@ -1040,6 +1123,7 @@ mod tests {
             app_connections: vec![],
             policy_rules: vec![],
             project_id: Some("proj_restricted".to_string()),
+            organization_id: Some("org_restricted".to_string()),
             agent_id: Some("agent_selective".to_string()),
             agent_name: Some("Selective Agent".to_string()),
             agent_identifier: None,
@@ -1050,14 +1134,14 @@ mod tests {
 
         store
             .set(
-                "connect:proj_restricted:aoc_t:api.resend.com",
+                "connect:org_restricted:proj_restricted:aoc_t:api.resend.com",
                 &response,
                 60,
             )
             .await;
 
         let cached: Option<ConnectResponse> = store
-            .get("connect:proj_restricted:aoc_t:api.resend.com")
+            .get("connect:org_restricted:proj_restricted:aoc_t:api.resend.com")
             .await;
         let cached = cached.expect("should be cached");
         assert!(cached.access_restricted);

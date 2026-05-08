@@ -3,12 +3,13 @@
 import { useEffect, useState, useCallback, useRef } from "react";
 import { useSearchParams, useRouter } from "next/navigation";
 import { Plus, KeyRound } from "lucide-react";
-import { getSecrets } from "@/lib/actions/secrets";
+import { getSecrets as defaultGetSecrets } from "@/lib/actions/secrets";
 import { Button } from "@onecli/ui/components/button";
 import { Card } from "@onecli/ui/components/card";
 import { Skeleton } from "@onecli/ui/components/skeleton";
 import { SecretCard } from "./secret-card";
 import { SecretDialog, type SecretPrefill } from "./secret-dialog";
+import type { SecretActions } from "./types";
 
 interface Secret {
   id: string;
@@ -19,14 +20,23 @@ interface Secret {
   pathPattern: string | null;
   injectionConfig: unknown;
   isPlatform: boolean;
+  scope?: string;
   createdAt: Date;
 }
 
 interface SecretsContentProps {
   typeFilter: "generic" | "llm";
+  getSecrets?: () => Promise<Secret[]>;
+  secretActions?: SecretActions;
+  pageScope?: "project" | "organization";
 }
 
-export const SecretsContent = ({ typeFilter }: SecretsContentProps) => {
+export const SecretsContent = ({
+  typeFilter,
+  getSecrets = defaultGetSecrets,
+  secretActions,
+  pageScope = "project",
+}: SecretsContentProps) => {
   const router = useRouter();
   const searchParams = useSearchParams();
   const [secrets, setSecrets] = useState<Secret[]>([]);
@@ -39,17 +49,22 @@ export const SecretsContent = ({ typeFilter }: SecretsContentProps) => {
     const result = await getSecrets();
     setSecrets(result);
     setLoading(false);
-  }, []);
+  }, [getSecrets]);
 
-  const filteredSecrets = secrets.filter((s) =>
+  const allFiltered = secrets.filter((s) =>
     typeFilter === "generic" ? s.type === "generic" : s.type !== "generic",
+  );
+  const ownSecrets = allFiltered.filter(
+    (s) => s.scope === pageScope || !s.scope,
+  );
+  const inheritedSecrets = allFiltered.filter(
+    (s) => s.scope && s.scope !== pageScope,
   );
 
   useEffect(() => {
     fetchSecrets();
   }, [fetchSecrets]);
 
-  // Auto-open create dialog from URL params (e.g., ?create=generic&host=api.example.com)
   useEffect(() => {
     if (paramHandled.current || loading) return;
     const createType = searchParams.get("create");
@@ -125,7 +140,7 @@ export const SecretsContent = ({ typeFilter }: SecretsContentProps) => {
         </Button>
       </div>
 
-      {filteredSecrets.length === 0 ? (
+      {ownSecrets.length === 0 && inheritedSecrets.length === 0 ? (
         <Card className="flex flex-col items-center justify-center py-16 text-center">
           <div className="bg-muted mb-4 flex size-12 items-center justify-center rounded-full">
             <KeyRound className="text-muted-foreground size-6" />
@@ -140,9 +155,25 @@ export const SecretsContent = ({ typeFilter }: SecretsContentProps) => {
           </p>
         </Card>
       ) : (
-        filteredSecrets.map((secret) => (
-          <SecretCard key={secret.id} secret={secret} onUpdate={fetchSecrets} />
-        ))
+        <>
+          {ownSecrets.map((secret) => (
+            <SecretCard
+              key={secret.id}
+              secret={secret}
+              onUpdate={fetchSecrets}
+              secretActions={secretActions}
+            />
+          ))}
+          {inheritedSecrets.map((secret) => (
+            <SecretCard
+              key={`inherited-${secret.id}`}
+              secret={secret}
+              onUpdate={fetchSecrets}
+              readOnly
+              badge="Organization"
+            />
+          ))}
+        </>
       )}
 
       <SecretDialog
@@ -157,6 +188,7 @@ export const SecretsContent = ({ typeFilter }: SecretsContentProps) => {
         allowedTypes={
           typeFilter === "llm" ? ["anthropic", "openai"] : undefined
         }
+        secretActions={secretActions}
       />
     </div>
   );

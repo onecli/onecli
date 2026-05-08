@@ -29,6 +29,7 @@ export const listConnections = async (projectId: string) => {
       label: true,
       status: true,
       scopes: true,
+      scope: true,
       metadata: true,
       connectedAt: true,
     },
@@ -51,6 +52,7 @@ export const listConnectionsByProvider = async (
       label: true,
       status: true,
       scopes: true,
+      scope: true,
       metadata: true,
       connectedAt: true,
     },
@@ -74,6 +76,7 @@ export const createConnection = async (
   return db.appConnection.create({
     data: {
       projectId,
+      scope: "project",
       provider,
       status: "connected",
       label: extractLabel(options?.metadata),

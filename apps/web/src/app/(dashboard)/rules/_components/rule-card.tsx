@@ -19,17 +19,33 @@ import {
   AlertDialogTitle,
   AlertDialogTrigger,
 } from "@onecli/ui/components/alert-dialog";
-import { deleteRule, updateRule } from "@/lib/actions/rules";
+import {
+  deleteRule as defaultDeleteRule,
+  updateRule as defaultUpdateRule,
+} from "@/lib/actions/rules";
+import { cn } from "@onecli/ui/lib/utils";
 import { RuleDialog } from "./rule-dialog";
-import type { AgentOption, PolicyRuleItem } from "./rules-content";
+import type { AgentOption, PolicyRuleItem, RuleActions } from "./types";
 
 interface RuleCardProps {
   rule: PolicyRuleItem;
   agents: AgentOption[];
   onUpdate: () => void;
+  readOnly?: boolean;
+  badge?: string;
+  ruleActions?: RuleActions;
 }
 
-export const RuleCard = ({ rule, agents, onUpdate }: RuleCardProps) => {
+export const RuleCard = ({
+  rule,
+  agents,
+  onUpdate,
+  readOnly,
+  badge,
+  ruleActions,
+}: RuleCardProps) => {
+  const deleteRule = ruleActions?.deleteRule ?? defaultDeleteRule;
+  const updateRule = ruleActions?.updateRule ?? defaultUpdateRule;
   const invalidateCache = useInvalidateGatewayCache();
   const [deleting, setDeleting] = useState(false);
   const [editOpen, setEditOpen] = useState(false);
@@ -84,7 +100,11 @@ export const RuleCard = ({ rule, agents, onUpdate }: RuleCardProps) => {
   return (
     <>
       <Card
-        className={`p-5 transition-opacity ${!rule.enabled ? "opacity-50" : ""}`}
+        className={cn(
+          "p-5 transition-opacity",
+          !rule.enabled && "opacity-50",
+          readOnly && "opacity-60 border-dashed",
+        )}
       >
         <div className="flex items-start justify-between gap-4">
           <div className="min-w-0 flex-1 space-y-3">
@@ -112,6 +132,11 @@ export const RuleCard = ({ rule, agents, onUpdate }: RuleCardProps) => {
                   className="text-muted-foreground text-xs"
                 >
                   {rateLimitLabel}
+                </Badge>
+              )}
+              {badge && (
+                <Badge variant="outline" className="text-[10px]">
+                  {badge}
                 </Badge>
               )}
             </div>
@@ -142,60 +167,65 @@ export const RuleCard = ({ rule, agents, onUpdate }: RuleCardProps) => {
             </div>
           </div>
 
-          <div className="flex items-center gap-2">
-            <Switch
-              checked={rule.enabled}
-              onCheckedChange={handleToggle}
-              disabled={toggling}
-              aria-label={rule.enabled ? "Disable rule" : "Enable rule"}
-            />
+          {!readOnly && (
+            <div className="flex items-center gap-2">
+              <Switch
+                checked={rule.enabled}
+                onCheckedChange={handleToggle}
+                disabled={toggling}
+                aria-label={rule.enabled ? "Disable rule" : "Enable rule"}
+              />
 
-            <Button
-              variant="ghost"
-              size="icon"
-              className="size-7"
-              onClick={() => setEditOpen(true)}
-            >
-              <Pencil className="size-3.5" />
-            </Button>
+              <Button
+                variant="ghost"
+                size="icon"
+                className="size-7"
+                onClick={() => setEditOpen(true)}
+              >
+                <Pencil className="size-3.5" />
+              </Button>
 
-            <AlertDialog>
-              <AlertDialogTrigger asChild>
-                <Button variant="ghost" size="icon" className="size-7">
-                  <Trash2 className="size-3.5" />
-                </Button>
-              </AlertDialogTrigger>
-              <AlertDialogContent>
-                <AlertDialogHeader>
-                  <AlertDialogTitle>Delete rule?</AlertDialogTitle>
-                  <AlertDialogDescription>
-                    This will permanently delete <strong>{rule.name}</strong>.
-                    This action cannot be undone.
-                  </AlertDialogDescription>
-                </AlertDialogHeader>
-                <AlertDialogFooter>
-                  <AlertDialogCancel>Cancel</AlertDialogCancel>
-                  <AlertDialogAction
-                    variant="destructive"
-                    onClick={handleDelete}
-                    disabled={deleting}
-                  >
-                    {deleting ? "Deleting..." : "Delete"}
-                  </AlertDialogAction>
-                </AlertDialogFooter>
-              </AlertDialogContent>
-            </AlertDialog>
-          </div>
+              <AlertDialog>
+                <AlertDialogTrigger asChild>
+                  <Button variant="ghost" size="icon" className="size-7">
+                    <Trash2 className="size-3.5" />
+                  </Button>
+                </AlertDialogTrigger>
+                <AlertDialogContent>
+                  <AlertDialogHeader>
+                    <AlertDialogTitle>Delete rule?</AlertDialogTitle>
+                    <AlertDialogDescription>
+                      This will permanently delete <strong>{rule.name}</strong>.
+                      This action cannot be undone.
+                    </AlertDialogDescription>
+                  </AlertDialogHeader>
+                  <AlertDialogFooter>
+                    <AlertDialogCancel>Cancel</AlertDialogCancel>
+                    <AlertDialogAction
+                      variant="destructive"
+                      onClick={handleDelete}
+                      disabled={deleting}
+                    >
+                      {deleting ? "Deleting..." : "Delete"}
+                    </AlertDialogAction>
+                  </AlertDialogFooter>
+                </AlertDialogContent>
+              </AlertDialog>
+            </div>
+          )}
         </div>
       </Card>
 
-      <RuleDialog
-        open={editOpen}
-        onOpenChange={setEditOpen}
-        rule={rule}
-        agents={agents}
-        onSaved={onUpdate}
-      />
+      {!readOnly && (
+        <RuleDialog
+          open={editOpen}
+          onOpenChange={setEditOpen}
+          rule={rule}
+          agents={agents}
+          onSaved={onUpdate}
+          ruleActions={ruleActions}
+        />
+      )}
     </>
   );
 };

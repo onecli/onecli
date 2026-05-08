@@ -33,8 +33,10 @@ const nextConfig = {
           "@/lib/actions/agents": "@/cloud/actions/agents",
           "@/lib/actions/rules": "@/cloud/actions/rules",
           "@/lib/actions/secrets": "@/cloud/actions/secrets",
+          "@/lib/actions/connections": "@/cloud/actions/connections",
           "@/lib/home-redirect": "@/cloud/home-redirect",
           "@/lib/components/pro-app-dialog": "@/cloud/apps/pro-app-dialog",
+          "@/lib/apps/oauth-org": "@/cloud/apps/oauth-org",
           "@/lib/dashboard/validate-session":
             "@/cloud/dashboard/validate-session",
         }

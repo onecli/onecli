@@ -49,6 +49,7 @@ use crate::auth::AuthUser;
 use crate::ca::CertificateAuthority;
 use crate::cache::CacheStore;
 use crate::connect::{self, AppConnectionResult, ConnectError, PolicyEngine};
+use crate::db;
 use crate::inject;
 use crate::vault;
 
@@ -59,6 +60,7 @@ use crate::vault;
 #[derive(Debug)]
 pub(crate) struct ProxyContext {
     pub project_id: Option<String>,
+    pub organization_id: Option<String>,
     pub agent_id: Option<String>,
     pub agent_name: Option<String>,
     pub agent_identifier: Option<String>,
@@ -266,10 +268,32 @@ async fn invalidate_cache(
     // Clear injection cache first, then connect cache. This ordering ensures
     // a concurrent request that re-resolves the connect cache also re-resolves
     // injections (since injection cache is already cleared).
-    let injection_prefix = format!("app_injection:{}:", auth.project_id);
-    state.cache.del_by_prefix(&injection_prefix).await;
-    let prefix = format!("connect:{}:", auth.project_id);
-    state.cache.del_by_prefix(&prefix).await;
+    // Cache keys include org_id — look it up once for both prefixes
+    let org_id = match db::find_organization_id_by_project(
+        &state.policy_engine.pool,
+        &auth.project_id,
+    )
+    .await
+    {
+        Ok(Some(oid)) => oid,
+        other => {
+            warn!(
+                project_id = %auth.project_id,
+                error = ?other.err(),
+                "cache invalidation: failed to resolve org_id; using broad prefix"
+            );
+            String::new()
+        }
+    };
+
+    state
+        .cache
+        .del_by_prefix(&format!("app_injection:{org_id}:{}:", auth.project_id))
+        .await;
+    state
+        .cache
+        .del_by_prefix(&format!("connect:{org_id}:{}:", auth.project_id))
+        .await;
     (
         StatusCode::OK,
         axum::Json(serde_json::json!({ "invalidated": true })),
@@ -451,30 +475,29 @@ async fn handle_connect(
     // Resolve at CONNECT time for the intercept decision and agent identity.
     // DB injection/policy rules are NOT frozen here — they're re-resolved
     // per request inside the MITM tunnel from cache (see mitm.rs).
-    let (mut intercept, project_id, agent_id, agent_name, agent_identifier) = if let Some(
-        ref token,
-    ) = agent_token
-    {
-        match connect::resolve(token, &hostname, &state.policy_engine, &*state.cache).await {
-            Ok(resp) => (
-                resp.intercept,
-                resp.project_id,
-                resp.agent_id,
-                resp.agent_name,
-                resp.agent_identifier,
-            ),
-            Err(ConnectError::InvalidToken) => {
-                warn!(peer = %peer_addr, host = %host, "CONNECT rejected: invalid agent token");
-                return Ok(response::proxy_auth_required());
+    let (mut intercept, project_id, organization_id, agent_id, agent_name, agent_identifier) =
+        if let Some(ref token) = agent_token {
+            match connect::resolve(token, &hostname, &state.policy_engine, &*state.cache).await {
+                Ok(resp) => (
+                    resp.intercept,
+                    resp.project_id,
+                    resp.organization_id,
+                    resp.agent_id,
+                    resp.agent_name,
+                    resp.agent_identifier,
+                ),
+                Err(ConnectError::InvalidToken) => {
+                    warn!(peer = %peer_addr, host = %host, "CONNECT rejected: invalid agent token");
+                    return Ok(response::proxy_auth_required());
+                }
+                Err(ConnectError::Internal(e)) => {
+                    warn!(peer = %peer_addr, host = %host, error = %e, "CONNECT rejected: internal error");
+                    return Ok(response::bad_gateway());
+                }
             }
-            Err(ConnectError::Internal(e)) => {
-                warn!(peer = %peer_addr, host = %host, error = %e, "CONNECT rejected: internal error");
-                return Ok(response::bad_gateway());
-            }
-        }
-    } else {
-        (false, None, None, None, None)
-    };
+        } else {
+            (false, None, None, None, None, None)
+        };
 
     // Vault fallback: resolved at CONNECT time and passed to mitm as a frozen
     // fallback. Vault queries are expensive (network calls to Bitwarden), so
@@ -524,6 +547,7 @@ async fn handle_connect(
     let approval_store = Arc::clone(&state.approval_store);
     let proxy_ctx = Arc::new(ProxyContext {
         project_id,
+        organization_id,
         agent_id,
         agent_name,
         agent_identifier,
@@ -603,14 +627,16 @@ async fn handle_http_proxy(
 
     // Per-request app connection disambiguation
     if resolved.injection_rules.is_empty() && !resolved.app_connections.is_empty() {
-        let aid = resolved.project_id.as_deref().unwrap_or("");
+        let oid = resolved.organization_id.as_deref().unwrap_or("");
+        let pid = resolved.project_id.as_deref().unwrap_or("");
         match state
             .policy_engine
             .resolve_app_injection_for_request(
                 &resolved.app_connections,
                 &hostname,
                 connection_id.as_deref(),
-                aid,
+                oid,
+                pid,
                 &*state.cache,
             )
             .await
@@ -654,6 +680,7 @@ async fn handle_http_proxy(
 
     let proxy_ctx = ProxyContext {
         project_id: resolved.project_id,
+        organization_id: resolved.organization_id,
         agent_id: resolved.agent_id,
         agent_name: resolved.agent_name,
         agent_identifier: resolved.agent_identifier,

@@ -26,6 +26,7 @@ pub(crate) struct AgentRow {
     pub name: String,
     pub identifier: Option<String>,
     pub project_id: String,
+    pub organization_id: String,
     pub secret_mode: String,
 }
 
@@ -133,12 +134,30 @@ pub(crate) async fn find_agent_by_token(
     access_token: &str,
 ) -> Result<Option<AgentRow>> {
     sqlx::query_as::<_, AgentRow>(
-        r#"SELECT id, name, identifier, project_id, secret_mode FROM agents WHERE access_token = $1 LIMIT 1"#,
+        r#"SELECT a.id, a.name, a.identifier, a.project_id, p.organization_id, a.secret_mode
+           FROM agents a
+           JOIN projects p ON a.project_id = p.id
+           WHERE a.access_token = $1
+           LIMIT 1"#,
     )
     .bind(access_token)
     .fetch_optional(pool)
     .await
     .context("querying agent by access_token")
+}
+
+/// Look up the organization ID for a project.
+pub(crate) async fn find_organization_id_by_project(
+    pool: &PgPool,
+    project_id: &str,
+) -> Result<Option<String>> {
+    let row: Option<(String,)> =
+        sqlx::query_as(r#"SELECT organization_id FROM projects WHERE id = $1 LIMIT 1"#)
+            .bind(project_id)
+            .fetch_optional(pool)
+            .await
+            .context("querying organization_id by project_id")?;
+    Ok(row.map(|(oid,)| oid))
 }
 
 /// Find all secrets for a given project.
@@ -169,6 +188,22 @@ pub(crate) async fn find_secrets_by_agent(pool: &PgPool, agent_id: &str) -> Resu
     .context("querying secrets by agent_id")
 }
 
+/// Find all organization-level secrets.
+pub(crate) async fn find_secrets_by_org(
+    pool: &PgPool,
+    organization_id: &str,
+) -> Result<Vec<SecretRow>> {
+    sqlx::query_as::<_, SecretRow>(
+        r#"SELECT type, encrypted_value, host_pattern, path_pattern, injection_config, is_platform
+           FROM secrets
+           WHERE organization_id = $1 AND scope = 'organization'"#,
+    )
+    .bind(organization_id)
+    .fetch_all(pool)
+    .await
+    .context("querying secrets by organization_id")
+}
+
 /// Find all enabled policy rules for a given project.
 pub(crate) async fn find_policy_rules_by_project(
     pool: &PgPool,
@@ -185,6 +220,24 @@ pub(crate) async fn find_policy_rules_by_project(
     .fetch_all(pool)
     .await
     .context("querying policy_rules by project_id")
+}
+
+/// Find all enabled organization-level policy rules.
+pub(crate) async fn find_policy_rules_by_org(
+    pool: &PgPool,
+    organization_id: &str,
+) -> Result<Vec<PolicyRuleRow>> {
+    sqlx::query_as::<_, PolicyRuleRow>(
+        r#"SELECT id, host_pattern, path_pattern, method, agent_id,
+                  action, rate_limit, rate_limit_window
+           FROM policy_rules
+           WHERE organization_id = $1 AND scope = 'organization' AND enabled = true
+             AND action IN ('block', 'rate_limit', 'manual_approval')"#,
+    )
+    .bind(organization_id)
+    .fetch_all(pool)
+    .await
+    .context("querying policy_rules by organization_id")
 }
 
 // ── App config queries (BYOC credentials) ─────────────────────────────
@@ -255,6 +308,22 @@ pub(crate) async fn find_app_connections_by_agent(
     .fetch_all(pool)
     .await
     .context("querying app_connections by agent_id")
+}
+
+/// Find all organization-level app connections.
+pub(crate) async fn find_app_connections_by_org(
+    pool: &PgPool,
+    organization_id: &str,
+) -> Result<Vec<AppConnectionRow>> {
+    sqlx::query_as::<_, AppConnectionRow>(
+        r#"SELECT id, provider, credentials, label, metadata
+           FROM app_connections
+           WHERE organization_id = $1 AND scope = 'organization' AND status = 'connected'"#,
+    )
+    .bind(organization_id)
+    .fetch_all(pool)
+    .await
+    .context("querying app_connections by organization_id")
 }
 
 /// Update the encrypted credentials for an app connection (e.g., after token refresh).

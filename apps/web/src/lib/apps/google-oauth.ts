@@ -35,6 +35,16 @@ export const exchangeGoogleCode = async ({
   callbackParams,
   redirectUri,
 }: OAuthExchangeCodeParams): Promise<OAuthExchangeResult> => {
+  if (callbackParams.error) {
+    throw new Error(
+      `Google authorization error: ${callbackParams.error} — ${callbackParams.error_description ?? "no description"}`,
+    );
+  }
+
+  if (!callbackParams.code) {
+    throw new Error("Google callback missing authorization code");
+  }
+
   const tokenRes = await fetch("https://oauth2.googleapis.com/token", {
     method: "POST",
     headers: { "Content-Type": "application/x-www-form-urlencoded" },
@@ -48,8 +58,9 @@ export const exchangeGoogleCode = async ({
   });
 
   if (!tokenRes.ok) {
+    const errorBody = await tokenRes.text();
     throw new Error(
-      `Google token exchange failed: ${tokenRes.status} ${tokenRes.statusText}`,
+      `Google token exchange failed: ${tokenRes.status} ${tokenRes.statusText} — ${errorBody}`,
     );
   }
 

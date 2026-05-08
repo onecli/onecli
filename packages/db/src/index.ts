@@ -30,9 +30,4 @@ function initDb(): PrismaClient {
 export const db = initDb();
 
 export type { PrismaClient } from "@prisma/client";
-export {
-  Prisma,
-  type User,
-  type ConnectedService,
-  type AuditLog,
-} from "@prisma/client";
+export { Prisma, type User, type AuditLog } from "@prisma/client";

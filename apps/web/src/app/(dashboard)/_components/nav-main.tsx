@@ -9,6 +9,7 @@ import {
   SidebarMenu,
   SidebarMenuButton,
   SidebarMenuItem,
+  SidebarSeparator,
 } from "@onecli/ui/components/sidebar";
 import { cn } from "@onecli/ui/lib/utils";
 
@@ -22,7 +23,7 @@ export interface NavItem {
 }
 
 interface NavMainProps {
-  items: NavItem[];
+  items: NavItem[] | NavItem[][];
 }
 
 export const NavMain = ({ items }: NavMainProps) => {
@@ -33,25 +34,35 @@ export const NavMain = ({ items }: NavMainProps) => {
     return pathname.startsWith(url);
   };
 
+  const groups: NavItem[][] =
+    items.length > 0 && Array.isArray(items[0])
+      ? (items as NavItem[][])
+      : [items as NavItem[]];
+
   return (
     <SidebarGroup className="group-data-[collapsible=icon]:items-center group-data-[collapsible=icon]:px-0">
-      <SidebarMenu>
-        {items.map((item) => (
-          <SidebarMenuItem key={item.url}>
-            <SidebarMenuButton
-              asChild
-              isActive={isActive(item.url)}
-              tooltip={item.title}
-              className={cn(sidebarMenuButtonActiveStyles)}
-            >
-              <Link href={item.url}>
-                <item.icon />
-                <span>{item.title}</span>
-              </Link>
-            </SidebarMenuButton>
-          </SidebarMenuItem>
-        ))}
-      </SidebarMenu>
+      {groups.map((group, i) => (
+        <div key={i}>
+          {i > 0 && <SidebarSeparator className="my-2" />}
+          <SidebarMenu>
+            {group.map((item) => (
+              <SidebarMenuItem key={item.url}>
+                <SidebarMenuButton
+                  asChild
+                  isActive={isActive(item.url)}
+                  tooltip={item.title}
+                  className={cn(sidebarMenuButtonActiveStyles)}
+                >
+                  <Link href={item.url}>
+                    <item.icon />
+                    <span>{item.title}</span>
+                  </Link>
+                </SidebarMenuButton>
+              </SidebarMenuItem>
+            ))}
+          </SidebarMenu>
+        </div>
+      ))}
     </SidebarGroup>
   );
 };

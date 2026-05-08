@@ -6,8 +6,9 @@ import { usePathname } from "next/navigation";
 import { ArrowLeft, Loader2 } from "lucide-react";
 import { Button } from "@onecli/ui/components/button";
 import { Skeleton } from "@onecli/ui/components/skeleton";
-import { getAppConnections } from "@/lib/actions/connections";
-import { checkAppConfigExists } from "@/lib/actions/app-config";
+import { getAppConnections as defaultGetConnections } from "@/lib/actions/connections";
+import { checkAppConfigExists as defaultCheckConfig } from "@/lib/actions/app-config";
+import { Card } from "@onecli/ui/components/card";
 import { useAppMessages } from "@/hooks/use-app-connected";
 import { useInvalidateGatewayCache } from "@/hooks/use-invalidate-cache";
 import { withProjectPrefix } from "@/lib/navigation";
@@ -42,6 +43,11 @@ interface AppDetailProps {
   };
   hasEnvDefaults: boolean;
   hasAppConfig: boolean;
+  getConnections?: typeof defaultGetConnections;
+  checkAppConfig?: typeof defaultCheckConfig;
+  disconnectAction?: (connectionId: string) => Promise<void>;
+  pageScope?: "project" | "organization";
+  backPath?: string;
 }
 
 interface ConnectionData {
@@ -50,6 +56,7 @@ interface ConnectionData {
   provider: string;
   status: string;
   scopes: string[];
+  scope?: string;
   metadata: Record<string, unknown> | null;
   connectedAt: Date;
 }
@@ -59,9 +66,17 @@ export const AppDetail = ({
   configurable,
   hasEnvDefaults,
   hasAppConfig,
+  getConnections = defaultGetConnections,
+  checkAppConfig = defaultCheckConfig,
+  disconnectAction,
+  pageScope = "project",
+  backPath,
 }: AppDetailProps) => {
   const pathname = usePathname();
   const [connections, setConnections] = useState<ConnectionData[]>([]);
+  const [inheritedConnections, setInheritedConnections] = useState<
+    ConnectionData[]
+  >([]);
   const [loading, setLoading] = useState(true);
   const [configDialogOpen, setConfigDialogOpen] = useState(false);
   const [configVersion, setConfigVersion] = useState(0);
@@ -69,20 +84,25 @@ export const AppDetail = ({
 
   const fetchConnections = useCallback(async () => {
     try {
-      const allConnections = await getAppConnections();
-      const matches = allConnections
+      const allConnections = await getConnections();
+      const forProvider = allConnections
         .filter((c) => c.provider === app.id && c.status === "connected")
         .map((c) => ({
           ...c,
           metadata: c.metadata as Record<string, unknown> | null,
         }));
-      setConnections(matches);
+      setConnections(
+        forProvider.filter((c) => c.scope === pageScope || !c.scope),
+      );
+      setInheritedConnections(
+        forProvider.filter((c) => c.scope && c.scope !== pageScope),
+      );
     } catch {
       // Connection fetch failed — show as disconnected
     } finally {
       setLoading(false);
     }
-  }, [app.id]);
+  }, [app.id, getConnections, pageScope]);
 
   useEffect(() => {
     fetchConnections();
@@ -100,12 +120,12 @@ export const AppDetail = ({
   const refreshConfigStatus = useCallback(async () => {
     fetchConnections();
     try {
-      const exists = await checkAppConfigExists(app.id);
+      const exists = await checkAppConfig(app.id);
       setAppConfigured(exists);
     } catch {
       // ignore
     }
-  }, [app.id, fetchConnections]);
+  }, [app.id, fetchConnections, checkAppConfig]);
 
   const hasCredentials = hasEnvDefaults || appConfigured;
 
@@ -117,9 +137,11 @@ export const AppDetail = ({
     const h = options?.height ?? 700;
     const left = Math.round(window.screenX + (window.outerWidth - w) / 2);
     const top = Math.round(window.screenY + (window.outerHeight - h) / 2);
-    const url = connectionId
-      ? `/app-connect/${app.id}?connectionId=${connectionId}`
-      : `/app-connect/${app.id}`;
+    const params = new URLSearchParams();
+    if (connectionId) params.set("connectionId", connectionId);
+    if (pageScope === "organization") params.set("org", "true");
+    const qs = params.toString();
+    const url = `/app-connect/${app.id}${qs ? `?${qs}` : ""}`;
     window.open(
       url,
       `connect-${app.id}-${connectionId ?? "new"}`,
@@ -138,14 +160,14 @@ export const AppDetail = ({
     openConnectPopup(undefined, popupOpts);
   };
 
-  const connectionCount = connections.length;
+  const connectionCount = connections.length + inheritedConnections.length;
   const isConnected = connectionCount > 0;
 
   return (
     <div className="space-y-6">
       {/* Back link */}
       <Link
-        href={withProjectPrefix(pathname, "/connections")}
+        href={backPath ?? withProjectPrefix(pathname, "/connections")}
         className="inline-flex items-center gap-1.5 text-sm text-muted-foreground hover:text-foreground transition-colors"
       >
         <ArrowLeft className="size-4" />
@@ -209,8 +231,13 @@ export const AppDetail = ({
         </div>
       ) : (
         <>
-          {isConnected && (
+          {connections.length > 0 && (
             <div className="space-y-2">
+              {inheritedConnections.length > 0 && (
+                <p className="text-xs font-medium text-muted-foreground uppercase tracking-wider">
+                  Project
+                </p>
+              )}
               {connections.map((conn) => {
                 const manageUrl =
                   typeof conn.metadata?.manageUrl === "string"
@@ -229,9 +256,37 @@ export const AppDetail = ({
                     }
                     reconnectLabel={manageUrl ? "Manage" : undefined}
                     onDisconnected={fetchConnections}
+                    disconnectAction={disconnectAction}
                   />
                 );
               })}
+            </div>
+          )}
+          {inheritedConnections.length > 0 && (
+            <div className="space-y-2">
+              <p className="text-xs font-medium text-muted-foreground uppercase tracking-wider">
+                Organization
+              </p>
+              {inheritedConnections.map((conn) => (
+                <Card
+                  key={conn.id}
+                  className="flex-row items-center justify-between gap-3 px-4 py-3 opacity-60 border-dashed"
+                >
+                  <div className="min-w-0">
+                    <p className="text-sm font-medium truncate">
+                      {conn.label ?? "Connected account"}
+                    </p>
+                    <p className="text-xs text-muted-foreground mt-0.5">
+                      Connected{" "}
+                      {new Date(conn.connectedAt).toLocaleDateString("en-US", {
+                        month: "long",
+                        day: "numeric",
+                        year: "numeric",
+                      })}
+                    </p>
+                  </div>
+                </Card>
+              ))}
             </div>
           )}
           {app.permissions.length > 0 && (
@@ -239,7 +294,13 @@ export const AppDetail = ({
               permissions={app.permissions}
               grantedScopes={
                 isConnected
-                  ? [...new Set(connections.flatMap((c) => c.scopes))]
+                  ? [
+                      ...new Set(
+                        [...connections, ...inheritedConnections].flatMap(
+                          (c) => c.scopes,
+                        ),
+                      ),
+                    ]
                   : undefined
               }
             />

@@ -24,7 +24,11 @@ import {
   AccordionTrigger,
 } from "@onecli/ui/components/accordion";
 import { Badge } from "@onecli/ui/components/badge";
-import { createSecret, updateSecret } from "@/lib/actions/secrets";
+import {
+  createSecret as defaultCreateSecret,
+  updateSecret as defaultUpdateSecret,
+} from "@/lib/actions/secrets";
+import type { SecretActions } from "./types";
 import { validateDisplayName } from "@/lib/validations/display-name";
 import {
   type InjectionConfig,
@@ -130,6 +134,7 @@ interface SecretDialogProps {
   defaultType?: SecretType;
   /** Filter which types appear in TypeStep. */
   allowedTypes?: SecretType[];
+  secretActions?: SecretActions;
 }
 
 export const SecretDialog = ({
@@ -140,6 +145,7 @@ export const SecretDialog = ({
   prefill,
   defaultType,
   allowedTypes,
+  secretActions,
 }: SecretDialogProps) => {
   const isEdit = !!secret;
   const invalidateCache = useInvalidateGatewayCache();
@@ -285,6 +291,9 @@ export const SecretDialog = ({
         }
         return { headerName, valueFormat: valueFormat || "{value}" };
       };
+
+      const updateSecret = secretActions?.updateSecret ?? defaultUpdateSecret;
+      const createSecret = secretActions?.createSecret ?? defaultCreateSecret;
 
       if (isEdit) {
         await updateSecret(

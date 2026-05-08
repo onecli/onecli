@@ -3,6 +3,7 @@ import { getApp } from "@/lib/apps/registry";
 import { resolveAppCredentials } from "@/lib/apps/resolve-credentials";
 import { APP_URL } from "@/lib/env";
 import { invalidateGatewayCacheForAccount } from "@/lib/gateway-invalidate";
+import { tryHandleOrgCallback } from "@/lib/apps/oauth-org";
 import { verifyOAuthState } from "@/lib/oauth-state";
 import {
   createConnection,
@@ -16,6 +17,10 @@ type Params = { params: Promise<{ provider: string }> };
 
 export const GET = async (request: NextRequest, { params }: Params) => {
   const { provider } = await params;
+
+  const orgResponse = await tryHandleOrgCallback(request, provider);
+  if (orgResponse) return orgResponse;
+
   const errorRedirect = (msg: string) =>
     NextResponse.redirect(
       `${APP_URL}/app-connect/${provider}?status=error&message=${encodeURIComponent(msg)}`,
@@ -36,6 +41,30 @@ export const GET = async (request: NextRequest, { params }: Params) => {
     const state = verifyOAuthState(stateParam);
     if (!state || state.provider !== provider) {
       return errorRedirect("Invalid state parameter");
+    }
+
+    // Microsoft can send duplicate callbacks — the first with a valid code
+    // (which succeeds) and the second with error=server_error. If a
+    // connection was created moments ago during this same OAuth flow,
+    // treat the error callback as a no-op and redirect to success.
+    if (request.nextUrl.searchParams.has("error")) {
+      const recentCutoff = new Date(Date.now() - 30_000);
+      const existing = await listConnectionsByProvider(
+        state.projectId,
+        provider,
+      );
+      const justCreated = existing.some(
+        (c) => c.status === "connected" && c.connectedAt >= recentCutoff,
+      );
+      if (justCreated) {
+        const successParams = new URLSearchParams({ status: "success" });
+        if (state.agentName) {
+          successParams.set("agent_name", state.agentName as string);
+        }
+        return NextResponse.redirect(
+          `${APP_URL}/app-connect/${provider}?${successParams}`,
+        );
+      }
     }
 
     const resolved = await resolveAppCredentials(state.projectId, app);

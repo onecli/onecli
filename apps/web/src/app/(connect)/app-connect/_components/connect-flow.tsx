@@ -36,6 +36,7 @@ interface ConnectFlowProps {
   errorMessage?: string;
   connectionId?: string;
   agentName?: string;
+  org?: boolean;
 }
 
 export const ConnectFlow = ({
@@ -45,6 +46,7 @@ export const ConnectFlow = ({
   errorMessage,
   connectionId,
   agentName,
+  org,
 }: ConnectFlowProps) => {
   const [state, setState] = useState<FlowState>(
     status === "success" ? "success" : status === "error" ? "error" : "ready",
@@ -60,10 +62,11 @@ export const ConnectFlow = ({
     const params = new URLSearchParams();
     if (connectionId) params.set("connectionId", connectionId);
     if (agentName) params.set("agent_name", agentName);
+    if (org) params.set("org", "true");
     const qs = params.toString();
     const authorizeUrl = `/api/apps/${app.id}/authorize${qs ? `?${qs}` : ""}`;
     window.location.href = authorizeUrl;
-  }, [app.id, connectionId, agentName]);
+  }, [app.id, connectionId, agentName, org]);
 
   // Countdown timer for auto-redirect
   useEffect(() => {

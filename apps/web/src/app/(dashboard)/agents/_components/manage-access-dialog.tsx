@@ -63,7 +63,11 @@ export const ManageAccessDialog = ({
     agent.secretMode === "selective" ? "selective" : "all",
   );
   const [secrets, setSecrets] = useState<Secret[]>([]);
+  const [orgSecrets, setOrgSecrets] = useState<Secret[]>([]);
   const [appConnections, setAppConnections] = useState<AppConnection[]>([]);
+  const [orgAppConnections, setOrgAppConnections] = useState<AppConnection[]>(
+    [],
+  );
   const [selectedSecretIds, setSelectedSecretIds] = useState<Set<string>>(
     () => new Set(),
   );
@@ -84,10 +88,22 @@ export const ManageAccessDialog = ({
           getAppConnections(),
           getAgentAppConnections(agent.id),
         ]);
-      setSecrets(allSecrets);
+      const projectSecrets: typeof allSecrets = [];
+      const orgSecretsList: typeof allSecrets = [];
+      for (const s of allSecrets) {
+        (s.scope === "organization" ? orgSecretsList : projectSecrets).push(s);
+      }
+      setSecrets(projectSecrets);
+      setOrgSecrets(orgSecretsList);
       setSelectedSecretIds(new Set(assignedSecretIds));
-      // Only show connected apps
-      setAppConnections(allConnections.filter((c) => c.status === "connected"));
+      const projectConns: typeof allConnections = [];
+      const orgConns: typeof allConnections = [];
+      for (const c of allConnections) {
+        if (c.status !== "connected") continue;
+        (c.scope === "organization" ? orgConns : projectConns).push(c);
+      }
+      setAppConnections(projectConns);
+      setOrgAppConnections(orgConns);
       setSelectedAppConnectionIds(new Set(assignedAppIds));
     } catch {
       toast.error("Failed to load credentials");
@@ -104,45 +120,72 @@ export const ManageAccessDialog = ({
     }
   }, [open, agent.secretMode, fetchData]);
 
-  const filteredSecrets = useMemo(() => {
-    if (!search.trim()) return secrets;
-    const q = search.toLowerCase();
-    return secrets.filter(
-      (s) =>
-        s.name.toLowerCase().includes(q) ||
-        s.hostPattern.toLowerCase().includes(q),
-    );
-  }, [secrets, search]);
-
-  const filteredAppConnections = useMemo(() => {
-    if (!search.trim()) return appConnections;
-    const q = search.toLowerCase();
-    return appConnections.filter((c) => {
-      const app = getApp(c.provider);
-      const name = app?.name ?? c.provider;
-      const meta = c.metadata as {
-        username?: string;
-        email?: string;
-        name?: string;
-      } | null;
-      return (
-        name.toLowerCase().includes(q) ||
-        c.provider.toLowerCase().includes(q) ||
-        (c.label?.toLowerCase().includes(q) ?? false) ||
-        (meta?.email?.toLowerCase().includes(q) ?? false) ||
-        (meta?.username?.toLowerCase().includes(q) ?? false) ||
-        (meta?.name?.toLowerCase().includes(q) ?? false)
+  const filterSecrets = useCallback(
+    (list: Secret[]) => {
+      if (!search.trim()) return list;
+      const q = search.toLowerCase();
+      return list.filter(
+        (s) =>
+          s.name.toLowerCase().includes(q) ||
+          s.hostPattern.toLowerCase().includes(q),
       );
-    });
-  }, [appConnections, search]);
+    },
+    [search],
+  );
 
+  const filterConnections = useCallback(
+    (list: AppConnection[]) => {
+      if (!search.trim()) return list;
+      const q = search.toLowerCase();
+      return list.filter((c) => {
+        const app = getApp(c.provider);
+        const name = app?.name ?? c.provider;
+        const meta = c.metadata as {
+          username?: string;
+          email?: string;
+          name?: string;
+        } | null;
+        return (
+          name.toLowerCase().includes(q) ||
+          c.provider.toLowerCase().includes(q) ||
+          (c.label?.toLowerCase().includes(q) ?? false) ||
+          (meta?.email?.toLowerCase().includes(q) ?? false) ||
+          (meta?.username?.toLowerCase().includes(q) ?? false) ||
+          (meta?.name?.toLowerCase().includes(q) ?? false)
+        );
+      });
+    },
+    [search],
+  );
+
+  const filteredSecrets = useMemo(
+    () => filterSecrets(secrets),
+    [secrets, filterSecrets],
+  );
+  const filteredOrgSecrets = useMemo(
+    () => filterSecrets(orgSecrets),
+    [orgSecrets, filterSecrets],
+  );
+  const filteredAppConnections = useMemo(
+    () => filterConnections(appConnections),
+    [appConnections, filterConnections],
+  );
+  const filteredOrgAppConnections = useMemo(
+    () => filterConnections(orgAppConnections),
+    [orgAppConnections, filterConnections],
+  );
+
+  const allConnections = useMemo(
+    () => [...appConnections, ...orgAppConnections],
+    [appConnections, orgAppConnections],
+  );
   const providerCounts = useMemo(() => {
     const counts = new Map<string, number>();
-    appConnections.forEach((c) =>
+    allConnections.forEach((c) =>
       counts.set(c.provider, (counts.get(c.provider) ?? 0) + 1),
     );
     return counts;
-  }, [appConnections]);
+  }, [allConnections]);
 
   const toggleSecret = (secretId: string) => {
     setSelectedSecretIds((prev) => {
@@ -162,12 +205,18 @@ export const ManageAccessDialog = ({
     });
   };
 
-  const totalItems = secrets.length + appConnections.length;
+  const totalItems =
+    secrets.length +
+    orgSecrets.length +
+    appConnections.length +
+    orgAppConnections.length;
   const totalSelected = selectedSecretIds.size + selectedAppConnectionIds.size;
 
   const selectAll = () => {
-    setSelectedSecretIds(new Set(secrets.map((s) => s.id)));
-    setSelectedAppConnectionIds(new Set(appConnections.map((c) => c.id)));
+    setSelectedSecretIds(new Set([...secrets, ...orgSecrets].map((s) => s.id)));
+    setSelectedAppConnectionIds(
+      new Set([...appConnections, ...orgAppConnections].map((c) => c.id)),
+    );
   };
 
   const clearAll = () => {
@@ -200,7 +249,92 @@ export const ManageAccessDialog = ({
   };
 
   const isSelective = mode === "selective";
-  const hasItems = secrets.length > 0 || appConnections.length > 0;
+  const hasItems = totalItems > 0;
+
+  const renderSecretSection = (title: string, items: Secret[]) => {
+    if (items.length === 0) return null;
+    return (
+      <>
+        <div className="bg-muted/30 flex items-center gap-2 px-3 py-1.5">
+          <KeyRound className="text-muted-foreground size-3" />
+          <p className="text-muted-foreground text-xs font-medium">{title}</p>
+        </div>
+        {items.map((secret) => (
+          <label
+            key={secret.id}
+            className="hover:bg-muted/50 flex cursor-pointer items-center gap-3 px-3 py-2.5 transition-colors"
+          >
+            <Checkbox
+              checked={selectedSecretIds.has(secret.id)}
+              onCheckedChange={() => toggleSecret(secret.id)}
+            />
+            <div className="min-w-0 flex-1">
+              <p className="truncate text-sm font-medium">{secret.name}</p>
+              <code className="text-muted-foreground text-xs">
+                {secret.hostPattern}
+              </code>
+            </div>
+            <Badge variant="secondary" className="shrink-0 text-xs">
+              {secret.typeLabel}
+            </Badge>
+          </label>
+        ))}
+      </>
+    );
+  };
+
+  const renderConnectionSection = (title: string, items: AppConnection[]) => {
+    if (items.length === 0) return null;
+    return (
+      <>
+        <div className="bg-muted/30 flex items-center gap-2 px-3 py-1.5">
+          <Plug className="text-muted-foreground size-3" />
+          <p className="text-muted-foreground text-xs font-medium">{title}</p>
+        </div>
+        {items.map((conn) => {
+          const app = getApp(conn.provider);
+          const meta = conn.metadata as Record<string, unknown> | null;
+          const label = conn.label ?? extractLabel(meta ?? undefined);
+          const baseName = app?.name ?? conn.provider;
+          const hasMultiple = (providerCounts.get(conn.provider) ?? 0) > 1;
+          const displayName =
+            hasMultiple && label ? `${baseName} - ${label}` : baseName;
+          return (
+            <label
+              key={conn.id}
+              className="hover:bg-muted/50 flex cursor-pointer items-center gap-3 px-3 py-2.5 transition-colors"
+            >
+              <Checkbox
+                checked={selectedAppConnectionIds.has(conn.id)}
+                onCheckedChange={() => toggleAppConnection(conn.id)}
+              />
+              <div className="flex min-w-0 flex-1 items-center gap-2.5">
+                {app?.icon && (
+                  <AppIcon
+                    icon={app.icon}
+                    darkIcon={app.darkIcon}
+                    name={baseName}
+                    size={16}
+                  />
+                )}
+                <div className="min-w-0">
+                  <p className="truncate text-sm font-medium">{displayName}</p>
+                  {!hasMultiple && label && (
+                    <p className="text-muted-foreground truncate text-xs">
+                      {label}
+                    </p>
+                  )}
+                </div>
+              </div>
+              <Badge variant="secondary" className="shrink-0 text-xs">
+                {app?.name ?? conn.provider}
+              </Badge>
+            </label>
+          );
+        })}
+      </>
+    );
+  };
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -330,112 +464,24 @@ export const ManageAccessDialog = ({
                 {/* List */}
                 <ScrollArea className="h-[280px] overflow-hidden rounded-md border">
                   <div className="divide-border divide-y">
-                    {/* Secrets section */}
-                    {filteredSecrets.length > 0 && (
-                      <>
-                        <div className="bg-muted/30 flex items-center gap-2 px-3 py-1.5">
-                          <KeyRound className="text-muted-foreground size-3" />
-                          <p className="text-muted-foreground text-xs font-medium">
-                            Secrets
-                          </p>
-                        </div>
-                        {filteredSecrets.map((secret) => (
-                          <label
-                            key={secret.id}
-                            className="hover:bg-muted/50 flex cursor-pointer items-center gap-3 px-3 py-2.5 transition-colors"
-                          >
-                            <Checkbox
-                              checked={selectedSecretIds.has(secret.id)}
-                              onCheckedChange={() => toggleSecret(secret.id)}
-                            />
-                            <div className="min-w-0 flex-1">
-                              <p className="truncate text-sm font-medium">
-                                {secret.name}
-                              </p>
-                              <code className="text-muted-foreground text-xs">
-                                {secret.hostPattern}
-                              </code>
-                            </div>
-                            <Badge
-                              variant="secondary"
-                              className="shrink-0 text-xs"
-                            >
-                              {secret.typeLabel}
-                            </Badge>
-                          </label>
-                        ))}
-                      </>
+                    {renderSecretSection("Secrets", filteredSecrets)}
+                    {renderConnectionSection(
+                      "App connections",
+                      filteredAppConnections,
                     )}
-
-                    {/* App connections section */}
-                    {filteredAppConnections.length > 0 && (
-                      <>
-                        <div className="bg-muted/30 flex items-center gap-2 px-3 py-1.5">
-                          <Plug className="text-muted-foreground size-3" />
-                          <p className="text-muted-foreground text-xs font-medium">
-                            App connections
-                          </p>
-                        </div>
-                        {filteredAppConnections.map((conn) => {
-                          const app = getApp(conn.provider);
-                          const meta = conn.metadata as Record<
-                            string,
-                            unknown
-                          > | null;
-                          const label =
-                            conn.label ?? extractLabel(meta ?? undefined);
-                          const baseName = app?.name ?? conn.provider;
-                          const hasMultiple =
-                            (providerCounts.get(conn.provider) ?? 0) > 1;
-                          const displayName =
-                            hasMultiple && label
-                              ? `${baseName} - ${label}`
-                              : baseName;
-                          return (
-                            <label
-                              key={conn.id}
-                              className="hover:bg-muted/50 flex cursor-pointer items-center gap-3 px-3 py-2.5 transition-colors"
-                            >
-                              <Checkbox
-                                checked={selectedAppConnectionIds.has(conn.id)}
-                                onCheckedChange={() =>
-                                  toggleAppConnection(conn.id)
-                                }
-                              />
-                              <div className="flex min-w-0 flex-1 items-center gap-2.5">
-                                {app?.icon && (
-                                  <AppIcon
-                                    icon={app.icon}
-                                    darkIcon={app.darkIcon}
-                                    name={baseName}
-                                    size={16}
-                                  />
-                                )}
-                                <div className="min-w-0">
-                                  <p className="truncate text-sm font-medium">
-                                    {displayName}
-                                  </p>
-                                  {!hasMultiple && label && (
-                                    <p className="text-muted-foreground truncate text-xs">
-                                      {label}
-                                    </p>
-                                  )}
-                                </div>
-                              </div>
-                              <Badge
-                                variant="secondary"
-                                className="shrink-0 text-xs"
-                              >
-                                {app?.name ?? conn.provider}
-                              </Badge>
-                            </label>
-                          );
-                        })}
-                      </>
+                    {renderSecretSection(
+                      "Organization secrets",
+                      filteredOrgSecrets,
+                    )}
+                    {renderConnectionSection(
+                      "Organization app connections",
+                      filteredOrgAppConnections,
                     )}
 
                     {filteredSecrets.length === 0 &&
-                      filteredAppConnections.length === 0 && (
+                      filteredOrgSecrets.length === 0 &&
+                      filteredAppConnections.length === 0 &&
+                      filteredOrgAppConnections.length === 0 && (
                         <p className="text-muted-foreground py-6 text-center text-xs">
                           No credentials match &ldquo;{search}&rdquo;
                         </p>

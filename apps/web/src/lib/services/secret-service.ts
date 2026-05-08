@@ -36,6 +36,7 @@ export const listSecrets = async (projectId: string) => {
       pathPattern: true,
       injectionConfig: true,
       isPlatform: true,
+      scope: true,
       createdAt: true,
     },
     orderBy: { createdAt: "desc" },
@@ -117,6 +118,7 @@ export const createSecret = async (
       pathPattern,
       injectionConfig,
       metadata,
+      scope: "project",
       projectId,
     },
     select: {
@@ -250,6 +252,7 @@ export const seedDemoSecret = async (projectId: string) => {
 
   await db.secret.create({
     data: {
+      scope: "project",
       name: DEMO_SECRET_NAME,
       type: "generic",
       encryptedValue: await cryptoService.encrypt(DEMO_SECRET_VALUE),

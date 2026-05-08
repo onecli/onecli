@@ -2,34 +2,29 @@
 
 import { useEffect, useState, useCallback } from "react";
 import { Plus, ShieldOff } from "lucide-react";
-import { getRules } from "@/lib/actions/rules";
+import { getRules as defaultGetRules } from "@/lib/actions/rules";
 import { getAgents } from "@/lib/actions/agents";
 import { Button } from "@onecli/ui/components/button";
 import { Card } from "@onecli/ui/components/card";
 import { Skeleton } from "@onecli/ui/components/skeleton";
 import { RuleCard } from "./rule-card";
 import { RuleDialog } from "./rule-dialog";
+import type { AgentOption, PolicyRuleItem, RuleActions } from "./types";
+export type { PolicyRuleItem, AgentOption, RuleActions } from "./types";
 
-export interface PolicyRuleItem {
-  id: string;
-  name: string;
-  hostPattern: string;
-  pathPattern: string | null;
-  method: string | null;
-  action: string;
-  enabled: boolean;
-  agentId: string | null;
-  rateLimit: number | null;
-  rateLimitWindow: string | null;
-  createdAt: Date;
+interface RulesContentProps {
+  getRules?: () => Promise<PolicyRuleItem[]>;
+  ruleActions?: RuleActions;
+  pageScope?: "project" | "organization";
+  showAgentField?: boolean;
 }
 
-export interface AgentOption {
-  id: string;
-  name: string;
-}
-
-export const RulesContent = () => {
+export const RulesContent = ({
+  getRules = defaultGetRules,
+  ruleActions,
+  pageScope = "project",
+  showAgentField = true,
+}: RulesContentProps) => {
   const [rules, setRules] = useState<PolicyRuleItem[]>([]);
   const [agents, setAgents] = useState<AgentOption[]>([]);
   const [loading, setLoading] = useState(true);
@@ -39,7 +34,7 @@ export const RulesContent = () => {
     const result = await getRules();
     setRules(result);
     setLoading(false);
-  }, []);
+  }, [getRules]);
 
   const fetchAgents = useCallback(async () => {
     const result = await getAgents();
@@ -48,8 +43,15 @@ export const RulesContent = () => {
 
   useEffect(() => {
     fetchRules();
-    fetchAgents();
-  }, [fetchRules, fetchAgents]);
+    if (showAgentField) fetchAgents();
+  }, [fetchRules, fetchAgents, showAgentField]);
+
+  const ownRules: PolicyRuleItem[] = [];
+  const inheritedRules: PolicyRuleItem[] = [];
+  for (const r of rules) {
+    if (r.scope && r.scope !== pageScope) inheritedRules.push(r);
+    else ownRules.push(r);
+  }
 
   if (loading) {
     return (
@@ -82,7 +84,7 @@ export const RulesContent = () => {
         </Button>
       </div>
 
-      {rules.length === 0 ? (
+      {ownRules.length === 0 && inheritedRules.length === 0 ? (
         <Card className="flex flex-col items-center justify-center py-16 text-center">
           <div className="mb-4 flex size-12 items-center justify-center rounded-full bg-amber-500/10">
             <ShieldOff className="size-6 text-amber-500" />
@@ -94,21 +96,36 @@ export const RulesContent = () => {
           </p>
         </Card>
       ) : (
-        rules.map((rule) => (
-          <RuleCard
-            key={rule.id}
-            rule={rule}
-            agents={agents}
-            onUpdate={fetchRules}
-          />
-        ))
+        <>
+          {ownRules.map((rule) => (
+            <RuleCard
+              key={rule.id}
+              rule={rule}
+              agents={agents}
+              onUpdate={fetchRules}
+              ruleActions={ruleActions}
+            />
+          ))}
+          {inheritedRules.map((rule) => (
+            <RuleCard
+              key={`inherited-${rule.id}`}
+              rule={rule}
+              agents={agents}
+              onUpdate={fetchRules}
+              readOnly
+              badge="Organization"
+            />
+          ))}
+        </>
       )}
 
       <RuleDialog
         open={createOpen}
         onOpenChange={setCreateOpen}
         onSaved={fetchRules}
-        agents={agents}
+        agents={showAgentField ? agents : []}
+        showAgentField={showAgentField}
+        ruleActions={ruleActions}
       />
     </div>
   );

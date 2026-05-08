@@ -10,18 +10,11 @@ import {
 } from "@onecli/ui/components/animated-tabs";
 import { Badge } from "@onecli/ui/components/badge";
 import {
-  getAppConnections,
-  getVaultConnections,
+  getAppConnections as defaultGetConnections,
+  getVaultConnections as defaultGetVaultConnections,
 } from "@/lib/actions/connections";
-import { getSecrets } from "@/lib/actions/secrets";
+import { getSecrets as defaultGetSecrets } from "@/lib/actions/secrets";
 
-/**
- * Derive tab URLs from the current pathname so navigation stays inside the
- * current prefix. In OSS the prefix is `/connections`; in cloud's project
- * routes it's `/p/<projectId>/connections`. Without this, clicking "Secrets"
- * inside a project would jump to the OSS `/connections/custom` URL and lose
- * the project scope.
- */
 const getTabRoutes = (pathname: string): Record<string, string> => {
   const idx = pathname.indexOf("/connections");
   const base =
@@ -44,20 +37,44 @@ const pathToTab = (pathname: string): string => {
   return "apps";
 };
 
-export const ConnectionsTabs = () => {
+interface ConnectionsTabsProps {
+  getConnections?: typeof defaultGetConnections;
+  getSecrets?: typeof defaultGetSecrets;
+  getVaultConnections?: typeof defaultGetVaultConnections | null;
+  showVaults?: boolean;
+  basePath?: string;
+}
+
+export const ConnectionsTabs = ({
+  getConnections = defaultGetConnections,
+  getSecrets = defaultGetSecrets,
+  getVaultConnections = defaultGetVaultConnections,
+  showVaults = true,
+  basePath,
+}: ConnectionsTabsProps) => {
   const pathname = usePathname();
   const router = useRouter();
-  const activeTab = pathToTab(pathname);
-  const tabRoutes = getTabRoutes(pathname);
+  const activeTab = basePath
+    ? pathToTab(pathname.replace(basePath, "/connections"))
+    : pathToTab(pathname);
+  const tabRoutes = basePath
+    ? {
+        apps: basePath,
+        custom: `${basePath}/custom`,
+        llms: `${basePath}/llms`,
+        vaults: `${basePath}/vaults`,
+        connected: `${basePath}/connected`,
+      }
+    : getTabRoutes(pathname);
   const [connectedCount, setConnectedCount] = useState(0);
   const [, startTransition] = useTransition();
 
   const fetchCount = useCallback(async () => {
     try {
       const [connections, secrets, vaults] = await Promise.all([
-        getAppConnections(),
+        getConnections(),
         getSecrets(),
-        getVaultConnections(),
+        getVaultConnections ? getVaultConnections() : Promise.resolve([]),
       ]);
       const appCount = connections.filter(
         (c) => c.status === "connected",
@@ -66,14 +83,12 @@ export const ConnectionsTabs = () => {
     } catch {
       // Keep count at 0
     }
-  }, []);
+  }, [getConnections, getSecrets, getVaultConnections]);
 
   useEffect(() => {
     fetchCount();
   }, [fetchCount]);
 
-  // Prefetch all tab routes so navigation is instant.
-  // Depend on pathname (primitive) rather than tabRoutes (new object each render).
   useEffect(() => {
     Object.values(tabRoutes).forEach((route) => router.prefetch(route));
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -93,10 +108,12 @@ export const ConnectionsTabs = () => {
           <AnimatedTabTrigger value="apps">Apps</AnimatedTabTrigger>
           <AnimatedTabTrigger value="custom">Custom</AnimatedTabTrigger>
           <AnimatedTabTrigger value="llms">LLMs</AnimatedTabTrigger>
-          <AnimatedTabTrigger value="vaults">
-            <span className="sm:hidden">Vaults</span>
-            <span className="hidden sm:inline">External Vaults</span>
-          </AnimatedTabTrigger>
+          {showVaults && (
+            <AnimatedTabTrigger value="vaults">
+              <span className="sm:hidden">Vaults</span>
+              <span className="hidden sm:inline">External Vaults</span>
+            </AnimatedTabTrigger>
+          )}
         </div>
         <AnimatedTabTrigger
           value="connected"

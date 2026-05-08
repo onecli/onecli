@@ -3,6 +3,7 @@ import { resolveApiAuth } from "@/lib/api-auth";
 import { unauthorized } from "@/lib/api-utils";
 import { getApp } from "@/lib/apps/registry";
 import { resolveAppCredentials } from "@/lib/apps/resolve-credentials";
+import { tryHandleOrgAuthorize } from "@/lib/apps/oauth-org";
 import { listConnectionsByProvider } from "@/lib/services/connection-service";
 import { APP_URL } from "@/lib/env";
 import { signOAuthState, generateNonce } from "@/lib/oauth-state";
@@ -10,10 +11,14 @@ import { signOAuthState, generateNonce } from "@/lib/oauth-state";
 type Params = { params: Promise<{ provider: string }> };
 
 export const GET = async (request: NextRequest, { params }: Params) => {
+  const { provider } = await params;
+
+  const orgResponse = await tryHandleOrgAuthorize(request, provider);
+  if (orgResponse) return orgResponse;
+
   const auth = await resolveApiAuth(request);
   if (!auth) return unauthorized();
 
-  const { provider } = await params;
   const app = getApp(provider);
 
   if (!app || !app.available || app.connectionMethod.type !== "oauth") {

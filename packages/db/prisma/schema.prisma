@@ -27,6 +27,10 @@ model Organization {
   members        OrganizationMember[]
   invitations    Invitation[]
   userProvisions UserProvision[]
+  secrets        Secret[]
+  appConnections AppConnection[]
+  appConfigs     AppConfig[]
+  policyRules    PolicyRule[]
 
   @@map("organizations")
 }
@@ -84,7 +88,6 @@ model Project {
   agents              Agent[]
   secrets             Secret[]
   policyRules         PolicyRule[]
-  connectedServices   ConnectedService[]
   auditLogs           AuditLog[]
   vaultConnections    VaultConnection[]
   onboardingSurvey    OnboardingSurvey?
@@ -166,44 +169,54 @@ model Agent {
 }
 
 model Secret {
-  id              String   @id @default(uuid())
-  projectId       String   @map("project_id")
+  id              String        @id @default(uuid())
+  scope           String        @default("project") // "project" | "organization"
+  projectId       String?       @map("project_id")
+  organizationId  String?       @map("organization_id")
   name            String
   type            String // "anthropic", "generic"
-  encryptedValue  String   @map("encrypted_value") // AES-256-GCM encrypted via CryptoService
-  hostPattern     String   @map("host_pattern") // "api.anthropic.com" or "*.example.com"
-  pathPattern     String?  @map("path_pattern") // "/v1/*", null = all paths
-  injectionConfig Json?    @map("injection_config") // type-specific config (generic: { headerName, valueFormat })
+  encryptedValue  String        @map("encrypted_value") // AES-256-GCM encrypted via CryptoService
+  hostPattern     String        @map("host_pattern") // "api.anthropic.com" or "*.example.com"
+  pathPattern     String?       @map("path_pattern") // "/v1/*", null = all paths
+  injectionConfig Json?         @map("injection_config") // type-specific config (generic: { headerName, valueFormat })
   metadata        Json? // type-specific metadata (anthropic: { authMode: "api-key" | "oauth" })
-  isPlatform      Boolean  @default(false) @map("is_platform")
-  createdAt       DateTime @default(now()) @map("created_at")
-  updatedAt       DateTime @updatedAt @map("updated_at")
-  project         Project  @relation(fields: [projectId], references: [id])
+  isPlatform      Boolean       @default(false) @map("is_platform")
+  createdAt       DateTime      @default(now()) @map("created_at")
+  updatedAt       DateTime      @updatedAt @map("updated_at")
+  project         Project?      @relation(fields: [projectId], references: [id])
+  organization    Organization? @relation(fields: [organizationId], references: [id])
 
   agentSecrets AgentSecret[]
 
   @@index([projectId])
+  @@index([organizationId])
+  @@index([scope])
   @@map("secrets")
 }
 
 model PolicyRule {
-  id              String   @id @default(uuid())
-  projectId       String   @map("project_id")
-  agentId         String?  @map("agent_id") // null = all agents, set = one agent only
+  id              String        @id @default(uuid())
+  scope           String        @default("project") // "project" | "organization"
+  projectId       String?       @map("project_id")
+  organizationId  String?       @map("organization_id")
+  agentId         String?       @map("agent_id") // null = all agents, set = one agent only (project-scoped only)
   name            String
-  hostPattern     String   @map("host_pattern") // "gmail.googleapis.com" or "*.googleapis.com"
-  pathPattern     String?  @map("path_pattern") // "/gmail/v1/users/me/messages/send" or "/gmail/*"
+  hostPattern     String        @map("host_pattern") // "gmail.googleapis.com" or "*.googleapis.com"
+  pathPattern     String?       @map("path_pattern") // "/gmail/v1/users/me/messages/send" or "/gmail/*"
   method          String? // "POST", null = all methods
-  action          String // "block" | "rate_limit"
+  action          String // "block" | "rate_limit" | "manual_approval"
   enabled         Boolean
-  rateLimit       Int?     @map("rate_limit") // max requests per window (only for rate_limit action)
-  rateLimitWindow String?  @map("rate_limit_window") // "minute" | "hour" | "day"
-  createdAt       DateTime @default(now()) @map("created_at")
-  updatedAt       DateTime @updatedAt @map("updated_at")
-  project         Project  @relation(fields: [projectId], references: [id])
-  agent           Agent?   @relation(fields: [agentId], references: [id], onDelete: Cascade)
+  rateLimit       Int?          @map("rate_limit") // max requests per window (only for rate_limit action)
+  rateLimitWindow String?       @map("rate_limit_window") // "minute" | "hour" | "day"
+  createdAt       DateTime      @default(now()) @map("created_at")
+  updatedAt       DateTime      @updatedAt @map("updated_at")
+  project         Project?      @relation(fields: [projectId], references: [id])
+  organization    Organization? @relation(fields: [organizationId], references: [id])
+  agent           Agent?        @relation(fields: [agentId], references: [id], onDelete: Cascade)
 
   @@index([projectId])
+  @@index([organizationId])
+  @@index([scope])
   @@map("policy_rules")
 }
 
@@ -221,24 +234,6 @@ model AgentSecret {
 
   @@id([agentId, secretId])
   @@map("agent_secrets")
-}
-
-model ConnectedService {
-  id           String    @id @default(uuid())
-  projectId    String    @map("project_id")
-  provider     String
-  status       String    @default("connected")
-  accessToken  String?   @map("access_token")
-  refreshToken String?   @map("refresh_token")
-  tokenExpiry  DateTime? @map("token_expiry")
-  scopes       String[]  @default([])
-  metadata     Json?
-  connectedAt  DateTime  @default(now()) @map("connected_at")
-  updatedAt    DateTime  @updatedAt @map("updated_at")
-  project      Project   @relation(fields: [projectId], references: [id])
-
-  @@unique([projectId, provider])
-  @@map("connected_services")
 }
 
 model AuditLog {
@@ -314,7 +309,9 @@ model OnboardingSurvey {
 
 model AppConnection {
   id                  String               @id @default(uuid())
-  projectId           String               @map("project_id")
+  scope               String               @default("project") // "project" | "organization"
+  projectId           String?              @map("project_id")
+  organizationId      String?              @map("organization_id")
   provider            String // "github", "gmail", "google-calendar", "google-drive", etc.
   label               String?              @map("label") // auto-populated from metadata (email/username)
   status              String               @default("connected")
@@ -323,10 +320,13 @@ model AppConnection {
   metadata            Json? // non-secret info (username, org, email)
   connectedAt         DateTime             @default(now()) @map("connected_at")
   updatedAt           DateTime             @updatedAt @map("updated_at")
-  project             Project              @relation(fields: [projectId], references: [id])
+  project             Project?             @relation(fields: [projectId], references: [id])
+  organization        Organization?        @relation(fields: [organizationId], references: [id])
   agentAppConnections AgentAppConnection[]
 
   @@index([projectId, provider])
+  @@index([organizationId, provider])
+  @@index([scope])
   @@map("app_connections")
 }
 
@@ -343,17 +343,22 @@ model AgentAppConnection {
 }
 
 model AppConfig {
-  id          String   @id @default(uuid())
-  projectId   String   @map("project_id")
-  provider    String // "github", "gmail", "google-calendar", "google-drive"
-  enabled     Boolean  @default(false)
-  credentials String?  @map("credentials") // encrypted (clientSecret)
-  settings    Json? // plain (clientId, scopes)
-  createdAt   DateTime @default(now()) @map("created_at")
-  updatedAt   DateTime @updatedAt @map("updated_at")
-  project     Project  @relation(fields: [projectId], references: [id])
+  id             String        @id @default(uuid())
+  scope          String        @default("project") // "project" | "organization"
+  projectId      String?       @map("project_id")
+  organizationId String?       @map("organization_id")
+  provider       String // "github", "gmail", "google-calendar", "google-drive"
+  enabled        Boolean       @default(false)
+  credentials    String?       @map("credentials") // encrypted (clientSecret)
+  settings       Json? // plain (clientId, scopes)
+  createdAt      DateTime      @default(now()) @map("created_at")
+  updatedAt      DateTime      @updatedAt @map("updated_at")
+  project        Project?      @relation(fields: [projectId], references: [id])
+  organization   Organization? @relation(fields: [organizationId], references: [id])
 
   @@unique([projectId, provider])
+  @@unique([organizationId, provider])
+  @@index([scope])
   @@map("app_configs")
 }
 

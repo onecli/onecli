@@ -31,8 +31,11 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@onecli/ui/components/select";
-import { createRule, updateRule } from "@/lib/actions/rules";
-import type { AgentOption, PolicyRuleItem } from "./rules-content";
+import {
+  createRule as defaultCreateRule,
+  updateRule as defaultUpdateRule,
+} from "@/lib/actions/rules";
+import type { AgentOption, PolicyRuleItem, RuleActions } from "./types";
 
 const METHOD_OPTIONS = [
   { value: "", label: "All methods" },
@@ -65,6 +68,8 @@ interface RuleDialogProps {
   agents: AgentOption[];
   /** Pass an existing rule to edit. Omit for create mode. */
   rule?: PolicyRuleItem;
+  showAgentField?: boolean;
+  ruleActions?: RuleActions;
 }
 
 export const RuleDialog = ({
@@ -73,6 +78,8 @@ export const RuleDialog = ({
   onSaved,
   agents,
   rule,
+  showAgentField = true,
+  ruleActions,
 }: RuleDialogProps) => {
   const isEdit = !!rule;
   const invalidateCache = useInvalidateGatewayCache();
@@ -133,6 +140,9 @@ export const RuleDialog = ({
         (rateLimit !== rule.rateLimit ||
           rateLimitWindow !== rule.rateLimitWindow))
     : true;
+
+  const createRule = ruleActions?.createRule ?? defaultCreateRule;
+  const updateRule = ruleActions?.updateRule ?? defaultUpdateRule;
 
   const handleSave = async () => {
     if (!isValid) return;
@@ -296,7 +306,9 @@ export const RuleDialog = ({
               </div>
             </div>
 
-            <div className="grid grid-cols-2 gap-4">
+            <div
+              className={`grid gap-4 ${showAgentField ? "grid-cols-2" : "grid-cols-1"}`}
+            >
               <div className="space-y-2">
                 <Label>Method</Label>
                 <Select
@@ -319,25 +331,27 @@ export const RuleDialog = ({
                 </Select>
               </div>
 
-              <div className="space-y-2">
-                <Label>Scope</Label>
-                <Select
-                  value={agentId || "_all"}
-                  onValueChange={(v) => setAgentId(v === "_all" ? "" : v)}
-                >
-                  <SelectTrigger className="w-full">
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="_all">All agents</SelectItem>
-                    {agents.map((agent) => (
-                      <SelectItem key={agent.id} value={agent.id}>
-                        {agent.name}
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-              </div>
+              {showAgentField && (
+                <div className="space-y-2">
+                  <Label>Scope</Label>
+                  <Select
+                    value={agentId || "_all"}
+                    onValueChange={(v) => setAgentId(v === "_all" ? "" : v)}
+                  >
+                    <SelectTrigger className="w-full">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="_all">All agents</SelectItem>
+                      {agents.map((agent) => (
+                        <SelectItem key={agent.id} value={agent.id}>
+                          {agent.name}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
+              )}
             </div>
           </div>
         )}

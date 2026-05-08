@@ -21,6 +21,7 @@ export const listPolicyRules = async (projectId: string) => {
       agentId: true,
       rateLimit: true,
       rateLimitWindow: true,
+      scope: true,
       createdAt: true,
     },
     orderBy: { createdAt: "desc" },
@@ -55,6 +56,7 @@ export const createPolicyRule = async (
         input.action === "rate_limit" ? (input.rateLimit ?? null) : null,
       rateLimitWindow:
         input.action === "rate_limit" ? (input.rateLimitWindow ?? null) : null,
+      scope: "project",
       projectId,
     },
     select: {

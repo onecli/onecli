@@ -6,6 +6,7 @@ import { Pencil, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 import { Card } from "@onecli/ui/components/card";
 import { Button } from "@onecli/ui/components/button";
+import { cn } from "@onecli/ui/lib/utils";
 import { Badge } from "@onecli/ui/components/badge";
 import {
   AlertDialog,
@@ -18,7 +19,8 @@ import {
   AlertDialogTitle,
   AlertDialogTrigger,
 } from "@onecli/ui/components/alert-dialog";
-import { deleteSecret } from "@/lib/actions/secrets";
+import { deleteSecret as defaultDeleteSecret } from "@/lib/actions/secrets";
+import type { SecretActions } from "./types";
 import {
   type InjectionConfig,
   isHeaderInjection,
@@ -39,9 +41,18 @@ interface SecretCardProps {
     createdAt: Date;
   };
   onUpdate: () => void;
+  secretActions?: SecretActions;
+  readOnly?: boolean;
+  badge?: string;
 }
 
-export const SecretCard = ({ secret, onUpdate }: SecretCardProps) => {
+export const SecretCard = ({
+  secret,
+  onUpdate,
+  secretActions,
+  readOnly,
+  badge,
+}: SecretCardProps) => {
   const invalidateCache = useInvalidateGatewayCache();
   const [deleting, setDeleting] = useState(false);
   const [editOpen, setEditOpen] = useState(false);
@@ -49,7 +60,7 @@ export const SecretCard = ({ secret, onUpdate }: SecretCardProps) => {
   const handleDelete = async () => {
     setDeleting(true);
     try {
-      await deleteSecret(secret.id);
+      await (secretActions?.deleteSecret ?? defaultDeleteSecret)(secret.id);
       onUpdate();
       invalidateCache();
       toast.success("Secret deleted");
@@ -64,7 +75,7 @@ export const SecretCard = ({ secret, onUpdate }: SecretCardProps) => {
 
   return (
     <>
-      <Card className="p-5">
+      <Card className={cn("p-5", readOnly && "opacity-60 border-dashed")}>
         <div className="flex items-start justify-between gap-4">
           <div className="min-w-0 flex-1 space-y-3">
             <div className="flex items-center gap-2">
@@ -75,6 +86,11 @@ export const SecretCard = ({ secret, onUpdate }: SecretCardProps) => {
               {secret.isPlatform && (
                 <Badge variant="outline" className="text-xs text-brand">
                   Trial
+                </Badge>
+              )}
+              {badge && (
+                <Badge variant="outline" className="text-[10px]">
+                  {badge}
                 </Badge>
               )}
             </div>
@@ -121,52 +137,58 @@ export const SecretCard = ({ secret, onUpdate }: SecretCardProps) => {
             </p>
           </div>
 
-          <div className="flex items-center gap-1">
-            <Button
-              variant="ghost"
-              size="icon"
-              className="size-7"
-              onClick={() => setEditOpen(true)}
-            >
-              <Pencil className="size-3.5" />
-            </Button>
+          {!readOnly && (
+            <div className="flex items-center gap-1">
+              <Button
+                variant="ghost"
+                size="icon"
+                className="size-7"
+                onClick={() => setEditOpen(true)}
+              >
+                <Pencil className="size-3.5" />
+              </Button>
 
-            <AlertDialog>
-              <AlertDialogTrigger asChild>
-                <Button variant="ghost" size="icon" className="size-7">
-                  <Trash2 className="size-3.5" />
-                </Button>
-              </AlertDialogTrigger>
-              <AlertDialogContent>
-                <AlertDialogHeader>
-                  <AlertDialogTitle>Delete secret?</AlertDialogTitle>
-                  <AlertDialogDescription>
-                    This will permanently delete <strong>{secret.name}</strong>{" "}
-                    and its encrypted value. This action cannot be undone.
-                  </AlertDialogDescription>
-                </AlertDialogHeader>
-                <AlertDialogFooter>
-                  <AlertDialogCancel>Cancel</AlertDialogCancel>
-                  <AlertDialogAction
-                    variant="destructive"
-                    onClick={handleDelete}
-                    disabled={deleting}
-                  >
-                    {deleting ? "Deleting..." : "Delete"}
-                  </AlertDialogAction>
-                </AlertDialogFooter>
-              </AlertDialogContent>
-            </AlertDialog>
-          </div>
+              <AlertDialog>
+                <AlertDialogTrigger asChild>
+                  <Button variant="ghost" size="icon" className="size-7">
+                    <Trash2 className="size-3.5" />
+                  </Button>
+                </AlertDialogTrigger>
+                <AlertDialogContent>
+                  <AlertDialogHeader>
+                    <AlertDialogTitle>Delete secret?</AlertDialogTitle>
+                    <AlertDialogDescription>
+                      This will permanently delete{" "}
+                      <strong>{secret.name}</strong> and its encrypted value.
+                      This action cannot be undone.
+                    </AlertDialogDescription>
+                  </AlertDialogHeader>
+                  <AlertDialogFooter>
+                    <AlertDialogCancel>Cancel</AlertDialogCancel>
+                    <AlertDialogAction
+                      variant="destructive"
+                      onClick={handleDelete}
+                      disabled={deleting}
+                    >
+                      {deleting ? "Deleting..." : "Delete"}
+                    </AlertDialogAction>
+                  </AlertDialogFooter>
+                </AlertDialogContent>
+              </AlertDialog>
+            </div>
+          )}
         </div>
       </Card>
 
-      <SecretDialog
-        open={editOpen}
-        onOpenChange={setEditOpen}
-        secret={secret}
-        onSaved={onUpdate}
-      />
+      {!readOnly && (
+        <SecretDialog
+          open={editOpen}
+          onOpenChange={setEditOpen}
+          secret={secret}
+          onSaved={onUpdate}
+          secretActions={secretActions}
+        />
+      )}
     </>
   );
 };

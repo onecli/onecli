@@ -4,18 +4,21 @@ import { useCallback, useEffect, useState } from "react";
 import { useRouter, usePathname } from "next/navigation";
 import { withProjectPrefix } from "@/lib/navigation";
 import { ChevronRight, KeyRound } from "lucide-react";
+import { Badge } from "@onecli/ui/components/badge";
 import { Card } from "@onecli/ui/components/card";
+import { cn } from "@onecli/ui/lib/utils";
 import { Skeleton } from "@onecli/ui/components/skeleton";
 import {
-  getAppConnections,
-  getVaultConnections,
+  getAppConnections as defaultGetConnections,
+  getVaultConnections as defaultGetVaultConnections,
 } from "@/lib/actions/connections";
-import { getSecrets } from "@/lib/actions/secrets";
+import { getSecrets as defaultGetSecrets } from "@/lib/actions/secrets";
 import { getApp } from "@/lib/apps/registry";
 import { useAppMessages } from "@/hooks/use-app-connected";
 import { extractLabel } from "@/lib/services/connection-service";
 import { AppIcon } from "./app-icon";
 import { SecretDialog } from "./secret-dialog";
+import type { SecretActions } from "./types";
 
 interface ConnectedItem {
   id: string;
@@ -28,6 +31,7 @@ interface ConnectedItem {
   detail: string;
   providerCount?: number;
   href?: string;
+  inherited?: boolean;
   secretData?: {
     id: string;
     name: string;
@@ -41,7 +45,23 @@ interface ConnectedItem {
   };
 }
 
-export const ConnectedTab = () => {
+interface ConnectedTabProps {
+  getConnections?: typeof defaultGetConnections;
+  getSecrets?: typeof defaultGetSecrets;
+  getVaultConnections?: typeof defaultGetVaultConnections | null;
+  basePath?: string;
+  secretActions?: SecretActions;
+  pageScope?: "project" | "organization";
+}
+
+export const ConnectedTab = ({
+  getConnections = defaultGetConnections,
+  getSecrets = defaultGetSecrets,
+  getVaultConnections = defaultGetVaultConnections,
+  basePath,
+  secretActions,
+  pageScope = "project",
+}: ConnectedTabProps) => {
   const router = useRouter();
   const pathname = usePathname();
   const [items, setItems] = useState<ConnectedItem[]>([]);
@@ -53,9 +73,9 @@ export const ConnectedTab = () => {
   const fetchItems = useCallback(async () => {
     try {
       const [connections, secrets, vaults] = await Promise.all([
-        getAppConnections(),
+        getConnections(),
         getSecrets(),
-        getVaultConnections(),
+        getVaultConnections ? getVaultConnections() : Promise.resolve([]),
       ]);
 
       const connectedApps = connections.filter((c) => c.status === "connected");
@@ -73,6 +93,7 @@ export const ConnectedTab = () => {
         const label = c.label ?? extractLabel(metadata ?? undefined);
         const baseName = appDef?.name ?? c.provider;
         const hasMultiple = (providerCounts.get(c.provider) ?? 0) > 1;
+        const isInherited = !!c.scope && c.scope !== pageScope;
         return {
           id: `app-${c.id}`,
           name: hasMultiple && label ? `${baseName} - ${label}` : baseName,
@@ -80,8 +101,9 @@ export const ConnectedTab = () => {
           icon: appDef?.icon ?? null,
           darkIcon: appDef?.darkIcon,
           type: "app" as const,
-          typeLabel:
-            appDef?.connectionMethod.type === "oauth"
+          typeLabel: isInherited
+            ? "Organization"
+            : appDef?.connectionMethod.type === "oauth"
               ? "OAuth"
               : appDef?.connectionMethod.type === "credentials_import"
                 ? "Credentials"
@@ -89,22 +111,29 @@ export const ConnectedTab = () => {
           detail: label
             ? `Connected as ${label}`
             : `${c.scopes.length} scope${c.scopes.length !== 1 ? "s" : ""} granted`,
-          href: withProjectPrefix(pathname, `/connections/apps/${c.provider}`),
+          href: basePath
+            ? `${basePath}/apps/${c.provider}`
+            : withProjectPrefix(pathname, `/connections/apps/${c.provider}`),
           providerCount: hasMultiple
             ? providerCounts.get(c.provider)
             : undefined,
+          inherited: isInherited,
         };
       });
 
-      const secretItems: ConnectedItem[] = secrets.map((s) => ({
-        id: `secret-${s.id}`,
-        name: s.name,
-        icon: null,
-        type: "secret" as const,
-        typeLabel: s.typeLabel,
-        detail: `Host: ${s.hostPattern}`,
-        secretData: s,
-      }));
+      const secretItems: ConnectedItem[] = secrets.map((s) => {
+        const isInherited = !!s.scope && s.scope !== pageScope;
+        return {
+          id: `secret-${s.id}`,
+          name: s.name,
+          icon: null,
+          type: "secret" as const,
+          typeLabel: isInherited ? "Organization" : s.typeLabel,
+          detail: `Host: ${s.hostPattern}`,
+          inherited: isInherited,
+          secretData: isInherited ? undefined : s,
+        };
+      });
 
       const vaultItems: ConnectedItem[] = vaults.map((v) => ({
         id: `vault-${v.provider}`,
@@ -114,7 +143,9 @@ export const ConnectedTab = () => {
         type: "vault" as const,
         typeLabel: "External Vault",
         detail: v.status === "connected" ? "Connected" : "Paired",
-        href: withProjectPrefix(pathname, `/connections/vaults/${v.provider}`),
+        href: basePath
+          ? `${basePath}/vaults/${v.provider}`
+          : withProjectPrefix(pathname, `/connections/vaults/${v.provider}`),
       }));
 
       setItems([...appItems, ...secretItems, ...vaultItems]);
@@ -123,7 +154,14 @@ export const ConnectedTab = () => {
     } finally {
       setLoading(false);
     }
-  }, [pathname]);
+  }, [
+    pathname,
+    basePath,
+    getConnections,
+    getSecrets,
+    getVaultConnections,
+    pageScope,
+  ]);
 
   useEffect(() => {
     fetchItems();
@@ -132,6 +170,7 @@ export const ConnectedTab = () => {
   useAppMessages({ onConnected: fetchItems, onConfigure: router.push });
 
   const handleItemClick = (item: ConnectedItem) => {
+    if (item.inherited) return;
     if (item.secretData) {
       setEditingSecret(item.secretData);
     } else if (item.href) {
@@ -167,7 +206,9 @@ export const ConnectedTab = () => {
           No connected services yet. Head to the{" "}
           <button
             onClick={() =>
-              router.push(withProjectPrefix(pathname, "/connections"))
+              router.push(
+                basePath ?? withProjectPrefix(pathname, "/connections"),
+              )
             }
             className="text-brand hover:underline font-medium"
           >
@@ -185,8 +226,13 @@ export const ConnectedTab = () => {
         {items.map((item) => (
           <Card
             key={item.id}
-            className="group p-4 cursor-pointer transition-colors hover:bg-accent/50"
-            onClick={() => handleItemClick(item)}
+            className={cn(
+              "group p-4 transition-colors",
+              item.inherited
+                ? "opacity-60 border-dashed"
+                : "cursor-pointer hover:bg-accent/50",
+            )}
+            onClick={item.inherited ? undefined : () => handleItemClick(item)}
           >
             <div className="flex items-center justify-between gap-4">
               <div className="flex items-center gap-3 min-w-0">
@@ -214,17 +260,25 @@ export const ConnectedTab = () => {
               </div>
 
               <div className="flex items-center gap-2 shrink-0">
-                <div className="flex items-center gap-1.5">
-                  <span className="size-2 rounded-full bg-brand" />
-                  <span className="text-xs text-brand font-medium">
-                    {item.type === "secret"
-                      ? "Active"
-                      : item.providerCount
-                        ? `Connected (${item.providerCount})`
-                        : "Connected"}
-                  </span>
-                </div>
-                <ChevronRight className="size-3.5 text-muted-foreground/40 transition-colors group-hover:text-muted-foreground" />
+                {item.inherited ? (
+                  <Badge variant="outline" className="text-[10px]">
+                    Organization
+                  </Badge>
+                ) : (
+                  <>
+                    <div className="flex items-center gap-1.5">
+                      <span className="size-2 rounded-full bg-brand" />
+                      <span className="text-xs text-brand font-medium">
+                        {item.type === "secret"
+                          ? "Active"
+                          : item.providerCount
+                            ? `Connected (${item.providerCount})`
+                            : "Connected"}
+                      </span>
+                    </div>
+                    <ChevronRight className="size-3.5 text-muted-foreground/40 transition-colors group-hover:text-muted-foreground" />
+                  </>
+                )}
               </div>
             </div>
           </Card>
@@ -238,6 +292,7 @@ export const ConnectedTab = () => {
         }}
         onSaved={fetchItems}
         secret={editingSecret ?? undefined}
+        secretActions={secretActions}
       />
     </>
   );

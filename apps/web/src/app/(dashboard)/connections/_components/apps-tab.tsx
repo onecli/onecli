@@ -8,9 +8,9 @@ import { Button } from "@onecli/ui/components/button";
 import { Skeleton } from "@onecli/ui/components/skeleton";
 import { cn } from "@onecli/ui/lib/utils";
 import type { AppDefinition } from "@/lib/apps/types";
-import { getAppConnections } from "@/lib/actions/connections";
+import { getAppConnections as defaultGetConnections } from "@/lib/actions/connections";
 import {
-  getConfiguredProviders,
+  getConfiguredProviders as defaultGetConfiguredProviders,
   getAvailableEnvDefaults,
 } from "@/lib/actions/app-config";
 import { apps } from "@/lib/apps/registry";
@@ -24,7 +24,19 @@ import { ConnectAppDialog } from "./connect-app-dialog";
 import { ConfigureCredentialsDialog } from "./configure-credentials-dialog";
 import { useConnectParam } from "./use-connect-param";
 
-export const AppsTab = () => {
+interface AppsTabProps {
+  getConnections?: typeof defaultGetConnections;
+  getConfiguredProviders?: typeof defaultGetConfiguredProviders;
+  pageScope?: "project" | "organization";
+  basePath?: string;
+}
+
+export const AppsTab = ({
+  getConnections = defaultGetConnections,
+  getConfiguredProviders = defaultGetConfiguredProviders,
+  pageScope = "project",
+  basePath,
+}: AppsTabProps) => {
   const router = useRouter();
   const pathname = usePathname();
   const [connectionCounts, setConnectionCounts] = useState<Map<string, number>>(
@@ -49,7 +61,7 @@ export const AppsTab = () => {
     try {
       const [connections, availableDefaults, configured, currentPlan] =
         await Promise.all([
-          getAppConnections(),
+          getConnections(),
           getAvailableEnvDefaults(),
           getConfiguredProviders().catch(() => [] as string[]),
           getCurrentPlan(),
@@ -67,7 +79,7 @@ export const AppsTab = () => {
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [getConnections, getConfiguredProviders]);
 
   useEffect(() => {
     fetchConnections();
@@ -90,11 +102,12 @@ export const AppsTab = () => {
     const h = options?.height ?? 700;
     const left = Math.round(window.screenX + (window.outerWidth - w) / 2);
     const top = Math.round(window.screenY + (window.outerHeight - h) / 2);
-    const params = options?.agentName
-      ? `?agent_name=${encodeURIComponent(options.agentName)}`
-      : "";
+    const searchParams = new URLSearchParams();
+    if (options?.agentName) searchParams.set("agent_name", options.agentName);
+    if (pageScope === "organization") searchParams.set("org", "true");
+    const qs = searchParams.toString();
     window.open(
-      `/app-connect/${provider}${params}`,
+      `/app-connect/${provider}${qs ? `?${qs}` : ""}`,
       `connect-${provider}`,
       `width=${w},height=${h},left=${left},top=${top},scrollbars=yes,resizable=yes`,
     );
@@ -158,7 +171,8 @@ export const AppsTab = () => {
         {sortedApps.map((app) => {
           const count = connectionCounts.get(app.id) ?? 0;
           const isCloudOnly = app.connectionMethod.type === "cloud_only";
-          const isLocked = isCloudOnly || (app.pro && plan !== "team");
+          const isLocked =
+            isCloudOnly || (app.pro && plan !== null && plan !== "team");
           return (
             <AppRow
               key={app.id}
@@ -174,10 +188,12 @@ export const AppsTab = () => {
                   ? () => setProApp(app)
                   : () =>
                       router.push(
-                        withProjectPrefix(
-                          pathname,
-                          `/connections/apps/${app.id}`,
-                        ),
+                        basePath
+                          ? `${basePath}/apps/${app.id}`
+                          : withProjectPrefix(
+                              pathname,
+                              `/connections/apps/${app.id}`,
+                            ),
                       )
               }
             />

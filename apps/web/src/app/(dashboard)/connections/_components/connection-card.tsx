@@ -16,7 +16,7 @@ import {
   AlertDialogTitle,
   AlertDialogTrigger,
 } from "@onecli/ui/components/alert-dialog";
-import { disconnectAppConnection } from "@/lib/actions/connections";
+import { disconnectAppConnection as defaultDisconnect } from "@/lib/actions/connections";
 import { useInvalidateGatewayCache } from "@/hooks/use-invalidate-cache";
 import { extractLabel } from "@/lib/services/connection-service";
 
@@ -33,6 +33,7 @@ interface ConnectionCardProps {
   onReconnect: (connectionId: string) => void;
   reconnectLabel?: string;
   onDisconnected: () => void;
+  disconnectAction?: (connectionId: string) => Promise<void>;
 }
 
 export const ConnectionCard = ({
@@ -41,6 +42,7 @@ export const ConnectionCard = ({
   onReconnect,
   reconnectLabel,
   onDisconnected,
+  disconnectAction = defaultDisconnect,
 }: ConnectionCardProps) => {
   const [disconnecting, setDisconnecting] = useState(false);
   const invalidateCache = useInvalidateGatewayCache();
@@ -62,7 +64,7 @@ export const ConnectionCard = ({
   const handleDisconnect = async () => {
     setDisconnecting(true);
     try {
-      await disconnectAppConnection(connection.id);
+      await disconnectAction(connection.id);
       invalidateCache();
       onDisconnected();
       toast.success(`${appName} account disconnected`);
