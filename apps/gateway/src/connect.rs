@@ -747,13 +747,16 @@ impl PolicyEngine {
                         )
                         .await
                         {
-                            Ok((new_token, new_expires_at)) => {
+                            Ok((new_token, new_expires_at, new_refresh_token)) => {
                                 debug!(provider = %provider, "refreshed expired token");
                                 token = Some(new_token.clone());
                                 effective_expires_at = Some(new_expires_at);
 
                                 creds["access_token"] = serde_json::Value::String(new_token);
                                 creds["expires_at"] = serde_json::json!(new_expires_at);
+                                if let Some(new_rt) = new_refresh_token {
+                                    creds["refresh_token"] = serde_json::Value::String(new_rt);
+                                }
                                 self.persist_refreshed_credentials(connection_id, provider, &creds)
                                     .await;
                             }

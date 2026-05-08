@@ -65,6 +65,15 @@ pub(crate) enum TokenBodyFormat {
     Json,
 }
 
+/// How client credentials are sent during token refresh.
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum ClientCredentialMethod {
+    /// Include `client_id` and `client_secret` in the request body (default).
+    Body,
+    /// Send `Authorization: Basic base64(client_id:client_secret)` header (Notion).
+    BasicAuth,
+}
+
 /// Configuration for refreshing expired OAuth tokens.
 pub(crate) struct RefreshConfig {
     /// Token endpoint URL (e.g., `https://oauth2.googleapis.com/token`).
@@ -75,6 +84,8 @@ pub(crate) struct RefreshConfig {
     pub(crate) client_secret_env: &'static str,
     /// Body format for token requests.
     pub(crate) body_format: TokenBodyFormat,
+    /// How client credentials are sent (body vs Basic auth header).
+    pub(crate) client_auth: ClientCredentialMethod,
 }
 
 /// Maps a credential JSON field to an HTTP header injected on every request.
@@ -117,6 +128,7 @@ static ATLASSIAN_REFRESH: RefreshConfig = RefreshConfig {
     client_id_env: "ATLASSIAN_CLIENT_ID",
     client_secret_env: "ATLASSIAN_CLIENT_SECRET",
     body_format: TokenBodyFormat::Json,
+    client_auth: ClientCredentialMethod::Body,
 };
 
 /// Refresh config for Todoist OAuth API.
@@ -125,6 +137,7 @@ static TODOIST_REFRESH: RefreshConfig = RefreshConfig {
     client_id_env: "TODOIST_CLIENT_ID",
     client_secret_env: "TODOIST_CLIENT_SECRET",
     body_format: TokenBodyFormat::Form,
+    client_auth: ClientCredentialMethod::Body,
 };
 
 /// Shared refresh config for all Google OAuth APIs.
@@ -133,6 +146,16 @@ static GOOGLE_REFRESH: RefreshConfig = RefreshConfig {
     client_id_env: "GOOGLE_CLIENT_ID",
     client_secret_env: "GOOGLE_CLIENT_SECRET",
     body_format: TokenBodyFormat::Form,
+    client_auth: ClientCredentialMethod::Body,
+};
+
+/// Refresh config for Notion OAuth API (uses Basic auth + token rotation).
+static NOTION_REFRESH: RefreshConfig = RefreshConfig {
+    token_url: "https://api.notion.com/v1/oauth/token",
+    client_id_env: "NOTION_CLIENT_ID",
+    client_secret_env: "NOTION_CLIENT_SECRET",
+    body_format: TokenBodyFormat::Json,
+    client_auth: ClientCredentialMethod::BasicAuth,
 };
 
 // ── Provider registry ──────────────────────────────────────────────────
@@ -508,6 +531,20 @@ static APP_PROVIDERS: &[AppProvider] = &[
         credential_headers: &[],
         host_rewrite: None,
     },
+    AppProvider {
+        provider: "notion",
+        display_name: "Notion",
+        host_rules: &[HostRule {
+            pattern: HostPattern::Exact("api.notion.com"),
+            path_prefix: None,
+            strategy: AuthStrategy::Bearer,
+            intercept: false,
+        }],
+        refresh: Some(&NOTION_REFRESH),
+        metadata_headers: &[],
+        credential_headers: &[],
+        host_rewrite: None,
+    },
 ];
 
 // ── Public API ─────────────────────────────────────────────────────────
@@ -727,7 +764,7 @@ pub(crate) fn is_intercept_target(hostname: &str, path: &str) -> bool {
 }
 
 /// Refresh an expired access token using the provider's token endpoint.
-/// Returns the new access token and updated expires_at timestamp.
+/// Returns (new_access_token, expires_at, optional_new_refresh_token).
 ///
 /// Client credentials are resolved in order:
 /// 1. Explicit `client_id`/`client_secret` (from BYOC AppConfig)
@@ -737,7 +774,7 @@ pub(crate) async fn refresh_access_token(
     refresh_token: &str,
     byoc_client_id: Option<&str>,
     byoc_client_secret: Option<&str>,
-) -> anyhow::Result<(String, i64)> {
+) -> anyhow::Result<(String, i64, Option<String>)> {
     let client_id = match byoc_client_id {
         Some(id) => id.to_string(),
         None => std::env::var(config.client_id_env)
@@ -749,20 +786,37 @@ pub(crate) async fn refresh_access_token(
             .map_err(|_| anyhow::anyhow!("{} env var not set", config.client_secret_env))?,
     };
 
-    let req = reqwest::Client::new().post(config.token_url);
-    let req = match config.body_format {
-        TokenBodyFormat::Form => req.form(&[
+    let mut req = reqwest::Client::new().post(config.token_url);
+
+    if matches!(config.client_auth, ClientCredentialMethod::BasicAuth) {
+        let b64 = base64::engine::general_purpose::STANDARD;
+        let encoded = b64.encode(format!("{client_id}:{client_secret}"));
+        req = req.header("authorization", format!("Basic {encoded}"));
+    }
+
+    let req = match (&config.body_format, &config.client_auth) {
+        (TokenBodyFormat::Form, ClientCredentialMethod::Body) => req.form(&[
             ("client_id", client_id.as_str()),
             ("client_secret", client_secret.as_str()),
             ("refresh_token", refresh_token),
             ("grant_type", "refresh_token"),
         ]),
-        TokenBodyFormat::Json => req.json(&serde_json::json!({
+        (TokenBodyFormat::Json, ClientCredentialMethod::Body) => req.json(&serde_json::json!({
             "client_id": client_id,
             "client_secret": client_secret,
             "refresh_token": refresh_token,
             "grant_type": "refresh_token",
         })),
+        (TokenBodyFormat::Form, ClientCredentialMethod::BasicAuth) => req.form(&[
+            ("refresh_token", refresh_token),
+            ("grant_type", "refresh_token"),
+        ]),
+        (TokenBodyFormat::Json, ClientCredentialMethod::BasicAuth) => {
+            req.json(&serde_json::json!({
+                "refresh_token": refresh_token,
+                "grant_type": "refresh_token",
+            }))
+        }
     };
     let resp = req
         .send()
@@ -786,6 +840,11 @@ pub(crate) async fn refresh_access_token(
         })?
         .to_string();
 
+    let new_refresh_token = body
+        .get("refresh_token")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+
     let expires_in = body
         .get("expires_in")
         .and_then(|v| v.as_i64())
@@ -796,7 +855,7 @@ pub(crate) async fn refresh_access_token(
         .expect("system clock before UNIX epoch")
         .as_secs() as i64;
 
-    Ok((access_token, now + expires_in))
+    Ok((access_token, now + expires_in, new_refresh_token))
 }
 
 #[derive(serde::Serialize)]
@@ -1292,6 +1351,42 @@ mod tests {
                 value: "Bearer re_test123".to_string(),
             }
         );
+    }
+
+    // ── Notion ────────────────────────────────────────────────────────
+
+    #[test]
+    fn providers_for_notion_host() {
+        assert_eq!(providers_for_host("api.notion.com"), vec!["notion"]);
+    }
+
+    #[test]
+    fn provider_for_host_notion() {
+        let result = provider_for_host("api.notion.com");
+        assert_eq!(result, Some(("notion", "Notion")));
+    }
+
+    #[test]
+    fn notion_api_uses_bearer() {
+        let injections = build_app_injections("notion", "api.notion.com", "ntn_test123");
+        assert_eq!(injections.len(), 1);
+        assert_eq!(
+            injections[0],
+            Injection::SetHeader {
+                name: "authorization".to_string(),
+                value: "Bearer ntn_test123".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn notion_refresh_uses_json_and_basic_auth() {
+        let config = refresh_config("notion").expect("notion should have refresh config");
+        assert!(matches!(config.body_format, TokenBodyFormat::Json));
+        assert!(matches!(
+            config.client_auth,
+            ClientCredentialMethod::BasicAuth
+        ));
     }
 
     // ── Cloud-only providers ─────────────────────────────────────────

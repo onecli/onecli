@@ -47,6 +47,8 @@
     "ANTHROPIC_SECRET_NAME",
     "MICROSOFT_CLIENT_ID",
     "MICROSOFT_CLIENT_SECRET",
+    "NOTION_CLIENT_ID",
+    "NOTION_CLIENT_SECRET",
     "RUST_LOG"
   ],
   "tasks": {
@@ -76,7 +78,9 @@
         "POSTHOG_API_KEY",
         "POSTHOG_HOST",
         "MICROSOFT_CLIENT_ID",
-        "MICROSOFT_CLIENT_SECRET"
+        "MICROSOFT_CLIENT_SECRET",
+        "NOTION_CLIENT_ID",
+        "NOTION_CLIENT_SECRET"
       ]
     },
     "@onecli/gateway#check": {

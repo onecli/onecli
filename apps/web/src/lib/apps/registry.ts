@@ -17,6 +17,7 @@ import { googleSearchConsole } from "./google-search-console";
 import { googleSheets } from "./google-sheets";
 import { googleSlides } from "./google-slides";
 import { googleTasks } from "./google-tasks";
+import { notion } from "./notion";
 import { resend } from "./resend";
 import { todoist } from "./todoist";
 import { vertexAi } from "./vertex-ai";
@@ -39,6 +40,7 @@ export const apps: AppDefinition[] = [
   googleSheets,
   googleSlides,
   googleTasks,
+  notion,
   jira,
   confluence,
   youtube,

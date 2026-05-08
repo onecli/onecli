@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from "react";
+import Image from "next/image";
 import { toast } from "sonner";
 import { Loader2 } from "lucide-react";
 import { Button } from "@onecli/ui/components/button";
@@ -61,6 +62,19 @@ export const ConnectionCard = ({
     ? (connection.metadata.repos as string[])
     : [];
 
+  const pages = Array.isArray(connection.metadata?.pages)
+    ? (connection.metadata.pages as {
+        name: string;
+        icon: string | null;
+        url?: string | null;
+      }[])
+    : [];
+
+  const workspaceName =
+    typeof connection.metadata?.workspaceName === "string"
+      ? connection.metadata.workspaceName
+      : null;
+
   const handleDisconnect = async () => {
     setDisconnecting(true);
     try {
@@ -78,18 +92,25 @@ export const ConnectionCard = ({
   return (
     <Card className="flex-row items-center justify-between gap-3 px-4 py-3">
       <div className="min-w-0">
-        {metadataUrl ? (
-          <a
-            href={metadataUrl}
-            target="_blank"
-            rel="noopener noreferrer"
-            className="text-sm font-medium truncate block hover:underline"
-          >
-            {displayName}
-          </a>
-        ) : (
-          <p className="text-sm font-medium truncate">{displayName}</p>
-        )}
+        <div className="flex items-center gap-1.5">
+          {metadataUrl ? (
+            <a
+              href={metadataUrl}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="text-sm font-medium truncate hover:underline"
+            >
+              {displayName}
+            </a>
+          ) : (
+            <span className="text-sm font-medium truncate">{displayName}</span>
+          )}
+          {workspaceName && (
+            <span className="text-xs text-muted-foreground shrink-0">
+              · {workspaceName}
+            </span>
+          )}
+        </div>
         {repos.length > 0 && (
           <div className="flex flex-wrap items-center gap-1 mt-1.5">
             <span className="text-[11px] font-medium text-muted-foreground/70 mr-0.5">
@@ -103,6 +124,59 @@ export const ConnectionCard = ({
                 {repo}
               </span>
             ))}
+          </div>
+        )}
+        {pages.length > 0 && (
+          <div className="flex flex-wrap items-center gap-1 mt-1.5">
+            <span className="text-[11px] font-medium text-muted-foreground/70 mr-0.5">
+              Pages
+            </span>
+            {pages.slice(0, 8).map((page, i) => {
+              const content = (
+                <>
+                  {page.icon &&
+                    (page.icon.startsWith("http") ? (
+                      <Image
+                        src={page.icon}
+                        alt=""
+                        width={12}
+                        height={12}
+                        unoptimized
+                        className="size-3 rounded-sm shrink-0"
+                      />
+                    ) : (
+                      <span className="text-[10px] leading-none shrink-0">
+                        {page.icon}
+                      </span>
+                    ))}
+                  {page.name}
+                </>
+              );
+              const key = page.url ?? `${page.name}-${i}`;
+              return page.url ? (
+                <a
+                  key={key}
+                  href={page.url}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="inline-flex items-center gap-0.5 rounded-md bg-muted px-1.5 py-0.5 text-[11px] text-muted-foreground hover:bg-muted/80 hover:text-foreground transition-colors"
+                >
+                  {content}
+                </a>
+              ) : (
+                <span
+                  key={key}
+                  className="inline-flex items-center gap-0.5 rounded-md bg-muted px-1.5 py-0.5 text-[11px] text-muted-foreground"
+                >
+                  {content}
+                </span>
+              );
+            })}
+            {pages.length > 8 && (
+              <span className="text-[11px] text-muted-foreground/50">
+                +{pages.length - 8} more
+              </span>
+            )}
           </div>
         )}
         <p className="text-xs text-muted-foreground mt-0.5">

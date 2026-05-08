@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useRouter, usePathname } from "next/navigation";
 import { withProjectPrefix } from "@/lib/navigation";
-import { ChevronRight } from "lucide-react";
+import { MoreHorizontal } from "lucide-react";
 import { Button } from "@onecli/ui/components/button";
 import { Skeleton } from "@onecli/ui/components/skeleton";
 import { cn } from "@onecli/ui/lib/utils";
@@ -295,7 +295,9 @@ const AppRow = ({
         <div className="flex size-9 shrink-0 items-center justify-center rounded-lg bg-muted">
           <AppIcon icon={icon} darkIcon={darkIcon} name={name} />
         </div>
-        <span className="text-sm font-medium">{name}</span>
+        <span className="text-sm font-medium group-hover:underline group-has-[button:hover]:no-underline">
+          {name}
+        </span>
       </div>
 
       <div className="flex items-center gap-2">
@@ -344,7 +346,7 @@ const AppRow = ({
           </Button>
         )}
         {cloudOnly ? null : (
-          <ChevronRight className="size-3.5 text-muted-foreground/40 transition-colors group-hover:text-muted-foreground" />
+          <MoreHorizontal className="size-4 text-muted-foreground transition-colors group-hover:text-foreground" />
         )}
       </div>
     </div>
