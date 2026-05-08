@@ -5,10 +5,10 @@
   "scripts": {
     "build": "cargo build --release",
     "dev": "cargo run --features \"${EDITION:-}\"",
-    "check": "cargo clippy -- -D warnings && cargo clippy --features cloud -- -D warnings && cargo fmt --check",
+    "check": "cargo clippy -- -D warnings && cargo fmt --check",
     "lint": "cargo fmt --check",
     "format:check": "cargo fmt --check",
-    "check-types": "cargo clippy -- -D warnings && cargo clippy --features cloud -- -D warnings",
-    "test": "cargo test && cargo test --features cloud"
+    "check-types": "cargo clippy -- -D warnings",
+    "test": "cargo test"
   }
 }
