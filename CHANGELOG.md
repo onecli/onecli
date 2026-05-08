@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.22.0](https://github.com/onecli/onecli/compare/v1.21.1...v1.22.0) (2026-05-08)
+
+
+### Features
+
+* add Notion as OAuth integration ([#257](https://github.com/onecli/onecli/issues/257)) ([c2e80e1](https://github.com/onecli/onecli/commit/c2e80e1002dbb1f9f8e3e1c7a8a6928a5198aabe))
+
 ## [1.21.1](https://github.com/onecli/onecli/compare/v1.21.0...v1.21.1) (2026-05-07)
 
 
