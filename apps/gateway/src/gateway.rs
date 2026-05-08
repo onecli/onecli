@@ -403,10 +403,15 @@ async fn fallback() -> StatusCode {
     StatusCode::BAD_REQUEST
 }
 
-/// An HTTP proxy request has an absolute URI with `http://` scheme
-/// (RFC 7230 §5.3.2). Direct requests use origin-form (`/path`).
+/// An HTTP proxy request has an absolute URI with `http://` or `https://`
+/// scheme (RFC 7230 §5.3.2). Direct requests use origin-form (`/path`).
+///
+/// Most clients use CONNECT for HTTPS, but some (notably axios v1.x with
+/// `HTTPS_PROXY` set) send absolute-form `https://` URIs straight to the
+/// proxy port. We accept both and let `handle_http_proxy` forward upstream
+/// over the matching scheme.
 fn is_http_proxy_request<T>(req: &Request<T>) -> bool {
-    req.uri().scheme_str() == Some("http")
+    matches!(req.uri().scheme_str(), Some("http" | "https"))
 }
 
 // ── Connection handling ─────────────────────────────────────────────────
@@ -603,6 +608,13 @@ async fn handle_http_proxy(
         .authority()
         .context("HTTP proxy request missing authority")?
         .to_string();
+    // `is_http_proxy_request` already restricts the inbound scheme to
+    // http/https; mapping to a `&'static str` here avoids borrowing
+    // from `req`, which is moved into `forward_request` below.
+    let scheme: &'static str = match req.uri().scheme_str() {
+        Some("https") => "https",
+        _ => "http",
+    };
     let hostname = strip_port(&authority).to_string();
 
     let agent_token = inject::extract_agent_token(&req).filter(|t| !t.is_empty());
@@ -700,7 +712,7 @@ async fn handle_http_proxy(
     let mut resp = forward::forward_request(
         req,
         &authority,
-        "http",
+        scheme,
         state.http_client.clone(),
         &rules,
         &*state.cache,
@@ -887,10 +899,25 @@ mod tests {
     }
 
     #[test]
-    fn http_proxy_not_detected_for_https_uri() {
-        // HTTPS absolute URIs shouldn't match — those use CONNECT
+    fn http_proxy_detected_for_https_absolute_uri() {
+        // Some clients (notably axios v1.x with HTTPS_PROXY set) send
+        // absolute-form `https://` URIs to the proxy port instead of
+        // using CONNECT. The gateway must accept these so credential
+        // injection still applies — `handle_http_proxy` forwards over
+        // the original scheme via reqwest.
         let req = Request::builder()
             .uri("https://api.example.com/data")
+            .body(())
+            .unwrap();
+        assert!(is_http_proxy_request(&req));
+    }
+
+    #[test]
+    fn http_proxy_not_detected_for_other_schemes() {
+        // Non-http(s) schemes (ws://, ftp://, etc.) shouldn't be treated
+        // as HTTP proxy requests.
+        let req = Request::builder()
+            .uri("ws://api.example.com/data")
             .body(())
             .unwrap();
         assert!(!is_http_proxy_request(&req));
