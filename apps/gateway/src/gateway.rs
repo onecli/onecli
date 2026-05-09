@@ -594,10 +594,11 @@ async fn handle_connect(
 
 // ── HTTP proxy handling ─────────────────────────────────────────────────
 
-/// Handle a plain HTTP proxy request (absolute URI like `GET http://host/path`).
+/// Handle a plain HTTP proxy request (absolute URI like `GET http(s)://host/path`).
 ///
-/// Unlike CONNECT, there is no tunnel upgrade or TLS — the gateway reads the
-/// request directly, applies credential injection, and forwards upstream over HTTP.
+/// Unlike CONNECT, there is no tunnel upgrade — the gateway reads the request
+/// directly, applies credential injection, and forwards upstream over the
+/// original scheme (reqwest handles TLS transparently for `https://`).
 async fn handle_http_proxy(
     req: Request<Incoming>,
     peer_addr: SocketAddr,
@@ -608,9 +609,7 @@ async fn handle_http_proxy(
         .authority()
         .context("HTTP proxy request missing authority")?
         .to_string();
-    // `is_http_proxy_request` already restricts the inbound scheme to
-    // http/https; mapping to a `&'static str` here avoids borrowing
-    // from `req`, which is moved into `forward_request` below.
+    // Static-map to avoid borrowing from `req`, which is moved below.
     let scheme: &'static str = match req.uri().scheme_str() {
         Some("https") => "https",
         _ => "http",
