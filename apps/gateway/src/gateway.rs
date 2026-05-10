@@ -405,11 +405,8 @@ async fn fallback() -> StatusCode {
 
 /// An HTTP proxy request has an absolute URI with `http://` or `https://`
 /// scheme (RFC 7230 §5.3.2). Direct requests use origin-form (`/path`).
-///
-/// Most clients use CONNECT for HTTPS, but some (notably axios v1.x with
-/// `HTTPS_PROXY` set) send absolute-form `https://` URIs straight to the
-/// proxy port. We accept both and let `handle_http_proxy` forward upstream
-/// over the matching scheme.
+/// Also matches `https://` because some clients (axios v1.x) send absolute-form
+/// HTTPS URIs to the proxy port instead of using CONNECT.
 fn is_http_proxy_request<T>(req: &Request<T>) -> bool {
     matches!(req.uri().scheme_str(), Some("http" | "https"))
 }
@@ -684,6 +681,7 @@ async fn handle_http_proxy(
     info!(
         peer = %peer_addr,
         host = %authority,
+        scheme = %scheme,
         injection_count = resolved.injection_rules.len(),
         policy_count = resolved.policy_rules.len(),
         "HTTP_PROXY"
@@ -708,11 +706,18 @@ async fn handle_http_proxy(
         rewrite_host: None,
     };
 
+    let http_client =
+        if scheme == "https" && host_matches_skip_verify(&hostname, &state.skip_verify_hosts) {
+            state.http_client_no_verify.clone()
+        } else {
+            state.http_client.clone()
+        };
+
     let mut resp = forward::forward_request(
         req,
         &authority,
         scheme,
-        state.http_client.clone(),
+        http_client,
         &rules,
         &*state.cache,
         &proxy_ctx,
@@ -899,11 +904,7 @@ mod tests {
 
     #[test]
     fn http_proxy_detected_for_https_absolute_uri() {
-        // Some clients (notably axios v1.x with HTTPS_PROXY set) send
-        // absolute-form `https://` URIs to the proxy port instead of
-        // using CONNECT. The gateway must accept these so credential
-        // injection still applies — `handle_http_proxy` forwards over
-        // the original scheme via reqwest.
+        // axios v1.x with HTTPS_PROXY sends absolute-form https:// instead of CONNECT
         let req = Request::builder()
             .uri("https://api.example.com/data")
             .body(())
