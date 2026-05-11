@@ -369,6 +369,7 @@ pub(crate) async fn forward_request(
             )
             .await?
         }
+        #[cfg(feature = "cloud")]
         Some(crate::apps::RequestFinalizer::AwsAssumeRole) => {
             super::aws_sts::finalize_request(
                 host,

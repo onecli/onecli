@@ -14,8 +14,6 @@
 //! - [`response`]: pre-built gateway error responses
 
 mod aws_sigv4;
-#[cfg(not(feature = "cloud"))]
-mod aws_sts;
 #[cfg(feature = "cloud")]
 #[path = "cloud/aws_sts.rs"]
 mod aws_sts;

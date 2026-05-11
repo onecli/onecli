@@ -29,7 +29,7 @@ pub(crate) enum RequestFinalizer {
     /// AWS Signature Version 4 — signs the request with IAM credentials.
     AwsSigV4,
     /// AWS STS AssumeRole — resolves temporary credentials, then signs with SigV4.
-    #[cfg_attr(not(feature = "cloud"), allow(dead_code))]
+    #[cfg(feature = "cloud")]
     AwsAssumeRole,
 }
 
