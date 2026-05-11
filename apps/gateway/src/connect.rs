@@ -62,6 +62,10 @@ pub(crate) enum AppConnectionResult {
         token_expires_at: Option<i64>,
         /// Rewritten upstream host (e.g., Datadog us5 → api.us5.datadoghq.com).
         rewrite_host: Option<String>,
+        /// Display label of the connection (e.g., email address for OAuth accounts).
+        connection_label: Option<String>,
+        /// Provider-specific request finalizer (e.g., SigV4 vs AssumeRole).
+        finalizer: Option<apps::RequestFinalizer>,
     },
     /// No app connections available for this provider.
     NoConnections,
@@ -76,6 +80,7 @@ pub(crate) enum AppConnectionResult {
 struct CachedAppInjection {
     rules: Vec<InjectionRule>,
     rewrite_host: Option<String>,
+    connection_label: Option<String>,
 }
 
 /// A single app connection option returned in disambiguation responses.
@@ -352,11 +357,15 @@ impl PolicyEngine {
             let mut rules = Vec::new();
             let mut earliest_expires_at: Option<i64> = None;
             let mut resolved_rewrite_host: Option<String> = None;
+            let mut resolved_label: Option<String> = None;
+            let mut resolved_finalizer: Option<apps::RequestFinalizer> = None;
             for conn in app_connections {
                 if let AppConnectionResult::Rules {
                     rules: r,
                     token_expires_at,
                     rewrite_host,
+                    connection_label,
+                    finalizer,
                 } = self
                     .resolve_connection_injections(
                         conn,
@@ -371,6 +380,12 @@ impl PolicyEngine {
                     if rewrite_host.is_some() {
                         resolved_rewrite_host = rewrite_host;
                     }
+                    if resolved_label.is_none() {
+                        resolved_label = connection_label;
+                    }
+                    if finalizer.is_some() {
+                        resolved_finalizer = finalizer;
+                    }
                     match (earliest_expires_at, token_expires_at) {
                         (None, exp) => earliest_expires_at = exp,
                         (Some(cur), Some(exp)) if exp < cur => earliest_expires_at = Some(exp),
@@ -382,6 +397,8 @@ impl PolicyEngine {
                 rules,
                 token_expires_at: earliest_expires_at,
                 rewrite_host: resolved_rewrite_host,
+                connection_label: resolved_label,
+                finalizer: resolved_finalizer,
             });
         }
 
@@ -417,6 +434,8 @@ impl PolicyEngine {
                 rules: cached.rules,
                 token_expires_at: None,
                 rewrite_host: cached.rewrite_host,
+                connection_label: cached.connection_label,
+                finalizer: apps::finalizer_for_provider(&conn.provider),
             });
         }
 
@@ -492,7 +511,7 @@ impl PolicyEngine {
             }
         }
 
-        let rewrite_host = creds.and_then(|c| apps::rewrite_host(&conn.provider, &c));
+        let rewrite_host = creds.and_then(|c| apps::rewrite_host(&conn.provider, &c, hostname));
 
         // Cache with TTL = min(CACHE_TTL, token remaining lifetime).
         // Skip caching if token is already expired — the stale token would cause
@@ -513,6 +532,7 @@ impl PolicyEngine {
                     &CachedAppInjection {
                         rules: rules.clone(),
                         rewrite_host: rewrite_host.clone(),
+                        connection_label: conn.label.clone(),
                     },
                     ttl,
                 )
@@ -523,6 +543,8 @@ impl PolicyEngine {
             rules,
             token_expires_at: expires_at,
             rewrite_host,
+            connection_label: conn.label.clone(),
+            finalizer: apps::finalizer_for_provider(&conn.provider),
         })
     }
 
@@ -639,6 +661,7 @@ impl PolicyEngine {
                     _ => return None,
                 };
                 Some(PolicyRule {
+                    name: r.name.clone(),
                     path_pattern: r.path_pattern.unwrap_or_else(|| "*".to_string()),
                     method: r.method,
                     action,

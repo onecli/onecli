@@ -13,6 +13,13 @@ pub(crate) const FLUSH_BATCH_SIZE: usize = 500;
 pub(crate) const CHANNEL_CAPACITY: usize = 10_000;
 const MAX_PATH_LEN: usize = 2048;
 
+#[allow(dead_code)] // variants read by cloud telemetry (extra_data), unused in OSS
+pub(crate) enum RequestDecision {
+    Allowed,
+    Blocked { rule_name: String },
+    RateLimited { rule_name: String },
+}
+
 pub(crate) struct RequestEvent {
     pub project_id: String,
     pub agent_id: String,
@@ -28,6 +35,10 @@ pub(crate) struct RequestEvent {
     #[allow(dead_code)] // read by cloud telemetry (PostHog), unused in OSS
     pub timestamp: String,
     pub injected: bool,
+    #[allow(dead_code)] // read by cloud telemetry (extra_data), unused in OSS
+    pub decision: RequestDecision,
+    #[allow(dead_code)] // read by cloud telemetry (extra_data), unused in OSS
+    pub connection_label: Option<String>,
     #[cfg(feature = "cloud")]
     pub model: Option<String>,
     #[cfg(feature = "cloud")]
@@ -134,6 +145,8 @@ mod tests {
             injection_count: 1,
             timestamp: "2026-01-01T00:00:00Z".into(),
             injected: true,
+            decision: RequestDecision::Allowed,
+            connection_label: None,
             #[cfg(feature = "cloud")]
             model: None,
             #[cfg(feature = "cloud")]

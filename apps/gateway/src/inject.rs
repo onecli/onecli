@@ -199,25 +199,84 @@ fn apply_set_param(request_path: &mut String, name: &str, value: &str) {
 }
 
 /// Check if a request path matches a rule's path pattern.
-/// Supports: `"*"` (matches everything), `"/prefix/*"` (prefix match), exact match.
-/// Query strings in `request_path` are stripped before comparison so that
-/// SetParam-mutated paths still match subsequent rules correctly.
+///
+/// Supported patterns (checked in order):
+/// - `"*"` — matches any path
+/// - `"/a/*/b"` — segment wildcard (`*` matches one segment, e.g. `/repos/*/issues`)
+/// - `"/a/*/b/*:action"` — segment wildcard with in-segment glob (`*:predict` matches `ep123:predict`)
+/// - `"/foo/*/bar/*"` — mixed (segment globs + trailing wildcard matches 1+ segments)
+/// - `"/prefix/*"` — prefix with path boundary (`/v1/*` matches `/v1/foo` but not `/v1beta`)
+/// - `"/prefix*"` — glob prefix (`/v1.0/me/messages*` matches `/v1.0/me/messages/123`)
+/// - exact match — path must equal pattern exactly
+///
+/// Query strings in `request_path` are stripped before comparison.
 pub(crate) fn path_matches(request_path: &str, pattern: &str) -> bool {
     let path = request_path.split('?').next().unwrap_or(request_path);
     if pattern == "*" {
         return true;
     }
+    if has_mid_path_wildcard(pattern) {
+        return segment_wildcard_matches(path, pattern);
+    }
     if let Some(prefix) = pattern.strip_suffix("/*") {
-        // "/v1/*" matches "/v1/messages", "/v1/", but not "/v2/foo"
         return path == prefix
             || (path.starts_with(prefix) && path.as_bytes().get(prefix.len()) == Some(&b'/'));
     }
     if let Some(prefix) = pattern.strip_suffix('*') {
-        // "/v1.0/me/messages*" matches "/v1.0/me/messages" and "/v1.0/me/messages/123"
         return path.starts_with(prefix);
     }
-    // Exact match
     path == pattern
+}
+
+fn has_mid_path_wildcard(pattern: &str) -> bool {
+    pattern.len() > 1 && pattern[..pattern.len() - 1].contains('*')
+}
+
+/// Match patterns with `*` wildcards in path segments. Each `*` matches
+/// any characters within a single segment (no `/` crossing), except a
+/// trailing standalone `*` which matches one or more remaining segments.
+///
+/// - `*` as a full segment matches any segment
+/// - `*:predict` matches `abc:predict` (glob within a segment)
+/// - trailing `*` matches 1+ remaining segments
+fn segment_wildcard_matches(path: &str, pattern: &str) -> bool {
+    let path_segs: Vec<&str> = path.split('/').collect();
+    let pat_segs: Vec<&str> = pattern.split('/').collect();
+
+    let trailing_wild = pat_segs.last() == Some(&"*");
+    let fixed_pats = if trailing_wild {
+        &pat_segs[..pat_segs.len() - 1]
+    } else {
+        &pat_segs[..]
+    };
+
+    if trailing_wild {
+        if path_segs.len() < fixed_pats.len() + 1 {
+            return false;
+        }
+    } else if path_segs.len() != pat_segs.len() {
+        return false;
+    }
+
+    for (pat, seg) in fixed_pats.iter().zip(path_segs.iter()) {
+        if !segment_matches(seg, pat) {
+            return false;
+        }
+    }
+    true
+}
+
+fn segment_matches(segment: &str, pattern: &str) -> bool {
+    match pattern.find('*') {
+        None => segment == pattern,
+        Some(pos) => {
+            let prefix = &pattern[..pos];
+            let suffix = &pattern[pos + 1..];
+            segment.starts_with(prefix)
+                && segment.ends_with(suffix)
+                && segment.len() >= prefix.len() + suffix.len()
+        }
+    }
 }
 
 // ── Vault credential → injection rules ──────────────────────────────
@@ -385,12 +444,152 @@ mod tests {
     }
 
     #[test]
+    fn path_segment_wildcard() {
+        // "/repos/*/issues" — mid-path segment wildcard for app permissions
+        assert!(path_matches("/repos/myrepo/issues", "/repos/*/issues"));
+        assert!(path_matches("/repos/other-repo/issues", "/repos/*/issues"));
+        assert!(!path_matches("/repos/myrepo/pulls", "/repos/*/issues"));
+        assert!(!path_matches("/repos/issues", "/repos/*/issues"));
+        assert!(!path_matches("/repos/myrepo/sub/issues", "/repos/*/issues"));
+    }
+
+    #[test]
+    fn path_segment_wildcard_multiple() {
+        // Multiple segment wildcards
+        assert!(path_matches(
+            "/repos/myrepo/issues/123/comments",
+            "/repos/*/issues/*/comments"
+        ));
+        assert!(!path_matches(
+            "/repos/myrepo/issues/comments",
+            "/repos/*/issues/*/comments"
+        ));
+        assert!(!path_matches(
+            "/repos/myrepo/pulls/123/comments",
+            "/repos/*/issues/*/comments"
+        ));
+    }
+
+    #[test]
+    fn path_segment_wildcard_with_query_string() {
+        assert!(path_matches(
+            "/repos/myrepo/issues?state=open",
+            "/repos/*/issues"
+        ));
+    }
+
+    #[test]
+    fn path_segment_wildcard_trailing() {
+        // "/gmail/v1/users/*/messages/*" — mid-path wildcard + trailing segment wildcard
+        assert!(path_matches(
+            "/gmail/v1/users/me/messages/abc123",
+            "/gmail/v1/users/*/messages/*"
+        ));
+        assert!(!path_matches(
+            "/gmail/v1/users/me/messages",
+            "/gmail/v1/users/*/messages/*"
+        ));
+        assert!(!path_matches(
+            "/gmail/v1/users/me/threads/abc123",
+            "/gmail/v1/users/*/messages/*"
+        ));
+    }
+
+    #[test]
+    fn path_segment_glob_suffix() {
+        // "/v1/documents/*:batchUpdate" — `*` matches prefix within segment
+        assert!(path_matches(
+            "/v1/documents/doc123:batchUpdate",
+            "/v1/documents/*:batchUpdate"
+        ));
+        assert!(!path_matches(
+            "/v1/documents/doc123:getContent",
+            "/v1/documents/*:batchUpdate"
+        ));
+        assert!(!path_matches(
+            "/v1/documents/doc123",
+            "/v1/documents/*:batchUpdate"
+        ));
+    }
+
+    #[test]
+    fn path_segment_glob_compound() {
+        // "/v1/projects/*/locations/*/endpoints/*:predict" — real Vertex AI pattern
+        assert!(path_matches(
+            "/v1/projects/my-proj/locations/us-central1/endpoints/ep123:predict",
+            "/v1/projects/*/locations/*/endpoints/*:predict"
+        ));
+        assert!(!path_matches(
+            "/v1/projects/my-proj/locations/us-central1/endpoints/ep123:explain",
+            "/v1/projects/*/locations/*/endpoints/*:predict"
+        ));
+    }
+
+    #[test]
     fn path_matches_ignores_query_string() {
         assert!(path_matches("/v1/messages?api_key=sk-123", "/v1/messages"));
         assert!(path_matches("/v1/messages?api_key=sk-123", "/v1/*"));
         assert!(path_matches("/v1/messages?api_key=sk-123", "*"));
         assert!(!path_matches("/v2/messages?api_key=sk-123", "/v1/*"));
         assert!(!path_matches("/v1/messages?api_key=sk-123", "/v1/other"));
+    }
+
+    #[test]
+    fn path_mid_segment_glob() {
+        // Google Calendar: block POST to /calendar/v3/calendars/*/events
+        assert!(path_matches(
+            "/calendar/v3/calendars/primary/events",
+            "/calendar/v3/calendars/*/events"
+        ));
+        assert!(path_matches(
+            "/calendar/v3/calendars/abc123/events",
+            "/calendar/v3/calendars/*/events"
+        ));
+        // Wrong suffix — should not match
+        assert!(!path_matches(
+            "/calendar/v3/calendars/primary/settings",
+            "/calendar/v3/calendars/*/events"
+        ));
+        // Too few segments
+        assert!(!path_matches(
+            "/calendar/v3/calendars/events",
+            "/calendar/v3/calendars/*/events"
+        ));
+        // Too many segments
+        assert!(!path_matches(
+            "/calendar/v3/calendars/primary/events/extra",
+            "/calendar/v3/calendars/*/events"
+        ));
+    }
+
+    #[test]
+    fn path_mid_glob_with_trailing_wildcard() {
+        // /calendar/v3/calendars/*/events/* — glob + trailing wildcard
+        assert!(path_matches(
+            "/calendar/v3/calendars/primary/events/eventId123",
+            "/calendar/v3/calendars/*/events/*"
+        ));
+        assert!(path_matches(
+            "/calendar/v3/calendars/primary/events/eventId123/instances",
+            "/calendar/v3/calendars/*/events/*"
+        ));
+        // Must have at least one segment after "events"
+        assert!(!path_matches(
+            "/calendar/v3/calendars/primary/events",
+            "/calendar/v3/calendars/*/events/*"
+        ));
+    }
+
+    #[test]
+    fn path_multiple_mid_globs() {
+        assert!(path_matches(
+            "/api/v1/orgs/myorg/repos/myrepo/issues",
+            "/api/v1/orgs/*/repos/*/issues"
+        ));
+        assert!(!path_matches(
+            "/api/v1/orgs/myorg/repos/myrepo/pulls",
+            "/api/v1/orgs/*/repos/*/issues"
+        ));
     }
 
     // ── apply_injections ────────────────────────────────────────────────

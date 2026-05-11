@@ -4,6 +4,7 @@ import {
   Shield,
   Settings,
   Plug,
+  Activity,
   User,
   KeyRound,
   ShieldCheck,
@@ -26,6 +27,7 @@ export const navItems: NavItem[] = [
   { title: "Agents", url: "/agents", icon: Bot },
   { title: "Rules", url: "/rules", icon: Shield },
   { title: "Connections", url: "/connections", icon: Plug },
+  { title: "Activity", url: "/activity", icon: Activity },
   { title: "Settings", url: "/settings", icon: Settings },
 ];
 

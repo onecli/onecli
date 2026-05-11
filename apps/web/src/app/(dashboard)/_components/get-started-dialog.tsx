@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { Loader2, MessageSquare, Zap } from "lucide-react";
+import { Bot, Loader2, Terminal } from "lucide-react";
 import {
   Dialog,
   DialogContent,
@@ -9,15 +9,19 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@onecli/ui/components/dialog";
-import { Button } from "@onecli/ui/components/button";
 import { cn } from "@onecli/ui/lib/utils";
-import {
-  getInstallInfo,
-  getDemoInfo,
-  seedDemoSecret,
-} from "@/lib/actions/secrets";
+import { getInstallInfo } from "@/lib/actions/secrets";
 import { IS_CLOUD } from "@/lib/env";
 import { TryDemoCommand } from "./try-demo-command";
+
+const CODING_AGENTS = [
+  { id: "claude-code", name: "Claude Code", runAlias: "claude" },
+  { id: "cursor", name: "Cursor", runAlias: "cursor" },
+  { id: "codex", name: "Codex", runAlias: "codex" },
+  { id: "github-copilot", name: "GitHub Copilot", runAlias: "copilot" },
+] as const;
+
+type AgentId = (typeof CODING_AGENTS)[number]["id"];
 
 interface GetStartedDialogProps {
   open: boolean;
@@ -34,26 +38,19 @@ export const GetStartedDialog = ({
     gatewayUrl: string;
     appUrl: string;
   } | null>(null);
-  const [demoInfo, setDemoInfo] = useState<{
-    agentToken: string;
-    gatewayUrl: string;
-  } | null>(null);
   const [loading, setLoading] = useState(false);
-  const [seeding, setSeeding] = useState(false);
-  const [activeSection, setActiveSection] = useState<
-    "install" | "gateway" | null
-  >("install");
+  const [activeSection, setActiveSection] = useState<"agents" | "install">(
+    "agents",
+  );
+  const [selectedAgent, setSelectedAgent] = useState<AgentId>("claude-code");
   const [installMode, setInstallMode] = useState<"new" | "migrate">("new");
 
   useEffect(() => {
     if (!open) return;
     setLoading(true);
-    setActiveSection("install");
-    Promise.all([getInstallInfo(), getDemoInfo()])
-      .then(([install, demo]) => {
-        setInstallInfo(install);
-        setDemoInfo(demo);
-      })
+    setActiveSection("agents");
+    getInstallInfo()
+      .then(setInstallInfo)
       .finally(() => setLoading(false));
   }, [open]);
 
@@ -69,20 +66,20 @@ export const GetStartedDialog = ({
   const installCommand = buildCurlCommand("install/nanoclaw");
   const migrateCommand = buildCurlCommand("migrate/nanoclaw");
 
-  const demoCommand = demoInfo
-    ? `curl -k -x http://x:${demoInfo.agentToken}@${demoInfo.gatewayUrl} -H "Authorization: Bearer FAKE_TOKEN" https://httpbin.org/anything`
-    : "";
+  const activeAgentDef = CODING_AGENTS.find((a) => a.id === selectedAgent)!;
 
-  const handleSeedDemo = async () => {
-    setSeeding(true);
-    try {
-      await seedDemoSecret();
-      const info = await getDemoInfo();
-      setDemoInfo(info);
-    } finally {
-      setSeeding(false);
+  const buildCliInstallCommand = () => {
+    if (!installInfo?.apiKey || !IS_CLOUD) return null;
+    const params = [`key=${installInfo.apiKey}`];
+    if (installInfo.appUrl !== "https://app.onecli.sh") {
+      params.push(`url=${encodeURIComponent(installInfo.appUrl)}`);
     }
+    params.push(`agent=${encodeURIComponent(selectedAgent)}`);
+    return `curl -fsSL "${installInfo.appUrl}/api/install/cli?${params.join("&")}" | sh`;
   };
+
+  const cliInstallCommand = buildCliInstallCommand();
+  const runCommand = `onecli run -- ${activeAgentDef.runAlias}`;
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -103,23 +100,72 @@ export const GetStartedDialog = ({
             {/* Section selector */}
             <div className="grid grid-cols-2 gap-2">
               <SectionCard
-                icon={MessageSquare}
+                icon={Bot}
+                title="Coding Agents"
+                description="Connect your AI coding assistant"
+                active={activeSection === "agents"}
+                onClick={() => setActiveSection("agents")}
+              />
+              <SectionCard
+                icon={Terminal}
                 title="Install NanoClaw"
                 description="Deploy an AI agent with OneCLI"
                 active={activeSection === "install"}
                 onClick={() => setActiveSection("install")}
               />
-              <SectionCard
-                icon={Zap}
-                title="Try the gateway"
-                description="Test secret injection in 30 seconds"
-                active={activeSection === "gateway"}
-                onClick={() => setActiveSection("gateway")}
-              />
             </div>
 
             {/* Section content */}
             <div className="mt-4">
+              {activeSection === "agents" && (
+                <div className="space-y-3">
+                  <div className="flex gap-1 rounded-md border p-0.5">
+                    {CODING_AGENTS.map((agent) => (
+                      <button
+                        key={agent.id}
+                        type="button"
+                        onClick={() => setSelectedAgent(agent.id)}
+                        className={cn(
+                          "flex-1 rounded-sm px-2 py-1 text-xs font-medium transition-colors",
+                          selectedAgent === agent.id
+                            ? "bg-muted text-foreground"
+                            : "text-muted-foreground hover:text-foreground",
+                        )}
+                      >
+                        {agent.name}
+                      </button>
+                    ))}
+                  </div>
+
+                  {cliInstallCommand ? (
+                    <div className="space-y-4">
+                      <div className="space-y-2">
+                        <p className="text-muted-foreground text-xs">
+                          <span className="bg-muted text-foreground mr-1.5 inline-flex size-4 items-center justify-center rounded-full text-[10px] font-semibold">
+                            1
+                          </span>
+                          Install the CLI:
+                        </p>
+                        <TryDemoCommand command={cliInstallCommand} />
+                      </div>
+                      <div className="space-y-2">
+                        <p className="text-muted-foreground text-xs">
+                          <span className="bg-muted text-foreground mr-1.5 inline-flex size-4 items-center justify-center rounded-full text-[10px] font-semibold">
+                            2
+                          </span>
+                          Run {activeAgentDef.name} through OneCLI:
+                        </p>
+                        <TryDemoCommand command={runCommand} />
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="flex items-center justify-center py-6">
+                      <Loader2 className="text-muted-foreground size-4 animate-spin" />
+                    </div>
+                  )}
+                </div>
+              )}
+
               {activeSection === "install" && (
                 <div className="space-y-3">
                   {IS_CLOUD && (installCommand || migrateCommand) ? (
@@ -214,58 +260,6 @@ export const GetStartedDialog = ({
                         </a>
                         .
                       </p>
-                    </div>
-                  )}
-                </div>
-              )}
-
-              {activeSection === "gateway" && (
-                <div className="space-y-3">
-                  {demoInfo ? (
-                    <>
-                      <p className="text-muted-foreground text-xs">
-                        Run this curl command - it sends a fake token through
-                        the gateway:
-                      </p>
-                      <TryDemoCommand
-                        command={demoCommand}
-                        highlight="FAKE_TOKEN"
-                      />
-                      <pre className="bg-muted rounded-lg border p-3 font-mono text-xs leading-relaxed whitespace-pre-wrap break-all">
-                        <span className="text-muted-foreground">
-                          {'{\n  ...\n  "headers": {\n    '}
-                        </span>
-                        <span className="text-muted-foreground line-through">
-                          {'"Authorization": "Bearer FAKE_TOKEN"'}
-                        </span>
-                        {"\n    "}
-                        <span className="text-brand font-semibold">
-                          {
-                            '"Authorization": "Bearer WELCOME-TO-ONECLI-SECRETS-ARE-WORKING"'
-                          }
-                        </span>
-                        <span className="text-muted-foreground">
-                          {"\n    ...\n  }\n}"}
-                        </span>
-                      </pre>
-                      <p className="text-muted-foreground text-xs">
-                        You sent <code className="text-[10px]">FAKE_TOKEN</code>{" "}
-                        - OneCLI replaced it with the real secret.
-                      </p>
-                    </>
-                  ) : (
-                    <div className="flex flex-col items-center gap-3 rounded-lg border py-6">
-                      <p className="text-muted-foreground text-xs">
-                        A demo secret is needed to try this.
-                      </p>
-                      <Button
-                        variant="outline"
-                        size="sm"
-                        onClick={handleSeedDemo}
-                        loading={seeding}
-                      >
-                        {seeding ? "Creating..." : "Create demo secret"}
-                      </Button>
                     </div>
                   )}
                 </div>

@@ -103,21 +103,26 @@ pub(super) async fn handle_websocket(
     let decision = policy::evaluate("GET", &path, &rules.policy_rules, agent_token, cache).await;
 
     match &decision {
-        PolicyDecision::Blocked => {
-            warn!(host = %host, path = %path, "WebSocket BLOCKED by policy rule");
-            return Ok(response::blocked_by_policy("GET", &path));
+        PolicyDecision::Blocked { rule_name } => {
+            warn!(host = %host, path = %path, rule = %rule_name, "WebSocket BLOCKED by policy rule");
+            return Ok(response::blocked_by_policy("GET", &path, rule_name));
         }
         PolicyDecision::RateLimited {
             limit,
             window,
             retry_after_secs,
+            ..
         } => {
             warn!(host = %host, path = %path, limit, window, "WebSocket RATE LIMITED");
             return Ok(response::rate_limited(*limit, window, *retry_after_secs));
         }
         PolicyDecision::ManualApproval { .. } => {
             warn!(host = %host, path = %path, "WebSocket blocked: manual approval not supported for WebSocket");
-            return Ok(response::blocked_by_policy("GET", &path));
+            return Ok(response::blocked_by_policy(
+                "GET",
+                &path,
+                "Manual approval required",
+            ));
         }
         PolicyDecision::Allow => {}
     }
@@ -358,6 +363,8 @@ fn emit_telemetry(
                 .format(&time::format_description::well_known::Iso8601::DEFAULT)
                 .unwrap_or_default(),
             injected: injection_count > 0,
+            decision: crate::telemetry_core::RequestDecision::Allowed,
+            connection_label: None,
             #[cfg(feature = "cloud")]
             model: None,
             #[cfg(feature = "cloud")]

@@ -35,6 +35,7 @@ pub(crate) struct RequestMeta {
     pub injection_count: u16,
     pub timestamp: String,
     pub injected: bool,
+    pub connection_label: Option<String>,
 }
 
 // ── Hooks ───────────────────────────────────────────────────────────────
@@ -73,6 +74,8 @@ pub(crate) fn track_and_wrap(
         injection_count: meta.injection_count,
         timestamp: meta.timestamp,
         injected: meta.injected,
+        decision: crate::telemetry_core::RequestDecision::Allowed,
+        connection_label: meta.connection_label,
     });
     Box::pin(stream.map_ok(Frame::data))
 }

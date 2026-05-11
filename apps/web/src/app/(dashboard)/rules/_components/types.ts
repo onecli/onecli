@@ -15,6 +15,7 @@ export interface PolicyRuleItem {
   rateLimit: number | null;
   rateLimitWindow: string | null;
   scope?: string;
+  metadata?: unknown;
   createdAt: Date;
 }
 

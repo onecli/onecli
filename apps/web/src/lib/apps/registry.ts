@@ -22,6 +22,7 @@ import { resend } from "./resend";
 import { todoist } from "./todoist";
 import { vertexAi } from "./vertex-ai";
 import { youtube } from "./youtube";
+import { aws } from "./aws";
 
 export const apps: AppDefinition[] = [
   gmail,
@@ -46,6 +47,7 @@ export const apps: AppDefinition[] = [
   youtube,
   vertexAi,
   todoist,
+  aws,
   ...cloudApps,
 ];
 

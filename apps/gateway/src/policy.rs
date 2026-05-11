@@ -26,6 +26,7 @@ pub(crate) enum PolicyAction {
 /// A resolved policy rule ready for evaluation.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub(crate) struct PolicyRule {
+    pub name: String,
     pub path_pattern: String,
     pub method: Option<String>,
     pub action: PolicyAction,
@@ -37,9 +38,10 @@ pub(crate) enum PolicyDecision {
     /// Request is allowed.
     Allow,
     /// Request is blocked by a block rule.
-    Blocked,
+    Blocked { rule_name: String },
     /// Request exceeds a rate limit.
     RateLimited {
+        rule_name: String,
         limit: u64,
         window: &'static str,
         retry_after_secs: u64,
@@ -67,7 +69,9 @@ pub(crate) async fn evaluate(
             continue;
         }
         if matches!(rule.action, PolicyAction::Block) {
-            return PolicyDecision::Blocked;
+            return PolicyDecision::Blocked {
+                rule_name: rule.name.clone(),
+            };
         }
     }
 
@@ -112,6 +116,7 @@ pub(crate) async fn evaluate(
                         _ => "window",
                     };
                     return PolicyDecision::RateLimited {
+                        rule_name: rule.name.clone(),
                         limit: *max_requests,
                         window: window_name,
                         retry_after_secs: retry_after,
@@ -156,6 +161,7 @@ mod tests {
 
     fn block_rule(path: &str, method: Option<&str>) -> PolicyRule {
         PolicyRule {
+            name: "Test block rule".to_string(),
             path_pattern: path.to_string(),
             method: method.map(|m| m.to_string()),
             action: PolicyAction::Block,
@@ -164,6 +170,7 @@ mod tests {
 
     fn rate_rule(path: &str, method: Option<&str>, max: u64, window: u64) -> PolicyRule {
         PolicyRule {
+            name: "Test rate rule".to_string(),
             path_pattern: path.to_string(),
             method: method.map(|m| m.to_string()),
             action: PolicyAction::RateLimit {
@@ -306,7 +313,7 @@ mod tests {
             rate_rule("/danger/*", Some("POST"), 100, 3600),
         ];
         let d = evaluate("POST", "/danger/path", &rules, "agent1", &*store).await;
-        assert!(matches!(d, PolicyDecision::Blocked));
+        assert!(matches!(d, PolicyDecision::Blocked { .. }));
     }
 
     #[tokio::test]
@@ -321,6 +328,7 @@ mod tests {
 
     fn approval_rule(path: &str, method: Option<&str>) -> PolicyRule {
         PolicyRule {
+            name: "Test approval rule".to_string(),
             path_pattern: path.to_string(),
             method: method.map(|m| m.to_string()),
             action: PolicyAction::ManualApproval {
@@ -353,7 +361,7 @@ mod tests {
             block_rule("/danger/*", Some("POST")),
         ];
         let d = evaluate("POST", "/danger/path", &rules, "agent1", &*store).await;
-        assert!(matches!(d, PolicyDecision::Blocked));
+        assert!(matches!(d, PolicyDecision::Blocked { .. }));
     }
 
     #[tokio::test]

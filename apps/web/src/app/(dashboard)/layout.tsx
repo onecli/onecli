@@ -101,7 +101,7 @@ export default function DashboardLayout({
           )}
           <ScrollArea className="h-full min-h-0 min-w-0 flex-1 [&>[data-radix-scroll-area-viewport]]:!overflow-x-hidden">
             {isSettings && <SettingsMobileNav />}
-            <main className="mx-auto min-w-0 max-w-5xl p-4 sm:p-6">
+            <main className="mx-auto min-w-0 max-w-6xl p-4 sm:p-6">
               {children}
             </main>
           </ScrollArea>

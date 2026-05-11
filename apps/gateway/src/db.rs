@@ -46,6 +46,7 @@ pub(crate) struct SecretRow {
 #[derive(Debug, FromRow)]
 pub(crate) struct PolicyRuleRow {
     pub id: String,
+    pub name: String,
     pub host_pattern: String,
     pub path_pattern: Option<String>,
     pub method: Option<String>,
@@ -210,7 +211,7 @@ pub(crate) async fn find_policy_rules_by_project(
     project_id: &str,
 ) -> Result<Vec<PolicyRuleRow>> {
     sqlx::query_as::<_, PolicyRuleRow>(
-        r#"SELECT id, host_pattern, path_pattern, method, agent_id,
+        r#"SELECT id, name, host_pattern, path_pattern, method, agent_id,
                   action, rate_limit, rate_limit_window
            FROM policy_rules
            WHERE project_id = $1 AND enabled = true
@@ -228,7 +229,7 @@ pub(crate) async fn find_policy_rules_by_org(
     organization_id: &str,
 ) -> Result<Vec<PolicyRuleRow>> {
     sqlx::query_as::<_, PolicyRuleRow>(
-        r#"SELECT id, host_pattern, path_pattern, method, agent_id,
+        r#"SELECT id, name, host_pattern, path_pattern, method, agent_id,
                   action, rate_limit, rate_limit_window
            FROM policy_rules
            WHERE organization_id = $1 AND scope = 'organization' AND enabled = true

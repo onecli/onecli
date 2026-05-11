@@ -1,5 +1,6 @@
 "use client";
 
+import type { ReactNode } from "react";
 import { useRef, useState } from "react";
 import { Button } from "@onecli/ui/components/button";
 import { Input } from "@onecli/ui/components/input";
@@ -34,6 +35,8 @@ export interface CredentialsFlowProps {
   fields: CredentialsFlowField[];
   fileImport?: FileImportConfig;
   connectionId?: string;
+  preContent?: ReactNode;
+  hiddenFields?: Record<string, string>;
   onSuccess: () => void;
   onError: (message: string) => void;
 }
@@ -43,6 +46,8 @@ export const CredentialsFlow = ({
   fields,
   fileImport,
   connectionId,
+  preContent,
+  hiddenFields,
   onSuccess,
   onError,
 }: CredentialsFlowProps) => {
@@ -113,7 +118,10 @@ export const CredentialsFlow = ({
       const resp = await fetch(`/api/apps/${app.id}/connect`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ fields: values, connectionId }),
+        body: JSON.stringify({
+          fields: { ...values, ...hiddenFields },
+          connectionId,
+        }),
       });
       if (!resp.ok) {
         const data = (await resp.json()) as { error?: string };
@@ -145,6 +153,7 @@ export const CredentialsFlow = ({
       appDarkIcon={app.darkIcon}
     >
       <div className="space-y-5 py-2">
+        {preContent}
         {fileImport && (
           <>
             <div>

@@ -148,16 +148,43 @@ pub(crate) async fn forward_request(
 
     // ── Early return for block / rate-limit (no body needed) ─────
     match &decision {
-        PolicyDecision::Blocked => {
-            warn!(method = %method, url = %url, "BLOCKED by policy rule");
-            return Ok(response::blocked_by_policy(method.as_str(), &path));
+        PolicyDecision::Blocked { rule_name } => {
+            warn!(method = %method, url = %url, rule = %rule_name, "BLOCKED by policy rule");
+            emit_policy_telemetry(
+                proxy_ctx,
+                host,
+                &method,
+                &path,
+                start,
+                StatusCode::FORBIDDEN,
+                crate::telemetry_core::RequestDecision::Blocked {
+                    rule_name: rule_name.clone(),
+                },
+            );
+            return Ok(response::blocked_by_policy(
+                method.as_str(),
+                &path,
+                rule_name,
+            ));
         }
         PolicyDecision::RateLimited {
+            rule_name,
             limit,
             window,
             retry_after_secs,
         } => {
-            warn!(method = %method, url = %url, limit, window, "RATE LIMITED by policy rule");
+            warn!(method = %method, url = %url, rule = %rule_name, limit, window, "RATE LIMITED by policy rule");
+            emit_policy_telemetry(
+                proxy_ctx,
+                host,
+                &method,
+                &path,
+                start,
+                StatusCode::TOO_MANY_REQUESTS,
+                crate::telemetry_core::RequestDecision::RateLimited {
+                    rule_name: rule_name.clone(),
+                },
+            );
             return Ok(response::rate_limited(*limit, window, *retry_after_secs));
         }
         _ => {}
@@ -327,6 +354,34 @@ pub(crate) async fn forward_request(
         reqwest::Body::wrap(body)
     };
 
+    // ── Provider-specific request signing ─────────────────────────
+    let forward_body = match rules
+        .finalizer
+        .or_else(|| crate::apps::finalizer_for_host(host.split(':').next().unwrap_or(host)))
+    {
+        Some(crate::apps::RequestFinalizer::AwsSigV4) => {
+            super::aws_sigv4::finalize_request(
+                host,
+                method.as_str(),
+                &upstream_path,
+                &mut headers,
+                forward_body,
+            )
+            .await?
+        }
+        Some(crate::apps::RequestFinalizer::AwsAssumeRole) => {
+            super::aws_sts::finalize_request(
+                host,
+                method.as_str(),
+                &upstream_path,
+                &mut headers,
+                forward_body,
+            )
+            .await?
+        }
+        None => forward_body,
+    };
+
     // ── Forward to upstream ──────────────────────────────────────────
     let mut upstream = http_client.request(method.clone(), &upstream_url);
     for (name, value) in headers.iter() {
@@ -486,6 +541,7 @@ pub(crate) async fn forward_request(
             injection_count: injection_count as u16,
             timestamp: ts,
             injected: injection_count > 0,
+            connection_label: rules.connection_label.clone(),
         };
 
         hooks::track_and_wrap(meta, rules, &resp_headers, upstream_resp.bytes_stream())
@@ -504,6 +560,63 @@ pub(crate) async fn forward_request(
     }
 
     Ok(response)
+}
+
+fn emit_policy_telemetry(
+    proxy_ctx: &super::ProxyContext,
+    host: &str,
+    method: &hyper::Method,
+    path: &str,
+    start: std::time::Instant,
+    status: StatusCode,
+    decision: crate::telemetry_core::RequestDecision,
+) {
+    let (pid, aid) = match (
+        proxy_ctx.project_id.as_deref(),
+        proxy_ctx.agent_id.as_deref(),
+    ) {
+        (Some(p), Some(a)) => (p, a),
+        _ => return,
+    };
+    let hostname = super::strip_port(host);
+    let (provider, _) =
+        crate::apps::provider_for_host_and_path(hostname, path).unwrap_or((hostname, hostname));
+    let ts = time::OffsetDateTime::now_utc()
+        .format(&time::format_description::well_known::Iso8601::DEFAULT)
+        .unwrap_or_default();
+    let telemetry_path = path.split('?').next().unwrap_or(path);
+    crate::telemetry::on_request(crate::telemetry::RequestEvent {
+        project_id: pid.to_string(),
+        agent_id: aid.to_string(),
+        agent_name: proxy_ctx
+            .agent_name
+            .as_deref()
+            .unwrap_or("unknown")
+            .to_string(),
+        method: method.to_string(),
+        host: host.to_string(),
+        path: telemetry_path.to_string(),
+        provider: provider.to_string(),
+        status: status.as_u16(),
+        latency_ms: start.elapsed().as_millis() as u32,
+        injection_count: 0,
+        timestamp: ts,
+        injected: false,
+        decision,
+        connection_label: None,
+        #[cfg(feature = "cloud")]
+        model: None,
+        #[cfg(feature = "cloud")]
+        input_tokens: None,
+        #[cfg(feature = "cloud")]
+        output_tokens: None,
+        #[cfg(feature = "cloud")]
+        cache_creation_input_tokens: None,
+        #[cfg(feature = "cloud")]
+        cache_read_input_tokens: None,
+        #[cfg(feature = "cloud")]
+        is_trial: false,
+    });
 }
 
 /// Check if a response body contains auth-related error keywords,

@@ -5,6 +5,7 @@ import { getGatewayCounts } from "@/lib/actions/counts";
 import { PageHeader } from "@dashboard/page-header";
 import { ApiKeyCard } from "./api-key-card";
 import { StatsCards } from "./stats-cards";
+import { RecentActivityCard } from "./recent-activity-card";
 
 export const OverviewContent = () => {
   const [gatewayCounts, setGatewayCounts] = useState({
@@ -32,6 +33,7 @@ export const OverviewContent = () => {
         secretCount={gatewayCounts.secrets}
         loading={loading}
       />
+      <RecentActivityCard />
     </div>
   );
 };

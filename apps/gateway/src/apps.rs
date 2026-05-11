@@ -18,8 +18,19 @@ pub(crate) enum AuthStrategy {
     /// `Authorization: Basic base64("x-access-token:{token}")`
     BasicXAccessToken,
     /// No `Authorization` header — auth injected via `credential_headers` only.
-    #[cfg_attr(not(feature = "cloud"), allow(dead_code))]
     None,
+}
+
+/// Provider-specific request transformation applied after header injection,
+/// before forwarding. Used for auth schemes that require signing the full
+/// request (headers + body) rather than injecting a static token.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RequestFinalizer {
+    /// AWS Signature Version 4 — signs the request with IAM credentials.
+    AwsSigV4,
+    /// AWS STS AssumeRole — resolves temporary credentials, then signs with SigV4.
+    #[cfg_attr(not(feature = "cloud"), allow(dead_code))]
+    AwsAssumeRole,
 }
 
 /// How a host rule matches incoming hostnames.
@@ -97,9 +108,10 @@ pub(crate) struct CredentialHeader {
 
 /// Rewrites the upstream host based on a credential field.
 /// Used for providers with regional endpoints (e.g., Datadog us5 → api.us5.datadoghq.com).
+/// The template receives (field_value, original_host) and returns `None` to skip rewriting.
 pub(crate) struct HostRewrite {
     pub(crate) credential_field: &'static str,
-    pub(crate) template: fn(&str) -> String,
+    pub(crate) template: fn(&str, &str) -> Option<String>,
 }
 
 /// Maps a connection metadata key to an HTTP header injected on every request.
@@ -120,6 +132,9 @@ pub(crate) struct AppProvider {
     pub(crate) credential_headers: &'static [CredentialHeader],
     /// Optional host rewrite based on a credential field (e.g., Datadog site → regional endpoint).
     pub(crate) host_rewrite: Option<&'static HostRewrite>,
+    /// Optional request finalizer for providers needing full request transformation
+    /// (e.g., AWS SigV4 signing). Called after injection, before forwarding.
+    pub(crate) finalizer: Option<RequestFinalizer>,
 }
 
 /// Shared refresh config for Atlassian OAuth APIs (Jira, Confluence).
@@ -188,6 +203,7 @@ static APP_PROVIDERS: &[AppProvider] = &[
         metadata_headers: &[],
         credential_headers: &[],
         host_rewrite: None,
+        finalizer: None,
     },
     AppProvider {
         provider: "gmail",
@@ -217,6 +233,7 @@ static APP_PROVIDERS: &[AppProvider] = &[
         metadata_headers: &[],
         credential_headers: &[],
         host_rewrite: None,
+        finalizer: None,
     },
     AppProvider {
         provider: "google-calendar",
@@ -239,6 +256,7 @@ static APP_PROVIDERS: &[AppProvider] = &[
         metadata_headers: &[],
         credential_headers: &[],
         host_rewrite: None,
+        finalizer: None,
     },
     AppProvider {
         provider: "google-drive",
@@ -267,6 +285,7 @@ static APP_PROVIDERS: &[AppProvider] = &[
         metadata_headers: &[],
         credential_headers: &[],
         host_rewrite: None,
+        finalizer: None,
     },
     AppProvider {
         provider: "google-docs",
@@ -281,6 +300,7 @@ static APP_PROVIDERS: &[AppProvider] = &[
         metadata_headers: &[],
         credential_headers: &[],
         host_rewrite: None,
+        finalizer: None,
     },
     AppProvider {
         provider: "google-sheets",
@@ -295,6 +315,7 @@ static APP_PROVIDERS: &[AppProvider] = &[
         metadata_headers: &[],
         credential_headers: &[],
         host_rewrite: None,
+        finalizer: None,
     },
     AppProvider {
         provider: "google-slides",
@@ -309,6 +330,7 @@ static APP_PROVIDERS: &[AppProvider] = &[
         metadata_headers: &[],
         credential_headers: &[],
         host_rewrite: None,
+        finalizer: None,
     },
     AppProvider {
         provider: "google-tasks",
@@ -323,6 +345,7 @@ static APP_PROVIDERS: &[AppProvider] = &[
         metadata_headers: &[],
         credential_headers: &[],
         host_rewrite: None,
+        finalizer: None,
     },
     AppProvider {
         provider: "google-forms",
@@ -337,6 +360,7 @@ static APP_PROVIDERS: &[AppProvider] = &[
         metadata_headers: &[],
         credential_headers: &[],
         host_rewrite: None,
+        finalizer: None,
     },
     AppProvider {
         provider: "google-classroom",
@@ -351,6 +375,7 @@ static APP_PROVIDERS: &[AppProvider] = &[
         metadata_headers: &[],
         credential_headers: &[],
         host_rewrite: None,
+        finalizer: None,
     },
     AppProvider {
         provider: "google-admin",
@@ -365,6 +390,7 @@ static APP_PROVIDERS: &[AppProvider] = &[
         metadata_headers: &[],
         credential_headers: &[],
         host_rewrite: None,
+        finalizer: None,
     },
     AppProvider {
         provider: "google-analytics",
@@ -379,6 +405,7 @@ static APP_PROVIDERS: &[AppProvider] = &[
         metadata_headers: &[],
         credential_headers: &[],
         host_rewrite: None,
+        finalizer: None,
     },
     AppProvider {
         provider: "google-search-console",
@@ -393,6 +420,7 @@ static APP_PROVIDERS: &[AppProvider] = &[
         metadata_headers: &[],
         credential_headers: &[],
         host_rewrite: None,
+        finalizer: None,
     },
     AppProvider {
         provider: "google-meet",
@@ -407,6 +435,7 @@ static APP_PROVIDERS: &[AppProvider] = &[
         metadata_headers: &[],
         credential_headers: &[],
         host_rewrite: None,
+        finalizer: None,
     },
     AppProvider {
         provider: "google-photos",
@@ -421,6 +450,7 @@ static APP_PROVIDERS: &[AppProvider] = &[
         metadata_headers: &[],
         credential_headers: &[],
         host_rewrite: None,
+        finalizer: None,
     },
     AppProvider {
         provider: "jira",
@@ -435,6 +465,7 @@ static APP_PROVIDERS: &[AppProvider] = &[
         metadata_headers: &[],
         credential_headers: &[],
         host_rewrite: None,
+        finalizer: None,
     },
     AppProvider {
         provider: "confluence",
@@ -449,6 +480,7 @@ static APP_PROVIDERS: &[AppProvider] = &[
         metadata_headers: &[],
         credential_headers: &[],
         host_rewrite: None,
+        finalizer: None,
     },
     AppProvider {
         provider: "youtube",
@@ -477,6 +509,7 @@ static APP_PROVIDERS: &[AppProvider] = &[
         metadata_headers: &[],
         credential_headers: &[],
         host_rewrite: None,
+        finalizer: None,
     },
     AppProvider {
         provider: "vertex-ai",
@@ -502,6 +535,7 @@ static APP_PROVIDERS: &[AppProvider] = &[
         }],
         credential_headers: &[],
         host_rewrite: None,
+        finalizer: None,
     },
     AppProvider {
         provider: "todoist",
@@ -516,6 +550,7 @@ static APP_PROVIDERS: &[AppProvider] = &[
         metadata_headers: &[],
         credential_headers: &[],
         host_rewrite: None,
+        finalizer: None,
     },
     AppProvider {
         provider: "resend",
@@ -530,6 +565,7 @@ static APP_PROVIDERS: &[AppProvider] = &[
         metadata_headers: &[],
         credential_headers: &[],
         host_rewrite: None,
+        finalizer: None,
     },
     AppProvider {
         provider: "notion",
@@ -544,6 +580,43 @@ static APP_PROVIDERS: &[AppProvider] = &[
         metadata_headers: &[],
         credential_headers: &[],
         host_rewrite: None,
+        finalizer: None,
+    },
+    AppProvider {
+        provider: "aws",
+        display_name: "AWS",
+        host_rules: &[
+            HostRule {
+                pattern: HostPattern::Suffix(".amazonaws.com"),
+                path_prefix: None,
+                strategy: AuthStrategy::None,
+                intercept: false,
+            },
+            HostRule {
+                pattern: HostPattern::Suffix(".api.aws"),
+                path_prefix: None,
+                strategy: AuthStrategy::None,
+                intercept: false,
+            },
+        ],
+        refresh: None,
+        metadata_headers: &[],
+        credential_headers: &[
+            CredentialHeader {
+                credential_field: "accessKeyId",
+                header_name: "x-onecli-aws-access-key-id",
+            },
+            CredentialHeader {
+                credential_field: "secretAccessKey",
+                header_name: "x-onecli-aws-secret-access-key",
+            },
+            CredentialHeader {
+                credential_field: "region",
+                header_name: "x-onecli-aws-region",
+            },
+        ],
+        host_rewrite: None,
+        finalizer: Some(RequestFinalizer::AwsSigV4),
     },
 ];
 
@@ -555,6 +628,22 @@ fn all_providers() -> impl Iterator<Item = &'static AppProvider> {
     APP_PROVIDERS
         .iter()
         .chain(crate::cloud_apps::providers().iter())
+}
+
+/// Return the request finalizer for the first matching provider, if any.
+pub(crate) fn finalizer_for_host(hostname: &str) -> Option<RequestFinalizer> {
+    all_providers().find_map(|p| {
+        p.host_rules
+            .iter()
+            .any(|r| host_rule_matches(r, hostname))
+            .then_some(p.finalizer)
+            .flatten()
+    })
+}
+
+/// Return the request finalizer for a specific provider by ID.
+pub(crate) fn finalizer_for_provider(provider: &str) -> Option<RequestFinalizer> {
+    all_providers().find_map(|p| (p.provider == provider).then_some(p.finalizer).flatten())
 }
 
 /// Given a hostname, return the first matching provider's (id, display_name).
@@ -720,12 +809,17 @@ pub(crate) fn credential_headers(provider: &str) -> &'static [CredentialHeader] 
 }
 
 /// Compute the rewritten upstream host for a provider based on credential fields.
-/// Returns `None` if the provider has no host rewrite rule or the credential field is missing.
-pub(crate) fn rewrite_host(provider: &str, creds: &serde_json::Value) -> Option<String> {
+/// Returns `None` if the provider has no host rewrite rule, the credential field is
+/// missing, or the template declines to rewrite (e.g., MCP hosts that should pass through).
+pub(crate) fn rewrite_host(
+    provider: &str,
+    creds: &serde_json::Value,
+    original_host: &str,
+) -> Option<String> {
     let app = all_providers().find(|p| p.provider == provider)?;
     let hw = app.host_rewrite?;
     let field_value = creds.get(hw.credential_field)?.as_str()?;
-    Some((hw.template)(field_value))
+    (hw.template)(field_value, original_host)
 }
 
 /// Returns true if the provider has any host rule that injects an Authorization header.
@@ -1389,6 +1483,71 @@ mod tests {
         ));
     }
 
+    // ── AWS ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn providers_for_aws_hosts() {
+        let s3 = providers_for_host("s3.us-east-1.amazonaws.com");
+        assert!(s3.contains(&"aws"), "expected aws provider for S3");
+
+        let ec2 = providers_for_host("ec2.eu-west-1.amazonaws.com");
+        assert!(ec2.contains(&"aws"), "expected aws provider for EC2");
+
+        let lambda = providers_for_host("lambda.us-west-2.api.aws");
+        assert!(lambda.contains(&"aws"), "expected aws provider for Lambda");
+    }
+
+    #[test]
+    fn aws_no_false_positives() {
+        assert!(providers_for_host("amazonaws.com").is_empty());
+        assert!(providers_for_host("api.aws").is_empty());
+    }
+
+    #[test]
+    fn aws_no_auth_header_injected() {
+        let injections = build_app_injections("aws", "s3.us-east-1.amazonaws.com", "unused");
+        assert!(
+            injections.is_empty(),
+            "AWS should not inject Authorization header"
+        );
+    }
+
+    #[test]
+    fn aws_credential_headers_defined() {
+        let headers = credential_headers("aws");
+        assert_eq!(headers.len(), 3);
+        assert_eq!(headers[0].credential_field, "accessKeyId");
+        assert_eq!(headers[0].header_name, "x-onecli-aws-access-key-id");
+        assert_eq!(headers[1].credential_field, "secretAccessKey");
+        assert_eq!(headers[1].header_name, "x-onecli-aws-secret-access-key");
+        assert_eq!(headers[2].credential_field, "region");
+        assert_eq!(headers[2].header_name, "x-onecli-aws-region");
+    }
+
+    #[test]
+    fn aws_does_not_need_access_token() {
+        assert!(!needs_access_token("aws"));
+    }
+
+    #[test]
+    fn provider_for_host_aws() {
+        let result = provider_for_host("s3.us-east-1.amazonaws.com");
+        assert_eq!(result, Some(("aws", "AWS")));
+    }
+
+    #[test]
+    fn finalizer_for_provider_aws() {
+        assert_eq!(
+            finalizer_for_provider("aws"),
+            Some(RequestFinalizer::AwsSigV4)
+        );
+    }
+
+    #[test]
+    fn finalizer_for_provider_unknown() {
+        assert_eq!(finalizer_for_provider("nonexistent"), None);
+    }
+
     // ── Cloud-only providers ─────────────────────────────────────────
 
     #[cfg(feature = "cloud")]
@@ -1408,6 +1567,13 @@ mod tests {
         }
 
         #[test]
+        fn providers_for_datadog_mcp_hosts() {
+            assert_eq!(providers_for_host("mcp.datadoghq.com"), vec!["datadog"]);
+            assert_eq!(providers_for_host("mcp.datadoghq.eu"), vec!["datadog"]);
+            assert_eq!(providers_for_host("mcp.ddog-gov.com"), vec!["datadog"]);
+        }
+
+        #[test]
         fn datadog_no_false_positives() {
             assert!(providers_for_host("datadoghq.com").is_empty());
             assert!(providers_for_host("datadoghq.eu").is_empty());
@@ -1418,6 +1584,46 @@ mod tests {
         fn provider_for_host_datadog() {
             let result = provider_for_host("api.datadoghq.com");
             assert_eq!(result, Some(("datadog", "Datadog")));
+        }
+
+        #[test]
+        fn datadog_rewrite_host_api() {
+            let creds = serde_json::json!({"site": "us5", "apiKey": "k", "appKey": "a"});
+            assert_eq!(
+                rewrite_host("datadog", &creds, "api.datadoghq.com"),
+                Some("api.us5.datadoghq.com".to_string()),
+            );
+        }
+
+        #[test]
+        fn datadog_rewrite_host_mcp() {
+            let creds = serde_json::json!({"site": "us5", "apiKey": "k", "appKey": "a"});
+            assert_eq!(
+                rewrite_host("datadog", &creds, "mcp.datadoghq.com"),
+                Some("mcp.us5.datadoghq.com".to_string()),
+            );
+        }
+
+        #[test]
+        fn datadog_rewrite_host_mcp_us1_unchanged() {
+            let creds = serde_json::json!({"site": "us1", "apiKey": "k", "appKey": "a"});
+            assert_eq!(
+                rewrite_host("datadog", &creds, "mcp.datadoghq.com"),
+                Some("mcp.datadoghq.com".to_string()),
+            );
+        }
+
+        #[test]
+        fn datadog_rewrite_host_eu() {
+            let creds = serde_json::json!({"site": "eu", "apiKey": "k", "appKey": "a"});
+            assert_eq!(
+                rewrite_host("datadog", &creds, "api.datadoghq.com"),
+                Some("api.datadoghq.eu".to_string()),
+            );
+            assert_eq!(
+                rewrite_host("datadog", &creds, "mcp.datadoghq.com"),
+                Some("mcp.datadoghq.eu".to_string()),
+            );
         }
 
         #[test]
@@ -1437,6 +1643,34 @@ mod tests {
             assert_eq!(headers[0].header_name, "DD-API-KEY");
             assert_eq!(headers[1].credential_field, "appKey");
             assert_eq!(headers[1].header_name, "DD-APPLICATION-KEY");
+        }
+
+        #[test]
+        fn finalizer_for_provider_aws_role() {
+            assert_eq!(
+                finalizer_for_provider("aws-role"),
+                Some(RequestFinalizer::AwsAssumeRole)
+            );
+        }
+
+        /// Regression: finalizer_for_host returns AwsSigV4 for amazonaws.com
+        /// because the OSS `aws` provider is iterated first. When a user has an
+        /// `aws-role` connection, the connection-resolved finalizer must be used
+        /// instead of the host-based lookup.
+        #[test]
+        fn aws_role_not_shadowed_by_aws_in_host_lookup() {
+            let host_finalizer = finalizer_for_host("s3.us-east-1.amazonaws.com");
+            let role_finalizer = finalizer_for_provider("aws-role");
+            assert_eq!(
+                host_finalizer,
+                Some(RequestFinalizer::AwsSigV4),
+                "host lookup returns AwsSigV4 (first match)"
+            );
+            assert_eq!(
+                role_finalizer,
+                Some(RequestFinalizer::AwsAssumeRole),
+                "provider lookup returns AwsAssumeRole (connection-aware)"
+            );
         }
     }
 

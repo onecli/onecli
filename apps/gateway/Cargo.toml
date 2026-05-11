@@ -82,7 +82,7 @@ async-trait = "0.1"
 hex = "0.4"
 
 [features]
-cloud = ["dep:aws-sdk-kms", "dep:aws-config", "dep:redis"]
+cloud = ["dep:aws-sdk-kms", "dep:aws-config", "dep:redis", "dep:aws-sdk-sts"]
 
 [dependencies.aws-sdk-kms]
 version = "1"
@@ -97,6 +97,16 @@ optional = true
 version = "1"
 features = ["tokio-comp", "connection-manager", "tokio-rustls-comp"]
 optional = true
+
+[dependencies.aws-sdk-sts]
+version = "1"
+optional = true
+
+[dependencies.aws-sigv4]
+version = "1"
+
+[dependencies.aws-credential-types]
+version = "1"
 
 [dependencies.percent-encoding]
 version = "2"

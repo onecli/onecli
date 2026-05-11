@@ -19,6 +19,7 @@ model Organization {
   slug               String   @unique
   stripeCustomerId   String?  @unique @map("stripe_customer_id")
   subscriptionStatus String   @default("free") @map("subscription_status")
+  awsExternalId      String?  @map("aws_external_id")
   demoSeeded         Boolean  @default(false) @map("demo_seeded")
   createdAt          DateTime @default(now()) @map("created_at")
   updatedAt          DateTime @updatedAt @map("updated_at")
@@ -208,6 +209,7 @@ model PolicyRule {
   enabled         Boolean
   rateLimit       Int?          @map("rate_limit") // max requests per window (only for rate_limit action)
   rateLimitWindow String?       @map("rate_limit_window") // "minute" | "hour" | "day"
+  metadata        Json?         @map("metadata") // e.g. { source: "app_permission", provider, toolId }
   createdAt       DateTime      @default(now()) @map("created_at")
   updatedAt       DateTime      @updatedAt @map("updated_at")
   project         Project?      @relation(fields: [projectId], references: [id])
@@ -333,6 +335,7 @@ model AppConnection {
 model AgentAppConnection {
   agentId         String        @map("agent_id")
   appConnectionId String        @map("app_connection_id")
+  sessionPolicy   String?       @map("session_policy")
   createdAt       DateTime      @default(now()) @map("created_at")
   updatedAt       DateTime      @updatedAt @map("updated_at")
   agent           Agent         @relation(fields: [agentId], references: [id], onDelete: Cascade)

@@ -269,14 +269,24 @@ pub(crate) fn manual_approval_denied<S>(
 }
 
 /// 403 Forbidden — request blocked by a policy rule.
-pub(crate) fn blocked_by_policy<S>(method: &str, path: &str) -> Response<ForwardBody<S>> {
+pub(crate) fn blocked_by_policy<S>(
+    method: &str,
+    path: &str,
+    rule_name: &str,
+) -> Response<ForwardBody<S>> {
     with_no_retry(json_error(
         StatusCode::FORBIDDEN,
         serde_json::json!({
             "error": "blocked_by_policy",
-            "message": "This request was blocked by an OneCLI policy rule. Check your rules at https://onecli.sh or your OneCLI dashboard.",
+            "message": format!(
+                "Blocked by OneCLI policy rule \"{rule_name}\". \
+                 {method} {path} is not allowed. \
+                 To change this, edit or disable the rule in your OneCLI dashboard."
+            ),
+            "rule_name": rule_name,
             "method": method,
             "path": path,
+            "dashboard_url": "https://app.onecli.sh/rules",
         }),
     ))
 }
@@ -617,7 +627,7 @@ mod tests {
 
     #[test]
     fn blocked_by_policy_has_correct_status_and_headers() {
-        let resp: Response<TestBody> = blocked_by_policy("POST", "/api/v1/send");
+        let resp: Response<TestBody> = blocked_by_policy("POST", "/api/v1/send", "Block sending");
         assert_eq!(resp.status(), StatusCode::FORBIDDEN);
         assert_eq!(
             resp.headers().get("content-type").unwrap(),

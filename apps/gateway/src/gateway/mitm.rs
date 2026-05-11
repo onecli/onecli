@@ -192,6 +192,11 @@ pub(crate) struct ResolvedRules {
     pub budget_blocked: bool,
     /// Rewritten upstream host (e.g., Datadog us5 → api.us5.datadoghq.com).
     pub rewrite_host: Option<String>,
+    /// Display label of the app connection used (e.g., email address for OAuth accounts).
+    pub connection_label: Option<String>,
+    /// Provider-specific request finalizer resolved from the app connection.
+    /// When set, takes precedence over the host-based finalizer lookup.
+    pub finalizer: Option<crate::apps::RequestFinalizer>,
 }
 
 /// Result of per-request rule resolution including app connection disambiguation.
@@ -244,6 +249,8 @@ async fn resolve_rules(
     let mut injection_rules = resp.injection_rules; // from secrets
     let mut token_expires_at: Option<i64> = None;
     let mut rewrite_host: Option<String> = None;
+    let mut connection_label: Option<String> = None;
+    let mut finalizer: Option<crate::apps::RequestFinalizer> = None;
 
     // If no secret rules, try app connections (per-request disambiguation)
     if injection_rules.is_empty() && !resp.app_connections.is_empty() {
@@ -262,10 +269,14 @@ async fn resolve_rules(
                 rules,
                 token_expires_at: exp,
                 rewrite_host: rh,
+                connection_label: cl,
+                finalizer: f,
             } => {
                 injection_rules = rules;
                 token_expires_at = exp;
                 rewrite_host = rh;
+                connection_label = cl;
+                finalizer = f;
             }
             AppConnectionResult::Ambiguous { connections } => {
                 return Ok(ResolveResult::Ambiguous(connections));
@@ -327,6 +338,8 @@ async fn resolve_rules(
             is_trial: resp.is_trial,
             budget_blocked: resp.budget_blocked,
             rewrite_host,
+            connection_label,
+            finalizer,
         },
         app_connections: resp.app_connections,
     })

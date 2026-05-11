@@ -1,5 +1,6 @@
 "use client";
 
+import type { ReactNode } from "react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Loader2 } from "lucide-react";
 import { Button } from "@onecli/ui/components/button";
@@ -37,6 +38,8 @@ interface ConnectFlowProps {
   connectionId?: string;
   agentName?: string;
   org?: boolean;
+  preContent?: ReactNode;
+  hiddenFields?: Record<string, string>;
 }
 
 export const ConnectFlow = ({
@@ -47,6 +50,8 @@ export const ConnectFlow = ({
   connectionId,
   agentName,
   org,
+  preContent,
+  hiddenFields,
 }: ConnectFlowProps) => {
   const [state, setState] = useState<FlowState>(
     status === "success" ? "success" : status === "error" ? "error" : "ready",
@@ -119,6 +124,8 @@ export const ConnectFlow = ({
         fields={app.fields}
         fileImport={app.fileImport}
         connectionId={connectionId}
+        preContent={preContent}
+        hiddenFields={hiddenFields}
         onSuccess={() => setState("success")}
         onError={(msg) => {
           setError(msg);
