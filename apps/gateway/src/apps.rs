@@ -568,6 +568,21 @@ static APP_PROVIDERS: &[AppProvider] = &[
         finalizer: None,
     },
     AppProvider {
+        provider: "cloudflare",
+        display_name: "Cloudflare",
+        host_rules: &[HostRule {
+            pattern: HostPattern::Exact("api.cloudflare.com"),
+            path_prefix: None,
+            strategy: AuthStrategy::Bearer,
+            intercept: false,
+        }],
+        refresh: None,
+        metadata_headers: &[],
+        credential_headers: &[],
+        host_rewrite: None,
+        finalizer: None,
+    },
+    AppProvider {
         provider: "notion",
         display_name: "Notion",
         host_rules: &[HostRule {
@@ -1443,6 +1458,26 @@ mod tests {
             Injection::SetHeader {
                 name: "authorization".to_string(),
                 value: "Bearer re_test123".to_string(),
+            }
+        );
+    }
+
+    // ── Cloudflare ─────────────────────────────────────────────────────
+
+    #[test]
+    fn providers_for_cloudflare_host() {
+        assert_eq!(providers_for_host("api.cloudflare.com"), vec!["cloudflare"]);
+    }
+
+    #[test]
+    fn cloudflare_api_uses_bearer() {
+        let injections = build_app_injections("cloudflare", "api.cloudflare.com", "cfut_test123");
+        assert_eq!(injections.len(), 1);
+        assert_eq!(
+            injections[0],
+            Injection::SetHeader {
+                name: "authorization".to_string(),
+                value: "Bearer cfut_test123".to_string(),
             }
         );
     }
