@@ -1,5 +1,18 @@
 # Changelog
 
+## [1.23.0](https://github.com/onecli/onecli/compare/v1.22.0...v1.23.0) (2026-05-11)
+
+
+### Features
+
+* add activity page, app permissions, AWS integration, and request telemetry ([#264](https://github.com/onecli/onecli/issues/264)) ([85ffc35](https://github.com/onecli/onecli/commit/85ffc35d1970cadc89f65a67e9fda8d6351b989a))
+* add Cloudflare integration with Bearer auth on api.cloudflare.com ([#265](https://github.com/onecli/onecli/issues/265)) ([cbc7be3](https://github.com/onecli/onecli/commit/cbc7be3e59c7d9995bd2af6a49e9740b16fd3df6))
+
+
+### Bug Fixes
+
+* **gateway:** forward absolute-form https:// proxy requests over TLS ([#259](https://github.com/onecli/onecli/issues/259)) ([353b727](https://github.com/onecli/onecli/commit/353b7273fd26908ec16613f71069c26057f89392))
+
 ## [1.22.0](https://github.com/onecli/onecli/compare/v1.21.1...v1.22.0) (2026-05-08)
 
 
