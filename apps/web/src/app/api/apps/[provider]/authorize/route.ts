@@ -4,7 +4,6 @@ import { unauthorized } from "@/lib/api-utils";
 import { getApp } from "@/lib/apps/registry";
 import { resolveAppCredentials } from "@/lib/apps/resolve-credentials";
 import { tryHandleOrgAuthorize } from "@/lib/apps/oauth-org";
-import { listConnectionsByProvider } from "@/lib/services/connection-service";
 import { APP_URL } from "@/lib/env";
 import { signOAuthState, generateNonce } from "@/lib/oauth-state";
 
@@ -50,20 +49,6 @@ export const GET = async (request: NextRequest, { params }: Params) => {
 
   const { values: creds } = resolved;
 
-  if (app.connectionMethod.checkExistingInstallations) {
-    try {
-      const redirectUrl = await app.connectionMethod.checkExistingInstallations(
-        creds,
-        async () => listConnectionsByProvider(auth.projectId, provider),
-        `${APP_URL}/api/apps/${provider}/callback`,
-        state,
-      );
-      if (redirectUrl) return NextResponse.redirect(redirectUrl);
-    } catch {
-      // Fall through to normal auth flow
-    }
-  }
-
   const redirectUri = `${APP_URL}/api/apps/${provider}/callback`;
   const scopes = app.connectionMethod.defaultScopes ?? [];
 
@@ -74,5 +59,13 @@ export const GET = async (request: NextRequest, { params }: Params) => {
     state,
   });
 
-  return NextResponse.redirect(authUrl);
+  const response = NextResponse.redirect(authUrl);
+  response.cookies.set("oauth_state", state, {
+    httpOnly: true,
+    secure: process.env.NODE_ENV === "production",
+    sameSite: "lax",
+    path: `/api/apps/${provider}/callback`,
+    maxAge: 600,
+  });
+  return response;
 };

@@ -3,45 +3,64 @@ import type {
   OAuthExchangeCodeParams,
   OAuthExchangeResult,
   OAuthConfigField,
-} from "./types";
+} from "../types";
 
-export const buildAtlassianAuthUrl = ({
+/**
+ * Build a Google OAuth 2.0 authorization URL.
+ * Shared by all Google Workspace app integrations.
+ */
+export const buildGoogleAuthUrl = ({
   appCredentials,
   redirectUri,
   scopes,
   state,
 }: OAuthBuildAuthUrlParams): string => {
-  const url = new URL("https://auth.atlassian.com/authorize");
+  const url = new URL("https://accounts.google.com/o/oauth2/v2/auth");
   url.searchParams.set("client_id", appCredentials.clientId!);
   url.searchParams.set("redirect_uri", redirectUri);
   url.searchParams.set("response_type", "code");
   url.searchParams.set("scope", scopes.join(" "));
   url.searchParams.set("state", state);
-  url.searchParams.set("audience", "api.atlassian.com");
+  url.searchParams.set("access_type", "offline");
   url.searchParams.set("prompt", "consent");
   return url.toString();
 };
 
-export const exchangeAtlassianCode = async ({
+/**
+ * Exchange an authorization code for Google OAuth tokens.
+ * Shared by all Google Workspace app integrations.
+ */
+export const exchangeGoogleCode = async ({
   appCredentials,
   callbackParams,
   redirectUri,
 }: OAuthExchangeCodeParams): Promise<OAuthExchangeResult> => {
-  const tokenRes = await fetch("https://auth.atlassian.com/oauth/token", {
+  if (callbackParams.error) {
+    throw new Error(
+      `Google authorization error: ${callbackParams.error} — ${callbackParams.error_description ?? "no description"}`,
+    );
+  }
+
+  if (!callbackParams.code) {
+    throw new Error("Google callback missing authorization code");
+  }
+
+  const tokenRes = await fetch("https://oauth2.googleapis.com/token", {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams({
+      code: callbackParams.code!,
       client_id: appCredentials.clientId!,
       client_secret: appCredentials.clientSecret!,
-      code: callbackParams.code!,
       redirect_uri: redirectUri,
       grant_type: "authorization_code",
     }),
   });
 
   if (!tokenRes.ok) {
+    const errorBody = await tokenRes.text();
     throw new Error(
-      `Atlassian token exchange failed: ${tokenRes.status} ${tokenRes.statusText}`,
+      `Google token exchange failed: ${tokenRes.status} ${tokenRes.statusText} — ${errorBody}`,
     );
   }
 
@@ -72,10 +91,12 @@ export const exchangeAtlassianCode = async ({
     expires_at: expiresAt,
   };
 
+  // Google returns scopes space-separated (not comma like GitHub)
   const scopes = tokenData.scope?.split(" ").filter(Boolean) ?? [];
 
+  // Fetch user info for metadata
   let metadata: Record<string, unknown> | undefined;
-  const userRes = await fetch("https://api.atlassian.com/me", {
+  const userRes = await fetch("https://www.googleapis.com/oauth2/v2/userinfo", {
     headers: { Authorization: `Bearer ${tokenData.access_token}` },
   });
 
@@ -95,21 +116,23 @@ export const exchangeAtlassianCode = async ({
   return { credentials, scopes, metadata };
 };
 
-export const atlassianConfigFields: OAuthConfigField[] = [
+/** Standard BYOC config fields for Google OAuth apps. */
+export const googleConfigFields: OAuthConfigField[] = [
   {
     name: "clientId",
     label: "Client ID",
-    placeholder: "your-atlassian-app-client-id",
+    placeholder: "123...apps.googleusercontent.com",
   },
   {
     name: "clientSecret",
     label: "Client Secret",
-    placeholder: "your-atlassian-app-client-secret",
+    placeholder: "GOCSPX-...",
     secret: true,
   },
 ];
 
-export const atlassianEnvDefaults = {
-  clientId: "ATLASSIAN_CLIENT_ID",
-  clientSecret: "ATLASSIAN_CLIENT_SECRET",
+/** envDefaults for apps that use the shared platform Google credentials. */
+export const googleEnvDefaults = {
+  clientId: "GOOGLE_CLIENT_ID",
+  clientSecret: "GOOGLE_CLIENT_SECRET",
 } as const;

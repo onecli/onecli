@@ -124,6 +124,7 @@ export const ConnectFlow = ({
         fields={app.fields}
         fileImport={app.fileImport}
         connectionId={connectionId}
+        org={org}
         preContent={preContent}
         hiddenFields={hiddenFields}
         onSuccess={() => setState("success")}

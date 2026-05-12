@@ -751,6 +751,38 @@ impl PolicyEngine {
                             "service account credentials incomplete, cannot refresh"
                         );
                     }
+                } else if cred_type == "client_credentials" {
+                    let client_id = creds.get("client_id").and_then(|v| v.as_str());
+                    let client_secret = creds.get("client_secret").and_then(|v| v.as_str());
+                    let token_url = creds.get("token_url").and_then(|v| v.as_str());
+
+                    if let (Some(id), Some(secret), Some(url)) =
+                        (client_id, client_secret, token_url)
+                    {
+                        match apps::refresh_via_client_credentials(url, id, secret).await {
+                            Ok((new_token, new_expires_at)) => {
+                                debug!(provider = %provider, "refreshed client_credentials token");
+                                token = Some(new_token.clone());
+                                effective_expires_at = Some(new_expires_at);
+
+                                creds["access_token"] = serde_json::Value::String(new_token);
+                                creds["expires_at"] = serde_json::json!(new_expires_at);
+                                self.persist_refreshed_credentials(connection_id, provider, &creds)
+                                    .await;
+                            }
+                            Err(e) => {
+                                debug!(provider = %provider, error = %e, "client_credentials token refresh failed");
+                            }
+                        }
+                    } else {
+                        debug!(
+                            provider = %provider,
+                            has_client_id = client_id.is_some(),
+                            has_client_secret = client_secret.is_some(),
+                            has_token_url = token_url.is_some(),
+                            "client_credentials incomplete, cannot refresh"
+                        );
+                    }
                 } else if let Some(refresh_token) =
                     creds.get("refresh_token").and_then(|v| v.as_str())
                 {

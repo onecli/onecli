@@ -7,7 +7,7 @@ export type {
 
 import type { AppPermissionDefinition } from "./types";
 import { confluencePermissions } from "./confluence";
-import { githubPermissions } from "./github";
+import { githubPermissions, githubAppPermissions } from "./github";
 import { gmailPermissions } from "./gmail";
 import { googleAdminPermissions } from "./google-admin";
 import { googleAnalyticsPermissions } from "./google-analytics";
@@ -23,6 +23,7 @@ import { googleSheetsPermissions } from "./google-sheets";
 import { googleSlidesPermissions } from "./google-slides";
 import { googleTasksPermissions } from "./google-tasks";
 import { jiraPermissions } from "./jira";
+import { mongodbAtlasPermissions } from "./mongodb-atlas";
 import { resendPermissions } from "./resend";
 import { todoistPermissions } from "./todoist";
 import { vertexAiPermissions } from "./vertex-ai";
@@ -40,6 +41,7 @@ export const getAppPermissionDefinition = (
 
 register(gmailPermissions);
 register(githubPermissions);
+register(githubAppPermissions);
 register(googleDrivePermissions);
 register(googleCalendarPermissions);
 register(googleSheetsPermissions);
@@ -59,3 +61,4 @@ register(confluencePermissions);
 register(resendPermissions);
 register(todoistPermissions);
 register(vertexAiPermissions);
+register(mongodbAtlasPermissions);

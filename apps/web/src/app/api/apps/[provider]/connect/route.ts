@@ -9,6 +9,7 @@ import {
   listConnectionsByProvider,
   reconnectConnection,
 } from "@/lib/services/connection-service";
+import { tryHandleOrgConnect } from "@/lib/apps/oauth-org";
 import { saveAppConfigWithoutDisconnect } from "@/lib/services/app-config-service";
 
 type Params = { params: Promise<{ provider: string }> };
@@ -52,6 +53,7 @@ export const POST = async (request: NextRequest, { params }: Params) => {
     const body = (await request.json()) as {
       fields?: Record<string, string>;
       connectionId?: string;
+      org?: boolean;
     };
     if (!body.fields) {
       return NextResponse.json(
@@ -113,10 +115,18 @@ export const POST = async (request: NextRequest, { params }: Params) => {
       }
     }
 
-    const connectionOpts = {
-      scopes,
-      metadata,
-    };
+    const connectionOpts = { scopes, metadata };
+
+    if (body.org) {
+      const orgResponse = await tryHandleOrgConnect(
+        provider,
+        credentials,
+        connectionOpts,
+        body.connectionId,
+        fields,
+      );
+      if (orgResponse) return orgResponse;
+    }
 
     if (body.connectionId) {
       await reconnectConnection(

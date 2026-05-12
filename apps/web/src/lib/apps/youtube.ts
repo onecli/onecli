@@ -4,7 +4,7 @@ import {
   exchangeGoogleCode,
   googleConfigFields,
   googleEnvDefaults,
-} from "./google-oauth";
+} from "./oauth/google";
 
 export const youtube: AppDefinition = {
   id: "youtube",

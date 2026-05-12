@@ -1,5 +1,9 @@
 import { db, Prisma } from "@onecli/db";
 import { logger } from "@/lib/logger";
+import {
+  invalidateGatewayCacheForAccount,
+  invalidateGatewayCacheForOrg,
+} from "@/lib/gateway-invalidate";
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
@@ -43,7 +47,8 @@ export type AuditSource = (typeof AUDIT_SOURCE)[keyof typeof AUDIT_SOURCE];
 // ─── Service ──────────────────────────────────────────────────────────────────
 
 export interface AuditEventParams {
-  projectId: string;
+  projectId?: string;
+  organizationId?: string;
   userId: string;
   userEmail: string;
   action: AuditAction;
@@ -102,9 +107,13 @@ export const withAudit = async <T>(
   getAuditParams: (result: T) => AuditParams,
 ): Promise<T> => {
   const result = await action();
+  const params = getAuditParams(result);
   await logAuditEvent({
     status: AUDIT_STATUS.SUCCESS,
-    ...getAuditParams(result),
+    ...params,
   });
+  if (params.projectId) invalidateGatewayCacheForAccount(params.projectId);
+  if (params.organizationId)
+    invalidateGatewayCacheForOrg(params.organizationId);
   return result;
 };

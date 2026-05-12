@@ -3,7 +3,7 @@ import {
   buildGoogleAuthUrl,
   exchangeGoogleCode,
   googleConfigFields,
-} from "./google-oauth";
+} from "./oauth/google";
 
 export const googleTasks: AppDefinition = {
   id: "google-tasks",

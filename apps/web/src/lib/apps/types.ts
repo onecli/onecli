@@ -39,13 +39,6 @@ export type ConnectionMethod =
       exchangeCode: (
         params: OAuthExchangeCodeParams,
       ) => Promise<OAuthExchangeResult>;
-      /** Pre-authorize hook: check for existing installations/connections. Returns redirect URL or null. */
-      checkExistingInstallations?: (
-        credentials: Record<string, string>,
-        listConnections: () => Promise<{ metadata: unknown; id: string }[]>,
-        callbackBaseUrl: string,
-        state: string,
-      ) => Promise<string | null>;
     }
   | {
       type: "api_key";
