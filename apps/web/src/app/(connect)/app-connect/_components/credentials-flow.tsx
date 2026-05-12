@@ -35,6 +35,7 @@ export interface CredentialsFlowProps {
   fields: CredentialsFlowField[];
   fileImport?: FileImportConfig;
   connectionId?: string;
+  org?: boolean;
   preContent?: ReactNode;
   hiddenFields?: Record<string, string>;
   onSuccess: () => void;
@@ -46,6 +47,7 @@ export const CredentialsFlow = ({
   fields,
   fileImport,
   connectionId,
+  org,
   preContent,
   hiddenFields,
   onSuccess,
@@ -121,6 +123,7 @@ export const CredentialsFlow = ({
         body: JSON.stringify({
           fields: { ...values, ...hiddenFields },
           connectionId,
+          ...(org ? { org: true } : {}),
         }),
       });
       if (!resp.ok) {

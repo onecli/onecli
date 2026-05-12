@@ -47,3 +47,29 @@ export const invalidateGatewayCacheForAccount = (projectId: string) => {
     })
     .catch(() => {});
 };
+
+/**
+ * Invalidate the gateway cache for all projects in an organization.
+ *
+ * Org-level changes (secrets, rules, connections) affect every project
+ * under the org, so each project's cache entry must be flushed.
+ *
+ * Fire-and-forget — failures are silently ignored.
+ */
+export const invalidateGatewayCacheForOrg = (organizationId: string) => {
+  db.apiKey
+    .findMany({
+      where: { project: { organizationId } },
+      select: { key: true },
+      distinct: ["projectId"],
+    })
+    .then((keys) => {
+      for (const { key } of keys) {
+        fetch(`${GATEWAY_URL}/api/cache/invalidate`, {
+          method: "POST",
+          headers: { authorization: `Bearer ${key}` },
+        }).catch(() => {});
+      }
+    })
+    .catch(() => {});
+};

@@ -33,7 +33,9 @@ export const GET = async (request: NextRequest, { params }: Params) => {
       return errorRedirect("Invalid provider");
     }
 
-    const stateParam = request.nextUrl.searchParams.get("state");
+    const stateParam =
+      request.nextUrl.searchParams.get("state") ??
+      request.cookies.get("oauth_state")?.value;
     if (!stateParam) {
       return errorRedirect("Missing state parameter");
     }
@@ -128,9 +130,11 @@ export const GET = async (request: NextRequest, { params }: Params) => {
     if (state.agentName) {
       successParams.set("agent_name", state.agentName as string);
     }
-    return NextResponse.redirect(
+    const successResponse = NextResponse.redirect(
       `${APP_URL}/app-connect/${provider}?${successParams}`,
     );
+    successResponse.cookies.delete("oauth_state");
+    return successResponse;
   } catch (err) {
     logger.error({ err, provider }, "OAuth callback failed");
     const message =

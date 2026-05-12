@@ -4,7 +4,7 @@ import {
   exchangeAtlassianCode,
   atlassianConfigFields,
   atlassianEnvDefaults,
-} from "./atlassian-oauth";
+} from "./oauth/atlassian";
 
 export const confluence: AppDefinition = {
   id: "confluence",

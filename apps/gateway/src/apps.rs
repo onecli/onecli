@@ -633,6 +633,21 @@ static APP_PROVIDERS: &[AppProvider] = &[
         host_rewrite: None,
         finalizer: Some(RequestFinalizer::AwsSigV4),
     },
+    AppProvider {
+        provider: "mongodb-atlas",
+        display_name: "MongoDB Atlas",
+        host_rules: &[HostRule {
+            pattern: HostPattern::Exact("cloud.mongodb.com"),
+            path_prefix: None,
+            strategy: AuthStrategy::Bearer,
+            intercept: false,
+        }],
+        refresh: None,
+        metadata_headers: &[],
+        credential_headers: &[],
+        host_rewrite: None,
+        finalizer: None,
+    },
 ];
 
 // ── Public API ─────────────────────────────────────────────────────────
@@ -1039,6 +1054,61 @@ pub(crate) async fn refresh_via_service_account(
         .get("expires_in")
         .and_then(|v| v.as_i64())
         .unwrap_or(3600);
+
+    Ok((access_token, now + expires_in))
+}
+
+/// Refresh an access token using the OAuth 2.0 client_credentials grant.
+/// Used by providers like MongoDB Atlas Service Accounts that store a
+/// client_id/client_secret pair and exchange them for short-lived Bearer tokens.
+pub(crate) async fn refresh_via_client_credentials(
+    token_url: &str,
+    client_id: &str,
+    client_secret: &str,
+) -> anyhow::Result<(String, i64)> {
+    let b64 = base64::engine::general_purpose::STANDARD;
+    let mut cred_buf = String::with_capacity(client_id.len() + 1 + client_secret.len());
+    cred_buf.push_str(client_id);
+    cred_buf.push(':');
+    cred_buf.push_str(client_secret);
+    let encoded = b64.encode(&cred_buf);
+
+    let resp = reqwest::Client::new()
+        .post(token_url)
+        .header("Authorization", format!("Basic {encoded}"))
+        .header("Content-Type", "application/x-www-form-urlencoded")
+        .header("Accept", "application/json")
+        .body("grant_type=client_credentials")
+        .send()
+        .await
+        .map_err(|e| anyhow::anyhow!("client_credentials token request failed: {e}"))?;
+
+    let body: serde_json::Value = resp
+        .json()
+        .await
+        .map_err(|e| anyhow::anyhow!("client_credentials token response parse failed: {e}"))?;
+
+    let access_token = body
+        .get("access_token")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| {
+            let error = body
+                .get("error")
+                .and_then(|v| v.as_str())
+                .unwrap_or("unknown");
+            anyhow::anyhow!("client_credentials token exchange failed: {error}")
+        })?
+        .to_string();
+
+    let expires_in = body
+        .get("expires_in")
+        .and_then(|v| v.as_i64())
+        .unwrap_or(3600);
+
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("system clock before UNIX epoch")
+        .as_secs() as i64;
 
     Ok((access_token, now + expires_in))
 }
@@ -1581,6 +1651,52 @@ mod tests {
     #[test]
     fn finalizer_for_provider_unknown() {
         assert_eq!(finalizer_for_provider("nonexistent"), None);
+    }
+
+    // ── MongoDB Atlas ─────────────────────────────────────────────────
+
+    #[test]
+    fn providers_for_mongodb_atlas_host() {
+        assert_eq!(
+            providers_for_host("cloud.mongodb.com"),
+            vec!["mongodb-atlas"]
+        );
+    }
+
+    #[test]
+    fn provider_for_host_mongodb_atlas() {
+        let result = provider_for_host("cloud.mongodb.com");
+        assert_eq!(result, Some(("mongodb-atlas", "MongoDB Atlas")));
+    }
+
+    #[test]
+    fn mongodb_atlas_api_uses_bearer() {
+        let injections =
+            build_app_injections("mongodb-atlas", "cloud.mongodb.com", "eyJtest.token");
+        assert_eq!(injections.len(), 1);
+        assert_eq!(
+            injections[0],
+            Injection::SetHeader {
+                name: "authorization".to_string(),
+                value: "Bearer eyJtest.token".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn mongodb_atlas_has_no_refresh_config() {
+        assert!(refresh_config("mongodb-atlas").is_none());
+    }
+
+    #[test]
+    fn mongodb_atlas_needs_access_token() {
+        assert!(needs_access_token("mongodb-atlas"));
+    }
+
+    #[test]
+    fn mongodb_atlas_does_not_match_other_mongodb_hosts() {
+        assert!(providers_for_host("mongodb.com").is_empty());
+        assert!(providers_for_host("atlas.mongodb.com").is_empty());
     }
 
     // ── Cloud-only providers ─────────────────────────────────────────

@@ -2,6 +2,7 @@ import type { AppDefinition } from "./types";
 import { cloudApps } from "@/lib/apps/cloud-app-registry";
 import { confluence } from "./confluence";
 import { github } from "./github";
+import { githubApp } from "./github-app";
 import { gmail } from "./gmail";
 import { jira } from "./jira";
 import { googleAdmin } from "./google-admin";
@@ -17,6 +18,7 @@ import { googleSearchConsole } from "./google-search-console";
 import { googleSheets } from "./google-sheets";
 import { googleSlides } from "./google-slides";
 import { googleTasks } from "./google-tasks";
+import { mongodbAtlas } from "./mongodb-atlas";
 import { notion } from "./notion";
 import { resend } from "./resend";
 import { todoist } from "./todoist";
@@ -28,6 +30,7 @@ import { aws } from "./aws";
 export const apps: AppDefinition[] = [
   gmail,
   github,
+  githubApp,
   googleDrive,
   googleCalendar,
   resend,
@@ -50,6 +53,7 @@ export const apps: AppDefinition[] = [
   todoist,
   cloudflare,
   aws,
+  mongodbAtlas,
   ...cloudApps,
 ];
 
