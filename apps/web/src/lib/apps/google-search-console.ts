@@ -3,6 +3,7 @@ import {
   buildGoogleAuthUrl,
   exchangeGoogleCode,
   googleConfigFields,
+  googleEnvDefaults,
 } from "./oauth/google";
 
 export const googleSearchConsole: AppDefinition = {
@@ -44,5 +45,6 @@ export const googleSearchConsole: AppDefinition = {
   available: true,
   configurable: {
     fields: googleConfigFields,
+    envDefaults: googleEnvDefaults,
   },
 };

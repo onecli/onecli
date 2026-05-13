@@ -6,6 +6,9 @@ export type {
 } from "./types";
 
 import type { AppPermissionDefinition } from "./types";
+import { awsPermissions } from "./aws";
+import { datadogPermissions } from "./datadog";
+import { cloudflarePermissions } from "./cloudflare";
 import { confluencePermissions } from "./confluence";
 import { githubPermissions, githubAppPermissions } from "./github";
 import { gmailPermissions } from "./gmail";
@@ -24,6 +27,7 @@ import { googleSlidesPermissions } from "./google-slides";
 import { googleTasksPermissions } from "./google-tasks";
 import { jiraPermissions } from "./jira";
 import { mongodbAtlasPermissions } from "./mongodb-atlas";
+import { notionPermissions } from "./notion";
 import { resendPermissions } from "./resend";
 import { todoistPermissions } from "./todoist";
 import { vertexAiPermissions } from "./vertex-ai";
@@ -39,6 +43,9 @@ export const getAppPermissionDefinition = (
   provider: string,
 ): AppPermissionDefinition | undefined => permissionRegistry.get(provider);
 
+register(awsPermissions);
+register(cloudflarePermissions);
+register(datadogPermissions);
 register(gmailPermissions);
 register(githubPermissions);
 register(githubAppPermissions);
@@ -62,3 +69,4 @@ register(resendPermissions);
 register(todoistPermissions);
 register(vertexAiPermissions);
 register(mongodbAtlasPermissions);
+register(notionPermissions);

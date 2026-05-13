@@ -53,3 +53,6 @@ apps/gateway/target/
 
 # Playwright MCP
 .playwright-mcp
+
+# DD skills (installed per-user via pup)
+.claude/skills/dd-*

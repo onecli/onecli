@@ -410,12 +410,20 @@ static APP_PROVIDERS: &[AppProvider] = &[
     AppProvider {
         provider: "google-search-console",
         display_name: "Google Search Console",
-        host_rules: &[HostRule {
-            pattern: HostPattern::Exact("searchconsole.googleapis.com"),
-            path_prefix: None,
-            strategy: AuthStrategy::Bearer,
-            intercept: false,
-        }],
+        host_rules: &[
+            HostRule {
+                pattern: HostPattern::Exact("searchconsole.googleapis.com"),
+                path_prefix: None,
+                strategy: AuthStrategy::Bearer,
+                intercept: false,
+            },
+            HostRule {
+                pattern: HostPattern::Exact("www.googleapis.com"),
+                path_prefix: Some("/webmasters/"),
+                strategy: AuthStrategy::Bearer,
+                intercept: false,
+            },
+        ],
         refresh: Some(&GOOGLE_REFRESH),
         metadata_headers: &[],
         credential_headers: &[],
@@ -1140,12 +1148,13 @@ mod tests {
     #[test]
     fn providers_for_googleapis_hosts() {
         assert_eq!(providers_for_host("gmail.googleapis.com"), vec!["gmail"]);
-        // www.googleapis.com is shared — Gmail, Calendar, Drive, and YouTube use path prefixes
+        // www.googleapis.com is shared — Gmail, Calendar, Drive, YouTube, and Search Console use path prefixes
         let www = providers_for_host("www.googleapis.com");
         assert!(www.contains(&"gmail"));
         assert!(www.contains(&"google-calendar"));
         assert!(www.contains(&"google-drive"));
         assert!(www.contains(&"youtube"));
+        assert!(www.contains(&"google-search-console"));
     }
 
     #[test]
@@ -1338,6 +1347,45 @@ mod tests {
         assert_eq!(
             providers_for_host("photoslibrary.googleapis.com"),
             vec!["google-photos"]
+        );
+    }
+
+    // ── Google Search Console ────────────────────────────────────────
+
+    #[test]
+    fn google_search_console_path_disambiguation() {
+        let result = provider_for_host_and_path(
+            "www.googleapis.com",
+            "/webmasters/v3/sites/sc-domain:onecli.sh/searchAnalytics/query",
+        );
+        assert_eq!(
+            result,
+            Some(("google-search-console", "Google Search Console"))
+        );
+    }
+
+    #[test]
+    fn google_search_console_produces_two_injection_rules() {
+        let rules = build_app_injection_rules(
+            "google-search-console",
+            "www.googleapis.com",
+            "ya29.gsc_test",
+        );
+        assert_eq!(
+            rules.len(),
+            1,
+            "expected one rule for Search Console on www.googleapis.com"
+        );
+
+        let (pattern, injections) = &rules[0];
+        assert_eq!(pattern, "/webmasters/*");
+        assert_eq!(injections.len(), 1);
+        assert_eq!(
+            injections[0],
+            Injection::SetHeader {
+                name: "authorization".to_string(),
+                value: "Bearer ya29.gsc_test".to_string(),
+            }
         );
     }
 
