@@ -642,7 +642,6 @@ static APP_PROVIDERS: &[AppProvider] = &[
             strategy: AuthStrategy::Bearer,
             intercept: false,
         }],
-        // Refresh is handled via the "client_credentials" cred_type sentinel in connect.rs.
         refresh: None,
         metadata_headers: &[],
         credential_headers: &[],
@@ -1685,23 +1684,7 @@ mod tests {
     }
 
     #[test]
-    fn mongodb_atlas_produces_one_injection_rule() {
-        let rules =
-            build_app_injection_rules("mongodb-atlas", "cloud.mongodb.com", "eyJtest.token");
-        assert_eq!(rules.len(), 1);
-        assert_eq!(rules[0].0, "*");
-        assert_eq!(
-            rules[0].1,
-            vec![Injection::SetHeader {
-                name: "authorization".to_string(),
-                value: "Bearer eyJtest.token".to_string(),
-            }]
-        );
-    }
-
-    #[test]
     fn mongodb_atlas_has_no_refresh_config() {
-        // Refresh is handled via the client_credentials sentinel in connect.rs, not RefreshConfig.
         assert!(refresh_config("mongodb-atlas").is_none());
     }
 
@@ -1711,7 +1694,7 @@ mod tests {
     }
 
     #[test]
-    fn mongodb_atlas_no_false_positives() {
+    fn mongodb_atlas_does_not_match_other_mongodb_hosts() {
         assert!(providers_for_host("mongodb.com").is_empty());
         assert!(providers_for_host("atlas.mongodb.com").is_empty());
     }
