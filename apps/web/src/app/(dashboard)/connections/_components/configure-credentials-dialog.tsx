@@ -13,7 +13,7 @@ import { Input } from "@onecli/ui/components/input";
 import { Label } from "@onecli/ui/components/label";
 import { SecretInput } from "@/components/secret-input";
 import { saveAppConfig, setAppConfigEnabled } from "@/lib/actions/app-config";
-import type { OAuthConfigField } from "@/lib/apps/types";
+import type { OAuthConfigField } from "@onecli/api/apps/types";
 import { IS_CLOUD } from "@/lib/env";
 import { AppIcon } from "./app-icon";
 

@@ -1,0 +1,48 @@
+import { randomBytes } from "crypto";
+import { db } from "@onecli/db";
+import { ServiceError } from "./errors";
+
+export const generateApiKey = () => `oc_${randomBytes(32).toString("hex")}`;
+
+/**
+ * Get the API key for a user in a specific account.
+ */
+export const getApiKey = async (userId: string, projectId: string) => {
+  const apiKey = await db.apiKey.findFirst({
+    where: { userId, projectId },
+    select: { key: true },
+  });
+
+  if (!apiKey) throw new ServiceError("NOT_FOUND", "API key not found");
+
+  return { apiKey: apiKey.key };
+};
+
+/**
+ * Regenerate the API key for a user in a specific account.
+ */
+export const regenerateApiKey = async (userId: string, projectId: string) => {
+  const key = generateApiKey();
+
+  const existing = await db.apiKey.findFirst({
+    where: { userId, projectId },
+    select: { id: true },
+  });
+
+  if (existing) {
+    await db.apiKey.update({
+      where: { id: existing.id },
+      data: { key },
+    });
+  } else {
+    const user = await db.user.findUniqueOrThrow({
+      where: { id: userId },
+      select: { email: true },
+    });
+    await db.apiKey.create({
+      data: { key, userId, userEmail: user.email, projectId },
+    });
+  }
+
+  return { apiKey: key };
+};

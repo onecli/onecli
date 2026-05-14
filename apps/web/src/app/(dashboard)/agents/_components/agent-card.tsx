@@ -43,7 +43,7 @@ import {
   regenerateAgentToken,
   renameAgent,
 } from "@/lib/actions/agents";
-import type { SecretMode } from "@/lib/services/agent-service";
+import type { SecretMode } from "@onecli/api/services/agent-service";
 import { ManageAccessDialog } from "./manage-access-dialog";
 
 interface AgentCardProps {

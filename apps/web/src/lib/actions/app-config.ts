@@ -1,12 +1,12 @@
 "use server";
 
 import { resolveUser } from "@/lib/actions/resolve-user";
-import { getApp } from "@/lib/apps/registry";
+import { getApp } from "@onecli/api/apps/registry";
 import {
   withAudit,
   AUDIT_ACTIONS,
   AUDIT_SERVICES,
-} from "@/lib/services/audit-service";
+} from "@onecli/api/services/audit-service";
 import {
   getAppConfig,
   upsertAppConfig,
@@ -14,7 +14,7 @@ import {
   hasAppConfig as hasAppConfigService,
   listConfiguredProviders,
   toggleAppConfigEnabled,
-} from "@/lib/services/app-config-service";
+} from "@onecli/api/services/app-config-service";
 
 export const saveAppConfig = async (
   provider: string,
@@ -66,8 +66,8 @@ export const deleteAppConfigAction = async (provider: string) => {
  * Only checks apps that define envDefaults in their app definition.
  */
 export const getAvailableEnvDefaults = async (): Promise<string[]> => {
-  const { apps } = await import("@/lib/apps/registry");
-  return apps
+  const { getApps } = await import("@onecli/api/apps/registry");
+  return getApps()
     .filter((app) => {
       const envDefaults = app.configurable?.envDefaults;
       if (!envDefaults) return false;

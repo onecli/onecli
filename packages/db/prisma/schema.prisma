@@ -20,7 +20,6 @@ model Organization {
   stripeCustomerId   String?  @unique @map("stripe_customer_id")
   subscriptionStatus String   @default("free") @map("subscription_status")
   awsExternalId      String?  @map("aws_external_id")
-  demoSeeded         Boolean  @default(false) @map("demo_seeded")
   createdAt          DateTime @default(now()) @map("created_at")
   updatedAt          DateTime @updatedAt @map("updated_at")
 
@@ -85,18 +84,17 @@ model Project {
   createdAt          DateTime @default(now()) @map("created_at")
   updatedAt          DateTime @updatedAt @map("updated_at")
 
-  createdByUser       User?                @relation("ProjectCreator", fields: [createdByUserId], references: [id])
-  organization        Organization         @relation(fields: [organizationId], references: [id])
-  apiKeys             ApiKey[]
-  agents              Agent[]
-  secrets             Secret[]
-  policyRules         PolicyRule[]
-  auditLogs           AuditLog[]
-  vaultConnections    VaultConnection[]
-  onboardingSurvey    OnboardingSurvey?
-  appConnections      AppConnection[]
-  appConfigs          AppConfig[]
-  platformDeployments PlatformDeployment[]
+  createdByUser    User?             @relation("ProjectCreator", fields: [createdByUserId], references: [id])
+  organization     Organization      @relation(fields: [organizationId], references: [id])
+  apiKeys          ApiKey[]
+  agents           Agent[]
+  secrets          Secret[]
+  policyRules      PolicyRule[]
+  auditLogs        AuditLog[]
+  vaultConnections VaultConnection[]
+  onboardingSurvey OnboardingSurvey?
+  appConnections   AppConnection[]
+  appConfigs       AppConfig[]
 
   @@unique([organizationId, slug])
   @@index([organizationId])
@@ -435,24 +433,6 @@ model CliAuthSession {
   createdAt DateTime @default(now()) @map("created_at")
 
   @@map("cli_auth_sessions")
-}
-
-model PlatformDeployment {
-  id         String   @id @default(uuid())
-  projectId  String   @map("project_id")
-  vmName     String   @unique @map("vm_name")
-  vmUrl      String   @map("vm_url")
-  proxyToken String?  @map("proxy_token")
-  imageTag   String?  @map("image_tag")
-  status     String   @default("provisioning") @map("status")
-  name       String   @default("Andy") @map("name")
-  channels   Json     @default("[]")
-  createdAt  DateTime @default(now()) @map("created_at")
-  updatedAt  DateTime @updatedAt @map("updated_at")
-  project    Project  @relation(fields: [projectId], references: [id])
-
-  @@index([projectId])
-  @@map("platform_deployments")
 }
 
 // ── Trial budget ────────────────────────────────────────────────────────

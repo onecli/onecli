@@ -13,9 +13,9 @@ import {
   getVaultConnections as defaultGetVaultConnections,
 } from "@/lib/actions/connections";
 import { getSecrets as defaultGetSecrets } from "@/lib/actions/secrets";
-import { getApp } from "@/lib/apps/registry";
+import { getApp } from "@onecli/api/apps/registry";
 import { useAppMessages } from "@/hooks/use-app-connected";
-import { extractLabel } from "@/lib/services/connection-service";
+import { extractLabel } from "@onecli/api/services/connection-service";
 import { AppIcon } from "./app-icon";
 import { SecretDialog } from "./secret-dialog";
 import type { SecretActions } from "./types";

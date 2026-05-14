@@ -16,13 +16,13 @@ import {
 import { StatusBadge } from "./status-badge";
 import { MethodBadge } from "./method-badge";
 import { ProviderIcon } from "./provider-icon";
-import { formatRelative, formatUTC } from "@/lib/format";
-import { getProviderIcon } from "@/lib/apps/provider-icons";
+import { formatRelative, formatUTC } from "@onecli/api/lib/format";
+import { getProviderIcon } from "@onecli/api/apps/provider-icons";
 import {
   isBlockedRequest,
   isRateLimitedRequest,
   type RequestLogEntry,
-} from "@/lib/services/request-log-service";
+} from "@onecli/api/services/request-log-service";
 
 const localTz = Intl.DateTimeFormat().resolvedOptions().timeZone;
 
@@ -61,14 +61,14 @@ interface ActivityTableProps {
 
 export const ActivityTable = ({ logs, onRowClick }: ActivityTableProps) => (
   <div className="rounded-lg border overflow-hidden">
-    <Table className="table-fixed">
+    <Table>
       <TableHeader>
         <TableRow className="hover:bg-transparent">
           <TableHead className="w-[5.5rem]">Time</TableHead>
           <TableHead className="w-[7rem]">Agent</TableHead>
           <TableHead className="w-[4.5rem]">Method</TableHead>
-          <TableHead>Endpoint</TableHead>
-          <TableHead className="w-[8rem]">Provider</TableHead>
+          <TableHead className="max-w-[18rem]">Endpoint</TableHead>
+          <TableHead className="w-[12rem]">Provider</TableHead>
           <TableHead className="w-[7rem]">Status</TableHead>
           <TableHead className="w-[5rem] text-right">Latency</TableHead>
         </TableRow>
@@ -107,23 +107,32 @@ export const ActivityTable = ({ logs, onRowClick }: ActivityTableProps) => (
                 <TableCell>
                   <MethodBadge method={log.method} />
                 </TableCell>
-                <TableCell>
-                  <div className="flex items-baseline gap-1.5 min-w-0">
-                    <span className="text-sm font-medium shrink-0">
-                      {log.host}
-                    </span>
-                    <span className="text-muted-foreground truncate font-mono text-xs">
+                <TableCell className="max-w-[18rem]">
+                  <div className="min-w-0">
+                    <div className="text-sm font-medium truncate">
+                      {log.host.replace(/:(?:443|80)$/, "")}
+                    </div>
+                    <div className="text-muted-foreground truncate font-mono text-xs">
                       {log.path || "/"}
-                    </span>
+                    </div>
                   </div>
                 </TableCell>
                 <TableCell>
-                  <div className="flex items-center gap-1.5">
-                    <ProviderIcon provider={log.provider} size={14} />
-                    <span className="text-sm">
+                  <Tooltip>
+                    <TooltipTrigger asChild>
+                      <div className="flex items-center gap-1.5 min-w-0">
+                        <span className="shrink-0">
+                          <ProviderIcon provider={log.provider} size={14} />
+                        </span>
+                        <span className="text-sm truncate">
+                          {providerInfo?.name ?? log.provider}
+                        </span>
+                      </div>
+                    </TooltipTrigger>
+                    <TooltipContent side="top">
                       {providerInfo?.name ?? log.provider}
-                    </span>
-                  </div>
+                    </TooltipContent>
+                  </Tooltip>
                 </TableCell>
                 <TableCell>
                   <StatusBadge

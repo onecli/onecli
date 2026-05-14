@@ -34,9 +34,9 @@ import {
   getAgentAppConnections,
   updateAgentAppConnections,
 } from "@/lib/actions/agents";
-import { getApp } from "@/lib/apps/registry";
-import { extractLabel } from "@/lib/services/connection-service";
-import type { SecretMode } from "@/lib/services/agent-service";
+import { getApp } from "@onecli/api/apps/registry";
+import { extractLabel } from "@onecli/api/services/connection-service";
+import type { SecretMode } from "@onecli/api/services/agent-service";
 
 interface ManageAccessDialogProps {
   agent: {

@@ -5,7 +5,7 @@ import { getServerSession } from "@/lib/auth/server";
 import {
   getUser,
   updateProfile as updateProfileService,
-} from "@/lib/services/user-service";
+} from "@onecli/api/services/user-service";
 
 export const getCurrentUser = async () => {
   const session = await getServerSession();

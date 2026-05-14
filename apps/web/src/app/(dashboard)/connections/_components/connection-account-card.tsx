@@ -34,7 +34,7 @@ import {
 import { Button } from "@onecli/ui/components/button";
 import { disconnectAppConnection } from "@/lib/actions/connections";
 import { useInvalidateGatewayCache } from "@/hooks/use-invalidate-cache";
-import { extractLabel } from "@/lib/services/connection-service";
+import { extractLabel } from "@onecli/api/services/connection-service";
 
 interface ConnectionAccountCardProps {
   connection: {

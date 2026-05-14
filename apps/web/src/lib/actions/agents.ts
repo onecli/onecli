@@ -1,7 +1,7 @@
 "use server";
 
 import { resolveUser } from "@/lib/actions/resolve-user";
-import type { SecretMode } from "@/lib/services/agent-service";
+import type { SecretMode } from "@onecli/api/services/agent-service";
 import {
   listAgents,
   getDefaultAgent as getDefaultAgentService,
@@ -14,12 +14,12 @@ import {
   updateAgentSecrets as updateAgentSecretsService,
   getAgentAppConnections as getAgentAppConnectionsService,
   updateAgentAppConnections as updateAgentAppConnectionsService,
-} from "@/lib/services/agent-service";
+} from "@onecli/api/services/agent-service";
 import {
   withAudit,
   AUDIT_ACTIONS,
   AUDIT_SERVICES,
-} from "@/lib/services/audit-service";
+} from "@onecli/api/services/audit-service";
 
 export const getAgents = async () => {
   const { projectId } = await resolveUser();

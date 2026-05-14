@@ -2,7 +2,7 @@
 
 import { db } from "@onecli/db";
 import { getServerSession } from "@/lib/auth/server";
-import { findUserDefaultProject } from "@/lib/services/organization-service";
+import { findUserDefaultProject } from "@onecli/api/services/organization-service";
 
 export interface UserContext {
   userId: string;

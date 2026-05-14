@@ -7,7 +7,7 @@ import { PageHeader } from "@dashboard/page-header";
 import { getActivityPage } from "@/lib/actions/request-logs";
 import { ActivityTable } from "./activity-table";
 import { ActivityDetailDialog } from "./activity-detail-dialog";
-import type { RequestLogEntry } from "@/lib/services/request-log-service";
+import type { RequestLogEntry } from "@onecli/api/services/request-log-service";
 
 type StatusFilter = "all" | "errors";
 

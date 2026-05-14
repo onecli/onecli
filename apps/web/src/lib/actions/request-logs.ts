@@ -5,7 +5,7 @@ import {
   getRecentRequestLogs,
   getRequestLogs,
   type ActivityPageParams,
-} from "@/lib/services/request-log-service";
+} from "@onecli/api/services/request-log-service";
 
 export const getRecentActivity = async () => {
   const { projectId } = await resolveUser();

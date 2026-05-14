@@ -76,10 +76,6 @@ export const DISCORD_WEBHOOK_URL = process.env.DISCORD_WEBHOOK_URL ?? "";
 
 export const ENVIRONMENT = process.env.ENVIRONMENT ?? "dev";
 
-// ── Cloud: exe.dev (NanoClaw deploy) ────────────────────────────────────
-
-export const EXE_DEV_TOKEN = process.env.EXE_DEV_TOKEN ?? "";
-
 // ── Cloud: KMS ──────────────────────────────────────────────────────────
 
 export const KMS_KEY_ARN = process.env.KMS_KEY_ARN ?? "";
@@ -110,14 +106,3 @@ export const NEXT_RUNTIME = process.env.NEXT_RUNTIME ?? "";
 
 /** User home directory (system). */
 export const HOME = process.env.HOME ?? "";
-
-// ── Cloud: Telegram Managed Bots ───────────────────────────────────
-
-export const TELEGRAM_MANAGER_BOT_TOKEN =
-  process.env.TELEGRAM_MANAGER_BOT_TOKEN ?? "";
-
-export const TELEGRAM_MANAGER_BOT_USERNAME =
-  process.env.TELEGRAM_MANAGER_BOT_USERNAME ?? "";
-
-export const TELEGRAM_WEBHOOK_SECRET =
-  process.env.TELEGRAM_WEBHOOK_SECRET ?? "";

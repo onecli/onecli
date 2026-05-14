@@ -3,7 +3,7 @@ import { db } from "@onecli/db";
 import {
   findUserDefaultProject,
   bootstrapOrganization,
-} from "@/lib/services/organization-service";
+} from "@onecli/api/services/organization-service";
 import { getAuthMode } from "./auth-mode";
 import type { AuthUser } from "./types";
 

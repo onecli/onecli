@@ -2,9 +2,7 @@
 
 import { db } from "@onecli/db";
 import { resolveUser } from "@/lib/actions/resolve-user";
-import { DEMO_SECRET_NAME } from "@/lib/constants";
 import { APP_URL, GATEWAY_BASE_URL } from "@/lib/env";
-import { seedDemoSecret as seedDemoSecretService } from "@/lib/services/secret-service";
 import {
   listSecrets,
   createSecret as createSecretService,
@@ -12,12 +10,12 @@ import {
   updateSecret as updateSecretService,
   type CreateSecretInput,
   type UpdateSecretInput,
-} from "@/lib/services/secret-service";
+} from "@onecli/api/services/secret-service";
 import {
   withAudit,
   AUDIT_ACTIONS,
   AUDIT_SERVICES,
-} from "@/lib/services/audit-service";
+} from "@onecli/api/services/audit-service";
 
 export const getSecrets = async () => {
   const { projectId } = await resolveUser();
@@ -76,11 +74,6 @@ export const getInstallInfo = async () => {
   };
 };
 
-export const seedDemoSecret = async () => {
-  const { projectId } = await resolveUser();
-  await seedDemoSecretService(projectId);
-};
-
 export const hasAnthropicSecret = async (): Promise<boolean> => {
   const { projectId } = await resolveUser();
   const secret = await db.secret.findFirst({
@@ -97,28 +90,6 @@ export const hasOpenaiSecret = async (): Promise<boolean> => {
     select: { id: true },
   });
   return !!secret;
-};
-
-export const getDemoInfo = async () => {
-  const { projectId } = await resolveUser();
-
-  const [demoSecret, agent] = await Promise.all([
-    db.secret.findFirst({
-      where: { projectId, name: DEMO_SECRET_NAME },
-      select: { id: true },
-    }),
-    db.agent.findFirst({
-      where: { projectId, isDefault: true },
-      select: { accessToken: true },
-    }),
-  ]);
-
-  if (!demoSecret || !agent) return null;
-
-  return {
-    agentToken: agent.accessToken,
-    gatewayUrl: GATEWAY_BASE_URL,
-  };
 };
 
 export const validateAnthropicKey = async (

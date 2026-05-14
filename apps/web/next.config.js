@@ -21,24 +21,21 @@ const nextConfig = {
           "@/lib/nav-config": "@/cloud/nav-config",
           "@dashboard/dashboard-sidebar": "@/cloud/dashboard/dashboard-sidebar",
           "@dashboard/dashboard-header": "@/cloud/dashboard/dashboard-header",
-          "@/lib/crypto": "@/cloud/kms-crypto",
           "@/lib/gateway-auth": "@/cloud/gateway-auth",
-          "@/lib/deploy/deploy-pages": "@/cloud/deploy/deploy-pages",
           "@/lib/auth/login-content": "@/cloud/auth/login-content",
           "@/lib/user-plan": "@/cloud/user-plan",
-          "@/lib/auth/session-hooks": "@/cloud/auth/session-hooks",
-          "@/lib/deploy/nav-deploy": "@/cloud/deploy/nav-deploy",
           "@/lib/components/request-app-slot": "@/cloud/apps/request-app-slot",
-          "@/lib/apps/cloud-app-registry": "@/cloud/apps/cloud-app-registry",
           "@/lib/actions/agents": "@/cloud/actions/agents",
           "@/lib/actions/rules": "@/cloud/actions/rules",
           "@/lib/actions/secrets": "@/cloud/actions/secrets",
           "@/lib/actions/connections": "@/cloud/actions/connections",
           "@/lib/home-redirect": "@/cloud/home-redirect",
           "@/lib/components/pro-app-dialog": "@/cloud/apps/pro-app-dialog",
-          "@/lib/apps/oauth-org": "@/cloud/apps/oauth-org",
-          "@/lib/dashboard/validate-session":
-            "@/cloud/dashboard/validate-session",
+          "@/lib/dashboard/session-redirect":
+            "@/cloud/dashboard/session-redirect",
+
+          // Cloud overrides (crypto, cloud apps, oauth-org, session hooks, cloud routes)
+          "@/lib/api/cloud-overrides": "@/cloud/api/cloud-overrides",
         }
       : {},
   },

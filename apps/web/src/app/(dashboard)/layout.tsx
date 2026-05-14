@@ -10,7 +10,7 @@ import { SettingsNav } from "@/app/(dashboard)/settings/_components/settings-nav
 import { SettingsMobileNav } from "@/app/(dashboard)/settings/_components/settings-mobile-nav";
 import { useAuth } from "@/providers/auth-provider";
 import { checkDashboardRedirect } from "@/lib/user-plan";
-import { getDashboardRedirect } from "@/lib/dashboard/validate-session";
+import { getDashboardRedirect } from "@/lib/dashboard/session-redirect";
 
 export default function DashboardLayout({
   children,

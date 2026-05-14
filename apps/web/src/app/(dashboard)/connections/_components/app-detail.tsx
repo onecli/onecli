@@ -12,11 +12,11 @@ import { Card } from "@onecli/ui/components/card";
 import { useAppMessages } from "@/hooks/use-app-connected";
 import { useInvalidateGatewayCache } from "@/hooks/use-invalidate-cache";
 import { withProjectPrefix } from "@/lib/navigation";
-import type { OAuthPermission } from "@/lib/apps/types";
+import type { OAuthPermission } from "@onecli/api/apps/types";
 import {
   getAppPermissionDefinition,
   type AppPermissionLevel,
-} from "@/lib/apps/app-permissions";
+} from "@onecli/api/apps/app-permissions";
 import { AppIcon } from "./app-icon";
 import { AppConfigForm } from "./app-config-form";
 import { ConfigureCredentialsDialog } from "./configure-credentials-dialog";

@@ -699,7 +699,8 @@ pub(crate) fn provider_for_host(hostname: &str) -> Option<(&'static str, &'stati
 ///
 /// For shared hosts (e.g., `www.googleapis.com`), uses the path prefix to disambiguate
 /// between providers (Gmail on `/gmail/*`, Calendar on `/calendar/*`, etc.).
-/// Falls back to the first host-only match if no path prefix matches.
+/// Falls back to the first host-only match only for dedicated subdomains; shared hosts
+/// with path-scoped providers return `None` when no prefix matches.
 pub(crate) fn provider_for_host_and_path(
     hostname: &str,
     path: &str,
@@ -718,8 +719,24 @@ pub(crate) fn provider_for_host_and_path(
         return path_match;
     }
 
-    // Fallback: host-only match (for providers with dedicated subdomains)
+    // Fallback: host-only match for dedicated subdomains (e.g., gmail.googleapis.com).
+    // Skip when the host has path-scoped providers (shared hosts like
+    // www.googleapis.com) — the first match would be arbitrary and misleading.
+    if host_has_path_scoped_providers(hostname) {
+        return None;
+    }
     provider_for_host(hostname)
+}
+
+/// Returns true when any provider registered for `hostname` uses path-prefix
+/// scoped rules, indicating a shared host where the host-only fallback would
+/// be ambiguous (e.g., `www.googleapis.com`).
+pub(crate) fn host_has_path_scoped_providers(hostname: &str) -> bool {
+    all_providers().any(|p| {
+        p.host_rules
+            .iter()
+            .any(|r| host_rule_matches(r, hostname) && r.path_prefix.is_some())
+    })
 }
 
 /// Given a hostname, return all provider names that have at least one host rule
@@ -1826,6 +1843,24 @@ mod tests {
         }
 
         #[test]
+        fn datadog_rewrite_host_compound_subdomain() {
+            let creds = serde_json::json!({"site": "us5", "apiKey": "k", "appKey": "a"});
+            assert_eq!(
+                rewrite_host("datadog", &creds, "http-intake.logs.us5.datadoghq.com"),
+                Some("http-intake.logs.us5.datadoghq.com".to_string()),
+            );
+        }
+
+        #[test]
+        fn datadog_rewrite_host_compound_subdomain_generic() {
+            let creds = serde_json::json!({"site": "us5", "apiKey": "k", "appKey": "a"});
+            assert_eq!(
+                rewrite_host("datadog", &creds, "http-intake.logs.datadoghq.com"),
+                Some("http-intake.logs.us5.datadoghq.com".to_string()),
+            );
+        }
+
+        #[test]
         fn datadog_no_auth_header_injected() {
             let injections = build_app_injections("datadog", "api.datadoghq.com", "unused");
             assert!(
@@ -1961,6 +1996,34 @@ mod tests {
             provider_for_host_and_path("unknown.example.com", "/foo"),
             None
         );
+    }
+
+    #[test]
+    fn provider_for_host_and_path_returns_none_for_unrecognized_path_on_shared_host() {
+        // www.googleapis.com is a shared host — unrecognized API paths must
+        // return None instead of falling back to the first match (Gmail).
+        assert_eq!(
+            provider_for_host_and_path("www.googleapis.com", "/some-unknown-api/v1/resource"),
+            None
+        );
+    }
+
+    // ── host_has_path_scoped_providers ─────────────────────────────────
+
+    #[test]
+    fn shared_host_is_path_scoped() {
+        assert!(host_has_path_scoped_providers("www.googleapis.com"));
+    }
+
+    #[test]
+    fn dedicated_subdomain_is_not_path_scoped() {
+        assert!(!host_has_path_scoped_providers("gmail.googleapis.com"));
+        assert!(!host_has_path_scoped_providers("api.github.com"));
+    }
+
+    #[test]
+    fn unknown_host_is_not_path_scoped() {
+        assert!(!host_has_path_scoped_providers("unknown.example.com"));
     }
 
     #[test]

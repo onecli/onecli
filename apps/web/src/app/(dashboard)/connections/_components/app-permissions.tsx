@@ -11,7 +11,7 @@ import { Accordion } from "@onecli/ui/components/accordion";
 import type {
   AppToolGroup,
   AppPermissionLevel,
-} from "@/lib/apps/app-permissions";
+} from "@onecli/api/apps/app-permissions";
 import {
   getAppPermissionStates,
   setAppPermissions,

@@ -17,7 +17,7 @@ import {
   CollapsibleTrigger,
 } from "@onecli/ui/components/collapsible";
 import { cn } from "@onecli/ui/lib/utils";
-import { getApp } from "@/lib/apps/registry";
+import { getApp } from "@onecli/api/apps/registry";
 import { withProjectPrefix } from "@/lib/navigation";
 import { AppIcon } from "@/app/(dashboard)/connections/_components/app-icon";
 import type { PolicyRuleItem } from "./types";

@@ -8,7 +8,18 @@ import { Plus } from "lucide-react";
  * turbopack `resolveAlias` in `next.config.js`. The cloud override opens
  * an in-app dialog that collects the request and emails the user an
  * acknowledgment via Resend.
+ *
+ * Both variants accept optional controlled props so the parent can open the
+ * request dialog programmatically (e.g., via `?request=` URL param). OSS
+ * ignores them; cloud wires them to the in-app dialog.
  */
+
+export interface RequestAppSlotProps {
+  requestOpen?: boolean;
+  onRequestOpenChange?: (open: boolean) => void;
+  initialName?: string;
+  initialUrl?: string;
+}
 
 const ISSUE_BODY_TEMPLATE = `**Website:**
 
@@ -23,7 +34,7 @@ const GITHUB_ISSUE_URL = `https://github.com/onecli/onecli/issues/new?${new URLS
   },
 ).toString()}`;
 
-export const RequestAppSlot = () => (
+export const RequestAppSlot = ({}: RequestAppSlotProps = {}) => (
   <a
     href={GITHUB_ISSUE_URL}
     target="_blank"

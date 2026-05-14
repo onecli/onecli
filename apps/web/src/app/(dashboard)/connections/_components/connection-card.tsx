@@ -19,7 +19,7 @@ import {
 } from "@onecli/ui/components/alert-dialog";
 import { disconnectAppConnection as defaultDisconnect } from "@/lib/actions/connections";
 import { useInvalidateGatewayCache } from "@/hooks/use-invalidate-cache";
-import { extractLabel } from "@/lib/services/connection-service";
+import { extractLabel } from "@onecli/api/services/connection-service";
 
 interface ConnectionCardProps {
   connection: {

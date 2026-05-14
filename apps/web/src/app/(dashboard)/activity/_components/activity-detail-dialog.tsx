@@ -17,14 +17,14 @@ import { StatusBadge } from "./status-badge";
 import { MethodBadge } from "./method-badge";
 import { ProviderIcon } from "./provider-icon";
 import { withProjectPrefix } from "@/lib/navigation";
-import { hasJsonData } from "@/lib/format";
+import { hasJsonData } from "@onecli/api/lib/format";
 import {
   isBlockedRequest,
   isRateLimitedRequest,
   getBlockedByRule,
   getConnectionLabel,
   type RequestLogEntry,
-} from "@/lib/services/request-log-service";
+} from "@onecli/api/services/request-log-service";
 
 interface ActivityDetailDialogProps {
   log: RequestLogEntry | null;

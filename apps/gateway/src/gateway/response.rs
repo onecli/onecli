@@ -127,6 +127,41 @@ pub(crate) fn app_not_connected<S>(
     ))
 }
 
+/// JSON error response for requests to a known app host where the specific API path
+/// doesn't match any registered provider (e.g., an unregistered Google API on
+/// `www.googleapis.com`). Directs the user to the apps page with the "Request an
+/// app" dialog pre-opened and pre-filled with the hostname.
+pub(crate) fn app_not_connected_unknown_provider<S>(
+    status: StatusCode,
+    hostname: &str,
+    agent_name: Option<&str>,
+) -> Response<ForwardBody<S>> {
+    let base = dashboard_url();
+    let encoded_host = utf8_percent_encode(hostname, NON_ALPHANUMERIC);
+    let connect_url = match agent_name {
+        Some(name) => format!(
+            "{base}/connections?request={encoded_host}&source=agent&agent_name={}",
+            utf8_percent_encode(name, NON_ALPHANUMERIC)
+        ),
+        None => format!("{base}/connections?request={encoded_host}"),
+    };
+    with_no_retry(json_error(
+        status,
+        serde_json::json!({
+            "error": "app_not_connected",
+            "message": format!(
+                "No app is connected for this API on {hostname}. \
+                 A pre-built link is provided in the `connect_url` field. \
+                 Before sending it to the user, append `&request_name=<name>` with the \
+                 human-readable app/service name (e.g., `&request_name=Google%20Custom%20Search`). \
+                 Then ask the user to open the link to request it."
+            ),
+            "hostname": hostname,
+            "connect_url": connect_url,
+        }),
+    ))
+}
+
 /// JSON error response when credentials exist for a host but the agent lacks access (selective mode).
 /// Covers both manual secrets and app connections.
 pub(crate) fn access_restricted<S>(
@@ -426,6 +461,53 @@ mod tests {
         assert!(
             url.contains("agent_name=Agent%20%26%20Co%3D1"),
             "connect_url should percent-encode & and = in agent_name, got: {url}"
+        );
+    }
+
+    #[tokio::test]
+    async fn app_not_connected_unknown_provider_opens_request_dialog() {
+        let resp: Response<TestBody> = app_not_connected_unknown_provider(
+            StatusCode::UNAUTHORIZED,
+            "www.googleapis.com",
+            Some("Claude Code"),
+        );
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+        use http_body_util::BodyExt;
+        let body = match resp.into_body() {
+            Either::Left(full) => full.collect().await.expect("collect full body").to_bytes(),
+            Either::Right(_) => panic!("expected Left"),
+        };
+        let json: serde_json::Value = serde_json::from_slice(&body).expect("valid JSON");
+        assert_eq!(json["error"], "app_not_connected");
+        let url = json["connect_url"].as_str().unwrap();
+        assert!(
+            url.contains("/connections?request="),
+            "connect_url should open request dialog, got: {url}"
+        );
+        assert!(
+            url.contains("agent_name=Claude%20Code"),
+            "connect_url should include agent_name, got: {url}"
+        );
+    }
+
+    #[tokio::test]
+    async fn app_not_connected_unknown_provider_without_agent_name() {
+        let resp: Response<TestBody> =
+            app_not_connected_unknown_provider(StatusCode::FORBIDDEN, "www.googleapis.com", None);
+        use http_body_util::BodyExt;
+        let body = match resp.into_body() {
+            Either::Left(full) => full.collect().await.expect("collect full body").to_bytes(),
+            Either::Right(_) => panic!("expected Left"),
+        };
+        let json: serde_json::Value = serde_json::from_slice(&body).expect("valid JSON");
+        let url = json["connect_url"].as_str().unwrap();
+        assert!(
+            url.contains("/connections?request="),
+            "connect_url should open request dialog, got: {url}"
+        );
+        assert!(
+            !url.contains("agent_name"),
+            "connect_url should not include agent_name, got: {url}"
         );
     }
 

@@ -1,7 +1,7 @@
 import type {
   CreatePolicyRuleInput,
   UpdatePolicyRuleInput,
-} from "@/lib/validations/policy-rule";
+} from "@onecli/api/validations/policy-rule";
 
 export interface PolicyRuleItem {
   id: string;

@@ -8,7 +8,10 @@ import {
   TooltipTrigger,
 } from "@onecli/ui/components/tooltip";
 import { Badge } from "@onecli/ui/components/badge";
-import type { AppTool, AppPermissionLevel } from "@/lib/apps/app-permissions";
+import type {
+  AppTool,
+  AppPermissionLevel,
+} from "@onecli/api/apps/app-permissions";
 
 interface AppPermissionRowProps {
   tool: AppTool;

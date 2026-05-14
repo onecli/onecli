@@ -1,5 +1,5 @@
 import { notFound } from "next/navigation";
-import { getApp } from "@/lib/apps/registry";
+import { getApp } from "@onecli/api/apps/registry";
 import { checkAppConfigExists } from "@/lib/actions/app-config";
 import { ConnectFlow } from "../_components/connect-flow";
 

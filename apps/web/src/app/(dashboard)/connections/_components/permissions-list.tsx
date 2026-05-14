@@ -4,7 +4,7 @@ import { Check, Eye, Minus, Pencil } from "lucide-react";
 import { Badge } from "@onecli/ui/components/badge";
 import { Card } from "@onecli/ui/components/card";
 import { cn } from "@onecli/ui/lib/utils";
-import type { OAuthPermission } from "@/lib/apps/types";
+import type { OAuthPermission } from "@onecli/api/apps/types";
 
 interface PermissionsListProps {
   permissions: OAuthPermission[];

@@ -17,7 +17,7 @@ import { Input } from "@onecli/ui/components/input";
 import { Label } from "@onecli/ui/components/label";
 import { Checkbox } from "@onecli/ui/components/checkbox";
 import { cn } from "@onecli/ui/lib/utils";
-import { validateDisplayName } from "@/lib/validations/display-name";
+import { validateDisplayName } from "@onecli/api/validations/display-name";
 import {
   Accordion,
   AccordionContent,

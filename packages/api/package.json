@@ -1,0 +1,48 @@
+{
+  "name": "@onecli/api",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts",
+    "./services/*": "./src/services/*.ts",
+    "./lib/*": "./src/lib/*.ts",
+    "./validations/*": "./src/validations/*.ts",
+    "./apps/*": "./src/apps/*.ts",
+    "./apps/app-permissions": "./src/apps/app-permissions/index.ts",
+    "./apps/app-permissions/*": "./src/apps/app-permissions/*.ts",
+    "./apps/oauth/*": "./src/apps/oauth/*.ts",
+    "./cloud": "./src/cloud/index.ts",
+    "./cloud/*": "./src/cloud/*.ts",
+    "./cloud/services/*": "./src/cloud/services/*.ts",
+    "./cloud/clients/*": "./src/cloud/clients/*.ts",
+    "./cloud/billing/*": "./src/cloud/billing/*.ts",
+    "./cloud/notifications/*": "./src/cloud/notifications/*.ts",
+    "./cloud/apps/*": "./src/cloud/apps/*.ts",
+    "./cloud/apps/app-permissions/*": "./src/cloud/apps/app-permissions/*.ts",
+    "./cloud/auth/*": "./src/cloud/auth/*.ts"
+  },
+  "scripts": {
+    "check-types": "tsc --noEmit",
+    "lint": "eslint --max-warnings 0",
+    "lint:fix": "eslint --fix --max-warnings 0"
+  },
+  "dependencies": {
+    "@aws-sdk/client-kms": "^3.1014.0",
+    "@aws-sdk/client-secrets-manager": "^3.1014.0",
+    "@onecli/db": "workspace:*",
+    "hono": "^4.12.0",
+    "ioredis": "^5.10.1",
+    "nanoid": "^5.1.9",
+    "pino": "^10.3.1",
+    "stripe": "^20.4.0",
+    "zod": "^4.3.6"
+  },
+  "devDependencies": {
+    "@onecli/eslint-config": "workspace:*",
+    "@onecli/typescript-config": "workspace:*",
+    "@types/node": "^22.15.3",
+    "pino-pretty": "^13.1.3",
+    "typescript": "5.9.2"
+  }
+}

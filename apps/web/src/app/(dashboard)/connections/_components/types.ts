@@ -1,7 +1,7 @@
 import type {
   CreateSecretInput,
   UpdateSecretInput,
-} from "@/lib/validations/secret";
+} from "@onecli/api/validations/secret";
 
 export interface SecretActions {
   createSecret: (input: CreateSecretInput) => Promise<{ id: string }>;

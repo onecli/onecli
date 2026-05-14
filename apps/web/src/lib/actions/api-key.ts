@@ -4,12 +4,12 @@ import { resolveUser } from "@/lib/actions/resolve-user";
 import {
   getApiKey as getApiKeyService,
   regenerateApiKey as regenerateApiKeyService,
-} from "@/lib/services/api-key-service";
+} from "@onecli/api/services/api-key-service";
 import {
   withAudit,
   AUDIT_ACTIONS,
   AUDIT_SERVICES,
-} from "@/lib/services/audit-service";
+} from "@onecli/api/services/audit-service";
 
 export const getApiKey = async () => {
   const { userId, projectId } = await resolveUser();

@@ -431,6 +431,16 @@ pub(crate) async fn forward_request(
             ));
         }
 
+        // 2b. Known host but unrecognized API path — pre-fill a custom connection form.
+        if apps::provider_for_host(hostname).is_some() {
+            info!(method = %method, url = %url, status = %status.as_u16(), host = %hostname, "app not connected — no matching provider, custom connection");
+            return Ok(response::app_not_connected_unknown_provider(
+                status,
+                hostname,
+                proxy_ctx.agent_name.as_deref(),
+            ));
+        }
+
         // 3. Unknown host — no credentials at all, guide user to create a secret.
         info!(method = %method, url = %url, status = %status.as_u16(), "credential not found");
         return Ok(response::credential_not_found(status, hostname, &path));
@@ -470,6 +480,14 @@ pub(crate) async fn forward_request(
                     StatusCode::BAD_REQUEST,
                     provider,
                     display_name,
+                    proxy_ctx.agent_name.as_deref(),
+                ));
+            }
+            if apps::provider_for_host(hostname).is_some() {
+                info!(method = %method, url = %url, status = 400, host = %hostname, "auth-related 400 — no matching provider, custom connection");
+                return Ok(response::app_not_connected_unknown_provider(
+                    StatusCode::BAD_REQUEST,
+                    hostname,
                     proxy_ctx.agent_name.as_deref(),
                 ));
             }

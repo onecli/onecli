@@ -15,13 +15,14 @@ import { StatusBadge } from "@/app/(dashboard)/activity/_components/status-badge
 import { MethodBadge } from "@/app/(dashboard)/activity/_components/method-badge";
 import { ProviderIcon } from "@/app/(dashboard)/activity/_components/provider-icon";
 import { getRecentActivity } from "@/lib/actions/request-logs";
-import { formatRelative } from "@/lib/format";
+import { formatRelative } from "@onecli/api/lib/format";
+import { getProviderIcon } from "@onecli/api/apps/provider-icons";
 import { withProjectPrefix } from "@/lib/navigation";
 import {
   isBlockedRequest,
   isRateLimitedRequest,
   type RequestLogEntry,
-} from "@/lib/services/request-log-service";
+} from "@onecli/api/services/request-log-service";
 
 export const RecentActivityCard = () => {
   const pathname = usePathname();
@@ -73,29 +74,41 @@ export const RecentActivityCard = () => {
         ) : (
           <div className="divide-y">
             {logs.map((log) => (
-              <div
+              <Link
                 key={log.id}
-                className="flex items-center gap-3 py-2.5 first:pt-0 last:pb-0"
+                href={activityUrl}
+                className="flex items-center gap-3 py-2.5 -mx-3 px-3 rounded-md hover:bg-muted/50 transition-colors cursor-pointer"
               >
                 <span className="text-muted-foreground text-xs tabular-nums w-14 shrink-0">
                   {formatRelative(log.createdAt)}
                 </span>
                 <MethodBadge method={log.method} />
-                <div className="flex min-w-0 items-center gap-1.5 flex-1">
-                  <ProviderIcon provider={log.provider} size={14} />
+                <div className="flex min-w-0 items-center gap-1.5 flex-1 border-l pl-3">
+                  <span className="shrink-0">
+                    <ProviderIcon provider={log.provider} size={14} />
+                  </span>
+                  <span className="shrink-0 text-sm">
+                    {getProviderIcon(log.provider)?.name ?? log.provider}
+                  </span>
+                  <span className="text-muted-foreground mx-0.5">·</span>
                   <span className="shrink-0 text-sm font-medium">
-                    {log.host}
+                    {log.host.replace(/:(?:443|80)$/, "")}
                   </span>
                   <span className="text-muted-foreground truncate font-mono text-xs">
-                    {log.path}
+                    {log.path || "/"}
                   </span>
                 </div>
-                <StatusBadge
-                  status={log.status}
-                  blocked={isBlockedRequest(log)}
-                  rateLimited={isRateLimitedRequest(log)}
-                />
-              </div>
+                <div className="flex items-center gap-2 border-l pl-3 shrink-0">
+                  <StatusBadge
+                    status={log.status}
+                    blocked={isBlockedRequest(log)}
+                    rateLimited={isRateLimitedRequest(log)}
+                  />
+                  <span className="text-muted-foreground font-mono text-xs tabular-nums">
+                    {log.latencyMs}ms
+                  </span>
+                </div>
+              </Link>
             ))}
           </div>
         )}

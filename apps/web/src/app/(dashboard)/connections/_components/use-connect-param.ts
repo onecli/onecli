@@ -2,8 +2,8 @@
 
 import { useEffect, useRef } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
-import { apps } from "@/lib/apps/registry";
-import type { AppDefinition } from "@/lib/apps/types";
+import { getApps } from "@onecli/api/apps/registry";
+import type { AppDefinition } from "@onecli/api/apps/types";
 
 interface UseConnectParamOptions {
   loading: boolean;
@@ -12,6 +12,7 @@ interface UseConnectParamOptions {
   envDefaultProviders: Set<string>;
   onConnect: (app: AppDefinition, agentName?: string) => void;
   onConfigure: (app: AppDefinition) => void;
+  onRequestApp: (hostname: string, appName?: string) => void;
 }
 
 /**
@@ -33,6 +34,7 @@ export const useConnectParam = ({
   envDefaultProviders,
   onConnect,
   onConfigure,
+  onRequestApp,
 }: UseConnectParamOptions) => {
   const router = useRouter();
   const searchParams = useSearchParams();
@@ -40,11 +42,21 @@ export const useConnectParam = ({
 
   useEffect(() => {
     if (loading || handled.current) return;
+
+    const requestHost = searchParams.get("request");
+    if (requestHost) {
+      handled.current = true;
+      const appName = searchParams.get("request_name") ?? undefined;
+      router.replace("/connections");
+      onRequestApp(requestHost, appName);
+      return;
+    }
+
     const provider = searchParams.get("connect");
     if (!provider) return;
 
     handled.current = true;
-    const app = apps.find((a) => a.id === provider);
+    const app = getApps().find((a) => a.id === provider);
     if (!app) {
       router.replace("/connections");
       return;
@@ -78,5 +90,6 @@ export const useConnectParam = ({
     router,
     onConnect,
     onConfigure,
+    onRequestApp,
   ]);
 };

@@ -6,12 +6,12 @@ import {
   withAudit,
   AUDIT_ACTIONS,
   AUDIT_SERVICES,
-} from "@/lib/services/audit-service";
+} from "@onecli/api/services/audit-service";
 import {
   listConnections,
   listConnectionsByProvider,
   deleteConnection,
-} from "@/lib/services/connection-service";
+} from "@onecli/api/services/connection-service";
 
 export const getAppConnections = async () => {
   const { projectId } = await resolveUser();

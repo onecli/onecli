@@ -43,6 +43,9 @@ importers:
       '@aws-sdk/client-secrets-manager':
         specifier: ^3.1014.0
         version: 3.1041.0
+      '@onecli/api':
+        specifier: workspace:*
+        version: link:../../packages/api
       '@onecli/db':
         specifier: workspace:*
         version: link:../../packages/db
@@ -52,6 +55,9 @@ importers:
       aws-amplify:
         specifier: ^6.16.2
         version: 6.16.2
+      hono:
+        specifier: ^4.12.0
+        version: 4.12.18
       input-otp:
         specifier: ^1.4.2
         version: 1.4.2(react-dom@19.2.4(react@19.2.4))(react@19.2.4)
@@ -128,6 +134,52 @@ importers:
       tailwindcss:
         specifier: ^4.1.18
         version: 4.2.1
+      typescript:
+        specifier: 5.9.2
+        version: 5.9.2
+
+  packages/api:
+    dependencies:
+      '@aws-sdk/client-kms':
+        specifier: ^3.1014.0
+        version: 3.1014.0
+      '@aws-sdk/client-secrets-manager':
+        specifier: ^3.1014.0
+        version: 3.1041.0
+      '@onecli/db':
+        specifier: workspace:*
+        version: link:../db
+      hono:
+        specifier: ^4.12.0
+        version: 4.12.18
+      ioredis:
+        specifier: ^5.10.1
+        version: 5.10.1
+      nanoid:
+        specifier: ^5.1.9
+        version: 5.1.9
+      pino:
+        specifier: ^10.3.1
+        version: 10.3.1
+      stripe:
+        specifier: ^20.4.0
+        version: 20.4.0(@types/node@22.19.11)
+      zod:
+        specifier: ^4.3.6
+        version: 4.3.6
+    devDependencies:
+      '@onecli/eslint-config':
+        specifier: workspace:*
+        version: link:../eslint-config
+      '@onecli/typescript-config':
+        specifier: workspace:*
+        version: link:../typescript-config
+      '@types/node':
+        specifier: ^22.15.3
+        version: 22.19.11
+      pino-pretty:
+        specifier: ^13.1.3
+        version: 13.1.3
       typescript:
         specifier: 5.9.2
         version: 5.9.2
@@ -3550,6 +3602,10 @@ packages:
 
   hermes-parser@0.25.1:
     resolution: {integrity: sha512-6pEjquH3rqaI6cYAXYPcz9MS4rY6R4ngRgrgfDshRptUZIc3lw0MCIJIGDj9++mfySOuPTHB4nrSW99BCvOPIA==}
+
+  hono@4.12.18:
+    resolution: {integrity: sha512-RWzP96k/yv0PQfyXnWjs6zot20TqfpfsNXhOnev8d1InAxubW93L11/oNUc3tQqn2G0bSdAOBpX+2uDFHV7kdQ==}
+    engines: {node: '>=16.9.0'}
 
   husky@9.1.7:
     resolution: {integrity: sha512-5gs5ytaNjBrh5Ow3zrvdUUY+0VxIuWVL4i9irt6friV+BqdCfmV11CQTWMiBYWHbXhco+J1kHfTOUkePhCDvMA==}
@@ -9339,6 +9395,8 @@ snapshots:
   hermes-parser@0.25.1:
     dependencies:
       hermes-estree: 0.25.1
+
+  hono@4.12.18: {}
 
   husky@9.1.7: {}
 

@@ -29,7 +29,7 @@ import {
   updateSecret as defaultUpdateSecret,
 } from "@/lib/actions/secrets";
 import type { SecretActions } from "./types";
-import { validateDisplayName } from "@/lib/validations/display-name";
+import { validateDisplayName } from "@onecli/api/validations/display-name";
 import {
   type InjectionConfig,
   detectAnthropicAuthMode,
@@ -37,7 +37,7 @@ import {
   isParamInjection,
   looksLikeAnthropicKey,
   looksLikeOpenaiKey,
-} from "@/lib/validations/secret";
+} from "@onecli/api/validations/secret";
 
 type SecretType = "anthropic" | "openai" | "generic";
 

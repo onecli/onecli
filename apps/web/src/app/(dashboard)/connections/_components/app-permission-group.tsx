@@ -15,7 +15,7 @@ import {
 import type {
   AppToolGroup,
   AppPermissionLevel,
-} from "@/lib/apps/app-permissions";
+} from "@onecli/api/apps/app-permissions";
 import { AppPermissionRow } from "./app-permission-row";
 
 interface AppPermissionGroupProps {

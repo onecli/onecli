@@ -1,5 +1,5 @@
 import Image from "next/image";
-import { getProviderIcon } from "@/lib/apps/provider-icons";
+import { getProviderIcon } from "@onecli/api/apps/provider-icons";
 
 interface ProviderIconProps {
   provider: string;

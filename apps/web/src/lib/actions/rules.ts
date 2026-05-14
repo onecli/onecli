@@ -11,16 +11,16 @@ import {
   countOverlappingRulesForHost,
   type CreatePolicyRuleInput,
   type UpdatePolicyRuleInput,
-} from "@/lib/services/policy-rule-service";
+} from "@onecli/api/services/policy-rule-service";
 import {
   withAudit,
   AUDIT_ACTIONS,
   AUDIT_SERVICES,
-} from "@/lib/services/audit-service";
+} from "@onecli/api/services/audit-service";
 import {
   getAppPermissionDefinition,
   type AppPermissionLevel,
-} from "@/lib/apps/app-permissions";
+} from "@onecli/api/apps/app-permissions";
 
 export const getRules = async () => {
   const { projectId } = await resolveUser();

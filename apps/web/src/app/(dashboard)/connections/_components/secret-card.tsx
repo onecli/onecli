@@ -25,7 +25,7 @@ import {
   type InjectionConfig,
   isHeaderInjection,
   isParamInjection,
-} from "@/lib/validations/secret";
+} from "@onecli/api/validations/secret";
 import { SecretDialog } from "./secret-dialog";
 
 interface SecretCardProps {

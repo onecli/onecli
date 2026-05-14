@@ -7,13 +7,13 @@ import { MoreHorizontal } from "lucide-react";
 import { Button } from "@onecli/ui/components/button";
 import { Skeleton } from "@onecli/ui/components/skeleton";
 import { cn } from "@onecli/ui/lib/utils";
-import type { AppDefinition } from "@/lib/apps/types";
+import type { AppDefinition } from "@onecli/api/apps/types";
 import { getAppConnections as defaultGetConnections } from "@/lib/actions/connections";
 import {
   getConfiguredProviders as defaultGetConfiguredProviders,
   getAvailableEnvDefaults,
 } from "@/lib/actions/app-config";
-import { apps } from "@/lib/apps/registry";
+import { getApps } from "@onecli/api/apps/registry";
 import { RequestAppSlot } from "@/lib/components/request-app-slot";
 import { useAppMessages } from "@/hooks/use-app-connected";
 import { useInvalidateGatewayCache } from "@/hooks/use-invalidate-cache";
@@ -56,6 +56,9 @@ export const AppsTab = ({
   const [premiumApp, setProApp] = useState<AppDefinition | null>(null);
   const [plan, setPlan] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
+  const [requestOpen, setRequestOpen] = useState(false);
+  const [requestHostname, setRequestHostname] = useState("");
+  const [requestAppName, setRequestAppName] = useState<string | undefined>();
 
   const fetchConnections = useCallback(async () => {
     try {
@@ -124,7 +127,7 @@ export const AppsTab = ({
     [connectionCounts],
   );
 
-  // Handle ?connect=<provider> URL param
+  // Handle ?connect=<provider> and ?request=<hostname> URL params
   useConnectParam({
     loading,
     connectedProviders,
@@ -135,11 +138,16 @@ export const AppsTab = ({
       setConnectAgentName(agentName);
     }, []),
     onConfigure: setConfigApp,
+    onRequestApp: useCallback((hostname: string, appName?: string) => {
+      setRequestHostname(hostname);
+      setRequestAppName(appName);
+      setRequestOpen(true);
+    }, []),
   });
 
   const sortedApps = useMemo(
     () =>
-      [...apps].sort((a, b) => {
+      [...getApps()].sort((a, b) => {
         const aConnected = (connectionCounts.get(a.id) ?? 0) > 0 ? 1 : 0;
         const bConnected = (connectionCounts.get(b.id) ?? 0) > 0 ? 1 : 0;
         return bConnected - aConnected;
@@ -167,7 +175,12 @@ export const AppsTab = ({
   return (
     <>
       <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
-        <RequestAppSlot />
+        <RequestAppSlot
+          requestOpen={requestOpen}
+          onRequestOpenChange={setRequestOpen}
+          initialName={requestAppName}
+          initialUrl={requestHostname}
+        />
         {sortedApps.map((app) => {
           const count = connectionCounts.get(app.id) ?? 0;
           const isCloudOnly = app.connectionMethod.type === "cloud_only";

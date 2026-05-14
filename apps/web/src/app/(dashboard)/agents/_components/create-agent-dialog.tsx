@@ -17,7 +17,7 @@ import { Label } from "@onecli/ui/components/label";
 import { cn } from "@onecli/ui/lib/utils";
 import { useCopyToClipboard } from "@/hooks/use-copy-to-clipboard";
 import { createAgent } from "@/lib/actions/agents";
-import { validateDisplayName } from "@/lib/validations/display-name";
+import { validateDisplayName } from "@onecli/api/validations/display-name";
 
 interface CreateAgentDialogProps {
   open: boolean;
