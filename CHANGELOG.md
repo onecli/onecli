@@ -1,5 +1,14 @@
 # Changelog
 
+## [1.24.0](https://github.com/onecli/onecli/compare/v1.23.0...v1.24.0) (2026-05-14)
+
+
+### Features
+
+* add app permission definitions for AWS, Cloudflare, Datadog, and Notion ([#270](https://github.com/onecli/onecli/issues/270)) ([b6bd222](https://github.com/onecli/onecli/commit/b6bd2222fc831d51a55ad264940036cbbba33a84))
+* add MongoDB Atlas Administration API integration ([#261](https://github.com/onecli/onecli/issues/261)) ([3cbbc02](https://github.com/onecli/onecli/commit/3cbbc02199e5a92f976d0d36d0aa30c7eeda5586))
+* add MongoDB Atlas, GitHub App integrations, org API keys, and OAuth refactoring ([#267](https://github.com/onecli/onecli/issues/267)) ([22b1611](https://github.com/onecli/onecli/commit/22b1611e9527ce105a903f9860562deeb0ad3dd6))
+
 ## [1.23.0](https://github.com/onecli/onecli/compare/v1.22.0...v1.23.0) (2026-05-11)
 
 
