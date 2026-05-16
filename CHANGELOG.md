@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.25.0](https://github.com/onecli/onecli/compare/v1.24.0...v1.25.0) (2026-05-16)
+
+
+### Features
+
+* add behavioral conditions to policy rules and org/project permission overlap ([#279](https://github.com/onecli/onecli/issues/279)) ([f3854a0](https://github.com/onecli/onecli/commit/f3854a035ac41fddaa6068c769888a63ea1fd241))
+
 ## [1.24.0](https://github.com/onecli/onecli/compare/v1.23.0...v1.24.0) (2026-05-14)
 
 
