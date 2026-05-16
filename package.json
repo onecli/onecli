@@ -1,5 +1,5 @@
 {
-  "name": "onecli-cloud",
+  "name": "onecli",
   "private": true,
   "scripts": {
     "build": "dotenv -e .env -- turbo run build",
