@@ -215,6 +215,7 @@ model PolicyRule {
   rateLimit       Int?          @map("rate_limit") // max requests per window (only for rate_limit action)
   rateLimitWindow String?       @map("rate_limit_window") // "minute" | "hour" | "day"
   metadata        Json?         @map("metadata") // e.g. { source: "app_permission", provider, toolId }
+  conditions      Json?         @map("conditions") // behavioral conditions: [{ target, operator, value, key? }]
   createdAt       DateTime      @default(now()) @map("created_at")
   updatedAt       DateTime      @updatedAt @map("updated_at")
   project         Project?      @relation(fields: [projectId], references: [id])

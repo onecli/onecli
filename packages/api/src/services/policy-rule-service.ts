@@ -1,8 +1,9 @@
-import { db } from "@onecli/db";
+import { db, Prisma } from "@onecli/db";
 import { ServiceError } from "./errors";
 import {
   type CreatePolicyRuleInput,
   type UpdatePolicyRuleInput,
+  type RuleCondition,
 } from "../validations/policy-rule";
 import type { AppTool, AppPermissionLevel } from "../apps/app-permissions";
 
@@ -24,6 +25,7 @@ export const listPolicyRules = async (projectId: string) => {
       rateLimitWindow: true,
       scope: true,
       metadata: true,
+      conditions: true,
       createdAt: true,
     },
     orderBy: { createdAt: "desc" },
@@ -58,6 +60,7 @@ export const createPolicyRule = async (
         input.action === "rate_limit" ? (input.rateLimit ?? null) : null,
       rateLimitWindow:
         input.action === "rate_limit" ? (input.rateLimitWindow ?? null) : null,
+      ...(input.conditions ? { conditions: input.conditions } : {}),
       scope: "project",
       projectId,
     },
@@ -72,6 +75,7 @@ export const createPolicyRule = async (
       agentId: true,
       rateLimit: true,
       rateLimitWindow: true,
+      conditions: true,
       createdAt: true,
     },
   });
@@ -118,6 +122,9 @@ export const updatePolicyRule = async (
   if (input.rateLimit !== undefined) data.rateLimit = input.rateLimit;
   if (input.rateLimitWindow !== undefined)
     data.rateLimitWindow = input.rateLimitWindow;
+  if (input.conditions !== undefined)
+    data.conditions =
+      input.conditions === null ? Prisma.JsonNull : input.conditions;
 
   await db.policyRule.update({
     where: { id: ruleId },
@@ -152,6 +159,7 @@ export const listAppPermissionRules = async (
       id: true,
       action: true,
       metadata: true,
+      conditions: true,
     },
   });
 };
@@ -167,6 +175,7 @@ export const setAppPermissionsService = async (
   provider: string,
   appName: string,
   changes: AppPermissionChange[],
+  conditions?: RuleCondition[],
 ) => {
   const existing = await listAppPermissionRules(projectId, provider);
   const existingByToolId = new Map(
@@ -184,13 +193,15 @@ export const setAppPermissionsService = async (
   const toUpdate: { ruleId: string; action: string }[] = [];
   const toDelete: string[] = [];
 
+  const conditionsProvided = conditions !== undefined;
+
   for (const change of changes) {
     const existingRule = existingByToolId.get(change.toolId);
 
     if (change.permission === "allow") {
       if (existingRule) toDelete.push(existingRule.id);
     } else if (existingRule) {
-      if (existingRule.action !== change.permission) {
+      if (existingRule.action !== change.permission || conditionsProvided) {
         toUpdate.push({ ruleId: existingRule.id, action: change.permission });
       }
     } else {
@@ -208,7 +219,15 @@ export const setAppPermissionsService = async (
     for (const update of toUpdate) {
       await tx.policyRule.update({
         where: { id: update.ruleId },
-        data: { action: update.action },
+        data: {
+          action: update.action,
+          ...(conditionsProvided
+            ? {
+                conditions:
+                  conditions.length > 0 ? conditions : Prisma.JsonNull,
+              }
+            : {}),
+        },
       });
     }
 
@@ -228,6 +247,9 @@ export const setAppPermissionsService = async (
             provider,
             toolId: create.toolId,
           },
+          ...(conditionsProvided && conditions.length > 0
+            ? { conditions }
+            : {}),
         },
       });
     }

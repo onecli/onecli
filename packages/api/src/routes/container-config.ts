@@ -7,6 +7,7 @@ import { loadCaCertificate } from "../lib/gateway-ca";
 import { parseAnthropicMetadata } from "../validations/secret";
 import { DEFAULT_AGENT_NAME } from "../lib/constants";
 import { generateAccessToken } from "../services/agent-service";
+import { getCrypto } from "../providers";
 import { logger } from "../lib/logger";
 
 const CA_CONTAINER_PATH = "/tmp/onecli-gateway-ca.pem";
@@ -115,11 +116,11 @@ export const containerConfigRoutes = () => {
                 type: "anthropic",
                 agentSecrets: { some: { agentId: agent.id } },
               },
-              select: { metadata: true },
+              select: { metadata: true, encryptedValue: true },
             })
           : await db.secret.findFirst({
               where: { projectId: auth.projectId, type: "anthropic" },
-              select: { metadata: true },
+              select: { metadata: true, encryptedValue: true },
             });
 
       const meta = parseAnthropicMetadata(anthropicSecret?.metadata);
@@ -128,6 +129,23 @@ export const containerConfigRoutes = () => {
         meta?.authMode === "oauth"
           ? { CLAUDE_CODE_OAUTH_TOKEN: "placeholder" }
           : { ANTHROPIC_API_KEY: "placeholder" };
+
+      const warnings: string[] = [];
+      if (!anthropicSecret) {
+        warnings.push(
+          "No Anthropic credentials configured — the agent will use its own API key if available. Add one at " +
+            (c.req.header("origin") ?? "") +
+            "/secrets",
+        );
+      } else {
+        try {
+          await getCrypto().decrypt(anthropicSecret.encryptedValue);
+        } catch {
+          warnings.push(
+            "Anthropic credentials exist but cannot be decrypted by the gateway (encryption format mismatch). Re-create the secret to fix this.",
+          );
+        }
+      }
 
       // Fire-and-forget: mark agent as connected
       markAgentConnected(auth.projectId).catch(() => {});
@@ -149,6 +167,7 @@ export const containerConfigRoutes = () => {
         },
         caCertificate,
         caCertificateContainerPath: CA_CONTAINER_PATH,
+        ...(warnings.length > 0 && { warnings }),
       });
     } catch (err) {
       logger.error(

@@ -54,6 +54,7 @@ pub(crate) struct PolicyRuleRow {
     pub action: String,
     pub rate_limit: Option<i32>,
     pub rate_limit_window: Option<String>,
+    pub conditions: Option<serde_json::Value>,
 }
 
 /// A user row from the `users` table.
@@ -212,7 +213,7 @@ pub(crate) async fn find_policy_rules_by_project(
 ) -> Result<Vec<PolicyRuleRow>> {
     sqlx::query_as::<_, PolicyRuleRow>(
         r#"SELECT id, name, host_pattern, path_pattern, method, agent_id,
-                  action, rate_limit, rate_limit_window
+                  action, rate_limit, rate_limit_window, conditions
            FROM policy_rules
            WHERE project_id = $1 AND enabled = true
              AND action IN ('block', 'rate_limit', 'manual_approval')"#,
@@ -230,7 +231,7 @@ pub(crate) async fn find_policy_rules_by_org(
 ) -> Result<Vec<PolicyRuleRow>> {
     sqlx::query_as::<_, PolicyRuleRow>(
         r#"SELECT id, name, host_pattern, path_pattern, method, agent_id,
-                  action, rate_limit, rate_limit_window
+                  action, rate_limit, rate_limit_window, conditions
            FROM policy_rules
            WHERE organization_id = $1 AND scope = 'organization' AND enabled = true
              AND action IN ('block', 'rate_limit', 'manual_approval')"#,

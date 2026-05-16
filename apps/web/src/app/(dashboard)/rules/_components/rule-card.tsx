@@ -134,6 +134,19 @@ export const RuleCard = ({
                   {rateLimitLabel}
                 </Badge>
               )}
+              {(() => {
+                const cond = Array.isArray(rule.conditions)
+                  ? (rule.conditions[0] as { value?: string } | undefined)
+                  : undefined;
+                return cond?.value ? (
+                  <Badge
+                    variant="outline"
+                    className="text-[10px] font-normal text-muted-foreground"
+                  >
+                    when body contains &ldquo;{cond.value}&rdquo;
+                  </Badge>
+                ) : null;
+              })()}
               {badge && (
                 <Badge variant="outline" className="text-[10px]">
                   {badge}

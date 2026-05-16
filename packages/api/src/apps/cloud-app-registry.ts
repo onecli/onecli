@@ -9,6 +9,7 @@ export const cloudApps: AppDefinition[] = [
     description: "Monitoring, APM, logs, and infrastructure metrics.",
     connectionMethod: { type: "cloud_only" },
     available: false,
+    teamOnly: true,
   },
   {
     id: "outlook-mail",
@@ -17,6 +18,7 @@ export const cloudApps: AppDefinition[] = [
     description: "Read, compose, and send emails via Microsoft Outlook.",
     connectionMethod: { type: "cloud_only" },
     available: false,
+    teamOnly: true,
   },
   {
     id: "outlook-calendar",
@@ -25,6 +27,7 @@ export const cloudApps: AppDefinition[] = [
     description: "View and manage calendar events in Microsoft Outlook.",
     connectionMethod: { type: "cloud_only" },
     available: false,
+    teamOnly: true,
   },
   {
     id: "microsoft-word",
@@ -34,5 +37,27 @@ export const cloudApps: AppDefinition[] = [
       "Read and edit Word documents stored in OneDrive and SharePoint.",
     connectionMethod: { type: "cloud_only" },
     available: false,
+    teamOnly: true,
+  },
+  {
+    id: "aws-role",
+    name: "AWS Role",
+    icon: "/icons/aws.svg",
+    darkIcon: "/icons/aws-light.svg",
+    description:
+      "Connect via IAM AssumeRole with temporary credentials and per-agent permissions.",
+    connectionMethod: { type: "cloud_only" },
+    available: false,
+    teamOnly: true,
+  },
+  {
+    id: "affinity",
+    name: "Affinity",
+    icon: "/icons/affinity.svg",
+    description:
+      "Manage relationships, deals, and interactions in Affinity CRM.",
+    connectionMethod: { type: "cloud_only" },
+    available: false,
+    teamOnly: true,
   },
 ];

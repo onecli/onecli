@@ -100,7 +100,8 @@ pub(super) async fn handle_websocket(
         .unwrap_or_else(|| "/".to_string());
 
     let agent_token = proxy_ctx.agent_token.as_deref().unwrap_or("");
-    let decision = policy::evaluate("GET", &path, &rules.policy_rules, agent_token, cache).await;
+    let decision =
+        policy::evaluate("GET", &path, None, &rules.policy_rules, agent_token, cache).await;
 
     match &decision {
         PolicyDecision::Blocked { rule_name } => {

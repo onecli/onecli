@@ -12,10 +12,9 @@ const exportSchema = z.object({
 
 export const migrateRoutes = () => {
   const app = new Hono<ApiEnv>();
-  app.use("*", authMiddleware);
 
   // POST /migrate/export
-  app.post("/export", async (c) => {
+  app.post("/export", authMiddleware, async (c) => {
     if (IS_CLOUD) {
       return c.json({ error: "Not found" }, 404);
     }

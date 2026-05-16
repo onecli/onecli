@@ -16,15 +16,22 @@ import type {
   AppToolGroup,
   AppPermissionLevel,
 } from "@onecli/api/apps/app-permissions";
+import type { RuleCondition } from "@onecli/api/validations/policy-rule";
+import type { AppPermissionState } from "@/lib/actions/rules";
+import {
+  isToolFullyLocked,
+  resolveToolPermission,
+} from "./resolve-tool-permission";
 import { AppPermissionRow } from "./app-permission-row";
 
 interface AppPermissionGroupProps {
   group: AppToolGroup;
-  permissionStates: Record<string, AppPermissionLevel>;
+  permissionStates: Record<string, AppPermissionState>;
   onPermissionChange: (toolId: string, permission: AppPermissionLevel) => void;
   onGroupChange: (permission: AppPermissionLevel) => void;
   disabled?: boolean;
   orgStates?: Record<string, AppPermissionLevel>;
+  orgConditions?: Record<string, unknown[]>;
 }
 
 const groupLabels: Record<string, string> = {
@@ -40,9 +47,9 @@ const permissionLabels: Record<string, string> = {
 
 const getGroupPermission = (
   tools: AppToolGroup["tools"],
-  states: Record<string, AppPermissionLevel>,
+  states: Record<string, AppPermissionState>,
 ): AppPermissionLevel | "custom" => {
-  const permissions = tools.map((t) => states[t.id] ?? "allow");
+  const permissions = tools.map((t) => states[t.id]?.permission ?? "allow");
   const first = permissions[0];
   if (first === undefined) return "allow";
   return permissions.every((p) => p === first) ? first : "custom";
@@ -55,11 +62,28 @@ export const AppPermissionGroup = ({
   onGroupChange,
   disabled,
   orgStates,
+  orgConditions,
 }: AppPermissionGroupProps) => {
   const groupPerm = getGroupPermission(group.tools, permissionStates);
+
+  const isGroupOptionDisabled = (opt: AppPermissionLevel) =>
+    group.tools.some((t) =>
+      resolveToolPermission(
+        permissionStates[t.id]?.permission ?? "allow",
+        [],
+        orgStates?.[t.id],
+        (orgConditions?.[t.id] ?? []) as RuleCondition[],
+      ).isOptionDisabled(opt),
+    );
+
   const allOrgEnforced =
     orgStates != null &&
-    group.tools.every((t) => orgStates[t.id] && orgStates[t.id] !== "allow");
+    group.tools.every((t) =>
+      isToolFullyLocked(
+        orgStates[t.id],
+        (orgConditions?.[t.id] ?? []) as RuleCondition[],
+      ),
+    );
 
   return (
     <AccordionItem value={group.category} className="border-b-0">
@@ -93,7 +117,11 @@ export const AppPermissionGroup = ({
               </SelectItem>
             )}
             {Object.entries(permissionLabels).map(([value, label]) => (
-              <SelectItem key={value} value={value}>
+              <SelectItem
+                key={value}
+                value={value}
+                disabled={isGroupOptionDisabled(value as AppPermissionLevel)}
+              >
                 {label}
               </SelectItem>
             ))}
@@ -102,16 +130,26 @@ export const AppPermissionGroup = ({
       </div>
       <AccordionContent className="pb-2">
         <div className="ml-6">
-          {group.tools.map((tool) => (
-            <AppPermissionRow
-              key={tool.id}
-              tool={tool}
-              permission={permissionStates[tool.id] ?? "allow"}
-              onPermissionChange={(perm) => onPermissionChange(tool.id, perm)}
-              disabled={disabled}
-              orgPermission={orgStates?.[tool.id]}
-            />
-          ))}
+          {group.tools.map((tool) => {
+            const state = permissionStates[tool.id];
+            const permission = state?.permission ?? "allow";
+            const projectConditions = (state?.conditions ??
+              []) as RuleCondition[];
+            const toolOrgConditions = (orgConditions?.[tool.id] ??
+              []) as RuleCondition[];
+            return (
+              <AppPermissionRow
+                key={tool.id}
+                tool={tool}
+                permission={permission}
+                conditions={projectConditions}
+                onPermissionChange={(perm) => onPermissionChange(tool.id, perm)}
+                disabled={disabled}
+                orgPermission={orgStates?.[tool.id]}
+                orgConditions={toolOrgConditions}
+              />
+            );
+          })}
         </div>
       </AccordionContent>
     </AccordionItem>

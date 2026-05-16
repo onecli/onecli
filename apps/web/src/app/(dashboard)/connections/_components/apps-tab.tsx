@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useRouter, usePathname } from "next/navigation";
 import { withProjectPrefix } from "@/lib/navigation";
-import { MoreHorizontal } from "lucide-react";
+import { ChevronRight } from "lucide-react";
 import { Button } from "@onecli/ui/components/button";
 import { Skeleton } from "@onecli/ui/components/skeleton";
 import { cn } from "@onecli/ui/lib/utils";
@@ -90,10 +90,20 @@ export const AppsTab = ({
 
   const invalidateCache = useInvalidateGatewayCache();
 
-  const handleConnected = useCallback(() => {
-    fetchConnections();
-    invalidateCache();
-  }, [fetchConnections, invalidateCache]);
+  const handleConnected = useCallback(
+    ({ provider }: { provider?: string }) => {
+      fetchConnections();
+      invalidateCache();
+      if (provider) {
+        router.push(
+          basePath
+            ? `${basePath}/apps/${provider}`
+            : withProjectPrefix(pathname, `/connections/apps/${provider}`),
+        );
+      }
+    },
+    [fetchConnections, invalidateCache, router, basePath, pathname],
+  );
 
   useAppMessages({ onConnected: handleConnected, onConfigure: router.push });
 
@@ -181,37 +191,47 @@ export const AppsTab = ({
           initialName={requestAppName}
           initialUrl={requestHostname}
         />
-        {sortedApps.map((app) => {
-          const count = connectionCounts.get(app.id) ?? 0;
-          const isCloudOnly = app.connectionMethod.type === "cloud_only";
-          const isLocked =
-            isCloudOnly || (app.pro && plan !== null && plan !== "team");
-          return (
-            <AppRow
-              key={app.id}
-              name={app.name}
-              icon={app.icon}
-              darkIcon={app.darkIcon}
-              connectionCount={count}
-              loading={loading}
-              cloudOnly={isLocked}
-              onConnect={(e) => handleConnect(e, app)}
-              onClick={
-                isLocked
-                  ? () => setProApp(app)
-                  : () =>
-                      router.push(
-                        basePath
-                          ? `${basePath}/apps/${app.id}`
-                          : withProjectPrefix(
-                              pathname,
-                              `/connections/apps/${app.id}`,
-                            ),
-                      )
-              }
-            />
-          );
-        })}
+        {loading
+          ? Array.from({ length: 12 }, (_, i) => (
+              <div
+                key={i}
+                className="flex items-center justify-between rounded-xl border bg-card px-4 py-3"
+              >
+                <div className="flex items-center gap-3">
+                  <Skeleton className="size-9 rounded-lg" />
+                  <Skeleton className="h-4 w-24 rounded" />
+                </div>
+                <Skeleton className="h-7 w-16 rounded-md" />
+              </div>
+            ))
+          : sortedApps.map((app) => {
+              const count = connectionCounts.get(app.id) ?? 0;
+              const isLocked = app.teamOnly === true && plan !== "team";
+              return (
+                <AppRow
+                  key={app.id}
+                  name={app.name}
+                  icon={app.icon}
+                  darkIcon={app.darkIcon}
+                  connectionCount={count}
+                  cloudOnly={isLocked}
+                  onConnect={(e) => handleConnect(e, app)}
+                  onClick={
+                    isLocked
+                      ? () => setProApp(app)
+                      : () =>
+                          router.push(
+                            basePath
+                              ? `${basePath}/apps/${app.id}`
+                              : withProjectPrefix(
+                                  pathname,
+                                  `/connections/apps/${app.id}`,
+                                ),
+                          )
+                  }
+                />
+              );
+            })}
       </div>
 
       {connectApp && (
@@ -279,7 +299,6 @@ interface AppRowProps {
   icon: string;
   darkIcon?: string;
   connectionCount: number;
-  loading: boolean;
   cloudOnly?: boolean;
   onConnect: (e: React.MouseEvent) => void;
   onClick: () => void;
@@ -290,7 +309,6 @@ const AppRow = ({
   icon,
   darkIcon,
   connectionCount,
-  loading,
   cloudOnly,
   onConnect,
   onClick,
@@ -299,69 +317,78 @@ const AppRow = ({
   return (
     <div
       className={cn(
-        "group flex items-center justify-between rounded-xl border bg-card px-4 py-3 transition-colors cursor-pointer hover:bg-accent/50",
+        "group flex items-center gap-3 rounded-xl border bg-card px-4 py-3.5 transition-colors cursor-pointer hover:bg-accent/50 has-[button:hover]:bg-card!",
         connected && "border-brand/30",
       )}
       onClick={onClick}
     >
-      <div className="flex items-center gap-3">
+      <div className="flex flex-1 items-center gap-3 min-w-0">
         <div className="flex size-9 shrink-0 items-center justify-center rounded-lg bg-muted">
           <AppIcon icon={icon} darkIcon={darkIcon} name={name} />
         </div>
-        <span className="text-sm font-medium group-hover:underline group-has-[button:hover]:no-underline">
-          {name}
-        </span>
+        <div className="min-w-0">
+          <span className="text-sm font-medium">{name}</span>
+          {!cloudOnly && (
+            <p className="text-[11px] text-muted-foreground group-hover:underline group-hover:text-foreground group-has-[button:hover]:no-underline group-has-[button:hover]:text-muted-foreground transition-colors">
+              View details
+            </p>
+          )}
+        </div>
       </div>
 
-      <div className="flex items-center gap-2">
-        {cloudOnly ? (
-          <span className="inline-flex items-center gap-1.5 rounded-full border border-brand/20 bg-brand/5 px-2.5 py-0.5">
-            <svg
-              width="11"
-              height="9"
-              viewBox="0 0 44 36"
-              fill="none"
-              className="shrink-0 -mt-px"
-            >
-              <path
-                d="M2 2L16 18L2 34"
-                stroke="currentColor"
-                strokeWidth="5"
-                strokeLinecap="round"
-                strokeLinejoin="round"
-                className="text-brand"
-              />
-              <path
-                d="M22 2L36 18L22 34"
-                stroke="currentColor"
-                strokeWidth="5"
-                strokeLinecap="round"
-                strokeLinejoin="round"
-                className="text-brand"
-              />
-            </svg>
-            <span className="text-[11px] font-semibold tracking-wide text-brand">
-              Pro
-            </span>
+      {cloudOnly ? (
+        <span className="inline-flex items-center gap-1.5 rounded-full border border-brand/20 bg-brand/5 px-2.5 py-0.5">
+          <svg
+            width="11"
+            height="9"
+            viewBox="0 0 44 36"
+            fill="none"
+            className="shrink-0 -mt-px"
+          >
+            <path
+              d="M2 2L16 18L2 34"
+              stroke="currentColor"
+              strokeWidth="5"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              className="text-brand"
+            />
+            <path
+              d="M22 2L36 18L22 34"
+              stroke="currentColor"
+              strokeWidth="5"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              className="text-brand"
+            />
+          </svg>
+          <span className="text-[11px] font-semibold tracking-wide text-brand">
+            Pro
           </span>
-        ) : loading ? (
-          <Skeleton className="h-6 w-16 rounded-md" />
-        ) : connected ? (
-          <div className="flex items-center gap-1.5">
-            <span className="size-2 rounded-full bg-brand" />
-            <span className="text-xs font-medium text-brand">
-              Connected{connectionCount > 1 ? ` (${connectionCount})` : ""}
-            </span>
+        </span>
+      ) : (
+        <div className="flex items-center gap-2 shrink-0">
+          <ChevronRight className="size-4 text-muted-foreground transition-all group-hover:text-foreground group-hover:translate-x-0.5 group-has-[button:hover]:text-muted-foreground group-has-[button:hover]:translate-x-0" />
+          <div className="border-l pl-2 min-w-20 flex justify-center">
+            {connected ? (
+              <div className="flex flex-col items-center">
+                <span className="text-xs font-medium text-brand">
+                  Connected
+                </span>
+                {connectionCount > 1 && (
+                  <span className="text-[11px] text-muted-foreground">
+                    {connectionCount} accounts
+                  </span>
+                )}
+              </div>
+            ) : (
+              <Button size="xs" onClick={onConnect}>
+                Connect
+              </Button>
+            )}
           </div>
-        ) : (
-          <Button size="xs" onClick={onConnect}>
-            Connect
-          </Button>
-        )}
-        {cloudOnly ? null : (
-          <MoreHorizontal className="size-4 text-muted-foreground transition-colors group-hover:text-foreground" />
-        )}
-      </div>
+        </div>
+      )}
     </div>
   );
 };

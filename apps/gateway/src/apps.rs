@@ -1764,11 +1764,77 @@ mod tests {
         assert!(providers_for_host("atlas.mongodb.com").is_empty());
     }
 
+    // ── Affinity ──────────────────────────────────────────────────────
+
     // ── Cloud-only providers ─────────────────────────────────────────
 
     #[cfg(feature = "cloud")]
     mod cloud_providers {
         use super::*;
+
+        #[test]
+        fn providers_for_affinity_api_host() {
+            assert_eq!(providers_for_host("api.affinity.co"), vec!["affinity"]);
+        }
+
+        #[test]
+        fn providers_for_affinity_mcp_host() {
+            assert_eq!(providers_for_host("mcp.affinity.co"), vec!["affinity"]);
+        }
+
+        #[test]
+        fn provider_for_host_affinity_api() {
+            let result = provider_for_host("api.affinity.co");
+            assert_eq!(result, Some(("affinity", "Affinity")));
+        }
+
+        #[test]
+        fn provider_for_host_affinity_mcp() {
+            let result = provider_for_host("mcp.affinity.co");
+            assert_eq!(result, Some(("affinity", "Affinity")));
+        }
+
+        #[test]
+        fn affinity_api_uses_bearer() {
+            let injections = build_app_injections("affinity", "api.affinity.co", "test_api_key");
+            assert_eq!(injections.len(), 1);
+            assert_eq!(
+                injections[0],
+                Injection::SetHeader {
+                    name: "authorization".to_string(),
+                    value: "Bearer test_api_key".to_string(),
+                }
+            );
+        }
+
+        #[test]
+        fn affinity_mcp_uses_bearer() {
+            let injections = build_app_injections("affinity", "mcp.affinity.co", "test_api_key");
+            assert_eq!(injections.len(), 1);
+            assert_eq!(
+                injections[0],
+                Injection::SetHeader {
+                    name: "authorization".to_string(),
+                    value: "Bearer test_api_key".to_string(),
+                }
+            );
+        }
+
+        #[test]
+        fn affinity_has_no_refresh_config() {
+            assert!(refresh_config("affinity").is_none());
+        }
+
+        #[test]
+        fn affinity_needs_access_token() {
+            assert!(needs_access_token("affinity"));
+        }
+
+        #[test]
+        fn affinity_no_false_positives() {
+            assert!(providers_for_host("affinity.co").is_empty());
+            assert!(providers_for_host("www.affinity.co").is_empty());
+        }
 
         #[test]
         fn providers_for_datadog_hosts() {

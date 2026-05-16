@@ -54,6 +54,7 @@ interface AppDetailProps {
   backPath?: string;
   permissionActions?: React.ComponentProps<typeof AppPermissions>["actions"];
   orgPermissionStates?: Record<string, AppPermissionLevel>;
+  orgConditions?: Record<string, unknown[]>;
 }
 
 interface ConnectionData {
@@ -78,6 +79,7 @@ export const AppDetail = ({
   backPath,
   permissionActions,
   orgPermissionStates,
+  orgConditions,
 }: AppDetailProps) => {
   const pathname = usePathname();
   const [connections, setConnections] = useState<ConnectionData[]>([]);
@@ -229,50 +231,50 @@ export const AppDetail = ({
         <div className="flex items-center justify-center py-12">
           <Loader2 className="size-5 animate-spin text-muted-foreground" />
         </div>
-      ) : isConnected ? (
+      ) : (
         <div className="space-y-6">
-          {/* Connected accounts — compact section */}
-          <div className="space-y-3">
-            <div className="flex items-start justify-between">
-              <h3 className="text-sm font-medium">Connected accounts</h3>
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={handleConnect}
-                className="shrink-0"
-              >
-                Connect
-              </Button>
-            </div>
-            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2">
-              {connections.map((conn) => (
-                <ConnectionAccountCard
-                  key={conn.id}
-                  connection={conn}
-                  appName={app.name}
-                  onReconnect={(id) => openConnectPopup(id, popupOpts)}
-                  onDisconnected={fetchConnections}
-                />
-              ))}
-              {inheritedConnections.map((conn) => (
-                <Card
-                  key={conn.id}
-                  className="flex-row items-center justify-between gap-3 px-4 py-3 opacity-60 border-dashed"
+          {isConnected && (
+            <div className="space-y-3">
+              <div className="flex items-start justify-between">
+                <h3 className="text-sm font-medium">Connected accounts</h3>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={handleConnect}
+                  className="shrink-0"
                 >
-                  <div className="min-w-0">
-                    <p className="text-sm font-medium truncate">
-                      {conn.label ?? "Connected account"}
-                    </p>
-                    <p className="text-xs text-muted-foreground mt-0.5">
-                      Organization
-                    </p>
-                  </div>
-                </Card>
-              ))}
+                  Connect
+                </Button>
+              </div>
+              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2">
+                {connections.map((conn) => (
+                  <ConnectionAccountCard
+                    key={conn.id}
+                    connection={conn}
+                    appName={app.name}
+                    onReconnect={(id) => openConnectPopup(id, popupOpts)}
+                    onDisconnected={fetchConnections}
+                  />
+                ))}
+                {inheritedConnections.map((conn) => (
+                  <Card
+                    key={conn.id}
+                    className="flex-row items-center justify-between gap-3 px-4 py-3 opacity-60 border-dashed"
+                  >
+                    <div className="min-w-0">
+                      <p className="text-sm font-medium truncate">
+                        {conn.label ?? "Connected account"}
+                      </p>
+                      <p className="text-xs text-muted-foreground mt-0.5">
+                        Organization
+                      </p>
+                    </div>
+                  </Card>
+                ))}
+              </div>
             </div>
-          </div>
+          )}
 
-          {/* Permissions — full width */}
           {permissionDefinition ? (
             <AppPermissions
               provider={app.id}
@@ -280,8 +282,9 @@ export const AppDetail = ({
               groups={permissionDefinition.groups}
               actions={permissionActions}
               orgStates={orgPermissionStates}
+              orgConditions={orgConditions}
             />
-          ) : app.permissions.length > 0 ? (
+          ) : isConnected && app.permissions.length > 0 ? (
             <PermissionsList
               permissions={app.permissions}
               grantedScopes={[
@@ -294,7 +297,7 @@ export const AppDetail = ({
             />
           ) : null}
         </div>
-      ) : null}
+      )}
 
       {configurable && (
         <AppConfigForm

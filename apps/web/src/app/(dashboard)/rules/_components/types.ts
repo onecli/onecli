@@ -1,7 +1,9 @@
 import type {
   CreatePolicyRuleInput,
   UpdatePolicyRuleInput,
+  RuleCondition,
 } from "@onecli/api/validations/policy-rule";
+import type { AppPermissionLevel } from "@onecli/api/apps/app-permissions";
 
 export interface PolicyRuleItem {
   id: string;
@@ -16,6 +18,7 @@ export interface PolicyRuleItem {
   rateLimitWindow: string | null;
   scope?: string;
   metadata?: unknown;
+  conditions?: unknown;
   createdAt: Date;
 }
 
@@ -28,4 +31,9 @@ export interface RuleActions {
   createRule: (input: CreatePolicyRuleInput) => Promise<unknown>;
   updateRule: (ruleId: string, input: UpdatePolicyRuleInput) => Promise<void>;
   deleteRule: (ruleId: string) => Promise<void>;
+  setAppPermissions?: (
+    provider: string,
+    changes: { toolId: string; permission: AppPermissionLevel }[],
+    conditions?: RuleCondition[],
+  ) => Promise<void>;
 }

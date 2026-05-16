@@ -5,12 +5,12 @@ const githubGroups: AppToolGroup[] = [
     category: "read",
     tools: [
       {
-        id: "list_repos",
-        name: "List repositories",
-        description: "List repositories for the authenticated user",
-        hostPattern: "api.github.com",
-        pathPattern: "/user/repos",
-        method: "GET",
+        id: "git_clone",
+        name: "Git clone / pull",
+        description: "Clone or pull repository contents via git over HTTPS",
+        hostPattern: "github.com",
+        pathPattern: "/*/*/git-upload-pack",
+        method: "POST",
       },
       {
         id: "get_repo",
@@ -21,11 +21,11 @@ const githubGroups: AppToolGroup[] = [
         method: "GET",
       },
       {
-        id: "list_issues",
-        name: "List issues",
-        description: "List issues in a repository",
+        id: "list_repos",
+        name: "List repositories",
+        description: "List repositories for the authenticated user",
         hostPattern: "api.github.com",
-        pathPattern: "/repos/*/issues",
+        pathPattern: "/user/repos",
         method: "GET",
       },
       {
@@ -34,6 +34,14 @@ const githubGroups: AppToolGroup[] = [
         description: "List pull requests in a repository",
         hostPattern: "api.github.com",
         pathPattern: "/repos/*/pulls",
+        method: "GET",
+      },
+      {
+        id: "list_issues",
+        name: "List issues",
+        description: "List issues in a repository",
+        hostPattern: "api.github.com",
+        pathPattern: "/repos/*/issues",
         method: "GET",
       },
       {
@@ -51,20 +59,11 @@ const githubGroups: AppToolGroup[] = [
     category: "write",
     tools: [
       {
-        id: "graphql_mutation",
-        name: "GraphQL API (mutations)",
-        description:
-          "Mutate data via GitHub GraphQL API. Used by the gh CLI for creating issues, PRs, and comments.",
-        hostPattern: "api.github.com",
-        pathPattern: "/graphql",
-        method: "POST",
-      },
-      {
-        id: "create_issue",
-        name: "Create issue",
-        description: "Create a new issue in a repository",
-        hostPattern: "api.github.com",
-        pathPattern: "/repos/*/issues",
+        id: "git_push",
+        name: "Git push",
+        description: "Push commits to a repository via git over HTTPS",
+        hostPattern: "github.com",
+        pathPattern: "/*/*/git-receive-pack",
         method: "POST",
       },
       {
@@ -81,6 +80,23 @@ const githubGroups: AppToolGroup[] = [
         description: "Comment on an issue or pull request",
         hostPattern: "api.github.com",
         pathPattern: "/repos/*/issues/*/comments",
+        method: "POST",
+      },
+      {
+        id: "create_issue",
+        name: "Create issue",
+        description: "Create a new issue in a repository",
+        hostPattern: "api.github.com",
+        pathPattern: "/repos/*/issues",
+        method: "POST",
+      },
+      {
+        id: "graphql_mutation",
+        name: "GraphQL API (mutations)",
+        description:
+          "Mutate data via GitHub GraphQL API. Used by the gh CLI for creating issues, PRs, and comments.",
+        hostPattern: "api.github.com",
+        pathPattern: "/graphql",
         method: "POST",
       },
       {

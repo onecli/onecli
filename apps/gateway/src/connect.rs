@@ -234,11 +234,18 @@ impl PolicyEngine {
 
         let mut rules = Vec::with_capacity(matching.len());
         for secret in &matching {
-            let decrypted = self
-                .crypto
-                .decrypt(&secret.encrypted_value)
-                .await
-                .map_err(decrypt_err)?;
+            let decrypted = match self.crypto.decrypt(&secret.encrypted_value).await {
+                Ok(v) => v,
+                Err(e) => {
+                    warn!(
+                        host_pattern = %secret.host_pattern,
+                        secret_type = %secret.type_,
+                        error = %e,
+                        "skipping secret: decryption failed (wrong key or format mismatch)"
+                    );
+                    continue;
+                }
+            };
 
             let injections =
                 build_injections(&secret.type_, &decrypted, secret.injection_config.as_ref());
@@ -443,11 +450,18 @@ impl PolicyEngine {
             return Ok(AppConnectionResult::NoConnections);
         };
 
-        let decrypted_json = self
-            .crypto
-            .decrypt(encrypted_creds)
-            .await
-            .map_err(decrypt_err)?;
+        let decrypted_json = match self.crypto.decrypt(encrypted_creds).await {
+            Ok(v) => v,
+            Err(e) => {
+                warn!(
+                    connection_id = %conn.id,
+                    provider = %conn.provider,
+                    error = %e,
+                    "app connection decrypt failed (wrong key or format mismatch)"
+                );
+                return Ok(AppConnectionResult::NoConnections);
+            }
+        };
 
         let needs_token = apps::needs_access_token(&conn.provider);
         let (token, expires_at) = if needs_token {
@@ -665,6 +679,7 @@ impl PolicyEngine {
                     path_pattern: r.path_pattern.unwrap_or_else(|| "*".to_string()),
                     method: r.method,
                     action,
+                    conditions_raw: r.conditions,
                 })
             })
             .collect();
@@ -896,10 +911,6 @@ impl PolicyEngine {
 
 fn db_err(e: anyhow::Error) -> ConnectError {
     ConnectError::Internal(format!("db error: {e:#}"))
-}
-
-fn decrypt_err(e: anyhow::Error) -> ConnectError {
-    ConnectError::Internal(format!("decrypt error: {e:#}"))
 }
 
 // ── Cached resolution ───────────────────────────────────────────────────

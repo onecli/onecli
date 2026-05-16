@@ -6,6 +6,7 @@ import { usePathname } from "next/navigation";
 import { ArrowRight } from "lucide-react";
 import {
   Card,
+  CardAction,
   CardContent,
   CardHeader,
   CardTitle,
@@ -39,20 +40,20 @@ export const RecentActivityCard = () => {
 
   return (
     <Card>
-      <CardHeader className="flex-row items-center justify-between">
-        <div>
-          <CardTitle>Recent Activity</CardTitle>
-          <p className="text-muted-foreground text-sm">
-            Latest requests from your gateway.
-          </p>
-        </div>
-        <Link
-          href={activityUrl}
-          className="text-muted-foreground hover:text-foreground group flex items-center gap-1 text-sm transition-colors"
-        >
-          View all
-          <ArrowRight className="size-3.5 transition-transform group-hover:translate-x-0.5" />
-        </Link>
+      <CardHeader>
+        <CardTitle>Recent Activity</CardTitle>
+        <p className="text-muted-foreground text-sm">
+          Latest requests from your gateway.
+        </p>
+        <CardAction>
+          <Link
+            href={activityUrl}
+            className="text-muted-foreground hover:text-foreground group flex items-center gap-1 text-sm transition-colors"
+          >
+            View all
+            <ArrowRight className="size-3.5 transition-transform group-hover:translate-x-0.5" />
+          </Link>
+        </CardAction>
       </CardHeader>
       <CardContent>
         {loading ? (
@@ -98,13 +99,14 @@ export const RecentActivityCard = () => {
                     {log.path || "/"}
                   </span>
                 </div>
-                <div className="flex items-center gap-2 border-l pl-3 shrink-0">
+                <div className="flex items-center border-l pl-3 shrink-0">
                   <StatusBadge
                     status={log.status}
                     blocked={isBlockedRequest(log)}
                     rateLimited={isRateLimitedRequest(log)}
                   />
-                  <span className="text-muted-foreground font-mono text-xs tabular-nums">
+                  <span className="text-muted-foreground mx-1.5">·</span>
+                  <span className="text-muted-foreground font-mono text-xs tabular-nums w-14 text-right">
                     {log.latencyMs}ms
                   </span>
                 </div>

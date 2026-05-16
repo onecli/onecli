@@ -10,6 +10,8 @@ import { RecentActivityCard } from "./recent-activity-card";
 export const OverviewContent = () => {
   const [gatewayCounts, setGatewayCounts] = useState({
     agents: 0,
+    apps: 0,
+    llms: 0,
     secrets: 0,
   });
   const [loading, setLoading] = useState(true);
@@ -30,6 +32,8 @@ export const OverviewContent = () => {
       <ApiKeyCard />
       <StatsCards
         agentCount={gatewayCounts.agents}
+        appCount={gatewayCounts.apps}
+        llmCount={gatewayCounts.llms}
         secretCount={gatewayCounts.secrets}
         loading={loading}
       />

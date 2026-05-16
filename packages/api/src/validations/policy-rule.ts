@@ -1,5 +1,14 @@
 import { z } from "zod";
 
+export const ruleConditionSchema = z.object({
+  target: z.enum(["body"]),
+  operator: z.enum(["contains"]),
+  value: z.string().min(1).max(1000),
+  key: z.string().max(500).optional(),
+});
+
+export type RuleCondition = z.infer<typeof ruleConditionSchema>;
+
 export const createPolicyRuleSchema = z
   .object({
     name: z.string().trim().min(1).max(255),
@@ -11,6 +20,7 @@ export const createPolicyRuleSchema = z
     agentId: z.string().optional(),
     rateLimit: z.number().int().min(1).max(1_000_000).optional(),
     rateLimitWindow: z.enum(["minute", "hour", "day"]).optional(),
+    conditions: z.array(ruleConditionSchema).max(10).optional(),
   })
   .refine(
     (data) => {
@@ -43,6 +53,7 @@ export const updatePolicyRuleSchema = z
     agentId: z.string().nullable().optional(),
     rateLimit: z.number().int().min(1).max(1_000_000).nullable().optional(),
     rateLimitWindow: z.enum(["minute", "hour", "day"]).nullable().optional(),
+    conditions: z.array(ruleConditionSchema).max(10).nullable().optional(),
   })
   .refine((data) => Object.keys(data).length > 0, {
     message: "At least one field must be provided",

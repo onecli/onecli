@@ -33,6 +33,13 @@ mod cloud_apps;
 mod connect;
 
 #[cfg(not(feature = "cloud"))]
+mod condition_match;
+
+#[cfg(feature = "cloud")]
+#[path = "cloud/condition_match.rs"]
+mod condition_match;
+
+#[cfg(not(feature = "cloud"))]
 mod crypto;
 
 #[cfg(feature = "cloud")]

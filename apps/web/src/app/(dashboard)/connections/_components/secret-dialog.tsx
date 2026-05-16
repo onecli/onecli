@@ -323,9 +323,13 @@ export const SecretDialog = ({
       onSaved();
       onOpenChange(false);
       invalidateCache();
-    } catch {
+    } catch (err) {
       toast.error(
-        isEdit ? "Failed to update secret" : "Failed to create secret",
+        err instanceof Error
+          ? err.message
+          : isEdit
+            ? "Failed to update secret"
+            : "Failed to create secret",
       );
     } finally {
       setSaving(false);

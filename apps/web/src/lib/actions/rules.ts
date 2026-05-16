@@ -21,6 +21,7 @@ import {
   getAppPermissionDefinition,
   type AppPermissionLevel,
 } from "@onecli/api/apps/app-permissions";
+import type { RuleCondition } from "@onecli/api/validations/policy-rule";
 
 export const getRules = async () => {
   const { projectId } = await resolveUser();
@@ -75,18 +76,25 @@ export const deleteRule = async (ruleId: string): Promise<void> => {
   );
 };
 
+export type AppPermissionState = {
+  permission: AppPermissionLevel;
+  conditions: unknown[];
+};
+
 export const getAppPermissionStates = async (
   provider: string,
-): Promise<Record<string, AppPermissionLevel>> => {
+): Promise<Record<string, AppPermissionState>> => {
   const { projectId } = await resolveUser();
   const rules = await listAppPermissionRules(projectId, provider);
 
-  const states: Record<string, AppPermissionLevel> = {};
+  const states: Record<string, AppPermissionState> = {};
   for (const rule of rules) {
     const meta = rule.metadata as { toolId?: string } | null;
     if (meta?.toolId) {
-      states[meta.toolId] =
-        rule.action === "block" ? "block" : "manual_approval";
+      states[meta.toolId] = {
+        permission: rule.action === "block" ? "block" : "manual_approval",
+        conditions: Array.isArray(rule.conditions) ? rule.conditions : [],
+      };
     }
   }
   return states;
@@ -95,6 +103,7 @@ export const getAppPermissionStates = async (
 export const setAppPermissions = async (
   provider: string,
   changes: { toolId: string; permission: AppPermissionLevel }[],
+  conditions?: RuleCondition[],
 ): Promise<void> => {
   const { userId, userEmail, projectId } = await resolveUser();
   const def = getAppPermissionDefinition(provider);
@@ -115,7 +124,13 @@ export const setAppPermissions = async (
 
   await withAudit(
     () =>
-      setAppPermissionsService(projectId, provider, appName, resolvedChanges),
+      setAppPermissionsService(
+        projectId,
+        provider,
+        appName,
+        resolvedChanges,
+        conditions,
+      ),
     (result) => ({
       projectId,
       userId,

@@ -3,27 +3,41 @@
 import { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { AlertTriangle, Loader2 } from "lucide-react";
+import { AlertTriangle, Loader2, Settings2 } from "lucide-react";
 import { toast } from "sonner";
 import { useInvalidateGatewayCache } from "@/hooks/use-invalidate-cache";
 import { withProjectPrefix } from "@/lib/navigation";
+import { Button } from "@onecli/ui/components/button";
 import { Accordion } from "@onecli/ui/components/accordion";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@onecli/ui/components/dialog";
 import type {
   AppToolGroup,
   AppPermissionLevel,
 } from "@onecli/api/apps/app-permissions";
+import type { RuleCondition } from "@onecli/api/validations/policy-rule";
 import {
   getAppPermissionStates,
   setAppPermissions,
   getOverlappingRuleCountForApp,
+  type AppPermissionState,
 } from "@/lib/actions/rules";
+import { ConditionBuilder } from "@/lib/components/condition-builder";
+import { isToolFullyLocked as checkToolFullyLocked } from "./resolve-tool-permission";
 import { AppPermissionGroup } from "./app-permission-group";
 
 interface AppPermissionActions {
-  getStates: (provider: string) => Promise<Record<string, AppPermissionLevel>>;
+  getStates: (provider: string) => Promise<Record<string, AppPermissionState>>;
   setPermissions: (
     provider: string,
     changes: { toolId: string; permission: AppPermissionLevel }[],
+    conditions?: RuleCondition[],
   ) => Promise<void>;
   getOverlappingRuleCount: (provider: string) => Promise<number>;
 }
@@ -34,6 +48,7 @@ interface AppPermissionsProps {
   groups: AppToolGroup[];
   actions?: AppPermissionActions;
   orgStates?: Record<string, AppPermissionLevel>;
+  orgConditions?: Record<string, unknown[]>;
 }
 
 export const AppPermissions = ({
@@ -42,12 +57,17 @@ export const AppPermissions = ({
   groups,
   actions,
   orgStates,
+  orgConditions,
 }: AppPermissionsProps) => {
   const pathname = usePathname();
-  const [states, setStates] = useState<Record<string, AppPermissionLevel>>({});
+  const [states, setStates] = useState<Record<string, AppPermissionState>>({});
   const [overlappingRuleCount, setOverlappingRuleCount] = useState(0);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
+  const [conditionDialogOpen, setConditionDialogOpen] = useState(false);
+  const [editingConditions, setEditingConditions] = useState<RuleCondition[]>(
+    [],
+  );
   const invalidateCache = useInvalidateGatewayCache();
 
   const fetchStates = actions?.getStates ?? getAppPermissionStates;
@@ -66,24 +86,32 @@ export const AppPermissions = ({
   }, [provider, fetchStates, fetchOverlappingCount]);
 
   const applyChanges = useCallback(
-    async (changes: { toolId: string; permission: AppPermissionLevel }[]) => {
-      let prev: Record<string, AppPermissionLevel> = {};
+    async (
+      changes: { toolId: string; permission: AppPermissionLevel }[],
+      conditions?: RuleCondition[],
+    ): Promise<boolean> => {
+      let prev: Record<string, AppPermissionState> = {};
       setStates((current) => {
         prev = current;
         const next = { ...current };
         for (const c of changes) {
-          next[c.toolId] = c.permission;
+          next[c.toolId] = {
+            permission: c.permission,
+            conditions: conditions ?? current[c.toolId]?.conditions ?? [],
+          };
         }
         return next;
       });
 
       setSaving(true);
       try {
-        await applyPermissions(provider, changes);
+        await applyPermissions(provider, changes, conditions);
         invalidateCache();
+        return true;
       } catch {
         setStates(prev);
         toast.error("Failed to update permissions");
+        return false;
       } finally {
         setSaving(false);
       }
@@ -109,6 +137,54 @@ export const AppPermissions = ({
     [applyChanges],
   );
 
+  const openConditionDialog = () => {
+    const firstCondition = Object.values(states).find(
+      (s) => s.conditions.length > 0,
+    );
+    setEditingConditions((firstCondition?.conditions as RuleCondition[]) ?? []);
+    setConditionDialogOpen(true);
+  };
+
+  const isLocked = (toolId: string) =>
+    checkToolFullyLocked(
+      orgStates?.[toolId],
+      (orgConditions?.[toolId] ?? []) as RuleCondition[],
+    );
+
+  const handleSaveConditions = async () => {
+    const allTools = groups.flatMap((g) => g.tools);
+    const restrictedTools = allTools.filter((t) => {
+      if (isLocked(t.id)) return false;
+      const perm = states[t.id]?.permission ?? "allow";
+      return perm !== "allow";
+    });
+
+    if (restrictedTools.length === 0) {
+      setConditionDialogOpen(false);
+      return;
+    }
+
+    const changes = restrictedTools.map((t) => ({
+      toolId: t.id,
+      permission: states[t.id]?.permission ?? ("block" as AppPermissionLevel),
+    }));
+
+    const ok = await applyChanges(changes, editingConditions);
+    if (!ok) return;
+    setConditionDialogOpen(false);
+    toast.success("Conditions updated for all restricted tools");
+  };
+
+  const hasAnyConditions = Object.values(states).some(
+    (s) => s.conditions.length > 0,
+  );
+  const restrictedCount = groups
+    .flatMap((g) => g.tools)
+    .filter((t) => {
+      if (isLocked(t.id)) return false;
+      return (states[t.id]?.permission ?? "allow") !== "allow";
+    }).length;
+
   if (loading) {
     return (
       <div className="space-y-3">
@@ -124,12 +200,25 @@ export const AppPermissions = ({
 
   return (
     <div className="space-y-3">
-      <div>
-        <h3 className="text-sm font-medium">Permissions</h3>
-        <p className="text-xs text-muted-foreground mt-0.5">
-          Control what agents can do with {appName}. Applied to all connected
-          accounts.
-        </p>
+      <div className="flex items-center justify-between">
+        <div>
+          <h3 className="text-sm font-medium">Permissions</h3>
+          <p className="text-xs text-muted-foreground mt-0.5">
+            Control what agents can do with {appName}. Applied to all connected
+            accounts.
+          </p>
+        </div>
+        {restrictedCount > 0 && (
+          <Button
+            variant="ghost"
+            size="sm"
+            className="text-xs text-muted-foreground gap-1.5"
+            onClick={openConditionDialog}
+          >
+            <Settings2 className="size-3.5" />
+            {hasAnyConditions ? "Edit condition" : "Add condition"}
+          </Button>
+        )}
       </div>
       {overlappingRuleCount > 0 && (
         <div className="flex items-center gap-2 rounded-md border border-amber-500/20 bg-amber-500/5 px-3 py-2">
@@ -157,9 +246,37 @@ export const AppPermissions = ({
             onGroupChange={(perm) => handleGroupChange(group, perm)}
             disabled={saving}
             orgStates={orgStates}
+            orgConditions={orgConditions}
           />
         ))}
       </Accordion>
+
+      <Dialog open={conditionDialogOpen} onOpenChange={setConditionDialogOpen}>
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle>Edit condition</DialogTitle>
+            <DialogDescription>
+              This condition applies to all {restrictedCount} restricted{" "}
+              {restrictedCount === 1 ? "tool" : "tools"} for {appName}.
+            </DialogDescription>
+          </DialogHeader>
+          <ConditionBuilder
+            conditions={editingConditions}
+            onChange={setEditingConditions}
+          />
+          <DialogFooter>
+            <Button
+              variant="ghost"
+              onClick={() => setConditionDialogOpen(false)}
+            >
+              Cancel
+            </Button>
+            <Button onClick={handleSaveConditions} loading={saving}>
+              {saving ? "Saving..." : "Save"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 };

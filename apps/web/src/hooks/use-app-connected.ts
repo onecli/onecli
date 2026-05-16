@@ -2,8 +2,12 @@
 
 import { useEffect } from "react";
 
+export interface AppConnectedEvent {
+  provider?: string;
+}
+
 interface UseAppMessagesOptions {
-  onConnected: () => void;
+  onConnected: (event: AppConnectedEvent) => void;
   onConfigure?: (url: string) => void;
 }
 
@@ -19,7 +23,7 @@ export const useAppMessages = ({
     const handler = (event: MessageEvent) => {
       if (event.origin !== window.location.origin) return;
       if (event.data?.type === "app-connected") {
-        onConnected();
+        onConnected({ provider: event.data.provider as string | undefined });
       }
       if (event.data?.type === "app-configure" && event.data?.url) {
         onConfigure?.(event.data.url);

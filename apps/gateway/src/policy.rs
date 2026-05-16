@@ -30,6 +30,8 @@ pub(crate) struct PolicyRule {
     pub path_pattern: String,
     pub method: Option<String>,
     pub action: PolicyAction,
+    #[serde(default)]
+    pub conditions_raw: Option<serde_json::Value>,
 }
 
 /// Result of policy evaluation for a single request.
@@ -59,13 +61,14 @@ pub(crate) enum PolicyDecision {
 pub(crate) async fn evaluate(
     request_method: &str,
     request_path: &str,
+    request_body: Option<&[u8]>,
     rules: &[PolicyRule],
     agent_token: &str,
     cache: &dyn CacheStore,
 ) -> PolicyDecision {
     // Pass 1: block rules (absolute deny, highest priority)
     for rule in rules {
-        if !matches_request(rule, request_method, request_path) {
+        if !matches_request(rule, request_method, request_path, request_body) {
             continue;
         }
         if matches!(rule.action, PolicyAction::Block) {
@@ -77,7 +80,7 @@ pub(crate) async fn evaluate(
 
     // Pass 2: manual approval rules
     for rule in rules {
-        if !matches_request(rule, request_method, request_path) {
+        if !matches_request(rule, request_method, request_path, request_body) {
             continue;
         }
         if let PolicyAction::ManualApproval { rule_id } = &rule.action {
@@ -89,7 +92,7 @@ pub(crate) async fn evaluate(
 
     // Pass 3: rate limit rules
     for rule in rules {
-        if !matches_request(rule, request_method, request_path) {
+        if !matches_request(rule, request_method, request_path, request_body) {
             continue;
         }
         if let PolicyAction::RateLimit {
@@ -130,26 +133,48 @@ pub(crate) async fn evaluate(
     PolicyDecision::Allow
 }
 
-/// Check if a rule matches the request method and path.
-fn matches_request(rule: &PolicyRule, method: &str, path: &str) -> bool {
-    path_matches(path, &rule.path_pattern)
+/// Check if a rule matches the request method, path, and conditions.
+fn matches_request(rule: &PolicyRule, method: &str, path: &str, body: Option<&[u8]>) -> bool {
+    let direct = path_matches(path, &rule.path_pattern)
         && rule
             .method
             .as_ref()
             .is_none_or(|m| m.eq_ignore_ascii_case(method))
+        && crate::condition_match::matches(rule, body);
+    if direct {
+        return true;
+    }
+    // Git push is two-phase: a GET info/refs?service=git-receive-pack discovery
+    // followed by POST git-receive-pack. A rule blocking the POST should also
+    // block the discovery so the push fails with a clear policy error.
+    if rule.path_pattern.ends_with("/git-receive-pack")
+        && method.eq_ignore_ascii_case("GET")
+        && is_git_push_discovery(path)
+    {
+        return crate::condition_match::matches(rule, body);
+    }
+    false
+}
+
+/// Returns true if the request path is a git push discovery request
+/// (`/info/refs?service=git-receive-pack`).
+fn is_git_push_discovery(path: &str) -> bool {
+    let (base, query) = path.split_once('?').unwrap_or((path, ""));
+    base.ends_with("/info/refs") && query.split('&').any(|p| p == "service=git-receive-pack")
 }
 
 /// Check if a request should be blocked by any policy rule (sync, block-only).
 /// Used in tests; production code uses `evaluate()`.
 #[allow(dead_code)]
-pub(crate) fn is_blocked(request_method: &str, request_path: &str, rules: &[PolicyRule]) -> bool {
+pub(crate) fn is_blocked(
+    request_method: &str,
+    request_path: &str,
+    request_body: Option<&[u8]>,
+    rules: &[PolicyRule],
+) -> bool {
     rules.iter().any(|rule| {
         matches!(rule.action, PolicyAction::Block)
-            && path_matches(request_path, &rule.path_pattern)
-            && rule
-                .method
-                .as_ref()
-                .is_none_or(|m| m.eq_ignore_ascii_case(request_method))
+            && matches_request(rule, request_method, request_path, request_body)
     })
 }
 
@@ -165,6 +190,7 @@ mod tests {
             path_pattern: path.to_string(),
             method: method.map(|m| m.to_string()),
             action: PolicyAction::Block,
+            conditions_raw: None,
         }
     }
 
@@ -178,6 +204,7 @@ mod tests {
                 max_requests: max,
                 window_secs: window,
             },
+            conditions_raw: None,
         }
     }
 
@@ -189,6 +216,7 @@ mod tests {
         assert!(is_blocked(
             "POST",
             "/gmail/v1/users/me/messages/send",
+            None,
             &rules
         ));
     }
@@ -199,6 +227,7 @@ mod tests {
         assert!(!is_blocked(
             "GET",
             "/gmail/v1/users/me/messages/send",
+            None,
             &rules
         ));
     }
@@ -206,15 +235,20 @@ mod tests {
     #[test]
     fn allows_different_path() {
         let rules = vec![block_rule("/gmail/v1/users/me/messages/send", Some("POST"))];
-        assert!(!is_blocked("POST", "/gmail/v1/users/me/messages", &rules));
+        assert!(!is_blocked(
+            "POST",
+            "/gmail/v1/users/me/messages",
+            None,
+            &rules
+        ));
     }
 
     #[test]
     fn blocks_all_methods_when_none() {
         let rules = vec![block_rule("/admin/*", None)];
-        assert!(is_blocked("GET", "/admin/users", &rules));
-        assert!(is_blocked("POST", "/admin/users", &rules));
-        assert!(is_blocked("DELETE", "/admin/settings", &rules));
+        assert!(is_blocked("GET", "/admin/users", None, &rules));
+        assert!(is_blocked("POST", "/admin/users", None, &rules));
+        assert!(is_blocked("DELETE", "/admin/settings", None, &rules));
     }
 
     #[test]
@@ -223,35 +257,36 @@ mod tests {
         assert!(is_blocked(
             "POST",
             "/gmail/v1/users/me/messages/send",
+            None,
             &rules
         ));
-        assert!(!is_blocked("POST", "/calendar/v1/events", &rules));
+        assert!(!is_blocked("POST", "/calendar/v1/events", None, &rules));
     }
 
     #[test]
     fn blocks_all_paths() {
         let rules = vec![block_rule("*", Some("DELETE"))];
-        assert!(is_blocked("DELETE", "/anything", &rules));
-        assert!(!is_blocked("GET", "/anything", &rules));
+        assert!(is_blocked("DELETE", "/anything", None, &rules));
+        assert!(!is_blocked("GET", "/anything", None, &rules));
     }
 
     #[test]
     fn method_matching_is_case_insensitive() {
         let rules = vec![block_rule("*", Some("POST"))];
-        assert!(is_blocked("post", "/path", &rules));
-        assert!(is_blocked("Post", "/path", &rules));
+        assert!(is_blocked("post", "/path", None, &rules));
+        assert!(is_blocked("Post", "/path", None, &rules));
     }
 
     #[test]
     fn no_rules_allows_everything() {
-        assert!(!is_blocked("POST", "/anything", &[]));
+        assert!(!is_blocked("POST", "/anything", None, &[]));
     }
 
     #[test]
     fn blocks_with_default_wildcard_path() {
         let rules = vec![block_rule("*", Some("POST"))];
-        assert!(is_blocked("POST", "/any/path/here", &rules));
-        assert!(is_blocked("POST", "/", &rules));
+        assert!(is_blocked("POST", "/any/path/here", None, &rules));
+        assert!(is_blocked("POST", "/", None, &rules));
     }
 
     #[test]
@@ -260,8 +295,8 @@ mod tests {
             block_rule("/safe/*", Some("GET")),
             block_rule("/danger/*", Some("POST")),
         ];
-        assert!(!is_blocked("POST", "/safe/path", &rules));
-        assert!(is_blocked("POST", "/danger/path", &rules));
+        assert!(!is_blocked("POST", "/safe/path", None, &rules));
+        assert!(is_blocked("POST", "/danger/path", None, &rules));
     }
 
     // ── Rate limit tests ─────────────────────────────────────────────────
@@ -270,7 +305,7 @@ mod tests {
     async fn rate_limit_allows_under_limit() {
         let store = crate::cache::create_store().await.unwrap();
         let rules = vec![rate_rule("*", Some("POST"), 5, 3600)];
-        let decision = evaluate("POST", "/path", &rules, "agent1", &*store).await;
+        let decision = evaluate("POST", "/path", None, &rules, "agent1", &*store).await;
         assert!(matches!(decision, PolicyDecision::Allow));
     }
 
@@ -280,13 +315,13 @@ mod tests {
         let rules = vec![rate_rule("*", Some("POST"), 2, 3600)];
 
         // First 2 requests allowed
-        let d1 = evaluate("POST", "/path", &rules, "agent1", &*store).await;
+        let d1 = evaluate("POST", "/path", None, &rules, "agent1", &*store).await;
         assert!(matches!(d1, PolicyDecision::Allow));
-        let d2 = evaluate("POST", "/path", &rules, "agent1", &*store).await;
+        let d2 = evaluate("POST", "/path", None, &rules, "agent1", &*store).await;
         assert!(matches!(d2, PolicyDecision::Allow));
 
         // Third request rate limited
-        let d3 = evaluate("POST", "/path", &rules, "agent1", &*store).await;
+        let d3 = evaluate("POST", "/path", None, &rules, "agent1", &*store).await;
         assert!(matches!(d3, PolicyDecision::RateLimited { .. }));
     }
 
@@ -296,12 +331,12 @@ mod tests {
         let rules = vec![rate_rule("*", Some("POST"), 1, 3600)];
 
         // Agent1 hits limit
-        evaluate("POST", "/path", &rules, "agent1", &*store).await;
-        let d = evaluate("POST", "/path", &rules, "agent1", &*store).await;
+        evaluate("POST", "/path", None, &rules, "agent1", &*store).await;
+        let d = evaluate("POST", "/path", None, &rules, "agent1", &*store).await;
         assert!(matches!(d, PolicyDecision::RateLimited { .. }));
 
         // Agent2 is unaffected
-        let d = evaluate("POST", "/path", &rules, "agent2", &*store).await;
+        let d = evaluate("POST", "/path", None, &rules, "agent2", &*store).await;
         assert!(matches!(d, PolicyDecision::Allow));
     }
 
@@ -312,7 +347,7 @@ mod tests {
             block_rule("/danger/*", Some("POST")),
             rate_rule("/danger/*", Some("POST"), 100, 3600),
         ];
-        let d = evaluate("POST", "/danger/path", &rules, "agent1", &*store).await;
+        let d = evaluate("POST", "/danger/path", None, &rules, "agent1", &*store).await;
         assert!(matches!(d, PolicyDecision::Blocked { .. }));
     }
 
@@ -320,7 +355,7 @@ mod tests {
     async fn evaluate_allows_non_matching_rules() {
         let store = crate::cache::create_store().await.unwrap();
         let rules = vec![block_rule("/blocked/*", Some("POST"))];
-        let d = evaluate("GET", "/safe/path", &rules, "agent1", &*store).await;
+        let d = evaluate("GET", "/safe/path", None, &rules, "agent1", &*store).await;
         assert!(matches!(d, PolicyDecision::Allow));
     }
 
@@ -334,6 +369,7 @@ mod tests {
             action: PolicyAction::ManualApproval {
                 rule_id: "test-approval".to_string(),
             },
+            conditions_raw: None,
         }
     }
 
@@ -341,7 +377,7 @@ mod tests {
     async fn manual_approval_matches_path_and_method() {
         let store = crate::cache::create_store().await.unwrap();
         let rules = vec![approval_rule("/send/*", Some("POST"))];
-        let d = evaluate("POST", "/send/email", &rules, "agent1", &*store).await;
+        let d = evaluate("POST", "/send/email", None, &rules, "agent1", &*store).await;
         assert!(matches!(d, PolicyDecision::ManualApproval { .. }));
     }
 
@@ -349,7 +385,7 @@ mod tests {
     async fn manual_approval_no_match_different_method() {
         let store = crate::cache::create_store().await.unwrap();
         let rules = vec![approval_rule("/send/*", Some("POST"))];
-        let d = evaluate("GET", "/send/email", &rules, "agent1", &*store).await;
+        let d = evaluate("GET", "/send/email", None, &rules, "agent1", &*store).await;
         assert!(matches!(d, PolicyDecision::Allow));
     }
 
@@ -360,7 +396,7 @@ mod tests {
             approval_rule("/danger/*", Some("POST")),
             block_rule("/danger/*", Some("POST")),
         ];
-        let d = evaluate("POST", "/danger/path", &rules, "agent1", &*store).await;
+        let d = evaluate("POST", "/danger/path", None, &rules, "agent1", &*store).await;
         assert!(matches!(d, PolicyDecision::Blocked { .. }));
     }
 
@@ -371,7 +407,42 @@ mod tests {
             rate_rule("/api/*", Some("POST"), 100, 3600),
             approval_rule("/api/*", Some("POST")),
         ];
-        let d = evaluate("POST", "/api/send", &rules, "agent1", &*store).await;
+        let d = evaluate("POST", "/api/send", None, &rules, "agent1", &*store).await;
         assert!(matches!(d, PolicyDecision::ManualApproval { .. }));
+    }
+
+    // ── Git push discovery tests ────────────────────────────────────
+
+    #[test]
+    fn git_push_block_also_blocks_discovery() {
+        let rules = vec![block_rule("/*/*/git-receive-pack", Some("POST"))];
+        assert!(is_blocked(
+            "GET",
+            "/owner/repo.git/info/refs?service=git-receive-pack",
+            None,
+            &rules
+        ));
+    }
+
+    #[test]
+    fn git_push_block_does_not_block_clone_discovery() {
+        let rules = vec![block_rule("/*/*/git-receive-pack", Some("POST"))];
+        assert!(!is_blocked(
+            "GET",
+            "/owner/repo.git/info/refs?service=git-upload-pack",
+            None,
+            &rules
+        ));
+    }
+
+    #[test]
+    fn git_push_block_still_blocks_receive_pack_post() {
+        let rules = vec![block_rule("/*/*/git-receive-pack", Some("POST"))];
+        assert!(is_blocked(
+            "POST",
+            "/owner/repo.git/git-receive-pack",
+            None,
+            &rules
+        ));
     }
 }

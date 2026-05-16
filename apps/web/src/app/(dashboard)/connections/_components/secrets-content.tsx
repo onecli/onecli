@@ -29,6 +29,7 @@ interface SecretsContentProps {
   getSecrets?: () => Promise<Secret[]>;
   secretActions?: SecretActions;
   pageScope?: "project" | "organization";
+  renderCreateButton?: (onCreate: () => void) => React.ReactNode;
 }
 
 export const SecretsContent = ({
@@ -36,6 +37,7 @@ export const SecretsContent = ({
   getSecrets = defaultGetSecrets,
   secretActions,
   pageScope = "project",
+  renderCreateButton,
 }: SecretsContentProps) => {
   const router = useRouter();
   const searchParams = useSearchParams();
@@ -134,10 +136,14 @@ export const SecretsContent = ({
   return (
     <div className="space-y-4">
       <div className="flex justify-end">
-        <Button size="sm" onClick={() => setCreateOpen(true)}>
-          <Plus className="size-3.5" />
-          {typeFilter === "llm" ? "Add LLM Key" : "Add Secret"}
-        </Button>
+        {renderCreateButton ? (
+          renderCreateButton(() => setCreateOpen(true))
+        ) : (
+          <Button size="sm" onClick={() => setCreateOpen(true)}>
+            <Plus className="size-3.5" />
+            {typeFilter === "llm" ? "Add LLM Key" : "Add Secret"}
+          </Button>
+        )}
       </div>
 
       {ownSecrets.length === 0 && inheritedSecrets.length === 0 ? (

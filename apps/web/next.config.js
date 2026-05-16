@@ -31,6 +31,8 @@ const nextConfig = {
           "@/lib/actions/connections": "@/cloud/actions/connections",
           "@/lib/home-redirect": "@/cloud/home-redirect",
           "@/lib/components/pro-app-dialog": "@/cloud/apps/pro-app-dialog",
+          "@/lib/components/condition-builder":
+            "@/cloud/components/condition-builder",
           "@/lib/dashboard/session-redirect":
             "@/cloud/dashboard/session-redirect",
 

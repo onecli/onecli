@@ -22,7 +22,13 @@ interface Agent {
   _count: { agentSecrets: number; agentAppConnections: number };
 }
 
-export const AgentsContent = () => {
+interface AgentsContentProps {
+  renderCreateButton?: (onCreate: () => void) => React.ReactNode;
+}
+
+export const AgentsContent = ({
+  renderCreateButton,
+}: AgentsContentProps = {}) => {
   const searchParams = useSearchParams();
   const manageAgentId = searchParams.get("manage");
   const [agents, setAgents] = useState<Agent[]>([]);
@@ -63,10 +69,14 @@ export const AgentsContent = () => {
   return (
     <div className="space-y-4">
       <div className="flex justify-end">
-        <Button size="sm" onClick={() => setCreateOpen(true)}>
-          <Plus className="size-3.5" />
-          Create Agent
-        </Button>
+        {renderCreateButton ? (
+          renderCreateButton(() => setCreateOpen(true))
+        ) : (
+          <Button size="sm" onClick={() => setCreateOpen(true)}>
+            <Plus className="size-3.5" />
+            Create Agent
+          </Button>
+        )}
       </div>
 
       {agents.length === 0 ? (

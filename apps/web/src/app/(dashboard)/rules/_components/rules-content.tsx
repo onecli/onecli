@@ -4,6 +4,7 @@ import { useEffect, useState, useCallback } from "react";
 import { Plus, ShieldOff } from "lucide-react";
 import { getRules as defaultGetRules } from "@/lib/actions/rules";
 import { getAgents } from "@/lib/actions/agents";
+import { getAppConnections } from "@/lib/actions/connections";
 import { Button } from "@onecli/ui/components/button";
 import { Card } from "@onecli/ui/components/card";
 import { Skeleton } from "@onecli/ui/components/skeleton";
@@ -35,6 +36,9 @@ export const RulesContent = ({
 }: RulesContentProps) => {
   const [rules, setRules] = useState<PolicyRuleItem[]>([]);
   const [agents, setAgents] = useState<AgentOption[]>([]);
+  const [connectedProviders, setConnectedProviders] = useState<
+    Map<string, string[]>
+  >(new Map());
   const [loading, setLoading] = useState(true);
   const [createOpen, setCreateOpen] = useState(false);
 
@@ -52,6 +56,18 @@ export const RulesContent = ({
   useEffect(() => {
     fetchRules();
     if (showAgentField) fetchAgents();
+    getAppConnections()
+      .then((connections) => {
+        const map = new Map<string, string[]>();
+        for (const c of connections) {
+          if (c.status !== "connected") continue;
+          const labels = map.get(c.provider) ?? [];
+          if (c.label) labels.push(c.label);
+          map.set(c.provider, labels);
+        }
+        setConnectedProviders(map);
+      })
+      .catch(() => {});
   }, [fetchRules, fetchAgents, showAgentField]);
 
   const isInherited = (r: PolicyRuleItem) =>
@@ -147,6 +163,7 @@ export const RulesContent = ({
               <AppPermissionSummary
                 rules={appPermRules}
                 pageScope={pageScope}
+                connectedProviders={connectedProviders}
               />
             </>
           )}
@@ -160,6 +177,7 @@ export const RulesContent = ({
         agents={showAgentField ? agents : []}
         showAgentField={showAgentField}
         ruleActions={ruleActions}
+        connectedProviders={connectedProviders}
       />
     </div>
   );

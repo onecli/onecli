@@ -136,10 +136,22 @@ pub(crate) async fn forward_request(
         }
     }
 
-    // Check policy rules before forwarding
+    // Buffer request body for condition matching if any rule has conditions.
+    // In OSS, needs_body_buffer() always returns false → zero overhead.
+    let (condition_buffer, req) = if crate::condition_match::needs_body_buffer(&rules.policy_rules)
+    {
+        let (parts, incoming) = req.into_parts();
+        let (buf, fwd_body) =
+            crate::condition_match::prepare_body(incoming, method.as_str(), &url).await?;
+        (buf, hyper::Request::from_parts(parts, fwd_body))
+    } else {
+        (None, req.map(reqwest::Body::wrap))
+    };
+
     let decision = policy::evaluate(
         method.as_str(),
         &path,
+        condition_buffer.as_deref(),
         &rules.policy_rules,
         agent_token,
         cache,
@@ -243,46 +255,67 @@ pub(crate) async fn forward_request(
         let agent_id = proxy_ctx.agent_id.as_deref().unwrap_or("unknown");
         let agent_name = proxy_ctx.agent_name.as_deref().unwrap_or("Unknown Agent");
 
-        // Peek the first 4KB of the body for a preview (shown to the approver),
-        // then chain the peeked bytes back with the remaining stream for forwarding.
-        // Only the preview (~4KB) lives in gateway RAM — the rest stays in the TCP pipe.
-        let mut body_stream = Box::pin(http_body_util::BodyDataStream::new(body));
-        let mut peeked: Vec<Bytes> = Vec::new();
-        let mut peeked_len: usize = 0;
-
-        while peeked_len < BODY_PREVIEW_BYTES {
-            match body_stream.next().await {
-                Some(Ok(data)) => {
-                    peeked_len += data.len();
-                    peeked.push(data);
-                }
-                Some(Err(e)) => {
-                    return Err(anyhow::anyhow!("reading request body for preview: {e}"));
-                }
-                None => break,
-            }
-        }
-
-        let body_preview = if peeked.is_empty() {
-            None
+        // Build body preview and forwarding body.
+        // If condition buffering already captured the body, reuse that buffer
+        // for the preview instead of peeking the stream a second time.
+        let (body_preview, fwd_body) = if let Some(ref buf) = condition_buffer {
+            let preview_len = buf.len().min(BODY_PREVIEW_BYTES);
+            let preview = if preview_len > 0 {
+                Some(String::from_utf8_lossy(&buf[..preview_len]).into_owned())
+            } else {
+                None
+            };
+            (preview, body)
         } else {
-            let mut buf = Vec::with_capacity(peeked_len.min(BODY_PREVIEW_BYTES));
-            for chunk in &peeked {
-                let take = (BODY_PREVIEW_BYTES - buf.len()).min(chunk.len());
-                buf.extend_from_slice(&chunk[..take]);
-                if buf.len() >= BODY_PREVIEW_BYTES {
-                    break;
+            let mut body_stream = Box::pin(http_body_util::BodyDataStream::new(body));
+            let mut peeked: Vec<Bytes> = Vec::new();
+            let mut peeked_len: usize = 0;
+
+            while peeked_len < BODY_PREVIEW_BYTES {
+                match body_stream.next().await {
+                    Some(Ok(data)) => {
+                        peeked_len += data.len();
+                        peeked.push(data);
+                    }
+                    Some(Err(e)) => {
+                        return Err(anyhow::anyhow!("reading request body for preview: {e}"));
+                    }
+                    None => break,
                 }
             }
-            Some(String::from_utf8_lossy(&buf).into_owned())
-        };
 
-        // Chain peeked bytes + remaining body into a single stream for forwarding.
-        let peeked_stream =
-            futures_util::stream::iter(peeked.into_iter().map(Ok::<_, std::io::Error>));
-        let remaining_stream =
-            body_stream.map(|r| r.map_err(|e| std::io::Error::other(e.to_string())));
-        let fwd_body = reqwest::Body::wrap_stream(peeked_stream.chain(remaining_stream));
+            if peeked_len >= BODY_PREVIEW_BYTES {
+                warn!(
+                    method = %method,
+                    url = %url,
+                    peeked = peeked_len,
+                    limit = BODY_PREVIEW_BYTES,
+                    "request body exceeds approval preview limit — preview truncated"
+                );
+            }
+
+            let preview = if peeked.is_empty() {
+                None
+            } else {
+                let mut buf = Vec::with_capacity(peeked_len.min(BODY_PREVIEW_BYTES));
+                for chunk in &peeked {
+                    let take = (BODY_PREVIEW_BYTES - buf.len()).min(chunk.len());
+                    buf.extend_from_slice(&chunk[..take]);
+                    if buf.len() >= BODY_PREVIEW_BYTES {
+                        break;
+                    }
+                }
+                Some(String::from_utf8_lossy(&buf).into_owned())
+            };
+
+            let peeked_stream =
+                futures_util::stream::iter(peeked.into_iter().map(Ok::<_, std::io::Error>));
+            let remaining_stream =
+                body_stream.map(|r| r.map_err(|e| std::io::Error::other(e.to_string())));
+            let reassembled = reqwest::Body::wrap_stream(peeked_stream.chain(remaining_stream));
+
+            (preview, reassembled)
+        };
 
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -351,7 +384,7 @@ pub(crate) async fn forward_request(
             }
         }
     } else {
-        reqwest::Body::wrap(body)
+        body
     };
 
     // ── Provider-specific request signing ─────────────────────────
