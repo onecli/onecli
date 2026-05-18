@@ -10,10 +10,11 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use hyper::server::conn::http1;
 use hyper::service::service_fn;
+use hyper::rt::{Read as HyperRead, Write as HyperWrite, ReadBufCursor};
 use hyper_util::rt::TokioIo;
 use std::fmt;
 use tokio_rustls::TlsAcceptor;
-use tracing::warn;
+use tracing::{info, warn};
 
 use crate::approval::ApprovalStore;
 use crate::ca::CertificateAuthority;
@@ -25,6 +26,66 @@ use crate::inject::InjectionRule;
 use super::forward;
 use super::response;
 use super::ProxyContext;
+
+/// IO wrapper that holds either a plain TCP stream or a TLS-wrapped stream.
+/// Enables `serve_connection` with a single type regardless of TLS presence.
+///
+/// - `Plain`: raw `Upgraded` which already implements `hyper::rt::Read + Write`
+/// - `Tls`: `TokioIo<TlsStream<...>>` which bridges tokio's TLS stream to hyper's traits
+enum MaybeTls {
+    Plain(hyper::upgrade::Upgraded),
+    Tls(TokioIo<tokio_rustls::server::TlsStream<TokioIo<hyper::upgrade::Upgraded>>>),
+}
+
+impl HyperRead for MaybeTls {
+    fn poll_read(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: ReadBufCursor<'_>,
+    ) -> std::task::Poll<Result<(), std::io::Error>> {
+        let this = self.get_mut();
+        match this {
+            MaybeTls::Plain(inner) => std::pin::Pin::new(inner).poll_read(cx, buf),
+            MaybeTls::Tls(inner) => std::pin::Pin::new(inner).poll_read(cx, buf),
+        }
+    }
+}
+
+impl HyperWrite for MaybeTls {
+    fn poll_write(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &[u8],
+    ) -> std::task::Poll<Result<usize, std::io::Error>> {
+        let this = self.get_mut();
+        match this {
+            MaybeTls::Plain(inner) => std::pin::Pin::new(inner).poll_write(cx, buf),
+            MaybeTls::Tls(inner) => std::pin::Pin::new(inner).poll_write(cx, buf),
+        }
+    }
+
+    fn poll_flush(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Result<(), std::io::Error>> {
+        let this = self.get_mut();
+        match this {
+            MaybeTls::Plain(inner) => std::pin::Pin::new(inner).poll_flush(cx),
+            MaybeTls::Tls(inner) => std::pin::Pin::new(inner).poll_flush(cx),
+        }
+    }
+
+    fn poll_shutdown(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Result<(), std::io::Error>> {
+        let this = self.get_mut();
+        match this {
+            MaybeTls::Plain(inner) => std::pin::Pin::new(inner).poll_shutdown(cx),
+            MaybeTls::Tls(inner) => std::pin::Pin::new(inner).poll_shutdown(cx),
+        }
+    }
+}
 
 /// Typed error context for TLS handshake failures with the client.
 #[derive(Debug)]
@@ -38,8 +99,16 @@ impl fmt::Display for TlsHandshakeWithClient {
 
 impl std::error::Error for TlsHandshakeWithClient {}
 
-/// Terminate TLS with the client, then forward each HTTP request through
-/// [`forward::forward_request`] with freshly resolved rules from cache.
+/// Intercept HTTP traffic through a CONNECT tunnel, with optional TLS termination.
+///
+/// When `scheme` is `"https"`, terminates TLS with the client using a generated
+/// leaf certificate, then forwards HTTP requests. When `scheme` is `"http"`,
+/// reads plain HTTP directly from the tunnel — this handles clients (e.g. undici's
+/// `ProxyAgent`) that tunnel HTTP targets via CONNECT but send plaintext bytes.
+///
+/// Rules (injection + policy) are re-resolved from cache on each HTTP request
+/// so that changes (e.g., adding a secret) take effect immediately without
+/// requiring the agent to reconnect.
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn mitm(
     upgraded: hyper::upgrade::Upgraded,
@@ -51,21 +120,36 @@ pub(super) async fn mitm(
     proxy_ctx: Arc<ProxyContext>,
     approval_store: Arc<dyn ApprovalStore>,
     policy_engine: Arc<PolicyEngine>,
+    scheme: &str,
 ) -> Result<()> {
     let hostname = super::strip_port(host);
 
-    let server_config = ca.server_config_for_host(hostname)?;
-    let acceptor = TlsAcceptor::from(server_config);
-
-    let client_io = TokioIo::new(upgraded);
-    let tls_stream = acceptor
-        .accept(client_io)
-        .await
-        .context(TlsHandshakeWithClient)?;
+    // Conditionally wrap the connection with TLS. For plain HTTP (port 80),
+    // clients send plaintext inside the CONNECT tunnel — skip the TLS handshake.
+    info!(
+        host = %host,
+        scheme = scheme,
+        "MITM session starting"
+    );
+    let io = if scheme == "https" {
+        let server_config = ca.server_config_for_host(hostname)?;
+        let acceptor = TlsAcceptor::from(server_config);
+        let client_io = TokioIo::new(upgraded);
+        let tls_stream = acceptor
+            .accept(client_io)
+            .await
+            .context(TlsHandshakeWithClient)?;
+        MaybeTls::Tls(TokioIo::new(tls_stream))
+    } else {
+        info!(host = %host, "skipping TLS for plain HTTP CONNECT tunnel");
+        MaybeTls::Plain(upgraded)
+    };
 
     let host_owned = host.to_string();
+    let host_for_context = host_owned.clone();
+    let scheme_owned = scheme.to_string();
+    let scheme_for_context = scheme_owned.clone();
     let vault_injection_rules = Arc::new(vault_injection_rules);
-    let io = TokioIo::new(tls_stream);
 
     http1::Builder::new()
         .preserve_header_case(true)
@@ -80,6 +164,7 @@ pub(super) async fn mitm(
                 let approvals = Arc::clone(&approval_store);
                 let engine = Arc::clone(&policy_engine);
                 let vault_rules = Arc::clone(&vault_injection_rules);
+                let scheme = scheme_owned.clone();
                 async move {
                     let is_ws = super::websocket::is_websocket_upgrade(&req);
                     let connection_id = connect::extract_connection_id(req.headers());
@@ -128,7 +213,7 @@ pub(super) async fn mitm(
                                 match forward::forward_request(
                                     req,
                                     effective_host,
-                                    "https",
+                                    &scheme,
                                     client,
                                     &rules,
                                     &*cache,
@@ -165,7 +250,13 @@ pub(super) async fn mitm(
         )
         .with_upgrades()
         .await
-        .context("serving MITM connection")
+        .with_context(|| {
+            if scheme_for_context == "https" {
+                format!("serving MITM connection for {}", host_for_context)
+            } else {
+                format!("serving HTTP intercept connection for {}", host_for_context)
+            }
+        })
 }
 
 /// Pre-computed data for token endpoint interception responses.
