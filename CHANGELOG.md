@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.27.0](https://github.com/onecli/onecli/compare/v1.26.0...v1.27.0) (2026-05-18)
+
+
+### Features
+
+* generic body transform pattern and gateway restructure ([#284](https://github.com/onecli/onecli/issues/284)) ([53c060a](https://github.com/onecli/onecli/commit/53c060a7afd8aaf50c39c899e99f8b8fe83e1b9b))
+
 ## [1.26.0](https://github.com/onecli/onecli/compare/v1.25.0...v1.26.0) (2026-05-18)
 
 
