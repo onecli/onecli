@@ -184,6 +184,15 @@ static SUPABASE_REFRESH: RefreshConfig = RefreshConfig {
     client_auth: ClientCredentialMethod::BasicAuth,
 };
 
+/// Refresh config for GitLab OAuth API.
+static GITLAB_REFRESH: RefreshConfig = RefreshConfig {
+    token_url: "https://gitlab.com/oauth/token",
+    client_id_env: "GITLAB_CLIENT_ID",
+    client_secret_env: "GITLAB_CLIENT_SECRET",
+    body_format: TokenBodyFormat::Form,
+    client_auth: ClientCredentialMethod::Body,
+};
+
 /// Refresh config for Notion OAuth API (uses Basic auth + token rotation).
 static NOTION_REFRESH: RefreshConfig = RefreshConfig {
     token_url: "https://api.notion.com/v1/oauth/token",
@@ -839,6 +848,22 @@ static APP_PROVIDERS: &[AppProvider] = &[
             intercept: false,
         }],
         refresh: Some(&SUPABASE_REFRESH),
+        metadata_headers: &[],
+        credential_headers: &[],
+        host_rewrite: None,
+        finalizer: None,
+        body_transform: None,
+    },
+    AppProvider {
+        provider: "gitlab",
+        display_name: "GitLab",
+        host_rules: &[HostRule {
+            pattern: HostPattern::Exact("gitlab.com"),
+            path_prefix: None,
+            strategy: AuthStrategy::Bearer,
+            intercept: false,
+        }],
+        refresh: Some(&GITLAB_REFRESH),
         metadata_headers: &[],
         credential_headers: &[],
         host_rewrite: None,
@@ -2343,5 +2368,32 @@ mod tests {
         );
         assert!(is_intercept_target("oauth2.googleapis.com", "/token"));
         assert!(!is_intercept_target("oauth2.googleapis.com", "/authorize"));
+    }
+
+    // ── GitLab ────────────────────────────────────────────────────────
+
+    #[test]
+    fn provider_for_host_gitlab() {
+        let result = provider_for_host("gitlab.com");
+        assert_eq!(result, Some(("gitlab", "GitLab")));
+    }
+
+    #[test]
+    fn gitlab_api_uses_bearer() {
+        let injections = build_app_injections("gitlab", "gitlab.com", "glpat-test123");
+        assert_eq!(injections.len(), 1);
+        assert_eq!(
+            injections[0],
+            Injection::SetHeader {
+                name: "authorization".to_string(),
+                value: "Bearer glpat-test123".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn gitlab_refresh_uses_form_body_format() {
+        let config = refresh_config("gitlab").expect("gitlab should have refresh config");
+        assert!(matches!(config.body_format, TokenBodyFormat::Form));
     }
 }
