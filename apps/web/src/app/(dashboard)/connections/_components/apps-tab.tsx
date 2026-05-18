@@ -206,7 +206,8 @@ export const AppsTab = ({
             ))
           : sortedApps.map((app) => {
               const count = connectionCounts.get(app.id) ?? 0;
-              const isLocked = app.teamOnly === true && plan !== "team";
+              const isLocked =
+                !app.available || (app.teamOnly === true && plan !== "team");
               return (
                 <AppRow
                   key={app.id}
