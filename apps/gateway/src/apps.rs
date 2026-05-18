@@ -164,6 +164,15 @@ static GOOGLE_REFRESH: RefreshConfig = RefreshConfig {
     client_auth: ClientCredentialMethod::Body,
 };
 
+/// Refresh config for Supabase Management API OAuth (uses Basic auth).
+static SUPABASE_REFRESH: RefreshConfig = RefreshConfig {
+    token_url: "https://api.supabase.com/v1/oauth/token",
+    client_id_env: "SUPABASE_CLIENT_ID",
+    client_secret_env: "SUPABASE_CLIENT_SECRET",
+    body_format: TokenBodyFormat::Form,
+    client_auth: ClientCredentialMethod::BasicAuth,
+};
+
 /// Refresh config for Notion OAuth API (uses Basic auth + token rotation).
 static NOTION_REFRESH: RefreshConfig = RefreshConfig {
     token_url: "https://api.notion.com/v1/oauth/token",
@@ -171,6 +180,24 @@ static NOTION_REFRESH: RefreshConfig = RefreshConfig {
     client_secret_env: "NOTION_CLIENT_SECRET",
     body_format: TokenBodyFormat::Json,
     client_auth: ClientCredentialMethod::BasicAuth,
+};
+
+/// Refresh config for Dropbox OAuth API.
+static DROPBOX_REFRESH: RefreshConfig = RefreshConfig {
+    token_url: "https://api.dropboxapi.com/oauth2/token",
+    client_id_env: "DROPBOX_CLIENT_ID",
+    client_secret_env: "DROPBOX_CLIENT_SECRET",
+    body_format: TokenBodyFormat::Form,
+    client_auth: ClientCredentialMethod::Body,
+};
+
+/// Refresh config for LinkedIn OAuth API.
+static LINKEDIN_REFRESH: RefreshConfig = RefreshConfig {
+    token_url: "https://www.linkedin.com/oauth/v2/accessToken",
+    client_id_env: "LINKEDIN_CLIENT_ID",
+    client_secret_env: "LINKEDIN_CLIENT_SECRET",
+    body_format: TokenBodyFormat::Form,
+    client_auth: ClientCredentialMethod::Body,
 };
 
 // ── Provider registry ──────────────────────────────────────────────────
@@ -606,6 +633,29 @@ static APP_PROVIDERS: &[AppProvider] = &[
         finalizer: None,
     },
     AppProvider {
+        provider: "dropbox",
+        display_name: "Dropbox",
+        host_rules: &[
+            HostRule {
+                pattern: HostPattern::Exact("api.dropboxapi.com"),
+                path_prefix: None,
+                strategy: AuthStrategy::Bearer,
+                intercept: false,
+            },
+            HostRule {
+                pattern: HostPattern::Exact("content.dropboxapi.com"),
+                path_prefix: None,
+                strategy: AuthStrategy::Bearer,
+                intercept: false,
+            },
+        ],
+        refresh: Some(&DROPBOX_REFRESH),
+        metadata_headers: &[],
+        credential_headers: &[],
+        host_rewrite: None,
+        finalizer: None,
+    },
+    AppProvider {
         provider: "aws",
         display_name: "AWS",
         host_rules: &[
@@ -651,6 +701,59 @@ static APP_PROVIDERS: &[AppProvider] = &[
             intercept: false,
         }],
         refresh: None,
+        metadata_headers: &[],
+        credential_headers: &[],
+        host_rewrite: None,
+        finalizer: None,
+    },
+    AppProvider {
+        provider: "flyio",
+        display_name: "Fly.io",
+        host_rules: &[
+            HostRule {
+                pattern: HostPattern::Exact("api.machines.dev"),
+                path_prefix: None,
+                strategy: AuthStrategy::Bearer,
+                intercept: false,
+            },
+            HostRule {
+                pattern: HostPattern::Exact("api.fly.io"),
+                path_prefix: None,
+                strategy: AuthStrategy::Bearer,
+                intercept: false,
+            },
+        ],
+        refresh: None,
+        metadata_headers: &[],
+        credential_headers: &[],
+        host_rewrite: None,
+        finalizer: None,
+    },
+    AppProvider {
+        provider: "linkedin",
+        display_name: "LinkedIn",
+        host_rules: &[HostRule {
+            pattern: HostPattern::Exact("api.linkedin.com"),
+            path_prefix: None,
+            strategy: AuthStrategy::Bearer,
+            intercept: false,
+        }],
+        refresh: Some(&LINKEDIN_REFRESH),
+        metadata_headers: &[],
+        credential_headers: &[],
+        host_rewrite: None,
+        finalizer: None,
+    },
+    AppProvider {
+        provider: "supabase",
+        display_name: "Supabase",
+        host_rules: &[HostRule {
+            pattern: HostPattern::Exact("api.supabase.com"),
+            path_prefix: None,
+            strategy: AuthStrategy::Bearer,
+            intercept: false,
+        }],
+        refresh: Some(&SUPABASE_REFRESH),
         metadata_headers: &[],
         credential_headers: &[],
         host_rewrite: None,
@@ -758,7 +861,7 @@ pub(crate) fn providers_for_host(hostname: &str) -> Vec<&'static str> {
 /// Return the path pattern for the first matching host rule of a provider.
 /// For providers with multiple rules on the same host, use `build_app_injection_rules` instead.
 #[cfg(test)]
-fn path_pattern_for(provider: &str, hostname: &str) -> String {
+pub(crate) fn path_pattern_for(provider: &str, hostname: &str) -> String {
     all_providers()
         .find(|p| p.provider == provider)
         .and_then(|app| {
@@ -773,7 +876,7 @@ fn path_pattern_for(provider: &str, hostname: &str) -> String {
 /// Build injections for the first matching host rule (single-rule providers).
 /// For multi-rule providers (e.g., Google Drive), use `build_app_injection_rules`.
 #[cfg(test)]
-fn build_app_injections(provider: &str, hostname: &str, token: &str) -> Vec<Injection> {
+pub(crate) fn build_app_injections(provider: &str, hostname: &str, token: &str) -> Vec<Injection> {
     let app = all_providers().find(|p| p.provider == provider);
     let Some(app) = app else { return vec![] };
 
@@ -1762,216 +1865,6 @@ mod tests {
     fn mongodb_atlas_does_not_match_other_mongodb_hosts() {
         assert!(providers_for_host("mongodb.com").is_empty());
         assert!(providers_for_host("atlas.mongodb.com").is_empty());
-    }
-
-    // ── Affinity ──────────────────────────────────────────────────────
-
-    // ── Cloud-only providers ─────────────────────────────────────────
-
-    #[cfg(feature = "cloud")]
-    mod cloud_providers {
-        use super::*;
-
-        #[test]
-        fn providers_for_affinity_api_host() {
-            assert_eq!(providers_for_host("api.affinity.co"), vec!["affinity"]);
-        }
-
-        #[test]
-        fn providers_for_affinity_mcp_host() {
-            assert_eq!(providers_for_host("mcp.affinity.co"), vec!["affinity"]);
-        }
-
-        #[test]
-        fn provider_for_host_affinity_api() {
-            let result = provider_for_host("api.affinity.co");
-            assert_eq!(result, Some(("affinity", "Affinity")));
-        }
-
-        #[test]
-        fn provider_for_host_affinity_mcp() {
-            let result = provider_for_host("mcp.affinity.co");
-            assert_eq!(result, Some(("affinity", "Affinity")));
-        }
-
-        #[test]
-        fn affinity_api_uses_bearer() {
-            let injections = build_app_injections("affinity", "api.affinity.co", "test_api_key");
-            assert_eq!(injections.len(), 1);
-            assert_eq!(
-                injections[0],
-                Injection::SetHeader {
-                    name: "authorization".to_string(),
-                    value: "Bearer test_api_key".to_string(),
-                }
-            );
-        }
-
-        #[test]
-        fn affinity_mcp_uses_bearer() {
-            let injections = build_app_injections("affinity", "mcp.affinity.co", "test_api_key");
-            assert_eq!(injections.len(), 1);
-            assert_eq!(
-                injections[0],
-                Injection::SetHeader {
-                    name: "authorization".to_string(),
-                    value: "Bearer test_api_key".to_string(),
-                }
-            );
-        }
-
-        #[test]
-        fn affinity_has_no_refresh_config() {
-            assert!(refresh_config("affinity").is_none());
-        }
-
-        #[test]
-        fn affinity_needs_access_token() {
-            assert!(needs_access_token("affinity"));
-        }
-
-        #[test]
-        fn affinity_no_false_positives() {
-            assert!(providers_for_host("affinity.co").is_empty());
-            assert!(providers_for_host("www.affinity.co").is_empty());
-        }
-
-        #[test]
-        fn providers_for_datadog_hosts() {
-            assert_eq!(providers_for_host("api.datadoghq.com"), vec!["datadog"]);
-            assert_eq!(providers_for_host("api.us3.datadoghq.com"), vec!["datadog"]);
-            assert_eq!(providers_for_host("api.us5.datadoghq.com"), vec!["datadog"]);
-            assert_eq!(providers_for_host("api.ap1.datadoghq.com"), vec!["datadog"]);
-            assert_eq!(providers_for_host("api.ap2.datadoghq.com"), vec!["datadog"]);
-            assert_eq!(providers_for_host("api.datadoghq.eu"), vec!["datadog"]);
-            assert_eq!(providers_for_host("api.ddog-gov.com"), vec!["datadog"]);
-            assert_eq!(providers_for_host("api.us2.ddog-gov.com"), vec!["datadog"]);
-        }
-
-        #[test]
-        fn providers_for_datadog_mcp_hosts() {
-            assert_eq!(providers_for_host("mcp.datadoghq.com"), vec!["datadog"]);
-            assert_eq!(providers_for_host("mcp.datadoghq.eu"), vec!["datadog"]);
-            assert_eq!(providers_for_host("mcp.ddog-gov.com"), vec!["datadog"]);
-        }
-
-        #[test]
-        fn datadog_no_false_positives() {
-            assert!(providers_for_host("datadoghq.com").is_empty());
-            assert!(providers_for_host("datadoghq.eu").is_empty());
-            assert!(providers_for_host("ddog-gov.com").is_empty());
-        }
-
-        #[test]
-        fn provider_for_host_datadog() {
-            let result = provider_for_host("api.datadoghq.com");
-            assert_eq!(result, Some(("datadog", "Datadog")));
-        }
-
-        #[test]
-        fn datadog_rewrite_host_api() {
-            let creds = serde_json::json!({"site": "us5", "apiKey": "k", "appKey": "a"});
-            assert_eq!(
-                rewrite_host("datadog", &creds, "api.datadoghq.com"),
-                Some("api.us5.datadoghq.com".to_string()),
-            );
-        }
-
-        #[test]
-        fn datadog_rewrite_host_mcp() {
-            let creds = serde_json::json!({"site": "us5", "apiKey": "k", "appKey": "a"});
-            assert_eq!(
-                rewrite_host("datadog", &creds, "mcp.datadoghq.com"),
-                Some("mcp.us5.datadoghq.com".to_string()),
-            );
-        }
-
-        #[test]
-        fn datadog_rewrite_host_mcp_us1_unchanged() {
-            let creds = serde_json::json!({"site": "us1", "apiKey": "k", "appKey": "a"});
-            assert_eq!(
-                rewrite_host("datadog", &creds, "mcp.datadoghq.com"),
-                Some("mcp.datadoghq.com".to_string()),
-            );
-        }
-
-        #[test]
-        fn datadog_rewrite_host_eu() {
-            let creds = serde_json::json!({"site": "eu", "apiKey": "k", "appKey": "a"});
-            assert_eq!(
-                rewrite_host("datadog", &creds, "api.datadoghq.com"),
-                Some("api.datadoghq.eu".to_string()),
-            );
-            assert_eq!(
-                rewrite_host("datadog", &creds, "mcp.datadoghq.com"),
-                Some("mcp.datadoghq.eu".to_string()),
-            );
-        }
-
-        #[test]
-        fn datadog_rewrite_host_compound_subdomain() {
-            let creds = serde_json::json!({"site": "us5", "apiKey": "k", "appKey": "a"});
-            assert_eq!(
-                rewrite_host("datadog", &creds, "http-intake.logs.us5.datadoghq.com"),
-                Some("http-intake.logs.us5.datadoghq.com".to_string()),
-            );
-        }
-
-        #[test]
-        fn datadog_rewrite_host_compound_subdomain_generic() {
-            let creds = serde_json::json!({"site": "us5", "apiKey": "k", "appKey": "a"});
-            assert_eq!(
-                rewrite_host("datadog", &creds, "http-intake.logs.datadoghq.com"),
-                Some("http-intake.logs.us5.datadoghq.com".to_string()),
-            );
-        }
-
-        #[test]
-        fn datadog_no_auth_header_injected() {
-            let injections = build_app_injections("datadog", "api.datadoghq.com", "unused");
-            assert!(
-                injections.is_empty(),
-                "Datadog should not inject Authorization header"
-            );
-        }
-
-        #[test]
-        fn datadog_credential_headers_defined() {
-            let headers = credential_headers("datadog");
-            assert_eq!(headers.len(), 2);
-            assert_eq!(headers[0].credential_field, "apiKey");
-            assert_eq!(headers[0].header_name, "DD-API-KEY");
-            assert_eq!(headers[1].credential_field, "appKey");
-            assert_eq!(headers[1].header_name, "DD-APPLICATION-KEY");
-        }
-
-        #[test]
-        fn finalizer_for_provider_aws_role() {
-            assert_eq!(
-                finalizer_for_provider("aws-role"),
-                Some(RequestFinalizer::AwsAssumeRole)
-            );
-        }
-
-        /// Regression: finalizer_for_host returns AwsSigV4 for amazonaws.com
-        /// because the OSS `aws` provider is iterated first. When a user has an
-        /// `aws-role` connection, the connection-resolved finalizer must be used
-        /// instead of the host-based lookup.
-        #[test]
-        fn aws_role_not_shadowed_by_aws_in_host_lookup() {
-            let host_finalizer = finalizer_for_host("s3.us-east-1.amazonaws.com");
-            let role_finalizer = finalizer_for_provider("aws-role");
-            assert_eq!(
-                host_finalizer,
-                Some(RequestFinalizer::AwsSigV4),
-                "host lookup returns AwsSigV4 (first match)"
-            );
-            assert_eq!(
-                role_finalizer,
-                Some(RequestFinalizer::AwsAssumeRole),
-                "provider lookup returns AwsAssumeRole (connection-aware)"
-            );
-        }
     }
 
     // ── Edge cases ───────────────────────────────────────────────────

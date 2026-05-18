@@ -5,7 +5,7 @@ import { authMiddleware } from "../middleware/auth";
 import { GATEWAY_BASE_URL } from "../lib/env";
 import { loadCaCertificate } from "../lib/gateway-ca";
 import { parseAnthropicMetadata } from "../validations/secret";
-import { DEFAULT_AGENT_NAME } from "../lib/constants";
+import { DEFAULT_AGENT_NAME, DEFAULT_AGENT_IDENTIFIER } from "../lib/constants";
 import { generateAccessToken } from "../services/agent-service";
 import { getCrypto } from "../providers";
 import { logger } from "../lib/logger";
@@ -83,6 +83,7 @@ export const containerConfigRoutes = () => {
         agent = await db.agent.create({
           data: {
             name: DEFAULT_AGENT_NAME,
+            identifier: DEFAULT_AGENT_IDENTIFIER,
             accessToken: generateAccessToken(),
             isDefault: true,
             projectId: auth.projectId,

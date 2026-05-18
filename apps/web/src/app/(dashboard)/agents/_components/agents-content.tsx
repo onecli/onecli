@@ -14,7 +14,7 @@ import { CreateAgentDialog } from "./create-agent-dialog";
 interface Agent {
   id: string;
   name: string;
-  identifier: string | null;
+  identifier: string;
   accessToken: string;
   isDefault: boolean;
   secretMode: SecretMode;

@@ -5,6 +5,7 @@ import type { SecretMode } from "@onecli/api/services/agent-service";
 import {
   listAgents,
   getDefaultAgent as getDefaultAgentService,
+  setDefaultAgent as setDefaultAgentService,
   createAgent as createAgentService,
   deleteAgent as deleteAgentService,
   renameAgent as renameAgentService,
@@ -42,6 +43,21 @@ export const createAgent = async (name: string, identifier: string) => {
       action: AUDIT_ACTIONS.CREATE,
       service: AUDIT_SERVICES.AGENT,
       metadata: { agentId: agent.id, name, identifier },
+    }),
+  );
+};
+
+export const setDefaultAgent = async (agentId: string): Promise<void> => {
+  const { userId, userEmail, projectId } = await resolveUser();
+  return withAudit(
+    () => setDefaultAgentService(projectId, agentId),
+    () => ({
+      projectId,
+      userId,
+      userEmail,
+      action: AUDIT_ACTIONS.UPDATE,
+      service: AUDIT_SERVICES.AGENT,
+      metadata: { agentId, change: "set-default" },
     }),
   );
 };

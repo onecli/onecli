@@ -1,5 +1,6 @@
 "use server";
 
+import "@/lib/init/server";
 import { db } from "@onecli/db";
 import { getServerSession } from "@/lib/auth/server";
 import { findUserDefaultProject } from "@onecli/api/services/organization-service";

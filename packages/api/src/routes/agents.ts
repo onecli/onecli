@@ -6,6 +6,7 @@ import {
   listAgents,
   createAgent,
   getDefaultAgent,
+  setDefaultAgent,
   renameAgent,
   deleteAgent,
   regenerateAgentToken,
@@ -86,6 +87,15 @@ export const agentRoutes = () => {
     await deleteAgent(auth.projectId, agentId);
     invalidateGatewayCache(c.req.raw);
     return c.body(null, 204);
+  });
+
+  // POST /agents/:agentId/set-default
+  app.post("/:agentId/set-default", async (c) => {
+    const auth = c.get("auth");
+    const agentId = c.req.param("agentId");
+    await setDefaultAgent(auth.projectId, agentId);
+    invalidateGatewayCache(c.req.raw);
+    return c.json({ success: true });
   });
 
   // POST /agents/:agentId/regenerate-token

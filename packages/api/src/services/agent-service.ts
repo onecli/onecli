@@ -122,6 +122,25 @@ export const createAgent = async (
   }
 };
 
+export const setDefaultAgent = async (projectId: string, agentId: string) => {
+  const agent = await db.agent.findFirst({
+    where: { id: agentId, projectId },
+    select: { id: true, isDefault: true },
+  });
+
+  if (!agent) throw new ServiceError("NOT_FOUND", "Agent not found");
+  if (agent.isDefault)
+    throw new ServiceError("BAD_REQUEST", "Agent is already the default");
+
+  await db.$transaction([
+    db.agent.updateMany({
+      where: { projectId, isDefault: true },
+      data: { isDefault: false },
+    }),
+    db.agent.update({ where: { id: agentId }, data: { isDefault: true } }),
+  ]);
+};
+
 export const deleteAgent = async (projectId: string, agentId: string) => {
   const agent = await db.agent.findFirst({
     where: { id: agentId, projectId },

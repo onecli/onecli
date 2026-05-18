@@ -10,6 +10,7 @@ import { Skeleton } from "@onecli/ui/components/skeleton";
 import { SecretCard } from "./secret-card";
 import { SecretDialog, type SecretPrefill } from "./secret-dialog";
 import type { SecretActions } from "./types";
+import { safeDecode } from "./safe-decode";
 
 interface Secret {
   id: string;
@@ -99,12 +100,12 @@ export const SecretsContent = ({
       setPrefill({
         type: "generic",
         hostPattern: host,
-        pathPattern: searchParams.get("path") ?? undefined,
-        name: searchParams.get("name") ?? `${host} Secret`,
-        headerName: searchParams.get("header") ?? undefined,
-        valueFormat: searchParams.get("format") ?? undefined,
-        paramName: searchParams.get("param") ?? undefined,
-        paramFormat: searchParams.get("paramFormat") ?? undefined,
+        pathPattern: safeDecode(searchParams.get("path")),
+        name: safeDecode(searchParams.get("name")) ?? `${host} Secret`,
+        headerName: safeDecode(searchParams.get("header")),
+        valueFormat: safeDecode(searchParams.get("format")),
+        paramName: safeDecode(searchParams.get("param")),
+        paramFormat: safeDecode(searchParams.get("paramFormat")),
       });
       setCreateOpen(true);
       router.replace(window.location.pathname, { scroll: false });

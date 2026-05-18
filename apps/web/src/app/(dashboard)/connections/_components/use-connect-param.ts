@@ -4,6 +4,7 @@ import { useEffect, useRef } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { getApps } from "@onecli/api/apps/registry";
 import type { AppDefinition } from "@onecli/api/apps/types";
+import { safeDecode } from "./safe-decode";
 
 interface UseConnectParamOptions {
   loading: boolean;
@@ -46,7 +47,7 @@ export const useConnectParam = ({
     const requestHost = searchParams.get("request");
     if (requestHost) {
       handled.current = true;
-      const appName = searchParams.get("request_name") ?? undefined;
+      const appName = safeDecode(searchParams.get("request_name"));
       router.replace("/connections");
       onRequestApp(requestHost, appName);
       return;
@@ -64,7 +65,7 @@ export const useConnectParam = ({
 
     const agentName =
       searchParams.get("source") === "agent"
-        ? (searchParams.get("agent_name") ?? "your agent")
+        ? (safeDecode(searchParams.get("agent_name")) ?? "your agent")
         : undefined;
 
     router.replace("/connections");

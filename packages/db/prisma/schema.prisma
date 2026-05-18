@@ -157,7 +157,7 @@ model Agent {
   id          String   @id @default(uuid())
   projectId   String   @map("project_id")
   name        String
-  identifier  String? // user-provided machine-readable ID, unique per project
+  identifier  String // user-provided machine-readable ID, unique per project
   accessToken String   @unique @map("access_token") // "aoc_..." prefix, used for gateway auth
   isDefault   Boolean  @default(false) @map("is_default")
   secretMode  String   @default("all") @map("secret_mode") // "all" or "selective"

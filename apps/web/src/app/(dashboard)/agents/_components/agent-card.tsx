@@ -8,6 +8,7 @@ import {
   Trash2,
   KeyRound,
   Pencil,
+  Star,
 } from "lucide-react";
 import { toast } from "sonner";
 import { Card } from "@onecli/ui/components/card";
@@ -19,6 +20,7 @@ import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
+  DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@onecli/ui/components/dropdown-menu";
 import {
@@ -39,9 +41,15 @@ import {
   DialogTitle,
 } from "@onecli/ui/components/dialog";
 import {
+  Tooltip,
+  TooltipContent,
+  TooltipTrigger,
+} from "@onecli/ui/components/tooltip";
+import {
   deleteAgent,
   regenerateAgentToken,
   renameAgent,
+  setDefaultAgent,
 } from "@/lib/actions/agents";
 import type { SecretMode } from "@onecli/api/services/agent-service";
 import { ManageAccessDialog } from "./manage-access-dialog";
@@ -50,7 +58,7 @@ interface AgentCardProps {
   agent: {
     id: string;
     name: string;
-    identifier: string | null;
+    identifier: string;
     accessToken: string;
     isDefault: boolean;
     secretMode: SecretMode;
@@ -70,9 +78,11 @@ export const AgentCard = ({
   const [deleting, setDeleting] = useState(false);
   const [regenerating, setRegenerating] = useState(false);
   const [renaming, setRenaming] = useState(false);
+  const [settingDefault, setSettingDefault] = useState(false);
   const [rotateDialogOpen, setRotateDialogOpen] = useState(false);
   const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
   const [renameDialogOpen, setRenameDialogOpen] = useState(false);
+  const [setDefaultDialogOpen, setSetDefaultDialogOpen] = useState(false);
   const [newName, setNewName] = useState("");
   const [secretsDialogOpen, setSecretsDialogOpen] = useState(
     autoOpenAccess ?? false,
@@ -121,6 +131,20 @@ export const AgentCard = ({
     }
   };
 
+  const handleSetDefault = async () => {
+    setSettingDefault(true);
+    try {
+      await setDefaultAgent(agent.id);
+      onUpdate();
+      invalidateCache();
+      toast.success("Default agent updated");
+    } catch {
+      toast.error("Failed to set default agent");
+    } finally {
+      setSettingDefault(false);
+    }
+  };
+
   const accessLabel = (() => {
     if (agent.secretMode !== "selective") return "All credentials";
     const s = agent._count.agentSecrets;
@@ -145,11 +169,9 @@ export const AgentCard = ({
           </div>
 
           <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs">
-            {agent.identifier && (
-              <code className="bg-muted text-muted-foreground rounded px-1.5 py-0.5 font-mono">
-                {agent.identifier}
-              </code>
-            )}
+            <code className="bg-muted text-muted-foreground rounded px-1.5 py-0.5 font-mono">
+              {agent.identifier}
+            </code>
             <span className="text-muted-foreground">
               Created {new Date(agent.createdAt).toLocaleDateString()}
             </span>
@@ -188,7 +210,28 @@ export const AgentCard = ({
               <RotateCw className="size-4" />
               Rotate token
             </DropdownMenuItem>
+            <DropdownMenuSeparator />
             {!agent.isDefault && (
+              <DropdownMenuItem onSelect={() => setSetDefaultDialogOpen(true)}>
+                <Star className="size-4" />
+                Set as default
+              </DropdownMenuItem>
+            )}
+            {agent.isDefault ? (
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <span className="pointer-events-auto">
+                    <DropdownMenuItem disabled variant="destructive">
+                      <Trash2 className="size-4" />
+                      Delete agent
+                    </DropdownMenuItem>
+                  </span>
+                </TooltipTrigger>
+                <TooltipContent side="left">
+                  Default agent cannot be deleted
+                </TooltipContent>
+              </Tooltip>
+            ) : (
               <DropdownMenuItem
                 variant="destructive"
                 onSelect={() => setDeleteDialogOpen(true)}
@@ -240,6 +283,30 @@ export const AgentCard = ({
               disabled={deleting}
             >
               {deleting ? "Deleting..." : "Delete"}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
+      <AlertDialog
+        open={setDefaultDialogOpen}
+        onOpenChange={setSetDefaultDialogOpen}
+      >
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Set as default agent?</AlertDialogTitle>
+            <AlertDialogDescription>
+              <strong>{agent.name}</strong> will become the default agent for
+              this project. The current default will become a regular agent.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              onClick={handleSetDefault}
+              disabled={settingDefault}
+            >
+              {settingDefault ? "Setting..." : "Set as default"}
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>

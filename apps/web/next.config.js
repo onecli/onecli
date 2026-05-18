@@ -36,8 +36,10 @@ const nextConfig = {
           "@/lib/dashboard/session-redirect":
             "@/cloud/dashboard/session-redirect",
 
-          // Cloud overrides (crypto, cloud apps, oauth-org, session hooks, cloud routes)
-          "@/lib/api/cloud-overrides": "@/cloud/api/cloud-overrides",
+          // Cloud initialization (api, server actions, client)
+          "@/lib/init/api": "@/cloud/init/api",
+          "@/lib/init/server": "@/cloud/init/server",
+          "@/lib/init/client": "@/cloud/init/client",
         }
       : {},
   },

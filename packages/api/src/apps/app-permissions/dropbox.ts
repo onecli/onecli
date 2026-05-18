@@ -1,0 +1,105 @@
+import type { AppPermissionDefinition } from "./types";
+
+export const dropboxPermissions: AppPermissionDefinition = {
+  provider: "dropbox",
+  groups: [
+    {
+      category: "read",
+      tools: [
+        {
+          id: "list_folder",
+          name: "List folder",
+          description: "List files and folders in a directory",
+          hostPattern: "api.dropboxapi.com",
+          pathPattern: "/2/files/list_folder*",
+          method: "POST",
+        },
+        {
+          id: "get_metadata",
+          name: "Get metadata",
+          description: "Get metadata for a file or folder",
+          hostPattern: "api.dropboxapi.com",
+          pathPattern: "/2/files/get_metadata",
+          method: "POST",
+        },
+        {
+          id: "search_files",
+          name: "Search files",
+          description: "Search for files and folders",
+          hostPattern: "api.dropboxapi.com",
+          pathPattern: "/2/files/search_v2",
+          method: "POST",
+        },
+        {
+          id: "download_file",
+          name: "Download file",
+          description: "Download a file",
+          hostPattern: "content.dropboxapi.com",
+          pathPattern: "/2/files/download",
+          method: "POST",
+        },
+        {
+          id: "list_shared_links",
+          name: "List shared links",
+          description: "List shared links for a file or folder",
+          hostPattern: "api.dropboxapi.com",
+          pathPattern: "/2/sharing/list_shared_links",
+          method: "POST",
+        },
+        {
+          id: "get_current_account",
+          name: "Get account info",
+          description: "Get current user account information",
+          hostPattern: "api.dropboxapi.com",
+          pathPattern: "/2/users/get_current_account",
+          method: "POST",
+        },
+      ],
+    },
+    {
+      category: "write",
+      tools: [
+        {
+          id: "upload_file",
+          name: "Upload file",
+          description: "Upload a file to Dropbox",
+          hostPattern: "content.dropboxapi.com",
+          pathPattern: "/2/files/upload",
+          method: "POST",
+        },
+        {
+          id: "create_folder",
+          name: "Create folder",
+          description: "Create a new folder",
+          hostPattern: "api.dropboxapi.com",
+          pathPattern: "/2/files/create_folder_v2",
+          method: "POST",
+        },
+        {
+          id: "move_file",
+          name: "Move file",
+          description: "Move a file or folder to a new location",
+          hostPattern: "api.dropboxapi.com",
+          pathPattern: "/2/files/move_v2",
+          method: "POST",
+        },
+        {
+          id: "delete_file",
+          name: "Delete file",
+          description: "Delete a file or folder",
+          hostPattern: "api.dropboxapi.com",
+          pathPattern: "/2/files/delete_v2",
+          method: "POST",
+        },
+        {
+          id: "create_shared_link",
+          name: "Create shared link",
+          description: "Create a shared link for a file or folder",
+          hostPattern: "api.dropboxapi.com",
+          pathPattern: "/2/sharing/create_shared_link_with_settings",
+          method: "POST",
+        },
+      ],
+    },
+  ],
+};

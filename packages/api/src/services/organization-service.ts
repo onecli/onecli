@@ -1,7 +1,7 @@
 import { db } from "@onecli/db";
 import { generateApiKey } from "./api-key-service";
 import { generateAccessToken } from "./agent-service";
-import { DEFAULT_AGENT_NAME } from "../lib/constants";
+import { DEFAULT_AGENT_NAME, DEFAULT_AGENT_IDENTIFIER } from "../lib/constants";
 import { generateProjectId, generateOrganizationId } from "../lib/ids";
 
 export const slugify = (raw: string) =>
@@ -78,6 +78,7 @@ export const bootstrapOrganization = async (
       agents: {
         create: {
           name: DEFAULT_AGENT_NAME,
+          identifier: DEFAULT_AGENT_IDENTIFIER,
           accessToken: generateAccessToken(),
           isDefault: true,
         },
@@ -124,6 +125,7 @@ export const ensureProjectSeeds = async (
     await db.agent.create({
       data: {
         name: DEFAULT_AGENT_NAME,
+        identifier: DEFAULT_AGENT_IDENTIFIER,
         accessToken: generateAccessToken(),
         isDefault: true,
         projectId,

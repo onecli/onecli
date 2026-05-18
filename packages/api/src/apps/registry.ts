@@ -25,7 +25,11 @@ import { todoist } from "./todoist";
 import { vertexAi } from "./vertex-ai";
 import { youtube } from "./youtube";
 import { cloudflare } from "./cloudflare";
+import { flyio } from "./flyio";
+import { dropbox } from "./dropbox";
+import { supabase } from "./supabase";
 import { aws } from "./aws";
+import { linkedin } from "./linkedin";
 
 const staticApps: AppDefinition[] = [
   gmail,
@@ -52,8 +56,12 @@ const staticApps: AppDefinition[] = [
   vertexAi,
   todoist,
   cloudflare,
+  flyio,
+  dropbox,
   aws,
   mongodbAtlas,
+  supabase,
+  linkedin,
 ];
 
 export const getApps = (): AppDefinition[] => [
