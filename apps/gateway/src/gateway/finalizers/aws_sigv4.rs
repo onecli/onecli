@@ -11,15 +11,14 @@ use aws_sigv4::http_request::{
     SigningSettings,
 };
 use aws_sigv4::sign::v4;
-use http_body_util::BodyExt;
-use hyper::body::Bytes;
 use hyper::header::{HeaderName, HeaderValue};
+
+use super::super::body::buffer_body;
 
 const AWS_ACCESS_KEY_HEADER: &str = "x-onecli-aws-access-key-id";
 const AWS_SECRET_KEY_HEADER: &str = "x-onecli-aws-secret-access-key";
 const AWS_SESSION_TOKEN_HEADER: &str = "x-onecli-aws-session-token";
 const AWS_REGION_HEADER: &str = "x-onecli-aws-region";
-const MAX_BODY_SIZE: usize = 10 * 1024 * 1024; // 10 MB
 
 #[derive(Clone)]
 pub(crate) struct AwsCredentials {
@@ -200,29 +199,6 @@ pub(crate) fn sign_request(
     Ok(())
 }
 
-/// Buffer a streaming `reqwest::Body` into bytes, enforcing size during read.
-///
-/// Rejects the body as soon as accumulated bytes exceed `MAX_BODY_SIZE`,
-/// preventing OOM on large uploads (e.g., S3 PutObject) without buffering
-/// the entire payload first.
-pub(crate) async fn buffer_body(mut body: reqwest::Body) -> anyhow::Result<Bytes> {
-    let mut buf = Vec::with_capacity(4096);
-
-    while let Some(frame_result) = body.frame().await {
-        let frame = frame_result.context("reading request body for SigV4 signing")?;
-        if let Some(data) = frame.data_ref() {
-            if buf.len() + data.len() > MAX_BODY_SIZE {
-                anyhow::bail!(
-                    "request body exceeds {MAX_BODY_SIZE} byte limit for AWS SigV4 signing"
-                );
-            }
-            buf.extend_from_slice(data);
-        }
-    }
-
-    Ok(Bytes::from(buf))
-}
-
 /// Sign an outgoing AWS request.
 ///
 /// Extracts credentials from internal headers, buffers the body, signs
@@ -396,22 +372,5 @@ mod tests {
         assert!(!headers.contains_key(AWS_SECRET_KEY_HEADER));
         assert!(!headers.contains_key(AWS_SESSION_TOKEN_HEADER));
         assert!(!headers.contains_key(AWS_REGION_HEADER));
-    }
-
-    #[tokio::test]
-    async fn buffer_body_rejects_oversized() {
-        let oversized = vec![0u8; MAX_BODY_SIZE + 1];
-        let body = reqwest::Body::from(oversized);
-        let result = buffer_body(body).await;
-        assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("exceeds"),);
-    }
-
-    #[tokio::test]
-    async fn buffer_body_accepts_within_limit() {
-        let data = vec![42u8; 1024];
-        let body = reqwest::Body::from(data.clone());
-        let result = buffer_body(body).await.expect("should succeed");
-        assert_eq!(result.as_ref(), data.as_slice());
     }
 }

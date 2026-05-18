@@ -58,7 +58,7 @@ interface AgentCardProps {
   agent: {
     id: string;
     name: string;
-    identifier: string;
+    identifier: string | null;
     accessToken: string;
     isDefault: boolean;
     secretMode: SecretMode;
@@ -170,7 +170,7 @@ export const AgentCard = ({
 
           <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs">
             <code className="bg-muted text-muted-foreground rounded px-1.5 py-0.5 font-mono">
-              {agent.identifier}
+              {agent.identifier ?? agent.name}
             </code>
             <span className="text-muted-foreground">
               Created {new Date(agent.createdAt).toLocaleDateString()}

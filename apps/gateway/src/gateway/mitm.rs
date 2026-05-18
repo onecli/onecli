@@ -197,6 +197,9 @@ pub(crate) struct ResolvedRules {
     /// Provider-specific request finalizer resolved from the app connection.
     /// When set, takes precedence over the host-based finalizer lookup.
     pub finalizer: Option<crate::apps::RequestFinalizer>,
+    /// Provider-specific body transform resolved from the app connection.
+    /// The handler decides per-request whether to act.
+    pub body_transform: Option<crate::apps::BodyTransform>,
 }
 
 /// Result of per-request rule resolution including app connection disambiguation.
@@ -251,6 +254,7 @@ async fn resolve_rules(
     let mut rewrite_host: Option<String> = None;
     let mut connection_label: Option<String> = None;
     let mut finalizer: Option<crate::apps::RequestFinalizer> = None;
+    let mut body_transform: Option<crate::apps::BodyTransform> = None;
 
     // If no secret rules, try app connections (per-request disambiguation)
     if injection_rules.is_empty() && !resp.app_connections.is_empty() {
@@ -271,12 +275,15 @@ async fn resolve_rules(
                 rewrite_host: rh,
                 connection_label: cl,
                 finalizer: f,
+                body_transform: bt,
+                ..
             } => {
                 injection_rules = rules;
                 token_expires_at = exp;
                 rewrite_host = rh;
                 connection_label = cl;
                 finalizer = f;
+                body_transform = bt;
             }
             AppConnectionResult::Ambiguous { connections } => {
                 return Ok(ResolveResult::Ambiguous(connections));
@@ -340,6 +347,7 @@ async fn resolve_rules(
             rewrite_host,
             connection_label,
             finalizer,
+            body_transform,
         },
         app_connections: resp.app_connections,
     })

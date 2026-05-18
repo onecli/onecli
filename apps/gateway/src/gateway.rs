@@ -13,10 +13,8 @@
 //! - [`tunnel`]: direct TCP tunneling for non-intercepted domains
 //! - [`response`]: pre-built gateway error responses
 
-mod aws_sigv4;
-#[cfg(feature = "cloud")]
-#[path = "cloud/aws_sts.rs"]
-mod aws_sts;
+mod body;
+mod finalizers;
 pub(crate) mod forward;
 #[cfg(not(feature = "cloud"))]
 mod hooks;
@@ -25,6 +23,7 @@ mod hooks;
 mod hooks;
 mod mitm;
 mod response;
+mod transforms;
 mod tunnel;
 mod websocket;
 
@@ -639,6 +638,7 @@ async fn handle_http_proxy(
 
     // Per-request app connection disambiguation
     let mut resolved_finalizer: Option<crate::apps::RequestFinalizer> = None;
+    let mut resolved_body_transform: Option<crate::apps::BodyTransform> = None;
     if resolved.injection_rules.is_empty() && !resolved.app_connections.is_empty() {
         let oid = resolved.organization_id.as_deref().unwrap_or("");
         let pid = resolved.project_id.as_deref().unwrap_or("");
@@ -655,10 +655,14 @@ async fn handle_http_proxy(
             .await
         {
             Ok(AppConnectionResult::Rules {
-                rules, finalizer, ..
+                rules,
+                finalizer,
+                body_transform,
+                ..
             }) => {
                 resolved.injection_rules = rules;
                 resolved_finalizer = finalizer;
+                resolved_body_transform = body_transform;
             }
             Ok(AppConnectionResult::Ambiguous { connections }) => {
                 return Ok(response::multiple_connections_axum(&connections));
@@ -716,6 +720,7 @@ async fn handle_http_proxy(
         rewrite_host: None,
         connection_label: None,
         finalizer: resolved_finalizer,
+        body_transform: resolved_body_transform,
     };
 
     let http_client =

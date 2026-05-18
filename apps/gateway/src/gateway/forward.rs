@@ -387,13 +387,40 @@ pub(crate) async fn forward_request(
         body
     };
 
+    // ── Provider-specific body transformation ────────────────────
+    let forward_body = match rules.body_transform {
+        Some(crate::apps::BodyTransform::GitHubCommitTrailer) => {
+            if let (Some(agent_name), Some(project_id)) = (
+                proxy_ctx.agent_name.as_deref(),
+                proxy_ctx.project_id.as_deref(),
+            ) {
+                super::transforms::github_commit_trailer::try_inject_trailer(
+                    host,
+                    &method,
+                    &path,
+                    forward_body,
+                    agent_name,
+                    project_id,
+                )
+                .await
+                .unwrap_or_else(|e| {
+                    tracing::warn!(error = %e, "body transform failed, forwarding empty body");
+                    reqwest::Body::from(vec![])
+                })
+            } else {
+                forward_body
+            }
+        }
+        None => forward_body,
+    };
+
     // ── Provider-specific request signing ─────────────────────────
     let forward_body = match rules
         .finalizer
         .or_else(|| crate::apps::finalizer_for_host(host.split(':').next().unwrap_or(host)))
     {
         Some(crate::apps::RequestFinalizer::AwsSigV4) => {
-            super::aws_sigv4::finalize_request(
+            super::finalizers::aws_sigv4::finalize_request(
                 host,
                 method.as_str(),
                 &upstream_path,
@@ -404,7 +431,7 @@ pub(crate) async fn forward_request(
         }
         #[cfg(feature = "cloud")]
         Some(crate::apps::RequestFinalizer::AwsAssumeRole) => {
-            super::aws_sts::finalize_request(
+            super::finalizers::aws_sts::finalize_request(
                 host,
                 method.as_str(),
                 &upstream_path,

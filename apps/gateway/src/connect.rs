@@ -66,6 +66,10 @@ pub(crate) enum AppConnectionResult {
         connection_label: Option<String>,
         /// Provider-specific request finalizer (e.g., SigV4 vs AssumeRole).
         finalizer: Option<apps::RequestFinalizer>,
+        /// Provider-specific body transform (e.g., commit trailer injection).
+        body_transform: Option<apps::BodyTransform>,
+        /// Provider name of the resolved connection (e.g., "github-app", "datadog").
+        provider: String,
     },
     /// No app connections available for this provider.
     NoConnections,
@@ -366,6 +370,8 @@ impl PolicyEngine {
             let mut resolved_rewrite_host: Option<String> = None;
             let mut resolved_label: Option<String> = None;
             let mut resolved_finalizer: Option<apps::RequestFinalizer> = None;
+            let mut resolved_body_transform: Option<apps::BodyTransform> = None;
+            let mut resolved_provider: Option<String> = None;
             for conn in app_connections {
                 if let AppConnectionResult::Rules {
                     rules: r,
@@ -373,6 +379,8 @@ impl PolicyEngine {
                     rewrite_host,
                     connection_label,
                     finalizer,
+                    body_transform,
+                    provider,
                 } = self
                     .resolve_connection_injections(
                         conn,
@@ -393,6 +401,12 @@ impl PolicyEngine {
                     if finalizer.is_some() {
                         resolved_finalizer = finalizer;
                     }
+                    if body_transform.is_some() {
+                        resolved_body_transform = body_transform;
+                    }
+                    if resolved_provider.is_none() {
+                        resolved_provider = Some(provider);
+                    }
                     match (earliest_expires_at, token_expires_at) {
                         (None, exp) => earliest_expires_at = exp,
                         (Some(cur), Some(exp)) if exp < cur => earliest_expires_at = Some(exp),
@@ -406,6 +420,8 @@ impl PolicyEngine {
                 rewrite_host: resolved_rewrite_host,
                 connection_label: resolved_label,
                 finalizer: resolved_finalizer,
+                body_transform: resolved_body_transform,
+                provider: resolved_provider.unwrap_or_default(),
             });
         }
 
@@ -443,6 +459,8 @@ impl PolicyEngine {
                 rewrite_host: cached.rewrite_host,
                 connection_label: cached.connection_label,
                 finalizer: apps::finalizer_for_provider(&conn.provider),
+                body_transform: apps::body_transform_for_provider(&conn.provider),
+                provider: conn.provider.clone(),
             });
         }
 
@@ -559,6 +577,8 @@ impl PolicyEngine {
             rewrite_host,
             connection_label: conn.label.clone(),
             finalizer: apps::finalizer_for_provider(&conn.provider),
+            body_transform: apps::body_transform_for_provider(&conn.provider),
+            provider: conn.provider.clone(),
         })
     }
 
@@ -718,13 +738,19 @@ impl PolicyEngine {
             if expires_at < now {
                 let cred_type = creds.get("type").and_then(|v| v.as_str()).unwrap_or("");
 
-                // Cloud-specific credential refresh (e.g., GitHub App JWT)
-                if let Some(result) =
+                // Try cloud-specific refresh first, then shared credential types
+                let refresh_result = if let Some(r) =
                     crate::cloud_apps::try_refresh_credentials(cred_type, &creds).await
                 {
+                    Some(r)
+                } else {
+                    apps::try_refresh_credentials(cred_type, &creds).await
+                };
+
+                if let Some(result) = refresh_result {
                     match result {
                         Ok((new_token, new_expires_at)) => {
-                            debug!(provider = %provider, cred_type, "refreshed cloud credential");
+                            debug!(provider = %provider, cred_type, "refreshed credential");
                             token = Some(new_token.clone());
                             effective_expires_at = Some(new_expires_at);
 
@@ -734,69 +760,8 @@ impl PolicyEngine {
                                 .await;
                         }
                         Err(e) => {
-                            warn!(provider = %provider, cred_type, error = %e, "cloud credential refresh failed");
+                            debug!(provider = %provider, cred_type, error = %e, "credential refresh failed");
                         }
-                    }
-                } else if cred_type == "service_account" {
-                    // Service account: sign JWT with private key
-                    let private_key = creds.get("private_key").and_then(|v| v.as_str());
-                    let client_email = creds.get("client_email").and_then(|v| v.as_str());
-
-                    if let (Some(pk), Some(email)) = (private_key, client_email) {
-                        match apps::refresh_via_service_account(pk, email).await {
-                            Ok((new_token, new_expires_at)) => {
-                                debug!(provider = %provider, "refreshed service account token via JWT");
-                                token = Some(new_token.clone());
-                                effective_expires_at = Some(new_expires_at);
-
-                                creds["access_token"] = serde_json::Value::String(new_token);
-                                creds["expires_at"] = serde_json::json!(new_expires_at);
-                                self.persist_refreshed_credentials(connection_id, provider, &creds)
-                                    .await;
-                            }
-                            Err(e) => {
-                                debug!(provider = %provider, error = %e, "service account JWT refresh failed");
-                            }
-                        }
-                    } else {
-                        debug!(
-                            provider = %provider,
-                            has_private_key = private_key.is_some(),
-                            has_client_email = client_email.is_some(),
-                            "service account credentials incomplete, cannot refresh"
-                        );
-                    }
-                } else if cred_type == "client_credentials" {
-                    let client_id = creds.get("client_id").and_then(|v| v.as_str());
-                    let client_secret = creds.get("client_secret").and_then(|v| v.as_str());
-                    let token_url = creds.get("token_url").and_then(|v| v.as_str());
-
-                    if let (Some(id), Some(secret), Some(url)) =
-                        (client_id, client_secret, token_url)
-                    {
-                        match apps::refresh_via_client_credentials(url, id, secret).await {
-                            Ok((new_token, new_expires_at)) => {
-                                debug!(provider = %provider, "refreshed client_credentials token");
-                                token = Some(new_token.clone());
-                                effective_expires_at = Some(new_expires_at);
-
-                                creds["access_token"] = serde_json::Value::String(new_token);
-                                creds["expires_at"] = serde_json::json!(new_expires_at);
-                                self.persist_refreshed_credentials(connection_id, provider, &creds)
-                                    .await;
-                            }
-                            Err(e) => {
-                                debug!(provider = %provider, error = %e, "client_credentials token refresh failed");
-                            }
-                        }
-                    } else {
-                        debug!(
-                            provider = %provider,
-                            has_client_id = client_id.is_some(),
-                            has_client_secret = client_secret.is_some(),
-                            has_token_url = token_url.is_some(),
-                            "client_credentials incomplete, cannot refresh"
-                        );
                     }
                 } else if let Some(refresh_token) =
                     creds.get("refresh_token").and_then(|v| v.as_str())

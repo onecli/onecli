@@ -33,6 +33,14 @@ pub(crate) enum RequestFinalizer {
     AwsAssumeRole,
 }
 
+/// Body transformation applied to specific requests after header injection.
+/// The handler internally decides whether to act based on host, method, and path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum BodyTransform {
+    /// Inject agent identity trailer into GitHub commit messages.
+    GitHubCommitTrailer,
+}
+
 /// How a host rule matches incoming hostnames.
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum HostPattern {
@@ -135,6 +143,9 @@ pub(crate) struct AppProvider {
     /// Optional request finalizer for providers needing full request transformation
     /// (e.g., AWS SigV4 signing). Called after injection, before forwarding.
     pub(crate) finalizer: Option<RequestFinalizer>,
+    /// Optional body transform for provider-specific request modifications.
+    /// The handler decides per-request whether to act.
+    pub(crate) body_transform: Option<BodyTransform>,
 }
 
 /// Shared refresh config for Atlassian OAuth APIs (Jira, Confluence).
@@ -231,6 +242,37 @@ static APP_PROVIDERS: &[AppProvider] = &[
         credential_headers: &[],
         host_rewrite: None,
         finalizer: None,
+        body_transform: None,
+    },
+    AppProvider {
+        provider: "github-app",
+        display_name: "GitHub App",
+        host_rules: &[
+            HostRule {
+                pattern: HostPattern::Exact("api.github.com"),
+                path_prefix: None,
+                strategy: AuthStrategy::Bearer,
+                intercept: false,
+            },
+            HostRule {
+                pattern: HostPattern::Exact("github.com"),
+                path_prefix: None,
+                strategy: AuthStrategy::BasicXAccessToken,
+                intercept: false,
+            },
+            HostRule {
+                pattern: HostPattern::Exact("raw.githubusercontent.com"),
+                path_prefix: None,
+                strategy: AuthStrategy::Bearer,
+                intercept: false,
+            },
+        ],
+        refresh: None,
+        metadata_headers: &[],
+        credential_headers: &[],
+        host_rewrite: None,
+        finalizer: None,
+        body_transform: Some(BodyTransform::GitHubCommitTrailer),
     },
     AppProvider {
         provider: "gmail",
@@ -261,6 +303,7 @@ static APP_PROVIDERS: &[AppProvider] = &[
         credential_headers: &[],
         host_rewrite: None,
         finalizer: None,
+        body_transform: None,
     },
     AppProvider {
         provider: "google-calendar",
@@ -284,6 +327,7 @@ static APP_PROVIDERS: &[AppProvider] = &[
         credential_headers: &[],
         host_rewrite: None,
         finalizer: None,
+        body_transform: None,
     },
     AppProvider {
         provider: "google-drive",
@@ -313,6 +357,7 @@ static APP_PROVIDERS: &[AppProvider] = &[
         credential_headers: &[],
         host_rewrite: None,
         finalizer: None,
+        body_transform: None,
     },
     AppProvider {
         provider: "google-docs",
@@ -328,6 +373,7 @@ static APP_PROVIDERS: &[AppProvider] = &[
         credential_headers: &[],
         host_rewrite: None,
         finalizer: None,
+        body_transform: None,
     },
     AppProvider {
         provider: "google-sheets",
@@ -343,6 +389,7 @@ static APP_PROVIDERS: &[AppProvider] = &[
         credential_headers: &[],
         host_rewrite: None,
         finalizer: None,
+        body_transform: None,
     },
     AppProvider {
         provider: "google-slides",
@@ -358,6 +405,7 @@ static APP_PROVIDERS: &[AppProvider] = &[
         credential_headers: &[],
         host_rewrite: None,
         finalizer: None,
+        body_transform: None,
     },
     AppProvider {
         provider: "google-tasks",
@@ -373,6 +421,7 @@ static APP_PROVIDERS: &[AppProvider] = &[
         credential_headers: &[],
         host_rewrite: None,
         finalizer: None,
+        body_transform: None,
     },
     AppProvider {
         provider: "google-forms",
@@ -388,6 +437,7 @@ static APP_PROVIDERS: &[AppProvider] = &[
         credential_headers: &[],
         host_rewrite: None,
         finalizer: None,
+        body_transform: None,
     },
     AppProvider {
         provider: "google-classroom",
@@ -403,6 +453,7 @@ static APP_PROVIDERS: &[AppProvider] = &[
         credential_headers: &[],
         host_rewrite: None,
         finalizer: None,
+        body_transform: None,
     },
     AppProvider {
         provider: "google-admin",
@@ -418,6 +469,7 @@ static APP_PROVIDERS: &[AppProvider] = &[
         credential_headers: &[],
         host_rewrite: None,
         finalizer: None,
+        body_transform: None,
     },
     AppProvider {
         provider: "google-analytics",
@@ -433,6 +485,7 @@ static APP_PROVIDERS: &[AppProvider] = &[
         credential_headers: &[],
         host_rewrite: None,
         finalizer: None,
+        body_transform: None,
     },
     AppProvider {
         provider: "google-search-console",
@@ -456,6 +509,7 @@ static APP_PROVIDERS: &[AppProvider] = &[
         credential_headers: &[],
         host_rewrite: None,
         finalizer: None,
+        body_transform: None,
     },
     AppProvider {
         provider: "google-meet",
@@ -471,6 +525,7 @@ static APP_PROVIDERS: &[AppProvider] = &[
         credential_headers: &[],
         host_rewrite: None,
         finalizer: None,
+        body_transform: None,
     },
     AppProvider {
         provider: "google-photos",
@@ -486,6 +541,7 @@ static APP_PROVIDERS: &[AppProvider] = &[
         credential_headers: &[],
         host_rewrite: None,
         finalizer: None,
+        body_transform: None,
     },
     AppProvider {
         provider: "jira",
@@ -501,6 +557,7 @@ static APP_PROVIDERS: &[AppProvider] = &[
         credential_headers: &[],
         host_rewrite: None,
         finalizer: None,
+        body_transform: None,
     },
     AppProvider {
         provider: "confluence",
@@ -516,6 +573,7 @@ static APP_PROVIDERS: &[AppProvider] = &[
         credential_headers: &[],
         host_rewrite: None,
         finalizer: None,
+        body_transform: None,
     },
     AppProvider {
         provider: "youtube",
@@ -545,6 +603,7 @@ static APP_PROVIDERS: &[AppProvider] = &[
         credential_headers: &[],
         host_rewrite: None,
         finalizer: None,
+        body_transform: None,
     },
     AppProvider {
         provider: "vertex-ai",
@@ -571,6 +630,7 @@ static APP_PROVIDERS: &[AppProvider] = &[
         credential_headers: &[],
         host_rewrite: None,
         finalizer: None,
+        body_transform: None,
     },
     AppProvider {
         provider: "todoist",
@@ -586,6 +646,7 @@ static APP_PROVIDERS: &[AppProvider] = &[
         credential_headers: &[],
         host_rewrite: None,
         finalizer: None,
+        body_transform: None,
     },
     AppProvider {
         provider: "resend",
@@ -601,6 +662,7 @@ static APP_PROVIDERS: &[AppProvider] = &[
         credential_headers: &[],
         host_rewrite: None,
         finalizer: None,
+        body_transform: None,
     },
     AppProvider {
         provider: "cloudflare",
@@ -616,6 +678,7 @@ static APP_PROVIDERS: &[AppProvider] = &[
         credential_headers: &[],
         host_rewrite: None,
         finalizer: None,
+        body_transform: None,
     },
     AppProvider {
         provider: "notion",
@@ -631,6 +694,7 @@ static APP_PROVIDERS: &[AppProvider] = &[
         credential_headers: &[],
         host_rewrite: None,
         finalizer: None,
+        body_transform: None,
     },
     AppProvider {
         provider: "dropbox",
@@ -654,6 +718,7 @@ static APP_PROVIDERS: &[AppProvider] = &[
         credential_headers: &[],
         host_rewrite: None,
         finalizer: None,
+        body_transform: None,
     },
     AppProvider {
         provider: "aws",
@@ -690,6 +755,7 @@ static APP_PROVIDERS: &[AppProvider] = &[
         ],
         host_rewrite: None,
         finalizer: Some(RequestFinalizer::AwsSigV4),
+        body_transform: None,
     },
     AppProvider {
         provider: "mongodb-atlas",
@@ -705,6 +771,7 @@ static APP_PROVIDERS: &[AppProvider] = &[
         credential_headers: &[],
         host_rewrite: None,
         finalizer: None,
+        body_transform: None,
     },
     AppProvider {
         provider: "flyio",
@@ -728,6 +795,7 @@ static APP_PROVIDERS: &[AppProvider] = &[
         credential_headers: &[],
         host_rewrite: None,
         finalizer: None,
+        body_transform: None,
     },
     AppProvider {
         provider: "linkedin",
@@ -743,6 +811,7 @@ static APP_PROVIDERS: &[AppProvider] = &[
         credential_headers: &[],
         host_rewrite: None,
         finalizer: None,
+        body_transform: None,
     },
     AppProvider {
         provider: "supabase",
@@ -758,6 +827,7 @@ static APP_PROVIDERS: &[AppProvider] = &[
         credential_headers: &[],
         host_rewrite: None,
         finalizer: None,
+        body_transform: None,
     },
 ];
 
@@ -785,6 +855,14 @@ pub(crate) fn finalizer_for_host(hostname: &str) -> Option<RequestFinalizer> {
 /// Return the request finalizer for a specific provider by ID.
 pub(crate) fn finalizer_for_provider(provider: &str) -> Option<RequestFinalizer> {
     all_providers().find_map(|p| (p.provider == provider).then_some(p.finalizer).flatten())
+}
+
+pub(crate) fn body_transform_for_provider(provider: &str) -> Option<BodyTransform> {
+    all_providers().find_map(|p| {
+        (p.provider == provider)
+            .then_some(p.body_transform)
+            .flatten()
+    })
 }
 
 /// Given a hostname, return the first matching provider's (id, display_name).
@@ -1239,6 +1317,131 @@ pub(crate) async fn refresh_via_client_credentials(
         .as_secs() as i64;
 
     Ok((access_token, now + expires_in))
+}
+
+/// Refresh an access token for a GitHub App installation.
+/// Signs a JWT with RS256 using the app's private key, then exchanges it for
+/// a short-lived installation access token (1h TTL).
+pub(crate) async fn refresh_github_app_token(
+    private_key_pem: &str,
+    app_id: &str,
+    installation_id: &str,
+) -> anyhow::Result<(String, i64)> {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("system clock before UNIX epoch")
+        .as_secs() as i64;
+
+    #[derive(serde::Serialize)]
+    struct Claims {
+        iss: String,
+        iat: i64,
+        exp: i64,
+    }
+
+    let claims = Claims {
+        iss: app_id.to_string(),
+        iat: now - 60,
+        exp: now + 600,
+    };
+
+    let key = jsonwebtoken::EncodingKey::from_rsa_pem(private_key_pem.as_bytes())
+        .map_err(|e| anyhow::anyhow!("invalid GitHub App private key: {e}"))?;
+
+    let jwt = jsonwebtoken::encode(
+        &jsonwebtoken::Header::new(jsonwebtoken::Algorithm::RS256),
+        &claims,
+        &key,
+    )
+    .map_err(|e| anyhow::anyhow!("GitHub App JWT signing failed: {e}"))?;
+
+    let resp = reqwest::Client::new()
+        .post(format!(
+            "https://api.github.com/app/installations/{installation_id}/access_tokens"
+        ))
+        .header("Authorization", format!("Bearer {jwt}"))
+        .header("Accept", "application/vnd.github+json")
+        .header("X-GitHub-Api-Version", "2022-11-28")
+        .header("User-Agent", "onecli-gateway")
+        .send()
+        .await
+        .map_err(|e| anyhow::anyhow!("GitHub App token request failed: {e}"))?;
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        return Err(anyhow::anyhow!(
+            "GitHub App token exchange failed ({status}): {body}"
+        ));
+    }
+
+    let body: serde_json::Value = resp
+        .json()
+        .await
+        .map_err(|e| anyhow::anyhow!("GitHub App token response parse failed: {e}"))?;
+
+    let token = body
+        .get("token")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| anyhow::anyhow!("GitHub App token response missing 'token' field"))?
+        .to_string();
+
+    let expires_at_str = body
+        .get("expires_at")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| anyhow::anyhow!("GitHub App token response missing 'expires_at' field"))?;
+
+    let expires_at = time::OffsetDateTime::parse(
+        expires_at_str,
+        &time::format_description::well_known::Rfc3339,
+    )
+    .map_err(|e| anyhow::anyhow!("failed to parse expires_at '{expires_at_str}': {e}"))?
+    .unix_timestamp();
+
+    Ok((token, expires_at))
+}
+
+/// Attempt to refresh credentials for a known credential type.
+/// Returns `None` if the type is not recognized (falls through to standard OAuth refresh).
+pub(crate) async fn try_refresh_credentials(
+    cred_type: &str,
+    creds: &serde_json::Value,
+) -> Option<anyhow::Result<(String, i64)>> {
+    match cred_type {
+        "github_app" => {
+            let pk = creds.get("private_key").and_then(|v| v.as_str());
+            let aid = creds.get("app_id").and_then(|v| v.as_str());
+            let iid = creds.get("installation_id").and_then(|v| v.as_str());
+            let (Some(pk), Some(aid), Some(iid)) = (pk, aid, iid) else {
+                return Some(Err(anyhow::anyhow!(
+                    "GitHub App credentials incomplete, cannot refresh"
+                )));
+            };
+            Some(refresh_github_app_token(pk, aid, iid).await)
+        }
+        "service_account" => {
+            let pk = creds.get("private_key").and_then(|v| v.as_str());
+            let email = creds.get("client_email").and_then(|v| v.as_str());
+            let (Some(pk), Some(email)) = (pk, email) else {
+                return Some(Err(anyhow::anyhow!(
+                    "service account credentials incomplete, cannot refresh"
+                )));
+            };
+            Some(refresh_via_service_account(pk, email).await)
+        }
+        "client_credentials" => {
+            let id = creds.get("client_id").and_then(|v| v.as_str());
+            let secret = creds.get("client_secret").and_then(|v| v.as_str());
+            let url = creds.get("token_url").and_then(|v| v.as_str());
+            let (Some(id), Some(secret), Some(url)) = (id, secret, url) else {
+                return Some(Err(anyhow::anyhow!(
+                    "client_credentials incomplete, cannot refresh"
+                )));
+            };
+            Some(refresh_via_client_credentials(url, id, secret).await)
+        }
+        _ => None,
+    }
 }
 
 // ── Tests ──────────────────────────────────────────────────────────────
