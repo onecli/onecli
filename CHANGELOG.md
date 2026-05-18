@@ -1,5 +1,17 @@
 # Changelog
 
+## [1.26.0](https://github.com/onecli/onecli/compare/v1.25.0...v1.26.0) (2026-05-18)
+
+
+### Features
+
+* switchable default agent, required identifier, and new app integrations ([#281](https://github.com/onecli/onecli/issues/281)) ([8dc667c](https://github.com/onecli/onecli/commit/8dc667ca4d18c4981c4557af675b8790f06e6495))
+
+
+### Bug Fixes
+
+* pro dialog ([#283](https://github.com/onecli/onecli/issues/283)) ([3bbee0c](https://github.com/onecli/onecli/commit/3bbee0cd706697660eb34f357b62a6dff066105c))
+
 ## [1.25.0](https://github.com/onecli/onecli/compare/v1.24.0...v1.25.0) (2026-05-16)
 
 
