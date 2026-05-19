@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.28.1](https://github.com/onecli/onecli/compare/v1.28.0...v1.28.1) (2026-05-19)
+
+
+### Bug Fixes
+
+* show cloud upsell instead of infinite spinner in get-started dialog for OSS ([#293](https://github.com/onecli/onecli/issues/293)) ([6119fc4](https://github.com/onecli/onecli/commit/6119fc411cc40268c204c48d2b412ae14d3a7824))
+
 ## [1.28.0](https://github.com/onecli/onecli/compare/v1.27.0...v1.28.0) (2026-05-19)
 
 
