@@ -92,7 +92,7 @@ export const GetStartedDialog = ({
           </DialogDescription>
         </DialogHeader>
 
-        {loading ? (
+        {loading && IS_CLOUD ? (
           <div className="flex items-center justify-center py-12">
             <Loader2 className="text-muted-foreground size-5 animate-spin" />
           </div>
@@ -160,9 +160,18 @@ export const GetStartedDialog = ({
                       </div>
                     </div>
                   ) : (
-                    <div className="flex items-center justify-center py-6">
-                      <Loader2 className="text-muted-foreground size-4 animate-spin" />
-                    </div>
+                    <p className="text-muted-foreground rounded-lg border p-4 text-sm">
+                      One-command install is available with{" "}
+                      <a
+                        href="https://app.onecli.sh"
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="text-foreground font-medium underline underline-offset-2"
+                      >
+                        OneCLI Cloud
+                      </a>
+                      .
+                    </p>
                   )}
                 </div>
               )}
