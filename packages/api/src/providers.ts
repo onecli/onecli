@@ -1,6 +1,7 @@
 export interface AuthContext {
   userId: string;
   projectId: string;
+  organizationId: string;
 }
 
 export interface SessionUser {
@@ -60,7 +61,8 @@ import * as defaultOAuthOrg from "./apps/oauth-org";
 
 export interface OAuthOrgHandlers {
   tryHandleOrgAuthorize: (
-    request: Request,
+    auth: AuthContext,
+    c: import("hono").Context,
     provider: string,
   ) => Promise<Response | null>;
   tryHandleOrgCallback: (
@@ -68,6 +70,7 @@ export interface OAuthOrgHandlers {
     provider: string,
   ) => Promise<Response | null>;
   tryHandleOrgConnect: (
+    auth: AuthContext,
     request: Request,
     provider: string,
     credentials: Record<string, unknown>,
@@ -84,3 +87,15 @@ export const initOAuthOrg = (handlers: OAuthOrgHandlers) => {
 };
 
 export const getOAuthOrg = (): OAuthOrgHandlers => _oauthOrg;
+
+// ── Self URL (base URL for OAuth callbacks, etc.) ───────────────────────
+
+import { APP_URL } from "./lib/env";
+
+let _selfUrl: string = APP_URL;
+
+export const initSelfUrl = (url: string) => {
+  _selfUrl = url;
+};
+
+export const getSelfUrl = (): string => _selfUrl;

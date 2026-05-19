@@ -2,7 +2,7 @@
 
 import { db } from "@onecli/db";
 import { resolveUser } from "@/lib/actions/resolve-user";
-import { APP_URL, GATEWAY_BASE_URL } from "@/lib/env";
+import { APP_URL, API_URL, GATEWAY_BASE_URL } from "@/lib/env";
 import {
   listSecrets,
   createSecret as createSecretService,
@@ -71,6 +71,7 @@ export const getInstallInfo = async () => {
     agentToken: agent?.accessToken ?? null,
     gatewayUrl: GATEWAY_BASE_URL,
     appUrl: APP_URL,
+    apiUrl: API_URL,
   };
 };
 

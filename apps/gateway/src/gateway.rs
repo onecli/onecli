@@ -208,6 +208,32 @@ impl GatewayServer {
         let axum_router = Router::new()
             .route("/healthz", axum::routing::get(healthz))
             .route("/me", axum::routing::get(me))
+            // /v1 routes
+            .route(
+                "/v1/vault/{provider}/pair",
+                axum::routing::post(vault::api::vault_pair),
+            )
+            .route(
+                "/v1/vault/{provider}/status",
+                axum::routing::get(vault::api::vault_status),
+            )
+            .route(
+                "/v1/vault/{provider}/pair",
+                axum::routing::delete(vault::api::vault_disconnect),
+            )
+            .route(
+                "/v1/cache/invalidate",
+                axum::routing::post(invalidate_cache),
+            )
+            .route(
+                "/v1/approvals/pending",
+                axum::routing::get(get_pending_approvals),
+            )
+            .route(
+                "/v1/approvals/{id}/decision",
+                axum::routing::post(submit_approval_decision),
+            )
+            // /api legacy routes (backwards compatibility)
             .route(
                 "/api/vault/{provider}/pair",
                 axum::routing::post(vault::api::vault_pair),

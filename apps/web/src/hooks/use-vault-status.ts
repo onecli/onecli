@@ -2,7 +2,8 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { toast } from "sonner";
-import { GATEWAY_URL, getGatewayFetchOptions } from "@/lib/gateway-auth";
+import { GATEWAY_API_URL } from "@/lib/env";
+import { getGatewayFetchOptions } from "@/lib/gateway-auth";
 
 export interface VaultStatus<T = unknown> {
   connected: boolean;
@@ -22,10 +23,13 @@ export const useVaultStatus = <T = unknown>(provider: string = "bitwarden") => {
   const fetchStatus = useCallback(async () => {
     try {
       const { headers, credentials } = await getGatewayFetchOptions();
-      const resp = await fetch(`${GATEWAY_URL}/api/vault/${provider}/status`, {
-        headers,
-        credentials,
-      });
+      const resp = await fetch(
+        `${GATEWAY_API_URL}/v1/vault/${provider}/status`,
+        {
+          headers,
+          credentials,
+        },
+      );
       if (resp.ok) {
         setStatus(await resp.json());
       }
@@ -62,15 +66,18 @@ export const useVaultPair = (
       setPairing(true);
       try {
         const { headers, credentials } = await getGatewayFetchOptions();
-        const resp = await fetch(`${GATEWAY_URL}/api/vault/${provider}/pair`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json", ...headers },
-          credentials,
-          body: JSON.stringify({
-            psk_hex: pskHex,
-            fingerprint_hex: fingerprintHex,
-          }),
-        });
+        const resp = await fetch(
+          `${GATEWAY_API_URL}/v1/vault/${provider}/pair`,
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json", ...headers },
+            credentials,
+            body: JSON.stringify({
+              psk_hex: pskHex,
+              fingerprint_hex: fingerprintHex,
+            }),
+          },
+        );
 
         if (resp.ok) {
           toast.success("Vault connected successfully");
@@ -104,7 +111,7 @@ export const useVaultDisconnect = (
     setDisconnecting(true);
     try {
       const { headers, credentials } = await getGatewayFetchOptions();
-      const resp = await fetch(`${GATEWAY_URL}/api/vault/${provider}/pair`, {
+      const resp = await fetch(`${GATEWAY_API_URL}/v1/vault/${provider}/pair`, {
         method: "DELETE",
         headers,
         credentials,

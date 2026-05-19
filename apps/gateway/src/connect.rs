@@ -964,7 +964,7 @@ fn host_matches(request_host: &str, pattern: &str) -> bool {
 // ── Injection building ──────────────────────────────────────────────────
 
 /// Build injection instructions for a secret based on its type.
-/// Mirrors the logic in `apps/web/src/app/api/gateway/connect/route.ts`.
+/// Mirrors the logic in `apps/web/src/app/v1/gateway/connect/route.ts`.
 fn build_injections(
     secret_type: &str,
     decrypted_value: &str,

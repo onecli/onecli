@@ -33,6 +33,7 @@ import {
   setAppConfigEnabled,
 } from "@/lib/actions/app-config";
 import { APP_URL, IS_CLOUD } from "@/lib/env";
+import { API_ORIGIN } from "@/lib/api-fetch";
 import { useCopyToClipboard } from "@/hooks/use-copy-to-clipboard";
 
 interface AppConfigFormProps {
@@ -342,7 +343,7 @@ export const AppConfigForm = ({
 };
 
 const RedirectUri = ({ provider }: { provider: string }) => {
-  const redirectUri = `${APP_URL}/api/apps/${provider}/callback`;
+  const redirectUri = `${API_ORIGIN || APP_URL}/v1/apps/${provider}/callback`;
   const { copied, copy } = useCopyToClipboard();
 
   return (

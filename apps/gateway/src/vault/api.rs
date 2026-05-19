@@ -11,7 +11,7 @@ use axum::Json;
 use crate::auth::AuthUser;
 use crate::gateway::GatewayState;
 
-/// POST /api/vault/:provider/pair
+/// POST /v1/vault/:provider/pair
 /// Body: provider-specific JSON (e.g. `{ psk_hex, fingerprint_hex }` for Bitwarden)
 pub(crate) async fn vault_pair(
     auth: AuthUser,
@@ -38,7 +38,7 @@ pub(crate) async fn vault_pair(
     }
 }
 
-/// GET /api/vault/:provider/status
+/// GET /v1/vault/:provider/status
 pub(crate) async fn vault_status(
     auth: AuthUser,
     State(state): State<GatewayState>,
@@ -68,7 +68,7 @@ pub(crate) async fn vault_status(
     }
 }
 
-/// DELETE /api/vault/:provider/pair
+/// DELETE /v1/vault/:provider/pair
 pub(crate) async fn vault_disconnect(
     auth: AuthUser,
     State(state): State<GatewayState>,

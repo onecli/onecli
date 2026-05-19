@@ -43,7 +43,7 @@ export const findUserDefaultProject = async (
  *
  * This is the single source of truth for the "first login" bootstrap flow.
  * Called by:
- *   - `GET /api/auth/session` (cloud + OSS)
+ *   - `GET /v1/auth/session` (cloud + OSS)
  *   - `ensureLocalUser()` (OSS local-auth mode)
  *   - `ensureUserDefaultOrgAndProject()` (cloud project management)
  */

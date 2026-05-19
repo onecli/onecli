@@ -127,7 +127,7 @@ export const BitwardenSetup = () => {
                     </code>{" "}
                     is running and your Bitwarden vault is unlocked.{" "}
                     <a
-                      href="https://www.onecli.sh/docs/vaults/bitwarden#troubleshooting"
+                      href="https://onecli.sh/docs/vaults/bitwarden#troubleshooting"
                       target="_blank"
                       rel="noopener noreferrer"
                       className="underline underline-offset-2 hover:no-underline"
@@ -200,7 +200,7 @@ export const BitwardenSetup = () => {
         <CardDescription>
           Pair your Bitwarden vault to inject credentials on-demand.{" "}
           <a
-            href="https://www.onecli.sh/docs/vaults/bitwarden"
+            href="https://onecli.sh/docs/vaults/bitwarden"
             target="_blank"
             rel="noopener noreferrer"
             className="text-foreground inline-flex items-center gap-0.5 underline underline-offset-2 hover:no-underline"

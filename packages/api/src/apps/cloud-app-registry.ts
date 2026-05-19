@@ -36,6 +36,15 @@ export const cloudApps: AppDefinition[] = [
     available: false,
   },
   {
+    id: "microsoft-onenote",
+    name: "Microsoft OneNote",
+    icon: "/icons/microsoft-onenote.svg",
+    description:
+      "Read and manage notebooks, sections, and pages in Microsoft OneNote.",
+    connectionMethod: { type: "cloud_only" },
+    available: false,
+  },
+  {
     id: "aws-role",
     name: "AWS Role",
     icon: "/icons/aws.svg",

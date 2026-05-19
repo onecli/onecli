@@ -2,12 +2,10 @@ import { Hono } from "hono";
 import { setCookie, getCookie, deleteCookie } from "hono/cookie";
 import { db } from "@onecli/db";
 import type { ApiEnv } from "../types";
-import { getSessionProvider } from "../providers";
 import { authMiddleware } from "../middleware/auth";
-import { validateApiKey } from "../lib/validate-api-key";
 import { getApp, getApps } from "../apps/registry";
 import { resolveAppCredentials } from "../apps/resolve-credentials";
-import { getOAuthOrg } from "../providers";
+import { getOAuthOrg, getSelfUrl } from "../providers";
 import {
   signOAuthState,
   verifyOAuthState,
@@ -26,7 +24,6 @@ import {
   extractLabel,
   deleteConnection,
 } from "../services/connection-service";
-import { findUserDefaultProject } from "../services/organization-service";
 import {
   getAppConfig,
   upsertAppConfig,
@@ -147,47 +144,16 @@ export const appRoutes = () => {
   });
 
   // ── GET /apps/:provider/authorize ── OAuth redirect ────────────────────
-  app.get("/:provider/authorize", async (c) => {
+  app.get("/:provider/authorize", authMiddleware, async (c) => {
     const provider = c.req.param("provider")!;
+    const auth = c.get("auth");
 
     const orgResponse = await getOAuthOrg().tryHandleOrgAuthorize(
-      c.req.raw,
+      auth,
+      c,
       provider,
     );
     if (orgResponse) return orgResponse;
-
-    // Auth check after org check (org authorize may use a different auth mechanism)
-    const apiKeyAuth = await validateApiKey(c.req.raw);
-    if (!apiKeyAuth) {
-      const session = getSessionProvider();
-      const user = await session.getSession(c.req.raw);
-      if (!user) return c.json({ error: "Unauthorized" }, 401);
-
-      const dbUser = await db.user.findUnique({
-        where: { externalAuthId: user.id },
-        select: { id: true },
-      });
-      if (!dbUser) return c.json({ error: "Unauthorized" }, 401);
-
-      const projectId = await session.resolveProjectForUser(
-        dbUser.id,
-        c.req.raw,
-      );
-      if (!projectId) {
-        const fallback = await findUserDefaultProject(dbUser.id);
-        if (!fallback) return c.json({ error: "Unauthorized" }, 401);
-        c.set("auth", {
-          userId: dbUser.id,
-          projectId: fallback.id,
-        });
-      } else {
-        c.set("auth", { userId: dbUser.id, projectId });
-      }
-    } else {
-      c.set("auth", apiKeyAuth);
-    }
-
-    const auth = c.get("auth");
     const appDef = getApp(provider);
 
     if (
@@ -222,7 +188,7 @@ export const appRoutes = () => {
 
     const { values: creds } = resolved;
 
-    const redirectUri = `${APP_URL}/api/apps/${provider}/callback`;
+    const redirectUri = `${getSelfUrl()}/v1/apps/${provider}/callback`;
     const scopes = appDef.connectionMethod.defaultScopes ?? [];
 
     const authUrl = appDef.connectionMethod.buildAuthUrl({
@@ -236,7 +202,7 @@ export const appRoutes = () => {
       httpOnly: true,
       secure: NODE_ENV === "production",
       sameSite: "Lax",
-      path: `/api/apps/${provider}/callback`,
+      path: `/v1/apps/${provider}/callback`,
       maxAge: 600,
     });
 
@@ -305,7 +271,7 @@ export const appRoutes = () => {
         return errorRedirect(`${appDef.name} is not configured`);
       }
 
-      const redirectUri = `${APP_URL}/api/apps/${provider}/callback`;
+      const redirectUri = `${getSelfUrl()}/v1/apps/${provider}/callback`;
 
       // Extract all query params as callback params
       const url = new URL(c.req.url);
@@ -364,7 +330,7 @@ export const appRoutes = () => {
       }
 
       deleteCookie(c, "oauth_state", {
-        path: `/api/apps/${provider}/callback`,
+        path: `/v1/apps/${provider}/callback`,
       });
 
       return c.redirect(`${APP_URL}/app-connect/${provider}?${successParams}`);
@@ -465,6 +431,7 @@ export const appRoutes = () => {
 
     if (body.org) {
       const orgResponse = await getOAuthOrg().tryHandleOrgConnect(
+        auth,
         c.req.raw,
         provider,
         credentials,

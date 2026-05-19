@@ -1,7 +1,5 @@
 import { db } from "@onecli/db";
-import { API_URL } from "./env";
-
-const GATEWAY_URL = API_URL;
+import { GATEWAY_API_URL } from "./env";
 
 export const invalidateGatewayCache = (request: Request) => {
   const authorization = request.headers.get("authorization");
@@ -11,7 +9,7 @@ export const invalidateGatewayCache = (request: Request) => {
   if (authorization) headers["authorization"] = authorization;
   if (cookie) headers["cookie"] = cookie;
 
-  fetch(`${GATEWAY_URL}/api/cache/invalidate`, {
+  fetch(`${GATEWAY_API_URL}/v1/cache/invalidate`, {
     method: "POST",
     headers,
   }).catch(() => {});
@@ -22,7 +20,7 @@ export const invalidateGatewayCacheForAccount = (projectId: string) => {
     .findFirst({ where: { projectId }, select: { key: true } })
     .then((apiKey) => {
       if (!apiKey) return;
-      fetch(`${GATEWAY_URL}/api/cache/invalidate`, {
+      fetch(`${GATEWAY_API_URL}/v1/cache/invalidate`, {
         method: "POST",
         headers: { authorization: `Bearer ${apiKey.key}` },
       }).catch(() => {});
@@ -39,7 +37,7 @@ export const invalidateGatewayCacheForOrg = (organizationId: string) => {
     })
     .then((keys) => {
       for (const { key } of keys) {
-        fetch(`${GATEWAY_URL}/api/cache/invalidate`, {
+        fetch(`${GATEWAY_API_URL}/v1/cache/invalidate`, {
           method: "POST",
           headers: { authorization: `Bearer ${key}` },
         }).catch(() => {});

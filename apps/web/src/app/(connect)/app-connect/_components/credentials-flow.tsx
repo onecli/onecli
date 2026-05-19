@@ -6,6 +6,7 @@ import { Button } from "@onecli/ui/components/button";
 import { Input } from "@onecli/ui/components/input";
 import { Label } from "@onecli/ui/components/label";
 import { SecretInput } from "@/components/secret-input";
+import { apiFetch } from "@/lib/api-fetch";
 import { ConnectLayout } from "./connect-layout";
 
 interface FileImportConfig {
@@ -117,9 +118,8 @@ export const CredentialsFlow = ({
     if (!hasInput) return;
     setSubmitting(true);
     try {
-      const resp = await fetch(`/api/apps/${app.id}/connect`, {
+      const resp = await apiFetch(`/v1/apps/${app.id}/connect`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           fields: { ...values, ...hiddenFields },
           connectionId,

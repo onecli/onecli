@@ -63,6 +63,7 @@ const cloudUnscopedRedirect = (request: NextRequest): NextResponse | null => {
 
 export const proxy = (request: NextRequest) => {
   const { pathname } = request.nextUrl;
+
   const error = getSetupError();
 
   if (pathname.startsWith("/setup-error")) {
@@ -87,6 +88,6 @@ export const proxy = (request: NextRequest) => {
 export const config = {
   matcher: [
     // Match all routes except static files, _next, and api routes
-    "/((?!_next/static|_next/image|favicon.ico|api|.*\\.).*)",
+    "/((?!_next/static|_next/image|favicon.ico|v1|api|.*\\.).*)",
   ],
 };

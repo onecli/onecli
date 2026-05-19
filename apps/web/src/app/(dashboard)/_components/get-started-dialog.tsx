@@ -37,6 +37,7 @@ export const GetStartedDialog = ({
     agentToken: string | null;
     gatewayUrl: string;
     appUrl: string;
+    apiUrl: string;
   } | null>(null);
   const [loading, setLoading] = useState(false);
   const [activeSection, setActiveSection] = useState<"agents" | "install">(
@@ -58,9 +59,9 @@ export const GetStartedDialog = ({
     if (!installInfo?.apiKey || !IS_CLOUD) return null;
     const params = [`key=${installInfo.apiKey}`];
     if (installInfo.appUrl !== "https://app.onecli.sh") {
-      params.push(`url=${encodeURIComponent(installInfo.appUrl)}`);
+      params.push(`url=${encodeURIComponent(installInfo.apiUrl)}`);
     }
-    return `curl -fsSL "${installInfo.appUrl}/api/${path}?${params.join("&")}" | sh`;
+    return `curl -fsSL "${installInfo.apiUrl}/v1/${path}?${params.join("&")}" | sh`;
   };
 
   const installCommand = buildCurlCommand("install/nanoclaw");
@@ -72,10 +73,10 @@ export const GetStartedDialog = ({
     if (!installInfo?.apiKey || !IS_CLOUD) return null;
     const params = [`key=${installInfo.apiKey}`];
     if (installInfo.appUrl !== "https://app.onecli.sh") {
-      params.push(`url=${encodeURIComponent(installInfo.appUrl)}`);
+      params.push(`url=${encodeURIComponent(installInfo.apiUrl)}`);
     }
     params.push(`agent=${encodeURIComponent(selectedAgent)}`);
-    return `curl -fsSL "${installInfo.appUrl}/api/install/cli?${params.join("&")}" | sh`;
+    return `curl -fsSL "${installInfo.apiUrl}/v1/install/cli?${params.join("&")}" | sh`;
   };
 
   const cliInstallCommand = buildCliInstallCommand();

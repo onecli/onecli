@@ -172,7 +172,7 @@ export const containerConfigRoutes = () => {
       });
     } catch (err) {
       logger.error(
-        { err, route: "GET /api/container-config" },
+        { err, route: "GET /v1/container-config" },
         "container config failed",
       );
       return c.json({ error: "Internal server error" }, 500);

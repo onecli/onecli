@@ -5,6 +5,7 @@ import { useRouter } from "next/navigation";
 import Image from "next/image";
 import { Button } from "@onecli/ui/components/button";
 import { useAuth } from "@/providers/auth-provider";
+import { apiFetch } from "@/lib/api-fetch";
 
 export const LoginContent = () => {
   const router = useRouter();
@@ -16,7 +17,7 @@ export const LoginContent = () => {
 
     const syncUser = async () => {
       try {
-        const res = await fetch("/api/auth/session");
+        const res = await apiFetch("/v1/auth/session");
         if (res.ok) {
           const data = (await res.json()) as { projectId?: string };
           router.replace(

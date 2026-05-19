@@ -11,6 +11,7 @@ import { SettingsMobileNav } from "@/app/(dashboard)/settings/_components/settin
 import { useAuth } from "@/providers/auth-provider";
 import { checkDashboardRedirect } from "@/lib/user-plan";
 import { getDashboardRedirect } from "@/lib/dashboard/session-redirect";
+import { apiFetch } from "@/lib/api-fetch";
 
 export default function DashboardLayout({
   children,
@@ -36,7 +37,7 @@ export default function DashboardLayout({
 
   const initSession = useCallback(async () => {
     try {
-      const res = await fetch("/api/auth/session");
+      const res = await apiFetch("/v1/auth/session");
       if (!res.ok) {
         signOutRef.current();
         return;

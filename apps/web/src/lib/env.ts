@@ -15,22 +15,20 @@
 export const APP_URL =
   process.env.NEXT_PUBLIC_APP_URL ?? "http://localhost:10254";
 
-/** Gateway API URL used by browser-side code (e.g., `http://localhost:10255`). */
+/** API server URL used by browser-side code for general API calls. */
 export const API_URL =
   process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:10255";
 
+/** Gateway HTTP API URL for vault, cache, and approval calls. */
+export const GATEWAY_API_URL =
+  process.env.NEXT_PUBLIC_GATEWAY_API_URL ?? "http://localhost:10255";
+
 /**
- * Gateway URL used by server-side code when the web app calls the gateway
- * from within a Docker network (e.g., `host.docker.internal:10255`).
+ * Gateway CONNECT proxy address used by server-side code when the web app
+ * calls the gateway from within a Docker network (e.g., `host.docker.internal:10255`).
  */
 export const GATEWAY_BASE_URL =
   process.env.GATEWAY_BASE_URL ?? "host.docker.internal:10255";
-
-/**
- * Gateway host:port for constructing proxy URLs shown to users
- * (e.g., `localhost:10255`). No protocol prefix.
- */
-export const API_BASE_URL = process.env.API_BASE_URL ?? "localhost:10255";
 
 // ── Edition ─────────────────────────────────────────────────────────────
 

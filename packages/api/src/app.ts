@@ -9,6 +9,7 @@ import {
   initCrypto,
   initCloudApps,
   initOAuthOrg,
+  initSelfUrl,
 } from "./providers";
 import { registerAppPermission } from "./apps/app-permissions";
 import { errorHandler } from "./middleware/error-handler";
@@ -35,6 +36,7 @@ export interface CreateApiAppOptions {
   cloudApps?: AppDefinition[];
   cloudAppPermissions?: AppPermissionDefinition[];
   oauthOrg?: OAuthOrgHandlers;
+  selfUrl?: string;
   sessionHooks?: Partial<SessionHooks>;
   version?: string;
 }
@@ -52,9 +54,10 @@ export const createApiApp = (
     }
   }
   if (options?.oauthOrg) initOAuthOrg(options.oauthOrg);
+  if (options?.selfUrl) initSelfUrl(options.selfUrl);
   if (options?.sessionHooks) initSessionHooks(options.sessionHooks);
 
-  const app = new Hono<ApiEnv>().basePath("/api");
+  const app = new Hono<ApiEnv>().basePath("/v1");
   app.onError(errorHandler);
 
   app.route("/health", healthRoutes(options?.version));

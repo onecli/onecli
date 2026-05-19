@@ -8,8 +8,11 @@ const nextConfig = {
   serverExternalPackages: ["@onecli/db"],
   env: {
     NEXT_PUBLIC_EDITION: process.env.NEXT_PUBLIC_EDITION || "oss",
-    NEXT_PUBLIC_API_URL: process.env.API_BASE_URL
-      ? `${isCloud && process.env.NODE_ENV !== "development" ? "https" : "http"}://${process.env.API_BASE_URL}`
+    NEXT_PUBLIC_API_URL: process.env.API_DOMAIN
+      ? `${isCloud && process.env.NODE_ENV !== "development" ? "https" : "http"}://${process.env.API_DOMAIN}`
+      : "http://localhost:10255",
+    NEXT_PUBLIC_GATEWAY_API_URL: process.env.GATEWAY_API_DOMAIN
+      ? `${isCloud && process.env.NODE_ENV !== "development" ? "https" : "http"}://${process.env.GATEWAY_API_DOMAIN}`
       : "http://localhost:10255",
   },
   turbopack: {
@@ -40,6 +43,9 @@ const nextConfig = {
           "@/lib/init/api": "@/cloud/init/api",
           "@/lib/init/server": "@/cloud/init/server",
           "@/lib/init/client": "@/cloud/init/client",
+
+          // Cloud API fetch (Bearer token auth for external api-server)
+          "@/lib/api-fetch": "@/cloud/api-fetch",
         }
       : {},
   },
