@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.28.0](https://github.com/onecli/onecli/compare/v1.27.0...v1.28.0) (2026-05-19)
+
+
+### Features
+
+* v1 API prefix migration ([#291](https://github.com/onecli/onecli/issues/291)) ([e560f38](https://github.com/onecli/onecli/commit/e560f380a6651910c9f77394fead1d64674e7d11))
+
 ## [1.27.0](https://github.com/onecli/onecli/compare/v1.26.0...v1.27.0) (2026-05-18)
 
 
