@@ -324,8 +324,8 @@ export const SecretDialog = ({
         });
         toast.success("Secret created");
       }
-      queryClient.invalidateQueries({ queryKey: queryKeys.secrets.all });
-      queryClient.invalidateQueries({ queryKey: queryKeys.counts.all });
+      queryClient.invalidateQueries({ queryKey: queryKeys.secrets.all() });
+      queryClient.invalidateQueries({ queryKey: queryKeys.counts.all() });
       onSaved?.();
       onOpenChange(false);
       invalidateCache();

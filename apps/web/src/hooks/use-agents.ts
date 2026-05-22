@@ -38,8 +38,8 @@ export const useCreateAgent = () => {
   return useMutation({
     mutationFn: agents.create,
     onSuccess: () => {
-      qc.invalidateQueries({ queryKey: queryKeys.agents.all });
-      qc.invalidateQueries({ queryKey: queryKeys.counts.all });
+      qc.invalidateQueries({ queryKey: queryKeys.agents.all() });
+      qc.invalidateQueries({ queryKey: queryKeys.counts.all() });
       invalidateGatewayCache();
     },
     onError: (err) =>
@@ -54,8 +54,8 @@ export const useDeleteAgent = () => {
   return useMutation({
     mutationFn: deleteAgent,
     onSuccess: () => {
-      qc.invalidateQueries({ queryKey: queryKeys.agents.all });
-      qc.invalidateQueries({ queryKey: queryKeys.counts.all });
+      qc.invalidateQueries({ queryKey: queryKeys.agents.all() });
+      qc.invalidateQueries({ queryKey: queryKeys.counts.all() });
       invalidateGatewayCache();
       toast.success("Agent deleted");
     },
@@ -69,7 +69,7 @@ export const useRenameAgent = () => {
     mutationFn: ({ agentId, name }: { agentId: string; name: string }) =>
       renameAgent(agentId, name),
     onSuccess: () => {
-      qc.invalidateQueries({ queryKey: queryKeys.agents.all });
+      qc.invalidateQueries({ queryKey: queryKeys.agents.all() });
       toast.success("Agent renamed");
     },
     onError: () => toast.error("Failed to rename agent"),
@@ -81,7 +81,7 @@ export const useRegenerateToken = () => {
   return useMutation({
     mutationFn: regenerateAgentToken,
     onSuccess: () => {
-      qc.invalidateQueries({ queryKey: queryKeys.agents.all });
+      qc.invalidateQueries({ queryKey: queryKeys.agents.all() });
       invalidateGatewayCache();
       toast.success("Token regenerated");
     },
@@ -94,7 +94,7 @@ export const useSetDefaultAgent = () => {
   return useMutation({
     mutationFn: setDefaultAgent,
     onSuccess: () => {
-      qc.invalidateQueries({ queryKey: queryKeys.agents.all });
+      qc.invalidateQueries({ queryKey: queryKeys.agents.all() });
       invalidateGatewayCache();
       toast.success("Default agent updated");
     },
@@ -113,7 +113,7 @@ export const useUpdateSecretMode = () => {
       mode: "all" | "selective";
     }) => updateAgentSecretMode(agentId, mode),
     onSuccess: (_data, { agentId }) => {
-      qc.invalidateQueries({ queryKey: queryKeys.agents.all });
+      qc.invalidateQueries({ queryKey: queryKeys.agents.all() });
       qc.invalidateQueries({ queryKey: queryKeys.agents.secrets(agentId) });
       invalidateGatewayCache();
     },
@@ -133,7 +133,7 @@ export const useUpdateAgentSecrets = () => {
     }) => updateAgentSecrets(agentId, secretIds),
     onSuccess: (_data, { agentId }) => {
       qc.invalidateQueries({ queryKey: queryKeys.agents.secrets(agentId) });
-      qc.invalidateQueries({ queryKey: queryKeys.agents.all });
+      qc.invalidateQueries({ queryKey: queryKeys.agents.all() });
       invalidateGatewayCache();
     },
     onError: () => toast.error("Failed to update agent secrets"),
@@ -154,7 +154,7 @@ export const useUpdateAgentConnections = () => {
       qc.invalidateQueries({
         queryKey: queryKeys.agents.connections(agentId),
       });
-      qc.invalidateQueries({ queryKey: queryKeys.agents.all });
+      qc.invalidateQueries({ queryKey: queryKeys.agents.all() });
       invalidateGatewayCache();
     },
     onError: () => toast.error("Failed to update agent connections"),

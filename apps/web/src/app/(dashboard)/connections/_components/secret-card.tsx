@@ -64,8 +64,8 @@ export const SecretCard = ({
     setDeleting(true);
     try {
       await (secretActions?.deleteSecret ?? defaultDeleteSecret)(secret.id);
-      queryClient.invalidateQueries({ queryKey: queryKeys.secrets.all });
-      queryClient.invalidateQueries({ queryKey: queryKeys.counts.all });
+      queryClient.invalidateQueries({ queryKey: queryKeys.secrets.all() });
+      queryClient.invalidateQueries({ queryKey: queryKeys.counts.all() });
       onUpdate?.();
       invalidateCache();
       toast.success("Secret deleted");

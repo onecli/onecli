@@ -15,8 +15,8 @@ export const useCreateSecret = () => {
   return useMutation({
     mutationFn: secrets.create,
     onSuccess: () => {
-      qc.invalidateQueries({ queryKey: queryKeys.secrets.all });
-      qc.invalidateQueries({ queryKey: queryKeys.counts.all });
+      qc.invalidateQueries({ queryKey: queryKeys.secrets.all() });
+      qc.invalidateQueries({ queryKey: queryKeys.counts.all() });
       invalidateGatewayCache();
     },
     onError: (err) =>
@@ -31,8 +31,8 @@ export const useDeleteSecret = () => {
   return useMutation({
     mutationFn: deleteSecret,
     onSuccess: () => {
-      qc.invalidateQueries({ queryKey: queryKeys.secrets.all });
-      qc.invalidateQueries({ queryKey: queryKeys.counts.all });
+      qc.invalidateQueries({ queryKey: queryKeys.secrets.all() });
+      qc.invalidateQueries({ queryKey: queryKeys.counts.all() });
       invalidateGatewayCache();
       toast.success("Secret deleted");
     },
@@ -51,7 +51,7 @@ export const useUpdateSecret = () => {
       input: Parameters<typeof updateSecret>[1];
     }) => updateSecret(secretId, input),
     onSuccess: () => {
-      qc.invalidateQueries({ queryKey: queryKeys.secrets.all });
+      qc.invalidateQueries({ queryKey: queryKeys.secrets.all() });
       invalidateGatewayCache();
       toast.success("Secret updated");
     },

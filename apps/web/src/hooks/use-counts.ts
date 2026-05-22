@@ -5,4 +5,4 @@ import { counts } from "@/lib/api";
 import { queryKeys } from "@/lib/api/keys";
 
 export const useCounts = () =>
-  useQuery({ queryKey: queryKeys.counts.all, queryFn: counts.get });
+  useQuery({ queryKey: queryKeys.counts.all(), queryFn: counts.get });

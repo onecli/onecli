@@ -183,8 +183,8 @@ export const CustomEndpointForm = ({
         });
         toast.success("Rule created");
       }
-      queryClient.invalidateQueries({ queryKey: queryKeys.rules.all });
-      queryClient.invalidateQueries({ queryKey: queryKeys.counts.all });
+      queryClient.invalidateQueries({ queryKey: queryKeys.rules.all() });
+      queryClient.invalidateQueries({ queryKey: queryKeys.counts.all() });
       onSaved?.();
       onClose();
       invalidateCache();

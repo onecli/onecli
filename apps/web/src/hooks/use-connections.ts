@@ -24,8 +24,8 @@ export const useDisconnectConnection = () => {
   return useMutation({
     mutationFn: connections.disconnect,
     onSuccess: () => {
-      qc.invalidateQueries({ queryKey: queryKeys.connections.all });
-      qc.invalidateQueries({ queryKey: queryKeys.counts.all });
+      qc.invalidateQueries({ queryKey: queryKeys.connections.all() });
+      qc.invalidateQueries({ queryKey: queryKeys.counts.all() });
       invalidateGatewayCache();
     },
     onError: () => toast.error("Failed to disconnect"),

@@ -15,8 +15,8 @@ export const useCreateRule = () => {
   return useMutation({
     mutationFn: rules.create,
     onSuccess: () => {
-      qc.invalidateQueries({ queryKey: queryKeys.rules.all });
-      qc.invalidateQueries({ queryKey: queryKeys.counts.all });
+      qc.invalidateQueries({ queryKey: queryKeys.rules.all() });
+      qc.invalidateQueries({ queryKey: queryKeys.counts.all() });
       invalidateGatewayCache();
     },
     onError: (err) =>
@@ -35,7 +35,7 @@ export const useUpdateRule = () => {
       input: Parameters<typeof updateRule>[1];
     }) => updateRule(ruleId, input),
     onSuccess: () => {
-      qc.invalidateQueries({ queryKey: queryKeys.rules.all });
+      qc.invalidateQueries({ queryKey: queryKeys.rules.all() });
       invalidateGatewayCache();
     },
     onError: () => toast.error("Failed to update rule"),
@@ -47,8 +47,8 @@ export const useDeleteRule = () => {
   return useMutation({
     mutationFn: deleteRule,
     onSuccess: () => {
-      qc.invalidateQueries({ queryKey: queryKeys.rules.all });
-      qc.invalidateQueries({ queryKey: queryKeys.counts.all });
+      qc.invalidateQueries({ queryKey: queryKeys.rules.all() });
+      qc.invalidateQueries({ queryKey: queryKeys.counts.all() });
       invalidateGatewayCache();
       toast.success("Rule deleted");
     },

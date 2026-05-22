@@ -74,8 +74,8 @@ export const RuleCard = ({
       : null;
 
   const invalidateRulesCache = () => {
-    queryClient.invalidateQueries({ queryKey: queryKeys.rules.all });
-    queryClient.invalidateQueries({ queryKey: queryKeys.counts.all });
+    queryClient.invalidateQueries({ queryKey: queryKeys.rules.all() });
+    queryClient.invalidateQueries({ queryKey: queryKeys.counts.all() });
   };
 
   const handleDelete = async () => {

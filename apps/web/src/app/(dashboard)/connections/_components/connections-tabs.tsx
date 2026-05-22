@@ -95,8 +95,8 @@ export const ConnectionsTabs = ({
 
   useAppMessages({
     onConnected: () => {
-      queryClient.invalidateQueries({ queryKey: queryKeys.connections.all });
-      queryClient.invalidateQueries({ queryKey: queryKeys.secrets.all });
+      queryClient.invalidateQueries({ queryKey: queryKeys.connections.all() });
+      queryClient.invalidateQueries({ queryKey: queryKeys.secrets.all() });
     },
     onConfigure: router.push,
   });

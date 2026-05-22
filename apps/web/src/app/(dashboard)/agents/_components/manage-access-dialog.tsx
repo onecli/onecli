@@ -238,7 +238,7 @@ export const ManageAccessDialog = ({
           ),
         ]);
       }
-      queryClient.invalidateQueries({ queryKey: queryKeys.agents.all });
+      queryClient.invalidateQueries({ queryKey: queryKeys.agents.all() });
       onUpdated?.();
       onOpenChange(false);
       invalidateCache();
