@@ -1,6 +1,6 @@
 import { Hono } from "hono";
 import type { ApiEnv } from "../types";
-import { authMiddleware } from "../middleware/auth";
+import { authMiddleware, requireProjectId } from "../middleware/auth";
 import { getUser, updateProfile } from "../services/user-service";
 import { getApiKey, regenerateApiKey } from "../services/api-key-service";
 import { updateProfileSchema } from "../validations/user";
@@ -35,14 +35,18 @@ export const userRoutes = () => {
   // GET /user/api-key
   app.get("/api-key", async (c) => {
     const auth = c.get("auth");
-    const result = await getApiKey(auth.userId, auth.projectId);
+    const result = await getApiKey(auth.userId, {
+      projectId: requireProjectId(auth),
+    });
     return c.json(result);
   });
 
   // POST /user/api-key/regenerate
   app.post("/api-key/regenerate", async (c) => {
     const auth = c.get("auth");
-    const result = await regenerateApiKey(auth.userId, auth.projectId);
+    const result = await regenerateApiKey(auth.userId, {
+      projectId: requireProjectId(auth),
+    });
     return c.json(result);
   });
 

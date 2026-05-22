@@ -1,8 +1,7 @@
 //! Forward hooks — extension points for the request forwarding pipeline.
 //!
 //! OSS version: all hooks are no-ops. The cloud build swaps this module
-//! via `#[path = "cloud/hooks.rs"]` to add trial budget enforcement and
-//! Anthropic token tracking.
+//! via `#[path = "cloud/hooks.rs"]` to add cloud-specific telemetry.
 
 use std::pin::Pin;
 
@@ -36,6 +35,8 @@ pub(crate) struct RequestMeta {
     pub timestamp: String,
     pub injected: bool,
     pub connection_label: Option<String>,
+    pub existing_log_id: Option<String>,
+    pub decision: Option<crate::telemetry_core::RequestDecision>,
 }
 
 // ── Hooks ───────────────────────────────────────────────────────────────
@@ -48,9 +49,11 @@ pub(crate) fn prepare_request(
 ) {
 }
 
-pub(crate) fn pre_forward(
+pub(crate) async fn pre_forward(
     _rules: &ResolvedRules,
     _proxy_ctx: &ProxyContext,
+    _cache: &dyn crate::cache::CacheStore,
+    _injection_count: usize,
 ) -> Option<Response<ForwardResponseBody>> {
     None
 }
@@ -74,8 +77,12 @@ pub(crate) fn track_and_wrap(
         injection_count: meta.injection_count,
         timestamp: meta.timestamp,
         injected: meta.injected,
-        decision: crate::telemetry_core::RequestDecision::Allowed,
+        decision: meta
+            .decision
+            .unwrap_or(crate::telemetry_core::RequestDecision::Allowed),
         connection_label: meta.connection_label,
+        existing_log_id: meta.existing_log_id,
+        log_id: None,
     });
     Box::pin(stream.map_ok(Frame::data))
 }

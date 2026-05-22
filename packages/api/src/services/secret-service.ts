@@ -1,6 +1,8 @@
 import { db, Prisma } from "@onecli/db";
 import { getCrypto } from "../providers";
 import { ServiceError } from "./errors";
+import type { ResourceScope } from "./resource-scope";
+import { scopeWhere, scopeCreate, scopeOwnership } from "./resource-scope";
 import {
   detectAnthropicAuthMode,
   isHeaderInjection,
@@ -15,18 +17,50 @@ const SECRET_TYPE_LABELS: Record<string, string> = {
   generic: "Generic Secret",
 };
 
-/**
- * Build a masked preview of a plaintext value.
- * Shows first 4 and last 4 characters: "sk-ant-a--------xxxx"
- */
 const buildPreview = (plaintext: string): string => {
   if (plaintext.length <= 8) return "•".repeat(plaintext.length);
   return `${plaintext.slice(0, 4)}${"•".repeat(8)}${plaintext.slice(-4)}`;
 };
 
-export const listSecrets = async (projectId: string) => {
+const buildInjectionConfig = (
+  config: CreateSecretInput["injectionConfig"],
+): Prisma.InputJsonValue | typeof Prisma.JsonNull => {
+  if (!config) return Prisma.JsonNull;
+  if (isParamInjection(config)) {
+    return {
+      paramName: config.paramName.trim(),
+      paramFormat: config.paramFormat?.trim() || "{value}",
+    } as Prisma.InputJsonValue;
+  }
+  if (isHeaderInjection(config)) {
+    return {
+      headerName: config.headerName.trim(),
+      valueFormat: config.valueFormat?.trim() || "{value}",
+    } as Prisma.InputJsonValue;
+  }
+  return Prisma.JsonNull;
+};
+
+const buildMetadata = (
+  type: string,
+  value: string,
+): Prisma.InputJsonValue | typeof Prisma.JsonNull => {
+  if (type === "anthropic") {
+    return {
+      authMode: detectAnthropicAuthMode(value) ?? "api-key",
+    } as Prisma.InputJsonValue;
+  }
+  if (type === "openai") {
+    return { authMode: "api-key" } as Prisma.InputJsonValue;
+  }
+  return Prisma.JsonNull;
+};
+
+export type { CreateSecretInput, UpdateSecretInput };
+
+export const listSecrets = async (scope: ResourceScope) => {
   const secrets = await db.secret.findMany({
-    where: { projectId },
+    where: scopeWhere(scope),
     select: {
       id: true,
       name: true,
@@ -47,10 +81,8 @@ export const listSecrets = async (projectId: string) => {
   }));
 };
 
-export type { CreateSecretInput, UpdateSecretInput };
-
 export const createSecret = async (
-  projectId: string,
+  scope: ResourceScope,
   input: CreateSecretInput,
 ) => {
   const name = input.name.trim();
@@ -83,30 +115,6 @@ export const createSecret = async (
   const encryptedValue = await getCrypto().encrypt(value);
   const preview = buildPreview(value);
   const pathPattern = input.pathPattern?.trim() || null;
-  let injectionConfig: Prisma.InputJsonValue | typeof Prisma.JsonNull =
-    Prisma.JsonNull;
-  if (input.type === "generic" && input.injectionConfig) {
-    if (isParamInjection(input.injectionConfig)) {
-      injectionConfig = {
-        paramName: input.injectionConfig.paramName.trim(),
-        paramFormat: input.injectionConfig.paramFormat?.trim() || "{value}",
-      } as Prisma.InputJsonValue;
-    } else if (isHeaderInjection(input.injectionConfig)) {
-      injectionConfig = {
-        headerName: input.injectionConfig.headerName.trim(),
-        valueFormat: input.injectionConfig.valueFormat?.trim() || "{value}",
-      } as Prisma.InputJsonValue;
-    }
-  }
-
-  const metadata =
-    input.type === "anthropic"
-      ? ({
-          authMode: detectAnthropicAuthMode(value) ?? "api-key",
-        } as Prisma.InputJsonValue)
-      : input.type === "openai"
-        ? ({ authMode: "api-key" } as Prisma.InputJsonValue)
-        : Prisma.JsonNull;
 
   const secret = await db.secret.create({
     data: {
@@ -115,10 +123,12 @@ export const createSecret = async (
       encryptedValue,
       hostPattern,
       pathPattern,
-      injectionConfig,
-      metadata,
-      scope: "project",
-      projectId,
+      injectionConfig:
+        input.type === "generic"
+          ? buildInjectionConfig(input.injectionConfig)
+          : Prisma.JsonNull,
+      metadata: buildMetadata(input.type, value),
+      ...scopeCreate(scope),
     },
     select: {
       id: true,
@@ -133,9 +143,9 @@ export const createSecret = async (
   return { ...secret, preview };
 };
 
-export const deleteSecret = async (projectId: string, secretId: string) => {
+export const deleteSecret = async (scope: ResourceScope, secretId: string) => {
   const secret = await db.secret.findFirst({
-    where: { id: secretId, projectId },
+    where: scopeOwnership(scope, secretId),
     select: { id: true },
   });
 
@@ -145,12 +155,12 @@ export const deleteSecret = async (projectId: string, secretId: string) => {
 };
 
 export const updateSecret = async (
-  projectId: string,
+  scope: ResourceScope,
   secretId: string,
   input: UpdateSecretInput,
 ) => {
   const secret = await db.secret.findFirst({
-    where: { id: secretId, projectId },
+    where: scopeOwnership(scope, secretId),
     select: { id: true, type: true, isPlatform: true },
   });
 
@@ -189,7 +199,6 @@ export const updateSecret = async (
       data.isPlatform = false;
     }
 
-    // Re-detect auth mode when value changes for Anthropic secrets
     if (secret.type === "anthropic") {
       data.metadata = {
         authMode: detectAnthropicAuthMode(value) ?? "api-key",
@@ -211,29 +220,12 @@ export const updateSecret = async (
   }
 
   if (input.injectionConfig !== undefined && secret.type === "generic") {
-    if (!input.injectionConfig) {
-      data.injectionConfig = Prisma.JsonNull;
-    } else if (isParamInjection(input.injectionConfig)) {
-      data.injectionConfig = {
-        paramName: input.injectionConfig.paramName.trim(),
-        paramFormat: input.injectionConfig.paramFormat?.trim() || "{value}",
-      } as Prisma.InputJsonValue;
-    } else if (isHeaderInjection(input.injectionConfig)) {
-      data.injectionConfig = {
-        headerName: input.injectionConfig.headerName.trim(),
-        valueFormat: input.injectionConfig.valueFormat?.trim() || "{value}",
-      } as Prisma.InputJsonValue;
-    } else {
-      data.injectionConfig = Prisma.JsonNull;
-    }
+    data.injectionConfig = buildInjectionConfig(input.injectionConfig);
   }
 
   if (Object.keys(data).length === 0) {
     throw new ServiceError("BAD_REQUEST", "No fields to update");
   }
 
-  await db.secret.update({
-    where: { id: secretId },
-    data,
-  });
+  await db.secret.update({ where: { id: secretId }, data });
 };

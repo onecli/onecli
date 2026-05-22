@@ -1,83 +1,101 @@
 import { createMiddleware } from "hono/factory";
-import { validateApiKey } from "../lib/validate-api-key";
-import type { AuthContext, SessionProvider } from "../providers";
-import { getSessionProvider } from "../providers";
+import type { AuthContext, OrgRole } from "../providers";
+import { getRoleResolver, ROLE_HIERARCHY } from "../providers";
+import { ServiceError } from "../services/errors";
 import type { ApiEnv } from "../types";
-import { db } from "@onecli/db";
-import { findUserDefaultProject } from "../services/organization-service";
+import { authenticateApiKey } from "./auth/api-key";
+import { authenticateSession } from "./auth/session";
 
-const resolveOrganizationId = async (
-  projectId: string,
-): Promise<string | null> => {
-  const project = await db.project.findFirst({
-    where: { id: projectId },
-    select: { organizationId: true },
-  });
-  return project?.organizationId ?? null;
-};
+export interface AuthOptions {
+  requireProject?: boolean;
+  role?: OrgRole;
+}
 
-export const authenticateWithSession = async (
-  session: SessionProvider,
-  request: Request,
-): Promise<AuthContext | null> => {
-  const user = await session.getSession(request);
-  if (!user) return null;
+const UNAUTHORIZED = {
+  error: {
+    message: "Invalid API key or token.",
+    type: "authentication_error",
+  },
+} as const;
 
-  const dbUser = await db.user.findUnique({
-    where: { externalAuthId: user.id },
-    select: { id: true },
-  });
-  if (!dbUser) return null;
+const FORBIDDEN_NOT_MEMBER = {
+  error: {
+    message: "Not a member of this organization",
+    type: "authentication_error",
+  },
+} as const;
 
-  const projectId =
-    (await session.resolveProjectForUser(dbUser.id, request)) ??
-    (await findUserDefaultProject(dbUser.id))?.id ??
-    null;
-  if (!projectId) return null;
+const FORBIDDEN_INSUFFICIENT = {
+  error: {
+    message: "Insufficient permissions",
+    type: "authentication_error",
+  },
+} as const;
 
-  const organizationId = await resolveOrganizationId(projectId);
-  if (!organizationId) return null;
+export const auth = (options?: AuthOptions) => {
+  const requireProject = options?.requireProject ?? true;
+  const minimumRole = options?.role;
 
-  return { userId: dbUser.id, projectId, organizationId };
-};
+  return createMiddleware<ApiEnv>(async (c, next) => {
+    let authResult: AuthContext | null = null;
 
-export const authMiddleware = createMiddleware<ApiEnv>(async (c, next) => {
-  // 1. API key
-  const apiKeyAuth = await validateApiKey(c.req.raw);
-  if (apiKeyAuth) {
-    const orgId = await resolveOrganizationId(apiKeyAuth.projectId);
-    if (!orgId) return c.json({ error: "Unauthorized" }, 401);
-    c.set("auth", { ...apiKeyAuth, organizationId: orgId });
-    return next();
-  }
+    // 1. API key (project or org)
+    authResult = await authenticateApiKey(c.req.raw, requireProject);
 
-  const session = getSessionProvider();
-
-  // 2. JWT from Authorization header
-  const headerAuth = await authenticateWithSession(session, c.req.raw);
-  if (headerAuth) {
-    c.set("auth", headerAuth);
-    return next();
-  }
-
-  // 3. JWT from query params (browser navigations to cross-origin api-server)
-  const url = new URL(c.req.url);
-  const queryToken = url.searchParams.get("_token");
-  if (queryToken) {
-    const headers = new Headers(c.req.raw.headers);
-    headers.set("authorization", `Bearer ${queryToken}`);
-    const queryProject = url.searchParams.get("_project");
-    if (queryProject) headers.set("x-project-id", queryProject);
-
-    const queryAuth = await authenticateWithSession(
-      session,
-      new Request(c.req.url, { headers }),
-    );
-    if (queryAuth) {
-      c.set("auth", queryAuth);
-      return next();
+    // 2. JWT from Authorization header
+    if (!authResult) {
+      authResult = await authenticateSession(c.req.raw, requireProject);
     }
-  }
 
-  return c.json({ error: "Unauthorized" }, 401);
-});
+    // 3. JWT from query params (browser navigations)
+    if (!authResult) {
+      const url = new URL(c.req.url);
+      const queryToken = url.searchParams.get("_token");
+      if (queryToken) {
+        const headers = new Headers(c.req.raw.headers);
+        headers.set("authorization", `Bearer ${queryToken}`);
+        const queryProject = url.searchParams.get("_project");
+        if (queryProject) headers.set("x-project-id", queryProject);
+
+        authResult = await authenticateSession(
+          new Request(c.req.url, { headers }),
+          requireProject,
+        );
+      }
+    }
+
+    if (!authResult) {
+      return c.json(UNAUTHORIZED, 401);
+    }
+
+    // 4. Role check (only when role option is specified)
+    if (minimumRole) {
+      const resolver = getRoleResolver();
+      if (!resolver) {
+        return c.json(FORBIDDEN_NOT_MEMBER, 403);
+      }
+      const userRole = await resolver.getUserRole(
+        authResult.userId,
+        authResult.organizationId,
+      );
+      if (!userRole) {
+        return c.json(FORBIDDEN_NOT_MEMBER, 403);
+      }
+      if (ROLE_HIERARCHY[userRole] < ROLE_HIERARCHY[minimumRole]) {
+        return c.json(FORBIDDEN_INSUFFICIENT, 403);
+      }
+      authResult.role = userRole;
+    }
+
+    c.set("auth", authResult);
+    return next();
+  });
+};
+
+export const authMiddleware = auth();
+
+export const requireProjectId = (auth: AuthContext): string => {
+  if (!auth.projectId)
+    throw new ServiceError("BAD_REQUEST", "X-Project-Id header is required");
+  return auth.projectId;
+};

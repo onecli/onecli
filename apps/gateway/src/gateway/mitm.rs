@@ -134,6 +134,7 @@ pub(super) async fn mitm(
                                     &*cache,
                                     &ctx,
                                     &approvals,
+                                    &engine.pool,
                                 )
                                 .await
                                 {
@@ -184,12 +185,9 @@ pub(crate) struct ResolvedRules {
     /// Ready-to-use interception data when the resolved connection has a
     /// cached token that should be served instead of forwarding.
     pub intercept_token: Option<InterceptToken>,
-    /// True when credentials come from a platform-provisioned secret (trial mode).
+    /// Normalized plan name for quota enforcement ("free", "pro", "team").
     #[cfg_attr(not(feature = "cloud"), allow(dead_code))]
-    pub is_trial: bool,
-    /// True when the trial budget is exhausted — requests should be blocked.
-    #[cfg_attr(not(feature = "cloud"), allow(dead_code))]
-    pub budget_blocked: bool,
+    pub plan: String,
     /// Rewritten upstream host (e.g., Datadog us5 → api.us5.datadoghq.com).
     pub rewrite_host: Option<String>,
     /// Display label of the app connection used (e.g., email address for OAuth accounts).
@@ -342,8 +340,7 @@ async fn resolve_rules(
             policy_rules: resp.policy_rules,
             access_restricted: resp.access_restricted,
             intercept_token,
-            is_trial: resp.is_trial,
-            budget_blocked: resp.budget_blocked,
+            plan: resp.plan,
             rewrite_host,
             connection_label,
             finalizer,

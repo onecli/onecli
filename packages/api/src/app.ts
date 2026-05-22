@@ -1,5 +1,11 @@
 import { Hono } from "hono";
-import type { SessionProvider, OAuthOrgHandlers } from "./providers";
+import type {
+  SessionProvider,
+  OAuthOrgHandlers,
+  ConnectionHooks,
+  ResourceHooks,
+  RoleResolver,
+} from "./providers";
 import type { CryptoService } from "./lib/crypto-types";
 import type { AppDefinition } from "./apps/types";
 import type { AppPermissionDefinition } from "./apps/app-permissions/types";
@@ -9,10 +15,13 @@ import {
   initCrypto,
   initCloudApps,
   initOAuthOrg,
+  initConnectionHooks,
+  initResourceHooks,
   initSelfUrl,
+  initRoleResolver,
 } from "./providers";
 import { registerAppPermission } from "./apps/app-permissions";
-import { errorHandler } from "./middleware/error-handler";
+import { errorHandler, notFoundHandler } from "./middleware/error-handler";
 import { healthRoutes } from "./routes/health";
 import { agentRoutes } from "./routes/agents";
 import { secretRoutes } from "./routes/secrets";
@@ -36,7 +45,10 @@ export interface CreateApiAppOptions {
   cloudApps?: AppDefinition[];
   cloudAppPermissions?: AppPermissionDefinition[];
   oauthOrg?: OAuthOrgHandlers;
+  connectionHooks?: ConnectionHooks;
+  resourceHooks?: ResourceHooks;
   selfUrl?: string;
+  roleResolver?: RoleResolver;
   sessionHooks?: Partial<SessionHooks>;
   version?: string;
 }
@@ -54,11 +66,15 @@ export const createApiApp = (
     }
   }
   if (options?.oauthOrg) initOAuthOrg(options.oauthOrg);
+  if (options?.connectionHooks) initConnectionHooks(options.connectionHooks);
+  if (options?.resourceHooks) initResourceHooks(options.resourceHooks);
   if (options?.selfUrl) initSelfUrl(options.selfUrl);
+  if (options?.roleResolver) initRoleResolver(options.roleResolver);
   if (options?.sessionHooks) initSessionHooks(options.sessionHooks);
 
   const app = new Hono<ApiEnv>().basePath("/v1");
   app.onError(errorHandler);
+  app.notFound(notFoundHandler);
 
   app.route("/health", healthRoutes(options?.version));
   app.route("/auth/session", authSessionRoutes());

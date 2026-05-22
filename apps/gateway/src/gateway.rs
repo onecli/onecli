@@ -14,6 +14,9 @@
 //! - [`response`]: pre-built gateway error responses
 
 mod body;
+#[cfg(feature = "cloud")]
+#[path = "cloud/response.rs"]
+mod cloud_response;
 mod finalizers;
 pub(crate) mod forward;
 #[cfg(not(feature = "cloud"))]
@@ -26,10 +29,6 @@ mod response;
 mod transforms;
 mod tunnel;
 mod websocket;
-
-#[cfg(feature = "cloud")]
-#[path = "cloud/trial.rs"]
-mod trial;
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -741,8 +740,7 @@ async fn handle_http_proxy(
         policy_rules: resolved.policy_rules,
         access_restricted: resolved.access_restricted,
         intercept_token: None,
-        is_trial: resolved.is_trial,
-        budget_blocked: resolved.budget_blocked,
+        plan: resolved.plan,
         rewrite_host: None,
         connection_label: None,
         finalizer: resolved_finalizer,
@@ -765,6 +763,7 @@ async fn handle_http_proxy(
         &*state.cache,
         &proxy_ctx,
         &state.approval_store,
+        &state.policy_engine.pool,
     )
     .await?;
 

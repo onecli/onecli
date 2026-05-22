@@ -32,8 +32,7 @@ import {
   AlertDialogTitle,
 } from "@onecli/ui/components/alert-dialog";
 import { Button } from "@onecli/ui/components/button";
-import { disconnectAppConnection } from "@/lib/actions/connections";
-import { useInvalidateGatewayCache } from "@/hooks/use-invalidate-cache";
+import { useDisconnectConnection } from "@/hooks/use-connections";
 import { extractLabel } from "@onecli/api/services/connection-service";
 
 interface ConnectionAccountCardProps {
@@ -56,9 +55,8 @@ export const ConnectionAccountCard = ({
   onReconnect,
   onDisconnected,
 }: ConnectionAccountCardProps) => {
-  const [disconnecting, setDisconnecting] = useState(false);
   const [confirmOpen, setConfirmOpen] = useState(false);
-  const invalidateCache = useInvalidateGatewayCache();
+  const disconnectMutation = useDisconnectConnection();
 
   const displayName =
     connection.label ??
@@ -69,18 +67,13 @@ export const ConnectionAccountCard = ({
   const accountType = connection.metadata?.accountType as string | undefined;
   const tags = (connection.metadata?.tags as string[] | undefined) ?? [];
 
-  const handleDisconnect = async () => {
-    setDisconnecting(true);
-    try {
-      await disconnectAppConnection(connection.id);
-      invalidateCache();
-      onDisconnected();
-      toast.success(`${appName} account disconnected`);
-    } catch {
-      toast.error("Failed to disconnect");
-    } finally {
-      setDisconnecting(false);
-    }
+  const handleDisconnect = () => {
+    disconnectMutation.mutate(connection.id, {
+      onSuccess: () => {
+        onDisconnected();
+        toast.success(`${appName} account disconnected`);
+      },
+    });
   };
 
   return (
@@ -152,15 +145,17 @@ export const ConnectionAccountCard = ({
               <DropdownMenuSeparator />
               <DropdownMenuItem
                 onClick={() => setConfirmOpen(true)}
-                disabled={disconnecting}
+                disabled={disconnectMutation.isPending}
                 className="text-destructive focus:text-destructive"
               >
-                {disconnecting ? (
+                {disconnectMutation.isPending ? (
                   <Loader2 className="size-4 animate-spin" />
                 ) : (
                   <Unplug className="size-4" />
                 )}
-                {disconnecting ? "Disconnecting..." : "Disconnect"}
+                {disconnectMutation.isPending
+                  ? "Disconnecting..."
+                  : "Disconnect"}
               </DropdownMenuItem>
             </DropdownMenuContent>
           </DropdownMenu>
@@ -192,9 +187,9 @@ export const ConnectionAccountCard = ({
             <AlertDialogAction
               onClick={handleDisconnect}
               variant="destructive"
-              disabled={disconnecting}
+              disabled={disconnectMutation.isPending}
             >
-              {disconnecting ? (
+              {disconnectMutation.isPending ? (
                 <>
                   <Loader2 className="size-3.5 animate-spin" />
                   Disconnecting...

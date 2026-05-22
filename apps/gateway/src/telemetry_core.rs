@@ -16,8 +16,27 @@ const MAX_PATH_LEN: usize = 2048;
 #[allow(dead_code)] // variants read by cloud telemetry (extra_data), unused in OSS
 pub(crate) enum RequestDecision {
     Allowed,
-    Blocked { rule_name: String },
-    RateLimited { rule_name: String },
+    Blocked {
+        rule_name: String,
+    },
+    RateLimited {
+        rule_name: String,
+    },
+    ApprovalPending {
+        approval_id: String,
+        triggered_at: String,
+    },
+    ApprovalDenied {
+        approval_id: String,
+        reason: String,
+        triggered_at: String,
+        resolved_at: String,
+    },
+    ApprovalApproved {
+        approval_id: String,
+        triggered_at: String,
+        resolved_at: String,
+    },
 }
 
 pub(crate) struct RequestEvent {
@@ -39,19 +58,10 @@ pub(crate) struct RequestEvent {
     pub decision: RequestDecision,
     #[allow(dead_code)] // read by cloud telemetry (extra_data), unused in OSS
     pub connection_label: Option<String>,
-    #[cfg(feature = "cloud")]
-    pub model: Option<String>,
-    #[cfg(feature = "cloud")]
-    pub input_tokens: Option<i32>,
-    #[cfg(feature = "cloud")]
-    pub output_tokens: Option<i32>,
-    #[cfg(feature = "cloud")]
-    pub cache_creation_input_tokens: Option<i32>,
-    #[cfg(feature = "cloud")]
-    pub cache_read_input_tokens: Option<i32>,
-    #[cfg(feature = "cloud")]
-    #[allow(dead_code)] // read by cloud telemetry (token counters), unused in OSS
-    pub is_trial: bool,
+    #[allow(dead_code)] // read by cloud telemetry (update path), unused in OSS
+    pub existing_log_id: Option<String>,
+    #[allow(dead_code)] // read by cloud telemetry (pre-assigned INSERT id), unused in OSS
+    pub log_id: Option<String>,
 }
 
 pub(crate) static SENDER: OnceLock<mpsc::Sender<RequestEvent>> = OnceLock::new();
@@ -113,7 +123,11 @@ pub(crate) fn extract_columns(events: &[&RequestEvent]) -> BatchColumns {
     BatchColumns {
         ids: events
             .iter()
-            .map(|_| uuid::Uuid::new_v4().to_string())
+            .map(|e| {
+                e.log_id
+                    .clone()
+                    .unwrap_or_else(|| uuid::Uuid::new_v4().to_string())
+            })
             .collect(),
         project_ids: events.iter().map(|e| e.project_id.clone()).collect(),
         agent_ids: events.iter().map(|e| e.agent_id.clone()).collect(),
@@ -147,18 +161,8 @@ mod tests {
             injected: true,
             decision: RequestDecision::Allowed,
             connection_label: None,
-            #[cfg(feature = "cloud")]
-            model: None,
-            #[cfg(feature = "cloud")]
-            input_tokens: None,
-            #[cfg(feature = "cloud")]
-            output_tokens: None,
-            #[cfg(feature = "cloud")]
-            cache_creation_input_tokens: None,
-            #[cfg(feature = "cloud")]
-            cache_read_input_tokens: None,
-            #[cfg(feature = "cloud")]
-            is_trial: false,
+            existing_log_id: None,
+            log_id: None,
         }
     }
 

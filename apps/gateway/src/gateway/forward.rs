@@ -96,6 +96,7 @@ pub(crate) async fn forward_request(
     cache: &dyn CacheStore,
     proxy_ctx: &ProxyContext,
     approval_store: &Arc<dyn ApprovalStore>,
+    pool: &sqlx::PgPool,
 ) -> Result<Response<hooks::ForwardResponseBody>> {
     let start = std::time::Instant::now();
     let method = req.method().clone();
@@ -237,155 +238,205 @@ pub(crate) async fn forward_request(
         inject::apply_injections(&mut headers, &mut upstream_path, &rules.injection_rules);
     let upstream_url = format!("{scheme}://{host}{upstream_path}");
 
-    if let Some(resp) = hooks::pre_forward(rules, proxy_ctx) {
+    if let Some(resp) = hooks::pre_forward(rules, proxy_ctx, cache, injection_count).await {
         return Ok(resp);
     }
 
     // ── ManualApproval: prepare body, store, wait for decision ─────
-    let forward_body = if let PolicyDecision::ManualApproval { rule_id } = &decision {
-        info!(method = %method, url = %url, rule_id = %rule_id, "MANUAL APPROVAL required");
+    // Approval log_id + metadata are stored as locals so they can be
+    // threaded to the telemetry section for the approved UPDATE.
 
-        let project_id = match proxy_ctx.project_id.as_deref() {
-            Some(id) => id,
-            None => {
-                warn!(url = %url, "manual approval requires authenticated agent");
+    let (forward_body, approval_log_id, approval_id_for_telemetry, approval_triggered_at) =
+        if let PolicyDecision::ManualApproval { rule_id } = &decision {
+            info!(method = %method, url = %url, rule_id = %rule_id, "MANUAL APPROVAL required");
+
+            let project_id = match proxy_ctx.project_id.as_deref() {
+                Some(id) => id,
+                None => {
+                    warn!(url = %url, "manual approval requires authenticated agent");
+                    return Ok(response::approval_store_unavailable());
+                }
+            };
+            let agent_id = proxy_ctx.agent_id.as_deref().unwrap_or("unknown");
+            let agent_name = proxy_ctx.agent_name.as_deref().unwrap_or("Unknown Agent");
+
+            // Build body preview and forwarding body.
+            // If condition buffering already captured the body, reuse that buffer
+            // for the preview instead of peeking the stream a second time.
+            let (body_preview, fwd_body) = if let Some(ref buf) = condition_buffer {
+                let preview_len = buf.len().min(BODY_PREVIEW_BYTES);
+                let preview = if preview_len > 0 {
+                    Some(String::from_utf8_lossy(&buf[..preview_len]).into_owned())
+                } else {
+                    None
+                };
+                (preview, body)
+            } else {
+                let mut body_stream = Box::pin(http_body_util::BodyDataStream::new(body));
+                let mut peeked: Vec<Bytes> = Vec::new();
+                let mut peeked_len: usize = 0;
+
+                while peeked_len < BODY_PREVIEW_BYTES {
+                    match body_stream.next().await {
+                        Some(Ok(data)) => {
+                            peeked_len += data.len();
+                            peeked.push(data);
+                        }
+                        Some(Err(e)) => {
+                            return Err(anyhow::anyhow!("reading request body for preview: {e}"));
+                        }
+                        None => break,
+                    }
+                }
+
+                if peeked_len >= BODY_PREVIEW_BYTES {
+                    warn!(
+                        method = %method,
+                        url = %url,
+                        peeked = peeked_len,
+                        limit = BODY_PREVIEW_BYTES,
+                        "request body exceeds approval preview limit — preview truncated"
+                    );
+                }
+
+                let preview = if peeked.is_empty() {
+                    None
+                } else {
+                    let mut buf = Vec::with_capacity(peeked_len.min(BODY_PREVIEW_BYTES));
+                    for chunk in &peeked {
+                        let take = (BODY_PREVIEW_BYTES - buf.len()).min(chunk.len());
+                        buf.extend_from_slice(&chunk[..take]);
+                        if buf.len() >= BODY_PREVIEW_BYTES {
+                            break;
+                        }
+                    }
+                    Some(String::from_utf8_lossy(&buf).into_owned())
+                };
+
+                let peeked_stream =
+                    futures_util::stream::iter(peeked.into_iter().map(Ok::<_, std::io::Error>));
+                let remaining_stream =
+                    body_stream.map(|r| r.map_err(|e| std::io::Error::other(e.to_string())));
+                let reassembled = reqwest::Body::wrap_stream(peeked_stream.chain(remaining_stream));
+
+                (preview, reassembled)
+            };
+
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+            let approval_id = uuid::Uuid::new_v4().to_string();
+
+            let approval = PendingApproval {
+                id: approval_id.clone(),
+                project_id: project_id.to_string(),
+                agent_id: agent_id.to_string(),
+                agent_name: agent_name.to_string(),
+                agent_identifier: proxy_ctx.agent_identifier.clone(),
+                method: method.to_string(),
+                scheme: scheme.to_string(),
+                host: host.to_string(),
+                path: path.clone(),
+                headers: sanitized_headers.unwrap_or_default(),
+                body_preview,
+                created_at: now,
+                expires_at: now + APPROVAL_TIMEOUT_SECS,
+            };
+
+            let decision_rx = approval_store.prepare_wait(&approval_id).await;
+
+            // Guard cleans up the approval if the agent disconnects (future cancelled).
+            // Created BEFORE store() so there's no window where cancellation misses cleanup.
+            let mut guard = ApprovalGuard::new(approval_id.clone(), Arc::clone(approval_store));
+
+            if let Err(e) = approval_store.store(&approval).await {
+                warn!(url = %url, error = %e, "failed to store pending approval");
+                guard.defuse();
+                approval_store.remove(&approval_id).await;
                 return Ok(response::approval_store_unavailable());
             }
-        };
-        let agent_id = proxy_ctx.agent_id.as_deref().unwrap_or("unknown");
-        let agent_name = proxy_ctx.agent_name.as_deref().unwrap_or("Unknown Agent");
 
-        // Build body preview and forwarding body.
-        // If condition buffering already captured the body, reuse that buffer
-        // for the preview instead of peeking the stream a second time.
-        let (body_preview, fwd_body) = if let Some(ref buf) = condition_buffer {
-            let preview_len = buf.len().min(BODY_PREVIEW_BYTES);
-            let preview = if preview_len > 0 {
-                Some(String::from_utf8_lossy(&buf[..preview_len]).into_owned())
-            } else {
-                None
-            };
-            (preview, body)
+            let telemetry_path = path.split('?').next().unwrap_or(&path);
+            let triggered_at = time::OffsetDateTime::now_utc()
+                .format(&time::format_description::well_known::Iso8601::DEFAULT)
+                .unwrap_or_default();
+
+            let log_id = uuid::Uuid::new_v4().to_string();
+            guard.set_log_context(log_id.clone(), pool.clone());
+            emit_approval_telemetry(
+                proxy_ctx,
+                host,
+                &method,
+                telemetry_path,
+                202,
+                0,
+                crate::telemetry_core::RequestDecision::ApprovalPending {
+                    approval_id: approval_id.clone(),
+                    triggered_at: triggered_at.clone(),
+                },
+                Some(log_id.clone()),
+                None,
+            );
+
+            info!(
+                url = %url,
+                approval_id = %approval_id,
+                agent = %agent_name,
+                injections = injection_count,
+                "holding request for approval"
+            );
+
+            let approval_decision = decision_rx
+                .wait(Duration::from_secs(APPROVAL_TIMEOUT_SECS))
+                .await;
+
+            // Decision received (or timed out) — defuse guard, handle explicitly.
+            guard.defuse();
+
+            match approval_decision {
+                Some(ApprovalDecision::Approve) => {
+                    info!(url = %url, approval_id = %approval_id, "APPROVED — forwarding request");
+                    approval_store.remove(&approval_id).await;
+                    (
+                        fwd_body,
+                        Some(log_id),
+                        Some(approval_id),
+                        Some(triggered_at),
+                    )
+                }
+                other => {
+                    let reason = match other {
+                        Some(ApprovalDecision::Deny) => "denied",
+                        _ => "timed out",
+                    };
+                    warn!(url = %url, approval_id = %approval_id, reason, "MANUAL APPROVAL rejected");
+                    approval_store.remove(&approval_id).await;
+                    let resolved_at = time::OffsetDateTime::now_utc()
+                        .format(&time::format_description::well_known::Iso8601::DEFAULT)
+                        .unwrap_or_default();
+                    emit_approval_telemetry(
+                        proxy_ctx,
+                        host,
+                        &method,
+                        telemetry_path,
+                        403,
+                        start.elapsed().as_millis() as u32,
+                        crate::telemetry_core::RequestDecision::ApprovalDenied {
+                            approval_id: approval_id.clone(),
+                            reason: reason.to_string(),
+                            triggered_at,
+                            resolved_at,
+                        },
+                        None,
+                        Some(log_id),
+                    );
+                    return Ok(response::manual_approval_denied(&approval_id, reason));
+                }
+            }
         } else {
-            let mut body_stream = Box::pin(http_body_util::BodyDataStream::new(body));
-            let mut peeked: Vec<Bytes> = Vec::new();
-            let mut peeked_len: usize = 0;
-
-            while peeked_len < BODY_PREVIEW_BYTES {
-                match body_stream.next().await {
-                    Some(Ok(data)) => {
-                        peeked_len += data.len();
-                        peeked.push(data);
-                    }
-                    Some(Err(e)) => {
-                        return Err(anyhow::anyhow!("reading request body for preview: {e}"));
-                    }
-                    None => break,
-                }
-            }
-
-            if peeked_len >= BODY_PREVIEW_BYTES {
-                warn!(
-                    method = %method,
-                    url = %url,
-                    peeked = peeked_len,
-                    limit = BODY_PREVIEW_BYTES,
-                    "request body exceeds approval preview limit — preview truncated"
-                );
-            }
-
-            let preview = if peeked.is_empty() {
-                None
-            } else {
-                let mut buf = Vec::with_capacity(peeked_len.min(BODY_PREVIEW_BYTES));
-                for chunk in &peeked {
-                    let take = (BODY_PREVIEW_BYTES - buf.len()).min(chunk.len());
-                    buf.extend_from_slice(&chunk[..take]);
-                    if buf.len() >= BODY_PREVIEW_BYTES {
-                        break;
-                    }
-                }
-                Some(String::from_utf8_lossy(&buf).into_owned())
-            };
-
-            let peeked_stream =
-                futures_util::stream::iter(peeked.into_iter().map(Ok::<_, std::io::Error>));
-            let remaining_stream =
-                body_stream.map(|r| r.map_err(|e| std::io::Error::other(e.to_string())));
-            let reassembled = reqwest::Body::wrap_stream(peeked_stream.chain(remaining_stream));
-
-            (preview, reassembled)
+            (body, None, None, None)
         };
-
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
-        let approval_id = uuid::Uuid::new_v4().to_string();
-
-        let approval = PendingApproval {
-            id: approval_id.clone(),
-            project_id: project_id.to_string(),
-            agent_id: agent_id.to_string(),
-            agent_name: agent_name.to_string(),
-            agent_identifier: proxy_ctx.agent_identifier.clone(),
-            method: method.to_string(),
-            scheme: scheme.to_string(),
-            host: host.to_string(),
-            path: path.clone(),
-            headers: sanitized_headers.unwrap_or_default(),
-            body_preview,
-            created_at: now,
-            expires_at: now + APPROVAL_TIMEOUT_SECS,
-        };
-
-        let decision_rx = approval_store.prepare_wait(&approval_id).await;
-
-        // Guard cleans up the approval if the agent disconnects (future cancelled).
-        // Created BEFORE store() so there's no window where cancellation misses cleanup.
-        let mut guard = ApprovalGuard::new(approval_id.clone(), Arc::clone(approval_store));
-
-        if let Err(e) = approval_store.store(&approval).await {
-            warn!(url = %url, error = %e, "failed to store pending approval");
-            guard.defuse(); // we'll clean up explicitly
-            approval_store.remove(&approval_id).await;
-            return Ok(response::approval_store_unavailable());
-        }
-
-        info!(
-            url = %url,
-            approval_id = %approval_id,
-            agent = %agent_name,
-            injections = injection_count,
-            "holding request for approval"
-        );
-
-        let approval_decision = decision_rx
-            .wait(Duration::from_secs(APPROVAL_TIMEOUT_SECS))
-            .await;
-
-        // Decision received (or timed out) — defuse guard, handle explicitly.
-        guard.defuse();
-
-        match approval_decision {
-            Some(ApprovalDecision::Approve) => {
-                info!(url = %url, approval_id = %approval_id, "APPROVED — forwarding request");
-                approval_store.remove(&approval_id).await;
-                fwd_body
-            }
-            other => {
-                let reason = match other {
-                    Some(ApprovalDecision::Deny) => "denied",
-                    _ => "timed out",
-                };
-                warn!(url = %url, approval_id = %approval_id, reason, "MANUAL APPROVAL rejected");
-                approval_store.remove(&approval_id).await;
-                return Ok(response::manual_approval_denied(&approval_id, reason));
-            }
-        }
-    } else {
-        body
-    };
 
     // ── Provider-specific body transformation ────────────────────
     let forward_body = match rules.body_transform {
@@ -603,6 +654,24 @@ pub(crate) async fn forward_request(
             None => &path,
         };
 
+        let resolved_at = time::OffsetDateTime::now_utc()
+            .format(&time::format_description::well_known::Iso8601::DEFAULT)
+            .unwrap_or_default();
+        let approval_decision = match (
+            &approval_log_id,
+            approval_id_for_telemetry,
+            approval_triggered_at,
+        ) {
+            (Some(_), Some(aid_val), Some(triggered)) => {
+                Some(crate::telemetry_core::RequestDecision::ApprovalApproved {
+                    approval_id: aid_val,
+                    triggered_at: triggered,
+                    resolved_at,
+                })
+            }
+            _ => None,
+        };
+
         let meta = hooks::RequestMeta {
             project_id: aid.to_string(),
             agent_id: gid.to_string(),
@@ -621,6 +690,8 @@ pub(crate) async fn forward_request(
             timestamp: ts,
             injected: injection_count > 0,
             connection_label: rules.connection_label.clone(),
+            existing_log_id: approval_log_id,
+            decision: approval_decision,
         };
 
         hooks::track_and_wrap(meta, rules, &resp_headers, upstream_resp.bytes_stream())
@@ -683,18 +754,57 @@ fn emit_policy_telemetry(
         injected: false,
         decision,
         connection_label: None,
-        #[cfg(feature = "cloud")]
-        model: None,
-        #[cfg(feature = "cloud")]
-        input_tokens: None,
-        #[cfg(feature = "cloud")]
-        output_tokens: None,
-        #[cfg(feature = "cloud")]
-        cache_creation_input_tokens: None,
-        #[cfg(feature = "cloud")]
-        cache_read_input_tokens: None,
-        #[cfg(feature = "cloud")]
-        is_trial: false,
+        existing_log_id: None,
+        log_id: None,
+    });
+}
+
+#[allow(clippy::too_many_arguments)]
+fn emit_approval_telemetry(
+    proxy_ctx: &super::ProxyContext,
+    host: &str,
+    method: &hyper::Method,
+    telemetry_path: &str,
+    status: u16,
+    latency_ms: u32,
+    decision: crate::telemetry_core::RequestDecision,
+    log_id: Option<String>,
+    existing_log_id: Option<String>,
+) {
+    let (pid, aid) = match (
+        proxy_ctx.project_id.as_deref(),
+        proxy_ctx.agent_id.as_deref(),
+    ) {
+        (Some(p), Some(a)) => (p, a),
+        _ => return,
+    };
+    let hostname = super::strip_port(host);
+    let (provider, _) = crate::apps::provider_for_host_and_path(hostname, telemetry_path)
+        .unwrap_or((hostname, hostname));
+    let ts = time::OffsetDateTime::now_utc()
+        .format(&time::format_description::well_known::Iso8601::DEFAULT)
+        .unwrap_or_default();
+    crate::telemetry::on_request(crate::telemetry::RequestEvent {
+        project_id: pid.to_string(),
+        agent_id: aid.to_string(),
+        agent_name: proxy_ctx
+            .agent_name
+            .as_deref()
+            .unwrap_or("unknown")
+            .to_string(),
+        method: method.to_string(),
+        host: host.to_string(),
+        path: telemetry_path.to_string(),
+        provider: provider.to_string(),
+        status,
+        latency_ms,
+        injection_count: 0,
+        timestamp: ts,
+        injected: false,
+        decision,
+        connection_label: None,
+        existing_log_id,
+        log_id,
     });
 }
 

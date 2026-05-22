@@ -23,13 +23,11 @@ export const LoginContent = () => {
           router.replace(
             data.projectId ? `/p/${data.projectId}/overview` : "/overview",
           );
-        } else {
-          console.error("Session sync failed:", res.status);
+        } else if (res.status === 401) {
           await signOut();
         }
-      } catch (err) {
-        console.error("Session sync error:", err);
-        await signOut();
+      } catch {
+        // Transient error (deploy, network) — don't sign out
       }
     };
 

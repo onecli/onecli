@@ -72,7 +72,7 @@ const POLICY_OPTIONS: {
 type Step = "app" | "configure";
 
 interface ApplicationRuleFormProps {
-  onSaved: () => void;
+  onSaved?: () => void;
   onClose: () => void;
   ruleActions?: RuleActions;
   connectedProviders?: Map<string, string[]>;
@@ -162,7 +162,7 @@ export const ApplicationRuleForm = ({
         conditions.length > 0 ? conditions : undefined,
       );
       toast.success("Permissions updated");
-      onSaved();
+      onSaved?.();
       onClose();
       invalidateCache();
     } catch (err) {

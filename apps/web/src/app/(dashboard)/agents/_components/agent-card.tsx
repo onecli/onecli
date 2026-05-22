@@ -1,7 +1,6 @@
 "use client";
 
 import { useState } from "react";
-import { useInvalidateGatewayCache } from "@/hooks/use-invalidate-cache";
 import {
   MoreHorizontal,
   RotateCw,
@@ -10,7 +9,6 @@ import {
   Pencil,
   Star,
 } from "lucide-react";
-import { toast } from "sonner";
 import { Card } from "@onecli/ui/components/card";
 import { Button } from "@onecli/ui/components/button";
 import { Badge } from "@onecli/ui/components/badge";
@@ -46,11 +44,11 @@ import {
   TooltipTrigger,
 } from "@onecli/ui/components/tooltip";
 import {
-  deleteAgent,
-  regenerateAgentToken,
-  renameAgent,
-  setDefaultAgent,
-} from "@/lib/actions/agents";
+  useDeleteAgent,
+  useRegenerateToken,
+  useRenameAgent,
+  useSetDefaultAgent,
+} from "@/hooks/use-agents";
 import type { SecretMode } from "@onecli/api/services/agent-service";
 import { ManageAccessDialog } from "./manage-access-dialog";
 
@@ -58,27 +56,21 @@ interface AgentCardProps {
   agent: {
     id: string;
     name: string;
-    identifier: string | null;
+    identifier: string;
     accessToken: string;
     isDefault: boolean;
     secretMode: SecretMode;
     createdAt: Date;
     _count: { agentSecrets: number; agentAppConnections: number };
   };
-  onUpdate: () => void;
   autoOpenAccess?: boolean;
 }
 
-export const AgentCard = ({
-  agent,
-  onUpdate,
-  autoOpenAccess,
-}: AgentCardProps) => {
-  const invalidateCache = useInvalidateGatewayCache();
-  const [deleting, setDeleting] = useState(false);
-  const [regenerating, setRegenerating] = useState(false);
-  const [renaming, setRenaming] = useState(false);
-  const [settingDefault, setSettingDefault] = useState(false);
+export const AgentCard = ({ agent, autoOpenAccess }: AgentCardProps) => {
+  const deleteMutation = useDeleteAgent();
+  const regenerateMutation = useRegenerateToken();
+  const renameMutation = useRenameAgent();
+  const setDefaultMutation = useSetDefaultAgent();
   const [rotateDialogOpen, setRotateDialogOpen] = useState(false);
   const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
   const [renameDialogOpen, setRenameDialogOpen] = useState(false);
@@ -88,62 +80,19 @@ export const AgentCard = ({
     autoOpenAccess ?? false,
   );
 
-  const handleRegenerate = async () => {
-    setRegenerating(true);
-    try {
-      await regenerateAgentToken(agent.id);
-      onUpdate();
-      invalidateCache();
-      toast.success("Token regenerated");
-    } catch {
-      toast.error("Failed to regenerate token");
-    } finally {
-      setRegenerating(false);
-    }
-  };
+  const handleRegenerate = () => regenerateMutation.mutate(agent.id);
 
-  const handleDelete = async () => {
-    setDeleting(true);
-    try {
-      await deleteAgent(agent.id);
-      onUpdate();
-      invalidateCache();
-      toast.success("Agent deleted");
-    } catch {
-      toast.error("Failed to delete agent");
-    } finally {
-      setDeleting(false);
-    }
-  };
+  const handleDelete = () => deleteMutation.mutate(agent.id);
 
-  const handleRename = async () => {
+  const handleRename = () => {
     if (!newName.trim()) return;
-    setRenaming(true);
-    try {
-      await renameAgent(agent.id, newName);
-      onUpdate();
-      setRenameDialogOpen(false);
-      toast.success("Agent renamed");
-    } catch {
-      toast.error("Failed to rename agent");
-    } finally {
-      setRenaming(false);
-    }
+    renameMutation.mutate(
+      { agentId: agent.id, name: newName },
+      { onSuccess: () => setRenameDialogOpen(false) },
+    );
   };
 
-  const handleSetDefault = async () => {
-    setSettingDefault(true);
-    try {
-      await setDefaultAgent(agent.id);
-      onUpdate();
-      invalidateCache();
-      toast.success("Default agent updated");
-    } catch {
-      toast.error("Failed to set default agent");
-    } finally {
-      setSettingDefault(false);
-    }
-  };
+  const handleSetDefault = () => setDefaultMutation.mutate(agent.id);
 
   const accessLabel = (() => {
     if (agent.secretMode !== "selective") return "All credentials";
@@ -170,7 +119,7 @@ export const AgentCard = ({
 
           <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs">
             <code className="bg-muted text-muted-foreground rounded px-1.5 py-0.5 font-mono">
-              {agent.identifier ?? agent.name}
+              {agent.identifier}
             </code>
             <span className="text-muted-foreground">
               Created {new Date(agent.createdAt).toLocaleDateString()}
@@ -258,9 +207,9 @@ export const AgentCard = ({
             <AlertDialogCancel>Cancel</AlertDialogCancel>
             <AlertDialogAction
               onClick={handleRegenerate}
-              disabled={regenerating}
+              disabled={regenerateMutation.isPending}
             >
-              {regenerating ? "Rotating..." : "Rotate"}
+              {regenerateMutation.isPending ? "Rotating..." : "Rotate"}
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>
@@ -280,9 +229,9 @@ export const AgentCard = ({
             <AlertDialogAction
               variant="destructive"
               onClick={handleDelete}
-              disabled={deleting}
+              disabled={deleteMutation.isPending}
             >
-              {deleting ? "Deleting..." : "Delete"}
+              {deleteMutation.isPending ? "Deleting..." : "Delete"}
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>
@@ -304,9 +253,9 @@ export const AgentCard = ({
             <AlertDialogCancel>Cancel</AlertDialogCancel>
             <AlertDialogAction
               onClick={handleSetDefault}
-              disabled={settingDefault}
+              disabled={setDefaultMutation.isPending}
             >
-              {settingDefault ? "Setting..." : "Set as default"}
+              {setDefaultMutation.isPending ? "Setting..." : "Set as default"}
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>
@@ -335,10 +284,10 @@ export const AgentCard = ({
             </Button>
             <Button
               onClick={handleRename}
-              loading={renaming}
+              loading={renameMutation.isPending}
               disabled={!newName.trim()}
             >
-              {renaming ? "Renaming..." : "Rename"}
+              {renameMutation.isPending ? "Renaming..." : "Rename"}
             </Button>
           </DialogFooter>
         </DialogContent>
@@ -348,7 +297,6 @@ export const AgentCard = ({
         agent={agent}
         open={secretsDialogOpen}
         onOpenChange={setSecretsDialogOpen}
-        onUpdated={onUpdate}
       />
     </Card>
   );

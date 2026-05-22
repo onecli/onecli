@@ -1,9 +1,10 @@
 import { Hono } from "hono";
 import type { ApiEnv } from "../types";
-import { authMiddleware } from "../middleware/auth";
+import { authMiddleware, requireProjectId } from "../middleware/auth";
 import { invalidateGatewayCache } from "../lib/gateway-invalidate";
 import {
   listPolicyRules,
+  getPolicyRule,
   createPolicyRule,
   updatePolicyRule,
   deletePolicyRule,
@@ -12,6 +13,7 @@ import {
   createPolicyRuleSchema,
   updatePolicyRuleSchema,
 } from "../validations/policy-rule";
+import { getResourceHooks } from "../providers";
 
 export const ruleRoutes = () => {
   const app = new Hono<ApiEnv>();
@@ -20,8 +22,22 @@ export const ruleRoutes = () => {
   // GET /rules
   app.get("/", async (c) => {
     const auth = c.get("auth");
-    const rules = await listPolicyRules(auth.projectId);
+    const rules = await listPolicyRules({
+      projectId: requireProjectId(auth),
+      organizationId: auth.organizationId,
+    });
     return c.json(rules);
+  });
+
+  // GET /rules/:ruleId
+  app.get("/:ruleId", async (c) => {
+    const auth = c.get("auth");
+    const ruleId = c.req.param("ruleId");
+    const rule = await getPolicyRule(
+      { projectId: requireProjectId(auth) },
+      ruleId,
+    );
+    return c.json(rule);
   });
 
   // POST /rules
@@ -36,7 +52,15 @@ export const ruleRoutes = () => {
       );
     }
 
-    const rule = await createPolicyRule(auth.projectId, parsed.data);
+    await getResourceHooks().beforeCreateRule(
+      auth.organizationId,
+      parsed.data.action,
+    );
+
+    const rule = await createPolicyRule(
+      { projectId: requireProjectId(auth) },
+      parsed.data,
+    );
     invalidateGatewayCache(c.req.raw);
     return c.json(rule, 201);
   });
@@ -54,7 +78,11 @@ export const ruleRoutes = () => {
       );
     }
 
-    await updatePolicyRule(auth.projectId, ruleId, parsed.data);
+    await updatePolicyRule(
+      { projectId: requireProjectId(auth) },
+      ruleId,
+      parsed.data,
+    );
     invalidateGatewayCache(c.req.raw);
     return c.json({ success: true });
   });
@@ -63,7 +91,7 @@ export const ruleRoutes = () => {
   app.delete("/:ruleId", async (c) => {
     const auth = c.get("auth");
     const ruleId = c.req.param("ruleId");
-    await deletePolicyRule(auth.projectId, ruleId);
+    await deletePolicyRule({ projectId: requireProjectId(auth) }, ruleId);
     invalidateGatewayCache(c.req.raw);
     return c.body(null, 204);
   });

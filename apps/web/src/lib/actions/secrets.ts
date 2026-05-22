@@ -19,13 +19,13 @@ import {
 
 export const getSecrets = async () => {
   const { projectId } = await resolveUser();
-  return listSecrets(projectId);
+  return listSecrets({ projectId });
 };
 
 export const createSecret = async (input: CreateSecretInput) => {
   const { userId, userEmail, projectId } = await resolveUser();
   return withAudit(
-    () => createSecretService(projectId, input),
+    () => createSecretService({ projectId }, input),
     (secret) => ({
       projectId,
       userId,
@@ -40,7 +40,7 @@ export const createSecret = async (input: CreateSecretInput) => {
 export const deleteSecret = async (secretId: string): Promise<void> => {
   const { userId, userEmail, projectId } = await resolveUser();
   return withAudit(
-    () => deleteSecretService(projectId, secretId),
+    () => deleteSecretService({ projectId }, secretId),
     () => ({
       projectId,
       userId,
@@ -176,7 +176,7 @@ export const updateSecret = async (
 ): Promise<void> => {
   const { userId, userEmail, projectId } = await resolveUser();
   return withAudit(
-    () => updateSecretService(projectId, secretId, input),
+    () => updateSecretService({ projectId }, secretId, input),
     () => ({
       projectId,
       userId,

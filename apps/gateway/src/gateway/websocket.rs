@@ -366,18 +366,8 @@ fn emit_telemetry(
             injected: injection_count > 0,
             decision: crate::telemetry_core::RequestDecision::Allowed,
             connection_label: None,
-            #[cfg(feature = "cloud")]
-            model: None,
-            #[cfg(feature = "cloud")]
-            input_tokens: None,
-            #[cfg(feature = "cloud")]
-            output_tokens: None,
-            #[cfg(feature = "cloud")]
-            cache_creation_input_tokens: None,
-            #[cfg(feature = "cloud")]
-            cache_read_input_tokens: None,
-            #[cfg(feature = "cloud")]
-            is_trial: false,
+            existing_log_id: None,
+            log_id: None,
         });
     }
 }

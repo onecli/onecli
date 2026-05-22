@@ -36,22 +36,36 @@ export default function DashboardLayout({
   }, [isLoading, isAuthenticated, router]);
 
   const initSession = useCallback(async () => {
+    let sessionData: Record<string, unknown> | null = null;
+
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        const res = await apiFetch("/v1/auth/session");
+        if (res.status === 401) {
+          signOutRef.current();
+          return;
+        }
+        if (res.ok) {
+          sessionData = await res.json();
+          break;
+        }
+      } catch {
+        // network error — fall through to retry
+      }
+      if (attempt < 2) {
+        await new Promise((r) => setTimeout(r, 1000 * (attempt + 1)));
+      }
+    }
+
     try {
-      const res = await apiFetch("/v1/auth/session");
-      if (!res.ok) {
-        signOutRef.current();
-        return;
+      if (sessionData) {
+        const sessionRedirect = getDashboardRedirect(sessionData, pathname);
+        if (sessionRedirect) {
+          router.replace(sessionRedirect);
+          return;
+        }
       }
 
-      const data = await res.json();
-
-      const sessionRedirect = getDashboardRedirect(data, pathname);
-      if (sessionRedirect) {
-        router.replace(sessionRedirect);
-        return;
-      }
-
-      // Account pages are always accessible (e.g. from create-org to delete account)
       if (!pathname.startsWith("/account")) {
         const redirectTo = await checkDashboardRedirect();
         if (redirectTo) {
@@ -59,11 +73,11 @@ export default function DashboardLayout({
           return;
         }
       }
-
-      setReady(true);
     } catch {
-      signOutRef.current();
+      // redirect checks failed (server down during deploy) — render dashboard anyway
     }
+
+    setReady(true);
   }, [router, pathname]);
 
   useEffect(() => {

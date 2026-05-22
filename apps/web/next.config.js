@@ -28,10 +28,6 @@ const nextConfig = {
           "@/lib/auth/login-content": "@/cloud/auth/login-content",
           "@/lib/user-plan": "@/cloud/user-plan",
           "@/lib/components/request-app-slot": "@/cloud/apps/request-app-slot",
-          "@/lib/actions/agents": "@/cloud/actions/agents",
-          "@/lib/actions/rules": "@/cloud/actions/rules",
-          "@/lib/actions/secrets": "@/cloud/actions/secrets",
-          "@/lib/actions/connections": "@/cloud/actions/connections",
           "@/lib/home-redirect": "@/cloud/home-redirect",
           "@/lib/components/pro-app-dialog": "@/cloud/apps/pro-app-dialog",
           "@/lib/components/condition-builder":

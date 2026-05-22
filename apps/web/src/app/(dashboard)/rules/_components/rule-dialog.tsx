@@ -20,7 +20,7 @@ import { CustomEndpointForm } from "./custom-endpoint-form";
 interface RuleDialogProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
-  onSaved: () => void;
+  onSaved?: () => void;
   agents: AgentOption[];
   rule?: PolicyRuleItem;
   showAgentField?: boolean;

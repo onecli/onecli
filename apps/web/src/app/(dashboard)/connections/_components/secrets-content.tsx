@@ -1,9 +1,11 @@
 "use client";
 
-import { useEffect, useState, useCallback, useRef } from "react";
+import { useEffect, useState, useRef } from "react";
 import { useSearchParams, useRouter } from "next/navigation";
+import { useQuery } from "@tanstack/react-query";
 import { Plus, KeyRound } from "lucide-react";
-import { getSecrets as defaultGetSecrets } from "@/lib/actions/secrets";
+import { secrets as secretsApi } from "@/lib/api";
+import { queryKeys } from "@/lib/api/keys";
 import { Button } from "@onecli/ui/components/button";
 import { Card } from "@onecli/ui/components/card";
 import { Skeleton } from "@onecli/ui/components/skeleton";
@@ -21,7 +23,7 @@ interface Secret {
   pathPattern: string | null;
   injectionConfig: unknown;
   isPlatform: boolean;
-  scope?: string;
+  scope?: string | null;
   createdAt: Date;
 }
 
@@ -35,38 +37,30 @@ interface SecretsContentProps {
 
 export const SecretsContent = ({
   typeFilter,
-  getSecrets = defaultGetSecrets,
+  getSecrets,
   secretActions,
   pageScope = "project",
   renderCreateButton,
 }: SecretsContentProps) => {
   const router = useRouter();
   const searchParams = useSearchParams();
-  const [secrets, setSecrets] = useState<Secret[]>([]);
-  const [loading, setLoading] = useState(true);
+  const { data: secrets = [], isPending: loading } = useQuery<Secret[]>({
+    queryKey: [...queryKeys.secrets.list(), pageScope],
+    queryFn: (getSecrets ?? secretsApi.list) as () => Promise<Secret[]>,
+  });
   const [createOpen, setCreateOpen] = useState(false);
   const [prefill, setPrefill] = useState<SecretPrefill | undefined>();
   const paramHandled = useRef(false);
 
-  const fetchSecrets = useCallback(async () => {
-    const result = await getSecrets();
-    setSecrets(result);
-    setLoading(false);
-  }, [getSecrets]);
-
-  const allFiltered = secrets.filter((s) =>
+  const allFiltered = secrets.filter((s: Secret) =>
     typeFilter === "generic" ? s.type === "generic" : s.type !== "generic",
   );
   const ownSecrets = allFiltered.filter(
-    (s) => s.scope === pageScope || !s.scope,
+    (s: Secret) => s.scope === pageScope || !s.scope,
   );
   const inheritedSecrets = allFiltered.filter(
-    (s) => s.scope && s.scope !== pageScope,
+    (s: Secret) => s.scope && s.scope !== pageScope,
   );
-
-  useEffect(() => {
-    fetchSecrets();
-  }, [fetchSecrets]);
 
   useEffect(() => {
     if (paramHandled.current || loading) return;
@@ -167,7 +161,6 @@ export const SecretsContent = ({
             <SecretCard
               key={secret.id}
               secret={secret}
-              onUpdate={fetchSecrets}
               secretActions={secretActions}
             />
           ))}
@@ -175,7 +168,6 @@ export const SecretsContent = ({
             <SecretCard
               key={`inherited-${secret.id}`}
               secret={secret}
-              onUpdate={fetchSecrets}
               readOnly
               badge="Organization"
             />
@@ -189,7 +181,6 @@ export const SecretsContent = ({
           setCreateOpen(open);
           if (!open) setPrefill(undefined);
         }}
-        onSaved={fetchSecrets}
         prefill={prefill}
         defaultType={typeFilter === "generic" ? "generic" : undefined}
         allowedTypes={

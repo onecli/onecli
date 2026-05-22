@@ -13,13 +13,13 @@ import {
 
 export const getApiKey = async () => {
   const { userId, projectId } = await resolveUser();
-  return getApiKeyService(userId, projectId);
+  return getApiKeyService(userId, { projectId });
 };
 
 export const regenerateApiKey = async () => {
   const { userId, userEmail, projectId } = await resolveUser();
   return withAudit(
-    () => regenerateApiKeyService(userId, projectId),
+    () => regenerateApiKeyService(userId, { projectId }),
     () => ({
       projectId,
       userId,

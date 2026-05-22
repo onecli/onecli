@@ -82,7 +82,6 @@ export const ActivityContent = () => {
         title="Activity"
         description="Request logs from your gateway. Bodies and query strings are never recorded."
       />
-
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-1 rounded-lg border p-1">
           <button

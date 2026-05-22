@@ -1,7 +1,7 @@
 import { Hono } from "hono";
 import { db } from "@onecli/db";
 import type { ApiEnv } from "../types";
-import { authMiddleware } from "../middleware/auth";
+import { authMiddleware, requireProjectId } from "../middleware/auth";
 import { GATEWAY_BASE_URL } from "../lib/env";
 import { loadCaCertificate } from "../lib/gateway-ca";
 import { parseAnthropicMetadata } from "../validations/secret";
@@ -56,19 +56,17 @@ export const containerConfigRoutes = () => {
   app.get("/", async (c) => {
     try {
       const auth = c.get("auth");
+      const projectId = requireProjectId(auth);
 
-      // Look up agent: by identifier if provided, otherwise default.
-      // Auto-creates the default agent on first call so `docker run` works
-      // without needing to open the dashboard first.
       const agentIdentifier = c.req.query("agent");
 
       let agent = agentIdentifier
         ? await db.agent.findFirst({
-            where: { projectId: auth.projectId, identifier: agentIdentifier },
+            where: { projectId, identifier: agentIdentifier },
             select: { id: true, accessToken: true, secretMode: true },
           })
         : await db.agent.findFirst({
-            where: { projectId: auth.projectId, isDefault: true },
+            where: { projectId, isDefault: true },
             select: { id: true, accessToken: true, secretMode: true },
           });
 
@@ -86,7 +84,7 @@ export const containerConfigRoutes = () => {
             identifier: DEFAULT_AGENT_IDENTIFIER,
             accessToken: generateAccessToken(),
             isDefault: true,
-            projectId: auth.projectId,
+            projectId,
           },
           select: { id: true, accessToken: true, secretMode: true },
         });
@@ -120,7 +118,7 @@ export const containerConfigRoutes = () => {
               select: { metadata: true, encryptedValue: true },
             })
           : await db.secret.findFirst({
-              where: { projectId: auth.projectId, type: "anthropic" },
+              where: { projectId, type: "anthropic" },
               select: { metadata: true, encryptedValue: true },
             });
 
@@ -149,7 +147,7 @@ export const containerConfigRoutes = () => {
       }
 
       // Fire-and-forget: mark agent as connected
-      markAgentConnected(auth.projectId).catch(() => {});
+      markAgentConnected(projectId).catch(() => {});
 
       return c.json({
         env: {

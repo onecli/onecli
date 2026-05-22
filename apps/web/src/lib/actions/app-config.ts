@@ -28,7 +28,12 @@ export const saveAppConfig = async (
 
   return withAudit(
     () =>
-      upsertAppConfig(projectId, provider, values, app.configurable!.fields),
+      upsertAppConfig(
+        { projectId },
+        provider,
+        values,
+        app.configurable!.fields,
+      ),
     () => ({
       projectId,
       userId,
@@ -42,14 +47,14 @@ export const saveAppConfig = async (
 
 export const getAppConfigStatus = async (provider: string) => {
   const { projectId } = await resolveUser();
-  return getAppConfig(projectId, provider);
+  return getAppConfig({ projectId }, provider);
 };
 
 export const deleteAppConfigAction = async (provider: string) => {
   const { userId, userEmail, projectId } = await resolveUser();
 
   return withAudit(
-    () => deleteAppConfig(projectId, provider),
+    () => deleteAppConfig({ projectId }, provider),
     () => ({
       projectId,
       userId,
@@ -82,7 +87,7 @@ export const checkAppConfigExists = async (
   provider: string,
 ): Promise<boolean> => {
   const { projectId } = await resolveUser();
-  return hasAppConfigService(projectId, provider);
+  return hasAppConfigService({ projectId }, provider);
 };
 
 /**
@@ -91,7 +96,7 @@ export const checkAppConfigExists = async (
  */
 export const getConfiguredProviders = async (): Promise<string[]> => {
   const { projectId } = await resolveUser();
-  return listConfiguredProviders(projectId);
+  return listConfiguredProviders({ projectId });
 };
 
 export const setAppConfigEnabled = async (
@@ -101,7 +106,7 @@ export const setAppConfigEnabled = async (
   const { userId, userEmail, projectId } = await resolveUser();
 
   return withAudit(
-    () => toggleAppConfigEnabled(projectId, provider, enabled),
+    () => toggleAppConfigEnabled({ projectId }, provider, enabled),
     () => ({
       projectId,
       userId,

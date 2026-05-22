@@ -1,26 +1,14 @@
 "use client";
 
-import { useEffect, useState, useCallback } from "react";
+import { useState } from "react";
 import { useSearchParams } from "next/navigation";
 import { Plus, Bot } from "lucide-react";
-import { getAgents } from "@/lib/actions/agents";
-import type { SecretMode } from "@onecli/api/services/agent-service";
+import { useAgents } from "@/hooks/use-agents";
 import { Button } from "@onecli/ui/components/button";
 import { Card } from "@onecli/ui/components/card";
 import { Skeleton } from "@onecli/ui/components/skeleton";
 import { AgentCard } from "./agent-card";
 import { CreateAgentDialog } from "./create-agent-dialog";
-
-interface Agent {
-  id: string;
-  name: string;
-  identifier: string | null;
-  accessToken: string;
-  isDefault: boolean;
-  secretMode: SecretMode;
-  createdAt: Date;
-  _count: { agentSecrets: number; agentAppConnections: number };
-}
 
 interface AgentsContentProps {
   renderCreateButton?: (onCreate: () => void) => React.ReactNode;
@@ -31,19 +19,8 @@ export const AgentsContent = ({
 }: AgentsContentProps = {}) => {
   const searchParams = useSearchParams();
   const manageAgentId = searchParams.get("manage");
-  const [agents, setAgents] = useState<Agent[]>([]);
-  const [loading, setLoading] = useState(true);
+  const { data: agents = [], isPending: loading } = useAgents();
   const [createOpen, setCreateOpen] = useState(false);
-
-  const fetchAgents = useCallback(async () => {
-    const result = await getAgents();
-    setAgents(result);
-    setLoading(false);
-  }, []);
-
-  useEffect(() => {
-    fetchAgents();
-  }, [fetchAgents]);
 
   if (loading) {
     return (
@@ -95,7 +72,6 @@ export const AgentsContent = ({
           <AgentCard
             key={agent.id}
             agent={agent}
-            onUpdate={fetchAgents}
             autoOpenAccess={
               !!manageAgentId && agent.id.startsWith(manageAgentId)
             }
@@ -103,11 +79,7 @@ export const AgentsContent = ({
         ))
       )}
 
-      <CreateAgentDialog
-        open={createOpen}
-        onOpenChange={setCreateOpen}
-        onCreated={fetchAgents}
-      />
+      <CreateAgentDialog open={createOpen} onOpenChange={setCreateOpen} />
     </div>
   );
 };

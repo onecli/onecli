@@ -1,10 +1,12 @@
 "use client";
 
-import { useEffect, useState, useCallback } from "react";
+import { useMemo, useState } from "react";
+import { useQuery } from "@tanstack/react-query";
 import { Plus, ShieldOff } from "lucide-react";
-import { getRules as defaultGetRules } from "@/lib/actions/rules";
-import { getAgents } from "@/lib/actions/agents";
-import { getAppConnections } from "@/lib/actions/connections";
+import { rules as rulesApi } from "@/lib/api";
+import { queryKeys } from "@/lib/api/keys";
+import { useAgents } from "@/hooks/use-agents";
+import { useConnections } from "@/hooks/use-connections";
 import { Button } from "@onecli/ui/components/button";
 import { Card } from "@onecli/ui/components/card";
 import { Skeleton } from "@onecli/ui/components/skeleton";
@@ -29,46 +31,32 @@ const isAppPermissionRule = (rule: PolicyRuleItem) =>
   rule.metadata.source === "app_permission";
 
 export const RulesContent = ({
-  getRules = defaultGetRules,
+  getRules,
   ruleActions,
   pageScope = "project",
   showAgentField = true,
 }: RulesContentProps) => {
-  const [rules, setRules] = useState<PolicyRuleItem[]>([]);
-  const [agents, setAgents] = useState<AgentOption[]>([]);
-  const [connectedProviders, setConnectedProviders] = useState<
-    Map<string, string[]>
-  >(new Map());
-  const [loading, setLoading] = useState(true);
+  const { data: rules = [], isPending: loading } = useQuery<PolicyRuleItem[]>({
+    queryKey: [...queryKeys.rules.list(), pageScope],
+    queryFn: (getRules ?? rulesApi.list) as () => Promise<PolicyRuleItem[]>,
+  });
+  const { data: agentsList = [] } = useAgents();
+  const agents: AgentOption[] = useMemo(
+    () => agentsList.map((a) => ({ id: a.id, name: a.name })),
+    [agentsList],
+  );
+  const { data: connectionsList = [] } = useConnections();
+  const connectedProviders = useMemo(() => {
+    const map = new Map<string, string[]>();
+    for (const c of connectionsList) {
+      if (c.status !== "connected") continue;
+      const labels = map.get(c.provider) ?? [];
+      if (c.label) labels.push(c.label);
+      map.set(c.provider, labels);
+    }
+    return map;
+  }, [connectionsList]);
   const [createOpen, setCreateOpen] = useState(false);
-
-  const fetchRules = useCallback(async () => {
-    const result = await getRules();
-    setRules(result);
-    setLoading(false);
-  }, [getRules]);
-
-  const fetchAgents = useCallback(async () => {
-    const result = await getAgents();
-    setAgents(result.map((a) => ({ id: a.id, name: a.name })));
-  }, []);
-
-  useEffect(() => {
-    fetchRules();
-    if (showAgentField) fetchAgents();
-    getAppConnections()
-      .then((connections) => {
-        const map = new Map<string, string[]>();
-        for (const c of connections) {
-          if (c.status !== "connected") continue;
-          const labels = map.get(c.provider) ?? [];
-          if (c.label) labels.push(c.label);
-          map.set(c.provider, labels);
-        }
-        setConnectedProviders(map);
-      })
-      .catch(() => {});
-  }, [fetchRules, fetchAgents, showAgentField]);
 
   const isInherited = (r: PolicyRuleItem) =>
     r.scope != null && r.scope !== pageScope;
@@ -140,7 +128,6 @@ export const RulesContent = ({
                   key={rule.id}
                   rule={rule}
                   agents={agents}
-                  onUpdate={fetchRules}
                   readOnly={isInherited(rule)}
                   badge={isInherited(rule) ? "Organization" : undefined}
                   ruleActions={ruleActions}
@@ -173,7 +160,6 @@ export const RulesContent = ({
       <RuleDialog
         open={createOpen}
         onOpenChange={setCreateOpen}
-        onSaved={fetchRules}
         agents={showAgentField ? agents : []}
         showAgentField={showAgentField}
         ruleActions={ruleActions}

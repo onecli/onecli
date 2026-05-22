@@ -121,7 +121,6 @@ model User {
   onboardingSurveys       OnboardingSurvey[]
   createdAgentSecrets     AgentSecret[]        @relation("AgentSecretCreator")
   updatedAgentSecrets     AgentSecret[]        @relation("AgentSecretUpdater")
-  trialBudget             TrialBudget?
   provisionedAs           UserProvision?       @relation("ProvisionedUser")
   createdProvisions       UserProvision[]      @relation("ProvisionCreator")
 
@@ -434,20 +433,4 @@ model CliAuthSession {
   createdAt DateTime @default(now()) @map("created_at")
 
   @@map("cli_auth_sessions")
-}
-
-// ── Trial budget ────────────────────────────────────────────────────────
-
-model TrialBudget {
-  id           String   @id @default(uuid())
-  userId       String   @unique @map("user_id")
-  budgetCents  Int      @default(500) @map("budget_cents")
-  spentCents   Int      @default(0) @map("spent_cents")
-  status       String   @default("active") // "active" | "exhausted" | "upgraded"
-  lastSyncedAt DateTime @default(now()) @map("last_synced_at")
-  createdAt    DateTime @default(now()) @map("created_at")
-  updatedAt    DateTime @updatedAt @map("updated_at")
-  user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
-
-  @@map("trial_budgets")
 }

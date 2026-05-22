@@ -45,12 +45,9 @@ pub(crate) struct ConnectResponse {
     /// a more helpful error ("grant access") instead of "connect the app".
     #[serde(default)]
     pub access_restricted: bool,
-    /// True when credentials were injected from a platform-provisioned secret (trial mode).
+    /// Normalized plan name for quota enforcement ("free", "pro", "team").
     #[serde(default)]
-    pub is_trial: bool,
-    /// True when the trial budget is exhausted — requests should be blocked.
-    #[serde(default)]
-    pub budget_blocked: bool,
+    pub plan: String,
 }
 
 /// Result of per-request app connection resolution.
@@ -170,7 +167,8 @@ impl PolicyEngine {
         agent: &db::AgentRow,
         hostname: &str,
     ) -> Result<ConnectResponse, ConnectError> {
-        let (injection_rules, is_trial) = self.resolve_secret_injections(agent, hostname).await?;
+        let (injection_rules, _has_platform) =
+            self.resolve_secret_injections(agent, hostname).await?;
         let app_connections = self.resolve_app_connections(agent, hostname).await?;
         let policy_rules = self.resolve_policy_rules(agent, hostname).await?;
         let has_rules =
@@ -182,13 +180,12 @@ impl PolicyEngine {
             && agent.secret_mode == SECRET_MODE_SELECTIVE
             && self.has_available_credentials(agent, hostname).await;
 
-        let budget_blocked = if is_trial {
-            db::is_trial_budget_blocked(&self.pool, &agent.project_id)
-                .await
-                .unwrap_or(false)
-        } else {
-            false
-        };
+        let plan = match agent.subscription_status.as_str() {
+            "pro" => "pro",
+            "team" => "team",
+            _ => "free",
+        }
+        .to_string();
 
         Ok(ConnectResponse {
             intercept: has_rules || access_restricted,
@@ -201,8 +198,7 @@ impl PolicyEngine {
             agent_name: Some(agent.name.clone()),
             agent_identifier: agent.identifier.clone(),
             access_restricted,
-            is_trial,
-            budget_blocked,
+            plan,
         })
     }
 
@@ -1078,8 +1074,7 @@ mod tests {
             agent_name: None,
             agent_identifier: None,
             access_restricted: false,
-            is_trial: false,
-            budget_blocked: false,
+            plan: "pro".to_string(),
         };
 
         store
@@ -1122,8 +1117,7 @@ mod tests {
             agent_name: Some("Test".to_string()),
             agent_identifier: None,
             access_restricted: false,
-            is_trial: false,
-            budget_blocked: false,
+            plan: "pro".to_string(),
         };
 
         // Pre-populate cache with the key format that resolve() uses
@@ -1162,8 +1156,7 @@ mod tests {
             agent_name: Some("Selective Agent".to_string()),
             agent_identifier: None,
             access_restricted: true,
-            is_trial: false,
-            budget_blocked: false,
+            plan: "pro".to_string(),
         };
 
         store

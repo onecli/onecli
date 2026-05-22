@@ -24,10 +24,11 @@ import {
   AccordionTrigger,
 } from "@onecli/ui/components/accordion";
 import { Badge } from "@onecli/ui/components/badge";
-import {
-  createSecret as defaultCreateSecret,
-  updateSecret as defaultUpdateSecret,
-} from "@/lib/actions/secrets";
+import { updateSecret as defaultUpdateSecret } from "@/lib/actions/secrets";
+import { useQueryClient } from "@tanstack/react-query";
+import { secrets } from "@/lib/api";
+import { queryKeys } from "@/lib/api/keys";
+import type { CreateSecretInput } from "@onecli/api/validations/secret";
 import type { SecretActions } from "./types";
 import { validateDisplayName } from "@onecli/api/validations/display-name";
 import {
@@ -125,7 +126,7 @@ export interface SecretPrefill {
 interface SecretDialogProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
-  onSaved: () => void;
+  onSaved?: () => void;
   /** Pass an existing secret to edit. Omit for create mode. */
   secret?: SecretItem;
   /** Pre-populate fields and skip type selection step. */
@@ -149,6 +150,7 @@ export const SecretDialog = ({
 }: SecretDialogProps) => {
   const isEdit = !!secret;
   const invalidateCache = useInvalidateGatewayCache();
+  const queryClient = useQueryClient();
   const valueInputRef = useRef<HTMLInputElement>(null);
   const [step, setStep] = useState<"type" | "form">("type");
   const [saving, setSaving] = useState(false);
@@ -293,7 +295,9 @@ export const SecretDialog = ({
       };
 
       const updateSecret = secretActions?.updateSecret ?? defaultUpdateSecret;
-      const createSecret = secretActions?.createSecret ?? defaultCreateSecret;
+      const createSecret =
+        secretActions?.createSecret ??
+        ((input: unknown) => secrets.create(input as CreateSecretInput));
 
       if (isEdit) {
         await updateSecret(
@@ -320,7 +324,9 @@ export const SecretDialog = ({
         });
         toast.success("Secret created");
       }
-      onSaved();
+      queryClient.invalidateQueries({ queryKey: queryKeys.secrets.all });
+      queryClient.invalidateQueries({ queryKey: queryKeys.counts.all });
+      onSaved?.();
       onOpenChange(false);
       invalidateCache();
     } catch (err) {
@@ -360,15 +366,13 @@ export const SecretDialog = ({
                 </DialogTitle>
               </div>
               <DialogDescription>
-                {isPlatformEdit
-                  ? "Replace the trial key with your own Anthropic key to continue using Claude."
-                  : isEdit
-                    ? "Update the secret\u2019s configuration. Leave the value field empty to keep the current value."
-                    : type === "anthropic"
-                      ? "Your key will be encrypted and injected into requests to api.anthropic.com."
-                      : type === "openai"
-                        ? "Your key will be encrypted and injected into requests to api.openai.com."
-                        : "Configure a custom secret to inject as a header or URL parameter into matching requests."}
+                {isEdit
+                  ? "Update the secret\u2019s configuration. Leave the value field empty to keep the current value."
+                  : type === "anthropic"
+                    ? "Your key will be encrypted and injected into requests to api.anthropic.com."
+                    : type === "openai"
+                      ? "Your key will be encrypted and injected into requests to api.openai.com."
+                      : "Configure a custom secret to inject as a header or URL parameter into matching requests."}
               </DialogDescription>
               {type === "generic" && !isEdit && !prefill && (
                 <div className="flex items-center gap-2 pt-1">
