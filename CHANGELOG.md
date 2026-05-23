@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.29.0](https://github.com/onecli/onecli/compare/v1.28.1...v1.29.0) (2026-05-23)
+
+
+### Features
+
+* add Monday.com integration and Sentry cloud-only stub ([#303](https://github.com/onecli/onecli/issues/303)) ([a67f521](https://github.com/onecli/onecli/commit/a67f52157f3fe954a9edbdbcd1599becd4869174))
+
 ## [1.28.1](https://github.com/onecli/onecli/compare/v1.28.0...v1.28.1) (2026-05-19)
 
 
