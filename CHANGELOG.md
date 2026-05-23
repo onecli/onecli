@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.29.1](https://github.com/onecli/onecli/compare/v1.29.0...v1.29.1) (2026-05-23)
+
+
+### Bug Fixes
+
+* show redirect URI in OAuth credentials dialog ([#305](https://github.com/onecli/onecli/issues/305)) ([a7e4cd1](https://github.com/onecli/onecli/commit/a7e4cd1524674b8a258ef58279305cd35f460c73))
+
 ## [1.29.0](https://github.com/onecli/onecli/compare/v1.28.1...v1.29.0) (2026-05-23)
 
 
