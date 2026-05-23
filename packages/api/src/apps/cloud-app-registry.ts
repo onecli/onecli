@@ -71,4 +71,14 @@ export const cloudApps: AppDefinition[] = [
     connectionMethod: { type: "cloud_only" },
     available: false,
   },
+  {
+    id: "sentry",
+    name: "Sentry",
+    icon: "/icons/sentry.svg",
+    darkIcon: "/icons/sentry-light.svg",
+    description:
+      "Error tracking, performance monitoring, and issue management.",
+    connectionMethod: { type: "cloud_only" },
+    available: false,
+  },
 ];

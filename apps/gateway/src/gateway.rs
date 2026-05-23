@@ -401,6 +401,18 @@ async fn submit_approval_decision(
         }
     }
 
+    let decision_str = match body.decision {
+        ApprovalDecision::Approve => "approve",
+        ApprovalDecision::Deny => "deny",
+    };
+
+    info!(
+        approval_id = %approval_id,
+        decision = decision_str,
+        project_id = %auth.project_id,
+        "approval decision submitted"
+    );
+
     let delivered = state
         .approval_store
         .submit_decision(&approval_id, body.decision)
@@ -412,6 +424,11 @@ async fn submit_approval_decision(
             axum::Json(serde_json::json!({ "success": true })),
         )
     } else {
+        warn!(
+            approval_id = %approval_id,
+            decision = decision_str,
+            "approval decision submitted but approval already expired"
+        );
         (
             StatusCode::GONE,
             axum::Json(serde_json::json!({ "error": "approval_expired" })),

@@ -64,6 +64,10 @@
     "ZOOM_CLIENT_SECRET",
     "LINKEDIN_CLIENT_ID",
     "LINKEDIN_CLIENT_SECRET",
+    "MONDAY_CLIENT_ID",
+    "MONDAY_CLIENT_SECRET",
+    "SENTRY_CLIENT_ID",
+    "SENTRY_CLIENT_SECRET",
     "RUST_LOG",
     "PORT"
   ],
@@ -104,7 +108,11 @@
         "ZOOM_CLIENT_ID",
         "ZOOM_CLIENT_SECRET",
         "LINKEDIN_CLIENT_ID",
-        "LINKEDIN_CLIENT_SECRET"
+        "LINKEDIN_CLIENT_SECRET",
+        "MONDAY_CLIENT_ID",
+        "MONDAY_CLIENT_SECRET",
+        "SENTRY_CLIENT_ID",
+        "SENTRY_CLIENT_SECRET"
       ]
     },
     "@onecli/gateway#check": {

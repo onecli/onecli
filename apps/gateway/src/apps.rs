@@ -798,6 +798,22 @@ static APP_PROVIDERS: &[AppProvider] = &[
         body_transform: None,
     },
     AppProvider {
+        provider: "monday",
+        display_name: "monday.com",
+        host_rules: &[HostRule {
+            pattern: HostPattern::Exact("api.monday.com"),
+            path_prefix: None,
+            strategy: AuthStrategy::Bearer,
+            intercept: false,
+        }],
+        refresh: None,
+        metadata_headers: &[],
+        credential_headers: &[],
+        host_rewrite: None,
+        finalizer: None,
+        body_transform: None,
+    },
+    AppProvider {
         provider: "linkedin",
         display_name: "LinkedIn",
         host_rules: &[HostRule {
@@ -2068,6 +2084,43 @@ mod tests {
     fn mongodb_atlas_does_not_match_other_mongodb_hosts() {
         assert!(providers_for_host("mongodb.com").is_empty());
         assert!(providers_for_host("atlas.mongodb.com").is_empty());
+    }
+
+    // ── Monday.com ────────────────────────────────────────────────────
+
+    #[test]
+    fn providers_for_monday_host() {
+        assert_eq!(providers_for_host("api.monday.com"), vec!["monday"]);
+    }
+
+    #[test]
+    fn provider_for_host_monday() {
+        let result = provider_for_host("api.monday.com");
+        assert_eq!(result, Some(("monday", "monday.com")));
+    }
+
+    #[test]
+    fn monday_api_uses_bearer() {
+        let injections = build_app_injections("monday", "api.monday.com", "test_token");
+        assert_eq!(injections.len(), 1);
+        assert_eq!(
+            injections[0],
+            Injection::SetHeader {
+                name: "authorization".to_string(),
+                value: "Bearer test_token".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn monday_has_no_refresh_config() {
+        assert!(refresh_config("monday").is_none());
+    }
+
+    #[test]
+    fn monday_does_not_match_other_monday_hosts() {
+        assert!(providers_for_host("monday.com").is_empty());
+        assert!(providers_for_host("auth.monday.com").is_empty());
     }
 
     // ── Edge cases ───────────────────────────────────────────────────
