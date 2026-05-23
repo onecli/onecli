@@ -11,6 +11,7 @@ import {
   ShieldCheck,
 } from "lucide-react";
 import type { NavItem } from "@/app/(dashboard)/_components/nav-main";
+import { IS_CLOUD } from "@/lib/env";
 
 export interface SettingsNavItem {
   title: string;
@@ -33,10 +34,14 @@ export const navItems: NavItem[] = [
 ];
 
 export const settingsSections: SettingsNavSection[] = [
-  {
-    label: "Instance",
-    items: [{ title: "General", url: "/settings/general", icon: Globe }],
-  },
+  ...(!IS_CLOUD
+    ? [
+        {
+          label: "Instance",
+          items: [{ title: "General", url: "/settings/general", icon: Globe }],
+        },
+      ]
+    : []),
   {
     label: "Account",
     items: [

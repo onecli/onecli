@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
+import Link from "next/link";
 import { Check, Copy, Loader2, Settings2 } from "lucide-react";
 import { toast } from "sonner";
 import {
@@ -357,15 +358,20 @@ const RedirectUri = ({
     <div className="grid gap-1.5">
       <Label>Redirect URI</Label>
       <p className="text-xs text-muted-foreground">
-        Add this URL to your OAuth app&apos;s allowed redirect URIs. You can
-        change the base URL in{" "}
-        <a
-          href="/settings/general"
-          className="text-foreground font-medium underline underline-offset-2 transition-colors hover:text-foreground/80"
-        >
-          Settings
-        </a>
-        .
+        Add this URL to your OAuth app&apos;s allowed redirect URIs.
+        {!IS_CLOUD && (
+          <>
+            {" "}
+            You can change the base URL in{" "}
+            <Link
+              href="/settings/general"
+              className="text-foreground font-medium underline underline-offset-2 transition-colors hover:text-foreground/80"
+            >
+              Settings
+            </Link>
+            .
+          </>
+        )}
       </p>
       <div className="flex items-center gap-3">
         <div className="flex-1 rounded-md border bg-muted/50 px-3 py-2 font-mono text-sm text-foreground truncate">

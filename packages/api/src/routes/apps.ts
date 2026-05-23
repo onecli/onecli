@@ -5,7 +5,8 @@ import type { ApiEnv } from "../types";
 import { authMiddleware, requireProjectId } from "../middleware/auth";
 import { getApp, getApps } from "../apps/registry";
 import { resolveAppCredentials } from "../apps/resolve-credentials";
-import { getOAuthOrg, getSelfUrl } from "../providers";
+import { getOAuthOrg } from "../providers";
+import { getProjectPublicUrl } from "../services/project-service";
 import {
   signOAuthState,
   verifyOAuthState,
@@ -244,7 +245,8 @@ export const appRoutes = () => {
 
     const { values: creds } = resolved;
 
-    const redirectUri = `${getSelfUrl()}/v1/apps/${provider}/callback`;
+    const baseUrl = await getProjectPublicUrl(projectId);
+    const redirectUri = `${baseUrl}/v1/apps/${provider}/callback`;
     const scopes = appDef.connectionMethod.defaultScopes ?? [];
 
     const authUrl = appDef.connectionMethod.buildAuthUrl({
@@ -334,7 +336,8 @@ export const appRoutes = () => {
         return errorRedirect(`${appDef.name} is not configured`);
       }
 
-      const redirectUri = `${getSelfUrl()}/v1/apps/${provider}/callback`;
+      const baseUrl = await getProjectPublicUrl(state.projectId);
+      const redirectUri = `${baseUrl}/v1/apps/${provider}/callback`;
 
       // Extract all query params as callback params
       const url = new URL(c.req.url);

@@ -15,11 +15,25 @@ import { Skeleton } from "@onecli/ui/components/skeleton";
 import { toast } from "sonner";
 import { getPublicUrl, updatePublicUrl } from "@/lib/actions/project";
 
+const validateUrl = (value: string): string | null => {
+  if (!value.trim()) return null;
+  try {
+    const parsed = new URL(value.trim());
+    if (!["http:", "https:"].includes(parsed.protocol)) {
+      return "URL must use http or https";
+    }
+    return null;
+  } catch {
+    return "Please enter a valid URL (e.g., https://example.com)";
+  }
+};
+
 export const PublicUrlForm = () => {
   const [url, setUrl] = useState("");
   const [initialUrl, setInitialUrl] = useState("");
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     getPublicUrl().then((resolved) => {
@@ -30,6 +44,12 @@ export const PublicUrlForm = () => {
   }, []);
 
   const handleSave = async () => {
+    const validationError = validateUrl(url);
+    if (validationError) {
+      setError(validationError);
+      return;
+    }
+
     setSaving(true);
     try {
       const trimmed = url.replace(/\/+$/, "");
@@ -77,14 +97,21 @@ export const PublicUrlForm = () => {
           <Input
             id="public-url"
             value={url}
-            onChange={(e) => setUrl(e.target.value)}
+            onChange={(e) => {
+              setUrl(e.target.value);
+              setError(null);
+            }}
             placeholder="http://localhost:10254"
             className="font-mono text-sm"
           />
-          <p className="text-muted-foreground text-xs">
-            Leave as default for local development. For tunnels or VPS, use your
-            public address (e.g., https://abc123.ngrok-free.app).
-          </p>
+          {error ? (
+            <p className="text-destructive text-xs">{error}</p>
+          ) : (
+            <p className="text-muted-foreground text-xs">
+              Leave as default for local development. For tunnels or VPS, use
+              your public address (e.g., https://abc123.ngrok-free.app).
+            </p>
+          )}
         </div>
         <Button
           onClick={handleSave}
