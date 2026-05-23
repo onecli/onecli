@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-import { Check, Copy, Loader2, Settings2 } from "lucide-react";
+import { Loader2, Settings2 } from "lucide-react";
 import { toast } from "sonner";
 import {
   Accordion,
@@ -32,9 +32,8 @@ import {
   deleteAppConfigAction,
   setAppConfigEnabled,
 } from "@/lib/actions/app-config";
-import { APP_URL, IS_CLOUD } from "@/lib/env";
-import { API_ORIGIN } from "@/lib/api-fetch";
-import { useCopyToClipboard } from "@/hooks/use-copy-to-clipboard";
+import { IS_CLOUD } from "@/lib/env";
+import { RedirectUri } from "./redirect-uri";
 
 interface AppConfigFormProps {
   provider: string;
@@ -339,35 +338,5 @@ export const AppConfigForm = ({
         </AlertDialogContent>
       </AlertDialog>
     </Accordion>
-  );
-};
-
-const RedirectUri = ({ provider }: { provider: string }) => {
-  const redirectUri = `${API_ORIGIN || APP_URL}/v1/apps/${provider}/callback`;
-  const { copied, copy } = useCopyToClipboard();
-
-  return (
-    <div className="grid gap-1.5">
-      <Label>Redirect URI</Label>
-      <p className="text-xs text-muted-foreground">
-        Add this URL to your OAuth app&apos;s allowed redirect URIs.
-      </p>
-      <div className="flex items-center gap-3">
-        <div className="flex-1 rounded-md border bg-muted/50 px-3 py-2 font-mono text-sm text-foreground truncate">
-          {redirectUri}
-        </div>
-        <button
-          type="button"
-          onClick={() => copy(redirectUri)}
-          className="shrink-0 text-muted-foreground hover:text-foreground transition-colors"
-        >
-          {copied ? (
-            <Check className="size-4 text-brand" />
-          ) : (
-            <Copy className="size-4" />
-          )}
-        </button>
-      </div>
-    </div>
   );
 };
