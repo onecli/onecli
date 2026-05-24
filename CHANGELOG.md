@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.30.0](https://github.com/onecli/onecli/compare/v1.29.2...v1.30.0) (2026-05-24)
+
+
+### Features
+
+* inherit parent agent permissions when creating sub-agents ([#312](https://github.com/onecli/onecli/issues/312)) ([a243837](https://github.com/onecli/onecli/commit/a2438377436ff78935d69f8b26a9e13bc24aa6fd)), closes [#297](https://github.com/onecli/onecli/issues/297)
+
 ## [1.29.2](https://github.com/onecli/onecli/compare/v1.29.1...v1.29.2) (2026-05-24)
 
 
