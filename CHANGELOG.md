@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.29.2](https://github.com/onecli/onecli/compare/v1.29.1...v1.29.2) (2026-05-24)
+
+
+### Bug Fixes
+
+* runtime env vars, credential response, and secret dialog improvements ([#310](https://github.com/onecli/onecli/issues/310)) ([624be33](https://github.com/onecli/onecli/commit/624be33c91ecd6b215a654ba1849dac6e2f13bda))
+
 ## [1.29.1](https://github.com/onecli/onecli/compare/v1.29.0...v1.29.1) (2026-05-23)
 
 
