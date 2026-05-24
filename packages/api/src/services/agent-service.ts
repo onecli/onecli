@@ -47,6 +47,7 @@ export const createAgent = async (
   projectId: string,
   name: string,
   identifier: string,
+  parentIdentifier?: string,
 ) => {
   const trimmed = name.trim();
   if (!trimmed || trimmed.length > 255) {
@@ -75,6 +76,28 @@ export const createAgent = async (
     );
   }
 
+  let inheritedSecretMode: SecretMode = "all";
+  let parentSecretIds: string[] = [];
+  let parentAppConnectionIds: string[] = [];
+
+  if (parentIdentifier) {
+    const parent = await db.agent.findFirst({
+      where: { projectId, identifier: parentIdentifier },
+      select: {
+        secretMode: true,
+        agentSecrets: { select: { secretId: true } },
+        agentAppConnections: { select: { appConnectionId: true } },
+      },
+    });
+    if (parent) {
+      inheritedSecretMode = parent.secretMode as SecretMode;
+      parentSecretIds = parent.agentSecrets.map((s) => s.secretId);
+      parentAppConnectionIds = parent.agentAppConnections.map(
+        (c) => c.appConnectionId,
+      );
+    }
+  }
+
   const accessToken = generateAccessToken();
 
   try {
@@ -83,7 +106,7 @@ export const createAgent = async (
         name: trimmed,
         identifier: trimmedIdentifier,
         accessToken,
-        secretMode: "all",
+        secretMode: inheritedSecretMode,
         projectId,
       },
       select: {
@@ -94,16 +117,32 @@ export const createAgent = async (
       },
     });
 
-    // Auto-assign the first anthropic secret if one exists
-    const anthropicSecret = await db.secret.findFirst({
-      where: { projectId, type: "anthropic" },
-      select: { id: true },
-      orderBy: { createdAt: "asc" },
-    });
+    if (parentSecretIds.length > 0) {
+      await db.agentSecret.createMany({
+        data: parentSecretIds.map((secretId) => ({
+          agentId: agent.id,
+          secretId,
+        })),
+      });
+    } else {
+      const anthropicSecret = await db.secret.findFirst({
+        where: { projectId, type: "anthropic" },
+        select: { id: true },
+        orderBy: { createdAt: "asc" },
+      });
+      if (anthropicSecret) {
+        await db.agentSecret.create({
+          data: { agentId: agent.id, secretId: anthropicSecret.id },
+        });
+      }
+    }
 
-    if (anthropicSecret) {
-      await db.agentSecret.create({
-        data: { agentId: agent.id, secretId: anthropicSecret.id },
+    if (parentAppConnectionIds.length > 0) {
+      await db.agentAppConnection.createMany({
+        data: parentAppConnectionIds.map((appConnectionId) => ({
+          agentId: agent.id,
+          appConnectionId,
+        })),
       });
     }
 

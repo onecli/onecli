@@ -8,6 +8,13 @@ export const createAgentSchema = z.object({
     message:
       "Identifier must be 1-50 characters, start with a letter, and contain only lowercase letters, numbers, and hyphens",
   }),
+  parentIdentifier: z
+    .string()
+    .regex(IDENTIFIER_REGEX, {
+      message:
+        "Parent identifier must be 1-50 characters, start with a letter, and contain only lowercase letters, numbers, and hyphens",
+    })
+    .optional(),
 });
 
 export const renameAgentSchema = z.object({

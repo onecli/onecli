@@ -51,6 +51,7 @@ export const agentRoutes = () => {
       requireProjectId(auth),
       parsed.data.name,
       parsed.data.identifier,
+      parsed.data.parentIdentifier,
     );
     invalidateGatewayCache(c.req.raw);
     return c.json(agent, 201);
