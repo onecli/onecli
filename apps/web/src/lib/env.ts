@@ -13,7 +13,9 @@
 
 /** Web app base URL (e.g., `https://app.onecli.sh` or `http://localhost:10254`). */
 export const APP_URL =
-  process.env.NEXT_PUBLIC_APP_URL ?? "http://localhost:10254";
+  process.env.APP_URL ??
+  process.env.NEXT_PUBLIC_APP_URL ??
+  "http://localhost:10254";
 
 /** API server URL used by browser-side code for general API calls. */
 export const API_URL =
@@ -21,7 +23,9 @@ export const API_URL =
 
 /** Gateway HTTP API URL for vault, cache, and approval calls. */
 export const GATEWAY_API_URL =
-  process.env.NEXT_PUBLIC_GATEWAY_API_URL ?? "http://localhost:10255";
+  process.env.GATEWAY_API_URL ??
+  process.env.NEXT_PUBLIC_GATEWAY_API_URL ??
+  "http://localhost:10255";
 
 /**
  * Gateway CONNECT proxy address used by server-side code when the web app
@@ -53,12 +57,17 @@ export const GOOGLE_CLIENT_SECRET = process.env.GOOGLE_CLIENT_SECRET ?? "";
 // ── Cloud: Cognito ──────────────────────────────────────────────────────
 
 export const COGNITO_CLIENT_ID =
-  process.env.NEXT_PUBLIC_COGNITO_CLIENT_ID ?? "";
+  process.env.COGNITO_CLIENT_ID ??
+  process.env.NEXT_PUBLIC_COGNITO_CLIENT_ID ??
+  "";
 
-export const COGNITO_DOMAIN = process.env.NEXT_PUBLIC_COGNITO_DOMAIN ?? "";
+export const COGNITO_DOMAIN =
+  process.env.COGNITO_DOMAIN ?? process.env.NEXT_PUBLIC_COGNITO_DOMAIN ?? "";
 
 export const COGNITO_USER_POOL_ID =
-  process.env.NEXT_PUBLIC_COGNITO_USER_POOL_ID ?? "";
+  process.env.COGNITO_USER_POOL_ID ??
+  process.env.NEXT_PUBLIC_COGNITO_USER_POOL_ID ??
+  "";
 
 // ── Cloud: Stripe ───────────────────────────────────────────────────────
 

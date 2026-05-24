@@ -2,8 +2,18 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { toast } from "sonner";
-import { GATEWAY_API_URL } from "@/lib/env";
+import { GATEWAY_API_URL, IS_CLOUD } from "@/lib/env";
 import { getGatewayFetchOptions } from "@/lib/gateway-auth";
+
+const getGatewayApiUrl = (): string => {
+  if (IS_CLOUD) return GATEWAY_API_URL;
+  return (
+    (typeof window !== "undefined" &&
+      ((window as unknown as Record<string, unknown>)
+        .__GATEWAY_API_URL__ as string)) ||
+    GATEWAY_API_URL
+  );
+};
 
 export interface VaultStatus<T = unknown> {
   connected: boolean;
@@ -24,7 +34,7 @@ export const useVaultStatus = <T = unknown>(provider: string = "bitwarden") => {
     try {
       const { headers, credentials } = await getGatewayFetchOptions();
       const resp = await fetch(
-        `${GATEWAY_API_URL}/v1/vault/${provider}/status`,
+        `${getGatewayApiUrl()}/v1/vault/${provider}/status`,
         {
           headers,
           credentials,
@@ -67,7 +77,7 @@ export const useVaultPair = (
       try {
         const { headers, credentials } = await getGatewayFetchOptions();
         const resp = await fetch(
-          `${GATEWAY_API_URL}/v1/vault/${provider}/pair`,
+          `${getGatewayApiUrl()}/v1/vault/${provider}/pair`,
           {
             method: "POST",
             headers: { "Content-Type": "application/json", ...headers },
@@ -111,11 +121,14 @@ export const useVaultDisconnect = (
     setDisconnecting(true);
     try {
       const { headers, credentials } = await getGatewayFetchOptions();
-      const resp = await fetch(`${GATEWAY_API_URL}/v1/vault/${provider}/pair`, {
-        method: "DELETE",
-        headers,
-        credentials,
-      });
+      const resp = await fetch(
+        `${getGatewayApiUrl()}/v1/vault/${provider}/pair`,
+        {
+          method: "DELETE",
+          headers,
+          credentials,
+        },
+      );
       if (resp.ok) {
         toast.success("Vault disconnected");
         await fetchStatus();

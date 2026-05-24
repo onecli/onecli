@@ -168,6 +168,7 @@ export const SecretDialog = ({
   const [valueFormat, setValueFormat] = useState("Bearer {value}");
   const [paramName, setParamName] = useState("");
   const [paramFormat, setParamFormat] = useState("");
+  const [advancedOpen, setAdvancedOpen] = useState("");
 
   const nameError = useMemo(() => validateDisplayName(name), [name]);
   const showNameError = nameTouched && nameError !== null;
@@ -189,6 +190,7 @@ export const SecretDialog = ({
   useEffect(() => {
     if (open) {
       setNameTouched(false);
+      setAdvancedOpen("");
       if (secret) {
         const config = secret.injectionConfig as InjectionConfig | null;
         setStep("form");
@@ -388,6 +390,7 @@ export const SecretDialog = ({
                       setInjectionTarget("header");
                       setHeaderName("Authorization");
                       setValueFormat("Bearer {value}");
+                      setAdvancedOpen("advanced");
                     }}
                   >
                     Header injection
@@ -402,6 +405,7 @@ export const SecretDialog = ({
                       setInjectionTarget("param");
                       setParamName("key");
                       setParamFormat("{value}");
+                      setAdvancedOpen("advanced");
                     }}
                   >
                     URL parameter
@@ -538,116 +542,13 @@ export const SecretDialog = ({
                 </div>
               )}
 
-              {type === "generic" && (
-                <div className="flex items-center gap-3">
-                  <Label
-                    id="inject-as-label"
-                    className="text-muted-foreground shrink-0 text-xs"
-                  >
-                    Inject as
-                  </Label>
-                  <div
-                    className="border-input inline-flex overflow-hidden rounded-md border"
-                    role="radiogroup"
-                    aria-labelledby="inject-as-label"
-                    onKeyDown={(e) => {
-                      if (
-                        ![
-                          "ArrowRight",
-                          "ArrowDown",
-                          "ArrowLeft",
-                          "ArrowUp",
-                        ].includes(e.key)
-                      )
-                        return;
-                      e.preventDefault();
-                      const next =
-                        injectionTarget === "header" ? "param" : "header";
-                      setInjectionTarget(next);
-                      e.currentTarget
-                        .querySelectorAll<HTMLButtonElement>('[role="radio"]')
-                        [next === "header" ? 0 : 1]?.focus();
-                    }}
-                  >
-                    <button
-                      type="button"
-                      role="radio"
-                      aria-checked={injectionTarget === "header"}
-                      tabIndex={injectionTarget === "header" ? 0 : -1}
-                      className={cn(
-                        "border-input px-3 py-1.5 text-xs font-medium transition-colors",
-                        injectionTarget === "header"
-                          ? "bg-accent text-foreground"
-                          : "text-muted-foreground hover:bg-muted hover:text-foreground",
-                      )}
-                      onClick={() => setInjectionTarget("header")}
-                    >
-                      Header
-                    </button>
-                    <button
-                      type="button"
-                      role="radio"
-                      aria-checked={injectionTarget === "param"}
-                      tabIndex={injectionTarget === "param" ? 0 : -1}
-                      className={cn(
-                        "border-input border-l px-3 py-1.5 text-xs font-medium transition-colors",
-                        injectionTarget === "param"
-                          ? "bg-accent text-foreground"
-                          : "text-muted-foreground hover:bg-muted hover:text-foreground",
-                      )}
-                      onClick={() => setInjectionTarget("param")}
-                    >
-                      URL Parameter
-                    </button>
-                  </div>
-                </div>
-              )}
-
-              {type === "generic" && (
-                <div
-                  key={`name-${injectionTarget}`}
-                  className="animate-in fade-in duration-150 space-y-2"
-                >
-                  <Label
-                    htmlFor={
-                      injectionTarget === "header"
-                        ? "secret-header"
-                        : "secret-param"
-                    }
-                  >
-                    {injectionTarget === "header"
-                      ? "Header name"
-                      : "Parameter name"}
-                  </Label>
-                  <Input
-                    id={
-                      injectionTarget === "header"
-                        ? "secret-header"
-                        : "secret-param"
-                    }
-                    placeholder={
-                      injectionTarget === "header"
-                        ? "e.g. Authorization"
-                        : "e.g. api_key"
-                    }
-                    value={
-                      injectionTarget === "header" ? headerName : paramName
-                    }
-                    onChange={(e) =>
-                      injectionTarget === "header"
-                        ? setHeaderName(e.target.value)
-                        : setParamName(e.target.value)
-                    }
-                  />
-                </div>
-              )}
-
               {isPlatformEdit ? null : (
                 <Accordion
                   type="single"
                   collapsible
                   className="border-none"
-                  defaultValue={undefined}
+                  value={advancedOpen}
+                  onValueChange={setAdvancedOpen}
                 >
                   <AccordionItem
                     value="advanced"
@@ -669,7 +570,6 @@ export const SecretDialog = ({
                               placeholder="e.g. api.example.com or *.example.com"
                               value={hostPattern}
                               onChange={(e) => setHostPattern(e.target.value)}
-                              disabled={!!prefill}
                             />
                             {hostPatternError ? (
                               <p className="text-xs text-red-500">
@@ -682,6 +582,116 @@ export const SecretDialog = ({
                                 for wildcard subdomains.
                               </p>
                             )}
+                          </div>
+                        )}
+
+                        {type === "generic" && (
+                          <div className="flex items-center gap-3">
+                            <Label
+                              id="inject-as-label"
+                              className="text-muted-foreground shrink-0 text-xs"
+                            >
+                              Inject as
+                            </Label>
+                            <div
+                              className="border-input inline-flex overflow-hidden rounded-md border"
+                              role="radiogroup"
+                              aria-labelledby="inject-as-label"
+                              onKeyDown={(e) => {
+                                if (
+                                  ![
+                                    "ArrowRight",
+                                    "ArrowDown",
+                                    "ArrowLeft",
+                                    "ArrowUp",
+                                  ].includes(e.key)
+                                )
+                                  return;
+                                e.preventDefault();
+                                const next =
+                                  injectionTarget === "header"
+                                    ? "param"
+                                    : "header";
+                                setInjectionTarget(next);
+                                e.currentTarget
+                                  .querySelectorAll<HTMLButtonElement>(
+                                    '[role="radio"]',
+                                  )
+                                  [next === "header" ? 0 : 1]?.focus();
+                              }}
+                            >
+                              <button
+                                type="button"
+                                role="radio"
+                                aria-checked={injectionTarget === "header"}
+                                tabIndex={injectionTarget === "header" ? 0 : -1}
+                                className={cn(
+                                  "border-input px-3 py-1.5 text-xs font-medium transition-colors",
+                                  injectionTarget === "header"
+                                    ? "bg-accent text-foreground"
+                                    : "text-muted-foreground hover:bg-muted hover:text-foreground",
+                                )}
+                                onClick={() => setInjectionTarget("header")}
+                              >
+                                Header
+                              </button>
+                              <button
+                                type="button"
+                                role="radio"
+                                aria-checked={injectionTarget === "param"}
+                                tabIndex={injectionTarget === "param" ? 0 : -1}
+                                className={cn(
+                                  "border-input border-l px-3 py-1.5 text-xs font-medium transition-colors",
+                                  injectionTarget === "param"
+                                    ? "bg-accent text-foreground"
+                                    : "text-muted-foreground hover:bg-muted hover:text-foreground",
+                                )}
+                                onClick={() => setInjectionTarget("param")}
+                              >
+                                URL Parameter
+                              </button>
+                            </div>
+                          </div>
+                        )}
+
+                        {type === "generic" && (
+                          <div
+                            key={`name-${injectionTarget}`}
+                            className="animate-in fade-in duration-150 space-y-2"
+                          >
+                            <Label
+                              htmlFor={
+                                injectionTarget === "header"
+                                  ? "secret-header"
+                                  : "secret-param"
+                              }
+                            >
+                              {injectionTarget === "header"
+                                ? "Header name"
+                                : "Parameter name"}
+                            </Label>
+                            <Input
+                              id={
+                                injectionTarget === "header"
+                                  ? "secret-header"
+                                  : "secret-param"
+                              }
+                              placeholder={
+                                injectionTarget === "header"
+                                  ? "e.g. Authorization"
+                                  : "e.g. api_key"
+                              }
+                              value={
+                                injectionTarget === "header"
+                                  ? headerName
+                                  : paramName
+                              }
+                              onChange={(e) =>
+                                injectionTarget === "header"
+                                  ? setHeaderName(e.target.value)
+                                  : setParamName(e.target.value)
+                              }
+                            />
                           </div>
                         )}
 

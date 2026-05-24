@@ -81,4 +81,12 @@ export const cloudApps: AppDefinition[] = [
     connectionMethod: { type: "cloud_only" },
     available: false,
   },
+  {
+    id: "hubspot",
+    name: "HubSpot",
+    icon: "/icons/hubspot.svg",
+    description: "CRM contacts, companies, deals, and tickets.",
+    connectionMethod: { type: "cloud_only" },
+    available: false,
+  },
 ];

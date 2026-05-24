@@ -5,6 +5,7 @@ import "@onecli/ui/globals.css";
 import "./globals.css";
 import { AuthProvider } from "@/providers/auth-provider";
 import { getAuthMode } from "@/lib/auth/auth-mode";
+import { GATEWAY_API_URL, IS_CLOUD } from "@/lib/env";
 import { QueryProvider } from "@/providers/query-provider";
 import { ThemeProvider } from "@/providers/theme-provider";
 import { Toaster } from "@onecli/ui/components/sonner";
@@ -54,6 +55,15 @@ export default function RootLayout({
 
   return (
     <html lang="en" suppressHydrationWarning className="bg-background">
+      {!IS_CLOUD && (
+        <head>
+          <script
+            dangerouslySetInnerHTML={{
+              __html: `window.__GATEWAY_API_URL__=${JSON.stringify(GATEWAY_API_URL)}`,
+            }}
+          />
+        </head>
+      )}
       <body
         className={`${geistSans.variable} ${geistMono.variable} ${sourceSerif.variable}`}
         suppressHydrationWarning
