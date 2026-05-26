@@ -29,8 +29,6 @@ const getSetupError = (): SetupErrorCode | null => {
   return null;
 };
 
-const DEFAULT_ORG_COOKIE = "onecli-default-org";
-
 export const proxy = (request: NextRequest) => {
   const { pathname } = request.nextUrl;
 
@@ -73,19 +71,9 @@ export const proxy = (request: NextRequest) => {
     requestHeaders.set("x-organization-id", orgId);
   }
 
-  const response = NextResponse.next({
+  return NextResponse.next({
     request: { headers: requestHeaders },
   });
-
-  if (orgId) {
-    response.cookies.set(DEFAULT_ORG_COOKIE, orgId, {
-      path: "/",
-      maxAge: 60 * 60 * 24 * 365,
-      sameSite: "lax",
-    });
-  }
-
-  return response;
 };
 
 export const config = {

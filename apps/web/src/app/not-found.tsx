@@ -23,7 +23,7 @@ export default function NotFound() {
         The page you&apos;re looking for doesn&apos;t exist.
       </p>
       <Link
-        href="/overview"
+        href="/"
         className="text-brand text-sm underline underline-offset-4"
       >
         Go to Dashboard

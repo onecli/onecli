@@ -27,7 +27,9 @@ export default function DashboardLayout({
     signOutRef.current = signOut;
   }, [signOut]);
 
-  const isSettings = pathname.startsWith("/settings");
+  const isSettings =
+    pathname.startsWith("/settings") ||
+    /^\/org\/[^/]+\/settings(\/|$)/.test(pathname);
 
   useEffect(() => {
     if (!isLoading && !isAuthenticated) {

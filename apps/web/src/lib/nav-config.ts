@@ -32,7 +32,11 @@ export const navItems: NavItem[] = [
   { title: "Settings", url: "/settings", icon: Settings },
 ];
 
-export const settingsSections: SettingsNavSection[] = [
+export const getSettingsSections = (
+  // Cloud override uses orgId to prefix URLs with /org/<id>
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  orgId?: string,
+): SettingsNavSection[] => [
   {
     label: "General",
     items: [{ title: "Instance", url: "/settings/instance", icon: Globe }],
@@ -51,3 +55,5 @@ export const settingsSections: SettingsNavSection[] = [
     ],
   },
 ];
+
+export const settingsSections = getSettingsSections();
