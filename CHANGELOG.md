@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.31.1](https://github.com/onecli/onecli/compare/v1.31.0...v1.31.1) (2026-05-26)
+
+
+### Bug Fixes
+
+* use spreadsheets scope to allow editing existing Google Sheets ([#319](https://github.com/onecli/onecli/issues/319)) ([fa91b50](https://github.com/onecli/onecli/commit/fa91b50d985cb59d05c1fa8019682438f9ada844))
+
 ## [1.31.0](https://github.com/onecli/onecli/compare/v1.30.0...v1.31.0) (2026-05-26)
 
 
