@@ -1,5 +1,17 @@
 # Changelog
 
+## [1.31.0](https://github.com/onecli/onecli/compare/v1.30.0...v1.31.0) (2026-05-26)
+
+
+### Features
+
+* org policy mode, scoped gateway URLs, and connect param fix ([#318](https://github.com/onecli/onecli/issues/318)) ([a3f8e51](https://github.com/onecli/onecli/commit/a3f8e5105eae665b9a0140295a02becd96537d92))
+
+
+### Bug Fixes
+
+* settings nav org-awareness and proxy cookie validation ([#316](https://github.com/onecli/onecli/issues/316)) ([ed1e9a9](https://github.com/onecli/onecli/commit/ed1e9a9ac0bf520b2cecac602ee480f288eef642))
+
 ## [1.30.0](https://github.com/onecli/onecli/compare/v1.29.2...v1.30.0) (2026-05-24)
 
 
