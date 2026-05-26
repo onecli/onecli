@@ -1,10 +1,9 @@
 import { db, Prisma } from "@onecli/db";
 import { getCrypto } from "../providers";
 import { ServiceError } from "./errors";
+import type { ResourceScope } from "./resource-scope";
+import { scopeWhere, scopeCreate, scopeOwnership } from "./resource-scope";
 
-/**
- * Extract a human-readable label from connection metadata.
- */
 export const extractLabel = (
   metadata?: Record<string, unknown>,
 ): string | null => {
@@ -17,54 +16,38 @@ export const extractLabel = (
   return null;
 };
 
-/**
- * List all app connections for an account (no credentials returned).
- */
-export const listConnections = async (projectId: string) => {
+const CONNECTION_SELECT = {
+  id: true,
+  provider: true,
+  label: true,
+  status: true,
+  scopes: true,
+  scope: true,
+  metadata: true,
+  connectedAt: true,
+} as const;
+
+export const listConnections = async (scope: ResourceScope) => {
   return db.appConnection.findMany({
-    where: { projectId },
-    select: {
-      id: true,
-      provider: true,
-      label: true,
-      status: true,
-      scopes: true,
-      scope: true,
-      metadata: true,
-      connectedAt: true,
-    },
+    where: scopeWhere(scope),
+    select: CONNECTION_SELECT,
     orderBy: { connectedAt: "desc" },
   });
 };
 
-/**
- * List all app connections for an account filtered by provider.
- */
 export const listConnectionsByProvider = async (
-  projectId: string,
+  scope: ResourceScope,
   provider: string,
 ) => {
   return db.appConnection.findMany({
-    where: { projectId, provider },
-    select: {
-      id: true,
-      provider: true,
-      label: true,
-      status: true,
-      scopes: true,
-      scope: true,
-      metadata: true,
-      connectedAt: true,
-    },
+    where: { ...scopeWhere(scope), provider },
+    select: CONNECTION_SELECT,
     orderBy: { connectedAt: "desc" },
   });
 };
 
-/**
- * Create a new app connection with encrypted credentials.
- */
 export const createConnection = async (
-  projectId: string,
+  scope: ResourceScope,
   provider: string,
   credentials: Record<string, unknown>,
   options?: { scopes?: string[]; metadata?: Record<string, unknown> },
@@ -75,8 +58,7 @@ export const createConnection = async (
 
   return db.appConnection.create({
     data: {
-      projectId,
-      scope: "project",
+      ...scopeCreate(scope),
       provider,
       status: "connected",
       label: extractLabel(options?.metadata),
@@ -88,17 +70,14 @@ export const createConnection = async (
   });
 };
 
-/**
- * Reconnect an existing app connection by updating its credentials.
- */
 export const reconnectConnection = async (
-  projectId: string,
+  scope: ResourceScope,
   connectionId: string,
   credentials: Record<string, unknown>,
   options?: { scopes?: string[]; metadata?: Record<string, unknown> },
 ) => {
   const existing = await db.appConnection.findFirst({
-    where: { id: connectionId, projectId },
+    where: scopeOwnership(scope, connectionId),
     select: { id: true, label: true },
   });
 
@@ -123,15 +102,12 @@ export const reconnectConnection = async (
   });
 };
 
-/**
- * Delete an app connection by id.
- */
 export const deleteConnection = async (
-  projectId: string,
+  scope: ResourceScope,
   connectionId: string,
 ) => {
   const connection = await db.appConnection.findFirst({
-    where: { id: connectionId, projectId },
+    where: scopeOwnership(scope, connectionId),
     select: { id: true },
   });
 

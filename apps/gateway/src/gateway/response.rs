@@ -198,33 +198,23 @@ pub(crate) fn credential_not_found<S>(
 ) -> Response<ForwardBody<S>> {
     let base = dashboard_url();
     let encoded_host = utf8_percent_encode(hostname, NON_ALPHANUMERIC);
-    let encoded_path = utf8_percent_encode(path, NON_ALPHANUMERIC);
     let secret_url =
-        format!("{base}/connections/custom?create=generic&host={encoded_host}&path={encoded_path}");
+        format!("{base}/connections/custom?create=generic&host={encoded_host}&path=%2F%2A");
     with_no_retry(json_error(
         status,
         serde_json::json!({
             "error": "credential_not_found",
             "message": format!(
-                "No credentials configured for {hostname} in OneCLI.\n\n\
-                 A pre-built link is provided in the `secret_url` field, pre-filled with:\n\
-                 - host: {hostname}\n\
-                 - path: {path}\n\n\
-                 Before sending this link to the user, consider whether to adjust it. \
-                 You can build a custom URL with any of these query parameters:\n\
-                 {base}/connections/custom?create=generic&host=<host>&path=<path>&name=<name>&header=<header>&format=<format>\n\n\
-                 Available parameters:\n\
-                 - `host` (required): hostname to match (e.g., api.example.com or *.example.com)\n\
-                 - `path`: path pattern (e.g., /v1/* or /*). Defaults to the exact request path.\n\
-                 - `name`: display name for the secret (e.g., 'Example API Key')\n\
-                 - `header`: HTTP header name to inject (default: Authorization)\n\
-                 - `format`: value format with {{value}} placeholder (default: Bearer {{value}})\n\n\
-                 Examples of when to customize:\n\
-                 - Change path to `/*` if the credential covers all endpoints on the host\n\
-                 - Change header to `X-API-Key` if the API uses a custom header\n\
-                 - Change format to `{{value}}` (raw) if the API expects the token without a prefix\n\n\
-                 Once you've decided on the right link, ask the user to open it. \
-                 They will see a pre-filled form where they paste their API key or token."
+                "No credentials configured for {hostname} in OneCLI.\n\
+                 A pre-built link is provided in the `secret_url` field. \
+                 Before sending this link to the user, append a display name: \
+                 &name=<name> (e.g., &name=Stripe%20API%20Key).\n\
+                 Then ask the user to open the link to add their API key.\n\n\
+                 If you know this API's auth method, you can also customize:\n\
+                 - Custom header: append &header=<name> (default: Authorization)\n\
+                 - Custom format: append &format=<format> using {{value}} as placeholder \
+                 (default: Bearer {{value}}, use just {{value}} for raw token)\n\
+                 - Query param auth instead of header: append &param=<name> (e.g., &param=api_key)"
             ),
             "hostname": hostname,
             "path": path,
@@ -602,10 +592,12 @@ mod tests {
         assert_eq!(json["error"], "credential_not_found");
         assert_eq!(json["hostname"], "api.custom-service.com");
         assert_eq!(json["path"], "/v1/send");
-        assert!(json["secret_url"]
-            .as_str()
-            .unwrap()
-            .contains("create=generic"));
+        let secret_url = json["secret_url"].as_str().unwrap();
+        assert!(secret_url.contains("create=generic"));
+        assert!(
+            secret_url.contains("path=%2F%2A"),
+            "secret_url should use wildcard path, got: {secret_url}"
+        );
         assert!(json["message"]
             .as_str()
             .unwrap()
@@ -613,7 +605,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn credential_not_found_encodes_special_characters() {
+    async fn credential_not_found_uses_wildcard_path_and_preserves_request_path() {
         let resp: Response<TestBody> = credential_not_found(
             StatusCode::FORBIDDEN,
             "api.example.com",
@@ -626,15 +618,14 @@ mod tests {
         };
         let json: serde_json::Value = serde_json::from_slice(&body).expect("valid JSON");
         let secret_url = json["secret_url"].as_str().unwrap();
-        // The & and = in the path should be encoded so they don't break the query string
-        assert!(
-            !secret_url.contains("&subject="),
-            "path params must be encoded"
-        );
         assert!(secret_url.contains("create=generic"));
         assert!(
-            !secret_url.contains("method="),
-            "method should not be in URL"
+            secret_url.contains("path=%2F%2A"),
+            "secret_url should always use wildcard path, got: {secret_url}"
+        );
+        assert_eq!(
+            json["path"], "/v1/send?to=user@test.com&subject=hello",
+            "original request path should be preserved in request_path field"
         );
     }
 

@@ -8,17 +8,21 @@ import { Badge } from "@onecli/ui/components/badge";
 import { Card } from "@onecli/ui/components/card";
 import { cn } from "@onecli/ui/lib/utils";
 import { Skeleton } from "@onecli/ui/components/skeleton";
-import {
-  getAppConnections as defaultGetConnections,
-  getVaultConnections as defaultGetVaultConnections,
-} from "@/lib/actions/connections";
-import { getSecrets as defaultGetSecrets } from "@/lib/actions/secrets";
+import type { getAppConnections as defaultGetConnections } from "@/lib/actions/connections";
+import { getVaultConnections as defaultGetVaultConnections } from "@/lib/actions/connections";
+import { apiGet } from "@/lib/api";
 import { getApp } from "@onecli/api/apps/registry";
 import { useAppMessages } from "@/hooks/use-app-connected";
 import { extractLabel } from "@onecli/api/services/connection-service";
 import { AppIcon } from "./app-icon";
 import { SecretDialog } from "./secret-dialog";
 import type { SecretActions } from "./types";
+
+const defaultGetConnections_ = () =>
+  apiGet<{ connections: Awaited<ReturnType<typeof defaultGetConnections>> }>(
+    "/v1/apps/connections",
+  ).then((r) => r.connections);
+const defaultGetSecrets_ = () => apiGet<SecretItem[]>("/v1/secrets");
 
 interface ConnectedItem {
   id: string;
@@ -45,9 +49,22 @@ interface ConnectedItem {
   };
 }
 
+interface SecretItem {
+  id: string;
+  name: string;
+  type: string;
+  typeLabel: string;
+  hostPattern: string;
+  pathPattern: string | null;
+  injectionConfig: unknown;
+  isPlatform: boolean;
+  scope: string | null;
+  createdAt: Date;
+}
+
 interface ConnectedTabProps {
   getConnections?: typeof defaultGetConnections;
-  getSecrets?: typeof defaultGetSecrets;
+  getSecrets?: () => Promise<SecretItem[]>;
   getVaultConnections?: typeof defaultGetVaultConnections | null;
   basePath?: string;
   secretActions?: SecretActions;
@@ -55,8 +72,8 @@ interface ConnectedTabProps {
 }
 
 export const ConnectedTab = ({
-  getConnections = defaultGetConnections,
-  getSecrets = defaultGetSecrets,
+  getConnections = defaultGetConnections_,
+  getSecrets = defaultGetSecrets_,
   getVaultConnections = defaultGetVaultConnections,
   basePath,
   secretActions,

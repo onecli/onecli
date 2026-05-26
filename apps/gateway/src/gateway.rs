@@ -14,6 +14,9 @@
 //! - [`response`]: pre-built gateway error responses
 
 mod body;
+#[cfg(feature = "cloud")]
+#[path = "cloud/response.rs"]
+mod cloud_response;
 mod finalizers;
 pub(crate) mod forward;
 #[cfg(not(feature = "cloud"))]
@@ -26,10 +29,6 @@ mod response;
 mod transforms;
 mod tunnel;
 mod websocket;
-
-#[cfg(feature = "cloud")]
-#[path = "cloud/trial.rs"]
-mod trial;
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -208,6 +207,32 @@ impl GatewayServer {
         let axum_router = Router::new()
             .route("/healthz", axum::routing::get(healthz))
             .route("/me", axum::routing::get(me))
+            // /v1 routes
+            .route(
+                "/v1/vault/{provider}/pair",
+                axum::routing::post(vault::api::vault_pair),
+            )
+            .route(
+                "/v1/vault/{provider}/status",
+                axum::routing::get(vault::api::vault_status),
+            )
+            .route(
+                "/v1/vault/{provider}/pair",
+                axum::routing::delete(vault::api::vault_disconnect),
+            )
+            .route(
+                "/v1/cache/invalidate",
+                axum::routing::post(invalidate_cache),
+            )
+            .route(
+                "/v1/approvals/pending",
+                axum::routing::get(get_pending_approvals),
+            )
+            .route(
+                "/v1/approvals/{id}/decision",
+                axum::routing::post(submit_approval_decision),
+            )
+            // /api legacy routes (backwards compatibility)
             .route(
                 "/api/vault/{provider}/pair",
                 axum::routing::post(vault::api::vault_pair),
@@ -376,6 +401,18 @@ async fn submit_approval_decision(
         }
     }
 
+    let decision_str = match body.decision {
+        ApprovalDecision::Approve => "approve",
+        ApprovalDecision::Deny => "deny",
+    };
+
+    info!(
+        approval_id = %approval_id,
+        decision = decision_str,
+        project_id = %auth.project_id,
+        "approval decision submitted"
+    );
+
     let delivered = state
         .approval_store
         .submit_decision(&approval_id, body.decision)
@@ -387,6 +424,11 @@ async fn submit_approval_decision(
             axum::Json(serde_json::json!({ "success": true })),
         )
     } else {
+        warn!(
+            approval_id = %approval_id,
+            decision = decision_str,
+            "approval decision submitted but approval already expired"
+        );
         (
             StatusCode::GONE,
             axum::Json(serde_json::json!({ "error": "approval_expired" })),
@@ -728,8 +770,7 @@ async fn handle_http_proxy(
         policy_rules: resolved.policy_rules,
         access_restricted: resolved.access_restricted,
         intercept_token: None,
-        is_trial: resolved.is_trial,
-        budget_blocked: resolved.budget_blocked,
+        plan: resolved.plan,
         rewrite_host: None,
         connection_label: None,
         finalizer: resolved_finalizer,
@@ -752,6 +793,7 @@ async fn handle_http_proxy(
         &*state.cache,
         &proxy_ctx,
         &state.approval_store,
+        &state.policy_engine.pool,
     )
     .await?;
 

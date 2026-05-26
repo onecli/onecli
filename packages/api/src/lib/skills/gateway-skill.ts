@@ -52,7 +52,7 @@ values are managed by OneCLI — do NOT modify or delete them.
 If an MCP server won't start due to missing credentials, create stubs
 **before** starting it. Use \`"onecli-managed"\` as the placeholder for all
 secret values, with file permissions \`0600\`. See the guide at:
-https://www.onecli.sh/docs/guides/credential-stubs/general-app
+https://onecli.sh/docs/guides/credential-stubs/general-app
 
 ## When a Request Fails
 

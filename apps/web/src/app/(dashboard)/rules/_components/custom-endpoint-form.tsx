@@ -24,10 +24,11 @@ import {
   SelectValue,
 } from "@onecli/ui/components/select";
 import { DialogFooter } from "@onecli/ui/components/dialog";
-import {
-  createRule as defaultCreateRule,
-  updateRule as defaultUpdateRule,
-} from "@/lib/actions/rules";
+import { updateRule as defaultUpdateRule } from "@/lib/actions/rules";
+import { useQueryClient } from "@tanstack/react-query";
+import { rules } from "@/lib/api";
+import type { CreateRuleInput } from "@/lib/api";
+import { queryKeys } from "@/lib/api/keys";
 import type { RuleCondition } from "@onecli/api/validations/policy-rule";
 import { ConditionBuilder } from "@/lib/components/condition-builder";
 import type { AgentOption, PolicyRuleItem, RuleActions } from "./types";
@@ -59,7 +60,7 @@ const STEPS = [
 type Step = (typeof STEPS)[number]["id"];
 
 interface CustomEndpointFormProps {
-  onSaved: () => void;
+  onSaved?: () => void;
   onClose: () => void;
   agents: AgentOption[];
   rule?: PolicyRuleItem;
@@ -77,6 +78,7 @@ export const CustomEndpointForm = ({
 }: CustomEndpointFormProps) => {
   const isEdit = !!rule;
   const invalidateCache = useInvalidateGatewayCache();
+  const queryClient = useQueryClient();
   const [saving, setSaving] = useState(false);
   const [step, setStep] = useState<Step>("endpoint");
   const [name, setName] = useState("");
@@ -140,7 +142,9 @@ export const CustomEndpointForm = ({
       conditionsChanged
     : true;
 
-  const createRule = ruleActions?.createRule ?? defaultCreateRule;
+  const createRule =
+    ruleActions?.createRule ??
+    ((input: unknown) => rules.create(input as CreateRuleInput));
   const updateRule = ruleActions?.updateRule ?? defaultUpdateRule;
 
   const handleSave = async () => {
@@ -179,7 +183,9 @@ export const CustomEndpointForm = ({
         });
         toast.success("Rule created");
       }
-      onSaved();
+      queryClient.invalidateQueries({ queryKey: queryKeys.rules.all() });
+      queryClient.invalidateQueries({ queryKey: queryKeys.counts.all() });
+      onSaved?.();
       onClose();
       invalidateCache();
     } catch (err) {

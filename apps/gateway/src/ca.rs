@@ -119,7 +119,7 @@ impl CertificateAuthority {
     }
 
     /// Return the CA certificate as PEM.
-    /// Used by the web API (`GET /api/gateway/ca`) for agents to download.
+    /// Used by the web API (`GET /v1/gateway/ca`) for agents to download.
     #[allow(dead_code)]
     pub fn ca_cert_pem(&self) -> String {
         der_to_pem(self.ca_cert_der.as_ref())

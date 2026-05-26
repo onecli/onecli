@@ -2,7 +2,7 @@
 
 import { db } from "@onecli/db";
 import { resolveUser } from "@/lib/actions/resolve-user";
-import { APP_URL, GATEWAY_BASE_URL } from "@/lib/env";
+import { APP_URL, API_URL, GATEWAY_BASE_URL } from "@/lib/env";
 import {
   listSecrets,
   createSecret as createSecretService,
@@ -19,13 +19,13 @@ import {
 
 export const getSecrets = async () => {
   const { projectId } = await resolveUser();
-  return listSecrets(projectId);
+  return listSecrets({ projectId });
 };
 
 export const createSecret = async (input: CreateSecretInput) => {
   const { userId, userEmail, projectId } = await resolveUser();
   return withAudit(
-    () => createSecretService(projectId, input),
+    () => createSecretService({ projectId }, input),
     (secret) => ({
       projectId,
       userId,
@@ -40,7 +40,7 @@ export const createSecret = async (input: CreateSecretInput) => {
 export const deleteSecret = async (secretId: string): Promise<void> => {
   const { userId, userEmail, projectId } = await resolveUser();
   return withAudit(
-    () => deleteSecretService(projectId, secretId),
+    () => deleteSecretService({ projectId }, secretId),
     () => ({
       projectId,
       userId,
@@ -71,6 +71,7 @@ export const getInstallInfo = async () => {
     agentToken: agent?.accessToken ?? null,
     gatewayUrl: GATEWAY_BASE_URL,
     appUrl: APP_URL,
+    apiUrl: API_URL,
   };
 };
 
@@ -175,7 +176,7 @@ export const updateSecret = async (
 ): Promise<void> => {
   const { userId, userEmail, projectId } = await resolveUser();
   return withAudit(
-    () => updateSecretService(projectId, secretId, input),
+    () => updateSecretService({ projectId }, secretId, input),
     () => ({
       projectId,
       userId,

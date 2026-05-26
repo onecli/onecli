@@ -5,6 +5,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { Loader2 } from "lucide-react";
 import { Button } from "@onecli/ui/components/button";
 import { IS_CLOUD } from "@/lib/env";
+import { API_ORIGIN, getAuthToken, getProjectId } from "@/lib/api-fetch";
 import { ConnectLayout } from "./connect-layout";
 import { ConnectSuccess } from "./connect-success";
 import { CredentialsFlow } from "./credentials-flow";
@@ -60,7 +61,7 @@ export const ConnectFlow = ({
   const [countdown, setCountdown] = useState(3);
   const redirectedRef = useRef(false);
 
-  const doRedirect = useCallback(() => {
+  const doRedirect = useCallback(async () => {
     if (redirectedRef.current) return;
     redirectedRef.current = true;
     setState("redirecting");
@@ -68,8 +69,14 @@ export const ConnectFlow = ({
     if (connectionId) params.set("connectionId", connectionId);
     if (agentName) params.set("agent_name", agentName);
     if (org) params.set("org", "true");
+
+    const token = await getAuthToken();
+    if (token) params.set("_token", token);
+    const projectId = getProjectId();
+    if (projectId) params.set("_project", projectId);
+
     const qs = params.toString();
-    const authorizeUrl = `/api/apps/${app.id}/authorize${qs ? `?${qs}` : ""}`;
+    const authorizeUrl = `${API_ORIGIN}/v1/apps/${app.id}/authorize${qs ? `?${qs}` : ""}`;
     window.location.href = authorizeUrl;
   }, [app.id, connectionId, agentName, org]);
 

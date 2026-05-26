@@ -28,6 +28,7 @@ pub(crate) struct AgentRow {
     pub project_id: String,
     pub organization_id: String,
     pub secret_mode: String,
+    pub subscription_status: String,
 }
 
 /// A secret row from the `secrets` table.
@@ -136,9 +137,10 @@ pub(crate) async fn find_agent_by_token(
     access_token: &str,
 ) -> Result<Option<AgentRow>> {
     sqlx::query_as::<_, AgentRow>(
-        r#"SELECT a.id, a.name, a.identifier, a.project_id, p.organization_id, a.secret_mode
+        r#"SELECT a.id, a.name, a.identifier, a.project_id, p.organization_id, a.secret_mode, o.subscription_status
            FROM agents a
            JOIN projects p ON a.project_id = p.id
+           JOIN organizations o ON p.organization_id = o.id
            WHERE a.access_token = $1
            LIMIT 1"#,
     )
@@ -402,23 +404,6 @@ pub(crate) async fn update_vault_connection_data(
     .await
     .context("updating vault_connection connection_data")?;
     Ok(())
-}
-
-/// Check if the trial budget for the project's owner is exhausted.
-pub(crate) async fn is_trial_budget_blocked(pool: &PgPool, project_id: &str) -> Result<bool> {
-    let row: Option<(String,)> = sqlx::query_as(
-        r#"SELECT tb.status
-           FROM trial_budgets tb
-           INNER JOIN organization_members om ON om.user_id = tb.user_id
-           INNER JOIN projects p ON p.organization_id = om.organization_id
-           WHERE p.id = $1 AND tb.status = 'exhausted'
-           LIMIT 1"#,
-    )
-    .bind(project_id)
-    .fetch_optional(pool)
-    .await
-    .context("checking trial budget status")?;
-    Ok(row.is_some())
 }
 
 /// Delete a vault connection for a project + provider pair.

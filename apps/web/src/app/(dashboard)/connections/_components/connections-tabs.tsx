@@ -1,7 +1,8 @@
 "use client";
 
-import { useCallback, useEffect, useState, useTransition } from "react";
+import { useMemo, useTransition } from "react";
 import { usePathname, useRouter } from "next/navigation";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useAppMessages } from "@/hooks/use-app-connected";
 import {
   AnimatedTabs,
@@ -10,10 +11,11 @@ import {
 } from "@onecli/ui/components/animated-tabs";
 import { Badge } from "@onecli/ui/components/badge";
 import {
-  getAppConnections as defaultGetConnections,
-  getVaultConnections as defaultGetVaultConnections,
-} from "@/lib/actions/connections";
-import { getSecrets as defaultGetSecrets } from "@/lib/actions/secrets";
+  connections as connectionsApi,
+  secrets as secretsApi,
+} from "@/lib/api";
+import { queryKeys } from "@/lib/api/keys";
+import { getVaultConnections as defaultGetVaults } from "@/lib/actions/connections";
 
 const getTabRoutes = (pathname: string): Record<string, string> => {
   const idx = pathname.indexOf("/connections");
@@ -38,22 +40,24 @@ const pathToTab = (pathname: string): string => {
 };
 
 interface ConnectionsTabsProps {
-  getConnections?: typeof defaultGetConnections;
-  getSecrets?: typeof defaultGetSecrets;
-  getVaultConnections?: typeof defaultGetVaultConnections | null;
+  getConnections?: () => Promise<{ status: string }[]>;
+  getSecrets?: () => Promise<unknown[]>;
+  getVaultConnections?: (() => Promise<unknown[]>) | null;
   showVaults?: boolean;
   basePath?: string;
 }
 
 export const ConnectionsTabs = ({
-  getConnections = defaultGetConnections,
-  getSecrets = defaultGetSecrets,
-  getVaultConnections = defaultGetVaultConnections,
+  getConnections,
+  getSecrets,
+  getVaultConnections = defaultGetVaults,
   showVaults = true,
   basePath,
 }: ConnectionsTabsProps) => {
   const pathname = usePathname();
   const router = useRouter();
+  const queryClient = useQueryClient();
+  const scope = basePath ? "org" : "project";
   const activeTab = basePath
     ? pathToTab(pathname.replace(basePath, "/connections"))
     : pathToTab(pathname);
@@ -66,35 +70,36 @@ export const ConnectionsTabs = ({
         connected: `${basePath}/connected`,
       }
     : getTabRoutes(pathname);
-  const [connectedCount, setConnectedCount] = useState(0);
   const [, startTransition] = useTransition();
 
-  const fetchCount = useCallback(async () => {
-    try {
-      const [connections, secrets, vaults] = await Promise.all([
-        getConnections(),
-        getSecrets(),
-        getVaultConnections ? getVaultConnections() : Promise.resolve([]),
-      ]);
-      const appCount = connections.filter(
-        (c) => c.status === "connected",
-      ).length;
-      setConnectedCount(appCount + secrets.length + vaults.length);
-    } catch {
-      // Keep count at 0
-    }
-  }, [getConnections, getSecrets, getVaultConnections]);
+  const { data: connectionsList = [] } = useQuery({
+    queryKey: [...queryKeys.connections.list(), scope],
+    queryFn: getConnections ?? connectionsApi.list,
+  });
+  const { data: secretsList = [] } = useQuery({
+    queryKey: [...queryKeys.secrets.list(), scope],
+    queryFn: getSecrets ?? secretsApi.list,
+  });
+  const { data: vaultsList = [] } = useQuery({
+    queryKey: [...queryKeys.vaults.list(), scope],
+    queryFn: getVaultConnections ?? (() => Promise.resolve([])),
+    enabled: showVaults && !!getVaultConnections,
+  });
 
-  useEffect(() => {
-    fetchCount();
-  }, [fetchCount]);
+  const connectedCount = useMemo(() => {
+    const appCount = connectionsList.filter(
+      (c) => c.status === "connected",
+    ).length;
+    return appCount + secretsList.length + (showVaults ? vaultsList.length : 0);
+  }, [connectionsList, secretsList, vaultsList, showVaults]);
 
-  useEffect(() => {
-    Object.values(tabRoutes).forEach((route) => router.prefetch(route));
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [router, pathname]);
-
-  useAppMessages({ onConnected: fetchCount, onConfigure: router.push });
+  useAppMessages({
+    onConnected: () => {
+      queryClient.invalidateQueries({ queryKey: queryKeys.connections.all() });
+      queryClient.invalidateQueries({ queryKey: queryKeys.secrets.all() });
+    },
+    onConfigure: router.push,
+  });
 
   const handleTabChange = (value: string) => {
     const href = tabRoutes[value];

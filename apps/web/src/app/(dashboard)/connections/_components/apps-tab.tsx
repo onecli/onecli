@@ -8,7 +8,8 @@ import { Button } from "@onecli/ui/components/button";
 import { Skeleton } from "@onecli/ui/components/skeleton";
 import { cn } from "@onecli/ui/lib/utils";
 import type { AppDefinition } from "@onecli/api/apps/types";
-import { getAppConnections as defaultGetConnections } from "@/lib/actions/connections";
+import type { getAppConnections as defaultGetConnections } from "@/lib/actions/connections";
+import { apiGet } from "@/lib/api";
 import {
   getConfiguredProviders as defaultGetConfiguredProviders,
   getAvailableEnvDefaults,
@@ -24,6 +25,11 @@ import { ConnectAppDialog } from "./connect-app-dialog";
 import { ConfigureCredentialsDialog } from "./configure-credentials-dialog";
 import { useConnectParam } from "./use-connect-param";
 
+const defaultGetConnections_ = () =>
+  apiGet<{ connections: Awaited<ReturnType<typeof defaultGetConnections>> }>(
+    "/v1/apps/connections",
+  ).then((r) => r.connections);
+
 interface AppsTabProps {
   getConnections?: typeof defaultGetConnections;
   getConfiguredProviders?: typeof defaultGetConfiguredProviders;
@@ -32,7 +38,7 @@ interface AppsTabProps {
 }
 
 export const AppsTab = ({
-  getConnections = defaultGetConnections,
+  getConnections = defaultGetConnections_,
   getConfiguredProviders = defaultGetConfiguredProviders,
   pageScope = "project",
   basePath,

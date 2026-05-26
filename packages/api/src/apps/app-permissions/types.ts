@@ -4,6 +4,7 @@ export interface AppTool {
   description: string;
   hostPattern: string;
   pathPattern: string;
+  aliasPatterns?: string[];
   method?: string;
 }
 

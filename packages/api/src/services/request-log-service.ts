@@ -37,6 +37,48 @@ export const getBlockedByRule = (log: RequestLogEntry): string | null => {
   return null;
 };
 
+export type ApprovalDecision =
+  | "pending"
+  | "approved"
+  | "denied"
+  | "timed_out"
+  | "cancelled";
+
+export const getApprovalDecision = (
+  log: RequestLogEntry,
+): ApprovalDecision | null => {
+  const data = log.extraData as Record<string, unknown> | null;
+  const decision = data?.decision;
+  if (decision === "approval_pending") return "pending";
+  if (decision === "approval_approved") return "approved";
+  if (decision === "approval_denied") {
+    return data?.approval_reason === "timed out" ? "timed_out" : "denied";
+  }
+  if (decision === "approval_cancelled") return "cancelled";
+  return null;
+};
+
+export const isApprovalPending = (log: RequestLogEntry): boolean => {
+  const data = log.extraData as Record<string, unknown> | null;
+  return data?.decision === "approval_pending";
+};
+
+export const isApprovalDenied = (log: RequestLogEntry): boolean => {
+  const data = log.extraData as Record<string, unknown> | null;
+  return data?.decision === "approval_denied";
+};
+
+export const isApprovalApproved = (log: RequestLogEntry): boolean => {
+  const data = log.extraData as Record<string, unknown> | null;
+  return data?.decision === "approval_approved";
+};
+
+export const getApprovalReason = (log: RequestLogEntry): string | null => {
+  const data = log.extraData as Record<string, unknown> | null;
+  const reason = data?.approval_reason;
+  return typeof reason === "string" ? reason : null;
+};
+
 export const getConnectionLabel = (log: RequestLogEntry): string | null => {
   const data = log.extraData as Record<string, unknown> | null;
   const label = data?.connection_label;

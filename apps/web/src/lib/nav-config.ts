@@ -8,6 +8,7 @@ import {
   User,
   KeyRound,
   ShieldCheck,
+  Globe,
 } from "lucide-react";
 import type { NavItem } from "@/app/(dashboard)/_components/nav-main";
 
@@ -32,6 +33,10 @@ export const navItems: NavItem[] = [
 ];
 
 export const settingsSections: SettingsNavSection[] = [
+  {
+    label: "General",
+    items: [{ title: "Instance", url: "/settings/instance", icon: Globe }],
+  },
   {
     label: "Account",
     items: [

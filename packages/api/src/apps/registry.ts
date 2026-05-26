@@ -30,6 +30,7 @@ import { dropbox } from "./dropbox";
 import { supabase } from "./supabase";
 import { aws } from "./aws";
 import { linkedin } from "./linkedin";
+import { monday } from "./monday";
 
 const staticApps: AppDefinition[] = [
   gmail,
@@ -59,6 +60,7 @@ const staticApps: AppDefinition[] = [
   flyio,
   dropbox,
   aws,
+  monday,
   mongodbAtlas,
   supabase,
   linkedin,

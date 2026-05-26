@@ -1,7 +1,9 @@
 "use client";
 
 import { useState } from "react";
+import { useQueryClient } from "@tanstack/react-query";
 import { useInvalidateGatewayCache } from "@/hooks/use-invalidate-cache";
+import { queryKeys } from "@/lib/api/keys";
 import { Pencil, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 import { Card } from "@onecli/ui/components/card";
@@ -30,7 +32,7 @@ import type { AgentOption, PolicyRuleItem, RuleActions } from "./types";
 interface RuleCardProps {
   rule: PolicyRuleItem;
   agents: AgentOption[];
-  onUpdate: () => void;
+  onUpdate?: () => void;
   readOnly?: boolean;
   badge?: string;
   ruleActions?: RuleActions;
@@ -47,6 +49,7 @@ export const RuleCard = ({
   const deleteRule = ruleActions?.deleteRule ?? defaultDeleteRule;
   const updateRule = ruleActions?.updateRule ?? defaultUpdateRule;
   const invalidateCache = useInvalidateGatewayCache();
+  const queryClient = useQueryClient();
   const [deleting, setDeleting] = useState(false);
   const [editOpen, setEditOpen] = useState(false);
   const [toggling, setToggling] = useState(false);
@@ -70,11 +73,17 @@ export const RuleCard = ({
         }`
       : null;
 
+  const invalidateRulesCache = () => {
+    queryClient.invalidateQueries({ queryKey: queryKeys.rules.all() });
+    queryClient.invalidateQueries({ queryKey: queryKeys.counts.all() });
+  };
+
   const handleDelete = async () => {
     setDeleting(true);
     try {
       await deleteRule(rule.id);
-      onUpdate();
+      invalidateRulesCache();
+      onUpdate?.();
       invalidateCache();
       toast.success("Rule deleted");
     } catch {
@@ -88,7 +97,8 @@ export const RuleCard = ({
     setToggling(true);
     try {
       await updateRule(rule.id, { enabled });
-      onUpdate();
+      invalidateRulesCache();
+      onUpdate?.();
       invalidateCache();
     } catch {
       toast.error("Failed to update rule");

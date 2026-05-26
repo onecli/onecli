@@ -1,6 +1,6 @@
 import { Hono } from "hono";
 import type { ApiEnv } from "../types";
-import { authMiddleware } from "../middleware/auth";
+import { authMiddleware, requireProjectId } from "../middleware/auth";
 import { invalidateGatewayCache } from "../lib/gateway-invalidate";
 import {
   listAgents,
@@ -20,6 +20,7 @@ import {
   secretModeSchema,
   updateAgentSecretsSchema,
 } from "../validations/agent";
+import { getResourceHooks } from "../providers";
 
 export const agentRoutes = () => {
   const app = new Hono<ApiEnv>();
@@ -28,7 +29,7 @@ export const agentRoutes = () => {
   // GET /agents
   app.get("/", async (c) => {
     const auth = c.get("auth");
-    const agents = await listAgents(auth.projectId);
+    const agents = await listAgents(requireProjectId(auth));
     return c.json(agents);
   });
 
@@ -44,10 +45,13 @@ export const agentRoutes = () => {
       );
     }
 
+    await getResourceHooks().beforeCreateAgent(auth.organizationId);
+
     const agent = await createAgent(
-      auth.projectId,
+      requireProjectId(auth),
       parsed.data.name,
       parsed.data.identifier,
+      parsed.data.parentIdentifier,
     );
     invalidateGatewayCache(c.req.raw);
     return c.json(agent, 201);
@@ -56,7 +60,7 @@ export const agentRoutes = () => {
   // GET /agents/default
   app.get("/default", async (c) => {
     const auth = c.get("auth");
-    const agent = await getDefaultAgent(auth.projectId);
+    const agent = await getDefaultAgent(requireProjectId(auth));
     if (!agent) {
       return c.json({ error: "No default agent found" }, 404);
     }
@@ -76,7 +80,7 @@ export const agentRoutes = () => {
       );
     }
 
-    await renameAgent(auth.projectId, agentId, parsed.data.name);
+    await renameAgent(requireProjectId(auth), agentId, parsed.data.name);
     return c.json({ success: true });
   });
 
@@ -84,7 +88,7 @@ export const agentRoutes = () => {
   app.delete("/:agentId", async (c) => {
     const auth = c.get("auth");
     const agentId = c.req.param("agentId");
-    await deleteAgent(auth.projectId, agentId);
+    await deleteAgent(requireProjectId(auth), agentId);
     invalidateGatewayCache(c.req.raw);
     return c.body(null, 204);
   });
@@ -93,7 +97,7 @@ export const agentRoutes = () => {
   app.post("/:agentId/set-default", async (c) => {
     const auth = c.get("auth");
     const agentId = c.req.param("agentId");
-    await setDefaultAgent(auth.projectId, agentId);
+    await setDefaultAgent(requireProjectId(auth), agentId);
     invalidateGatewayCache(c.req.raw);
     return c.json({ success: true });
   });
@@ -102,7 +106,7 @@ export const agentRoutes = () => {
   app.post("/:agentId/regenerate-token", async (c) => {
     const auth = c.get("auth");
     const agentId = c.req.param("agentId");
-    const result = await regenerateAgentToken(auth.projectId, agentId);
+    const result = await regenerateAgentToken(requireProjectId(auth), agentId);
     invalidateGatewayCache(c.req.raw);
     return c.json(result);
   });
@@ -120,7 +124,11 @@ export const agentRoutes = () => {
       );
     }
 
-    await updateAgentSecretMode(auth.projectId, agentId, parsed.data.mode);
+    await updateAgentSecretMode(
+      requireProjectId(auth),
+      agentId,
+      parsed.data.mode,
+    );
     invalidateGatewayCache(c.req.raw);
     return c.json({ success: true });
   });
@@ -129,7 +137,7 @@ export const agentRoutes = () => {
   app.get("/:agentId/secrets", async (c) => {
     const auth = c.get("auth");
     const agentId = c.req.param("agentId");
-    const secretIds = await getAgentSecrets(auth.projectId, agentId);
+    const secretIds = await getAgentSecrets(requireProjectId(auth), agentId);
     return c.json(secretIds);
   });
 
@@ -146,7 +154,11 @@ export const agentRoutes = () => {
       );
     }
 
-    await updateAgentSecrets(auth.projectId, agentId, parsed.data.secretIds);
+    await updateAgentSecrets(
+      requireProjectId(auth),
+      agentId,
+      parsed.data.secretIds,
+    );
     invalidateGatewayCache(c.req.raw);
     return c.json({ success: true });
   });

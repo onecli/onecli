@@ -25,13 +25,13 @@ import type { RuleCondition } from "@onecli/api/validations/policy-rule";
 
 export const getRules = async () => {
   const { projectId } = await resolveUser();
-  return listPolicyRules(projectId);
+  return listPolicyRules({ projectId });
 };
 
 export const createRule = async (input: CreatePolicyRuleInput) => {
   const { userId, userEmail, projectId } = await resolveUser();
   return withAudit(
-    () => createPolicyRuleService(projectId, input),
+    () => createPolicyRuleService({ projectId }, input),
     (rule) => ({
       projectId,
       userId,
@@ -49,7 +49,7 @@ export const updateRule = async (
 ): Promise<void> => {
   const { userId, userEmail, projectId } = await resolveUser();
   return withAudit(
-    () => updatePolicyRuleService(projectId, ruleId, input),
+    () => updatePolicyRuleService({ projectId }, ruleId, input),
     () => ({
       projectId,
       userId,
@@ -64,7 +64,7 @@ export const updateRule = async (
 export const deleteRule = async (ruleId: string): Promise<void> => {
   const { userId, userEmail, projectId } = await resolveUser();
   return withAudit(
-    () => deletePolicyRuleService(projectId, ruleId),
+    () => deletePolicyRuleService({ projectId }, ruleId),
     () => ({
       projectId,
       userId,
@@ -85,7 +85,7 @@ export const getAppPermissionStates = async (
   provider: string,
 ): Promise<Record<string, AppPermissionState>> => {
   const { projectId } = await resolveUser();
-  const rules = await listAppPermissionRules(projectId, provider);
+  const rules = await listAppPermissionRules({ projectId }, provider);
 
   const states: Record<string, AppPermissionState> = {};
   for (const rule of rules) {
@@ -125,7 +125,7 @@ export const setAppPermissions = async (
   await withAudit(
     () =>
       setAppPermissionsService(
-        projectId,
+        { projectId },
         provider,
         appName,
         resolvedChanges,
@@ -159,5 +159,5 @@ export const getOverlappingRuleCountForApp = async (
   const hostPatterns = [
     ...new Set(def.groups.flatMap((g) => g.tools.map((t) => t.hostPattern))),
   ];
-  return countOverlappingRulesForHost(projectId, hostPatterns);
+  return countOverlappingRulesForHost({ projectId }, hostPatterns);
 };

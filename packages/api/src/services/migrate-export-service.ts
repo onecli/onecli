@@ -1,9 +1,7 @@
 import { db } from "@onecli/db";
-import { getCrypto } from "../providers";
+import { getCrypto, getSelfUrl } from "../providers";
 import { ServiceError } from "./errors";
 import { logger } from "../lib/logger";
-
-const CLOUD_URL = "https://app.onecli.sh";
 
 interface MigrateImported {
   secrets: number;
@@ -152,7 +150,7 @@ export const exportToCloud = async (
 
   // ── Send to cloud ─────────────────────────────────────────────
 
-  const response = await fetch(`${CLOUD_URL}/api/migrate/import`, {
+  const response = await fetch(`${getSelfUrl()}/v1/migrate/import`, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",

@@ -71,7 +71,7 @@ To use this with Anthropic, store your API key as the password in a Bitwarden lo
 The vault system is provider-agnostic. Bitwarden is the first implementation. Future providers (1Password, etc.) can be added by implementing the `VaultProvider` trait.
 
 ```
-Browser ──► Gateway /api/vault/bitwarden/pair   (pairing)
+Browser ──► Gateway /v1/vault/bitwarden/pair   (pairing)
 Agent   ──► Gateway CONNECT host:443            (credential injection)
               │
               ├─ DB secrets matched? ──► inject from DB

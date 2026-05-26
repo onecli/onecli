@@ -16,13 +16,12 @@ import { Input } from "@onecli/ui/components/input";
 import { Label } from "@onecli/ui/components/label";
 import { cn } from "@onecli/ui/lib/utils";
 import { useCopyToClipboard } from "@/hooks/use-copy-to-clipboard";
-import { createAgent } from "@/lib/actions/agents";
+import { useCreateAgent } from "@/hooks/use-agents";
 import { validateDisplayName } from "@onecli/api/validations/display-name";
 
 interface CreateAgentDialogProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
-  onCreated: () => void;
 }
 
 const nameToIdentifier = (name: string) =>
@@ -36,17 +35,16 @@ const nameToIdentifier = (name: string) =>
 export const CreateAgentDialog = ({
   open,
   onOpenChange,
-  onCreated,
 }: CreateAgentDialogProps) => {
   const [name, setName] = useState("");
   const [nameTouched, setNameTouched] = useState(false);
   const [identifier, setIdentifier] = useState("");
   const [identifierTouched, setIdentifierTouched] = useState(false);
-  const [creating, setCreating] = useState(false);
   const [createdIdentifier, setCreatedIdentifier] = useState<string | null>(
     null,
   );
   const { copied, copy } = useCopyToClipboard();
+  const createAgent = useCreateAgent();
 
   const nameError = useMemo(() => validateDisplayName(name), [name]);
   const showNameError = nameTouched && nameError !== null;
@@ -66,21 +64,17 @@ export const CreateAgentDialog = ({
 
   const isValidIdentifier = /^[a-z][a-z0-9-]{0,49}$/.test(identifier);
 
-  const handleCreate = async () => {
+  const handleCreate = () => {
     if (!isNameValid || !isValidIdentifier) return;
-    setCreating(true);
-    try {
-      const agent = await createAgent(name, identifier);
-      setCreatedIdentifier(agent.identifier);
-      onCreated();
-      toast.success("Agent created");
-    } catch (err) {
-      toast.error(
-        err instanceof Error ? err.message : "Failed to create agent",
-      );
-    } finally {
-      setCreating(false);
-    }
+    createAgent.mutate(
+      { name, identifier },
+      {
+        onSuccess: (agent) => {
+          setCreatedIdentifier(agent.identifier);
+          toast.success("Agent created");
+        },
+      },
+    );
   };
 
   const handleClose = (value: boolean) => {
@@ -197,10 +191,12 @@ export const CreateAgentDialog = ({
                   setNameTouched(true);
                   if (isNameValid && isValidIdentifier) handleCreate();
                 }}
-                loading={creating}
-                disabled={!isNameValid || !isValidIdentifier || creating}
+                loading={createAgent.isPending}
+                disabled={
+                  !isNameValid || !isValidIdentifier || createAgent.isPending
+                }
               >
-                {creating ? "Creating..." : "Create"}
+                {createAgent.isPending ? "Creating..." : "Create"}
               </Button>
             </DialogFooter>
           </>

@@ -1,35 +1,101 @@
 import { createMiddleware } from "hono/factory";
-import { validateApiKey } from "../lib/validate-api-key";
-import { getSessionProvider } from "../providers";
+import type { AuthContext, OrgRole } from "../providers";
+import { getRoleResolver, ROLE_HIERARCHY } from "../providers";
+import { ServiceError } from "../services/errors";
 import type { ApiEnv } from "../types";
-import { db } from "@onecli/db";
-import { findUserDefaultProject } from "../services/organization-service";
+import { authenticateApiKey } from "./auth/api-key";
+import { authenticateSession } from "./auth/session";
 
-export const authMiddleware = createMiddleware<ApiEnv>(async (c, next) => {
-  const apiKeyAuth = await validateApiKey(c.req.raw);
-  if (apiKeyAuth) {
-    c.set("auth", apiKeyAuth);
+export interface AuthOptions {
+  requireProject?: boolean;
+  role?: OrgRole;
+}
+
+const UNAUTHORIZED = {
+  error: {
+    message: "Invalid API key or token.",
+    type: "authentication_error",
+  },
+} as const;
+
+const FORBIDDEN_NOT_MEMBER = {
+  error: {
+    message: "Not a member of this organization",
+    type: "authentication_error",
+  },
+} as const;
+
+const FORBIDDEN_INSUFFICIENT = {
+  error: {
+    message: "Insufficient permissions",
+    type: "authentication_error",
+  },
+} as const;
+
+export const auth = (options?: AuthOptions) => {
+  const requireProject = options?.requireProject ?? true;
+  const minimumRole = options?.role;
+
+  return createMiddleware<ApiEnv>(async (c, next) => {
+    let authResult: AuthContext | null = null;
+
+    // 1. API key (project or org)
+    authResult = await authenticateApiKey(c.req.raw, requireProject);
+
+    // 2. JWT from Authorization header
+    if (!authResult) {
+      authResult = await authenticateSession(c.req.raw, requireProject);
+    }
+
+    // 3. JWT from query params (browser navigations)
+    if (!authResult) {
+      const url = new URL(c.req.url);
+      const queryToken = url.searchParams.get("_token");
+      if (queryToken) {
+        const headers = new Headers(c.req.raw.headers);
+        headers.set("authorization", `Bearer ${queryToken}`);
+        const queryProject = url.searchParams.get("_project");
+        if (queryProject) headers.set("x-project-id", queryProject);
+
+        authResult = await authenticateSession(
+          new Request(c.req.url, { headers }),
+          requireProject,
+        );
+      }
+    }
+
+    if (!authResult) {
+      return c.json(UNAUTHORIZED, 401);
+    }
+
+    // 4. Role check (only when role option is specified)
+    if (minimumRole) {
+      const resolver = getRoleResolver();
+      if (!resolver) {
+        return c.json(FORBIDDEN_NOT_MEMBER, 403);
+      }
+      const userRole = await resolver.getUserRole(
+        authResult.userId,
+        authResult.organizationId,
+      );
+      if (!userRole) {
+        return c.json(FORBIDDEN_NOT_MEMBER, 403);
+      }
+      if (ROLE_HIERARCHY[userRole] < ROLE_HIERARCHY[minimumRole]) {
+        return c.json(FORBIDDEN_INSUFFICIENT, 403);
+      }
+      authResult.role = userRole;
+    }
+
+    c.set("auth", authResult);
     return next();
-  }
-
-  const session = getSessionProvider();
-  const user = await session.getSession(c.req.raw);
-  if (!user) return c.json({ error: "Unauthorized" }, 401);
-
-  const dbUser = await db.user.findUnique({
-    where: { externalAuthId: user.id },
-    select: { id: true },
   });
-  if (!dbUser) return c.json({ error: "Unauthorized" }, 401);
+};
 
-  const projectId = await session.resolveProjectForUser(dbUser.id, c.req.raw);
-  if (!projectId) {
-    const fallback = await findUserDefaultProject(dbUser.id);
-    if (!fallback) return c.json({ error: "Unauthorized" }, 401);
-    c.set("auth", { userId: dbUser.id, projectId: fallback.id });
-    return next();
-  }
+export const authMiddleware = auth();
 
-  c.set("auth", { userId: dbUser.id, projectId });
-  return next();
-});
+export const requireProjectId = (auth: AuthContext): string => {
+  if (!auth.projectId)
+    throw new ServiceError("BAD_REQUEST", "X-Project-Id header is required");
+  return auth.projectId;
+};

@@ -404,10 +404,10 @@ mod tests {
     async fn manual_approval_takes_precedence_over_rate_limit() {
         let store = crate::cache::create_store().await.unwrap();
         let rules = vec![
-            rate_rule("/api/*", Some("POST"), 100, 3600),
-            approval_rule("/api/*", Some("POST")),
+            rate_rule("/v1/*", Some("POST"), 100, 3600),
+            approval_rule("/v1/*", Some("POST")),
         ];
-        let d = evaluate("POST", "/api/send", None, &rules, "agent1", &*store).await;
+        let d = evaluate("POST", "/v1/send", None, &rules, "agent1", &*store).await;
         assert!(matches!(d, PolicyDecision::ManualApproval { .. }));
     }
 

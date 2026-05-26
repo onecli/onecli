@@ -1,6 +1,5 @@
 "use client";
 
-import { useState } from "react";
 import Image from "next/image";
 import { toast } from "sonner";
 import { Loader2 } from "lucide-react";
@@ -17,8 +16,7 @@ import {
   AlertDialogTitle,
   AlertDialogTrigger,
 } from "@onecli/ui/components/alert-dialog";
-import { disconnectAppConnection as defaultDisconnect } from "@/lib/actions/connections";
-import { useInvalidateGatewayCache } from "@/hooks/use-invalidate-cache";
+import { useDisconnectConnection } from "@/hooks/use-connections";
 import { extractLabel } from "@onecli/api/services/connection-service";
 
 interface ConnectionCardProps {
@@ -43,10 +41,9 @@ export const ConnectionCard = ({
   onReconnect,
   reconnectLabel,
   onDisconnected,
-  disconnectAction = defaultDisconnect,
+  disconnectAction,
 }: ConnectionCardProps) => {
-  const [disconnecting, setDisconnecting] = useState(false);
-  const invalidateCache = useInvalidateGatewayCache();
+  const disconnectMutation = useDisconnectConnection();
 
   const displayName =
     connection.label ??
@@ -76,16 +73,21 @@ export const ConnectionCard = ({
       : null;
 
   const handleDisconnect = async () => {
-    setDisconnecting(true);
-    try {
-      await disconnectAction(connection.id);
-      invalidateCache();
-      onDisconnected();
-      toast.success(`${appName} account disconnected`);
-    } catch {
-      toast.error("Failed to disconnect");
-    } finally {
-      setDisconnecting(false);
+    if (disconnectAction) {
+      try {
+        await disconnectAction(connection.id);
+        onDisconnected();
+        toast.success(`${appName} account disconnected`);
+      } catch {
+        toast.error("Failed to disconnect");
+      }
+    } else {
+      disconnectMutation.mutate(connection.id, {
+        onSuccess: () => {
+          onDisconnected();
+          toast.success(`${appName} account disconnected`);
+        },
+      });
     }
   };
 
@@ -202,9 +204,9 @@ export const ConnectionCard = ({
               variant="ghost"
               size="sm"
               className="text-red-400 hover:text-red-300 hover:bg-red-400/10"
-              disabled={disconnecting}
+              disabled={disconnectMutation.isPending}
             >
-              {disconnecting ? (
+              {disconnectMutation.isPending ? (
                 <>
                   <Loader2 className="size-3.5 animate-spin" />
                   Disconnecting...
@@ -228,9 +230,9 @@ export const ConnectionCard = ({
               <AlertDialogAction
                 onClick={handleDisconnect}
                 variant="destructive"
-                disabled={disconnecting}
+                disabled={disconnectMutation.isPending}
               >
-                {disconnecting ? (
+                {disconnectMutation.isPending ? (
                   <>
                     <Loader2 className="size-3.5 animate-spin" />
                     Disconnecting...

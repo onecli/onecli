@@ -1,5 +1,12 @@
 import { db, Prisma } from "@onecli/db";
 import { ServiceError } from "./errors";
+import type { ResourceScope } from "./resource-scope";
+import {
+  scopeWhere,
+  scopeCreate,
+  scopeOwnership,
+  isOrgScope,
+} from "./resource-scope";
 import {
   type CreatePolicyRuleInput,
   type UpdatePolicyRuleInput,
@@ -9,39 +16,52 @@ import type { AppTool, AppPermissionLevel } from "../apps/app-permissions";
 
 export type { CreatePolicyRuleInput, UpdatePolicyRuleInput };
 
-export const listPolicyRules = async (projectId: string) => {
+const RULE_SELECT = {
+  id: true,
+  name: true,
+  hostPattern: true,
+  pathPattern: true,
+  method: true,
+  action: true,
+  enabled: true,
+  agentId: true,
+  rateLimit: true,
+  rateLimitWindow: true,
+  scope: true,
+  metadata: true,
+  conditions: true,
+  createdAt: true,
+} as const;
+
+export const listPolicyRules = async (scope: ResourceScope) => {
   return db.policyRule.findMany({
-    where: { projectId },
-    select: {
-      id: true,
-      name: true,
-      hostPattern: true,
-      pathPattern: true,
-      method: true,
-      action: true,
-      enabled: true,
-      agentId: true,
-      rateLimit: true,
-      rateLimitWindow: true,
-      scope: true,
-      metadata: true,
-      conditions: true,
-      createdAt: true,
-    },
+    where: scopeWhere(scope),
+    select: RULE_SELECT,
     orderBy: { createdAt: "desc" },
   });
 };
 
+export const getPolicyRule = async (scope: ResourceScope, ruleId: string) => {
+  const rule = await db.policyRule.findFirst({
+    where: scopeOwnership(scope, ruleId),
+    select: RULE_SELECT,
+  });
+  if (!rule) throw new ServiceError("NOT_FOUND", "Policy rule not found");
+  return rule;
+};
+
 export const createPolicyRule = async (
-  projectId: string,
+  scope: ResourceScope,
   input: CreatePolicyRuleInput,
 ) => {
   const name = input.name.trim();
+  const orgScope = isOrgScope(scope);
 
-  // Validate agent belongs to account if specified
-  if (input.agentId) {
+  const agentId = orgScope ? null : input.agentId || null;
+
+  if (agentId && scope.projectId) {
     const agent = await db.agent.findFirst({
-      where: { id: input.agentId, projectId },
+      where: { id: agentId, projectId: scope.projectId },
       select: { id: true },
     });
     if (!agent) throw new ServiceError("NOT_FOUND", "Agent not found");
@@ -55,14 +75,13 @@ export const createPolicyRule = async (
       method: input.method || null,
       action: input.action,
       enabled: input.enabled,
-      agentId: input.agentId || null,
+      agentId,
       rateLimit:
         input.action === "rate_limit" ? (input.rateLimit ?? null) : null,
       rateLimitWindow:
         input.action === "rate_limit" ? (input.rateLimitWindow ?? null) : null,
       ...(input.conditions ? { conditions: input.conditions } : {}),
-      scope: "project",
-      projectId,
+      ...scopeCreate(scope),
     },
     select: {
       id: true,
@@ -82,21 +101,22 @@ export const createPolicyRule = async (
 };
 
 export const updatePolicyRule = async (
-  projectId: string,
+  scope: ResourceScope,
   ruleId: string,
   input: UpdatePolicyRuleInput,
 ) => {
   const rule = await db.policyRule.findFirst({
-    where: { id: ruleId, projectId },
+    where: scopeOwnership(scope, ruleId),
     select: { id: true },
   });
 
   if (!rule) throw new ServiceError("NOT_FOUND", "Policy rule not found");
 
-  // Validate agent belongs to account if changing agentId
-  if (input.agentId) {
+  const orgScope = isOrgScope(scope);
+
+  if (!orgScope && input.agentId) {
     const agent = await db.agent.findFirst({
-      where: { id: input.agentId, projectId },
+      where: { id: input.agentId, projectId: scope.projectId! },
       select: { id: true },
     });
     if (!agent) throw new ServiceError("NOT_FOUND", "Agent not found");
@@ -118,7 +138,8 @@ export const updatePolicyRule = async (
     }
   }
   if (input.enabled !== undefined) data.enabled = input.enabled;
-  if (input.agentId !== undefined) data.agentId = input.agentId || null;
+  if (!orgScope && input.agentId !== undefined)
+    data.agentId = input.agentId || null;
   if (input.rateLimit !== undefined) data.rateLimit = input.rateLimit;
   if (input.rateLimitWindow !== undefined)
     data.rateLimitWindow = input.rateLimitWindow;
@@ -132,9 +153,12 @@ export const updatePolicyRule = async (
   });
 };
 
-export const deletePolicyRule = async (projectId: string, ruleId: string) => {
+export const deletePolicyRule = async (
+  scope: ResourceScope,
+  ruleId: string,
+) => {
   const rule = await db.policyRule.findFirst({
-    where: { id: ruleId, projectId },
+    where: scopeOwnership(scope, ruleId),
     select: { id: true },
   });
 
@@ -144,12 +168,12 @@ export const deletePolicyRule = async (projectId: string, ruleId: string) => {
 };
 
 export const listAppPermissionRules = async (
-  projectId: string,
+  scope: ResourceScope,
   provider: string,
 ) => {
   return db.policyRule.findMany({
     where: {
-      projectId,
+      ...scopeWhere(scope),
       AND: [
         { metadata: { path: ["source"], equals: "app_permission" } },
         { metadata: { path: ["provider"], equals: provider } },
@@ -160,6 +184,7 @@ export const listAppPermissionRules = async (
       action: true,
       metadata: true,
       conditions: true,
+      pathPattern: true,
     },
   });
 };
@@ -170,49 +195,77 @@ export interface AppPermissionChange {
   tool: AppTool;
 }
 
+const allPatterns = (tool: AppTool): string[] => [
+  tool.pathPattern,
+  ...(tool.aliasPatterns ?? []),
+];
+
 export const setAppPermissionsService = async (
-  projectId: string,
+  scope: ResourceScope,
   provider: string,
   appName: string,
   changes: AppPermissionChange[],
   conditions?: RuleCondition[],
 ) => {
-  const existing = await listAppPermissionRules(projectId, provider);
-  const existingByToolId = new Map(
-    existing
-      .filter(
-        (r): r is typeof r & { metadata: { toolId: string } } =>
-          r.metadata != null &&
-          typeof r.metadata === "object" &&
-          "toolId" in r.metadata,
-      )
-      .map((r) => [r.metadata.toolId, r]),
-  );
+  const existing = await listAppPermissionRules(scope, provider);
 
-  const toCreate: AppPermissionChange[] = [];
+  const existingByToolId = new Map<string, typeof existing>();
+  for (const r of existing) {
+    if (
+      r.metadata == null ||
+      typeof r.metadata !== "object" ||
+      !("toolId" in r.metadata)
+    )
+      continue;
+    const toolId = (r.metadata as { toolId: string }).toolId;
+    const arr = existingByToolId.get(toolId) ?? [];
+    arr.push(r);
+    existingByToolId.set(toolId, arr);
+  }
+
+  const toCreateRules: {
+    change: AppPermissionChange;
+    pathPattern: string;
+  }[] = [];
   const toUpdate: { ruleId: string; action: string }[] = [];
   const toDelete: string[] = [];
 
   const conditionsProvided = conditions !== undefined;
 
   for (const change of changes) {
-    const existingRule = existingByToolId.get(change.toolId);
+    const existingRules = existingByToolId.get(change.toolId) ?? [];
 
     if (change.permission === "allow") {
-      if (existingRule) toDelete.push(existingRule.id);
-    } else if (existingRule) {
-      if (existingRule.action !== change.permission || conditionsProvided) {
-        toUpdate.push({ ruleId: existingRule.id, action: change.permission });
+      for (const rule of existingRules) {
+        toDelete.push(rule.id);
+      }
+    } else if (existingRules.length > 0) {
+      for (const rule of existingRules) {
+        if (rule.action !== change.permission || conditionsProvided) {
+          toUpdate.push({ ruleId: rule.id, action: change.permission });
+        }
+      }
+      const existingPatterns = new Set(existingRules.map((r) => r.pathPattern));
+      for (const pattern of allPatterns(change.tool)) {
+        if (!existingPatterns.has(pattern)) {
+          toCreateRules.push({ change, pathPattern: pattern });
+        }
       }
     } else {
-      toCreate.push(change);
+      for (const pattern of allPatterns(change.tool)) {
+        toCreateRules.push({ change, pathPattern: pattern });
+      }
     }
   }
+
+  const scopeDeleteWhere = scope.organizationId
+    ? { organizationId: scope.organizationId }
+    : { projectId: scope.projectId! };
 
   await db.$transaction(async (tx) => {
     if (toDelete.length > 0) {
       await tx.policyRule.deleteMany({
-        where: { id: { in: toDelete }, projectId },
+        where: { id: { in: toDelete }, ...scopeDeleteWhere },
       });
     }
 
@@ -231,21 +284,21 @@ export const setAppPermissionsService = async (
       });
     }
 
-    for (const create of toCreate) {
+    for (const { change, pathPattern } of toCreateRules) {
       await tx.policyRule.create({
         data: {
-          projectId,
-          scope: "project",
-          name: `${appName}: ${create.tool.name}`,
-          hostPattern: create.tool.hostPattern,
-          pathPattern: create.tool.pathPattern,
-          method: create.tool.method ?? null,
-          action: create.permission,
+          ...scopeCreate(scope),
+          agentId: isOrgScope(scope) ? null : undefined,
+          name: `${change.tool.name}`,
+          hostPattern: change.tool.hostPattern,
+          pathPattern,
+          method: change.tool.method ?? null,
+          action: change.permission,
           enabled: true,
           metadata: {
             source: "app_permission",
             provider,
-            toolId: create.toolId,
+            toolId: change.toolId,
           },
           ...(conditionsProvided && conditions.length > 0
             ? { conditions }
@@ -256,20 +309,20 @@ export const setAppPermissionsService = async (
   });
 
   return {
-    created: toCreate.length,
+    created: toCreateRules.length,
     updated: toUpdate.length,
     deleted: toDelete.length,
   };
 };
 
 export const countOverlappingRulesForHost = async (
-  projectId: string,
+  scope: ResourceScope,
   hostPatterns: string[],
 ) => {
   if (hostPatterns.length === 0) return 0;
   return db.policyRule.count({
     where: {
-      projectId,
+      ...scopeWhere(scope),
       enabled: true,
       hostPattern: { in: hostPatterns },
       NOT: {

@@ -2,12 +2,10 @@ import { Hono } from "hono";
 import { setCookie, getCookie, deleteCookie } from "hono/cookie";
 import { db } from "@onecli/db";
 import type { ApiEnv } from "../types";
-import { getSessionProvider } from "../providers";
-import { authMiddleware } from "../middleware/auth";
-import { validateApiKey } from "../lib/validate-api-key";
+import { authMiddleware, requireProjectId } from "../middleware/auth";
 import { getApp, getApps } from "../apps/registry";
 import { resolveAppCredentials } from "../apps/resolve-credentials";
-import { getOAuthOrg } from "../providers";
+import { getOAuthOrg, getSelfUrl } from "../providers";
 import {
   signOAuthState,
   verifyOAuthState,
@@ -26,7 +24,7 @@ import {
   extractLabel,
   deleteConnection,
 } from "../services/connection-service";
-import { findUserDefaultProject } from "../services/organization-service";
+import { getConnectionHooks } from "../providers";
 import {
   getAppConfig,
   upsertAppConfig,
@@ -44,10 +42,11 @@ export const appRoutes = () => {
   // ── GET /apps ── list all apps ─────────────────────────────────────────
   app.get("/", authMiddleware, async (c) => {
     const auth = c.get("auth");
+    const projectId = requireProjectId(auth);
 
     const [configs, connections] = await Promise.all([
       db.appConfig.findMany({
-        where: { projectId: auth.projectId },
+        where: { projectId },
         select: {
           provider: true,
           enabled: true,
@@ -55,7 +54,7 @@ export const appRoutes = () => {
           createdAt: true,
         },
       }),
-      listConnections(auth.projectId),
+      listConnections({ projectId }),
     ]);
 
     const configMap = new Map(configs.map((cfg) => [cfg.provider, cfg]));
@@ -93,9 +92,62 @@ export const appRoutes = () => {
     return c.json(result);
   });
 
+  // ── GET /apps/connections ── list all connections ───────────────────────
+  app.get("/connections", authMiddleware, async (c) => {
+    const auth = c.get("auth");
+    const connections = await listConnections({
+      projectId: requireProjectId(auth),
+      organizationId: auth.organizationId,
+    });
+    return c.json({ connections });
+  });
+
+  // ── GET /apps/connections/:provider ── list connections by provider ────
+  app.get("/connections/:provider", authMiddleware, async (c) => {
+    const auth = c.get("auth");
+    const provider = c.req.param("provider");
+    const connections = await listConnectionsByProvider(
+      {
+        projectId: requireProjectId(auth),
+        organizationId: auth.organizationId,
+      },
+      provider,
+    );
+    return c.json({ connections });
+  });
+
+  // ── DELETE /apps/connections/:connectionId ── disconnect ───────────────
+  app.delete("/connections/:connectionId", authMiddleware, async (c) => {
+    const auth = c.get("auth");
+    const connectionId = c.req.param("connectionId");
+    const connection = await db.appConnection.findFirst({
+      where: {
+        id: connectionId,
+        OR: [
+          { projectId: requireProjectId(auth) },
+          ...(auth.organizationId
+            ? [{ organizationId: auth.organizationId }]
+            : []),
+        ],
+      },
+      select: { scope: true },
+    });
+    if (!connection) {
+      return c.json({ error: "Connection not found" }, 404);
+    }
+    const scope =
+      connection.scope === "organization"
+        ? { organizationId: auth.organizationId }
+        : { projectId: requireProjectId(auth) };
+    await deleteConnection(scope, connectionId);
+    invalidateGatewayCache(c.req.raw);
+    return c.body(null, 204);
+  });
+
   // ── GET /apps/:provider ── single app detail ───────────────────────────
   app.get("/:provider", authMiddleware, async (c) => {
     const auth = c.get("auth");
+    const projectId = requireProjectId(auth);
     const provider = c.req.param("provider")!;
     const appDef = getApp(provider);
     if (!appDef) {
@@ -103,9 +155,9 @@ export const appRoutes = () => {
     }
 
     const [config, connection] = await Promise.all([
-      getAppConfig(auth.projectId, provider),
+      getAppConfig({ projectId }, provider),
       db.appConnection.findFirst({
-        where: { projectId: auth.projectId, provider },
+        where: { projectId, provider },
         select: {
           status: true,
           scopes: true,
@@ -147,47 +199,17 @@ export const appRoutes = () => {
   });
 
   // ── GET /apps/:provider/authorize ── OAuth redirect ────────────────────
-  app.get("/:provider/authorize", async (c) => {
+  app.get("/:provider/authorize", authMiddleware, async (c) => {
     const provider = c.req.param("provider")!;
+    const auth = c.get("auth");
+    const projectId = requireProjectId(auth);
 
     const orgResponse = await getOAuthOrg().tryHandleOrgAuthorize(
-      c.req.raw,
+      auth,
+      c,
       provider,
     );
     if (orgResponse) return orgResponse;
-
-    // Auth check after org check (org authorize may use a different auth mechanism)
-    const apiKeyAuth = await validateApiKey(c.req.raw);
-    if (!apiKeyAuth) {
-      const session = getSessionProvider();
-      const user = await session.getSession(c.req.raw);
-      if (!user) return c.json({ error: "Unauthorized" }, 401);
-
-      const dbUser = await db.user.findUnique({
-        where: { externalAuthId: user.id },
-        select: { id: true },
-      });
-      if (!dbUser) return c.json({ error: "Unauthorized" }, 401);
-
-      const projectId = await session.resolveProjectForUser(
-        dbUser.id,
-        c.req.raw,
-      );
-      if (!projectId) {
-        const fallback = await findUserDefaultProject(dbUser.id);
-        if (!fallback) return c.json({ error: "Unauthorized" }, 401);
-        c.set("auth", {
-          userId: dbUser.id,
-          projectId: fallback.id,
-        });
-      } else {
-        c.set("auth", { userId: dbUser.id, projectId });
-      }
-    } else {
-      c.set("auth", apiKeyAuth);
-    }
-
-    const auth = c.get("auth");
     const appDef = getApp(provider);
 
     if (
@@ -203,14 +225,14 @@ export const appRoutes = () => {
     const agentName = rawAgentName ? rawAgentName.slice(0, 128) : undefined;
 
     const state = signOAuthState({
-      projectId: auth.projectId,
+      projectId,
       provider,
       nonce: generateNonce(),
       ...(connectionId ? { connectionId } : {}),
       ...(agentName ? { agentName } : {}),
     });
 
-    const resolved = await resolveAppCredentials(auth.projectId, appDef);
+    const resolved = await resolveAppCredentials(projectId, appDef);
     if (!resolved) {
       return c.json(
         {
@@ -222,7 +244,7 @@ export const appRoutes = () => {
 
     const { values: creds } = resolved;
 
-    const redirectUri = `${APP_URL}/api/apps/${provider}/callback`;
+    const redirectUri = `${getSelfUrl()}/v1/apps/${provider}/callback`;
     const scopes = appDef.connectionMethod.defaultScopes ?? [];
 
     const authUrl = appDef.connectionMethod.buildAuthUrl({
@@ -236,7 +258,7 @@ export const appRoutes = () => {
       httpOnly: true,
       secure: NODE_ENV === "production",
       sameSite: "Lax",
-      path: `/api/apps/${provider}/callback`,
+      path: `/v1/apps/${provider}/callback`,
       maxAge: 600,
     });
 
@@ -275,6 +297,13 @@ export const appRoutes = () => {
         return errorRedirect("Invalid state parameter");
       }
 
+      const stateProject = await db.project.findUnique({
+        where: { id: state.projectId },
+        select: { organizationId: true },
+      });
+      if (!stateProject) return errorRedirect("Project not found");
+      const stateOrgId = stateProject.organizationId;
+
       // Microsoft can send duplicate callbacks -- the first with a valid code
       // (which succeeds) and the second with error=server_error. If a
       // connection was created moments ago during this same OAuth flow,
@@ -282,7 +311,7 @@ export const appRoutes = () => {
       if (c.req.query("error")) {
         const recentCutoff = new Date(Date.now() - 30_000);
         const existing = await listConnectionsByProvider(
-          state.projectId,
+          { projectId: state.projectId },
           provider,
         );
         const justCreated = existing.some(
@@ -305,7 +334,7 @@ export const appRoutes = () => {
         return errorRedirect(`${appDef.name} is not configured`);
       }
 
-      const redirectUri = `${APP_URL}/api/apps/${provider}/callback`;
+      const redirectUri = `${getSelfUrl()}/v1/apps/${provider}/callback`;
 
       // Extract all query params as callback params
       const url = new URL(c.req.url);
@@ -325,7 +354,7 @@ export const appRoutes = () => {
         const identity = extractLabel(metadata)?.toLowerCase().trim();
         if (identity) {
           const existing = await listConnectionsByProvider(
-            state.projectId,
+            { projectId: state.projectId },
             provider,
           );
           const duplicate = existing.find((conn) => {
@@ -344,16 +373,29 @@ export const appRoutes = () => {
         }
       }
 
+      await getConnectionHooks().beforeConnect(stateOrgId, appDef);
+
       if (reconnectId) {
-        await reconnectConnection(state.projectId, reconnectId, credentials, {
-          scopes,
-          metadata,
-        });
+        await reconnectConnection(
+          { projectId: state.projectId },
+          reconnectId,
+          credentials,
+          {
+            scopes,
+            metadata,
+          },
+        );
       } else {
-        await createConnection(state.projectId, provider, credentials, {
-          scopes,
-          metadata,
-        });
+        await getConnectionHooks().beforeCreate(stateOrgId);
+        await createConnection(
+          { projectId: state.projectId },
+          provider,
+          credentials,
+          {
+            scopes,
+            metadata,
+          },
+        );
       }
 
       invalidateGatewayCacheForAccount(state.projectId);
@@ -364,7 +406,7 @@ export const appRoutes = () => {
       }
 
       deleteCookie(c, "oauth_state", {
-        path: `/api/apps/${provider}/callback`,
+        path: `/v1/apps/${provider}/callback`,
       });
 
       return c.redirect(`${APP_URL}/app-connect/${provider}?${successParams}`);
@@ -379,6 +421,7 @@ export const appRoutes = () => {
   // ── POST /apps/:provider/connect ── direct connect ─────────────────────
   app.post("/:provider/connect", authMiddleware, async (c) => {
     const auth = c.get("auth");
+    const projectId = requireProjectId(auth);
     const provider = c.req.param("provider")!;
     const appDef = getApp(provider);
 
@@ -465,6 +508,7 @@ export const appRoutes = () => {
 
     if (body.org) {
       const orgResponse = await getOAuthOrg().tryHandleOrgConnect(
+        auth,
         c.req.raw,
         provider,
         credentials,
@@ -475,18 +519,17 @@ export const appRoutes = () => {
       if (orgResponse) return orgResponse;
     }
 
+    await getConnectionHooks().beforeConnect(auth.organizationId, appDef);
+
     if (body.connectionId) {
       await reconnectConnection(
-        auth.projectId,
+        { projectId },
         body.connectionId,
         credentials,
         connectionOpts,
       );
     } else {
-      const existing = await listConnectionsByProvider(
-        auth.projectId,
-        provider,
-      );
+      const existing = await listConnectionsByProvider({ projectId }, provider);
       const duplicate = metadata
         ? existing.find((conn) => {
             const label = extractLabel(
@@ -503,14 +546,15 @@ export const appRoutes = () => {
 
       if (duplicate) {
         await reconnectConnection(
-          auth.projectId,
+          { projectId },
           duplicate.id,
           credentials,
           connectionOpts,
         );
       } else {
+        await getConnectionHooks().beforeCreate(auth.organizationId);
         await createConnection(
-          auth.projectId,
+          { projectId },
           provider,
           credentials,
           connectionOpts,
@@ -518,9 +562,6 @@ export const appRoutes = () => {
       }
     }
 
-    // For authorized_user credentials_import: persist client credentials as
-    // BYOC AppConfig so the gateway can refresh tokens. Service accounts are
-    // self-contained (private key stored in AppConnection) and skip this.
     if (
       appDef.connectionMethod.type === "credentials_import" &&
       !fields.privateKey &&
@@ -528,7 +569,7 @@ export const appRoutes = () => {
       fields.clientSecret
     ) {
       await saveAppConfigWithoutDisconnect(
-        auth.projectId,
+        { projectId },
         provider,
         fields.clientId,
         fields.clientSecret,
@@ -540,25 +581,14 @@ export const appRoutes = () => {
     return c.json({ success: true });
   });
 
-  // ── DELETE /apps/:provider/connection ── disconnect ─────────────────────
-  app.delete("/:provider/connection", authMiddleware, async (c) => {
-    const auth = c.get("auth");
-    const connectionId = c.req.query("connectionId");
-
-    if (!connectionId) {
-      return c.json({ error: "connectionId query parameter is required" }, 400);
-    }
-
-    await deleteConnection(auth.projectId, connectionId);
-    invalidateGatewayCache(c.req.raw);
-    return c.body(null, 204);
-  });
-
   // ── GET /apps/:provider/config ── get app config ───────────────────────
   app.get("/:provider/config", authMiddleware, async (c) => {
     const auth = c.get("auth");
     const provider = c.req.param("provider")!;
-    const config = await getAppConfig(auth.projectId, provider);
+    const config = await getAppConfig(
+      { projectId: requireProjectId(auth) },
+      provider,
+    );
 
     return c.json(config ?? { hasCredentials: false, enabled: false });
   });
@@ -587,7 +617,7 @@ export const appRoutes = () => {
 
     const { clientId, clientSecret } = parsed.data;
     await upsertAppConfig(
-      auth.projectId,
+      { projectId: requireProjectId(auth) },
       provider,
       { clientId, clientSecret },
       appDef.configurable.fields,
@@ -602,7 +632,7 @@ export const appRoutes = () => {
   app.delete("/:provider/config", authMiddleware, async (c) => {
     const auth = c.get("auth");
     const provider = c.req.param("provider")!;
-    await deleteAppConfig(auth.projectId, provider);
+    await deleteAppConfig({ projectId: requireProjectId(auth) }, provider);
     invalidateGatewayCache(c.req.raw);
     return c.body(null, 204);
   });

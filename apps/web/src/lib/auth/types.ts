@@ -2,7 +2,7 @@ export interface AuthUser {
   id: string;
   email: string;
   name?: string;
-  // Active project id, returned by /api/auth/session. Used by client-side
+  // Active project id, returned by /v1/auth/session. Used by client-side
   // redirects to land on /p/[projectId]/... rather than the unscoped legacy
   // /overview URL.
   projectId?: string;

@@ -16,6 +16,7 @@ import { saveAppConfig, setAppConfigEnabled } from "@/lib/actions/app-config";
 import type { OAuthConfigField } from "@onecli/api/apps/types";
 import { IS_CLOUD } from "@/lib/env";
 import { AppIcon } from "./app-icon";
+import { RedirectUri } from "./redirect-uri";
 
 interface ConfigureCredentialsDialogProps {
   provider: string;
@@ -79,6 +80,7 @@ export const ConfigureCredentialsDialog = ({
 
         <div className="space-y-4 pt-2">
           {hint && <p className="text-muted-foreground text-xs">{hint}</p>}
+          <RedirectUri provider={provider} />
           {fields.map((field, i) => (
             <div key={field.name} className="grid gap-1.5">
               <Label htmlFor={`config-${field.name}`}>

@@ -35,6 +35,7 @@ import { todoistPermissions } from "./todoist";
 import { vertexAiPermissions } from "./vertex-ai";
 import { youtubePermissions } from "./youtube";
 import { linkedinPermissions } from "./linkedin";
+import { mondayPermissions } from "./monday";
 
 const permissionRegistry = new Map<string, AppPermissionDefinition>();
 
@@ -78,3 +79,4 @@ register(flyioPermissions);
 register(dropboxPermissions);
 register(supabasePermissions);
 register(linkedinPermissions);
+register(mondayPermissions);

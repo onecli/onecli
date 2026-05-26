@@ -18,10 +18,13 @@ export const API_URL =
   process.env.NEXT_PUBLIC_API_URL ??
   "http://localhost:10255";
 
+export const GATEWAY_API_URL =
+  process.env.GATEWAY_API_URL ??
+  process.env.NEXT_PUBLIC_GATEWAY_API_URL ??
+  "http://localhost:10255";
+
 export const GATEWAY_BASE_URL =
   process.env.GATEWAY_BASE_URL ?? "host.docker.internal:10255";
-
-export const API_BASE_URL = process.env.API_BASE_URL ?? "localhost:10255";
 
 // ── Edition ─────────────────────────────────────────────────────────────
 

@@ -15,12 +15,12 @@ use async_trait::async_trait;
 use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
 use tokio::sync::{broadcast, watch};
-use tracing::debug;
+use tracing::{debug, warn};
 
 // ── Constants ──────────────────────────────────────────────────────────
 
 /// How long a pending approval lives before auto-deny (seconds).
-pub(crate) const APPROVAL_TIMEOUT_SECS: u64 = 300;
+pub(crate) const APPROVAL_TIMEOUT_SECS: u64 = 180;
 
 /// How often the background task cleans up expired approvals (seconds).
 const CLEANUP_INTERVAL_SECS: u64 = 30;
@@ -105,6 +105,8 @@ impl DecisionReceiver {
 pub(crate) struct ApprovalGuard {
     approval_id: Option<String>,
     store: Arc<dyn ApprovalStore>,
+    log_id: Option<String>,
+    pool: Option<sqlx::PgPool>,
 }
 
 impl ApprovalGuard {
@@ -112,12 +114,21 @@ impl ApprovalGuard {
         Self {
             approval_id: Some(id),
             store,
+            log_id: None,
+            pool: None,
         }
+    }
+
+    pub fn set_log_context(&mut self, log_id: String, pool: sqlx::PgPool) {
+        self.log_id = Some(log_id);
+        self.pool = Some(pool);
     }
 
     /// Prevent cleanup on drop. Call when the decision is handled normally.
     pub fn defuse(&mut self) {
         self.approval_id = None;
+        self.log_id = None;
+        self.pool = None;
     }
 }
 
@@ -125,8 +136,25 @@ impl Drop for ApprovalGuard {
     fn drop(&mut self) {
         if let Some(id) = self.approval_id.take() {
             let store = Arc::clone(&self.store);
+            let log_id = self.log_id.take();
+            let pool = self.pool.take();
             tokio::spawn(async move {
                 store.remove(&id).await;
+                if let (Some(log_id), Some(pool)) = (log_id, pool) {
+                    if let Err(e) = sqlx::query(
+                        "UPDATE request_logs \
+                         SET extra_data = jsonb_set(\
+                             COALESCE(extra_data, '{}'), \
+                             '{decision}', '\"approval_cancelled\"'\
+                         ) WHERE id = $1",
+                    )
+                    .bind(&log_id)
+                    .execute(&pool)
+                    .await
+                    {
+                        warn!(log_id = %log_id, error = %e, "failed to mark cancelled approval log");
+                    }
+                }
                 debug!(approval_id = %id, "cleaned up cancelled approval");
             });
         }

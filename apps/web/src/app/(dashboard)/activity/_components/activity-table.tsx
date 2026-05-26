@@ -14,6 +14,7 @@ import {
   TableRow,
 } from "@onecli/ui/components/table";
 import { StatusBadge } from "./status-badge";
+import { DecisionBadge } from "./decision-badge";
 import { MethodBadge } from "./method-badge";
 import { ProviderIcon } from "./provider-icon";
 import { formatRelative, formatUTC } from "@onecli/api/lib/format";
@@ -21,6 +22,7 @@ import { getProviderIcon } from "@onecli/api/apps/provider-icons";
 import {
   isBlockedRequest,
   isRateLimitedRequest,
+  getApprovalDecision,
   type RequestLogEntry,
 } from "@onecli/api/services/request-log-service";
 
@@ -33,23 +35,11 @@ const DateCell = ({ dateStr }: { dateStr: string }) => (
         {formatRelative(dateStr)}
       </span>
     </TooltipTrigger>
-    <TooltipContent side="left" align="start" className="font-mono text-xs">
-      <table className="border-separate border-spacing-x-3 border-spacing-y-0.5">
-        <tbody>
-          <tr>
-            <td className="text-muted-foreground">UTC</td>
-            <td>{formatUTC(dateStr)}</td>
-          </tr>
-          <tr>
-            <td className="text-muted-foreground">{localTz}</td>
-            <td>{new Date(dateStr).toLocaleString()}</td>
-          </tr>
-          <tr>
-            <td className="text-muted-foreground">ISO</td>
-            <td>{dateStr}</td>
-          </tr>
-        </tbody>
-      </table>
+    <TooltipContent side="bottom" align="start" className="text-xs">
+      <p>{formatUTC(dateStr)}</p>
+      <p className="text-muted-foreground">
+        {new Date(dateStr).toLocaleString()} ({localTz})
+      </p>
     </TooltipContent>
   </Tooltip>
 );
@@ -69,7 +59,8 @@ export const ActivityTable = ({ logs, onRowClick }: ActivityTableProps) => (
           <TableHead className="w-[4.5rem]">Method</TableHead>
           <TableHead className="max-w-[18rem]">Endpoint</TableHead>
           <TableHead className="w-[12rem]">Provider</TableHead>
-          <TableHead className="w-[7rem]">Status</TableHead>
+          <TableHead className="w-[5rem]">Status</TableHead>
+          <TableHead className="w-28">Decision</TableHead>
           <TableHead className="w-[5rem] text-right">Latency</TableHead>
         </TableRow>
       </TableHeader>
@@ -77,7 +68,7 @@ export const ActivityTable = ({ logs, onRowClick }: ActivityTableProps) => (
         {logs.length === 0 ? (
           <TableRow className="hover:bg-transparent">
             <TableCell
-              colSpan={7}
+              colSpan={8}
               className="text-muted-foreground py-16 text-center text-sm"
             >
               No requests yet.
@@ -140,6 +131,9 @@ export const ActivityTable = ({ logs, onRowClick }: ActivityTableProps) => (
                     blocked={isBlockedRequest(log)}
                     rateLimited={isRateLimitedRequest(log)}
                   />
+                </TableCell>
+                <TableCell>
+                  <DecisionBadge decision={getApprovalDecision(log)} />
                 </TableCell>
                 <TableCell className="text-right">
                   <span className="text-muted-foreground font-mono text-xs tabular-nums">

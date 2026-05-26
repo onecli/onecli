@@ -15,12 +15,12 @@ import {
 
 export const getAppConnections = async () => {
   const { projectId } = await resolveUser();
-  return listConnections(projectId);
+  return listConnections({ projectId });
 };
 
 export const getAppConnectionsByProvider = async (provider: string) => {
   const { projectId } = await resolveUser();
-  return listConnectionsByProvider(projectId, provider);
+  return listConnectionsByProvider({ projectId }, provider);
 };
 
 export const getVaultConnections = async () => {
@@ -42,7 +42,7 @@ export const disconnectAppConnection = async (connectionId: string) => {
   const { userId, userEmail, projectId } = await resolveUser();
 
   return withAudit(
-    () => deleteConnection(projectId, connectionId),
+    () => deleteConnection({ projectId }, connectionId),
     () => ({
       projectId,
       userId,

@@ -1,7 +1,9 @@
 "use client";
 
 import { useState } from "react";
+import { useQueryClient } from "@tanstack/react-query";
 import { useInvalidateGatewayCache } from "@/hooks/use-invalidate-cache";
+import { queryKeys } from "@/lib/api/keys";
 import { Pencil, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 import { Card } from "@onecli/ui/components/card";
@@ -40,7 +42,7 @@ interface SecretCardProps {
     isPlatform: boolean;
     createdAt: Date;
   };
-  onUpdate: () => void;
+  onUpdate?: () => void;
   secretActions?: SecretActions;
   readOnly?: boolean;
   badge?: string;
@@ -54,6 +56,7 @@ export const SecretCard = ({
   badge,
 }: SecretCardProps) => {
   const invalidateCache = useInvalidateGatewayCache();
+  const queryClient = useQueryClient();
   const [deleting, setDeleting] = useState(false);
   const [editOpen, setEditOpen] = useState(false);
 
@@ -61,7 +64,9 @@ export const SecretCard = ({
     setDeleting(true);
     try {
       await (secretActions?.deleteSecret ?? defaultDeleteSecret)(secret.id);
-      onUpdate();
+      queryClient.invalidateQueries({ queryKey: queryKeys.secrets.all() });
+      queryClient.invalidateQueries({ queryKey: queryKeys.counts.all() });
+      onUpdate?.();
       invalidateCache();
       toast.success("Secret deleted");
     } catch {

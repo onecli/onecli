@@ -12,6 +12,7 @@ export const linkedinPermissions: AppPermissionDefinition = {
           description: "Get the authenticated user's profile information",
           hostPattern: "api.linkedin.com",
           pathPattern: "/v2/userinfo",
+          aliasPatterns: ["/v2/me"],
           method: "GET",
         },
         {
@@ -20,6 +21,7 @@ export const linkedinPermissions: AppPermissionDefinition = {
           description: "List posts by the authenticated user",
           hostPattern: "api.linkedin.com",
           pathPattern: "/rest/posts*",
+          aliasPatterns: ["/v2/ugcPosts*", "/v2/shares*"],
           method: "GET",
         },
       ],
@@ -33,6 +35,7 @@ export const linkedinPermissions: AppPermissionDefinition = {
           description: "Create a new post on LinkedIn",
           hostPattern: "api.linkedin.com",
           pathPattern: "/rest/posts",
+          aliasPatterns: ["/v2/ugcPosts", "/v2/shares"],
           method: "POST",
         },
         {
@@ -41,6 +44,7 @@ export const linkedinPermissions: AppPermissionDefinition = {
           description: "Delete an existing post",
           hostPattern: "api.linkedin.com",
           pathPattern: "/rest/posts/*",
+          aliasPatterns: ["/v2/ugcPosts/*", "/v2/shares/*"],
           method: "DELETE",
         },
         {
@@ -49,7 +53,17 @@ export const linkedinPermissions: AppPermissionDefinition = {
           description: "Comment on a post",
           hostPattern: "api.linkedin.com",
           pathPattern: "/rest/socialActions/*/comments",
+          aliasPatterns: ["/v2/socialActions/*/comments"],
           method: "POST",
+        },
+        {
+          id: "delete_comment",
+          name: "Delete comment",
+          description: "Delete a comment from a post",
+          hostPattern: "api.linkedin.com",
+          pathPattern: "/rest/socialActions/*/comments/*",
+          aliasPatterns: ["/v2/socialActions/*/comments/*"],
+          method: "DELETE",
         },
         {
           id: "create_reaction",
@@ -57,7 +71,23 @@ export const linkedinPermissions: AppPermissionDefinition = {
           description: "Add a reaction to a post",
           hostPattern: "api.linkedin.com",
           pathPattern: "/rest/reactions*",
+          aliasPatterns: [
+            "/rest/socialActions/*/likes",
+            "/v2/socialActions/*/likes",
+          ],
           method: "POST",
+        },
+        {
+          id: "delete_reaction",
+          name: "Remove reaction",
+          description: "Remove a reaction from a post",
+          hostPattern: "api.linkedin.com",
+          pathPattern: "/rest/reactions/*",
+          aliasPatterns: [
+            "/rest/socialActions/*/likes/*",
+            "/v2/socialActions/*/likes/*",
+          ],
+          method: "DELETE",
         },
       ],
     },

@@ -8,13 +8,14 @@
 
 use std::sync::Arc;
 
+use serde_json::json;
 use sqlx::PgPool;
 use tokio::sync::mpsc;
 use tracing::{info, warn};
 
 use crate::cache::CacheStore;
 use crate::telemetry_core::{
-    collect_batch, extract_columns, CHANNEL_CAPACITY, FLUSH_BATCH_SIZE, SENDER,
+    collect_batch, extract_columns, RequestDecision, CHANNEL_CAPACITY, FLUSH_BATCH_SIZE, SENDER,
 };
 
 // Re-export shared types for consumer code
@@ -30,11 +31,14 @@ pub(crate) fn init(pool: PgPool, _cache: Arc<dyn CacheStore>) {
 }
 
 async fn insert_batch(pool: &PgPool, events: &[RequestEvent]) -> Result<(), sqlx::Error> {
-    let injected: Vec<&RequestEvent> = events.iter().filter(|e| e.injected).collect();
-    if injected.is_empty() {
+    let filtered: Vec<&RequestEvent> = events
+        .iter()
+        .filter(|e| e.injected || !matches!(e.decision, RequestDecision::Allowed))
+        .collect();
+    if filtered.is_empty() {
         return Ok(());
     }
-    let c = extract_columns(&injected);
+    let c = extract_columns(&filtered);
 
     sqlx::query(
         "INSERT INTO request_logs (id, project_id, agent_id, method, host, path, provider, status, latency_ms, injection_count)
@@ -56,6 +60,56 @@ async fn insert_batch(pool: &PgPool, events: &[RequestEvent]) -> Result<(), sqlx
     Ok(())
 }
 
+async fn update_batch(pool: &PgPool, events: &[RequestEvent]) {
+    for event in events {
+        let Some(log_id) = event.existing_log_id.as_ref() else {
+            continue;
+        };
+        let extra = match &event.decision {
+            RequestDecision::ApprovalApproved {
+                approval_id,
+                triggered_at,
+                resolved_at,
+            } => json!({
+                "decision": "approval_approved",
+                "approval_id": approval_id,
+                "triggered_at": triggered_at,
+                "resolved_at": resolved_at,
+            })
+            .to_string(),
+            RequestDecision::ApprovalDenied {
+                approval_id,
+                reason,
+                triggered_at,
+                resolved_at,
+            } => json!({
+                "decision": "approval_denied",
+                "approval_id": approval_id,
+                "approval_reason": reason,
+                "triggered_at": triggered_at,
+                "resolved_at": resolved_at,
+            })
+            .to_string(),
+            _ => "{}".to_string(),
+        };
+        if let Err(e) = sqlx::query(
+            "UPDATE request_logs \
+             SET status = $1, latency_ms = $2, \
+                 extra_data = COALESCE(extra_data, '{}'::jsonb) || $3::jsonb \
+             WHERE id = $4",
+        )
+        .bind(event.status as i32)
+        .bind(event.latency_ms as i32)
+        .bind(&extra)
+        .bind(log_id)
+        .execute(pool)
+        .await
+        {
+            warn!(log_id = %log_id, error = %e, "telemetry approval update failed");
+        }
+    }
+}
+
 async fn flush_loop(mut rx: mpsc::Receiver<RequestEvent>, pool: PgPool) {
     let mut buffer: Vec<RequestEvent> = Vec::with_capacity(FLUSH_BATCH_SIZE);
 
@@ -68,8 +122,22 @@ async fn flush_loop(mut rx: mpsc::Receiver<RequestEvent>, pool: PgPool) {
             continue;
         }
 
-        if let Err(e) = insert_batch(&pool, &buffer).await {
-            warn!(count = buffer.len(), error = %e, "telemetry batch insert failed");
+        let mut updates = Vec::new();
+        let mut regular = Vec::new();
+        for event in buffer.drain(..) {
+            if event.existing_log_id.is_some() {
+                updates.push(event);
+            } else {
+                regular.push(event);
+            }
+        }
+
+        if let Err(e) = insert_batch(&pool, &regular).await {
+            warn!(count = regular.len(), error = %e, "telemetry batch insert failed");
+        }
+
+        if !updates.is_empty() {
+            update_batch(&pool, &updates).await;
         }
 
         buffer.clear();

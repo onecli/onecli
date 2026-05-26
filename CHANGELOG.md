@@ -1,5 +1,47 @@
 # Changelog
 
+## [1.30.0](https://github.com/onecli/onecli/compare/v1.29.2...v1.30.0) (2026-05-24)
+
+
+### Features
+
+* inherit parent agent permissions when creating sub-agents ([#312](https://github.com/onecli/onecli/issues/312)) ([a243837](https://github.com/onecli/onecli/commit/a2438377436ff78935d69f8b26a9e13bc24aa6fd)), closes [#297](https://github.com/onecli/onecli/issues/297)
+
+## [1.29.2](https://github.com/onecli/onecli/compare/v1.29.1...v1.29.2) (2026-05-24)
+
+
+### Bug Fixes
+
+* runtime env vars, credential response, and secret dialog improvements ([#310](https://github.com/onecli/onecli/issues/310)) ([624be33](https://github.com/onecli/onecli/commit/624be33c91ecd6b215a654ba1849dac6e2f13bda))
+
+## [1.29.1](https://github.com/onecli/onecli/compare/v1.29.0...v1.29.1) (2026-05-23)
+
+
+### Bug Fixes
+
+* show redirect URI in OAuth credentials dialog ([#305](https://github.com/onecli/onecli/issues/305)) ([a7e4cd1](https://github.com/onecli/onecli/commit/a7e4cd1524674b8a258ef58279305cd35f460c73))
+
+## [1.29.0](https://github.com/onecli/onecli/compare/v1.28.1...v1.29.0) (2026-05-23)
+
+
+### Features
+
+* add Monday.com integration and Sentry cloud-only stub ([#303](https://github.com/onecli/onecli/issues/303)) ([a67f521](https://github.com/onecli/onecli/commit/a67f52157f3fe954a9edbdbcd1599becd4869174))
+
+## [1.28.1](https://github.com/onecli/onecli/compare/v1.28.0...v1.28.1) (2026-05-19)
+
+
+### Bug Fixes
+
+* show cloud upsell instead of infinite spinner in get-started dialog for OSS ([#293](https://github.com/onecli/onecli/issues/293)) ([6119fc4](https://github.com/onecli/onecli/commit/6119fc411cc40268c204c48d2b412ae14d3a7824))
+
+## [1.28.0](https://github.com/onecli/onecli/compare/v1.27.0...v1.28.0) (2026-05-19)
+
+
+### Features
+
+* v1 API prefix migration ([#291](https://github.com/onecli/onecli/issues/291)) ([e560f38](https://github.com/onecli/onecli/commit/e560f380a6651910c9f77394fead1d64674e7d11))
+
 ## [1.27.0](https://github.com/onecli/onecli/compare/v1.26.0...v1.27.0) (2026-05-18)
 
 

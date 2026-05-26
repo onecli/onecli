@@ -25,8 +25,13 @@ import { Badge } from "@onecli/ui/components/badge";
 import { Checkbox } from "@onecli/ui/components/checkbox";
 import { ScrollArea } from "@onecli/ui/components/scroll-area";
 import { cn } from "@onecli/ui/lib/utils";
-import { getSecrets } from "@/lib/actions/secrets";
-import { getAppConnections } from "@/lib/actions/connections";
+import { useQueryClient } from "@tanstack/react-query";
+import {
+  secrets as secretsApi,
+  connections as connectionsApi,
+} from "@/lib/api";
+import type { Secret, Connection } from "@/lib/api";
+import { queryKeys } from "@/lib/api/keys";
 import {
   getAgentSecrets,
   updateAgentSecretMode,
@@ -46,11 +51,8 @@ interface ManageAccessDialogProps {
   };
   open: boolean;
   onOpenChange: (open: boolean) => void;
-  onUpdated: () => void;
+  onUpdated?: () => void;
 }
-
-type Secret = Awaited<ReturnType<typeof getSecrets>>[number];
-type AppConnection = Awaited<ReturnType<typeof getAppConnections>>[number];
 
 export const ManageAccessDialog = ({
   agent,
@@ -59,19 +61,18 @@ export const ManageAccessDialog = ({
   onUpdated,
 }: ManageAccessDialogProps) => {
   const invalidateCache = useInvalidateGatewayCache();
+  const queryClient = useQueryClient();
   const [mode, setMode] = useState<SecretMode>(
     agent.secretMode === "selective" ? "selective" : "all",
   );
   const [secrets, setSecrets] = useState<Secret[]>([]);
   const [orgSecrets, setOrgSecrets] = useState<Secret[]>([]);
-  const [appConnections, setAppConnections] = useState<AppConnection[]>([]);
-  const [orgAppConnections, setOrgAppConnections] = useState<AppConnection[]>(
-    [],
-  );
+  const [appConnections, setConnections] = useState<Connection[]>([]);
+  const [orgConnections, setOrgConnections] = useState<Connection[]>([]);
   const [selectedSecretIds, setSelectedSecretIds] = useState<Set<string>>(
     () => new Set(),
   );
-  const [selectedAppConnectionIds, setSelectedAppConnectionIds] = useState<
+  const [selectedConnectionIds, setSelectedConnectionIds] = useState<
     Set<string>
   >(() => new Set());
   const [loading, setLoading] = useState(true);
@@ -83,9 +84,9 @@ export const ManageAccessDialog = ({
     try {
       const [allSecrets, assignedSecretIds, allConnections, assignedAppIds] =
         await Promise.all([
-          getSecrets(),
+          secretsApi.list(),
           getAgentSecrets(agent.id),
-          getAppConnections(),
+          connectionsApi.list(),
           getAgentAppConnections(agent.id),
         ]);
       const projectSecrets: typeof allSecrets = [];
@@ -102,9 +103,9 @@ export const ManageAccessDialog = ({
         if (c.status !== "connected") continue;
         (c.scope === "organization" ? orgConns : projectConns).push(c);
       }
-      setAppConnections(projectConns);
-      setOrgAppConnections(orgConns);
-      setSelectedAppConnectionIds(new Set(assignedAppIds));
+      setConnections(projectConns);
+      setOrgConnections(orgConns);
+      setSelectedConnectionIds(new Set(assignedAppIds));
     } catch {
       toast.error("Failed to load credentials");
     } finally {
@@ -134,7 +135,7 @@ export const ManageAccessDialog = ({
   );
 
   const filterConnections = useCallback(
-    (list: AppConnection[]) => {
+    (list: Connection[]) => {
       if (!search.trim()) return list;
       const q = search.toLowerCase();
       return list.filter((c) => {
@@ -166,18 +167,18 @@ export const ManageAccessDialog = ({
     () => filterSecrets(orgSecrets),
     [orgSecrets, filterSecrets],
   );
-  const filteredAppConnections = useMemo(
+  const filteredConnections = useMemo(
     () => filterConnections(appConnections),
     [appConnections, filterConnections],
   );
-  const filteredOrgAppConnections = useMemo(
-    () => filterConnections(orgAppConnections),
-    [orgAppConnections, filterConnections],
+  const filteredOrgConnections = useMemo(
+    () => filterConnections(orgConnections),
+    [orgConnections, filterConnections],
   );
 
   const allConnections = useMemo(
-    () => [...appConnections, ...orgAppConnections],
-    [appConnections, orgAppConnections],
+    () => [...appConnections, ...orgConnections],
+    [appConnections, orgConnections],
   );
   const providerCounts = useMemo(() => {
     const counts = new Map<string, number>();
@@ -196,8 +197,8 @@ export const ManageAccessDialog = ({
     });
   };
 
-  const toggleAppConnection = (connectionId: string) => {
-    setSelectedAppConnectionIds((prev) => {
+  const toggleConnection = (connectionId: string) => {
+    setSelectedConnectionIds((prev) => {
       const next = new Set(prev);
       if (next.has(connectionId)) next.delete(connectionId);
       else next.add(connectionId);
@@ -209,19 +210,19 @@ export const ManageAccessDialog = ({
     secrets.length +
     orgSecrets.length +
     appConnections.length +
-    orgAppConnections.length;
-  const totalSelected = selectedSecretIds.size + selectedAppConnectionIds.size;
+    orgConnections.length;
+  const totalSelected = selectedSecretIds.size + selectedConnectionIds.size;
 
   const selectAll = () => {
     setSelectedSecretIds(new Set([...secrets, ...orgSecrets].map((s) => s.id)));
-    setSelectedAppConnectionIds(
-      new Set([...appConnections, ...orgAppConnections].map((c) => c.id)),
+    setSelectedConnectionIds(
+      new Set([...appConnections, ...orgConnections].map((c) => c.id)),
     );
   };
 
   const clearAll = () => {
     setSelectedSecretIds(new Set());
-    setSelectedAppConnectionIds(new Set());
+    setSelectedConnectionIds(new Set());
   };
 
   const handleSave = async () => {
@@ -233,11 +234,12 @@ export const ManageAccessDialog = ({
           updateAgentSecrets(agent.id, Array.from(selectedSecretIds)),
           updateAgentAppConnections(
             agent.id,
-            Array.from(selectedAppConnectionIds),
+            Array.from(selectedConnectionIds),
           ),
         ]);
       }
-      onUpdated();
+      queryClient.invalidateQueries({ queryKey: queryKeys.agents.all() });
+      onUpdated?.();
       onOpenChange(false);
       invalidateCache();
       toast.success("Credential access updated");
@@ -283,7 +285,7 @@ export const ManageAccessDialog = ({
     );
   };
 
-  const renderConnectionSection = (title: string, items: AppConnection[]) => {
+  const renderConnectionSection = (title: string, items: Connection[]) => {
     if (items.length === 0) return null;
     return (
       <>
@@ -305,8 +307,8 @@ export const ManageAccessDialog = ({
               className="hover:bg-muted/50 flex cursor-pointer items-center gap-3 px-3 py-2.5 transition-colors"
             >
               <Checkbox
-                checked={selectedAppConnectionIds.has(conn.id)}
-                onCheckedChange={() => toggleAppConnection(conn.id)}
+                checked={selectedConnectionIds.has(conn.id)}
+                onCheckedChange={() => toggleConnection(conn.id)}
               />
               <div className="flex min-w-0 flex-1 items-center gap-2.5">
                 {app?.icon && (
@@ -467,7 +469,7 @@ export const ManageAccessDialog = ({
                     {renderSecretSection("Secrets", filteredSecrets)}
                     {renderConnectionSection(
                       "App connections",
-                      filteredAppConnections,
+                      filteredConnections,
                     )}
                     {renderSecretSection(
                       "Organization secrets",
@@ -475,13 +477,13 @@ export const ManageAccessDialog = ({
                     )}
                     {renderConnectionSection(
                       "Organization app connections",
-                      filteredOrgAppConnections,
+                      filteredOrgConnections,
                     )}
 
                     {filteredSecrets.length === 0 &&
                       filteredOrgSecrets.length === 0 &&
-                      filteredAppConnections.length === 0 &&
-                      filteredOrgAppConnections.length === 0 && (
+                      filteredConnections.length === 0 &&
+                      filteredOrgConnections.length === 0 && (
                         <p className="text-muted-foreground py-6 text-center text-xs">
                           No credentials match &ldquo;{search}&rdquo;
                         </p>

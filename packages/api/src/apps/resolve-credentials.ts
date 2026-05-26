@@ -22,7 +22,7 @@ export const resolveAppCredentials = async (
 
   const requiredFields = app.configurable.fields.map((f) => f.name);
 
-  const config = await getAppConfigCredentials(projectId, app.id);
+  const config = await getAppConfigCredentials({ projectId }, app.id);
   if (config && requiredFields.every((f) => !!config[f])) {
     const values: Record<string, string> = {};
     for (const f of requiredFields) values[f] = config[f]!;

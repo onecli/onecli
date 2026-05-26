@@ -3,26 +3,21 @@ import { getCrypto } from "../providers";
 import { logger } from "../lib/logger";
 import { ServiceError } from "./errors";
 import type { OAuthConfigField } from "../apps/types";
+import type { ResourceScope } from "./resource-scope";
+import { scopeWhere, scopeCreate, appConfigKey } from "./resource-scope";
 
-/**
- * Disconnect the app connection for a provider if one exists.
- * Called when BYOC config changes (save, disable, delete) because
- * refresh tokens are bound to the client ID that issued them —
- * changing the OAuth app invalidates existing tokens.
- */
-const disconnectIfConnected = async (projectId: string, provider: string) => {
+const disconnectIfConnected = async (
+  scope: ResourceScope,
+  provider: string,
+) => {
   await db.appConnection.deleteMany({
-    where: { projectId, provider },
+    where: { ...scopeWhere(scope), provider },
   });
 };
 
-/**
- * Get the non-secret config and whether encrypted credentials exist.
- * Never returns decrypted secrets — use `getAppConfigCredentials` for that.
- */
-export const getAppConfig = async (projectId: string, provider: string) => {
+export const getAppConfig = async (scope: ResourceScope, provider: string) => {
   const config = await db.appConfig.findUnique({
-    where: { projectId_provider: { projectId, provider } },
+    where: appConfigKey(scope, provider),
     select: { settings: true, credentials: true, enabled: true },
   });
 
@@ -35,16 +30,12 @@ export const getAppConfig = async (projectId: string, provider: string) => {
   };
 };
 
-/**
- * Get the full decrypted credentials (settings + decrypted secrets merged).
- * Internal only — used by resolve-credentials, never exposed to client.
- */
 export const getAppConfigCredentials = async (
-  projectId: string,
+  scope: ResourceScope,
   provider: string,
 ): Promise<Record<string, string> | null> => {
   const config = await db.appConfig.findUnique({
-    where: { projectId_provider: { projectId, provider } },
+    where: appConfigKey(scope, provider),
     select: { settings: true, credentials: true, enabled: true },
   });
 
@@ -61,7 +52,7 @@ export const getAppConfigCredentials = async (
     ) as Record<string, string>;
   } catch (err) {
     logger.warn(
-      { err, projectId, provider },
+      { err, ...scope, provider },
       "failed to decrypt app config credentials",
     );
     return settings;
@@ -70,12 +61,8 @@ export const getAppConfigCredentials = async (
   return { ...settings, ...decrypted };
 };
 
-/**
- * Create or update an app config, separating secret and non-secret fields.
- * Empty secret values on update are ignored (preserves existing encrypted value).
- */
 export const upsertAppConfig = async (
-  projectId: string,
+  scope: ResourceScope,
   provider: string,
   values: Record<string, string>,
   fieldDefinitions: OAuthConfigField[],
@@ -92,16 +79,14 @@ export const upsertAppConfig = async (
     }
   }
 
-  // Merge with existing encrypted secrets if doing a partial update
   let encryptedCredentials: string | undefined;
   if (Object.keys(secretFields).length > 0) {
     encryptedCredentials = await getCrypto().encrypt(
       JSON.stringify(secretFields),
     );
   } else {
-    // No new secrets provided — check if we should preserve existing
     const existing = await db.appConfig.findUnique({
-      where: { projectId_provider: { projectId, provider } },
+      where: appConfigKey(scope, provider),
       select: { credentials: true },
     });
     if (existing?.credentials) {
@@ -109,13 +94,12 @@ export const upsertAppConfig = async (
     }
   }
 
-  // Disconnect existing connection — refresh tokens are bound to the client ID
-  await disconnectIfConnected(projectId, provider);
+  await disconnectIfConnected(scope, provider);
 
   return db.appConfig.upsert({
-    where: { projectId_provider: { projectId, provider } },
+    where: appConfigKey(scope, provider),
     create: {
-      projectId,
+      ...scopeCreate(scope),
       provider,
       enabled: true,
       settings: plainFields as Prisma.InputJsonValue,
@@ -132,13 +116,8 @@ export const upsertAppConfig = async (
   });
 };
 
-/**
- * Save client credentials as BYOC AppConfig without disconnecting existing
- * connections. Used by credentials_import flow where the connection and
- * client credentials are created together.
- */
 export const saveAppConfigWithoutDisconnect = async (
-  projectId: string,
+  scope: ResourceScope,
   provider: string,
   clientId: string,
   clientSecret: string,
@@ -148,9 +127,9 @@ export const saveAppConfigWithoutDisconnect = async (
   );
 
   return db.appConfig.upsert({
-    where: { projectId_provider: { projectId, provider } },
+    where: appConfigKey(scope, provider),
     create: {
-      projectId,
+      ...scopeCreate(scope),
       provider,
       enabled: true,
       settings: { clientId } as Prisma.InputJsonValue,
@@ -165,12 +144,12 @@ export const saveAppConfigWithoutDisconnect = async (
   });
 };
 
-/**
- * Delete an app config record.
- */
-export const deleteAppConfig = async (projectId: string, provider: string) => {
+export const deleteAppConfig = async (
+  scope: ResourceScope,
+  provider: string,
+) => {
   const config = await db.appConfig.findUnique({
-    where: { projectId_provider: { projectId, provider } },
+    where: appConfigKey(scope, provider),
     select: { id: true },
   });
 
@@ -179,54 +158,40 @@ export const deleteAppConfig = async (projectId: string, provider: string) => {
   }
 
   await db.appConfig.delete({
-    where: { projectId_provider: { projectId, provider } },
+    where: appConfigKey(scope, provider),
   });
 
-  // Disconnect existing connection — tokens issued with deleted credentials are invalid
-  await disconnectIfConnected(projectId, provider);
+  await disconnectIfConnected(scope, provider);
 };
 
-/**
- * Lightweight check for whether an AppConfig exists for this provider.
- */
-/**
- * Check whether an enabled AppConfig exists for this provider.
- */
 export const hasAppConfig = async (
-  projectId: string,
+  scope: ResourceScope,
   provider: string,
 ): Promise<boolean> => {
   const config = await db.appConfig.findUnique({
-    where: { projectId_provider: { projectId, provider } },
+    where: appConfigKey(scope, provider),
     select: { enabled: true },
   });
   return !!config?.enabled;
 };
 
-/**
- * Return all provider IDs with an enabled AppConfig for this account.
- * Single query alternative to calling hasAppConfig in a loop.
- */
 export const listConfiguredProviders = async (
-  projectId: string,
+  scope: ResourceScope,
 ): Promise<string[]> => {
   const configs = await db.appConfig.findMany({
-    where: { projectId, enabled: true },
+    where: { ...scopeWhere(scope), enabled: true },
     select: { provider: true },
   });
   return configs.map((c) => c.provider);
 };
 
-/**
- * Toggle the enabled state of an AppConfig.
- */
 export const toggleAppConfigEnabled = async (
-  projectId: string,
+  scope: ResourceScope,
   provider: string,
   enabled: boolean,
 ) => {
   const config = await db.appConfig.findUnique({
-    where: { projectId_provider: { projectId, provider } },
+    where: appConfigKey(scope, provider),
     select: { id: true },
   });
 
@@ -234,13 +199,10 @@ export const toggleAppConfigEnabled = async (
     throw new ServiceError("NOT_FOUND", "App config not found");
   }
 
-  // Disconnect on any toggle — tokens are bound to the client ID that issued them.
-  // Enabling switches from platform → BYOC client, disabling switches back.
-  // Either way the existing token is invalid.
-  await disconnectIfConnected(projectId, provider);
+  await disconnectIfConnected(scope, provider);
 
   return db.appConfig.update({
-    where: { projectId_provider: { projectId, provider } },
+    where: appConfigKey(scope, provider),
     data: { enabled },
     select: { id: true, enabled: true },
   });

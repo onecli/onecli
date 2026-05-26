@@ -121,7 +121,7 @@ export const authSessionRoutes = () => {
       });
     } catch (err) {
       logger.error(
-        { err, route: "GET /api/auth/session" },
+        { err, route: "GET /v1/auth/session" },
         "session sync failed",
       );
       return c.json({ error: "Internal server error" }, 500);

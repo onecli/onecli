@@ -6,7 +6,8 @@ import { usePathname } from "next/navigation";
 import { ArrowLeft, Loader2 } from "lucide-react";
 import { Button } from "@onecli/ui/components/button";
 import { Skeleton } from "@onecli/ui/components/skeleton";
-import { getAppConnections as defaultGetConnections } from "@/lib/actions/connections";
+import type { getAppConnections as defaultGetConnections } from "@/lib/actions/connections";
+import { apiGet } from "@/lib/api";
 import { checkAppConfigExists as defaultCheckConfig } from "@/lib/actions/app-config";
 import { Card } from "@onecli/ui/components/card";
 import { useAppMessages } from "@/hooks/use-app-connected";
@@ -23,6 +24,11 @@ import { ConfigureCredentialsDialog } from "./configure-credentials-dialog";
 import { PermissionsList } from "./permissions-list";
 import { AppPermissions } from "./app-permissions";
 import { ConnectionAccountCard } from "./connection-account-card";
+
+const defaultGetConnections_ = () =>
+  apiGet<{ connections: Awaited<ReturnType<typeof defaultGetConnections>> }>(
+    "/v1/apps/connections",
+  ).then((r) => r.connections);
 
 interface AppDetailProps {
   app: {
@@ -73,7 +79,7 @@ export const AppDetail = ({
   configurable,
   hasEnvDefaults,
   hasAppConfig,
-  getConnections = defaultGetConnections,
+  getConnections = defaultGetConnections_,
   checkAppConfig = defaultCheckConfig,
   pageScope = "project",
   backPath,

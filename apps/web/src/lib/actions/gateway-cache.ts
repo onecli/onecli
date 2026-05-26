@@ -2,7 +2,7 @@
 
 import { db } from "@onecli/db";
 import { cookies } from "next/headers";
-import { API_URL } from "@/lib/env";
+import { GATEWAY_API_URL } from "@/lib/env";
 import { resolveUser } from "@/lib/actions/resolve-user";
 
 /**
@@ -34,7 +34,7 @@ export const invalidateGatewayCache = async () => {
         .join("; ");
     }
 
-    await fetch(`${API_URL}/api/cache/invalidate`, {
+    await fetch(`${GATEWAY_API_URL}/v1/cache/invalidate`, {
       method: "POST",
       headers,
     });

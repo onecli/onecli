@@ -14,7 +14,7 @@ export const StatusBadge = ({
   if (blocked) {
     return (
       <span className="inline-flex items-center gap-1 text-xs font-medium text-destructive">
-        <Ban className="size-3" />
+        <Ban className="size-3 shrink-0" />
         Blocked
       </span>
     );
@@ -23,7 +23,7 @@ export const StatusBadge = ({
   if (rateLimited) {
     return (
       <span className="inline-flex items-center gap-1 text-xs font-medium text-amber-600 dark:text-amber-400">
-        <Timer className="size-3" />
+        <Timer className="size-3 shrink-0" />
         Rate Limited
       </span>
     );

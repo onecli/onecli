@@ -1,6 +1,6 @@
 import { Hono } from "hono";
 import type { ApiEnv } from "../types";
-import { authMiddleware } from "../middleware/auth";
+import { authMiddleware, requireProjectId } from "../middleware/auth";
 import { invalidateGatewayCache } from "../lib/gateway-invalidate";
 import {
   listSecrets,
@@ -9,6 +9,7 @@ import {
   deleteSecret,
 } from "../services/secret-service";
 import { createSecretSchema, updateSecretSchema } from "../validations/secret";
+import { getResourceHooks } from "../providers";
 
 export const secretRoutes = () => {
   const app = new Hono<ApiEnv>();
@@ -17,7 +18,10 @@ export const secretRoutes = () => {
   // GET /secrets
   app.get("/", async (c) => {
     const auth = c.get("auth");
-    const secrets = await listSecrets(auth.projectId);
+    const secrets = await listSecrets({
+      projectId: requireProjectId(auth),
+      organizationId: auth.organizationId,
+    });
     return c.json(secrets);
   });
 
@@ -33,7 +37,12 @@ export const secretRoutes = () => {
       );
     }
 
-    const secret = await createSecret(auth.projectId, parsed.data);
+    await getResourceHooks().beforeCreateSecret(auth.organizationId);
+
+    const secret = await createSecret(
+      { projectId: requireProjectId(auth) },
+      parsed.data,
+    );
     invalidateGatewayCache(c.req.raw);
     return c.json(secret, 201);
   });
@@ -51,7 +60,11 @@ export const secretRoutes = () => {
       );
     }
 
-    await updateSecret(auth.projectId, secretId, parsed.data);
+    await updateSecret(
+      { projectId: requireProjectId(auth) },
+      secretId,
+      parsed.data,
+    );
     invalidateGatewayCache(c.req.raw);
     return c.json({ success: true });
   });
@@ -60,7 +73,7 @@ export const secretRoutes = () => {
   app.delete("/:secretId", async (c) => {
     const auth = c.get("auth");
     const secretId = c.req.param("secretId");
-    await deleteSecret(auth.projectId, secretId);
+    await deleteSecret({ projectId: requireProjectId(auth) }, secretId);
     invalidateGatewayCache(c.req.raw);
     return c.body(null, 204);
   });
