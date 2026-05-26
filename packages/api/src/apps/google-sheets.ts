@@ -17,7 +17,7 @@ export const googleSheets: AppDefinition = {
       "email",
       "profile",
       "https://www.googleapis.com/auth/drive.readonly",
-      "https://www.googleapis.com/auth/drive.file",
+      "https://www.googleapis.com/auth/spreadsheets",
     ],
     permissions: [
       {
@@ -27,9 +27,9 @@ export const googleSheets: AppDefinition = {
         access: "read",
       },
       {
-        scope: "https://www.googleapis.com/auth/drive.file",
-        name: "Manage app spreadsheets",
-        description: "Create and edit spreadsheets opened or created by OneCLI",
+        scope: "https://www.googleapis.com/auth/spreadsheets",
+        name: "Edit spreadsheets",
+        description: "Create and edit any of your Google Sheets",
         access: "write",
       },
       {
