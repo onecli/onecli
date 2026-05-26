@@ -20,6 +20,7 @@ import { withProjectPrefix } from "@/lib/navigation";
 import { hasJsonData } from "@onecli/api/lib/format";
 import {
   isBlockedRequest,
+  isDefaultDenied,
   isRateLimitedRequest,
   getBlockedByRule,
   getConnectionLabel,
@@ -50,6 +51,7 @@ export const ActivityDetailDialog = ({
 }: ActivityDetailDialogProps) => {
   const pathname = usePathname();
   const blocked = log ? isBlockedRequest(log) : false;
+  const defaultDenied = log ? isDefaultDenied(log) : false;
   const rateLimited = log ? isRateLimitedRequest(log) : false;
   const blockedByRule = log ? getBlockedByRule(log) : null;
   const connectionLabel = log ? getConnectionLabel(log) : null;
@@ -99,9 +101,20 @@ export const ActivityDetailDialog = ({
               <StatusBadge
                 status={log.status}
                 blocked={blocked}
+                defaultDenied={defaultDenied}
                 rateLimited={rateLimited}
               />
             </Row>
+            {defaultDenied && (
+              <Row label="Reason">
+                <Link
+                  href={rulesUrl}
+                  className="text-destructive hover:text-destructive/80 underline underline-offset-4 transition-colors"
+                >
+                  No matching allow rule
+                </Link>
+              </Row>
+            )}
             {(blocked || rateLimited) && blockedByRule && (
               <Row label={rateLimited ? "Limited by" : "Blocked by"}>
                 <Link

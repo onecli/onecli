@@ -762,6 +762,7 @@ async fn handle_http_proxy(
         connection_label: None,
         finalizer: resolved_finalizer,
         body_transform: resolved_body_transform,
+        policy_mode: resolved.policy_mode,
     };
 
     let http_client =

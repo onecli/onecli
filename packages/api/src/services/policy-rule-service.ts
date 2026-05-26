@@ -11,6 +11,7 @@ import {
   type CreatePolicyRuleInput,
   type UpdatePolicyRuleInput,
   type RuleCondition,
+  type PolicyMode,
 } from "../validations/policy-rule";
 import type { AppTool, AppPermissionLevel } from "../apps/app-permissions";
 
@@ -206,7 +207,9 @@ export const setAppPermissionsService = async (
   appName: string,
   changes: AppPermissionChange[],
   conditions?: RuleCondition[],
+  policyMode?: PolicyMode,
 ) => {
+  const isDenyMode = policyMode === "deny";
   const existing = await listAppPermissionRules(scope, provider);
 
   const existingByToolId = new Map<string, typeof existing>();
@@ -236,6 +239,35 @@ export const setAppPermissionsService = async (
     const existingRules = existingByToolId.get(change.toolId) ?? [];
 
     if (change.permission === "allow") {
+      if (isDenyMode) {
+        // Deny mode: "allow" = create an explicit allow rule
+        if (existingRules.length > 0) {
+          for (const rule of existingRules) {
+            if (rule.action !== "allow" || conditionsProvided) {
+              toUpdate.push({ ruleId: rule.id, action: "allow" });
+            }
+          }
+          const existingPatterns = new Set(
+            existingRules.map((r) => r.pathPattern),
+          );
+          for (const pattern of allPatterns(change.tool)) {
+            if (!existingPatterns.has(pattern)) {
+              toCreateRules.push({ change, pathPattern: pattern });
+            }
+          }
+        } else {
+          for (const pattern of allPatterns(change.tool)) {
+            toCreateRules.push({ change, pathPattern: pattern });
+          }
+        }
+      } else {
+        // Allow mode: "allow" = delete the restriction rule (default = allowed)
+        for (const rule of existingRules) {
+          toDelete.push(rule.id);
+        }
+      }
+    } else if (change.permission === "block" && isDenyMode) {
+      // Deny mode: "block" = delete the allow rule (default = blocked)
       for (const rule of existingRules) {
         toDelete.push(rule.id);
       }

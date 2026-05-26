@@ -29,7 +29,10 @@ import {
   getAppPermissionDefinition,
   type AppPermissionLevel,
 } from "@onecli/api/apps/app-permissions";
-import type { RuleCondition } from "@onecli/api/validations/policy-rule";
+import type {
+  RuleCondition,
+  PolicyMode,
+} from "@onecli/api/validations/policy-rule";
 import { setAppPermissions as defaultSetAppPermissions } from "@/lib/actions/rules";
 import { ConditionBuilder } from "@/lib/components/condition-builder";
 import type { RuleActions } from "./types";
@@ -76,6 +79,7 @@ interface ApplicationRuleFormProps {
   onClose: () => void;
   ruleActions?: RuleActions;
   connectedProviders?: Map<string, string[]>;
+  policyMode?: PolicyMode;
 }
 
 export const ApplicationRuleForm = ({
@@ -83,13 +87,17 @@ export const ApplicationRuleForm = ({
   onClose,
   ruleActions,
   connectedProviders,
+  policyMode = "allow",
 }: ApplicationRuleFormProps) => {
+  const isDenyMode = policyMode === "deny";
   const invalidateCache = useInvalidateGatewayCache();
   const [step, setStep] = useState<Step>("app");
   const [selectedProvider, setSelectedProvider] = useState<string | null>(null);
   const [scope, setScope] = useState<Scope>("all");
   const [selectedToolId, setSelectedToolId] = useState<string | null>(null);
-  const [policy, setPolicy] = useState<AppPermissionLevel>("allow");
+  const [policy, setPolicy] = useState<AppPermissionLevel>(
+    isDenyMode ? "block" : "allow",
+  );
   const [conditions, setConditions] = useState<RuleCondition[]>([]);
   const [saving, setSaving] = useState(false);
 

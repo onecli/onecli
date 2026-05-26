@@ -37,6 +37,7 @@ pub(crate) enum RequestDecision {
         triggered_at: String,
         resolved_at: String,
     },
+    BlockedByDefaultPolicy,
 }
 
 pub(crate) struct RequestEvent {

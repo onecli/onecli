@@ -1,16 +1,27 @@
-import { Ban, Timer } from "lucide-react";
+import { Ban, ShieldCheck, Timer } from "lucide-react";
 
 interface StatusBadgeProps {
   status: number;
   blocked?: boolean;
+  defaultDenied?: boolean;
   rateLimited?: boolean;
 }
 
 export const StatusBadge = ({
   status,
   blocked,
+  defaultDenied,
   rateLimited,
 }: StatusBadgeProps) => {
+  if (defaultDenied) {
+    return (
+      <span className="inline-flex items-center gap-1 text-xs font-medium text-destructive">
+        <ShieldCheck className="size-3 shrink-0" />
+        Not allowed
+      </span>
+    );
+  }
+
   if (blocked) {
     return (
       <span className="inline-flex items-center gap-1 text-xs font-medium text-destructive">

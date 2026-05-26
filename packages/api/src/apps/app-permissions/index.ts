@@ -4,6 +4,7 @@ export type {
   AppPermissionLevel,
   AppPermissionDefinition,
 } from "./types";
+export { mapRuleActionToPermission } from "./types";
 
 import type { AppPermissionDefinition } from "./types";
 import { awsPermissions } from "./aws";

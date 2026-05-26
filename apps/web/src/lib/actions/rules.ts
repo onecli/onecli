@@ -1,5 +1,7 @@
 "use server";
 
+import { db } from "@onecli/db";
+import type { PolicyMode } from "@onecli/api/validations/policy-rule";
 import { resolveProjectContext } from "@/lib/actions/resolve-user";
 import {
   listPolicyRules,
@@ -19,6 +21,7 @@ import {
 } from "@onecli/api/services/audit-service";
 import {
   getAppPermissionDefinition,
+  mapRuleActionToPermission,
   type AppPermissionLevel,
 } from "@onecli/api/apps/app-permissions";
 import type { RuleCondition } from "@onecli/api/validations/policy-rule";
@@ -92,7 +95,7 @@ export const getAppPermissionStates = async (
     const meta = rule.metadata as { toolId?: string } | null;
     if (meta?.toolId) {
       states[meta.toolId] = {
-        permission: rule.action === "block" ? "block" : "manual_approval",
+        permission: mapRuleActionToPermission(rule.action),
         conditions: Array.isArray(rule.conditions) ? rule.conditions : [],
       };
     }
@@ -105,7 +108,8 @@ export const setAppPermissions = async (
   changes: { toolId: string; permission: AppPermissionLevel }[],
   conditions?: RuleCondition[],
 ): Promise<void> => {
-  const { userId, userEmail, projectId } = await resolveProjectContext();
+  const { userId, userEmail, projectId, organizationId } =
+    await resolveProjectContext();
   const def = getAppPermissionDefinition(provider);
   if (!def)
     throw new Error(`No permission definition for provider: ${provider}`);
@@ -122,6 +126,11 @@ export const setAppPermissions = async (
   const appName =
     provider.charAt(0).toUpperCase() + provider.slice(1).replace(/-/g, " ");
 
+  const org = await db.organization.findUniqueOrThrow({
+    where: { id: organizationId },
+    select: { policyMode: true },
+  });
+
   await withAudit(
     () =>
       setAppPermissionsService(
@@ -130,6 +139,7 @@ export const setAppPermissions = async (
         appName,
         resolvedChanges,
         conditions,
+        org.policyMode as PolicyMode,
       ),
     (result) => ({
       projectId,

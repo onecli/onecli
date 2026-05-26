@@ -29,6 +29,11 @@ export const isRateLimitedRequest = (log: RequestLogEntry): boolean => {
   return data?.decision === DECISION_RATE_LIMITED;
 };
 
+export const isDefaultDenied = (log: RequestLogEntry): boolean => {
+  const data = log.extraData as Record<string, unknown> | null;
+  return data?.decision === "blocked_by_default_policy";
+};
+
 export const getBlockedByRule = (log: RequestLogEntry): string | null => {
   const data = log.extraData as Record<string, unknown> | null;
   if (typeof data?.[BLOCKED_BY_RULE_KEY] === "string") {

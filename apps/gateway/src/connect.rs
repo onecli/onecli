@@ -48,6 +48,9 @@ pub(crate) struct ConnectResponse {
     /// Normalized plan name for quota enforcement ("free", "pro", "team").
     #[serde(default)]
     pub plan: String,
+    /// Organization policy mode: "allow" (default) or "deny" (block by default).
+    #[serde(default)]
+    pub policy_mode: String,
 }
 
 /// Result of per-request app connection resolution.
@@ -199,6 +202,7 @@ impl PolicyEngine {
             agent_identifier: agent.identifier.clone(),
             access_restricted,
             plan,
+            policy_mode: agent.policy_mode.clone(),
         })
     }
 
@@ -688,6 +692,7 @@ impl PolicyEngine {
                     "manual_approval" => PolicyAction::ManualApproval {
                         rule_id: r.id.clone(),
                     },
+                    "allow" => PolicyAction::Allow,
                     _ => return None,
                 };
                 Some(PolicyRule {
@@ -1075,6 +1080,7 @@ mod tests {
             agent_identifier: None,
             access_restricted: false,
             plan: "pro".to_string(),
+            policy_mode: "allow".to_string(),
         };
 
         store
@@ -1118,6 +1124,7 @@ mod tests {
             agent_identifier: None,
             access_restricted: false,
             plan: "pro".to_string(),
+            policy_mode: "allow".to_string(),
         };
 
         // Pre-populate cache with the key format that resolve() uses
@@ -1157,6 +1164,7 @@ mod tests {
             agent_identifier: None,
             access_restricted: true,
             plan: "pro".to_string(),
+            policy_mode: "allow".to_string(),
         };
 
         store

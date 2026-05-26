@@ -100,10 +100,28 @@ pub(super) async fn handle_websocket(
         .unwrap_or_else(|| "/".to_string());
 
     let agent_token = proxy_ctx.agent_token.as_deref().unwrap_or("");
-    let decision =
-        policy::evaluate("GET", &path, None, &rules.policy_rules, agent_token, cache).await;
+    let decision = policy::evaluate(
+        "GET",
+        &path,
+        None,
+        &rules.policy_rules,
+        agent_token,
+        cache,
+        &rules.policy_mode,
+        !rules.injection_rules.is_empty(),
+    )
+    .await;
 
     match &decision {
+        PolicyDecision::BlockedByDefaultPolicy => {
+            warn!(host = %host, path = %path, "WebSocket BLOCKED by default deny policy");
+            return Ok(response::blocked_by_default_policy(
+                "GET",
+                &path,
+                host,
+                proxy_ctx.project_id.as_deref(),
+            ));
+        }
         PolicyDecision::Blocked { rule_name } => {
             warn!(host = %host, path = %path, rule = %rule_name, "WebSocket BLOCKED by policy rule");
             return Ok(response::blocked_by_policy(

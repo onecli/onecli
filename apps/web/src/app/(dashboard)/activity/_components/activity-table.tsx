@@ -21,6 +21,7 @@ import { formatRelative, formatUTC } from "@onecli/api/lib/format";
 import { getProviderIcon } from "@onecli/api/apps/provider-icons";
 import {
   isBlockedRequest,
+  isDefaultDenied,
   isRateLimitedRequest,
   getApprovalDecision,
   type RequestLogEntry,
@@ -129,6 +130,7 @@ export const ActivityTable = ({ logs, onRowClick }: ActivityTableProps) => (
                   <StatusBadge
                     status={log.status}
                     blocked={isBlockedRequest(log)}
+                    defaultDenied={isDefaultDenied(log)}
                     rateLimited={isRateLimitedRequest(log)}
                   />
                 </TableCell>

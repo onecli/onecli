@@ -201,6 +201,8 @@ pub(crate) struct ResolvedRules {
     /// Provider-specific body transform resolved from the app connection.
     /// The handler decides per-request whether to act.
     pub body_transform: Option<crate::apps::BodyTransform>,
+    /// Organization policy mode: "allow" (default) or "deny" (block by default).
+    pub policy_mode: String,
 }
 
 /// Result of per-request rule resolution including app connection disambiguation.
@@ -348,6 +350,7 @@ async fn resolve_rules(
             connection_label,
             finalizer,
             body_transform,
+            policy_mode: resp.policy_mode,
         },
         app_connections: resp.app_connections,
     })

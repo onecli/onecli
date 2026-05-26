@@ -51,6 +51,7 @@ export const getSettingsSections = (
   {
     label: "Security",
     items: [
+      { title: "Policy", url: "/settings/policy", icon: Shield },
       { title: "Encryption", url: "/settings/encryption", icon: ShieldCheck },
     ],
   },

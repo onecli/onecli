@@ -156,11 +156,31 @@ pub(crate) async fn forward_request(
         &rules.policy_rules,
         agent_token,
         cache,
+        &rules.policy_mode,
+        !rules.injection_rules.is_empty(),
     )
     .await;
 
-    // ── Early return for block / rate-limit (no body needed) ─────
+    // ── Early return for block / rate-limit / default-deny (no body needed) ───
     match &decision {
+        PolicyDecision::BlockedByDefaultPolicy => {
+            warn!(method = %method, url = %url, "BLOCKED by default deny policy");
+            emit_policy_telemetry(
+                proxy_ctx,
+                host,
+                &method,
+                &path,
+                start,
+                StatusCode::FORBIDDEN,
+                crate::telemetry_core::RequestDecision::BlockedByDefaultPolicy,
+            );
+            return Ok(response::blocked_by_default_policy(
+                method.as_str(),
+                &path,
+                host,
+                proxy_ctx.project_id.as_deref(),
+            ));
+        }
         PolicyDecision::Blocked { rule_name } => {
             warn!(method = %method, url = %url, rule = %rule_name, "BLOCKED by policy rule");
             emit_policy_telemetry(

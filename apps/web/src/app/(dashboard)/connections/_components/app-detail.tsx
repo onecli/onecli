@@ -65,6 +65,7 @@ interface AppDetailProps {
   permissionActions?: React.ComponentProps<typeof AppPermissions>["actions"];
   orgPermissionStates?: Record<string, AppPermissionLevel>;
   orgConditions?: Record<string, unknown[]>;
+  policyMode?: "allow" | "deny";
 }
 
 interface ConnectionData {
@@ -90,6 +91,7 @@ export const AppDetail = ({
   permissionActions,
   orgPermissionStates,
   orgConditions,
+  policyMode,
 }: AppDetailProps) => {
   const pathname = usePathname();
   const [connections, setConnections] = useState<ConnectionData[]>([]);
@@ -298,6 +300,7 @@ export const AppDetail = ({
               actions={permissionActions}
               orgStates={orgPermissionStates}
               orgConditions={orgConditions}
+              policyMode={policyMode}
             />
           ) : isConnected && app.permissions.length > 0 ? (
             <PermissionsList

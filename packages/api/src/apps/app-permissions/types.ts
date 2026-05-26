@@ -15,6 +15,15 @@ export interface AppToolGroup {
 
 export type AppPermissionLevel = "allow" | "manual_approval" | "block";
 
+export const mapRuleActionToPermission = (
+  action: string,
+): AppPermissionLevel =>
+  action === "block"
+    ? "block"
+    : action === "allow"
+      ? "allow"
+      : "manual_approval";
+
 export interface AppPermissionDefinition {
   provider: string;
   groups: AppToolGroup[];

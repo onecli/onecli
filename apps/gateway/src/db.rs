@@ -29,6 +29,7 @@ pub(crate) struct AgentRow {
     pub organization_id: String,
     pub secret_mode: String,
     pub subscription_status: String,
+    pub policy_mode: String,
 }
 
 /// A secret row from the `secrets` table.
@@ -137,7 +138,7 @@ pub(crate) async fn find_agent_by_token(
     access_token: &str,
 ) -> Result<Option<AgentRow>> {
     sqlx::query_as::<_, AgentRow>(
-        r#"SELECT a.id, a.name, a.identifier, a.project_id, p.organization_id, a.secret_mode, o.subscription_status
+        r#"SELECT a.id, a.name, a.identifier, a.project_id, p.organization_id, a.secret_mode, o.subscription_status, o.policy_mode
            FROM agents a
            JOIN projects p ON a.project_id = p.id
            JOIN organizations o ON p.organization_id = o.id
@@ -218,7 +219,7 @@ pub(crate) async fn find_policy_rules_by_project(
                   action, rate_limit, rate_limit_window, conditions
            FROM policy_rules
            WHERE project_id = $1 AND enabled = true
-             AND action IN ('block', 'rate_limit', 'manual_approval')"#,
+             AND action IN ('block', 'rate_limit', 'manual_approval', 'allow')"#,
     )
     .bind(project_id)
     .fetch_all(pool)
@@ -236,7 +237,7 @@ pub(crate) async fn find_policy_rules_by_org(
                   action, rate_limit, rate_limit_window, conditions
            FROM policy_rules
            WHERE organization_id = $1 AND scope = 'organization' AND enabled = true
-             AND action IN ('block', 'rate_limit', 'manual_approval')"#,
+             AND action IN ('block', 'rate_limit', 'manual_approval', 'allow')"#,
     )
     .bind(organization_id)
     .fetch_all(pool)

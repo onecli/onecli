@@ -329,6 +329,33 @@ pub(crate) fn blocked_by_policy<S>(
     ))
 }
 
+/// 403 Forbidden — no allow rule matched in deny-by-default mode.
+pub(crate) fn blocked_by_default_policy<S>(
+    method: &str,
+    path: &str,
+    host: &str,
+    project_id: Option<&str>,
+) -> Response<ForwardBody<S>> {
+    let base = scoped_url(dashboard_url(), "", project_id);
+    let hostname = host.split(':').next().unwrap_or(host);
+    let encoded_host = utf8_percent_encode(hostname, NON_ALPHANUMERIC);
+    with_no_retry(json_error(
+        StatusCode::FORBIDDEN,
+        serde_json::json!({
+            "error": "blocked_by_default_policy",
+            "message": format!(
+                "Your organization's default-deny policy blocked this request. \
+                 {method} {hostname}{path} requires an explicit allow rule. \
+                 Create one in your OneCLI dashboard."
+            ),
+            "method": method,
+            "host": hostname,
+            "path": path,
+            "dashboard_url": format!("{base}/rules?create=allow&host={encoded_host}"),
+        }),
+    ))
+}
+
 /// 429 Too Many Requests — request rate-limited by a policy rule.
 pub(crate) fn rate_limited<S>(
     limit: u64,

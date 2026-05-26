@@ -20,6 +20,7 @@ model Organization {
   stripeCustomerId   String?  @unique @map("stripe_customer_id")
   subscriptionStatus String   @default("free") @map("subscription_status")
   awsExternalId      String?  @map("aws_external_id")
+  policyMode         String   @default("allow") @map("policy_mode") // "allow" | "deny"
   createdAt          DateTime @default(now()) @map("created_at")
   updatedAt          DateTime @updatedAt @map("updated_at")
 
