@@ -575,10 +575,22 @@ async fn handle_connect(
         intercept = true;
     }
 
+    // Derive upstream scheme from the CONNECT port.
+    // Only port 443 (HTTPS default) uses TLS. All other ports — including 80
+    // and non-standard ports like 4000 — are treated as plain HTTP, which
+    // matches reality for Docker-internal services.
+    let scheme: String = host
+        .rsplit_once(':')
+        .and_then(|(_, p)| p.parse::<u16>().ok())
+        .map(|p| if p == 443 { "https" } else { "http" })
+        .unwrap_or("https")
+        .to_string();
+
     info!(
         peer = %peer_addr,
         host = %host,
         mode = if intercept { "mitm" } else { "tunnel" },
+        scheme = %scheme,
         "CONNECT"
     );
 
@@ -615,13 +627,14 @@ async fn handle_connect(
                         proxy_ctx,
                         approval_store,
                         Arc::clone(&state.policy_engine),
+                        &scheme,
                     )
                     .await
                 } else {
                     tunnel::tunnel(upgraded, &host).await
                 };
                 if let Err(e) = result {
-                    warn!(host = %host, error = %e, "connection error");
+                    warn!(host = %host, error = %e, error_debug = ?e, "connection error");
                 }
             }
             Err(e) => {
