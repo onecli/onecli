@@ -2,7 +2,11 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useRouter, usePathname } from "next/navigation";
-import { withProjectPrefix } from "@/lib/navigation";
+import {
+  PROJECT_PATH_RE,
+  ORG_PATH_RE,
+  withProjectPrefix,
+} from "@/lib/navigation";
 import { ChevronRight } from "lucide-react";
 import { Button } from "@onecli/ui/components/button";
 import { Skeleton } from "@onecli/ui/components/skeleton";
@@ -123,7 +127,12 @@ export const AppsTab = ({
     const top = Math.round(window.screenY + (window.outerHeight - h) / 2);
     const searchParams = new URLSearchParams();
     if (options?.agentName) searchParams.set("agent_name", options.agentName);
-    if (pageScope === "organization") searchParams.set("org", "true");
+    const projectMatch = pathname.match(PROJECT_PATH_RE)?.[1];
+    if (projectMatch) searchParams.set("projectId", projectMatch);
+    if (pageScope === "organization") {
+      const orgMatch = pathname.match(ORG_PATH_RE)?.[1];
+      if (orgMatch) searchParams.set("orgId", orgMatch);
+    }
     const qs = searchParams.toString();
     window.open(
       `/app-connect/${provider}${qs ? `?${qs}` : ""}`,
@@ -370,7 +379,7 @@ const AppRow = ({
             />
           </svg>
           <span className="text-[11px] font-semibold tracking-wide text-brand">
-            Pro
+            Team
           </span>
         </span>
       ) : (

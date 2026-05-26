@@ -12,6 +12,7 @@ import {
   generateNonce,
 } from "../lib/oauth-state";
 import { APP_URL, NODE_ENV } from "../lib/env";
+import { dashboardUrl } from "../lib/dashboard-url";
 import {
   invalidateGatewayCache,
   invalidateGatewayCacheForAccount,
@@ -172,7 +173,7 @@ export const appRoutes = () => {
 
     const hint = isConfigured
       ? `Your MCP server needs local credential stub files to start. Create them in the format and location the MCP server expects, but use 'onecli-managed' as a placeholder for all secrets. See ${docsBaseURL}/${provider}.md for examples (fallback: ${docsBaseURL}/general-app.md ). The OneCLI gateway handles real OAuth token exchange at request time.`
-      : `This app is not configured yet. Go to ${APP_URL}/connections?connect=${provider} to set up your credentials.`;
+      : `This app is not configured yet. Go to ${dashboardUrl(`/connections?connect=${provider}`, { projectId })} to set up your credentials.`;
 
     return c.json({
       id: appDef.id,
@@ -295,6 +296,10 @@ export const appRoutes = () => {
       const state = verifyOAuthState(stateParam);
       if (!state || state.provider !== provider) {
         return errorRedirect("Invalid state parameter");
+      }
+
+      if (!state.projectId) {
+        return errorRedirect("Missing project in state");
       }
 
       const stateProject = await db.project.findUnique({
@@ -448,7 +453,6 @@ export const appRoutes = () => {
     const body = (await c.req.json().catch(() => null)) as {
       fields?: Record<string, string>;
       connectionId?: string;
-      org?: boolean;
     } | null;
     if (!body?.fields) {
       return c.json({ error: "Missing fields in request body" }, 400);
@@ -506,18 +510,16 @@ export const appRoutes = () => {
 
     const connectionOpts = { scopes, metadata };
 
-    if (body.org) {
-      const orgResponse = await getOAuthOrg().tryHandleOrgConnect(
-        auth,
-        c.req.raw,
-        provider,
-        credentials,
-        connectionOpts,
-        body.connectionId,
-        fields,
-      );
-      if (orgResponse) return orgResponse;
-    }
+    const orgResponse = await getOAuthOrg().tryHandleOrgConnect(
+      auth,
+      c.req.raw,
+      provider,
+      credentials,
+      connectionOpts,
+      body.connectionId,
+      fields,
+    );
+    if (orgResponse) return orgResponse;
 
     await getConnectionHooks().beforeConnect(auth.organizationId, appDef);
 

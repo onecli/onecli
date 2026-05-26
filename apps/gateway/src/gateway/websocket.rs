@@ -106,7 +106,12 @@ pub(super) async fn handle_websocket(
     match &decision {
         PolicyDecision::Blocked { rule_name } => {
             warn!(host = %host, path = %path, rule = %rule_name, "WebSocket BLOCKED by policy rule");
-            return Ok(response::blocked_by_policy("GET", &path, rule_name));
+            return Ok(response::blocked_by_policy(
+                "GET",
+                &path,
+                rule_name,
+                proxy_ctx.project_id.as_deref(),
+            ));
         }
         PolicyDecision::RateLimited {
             limit,
@@ -123,6 +128,7 @@ pub(super) async fn handle_websocket(
                 "GET",
                 &path,
                 "Manual approval required",
+                proxy_ctx.project_id.as_deref(),
             ));
         }
         PolicyDecision::Allow => {}

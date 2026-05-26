@@ -1,6 +1,6 @@
 "use server";
 
-import { resolveUser } from "@/lib/actions/resolve-user";
+import { resolveProjectContext } from "@/lib/actions/resolve-user";
 import {
   listPolicyRules,
   createPolicyRule as createPolicyRuleService,
@@ -24,12 +24,12 @@ import {
 import type { RuleCondition } from "@onecli/api/validations/policy-rule";
 
 export const getRules = async () => {
-  const { projectId } = await resolveUser();
+  const { projectId } = await resolveProjectContext();
   return listPolicyRules({ projectId });
 };
 
 export const createRule = async (input: CreatePolicyRuleInput) => {
-  const { userId, userEmail, projectId } = await resolveUser();
+  const { userId, userEmail, projectId } = await resolveProjectContext();
   return withAudit(
     () => createPolicyRuleService({ projectId }, input),
     (rule) => ({
@@ -47,7 +47,7 @@ export const updateRule = async (
   ruleId: string,
   input: UpdatePolicyRuleInput,
 ): Promise<void> => {
-  const { userId, userEmail, projectId } = await resolveUser();
+  const { userId, userEmail, projectId } = await resolveProjectContext();
   return withAudit(
     () => updatePolicyRuleService({ projectId }, ruleId, input),
     () => ({
@@ -62,7 +62,7 @@ export const updateRule = async (
 };
 
 export const deleteRule = async (ruleId: string): Promise<void> => {
-  const { userId, userEmail, projectId } = await resolveUser();
+  const { userId, userEmail, projectId } = await resolveProjectContext();
   return withAudit(
     () => deletePolicyRuleService({ projectId }, ruleId),
     () => ({
@@ -84,7 +84,7 @@ export type AppPermissionState = {
 export const getAppPermissionStates = async (
   provider: string,
 ): Promise<Record<string, AppPermissionState>> => {
-  const { projectId } = await resolveUser();
+  const { projectId } = await resolveProjectContext();
   const rules = await listAppPermissionRules({ projectId }, provider);
 
   const states: Record<string, AppPermissionState> = {};
@@ -105,7 +105,7 @@ export const setAppPermissions = async (
   changes: { toolId: string; permission: AppPermissionLevel }[],
   conditions?: RuleCondition[],
 ): Promise<void> => {
-  const { userId, userEmail, projectId } = await resolveUser();
+  const { userId, userEmail, projectId } = await resolveProjectContext();
   const def = getAppPermissionDefinition(provider);
   if (!def)
     throw new Error(`No permission definition for provider: ${provider}`);
@@ -153,7 +153,7 @@ export const setAppPermissions = async (
 export const getOverlappingRuleCountForApp = async (
   provider: string,
 ): Promise<number> => {
-  const { projectId } = await resolveUser();
+  const { projectId } = await resolveProjectContext();
   const def = getAppPermissionDefinition(provider);
   if (!def) return 0;
   const hostPatterns = [

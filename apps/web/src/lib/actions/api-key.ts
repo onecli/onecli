@@ -1,6 +1,6 @@
 "use server";
 
-import { resolveUser } from "@/lib/actions/resolve-user";
+import { resolveProjectContext } from "@/lib/actions/resolve-user";
 import {
   getApiKey as getApiKeyService,
   regenerateApiKey as regenerateApiKeyService,
@@ -12,12 +12,12 @@ import {
 } from "@onecli/api/services/audit-service";
 
 export const getApiKey = async () => {
-  const { userId, projectId } = await resolveUser();
+  const { userId, projectId } = await resolveProjectContext();
   return getApiKeyService(userId, { projectId });
 };
 
 export const regenerateApiKey = async () => {
-  const { userId, userEmail, projectId } = await resolveUser();
+  const { userId, userEmail, projectId } = await resolveProjectContext();
   return withAudit(
     () => regenerateApiKeyService(userId, { projectId }),
     () => ({

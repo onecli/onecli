@@ -268,7 +268,7 @@ impl GatewayServer {
 
             tokio::spawn(async move {
                 if let Err(e) = handle_connection(stream, peer_addr, state, router).await {
-                    warn!(peer = %peer_addr, error = %e, "connection error");
+                    warn!(peer = %peer_addr, error = ?e, "connection error");
                 }
             });
         }
@@ -621,7 +621,7 @@ async fn handle_connect(
                     tunnel::tunnel(upgraded, &host).await
                 };
                 if let Err(e) = result {
-                    warn!(host = %host, error = %e, "connection error");
+                    warn!(host = %host, error = ?e, "connection error");
                 }
             }
             Err(e) => {

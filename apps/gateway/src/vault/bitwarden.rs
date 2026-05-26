@@ -214,7 +214,7 @@ impl BitwardenVaultProvider {
             Some(v) => match decrypt_connection_data(&self.crypto, v).await {
                 Ok(cd) => Some(cd),
                 Err(e) => {
-                    warn!(error = %e, project_id, "failed to decrypt vault connection data");
+                    warn!(error = ?e, project_id, "failed to decrypt vault connection data");
                     None
                 }
             },

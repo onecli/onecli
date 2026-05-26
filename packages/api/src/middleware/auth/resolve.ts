@@ -23,14 +23,7 @@ export const resolveProjectId = async (
   request: Request,
   userId: string,
 ): Promise<string | null> => {
-  const headerProjectId =
-    request.headers.get("x-project-id") ??
-    request.headers
-      .get("cookie")
-      ?.split("; ")
-      .find((c) => c.startsWith("onecli-project-id="))
-      ?.split("=")[1] ??
-    null;
+  const headerProjectId = request.headers.get("x-project-id");
 
   if (headerProjectId) {
     const memberOrgIds = await db.user

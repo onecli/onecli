@@ -38,9 +38,10 @@ interface ConnectFlowProps {
   errorMessage?: string;
   connectionId?: string;
   agentName?: string;
-  org?: boolean;
   preContent?: ReactNode;
   hiddenFields?: Record<string, string>;
+  projectId?: string;
+  orgId?: string;
 }
 
 export const ConnectFlow = ({
@@ -50,9 +51,10 @@ export const ConnectFlow = ({
   errorMessage,
   connectionId,
   agentName,
-  org,
   preContent,
   hiddenFields,
+  projectId: explicitProjectId,
+  orgId,
 }: ConnectFlowProps) => {
   const [state, setState] = useState<FlowState>(
     status === "success" ? "success" : status === "error" ? "error" : "ready",
@@ -68,17 +70,17 @@ export const ConnectFlow = ({
     const params = new URLSearchParams();
     if (connectionId) params.set("connectionId", connectionId);
     if (agentName) params.set("agent_name", agentName);
-    if (org) params.set("org", "true");
 
     const token = await getAuthToken();
     if (token) params.set("_token", token);
-    const projectId = getProjectId();
+    const projectId = explicitProjectId || getProjectId();
     if (projectId) params.set("_project", projectId);
+    if (orgId) params.set("_org", orgId);
 
     const qs = params.toString();
     const authorizeUrl = `${API_ORIGIN}/v1/apps/${app.id}/authorize${qs ? `?${qs}` : ""}`;
     window.location.href = authorizeUrl;
-  }, [app.id, connectionId, agentName, org]);
+  }, [app.id, connectionId, agentName, explicitProjectId, orgId]);
 
   // Countdown timer for auto-redirect
   useEffect(() => {
@@ -131,9 +133,10 @@ export const ConnectFlow = ({
         fields={app.fields}
         fileImport={app.fileImport}
         connectionId={connectionId}
-        org={org}
         preContent={preContent}
         hiddenFields={hiddenFields}
+        projectId={explicitProjectId}
+        orgId={orgId}
         onSuccess={() => setState("success")}
         onError={(msg) => {
           setError(msg);

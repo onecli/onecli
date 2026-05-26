@@ -120,7 +120,7 @@ pub(super) async fn mitm(
                                         Ok(resp)
                                     }
                                     Err(e) => {
-                                        warn!(host = %host, error = %e, "WebSocket handler failed");
+                                        warn!(host = %host, error = ?e, "WebSocket handler failed");
                                         Ok(response::resolution_failed())
                                     }
                                 }
@@ -145,7 +145,10 @@ pub(super) async fn mitm(
                                         );
                                         Ok(resp)
                                     }
-                                    Err(e) => Err(e),
+                                    Err(e) => {
+                                        warn!(host = %host, error = ?e, "request forwarding failed");
+                                        Ok::<_, anyhow::Error>(response::resolution_failed())
+                                    }
                                 }
                             }
                         }

@@ -12,7 +12,11 @@ import { checkAppConfigExists as defaultCheckConfig } from "@/lib/actions/app-co
 import { Card } from "@onecli/ui/components/card";
 import { useAppMessages } from "@/hooks/use-app-connected";
 import { useInvalidateGatewayCache } from "@/hooks/use-invalidate-cache";
-import { withProjectPrefix } from "@/lib/navigation";
+import {
+  PROJECT_PATH_RE,
+  ORG_PATH_RE,
+  withProjectPrefix,
+} from "@/lib/navigation";
 import type { OAuthPermission } from "@onecli/api/apps/types";
 import {
   getAppPermissionDefinition,
@@ -155,7 +159,12 @@ export const AppDetail = ({
     const top = Math.round(window.screenY + (window.outerHeight - h) / 2);
     const params = new URLSearchParams();
     if (connectionId) params.set("connectionId", connectionId);
-    if (pageScope === "organization") params.set("org", "true");
+    const projectMatch = pathname.match(PROJECT_PATH_RE)?.[1];
+    if (projectMatch) params.set("projectId", projectMatch);
+    if (pageScope === "organization") {
+      const orgMatch = pathname.match(ORG_PATH_RE)?.[1];
+      if (orgMatch) params.set("orgId", orgMatch);
+    }
     const qs = params.toString();
     const url = `/app-connect/${app.id}${qs ? `?${qs}` : ""}`;
     window.open(

@@ -10,13 +10,15 @@ interface Props {
     message?: string;
     connectionId?: string;
     agent_name?: string;
-    org?: string;
+    projectId?: string;
+    orgId?: string;
   }>;
 }
 
 export default async function ConnectPage({ params, searchParams }: Props) {
   const { provider } = await params;
-  const { status, message, connectionId, agent_name, org } = await searchParams;
+  const { status, message, connectionId, agent_name, projectId, orgId } =
+    await searchParams;
 
   const app = getApp(provider);
   if (!app || !app.available) notFound();
@@ -60,7 +62,8 @@ export default async function ConnectPage({ params, searchParams }: Props) {
       errorMessage={message}
       connectionId={connectionId}
       agentName={agent_name}
-      org={org === "true"}
+      projectId={projectId}
+      orgId={orgId}
     />
   );
 }

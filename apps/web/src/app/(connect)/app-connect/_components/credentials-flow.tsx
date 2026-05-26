@@ -36,11 +36,12 @@ export interface CredentialsFlowProps {
   fields: CredentialsFlowField[];
   fileImport?: FileImportConfig;
   connectionId?: string;
-  org?: boolean;
   preContent?: ReactNode;
   hiddenFields?: Record<string, string>;
   onSuccess: () => void;
   onError: (message: string) => void;
+  projectId?: string;
+  orgId?: string;
 }
 
 export const CredentialsFlow = ({
@@ -48,11 +49,12 @@ export const CredentialsFlow = ({
   fields,
   fileImport,
   connectionId,
-  org,
   preContent,
   hiddenFields,
   onSuccess,
   onError,
+  projectId,
+  orgId,
 }: CredentialsFlowProps) => {
   const [values, setValues] = useState<Record<string, string>>({});
   const [submitting, setSubmitting] = useState(false);
@@ -123,8 +125,11 @@ export const CredentialsFlow = ({
         body: JSON.stringify({
           fields: { ...values, ...hiddenFields },
           connectionId,
-          ...(org ? { org: true } : {}),
         }),
+        headers: {
+          ...(projectId ? { "X-Project-Id": projectId } : {}),
+          ...(orgId ? { "X-Organization-Id": orgId } : {}),
+        },
       });
       if (!resp.ok) {
         const data = (await resp.json()) as { error?: string };

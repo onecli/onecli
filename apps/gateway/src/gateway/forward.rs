@@ -178,6 +178,7 @@ pub(crate) async fn forward_request(
                 method.as_str(),
                 &path,
                 rule_name,
+                proxy_ctx.project_id.as_deref(),
             ));
         }
         PolicyDecision::RateLimited {
@@ -351,7 +352,7 @@ pub(crate) async fn forward_request(
             let mut guard = ApprovalGuard::new(approval_id.clone(), Arc::clone(approval_store));
 
             if let Err(e) = approval_store.store(&approval).await {
-                warn!(url = %url, error = %e, "failed to store pending approval");
+                warn!(url = %url, error = ?e, "failed to store pending approval");
                 guard.defuse();
                 approval_store.remove(&approval_id).await;
                 return Ok(response::approval_store_unavailable());
@@ -455,7 +456,7 @@ pub(crate) async fn forward_request(
                 )
                 .await
                 .unwrap_or_else(|e| {
-                    tracing::warn!(error = %e, "body transform failed, forwarding empty body");
+                    tracing::warn!(error = ?e, "body transform failed, forwarding empty body");
                     reqwest::Body::from(vec![])
                 })
             } else {
@@ -528,6 +529,7 @@ pub(crate) async fn forward_request(
                 provider,
                 display_name,
                 proxy_ctx.agent_id.as_deref(),
+                proxy_ctx.project_id.as_deref(),
             ));
         }
 
@@ -539,6 +541,7 @@ pub(crate) async fn forward_request(
                 provider,
                 display_name,
                 proxy_ctx.agent_name.as_deref(),
+                proxy_ctx.project_id.as_deref(),
             ));
         }
 
@@ -549,12 +552,18 @@ pub(crate) async fn forward_request(
                 status,
                 hostname,
                 proxy_ctx.agent_name.as_deref(),
+                proxy_ctx.project_id.as_deref(),
             ));
         }
 
         // 3. Unknown host — no credentials at all, guide user to create a secret.
         info!(method = %method, url = %url, status = %status.as_u16(), "credential not found");
-        return Ok(response::credential_not_found(status, hostname, &path));
+        return Ok(response::credential_not_found(
+            status,
+            hostname,
+            &path,
+            proxy_ctx.project_id.as_deref(),
+        ));
     }
 
     // Some APIs (e.g. Google) return 400 instead of 401 for invalid/missing API keys.
@@ -581,6 +590,7 @@ pub(crate) async fn forward_request(
                     provider,
                     display_name,
                     proxy_ctx.agent_id.as_deref(),
+                    proxy_ctx.project_id.as_deref(),
                 ));
             }
             if let Some((provider, display_name)) =
@@ -592,6 +602,7 @@ pub(crate) async fn forward_request(
                     provider,
                     display_name,
                     proxy_ctx.agent_name.as_deref(),
+                    proxy_ctx.project_id.as_deref(),
                 ));
             }
             if apps::provider_for_host(hostname).is_some() {
@@ -600,6 +611,7 @@ pub(crate) async fn forward_request(
                     StatusCode::BAD_REQUEST,
                     hostname,
                     proxy_ctx.agent_name.as_deref(),
+                    proxy_ctx.project_id.as_deref(),
                 ));
             }
             info!(method = %method, url = %url, status = 400, "auth-related 400 — credential not found");
@@ -607,6 +619,7 @@ pub(crate) async fn forward_request(
                 StatusCode::BAD_REQUEST,
                 hostname,
                 &path,
+                proxy_ctx.project_id.as_deref(),
             ));
         }
 

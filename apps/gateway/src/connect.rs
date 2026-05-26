@@ -240,7 +240,7 @@ impl PolicyEngine {
                     warn!(
                         host_pattern = %secret.host_pattern,
                         secret_type = %secret.type_,
-                        error = %e,
+                        error = ?e,
                         "skipping secret: decryption failed (wrong key or format mismatch)"
                     );
                     continue;
@@ -470,7 +470,7 @@ impl PolicyEngine {
                 warn!(
                     connection_id = %conn.id,
                     provider = %conn.provider,
-                    error = %e,
+                    error = ?e,
                     "app connection decrypt failed (wrong key or format mismatch)"
                 );
                 return Ok(AppConnectionResult::NoConnections);
@@ -756,7 +756,7 @@ impl PolicyEngine {
                                 .await;
                         }
                         Err(e) => {
-                            debug!(provider = %provider, cred_type, error = %e, "credential refresh failed");
+                            debug!(provider = %provider, cred_type, error = ?e, "credential refresh failed");
                         }
                     }
                 } else if let Some(refresh_token) =
@@ -792,7 +792,7 @@ impl PolicyEngine {
                                     .await;
                             }
                             Err(e) => {
-                                debug!(provider = %provider, error = %e, "token refresh failed");
+                                debug!(provider = %provider, error = ?e, "token refresh failed");
                             }
                         }
                     }
@@ -830,7 +830,7 @@ impl PolicyEngine {
                 }
             }
             Err(e) => {
-                debug!(provider = %provider, error = %e, "failed to encrypt refreshed credentials");
+                debug!(provider = %provider, error = ?e, "failed to encrypt refreshed credentials");
             }
         }
     }

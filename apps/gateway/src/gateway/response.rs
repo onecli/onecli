@@ -32,6 +32,13 @@ fn dashboard_url() -> &'static str {
     })
 }
 
+fn scoped_url(base: &str, path: &str, project_id: Option<&str>) -> String {
+    match project_id {
+        Some(pid) => format!("{base}/p/{pid}{path}"),
+        None => format!("{base}{path}"),
+    }
+}
+
 /// Build a JSON error response with the given status code and body.
 /// Used by `forward_request` (MITM and HTTP proxy forwarding path).
 fn json_error<S>(status: StatusCode, body: serde_json::Value) -> Response<ForwardBody<S>> {
@@ -107,8 +114,9 @@ pub(crate) fn app_not_connected<S>(
     provider: &str,
     display_name: &str,
     agent_name: Option<&str>,
+    project_id: Option<&str>,
 ) -> Response<ForwardBody<S>> {
-    let base = dashboard_url();
+    let base = scoped_url(dashboard_url(), "", project_id);
     let connect_url = match agent_name {
         Some(name) => format!(
             "{base}/connections?connect={provider}&source=agent&agent_name={}",
@@ -135,8 +143,9 @@ pub(crate) fn app_not_connected_unknown_provider<S>(
     status: StatusCode,
     hostname: &str,
     agent_name: Option<&str>,
+    project_id: Option<&str>,
 ) -> Response<ForwardBody<S>> {
-    let base = dashboard_url();
+    let base = scoped_url(dashboard_url(), "", project_id);
     let encoded_host = utf8_percent_encode(hostname, NON_ALPHANUMERIC);
     let connect_url = match agent_name {
         Some(name) => format!(
@@ -169,8 +178,9 @@ pub(crate) fn access_restricted<S>(
     provider: &str,
     display_name: &str,
     agent_id: Option<&str>,
+    project_id: Option<&str>,
 ) -> Response<ForwardBody<S>> {
-    let base = dashboard_url();
+    let base = scoped_url(dashboard_url(), "", project_id);
     let manage_url = match agent_id {
         Some(id) => format!("{base}/agents?manage={}", id.get(..8).unwrap_or(id)),
         None => format!("{base}/agents"),
@@ -195,8 +205,9 @@ pub(crate) fn credential_not_found<S>(
     status: StatusCode,
     hostname: &str,
     path: &str,
+    project_id: Option<&str>,
 ) -> Response<ForwardBody<S>> {
-    let base = dashboard_url();
+    let base = scoped_url(dashboard_url(), "", project_id);
     let encoded_host = utf8_percent_encode(hostname, NON_ALPHANUMERIC);
     let secret_url =
         format!("{base}/connections/custom?create=generic&host={encoded_host}&path=%2F%2A");
@@ -298,7 +309,9 @@ pub(crate) fn blocked_by_policy<S>(
     method: &str,
     path: &str,
     rule_name: &str,
+    project_id: Option<&str>,
 ) -> Response<ForwardBody<S>> {
+    let rules_url = scoped_url(dashboard_url(), "/rules", project_id);
     with_no_retry(json_error(
         StatusCode::FORBIDDEN,
         serde_json::json!({
@@ -311,7 +324,7 @@ pub(crate) fn blocked_by_policy<S>(
             "rule_name": rule_name,
             "method": method,
             "path": path,
-            "dashboard_url": "https://app.onecli.sh/rules",
+            "dashboard_url": rules_url,
         }),
     ))
 }
@@ -369,7 +382,7 @@ mod tests {
     #[test]
     fn app_not_connected_preserves_status() {
         let resp: Response<TestBody> =
-            app_not_connected(StatusCode::UNAUTHORIZED, "gmail", "Gmail", None);
+            app_not_connected(StatusCode::UNAUTHORIZED, "gmail", "Gmail", None, None);
         assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
         assert_eq!(
             resp.headers().get("content-type").unwrap(),
@@ -381,7 +394,7 @@ mod tests {
     #[tokio::test]
     async fn app_not_connected_body_contains_provider_and_connect_url() {
         let resp: Response<TestBody> =
-            app_not_connected(StatusCode::FORBIDDEN, "github", "GitHub", None);
+            app_not_connected(StatusCode::FORBIDDEN, "github", "GitHub", None, None);
         assert_eq!(resp.status(), StatusCode::FORBIDDEN);
 
         // Extract body bytes from Either::Left(Full<Bytes>)
@@ -414,6 +427,7 @@ mod tests {
             "gmail",
             "Gmail",
             Some("ChartDB Assistant"),
+            None,
         );
         use http_body_util::BodyExt;
         let body = match resp.into_body() {
@@ -435,6 +449,7 @@ mod tests {
             "gmail",
             "Gmail",
             Some("Agent & Co=1"),
+            None,
         );
         use http_body_util::BodyExt;
         let body = match resp.into_body() {
@@ -460,6 +475,7 @@ mod tests {
             StatusCode::UNAUTHORIZED,
             "www.googleapis.com",
             Some("Claude Code"),
+            None,
         );
         assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
         use http_body_util::BodyExt;
@@ -482,8 +498,12 @@ mod tests {
 
     #[tokio::test]
     async fn app_not_connected_unknown_provider_without_agent_name() {
-        let resp: Response<TestBody> =
-            app_not_connected_unknown_provider(StatusCode::FORBIDDEN, "www.googleapis.com", None);
+        let resp: Response<TestBody> = app_not_connected_unknown_provider(
+            StatusCode::FORBIDDEN,
+            "www.googleapis.com",
+            None,
+            None,
+        );
         use http_body_util::BodyExt;
         let body = match resp.into_body() {
             Either::Left(full) => full.collect().await.expect("collect full body").to_bytes(),
@@ -508,6 +528,7 @@ mod tests {
             "resend",
             "Resend",
             Some("abc12345-def"),
+            None,
         );
         assert_eq!(resp.status(), StatusCode::FORBIDDEN);
         assert_eq!(
@@ -524,6 +545,7 @@ mod tests {
             "resend",
             "Resend",
             Some("abc12345-long-id"),
+            None,
         );
         use http_body_util::BodyExt;
         let body = match resp.into_body() {
@@ -546,7 +568,7 @@ mod tests {
     #[tokio::test]
     async fn access_restricted_body_without_agent_id() {
         let resp: Response<TestBody> =
-            access_restricted(StatusCode::FORBIDDEN, "github", "GitHub", None);
+            access_restricted(StatusCode::FORBIDDEN, "github", "GitHub", None, None);
         use http_body_util::BodyExt;
         let body = match resp.into_body() {
             Either::Left(full) => full.collect().await.expect("collect full body").to_bytes(),
@@ -560,7 +582,7 @@ mod tests {
     #[tokio::test]
     async fn access_restricted_short_agent_id() {
         let resp: Response<TestBody> =
-            access_restricted(StatusCode::FORBIDDEN, "resend", "Resend", Some("abc"));
+            access_restricted(StatusCode::FORBIDDEN, "resend", "Resend", Some("abc"), None);
         use http_body_util::BodyExt;
         let body = match resp.into_body() {
             Either::Left(full) => full.collect().await.expect("collect full body").to_bytes(),
@@ -579,6 +601,7 @@ mod tests {
             StatusCode::UNAUTHORIZED,
             "api.custom-service.com",
             "/v1/send",
+            None,
         );
         assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
         assert_eq!(resp.headers().get("x-should-retry").unwrap(), "false");
@@ -610,6 +633,7 @@ mod tests {
             StatusCode::FORBIDDEN,
             "api.example.com",
             "/v1/send?to=user@test.com&subject=hello",
+            None,
         );
         use http_body_util::BodyExt;
         let body = match resp.into_body() {
@@ -700,7 +724,8 @@ mod tests {
 
     #[test]
     fn blocked_by_policy_has_correct_status_and_headers() {
-        let resp: Response<TestBody> = blocked_by_policy("POST", "/api/v1/send", "Block sending");
+        let resp: Response<TestBody> =
+            blocked_by_policy("POST", "/api/v1/send", "Block sending", None);
         assert_eq!(resp.status(), StatusCode::FORBIDDEN);
         assert_eq!(
             resp.headers().get("content-type").unwrap(),
