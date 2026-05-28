@@ -1,5 +1,17 @@
 # Changelog
 
+## [1.32.0](https://github.com/onecli/onecli/compare/v1.31.1...v1.32.0) (2026-05-28)
+
+
+### Features
+
+* sync shared changes from cloud repo ([#323](https://github.com/onecli/onecli/issues/323)) ([55629b1](https://github.com/onecli/onecli/commit/55629b1cb2de7db16e7ad922c195ad1eb6cb3935))
+
+
+### Bug Fixes
+
+* derive OAuth redirect URI from request host to resolve localhost vs 127.0.0.1 mismatch ([#325](https://github.com/onecli/onecli/issues/325)) ([ccf5b2b](https://github.com/onecli/onecli/commit/ccf5b2bf4b8f5e19d85ef2f6ade4a942525836de))
+
 ## [1.31.1](https://github.com/onecli/onecli/compare/v1.31.0...v1.31.1) (2026-05-26)
 
 
