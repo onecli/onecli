@@ -5,14 +5,15 @@ import type { ApiEnv } from "../types";
 import { authMiddleware, requireProjectId } from "../middleware/auth";
 import { getApp, getApps } from "../apps/registry";
 import { resolveAppCredentials } from "../apps/resolve-credentials";
-import { getOAuthOrg, getSelfUrl } from "../providers";
+import { getOAuthOrg } from "../providers";
 import {
   signOAuthState,
   verifyOAuthState,
   generateNonce,
 } from "../lib/oauth-state";
-import { APP_URL, NODE_ENV } from "../lib/env";
+import { NODE_ENV } from "../lib/env";
 import { dashboardUrl } from "../lib/dashboard-url";
+import { getRequestOrigin } from "../lib/request-origin";
 import { buildFragmentBridgeHtml } from "../lib/fragment-bridge";
 import {
   invalidateGatewayCache,
@@ -285,7 +286,7 @@ export const appRoutes = () => {
 
     const { values: creds } = resolved;
 
-    const redirectUri = `${getSelfUrl()}/v1/apps/${provider}/callback`;
+    const redirectUri = `${getRequestOrigin(c.req.raw)}/v1/apps/${provider}/callback`;
     const scopes = appDef.connectionMethod.defaultScopes ?? [];
 
     const authUrl = appDef.connectionMethod.buildAuthUrl({
@@ -309,6 +310,7 @@ export const appRoutes = () => {
   // ── GET /apps/:provider/callback ── OAuth callback ─────────────────────
   app.get("/:provider/callback", async (c) => {
     const provider = c.req.param("provider")!;
+    const origin = getRequestOrigin(c.req.raw);
 
     const appDef = getApp(provider);
     if (
@@ -316,7 +318,7 @@ export const appRoutes = () => {
       appDef.connectionMethod.fragmentCallback &&
       !c.req.query(appDef.connectionMethod.fragmentCallback.paramName)
     ) {
-      const errorUrl = `${APP_URL}/app-connect/${provider}?status=error&message=${encodeURIComponent("No token received")}`;
+      const errorUrl = `${origin}/app-connect/${provider}?status=error&message=${encodeURIComponent("No token received")}`;
       return c.html(
         buildFragmentBridgeHtml(
           appDef.connectionMethod.fragmentCallback.paramName,
@@ -333,7 +335,7 @@ export const appRoutes = () => {
 
     const errorRedirect = (msg: string) =>
       c.redirect(
-        `${APP_URL}/app-connect/${provider}?status=error&message=${encodeURIComponent(msg)}`,
+        `${origin}/app-connect/${provider}?status=error&message=${encodeURIComponent(msg)}`,
       );
 
     try {
@@ -384,7 +386,7 @@ export const appRoutes = () => {
             successParams.set("agent_name", state.agentName as string);
           }
           return c.redirect(
-            `${APP_URL}/app-connect/${provider}?${successParams}`,
+            `${origin}/app-connect/${provider}?${successParams}`,
           );
         }
       }
@@ -394,7 +396,7 @@ export const appRoutes = () => {
         return errorRedirect(`${appDef.name} is not configured`);
       }
 
-      const redirectUri = `${getSelfUrl()}/v1/apps/${provider}/callback`;
+      const redirectUri = `${origin}/v1/apps/${provider}/callback`;
 
       // Extract all query params as callback params
       const url = new URL(c.req.url);
@@ -460,7 +462,7 @@ export const appRoutes = () => {
         path: `/v1/apps/${provider}/callback`,
       });
 
-      return c.redirect(`${APP_URL}/app-connect/${provider}?${successParams}`);
+      return c.redirect(`${origin}/app-connect/${provider}?${successParams}`);
     } catch (err) {
       logger.error({ err, provider }, "OAuth callback failed");
       const message =
