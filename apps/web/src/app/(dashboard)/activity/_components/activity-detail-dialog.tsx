@@ -21,6 +21,7 @@ import { hasJsonData } from "@onecli/api/lib/format";
 import {
   isBlockedRequest,
   isDefaultDenied,
+  isOwnKey,
   isRateLimitedRequest,
   getBlockedByRule,
   getConnectionLabel,
@@ -95,6 +96,13 @@ export const ActivityDetailDialog = ({
             {connectionLabel && (
               <Row label="Account">
                 <span>{connectionLabel}</span>
+              </Row>
+            )}
+            {isOwnKey(log) && (
+              <Row label="Credentials">
+                <span className="text-muted-foreground">
+                  Agent&apos;s own key
+                </span>
               </Row>
             )}
             <Row label="Status">

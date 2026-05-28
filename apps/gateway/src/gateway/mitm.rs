@@ -83,6 +83,7 @@ pub(super) async fn mitm(
                 async move {
                     let is_ws = super::websocket::is_websocket_upgrade(&req);
                     let connection_id = connect::extract_connection_id(req.headers());
+                    let request_path = req.uri().path_and_query().map(|pq| pq.to_string());
 
                     // Re-resolve rules from cache on each request so that
                     // secret/rule changes take effect without a reconnect.
@@ -94,6 +95,7 @@ pub(super) async fn mitm(
                         &*cache,
                         &vault_rules,
                         connection_id.as_deref(),
+                        request_path.as_deref(),
                     )
                     .await
                     {
@@ -155,6 +157,9 @@ pub(super) async fn mitm(
                         Ok(ResolveResult::Ambiguous(connections)) => {
                             Ok(response::multiple_connections(&connections))
                         }
+                        Ok(ResolveResult::MultipleProviders(connections)) => {
+                            Ok(response::multiple_providers(&connections))
+                        }
                         Ok(ResolveResult::NotFound {
                             connection_id: cid,
                             connections,
@@ -214,6 +219,8 @@ enum ResolveResult {
     },
     /// Multiple connections exist and no header was provided.
     Ambiguous(Vec<ConnectionChoice>),
+    /// Multiple providers match the same request path.
+    MultipleProviders(Vec<ConnectionChoice>),
     /// The requested connection ID was not found.
     NotFound {
         connection_id: String,
@@ -231,6 +238,7 @@ async fn resolve_rules(
     cache: &dyn CacheStore,
     vault_rules: &[InjectionRule],
     connection_id: Option<&str>,
+    request_path: Option<&str>,
 ) -> Result<ResolveResult, crate::connect::ConnectError> {
     let project_id = ctx.project_id.as_deref().ok_or_else(|| {
         crate::connect::ConnectError::Internal("MITM session missing project_id".to_string())
@@ -265,6 +273,7 @@ async fn resolve_rules(
             .resolve_app_injection_for_request(
                 &resp.app_connections,
                 hostname,
+                request_path,
                 connection_id,
                 organization_id,
                 project_id,
@@ -290,6 +299,9 @@ async fn resolve_rules(
             }
             AppConnectionResult::Ambiguous { connections } => {
                 return Ok(ResolveResult::Ambiguous(connections));
+            }
+            AppConnectionResult::MultipleProviders { connections } => {
+                return Ok(ResolveResult::MultipleProviders(connections));
             }
             AppConnectionResult::NotFound { connections } => {
                 return Ok(ResolveResult::NotFound {

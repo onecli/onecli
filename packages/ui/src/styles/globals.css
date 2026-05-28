@@ -64,8 +64,8 @@
   --accent-foreground: oklch(0.985 0 0);
   --destructive: oklch(0.396 0.141 25.723);
   --destructive-foreground: oklch(0.637 0.237 25.331);
-  --border: oklch(0.22 0 0);
-  --input: oklch(0.22 0 0);
+  --border: oklch(0.3 0 0);
+  --input: oklch(0.3 0 0);
   --ring: oklch(0.4 0 0);
   --chart-1: #19ba5d;
   --chart-2: oklch(0.75 0.15 200);
@@ -79,7 +79,7 @@
   --sidebar-primary-foreground: #ffffff;
   --sidebar-accent: oklch(0.269 0 0);
   --sidebar-accent-foreground: oklch(0.985 0 0);
-  --sidebar-border: oklch(0.22 0 0);
+  --sidebar-border: oklch(0.3 0 0);
   --sidebar-ring: oklch(0.35 0 0);
   /* OneCLI brand: green #19BA5D */
   --brand: #19ba5d;

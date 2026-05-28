@@ -684,11 +684,13 @@ async fn handle_http_proxy(
     if resolved.injection_rules.is_empty() && !resolved.app_connections.is_empty() {
         let oid = resolved.organization_id.as_deref().unwrap_or("");
         let pid = resolved.project_id.as_deref().unwrap_or("");
+        let request_path = req.uri().path_and_query().map(|pq| pq.as_str());
         match state
             .policy_engine
             .resolve_app_injection_for_request(
                 &resolved.app_connections,
                 &hostname,
+                request_path,
                 connection_id.as_deref(),
                 oid,
                 pid,
@@ -708,6 +710,9 @@ async fn handle_http_proxy(
             }
             Ok(AppConnectionResult::Ambiguous { connections }) => {
                 return Ok(response::multiple_connections_axum(&connections));
+            }
+            Ok(AppConnectionResult::MultipleProviders { connections }) => {
+                return Ok(response::multiple_providers_axum(&connections));
             }
             Ok(AppConnectionResult::NotFound { connections }) => {
                 let cid = connection_id.as_deref().unwrap_or("");

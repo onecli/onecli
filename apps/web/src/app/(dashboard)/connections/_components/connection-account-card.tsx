@@ -7,6 +7,7 @@ import {
   Building2,
   Loader2,
   MoreVertical,
+  Pencil,
   RefreshCw,
   Settings,
   Unplug,
@@ -31,8 +32,20 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from "@onecli/ui/components/alert-dialog";
+import {
+  Dialog,
+  DialogContent,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@onecli/ui/components/dialog";
 import { Button } from "@onecli/ui/components/button";
-import { useDisconnectConnection } from "@/hooks/use-connections";
+import { Input } from "@onecli/ui/components/input";
+import { Label } from "@onecli/ui/components/label";
+import {
+  useDisconnectConnection,
+  useRenameConnection,
+} from "@/hooks/use-connections";
 import { extractLabel } from "@onecli/api/services/connection-service";
 
 interface ConnectionAccountCardProps {
@@ -46,17 +59,20 @@ interface ConnectionAccountCardProps {
   };
   appName: string;
   onReconnect: (connectionId: string) => void;
-  onDisconnected: () => void;
+  refetchConnections: () => void;
 }
 
 export const ConnectionAccountCard = ({
   connection,
   appName,
   onReconnect,
-  onDisconnected,
+  refetchConnections,
 }: ConnectionAccountCardProps) => {
   const [confirmOpen, setConfirmOpen] = useState(false);
+  const [renameOpen, setRenameOpen] = useState(false);
+  const [renameValue, setRenameValue] = useState("");
   const disconnectMutation = useDisconnectConnection();
+  const renameMutation = useRenameConnection();
 
   const displayName =
     connection.label ??
@@ -67,10 +83,25 @@ export const ConnectionAccountCard = ({
   const accountType = connection.metadata?.accountType as string | undefined;
   const tags = (connection.metadata?.tags as string[] | undefined) ?? [];
 
+  const handleRename = () => {
+    const trimmed = renameValue.trim();
+    if (!trimmed) return;
+    renameMutation.mutate(
+      { id: connection.id, label: trimmed },
+      {
+        onSuccess: () => {
+          refetchConnections();
+          toast.success("Connection renamed");
+          setRenameOpen(false);
+        },
+      },
+    );
+  };
+
   const handleDisconnect = () => {
     disconnectMutation.mutate(connection.id, {
       onSuccess: () => {
-        onDisconnected();
+        refetchConnections();
         toast.success(`${appName} account disconnected`);
       },
     });
@@ -142,6 +173,17 @@ export const ConnectionAccountCard = ({
                   Reconnect
                 </DropdownMenuItem>
               )}
+              <DropdownMenuItem
+                onClick={() => {
+                  setRenameValue(
+                    displayName === "Unknown account" ? "" : displayName,
+                  );
+                  setRenameOpen(true);
+                }}
+              >
+                <Pencil className="size-4" />
+                Rename
+              </DropdownMenuItem>
               <DropdownMenuSeparator />
               <DropdownMenuItem
                 onClick={() => setConfirmOpen(true)}
@@ -201,6 +243,38 @@ export const ConnectionAccountCard = ({
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
+
+      <Dialog open={renameOpen} onOpenChange={setRenameOpen}>
+        <DialogContent className="sm:max-w-sm">
+          <DialogHeader>
+            <DialogTitle>Rename connection</DialogTitle>
+          </DialogHeader>
+          <div className="grid gap-1.5 py-2">
+            <Label htmlFor="rename-label">Label</Label>
+            <Input
+              id="rename-label"
+              value={renameValue}
+              onChange={(e) => setRenameValue(e.target.value)}
+              placeholder="e.g. work, personal"
+              className="font-mono text-sm"
+              onKeyDown={(e) => {
+                if (e.key === "Enter") handleRename();
+              }}
+              autoFocus
+            />
+          </div>
+          <DialogFooter>
+            <Button
+              onClick={handleRename}
+              disabled={!renameValue.trim() || renameMutation.isPending}
+              loading={renameMutation.isPending}
+              size="sm"
+            >
+              {renameMutation.isPending ? "Saving..." : "Save"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </>
   );
 };

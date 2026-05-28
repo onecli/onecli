@@ -71,7 +71,7 @@ pub(crate) async fn evaluate(
     agent_token: &str,
     cache: &dyn CacheStore,
     policy_mode: &str,
-    has_injections: bool,
+    enforce_deny: bool,
 ) -> PolicyDecision {
     // Pass 1: block rules (absolute deny, highest priority)
     for rule in rules {
@@ -137,8 +137,8 @@ pub(crate) async fn evaluate(
         }
     }
 
-    // Pass 4: in deny mode with injections, require an explicit allow rule.
-    if policy_mode == "deny" && has_injections {
+    // Pass 4: in deny mode, require an explicit allow rule when enforced.
+    if policy_mode == "deny" && enforce_deny {
         let has_allow = rules.iter().any(|rule| {
             matches_request(rule, request_method, request_path, request_body)
                 && matches!(
@@ -182,6 +182,19 @@ fn matches_request(rule: &PolicyRule, method: &str, path: &str, body: Option<&[u
 fn is_git_push_discovery(path: &str) -> bool {
     let (base, query) = path.split_once('?').unwrap_or((path, ""));
     base.ends_with("/info/refs") && query.split('&').any(|p| p == "service=git-receive-pack")
+}
+
+/// Returns true if the host belongs to a known LLM provider.
+/// LLM traffic bypasses deny-by-default policy and is always logged.
+pub(crate) fn is_llm_host(host: &str) -> bool {
+    let h = host.split(':').next().unwrap_or(host);
+    h.contains("anthropic.com")
+        || h.contains("openai.com")
+        || h.contains("deepseek.com")
+        || h.contains("groq.com")
+        || h.contains("openrouter.ai")
+        || h.contains("moonshot.cn")
+        || h.contains("generativelanguage.googleapis.com")
 }
 
 /// Check if a request should be blocked by any policy rule (sync, block-only).
@@ -706,5 +719,30 @@ mod tests {
         let rules: Vec<PolicyRule> = vec![];
         let d = evaluate("POST", "/path", None, &rules, "agent1", &*store, "", false).await;
         assert!(matches!(d, PolicyDecision::Allow));
+    }
+
+    // ── LLM host detection tests ────────────────────────────────────
+
+    #[test]
+    fn is_llm_host_matches_known_providers() {
+        assert!(is_llm_host("api.anthropic.com"));
+        assert!(is_llm_host("api.openai.com"));
+        assert!(is_llm_host("api.deepseek.com"));
+        assert!(is_llm_host("api.groq.com"));
+        assert!(is_llm_host("openrouter.ai"));
+        assert!(is_llm_host("api.moonshot.cn"));
+        assert!(is_llm_host("generativelanguage.googleapis.com"));
+    }
+
+    #[test]
+    fn is_llm_host_strips_port() {
+        assert!(is_llm_host("api.anthropic.com:443"));
+    }
+
+    #[test]
+    fn is_llm_host_rejects_non_llm() {
+        assert!(!is_llm_host("api.github.com"));
+        assert!(!is_llm_host("gmail.googleapis.com"));
+        assert!(!is_llm_host("example.com"));
     }
 }

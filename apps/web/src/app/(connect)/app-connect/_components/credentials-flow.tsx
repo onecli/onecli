@@ -2,7 +2,13 @@
 
 import type { ReactNode } from "react";
 import { useRef, useState } from "react";
+import { ChevronRight } from "lucide-react";
 import { Button } from "@onecli/ui/components/button";
+import {
+  Collapsible,
+  CollapsibleContent,
+  CollapsibleTrigger,
+} from "@onecli/ui/components/collapsible";
 import { Input } from "@onecli/ui/components/input";
 import { Label } from "@onecli/ui/components/label";
 import { SecretInput } from "@/components/secret-input";
@@ -32,6 +38,7 @@ export interface CredentialsFlowProps {
     icon: string;
     darkIcon?: string;
     connectionType: string;
+    labelHint?: string;
   };
   fields: CredentialsFlowField[];
   fileImport?: FileImportConfig;
@@ -57,6 +64,7 @@ export const CredentialsFlow = ({
   orgId,
 }: CredentialsFlowProps) => {
   const [values, setValues] = useState<Record<string, string>>({});
+  const [connectionLabel, setConnectionLabel] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
@@ -68,9 +76,12 @@ export const CredentialsFlow = ({
     groups[0] ?? null,
   );
 
-  const visibleFields = hasGroups
+  const allVisibleFields = hasGroups
     ? fields.filter((f) => !f.group || f.group === activeGroup)
     : fields;
+
+  const visibleFields = allVisibleFields.filter((f) => !f.optional);
+  const advancedFields = allVisibleFields.filter((f) => f.optional);
 
   const handleFileImport = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -112,9 +123,7 @@ export const CredentialsFlow = ({
     setValues({});
   };
 
-  const hasInput = visibleFields
-    .filter((f) => !f.optional)
-    .every((f) => !!values[f.name]?.trim());
+  const hasInput = visibleFields.every((f) => !!values[f.name]?.trim());
 
   const handleSubmit = async () => {
     if (!hasInput) return;
@@ -125,6 +134,7 @@ export const CredentialsFlow = ({
         body: JSON.stringify({
           fields: { ...values, ...hiddenFields },
           connectionId,
+          ...(connectionLabel.trim() ? { label: connectionLabel.trim() } : {}),
         }),
         headers: {
           ...(projectId ? { "X-Project-Id": projectId } : {}),
@@ -190,50 +200,60 @@ export const CredentialsFlow = ({
           </>
         )}
         {visibleFields.map((field, i) => (
-          <div key={field.name} className="grid gap-1.5">
-            <Label htmlFor={`connect-${field.name}`}>
-              {field.label}
-              {!field.optional && (
-                <span className="text-destructive ml-0.5">*</span>
-              )}
-            </Label>
-            {field.description && (
-              <p className="text-xs text-muted-foreground">
-                {field.description}
-              </p>
-            )}
-            {field.secret === true ||
-            (field.secret === undefined && app.connectionType === "api_key") ? (
-              <SecretInput
-                id={`connect-${field.name}`}
-                value={values[field.name] ?? ""}
-                onChange={(e) =>
-                  setValues((prev) => ({
-                    ...prev,
-                    [field.name]: e.target.value,
-                  }))
-                }
-                placeholder={field.placeholder}
-                autoFocus={i === 0}
-              />
-            ) : (
-              <Input
-                id={`connect-${field.name}`}
-                type="text"
-                value={values[field.name] ?? ""}
-                onChange={(e) =>
-                  setValues((prev) => ({
-                    ...prev,
-                    [field.name]: e.target.value,
-                  }))
-                }
-                placeholder={field.placeholder}
-                className="font-mono text-sm"
-                autoFocus={i === 0}
-              />
-            )}
-          </div>
+          <FieldInput
+            key={field.name}
+            field={field}
+            value={values[field.name] ?? ""}
+            onChange={(val) =>
+              setValues((prev) => ({ ...prev, [field.name]: val }))
+            }
+            connectionType={app.connectionType}
+            autoFocus={i === 0}
+          />
         ))}
+        <Collapsible>
+          <CollapsibleTrigger className="group flex w-full items-center gap-2.5 text-xs text-muted-foreground/70 transition-colors hover:text-muted-foreground">
+            <div className="bg-border h-px flex-1" />
+            <span className="flex items-center gap-1">
+              <ChevronRight className="size-3 transition-transform group-data-[state=open]:rotate-90" />
+              Advanced
+            </span>
+            <div className="bg-border h-px flex-1" />
+          </CollapsibleTrigger>
+          <CollapsibleContent className="overflow-hidden data-[state=closed]:animate-collapsible-up data-[state=open]:animate-collapsible-down">
+            <div className="mt-4 space-y-5">
+              <div className="grid gap-1.5">
+                <Label htmlFor="connect-label">Connection label</Label>
+                <Input
+                  id="connect-label"
+                  type="text"
+                  value={connectionLabel}
+                  onChange={(e) => setConnectionLabel(e.target.value)}
+                  placeholder={
+                    app.labelHint?.replace(/^e\.g\.\s*/, "") ||
+                    "personal, work…"
+                  }
+                  className="text-sm"
+                />
+                <p className="text-[11px] text-muted-foreground/60">
+                  Optional - helps identify this account when you have multiple
+                  connections.
+                </p>
+              </div>
+              {advancedFields.map((field) => (
+                <FieldInput
+                  key={field.name}
+                  field={field}
+                  value={values[field.name] ?? ""}
+                  onChange={(val) =>
+                    setValues((prev) => ({ ...prev, [field.name]: val }))
+                  }
+                  connectionType={app.connectionType}
+                />
+              ))}
+            </div>
+          </CollapsibleContent>
+        </Collapsible>
         <Button
           className="w-full"
           onClick={handleSubmit}
@@ -257,3 +277,47 @@ export const CredentialsFlow = ({
     </ConnectLayout>
   );
 };
+
+const FieldInput = ({
+  field,
+  value,
+  onChange,
+  connectionType,
+  autoFocus,
+}: {
+  field: CredentialsFlowField;
+  value: string;
+  onChange: (value: string) => void;
+  connectionType: string;
+  autoFocus?: boolean;
+}) => (
+  <div className="grid gap-1.5">
+    <Label htmlFor={`connect-${field.name}`}>
+      {field.label}
+      {!field.optional && <span className="text-destructive ml-0.5">*</span>}
+    </Label>
+    {field.description && (
+      <p className="text-xs text-muted-foreground">{field.description}</p>
+    )}
+    {field.secret === true ||
+    (field.secret === undefined && connectionType === "api_key") ? (
+      <SecretInput
+        id={`connect-${field.name}`}
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        placeholder={field.placeholder}
+        autoFocus={autoFocus}
+      />
+    ) : (
+      <Input
+        id={`connect-${field.name}`}
+        type="text"
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        placeholder={field.placeholder}
+        className="font-mono text-sm"
+        autoFocus={autoFocus}
+      />
+    )}
+  </div>
+);

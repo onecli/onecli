@@ -1,6 +1,7 @@
 import type { AppDefinition } from "./types";
 import { getCloudApps } from "../providers";
 import { confluence } from "./confluence";
+import { docker } from "./docker";
 import { github } from "./github";
 import { githubApp } from "./github-app";
 import { gmail } from "./gmail";
@@ -30,7 +31,9 @@ import { dropbox } from "./dropbox";
 import { supabase } from "./supabase";
 import { aws } from "./aws";
 import { linkedin } from "./linkedin";
+import { trello } from "./trello";
 import { monday } from "./monday";
+import { vercel } from "./vercel";
 
 const staticApps: AppDefinition[] = [
   gmail,
@@ -53,6 +56,7 @@ const staticApps: AppDefinition[] = [
   notion,
   jira,
   confluence,
+  docker,
   youtube,
   vertexAi,
   todoist,
@@ -64,6 +68,8 @@ const staticApps: AppDefinition[] = [
   mongodbAtlas,
   supabase,
   linkedin,
+  trello,
+  vercel,
 ];
 
 export const getApps = (): AppDefinition[] => [

@@ -13,6 +13,7 @@ import {
 } from "../lib/oauth-state";
 import { APP_URL, NODE_ENV } from "../lib/env";
 import { dashboardUrl } from "../lib/dashboard-url";
+import { buildFragmentBridgeHtml } from "../lib/fragment-bridge";
 import {
   invalidateGatewayCache,
   invalidateGatewayCacheForAccount,
@@ -24,6 +25,7 @@ import {
   listConnectionsByProvider,
   extractLabel,
   deleteConnection,
+  updateConnectionLabel,
 } from "../services/connection-service";
 import { getConnectionHooks } from "../providers";
 import {
@@ -143,6 +145,44 @@ export const appRoutes = () => {
     await deleteConnection(scope, connectionId);
     invalidateGatewayCache(c.req.raw);
     return c.body(null, 204);
+  });
+
+  // ── PATCH /apps/connections/:connectionId ── rename ─────────────────────
+  app.patch("/connections/:connectionId", authMiddleware, async (c) => {
+    const auth = c.get("auth");
+    const connectionId = c.req.param("connectionId");
+
+    const body = (await c.req.json().catch(() => null)) as {
+      label?: string;
+    } | null;
+    const label = body?.label?.trim();
+    if (!label) {
+      return c.json({ error: "Label is required" }, 400);
+    }
+
+    const connection = await db.appConnection.findFirst({
+      where: {
+        id: connectionId,
+        OR: [
+          { projectId: requireProjectId(auth) },
+          ...(auth.organizationId
+            ? [{ organizationId: auth.organizationId }]
+            : []),
+        ],
+      },
+      select: { scope: true },
+    });
+    if (!connection) {
+      return c.json({ error: "Connection not found" }, 404);
+    }
+
+    const scope =
+      connection.scope === "organization"
+        ? { organizationId: auth.organizationId }
+        : { projectId: requireProjectId(auth) };
+
+    const updated = await updateConnectionLabel(scope, connectionId, label);
+    return c.json(updated);
   });
 
   // ── GET /apps/:provider ── single app detail ───────────────────────────
@@ -270,6 +310,21 @@ export const appRoutes = () => {
   app.get("/:provider/callback", async (c) => {
     const provider = c.req.param("provider")!;
 
+    const appDef = getApp(provider);
+    if (
+      appDef?.connectionMethod.type === "oauth" &&
+      appDef.connectionMethod.fragmentCallback &&
+      !c.req.query(appDef.connectionMethod.fragmentCallback.paramName)
+    ) {
+      const errorUrl = `${APP_URL}/app-connect/${provider}?status=error&message=${encodeURIComponent("No token received")}`;
+      return c.html(
+        buildFragmentBridgeHtml(
+          appDef.connectionMethod.fragmentCallback.paramName,
+          errorUrl,
+        ),
+      );
+    }
+
     const orgResponse = await getOAuthOrg().tryHandleOrgCallback(
       c.req.raw,
       provider,
@@ -362,18 +417,9 @@ export const appRoutes = () => {
             { projectId: state.projectId },
             provider,
           );
-          const duplicate = existing.find((conn) => {
-            if (
-              !conn.metadata ||
-              typeof conn.metadata !== "object" ||
-              Array.isArray(conn.metadata)
-            )
-              return false;
-            const existingIdentity = extractLabel(
-              conn.metadata as Record<string, unknown>,
-            );
-            return existingIdentity?.toLowerCase().trim() === identity;
-          });
+          const duplicate = existing.find(
+            (conn) => conn.label?.toLowerCase().trim() === identity,
+          );
           if (duplicate) reconnectId = duplicate.id;
         }
       }
@@ -453,6 +499,7 @@ export const appRoutes = () => {
     const body = (await c.req.json().catch(() => null)) as {
       fields?: Record<string, string>;
       connectionId?: string;
+      label?: string;
     } | null;
     if (!body?.fields) {
       return c.json({ error: "Missing fields in request body" }, 400);
@@ -508,7 +555,11 @@ export const appRoutes = () => {
       }
     }
 
-    const connectionOpts = { scopes, metadata };
+    const connectionOpts = {
+      scopes,
+      metadata,
+      label: body.label?.trim() || undefined,
+    };
 
     const orgResponse = await getOAuthOrg().tryHandleOrgConnect(
       auth,
@@ -532,18 +583,15 @@ export const appRoutes = () => {
       );
     } else {
       const existing = await listConnectionsByProvider({ projectId }, provider);
-      const duplicate = metadata
-        ? existing.find((conn) => {
-            const label = extractLabel(
-              conn.metadata as Record<string, unknown> | undefined,
-            );
-            const newLabel = extractLabel(metadata);
-            return (
-              label &&
-              newLabel &&
-              label.toLowerCase().trim() === newLabel.toLowerCase().trim()
-            );
-          })
+      const effectiveLabel =
+        connectionOpts.label || extractLabel(metadata) || null;
+
+      const duplicate = effectiveLabel
+        ? existing.find(
+            (conn) =>
+              conn.label?.toLowerCase().trim() ===
+              effectiveLabel.toLowerCase().trim(),
+          )
         : existing[0];
 
       if (duplicate) {

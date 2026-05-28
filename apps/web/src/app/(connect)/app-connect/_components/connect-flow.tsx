@@ -19,12 +19,14 @@ interface ConnectFlowProps {
     icon: string;
     darkIcon?: string;
     connectionType: string;
+    labelHint?: string;
     fields?: {
       name: string;
       label: string;
       description?: string;
       placeholder: string;
       secret?: boolean;
+      optional?: boolean;
       group?: string;
     }[];
     fileImport?: {

@@ -64,12 +64,20 @@
     "ZOOM_CLIENT_SECRET",
     "LINKEDIN_CLIENT_ID",
     "LINKEDIN_CLIENT_SECRET",
+    "TRELLO_API_KEY",
+    "TRELLO_API_SECRET",
     "MONDAY_CLIENT_ID",
     "MONDAY_CLIENT_SECRET",
     "SENTRY_CLIENT_ID",
     "SENTRY_CLIENT_SECRET",
+    "HUBSPOT_CLIENT_ID",
+    "HUBSPOT_CLIENT_SECRET",
+    "LINEAR_CLIENT_ID",
+    "LINEAR_CLIENT_SECRET",
     "RUST_LOG",
-    "PORT"
+    "PORT",
+    "ATLASSIAN_CLIENT_ID",
+    "ATLASSIAN_CLIENT_SECRET"
   ],
   "tasks": {
     "build": {
@@ -112,7 +120,11 @@
         "MONDAY_CLIENT_ID",
         "MONDAY_CLIENT_SECRET",
         "SENTRY_CLIENT_ID",
-        "SENTRY_CLIENT_SECRET"
+        "SENTRY_CLIENT_SECRET",
+        "HUBSPOT_CLIENT_ID",
+        "HUBSPOT_CLIENT_SECRET",
+        "LINEAR_CLIENT_ID",
+        "LINEAR_CLIENT_SECRET"
       ]
     },
     "@onecli/gateway#check": {

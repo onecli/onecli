@@ -149,6 +149,9 @@ pub(crate) async fn forward_request(
         (None, req.map(reqwest::Body::wrap))
     };
 
+    let has_injections = !rules.injection_rules.is_empty();
+    let enforce_deny = has_injections && !policy::is_llm_host(host);
+
     let decision = policy::evaluate(
         method.as_str(),
         &path,
@@ -157,7 +160,7 @@ pub(crate) async fn forward_request(
         agent_token,
         cache,
         &rules.policy_mode,
-        !rules.injection_rules.is_empty(),
+        enforce_deny,
     )
     .await;
 

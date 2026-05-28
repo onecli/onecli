@@ -270,7 +270,7 @@ export const AppDetail = ({
                     connection={conn}
                     appName={app.name}
                     onReconnect={(id) => openConnectPopup(id, popupOpts)}
-                    onDisconnected={fetchConnections}
+                    refetchConnections={fetchConnections}
                   />
                 ))}
                 {inheritedConnections.map((conn) => (

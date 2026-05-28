@@ -2,7 +2,6 @@
 
 import { useEffect, useState, useRef, useCallback } from "react";
 import { useRouter, usePathname } from "next/navigation";
-import { ScrollArea } from "@onecli/ui/components/scroll-area";
 import { SidebarInset, SidebarProvider } from "@onecli/ui/components/sidebar";
 import { DashboardSidebar } from "@dashboard/dashboard-sidebar";
 import { DashboardHeader } from "@dashboard/dashboard-header";
@@ -116,12 +115,12 @@ export default function DashboardLayout({
               <SettingsNav />
             </aside>
           )}
-          <ScrollArea className="h-full min-h-0 min-w-0 flex-1 [&>[data-radix-scroll-area-viewport]]:!overflow-x-hidden">
+          <div className="min-h-0 min-w-0 flex-1 overflow-y-auto overflow-x-hidden">
             {isSettings && <SettingsMobileNav />}
             <main className="mx-auto min-w-0 max-w-6xl p-4 sm:p-6">
               {children}
             </main>
-          </ScrollArea>
+          </div>
         </div>
       </SidebarInset>
     </SidebarProvider>

@@ -25,3 +25,12 @@ export const withProjectPrefix = (
   if (!match) return targetPath;
   return `/p/${match[1]}${targetPath}`;
 };
+
+export const withOrgPrefix = (
+  currentPathname: string,
+  targetPath: string,
+): string => {
+  const match = currentPathname.match(ORG_PATH_RE);
+  if (!match) return targetPath;
+  return `/org/${match[1]}${targetPath}`;
+};

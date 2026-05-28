@@ -100,6 +100,9 @@ pub(super) async fn handle_websocket(
         .unwrap_or_else(|| "/".to_string());
 
     let agent_token = proxy_ctx.agent_token.as_deref().unwrap_or("");
+    let has_injections = !rules.injection_rules.is_empty();
+    let enforce_deny = has_injections && !policy::is_llm_host(host);
+
     let decision = policy::evaluate(
         "GET",
         &path,
@@ -108,7 +111,7 @@ pub(super) async fn handle_websocket(
         agent_token,
         cache,
         &rules.policy_mode,
-        !rules.injection_rules.is_empty(),
+        enforce_deny,
     )
     .await;
 

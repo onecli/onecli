@@ -75,6 +75,8 @@ pub(crate) enum AppConnectionResult {
     NoConnections,
     /// Multiple connections exist and no header was provided — agent must pick.
     Ambiguous { connections: Vec<ConnectionChoice> },
+    /// Multiple providers match the same request path — agent must pick.
+    MultipleProviders { connections: Vec<ConnectionChoice> },
     /// The requested connection ID was not found — return the valid options.
     NotFound { connections: Vec<ConnectionChoice> },
 }
@@ -93,6 +95,7 @@ pub(crate) struct ConnectionChoice {
     pub id: String,
     pub label: Option<String>,
     pub provider: String,
+    pub display_name: Option<&'static str>,
 }
 
 impl ConnectionChoice {
@@ -101,6 +104,7 @@ impl ConnectionChoice {
             id: row.id.clone(),
             label: row.label.clone(),
             provider: row.provider.clone(),
+            display_name: apps::display_name_for_provider(&row.provider),
         }
     }
 }
@@ -310,10 +314,13 @@ impl PolicyEngine {
     /// Resolve app connection injection rules for a single request.
     /// Called per-request with the cached `app_connections` (already filtered to
     /// providers matching the hostname at cache time by `resolve_app_connections`).
+    // request_path added for cross-provider disambiguation on shared hosts
+    #[expect(clippy::too_many_arguments)]
     pub(crate) async fn resolve_app_injection_for_request(
         &self,
         app_connections: &[db::AppConnectionRow],
         hostname: &str,
+        request_path: Option<&str>,
         connection_id: Option<&str>,
         organization_id: &str,
         project_id: &str,
@@ -364,6 +371,26 @@ impl PolicyEngine {
         }
 
         if by_provider.values().all(|conns| conns.len() == 1) {
+            // Check for cross-provider path overlap before resolving
+            if let Some(path) = request_path {
+                let matching_providers: Vec<&str> = by_provider
+                    .keys()
+                    .copied()
+                    .filter(|provider| {
+                        apps::provider_matches_host_and_path(provider, hostname, path)
+                    })
+                    .collect();
+
+                if matching_providers.len() > 1 {
+                    let connections = app_connections
+                        .iter()
+                        .filter(|c| matching_providers.contains(&c.provider.as_str()))
+                        .map(ConnectionChoice::from_row)
+                        .collect();
+                    return Ok(AppConnectionResult::MultipleProviders { connections });
+                }
+            }
+
             // Each provider has exactly one connection — no ambiguity, resolve all
             let mut rules = Vec::new();
             let mut earliest_expires_at: Option<i64> = None;
@@ -504,11 +531,17 @@ impl PolicyEngine {
                 .collect();
 
         // For credential-only providers (no auth rules), ensure at least one
-        // catch-all rule exists so credential headers have somewhere to attach.
-        if rules.is_empty() && !apps::credential_headers(&conn.provider).is_empty() {
+        // catch-all rule exists so credential headers/params have somewhere to attach.
+        if rules.is_empty()
+            && (!apps::credential_headers(&conn.provider).is_empty()
+                || !apps::credential_params(&conn.provider).is_empty())
+        {
+            let capacity = apps::metadata_headers(&conn.provider).len()
+                + apps::credential_headers(&conn.provider).len()
+                + apps::credential_params(&conn.provider).len();
             rules.push(InjectionRule {
                 path_pattern: "*".to_string(),
-                injections: Vec::new(),
+                injections: Vec::with_capacity(capacity),
             });
         }
 
@@ -536,6 +569,18 @@ impl PolicyEngine {
                     for rule in &mut rules {
                         rule.injections.push(Injection::SetHeader {
                             name: ch.header_name.to_string(),
+                            value: value.to_string(),
+                        });
+                    }
+                }
+            }
+
+            // Inject credential-driven query params (e.g., Trello's ?key=...&token=...)
+            for cp in apps::credential_params(&conn.provider) {
+                if let Some(value) = creds.get(cp.credential_field).and_then(|v| v.as_str()) {
+                    for rule in &mut rules {
+                        rule.injections.push(Injection::SetParam {
+                            name: cp.param_name.to_string(),
                             value: value.to_string(),
                         });
                     }

@@ -244,6 +244,42 @@ pub(crate) fn multiple_connections<S>(
     ))
 }
 
+/// Build the shared JSON body for multiple-providers responses.
+fn multiple_providers_json(connections: &[crate::connect::ConnectionChoice]) -> serde_json::Value {
+    let hdr = crate::connect::CONNECTION_ID_HEADER;
+    serde_json::json!({
+        "error": "multiple_providers",
+        "message": format!(
+            "Multiple app integrations are connected that can handle this API request. \
+             If you can determine the correct provider from context, specify it using the {hdr} header. \
+             Otherwise, ask the user which provider to use."
+        ),
+        "connections": connections,
+        "header": hdr,
+        "example": format!("{hdr}: {}", connections.first().map(|c| c.id.as_str()).unwrap_or("CONNECTION_ID")),
+    })
+}
+
+/// 409 Conflict — multiple providers match the same request path (axum body).
+pub(super) fn multiple_providers_axum(
+    connections: &[crate::connect::ConnectionChoice],
+) -> Response<axum::body::Body> {
+    with_no_retry(json_error_axum(
+        StatusCode::CONFLICT,
+        multiple_providers_json(connections),
+    ))
+}
+
+/// 409 Conflict — multiple providers match the same request path.
+pub(crate) fn multiple_providers<S>(
+    connections: &[crate::connect::ConnectionChoice],
+) -> Response<ForwardBody<S>> {
+    with_no_retry(json_error(
+        StatusCode::CONFLICT,
+        multiple_providers_json(connections),
+    ))
+}
+
 /// 404 Not Found — the requested connection ID does not exist.
 pub(crate) fn connection_not_found<S>(
     connection_id: &str,
@@ -687,11 +723,13 @@ mod tests {
                 id: "conn_1".to_string(),
                 label: Some("alice@gmail.com".to_string()),
                 provider: "gmail".to_string(),
+                display_name: Some("Gmail"),
             },
             crate::connect::ConnectionChoice {
                 id: "conn_2".to_string(),
                 label: Some("alice.work@company.com".to_string()),
                 provider: "gmail".to_string(),
+                display_name: Some("Gmail"),
             },
         ];
         let resp: Response<TestBody> = multiple_connections(&connections);
@@ -725,6 +763,63 @@ mod tests {
             "application/json"
         );
         assert_eq!(resp.headers().get("x-should-retry").unwrap(), "false");
+    }
+
+    #[tokio::test]
+    async fn multiple_providers_returns_409_with_choices() {
+        let connections = vec![
+            crate::connect::ConnectionChoice {
+                id: "conn_jira".to_string(),
+                label: Some("dev@company.com".to_string()),
+                provider: "jira".to_string(),
+                display_name: Some("Jira"),
+            },
+            crate::connect::ConnectionChoice {
+                id: "conn_confluence".to_string(),
+                label: Some("dev@company.com".to_string()),
+                provider: "confluence".to_string(),
+                display_name: Some("Confluence"),
+            },
+        ];
+        let resp: Response<TestBody> = multiple_providers(&connections);
+        assert_eq!(resp.status(), StatusCode::CONFLICT);
+        assert_eq!(resp.headers().get("x-should-retry").unwrap(), "false");
+
+        use http_body_util::BodyExt;
+        let body = match resp.into_body() {
+            Either::Left(full) => full.collect().await.expect("collect").to_bytes(),
+            Either::Right(_) => panic!("expected Left"),
+        };
+        let json: serde_json::Value = serde_json::from_slice(&body).expect("valid JSON");
+        assert_eq!(json["error"], "multiple_providers");
+        assert_eq!(json["header"], crate::connect::CONNECTION_ID_HEADER);
+        let conns = json["connections"].as_array().unwrap();
+        assert_eq!(conns.len(), 2);
+        assert_eq!(conns[0]["provider"], "jira");
+        assert_eq!(conns[0]["display_name"], "Jira");
+        assert_eq!(conns[1]["provider"], "confluence");
+        assert_eq!(conns[1]["display_name"], "Confluence");
+        let example = json["example"].as_str().unwrap();
+        assert!(example.contains("conn_jira"));
+    }
+
+    #[tokio::test]
+    async fn multiple_connections_includes_display_name() {
+        let connections = vec![crate::connect::ConnectionChoice {
+            id: "conn_1".to_string(),
+            label: Some("alice@gmail.com".to_string()),
+            provider: "gmail".to_string(),
+            display_name: Some("Gmail"),
+        }];
+        let resp: Response<TestBody> = multiple_connections(&connections);
+        use http_body_util::BodyExt;
+        let body = match resp.into_body() {
+            Either::Left(full) => full.collect().await.expect("collect").to_bytes(),
+            Either::Right(_) => panic!("expected Left"),
+        };
+        let json: serde_json::Value = serde_json::from_slice(&body).expect("valid JSON");
+        let conns = json["connections"].as_array().unwrap();
+        assert_eq!(conns[0]["display_name"], "Gmail");
     }
 
     #[test]

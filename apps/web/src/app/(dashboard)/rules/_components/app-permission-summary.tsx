@@ -18,7 +18,7 @@ import {
 } from "@onecli/ui/components/collapsible";
 import { cn } from "@onecli/ui/lib/utils";
 import { getApp } from "@onecli/api/apps/registry";
-import { withProjectPrefix } from "@/lib/navigation";
+import { withProjectPrefix, withOrgPrefix } from "@/lib/navigation";
 import { AppIcon } from "@/app/(dashboard)/connections/_components/app-icon";
 import type { PolicyRuleItem } from "./types";
 
@@ -224,7 +224,10 @@ export const AppPermissionSummary = ({
       {sortedGroups.map((group) => {
         const href =
           pageScope === "organization"
-            ? `/global-connections/apps/${group.provider}`
+            ? withOrgPrefix(
+                pathname,
+                `/global-connections/apps/${group.provider}`,
+              )
             : withProjectPrefix(
                 pathname,
                 `/connections/apps/${group.provider}`,

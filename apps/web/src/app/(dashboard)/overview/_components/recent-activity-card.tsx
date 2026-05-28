@@ -3,7 +3,12 @@
 import { useEffect, useState } from "react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { ArrowRight } from "lucide-react";
+import { ArrowRight, KeyRound } from "lucide-react";
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipTrigger,
+} from "@onecli/ui/components/tooltip";
 import {
   Card,
   CardAction,
@@ -22,6 +27,8 @@ import { getProviderIcon } from "@onecli/api/apps/provider-icons";
 import { withProjectPrefix } from "@/lib/navigation";
 import {
   isBlockedRequest,
+  isDefaultDenied,
+  isOwnKey,
   isRateLimitedRequest,
   getApprovalDecision,
   type RequestLogEntry,
@@ -87,14 +94,28 @@ export const RecentActivityCard = () => {
                   <span className="text-muted-foreground text-xs tabular-nums w-14 shrink-0">
                     {formatRelative(log.createdAt)}
                   </span>
-                  <MethodBadge method={log.method} />
+                  <span className="flex w-16 shrink-0 justify-center">
+                    <MethodBadge method={log.method} />
+                  </span>
                   <div className="flex min-w-0 items-center gap-1.5 flex-1 border-l pl-3">
-                    <span className="shrink-0">
-                      <ProviderIcon provider={log.provider} size={14} />
+                    <span className="shrink-0 flex w-24 items-center gap-1.5">
+                      <span className="flex size-3.5 items-center justify-center shrink-0">
+                        <ProviderIcon provider={log.provider} size={14} />
+                      </span>
+                      <span className="text-sm truncate">
+                        {getProviderIcon(log.provider)?.name ?? log.provider}
+                      </span>
                     </span>
-                    <span className="shrink-0 text-sm">
-                      {getProviderIcon(log.provider)?.name ?? log.provider}
-                    </span>
+                    {isOwnKey(log) && (
+                      <Tooltip>
+                        <TooltipTrigger asChild>
+                          <KeyRound className="size-2.5 text-muted-foreground/40 shrink-0" />
+                        </TooltipTrigger>
+                        <TooltipContent side="top" className="text-xs">
+                          Agent&apos;s own credentials - not managed by OneCLI
+                        </TooltipContent>
+                      </Tooltip>
+                    )}
                     <span className="text-muted-foreground mx-0.5">·</span>
                     <span className="shrink-0 text-sm font-medium">
                       {log.host.replace(/:(?:443|80)$/, "")}
@@ -103,10 +124,11 @@ export const RecentActivityCard = () => {
                       {log.path || "/"}
                     </span>
                   </div>
-                  <div className="flex items-center border-l pl-3 shrink-0">
+                  <div className="flex items-center justify-end border-l pl-3 shrink-0 w-[140px]">
                     <StatusBadge
                       status={log.status}
                       blocked={isBlockedRequest(log)}
+                      defaultDenied={isDefaultDenied(log)}
                       rateLimited={isRateLimitedRequest(log)}
                     />
                     {decision && (
@@ -115,7 +137,6 @@ export const RecentActivityCard = () => {
                         <DecisionBadge decision={decision} />
                       </>
                     )}
-                    <span className="text-muted-foreground mx-1.5">·</span>
                     <span className="text-muted-foreground font-mono text-xs tabular-nums w-14 text-right">
                       {log.latencyMs}ms
                     </span>

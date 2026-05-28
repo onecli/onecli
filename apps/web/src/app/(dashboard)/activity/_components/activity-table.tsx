@@ -5,6 +5,7 @@ import {
   TooltipContent,
   TooltipTrigger,
 } from "@onecli/ui/components/tooltip";
+import { KeyRound } from "lucide-react";
 import {
   Table,
   TableBody,
@@ -22,6 +23,7 @@ import { getProviderIcon } from "@onecli/api/apps/provider-icons";
 import {
   isBlockedRequest,
   isDefaultDenied,
+  isOwnKey,
   isRateLimitedRequest,
   getApprovalDecision,
   type RequestLogEntry,
@@ -110,21 +112,33 @@ export const ActivityTable = ({ logs, onRowClick }: ActivityTableProps) => (
                   </div>
                 </TableCell>
                 <TableCell>
-                  <Tooltip>
-                    <TooltipTrigger asChild>
-                      <div className="flex items-center gap-1.5 min-w-0">
-                        <span className="shrink-0">
-                          <ProviderIcon provider={log.provider} size={14} />
-                        </span>
-                        <span className="text-sm truncate">
-                          {providerInfo?.name ?? log.provider}
-                        </span>
-                      </div>
-                    </TooltipTrigger>
-                    <TooltipContent side="top">
-                      {providerInfo?.name ?? log.provider}
-                    </TooltipContent>
-                  </Tooltip>
+                  <div className="flex items-center gap-1.5 min-w-0">
+                    <Tooltip>
+                      <TooltipTrigger asChild>
+                        <div className="flex items-center gap-1.5 min-w-0">
+                          <span className="shrink-0">
+                            <ProviderIcon provider={log.provider} size={14} />
+                          </span>
+                          <span className="text-sm truncate">
+                            {providerInfo?.name ?? log.provider}
+                          </span>
+                        </div>
+                      </TooltipTrigger>
+                      <TooltipContent side="top">
+                        {providerInfo?.name ?? log.provider}
+                      </TooltipContent>
+                    </Tooltip>
+                    {isOwnKey(log) && (
+                      <Tooltip>
+                        <TooltipTrigger asChild>
+                          <KeyRound className="size-2.5 text-muted-foreground/40 shrink-0" />
+                        </TooltipTrigger>
+                        <TooltipContent side="top" className="text-xs">
+                          Agent&apos;s own credentials - not managed by OneCLI
+                        </TooltipContent>
+                      </Tooltip>
+                    )}
+                  </div>
                 </TableCell>
                 <TableCell>
                   <StatusBadge
