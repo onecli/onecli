@@ -1,14 +1,14 @@
 import { Hono } from "hono";
 import type { ApiEnv } from "../types";
 import { authMiddleware } from "../middleware/auth";
-import { API_URL } from "../lib/env";
+import { GATEWAY_API_URL } from "../lib/env";
 import { loadCaCertificate } from "../lib/gateway-ca";
 
 export const gatewayUrlRoutes = () => {
   const app = new Hono<ApiEnv>();
   app.use("*", authMiddleware);
 
-  app.get("/", (c) => c.json({ url: API_URL }));
+  app.get("/", (c) => c.json({ url: GATEWAY_API_URL }));
 
   return app;
 };
