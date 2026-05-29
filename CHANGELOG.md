@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.32.1](https://github.com/onecli/onecli/compare/v1.32.0...v1.32.1) (2026-05-29)
+
+
+### Bug Fixes
+
+* return GATEWAY_API_URL from /v1/gateway-url endpoint ([#326](https://github.com/onecli/onecli/issues/326)) ([93df414](https://github.com/onecli/onecli/commit/93df4143d2ba4f5a126ab1a95987600b2b2814e6))
+
 ## [1.32.0](https://github.com/onecli/onecli/compare/v1.31.1...v1.32.0) (2026-05-28)
 
 
