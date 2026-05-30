@@ -446,6 +446,23 @@ static APP_PROVIDERS: &[AppProvider] = &[
         body_transform: None,
     },
     AppProvider {
+        provider: "google-chat",
+        display_name: "Google Chat",
+        host_rules: &[HostRule {
+            pattern: HostPattern::Exact("chat.googleapis.com"),
+            path_prefix: None,
+            strategy: AuthStrategy::Bearer,
+            intercept: false,
+        }],
+        refresh: Some(&GOOGLE_REFRESH),
+        metadata_headers: &[],
+        credential_headers: &[],
+        credential_params: &[],
+        host_rewrite: None,
+        finalizer: None,
+        body_transform: None,
+    },
+    AppProvider {
         provider: "google-forms",
         display_name: "Google Forms",
         host_rules: &[HostRule {
