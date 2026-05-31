@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.32.2](https://github.com/onecli/onecli/compare/v1.32.1...v1.32.2) (2026-05-31)
+
+
+### Bug Fixes
+
+* sync shared changes from cloud repo ([#328](https://github.com/onecli/onecli/issues/328)) ([c9932a4](https://github.com/onecli/onecli/commit/c9932a4457a9c5bf872b4472e9ad5d40908aaad0))
+
 ## [1.32.1](https://github.com/onecli/onecli/compare/v1.32.0...v1.32.1) (2026-05-29)
 
 
