@@ -6,8 +6,11 @@ import { IS_CLOUD } from "../lib/env";
 import { exportToCloud } from "../services/migrate-export-service";
 import { logger } from "../lib/logger";
 
+const CLOUD_API_URL = "https://api.onecli.sh";
+
 const exportSchema = z.object({
   cloudApiKey: z.string().min(1, "Cloud API key is required"),
+  cloudUrl: z.string().url().optional(),
 });
 
 export const migrateRoutes = () => {
@@ -31,7 +34,12 @@ export const migrateRoutes = () => {
       );
     }
 
-    const result = await exportToCloud(projectId, parsed.data.cloudApiKey);
+    const cloudUrl = parsed.data.cloudUrl ?? CLOUD_API_URL;
+    const result = await exportToCloud(
+      projectId,
+      parsed.data.cloudApiKey,
+      cloudUrl,
+    );
 
     logger.info(
       { projectId, imported: result.imported },
