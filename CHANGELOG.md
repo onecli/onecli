@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.32.3](https://github.com/onecli/onecli/compare/v1.32.2...v1.32.3) (2026-05-31)
+
+
+### Bug Fixes
+
+* migrate export sends data to cloud instead of itself ([#330](https://github.com/onecli/onecli/issues/330)) ([604bc65](https://github.com/onecli/onecli/commit/604bc65a9167bf740457cd43ae035e233ac887a1))
+
 ## [1.32.2](https://github.com/onecli/onecli/compare/v1.32.1...v1.32.2) (2026-05-31)
 
 
