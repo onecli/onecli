@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.33.0](https://github.com/onecli/onecli/compare/v1.32.3...v1.33.0) (2026-05-31)
+
+
+### Features
+
+* add Codex (OpenAI OAuth) secret type with auto-refresh ([#332](https://github.com/onecli/onecli/issues/332)) ([9e8a0c7](https://github.com/onecli/onecli/commit/9e8a0c7ac367b9080d3f1b108f1bd3eab62ea554))
+
 ## [1.32.3](https://github.com/onecli/onecli/compare/v1.32.2...v1.32.3) (2026-05-31)
 
 
