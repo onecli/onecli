@@ -65,14 +65,17 @@ pub(crate) struct HostRule {
     pub(crate) intercept: bool,
 }
 
-/// Check whether a `HostRule` matches a given hostname.
-/// Suffix rules match any hostname that ends with the suffix and is strictly longer
-/// (so the bare suffix itself never matches). Exact rules compare the host directly.
-fn host_rule_matches(rule: &HostRule, hostname: &str) -> bool {
-    match rule.pattern {
-        HostPattern::Exact(host) => host == hostname,
-        HostPattern::Suffix(suffix) => hostname.ends_with(suffix) && hostname.len() > suffix.len(),
+impl HostPattern {
+    pub(crate) fn matches(&self, hostname: &str) -> bool {
+        match self {
+            Self::Exact(host) => *host == hostname,
+            Self::Suffix(suffix) => hostname.ends_with(suffix) && hostname.len() > suffix.len(),
+        }
     }
+}
+
+fn host_rule_matches(rule: &HostRule, hostname: &str) -> bool {
+    rule.pattern.matches(hostname)
 }
 
 /// Body format for token refresh requests.
@@ -584,12 +587,6 @@ static APP_PROVIDERS: &[AppProvider] = &[
                 strategy: AuthStrategy::Bearer,
                 intercept: false,
             },
-            HostRule {
-                pattern: HostPattern::Suffix(".atlassian.net"),
-                path_prefix: None,
-                strategy: AuthStrategy::Bearer,
-                intercept: false,
-            },
         ],
         refresh: Some(&ATLASSIAN_REFRESH),
         metadata_headers: &[],
@@ -612,12 +609,6 @@ static APP_PROVIDERS: &[AppProvider] = &[
             HostRule {
                 pattern: HostPattern::Exact("api.atlassian.com"),
                 path_prefix: Some("/oauth/token/accessible-resources"),
-                strategy: AuthStrategy::Bearer,
-                intercept: false,
-            },
-            HostRule {
-                pattern: HostPattern::Suffix(".atlassian.net"),
-                path_prefix: None,
                 strategy: AuthStrategy::Bearer,
                 intercept: false,
             },
@@ -1508,6 +1499,7 @@ pub(crate) async fn refresh_github_app_token(
     private_key_pem: &str,
     app_id: &str,
     installation_id: &str,
+    repositories: Option<&[String]>,
 ) -> anyhow::Result<(String, i64)> {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -1537,14 +1529,24 @@ pub(crate) async fn refresh_github_app_token(
     )
     .map_err(|e| anyhow::anyhow!("GitHub App JWT signing failed: {e}"))?;
 
-    let resp = reqwest::Client::new()
+    let mut req = reqwest::Client::new()
         .post(format!(
             "https://api.github.com/app/installations/{installation_id}/access_tokens"
         ))
         .header("Authorization", format!("Bearer {jwt}"))
         .header("Accept", "application/vnd.github+json")
         .header("X-GitHub-Api-Version", "2022-11-28")
-        .header("User-Agent", "onecli-gateway")
+        .header("User-Agent", "onecli-gateway");
+
+    if let Some(repos) = repositories {
+        let bare_names: Vec<&str> = repos
+            .iter()
+            .map(|r| r.rsplit('/').next().unwrap_or(r.as_str()))
+            .collect();
+        req = req.json(&serde_json::json!({ "repositories": bare_names }));
+    }
+
+    let resp = req
         .send()
         .await
         .map_err(|e| anyhow::anyhow!("GitHub App token request failed: {e}"))?;
@@ -1588,6 +1590,7 @@ pub(crate) async fn refresh_github_app_token(
 pub(crate) async fn try_refresh_credentials(
     cred_type: &str,
     creds: &serde_json::Value,
+    _session_policy: Option<&serde_json::Value>,
 ) -> Option<anyhow::Result<(String, i64)>> {
     match cred_type {
         "github_app" => {
@@ -1599,7 +1602,7 @@ pub(crate) async fn try_refresh_credentials(
                     "GitHub App credentials incomplete, cannot refresh"
                 )));
             };
-            Some(refresh_github_app_token(pk, aid, iid).await)
+            Some(refresh_github_app_token(pk, aid, iid, None).await)
         }
         "service_account" => {
             let pk = creds.get("private_key").and_then(|v| v.as_str());
@@ -2004,21 +2007,20 @@ mod tests {
     }
 
     #[test]
-    fn jira_tenant_host_matches() {
+    fn atlassian_net_tenant_host_no_longer_matches() {
         let providers = providers_for_host("mysite.atlassian.net");
-        assert!(providers.contains(&"jira"));
+        assert!(
+            providers.is_empty(),
+            "*.atlassian.net should not match any provider (deprecated)"
+        );
     }
 
     #[test]
-    fn jira_tenant_host_uses_bearer() {
+    fn atlassian_net_tenant_host_produces_no_injections() {
         let injections = build_app_injections("jira", "mysite.atlassian.net", "eyJ0eXAi.test");
-        assert_eq!(injections.len(), 1);
-        assert_eq!(
-            injections[0],
-            Injection::SetHeader {
-                name: "authorization".to_string(),
-                value: "Bearer eyJ0eXAi.test".to_string(),
-            }
+        assert!(
+            injections.is_empty(),
+            "*.atlassian.net should produce no injections (deprecated)"
         );
     }
 

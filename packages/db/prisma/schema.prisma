@@ -344,7 +344,7 @@ model AppConnection {
 model AgentAppConnection {
   agentId         String        @map("agent_id")
   appConnectionId String        @map("app_connection_id")
-  sessionPolicy   String?       @map("session_policy")
+  sessionPolicy   Json?         @map("session_policy")
   createdAt       DateTime      @default(now()) @map("created_at")
   updatedAt       DateTime      @updatedAt @map("updated_at")
   agent           Agent         @relation(fields: [agentId], references: [id], onDelete: Cascade)

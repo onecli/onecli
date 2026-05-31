@@ -3,7 +3,7 @@
 use anyhow::{Context, Result};
 use hyper_util::rt::TokioIo;
 use tokio::net::TcpStream;
-use tracing::info;
+use tracing::{debug, info};
 
 /// Connect to the target server and splice bytes in both directions
 /// until either side closes the connection. Used for non-intercepted domains.
@@ -11,6 +11,7 @@ pub(super) async fn tunnel(upgraded: hyper::upgrade::Upgraded, host: &str) -> Re
     let mut server = TcpStream::connect(host)
         .await
         .with_context(|| format!("connecting to upstream {host}"))?;
+    debug!(host = %host, "tunnel established");
 
     let mut client = TokioIo::new(upgraded);
 

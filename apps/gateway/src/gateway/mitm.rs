@@ -13,7 +13,7 @@ use hyper::service::service_fn;
 use hyper_util::rt::TokioIo;
 use std::fmt;
 use tokio_rustls::TlsAcceptor;
-use tracing::warn;
+use tracing::{debug, warn};
 
 use crate::approval::ApprovalStore;
 use crate::ca::CertificateAuthority;
@@ -62,6 +62,7 @@ pub(super) async fn mitm(
         .accept(client_io)
         .await
         .context(TlsHandshakeWithClient)?;
+    debug!(host = %hostname, "TLS handshake with client succeeded");
 
     let host_owned = host.to_string();
     let vault_injection_rules = Arc::new(vault_injection_rules);

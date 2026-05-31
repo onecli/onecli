@@ -106,6 +106,15 @@ export const RecentActivityCard = () => {
                         {getProviderIcon(log.provider)?.name ?? log.provider}
                       </span>
                     </span>
+                    <span className="text-muted-foreground mx-0.5">·</span>
+                    <span className="shrink-0 text-sm font-medium">
+                      {log.host.replace(/:(?:443|80)$/, "")}
+                    </span>
+                    <span className="text-muted-foreground truncate font-mono text-xs">
+                      {log.path || "/"}
+                    </span>
+                  </div>
+                  <div className="flex w-5 shrink-0 items-center justify-center">
                     {isOwnKey(log) && (
                       <Tooltip>
                         <TooltipTrigger asChild>
@@ -116,15 +125,8 @@ export const RecentActivityCard = () => {
                         </TooltipContent>
                       </Tooltip>
                     )}
-                    <span className="text-muted-foreground mx-0.5">·</span>
-                    <span className="shrink-0 text-sm font-medium">
-                      {log.host.replace(/:(?:443|80)$/, "")}
-                    </span>
-                    <span className="text-muted-foreground truncate font-mono text-xs">
-                      {log.path || "/"}
-                    </span>
                   </div>
-                  <div className="flex items-center justify-end border-l pl-3 shrink-0 w-[140px]">
+                  <div className="flex items-center justify-end shrink-0 border-l pl-2">
                     <StatusBadge
                       status={log.status}
                       blocked={isBlockedRequest(log)}

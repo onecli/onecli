@@ -41,6 +41,8 @@ pub(crate) enum RequestDecision {
 }
 
 pub(crate) struct RequestEvent {
+    #[allow(dead_code)] // read by cloud telemetry (Redis counters), unused in OSS
+    pub org_id: String,
     pub project_id: String,
     pub agent_id: String,
     #[allow(dead_code)] // read by cloud telemetry (PostHog), unused in OSS
@@ -148,6 +150,7 @@ mod tests {
 
     fn base_event() -> RequestEvent {
         RequestEvent {
+            org_id: "org1".into(),
             project_id: "p1".into(),
             agent_id: "a1".into(),
             agent_name: "test".into(),

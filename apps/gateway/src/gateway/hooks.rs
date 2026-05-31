@@ -22,6 +22,7 @@ pub(crate) type ForwardResponseBody = Either<Full<Bytes>, StreamBody<BodyStream>
 
 /// Common telemetry fields for a proxied request, passed from forward to hooks.
 pub(crate) struct RequestMeta {
+    pub org_id: String,
     pub project_id: String,
     pub agent_id: String,
     pub agent_name: String,
@@ -54,6 +55,7 @@ pub(crate) async fn pre_forward(
     _proxy_ctx: &ProxyContext,
     _cache: &dyn crate::cache::CacheStore,
     _injection_count: usize,
+    _host: &str,
 ) -> Option<Response<ForwardResponseBody>> {
     None
 }
@@ -65,6 +67,7 @@ pub(crate) fn track_and_wrap(
     stream: impl futures_util::Stream<Item = Result<Bytes, reqwest::Error>> + Send + 'static,
 ) -> BodyStream {
     crate::telemetry::on_request(crate::telemetry::RequestEvent {
+        org_id: meta.org_id,
         project_id: meta.project_id,
         agent_id: meta.agent_id,
         agent_name: meta.agent_name,

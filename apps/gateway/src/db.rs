@@ -65,11 +65,19 @@ pub(crate) struct UserRow {
     pub id: String,
 }
 
-/// An API key row from the `api_keys` table.
+/// An API key row from the `api_keys` table (project-scoped).
 #[derive(Debug, FromRow)]
 pub(crate) struct ApiKeyRow {
     pub user_id: String,
     pub project_id: String,
+}
+
+/// An org-scoped API key row from the `api_keys` table.
+#[cfg(feature = "cloud")]
+#[derive(Debug, FromRow)]
+pub(crate) struct OrgApiKeyRow {
+    pub user_id: String,
+    pub organization_id: String,
 }
 
 /// A vault connection row from the `vault_connections` table.
@@ -130,6 +138,38 @@ pub(crate) async fn find_api_key(pool: &PgPool, key: &str) -> Result<Option<ApiK
     .fetch_optional(pool)
     .await
     .context("querying api_keys by key")
+}
+
+/// Look up an org-scoped API key (`oc_org_...`) and return its user_id and organization_id.
+#[cfg(feature = "cloud")]
+pub(crate) async fn find_org_api_key(pool: &PgPool, key: &str) -> Result<Option<OrgApiKeyRow>> {
+    sqlx::query_as::<_, OrgApiKeyRow>(
+        r#"SELECT user_id, organization_id
+           FROM api_keys
+           WHERE key = $1 AND scope = 'organization' AND organization_id IS NOT NULL
+           LIMIT 1"#,
+    )
+    .bind(key)
+    .fetch_optional(pool)
+    .await
+    .context("querying org api_keys by key")
+}
+
+/// Verify that a project belongs to the given organization.
+#[cfg(feature = "cloud")]
+pub(crate) async fn verify_project_in_org(
+    pool: &PgPool,
+    project_id: &str,
+    organization_id: &str,
+) -> Result<bool> {
+    let row: Option<(String,)> =
+        sqlx::query_as(r#"SELECT id FROM projects WHERE id = $1 AND organization_id = $2 LIMIT 1"#)
+            .bind(project_id)
+            .bind(organization_id)
+            .fetch_optional(pool)
+            .await
+            .context("verifying project belongs to organization")?;
+    Ok(row.is_some())
 }
 
 /// Look up an agent by its access token.
@@ -282,6 +322,7 @@ pub(crate) struct AppConnectionRow {
     pub credentials: Option<String>,
     pub label: Option<String>,
     pub metadata: Option<serde_json::Value>,
+    pub session_policy: Option<serde_json::Value>,
 }
 
 /// Find all connected app connections for a given project.
@@ -290,7 +331,7 @@ pub(crate) async fn find_app_connections_by_project(
     project_id: &str,
 ) -> Result<Vec<AppConnectionRow>> {
     sqlx::query_as::<_, AppConnectionRow>(
-        r#"SELECT id, provider, credentials, label, metadata FROM app_connections WHERE project_id = $1 AND status = 'connected'"#,
+        r#"SELECT id, provider, credentials, label, metadata, NULL::jsonb AS session_policy FROM app_connections WHERE project_id = $1 AND status = 'connected'"#,
     )
     .bind(project_id)
     .fetch_all(pool)
@@ -304,7 +345,7 @@ pub(crate) async fn find_app_connections_by_agent(
     agent_id: &str,
 ) -> Result<Vec<AppConnectionRow>> {
     sqlx::query_as::<_, AppConnectionRow>(
-        r#"SELECT ac.id, ac.provider, ac.credentials, ac.label, ac.metadata
+        r#"SELECT ac.id, ac.provider, ac.credentials, ac.label, ac.metadata, aac.session_policy
            FROM app_connections ac
            INNER JOIN agent_app_connections aac ON ac.id = aac.app_connection_id
            WHERE aac.agent_id = $1 AND ac.status = 'connected'"#,
@@ -321,7 +362,7 @@ pub(crate) async fn find_app_connections_by_org(
     organization_id: &str,
 ) -> Result<Vec<AppConnectionRow>> {
     sqlx::query_as::<_, AppConnectionRow>(
-        r#"SELECT id, provider, credentials, label, metadata
+        r#"SELECT id, provider, credentials, label, metadata, NULL::jsonb AS session_policy
            FROM app_connections
            WHERE organization_id = $1 AND scope = 'organization' AND status = 'connected'"#,
     )

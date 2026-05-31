@@ -103,7 +103,12 @@ pub(super) async fn handle_websocket(
     let has_injections = !rules.injection_rules.is_empty();
     let enforce_deny = has_injections && !policy::is_llm_host(host);
 
+    let org_id = proxy_ctx.organization_id.as_deref().unwrap_or("");
+    let pid = proxy_ctx.project_id.as_deref().unwrap_or("");
+
     let decision = policy::evaluate(
+        org_id,
+        pid,
         "GET",
         &path,
         None,
@@ -373,6 +378,11 @@ fn emit_telemetry(
             crate::apps::provider_for_host_and_path(hostname, path).unwrap_or((hostname, hostname));
 
         crate::telemetry::on_request(crate::telemetry::RequestEvent {
+            org_id: proxy_ctx
+                .organization_id
+                .as_deref()
+                .unwrap_or("")
+                .to_string(),
             project_id: pid.to_string(),
             agent_id: aid.to_string(),
             agent_name: proxy_ctx

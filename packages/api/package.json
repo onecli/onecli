@@ -21,7 +21,8 @@
     "./cloud/notifications/*": "./src/cloud/notifications/*.ts",
     "./cloud/apps/*": "./src/cloud/apps/*.ts",
     "./cloud/apps/app-permissions/*": "./src/cloud/apps/app-permissions/*.ts",
-    "./cloud/auth/*": "./src/cloud/auth/*.ts"
+    "./cloud/auth/*": "./src/cloud/auth/*.ts",
+    "./cloud/granular-access": "./src/cloud/granular-access/index.ts"
   },
   "scripts": {
     "check-types": "tsc --noEmit",

@@ -5,6 +5,8 @@
 //! - **Rate limit**: allows up to N requests per time window, then 429
 //! - **Allow**: explicitly permits a request (used in deny-by-default mode)
 
+use tracing::{debug, warn};
+
 use crate::cache::CacheStore;
 use crate::inject::path_matches;
 
@@ -64,6 +66,8 @@ pub(crate) enum PolicyDecision {
 /// Each pass checks only one action type to enforce strict ordering.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn evaluate(
+    org_id: &str,
+    project_id: &str,
     request_method: &str,
     request_path: &str,
     request_body: Option<&[u8]>,
@@ -79,6 +83,7 @@ pub(crate) async fn evaluate(
             continue;
         }
         if matches!(rule.action, PolicyAction::Block) {
+            debug!(rule = %rule.name, method = request_method, path = request_path, "policy: block rule matched");
             return PolicyDecision::Blocked {
                 rule_name: rule.name.clone(),
             };
@@ -91,6 +96,7 @@ pub(crate) async fn evaluate(
             continue;
         }
         if let PolicyAction::ManualApproval { rule_id } = &rule.action {
+            debug!(rule = %rule.name, rule_id = %rule_id, method = request_method, path = request_path, "policy: manual approval rule matched");
             return PolicyDecision::ManualApproval {
                 rule_id: rule_id.clone(),
             };
@@ -113,7 +119,7 @@ pub(crate) async fn evaluate(
                 .unwrap_or_default()
                 .as_secs();
             let window_id = now / (*window_secs).max(1);
-            let key = format!("rate:{rule_id}:{agent_token}:{window_id}");
+            let key = format!("rate:{org_id}:{project_id}:{rule_id}:{agent_token}:{window_id}");
 
             if let Some(count) = cache.incr(&key, *window_secs).await {
                 if count > *max_requests {
@@ -132,8 +138,9 @@ pub(crate) async fn evaluate(
                         retry_after_secs: retry_after,
                     };
                 }
+            } else {
+                warn!(rule = %rule.name, "policy: rate limit cache unavailable, allowing through");
             }
-            // If incr failed (cache unavailable), allow through — graceful fallback
         }
     }
 
@@ -147,6 +154,11 @@ pub(crate) async fn evaluate(
                 )
         });
         if !has_allow {
+            debug!(
+                method = request_method,
+                path = request_path,
+                "policy: no allow rule matched in deny-by-default mode"
+            );
             return PolicyDecision::BlockedByDefaultPolicy;
         }
     }
@@ -340,7 +352,7 @@ mod tests {
         let store = crate::cache::create_store().await.unwrap();
         let rules = vec![rate_rule("*", Some("POST"), 5, 3600)];
         let decision = evaluate(
-            "POST", "/path", None, &rules, "agent1", &*store, "allow", false,
+            "org1", "proj1", "POST", "/path", None, &rules, "agent1", &*store, "allow", false,
         )
         .await;
         assert!(matches!(decision, PolicyDecision::Allow));
@@ -353,19 +365,19 @@ mod tests {
 
         // First 2 requests allowed
         let d1 = evaluate(
-            "POST", "/path", None, &rules, "agent1", &*store, "allow", false,
+            "org1", "proj1", "POST", "/path", None, &rules, "agent1", &*store, "allow", false,
         )
         .await;
         assert!(matches!(d1, PolicyDecision::Allow));
         let d2 = evaluate(
-            "POST", "/path", None, &rules, "agent1", &*store, "allow", false,
+            "org1", "proj1", "POST", "/path", None, &rules, "agent1", &*store, "allow", false,
         )
         .await;
         assert!(matches!(d2, PolicyDecision::Allow));
 
         // Third request rate limited
         let d3 = evaluate(
-            "POST", "/path", None, &rules, "agent1", &*store, "allow", false,
+            "org1", "proj1", "POST", "/path", None, &rules, "agent1", &*store, "allow", false,
         )
         .await;
         assert!(matches!(d3, PolicyDecision::RateLimited { .. }));
@@ -378,18 +390,18 @@ mod tests {
 
         // Agent1 hits limit
         evaluate(
-            "POST", "/path", None, &rules, "agent1", &*store, "allow", false,
+            "org1", "proj1", "POST", "/path", None, &rules, "agent1", &*store, "allow", false,
         )
         .await;
         let d = evaluate(
-            "POST", "/path", None, &rules, "agent1", &*store, "allow", false,
+            "org1", "proj1", "POST", "/path", None, &rules, "agent1", &*store, "allow", false,
         )
         .await;
         assert!(matches!(d, PolicyDecision::RateLimited { .. }));
 
         // Agent2 is unaffected
         let d = evaluate(
-            "POST", "/path", None, &rules, "agent2", &*store, "allow", false,
+            "org1", "proj1", "POST", "/path", None, &rules, "agent2", &*store, "allow", false,
         )
         .await;
         assert!(matches!(d, PolicyDecision::Allow));
@@ -403,6 +415,8 @@ mod tests {
             rate_rule("/danger/*", Some("POST"), 100, 3600),
         ];
         let d = evaluate(
+            "org1",
+            "proj1",
             "POST",
             "/danger/path",
             None,
@@ -421,6 +435,8 @@ mod tests {
         let store = crate::cache::create_store().await.unwrap();
         let rules = vec![block_rule("/blocked/*", Some("POST"))];
         let d = evaluate(
+            "org1",
+            "proj1",
             "GET",
             "/safe/path",
             None,
@@ -453,6 +469,8 @@ mod tests {
         let store = crate::cache::create_store().await.unwrap();
         let rules = vec![approval_rule("/send/*", Some("POST"))];
         let d = evaluate(
+            "org1",
+            "proj1",
             "POST",
             "/send/email",
             None,
@@ -471,6 +489,8 @@ mod tests {
         let store = crate::cache::create_store().await.unwrap();
         let rules = vec![approval_rule("/send/*", Some("POST"))];
         let d = evaluate(
+            "org1",
+            "proj1",
             "GET",
             "/send/email",
             None,
@@ -492,6 +512,8 @@ mod tests {
             block_rule("/danger/*", Some("POST")),
         ];
         let d = evaluate(
+            "org1",
+            "proj1",
             "POST",
             "/danger/path",
             None,
@@ -513,7 +535,7 @@ mod tests {
             approval_rule("/v1/*", Some("POST")),
         ];
         let d = evaluate(
-            "POST", "/v1/send", None, &rules, "agent1", &*store, "allow", false,
+            "org1", "proj1", "POST", "/v1/send", None, &rules, "agent1", &*store, "allow", false,
         )
         .await;
         assert!(matches!(d, PolicyDecision::ManualApproval { .. }));
@@ -571,6 +593,8 @@ mod tests {
         let store = crate::cache::create_store().await.unwrap();
         let rules: Vec<PolicyRule> = vec![];
         let d = evaluate(
+            "org1",
+            "proj1",
             "POST",
             "/api/v1/messages",
             None,
@@ -589,6 +613,8 @@ mod tests {
         let store = crate::cache::create_store().await.unwrap();
         let rules = vec![allow_rule("/api/*", Some("POST"))];
         let d = evaluate(
+            "org1",
+            "proj1",
             "POST",
             "/api/v1/messages",
             None,
@@ -610,6 +636,8 @@ mod tests {
             block_rule("/api/v1/danger", Some("POST")),
         ];
         let d = evaluate(
+            "org1",
+            "proj1",
             "POST",
             "/api/v1/danger",
             None,
@@ -628,6 +656,8 @@ mod tests {
         let store = crate::cache::create_store().await.unwrap();
         let rules = vec![rate_rule("/api/*", Some("POST"), 100, 3600)];
         let d = evaluate(
+            "org1",
+            "proj1",
             "POST",
             "/api/v1/send",
             None,
@@ -646,6 +676,8 @@ mod tests {
         let store = crate::cache::create_store().await.unwrap();
         let rules = vec![approval_rule("/send/*", Some("POST"))];
         let d = evaluate(
+            "org1",
+            "proj1",
             "POST",
             "/send/email",
             None,
@@ -664,6 +696,8 @@ mod tests {
         let store = crate::cache::create_store().await.unwrap();
         let rules = vec![allow_rule("/api/*", Some("GET"))];
         let d = evaluate(
+            "org1",
+            "proj1",
             "POST",
             "/api/v1/send",
             None,
@@ -682,6 +716,8 @@ mod tests {
         let store = crate::cache::create_store().await.unwrap();
         let rules = vec![allow_rule("/api/*", Some("POST"))];
         let d = evaluate(
+            "org1",
+            "proj1",
             "POST",
             "/other/path",
             None,
@@ -700,6 +736,8 @@ mod tests {
         let store = crate::cache::create_store().await.unwrap();
         let rules: Vec<PolicyRule> = vec![];
         let d = evaluate(
+            "org1",
+            "proj1",
             "POST",
             "/api/v1/messages",
             None,
@@ -717,7 +755,10 @@ mod tests {
     async fn allow_mode_empty_string_same_as_allow() {
         let store = crate::cache::create_store().await.unwrap();
         let rules: Vec<PolicyRule> = vec![];
-        let d = evaluate("POST", "/path", None, &rules, "agent1", &*store, "", false).await;
+        let d = evaluate(
+            "org1", "proj1", "POST", "/path", None, &rules, "agent1", &*store, "", false,
+        )
+        .await;
         assert!(matches!(d, PolicyDecision::Allow));
     }
 

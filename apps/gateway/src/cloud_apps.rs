@@ -12,6 +12,7 @@ pub(crate) fn providers() -> &'static [AppProvider] {
 pub(crate) async fn try_refresh_credentials(
     _cred_type: &str,
     _creds: &serde_json::Value,
+    _session_policy: Option<&serde_json::Value>,
 ) -> Option<anyhow::Result<(String, i64)>> {
     None
 }
