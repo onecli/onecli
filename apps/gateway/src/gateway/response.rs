@@ -22,7 +22,7 @@ pub(crate) type ForwardBody<S> = Either<Full<Bytes>, S>;
 
 /// Resolve the OneCLI dashboard base URL from `APP_URL`,
 /// falling back to `http://localhost:10254`. Cached after first call.
-fn dashboard_url() -> &'static str {
+pub(crate) fn dashboard_url() -> &'static str {
     static URL: std::sync::OnceLock<String> = std::sync::OnceLock::new();
     URL.get_or_init(|| {
         std::env::var("APP_URL")
@@ -41,7 +41,10 @@ fn scoped_url(base: &str, path: &str, project_id: Option<&str>) -> String {
 
 /// Build a JSON error response with the given status code and body.
 /// Used by `forward_request` (MITM and HTTP proxy forwarding path).
-fn json_error<S>(status: StatusCode, body: serde_json::Value) -> Response<ForwardBody<S>> {
+pub(super) fn json_error<S>(
+    status: StatusCode,
+    body: serde_json::Value,
+) -> Response<ForwardBody<S>> {
     let json = body.to_string();
     let mut response = Response::new(Either::Left(Full::new(Bytes::from(json))));
     *response.status_mut() = status;
@@ -64,7 +67,7 @@ fn json_error_axum(status: StatusCode, body: serde_json::Value) -> Response<axum
 }
 
 /// Mark a response as non-transient so clients know not to retry.
-fn with_no_retry<B>(mut resp: Response<B>) -> Response<B> {
+pub(super) fn with_no_retry<B>(mut resp: Response<B>) -> Response<B> {
     resp.headers_mut()
         .insert("x-should-retry", HeaderValue::from_static("false"));
     resp

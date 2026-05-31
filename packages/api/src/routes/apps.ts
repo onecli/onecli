@@ -11,7 +11,7 @@ import {
   verifyOAuthState,
   generateNonce,
 } from "../lib/oauth-state";
-import { NODE_ENV } from "../lib/env";
+import { APP_URL, NODE_ENV } from "../lib/env";
 import { dashboardUrl } from "../lib/dashboard-url";
 import { getRequestOrigin } from "../lib/request-origin";
 import { buildFragmentBridgeHtml } from "../lib/fragment-bridge";
@@ -310,7 +310,8 @@ export const appRoutes = () => {
   // ── GET /apps/:provider/callback ── OAuth callback ─────────────────────
   app.get("/:provider/callback", async (c) => {
     const provider = c.req.param("provider")!;
-    const origin = getRequestOrigin(c.req.raw);
+    const apiOrigin = getRequestOrigin(c.req.raw);
+    const appOrigin = APP_URL || apiOrigin;
 
     const appDef = getApp(provider);
     if (
@@ -318,7 +319,7 @@ export const appRoutes = () => {
       appDef.connectionMethod.fragmentCallback &&
       !c.req.query(appDef.connectionMethod.fragmentCallback.paramName)
     ) {
-      const errorUrl = `${origin}/app-connect/${provider}?status=error&message=${encodeURIComponent("No token received")}`;
+      const errorUrl = `${appOrigin}/app-connect/${provider}?status=error&message=${encodeURIComponent("No token received")}`;
       return c.html(
         buildFragmentBridgeHtml(
           appDef.connectionMethod.fragmentCallback.paramName,
@@ -335,7 +336,7 @@ export const appRoutes = () => {
 
     const errorRedirect = (msg: string) =>
       c.redirect(
-        `${origin}/app-connect/${provider}?status=error&message=${encodeURIComponent(msg)}`,
+        `${appOrigin}/app-connect/${provider}?status=error&message=${encodeURIComponent(msg)}`,
       );
 
     try {
@@ -386,7 +387,7 @@ export const appRoutes = () => {
             successParams.set("agent_name", state.agentName as string);
           }
           return c.redirect(
-            `${origin}/app-connect/${provider}?${successParams}`,
+            `${appOrigin}/app-connect/${provider}?${successParams}`,
           );
         }
       }
@@ -396,7 +397,7 @@ export const appRoutes = () => {
         return errorRedirect(`${appDef.name} is not configured`);
       }
 
-      const redirectUri = `${origin}/v1/apps/${provider}/callback`;
+      const redirectUri = `${apiOrigin}/v1/apps/${provider}/callback`;
 
       // Extract all query params as callback params
       const url = new URL(c.req.url);
@@ -462,7 +463,9 @@ export const appRoutes = () => {
         path: `/v1/apps/${provider}/callback`,
       });
 
-      return c.redirect(`${origin}/app-connect/${provider}?${successParams}`);
+      return c.redirect(
+        `${appOrigin}/app-connect/${provider}?${successParams}`,
+      );
     } catch (err) {
       logger.error({ err, provider }, "OAuth callback failed");
       const message =

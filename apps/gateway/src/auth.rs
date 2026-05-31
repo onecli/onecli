@@ -69,6 +69,7 @@ fn nextauth_secret() -> Option<&'static str> {
 pub(crate) struct AuthUser {
     pub user_id: String,
     pub project_id: String,
+    pub auth_method: String,
 }
 
 impl FromRequestParts<GatewayState> for AuthUser {
@@ -103,6 +104,7 @@ impl FromRequestParts<GatewayState> for AuthUser {
         Ok(Self {
             user_id,
             project_id,
+            auth_method: "session".to_string(),
         })
     }
 }
@@ -126,9 +128,11 @@ async fn validate_api_key(pool: &PgPool, headers: &HeaderMap) -> Option<AuthUser
         .map_err(|e| warn!(error = %e, "api key auth: db error"))
         .ok()??;
 
+    let prefix = token.get(..12).unwrap_or(token);
     Some(AuthUser {
         user_id: api_key.user_id,
         project_id: api_key.project_id,
+        auth_method: format!("api_key:{prefix}"),
     })
 }
 

@@ -19,6 +19,7 @@ mod body;
 mod cloud_response;
 mod finalizers;
 pub(crate) mod forward;
+mod hints;
 #[cfg(not(feature = "cloud"))]
 mod hooks;
 #[cfg(feature = "cloud")]
@@ -44,7 +45,7 @@ use hyper_util::rt::TokioIo;
 use tokio::net::{TcpListener, TcpStream};
 use tower::ServiceExt;
 use tower_http::cors::CorsLayer;
-use tracing::{info, warn};
+use tracing::{info, info_span, warn, Instrument};
 
 use crate::approval::{ApprovalDecision, ApprovalStore, APPROVAL_TIMEOUT_SECS};
 use crate::auth::AuthUser;
@@ -293,39 +294,42 @@ async fn invalidate_cache(
     auth: AuthUser,
     State(state): State<GatewayState>,
 ) -> impl axum::response::IntoResponse {
-    // Clear injection cache first, then connect cache. This ordering ensures
-    // a concurrent request that re-resolves the connect cache also re-resolves
-    // injections (since injection cache is already cleared).
-    // Cache keys include org_id — look it up once for both prefixes
-    let org_id = match db::find_organization_id_by_project(
-        &state.policy_engine.pool,
-        &auth.project_id,
-    )
-    .await
-    {
-        Ok(Some(oid)) => oid,
-        other => {
-            warn!(
-                project_id = %auth.project_id,
-                error = ?other.err(),
-                "cache invalidation: failed to resolve org_id; using broad prefix"
-            );
-            String::new()
-        }
-    };
+    let span = info_span!("cache_invalidate",
+        project_id = %auth.project_id,
+        user_id = %auth.user_id,
+        auth_method = %auth.auth_method,
+    );
+    async move {
+        let org_id =
+            match db::find_organization_id_by_project(&state.policy_engine.pool, &auth.project_id)
+                .await
+            {
+                Ok(Some(oid)) => oid,
+                other => {
+                    warn!(
+                        error = ?other.err(),
+                        "cache invalidation: failed to resolve org_id; using broad prefix"
+                    );
+                    String::new()
+                }
+            };
 
-    state
-        .cache
-        .del_by_prefix(&format!("app_injection:{org_id}:{}:", auth.project_id))
-        .await;
-    state
-        .cache
-        .del_by_prefix(&format!("connect:{org_id}:{}:", auth.project_id))
-        .await;
-    (
-        StatusCode::OK,
-        axum::Json(serde_json::json!({ "invalidated": true })),
-    )
+        state
+            .cache
+            .del_by_prefix(&format!("app_injection:{org_id}:{}:", auth.project_id))
+            .await;
+        state
+            .cache
+            .del_by_prefix(&format!("connect:{org_id}:{}:", auth.project_id))
+            .await;
+        info!("cache invalidated");
+        (
+            StatusCode::OK,
+            axum::Json(serde_json::json!({ "invalidated": true })),
+        )
+    }
+    .instrument(span)
+    .await
 }
 
 /// Query parameters for the pending approvals endpoint.
@@ -344,43 +348,64 @@ async fn get_pending_approvals(
     State(state): State<GatewayState>,
     axum::extract::Query(params): axum::extract::Query<PendingParams>,
 ) -> impl axum::response::IntoResponse {
-    let exclude: std::collections::HashSet<&str> = params
-        .exclude
-        .split(',')
-        .map(|s| s.trim())
-        .filter(|s| !s.is_empty())
-        .collect();
+    let span = info_span!("approval_poll",
+        project_id = %auth.project_id,
+        user_id = %auth.user_id,
+        auth_method = %auth.auth_method,
+    );
+    async move {
+        let org_id = db::find_organization_id_by_project(&state.policy_engine.pool, &auth.project_id)
+            .await
+            .ok()
+            .flatten()
+            .unwrap_or_default();
 
-    let mut pending = state.approval_store.list_pending(&auth.project_id).await;
-    pending.retain(|a| !exclude.contains(a.id.as_str()));
+        let exclude: std::collections::HashSet<&str> = params
+            .exclude
+            .split(',')
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            .collect();
 
-    if pending.is_empty() {
-        let got_new = state
-            .approval_store
-            .wait_for_new(&auth.project_id, std::time::Duration::from_secs(30))
-            .await;
-        if got_new {
-            let mut fresh = state.approval_store.list_pending(&auth.project_id).await;
-            fresh.retain(|a| !exclude.contains(a.id.as_str()));
-            pending = fresh;
+        info!(exclude_count = exclude.len(), "approval poll started");
+
+        let mut pending = state.approval_store.list_pending(&org_id, &auth.project_id).await;
+        pending.retain(|a| !exclude.contains(a.id.as_str()));
+
+        let mut long_polled = false;
+        if pending.is_empty() {
+            long_polled = true;
+            let got_new = state
+                .approval_store
+                .wait_for_new(&org_id, &auth.project_id, std::time::Duration::from_secs(30))
+                .await;
+            if got_new {
+                let mut fresh = state.approval_store.list_pending(&org_id, &auth.project_id).await;
+                fresh.retain(|a| !exclude.contains(a.id.as_str()));
+                pending = fresh;
+            }
         }
-    }
 
-    axum::Json(serde_json::json!({
-        "requests": pending.iter().map(|a| serde_json::json!({
-            "id": a.id,
-            "method": a.method,
-            "url": format!("{}://{}{}", a.scheme, a.host, a.path),
-            "host": a.host,
-            "path": a.path,
-            "headers": a.headers,
-            "bodyPreview": a.body_preview,
-            "agent": { "id": a.agent_id, "name": a.agent_name, "externalId": a.agent_identifier },
-            "createdAt": format_unix_ts(a.created_at),
-            "expiresAt": format_unix_ts(a.expires_at),
-        })).collect::<Vec<_>>(),
-        "timeoutSeconds": APPROVAL_TIMEOUT_SECS,
-    }))
+        info!(count = pending.len(), long_polled, "approval poll completed");
+
+        axum::Json(serde_json::json!({
+            "requests": pending.iter().map(|a| serde_json::json!({
+                "id": a.id,
+                "method": a.method,
+                "url": format!("{}://{}{}", a.scheme, a.host, a.path),
+                "host": a.host,
+                "path": a.path,
+                "headers": a.headers,
+                "bodyPreview": a.body_preview,
+                "agent": { "id": a.agent_id, "name": a.agent_name, "externalId": a.agent_identifier },
+                "createdAt": format_unix_ts(a.created_at),
+                "expiresAt": format_unix_ts(a.expires_at),
+            })).collect::<Vec<_>>(),
+            "timeoutSeconds": APPROVAL_TIMEOUT_SECS,
+        }))
+    }
+    .instrument(span)
+    .await
 }
 
 /// Submit a decision for a pending manual approval request.
@@ -390,50 +415,66 @@ async fn submit_approval_decision(
     axum::extract::Path(approval_id): axum::extract::Path<String>,
     axum::Json(body): axum::Json<DecisionBody>,
 ) -> impl axum::response::IntoResponse {
-    // O(1) lookup — verify approval exists and belongs to this project.
-    match state.approval_store.get_pending(&approval_id).await {
-        Some(a) if a.project_id == auth.project_id => {}
-        _ => {
-            return (
-                StatusCode::NOT_FOUND,
-                axum::Json(serde_json::json!({ "error": "approval_not_found" })),
+    let span = info_span!("approval_decision",
+        project_id = %auth.project_id,
+        user_id = %auth.user_id,
+        auth_method = %auth.auth_method,
+        approval_id = %approval_id,
+    );
+    async move {
+        let org_id =
+            db::find_organization_id_by_project(&state.policy_engine.pool, &auth.project_id)
+                .await
+                .ok()
+                .flatten()
+                .unwrap_or_default();
+
+        // O(1) lookup — verify approval exists and belongs to this project.
+        match state
+            .approval_store
+            .get_pending(&org_id, &auth.project_id, &approval_id)
+            .await
+        {
+            Some(a) if a.project_id == auth.project_id => {}
+            _ => {
+                warn!("approval decision rejected: not found or wrong project");
+                return (
+                    StatusCode::NOT_FOUND,
+                    axum::Json(serde_json::json!({ "error": "approval_not_found" })),
+                );
+            }
+        }
+
+        let decision_str = match body.decision {
+            ApprovalDecision::Approve => "approve",
+            ApprovalDecision::Deny => "deny",
+        };
+
+        info!(decision = decision_str, "approval decision submitted");
+
+        let delivered = state
+            .approval_store
+            .submit_decision(&org_id, &auth.project_id, &approval_id, body.decision)
+            .await;
+
+        if delivered {
+            (
+                StatusCode::OK,
+                axum::Json(serde_json::json!({ "success": true })),
+            )
+        } else {
+            warn!(
+                decision = decision_str,
+                "approval decision submitted but approval already expired"
             );
+            (
+                StatusCode::GONE,
+                axum::Json(serde_json::json!({ "error": "approval_expired" })),
+            )
         }
     }
-
-    let decision_str = match body.decision {
-        ApprovalDecision::Approve => "approve",
-        ApprovalDecision::Deny => "deny",
-    };
-
-    info!(
-        approval_id = %approval_id,
-        decision = decision_str,
-        project_id = %auth.project_id,
-        "approval decision submitted"
-    );
-
-    let delivered = state
-        .approval_store
-        .submit_decision(&approval_id, body.decision)
-        .await;
-
-    if delivered {
-        (
-            StatusCode::OK,
-            axum::Json(serde_json::json!({ "success": true })),
-        )
-    } else {
-        warn!(
-            approval_id = %approval_id,
-            decision = decision_str,
-            "approval decision submitted but approval already expired"
-        );
-        (
-            StatusCode::GONE,
-            axum::Json(serde_json::json!({ "error": "approval_expired" })),
-        )
-    }
+    .instrument(span)
+    .await
 }
 
 /// Request body for the approval decision endpoint.
@@ -575,9 +616,17 @@ async fn handle_connect(
         intercept = true;
     }
 
-    info!(
+    let session_span = info_span!("session",
         peer = %peer_addr,
         host = %host,
+        project_id = project_id.as_deref().unwrap_or("-"),
+        org_id = organization_id.as_deref().unwrap_or("-"),
+        agent = agent_name.as_deref().unwrap_or("-"),
+        agent_id = agent_id.as_deref().unwrap_or("-"),
+    );
+
+    info!(
+        parent: &session_span,
         mode = if intercept { "mitm" } else { "tunnel" },
         "CONNECT"
     );
@@ -585,7 +634,7 @@ async fn handle_connect(
     let ca = Arc::clone(&state.ca);
     let skip_verify = host_matches_skip_verify(&hostname, &state.skip_verify_hosts);
     let http_client = if skip_verify {
-        info!(host = %hostname, "TLS verification skipped (GATEWAY_SKIP_VERIFY_HOSTS)");
+        info!(parent: &session_span, "TLS verification skipped (GATEWAY_SKIP_VERIFY_HOSTS)");
         state.http_client_no_verify.clone()
     } else {
         state.http_client.clone()
@@ -601,34 +650,37 @@ async fn handle_connect(
         agent_token: agent_token.clone(),
     });
 
-    tokio::spawn(async move {
-        match hyper::upgrade::on(req).await {
-            Ok(upgraded) => {
-                let result = if intercept {
-                    mitm::mitm(
-                        upgraded,
-                        &host,
-                        &ca,
-                        http_client,
-                        vault_injection_rules,
-                        cache,
-                        proxy_ctx,
-                        approval_store,
-                        Arc::clone(&state.policy_engine),
-                    )
-                    .await
-                } else {
-                    tunnel::tunnel(upgraded, &host).await
-                };
-                if let Err(e) = result {
-                    warn!(host = %host, error = ?e, "connection error");
+    tokio::spawn(
+        async move {
+            match hyper::upgrade::on(req).await {
+                Ok(upgraded) => {
+                    let result = if intercept {
+                        mitm::mitm(
+                            upgraded,
+                            &host,
+                            &ca,
+                            http_client,
+                            vault_injection_rules,
+                            cache,
+                            proxy_ctx,
+                            approval_store,
+                            Arc::clone(&state.policy_engine),
+                        )
+                        .await
+                    } else {
+                        tunnel::tunnel(upgraded, &host).await
+                    };
+                    if let Err(e) = result {
+                        warn!(host = %host, error = ?e, "connection error");
+                    }
+                }
+                Err(e) => {
+                    warn!(host = %host, error = %e, "upgrade failed");
                 }
             }
-            Err(e) => {
-                warn!(host = %host, error = %e, "upgrade failed");
-            }
         }
-    });
+        .instrument(session_span),
+    );
 
     // 200 tells the client the tunnel is established.
     Ok(Response::new(axum::body::Body::empty()))
@@ -739,9 +791,17 @@ async fn handle_http_proxy(
         }
     }
 
-    info!(
+    let session_span = info_span!("session",
         peer = %peer_addr,
         host = %authority,
+        project_id = resolved.project_id.as_deref().unwrap_or("-"),
+        org_id = resolved.organization_id.as_deref().unwrap_or("-"),
+        agent = resolved.agent_name.as_deref().unwrap_or("-"),
+        agent_id = resolved.agent_id.as_deref().unwrap_or("-"),
+    );
+
+    info!(
+        parent: &session_span,
         scheme = %scheme,
         injection_count = resolved.injection_rules.len(),
         policy_count = resolved.policy_rules.len(),
@@ -777,17 +837,21 @@ async fn handle_http_proxy(
             state.http_client.clone()
         };
 
-    let mut resp = forward::forward_request(
-        req,
-        &authority,
-        scheme,
-        http_client,
-        &rules,
-        &*state.cache,
-        &proxy_ctx,
-        &state.approval_store,
-        &state.policy_engine.pool,
-    )
+    let mut resp = async {
+        forward::forward_request(
+            req,
+            &authority,
+            scheme,
+            http_client,
+            &rules,
+            &*state.cache,
+            &proxy_ctx,
+            &state.approval_store,
+            &state.policy_engine.pool,
+        )
+        .await
+    }
+    .instrument(session_span)
     .await?;
 
     connect::inject_connections_header(&mut resp, &resolved.app_connections);

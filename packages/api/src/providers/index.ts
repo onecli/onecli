@@ -23,4 +23,7 @@ export {
   type ConnectionHooks,
   initConnectionHooks,
   getConnectionHooks,
+  type PolicyValidator,
+  initPolicyValidator,
+  getPolicyValidator,
 } from "./hooks";

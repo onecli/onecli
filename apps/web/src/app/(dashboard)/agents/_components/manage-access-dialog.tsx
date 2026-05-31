@@ -42,6 +42,8 @@ import {
 import { getApp } from "@onecli/api/apps/registry";
 import { extractLabel } from "@onecli/api/services/connection-service";
 import type { SecretMode } from "@onecli/api/services/agent-service";
+import { granularAccessConfigs } from "@/lib/granular-access";
+import { ProAppDialog } from "@/lib/components/pro-app-dialog";
 
 interface ManageAccessDialogProps {
   agent: {
@@ -72,17 +74,25 @@ export const ManageAccessDialog = ({
   const [selectedSecretIds, setSelectedSecretIds] = useState<Set<string>>(
     () => new Set(),
   );
-  const [selectedConnectionIds, setSelectedConnectionIds] = useState<
-    Set<string>
-  >(() => new Set());
+  const [connectionPolicies, setConnectionPolicies] = useState<
+    Map<string, Record<string, unknown> | null>
+  >(() => new Map());
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [search, setSearch] = useState("");
 
+  const [granularDialogConnId, setGranularDialogConnId] = useState<
+    string | null
+  >(null);
+  const [editingPolicy, setEditingPolicy] = useState<Record<
+    string,
+    unknown
+  > | null>(null);
+
   const fetchData = useCallback(async () => {
     setLoading(true);
     try {
-      const [allSecrets, assignedSecretIds, allConnections, assignedAppIds] =
+      const [allSecrets, assignedSecretIds, allConnections, assignedConns] =
         await Promise.all([
           secretsApi.list(),
           getAgentSecrets(agent.id),
@@ -105,7 +115,14 @@ export const ManageAccessDialog = ({
       }
       setConnections(projectConns);
       setOrgConnections(orgConns);
-      setSelectedConnectionIds(new Set(assignedAppIds));
+      const policies = new Map<string, Record<string, unknown> | null>();
+      for (const ac of assignedConns) {
+        policies.set(
+          ac.appConnectionId,
+          ac.sessionPolicy as Record<string, unknown> | null,
+        );
+      }
+      setConnectionPolicies(policies);
     } catch {
       toast.error("Failed to load credentials");
     } finally {
@@ -117,6 +134,7 @@ export const ManageAccessDialog = ({
     if (open) {
       setMode(agent.secretMode === "selective" ? "selective" : "all");
       setSearch("");
+      setGranularDialogConnId(null);
       fetchData();
     }
   }, [open, agent.secretMode, fetchData]);
@@ -198,10 +216,10 @@ export const ManageAccessDialog = ({
   };
 
   const toggleConnection = (connectionId: string) => {
-    setSelectedConnectionIds((prev) => {
-      const next = new Set(prev);
+    setConnectionPolicies((prev) => {
+      const next = new Map(prev);
       if (next.has(connectionId)) next.delete(connectionId);
-      else next.add(connectionId);
+      else next.set(connectionId, null);
       return next;
     });
   };
@@ -211,18 +229,20 @@ export const ManageAccessDialog = ({
     orgSecrets.length +
     appConnections.length +
     orgConnections.length;
-  const totalSelected = selectedSecretIds.size + selectedConnectionIds.size;
+  const totalSelected = selectedSecretIds.size + connectionPolicies.size;
 
   const selectAll = () => {
     setSelectedSecretIds(new Set([...secrets, ...orgSecrets].map((s) => s.id)));
-    setSelectedConnectionIds(
-      new Set([...appConnections, ...orgConnections].map((c) => c.id)),
-    );
+    const allPolicies = new Map<string, Record<string, unknown> | null>();
+    for (const c of [...appConnections, ...orgConnections]) {
+      allPolicies.set(c.id, connectionPolicies.get(c.id) ?? null);
+    }
+    setConnectionPolicies(allPolicies);
   };
 
   const clearAll = () => {
     setSelectedSecretIds(new Set());
-    setSelectedConnectionIds(new Set());
+    setConnectionPolicies(new Map());
   };
 
   const handleSave = async () => {
@@ -230,12 +250,15 @@ export const ManageAccessDialog = ({
     try {
       await updateAgentSecretMode(agent.id, mode);
       if (mode === "selective") {
+        const connPayload = Array.from(connectionPolicies.entries()).map(
+          ([id, policy]) => ({
+            appConnectionId: id,
+            sessionPolicy: policy,
+          }),
+        );
         await Promise.all([
           updateAgentSecrets(agent.id, Array.from(selectedSecretIds)),
-          updateAgentAppConnections(
-            agent.id,
-            Array.from(selectedConnectionIds),
-          ),
+          updateAgentAppConnections(agent.id, connPayload),
         ]);
       }
       queryClient.invalidateQueries({ queryKey: queryKeys.agents.all() });
@@ -252,6 +275,40 @@ export const ManageAccessDialog = ({
 
   const isSelective = mode === "selective";
   const hasItems = totalItems > 0;
+
+  const granularDialogConn = useMemo(
+    () =>
+      granularDialogConnId
+        ? [...appConnections, ...orgConnections].find(
+            (c) => c.id === granularDialogConnId,
+          )
+        : undefined,
+    [granularDialogConnId, appConnections, orgConnections],
+  );
+  const granularDialogConfig = granularDialogConn
+    ? granularAccessConfigs.get(granularDialogConn.provider)
+    : undefined;
+  const granularDialogApp = granularDialogConn
+    ? getApp(granularDialogConn.provider)
+    : undefined;
+  const granularDialogMeta =
+    (granularDialogConn?.metadata as Record<string, unknown>) ?? {};
+
+  const openGranularDialog = (connId: string) => {
+    setGranularDialogConnId(connId);
+    setEditingPolicy(connectionPolicies.get(connId) ?? null);
+  };
+
+  const saveGranularPolicy = () => {
+    if (granularDialogConnId) {
+      setConnectionPolicies((prev) => {
+        const next = new Map(prev);
+        next.set(granularDialogConnId, editingPolicy);
+        return next;
+      });
+    }
+    setGranularDialogConnId(null);
+  };
 
   const renderSecretSection = (title: string, items: Secret[]) => {
     if (items.length === 0) return null;
@@ -301,37 +358,117 @@ export const ManageAccessDialog = ({
           const hasMultiple = (providerCounts.get(conn.provider) ?? 0) > 1;
           const displayName =
             hasMultiple && label ? `${baseName} - ${label}` : baseName;
+          const isSelected = connectionPolicies.has(conn.id);
+          const config = granularAccessConfigs.get(conn.provider);
+          const hasGranularAccess =
+            config && isSelected && config.isSupported(meta ?? {});
+          const policy = connectionPolicies.get(conn.id);
+
+          const policyItems = hasGranularAccess
+            ? config.getItems(meta ?? {})
+            : [];
+          const selectedItemIds = new Set(
+            policy && hasGranularAccess ? config.getSelectedItems(policy) : [],
+          );
+          const isAllItems = !policy || Object.keys(policy).length === 0;
+
           return (
-            <label
-              key={conn.id}
-              className="hover:bg-muted/50 flex cursor-pointer items-center gap-3 px-3 py-2.5 transition-colors"
-            >
-              <Checkbox
-                checked={selectedConnectionIds.has(conn.id)}
-                onCheckedChange={() => toggleConnection(conn.id)}
-              />
-              <div className="flex min-w-0 flex-1 items-center gap-2.5">
-                {app?.icon && (
-                  <AppIcon
-                    icon={app.icon}
-                    darkIcon={app.darkIcon}
-                    name={baseName}
-                    size={16}
-                  />
-                )}
-                <div className="min-w-0">
-                  <p className="truncate text-sm font-medium">{displayName}</p>
-                  {!hasMultiple && label && (
-                    <p className="text-muted-foreground truncate text-xs">
-                      {label}
-                    </p>
+            <div key={conn.id}>
+              <label className="hover:bg-muted/50 flex cursor-pointer items-center gap-3 px-3 py-2.5 transition-colors">
+                <Checkbox
+                  checked={isSelected}
+                  onCheckedChange={() => toggleConnection(conn.id)}
+                />
+                <div className="flex min-w-0 flex-1 items-center gap-2.5">
+                  {app?.icon && (
+                    <AppIcon
+                      icon={app.icon}
+                      darkIcon={app.darkIcon}
+                      name={baseName}
+                      size={16}
+                    />
                   )}
+                  <div className="min-w-0">
+                    <p className="truncate text-sm font-medium">
+                      {displayName}
+                    </p>
+                    {!hasMultiple && label && (
+                      <p className="text-muted-foreground truncate text-xs">
+                        {label}
+                      </p>
+                    )}
+                  </div>
                 </div>
-              </div>
-              <Badge variant="secondary" className="shrink-0 text-xs">
-                {app?.name ?? conn.provider}
-              </Badge>
-            </label>
+                <div className="flex shrink-0 items-center gap-1.5">
+                  {hasGranularAccess &&
+                    config.PolicyDialogContent &&
+                    !isAllItems && (
+                      <Badge variant="outline" className="text-xs">
+                        {selectedItemIds.size}{" "}
+                        {selectedItemIds.size !== 1
+                          ? config.itemLabel.plural
+                          : config.itemLabel.singular}
+                      </Badge>
+                    )}
+                  <Badge variant="secondary" className="text-xs">
+                    {app?.name ?? conn.provider}
+                  </Badge>
+                </div>
+              </label>
+
+              {hasGranularAccess && (
+                <button
+                  type="button"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    openGranularDialog(conn.id);
+                  }}
+                  className="hover:bg-muted/50 ml-9 mr-3 mb-2 flex items-center gap-1.5 rounded-md px-2 py-1 transition-colors"
+                >
+                  <config.Icon className="text-muted-foreground size-3" />
+                  <span className="text-muted-foreground text-xs">
+                    {isAllItems
+                      ? `All ${config.itemLabel.plural}`
+                      : `${selectedItemIds.size} of ${policyItems.length} ${config.itemLabel.plural}`}
+                  </span>
+                  <span className="text-muted-foreground/30 text-xs">·</span>
+                  <span className="text-muted-foreground text-xs font-medium">
+                    Manage
+                  </span>
+                  {!config.PolicyDialogContent && (
+                    <span className="inline-flex items-center gap-1.5 rounded-full border border-brand/20 bg-brand/5 px-2 py-px">
+                      <svg
+                        width="11"
+                        height="9"
+                        viewBox="0 0 44 36"
+                        fill="none"
+                        className="-mt-px shrink-0"
+                      >
+                        <path
+                          d="M2 2L16 18L2 34"
+                          stroke="currentColor"
+                          strokeWidth="5"
+                          strokeLinecap="round"
+                          strokeLinejoin="round"
+                          className="text-brand"
+                        />
+                        <path
+                          d="M22 2L36 18L22 34"
+                          stroke="currentColor"
+                          strokeWidth="5"
+                          strokeLinecap="round"
+                          strokeLinejoin="round"
+                          className="text-brand"
+                        />
+                      </svg>
+                      <span className="text-[10px] font-semibold tracking-wide text-brand">
+                        Team
+                      </span>
+                    </span>
+                  )}
+                </button>
+              )}
+            </div>
           );
         })}
       </>
@@ -339,172 +476,226 @@ export const ManageAccessDialog = ({
   };
 
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="gap-0 p-0 sm:max-w-lg">
-        <DialogHeader className="p-6 pb-4">
-          <DialogTitle>Credential access for {agent.name}</DialogTitle>
-          <p className="text-muted-foreground text-xs leading-relaxed">
-            Secrets and app connections are injected by the gateway at request
-            time. The agent never sees raw values.
-          </p>
-        </DialogHeader>
+    <>
+      <Dialog open={open} onOpenChange={onOpenChange}>
+        <DialogContent className="gap-0 p-0 sm:max-w-lg">
+          <DialogHeader className="p-6 pb-4">
+            <DialogTitle>Credential access for {agent.name}</DialogTitle>
+            <p className="text-muted-foreground text-xs leading-relaxed">
+              Secrets and app connections are injected by the gateway at request
+              time. The agent never sees raw values.
+            </p>
+          </DialogHeader>
 
-        {/* Mode selection */}
-        <div className="space-y-2 px-6 pb-2">
-          <p className="text-muted-foreground text-xs font-medium uppercase tracking-wider">
-            Access mode
-          </p>
-          <div className="grid grid-cols-2 gap-2">
-            {(
-              [
-                {
-                  value: "all",
-                  icon: Globe,
-                  label: "All credentials",
-                  desc: "Every secret and app connection",
-                },
-                {
-                  value: "selective",
-                  icon: ListChecks,
-                  label: "Selective",
-                  desc: "Choose specific secrets and apps",
-                },
-              ] as const
-            ).map(({ value, icon: Icon, label, desc }) => (
-              <button
-                key={value}
-                type="button"
-                onClick={() => setMode(value)}
-                className={cn(
-                  "flex flex-col gap-2 rounded-lg border p-3 text-left transition-colors",
-                  mode === value
-                    ? "border-foreground/30 bg-muted/60"
-                    : "border-border hover:bg-muted/30",
-                )}
-              >
-                <div className="flex items-center gap-2">
-                  <Icon
-                    className={cn(
-                      "size-3.5",
-                      mode === value
-                        ? "text-foreground"
-                        : "text-muted-foreground/60",
-                    )}
-                  />
-                  <p
-                    className={cn(
-                      "text-sm font-medium",
-                      mode !== value && "text-muted-foreground",
-                    )}
-                  >
-                    {label}
-                  </p>
-                </div>
-                <p className="text-muted-foreground text-xs">{desc}</p>
-              </button>
-            ))}
-          </div>
-        </div>
-
-        {/* Credential lists — revealed when selective */}
-        {isSelective && (
-          <div className="px-6 pt-2 pb-1">
-            {loading ? (
-              <div className="flex items-center justify-center py-8">
-                <Loader2 className="text-muted-foreground size-4 animate-spin" />
-              </div>
-            ) : !hasItems ? (
-              <div className="flex flex-col items-center justify-center py-8 text-center">
-                <div className="bg-muted mb-3 flex size-10 items-center justify-center rounded-full">
-                  <KeyRound className="text-muted-foreground size-4" />
-                </div>
-                <p className="text-sm font-medium">No credentials yet</p>
-                <p className="text-muted-foreground mt-1 text-xs">
-                  Add secrets or connect apps first.
-                </p>
-              </div>
-            ) : (
-              <div className="space-y-2">
-                {/* Search */}
-                <div className="relative">
-                  <Search className="text-muted-foreground pointer-events-none absolute top-1/2 left-2.5 size-3.5 -translate-y-1/2" />
-                  <Input
-                    placeholder="Filter credentials..."
-                    value={search}
-                    onChange={(e) => setSearch(e.target.value)}
-                    className="h-8 pl-8 text-sm"
-                  />
-                </div>
-
-                {/* Toolbar: count + actions */}
-                <div className="flex items-center justify-between">
-                  <p className="text-muted-foreground text-xs">
-                    <span className="text-foreground font-medium">
-                      {totalSelected}
-                    </span>{" "}
-                    of {totalItems} selected
-                  </p>
-                  <div className="flex gap-1">
-                    <button
-                      type="button"
-                      onClick={selectAll}
-                      className="text-muted-foreground hover:text-foreground text-xs transition-colors"
-                    >
-                      Select all
-                    </button>
-                    <span className="text-muted-foreground/40 text-xs">/</span>
-                    <button
-                      type="button"
-                      onClick={clearAll}
-                      className="text-muted-foreground hover:text-foreground text-xs transition-colors"
-                    >
-                      Clear
-                    </button>
-                  </div>
-                </div>
-
-                {/* List */}
-                <ScrollArea className="h-[280px] overflow-hidden rounded-md border">
-                  <div className="divide-border divide-y">
-                    {renderSecretSection("Secrets", filteredSecrets)}
-                    {renderConnectionSection(
-                      "App connections",
-                      filteredConnections,
-                    )}
-                    {renderSecretSection(
-                      "Organization secrets",
-                      filteredOrgSecrets,
-                    )}
-                    {renderConnectionSection(
-                      "Organization app connections",
-                      filteredOrgConnections,
-                    )}
-
-                    {filteredSecrets.length === 0 &&
-                      filteredOrgSecrets.length === 0 &&
-                      filteredConnections.length === 0 &&
-                      filteredOrgConnections.length === 0 && (
-                        <p className="text-muted-foreground py-6 text-center text-xs">
-                          No credentials match &ldquo;{search}&rdquo;
-                        </p>
+          {/* Mode selection */}
+          <div className="space-y-2 px-6 pb-2">
+            <p className="text-muted-foreground text-xs font-medium uppercase tracking-wider">
+              Access mode
+            </p>
+            <div className="grid grid-cols-2 gap-2">
+              {(
+                [
+                  {
+                    value: "all",
+                    icon: Globe,
+                    label: "All credentials",
+                    desc: "Every secret and app connection",
+                  },
+                  {
+                    value: "selective",
+                    icon: ListChecks,
+                    label: "Selective",
+                    desc: "Choose specific secrets and apps",
+                  },
+                ] as const
+              ).map(({ value, icon: Icon, label, desc }) => (
+                <button
+                  key={value}
+                  type="button"
+                  onClick={() => setMode(value)}
+                  className={cn(
+                    "flex flex-col gap-2 rounded-lg border p-3 text-left transition-colors",
+                    mode === value
+                      ? "border-foreground/30 bg-muted/60"
+                      : "border-border hover:bg-muted/30",
+                  )}
+                >
+                  <div className="flex items-center gap-2">
+                    <Icon
+                      className={cn(
+                        "size-3.5",
+                        mode === value
+                          ? "text-foreground"
+                          : "text-muted-foreground/60",
                       )}
+                    />
+                    <p
+                      className={cn(
+                        "text-sm font-medium",
+                        mode !== value && "text-muted-foreground",
+                      )}
+                    >
+                      {label}
+                    </p>
                   </div>
-                </ScrollArea>
-              </div>
-            )}
+                  <p className="text-muted-foreground text-xs">{desc}</p>
+                </button>
+              ))}
+            </div>
           </div>
-        )}
 
-        {/* Footer */}
-        <DialogFooter className="border-border/50 border-t px-6 py-4">
-          <Button variant="ghost" onClick={() => onOpenChange(false)}>
-            Cancel
-          </Button>
-          <Button onClick={handleSave} loading={saving} disabled={loading}>
-            {saving ? "Saving..." : "Save"}
-          </Button>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
+          {/* Credential lists — revealed when selective */}
+          {isSelective && (
+            <div className="px-6 pt-2 pb-1">
+              {loading ? (
+                <div className="flex items-center justify-center py-8">
+                  <Loader2 className="text-muted-foreground size-4 animate-spin" />
+                </div>
+              ) : !hasItems ? (
+                <div className="flex flex-col items-center justify-center py-8 text-center">
+                  <div className="bg-muted mb-3 flex size-10 items-center justify-center rounded-full">
+                    <KeyRound className="text-muted-foreground size-4" />
+                  </div>
+                  <p className="text-sm font-medium">No credentials yet</p>
+                  <p className="text-muted-foreground mt-1 text-xs">
+                    Add secrets or connect apps first.
+                  </p>
+                </div>
+              ) : (
+                <div className="space-y-2">
+                  {/* Search */}
+                  <div className="relative">
+                    <Search className="text-muted-foreground pointer-events-none absolute top-1/2 left-2.5 size-3.5 -translate-y-1/2" />
+                    <Input
+                      placeholder="Filter credentials..."
+                      value={search}
+                      onChange={(e) => setSearch(e.target.value)}
+                      className="h-8 pl-8 text-sm"
+                    />
+                  </div>
+
+                  {/* Toolbar: count + actions */}
+                  <div className="flex items-center justify-between">
+                    <p className="text-muted-foreground text-xs">
+                      <span className="text-foreground font-medium">
+                        {totalSelected}
+                      </span>{" "}
+                      of {totalItems} selected
+                    </p>
+                    <div className="flex gap-1">
+                      <button
+                        type="button"
+                        onClick={selectAll}
+                        className="text-muted-foreground hover:text-foreground text-xs transition-colors"
+                      >
+                        Select all
+                      </button>
+                      <span className="text-muted-foreground/40 text-xs">
+                        /
+                      </span>
+                      <button
+                        type="button"
+                        onClick={clearAll}
+                        className="text-muted-foreground hover:text-foreground text-xs transition-colors"
+                      >
+                        Clear
+                      </button>
+                    </div>
+                  </div>
+
+                  {/* List */}
+                  <ScrollArea className="h-70 overflow-hidden rounded-md border">
+                    <div className="divide-border divide-y">
+                      {renderSecretSection("Secrets", filteredSecrets)}
+                      {renderConnectionSection(
+                        "App connections",
+                        filteredConnections,
+                      )}
+                      {renderSecretSection(
+                        "Organization secrets",
+                        filteredOrgSecrets,
+                      )}
+                      {renderConnectionSection(
+                        "Organization app connections",
+                        filteredOrgConnections,
+                      )}
+
+                      {filteredSecrets.length === 0 &&
+                        filteredOrgSecrets.length === 0 &&
+                        filteredConnections.length === 0 &&
+                        filteredOrgConnections.length === 0 && (
+                          <p className="text-muted-foreground py-6 text-center text-xs">
+                            No credentials match &ldquo;{search}&rdquo;
+                          </p>
+                        )}
+                    </div>
+                  </ScrollArea>
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* Footer */}
+          <DialogFooter className="border-border/50 border-t px-6 py-4">
+            <Button variant="ghost" onClick={() => onOpenChange(false)}>
+              Cancel
+            </Button>
+            <Button onClick={handleSave} loading={saving} disabled={loading}>
+              {saving ? "Saving..." : "Save"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Granular access policy dialog (cloud) */}
+      {granularDialogConnId && granularDialogConfig?.PolicyDialogContent && (
+        <Dialog open onOpenChange={() => setGranularDialogConnId(null)}>
+          <DialogContent className="gap-0 overflow-hidden p-0 sm:max-w-sm">
+            <DialogHeader className="border-border/50 border-b px-5 py-4">
+              <div className="flex items-center gap-3">
+                {granularDialogApp?.icon && (
+                  <AppIcon
+                    icon={granularDialogApp.icon}
+                    darkIcon={granularDialogApp.darkIcon}
+                    name={granularDialogApp.name}
+                    size={18}
+                  />
+                )}
+                <div>
+                  <DialogTitle className="text-sm">
+                    Manage {granularDialogConfig.itemLabel.singular} access
+                  </DialogTitle>
+                  <p className="text-muted-foreground text-xs">
+                    {granularDialogConn?.label ??
+                      extractLabel(granularDialogMeta ?? undefined) ??
+                      granularDialogApp?.name}
+                  </p>
+                </div>
+              </div>
+            </DialogHeader>
+
+            <granularDialogConfig.PolicyDialogContent
+              metadata={granularDialogMeta}
+              policy={editingPolicy}
+              onPolicyChange={setEditingPolicy}
+              onSave={saveGranularPolicy}
+              onCancel={() => setGranularDialogConnId(null)}
+            />
+          </DialogContent>
+        </Dialog>
+      )}
+
+      {/* Granular access upsell (OSS) */}
+      {granularDialogConnId && !granularDialogConfig?.PolicyDialogContent && (
+        <ProAppDialog
+          appName="Granular access control"
+          appIcon={granularDialogApp?.icon ?? ""}
+          appDarkIcon={granularDialogApp?.darkIcon}
+          description="Control which resources each agent can access through your app connections."
+          open
+          onOpenChange={() => setGranularDialogConnId(null)}
+        />
+      )}
+    </>
   );
 };

@@ -34,6 +34,7 @@ const nextConfig = {
             "@/cloud/components/condition-builder",
           "@/lib/dashboard/session-redirect":
             "@/cloud/dashboard/session-redirect",
+          "@/lib/granular-access": "@/cloud/granular-access",
 
           // Cloud initialization (api, server actions, client)
           "@/lib/init/api": "@/cloud/init/api",

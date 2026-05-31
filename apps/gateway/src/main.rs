@@ -101,9 +101,13 @@ fn default_data_dir() -> &'static str {
 #[tokio::main]
 async fn main() -> Result<()> {
     // Install ring as the default rustls CryptoProvider (required by reqwest)
-    rustls::crypto::ring::default_provider()
+    if rustls::crypto::ring::default_provider()
         .install_default()
-        .expect("failed to install rustls CryptoProvider");
+        .is_err()
+    {
+        eprintln!("fatal: failed to install rustls CryptoProvider");
+        std::process::exit(1);
+    }
 
     // Initialize logging — JSON for production (CloudWatch), text for dev
     let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
@@ -128,6 +132,7 @@ async fn main() -> Result<()> {
 
     // Load or generate CA
     let ca = CertificateAuthority::load_or_generate(&data_dir).await?;
+    info!("CA certificate loaded");
 
     // Connect to PostgreSQL
     // Support both DATABASE_URL (OSS) and individual DB_* vars (cloud ECS from Secrets Manager)
@@ -144,12 +149,14 @@ async fn main() -> Result<()> {
         }
     };
     let pool = db::create_pool(&database_url).await?;
+    info!("database pool created");
     let telemetry_pool = pool.clone();
 
     // Load crypto service for secret decryption
     // OSS: AES-256-GCM with local key from SECRET_ENCRYPTION_KEY
     // Cloud: KMS envelope decryption (calls KMS Decrypt for each data key)
     let crypto = Arc::new(crypto::CryptoService::from_env().await?);
+    info!("crypto service initialized");
 
     let policy_engine = Arc::new(PolicyEngine {
         pool,
@@ -168,16 +175,20 @@ async fn main() -> Result<()> {
         vec![Box::new(bitwarden)],
         policy_engine.pool.clone(),
     ));
+    info!("vault service initialized");
 
     // Initialize cache store
     // OSS: in-memory DashMap. Cloud: Redis (ElastiCache with TLS + AUTH).
     let cache = cache::create_store().await?;
+    info!("cache store created");
 
     // Initialize approval store for manual approval policy action
     // OSS: in-memory DashMap + tokio channels. Cloud: Redis + BLPOP.
     let approval_store = approval::create_store().await?;
+    info!("approval store created");
 
     telemetry::init(telemetry_pool, Arc::clone(&cache));
+    info!("telemetry initialized");
 
     info!(port = cli.port, "gateway ready");
 

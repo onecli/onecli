@@ -1,7 +1,10 @@
 "use server";
 
 import { resolveProjectContext } from "@/lib/actions/resolve-user";
-import type { SecretMode } from "@onecli/api/services/agent-service";
+import type {
+  SecretMode,
+  AgentAppConnectionInput,
+} from "@onecli/api/services/agent-service";
 import {
   listAgents,
   getDefaultAgent as getDefaultAgentService,
@@ -158,19 +161,18 @@ export const getAgentAppConnections = async (agentId: string) => {
 
 export const updateAgentAppConnections = async (
   agentId: string,
-  appConnectionIds: string[],
+  connections: AgentAppConnectionInput[],
 ): Promise<void> => {
   const { userId, userEmail, projectId } = await resolveProjectContext();
   return withAudit(
-    () =>
-      updateAgentAppConnectionsService(projectId, agentId, appConnectionIds),
+    () => updateAgentAppConnectionsService(projectId, agentId, connections),
     () => ({
       projectId,
       userId,
       userEmail,
       action: AUDIT_ACTIONS.UPDATE,
       service: AUDIT_SERVICES.AGENT,
-      metadata: { agentId, appConnectionCount: appConnectionIds.length },
+      metadata: { agentId, appConnectionCount: connections.length },
     }),
   );
 };

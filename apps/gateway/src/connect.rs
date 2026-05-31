@@ -473,8 +473,13 @@ impl PolicyEngine {
         project_id: &str,
         cache: &dyn CacheStore,
     ) -> Result<AppConnectionResult, ConnectError> {
+        let policy_suffix = conn
+            .session_policy
+            .as_ref()
+            .map(|sp| format!(":{sp}"))
+            .unwrap_or_default();
         let cache_key = format!(
-            "app_injection:{organization_id}:{project_id}:{}:{hostname}",
+            "app_injection:{organization_id}:{project_id}:{}:{hostname}{policy_suffix}",
             conn.id
         );
 
@@ -511,7 +516,13 @@ impl PolicyEngine {
         let needs_token = apps::needs_access_token(&conn.provider);
         let (token, expires_at) = if needs_token {
             let Some(resolved) = self
-                .resolve_access_token(&decrypted_json, &conn.provider, project_id, &conn.id)
+                .resolve_access_token(
+                    &decrypted_json,
+                    &conn.provider,
+                    project_id,
+                    &conn.id,
+                    conn.session_policy.as_ref(),
+                )
                 .await
             else {
                 return Ok(AppConnectionResult::NoConnections);
@@ -560,7 +571,11 @@ impl PolicyEngine {
         }
 
         // Parse credentials once for credential headers and host rewrite
-        let creds: Option<serde_json::Value> = serde_json::from_str(&decrypted_json).ok();
+        let creds: Option<serde_json::Value> = serde_json::from_str(&decrypted_json)
+            .map_err(|e| {
+                warn!(provider = %conn.provider, error = %e, "failed to parse app connection credentials JSON");
+            })
+            .ok();
 
         // Inject credential-driven headers (e.g., DD-API-KEY from credentials.apiKey)
         if let Some(ref creds) = creds {
@@ -764,8 +779,13 @@ impl PolicyEngine {
         provider: &str,
         project_id: &str,
         connection_id: &str,
+        session_policy: Option<&serde_json::Value>,
     ) -> Option<(String, Option<i64>)> {
-        let mut creds: serde_json::Value = serde_json::from_str(json).ok()?;
+        let mut creds: serde_json::Value = serde_json::from_str(json)
+            .map_err(|e| {
+                warn!(provider = %provider, error = %e, "failed to parse access token credentials JSON");
+            })
+            .ok()?;
 
         let mut token = creds
             .get("access_token")
@@ -774,6 +794,13 @@ impl PolicyEngine {
 
         let mut effective_expires_at = creds.get("expires_at").and_then(|v| v.as_i64());
 
+        // Any non-empty session policy means scoped access is required.
+        // Provider-specific interpretation (e.g. GitHub repos) is handled by
+        // cloud_apps::try_refresh_credentials, not here.
+        let needs_scoped_token = session_policy
+            .and_then(|sp| sp.as_object())
+            .is_some_and(|obj| !obj.is_empty());
+
         // Check if token is expired and needs refresh
         if let Some(expires_at) = effective_expires_at {
             let now = std::time::SystemTime::now()
@@ -781,16 +808,17 @@ impl PolicyEngine {
                 .expect("system clock before UNIX epoch")
                 .as_secs() as i64;
 
-            if expires_at < now {
+            if expires_at < now || needs_scoped_token {
                 let cred_type = creds.get("type").and_then(|v| v.as_str()).unwrap_or("");
 
                 // Try cloud-specific refresh first, then shared credential types
                 let refresh_result = if let Some(r) =
-                    crate::cloud_apps::try_refresh_credentials(cred_type, &creds).await
+                    crate::cloud_apps::try_refresh_credentials(cred_type, &creds, session_policy)
+                        .await
                 {
                     Some(r)
                 } else {
-                    apps::try_refresh_credentials(cred_type, &creds).await
+                    apps::try_refresh_credentials(cred_type, &creds, session_policy).await
                 };
 
                 if let Some(result) = refresh_result {
@@ -800,10 +828,14 @@ impl PolicyEngine {
                             token = Some(new_token.clone());
                             effective_expires_at = Some(new_expires_at);
 
-                            creds["access_token"] = serde_json::Value::String(new_token);
-                            creds["expires_at"] = serde_json::json!(new_expires_at);
-                            self.persist_refreshed_credentials(connection_id, provider, &creds)
-                                .await;
+                            if needs_scoped_token {
+                                debug!(provider = %provider, "scoped token generated, skipping persist");
+                            } else {
+                                creds["access_token"] = serde_json::Value::String(new_token);
+                                creds["expires_at"] = serde_json::json!(new_expires_at);
+                                self.persist_refreshed_credentials(connection_id, provider, &creds)
+                                    .await;
+                            }
                         }
                         Err(e) => {
                             debug!(provider = %provider, cred_type, error = ?e, "credential refresh failed");
@@ -907,8 +939,15 @@ impl PolicyEngine {
 
         // clientSecret is in credentials (encrypted)
         let encrypted = config.credentials.as_deref()?;
-        let decrypted = self.crypto.decrypt(encrypted).await.ok()?;
-        let secrets: serde_json::Value = serde_json::from_str(&decrypted).ok()?;
+        let decrypted = self
+            .crypto
+            .decrypt(encrypted)
+            .await
+            .map_err(|e| warn!(error = %e, "failed to decrypt BYOC credentials"))
+            .ok()?;
+        let secrets: serde_json::Value = serde_json::from_str(&decrypted)
+            .map_err(|e| warn!(error = %e, "failed to parse BYOC credentials JSON"))
+            .ok()?;
         let client_secret = secrets
             .get("clientSecret")
             .and_then(|v| v.as_str())
