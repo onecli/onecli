@@ -3,7 +3,7 @@
 import { useState, useEffect, useRef, useMemo } from "react";
 import { useInvalidateGatewayCache } from "@/hooks/use-invalidate-cache";
 import { toast } from "sonner";
-import { ArrowLeft, Key, Settings2 } from "lucide-react";
+import { ArrowLeft, Key, Settings2, Upload } from "lucide-react";
 import { cn } from "@onecli/ui/lib/utils";
 import {
   Dialog,
@@ -38,9 +38,10 @@ import {
   isParamInjection,
   looksLikeAnthropicKey,
   looksLikeOpenaiKey,
+  parseCodexAuthJson,
 } from "@onecli/api/validations/secret";
 
-type SecretType = "anthropic" | "openai" | "generic";
+type SecretType = "anthropic" | "openai" | "codex" | "generic";
 
 interface SecretTypeOption {
   value: SecretType;
@@ -85,8 +86,9 @@ const SECRET_TYPE_OPTIONS: SecretTypeOption[] = [
   },
   {
     value: "openai",
-    label: "OpenAI API Key",
-    description: "Inject your OpenAI key into requests to api.openai.com",
+    label: "OpenAI",
+    description:
+      "Inject an API key or Codex OAuth credentials into requests to api.openai.com",
     icon: <OpenAIIcon className="size-5" />,
     hostDefault: "api.openai.com",
     nameDefault: "OpenAI Token",
@@ -156,6 +158,8 @@ export const SecretDialog = ({
   const [saving, setSaving] = useState(false);
 
   const [type, setType] = useState<SecretType>("anthropic");
+  const [openaiMode, setOpenaiMode] = useState<"api-key" | "codex">("api-key");
+  const fileInputRef = useRef<HTMLInputElement>(null);
   const [name, setName] = useState("");
   const [nameTouched, setNameTouched] = useState(false);
   const [value, setValue] = useState("");
@@ -169,6 +173,9 @@ export const SecretDialog = ({
   const [paramName, setParamName] = useState("");
   const [paramFormat, setParamFormat] = useState("");
   const [advancedOpen, setAdvancedOpen] = useState("");
+
+  const effectiveType =
+    type === "openai" && openaiMode === "codex" ? "codex" : type;
 
   const nameError = useMemo(() => validateDisplayName(name), [name]);
   const showNameError = nameTouched && nameError !== null;
@@ -191,10 +198,13 @@ export const SecretDialog = ({
     if (open) {
       setNameTouched(false);
       setAdvancedOpen("");
+      setOpenaiMode("api-key");
       if (secret) {
         const config = secret.injectionConfig as InjectionConfig | null;
         setStep("form");
-        setType(secret.type as SecretType);
+        const secretType = secret.type === "codex" ? "openai" : secret.type;
+        setType(secretType as SecretType);
+        if (secret.type === "codex") setOpenaiMode("codex");
         setName(secret.name);
         setValue("");
         setHostPattern(secret.hostPattern);
@@ -221,7 +231,9 @@ export const SecretDialog = ({
       } else if (prefill) {
         const isParam = !!prefill.paramName;
         setStep("form");
-        setType(prefill.type);
+        const prefillType = prefill.type === "codex" ? "openai" : prefill.type;
+        setType(prefillType as SecretType);
+        if (prefill.type === "codex") setOpenaiMode("codex");
         setName(prefill.name);
         setValue("");
         setHostPattern(prefill.hostPattern);
@@ -270,7 +282,7 @@ export const SecretDialog = ({
   };
 
   const hasInjectionTarget =
-    type !== "generic" ||
+    effectiveType !== "generic" ||
     (injectionTarget === "header" ? headerName.trim() : paramName.trim());
 
   const isPlatformEdit = isEdit && secret?.isPlatform;
@@ -289,7 +301,7 @@ export const SecretDialog = ({
     setSaving(true);
     try {
       const buildInjectionConfig = () => {
-        if (type !== "generic") return undefined;
+        if (effectiveType !== "generic") return undefined;
         if (injectionTarget === "param") {
           return { paramName, paramFormat: paramFormat || "{value}" };
         }
@@ -318,7 +330,7 @@ export const SecretDialog = ({
       } else {
         await createSecret({
           name,
-          type,
+          type: effectiveType,
           value,
           hostPattern,
           pathPattern: pathPattern || undefined,
@@ -345,6 +357,26 @@ export const SecretDialog = ({
   };
 
   const typeOption = SECRET_TYPE_OPTIONS.find((o) => o.value === type)!;
+
+  const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = (ev) => {
+      const contents = (ev.target?.result as string)?.trim();
+      if (!contents) return;
+      if (!parseCodexAuthJson(contents)) {
+        toast.error(
+          "Invalid auth.json — must contain tokens.access_token and tokens.refresh_token",
+        );
+        return;
+      }
+      setValue(contents);
+      if (!name.trim()) setName("Codex Token");
+    };
+    reader.readAsText(file);
+    e.target.value = "";
+  };
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -373,10 +405,10 @@ export const SecretDialog = ({
                   : type === "anthropic"
                     ? "Your key will be encrypted and injected into requests to api.anthropic.com."
                     : type === "openai"
-                      ? "Your key will be encrypted and injected into requests to api.openai.com."
+                      ? "Inject credentials into requests to api.openai.com."
                       : "Configure a custom secret to inject as a header or URL parameter into matching requests."}
               </DialogDescription>
-              {type === "generic" && !isEdit && !prefill && (
+              {effectiveType === "generic" && !isEdit && !prefill && (
                 <div className="flex items-center gap-2 pt-1">
                   <span className="text-muted-foreground text-xs">
                     Try an example:
@@ -415,17 +447,106 @@ export const SecretDialog = ({
             </DialogHeader>
 
             <div className="min-h-0 space-y-4 overflow-y-auto py-2">
+              {type === "openai" && !isEdit && (
+                <div className="space-y-2">
+                  <div
+                    className="flex w-full items-center gap-1 rounded-lg border p-1"
+                    role="radiogroup"
+                    aria-label="OpenAI auth method"
+                  >
+                    <button
+                      type="button"
+                      role="radio"
+                      aria-checked={openaiMode === "api-key"}
+                      className={cn(
+                        "flex-1 rounded-md px-3 py-1 text-sm font-medium transition-colors",
+                        openaiMode === "api-key"
+                          ? "bg-brand/10 text-brand"
+                          : "text-muted-foreground hover:bg-brand/5 hover:text-brand/80",
+                      )}
+                      onClick={() => {
+                        setOpenaiMode("api-key");
+                        setName("OpenAI Token");
+                        setValue("");
+                      }}
+                    >
+                      API Key
+                    </button>
+                    <button
+                      type="button"
+                      role="radio"
+                      aria-checked={openaiMode === "codex"}
+                      className={cn(
+                        "flex-1 rounded-md px-3 py-1 text-sm font-medium transition-colors",
+                        openaiMode === "codex"
+                          ? "bg-brand/10 text-brand"
+                          : "text-muted-foreground hover:bg-brand/5 hover:text-brand/80",
+                      )}
+                      onClick={() => {
+                        setOpenaiMode("codex");
+                        setName("Codex Token");
+                        setValue("");
+                      }}
+                    >
+                      Codex (OAuth)
+                    </button>
+                  </div>
+                  <p className="text-muted-foreground text-xs">
+                    {openaiMode === "api-key" ? (
+                      <>
+                        Paste your API key from{" "}
+                        <a
+                          href="https://platform.openai.com/api-keys"
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="text-foreground underline underline-offset-2"
+                        >
+                          platform.openai.com
+                        </a>
+                        .{" "}
+                        <a
+                          href="https://onecli.sh/docs/integrations/openai#setup-api-key"
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="text-foreground underline underline-offset-2"
+                        >
+                          Setup guide
+                        </a>
+                      </>
+                    ) : (
+                      <>
+                        Run{" "}
+                        <code className="bg-muted rounded px-1 py-0.5 text-[11px]">
+                          codex login --device-auth
+                        </code>{" "}
+                        and upload the auth.json file.{" "}
+                        <a
+                          href="https://onecli.sh/docs/integrations/openai#setup-codex-oauth"
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="text-foreground underline underline-offset-2"
+                        >
+                          Setup guide
+                        </a>
+                      </>
+                    )}
+                  </p>
+                </div>
+              )}
+
               {!isPlatformEdit && (
                 <div className="space-y-2">
                   <Label htmlFor="secret-name">Name</Label>
                   <Input
                     id="secret-name"
                     placeholder={
-                      type === "anthropic"
+                      effectiveType === "anthropic"
                         ? "e.g. Anthropic Production Key"
-                        : type === "openai"
-                          ? "e.g. OpenAI Production Key"
-                          : "e.g. GitHub Token"
+                        : effectiveType === "codex"
+                          ? "e.g. Codex Personal"
+                          : effectiveType === "openai"
+                            ? "e.g. OpenAI Production Key"
+                            : "e.g. GitHub Token"
                     }
                     value={name}
                     onChange={(e) => setName(e.target.value)}
@@ -445,83 +566,139 @@ export const SecretDialog = ({
                     ? "Your API key"
                     : isEdit
                       ? "New value"
-                      : "Secret value"}{" "}
+                      : effectiveType === "codex"
+                        ? "Token file"
+                        : "Secret value"}{" "}
                   {isEdit && !isPlatformEdit && (
                     <span className="text-muted-foreground font-normal">
                       (leave empty to keep current)
                     </span>
                   )}
                 </Label>
-                <SecretInput
-                  ref={valueInputRef}
-                  id="secret-value"
-                  placeholder={
-                    type === "anthropic"
-                      ? "sk-ant-api03-..."
-                      : type === "openai"
-                        ? "sk-proj-..."
-                        : "Enter secret value"
-                  }
-                  value={value}
-                  onChange={(e) => {
-                    const val = e.target.value;
-                    setValue(val);
-                    if (type === "anthropic" && !name.trim()) {
-                      const detected = detectAnthropicAuthMode(val);
-                      if (detected === "api-key") setName("Anthropic API Key");
-                      else if (detected === "oauth")
-                        setName("Anthropic OAuth Token");
-                    }
-                    if (type === "openai" && !name.trim()) {
-                      if (looksLikeOpenaiKey(val)) setName("OpenAI API Key");
-                    }
-                  }}
-                />
-                <div className="flex items-center gap-2">
-                  {type === "anthropic" &&
-                  value.trim() &&
-                  !looksLikeAnthropicKey(value) ? (
-                    <p className="text-xs text-amber-600 dark:text-amber-400">
-                      {detectAnthropicAuthMode(value) !== null ? (
-                        "This key looks incomplete. Make sure you copied the full value."
+
+                {effectiveType === "codex" ? (
+                  <>
+                    <input
+                      ref={fileInputRef}
+                      type="file"
+                      accept=".json,application/json"
+                      className="hidden"
+                      onChange={handleFileUpload}
+                    />
+                    {value ? (
+                      <div className="border-brand/30 bg-brand/5 flex items-center justify-between rounded-md border px-3 py-2.5">
+                        <div className="flex items-center gap-2">
+                          <div className="bg-brand/10 flex size-6 items-center justify-center rounded-full">
+                            <Upload className="text-brand size-3" />
+                          </div>
+                          <span className="text-sm font-medium">auth.json</span>
+                        </div>
+                        <button
+                          type="button"
+                          className="text-muted-foreground hover:text-foreground shrink-0 text-xs transition-colors"
+                          onClick={() => setValue("")}
+                        >
+                          Remove
+                        </button>
+                      </div>
+                    ) : (
+                      <button
+                        type="button"
+                        onClick={() => fileInputRef.current?.click()}
+                        className="border-input hover:border-brand/30 hover:bg-brand/5 flex w-full items-center gap-3 rounded-md border border-dashed px-4 py-3.5 transition-colors"
+                      >
+                        <div className="bg-muted flex size-8 shrink-0 items-center justify-center rounded-full">
+                          <Upload className="text-muted-foreground size-4" />
+                        </div>
+                        <div className="text-left">
+                          <span className="text-sm font-medium">
+                            Upload auth.json
+                          </span>
+                          <p className="text-muted-foreground text-xs">
+                            ~/.codex/auth.json
+                          </p>
+                        </div>
+                      </button>
+                    )}
+                  </>
+                ) : (
+                  <>
+                    <SecretInput
+                      ref={valueInputRef}
+                      id="secret-value"
+                      placeholder={
+                        effectiveType === "anthropic"
+                          ? "sk-ant-api03-..."
+                          : effectiveType === "openai"
+                            ? "sk-proj-..."
+                            : "Enter secret value"
+                      }
+                      value={value}
+                      onChange={(e) => {
+                        const val = e.target.value;
+                        setValue(val);
+                        if (effectiveType === "anthropic" && !name.trim()) {
+                          const detected = detectAnthropicAuthMode(val);
+                          if (detected === "api-key")
+                            setName("Anthropic API Key");
+                          else if (detected === "oauth")
+                            setName("Anthropic OAuth Token");
+                        }
+                        if (effectiveType === "openai" && !name.trim()) {
+                          if (looksLikeOpenaiKey(val))
+                            setName("OpenAI API Key");
+                        }
+                      }}
+                    />
+                    <div className="flex items-center gap-2">
+                      {effectiveType === "anthropic" &&
+                      value.trim() &&
+                      !looksLikeAnthropicKey(value) ? (
+                        <p className="text-xs text-amber-600 dark:text-amber-400">
+                          {detectAnthropicAuthMode(value) !== null ? (
+                            "This key looks incomplete. Make sure you copied the full value."
+                          ) : (
+                            <>
+                              Keys typically start with{" "}
+                              <code className="text-[11px]">sk-ant-api</code> or{" "}
+                              <code className="text-[11px]">sk-ant-oat</code>
+                            </>
+                          )}
+                        </p>
+                      ) : effectiveType === "openai" &&
+                        value.trim() &&
+                        !looksLikeOpenaiKey(value) ? (
+                        <p className="text-xs text-amber-600 dark:text-amber-400">
+                          {value.startsWith("sk-ant-") ? (
+                            "This looks like an Anthropic key, not an OpenAI key."
+                          ) : value.startsWith("sk-") ? (
+                            "This key looks incomplete. Make sure you copied the full value."
+                          ) : (
+                            <>
+                              Keys typically start with{" "}
+                              <code className="text-[11px]">sk-proj-</code> or{" "}
+                              <code className="text-[11px]">sk-</code>
+                            </>
+                          )}
+                        </p>
                       ) : (
-                        <>
-                          Keys typically start with{" "}
-                          <code className="text-[11px]">sk-ant-api</code> or{" "}
-                          <code className="text-[11px]">sk-ant-oat</code>
-                        </>
+                        <p className="text-muted-foreground text-xs">
+                          {effectiveType === "anthropic"
+                            ? "Paste your API key or OAuth token from the Anthropic Console."
+                            : effectiveType === "openai"
+                              ? "Paste your API key from the OpenAI Dashboard."
+                              : "Encrypted at rest. You won\u2019t be able to view this value again."}
+                        </p>
                       )}
-                    </p>
-                  ) : type === "openai" &&
-                    value.trim() &&
-                    !looksLikeOpenaiKey(value) ? (
-                    <p className="text-xs text-amber-600 dark:text-amber-400">
-                      {value.startsWith("sk-ant-") ? (
-                        "This looks like an Anthropic key, not an OpenAI key."
-                      ) : value.startsWith("sk-") ? (
-                        "This key looks incomplete. Make sure you copied the full value."
-                      ) : (
-                        <>
-                          Keys typically start with{" "}
-                          <code className="text-[11px]">sk-proj-</code> or{" "}
-                          <code className="text-[11px]">sk-</code>
-                        </>
+                      {effectiveType === "anthropic" && (
+                        <AnthropicKeyBadge value={value} />
                       )}
-                    </p>
-                  ) : (
-                    <p className="text-muted-foreground text-xs">
-                      {type === "anthropic"
-                        ? "Paste your API key or OAuth token from the Anthropic Console."
-                        : type === "openai"
-                          ? "Paste your API key from the OpenAI Dashboard."
-                          : "Encrypted at rest. You won\u2019t be able to view this value again."}
-                    </p>
-                  )}
-                  {type === "anthropic" && <AnthropicKeyBadge value={value} />}
-                </div>
+                    </div>
+                  </>
+                )}
               </div>
 
-              {type === "generic" && !prefill && (
+              {effectiveType === "generic" && !prefill && (
                 <div className="space-y-2">
                   <Label htmlFor="secret-host">Host pattern</Label>
                   <Input
@@ -562,7 +739,7 @@ export const SecretDialog = ({
                     </AccordionTrigger>
                     <AccordionContent className="pb-0">
                       <div className="space-y-4">
-                        {(type !== "generic" || !!prefill) && (
+                        {(effectiveType !== "generic" || !!prefill) && (
                           <div className="space-y-2">
                             <Label htmlFor="secret-host">Host pattern</Label>
                             <Input
@@ -585,7 +762,7 @@ export const SecretDialog = ({
                           </div>
                         )}
 
-                        {type === "generic" && (
+                        {effectiveType === "generic" && (
                           <div className="flex items-center gap-3">
                             <Label
                               id="inject-as-label"
@@ -654,7 +831,7 @@ export const SecretDialog = ({
                           </div>
                         )}
 
-                        {type === "generic" && (
+                        {effectiveType === "generic" && (
                           <div
                             key={`name-${injectionTarget}`}
                             className="animate-in fade-in duration-150 space-y-2"
@@ -710,7 +887,7 @@ export const SecretDialog = ({
                           />
                         </div>
 
-                        {type === "generic" && (
+                        {effectiveType === "generic" && (
                           <div
                             key={`format-${injectionTarget}`}
                             className="animate-in fade-in duration-150 space-y-2"

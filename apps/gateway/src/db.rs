@@ -35,6 +35,7 @@ pub(crate) struct AgentRow {
 /// A secret row from the `secrets` table.
 #[derive(Debug, FromRow)]
 pub(crate) struct SecretRow {
+    pub id: String,
     #[sqlx(rename = "type")]
     pub type_: String,
     pub encrypted_value: String,
@@ -42,6 +43,8 @@ pub(crate) struct SecretRow {
     pub path_pattern: Option<String>,
     pub injection_config: Option<serde_json::Value>,
     pub is_platform: bool,
+    #[allow(dead_code)]
+    pub metadata: Option<serde_json::Value>,
 }
 
 /// A policy rule row from the `policy_rules` table.
@@ -211,7 +214,7 @@ pub(crate) async fn find_secrets_by_project(
     project_id: &str,
 ) -> Result<Vec<SecretRow>> {
     sqlx::query_as::<_, SecretRow>(
-        r#"SELECT type, encrypted_value, host_pattern, path_pattern, injection_config, is_platform FROM secrets WHERE project_id = $1"#,
+        r#"SELECT id, type, encrypted_value, host_pattern, path_pattern, injection_config, is_platform, metadata FROM secrets WHERE project_id = $1"#,
     )
     .bind(project_id)
     .fetch_all(pool)
@@ -222,7 +225,7 @@ pub(crate) async fn find_secrets_by_project(
 /// Find secrets assigned to a specific agent (selective mode).
 pub(crate) async fn find_secrets_by_agent(pool: &PgPool, agent_id: &str) -> Result<Vec<SecretRow>> {
     sqlx::query_as::<_, SecretRow>(
-        r#"SELECT s.type, s.encrypted_value, s.host_pattern, s.path_pattern, s.injection_config, s.is_platform
+        r#"SELECT s.id, s.type, s.encrypted_value, s.host_pattern, s.path_pattern, s.injection_config, s.is_platform, s.metadata
            FROM secrets s
            INNER JOIN agent_secrets as_ ON s.id = as_.secret_id
            WHERE as_.agent_id = $1"#,
@@ -239,7 +242,7 @@ pub(crate) async fn find_secrets_by_org(
     organization_id: &str,
 ) -> Result<Vec<SecretRow>> {
     sqlx::query_as::<_, SecretRow>(
-        r#"SELECT type, encrypted_value, host_pattern, path_pattern, injection_config, is_platform
+        r#"SELECT id, type, encrypted_value, host_pattern, path_pattern, injection_config, is_platform, metadata
            FROM secrets
            WHERE organization_id = $1 AND scope = 'organization'"#,
     )
@@ -247,6 +250,21 @@ pub(crate) async fn find_secrets_by_org(
     .fetch_all(pool)
     .await
     .context("querying secrets by organization_id")
+}
+
+/// Update a secret's encrypted value (used for token refresh).
+pub(crate) async fn update_secret_value(
+    pool: &PgPool,
+    secret_id: &str,
+    encrypted_value: &str,
+) -> Result<()> {
+    sqlx::query(r#"UPDATE secrets SET encrypted_value = $1, updated_at = NOW() WHERE id = $2"#)
+        .bind(encrypted_value)
+        .bind(secret_id)
+        .execute(pool)
+        .await
+        .context("updating secret encrypted value")?;
+    Ok(())
 }
 
 /// Find all enabled policy rules for a given project.

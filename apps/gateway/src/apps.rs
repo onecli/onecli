@@ -7,6 +7,7 @@
 use base64::Engine;
 
 use crate::inject::Injection;
+use crate::util::parse_jwt_exp;
 
 // ── Host rule ──────────────────────────────────────────────────────────
 
@@ -1681,15 +1682,6 @@ async fn refresh_docker_hub_token(username: &str, password: &str) -> anyhow::Res
     Ok((token, expires_at))
 }
 
-fn parse_jwt_exp(token: &str) -> Option<i64> {
-    let payload = token.split('.').nth(1)?;
-    let decoded = base64::engine::general_purpose::URL_SAFE_NO_PAD
-        .decode(payload.trim_end_matches('='))
-        .ok()?;
-    let json: serde_json::Value = serde_json::from_slice(&decoded).ok()?;
-    json.get("exp")?.as_i64()
-}
-
 // ── Tests ──────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -2396,20 +2388,6 @@ mod tests {
         assert!(providers_for_host("docker.com").is_empty());
         assert!(providers_for_host("registry.docker.com").is_empty());
         assert!(providers_for_host("index.docker.io").is_empty());
-    }
-
-    #[test]
-    fn parse_jwt_exp_extracts_expiry() {
-        // JWT with payload {"exp": 1700000000}
-        let token = "eyJhbGciOiJIUzI1NiJ9.eyJleHAiOjE3MDAwMDAwMDB9.signature";
-        assert_eq!(parse_jwt_exp(token), Some(1700000000));
-    }
-
-    #[test]
-    fn parse_jwt_exp_returns_none_for_invalid_token() {
-        assert_eq!(parse_jwt_exp("not-a-jwt"), None);
-        assert_eq!(parse_jwt_exp(""), None);
-        assert_eq!(parse_jwt_exp("a.!!!.c"), None);
     }
 
     // ── Monday.com ────────────────────────────────────────────────────

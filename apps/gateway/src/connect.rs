@@ -14,6 +14,7 @@ use crate::crypto::CryptoService;
 use crate::db;
 use crate::inject::{Injection, InjectionRule};
 use crate::policy::{PolicyAction, PolicyRule};
+use crate::secret_inject;
 
 /// How long to cache resolved connect responses before re-checking.
 const CACHE_TTL_SECS: u64 = 60;
@@ -255,8 +256,27 @@ impl PolicyEngine {
                 }
             };
 
-            let injections =
-                build_injections(&secret.type_, &decrypted, secret.injection_config.as_ref());
+            let effective_value = if secret.type_ == "codex" {
+                match secret_inject::refresh_codex_if_expired(
+                    &self.crypto,
+                    &self.pool,
+                    &decrypted,
+                    &secret.id,
+                )
+                .await
+                {
+                    Some(refreshed) => refreshed,
+                    None => decrypted,
+                }
+            } else {
+                decrypted
+            };
+
+            let injections = secret_inject::build_injections(
+                &secret.type_,
+                &effective_value,
+                secret.injection_config.as_ref(),
+            );
 
             rules.push(InjectionRule {
                 path_pattern: secret
@@ -1046,100 +1066,6 @@ fn host_matches(request_host: &str, pattern: &str) -> bool {
     false
 }
 
-// ── Injection building ──────────────────────────────────────────────────
-
-/// Build injection instructions for a secret based on its type.
-/// Mirrors the logic in `apps/web/src/app/v1/gateway/connect/route.ts`.
-fn build_injections(
-    secret_type: &str,
-    decrypted_value: &str,
-    injection_config: Option<&serde_json::Value>,
-) -> Vec<Injection> {
-    match secret_type {
-        "anthropic" => {
-            let is_oauth = decrypted_value.starts_with("sk-ant-oat");
-            if is_oauth {
-                // OAuth: replace Authorization when the SDK sends the exchange
-                // request. The temp API key from the exchange passes through
-                // untouched on subsequent requests.
-                vec![Injection::ReplaceHeader {
-                    name: "authorization".to_string(),
-                    value: format!("Bearer {decrypted_value}"),
-                }]
-            } else {
-                vec![
-                    Injection::SetHeader {
-                        name: "x-api-key".to_string(),
-                        value: decrypted_value.to_string(),
-                    },
-                    Injection::RemoveHeader {
-                        name: "authorization".to_string(),
-                    },
-                ]
-            }
-        }
-
-        "openai" => vec![Injection::SetHeader {
-            name: "authorization".to_string(),
-            value: format!("Bearer {decrypted_value}"),
-        }],
-
-        "generic" => {
-            let config = injection_config.and_then(|v| v.as_object());
-
-            // Check for header injection
-            let header_name = config
-                .and_then(|c| c.get("headerName"))
-                .and_then(|v| v.as_str());
-
-            // Check for parameter injection
-            let param_name = config
-                .and_then(|c| c.get("paramName"))
-                .and_then(|v| v.as_str());
-
-            if header_name.is_some() && param_name.is_some() {
-                tracing::warn!(
-                    "generic secret has both headerName and paramName; using headerName"
-                );
-            }
-
-            if let Some(header_name) = header_name {
-                let value_format = config
-                    .and_then(|c| c.get("valueFormat"))
-                    .and_then(|v| v.as_str());
-
-                let value = match value_format {
-                    Some(fmt) => fmt.replace("{value}", decrypted_value),
-                    None => decrypted_value.to_string(),
-                };
-
-                vec![Injection::SetHeader {
-                    name: header_name.to_string(),
-                    value,
-                }]
-            } else if let Some(param_name) = param_name {
-                let param_format = config
-                    .and_then(|c| c.get("paramFormat"))
-                    .and_then(|v| v.as_str());
-
-                let value = match param_format {
-                    Some(fmt) => fmt.replace("{value}", decrypted_value),
-                    None => decrypted_value.to_string(),
-                };
-
-                vec![Injection::SetParam {
-                    name: param_name.to_string(),
-                    value,
-                }]
-            } else {
-                vec![]
-            }
-        }
-
-        _ => vec![],
-    }
-}
-
 // ── Tests ───────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -1286,133 +1212,5 @@ mod tests {
     #[test]
     fn host_wildcard_no_match_without_dot() {
         assert!(!host_matches("notexample.com", "*.example.com"));
-    }
-
-    // ── build_injections ────────────────────────────────────────────────
-
-    #[test]
-    fn build_injections_anthropic_api_key() {
-        let injections = build_injections("anthropic", "sk-ant-api03-test", None);
-        assert_eq!(injections.len(), 2);
-        assert_eq!(
-            injections[0],
-            Injection::SetHeader {
-                name: "x-api-key".to_string(),
-                value: "sk-ant-api03-test".to_string(),
-            }
-        );
-        assert_eq!(
-            injections[1],
-            Injection::RemoveHeader {
-                name: "authorization".to_string(),
-            }
-        );
-    }
-
-    #[test]
-    fn build_injections_anthropic_oauth() {
-        let injections = build_injections("anthropic", "sk-ant-oat-test-token", None);
-        assert_eq!(injections.len(), 1);
-        assert_eq!(
-            injections[0],
-            Injection::ReplaceHeader {
-                name: "authorization".to_string(),
-                value: "Bearer sk-ant-oat-test-token".to_string(),
-            }
-        );
-    }
-
-    #[test]
-    fn build_injections_generic_with_format() {
-        let config = serde_json::json!({
-            "headerName": "authorization",
-            "valueFormat": "Bearer {value}"
-        });
-        let injections = build_injections("generic", "my-secret", Some(&config));
-        assert_eq!(injections.len(), 1);
-        assert_eq!(
-            injections[0],
-            Injection::SetHeader {
-                name: "authorization".to_string(),
-                value: "Bearer my-secret".to_string(),
-            }
-        );
-    }
-
-    #[test]
-    fn build_injections_generic_without_format() {
-        let config = serde_json::json!({
-            "headerName": "x-custom-key"
-        });
-        let injections = build_injections("generic", "raw-value", Some(&config));
-        assert_eq!(injections.len(), 1);
-        assert_eq!(
-            injections[0],
-            Injection::SetHeader {
-                name: "x-custom-key".to_string(),
-                value: "raw-value".to_string(),
-            }
-        );
-    }
-
-    #[test]
-    fn build_injections_generic_missing_header_name() {
-        let config = serde_json::json!({});
-        let injections = build_injections("generic", "value", Some(&config));
-        assert!(injections.is_empty());
-    }
-
-    #[test]
-    fn build_injections_generic_no_config() {
-        let injections = build_injections("generic", "value", None);
-        assert!(injections.is_empty());
-    }
-
-    #[test]
-    fn build_injections_unknown_type() {
-        let injections = build_injections("unknown", "value", None);
-        assert!(injections.is_empty());
-    }
-
-    // ── build_injections: paramName ─────────────────────────────────────
-
-    #[test]
-    fn build_injections_generic_param_name() {
-        let config = serde_json::json!({ "paramName": "api_key" });
-        let injections = build_injections("generic", "my-secret", Some(&config));
-        assert_eq!(injections.len(), 1);
-        assert_eq!(
-            injections[0],
-            Injection::SetParam {
-                name: "api_key".to_string(),
-                value: "my-secret".to_string(),
-            }
-        );
-    }
-
-    #[test]
-    fn build_injections_generic_param_name_with_format() {
-        let config = serde_json::json!({ "paramName": "token", "paramFormat": "Bearer-{value}" });
-        let injections = build_injections("generic", "my-secret", Some(&config));
-        assert_eq!(injections.len(), 1);
-        assert_eq!(
-            injections[0],
-            Injection::SetParam {
-                name: "token".to_string(),
-                value: "Bearer-my-secret".to_string(),
-            }
-        );
-    }
-
-    #[test]
-    fn build_injections_generic_header_takes_precedence_over_param() {
-        // If both headerName and paramName are present, headerName wins
-        let config = serde_json::json!({
-            "headerName": "Authorization",
-            "paramName": "api_key"
-        });
-        let injections = build_injections("generic", "my-secret", Some(&config));
-        assert_eq!(injections.len(), 1);
-        assert!(matches!(injections[0], Injection::SetHeader { .. }));
     }
 }

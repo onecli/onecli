@@ -50,7 +50,9 @@ mod db;
 mod gateway;
 mod inject;
 mod policy;
+mod secret_inject;
 mod telemetry_core;
+mod util;
 
 #[cfg(not(feature = "cloud"))]
 mod telemetry;
