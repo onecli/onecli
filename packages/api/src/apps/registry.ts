@@ -9,6 +9,7 @@ import { jira } from "./jira";
 import { googleAdmin } from "./google-admin";
 import { googleAnalytics } from "./google-analytics";
 import { googleCalendar } from "./google-calendar";
+import { googleChat } from "./google-chat";
 import { googleClassroom } from "./google-classroom";
 import { googleDocs } from "./google-docs";
 import { googleDrive } from "./google-drive";
@@ -41,6 +42,7 @@ const staticApps: AppDefinition[] = [
   githubApp,
   googleDrive,
   googleCalendar,
+  googleChat,
   resend,
   googleAdmin,
   googleAnalytics,
