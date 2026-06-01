@@ -89,6 +89,15 @@ export const SecretsContent = ({
       });
       setCreateOpen(true);
       router.replace(window.location.pathname, { scroll: false });
+    } else if (createType === "codex" && typeFilter === "llm") {
+      paramHandled.current = true;
+      setPrefill({
+        type: "codex",
+        hostPattern: "api.openai.com",
+        name: "Codex Token",
+      });
+      setCreateOpen(true);
+      router.replace(window.location.pathname, { scroll: false });
     } else if (createType === "generic" && typeFilter === "generic" && host) {
       paramHandled.current = true;
       setPrefill({

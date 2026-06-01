@@ -145,11 +145,14 @@ export const useUpdateAgentConnections = () => {
   return useMutation({
     mutationFn: ({
       agentId,
-      connectionIds,
+      connections,
     }: {
       agentId: string;
-      connectionIds: string[];
-    }) => updateAgentAppConnections(agentId, connectionIds),
+      connections: {
+        appConnectionId: string;
+        sessionPolicy?: Record<string, unknown> | null;
+      }[];
+    }) => updateAgentAppConnections(agentId, connections),
     onSuccess: (_data, { agentId }) => {
       qc.invalidateQueries({
         queryKey: queryKeys.agents.connections(agentId),

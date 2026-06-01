@@ -63,5 +63,6 @@ export const mongodbAtlas: AppDefinition = {
     ],
     exchangeCredentials,
   },
+  labelHint: 'e.g. "prod-cluster", "analytics"',
   available: true,
 };

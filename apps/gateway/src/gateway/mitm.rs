@@ -13,7 +13,7 @@ use hyper::service::service_fn;
 use hyper_util::rt::TokioIo;
 use std::fmt;
 use tokio_rustls::TlsAcceptor;
-use tracing::warn;
+use tracing::{debug, warn};
 
 use crate::approval::ApprovalStore;
 use crate::ca::CertificateAuthority;
@@ -62,6 +62,7 @@ pub(super) async fn mitm(
         .accept(client_io)
         .await
         .context(TlsHandshakeWithClient)?;
+    debug!(host = %hostname, "TLS handshake with client succeeded");
 
     let host_owned = host.to_string();
     let vault_injection_rules = Arc::new(vault_injection_rules);
@@ -83,6 +84,7 @@ pub(super) async fn mitm(
                 async move {
                     let is_ws = super::websocket::is_websocket_upgrade(&req);
                     let connection_id = connect::extract_connection_id(req.headers());
+                    let request_path = req.uri().path_and_query().map(|pq| pq.to_string());
 
                     // Re-resolve rules from cache on each request so that
                     // secret/rule changes take effect without a reconnect.
@@ -94,6 +96,7 @@ pub(super) async fn mitm(
                         &*cache,
                         &vault_rules,
                         connection_id.as_deref(),
+                        request_path.as_deref(),
                     )
                     .await
                     {
@@ -120,7 +123,7 @@ pub(super) async fn mitm(
                                         Ok(resp)
                                     }
                                     Err(e) => {
-                                        warn!(host = %host, error = %e, "WebSocket handler failed");
+                                        warn!(host = %host, error = ?e, "WebSocket handler failed");
                                         Ok(response::resolution_failed())
                                     }
                                 }
@@ -145,12 +148,18 @@ pub(super) async fn mitm(
                                         );
                                         Ok(resp)
                                     }
-                                    Err(e) => Err(e),
+                                    Err(e) => {
+                                        warn!(host = %host, error = ?e, "request forwarding failed");
+                                        Ok::<_, anyhow::Error>(response::resolution_failed())
+                                    }
                                 }
                             }
                         }
                         Ok(ResolveResult::Ambiguous(connections)) => {
                             Ok(response::multiple_connections(&connections))
+                        }
+                        Ok(ResolveResult::MultipleProviders(connections)) => {
+                            Ok(response::multiple_providers(&connections))
                         }
                         Ok(ResolveResult::NotFound {
                             connection_id: cid,
@@ -198,6 +207,8 @@ pub(crate) struct ResolvedRules {
     /// Provider-specific body transform resolved from the app connection.
     /// The handler decides per-request whether to act.
     pub body_transform: Option<crate::apps::BodyTransform>,
+    /// Organization policy mode: "allow" (default) or "deny" (block by default).
+    pub policy_mode: String,
 }
 
 /// Result of per-request rule resolution including app connection disambiguation.
@@ -209,6 +220,8 @@ enum ResolveResult {
     },
     /// Multiple connections exist and no header was provided.
     Ambiguous(Vec<ConnectionChoice>),
+    /// Multiple providers match the same request path.
+    MultipleProviders(Vec<ConnectionChoice>),
     /// The requested connection ID was not found.
     NotFound {
         connection_id: String,
@@ -226,6 +239,7 @@ async fn resolve_rules(
     cache: &dyn CacheStore,
     vault_rules: &[InjectionRule],
     connection_id: Option<&str>,
+    request_path: Option<&str>,
 ) -> Result<ResolveResult, crate::connect::ConnectError> {
     let project_id = ctx.project_id.as_deref().ok_or_else(|| {
         crate::connect::ConnectError::Internal("MITM session missing project_id".to_string())
@@ -260,6 +274,7 @@ async fn resolve_rules(
             .resolve_app_injection_for_request(
                 &resp.app_connections,
                 hostname,
+                request_path,
                 connection_id,
                 organization_id,
                 project_id,
@@ -285,6 +300,9 @@ async fn resolve_rules(
             }
             AppConnectionResult::Ambiguous { connections } => {
                 return Ok(ResolveResult::Ambiguous(connections));
+            }
+            AppConnectionResult::MultipleProviders { connections } => {
+                return Ok(ResolveResult::MultipleProviders(connections));
             }
             AppConnectionResult::NotFound { connections } => {
                 return Ok(ResolveResult::NotFound {
@@ -345,6 +363,7 @@ async fn resolve_rules(
             connection_label,
             finalizer,
             body_transform,
+            policy_mode: resp.policy_mode,
         },
         app_connections: resp.app_connections,
     })

@@ -8,6 +8,7 @@ import {
   User,
   KeyRound,
   ShieldCheck,
+  Globe,
 } from "lucide-react";
 import type { NavItem } from "@/app/(dashboard)/_components/nav-main";
 
@@ -31,7 +32,15 @@ export const navItems: NavItem[] = [
   { title: "Settings", url: "/settings", icon: Settings },
 ];
 
-export const settingsSections: SettingsNavSection[] = [
+export const getSettingsSections = (
+  // Cloud override uses orgId to prefix URLs with /org/<id>
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  orgId?: string,
+): SettingsNavSection[] => [
+  {
+    label: "General",
+    items: [{ title: "Instance", url: "/settings/instance", icon: Globe }],
+  },
   {
     label: "Account",
     items: [
@@ -42,7 +51,10 @@ export const settingsSections: SettingsNavSection[] = [
   {
     label: "Security",
     items: [
+      { title: "Policy", url: "/settings/policy", icon: Shield },
       { title: "Encryption", url: "/settings/encryption", icon: ShieldCheck },
     ],
   },
 ];
+
+export const settingsSections = getSettingsSections();

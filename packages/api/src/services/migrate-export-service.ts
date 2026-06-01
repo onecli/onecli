@@ -1,5 +1,5 @@
 import { db } from "@onecli/db";
-import { getCrypto, getSelfUrl } from "../providers";
+import { getCrypto } from "../providers";
 import { ServiceError } from "./errors";
 import { logger } from "../lib/logger";
 
@@ -29,6 +29,7 @@ interface MigrateResult {
 export const exportToCloud = async (
   projectId: string,
   cloudApiKey: string,
+  cloudUrl: string,
 ): Promise<MigrateResult> => {
   // ── Gather data ───────────────────────────────────────────────
 
@@ -150,7 +151,7 @@ export const exportToCloud = async (
 
   // ── Send to cloud ─────────────────────────────────────────────
 
-  const response = await fetch(`${getSelfUrl()}/v1/migrate/import`, {
+  const response = await fetch(`${cloudUrl}/v1/migrate/import`, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",

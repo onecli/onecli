@@ -1,6 +1,7 @@
 import type { AppDefinition } from "./types";
 import { getCloudApps } from "../providers";
 import { confluence } from "./confluence";
+import { docker } from "./docker";
 import { github } from "./github";
 import { githubApp } from "./github-app";
 import { gitlab } from "./gitlab";
@@ -9,6 +10,7 @@ import { jira } from "./jira";
 import { googleAdmin } from "./google-admin";
 import { googleAnalytics } from "./google-analytics";
 import { googleCalendar } from "./google-calendar";
+import { googleChat } from "./google-chat";
 import { googleClassroom } from "./google-classroom";
 import { googleDocs } from "./google-docs";
 import { googleDrive } from "./google-drive";
@@ -31,7 +33,9 @@ import { dropbox } from "./dropbox";
 import { supabase } from "./supabase";
 import { aws } from "./aws";
 import { linkedin } from "./linkedin";
+import { trello } from "./trello";
 import { monday } from "./monday";
+import { vercel } from "./vercel";
 
 const staticApps: AppDefinition[] = [
   gmail,
@@ -40,6 +44,7 @@ const staticApps: AppDefinition[] = [
   gitlab,
   googleDrive,
   googleCalendar,
+  googleChat,
   resend,
   googleAdmin,
   googleAnalytics,
@@ -55,6 +60,7 @@ const staticApps: AppDefinition[] = [
   notion,
   jira,
   confluence,
+  docker,
   youtube,
   vertexAi,
   todoist,
@@ -66,6 +72,8 @@ const staticApps: AppDefinition[] = [
   mongodbAtlas,
   supabase,
   linkedin,
+  trello,
+  vercel,
 ];
 
 export const getApps = (): AppDefinition[] => [

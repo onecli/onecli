@@ -1,7 +1,7 @@
 "use server";
 
 import { db } from "@onecli/db";
-import { resolveUser } from "@/lib/actions/resolve-user";
+import { resolveProjectContext } from "@/lib/actions/resolve-user";
 import { APP_URL, API_URL, GATEWAY_BASE_URL } from "@/lib/env";
 import {
   listSecrets,
@@ -18,12 +18,12 @@ import {
 } from "@onecli/api/services/audit-service";
 
 export const getSecrets = async () => {
-  const { projectId } = await resolveUser();
+  const { projectId } = await resolveProjectContext();
   return listSecrets({ projectId });
 };
 
 export const createSecret = async (input: CreateSecretInput) => {
-  const { userId, userEmail, projectId } = await resolveUser();
+  const { userId, userEmail, projectId } = await resolveProjectContext();
   return withAudit(
     () => createSecretService({ projectId }, input),
     (secret) => ({
@@ -38,7 +38,7 @@ export const createSecret = async (input: CreateSecretInput) => {
 };
 
 export const deleteSecret = async (secretId: string): Promise<void> => {
-  const { userId, userEmail, projectId } = await resolveUser();
+  const { userId, userEmail, projectId } = await resolveProjectContext();
   return withAudit(
     () => deleteSecretService({ projectId }, secretId),
     () => ({
@@ -53,7 +53,7 @@ export const deleteSecret = async (secretId: string): Promise<void> => {
 };
 
 export const getInstallInfo = async () => {
-  const { projectId, userId } = await resolveUser();
+  const { projectId, userId } = await resolveProjectContext();
 
   const [apiKey, agent] = await Promise.all([
     db.apiKey.findFirst({
@@ -76,7 +76,7 @@ export const getInstallInfo = async () => {
 };
 
 export const hasAnthropicSecret = async (): Promise<boolean> => {
-  const { projectId } = await resolveUser();
+  const { projectId } = await resolveProjectContext();
   const secret = await db.secret.findFirst({
     where: { projectId, type: "anthropic" },
     select: { id: true },
@@ -85,7 +85,7 @@ export const hasAnthropicSecret = async (): Promise<boolean> => {
 };
 
 export const hasOpenaiSecret = async (): Promise<boolean> => {
-  const { projectId } = await resolveUser();
+  const { projectId } = await resolveProjectContext();
   const secret = await db.secret.findFirst({
     where: { projectId, type: "openai" },
     select: { id: true },
@@ -174,7 +174,7 @@ export const updateSecret = async (
   secretId: string,
   input: UpdateSecretInput,
 ): Promise<void> => {
-  const { userId, userEmail, projectId } = await resolveUser();
+  const { userId, userEmail, projectId } = await resolveProjectContext();
   return withAudit(
     () => updateSecretService({ projectId }, secretId, input),
     () => ({

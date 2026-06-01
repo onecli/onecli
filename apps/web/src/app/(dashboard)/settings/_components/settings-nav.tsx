@@ -3,14 +3,17 @@
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { cn } from "@onecli/ui/lib/utils";
-import { settingsSections } from "@/lib/nav-config";
+import { getSettingsSections } from "@/lib/nav-config";
+import { ORG_PATH_RE } from "@/lib/navigation";
 
 export const SettingsNav = () => {
   const pathname = usePathname();
+  const orgId = pathname.match(ORG_PATH_RE)?.[1];
+  const sections = getSettingsSections(orgId);
 
   return (
     <nav className="space-y-5">
-      {settingsSections.map((section) => (
+      {sections.map((section) => (
         <div key={section.label} className="space-y-1">
           <p className="text-muted-foreground px-2 pb-1 text-xs font-medium">
             {section.label}

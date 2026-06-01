@@ -16,20 +16,20 @@ export const googleSheets: AppDefinition = {
       "openid",
       "email",
       "profile",
-      "https://www.googleapis.com/auth/drive.readonly",
-      "https://www.googleapis.com/auth/drive.file",
+      "https://www.googleapis.com/auth/spreadsheets.readonly",
+      "https://www.googleapis.com/auth/spreadsheets",
     ],
     permissions: [
       {
-        scope: "https://www.googleapis.com/auth/drive.readonly",
+        scope: "https://www.googleapis.com/auth/spreadsheets.readonly",
         name: "Read spreadsheets",
-        description: "View all your Google Sheets",
+        description: "View all your Google Sheets spreadsheets",
         access: "read",
       },
       {
-        scope: "https://www.googleapis.com/auth/drive.file",
-        name: "Manage app spreadsheets",
-        description: "Create and edit spreadsheets opened or created by OneCLI",
+        scope: "https://www.googleapis.com/auth/spreadsheets",
+        name: "Edit spreadsheets",
+        description: "Create and edit all your Google Sheets spreadsheets",
         access: "write",
       },
       {

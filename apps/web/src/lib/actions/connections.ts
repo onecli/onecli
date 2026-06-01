@@ -1,7 +1,7 @@
 "use server";
 
 import { db } from "@onecli/db";
-import { resolveUser } from "@/lib/actions/resolve-user";
+import { resolveProjectContext } from "@/lib/actions/resolve-user";
 import {
   withAudit,
   AUDIT_ACTIONS,
@@ -14,17 +14,17 @@ import {
 } from "@onecli/api/services/connection-service";
 
 export const getAppConnections = async () => {
-  const { projectId } = await resolveUser();
+  const { projectId } = await resolveProjectContext();
   return listConnections({ projectId });
 };
 
 export const getAppConnectionsByProvider = async (provider: string) => {
-  const { projectId } = await resolveUser();
+  const { projectId } = await resolveProjectContext();
   return listConnectionsByProvider({ projectId }, provider);
 };
 
 export const getVaultConnections = async () => {
-  const { projectId } = await resolveUser();
+  const { projectId } = await resolveProjectContext();
   return db.vaultConnection.findMany({
     where: { projectId },
     select: {
@@ -39,7 +39,7 @@ export const getVaultConnections = async () => {
 };
 
 export const disconnectAppConnection = async (connectionId: string) => {
-  const { userId, userEmail, projectId } = await resolveUser();
+  const { userId, userEmail, projectId } = await resolveProjectContext();
 
   return withAudit(
     () => deleteConnection({ projectId }, connectionId),

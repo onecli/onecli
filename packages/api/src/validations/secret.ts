@@ -56,7 +56,7 @@ const hostPatternSchema = z
 
 export const createSecretSchema = z.object({
   name: z.string().trim().min(1).max(255),
-  type: z.enum(["anthropic", "openai", "generic"]),
+  type: z.enum(["anthropic", "openai", "codex", "generic"]),
   value: z.string().min(1).max(10000),
   hostPattern: hostPatternSchema,
   pathPattern: z.string().max(1000).optional(),
@@ -122,3 +122,36 @@ export const looksLikeOpenaiKey = (value: string): boolean =>
   value.startsWith("sk-") &&
   !value.startsWith("sk-ant-") &&
   value.length >= OPENAI_KEY_MIN_LENGTH;
+
+export interface CodexAuthJson {
+  auth_mode?: string;
+  tokens: {
+    id_token?: string | null;
+    access_token: string;
+    refresh_token: string;
+    account_id?: string;
+  };
+  last_refresh?: string;
+}
+
+export interface CodexSecretMetadata {
+  authMode: "oauth";
+  accountId?: string;
+}
+
+export const parseCodexAuthJson = (value: string): CodexAuthJson | null => {
+  try {
+    const parsed = JSON.parse(value) as Record<string, unknown>;
+    const tokens = parsed.tokens as Record<string, unknown> | undefined;
+    if (
+      tokens &&
+      typeof tokens.access_token === "string" &&
+      typeof tokens.refresh_token === "string"
+    ) {
+      return parsed as unknown as CodexAuthJson;
+    }
+    return null;
+  } catch {
+    return null;
+  }
+};

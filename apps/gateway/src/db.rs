@@ -29,11 +29,13 @@ pub(crate) struct AgentRow {
     pub organization_id: String,
     pub secret_mode: String,
     pub subscription_status: String,
+    pub policy_mode: String,
 }
 
 /// A secret row from the `secrets` table.
 #[derive(Debug, FromRow)]
 pub(crate) struct SecretRow {
+    pub id: String,
     #[sqlx(rename = "type")]
     pub type_: String,
     pub encrypted_value: String,
@@ -41,6 +43,8 @@ pub(crate) struct SecretRow {
     pub path_pattern: Option<String>,
     pub injection_config: Option<serde_json::Value>,
     pub is_platform: bool,
+    #[allow(dead_code)]
+    pub metadata: Option<serde_json::Value>,
 }
 
 /// A policy rule row from the `policy_rules` table.
@@ -64,11 +68,19 @@ pub(crate) struct UserRow {
     pub id: String,
 }
 
-/// An API key row from the `api_keys` table.
+/// An API key row from the `api_keys` table (project-scoped).
 #[derive(Debug, FromRow)]
 pub(crate) struct ApiKeyRow {
     pub user_id: String,
     pub project_id: String,
+}
+
+/// An org-scoped API key row from the `api_keys` table.
+#[cfg(feature = "cloud")]
+#[derive(Debug, FromRow)]
+pub(crate) struct OrgApiKeyRow {
+    pub user_id: String,
+    pub organization_id: String,
 }
 
 /// A vault connection row from the `vault_connections` table.
@@ -131,13 +143,45 @@ pub(crate) async fn find_api_key(pool: &PgPool, key: &str) -> Result<Option<ApiK
     .context("querying api_keys by key")
 }
 
+/// Look up an org-scoped API key (`oc_org_...`) and return its user_id and organization_id.
+#[cfg(feature = "cloud")]
+pub(crate) async fn find_org_api_key(pool: &PgPool, key: &str) -> Result<Option<OrgApiKeyRow>> {
+    sqlx::query_as::<_, OrgApiKeyRow>(
+        r#"SELECT user_id, organization_id
+           FROM api_keys
+           WHERE key = $1 AND scope = 'organization' AND organization_id IS NOT NULL
+           LIMIT 1"#,
+    )
+    .bind(key)
+    .fetch_optional(pool)
+    .await
+    .context("querying org api_keys by key")
+}
+
+/// Verify that a project belongs to the given organization.
+#[cfg(feature = "cloud")]
+pub(crate) async fn verify_project_in_org(
+    pool: &PgPool,
+    project_id: &str,
+    organization_id: &str,
+) -> Result<bool> {
+    let row: Option<(String,)> =
+        sqlx::query_as(r#"SELECT id FROM projects WHERE id = $1 AND organization_id = $2 LIMIT 1"#)
+            .bind(project_id)
+            .bind(organization_id)
+            .fetch_optional(pool)
+            .await
+            .context("verifying project belongs to organization")?;
+    Ok(row.is_some())
+}
+
 /// Look up an agent by its access token.
 pub(crate) async fn find_agent_by_token(
     pool: &PgPool,
     access_token: &str,
 ) -> Result<Option<AgentRow>> {
     sqlx::query_as::<_, AgentRow>(
-        r#"SELECT a.id, a.name, a.identifier, a.project_id, p.organization_id, a.secret_mode, o.subscription_status
+        r#"SELECT a.id, a.name, a.identifier, a.project_id, p.organization_id, a.secret_mode, o.subscription_status, o.policy_mode
            FROM agents a
            JOIN projects p ON a.project_id = p.id
            JOIN organizations o ON p.organization_id = o.id
@@ -170,7 +214,7 @@ pub(crate) async fn find_secrets_by_project(
     project_id: &str,
 ) -> Result<Vec<SecretRow>> {
     sqlx::query_as::<_, SecretRow>(
-        r#"SELECT type, encrypted_value, host_pattern, path_pattern, injection_config, is_platform FROM secrets WHERE project_id = $1"#,
+        r#"SELECT id, type, encrypted_value, host_pattern, path_pattern, injection_config, is_platform, metadata FROM secrets WHERE project_id = $1"#,
     )
     .bind(project_id)
     .fetch_all(pool)
@@ -181,7 +225,7 @@ pub(crate) async fn find_secrets_by_project(
 /// Find secrets assigned to a specific agent (selective mode).
 pub(crate) async fn find_secrets_by_agent(pool: &PgPool, agent_id: &str) -> Result<Vec<SecretRow>> {
     sqlx::query_as::<_, SecretRow>(
-        r#"SELECT s.type, s.encrypted_value, s.host_pattern, s.path_pattern, s.injection_config, s.is_platform
+        r#"SELECT s.id, s.type, s.encrypted_value, s.host_pattern, s.path_pattern, s.injection_config, s.is_platform, s.metadata
            FROM secrets s
            INNER JOIN agent_secrets as_ ON s.id = as_.secret_id
            WHERE as_.agent_id = $1"#,
@@ -198,7 +242,7 @@ pub(crate) async fn find_secrets_by_org(
     organization_id: &str,
 ) -> Result<Vec<SecretRow>> {
     sqlx::query_as::<_, SecretRow>(
-        r#"SELECT type, encrypted_value, host_pattern, path_pattern, injection_config, is_platform
+        r#"SELECT id, type, encrypted_value, host_pattern, path_pattern, injection_config, is_platform, metadata
            FROM secrets
            WHERE organization_id = $1 AND scope = 'organization'"#,
     )
@@ -206,6 +250,21 @@ pub(crate) async fn find_secrets_by_org(
     .fetch_all(pool)
     .await
     .context("querying secrets by organization_id")
+}
+
+/// Update a secret's encrypted value (used for token refresh).
+pub(crate) async fn update_secret_value(
+    pool: &PgPool,
+    secret_id: &str,
+    encrypted_value: &str,
+) -> Result<()> {
+    sqlx::query(r#"UPDATE secrets SET encrypted_value = $1, updated_at = NOW() WHERE id = $2"#)
+        .bind(encrypted_value)
+        .bind(secret_id)
+        .execute(pool)
+        .await
+        .context("updating secret encrypted value")?;
+    Ok(())
 }
 
 /// Find all enabled policy rules for a given project.
@@ -218,7 +277,7 @@ pub(crate) async fn find_policy_rules_by_project(
                   action, rate_limit, rate_limit_window, conditions
            FROM policy_rules
            WHERE project_id = $1 AND enabled = true
-             AND action IN ('block', 'rate_limit', 'manual_approval')"#,
+             AND action IN ('block', 'rate_limit', 'manual_approval', 'allow')"#,
     )
     .bind(project_id)
     .fetch_all(pool)
@@ -236,7 +295,7 @@ pub(crate) async fn find_policy_rules_by_org(
                   action, rate_limit, rate_limit_window, conditions
            FROM policy_rules
            WHERE organization_id = $1 AND scope = 'organization' AND enabled = true
-             AND action IN ('block', 'rate_limit', 'manual_approval')"#,
+             AND action IN ('block', 'rate_limit', 'manual_approval', 'allow')"#,
     )
     .bind(organization_id)
     .fetch_all(pool)
@@ -281,6 +340,7 @@ pub(crate) struct AppConnectionRow {
     pub credentials: Option<String>,
     pub label: Option<String>,
     pub metadata: Option<serde_json::Value>,
+    pub session_policy: Option<serde_json::Value>,
 }
 
 /// Find all connected app connections for a given project.
@@ -289,7 +349,7 @@ pub(crate) async fn find_app_connections_by_project(
     project_id: &str,
 ) -> Result<Vec<AppConnectionRow>> {
     sqlx::query_as::<_, AppConnectionRow>(
-        r#"SELECT id, provider, credentials, label, metadata FROM app_connections WHERE project_id = $1 AND status = 'connected'"#,
+        r#"SELECT id, provider, credentials, label, metadata, NULL::jsonb AS session_policy FROM app_connections WHERE project_id = $1 AND status = 'connected'"#,
     )
     .bind(project_id)
     .fetch_all(pool)
@@ -303,7 +363,7 @@ pub(crate) async fn find_app_connections_by_agent(
     agent_id: &str,
 ) -> Result<Vec<AppConnectionRow>> {
     sqlx::query_as::<_, AppConnectionRow>(
-        r#"SELECT ac.id, ac.provider, ac.credentials, ac.label, ac.metadata
+        r#"SELECT ac.id, ac.provider, ac.credentials, ac.label, ac.metadata, aac.session_policy
            FROM app_connections ac
            INNER JOIN agent_app_connections aac ON ac.id = aac.app_connection_id
            WHERE aac.agent_id = $1 AND ac.status = 'connected'"#,
@@ -320,7 +380,7 @@ pub(crate) async fn find_app_connections_by_org(
     organization_id: &str,
 ) -> Result<Vec<AppConnectionRow>> {
     sqlx::query_as::<_, AppConnectionRow>(
-        r#"SELECT id, provider, credentials, label, metadata
+        r#"SELECT id, provider, credentials, label, metadata, NULL::jsonb AS session_policy
            FROM app_connections
            WHERE organization_id = $1 AND scope = 'organization' AND status = 'connected'"#,
     )

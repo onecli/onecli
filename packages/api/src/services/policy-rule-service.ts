@@ -11,6 +11,7 @@ import {
   type CreatePolicyRuleInput,
   type UpdatePolicyRuleInput,
   type RuleCondition,
+  type PolicyMode,
 } from "../validations/policy-rule";
 import type { AppTool, AppPermissionLevel } from "../apps/app-permissions";
 
@@ -184,6 +185,7 @@ export const listAppPermissionRules = async (
       action: true,
       metadata: true,
       conditions: true,
+      pathPattern: true,
     },
   });
 };
@@ -194,42 +196,97 @@ export interface AppPermissionChange {
   tool: AppTool;
 }
 
+const allPatterns = (tool: AppTool): string[] => [
+  tool.pathPattern,
+  ...(tool.aliasPatterns ?? []),
+];
+
 export const setAppPermissionsService = async (
   scope: ResourceScope,
   provider: string,
   appName: string,
   changes: AppPermissionChange[],
   conditions?: RuleCondition[],
+  policyMode?: PolicyMode,
 ) => {
+  const isDenyMode = policyMode === "deny";
   const existing = await listAppPermissionRules(scope, provider);
-  const existingByToolId = new Map(
-    existing
-      .filter(
-        (r): r is typeof r & { metadata: { toolId: string } } =>
-          r.metadata != null &&
-          typeof r.metadata === "object" &&
-          "toolId" in r.metadata,
-      )
-      .map((r) => [r.metadata.toolId, r]),
-  );
 
-  const toCreate: AppPermissionChange[] = [];
+  const existingByToolId = new Map<string, typeof existing>();
+  for (const r of existing) {
+    if (
+      r.metadata == null ||
+      typeof r.metadata !== "object" ||
+      !("toolId" in r.metadata)
+    )
+      continue;
+    const toolId = (r.metadata as { toolId: string }).toolId;
+    const arr = existingByToolId.get(toolId) ?? [];
+    arr.push(r);
+    existingByToolId.set(toolId, arr);
+  }
+
+  const toCreateRules: {
+    change: AppPermissionChange;
+    pathPattern: string;
+  }[] = [];
   const toUpdate: { ruleId: string; action: string }[] = [];
   const toDelete: string[] = [];
 
   const conditionsProvided = conditions !== undefined;
 
   for (const change of changes) {
-    const existingRule = existingByToolId.get(change.toolId);
+    const existingRules = existingByToolId.get(change.toolId) ?? [];
 
     if (change.permission === "allow") {
-      if (existingRule) toDelete.push(existingRule.id);
-    } else if (existingRule) {
-      if (existingRule.action !== change.permission || conditionsProvided) {
-        toUpdate.push({ ruleId: existingRule.id, action: change.permission });
+      if (isDenyMode) {
+        // Deny mode: "allow" = create an explicit allow rule
+        if (existingRules.length > 0) {
+          for (const rule of existingRules) {
+            if (rule.action !== "allow" || conditionsProvided) {
+              toUpdate.push({ ruleId: rule.id, action: "allow" });
+            }
+          }
+          const existingPatterns = new Set(
+            existingRules.map((r) => r.pathPattern),
+          );
+          for (const pattern of allPatterns(change.tool)) {
+            if (!existingPatterns.has(pattern)) {
+              toCreateRules.push({ change, pathPattern: pattern });
+            }
+          }
+        } else {
+          for (const pattern of allPatterns(change.tool)) {
+            toCreateRules.push({ change, pathPattern: pattern });
+          }
+        }
+      } else {
+        // Allow mode: "allow" = delete the restriction rule (default = allowed)
+        for (const rule of existingRules) {
+          toDelete.push(rule.id);
+        }
+      }
+    } else if (change.permission === "block" && isDenyMode) {
+      // Deny mode: "block" = delete the allow rule (default = blocked)
+      for (const rule of existingRules) {
+        toDelete.push(rule.id);
+      }
+    } else if (existingRules.length > 0) {
+      for (const rule of existingRules) {
+        if (rule.action !== change.permission || conditionsProvided) {
+          toUpdate.push({ ruleId: rule.id, action: change.permission });
+        }
+      }
+      const existingPatterns = new Set(existingRules.map((r) => r.pathPattern));
+      for (const pattern of allPatterns(change.tool)) {
+        if (!existingPatterns.has(pattern)) {
+          toCreateRules.push({ change, pathPattern: pattern });
+        }
       }
     } else {
-      toCreate.push(change);
+      for (const pattern of allPatterns(change.tool)) {
+        toCreateRules.push({ change, pathPattern: pattern });
+      }
     }
   }
 
@@ -259,21 +316,21 @@ export const setAppPermissionsService = async (
       });
     }
 
-    for (const create of toCreate) {
+    for (const { change, pathPattern } of toCreateRules) {
       await tx.policyRule.create({
         data: {
           ...scopeCreate(scope),
           agentId: isOrgScope(scope) ? null : undefined,
-          name: `${appName}: ${create.tool.name}`,
-          hostPattern: create.tool.hostPattern,
-          pathPattern: create.tool.pathPattern,
-          method: create.tool.method ?? null,
-          action: create.permission,
+          name: `${change.tool.name}`,
+          hostPattern: change.tool.hostPattern,
+          pathPattern,
+          method: change.tool.method ?? null,
+          action: change.permission,
           enabled: true,
           metadata: {
             source: "app_permission",
             provider,
-            toolId: create.toolId,
+            toolId: change.toolId,
           },
           ...(conditionsProvided && conditions.length > 0
             ? { conditions }
@@ -284,7 +341,7 @@ export const setAppPermissionsService = async (
   });
 
   return {
-    created: toCreate.length,
+    created: toCreateRules.length,
     updated: toUpdate.length,
     deleted: toDelete.length,
   };

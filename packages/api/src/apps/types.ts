@@ -35,6 +35,10 @@ export type ConnectionMethod =
       defaultScopes?: string[];
       /** Human-friendly permission descriptions. Drives the permissions UI. */
       permissions?: OAuthPermission[];
+      /** Providers that return the token in a URL fragment (#token=...) instead
+       *  of a query parameter. The bridge page extracts the named param from the
+       *  fragment and resubmits it as a query parameter for the server. */
+      fragmentCallback?: { paramName: string };
       buildAuthUrl: (params: OAuthBuildAuthUrlParams) => string;
       exchangeCode: (
         params: OAuthExchangeCodeParams,
@@ -65,6 +69,8 @@ export type ConnectionMethod =
         description?: string;
         placeholder: string;
         secret?: boolean;
+        /** When true, the field is not required. */
+        optional?: boolean;
         /** When set, field is only shown when this group is active (e.g., "service_account"). */
         group?: string;
       }[];
@@ -103,6 +109,8 @@ export interface AppDefinition {
   description: string;
   connectionMethod: ConnectionMethod;
   available: boolean;
+  /** Custom hint for the connection label field (e.g. 'e.g. "staging", "my-org"'). */
+  labelHint?: string;
   teamOnly?: boolean;
   /** Credential stubs for provisioners to write so MCP servers can boot. */
   credentialStubs?: {

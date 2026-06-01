@@ -3,11 +3,13 @@
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { cn } from "@onecli/ui/lib/utils";
-import { settingsSections } from "@/lib/nav-config";
+import { getSettingsSections } from "@/lib/nav-config";
+import { ORG_PATH_RE } from "@/lib/navigation";
 
 export const SettingsMobileNav = () => {
   const pathname = usePathname();
-  const items = settingsSections.flatMap((s) => s.items);
+  const orgId = pathname.match(ORG_PATH_RE)?.[1];
+  const items = getSettingsSections(orgId).flatMap((s) => s.items);
 
   return (
     <nav className="flex gap-1 overflow-x-auto border-b px-4 py-2 scrollbar-hide md:hidden">

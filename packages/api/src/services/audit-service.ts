@@ -25,6 +25,7 @@ export const AUDIT_SERVICES = {
   APP_CONFIG: "app-config",
   DEPLOYMENT: "deployment",
   PROJECT: "project",
+  ORGANIZATION: "organization",
 } as const;
 
 export const AUDIT_STATUS = {

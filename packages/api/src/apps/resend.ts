@@ -16,6 +16,29 @@ export const resend: AppDefinition = {
         placeholder: "re_...",
       },
     ],
+    resolveMetadata: async (fields) => {
+      try {
+        const res = await fetch("https://api.resend.com/domains", {
+          headers: { Authorization: `Bearer ${fields.apiKey}` },
+        });
+        if (res.ok) {
+          const { data } = (await res.json()) as {
+            data?: { name?: string; id?: string }[];
+          };
+          const domain = data?.[0];
+          if (domain?.name) {
+            return {
+              name: domain.name,
+              username: domain.name,
+            };
+          }
+        }
+      } catch {
+        // Non-fatal
+      }
+      return null;
+    },
   },
+  labelHint: 'e.g. "transactional", "marketing"',
   available: true,
 };

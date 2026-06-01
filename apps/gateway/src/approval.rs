@@ -34,6 +34,7 @@ const BROADCAST_CAPACITY: usize = 16;
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub(crate) struct PendingApproval {
     pub id: String,
+    pub organization_id: String,
     pub project_id: String,
     pub agent_id: String,
     pub agent_name: String,
@@ -104,15 +105,24 @@ impl DecisionReceiver {
 /// (approve, deny, or timeout) to prevent double-cleanup.
 pub(crate) struct ApprovalGuard {
     approval_id: Option<String>,
+    org_id: String,
+    project_id: String,
     store: Arc<dyn ApprovalStore>,
     log_id: Option<String>,
     pool: Option<sqlx::PgPool>,
 }
 
 impl ApprovalGuard {
-    pub fn new(id: String, store: Arc<dyn ApprovalStore>) -> Self {
+    pub fn new(
+        id: String,
+        org_id: String,
+        project_id: String,
+        store: Arc<dyn ApprovalStore>,
+    ) -> Self {
         Self {
             approval_id: Some(id),
+            org_id,
+            project_id,
             store,
             log_id: None,
             pool: None,
@@ -136,10 +146,12 @@ impl Drop for ApprovalGuard {
     fn drop(&mut self) {
         if let Some(id) = self.approval_id.take() {
             let store = Arc::clone(&self.store);
+            let org_id = self.org_id.clone();
+            let project_id = self.project_id.clone();
             let log_id = self.log_id.take();
             let pool = self.pool.take();
             tokio::spawn(async move {
-                store.remove(&id).await;
+                store.remove(&org_id, &project_id, &id).await;
                 if let (Some(log_id), Some(pool)) = (log_id, pool) {
                     if let Err(e) = sqlx::query(
                         "UPDATE request_logs \
@@ -169,7 +181,7 @@ pub(crate) trait ApprovalStore: Send + Sync {
     ///
     /// **Must be called before `store()`** to prevent a race condition where
     /// the SDK submits a decision before the gateway starts listening.
-    async fn prepare_wait(&self, id: &str) -> DecisionReceiver;
+    async fn prepare_wait(&self, org_id: &str, project_id: &str, id: &str) -> DecisionReceiver;
 
     /// Store a pending approval and notify long-polling waiters.
     ///
@@ -178,21 +190,32 @@ pub(crate) trait ApprovalStore: Send + Sync {
     async fn store(&self, approval: &PendingApproval) -> anyhow::Result<()>;
 
     /// Get a single pending approval by ID. O(1) lookup.
-    async fn get_pending(&self, id: &str) -> Option<PendingApproval>;
+    async fn get_pending(
+        &self,
+        org_id: &str,
+        project_id: &str,
+        id: &str,
+    ) -> Option<PendingApproval>;
 
     /// List all non-expired pending approvals for a project.
-    async fn list_pending(&self, project_id: &str) -> Vec<PendingApproval>;
+    async fn list_pending(&self, org_id: &str, project_id: &str) -> Vec<PendingApproval>;
 
     /// Remove a pending approval (after decision or expiry).
-    async fn remove(&self, id: &str);
+    async fn remove(&self, org_id: &str, project_id: &str, id: &str);
 
     /// Block until a new approval arrives for this project, or timeout.
     /// Returns `true` if notified, `false` on timeout.
-    async fn wait_for_new(&self, project_id: &str, timeout: Duration) -> bool;
+    async fn wait_for_new(&self, org_id: &str, project_id: &str, timeout: Duration) -> bool;
 
     /// Submit a decision for a pending approval. Wakes the held request.
     /// Returns `true` if the approval was found and decision delivered.
-    async fn submit_decision(&self, id: &str, decision: ApprovalDecision) -> bool;
+    async fn submit_decision(
+        &self,
+        org_id: &str,
+        project_id: &str,
+        id: &str,
+        decision: ApprovalDecision,
+    ) -> bool;
 }
 
 // ── In-memory implementation ───────────────────────────────────────────
@@ -220,7 +243,7 @@ impl InMemoryApprovalStore {
 
 #[async_trait]
 impl ApprovalStore for InMemoryApprovalStore {
-    async fn prepare_wait(&self, id: &str) -> DecisionReceiver {
+    async fn prepare_wait(&self, _org_id: &str, _project_id: &str, id: &str) -> DecisionReceiver {
         let (tx, rx) = watch::channel(None);
         self.decisions.insert(id.to_string(), tx);
         DecisionReceiver { rx }
@@ -230,14 +253,20 @@ impl ApprovalStore for InMemoryApprovalStore {
         self.pending.insert(approval.id.clone(), approval.clone());
 
         // Notify any long-pollers for this project.
-        if let Some(sender) = self.new_notify.get(&approval.project_id) {
+        let notify_key = format!("{}:{}", approval.organization_id, approval.project_id);
+        if let Some(sender) = self.new_notify.get(&notify_key) {
             let _ = sender.send(()); // ok if no receivers
         }
 
         Ok(())
     }
 
-    async fn get_pending(&self, id: &str) -> Option<PendingApproval> {
+    async fn get_pending(
+        &self,
+        _org_id: &str,
+        _project_id: &str,
+        id: &str,
+    ) -> Option<PendingApproval> {
         let entry = self.pending.get(id)?;
         if entry.expires_at > unix_now() {
             Some(entry.value().clone())
@@ -248,7 +277,7 @@ impl ApprovalStore for InMemoryApprovalStore {
         }
     }
 
-    async fn list_pending(&self, project_id: &str) -> Vec<PendingApproval> {
+    async fn list_pending(&self, _org_id: &str, project_id: &str) -> Vec<PendingApproval> {
         let now = unix_now();
         self.pending
             .iter()
@@ -257,18 +286,19 @@ impl ApprovalStore for InMemoryApprovalStore {
             .collect()
     }
 
-    async fn remove(&self, id: &str) {
+    async fn remove(&self, _org_id: &str, _project_id: &str, id: &str) {
         self.pending.remove(id);
         self.decisions.remove(id);
     }
 
-    async fn wait_for_new(&self, project_id: &str, timeout: Duration) -> bool {
+    async fn wait_for_new(&self, org_id: &str, project_id: &str, timeout: Duration) -> bool {
+        let notify_key = format!("{org_id}:{project_id}");
         // Get or create broadcast sender, subscribe, then drop the guard
         // before awaiting (critical: never hold DashMap guard across .await).
         let mut rx = {
             let sender = self
                 .new_notify
-                .entry(project_id.to_string())
+                .entry(notify_key)
                 .or_insert_with(|| broadcast::channel(BROADCAST_CAPACITY).0);
             sender.subscribe()
         }; // guard dropped here — safe to await
@@ -276,7 +306,13 @@ impl ApprovalStore for InMemoryApprovalStore {
         tokio::time::timeout(timeout, rx.recv()).await.is_ok()
     }
 
-    async fn submit_decision(&self, id: &str, decision: ApprovalDecision) -> bool {
+    async fn submit_decision(
+        &self,
+        _org_id: &str,
+        _project_id: &str,
+        id: &str,
+        decision: ApprovalDecision,
+    ) -> bool {
         if let Some((_, tx)) = self.decisions.remove(id) {
             let _ = tx.send(Some(decision));
             self.pending.remove(id);
@@ -348,10 +384,13 @@ mod tests {
         Arc::new(InMemoryApprovalStore::new())
     }
 
+    const TEST_ORG: &str = "org-1";
+
     fn make_approval(id: &str, project_id: &str) -> PendingApproval {
         let now = unix_now();
         PendingApproval {
             id: id.to_string(),
+            organization_id: TEST_ORG.to_string(),
             project_id: project_id.to_string(),
             agent_id: "agent-1".to_string(),
             agent_name: "Test Agent".to_string(),
@@ -370,6 +409,7 @@ mod tests {
     fn make_expired_approval(id: &str, project_id: &str) -> PendingApproval {
         PendingApproval {
             id: id.to_string(),
+            organization_id: TEST_ORG.to_string(),
             project_id: project_id.to_string(),
             agent_id: "agent-1".to_string(),
             agent_name: "Test Agent".to_string(),
@@ -390,10 +430,10 @@ mod tests {
         let store = new_store().await;
         let approval = make_approval("a1", "acc-1");
 
-        let _ = store.prepare_wait("a1").await;
+        let _ = store.prepare_wait(TEST_ORG, "acc-1", "a1").await;
         store.store(&approval).await.unwrap();
 
-        let pending = store.list_pending("acc-1").await;
+        let pending = store.list_pending(TEST_ORG, "acc-1").await;
         assert_eq!(pending.len(), 1);
         assert_eq!(pending[0].id, "a1");
     }
@@ -404,12 +444,12 @@ mod tests {
         let valid = make_approval("a1", "acc-1");
         let expired = make_expired_approval("a2", "acc-1");
 
-        let _ = store.prepare_wait("a1").await;
+        let _ = store.prepare_wait(TEST_ORG, "acc-1", "a1").await;
         store.store(&valid).await.unwrap();
-        let _ = store.prepare_wait("a2").await;
+        let _ = store.prepare_wait(TEST_ORG, "acc-1", "a2").await;
         store.store(&expired).await.unwrap();
 
-        let pending = store.list_pending("acc-1").await;
+        let pending = store.list_pending(TEST_ORG, "acc-1").await;
         assert_eq!(pending.len(), 1);
         assert_eq!(pending[0].id, "a1");
     }
@@ -419,11 +459,14 @@ mod tests {
         let store = new_store().await;
         let approval = make_approval("a1", "acc-1");
 
-        let _ = store.prepare_wait("a1").await;
+        let _ = store.prepare_wait(TEST_ORG, "acc-1", "a1").await;
         store.store(&approval).await.unwrap();
 
-        assert!(store.get_pending("a1").await.is_some());
-        assert!(store.get_pending("nonexistent").await.is_none());
+        assert!(store.get_pending(TEST_ORG, "acc-1", "a1").await.is_some());
+        assert!(store
+            .get_pending(TEST_ORG, "acc-1", "nonexistent")
+            .await
+            .is_none());
     }
 
     #[tokio::test]
@@ -431,10 +474,10 @@ mod tests {
         let store = new_store().await;
         let expired = make_expired_approval("a1", "acc-1");
 
-        let _ = store.prepare_wait("a1").await;
+        let _ = store.prepare_wait(TEST_ORG, "acc-1", "a1").await;
         store.store(&expired).await.unwrap();
 
-        assert!(store.get_pending("a1").await.is_none());
+        assert!(store.get_pending(TEST_ORG, "acc-1", "a1").await.is_none());
     }
 
     #[tokio::test]
@@ -442,7 +485,7 @@ mod tests {
         let store = new_store().await;
         let approval = make_approval("a1", "acc-1");
 
-        let rx = store.prepare_wait("a1").await;
+        let rx = store.prepare_wait(TEST_ORG, "acc-1", "a1").await;
         store.store(&approval).await.unwrap();
 
         // Submit decision from another task
@@ -450,7 +493,7 @@ mod tests {
         tokio::spawn(async move {
             tokio::time::sleep(Duration::from_millis(50)).await;
             store2
-                .submit_decision("a1", ApprovalDecision::Approve)
+                .submit_decision(TEST_ORG, "acc-1", "a1", ApprovalDecision::Approve)
                 .await;
         });
 
@@ -463,13 +506,15 @@ mod tests {
         let store = new_store().await;
         let approval = make_approval("a1", "acc-1");
 
-        let rx = store.prepare_wait("a1").await;
+        let rx = store.prepare_wait(TEST_ORG, "acc-1", "a1").await;
         store.store(&approval).await.unwrap();
 
         let store2 = Arc::clone(&store);
         tokio::spawn(async move {
             tokio::time::sleep(Duration::from_millis(50)).await;
-            store2.submit_decision("a1", ApprovalDecision::Deny).await;
+            store2
+                .submit_decision(TEST_ORG, "acc-1", "a1", ApprovalDecision::Deny)
+                .await;
         });
 
         let decision = rx.wait(Duration::from_secs(5)).await;
@@ -481,7 +526,7 @@ mod tests {
         let store = new_store().await;
         let approval = make_approval("a1", "acc-1");
 
-        let rx = store.prepare_wait("a1").await;
+        let rx = store.prepare_wait(TEST_ORG, "acc-1", "a1").await;
         store.store(&approval).await.unwrap();
 
         // No decision submitted — should timeout
@@ -495,16 +540,16 @@ mod tests {
         let a1 = make_approval("a1", "acc-1");
         let a2 = make_approval("a2", "acc-2");
 
-        let _ = store.prepare_wait("a1").await;
+        let _ = store.prepare_wait(TEST_ORG, "acc-1", "a1").await;
         store.store(&a1).await.unwrap();
-        let _ = store.prepare_wait("a2").await;
+        let _ = store.prepare_wait(TEST_ORG, "acc-2", "a2").await;
         store.store(&a2).await.unwrap();
 
-        let pending_1 = store.list_pending("acc-1").await;
+        let pending_1 = store.list_pending(TEST_ORG, "acc-1").await;
         assert_eq!(pending_1.len(), 1);
         assert_eq!(pending_1[0].id, "a1");
 
-        let pending_2 = store.list_pending("acc-2").await;
+        let pending_2 = store.list_pending(TEST_ORG, "acc-2").await;
         assert_eq!(pending_2.len(), 1);
         assert_eq!(pending_2[0].id, "a2");
     }
@@ -514,13 +559,13 @@ mod tests {
         let store = new_store().await;
         let approval = make_approval("a1", "acc-1");
 
-        let _ = store.prepare_wait("a1").await;
+        let _ = store.prepare_wait(TEST_ORG, "acc-1", "a1").await;
         store.store(&approval).await.unwrap();
 
-        store.remove("a1").await;
+        store.remove(TEST_ORG, "acc-1", "a1").await;
 
-        assert!(store.get_pending("a1").await.is_none());
-        assert!(store.list_pending("acc-1").await.is_empty());
+        assert!(store.get_pending(TEST_ORG, "acc-1", "a1").await.is_none());
+        assert!(store.list_pending(TEST_ORG, "acc-1").await.is_empty());
     }
 
     #[tokio::test]
@@ -528,19 +573,21 @@ mod tests {
         let store = new_store().await;
         let approval = make_approval("a1", "acc-1");
 
-        let _ = store.prepare_wait("a1").await;
+        let _ = store.prepare_wait(TEST_ORG, "acc-1", "a1").await;
         store.store(&approval).await.unwrap();
 
-        store.submit_decision("a1", ApprovalDecision::Approve).await;
+        store
+            .submit_decision(TEST_ORG, "acc-1", "a1", ApprovalDecision::Approve)
+            .await;
 
-        assert!(store.get_pending("a1").await.is_none());
+        assert!(store.get_pending(TEST_ORG, "acc-1", "a1").await.is_none());
     }
 
     #[tokio::test]
     async fn submit_decision_nonexistent_returns_false() {
         let store = new_store().await;
         let result = store
-            .submit_decision("nonexistent", ApprovalDecision::Approve)
+            .submit_decision(TEST_ORG, "acc-1", "nonexistent", ApprovalDecision::Approve)
             .await;
         assert!(!result);
     }
@@ -553,11 +600,13 @@ mod tests {
         tokio::spawn(async move {
             tokio::time::sleep(Duration::from_millis(50)).await;
             let approval = make_approval("a1", "acc-1");
-            let _ = store2.prepare_wait("a1").await;
+            let _ = store2.prepare_wait(TEST_ORG, "acc-1", "a1").await;
             store2.store(&approval).await.unwrap();
         });
 
-        let got_new = store.wait_for_new("acc-1", Duration::from_secs(5)).await;
+        let got_new = store
+            .wait_for_new(TEST_ORG, "acc-1", Duration::from_secs(5))
+            .await;
         assert!(got_new);
     }
 
@@ -565,7 +614,7 @@ mod tests {
     async fn wait_for_new_timeout() {
         let store = new_store().await;
         let got_new = store
-            .wait_for_new("acc-1", Duration::from_millis(100))
+            .wait_for_new(TEST_ORG, "acc-1", Duration::from_millis(100))
             .await;
         assert!(!got_new);
     }

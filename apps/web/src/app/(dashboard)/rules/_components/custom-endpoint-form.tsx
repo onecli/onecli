@@ -3,7 +3,14 @@
 import { useState, useEffect, useMemo } from "react";
 import { useInvalidateGatewayCache } from "@/hooks/use-invalidate-cache";
 import { toast } from "sonner";
-import { ShieldBan, Gauge, Hand, Check, Settings2 } from "lucide-react";
+import {
+  ShieldBan,
+  ShieldCheck,
+  Gauge,
+  Hand,
+  Check,
+  Settings2,
+} from "lucide-react";
 import { Button } from "@onecli/ui/components/button";
 import { Input } from "@onecli/ui/components/input";
 import { Label } from "@onecli/ui/components/label";
@@ -24,6 +31,7 @@ import {
   SelectValue,
 } from "@onecli/ui/components/select";
 import { DialogFooter } from "@onecli/ui/components/dialog";
+import type { PolicyMode } from "@onecli/api/validations/policy-rule";
 import { updateRule as defaultUpdateRule } from "@/lib/actions/rules";
 import { useQueryClient } from "@tanstack/react-query";
 import { rules } from "@/lib/api";
@@ -66,6 +74,7 @@ interface CustomEndpointFormProps {
   rule?: PolicyRuleItem;
   showAgentField?: boolean;
   ruleActions?: RuleActions;
+  policyMode?: PolicyMode;
 }
 
 export const CustomEndpointForm = ({
@@ -75,7 +84,9 @@ export const CustomEndpointForm = ({
   rule,
   showAgentField = true,
   ruleActions,
+  policyMode = "allow",
 }: CustomEndpointFormProps) => {
+  const isDenyMode = policyMode === "deny";
   const isEdit = !!rule;
   const invalidateCache = useInvalidateGatewayCache();
   const queryClient = useQueryClient();
@@ -88,8 +99,8 @@ export const CustomEndpointForm = ({
   const [method, setMethod] = useState("");
   const [agentId, setAgentId] = useState("");
   const [action, setAction] = useState<
-    "block" | "rate_limit" | "manual_approval"
-  >("block");
+    "block" | "rate_limit" | "manual_approval" | "allow"
+  >(isDenyMode ? "allow" : "block");
   const [rateLimit, setRateLimit] = useState(100);
   const [rateLimitWindow, setRateLimitWindow] = useState<
     "minute" | "hour" | "day"
@@ -106,7 +117,8 @@ export const CustomEndpointForm = ({
     setMethod(rule?.method ?? "");
     setAgentId(rule?.agentId ?? "");
     setAction(
-      (rule?.action as "block" | "rate_limit" | "manual_approval") ?? "block",
+      (rule?.action as "block" | "rate_limit" | "manual_approval" | "allow") ??
+        (isDenyMode ? "allow" : "block"),
     );
     setRateLimit(rule?.rateLimit ?? 100);
     setRateLimitWindow(
@@ -114,7 +126,7 @@ export const CustomEndpointForm = ({
     );
     setEnabled(rule?.enabled ?? true);
     setConditions((rule?.conditions as RuleCondition[]) ?? []);
-  }, [rule]);
+  }, [rule, isDenyMode]);
 
   const nameError = useMemo(() => validateDisplayName(name), [name]);
   const showNameError = nameTouched && nameError !== null;
@@ -378,29 +390,55 @@ export const CustomEndpointForm = ({
       {step === "action" && (
         <div className="space-y-4 pt-5">
           <div className="grid grid-cols-3 gap-2">
-            <button
-              type="button"
-              onClick={() => setAction("block")}
-              className={cn(
-                "flex flex-col gap-1.5 rounded-md border p-3.5 text-left transition-colors",
-                action === "block"
-                  ? "border-destructive bg-destructive/5"
-                  : "hover:bg-muted/50 hover:border-foreground/20",
-              )}
-            >
-              <span className="flex items-center gap-2 text-sm font-medium">
-                <ShieldBan
-                  className={cn(
-                    "size-4",
-                    action === "block" && "text-destructive",
-                  )}
-                />
-                Block
-              </span>
-              <span className="text-muted-foreground text-xs">
-                Deny the request entirely
-              </span>
-            </button>
+            {isDenyMode ? (
+              <button
+                type="button"
+                onClick={() => setAction("allow")}
+                className={cn(
+                  "flex flex-col gap-1.5 rounded-md border p-3.5 text-left transition-colors",
+                  action === "allow"
+                    ? "border-emerald-500 bg-emerald-500/5"
+                    : "hover:bg-muted/50 hover:border-foreground/20",
+                )}
+              >
+                <span className="flex items-center gap-2 text-sm font-medium">
+                  <ShieldCheck
+                    className={cn(
+                      "size-4",
+                      action === "allow" && "text-emerald-500",
+                    )}
+                  />
+                  Allow
+                </span>
+                <span className="text-muted-foreground text-xs">
+                  Permit the request through
+                </span>
+              </button>
+            ) : (
+              <button
+                type="button"
+                onClick={() => setAction("block")}
+                className={cn(
+                  "flex flex-col gap-1.5 rounded-md border p-3.5 text-left transition-colors",
+                  action === "block"
+                    ? "border-destructive bg-destructive/5"
+                    : "hover:bg-muted/50 hover:border-foreground/20",
+                )}
+              >
+                <span className="flex items-center gap-2 text-sm font-medium">
+                  <ShieldBan
+                    className={cn(
+                      "size-4",
+                      action === "block" && "text-destructive",
+                    )}
+                  />
+                  Block
+                </span>
+                <span className="text-muted-foreground text-xs">
+                  Deny the request entirely
+                </span>
+              </button>
+            )}
             <button
               type="button"
               onClick={() => setAction("rate_limit")}

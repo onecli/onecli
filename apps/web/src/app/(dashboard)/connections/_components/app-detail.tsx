@@ -12,7 +12,11 @@ import { checkAppConfigExists as defaultCheckConfig } from "@/lib/actions/app-co
 import { Card } from "@onecli/ui/components/card";
 import { useAppMessages } from "@/hooks/use-app-connected";
 import { useInvalidateGatewayCache } from "@/hooks/use-invalidate-cache";
-import { withProjectPrefix } from "@/lib/navigation";
+import {
+  PROJECT_PATH_RE,
+  ORG_PATH_RE,
+  withProjectPrefix,
+} from "@/lib/navigation";
 import type { OAuthPermission } from "@onecli/api/apps/types";
 import {
   getAppPermissionDefinition,
@@ -61,6 +65,7 @@ interface AppDetailProps {
   permissionActions?: React.ComponentProps<typeof AppPermissions>["actions"];
   orgPermissionStates?: Record<string, AppPermissionLevel>;
   orgConditions?: Record<string, unknown[]>;
+  policyMode?: "allow" | "deny";
 }
 
 interface ConnectionData {
@@ -86,6 +91,7 @@ export const AppDetail = ({
   permissionActions,
   orgPermissionStates,
   orgConditions,
+  policyMode,
 }: AppDetailProps) => {
   const pathname = usePathname();
   const [connections, setConnections] = useState<ConnectionData[]>([]);
@@ -155,7 +161,12 @@ export const AppDetail = ({
     const top = Math.round(window.screenY + (window.outerHeight - h) / 2);
     const params = new URLSearchParams();
     if (connectionId) params.set("connectionId", connectionId);
-    if (pageScope === "organization") params.set("org", "true");
+    const projectMatch = pathname.match(PROJECT_PATH_RE)?.[1];
+    if (projectMatch) params.set("projectId", projectMatch);
+    if (pageScope === "organization") {
+      const orgMatch = pathname.match(ORG_PATH_RE)?.[1];
+      if (orgMatch) params.set("orgId", orgMatch);
+    }
     const qs = params.toString();
     const url = `/app-connect/${app.id}${qs ? `?${qs}` : ""}`;
     window.open(
@@ -259,7 +270,7 @@ export const AppDetail = ({
                     connection={conn}
                     appName={app.name}
                     onReconnect={(id) => openConnectPopup(id, popupOpts)}
-                    onDisconnected={fetchConnections}
+                    refetchConnections={fetchConnections}
                   />
                 ))}
                 {inheritedConnections.map((conn) => (
@@ -289,6 +300,7 @@ export const AppDetail = ({
               actions={permissionActions}
               orgStates={orgPermissionStates}
               orgConditions={orgConditions}
+              policyMode={policyMode}
             />
           ) : isConnected && app.permissions.length > 0 ? (
             <PermissionsList

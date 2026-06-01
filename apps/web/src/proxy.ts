@@ -6,6 +6,7 @@ import {
   NEXTAUTH_SECRET,
   SECRET_ENCRYPTION_KEY,
 } from "@/lib/env";
+import { PROJECT_PATH_RE, ORG_PATH_RE } from "@/lib/navigation";
 
 type SetupErrorCode = "oauth-misconfigured" | "missing-encryption-key";
 
@@ -28,39 +29,6 @@ const getSetupError = (): SetupErrorCode | null => {
   return null;
 };
 
-// Cloud-only: legacy unscoped dashboard routes that should redirect to their
-// project-scoped equivalents. The cookie set by /p/[projectId] navigation or
-// switchProjectAction is the source of truth for "active project". If the
-// cookie is missing (first visit, signed out, etc.) we fall through to the
-// auth flow / projects landing.
-const UNSCOPED_REDIRECTS = new Set([
-  "/overview",
-  "/agents",
-  "/connections",
-  "/rules",
-]);
-
-const ACTIVE_PROJECT_COOKIE = "onecli-project-id";
-
-const cloudUnscopedRedirect = (request: NextRequest): NextResponse | null => {
-  if (!IS_CLOUD) return null;
-  const { pathname } = request.nextUrl;
-
-  // Match exact unscoped paths and their nested subroutes
-  // (e.g. /connections/apps, /connections/secrets/...).
-  const matchedPrefix = [...UNSCOPED_REDIRECTS].find(
-    (p) => pathname === p || pathname.startsWith(`${p}/`),
-  );
-  if (!matchedPrefix) return null;
-
-  const projectId = request.cookies.get(ACTIVE_PROJECT_COOKIE)?.value;
-  if (!projectId) return null;
-
-  const url = request.nextUrl.clone();
-  url.pathname = `/p/${projectId}${pathname}`;
-  return NextResponse.redirect(url);
-};
-
 export const proxy = (request: NextRequest) => {
   const { pathname } = request.nextUrl;
 
@@ -79,10 +47,33 @@ export const proxy = (request: NextRequest) => {
     );
   }
 
-  const cloudRedirect = cloudUnscopedRedirect(request);
-  if (cloudRedirect) return cloudRedirect;
+  if (!IS_CLOUD) {
+    const scopeStripped = pathname
+      .replace(PROJECT_PATH_RE, "")
+      .replace(ORG_PATH_RE, "");
+    if (scopeStripped !== pathname) {
+      const url = request.nextUrl.clone();
+      url.pathname = scopeStripped || "/";
+      return NextResponse.redirect(url);
+    }
+    return NextResponse.next();
+  }
 
-  return NextResponse.next();
+  const requestHeaders = new Headers(request.headers);
+
+  const projectId = pathname.match(PROJECT_PATH_RE)?.[1];
+  if (projectId) {
+    requestHeaders.set("x-project-id", projectId);
+  }
+
+  const orgId = pathname.match(ORG_PATH_RE)?.[1];
+  if (orgId) {
+    requestHeaders.set("x-organization-id", orgId);
+  }
+
+  return NextResponse.next({
+    request: { headers: requestHeaders },
+  });
 };
 
 export const config = {

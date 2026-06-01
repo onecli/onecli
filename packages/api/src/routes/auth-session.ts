@@ -108,6 +108,7 @@ export const authSessionRoutes = () => {
           email: dbUser.email,
           name: dbUser.name,
           projectId,
+          organizationId: defaultProject.organizationId,
         });
       }
 

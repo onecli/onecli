@@ -7,6 +7,7 @@
 use base64::Engine;
 
 use crate::inject::Injection;
+use crate::util::parse_jwt_exp;
 
 // ── Host rule ──────────────────────────────────────────────────────────
 
@@ -65,14 +66,17 @@ pub(crate) struct HostRule {
     pub(crate) intercept: bool,
 }
 
-/// Check whether a `HostRule` matches a given hostname.
-/// Suffix rules match any hostname that ends with the suffix and is strictly longer
-/// (so the bare suffix itself never matches). Exact rules compare the host directly.
-fn host_rule_matches(rule: &HostRule, hostname: &str) -> bool {
-    match rule.pattern {
-        HostPattern::Exact(host) => host == hostname,
-        HostPattern::Suffix(suffix) => hostname.ends_with(suffix) && hostname.len() > suffix.len(),
+impl HostPattern {
+    pub(crate) fn matches(&self, hostname: &str) -> bool {
+        match self {
+            Self::Exact(host) => *host == hostname,
+            Self::Suffix(suffix) => hostname.ends_with(suffix) && hostname.len() > suffix.len(),
+        }
     }
+}
+
+fn host_rule_matches(rule: &HostRule, hostname: &str) -> bool {
+    rule.pattern.matches(hostname)
 }
 
 /// Body format for token refresh requests.
@@ -114,6 +118,13 @@ pub(crate) struct CredentialHeader {
     pub(crate) header_name: &'static str,
 }
 
+/// Maps a credential JSON field to a URL query parameter injected on every request.
+/// Used for providers that authenticate via query params (e.g., Trello's `?key=...&token=...`).
+pub(crate) struct CredentialParam {
+    pub(crate) credential_field: &'static str,
+    pub(crate) param_name: &'static str,
+}
+
 /// Rewrites the upstream host based on a credential field.
 /// Used for providers with regional endpoints (e.g., Datadog us5 → api.us5.datadoghq.com).
 /// The template receives (field_value, original_host) and returns `None` to skip rewriting.
@@ -138,6 +149,8 @@ pub(crate) struct AppProvider {
     pub(crate) metadata_headers: &'static [MetadataHeader],
     /// Headers injected from credential fields (e.g., DD-API-KEY from credentials.apiKey).
     pub(crate) credential_headers: &'static [CredentialHeader],
+    /// Query params injected from credential fields (e.g., Trello's `?key=...&token=...`).
+    pub(crate) credential_params: &'static [CredentialParam],
     /// Optional host rewrite based on a credential field (e.g., Datadog site → regional endpoint).
     pub(crate) host_rewrite: Option<&'static HostRewrite>,
     /// Optional request finalizer for providers needing full request transformation
@@ -249,6 +262,7 @@ static APP_PROVIDERS: &[AppProvider] = &[
         refresh: None,
         metadata_headers: &[],
         credential_headers: &[],
+        credential_params: &[],
         host_rewrite: None,
         finalizer: None,
         body_transform: None,
@@ -279,6 +293,7 @@ static APP_PROVIDERS: &[AppProvider] = &[
         refresh: None,
         metadata_headers: &[],
         credential_headers: &[],
+        credential_params: &[],
         host_rewrite: None,
         finalizer: None,
         body_transform: Some(BodyTransform::GitHubCommitTrailer),
@@ -310,6 +325,7 @@ static APP_PROVIDERS: &[AppProvider] = &[
         refresh: Some(&GOOGLE_REFRESH),
         metadata_headers: &[],
         credential_headers: &[],
+        credential_params: &[],
         host_rewrite: None,
         finalizer: None,
         body_transform: None,
@@ -334,6 +350,7 @@ static APP_PROVIDERS: &[AppProvider] = &[
         refresh: Some(&GOOGLE_REFRESH),
         metadata_headers: &[],
         credential_headers: &[],
+        credential_params: &[],
         host_rewrite: None,
         finalizer: None,
         body_transform: None,
@@ -364,6 +381,7 @@ static APP_PROVIDERS: &[AppProvider] = &[
         refresh: Some(&GOOGLE_REFRESH),
         metadata_headers: &[],
         credential_headers: &[],
+        credential_params: &[],
         host_rewrite: None,
         finalizer: None,
         body_transform: None,
@@ -380,6 +398,7 @@ static APP_PROVIDERS: &[AppProvider] = &[
         refresh: Some(&GOOGLE_REFRESH),
         metadata_headers: &[],
         credential_headers: &[],
+        credential_params: &[],
         host_rewrite: None,
         finalizer: None,
         body_transform: None,
@@ -396,6 +415,7 @@ static APP_PROVIDERS: &[AppProvider] = &[
         refresh: Some(&GOOGLE_REFRESH),
         metadata_headers: &[],
         credential_headers: &[],
+        credential_params: &[],
         host_rewrite: None,
         finalizer: None,
         body_transform: None,
@@ -412,6 +432,7 @@ static APP_PROVIDERS: &[AppProvider] = &[
         refresh: Some(&GOOGLE_REFRESH),
         metadata_headers: &[],
         credential_headers: &[],
+        credential_params: &[],
         host_rewrite: None,
         finalizer: None,
         body_transform: None,
@@ -428,6 +449,24 @@ static APP_PROVIDERS: &[AppProvider] = &[
         refresh: Some(&GOOGLE_REFRESH),
         metadata_headers: &[],
         credential_headers: &[],
+        credential_params: &[],
+        host_rewrite: None,
+        finalizer: None,
+        body_transform: None,
+    },
+    AppProvider {
+        provider: "google-chat",
+        display_name: "Google Chat",
+        host_rules: &[HostRule {
+            pattern: HostPattern::Exact("chat.googleapis.com"),
+            path_prefix: None,
+            strategy: AuthStrategy::Bearer,
+            intercept: false,
+        }],
+        refresh: Some(&GOOGLE_REFRESH),
+        metadata_headers: &[],
+        credential_headers: &[],
+        credential_params: &[],
         host_rewrite: None,
         finalizer: None,
         body_transform: None,
@@ -444,6 +483,7 @@ static APP_PROVIDERS: &[AppProvider] = &[
         refresh: Some(&GOOGLE_REFRESH),
         metadata_headers: &[],
         credential_headers: &[],
+        credential_params: &[],
         host_rewrite: None,
         finalizer: None,
         body_transform: None,
@@ -460,6 +500,7 @@ static APP_PROVIDERS: &[AppProvider] = &[
         refresh: Some(&GOOGLE_REFRESH),
         metadata_headers: &[],
         credential_headers: &[],
+        credential_params: &[],
         host_rewrite: None,
         finalizer: None,
         body_transform: None,
@@ -476,6 +517,7 @@ static APP_PROVIDERS: &[AppProvider] = &[
         refresh: Some(&GOOGLE_REFRESH),
         metadata_headers: &[],
         credential_headers: &[],
+        credential_params: &[],
         host_rewrite: None,
         finalizer: None,
         body_transform: None,
@@ -492,6 +534,7 @@ static APP_PROVIDERS: &[AppProvider] = &[
         refresh: Some(&GOOGLE_REFRESH),
         metadata_headers: &[],
         credential_headers: &[],
+        credential_params: &[],
         host_rewrite: None,
         finalizer: None,
         body_transform: None,
@@ -516,6 +559,7 @@ static APP_PROVIDERS: &[AppProvider] = &[
         refresh: Some(&GOOGLE_REFRESH),
         metadata_headers: &[],
         credential_headers: &[],
+        credential_params: &[],
         host_rewrite: None,
         finalizer: None,
         body_transform: None,
@@ -532,6 +576,7 @@ static APP_PROVIDERS: &[AppProvider] = &[
         refresh: Some(&GOOGLE_REFRESH),
         metadata_headers: &[],
         credential_headers: &[],
+        credential_params: &[],
         host_rewrite: None,
         finalizer: None,
         body_transform: None,
@@ -548,6 +593,7 @@ static APP_PROVIDERS: &[AppProvider] = &[
         refresh: Some(&GOOGLE_REFRESH),
         metadata_headers: &[],
         credential_headers: &[],
+        credential_params: &[],
         host_rewrite: None,
         finalizer: None,
         body_transform: None,
@@ -555,15 +601,24 @@ static APP_PROVIDERS: &[AppProvider] = &[
     AppProvider {
         provider: "jira",
         display_name: "Jira",
-        host_rules: &[HostRule {
-            pattern: HostPattern::Exact("api.atlassian.com"),
-            path_prefix: Some("/ex/jira/"),
-            strategy: AuthStrategy::Bearer,
-            intercept: false,
-        }],
+        host_rules: &[
+            HostRule {
+                pattern: HostPattern::Exact("api.atlassian.com"),
+                path_prefix: Some("/ex/jira/"),
+                strategy: AuthStrategy::Bearer,
+                intercept: false,
+            },
+            HostRule {
+                pattern: HostPattern::Exact("api.atlassian.com"),
+                path_prefix: Some("/oauth/token/accessible-resources"),
+                strategy: AuthStrategy::Bearer,
+                intercept: false,
+            },
+        ],
         refresh: Some(&ATLASSIAN_REFRESH),
         metadata_headers: &[],
         credential_headers: &[],
+        credential_params: &[],
         host_rewrite: None,
         finalizer: None,
         body_transform: None,
@@ -571,15 +626,24 @@ static APP_PROVIDERS: &[AppProvider] = &[
     AppProvider {
         provider: "confluence",
         display_name: "Confluence",
-        host_rules: &[HostRule {
-            pattern: HostPattern::Exact("api.atlassian.com"),
-            path_prefix: Some("/ex/confluence/"),
-            strategy: AuthStrategy::Bearer,
-            intercept: false,
-        }],
+        host_rules: &[
+            HostRule {
+                pattern: HostPattern::Exact("api.atlassian.com"),
+                path_prefix: Some("/ex/confluence/"),
+                strategy: AuthStrategy::Bearer,
+                intercept: false,
+            },
+            HostRule {
+                pattern: HostPattern::Exact("api.atlassian.com"),
+                path_prefix: Some("/oauth/token/accessible-resources"),
+                strategy: AuthStrategy::Bearer,
+                intercept: false,
+            },
+        ],
         refresh: Some(&ATLASSIAN_REFRESH),
         metadata_headers: &[],
         credential_headers: &[],
+        credential_params: &[],
         host_rewrite: None,
         finalizer: None,
         body_transform: None,
@@ -610,6 +674,7 @@ static APP_PROVIDERS: &[AppProvider] = &[
         refresh: Some(&GOOGLE_REFRESH),
         metadata_headers: &[],
         credential_headers: &[],
+        credential_params: &[],
         host_rewrite: None,
         finalizer: None,
         body_transform: None,
@@ -637,6 +702,7 @@ static APP_PROVIDERS: &[AppProvider] = &[
             header_name: "x-goog-user-project",
         }],
         credential_headers: &[],
+        credential_params: &[],
         host_rewrite: None,
         finalizer: None,
         body_transform: None,
@@ -653,6 +719,7 @@ static APP_PROVIDERS: &[AppProvider] = &[
         refresh: Some(&TODOIST_REFRESH),
         metadata_headers: &[],
         credential_headers: &[],
+        credential_params: &[],
         host_rewrite: None,
         finalizer: None,
         body_transform: None,
@@ -669,6 +736,7 @@ static APP_PROVIDERS: &[AppProvider] = &[
         refresh: None,
         metadata_headers: &[],
         credential_headers: &[],
+        credential_params: &[],
         host_rewrite: None,
         finalizer: None,
         body_transform: None,
@@ -685,6 +753,7 @@ static APP_PROVIDERS: &[AppProvider] = &[
         refresh: None,
         metadata_headers: &[],
         credential_headers: &[],
+        credential_params: &[],
         host_rewrite: None,
         finalizer: None,
         body_transform: None,
@@ -701,6 +770,7 @@ static APP_PROVIDERS: &[AppProvider] = &[
         refresh: Some(&NOTION_REFRESH),
         metadata_headers: &[],
         credential_headers: &[],
+        credential_params: &[],
         host_rewrite: None,
         finalizer: None,
         body_transform: None,
@@ -725,6 +795,7 @@ static APP_PROVIDERS: &[AppProvider] = &[
         refresh: Some(&DROPBOX_REFRESH),
         metadata_headers: &[],
         credential_headers: &[],
+        credential_params: &[],
         host_rewrite: None,
         finalizer: None,
         body_transform: None,
@@ -762,6 +833,7 @@ static APP_PROVIDERS: &[AppProvider] = &[
                 header_name: "x-onecli-aws-region",
             },
         ],
+        credential_params: &[],
         host_rewrite: None,
         finalizer: Some(RequestFinalizer::AwsSigV4),
         body_transform: None,
@@ -778,6 +850,7 @@ static APP_PROVIDERS: &[AppProvider] = &[
         refresh: None,
         metadata_headers: &[],
         credential_headers: &[],
+        credential_params: &[],
         host_rewrite: None,
         finalizer: None,
         body_transform: None,
@@ -802,6 +875,24 @@ static APP_PROVIDERS: &[AppProvider] = &[
         refresh: None,
         metadata_headers: &[],
         credential_headers: &[],
+        credential_params: &[],
+        host_rewrite: None,
+        finalizer: None,
+        body_transform: None,
+    },
+    AppProvider {
+        provider: "docker",
+        display_name: "Docker Hub",
+        host_rules: &[HostRule {
+            pattern: HostPattern::Exact("hub.docker.com"),
+            path_prefix: None,
+            strategy: AuthStrategy::Bearer,
+            intercept: false,
+        }],
+        refresh: None,
+        metadata_headers: &[],
+        credential_headers: &[],
+        credential_params: &[],
         host_rewrite: None,
         finalizer: None,
         body_transform: None,
@@ -818,6 +909,7 @@ static APP_PROVIDERS: &[AppProvider] = &[
         refresh: None,
         metadata_headers: &[],
         credential_headers: &[],
+        credential_params: &[],
         host_rewrite: None,
         finalizer: None,
         body_transform: None,
@@ -834,6 +926,24 @@ static APP_PROVIDERS: &[AppProvider] = &[
         refresh: Some(&LINKEDIN_REFRESH),
         metadata_headers: &[],
         credential_headers: &[],
+        credential_params: &[],
+        host_rewrite: None,
+        finalizer: None,
+        body_transform: None,
+    },
+    AppProvider {
+        provider: "vercel",
+        display_name: "Vercel",
+        host_rules: &[HostRule {
+            pattern: HostPattern::Exact("api.vercel.com"),
+            path_prefix: None,
+            strategy: AuthStrategy::Bearer,
+            intercept: false,
+        }],
+        refresh: None,
+        metadata_headers: &[],
+        credential_headers: &[],
+        credential_params: &[],
         host_rewrite: None,
         finalizer: None,
         body_transform: None,
@@ -850,6 +960,33 @@ static APP_PROVIDERS: &[AppProvider] = &[
         refresh: Some(&SUPABASE_REFRESH),
         metadata_headers: &[],
         credential_headers: &[],
+        credential_params: &[],
+        host_rewrite: None,
+        finalizer: None,
+        body_transform: None,
+    },
+    AppProvider {
+        provider: "trello",
+        display_name: "Trello",
+        host_rules: &[HostRule {
+            pattern: HostPattern::Exact("api.trello.com"),
+            path_prefix: None,
+            strategy: AuthStrategy::None,
+            intercept: false,
+        }],
+        refresh: None,
+        metadata_headers: &[],
+        credential_headers: &[],
+        credential_params: &[
+            CredentialParam {
+                credential_field: "apiKey",
+                param_name: "key",
+            },
+            CredentialParam {
+                credential_field: "access_token",
+                param_name: "token",
+            },
+        ],
         host_rewrite: None,
         finalizer: None,
         body_transform: None,
@@ -866,6 +1003,7 @@ static APP_PROVIDERS: &[AppProvider] = &[
         refresh: Some(&GITLAB_REFRESH),
         metadata_headers: &[],
         credential_headers: &[],
+        credential_params: &[],
         host_rewrite: None,
         finalizer: None,
         body_transform: None,
@@ -883,6 +1021,7 @@ fn all_providers() -> impl Iterator<Item = &'static AppProvider> {
 }
 
 /// Return the request finalizer for the first matching provider, if any.
+#[must_use]
 pub(crate) fn finalizer_for_host(hostname: &str) -> Option<RequestFinalizer> {
     all_providers().find_map(|p| {
         p.host_rules
@@ -894,10 +1033,12 @@ pub(crate) fn finalizer_for_host(hostname: &str) -> Option<RequestFinalizer> {
 }
 
 /// Return the request finalizer for a specific provider by ID.
+#[must_use]
 pub(crate) fn finalizer_for_provider(provider: &str) -> Option<RequestFinalizer> {
     all_providers().find_map(|p| (p.provider == provider).then_some(p.finalizer).flatten())
 }
 
+#[must_use]
 pub(crate) fn body_transform_for_provider(provider: &str) -> Option<BodyTransform> {
     all_providers().find_map(|p| {
         (p.provider == provider)
@@ -908,6 +1049,7 @@ pub(crate) fn body_transform_for_provider(provider: &str) -> Option<BodyTransfor
 
 /// Given a hostname, return the first matching provider's (id, display_name).
 /// Returns `None` if no provider matches.
+#[must_use]
 pub(crate) fn provider_for_host(hostname: &str) -> Option<(&'static str, &'static str)> {
     all_providers().find_map(|p| {
         p.host_rules
@@ -923,6 +1065,7 @@ pub(crate) fn provider_for_host(hostname: &str) -> Option<(&'static str, &'stati
 /// between providers (Gmail on `/gmail/*`, Calendar on `/calendar/*`, etc.).
 /// Falls back to the first host-only match only for dedicated subdomains; shared hosts
 /// with path-scoped providers return `None` when no prefix matches.
+#[must_use]
 pub(crate) fn provider_for_host_and_path(
     hostname: &str,
     path: &str,
@@ -1062,7 +1205,29 @@ pub(crate) fn build_app_injection_rules(
         .collect()
 }
 
+/// Check if a specific provider has host rules matching both the hostname and path.
+#[must_use]
+pub(crate) fn provider_matches_host_and_path(provider: &str, hostname: &str, path: &str) -> bool {
+    all_providers()
+        .find(|p| p.provider == provider)
+        .is_some_and(|app| {
+            app.host_rules.iter().any(|r| {
+                host_rule_matches(r, hostname)
+                    && r.path_prefix.is_none_or(|pfx| path.starts_with(pfx))
+            })
+        })
+}
+
+/// Look up the display name for a provider slug (e.g., "jira" -> "Jira").
+#[must_use]
+pub(crate) fn display_name_for_provider(provider: &str) -> Option<&'static str> {
+    all_providers()
+        .find(|p| p.provider == provider)
+        .map(|p| p.display_name)
+}
+
 /// Get the refresh config for a provider, if it supports token refresh.
+#[must_use]
 pub(crate) fn refresh_config(provider: &str) -> Option<&'static RefreshConfig> {
     all_providers()
         .find(|p| p.provider == provider)
@@ -1070,6 +1235,7 @@ pub(crate) fn refresh_config(provider: &str) -> Option<&'static RefreshConfig> {
 }
 
 /// Get metadata-to-header mappings for a provider.
+#[must_use]
 pub(crate) fn metadata_headers(provider: &str) -> &'static [MetadataHeader] {
     all_providers()
         .find(|p| p.provider == provider)
@@ -1078,10 +1244,20 @@ pub(crate) fn metadata_headers(provider: &str) -> &'static [MetadataHeader] {
 }
 
 /// Get credential-to-header mappings for a provider.
+#[must_use]
 pub(crate) fn credential_headers(provider: &str) -> &'static [CredentialHeader] {
     all_providers()
         .find(|p| p.provider == provider)
         .map(|p| p.credential_headers)
+        .unwrap_or(&[])
+}
+
+/// Get credential-to-query-param mappings for a provider.
+#[must_use]
+pub(crate) fn credential_params(provider: &str) -> &'static [CredentialParam] {
+    all_providers()
+        .find(|p| p.provider == provider)
+        .map(|p| p.credential_params)
         .unwrap_or(&[])
 }
 
@@ -1367,6 +1543,7 @@ pub(crate) async fn refresh_github_app_token(
     private_key_pem: &str,
     app_id: &str,
     installation_id: &str,
+    repositories: Option<&[String]>,
 ) -> anyhow::Result<(String, i64)> {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -1396,14 +1573,24 @@ pub(crate) async fn refresh_github_app_token(
     )
     .map_err(|e| anyhow::anyhow!("GitHub App JWT signing failed: {e}"))?;
 
-    let resp = reqwest::Client::new()
+    let mut req = reqwest::Client::new()
         .post(format!(
             "https://api.github.com/app/installations/{installation_id}/access_tokens"
         ))
         .header("Authorization", format!("Bearer {jwt}"))
         .header("Accept", "application/vnd.github+json")
         .header("X-GitHub-Api-Version", "2022-11-28")
-        .header("User-Agent", "onecli-gateway")
+        .header("User-Agent", "onecli-gateway");
+
+    if let Some(repos) = repositories {
+        let bare_names: Vec<&str> = repos
+            .iter()
+            .map(|r| r.rsplit('/').next().unwrap_or(r.as_str()))
+            .collect();
+        req = req.json(&serde_json::json!({ "repositories": bare_names }));
+    }
+
+    let resp = req
         .send()
         .await
         .map_err(|e| anyhow::anyhow!("GitHub App token request failed: {e}"))?;
@@ -1447,6 +1634,7 @@ pub(crate) async fn refresh_github_app_token(
 pub(crate) async fn try_refresh_credentials(
     cred_type: &str,
     creds: &serde_json::Value,
+    _session_policy: Option<&serde_json::Value>,
 ) -> Option<anyhow::Result<(String, i64)>> {
     match cred_type {
         "github_app" => {
@@ -1458,7 +1646,7 @@ pub(crate) async fn try_refresh_credentials(
                     "GitHub App credentials incomplete, cannot refresh"
                 )));
             };
-            Some(refresh_github_app_token(pk, aid, iid).await)
+            Some(refresh_github_app_token(pk, aid, iid, None).await)
         }
         "service_account" => {
             let pk = creds.get("private_key").and_then(|v| v.as_str());
@@ -1481,8 +1669,60 @@ pub(crate) async fn try_refresh_credentials(
             };
             Some(refresh_via_client_credentials(url, id, secret).await)
         }
+        "docker_hub" => {
+            let username = creds.get("username").and_then(|v| v.as_str());
+            let password = creds.get("password").and_then(|v| v.as_str());
+            let (Some(username), Some(password)) = (username, password) else {
+                return Some(Err(anyhow::anyhow!(
+                    "Docker Hub credentials incomplete, cannot refresh"
+                )));
+            };
+            Some(refresh_docker_hub_token(username, password).await)
+        }
         _ => None,
     }
+}
+
+async fn refresh_docker_hub_token(username: &str, password: &str) -> anyhow::Result<(String, i64)> {
+    let resp = reqwest::Client::new()
+        .post("https://hub.docker.com/v2/users/login")
+        .json(&serde_json::json!({
+            "username": username,
+            "password": password,
+        }))
+        .send()
+        .await
+        .map_err(|e| anyhow::anyhow!("Docker Hub login request failed: {e}"))?;
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        return Err(anyhow::anyhow!(
+            "Docker Hub login failed ({status}): {body}"
+        ));
+    }
+
+    let body: serde_json::Value = resp
+        .json()
+        .await
+        .map_err(|e| anyhow::anyhow!("Docker Hub login response parse failed: {e}"))?;
+
+    let token = body
+        .get("token")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| anyhow::anyhow!("Docker Hub login response missing 'token' field"))?
+        .to_string();
+
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("system clock before UNIX epoch")
+        .as_secs() as i64;
+
+    let expires_at = parse_jwt_exp(&token)
+        .map(|exp| exp - 60)
+        .unwrap_or(now + 3600);
+
+    Ok((token, expires_at))
 }
 
 // ── Tests ──────────────────────────────────────────────────────────────
@@ -1802,6 +2042,24 @@ mod tests {
     }
 
     #[test]
+    fn atlassian_net_tenant_host_no_longer_matches() {
+        let providers = providers_for_host("mysite.atlassian.net");
+        assert!(
+            providers.is_empty(),
+            "*.atlassian.net should not match any provider (deprecated)"
+        );
+    }
+
+    #[test]
+    fn atlassian_net_tenant_host_produces_no_injections() {
+        let injections = build_app_injections("jira", "mysite.atlassian.net", "eyJ0eXAi.test");
+        assert!(
+            injections.is_empty(),
+            "*.atlassian.net should produce no injections (deprecated)"
+        );
+    }
+
+    #[test]
     fn jira_path_disambiguation() {
         let result =
             provider_for_host_and_path("api.atlassian.com", "/ex/jira/11223344/rest/api/3/issue");
@@ -1922,6 +2180,27 @@ mod tests {
     fn todoist_refresh_uses_form_body_format() {
         let config = refresh_config("todoist").expect("todoist should have refresh config");
         assert!(matches!(config.body_format, TokenBodyFormat::Form));
+    }
+
+    // ── Vercel ────────────────────────────────────────────────────────
+
+    #[test]
+    fn provider_for_host_vercel() {
+        let result = provider_for_host("api.vercel.com");
+        assert_eq!(result, Some(("vercel", "Vercel")));
+    }
+
+    #[test]
+    fn vercel_api_uses_bearer() {
+        let injections = build_app_injections("vercel", "api.vercel.com", "vca_test123");
+        assert_eq!(injections.len(), 1);
+        assert_eq!(
+            injections[0],
+            Injection::SetHeader {
+                name: "authorization".to_string(),
+                value: "Bearer vca_test123".to_string(),
+            }
+        );
     }
 
     // ── Resend ────────────────────────────────────────────────────────
@@ -2109,6 +2388,49 @@ mod tests {
     fn mongodb_atlas_does_not_match_other_mongodb_hosts() {
         assert!(providers_for_host("mongodb.com").is_empty());
         assert!(providers_for_host("atlas.mongodb.com").is_empty());
+    }
+
+    // ── Docker Hub ────────────────────────────────────────────────────
+
+    #[test]
+    fn providers_for_docker_hub_host() {
+        assert_eq!(providers_for_host("hub.docker.com"), vec!["docker"]);
+    }
+
+    #[test]
+    fn provider_for_host_docker() {
+        let result = provider_for_host("hub.docker.com");
+        assert_eq!(result, Some(("docker", "Docker Hub")));
+    }
+
+    #[test]
+    fn docker_api_uses_bearer() {
+        let injections = build_app_injections("docker", "hub.docker.com", "eyJjwt_token_here");
+        assert_eq!(injections.len(), 1);
+        assert_eq!(
+            injections[0],
+            Injection::SetHeader {
+                name: "authorization".to_string(),
+                value: "Bearer eyJjwt_token_here".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn docker_has_no_refresh_config() {
+        assert!(refresh_config("docker").is_none());
+    }
+
+    #[test]
+    fn docker_needs_access_token() {
+        assert!(needs_access_token("docker"));
+    }
+
+    #[test]
+    fn docker_does_not_match_other_docker_hosts() {
+        assert!(providers_for_host("docker.com").is_empty());
+        assert!(providers_for_host("registry.docker.com").is_empty());
+        assert!(providers_for_host("index.docker.io").is_empty());
     }
 
     // ── Monday.com ────────────────────────────────────────────────────
@@ -2395,5 +2717,100 @@ mod tests {
     fn gitlab_refresh_uses_form_body_format() {
         let config = refresh_config("gitlab").expect("gitlab should have refresh config");
         assert!(matches!(config.body_format, TokenBodyFormat::Form));
+    }
+
+    #[test]
+    fn provider_for_host_trello() {
+        assert_eq!(
+            provider_for_host("api.trello.com"),
+            Some(("trello", "Trello"))
+        );
+    }
+
+    #[test]
+    fn trello_uses_query_param_injection() {
+        let rules = build_app_injection_rules("trello", "api.trello.com", "");
+        assert_eq!(rules.len(), 1);
+        let (pattern, injections) = &rules[0];
+        assert_eq!(pattern, "*");
+        // AuthStrategy::None produces no injections — params come from credential_params
+        assert!(injections.is_empty());
+    }
+
+    #[test]
+    fn trello_credential_params_defined() {
+        let params = credential_params("trello");
+        assert_eq!(params.len(), 2);
+        assert_eq!(params[0].credential_field, "apiKey");
+        assert_eq!(params[0].param_name, "key");
+        assert_eq!(params[1].credential_field, "access_token");
+        assert_eq!(params[1].param_name, "token");
+    }
+
+    #[test]
+    fn trello_no_refresh() {
+        assert!(refresh_config("trello").is_none());
+    }
+
+    // ── provider_matches_host_and_path ────────────────────────────────
+
+    #[test]
+    fn provider_matches_jira_unique_path() {
+        assert!(provider_matches_host_and_path(
+            "jira",
+            "api.atlassian.com",
+            "/ex/jira/rest/api/3/issue"
+        ));
+    }
+
+    #[test]
+    fn provider_matches_jira_shared_path() {
+        assert!(provider_matches_host_and_path(
+            "jira",
+            "api.atlassian.com",
+            "/oauth/token/accessible-resources"
+        ));
+    }
+
+    #[test]
+    fn provider_matches_confluence_shared_path() {
+        assert!(provider_matches_host_and_path(
+            "confluence",
+            "api.atlassian.com",
+            "/oauth/token/accessible-resources"
+        ));
+    }
+
+    #[test]
+    fn provider_does_not_match_wrong_path() {
+        assert!(!provider_matches_host_and_path(
+            "jira",
+            "api.atlassian.com",
+            "/ex/confluence/wiki/rest/api"
+        ));
+    }
+
+    #[test]
+    fn provider_does_not_match_wrong_host() {
+        assert!(!provider_matches_host_and_path(
+            "jira",
+            "api.github.com",
+            "/ex/jira/rest/api/3/issue"
+        ));
+    }
+
+    // ── display_name_for_provider ─────────────────────────────────────
+
+    #[test]
+    fn display_name_for_known_providers() {
+        assert_eq!(display_name_for_provider("jira"), Some("Jira"));
+        assert_eq!(display_name_for_provider("confluence"), Some("Confluence"));
+        assert_eq!(display_name_for_provider("gmail"), Some("Gmail"));
+        assert_eq!(display_name_for_provider("github"), Some("GitHub"));
+    }
+
+    #[test]
+    fn display_name_for_unknown_provider() {
+        assert_eq!(display_name_for_provider("nonexistent"), None);
     }
 }

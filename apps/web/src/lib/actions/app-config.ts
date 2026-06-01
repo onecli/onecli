@@ -1,6 +1,6 @@
 "use server";
 
-import { resolveUser } from "@/lib/actions/resolve-user";
+import { resolveProjectContext } from "@/lib/actions/resolve-user";
 import { getApp } from "@onecli/api/apps/registry";
 import {
   withAudit,
@@ -20,7 +20,7 @@ export const saveAppConfig = async (
   provider: string,
   values: Record<string, string>,
 ) => {
-  const { userId, userEmail, projectId } = await resolveUser();
+  const { userId, userEmail, projectId } = await resolveProjectContext();
   const app = getApp(provider);
   if (!app?.configurable) {
     throw new Error(`Provider "${provider}" is not configurable`);
@@ -46,12 +46,12 @@ export const saveAppConfig = async (
 };
 
 export const getAppConfigStatus = async (provider: string) => {
-  const { projectId } = await resolveUser();
+  const { projectId } = await resolveProjectContext();
   return getAppConfig({ projectId }, provider);
 };
 
 export const deleteAppConfigAction = async (provider: string) => {
-  const { userId, userEmail, projectId } = await resolveUser();
+  const { userId, userEmail, projectId } = await resolveProjectContext();
 
   return withAudit(
     () => deleteAppConfig({ projectId }, provider),
@@ -86,7 +86,7 @@ export const getAvailableEnvDefaults = async (): Promise<string[]> => {
 export const checkAppConfigExists = async (
   provider: string,
 ): Promise<boolean> => {
-  const { projectId } = await resolveUser();
+  const { projectId } = await resolveProjectContext();
   return hasAppConfigService({ projectId }, provider);
 };
 
@@ -95,7 +95,7 @@ export const checkAppConfigExists = async (
  * Use this instead of calling checkAppConfigExists in a loop.
  */
 export const getConfiguredProviders = async (): Promise<string[]> => {
-  const { projectId } = await resolveUser();
+  const { projectId } = await resolveProjectContext();
   return listConfiguredProviders({ projectId });
 };
 
@@ -103,7 +103,7 @@ export const setAppConfigEnabled = async (
   provider: string,
   enabled: boolean,
 ) => {
-  const { userId, userEmail, projectId } = await resolveUser();
+  const { userId, userEmail, projectId } = await resolveProjectContext();
 
   return withAudit(
     () => toggleAppConfigEnabled({ projectId }, provider, enabled),

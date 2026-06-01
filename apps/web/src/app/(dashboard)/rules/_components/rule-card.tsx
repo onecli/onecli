@@ -27,6 +27,7 @@ import {
 } from "@/lib/actions/rules";
 import { cn } from "@onecli/ui/lib/utils";
 import { RuleDialog } from "./rule-dialog";
+import type { PolicyMode } from "@onecli/api/validations/policy-rule";
 import type { AgentOption, PolicyRuleItem, RuleActions } from "./types";
 
 interface RuleCardProps {
@@ -36,6 +37,7 @@ interface RuleCardProps {
   readOnly?: boolean;
   badge?: string;
   ruleActions?: RuleActions;
+  policyMode?: PolicyMode;
 }
 
 export const RuleCard = ({
@@ -45,6 +47,7 @@ export const RuleCard = ({
   readOnly,
   badge,
   ruleActions,
+  policyMode,
 }: RuleCardProps) => {
   const deleteRule = ruleActions?.deleteRule ?? defaultDeleteRule;
   const updateRule = ruleActions?.updateRule ?? defaultUpdateRule;
@@ -123,11 +126,12 @@ export const RuleCard = ({
               <Badge
                 variant={
                   rule.action === "rate_limit" ||
-                  rule.action === "manual_approval"
+                  rule.action === "manual_approval" ||
+                  rule.action === "allow"
                     ? "secondary"
                     : "destructive"
                 }
-                className={`text-xs ${rule.action === "rate_limit" ? "bg-amber-500/15 text-amber-600 dark:text-amber-400" : rule.action === "manual_approval" ? "bg-blue-500/15 text-blue-600 dark:text-blue-400" : ""}`}
+                className={`text-xs ${rule.action === "rate_limit" ? "bg-amber-500/15 text-amber-600 dark:text-amber-400" : rule.action === "manual_approval" ? "bg-blue-500/15 text-blue-600 dark:text-blue-400" : rule.action === "allow" ? "bg-emerald-500/15 text-emerald-600 dark:text-emerald-400" : ""}`}
               >
                 {actionLabel}
               </Badge>
@@ -247,6 +251,7 @@ export const RuleCard = ({
           agents={agents}
           onSaved={onUpdate}
           ruleActions={ruleActions}
+          policyMode={policyMode}
         />
       )}
     </>

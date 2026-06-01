@@ -22,7 +22,7 @@ pub(crate) type ForwardBody<S> = Either<Full<Bytes>, S>;
 
 /// Resolve the OneCLI dashboard base URL from `APP_URL`,
 /// falling back to `http://localhost:10254`. Cached after first call.
-fn dashboard_url() -> &'static str {
+pub(crate) fn dashboard_url() -> &'static str {
     static URL: std::sync::OnceLock<String> = std::sync::OnceLock::new();
     URL.get_or_init(|| {
         std::env::var("APP_URL")
@@ -32,9 +32,19 @@ fn dashboard_url() -> &'static str {
     })
 }
 
+fn scoped_url(base: &str, path: &str, project_id: Option<&str>) -> String {
+    match project_id {
+        Some(pid) => format!("{base}/p/{pid}{path}"),
+        None => format!("{base}{path}"),
+    }
+}
+
 /// Build a JSON error response with the given status code and body.
 /// Used by `forward_request` (MITM and HTTP proxy forwarding path).
-fn json_error<S>(status: StatusCode, body: serde_json::Value) -> Response<ForwardBody<S>> {
+pub(super) fn json_error<S>(
+    status: StatusCode,
+    body: serde_json::Value,
+) -> Response<ForwardBody<S>> {
     let json = body.to_string();
     let mut response = Response::new(Either::Left(Full::new(Bytes::from(json))));
     *response.status_mut() = status;
@@ -57,7 +67,7 @@ fn json_error_axum(status: StatusCode, body: serde_json::Value) -> Response<axum
 }
 
 /// Mark a response as non-transient so clients know not to retry.
-fn with_no_retry<B>(mut resp: Response<B>) -> Response<B> {
+pub(super) fn with_no_retry<B>(mut resp: Response<B>) -> Response<B> {
     resp.headers_mut()
         .insert("x-should-retry", HeaderValue::from_static("false"));
     resp
@@ -107,8 +117,9 @@ pub(crate) fn app_not_connected<S>(
     provider: &str,
     display_name: &str,
     agent_name: Option<&str>,
+    project_id: Option<&str>,
 ) -> Response<ForwardBody<S>> {
-    let base = dashboard_url();
+    let base = scoped_url(dashboard_url(), "", project_id);
     let connect_url = match agent_name {
         Some(name) => format!(
             "{base}/connections?connect={provider}&source=agent&agent_name={}",
@@ -135,8 +146,9 @@ pub(crate) fn app_not_connected_unknown_provider<S>(
     status: StatusCode,
     hostname: &str,
     agent_name: Option<&str>,
+    project_id: Option<&str>,
 ) -> Response<ForwardBody<S>> {
-    let base = dashboard_url();
+    let base = scoped_url(dashboard_url(), "", project_id);
     let encoded_host = utf8_percent_encode(hostname, NON_ALPHANUMERIC);
     let connect_url = match agent_name {
         Some(name) => format!(
@@ -169,8 +181,9 @@ pub(crate) fn access_restricted<S>(
     provider: &str,
     display_name: &str,
     agent_id: Option<&str>,
+    project_id: Option<&str>,
 ) -> Response<ForwardBody<S>> {
-    let base = dashboard_url();
+    let base = scoped_url(dashboard_url(), "", project_id);
     let manage_url = match agent_id {
         Some(id) => format!("{base}/agents?manage={}", id.get(..8).unwrap_or(id)),
         None => format!("{base}/agents"),
@@ -195,36 +208,27 @@ pub(crate) fn credential_not_found<S>(
     status: StatusCode,
     hostname: &str,
     path: &str,
+    project_id: Option<&str>,
 ) -> Response<ForwardBody<S>> {
-    let base = dashboard_url();
+    let base = scoped_url(dashboard_url(), "", project_id);
     let encoded_host = utf8_percent_encode(hostname, NON_ALPHANUMERIC);
-    let encoded_path = utf8_percent_encode(path, NON_ALPHANUMERIC);
     let secret_url =
-        format!("{base}/connections/custom?create=generic&host={encoded_host}&path={encoded_path}");
+        format!("{base}/connections/custom?create=generic&host={encoded_host}&path=%2F%2A");
     with_no_retry(json_error(
         status,
         serde_json::json!({
             "error": "credential_not_found",
             "message": format!(
-                "No credentials configured for {hostname} in OneCLI.\n\n\
-                 A pre-built link is provided in the `secret_url` field, pre-filled with:\n\
-                 - host: {hostname}\n\
-                 - path: {path}\n\n\
-                 Before sending this link to the user, consider whether to adjust it. \
-                 You can build a custom URL with any of these query parameters:\n\
-                 {base}/connections/custom?create=generic&host=<host>&path=<path>&name=<name>&header=<header>&format=<format>\n\n\
-                 Available parameters:\n\
-                 - `host` (required): hostname to match (e.g., api.example.com or *.example.com)\n\
-                 - `path`: path pattern (e.g., /v1/* or /*). Defaults to the exact request path.\n\
-                 - `name`: display name for the secret (e.g., 'Example API Key')\n\
-                 - `header`: HTTP header name to inject (default: Authorization)\n\
-                 - `format`: value format with {{value}} placeholder (default: Bearer {{value}})\n\n\
-                 Examples of when to customize:\n\
-                 - Change path to `/*` if the credential covers all endpoints on the host\n\
-                 - Change header to `X-API-Key` if the API uses a custom header\n\
-                 - Change format to `{{value}}` (raw) if the API expects the token without a prefix\n\n\
-                 Once you've decided on the right link, ask the user to open it. \
-                 They will see a pre-filled form where they paste their API key or token."
+                "No credentials configured for {hostname} in OneCLI.\n\
+                 A pre-built link is provided in the `secret_url` field. \
+                 Before sending this link to the user, append a display name: \
+                 &name=<name> (e.g., &name=Stripe%20API%20Key).\n\
+                 Then ask the user to open the link to add their API key.\n\n\
+                 If you know this API's auth method, you can also customize:\n\
+                 - Custom header: append &header=<name> (default: Authorization)\n\
+                 - Custom format: append &format=<format> using {{value}} as placeholder \
+                 (default: Bearer {{value}}, use just {{value}} for raw token)\n\
+                 - Query param auth instead of header: append &param=<name> (e.g., &param=api_key)"
             ),
             "hostname": hostname,
             "path": path,
@@ -240,6 +244,42 @@ pub(crate) fn multiple_connections<S>(
     with_no_retry(json_error(
         StatusCode::CONFLICT,
         multiple_connections_json(connections),
+    ))
+}
+
+/// Build the shared JSON body for multiple-providers responses.
+fn multiple_providers_json(connections: &[crate::connect::ConnectionChoice]) -> serde_json::Value {
+    let hdr = crate::connect::CONNECTION_ID_HEADER;
+    serde_json::json!({
+        "error": "multiple_providers",
+        "message": format!(
+            "Multiple app integrations are connected that can handle this API request. \
+             If you can determine the correct provider from context, specify it using the {hdr} header. \
+             Otherwise, ask the user which provider to use."
+        ),
+        "connections": connections,
+        "header": hdr,
+        "example": format!("{hdr}: {}", connections.first().map(|c| c.id.as_str()).unwrap_or("CONNECTION_ID")),
+    })
+}
+
+/// 409 Conflict — multiple providers match the same request path (axum body).
+pub(super) fn multiple_providers_axum(
+    connections: &[crate::connect::ConnectionChoice],
+) -> Response<axum::body::Body> {
+    with_no_retry(json_error_axum(
+        StatusCode::CONFLICT,
+        multiple_providers_json(connections),
+    ))
+}
+
+/// 409 Conflict — multiple providers match the same request path.
+pub(crate) fn multiple_providers<S>(
+    connections: &[crate::connect::ConnectionChoice],
+) -> Response<ForwardBody<S>> {
+    with_no_retry(json_error(
+        StatusCode::CONFLICT,
+        multiple_providers_json(connections),
     ))
 }
 
@@ -308,7 +348,9 @@ pub(crate) fn blocked_by_policy<S>(
     method: &str,
     path: &str,
     rule_name: &str,
+    project_id: Option<&str>,
 ) -> Response<ForwardBody<S>> {
+    let rules_url = scoped_url(dashboard_url(), "/rules", project_id);
     with_no_retry(json_error(
         StatusCode::FORBIDDEN,
         serde_json::json!({
@@ -321,7 +363,34 @@ pub(crate) fn blocked_by_policy<S>(
             "rule_name": rule_name,
             "method": method,
             "path": path,
-            "dashboard_url": "https://app.onecli.sh/rules",
+            "dashboard_url": rules_url,
+        }),
+    ))
+}
+
+/// 403 Forbidden — no allow rule matched in deny-by-default mode.
+pub(crate) fn blocked_by_default_policy<S>(
+    method: &str,
+    path: &str,
+    host: &str,
+    project_id: Option<&str>,
+) -> Response<ForwardBody<S>> {
+    let base = scoped_url(dashboard_url(), "", project_id);
+    let hostname = host.split(':').next().unwrap_or(host);
+    let encoded_host = utf8_percent_encode(hostname, NON_ALPHANUMERIC);
+    with_no_retry(json_error(
+        StatusCode::FORBIDDEN,
+        serde_json::json!({
+            "error": "blocked_by_default_policy",
+            "message": format!(
+                "Your organization's default-deny policy blocked this request. \
+                 {method} {hostname}{path} requires an explicit allow rule. \
+                 Create one in your OneCLI dashboard."
+            ),
+            "method": method,
+            "host": hostname,
+            "path": path,
+            "dashboard_url": format!("{base}/rules?create=allow&host={encoded_host}"),
         }),
     ))
 }
@@ -379,7 +448,7 @@ mod tests {
     #[test]
     fn app_not_connected_preserves_status() {
         let resp: Response<TestBody> =
-            app_not_connected(StatusCode::UNAUTHORIZED, "gmail", "Gmail", None);
+            app_not_connected(StatusCode::UNAUTHORIZED, "gmail", "Gmail", None, None);
         assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
         assert_eq!(
             resp.headers().get("content-type").unwrap(),
@@ -391,7 +460,7 @@ mod tests {
     #[tokio::test]
     async fn app_not_connected_body_contains_provider_and_connect_url() {
         let resp: Response<TestBody> =
-            app_not_connected(StatusCode::FORBIDDEN, "github", "GitHub", None);
+            app_not_connected(StatusCode::FORBIDDEN, "github", "GitHub", None, None);
         assert_eq!(resp.status(), StatusCode::FORBIDDEN);
 
         // Extract body bytes from Either::Left(Full<Bytes>)
@@ -424,6 +493,7 @@ mod tests {
             "gmail",
             "Gmail",
             Some("ChartDB Assistant"),
+            None,
         );
         use http_body_util::BodyExt;
         let body = match resp.into_body() {
@@ -445,6 +515,7 @@ mod tests {
             "gmail",
             "Gmail",
             Some("Agent & Co=1"),
+            None,
         );
         use http_body_util::BodyExt;
         let body = match resp.into_body() {
@@ -470,6 +541,7 @@ mod tests {
             StatusCode::UNAUTHORIZED,
             "www.googleapis.com",
             Some("Claude Code"),
+            None,
         );
         assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
         use http_body_util::BodyExt;
@@ -492,8 +564,12 @@ mod tests {
 
     #[tokio::test]
     async fn app_not_connected_unknown_provider_without_agent_name() {
-        let resp: Response<TestBody> =
-            app_not_connected_unknown_provider(StatusCode::FORBIDDEN, "www.googleapis.com", None);
+        let resp: Response<TestBody> = app_not_connected_unknown_provider(
+            StatusCode::FORBIDDEN,
+            "www.googleapis.com",
+            None,
+            None,
+        );
         use http_body_util::BodyExt;
         let body = match resp.into_body() {
             Either::Left(full) => full.collect().await.expect("collect full body").to_bytes(),
@@ -518,6 +594,7 @@ mod tests {
             "resend",
             "Resend",
             Some("abc12345-def"),
+            None,
         );
         assert_eq!(resp.status(), StatusCode::FORBIDDEN);
         assert_eq!(
@@ -534,6 +611,7 @@ mod tests {
             "resend",
             "Resend",
             Some("abc12345-long-id"),
+            None,
         );
         use http_body_util::BodyExt;
         let body = match resp.into_body() {
@@ -556,7 +634,7 @@ mod tests {
     #[tokio::test]
     async fn access_restricted_body_without_agent_id() {
         let resp: Response<TestBody> =
-            access_restricted(StatusCode::FORBIDDEN, "github", "GitHub", None);
+            access_restricted(StatusCode::FORBIDDEN, "github", "GitHub", None, None);
         use http_body_util::BodyExt;
         let body = match resp.into_body() {
             Either::Left(full) => full.collect().await.expect("collect full body").to_bytes(),
@@ -570,7 +648,7 @@ mod tests {
     #[tokio::test]
     async fn access_restricted_short_agent_id() {
         let resp: Response<TestBody> =
-            access_restricted(StatusCode::FORBIDDEN, "resend", "Resend", Some("abc"));
+            access_restricted(StatusCode::FORBIDDEN, "resend", "Resend", Some("abc"), None);
         use http_body_util::BodyExt;
         let body = match resp.into_body() {
             Either::Left(full) => full.collect().await.expect("collect full body").to_bytes(),
@@ -589,6 +667,7 @@ mod tests {
             StatusCode::UNAUTHORIZED,
             "api.custom-service.com",
             "/v1/send",
+            None,
         );
         assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
         assert_eq!(resp.headers().get("x-should-retry").unwrap(), "false");
@@ -602,10 +681,12 @@ mod tests {
         assert_eq!(json["error"], "credential_not_found");
         assert_eq!(json["hostname"], "api.custom-service.com");
         assert_eq!(json["path"], "/v1/send");
-        assert!(json["secret_url"]
-            .as_str()
-            .unwrap()
-            .contains("create=generic"));
+        let secret_url = json["secret_url"].as_str().unwrap();
+        assert!(secret_url.contains("create=generic"));
+        assert!(
+            secret_url.contains("path=%2F%2A"),
+            "secret_url should use wildcard path, got: {secret_url}"
+        );
         assert!(json["message"]
             .as_str()
             .unwrap()
@@ -613,11 +694,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn credential_not_found_encodes_special_characters() {
+    async fn credential_not_found_uses_wildcard_path_and_preserves_request_path() {
         let resp: Response<TestBody> = credential_not_found(
             StatusCode::FORBIDDEN,
             "api.example.com",
             "/v1/send?to=user@test.com&subject=hello",
+            None,
         );
         use http_body_util::BodyExt;
         let body = match resp.into_body() {
@@ -626,15 +708,14 @@ mod tests {
         };
         let json: serde_json::Value = serde_json::from_slice(&body).expect("valid JSON");
         let secret_url = json["secret_url"].as_str().unwrap();
-        // The & and = in the path should be encoded so they don't break the query string
-        assert!(
-            !secret_url.contains("&subject="),
-            "path params must be encoded"
-        );
         assert!(secret_url.contains("create=generic"));
         assert!(
-            !secret_url.contains("method="),
-            "method should not be in URL"
+            secret_url.contains("path=%2F%2A"),
+            "secret_url should always use wildcard path, got: {secret_url}"
+        );
+        assert_eq!(
+            json["path"], "/v1/send?to=user@test.com&subject=hello",
+            "original request path should be preserved in request_path field"
         );
     }
 
@@ -645,11 +726,13 @@ mod tests {
                 id: "conn_1".to_string(),
                 label: Some("alice@gmail.com".to_string()),
                 provider: "gmail".to_string(),
+                display_name: Some("Gmail"),
             },
             crate::connect::ConnectionChoice {
                 id: "conn_2".to_string(),
                 label: Some("alice.work@company.com".to_string()),
                 provider: "gmail".to_string(),
+                display_name: Some("Gmail"),
             },
         ];
         let resp: Response<TestBody> = multiple_connections(&connections);
@@ -685,6 +768,63 @@ mod tests {
         assert_eq!(resp.headers().get("x-should-retry").unwrap(), "false");
     }
 
+    #[tokio::test]
+    async fn multiple_providers_returns_409_with_choices() {
+        let connections = vec![
+            crate::connect::ConnectionChoice {
+                id: "conn_jira".to_string(),
+                label: Some("dev@company.com".to_string()),
+                provider: "jira".to_string(),
+                display_name: Some("Jira"),
+            },
+            crate::connect::ConnectionChoice {
+                id: "conn_confluence".to_string(),
+                label: Some("dev@company.com".to_string()),
+                provider: "confluence".to_string(),
+                display_name: Some("Confluence"),
+            },
+        ];
+        let resp: Response<TestBody> = multiple_providers(&connections);
+        assert_eq!(resp.status(), StatusCode::CONFLICT);
+        assert_eq!(resp.headers().get("x-should-retry").unwrap(), "false");
+
+        use http_body_util::BodyExt;
+        let body = match resp.into_body() {
+            Either::Left(full) => full.collect().await.expect("collect").to_bytes(),
+            Either::Right(_) => panic!("expected Left"),
+        };
+        let json: serde_json::Value = serde_json::from_slice(&body).expect("valid JSON");
+        assert_eq!(json["error"], "multiple_providers");
+        assert_eq!(json["header"], crate::connect::CONNECTION_ID_HEADER);
+        let conns = json["connections"].as_array().unwrap();
+        assert_eq!(conns.len(), 2);
+        assert_eq!(conns[0]["provider"], "jira");
+        assert_eq!(conns[0]["display_name"], "Jira");
+        assert_eq!(conns[1]["provider"], "confluence");
+        assert_eq!(conns[1]["display_name"], "Confluence");
+        let example = json["example"].as_str().unwrap();
+        assert!(example.contains("conn_jira"));
+    }
+
+    #[tokio::test]
+    async fn multiple_connections_includes_display_name() {
+        let connections = vec![crate::connect::ConnectionChoice {
+            id: "conn_1".to_string(),
+            label: Some("alice@gmail.com".to_string()),
+            provider: "gmail".to_string(),
+            display_name: Some("Gmail"),
+        }];
+        let resp: Response<TestBody> = multiple_connections(&connections);
+        use http_body_util::BodyExt;
+        let body = match resp.into_body() {
+            Either::Left(full) => full.collect().await.expect("collect").to_bytes(),
+            Either::Right(_) => panic!("expected Left"),
+        };
+        let json: serde_json::Value = serde_json::from_slice(&body).expect("valid JSON");
+        let conns = json["connections"].as_array().unwrap();
+        assert_eq!(conns[0]["display_name"], "Gmail");
+    }
+
     #[test]
     fn connection_not_found_has_correct_status_and_headers() {
         let resp: Response<TestBody> = connection_not_found("conn-xyz", &[]);
@@ -709,7 +849,8 @@ mod tests {
 
     #[test]
     fn blocked_by_policy_has_correct_status_and_headers() {
-        let resp: Response<TestBody> = blocked_by_policy("POST", "/api/v1/send", "Block sending");
+        let resp: Response<TestBody> =
+            blocked_by_policy("POST", "/api/v1/send", "Block sending", None);
         assert_eq!(resp.status(), StatusCode::FORBIDDEN);
         assert_eq!(
             resp.headers().get("content-type").unwrap(),

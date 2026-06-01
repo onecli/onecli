@@ -17,7 +17,7 @@ export interface UserContext {
  * active project. Always validates the session server-side — never trusts
  * client input.
  */
-export const resolveUser = async (): Promise<UserContext> => {
+export const resolveProjectContext = async (): Promise<UserContext> => {
   const session = await getServerSession();
   if (!session) throw new Error("Not authenticated");
 

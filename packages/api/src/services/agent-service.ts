@@ -1,6 +1,7 @@
 import { randomBytes } from "crypto";
 import { db, Prisma } from "@onecli/db";
 import { ServiceError } from "./errors";
+import { getPolicyValidator } from "../providers/hooks/policy-validator";
 import { IDENTIFIER_REGEX } from "../validations/agent";
 
 export type SecretMode = "all" | "selective";
@@ -47,6 +48,7 @@ export const createAgent = async (
   projectId: string,
   name: string,
   identifier: string,
+  parentIdentifier?: string,
 ) => {
   const trimmed = name.trim();
   if (!trimmed || trimmed.length > 255) {
@@ -75,6 +77,28 @@ export const createAgent = async (
     );
   }
 
+  let inheritedSecretMode: SecretMode = "all";
+  let parentSecretIds: string[] = [];
+  let parentAppConnectionIds: string[] = [];
+
+  if (parentIdentifier) {
+    const parent = await db.agent.findFirst({
+      where: { projectId, identifier: parentIdentifier },
+      select: {
+        secretMode: true,
+        agentSecrets: { select: { secretId: true } },
+        agentAppConnections: { select: { appConnectionId: true } },
+      },
+    });
+    if (parent) {
+      inheritedSecretMode = parent.secretMode as SecretMode;
+      parentSecretIds = parent.agentSecrets.map((s) => s.secretId);
+      parentAppConnectionIds = parent.agentAppConnections.map(
+        (c) => c.appConnectionId,
+      );
+    }
+  }
+
   const accessToken = generateAccessToken();
 
   try {
@@ -83,7 +107,7 @@ export const createAgent = async (
         name: trimmed,
         identifier: trimmedIdentifier,
         accessToken,
-        secretMode: "all",
+        secretMode: inheritedSecretMode,
         projectId,
       },
       select: {
@@ -94,16 +118,32 @@ export const createAgent = async (
       },
     });
 
-    // Auto-assign the first anthropic secret if one exists
-    const anthropicSecret = await db.secret.findFirst({
-      where: { projectId, type: "anthropic" },
-      select: { id: true },
-      orderBy: { createdAt: "asc" },
-    });
+    if (parentSecretIds.length > 0) {
+      await db.agentSecret.createMany({
+        data: parentSecretIds.map((secretId) => ({
+          agentId: agent.id,
+          secretId,
+        })),
+      });
+    } else {
+      const anthropicSecret = await db.secret.findFirst({
+        where: { projectId, type: "anthropic" },
+        select: { id: true },
+        orderBy: { createdAt: "asc" },
+      });
+      if (anthropicSecret) {
+        await db.agentSecret.create({
+          data: { agentId: agent.id, secretId: anthropicSecret.id },
+        });
+      }
+    }
 
-    if (anthropicSecret) {
-      await db.agentSecret.create({
-        data: { agentId: agent.id, secretId: anthropicSecret.id },
+    if (parentAppConnectionIds.length > 0) {
+      await db.agentAppConnection.createMany({
+        data: parentAppConnectionIds.map((appConnectionId) => ({
+          agentId: agent.id,
+          appConnectionId,
+        })),
       });
     }
 
@@ -280,10 +320,17 @@ export const updateAgentSecrets = async (
   ]);
 };
 
+export type SessionPolicy = Record<string, unknown>;
+
+export interface AgentAppConnectionEntry {
+  appConnectionId: string;
+  sessionPolicy: SessionPolicy | null;
+}
+
 export const getAgentAppConnections = async (
   projectId: string,
   agentId: string,
-) => {
+): Promise<AgentAppConnectionEntry[]> => {
   const agent = await db.agent.findFirst({
     where: { id: agentId, projectId },
     select: { id: true },
@@ -293,16 +340,24 @@ export const getAgentAppConnections = async (
 
   const rows = await db.agentAppConnection.findMany({
     where: { agentId },
-    select: { appConnectionId: true },
+    select: { appConnectionId: true, sessionPolicy: true },
   });
 
-  return rows.map((r) => r.appConnectionId);
+  return rows.map((r) => ({
+    appConnectionId: r.appConnectionId,
+    sessionPolicy: r.sessionPolicy as SessionPolicy | null,
+  }));
 };
+
+export interface AgentAppConnectionInput {
+  appConnectionId: string;
+  sessionPolicy?: SessionPolicy | null;
+}
 
 export const updateAgentAppConnections = async (
   projectId: string,
   agentId: string,
-  appConnectionIds: string[],
+  connections: AgentAppConnectionInput[],
 ) => {
   const agent = await db.agent.findFirst({
     where: { id: agentId, projectId },
@@ -311,12 +366,14 @@ export const updateAgentAppConnections = async (
 
   if (!agent) throw new ServiceError("NOT_FOUND", "Agent not found");
 
+  const appConnectionIds = connections.map((c) => c.appConnectionId);
+
   const project = await db.project.findUnique({
     where: { id: projectId },
     select: { organizationId: true },
   });
 
-  const connections = await db.appConnection.findMany({
+  const dbConnections = await db.appConnection.findMany({
     where: {
       id: { in: appConnectionIds },
       OR: [
@@ -326,10 +383,10 @@ export const updateAgentAppConnections = async (
           : []),
       ],
     },
-    select: { id: true },
+    select: { id: true, provider: true, metadata: true },
   });
 
-  const validIds = new Set(connections.map((c) => c.id));
+  const validIds = new Set(dbConnections.map((c) => c.id));
   const invalid = appConnectionIds.filter((id) => !validIds.has(id));
   if (invalid.length > 0) {
     throw new ServiceError(
@@ -338,10 +395,34 @@ export const updateAgentAppConnections = async (
     );
   }
 
+  const dbConnectionMap = new Map(dbConnections.map((c) => [c.id, c]));
+  const validator = getPolicyValidator();
+  for (const conn of connections) {
+    if (!conn.sessionPolicy || Object.keys(conn.sessionPolicy).length === 0)
+      continue;
+    const dbConn = dbConnectionMap.get(conn.appConnectionId);
+    if (dbConn) {
+      await validator.validate(
+        project?.organizationId ?? "",
+        dbConn.provider,
+        dbConn.metadata as Record<string, unknown> | null,
+        conn.sessionPolicy,
+      );
+    }
+  }
+
   await db.$transaction([
     db.agentAppConnection.deleteMany({ where: { agentId } }),
-    ...appConnectionIds.map((appConnectionId) =>
-      db.agentAppConnection.create({ data: { agentId, appConnectionId } }),
+    ...connections.map((conn) =>
+      db.agentAppConnection.create({
+        data: {
+          agentId,
+          appConnectionId: conn.appConnectionId,
+          sessionPolicy: conn.sessionPolicy
+            ? (conn.sessionPolicy as unknown as Prisma.InputJsonValue)
+            : Prisma.DbNull,
+        },
+      }),
     ),
   ]);
 };

@@ -49,6 +49,7 @@ interface AppPermissionsProps {
   actions?: AppPermissionActions;
   orgStates?: Record<string, AppPermissionLevel>;
   orgConditions?: Record<string, unknown[]>;
+  policyMode?: "allow" | "deny";
 }
 
 export const AppPermissions = ({
@@ -58,7 +59,10 @@ export const AppPermissions = ({
   actions,
   orgStates,
   orgConditions,
+  policyMode = "allow",
 }: AppPermissionsProps) => {
+  const defaultPermission: AppPermissionLevel =
+    policyMode === "deny" ? "block" : "allow";
   const pathname = usePathname();
   const [states, setStates] = useState<Record<string, AppPermissionState>>({});
   const [overlappingRuleCount, setOverlappingRuleCount] = useState(0);
@@ -155,8 +159,8 @@ export const AppPermissions = ({
     const allTools = groups.flatMap((g) => g.tools);
     const restrictedTools = allTools.filter((t) => {
       if (isLocked(t.id)) return false;
-      const perm = states[t.id]?.permission ?? "allow";
-      return perm !== "allow";
+      const perm = states[t.id]?.permission ?? defaultPermission;
+      return perm !== defaultPermission;
     });
 
     if (restrictedTools.length === 0) {
@@ -182,7 +186,9 @@ export const AppPermissions = ({
     .flatMap((g) => g.tools)
     .filter((t) => {
       if (isLocked(t.id)) return false;
-      return (states[t.id]?.permission ?? "allow") !== "allow";
+      return (
+        (states[t.id]?.permission ?? defaultPermission) !== defaultPermission
+      );
     }).length;
 
   if (loading) {
@@ -247,6 +253,7 @@ export const AppPermissions = ({
             disabled={saving}
             orgStates={orgStates}
             orgConditions={orgConditions}
+            defaultPermission={defaultPermission}
           />
         ))}
       </Accordion>

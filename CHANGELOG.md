@@ -1,5 +1,78 @@
 # Changelog
 
+## [1.33.0](https://github.com/onecli/onecli/compare/v1.32.3...v1.33.0) (2026-05-31)
+
+
+### Features
+
+* add Codex (OpenAI OAuth) secret type with auto-refresh ([#332](https://github.com/onecli/onecli/issues/332)) ([9e8a0c7](https://github.com/onecli/onecli/commit/9e8a0c7ac367b9080d3f1b108f1bd3eab62ea554))
+
+## [1.32.3](https://github.com/onecli/onecli/compare/v1.32.2...v1.32.3) (2026-05-31)
+
+
+### Bug Fixes
+
+* migrate export sends data to cloud instead of itself ([#330](https://github.com/onecli/onecli/issues/330)) ([604bc65](https://github.com/onecli/onecli/commit/604bc65a9167bf740457cd43ae035e233ac887a1))
+
+## [1.32.2](https://github.com/onecli/onecli/compare/v1.32.1...v1.32.2) (2026-05-31)
+
+
+### Bug Fixes
+
+* sync shared changes from cloud repo ([#328](https://github.com/onecli/onecli/issues/328)) ([c9932a4](https://github.com/onecli/onecli/commit/c9932a4457a9c5bf872b4472e9ad5d40908aaad0))
+
+## [1.32.1](https://github.com/onecli/onecli/compare/v1.32.0...v1.32.1) (2026-05-29)
+
+
+### Bug Fixes
+
+* return GATEWAY_API_URL from /v1/gateway-url endpoint ([#326](https://github.com/onecli/onecli/issues/326)) ([93df414](https://github.com/onecli/onecli/commit/93df4143d2ba4f5a126ab1a95987600b2b2814e6))
+
+## [1.32.0](https://github.com/onecli/onecli/compare/v1.31.1...v1.32.0) (2026-05-28)
+
+
+### Features
+
+* sync shared changes from cloud repo ([#323](https://github.com/onecli/onecli/issues/323)) ([55629b1](https://github.com/onecli/onecli/commit/55629b1cb2de7db16e7ad922c195ad1eb6cb3935))
+
+
+### Bug Fixes
+
+* derive OAuth redirect URI from request host to resolve localhost vs 127.0.0.1 mismatch ([#325](https://github.com/onecli/onecli/issues/325)) ([ccf5b2b](https://github.com/onecli/onecli/commit/ccf5b2bf4b8f5e19d85ef2f6ade4a942525836de))
+
+## [1.31.1](https://github.com/onecli/onecli/compare/v1.31.0...v1.31.1) (2026-05-26)
+
+
+### Bug Fixes
+
+* use spreadsheets scope to allow editing existing Google Sheets ([#319](https://github.com/onecli/onecli/issues/319)) ([fa91b50](https://github.com/onecli/onecli/commit/fa91b50d985cb59d05c1fa8019682438f9ada844))
+
+## [1.31.0](https://github.com/onecli/onecli/compare/v1.30.0...v1.31.0) (2026-05-26)
+
+
+### Features
+
+* org policy mode, scoped gateway URLs, and connect param fix ([#318](https://github.com/onecli/onecli/issues/318)) ([a3f8e51](https://github.com/onecli/onecli/commit/a3f8e5105eae665b9a0140295a02becd96537d92))
+
+
+### Bug Fixes
+
+* settings nav org-awareness and proxy cookie validation ([#316](https://github.com/onecli/onecli/issues/316)) ([ed1e9a9](https://github.com/onecli/onecli/commit/ed1e9a9ac0bf520b2cecac602ee480f288eef642))
+
+## [1.30.0](https://github.com/onecli/onecli/compare/v1.29.2...v1.30.0) (2026-05-24)
+
+
+### Features
+
+* inherit parent agent permissions when creating sub-agents ([#312](https://github.com/onecli/onecli/issues/312)) ([a243837](https://github.com/onecli/onecli/commit/a2438377436ff78935d69f8b26a9e13bc24aa6fd)), closes [#297](https://github.com/onecli/onecli/issues/297)
+
+## [1.29.2](https://github.com/onecli/onecli/compare/v1.29.1...v1.29.2) (2026-05-24)
+
+
+### Bug Fixes
+
+* runtime env vars, credential response, and secret dialog improvements ([#310](https://github.com/onecli/onecli/issues/310)) ([624be33](https://github.com/onecli/onecli/commit/624be33c91ecd6b215a654ba1849dac6e2f13bda))
+
 ## [1.29.1](https://github.com/onecli/onecli/compare/v1.29.0...v1.29.1) (2026-05-23)
 
 

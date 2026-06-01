@@ -4,11 +4,13 @@ export type {
   AppPermissionLevel,
   AppPermissionDefinition,
 } from "./types";
+export { mapRuleActionToPermission } from "./types";
 
 import type { AppPermissionDefinition } from "./types";
 import { awsPermissions } from "./aws";
 import { cloudflarePermissions } from "./cloudflare";
 import { confluencePermissions } from "./confluence";
+import { dockerPermissions } from "./docker";
 import { flyioPermissions } from "./flyio";
 import { dropboxPermissions } from "./dropbox";
 import { githubPermissions, githubAppPermissions } from "./github";
@@ -17,6 +19,7 @@ import { gmailPermissions } from "./gmail";
 import { googleAdminPermissions } from "./google-admin";
 import { googleAnalyticsPermissions } from "./google-analytics";
 import { googleCalendarPermissions } from "./google-calendar";
+import { googleChatPermissions } from "./google-chat";
 import { googleClassroomPermissions } from "./google-classroom";
 import { googleDocsPermissions } from "./google-docs";
 import { googleDrivePermissions } from "./google-drive";
@@ -36,7 +39,9 @@ import { todoistPermissions } from "./todoist";
 import { vertexAiPermissions } from "./vertex-ai";
 import { youtubePermissions } from "./youtube";
 import { linkedinPermissions } from "./linkedin";
+import { trelloPermissions } from "./trello";
 import { mondayPermissions } from "./monday";
+import { vercelPermissions } from "./vercel";
 
 const permissionRegistry = new Map<string, AppPermissionDefinition>();
 
@@ -58,6 +63,7 @@ register(githubAppPermissions);
 register(gitlabPermissions);
 register(googleDrivePermissions);
 register(googleCalendarPermissions);
+register(googleChatPermissions);
 register(googleSheetsPermissions);
 register(googleDocsPermissions);
 register(googleSlidesPermissions);
@@ -72,6 +78,7 @@ register(googleTasksPermissions);
 register(youtubePermissions);
 register(jiraPermissions);
 register(confluencePermissions);
+register(dockerPermissions);
 register(resendPermissions);
 register(todoistPermissions);
 register(vertexAiPermissions);
@@ -81,4 +88,6 @@ register(flyioPermissions);
 register(dropboxPermissions);
 register(supabasePermissions);
 register(linkedinPermissions);
+register(trelloPermissions);
 register(mondayPermissions);
+register(vercelPermissions);

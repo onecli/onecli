@@ -100,13 +100,44 @@ pub(super) async fn handle_websocket(
         .unwrap_or_else(|| "/".to_string());
 
     let agent_token = proxy_ctx.agent_token.as_deref().unwrap_or("");
-    let decision =
-        policy::evaluate("GET", &path, None, &rules.policy_rules, agent_token, cache).await;
+    let has_injections = !rules.injection_rules.is_empty();
+    let enforce_deny = has_injections && !policy::is_llm_host(host);
+
+    let org_id = proxy_ctx.organization_id.as_deref().unwrap_or("");
+    let pid = proxy_ctx.project_id.as_deref().unwrap_or("");
+
+    let decision = policy::evaluate(
+        org_id,
+        pid,
+        "GET",
+        &path,
+        None,
+        &rules.policy_rules,
+        agent_token,
+        cache,
+        &rules.policy_mode,
+        enforce_deny,
+    )
+    .await;
 
     match &decision {
+        PolicyDecision::BlockedByDefaultPolicy => {
+            warn!(host = %host, path = %path, "WebSocket BLOCKED by default deny policy");
+            return Ok(response::blocked_by_default_policy(
+                "GET",
+                &path,
+                host,
+                proxy_ctx.project_id.as_deref(),
+            ));
+        }
         PolicyDecision::Blocked { rule_name } => {
             warn!(host = %host, path = %path, rule = %rule_name, "WebSocket BLOCKED by policy rule");
-            return Ok(response::blocked_by_policy("GET", &path, rule_name));
+            return Ok(response::blocked_by_policy(
+                "GET",
+                &path,
+                rule_name,
+                proxy_ctx.project_id.as_deref(),
+            ));
         }
         PolicyDecision::RateLimited {
             limit,
@@ -123,6 +154,7 @@ pub(super) async fn handle_websocket(
                 "GET",
                 &path,
                 "Manual approval required",
+                proxy_ctx.project_id.as_deref(),
             ));
         }
         PolicyDecision::Allow => {}
@@ -346,6 +378,11 @@ fn emit_telemetry(
             crate::apps::provider_for_host_and_path(hostname, path).unwrap_or((hostname, hostname));
 
         crate::telemetry::on_request(crate::telemetry::RequestEvent {
+            org_id: proxy_ctx
+                .organization_id
+                .as_deref()
+                .unwrap_or("")
+                .to_string(),
             project_id: pid.to_string(),
             agent_id: aid.to_string(),
             agent_name: proxy_ctx

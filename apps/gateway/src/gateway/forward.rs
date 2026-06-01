@@ -149,18 +149,46 @@ pub(crate) async fn forward_request(
         (None, req.map(reqwest::Body::wrap))
     };
 
+    let has_injections = !rules.injection_rules.is_empty();
+    let enforce_deny = has_injections && !policy::is_llm_host(host);
+
+    let org_id = proxy_ctx.organization_id.as_deref().unwrap_or("");
+    let pid = proxy_ctx.project_id.as_deref().unwrap_or("");
+
     let decision = policy::evaluate(
+        org_id,
+        pid,
         method.as_str(),
         &path,
         condition_buffer.as_deref(),
         &rules.policy_rules,
         agent_token,
         cache,
+        &rules.policy_mode,
+        enforce_deny,
     )
     .await;
 
-    // ── Early return for block / rate-limit (no body needed) ─────
+    // ── Early return for block / rate-limit / default-deny (no body needed) ───
     match &decision {
+        PolicyDecision::BlockedByDefaultPolicy => {
+            warn!(method = %method, url = %url, "BLOCKED by default deny policy");
+            emit_policy_telemetry(
+                proxy_ctx,
+                host,
+                &method,
+                &path,
+                start,
+                StatusCode::FORBIDDEN,
+                crate::telemetry_core::RequestDecision::BlockedByDefaultPolicy,
+            );
+            return Ok(response::blocked_by_default_policy(
+                method.as_str(),
+                &path,
+                host,
+                proxy_ctx.project_id.as_deref(),
+            ));
+        }
         PolicyDecision::Blocked { rule_name } => {
             warn!(method = %method, url = %url, rule = %rule_name, "BLOCKED by policy rule");
             emit_policy_telemetry(
@@ -178,6 +206,7 @@ pub(crate) async fn forward_request(
                 method.as_str(),
                 &path,
                 rule_name,
+                proxy_ctx.project_id.as_deref(),
             ));
         }
         PolicyDecision::RateLimited {
@@ -238,7 +267,7 @@ pub(crate) async fn forward_request(
         inject::apply_injections(&mut headers, &mut upstream_path, &rules.injection_rules);
     let upstream_url = format!("{scheme}://{host}{upstream_path}");
 
-    if let Some(resp) = hooks::pre_forward(rules, proxy_ctx, cache, injection_count).await {
+    if let Some(resp) = hooks::pre_forward(rules, proxy_ctx, cache, injection_count, host).await {
         return Ok(resp);
     }
 
@@ -257,6 +286,7 @@ pub(crate) async fn forward_request(
                     return Ok(response::approval_store_unavailable());
                 }
             };
+            let org_id = proxy_ctx.organization_id.as_deref().unwrap_or("");
             let agent_id = proxy_ctx.agent_id.as_deref().unwrap_or("unknown");
             let agent_name = proxy_ctx.agent_name.as_deref().unwrap_or("Unknown Agent");
 
@@ -330,6 +360,7 @@ pub(crate) async fn forward_request(
 
             let approval = PendingApproval {
                 id: approval_id.clone(),
+                organization_id: org_id.to_string(),
                 project_id: project_id.to_string(),
                 agent_id: agent_id.to_string(),
                 agent_name: agent_name.to_string(),
@@ -344,16 +375,25 @@ pub(crate) async fn forward_request(
                 expires_at: now + APPROVAL_TIMEOUT_SECS,
             };
 
-            let decision_rx = approval_store.prepare_wait(&approval_id).await;
+            let decision_rx = approval_store
+                .prepare_wait(org_id, project_id, &approval_id)
+                .await;
 
             // Guard cleans up the approval if the agent disconnects (future cancelled).
             // Created BEFORE store() so there's no window where cancellation misses cleanup.
-            let mut guard = ApprovalGuard::new(approval_id.clone(), Arc::clone(approval_store));
+            let mut guard = ApprovalGuard::new(
+                approval_id.clone(),
+                org_id.to_string(),
+                project_id.to_string(),
+                Arc::clone(approval_store),
+            );
 
             if let Err(e) = approval_store.store(&approval).await {
-                warn!(url = %url, error = %e, "failed to store pending approval");
+                warn!(url = %url, error = ?e, "failed to store pending approval");
                 guard.defuse();
-                approval_store.remove(&approval_id).await;
+                approval_store
+                    .remove(org_id, project_id, &approval_id)
+                    .await;
                 return Ok(response::approval_store_unavailable());
             }
 
@@ -397,7 +437,9 @@ pub(crate) async fn forward_request(
             match approval_decision {
                 Some(ApprovalDecision::Approve) => {
                     info!(url = %url, approval_id = %approval_id, "APPROVED — forwarding request");
-                    approval_store.remove(&approval_id).await;
+                    approval_store
+                        .remove(org_id, project_id, &approval_id)
+                        .await;
                     (
                         fwd_body,
                         Some(log_id),
@@ -411,7 +453,9 @@ pub(crate) async fn forward_request(
                         _ => "timed out",
                     };
                     warn!(url = %url, approval_id = %approval_id, reason, "MANUAL APPROVAL rejected");
-                    approval_store.remove(&approval_id).await;
+                    approval_store
+                        .remove(org_id, project_id, &approval_id)
+                        .await;
                     let resolved_at = time::OffsetDateTime::now_utc()
                         .format(&time::format_description::well_known::Iso8601::DEFAULT)
                         .unwrap_or_default();
@@ -455,7 +499,7 @@ pub(crate) async fn forward_request(
                 )
                 .await
                 .unwrap_or_else(|e| {
-                    tracing::warn!(error = %e, "body transform failed, forwarding empty body");
+                    tracing::warn!(error = ?e, "body transform failed, forwarding empty body");
                     reqwest::Body::from(vec![])
                 })
             } else {
@@ -509,6 +553,23 @@ pub(crate) async fn forward_request(
     let status = upstream_resp.status();
     let resp_headers = upstream_resp.headers().clone();
 
+    // Response hints: intercept known-deprecated host error responses.
+    if proxy_ctx.agent_token.is_some() {
+        let hostname = super::strip_port(host);
+        if let Some(hint) =
+            super::hints::find_hint(hostname, &path, status.as_u16(), injection_count)
+        {
+            info!(
+                method = %method,
+                url = %url,
+                status = %status.as_u16(),
+                hint = %hint.error_code,
+                "deprecated host — returning response hint"
+            );
+            return Ok(super::hints::hint_response(hint, hostname, &path));
+        }
+    }
+
     // If no credentials were injected and upstream returned 401/403,
     // guide the agent to connect/configure credentials in OneCLI.
     if injection_count == 0
@@ -528,6 +589,7 @@ pub(crate) async fn forward_request(
                 provider,
                 display_name,
                 proxy_ctx.agent_id.as_deref(),
+                proxy_ctx.project_id.as_deref(),
             ));
         }
 
@@ -539,6 +601,7 @@ pub(crate) async fn forward_request(
                 provider,
                 display_name,
                 proxy_ctx.agent_name.as_deref(),
+                proxy_ctx.project_id.as_deref(),
             ));
         }
 
@@ -549,12 +612,18 @@ pub(crate) async fn forward_request(
                 status,
                 hostname,
                 proxy_ctx.agent_name.as_deref(),
+                proxy_ctx.project_id.as_deref(),
             ));
         }
 
         // 3. Unknown host — no credentials at all, guide user to create a secret.
         info!(method = %method, url = %url, status = %status.as_u16(), "credential not found");
-        return Ok(response::credential_not_found(status, hostname, &path));
+        return Ok(response::credential_not_found(
+            status,
+            hostname,
+            &path,
+            proxy_ctx.project_id.as_deref(),
+        ));
     }
 
     // Some APIs (e.g. Google) return 400 instead of 401 for invalid/missing API keys.
@@ -581,6 +650,7 @@ pub(crate) async fn forward_request(
                     provider,
                     display_name,
                     proxy_ctx.agent_id.as_deref(),
+                    proxy_ctx.project_id.as_deref(),
                 ));
             }
             if let Some((provider, display_name)) =
@@ -592,6 +662,7 @@ pub(crate) async fn forward_request(
                     provider,
                     display_name,
                     proxy_ctx.agent_name.as_deref(),
+                    proxy_ctx.project_id.as_deref(),
                 ));
             }
             if apps::provider_for_host(hostname).is_some() {
@@ -600,6 +671,7 @@ pub(crate) async fn forward_request(
                     StatusCode::BAD_REQUEST,
                     hostname,
                     proxy_ctx.agent_name.as_deref(),
+                    proxy_ctx.project_id.as_deref(),
                 ));
             }
             info!(method = %method, url = %url, status = 400, "auth-related 400 — credential not found");
@@ -607,6 +679,7 @@ pub(crate) async fn forward_request(
                 StatusCode::BAD_REQUEST,
                 hostname,
                 &path,
+                proxy_ctx.project_id.as_deref(),
             ));
         }
 
@@ -673,6 +746,11 @@ pub(crate) async fn forward_request(
         };
 
         let meta = hooks::RequestMeta {
+            org_id: proxy_ctx
+                .organization_id
+                .as_deref()
+                .unwrap_or("")
+                .to_string(),
             project_id: aid.to_string(),
             agent_id: gid.to_string(),
             agent_name: proxy_ctx
@@ -736,6 +814,11 @@ fn emit_policy_telemetry(
         .unwrap_or_default();
     let telemetry_path = path.split('?').next().unwrap_or(path);
     crate::telemetry::on_request(crate::telemetry::RequestEvent {
+        org_id: proxy_ctx
+            .organization_id
+            .as_deref()
+            .unwrap_or("")
+            .to_string(),
         project_id: pid.to_string(),
         agent_id: aid.to_string(),
         agent_name: proxy_ctx
@@ -785,6 +868,11 @@ fn emit_approval_telemetry(
         .format(&time::format_description::well_known::Iso8601::DEFAULT)
         .unwrap_or_default();
     crate::telemetry::on_request(crate::telemetry::RequestEvent {
+        org_id: proxy_ctx
+            .organization_id
+            .as_deref()
+            .unwrap_or("")
+            .to_string(),
         project_id: pid.to_string(),
         agent_id: aid.to_string(),
         agent_name: proxy_ctx

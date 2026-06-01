@@ -1,8 +1,9 @@
 "use client";
 
 import { useMemo, useState } from "react";
+import Link from "next/link";
 import { useQuery } from "@tanstack/react-query";
-import { Plus, ShieldOff } from "lucide-react";
+import { Plus, Settings2, Shield, ShieldOff } from "lucide-react";
 import { rules as rulesApi } from "@/lib/api";
 import { queryKeys } from "@/lib/api/keys";
 import { useAgents } from "@/hooks/use-agents";
@@ -14,6 +15,7 @@ import { Separator } from "@onecli/ui/components/separator";
 import { RuleCard } from "./rule-card";
 import { RuleDialog } from "./rule-dialog";
 import { AppPermissionSummary } from "./app-permission-summary";
+import type { PolicyMode } from "@onecli/api/validations/policy-rule";
 import type { AgentOption, PolicyRuleItem, RuleActions } from "./types";
 export type { PolicyRuleItem, AgentOption, RuleActions } from "./types";
 
@@ -22,6 +24,8 @@ interface RulesContentProps {
   ruleActions?: RuleActions;
   pageScope?: "project" | "organization";
   showAgentField?: boolean;
+  policyMode?: PolicyMode;
+  settingsHref?: string;
 }
 
 const isAppPermissionRule = (rule: PolicyRuleItem) =>
@@ -35,7 +39,10 @@ export const RulesContent = ({
   ruleActions,
   pageScope = "project",
   showAgentField = true,
+  policyMode = "allow",
+  settingsHref,
 }: RulesContentProps) => {
+  const isDenyMode = policyMode === "deny";
   const { data: rules = [], isPending: loading } = useQuery<PolicyRuleItem[]>({
     queryKey: [...queryKeys.rules.list(), pageScope],
     queryFn: (getRules ?? rulesApi.list) as () => Promise<PolicyRuleItem[]>,
@@ -110,14 +117,38 @@ export const RulesContent = ({
 
       {customRules.length === 0 && appPermRules.length === 0 ? (
         <Card className="flex flex-col items-center justify-center py-16 text-center">
-          <div className="mb-4 flex size-12 items-center justify-center rounded-full bg-amber-500/10">
-            <ShieldOff className="size-6 text-amber-500" />
-          </div>
-          <p className="text-sm font-medium">YOLO mode</p>
-          <p className="text-muted-foreground mt-1 max-w-xs text-xs">
-            Your agents have unrestricted access to all assigned secrets. Add a
-            rule to block specific endpoints or set boundaries.
-          </p>
+          {isDenyMode ? (
+            <>
+              <div className="mb-4 flex size-12 items-center justify-center rounded-full bg-blue-500/10">
+                <Shield className="size-6 text-blue-500" />
+              </div>
+              <p className="text-sm font-medium">Lockdown mode</p>
+              <p className="text-muted-foreground mt-1 max-w-xs text-xs">
+                All traffic is blocked by default. Add an allow rule to permit
+                specific endpoints your agents need.
+              </p>
+            </>
+          ) : (
+            <>
+              <div className="mb-4 flex size-12 items-center justify-center rounded-full bg-amber-500/10">
+                <ShieldOff className="size-6 text-amber-500" />
+              </div>
+              <p className="text-sm font-medium">YOLO mode</p>
+              <p className="text-muted-foreground mt-1 max-w-xs text-xs">
+                Your agents have unrestricted access to all assigned secrets.
+                Add a rule to block specific endpoints or set boundaries.
+              </p>
+            </>
+          )}
+          {settingsHref && (
+            <Link
+              href={settingsHref}
+              className="text-muted-foreground hover:text-foreground mt-4 inline-flex items-center gap-1.5 text-xs transition-colors"
+            >
+              <Settings2 className="size-3" />
+              Change policy mode
+            </Link>
+          )}
         </Card>
       ) : (
         <>
@@ -131,6 +162,7 @@ export const RulesContent = ({
                   readOnly={isInherited(rule)}
                   badge={isInherited(rule) ? "Organization" : undefined}
                   ruleActions={ruleActions}
+                  policyMode={policyMode}
                 />
               ))}
             </div>
@@ -164,6 +196,7 @@ export const RulesContent = ({
         showAgentField={showAgentField}
         ruleActions={ruleActions}
         connectedProviders={connectedProviders}
+        policyMode={policyMode}
       />
     </div>
   );

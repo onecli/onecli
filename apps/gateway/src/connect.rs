@@ -14,6 +14,7 @@ use crate::crypto::CryptoService;
 use crate::db;
 use crate::inject::{Injection, InjectionRule};
 use crate::policy::{PolicyAction, PolicyRule};
+use crate::secret_inject;
 
 /// How long to cache resolved connect responses before re-checking.
 const CACHE_TTL_SECS: u64 = 60;
@@ -48,6 +49,9 @@ pub(crate) struct ConnectResponse {
     /// Normalized plan name for quota enforcement ("free", "pro", "team").
     #[serde(default)]
     pub plan: String,
+    /// Organization policy mode: "allow" (default) or "deny" (block by default).
+    #[serde(default)]
+    pub policy_mode: String,
 }
 
 /// Result of per-request app connection resolution.
@@ -72,6 +76,8 @@ pub(crate) enum AppConnectionResult {
     NoConnections,
     /// Multiple connections exist and no header was provided — agent must pick.
     Ambiguous { connections: Vec<ConnectionChoice> },
+    /// Multiple providers match the same request path — agent must pick.
+    MultipleProviders { connections: Vec<ConnectionChoice> },
     /// The requested connection ID was not found — return the valid options.
     NotFound { connections: Vec<ConnectionChoice> },
 }
@@ -90,6 +96,7 @@ pub(crate) struct ConnectionChoice {
     pub id: String,
     pub label: Option<String>,
     pub provider: String,
+    pub display_name: Option<&'static str>,
 }
 
 impl ConnectionChoice {
@@ -98,6 +105,7 @@ impl ConnectionChoice {
             id: row.id.clone(),
             label: row.label.clone(),
             provider: row.provider.clone(),
+            display_name: apps::display_name_for_provider(&row.provider),
         }
     }
 }
@@ -199,6 +207,7 @@ impl PolicyEngine {
             agent_identifier: agent.identifier.clone(),
             access_restricted,
             plan,
+            policy_mode: agent.policy_mode.clone(),
         })
     }
 
@@ -240,15 +249,34 @@ impl PolicyEngine {
                     warn!(
                         host_pattern = %secret.host_pattern,
                         secret_type = %secret.type_,
-                        error = %e,
+                        error = ?e,
                         "skipping secret: decryption failed (wrong key or format mismatch)"
                     );
                     continue;
                 }
             };
 
-            let injections =
-                build_injections(&secret.type_, &decrypted, secret.injection_config.as_ref());
+            let effective_value = if secret.type_ == "codex" {
+                match secret_inject::refresh_codex_if_expired(
+                    &self.crypto,
+                    &self.pool,
+                    &decrypted,
+                    &secret.id,
+                )
+                .await
+                {
+                    Some(refreshed) => refreshed,
+                    None => decrypted,
+                }
+            } else {
+                decrypted
+            };
+
+            let injections = secret_inject::build_injections(
+                &secret.type_,
+                &effective_value,
+                secret.injection_config.as_ref(),
+            );
 
             rules.push(InjectionRule {
                 path_pattern: secret
@@ -306,10 +334,13 @@ impl PolicyEngine {
     /// Resolve app connection injection rules for a single request.
     /// Called per-request with the cached `app_connections` (already filtered to
     /// providers matching the hostname at cache time by `resolve_app_connections`).
+    // request_path added for cross-provider disambiguation on shared hosts
+    #[expect(clippy::too_many_arguments)]
     pub(crate) async fn resolve_app_injection_for_request(
         &self,
         app_connections: &[db::AppConnectionRow],
         hostname: &str,
+        request_path: Option<&str>,
         connection_id: Option<&str>,
         organization_id: &str,
         project_id: &str,
@@ -360,6 +391,26 @@ impl PolicyEngine {
         }
 
         if by_provider.values().all(|conns| conns.len() == 1) {
+            // Check for cross-provider path overlap before resolving
+            if let Some(path) = request_path {
+                let matching_providers: Vec<&str> = by_provider
+                    .keys()
+                    .copied()
+                    .filter(|provider| {
+                        apps::provider_matches_host_and_path(provider, hostname, path)
+                    })
+                    .collect();
+
+                if matching_providers.len() > 1 {
+                    let connections = app_connections
+                        .iter()
+                        .filter(|c| matching_providers.contains(&c.provider.as_str()))
+                        .map(ConnectionChoice::from_row)
+                        .collect();
+                    return Ok(AppConnectionResult::MultipleProviders { connections });
+                }
+            }
+
             // Each provider has exactly one connection — no ambiguity, resolve all
             let mut rules = Vec::new();
             let mut earliest_expires_at: Option<i64> = None;
@@ -442,8 +493,13 @@ impl PolicyEngine {
         project_id: &str,
         cache: &dyn CacheStore,
     ) -> Result<AppConnectionResult, ConnectError> {
+        let policy_suffix = conn
+            .session_policy
+            .as_ref()
+            .map(|sp| format!(":{sp}"))
+            .unwrap_or_default();
         let cache_key = format!(
-            "app_injection:{organization_id}:{project_id}:{}:{hostname}",
+            "app_injection:{organization_id}:{project_id}:{}:{hostname}{policy_suffix}",
             conn.id
         );
 
@@ -470,7 +526,7 @@ impl PolicyEngine {
                 warn!(
                     connection_id = %conn.id,
                     provider = %conn.provider,
-                    error = %e,
+                    error = ?e,
                     "app connection decrypt failed (wrong key or format mismatch)"
                 );
                 return Ok(AppConnectionResult::NoConnections);
@@ -480,7 +536,13 @@ impl PolicyEngine {
         let needs_token = apps::needs_access_token(&conn.provider);
         let (token, expires_at) = if needs_token {
             let Some(resolved) = self
-                .resolve_access_token(&decrypted_json, &conn.provider, project_id, &conn.id)
+                .resolve_access_token(
+                    &decrypted_json,
+                    &conn.provider,
+                    project_id,
+                    &conn.id,
+                    conn.session_policy.as_ref(),
+                )
                 .await
             else {
                 return Ok(AppConnectionResult::NoConnections);
@@ -500,11 +562,17 @@ impl PolicyEngine {
                 .collect();
 
         // For credential-only providers (no auth rules), ensure at least one
-        // catch-all rule exists so credential headers have somewhere to attach.
-        if rules.is_empty() && !apps::credential_headers(&conn.provider).is_empty() {
+        // catch-all rule exists so credential headers/params have somewhere to attach.
+        if rules.is_empty()
+            && (!apps::credential_headers(&conn.provider).is_empty()
+                || !apps::credential_params(&conn.provider).is_empty())
+        {
+            let capacity = apps::metadata_headers(&conn.provider).len()
+                + apps::credential_headers(&conn.provider).len()
+                + apps::credential_params(&conn.provider).len();
             rules.push(InjectionRule {
                 path_pattern: "*".to_string(),
-                injections: Vec::new(),
+                injections: Vec::with_capacity(capacity),
             });
         }
 
@@ -523,7 +591,11 @@ impl PolicyEngine {
         }
 
         // Parse credentials once for credential headers and host rewrite
-        let creds: Option<serde_json::Value> = serde_json::from_str(&decrypted_json).ok();
+        let creds: Option<serde_json::Value> = serde_json::from_str(&decrypted_json)
+            .map_err(|e| {
+                warn!(provider = %conn.provider, error = %e, "failed to parse app connection credentials JSON");
+            })
+            .ok();
 
         // Inject credential-driven headers (e.g., DD-API-KEY from credentials.apiKey)
         if let Some(ref creds) = creds {
@@ -532,6 +604,18 @@ impl PolicyEngine {
                     for rule in &mut rules {
                         rule.injections.push(Injection::SetHeader {
                             name: ch.header_name.to_string(),
+                            value: value.to_string(),
+                        });
+                    }
+                }
+            }
+
+            // Inject credential-driven query params (e.g., Trello's ?key=...&token=...)
+            for cp in apps::credential_params(&conn.provider) {
+                if let Some(value) = creds.get(cp.credential_field).and_then(|v| v.as_str()) {
+                    for rule in &mut rules {
+                        rule.injections.push(Injection::SetParam {
+                            name: cp.param_name.to_string(),
                             value: value.to_string(),
                         });
                     }
@@ -688,6 +772,7 @@ impl PolicyEngine {
                     "manual_approval" => PolicyAction::ManualApproval {
                         rule_id: r.id.clone(),
                     },
+                    "allow" => PolicyAction::Allow,
                     _ => return None,
                 };
                 Some(PolicyRule {
@@ -714,8 +799,13 @@ impl PolicyEngine {
         provider: &str,
         project_id: &str,
         connection_id: &str,
+        session_policy: Option<&serde_json::Value>,
     ) -> Option<(String, Option<i64>)> {
-        let mut creds: serde_json::Value = serde_json::from_str(json).ok()?;
+        let mut creds: serde_json::Value = serde_json::from_str(json)
+            .map_err(|e| {
+                warn!(provider = %provider, error = %e, "failed to parse access token credentials JSON");
+            })
+            .ok()?;
 
         let mut token = creds
             .get("access_token")
@@ -724,6 +814,13 @@ impl PolicyEngine {
 
         let mut effective_expires_at = creds.get("expires_at").and_then(|v| v.as_i64());
 
+        // Any non-empty session policy means scoped access is required.
+        // Provider-specific interpretation (e.g. GitHub repos) is handled by
+        // cloud_apps::try_refresh_credentials, not here.
+        let needs_scoped_token = session_policy
+            .and_then(|sp| sp.as_object())
+            .is_some_and(|obj| !obj.is_empty());
+
         // Check if token is expired and needs refresh
         if let Some(expires_at) = effective_expires_at {
             let now = std::time::SystemTime::now()
@@ -731,16 +828,17 @@ impl PolicyEngine {
                 .expect("system clock before UNIX epoch")
                 .as_secs() as i64;
 
-            if expires_at < now {
+            if expires_at < now || needs_scoped_token {
                 let cred_type = creds.get("type").and_then(|v| v.as_str()).unwrap_or("");
 
                 // Try cloud-specific refresh first, then shared credential types
                 let refresh_result = if let Some(r) =
-                    crate::cloud_apps::try_refresh_credentials(cred_type, &creds).await
+                    crate::cloud_apps::try_refresh_credentials(cred_type, &creds, session_policy)
+                        .await
                 {
                     Some(r)
                 } else {
-                    apps::try_refresh_credentials(cred_type, &creds).await
+                    apps::try_refresh_credentials(cred_type, &creds, session_policy).await
                 };
 
                 if let Some(result) = refresh_result {
@@ -750,13 +848,17 @@ impl PolicyEngine {
                             token = Some(new_token.clone());
                             effective_expires_at = Some(new_expires_at);
 
-                            creds["access_token"] = serde_json::Value::String(new_token);
-                            creds["expires_at"] = serde_json::json!(new_expires_at);
-                            self.persist_refreshed_credentials(connection_id, provider, &creds)
-                                .await;
+                            if needs_scoped_token {
+                                debug!(provider = %provider, "scoped token generated, skipping persist");
+                            } else {
+                                creds["access_token"] = serde_json::Value::String(new_token);
+                                creds["expires_at"] = serde_json::json!(new_expires_at);
+                                self.persist_refreshed_credentials(connection_id, provider, &creds)
+                                    .await;
+                            }
                         }
                         Err(e) => {
-                            debug!(provider = %provider, cred_type, error = %e, "credential refresh failed");
+                            debug!(provider = %provider, cred_type, error = ?e, "credential refresh failed");
                         }
                     }
                 } else if let Some(refresh_token) =
@@ -792,7 +894,7 @@ impl PolicyEngine {
                                     .await;
                             }
                             Err(e) => {
-                                debug!(provider = %provider, error = %e, "token refresh failed");
+                                debug!(provider = %provider, error = ?e, "token refresh failed");
                             }
                         }
                     }
@@ -830,7 +932,7 @@ impl PolicyEngine {
                 }
             }
             Err(e) => {
-                debug!(provider = %provider, error = %e, "failed to encrypt refreshed credentials");
+                debug!(provider = %provider, error = ?e, "failed to encrypt refreshed credentials");
             }
         }
     }
@@ -857,8 +959,15 @@ impl PolicyEngine {
 
         // clientSecret is in credentials (encrypted)
         let encrypted = config.credentials.as_deref()?;
-        let decrypted = self.crypto.decrypt(encrypted).await.ok()?;
-        let secrets: serde_json::Value = serde_json::from_str(&decrypted).ok()?;
+        let decrypted = self
+            .crypto
+            .decrypt(encrypted)
+            .await
+            .map_err(|e| warn!(error = %e, "failed to decrypt BYOC credentials"))
+            .ok()?;
+        let secrets: serde_json::Value = serde_json::from_str(&decrypted)
+            .map_err(|e| warn!(error = %e, "failed to parse BYOC credentials JSON"))
+            .ok()?;
         let client_secret = secrets
             .get("clientSecret")
             .and_then(|v| v.as_str())
@@ -957,100 +1066,6 @@ fn host_matches(request_host: &str, pattern: &str) -> bool {
     false
 }
 
-// ── Injection building ──────────────────────────────────────────────────
-
-/// Build injection instructions for a secret based on its type.
-/// Mirrors the logic in `apps/web/src/app/v1/gateway/connect/route.ts`.
-fn build_injections(
-    secret_type: &str,
-    decrypted_value: &str,
-    injection_config: Option<&serde_json::Value>,
-) -> Vec<Injection> {
-    match secret_type {
-        "anthropic" => {
-            let is_oauth = decrypted_value.starts_with("sk-ant-oat");
-            if is_oauth {
-                // OAuth: replace Authorization when the SDK sends the exchange
-                // request. The temp API key from the exchange passes through
-                // untouched on subsequent requests.
-                vec![Injection::ReplaceHeader {
-                    name: "authorization".to_string(),
-                    value: format!("Bearer {decrypted_value}"),
-                }]
-            } else {
-                vec![
-                    Injection::SetHeader {
-                        name: "x-api-key".to_string(),
-                        value: decrypted_value.to_string(),
-                    },
-                    Injection::RemoveHeader {
-                        name: "authorization".to_string(),
-                    },
-                ]
-            }
-        }
-
-        "openai" => vec![Injection::SetHeader {
-            name: "authorization".to_string(),
-            value: format!("Bearer {decrypted_value}"),
-        }],
-
-        "generic" => {
-            let config = injection_config.and_then(|v| v.as_object());
-
-            // Check for header injection
-            let header_name = config
-                .and_then(|c| c.get("headerName"))
-                .and_then(|v| v.as_str());
-
-            // Check for parameter injection
-            let param_name = config
-                .and_then(|c| c.get("paramName"))
-                .and_then(|v| v.as_str());
-
-            if header_name.is_some() && param_name.is_some() {
-                tracing::warn!(
-                    "generic secret has both headerName and paramName; using headerName"
-                );
-            }
-
-            if let Some(header_name) = header_name {
-                let value_format = config
-                    .and_then(|c| c.get("valueFormat"))
-                    .and_then(|v| v.as_str());
-
-                let value = match value_format {
-                    Some(fmt) => fmt.replace("{value}", decrypted_value),
-                    None => decrypted_value.to_string(),
-                };
-
-                vec![Injection::SetHeader {
-                    name: header_name.to_string(),
-                    value,
-                }]
-            } else if let Some(param_name) = param_name {
-                let param_format = config
-                    .and_then(|c| c.get("paramFormat"))
-                    .and_then(|v| v.as_str());
-
-                let value = match param_format {
-                    Some(fmt) => fmt.replace("{value}", decrypted_value),
-                    None => decrypted_value.to_string(),
-                };
-
-                vec![Injection::SetParam {
-                    name: param_name.to_string(),
-                    value,
-                }]
-            } else {
-                vec![]
-            }
-        }
-
-        _ => vec![],
-    }
-}
-
 // ── Tests ───────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -1075,6 +1090,7 @@ mod tests {
             agent_identifier: None,
             access_restricted: false,
             plan: "pro".to_string(),
+            policy_mode: "allow".to_string(),
         };
 
         store
@@ -1118,6 +1134,7 @@ mod tests {
             agent_identifier: None,
             access_restricted: false,
             plan: "pro".to_string(),
+            policy_mode: "allow".to_string(),
         };
 
         // Pre-populate cache with the key format that resolve() uses
@@ -1157,6 +1174,7 @@ mod tests {
             agent_identifier: None,
             access_restricted: true,
             plan: "pro".to_string(),
+            policy_mode: "allow".to_string(),
         };
 
         store
@@ -1194,133 +1212,5 @@ mod tests {
     #[test]
     fn host_wildcard_no_match_without_dot() {
         assert!(!host_matches("notexample.com", "*.example.com"));
-    }
-
-    // ── build_injections ────────────────────────────────────────────────
-
-    #[test]
-    fn build_injections_anthropic_api_key() {
-        let injections = build_injections("anthropic", "sk-ant-api03-test", None);
-        assert_eq!(injections.len(), 2);
-        assert_eq!(
-            injections[0],
-            Injection::SetHeader {
-                name: "x-api-key".to_string(),
-                value: "sk-ant-api03-test".to_string(),
-            }
-        );
-        assert_eq!(
-            injections[1],
-            Injection::RemoveHeader {
-                name: "authorization".to_string(),
-            }
-        );
-    }
-
-    #[test]
-    fn build_injections_anthropic_oauth() {
-        let injections = build_injections("anthropic", "sk-ant-oat-test-token", None);
-        assert_eq!(injections.len(), 1);
-        assert_eq!(
-            injections[0],
-            Injection::ReplaceHeader {
-                name: "authorization".to_string(),
-                value: "Bearer sk-ant-oat-test-token".to_string(),
-            }
-        );
-    }
-
-    #[test]
-    fn build_injections_generic_with_format() {
-        let config = serde_json::json!({
-            "headerName": "authorization",
-            "valueFormat": "Bearer {value}"
-        });
-        let injections = build_injections("generic", "my-secret", Some(&config));
-        assert_eq!(injections.len(), 1);
-        assert_eq!(
-            injections[0],
-            Injection::SetHeader {
-                name: "authorization".to_string(),
-                value: "Bearer my-secret".to_string(),
-            }
-        );
-    }
-
-    #[test]
-    fn build_injections_generic_without_format() {
-        let config = serde_json::json!({
-            "headerName": "x-custom-key"
-        });
-        let injections = build_injections("generic", "raw-value", Some(&config));
-        assert_eq!(injections.len(), 1);
-        assert_eq!(
-            injections[0],
-            Injection::SetHeader {
-                name: "x-custom-key".to_string(),
-                value: "raw-value".to_string(),
-            }
-        );
-    }
-
-    #[test]
-    fn build_injections_generic_missing_header_name() {
-        let config = serde_json::json!({});
-        let injections = build_injections("generic", "value", Some(&config));
-        assert!(injections.is_empty());
-    }
-
-    #[test]
-    fn build_injections_generic_no_config() {
-        let injections = build_injections("generic", "value", None);
-        assert!(injections.is_empty());
-    }
-
-    #[test]
-    fn build_injections_unknown_type() {
-        let injections = build_injections("unknown", "value", None);
-        assert!(injections.is_empty());
-    }
-
-    // ── build_injections: paramName ─────────────────────────────────────
-
-    #[test]
-    fn build_injections_generic_param_name() {
-        let config = serde_json::json!({ "paramName": "api_key" });
-        let injections = build_injections("generic", "my-secret", Some(&config));
-        assert_eq!(injections.len(), 1);
-        assert_eq!(
-            injections[0],
-            Injection::SetParam {
-                name: "api_key".to_string(),
-                value: "my-secret".to_string(),
-            }
-        );
-    }
-
-    #[test]
-    fn build_injections_generic_param_name_with_format() {
-        let config = serde_json::json!({ "paramName": "token", "paramFormat": "Bearer-{value}" });
-        let injections = build_injections("generic", "my-secret", Some(&config));
-        assert_eq!(injections.len(), 1);
-        assert_eq!(
-            injections[0],
-            Injection::SetParam {
-                name: "token".to_string(),
-                value: "Bearer-my-secret".to_string(),
-            }
-        );
-    }
-
-    #[test]
-    fn build_injections_generic_header_takes_precedence_over_param() {
-        // If both headerName and paramName are present, headerName wins
-        let config = serde_json::json!({
-            "headerName": "Authorization",
-            "paramName": "api_key"
-        });
-        let injections = build_injections("generic", "my-secret", Some(&config));
-        assert_eq!(injections.len(), 1);
-        assert!(matches!(injections[0], Injection::SetHeader { .. }));
     }
 }

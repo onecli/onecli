@@ -70,7 +70,7 @@ export const ProAppDialog = ({
               />
             </svg>
             <span className="text-[11px] font-semibold tracking-wide text-brand">
-              Pro
+              Team
             </span>
           </div>
 

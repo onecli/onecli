@@ -50,7 +50,11 @@ export const createConnection = async (
   scope: ResourceScope,
   provider: string,
   credentials: Record<string, unknown>,
-  options?: { scopes?: string[]; metadata?: Record<string, unknown> },
+  options?: {
+    scopes?: string[];
+    metadata?: Record<string, unknown>;
+    label?: string;
+  },
 ) => {
   const encryptedCredentials = await getCrypto().encrypt(
     JSON.stringify(credentials),
@@ -61,7 +65,7 @@ export const createConnection = async (
       ...scopeCreate(scope),
       provider,
       status: "connected",
-      label: extractLabel(options?.metadata),
+      label: options?.label || extractLabel(options?.metadata),
       credentials: encryptedCredentials,
       scopes: options?.scopes ?? [],
       metadata: (options?.metadata as Prisma.InputJsonValue) ?? undefined,
@@ -74,7 +78,11 @@ export const reconnectConnection = async (
   scope: ResourceScope,
   connectionId: string,
   credentials: Record<string, unknown>,
-  options?: { scopes?: string[]; metadata?: Record<string, unknown> },
+  options?: {
+    scopes?: string[];
+    metadata?: Record<string, unknown>;
+    label?: string;
+  },
 ) => {
   const existing = await db.appConnection.findFirst({
     where: scopeOwnership(scope, connectionId),
@@ -93,11 +101,33 @@ export const reconnectConnection = async (
     where: { id: existing.id },
     data: {
       status: "connected",
-      label: extractLabel(options?.metadata) ?? existing.label,
+      label:
+        options?.label || (extractLabel(options?.metadata) ?? existing.label),
       credentials: encryptedCredentials,
       scopes: options?.scopes ?? undefined,
       metadata: (options?.metadata as Prisma.InputJsonValue) ?? undefined,
     },
+    select: { id: true, provider: true, status: true, label: true },
+  });
+};
+
+export const updateConnectionLabel = async (
+  scope: ResourceScope,
+  connectionId: string,
+  label: string,
+) => {
+  const existing = await db.appConnection.findFirst({
+    where: scopeOwnership(scope, connectionId),
+    select: { id: true },
+  });
+
+  if (!existing) {
+    throw new ServiceError("NOT_FOUND", "Connection not found");
+  }
+
+  return db.appConnection.update({
+    where: { id: existing.id },
+    data: { label },
     select: { id: true, provider: true, status: true, label: true },
   });
 };

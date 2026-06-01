@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useRef } from "react";
-import { useRouter, useSearchParams } from "next/navigation";
+import { useRouter, usePathname, useSearchParams } from "next/navigation";
 import { getApps } from "@onecli/api/apps/registry";
 import type { AppDefinition } from "@onecli/api/apps/types";
 import { safeDecode } from "./safe-decode";
@@ -38,6 +38,7 @@ export const useConnectParam = ({
   onRequestApp,
 }: UseConnectParamOptions) => {
   const router = useRouter();
+  const pathname = usePathname();
   const searchParams = useSearchParams();
   const handled = useRef(false);
 
@@ -48,7 +49,7 @@ export const useConnectParam = ({
     if (requestHost) {
       handled.current = true;
       const appName = safeDecode(searchParams.get("request_name"));
-      router.replace("/connections");
+      router.replace(pathname);
       onRequestApp(requestHost, appName);
       return;
     }
@@ -59,7 +60,7 @@ export const useConnectParam = ({
     handled.current = true;
     const app = getApps().find((a) => a.id === provider);
     if (!app) {
-      router.replace("/connections");
+      router.replace(pathname);
       return;
     }
 
@@ -68,7 +69,7 @@ export const useConnectParam = ({
         ? (safeDecode(searchParams.get("agent_name")) ?? "your agent")
         : undefined;
 
-    router.replace("/connections");
+    router.replace(pathname);
 
     const hasCredentials =
       envDefaultProviders.has(app.id) || configuredProviders.has(app.id);
@@ -84,6 +85,7 @@ export const useConnectParam = ({
     }
   }, [
     loading,
+    pathname,
     searchParams,
     connectedProviders,
     configuredProviders,

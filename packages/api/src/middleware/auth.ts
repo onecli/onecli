@@ -56,6 +56,8 @@ export const auth = (options?: AuthOptions) => {
         headers.set("authorization", `Bearer ${queryToken}`);
         const queryProject = url.searchParams.get("_project");
         if (queryProject) headers.set("x-project-id", queryProject);
+        const queryOrg = url.searchParams.get("_org");
+        if (queryOrg) headers.set("x-organization-id", queryOrg);
 
         authResult = await authenticateSession(
           new Request(c.req.url, { headers }),

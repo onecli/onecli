@@ -19,7 +19,7 @@ export default function Home() {
 
     resolveHomeRedirect()
       .then((url) => router.replace(url))
-      .catch(() => router.replace("/overview"));
+      .catch(() => router.replace("/auth/login"));
   }, [isLoading, isAuthenticated, router]);
 
   return (

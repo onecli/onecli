@@ -32,6 +32,7 @@ interface AppPermissionGroupProps {
   disabled?: boolean;
   orgStates?: Record<string, AppPermissionLevel>;
   orgConditions?: Record<string, unknown[]>;
+  defaultPermission?: AppPermissionLevel;
 }
 
 const groupLabels: Record<string, string> = {
@@ -48,10 +49,11 @@ const permissionLabels: Record<string, string> = {
 const getGroupPermission = (
   tools: AppToolGroup["tools"],
   states: Record<string, AppPermissionState>,
+  fallback: AppPermissionLevel = "allow",
 ): AppPermissionLevel | "custom" => {
-  const permissions = tools.map((t) => states[t.id]?.permission ?? "allow");
+  const permissions = tools.map((t) => states[t.id]?.permission ?? fallback);
   const first = permissions[0];
-  if (first === undefined) return "allow";
+  if (first === undefined) return fallback;
   return permissions.every((p) => p === first) ? first : "custom";
 };
 
@@ -63,13 +65,18 @@ export const AppPermissionGroup = ({
   disabled,
   orgStates,
   orgConditions,
+  defaultPermission = "allow",
 }: AppPermissionGroupProps) => {
-  const groupPerm = getGroupPermission(group.tools, permissionStates);
+  const groupPerm = getGroupPermission(
+    group.tools,
+    permissionStates,
+    defaultPermission,
+  );
 
   const isGroupOptionDisabled = (opt: AppPermissionLevel) =>
     group.tools.some((t) =>
       resolveToolPermission(
-        permissionStates[t.id]?.permission ?? "allow",
+        permissionStates[t.id]?.permission ?? defaultPermission,
         [],
         orgStates?.[t.id],
         (orgConditions?.[t.id] ?? []) as RuleCondition[],
@@ -132,7 +139,7 @@ export const AppPermissionGroup = ({
         <div className="ml-6">
           {group.tools.map((tool) => {
             const state = permissionStates[tool.id];
-            const permission = state?.permission ?? "allow";
+            const permission = state?.permission ?? defaultPermission;
             const projectConditions = (state?.conditions ??
               []) as RuleCondition[];
             const toolOrgConditions = (orgConditions?.[tool.id] ??

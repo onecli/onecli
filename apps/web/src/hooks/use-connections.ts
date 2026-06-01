@@ -19,6 +19,19 @@ export const useVaultConnections = () =>
     queryFn: getVaultConnections,
   });
 
+export const useRenameConnection = () => {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ id, label }: { id: string; label: string }) =>
+      connections.rename(id, label),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: queryKeys.connections.all() });
+      invalidateGatewayCache();
+    },
+    onError: () => toast.error("Failed to rename connection"),
+  });
+};
+
 export const useDisconnectConnection = () => {
   const qc = useQueryClient();
   return useMutation({

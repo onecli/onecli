@@ -3,7 +3,7 @@
 import { db } from "@onecli/db";
 import { cookies } from "next/headers";
 import { GATEWAY_API_URL } from "@/lib/env";
-import { resolveUser } from "@/lib/actions/resolve-user";
+import { resolveProjectContext } from "@/lib/actions/resolve-user";
 
 /**
  * Invalidate the gateway's CONNECT response cache for the current account.
@@ -17,7 +17,7 @@ export const invalidateGatewayCache = async () => {
     const headers: Record<string, string> = {};
 
     // Prefer API key auth — works regardless of gateway auth mode
-    const { projectId } = await resolveUser();
+    const { projectId } = await resolveProjectContext();
     const apiKey = await db.apiKey.findFirst({
       where: { projectId },
       select: { key: true },

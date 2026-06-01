@@ -81,5 +81,6 @@ export const aws: AppDefinition = {
       },
     },
   },
+  labelHint: 'e.g. "production", "dev-account"',
   available: true,
 };

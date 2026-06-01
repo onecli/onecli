@@ -3,7 +3,7 @@
 import { useState } from "react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { Ban, ChevronDown, Hand } from "lucide-react";
+import { Ban, ChevronDown, Hand, ShieldCheck } from "lucide-react";
 import { Badge } from "@onecli/ui/components/badge";
 import { Button } from "@onecli/ui/components/button";
 import {
@@ -18,7 +18,7 @@ import {
 } from "@onecli/ui/components/collapsible";
 import { cn } from "@onecli/ui/lib/utils";
 import { getApp } from "@onecli/api/apps/registry";
-import { withProjectPrefix } from "@/lib/navigation";
+import { withProjectPrefix, withOrgPrefix } from "@/lib/navigation";
 import { AppIcon } from "@/app/(dashboard)/connections/_components/app-icon";
 import type { PolicyRuleItem } from "./types";
 
@@ -129,12 +129,18 @@ const AppPermissionCard = ({
                   <TooltipTrigger asChild>
                     {tool.action === "block" ? (
                       <Ban className="size-3 text-destructive shrink-0 mt-0.5" />
+                    ) : tool.action === "allow" ? (
+                      <ShieldCheck className="size-3 text-emerald-500 shrink-0 mt-0.5" />
                     ) : (
                       <Hand className="size-3 text-blue-500 shrink-0 mt-0.5" />
                     )}
                   </TooltipTrigger>
                   <TooltipContent side="left" className="text-xs">
-                    {tool.action === "block" ? "Blocked" : "Needs approval"}
+                    {tool.action === "block"
+                      ? "Blocked"
+                      : tool.action === "allow"
+                        ? "Allowed"
+                        : "Needs approval"}
                   </TooltipContent>
                 </Tooltip>
                 <div className="min-w-0">
@@ -218,7 +224,10 @@ export const AppPermissionSummary = ({
       {sortedGroups.map((group) => {
         const href =
           pageScope === "organization"
-            ? `/global-connections/apps/${group.provider}`
+            ? withOrgPrefix(
+                pathname,
+                `/global-connections/apps/${group.provider}`,
+              )
             : withProjectPrefix(
                 pathname,
                 `/connections/apps/${group.provider}`,
