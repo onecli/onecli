@@ -59,11 +59,8 @@ export const gitlab: AppDefinition = {
     exchangeCode: async ({ appCredentials, callbackParams, redirectUri }) => {
       const tokenRes = await fetch("https://gitlab.com/oauth/token", {
         method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Accept: "application/json",
-        },
-        body: JSON.stringify({
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        body: new URLSearchParams({
           client_id: appCredentials.clientId!,
           client_secret: appCredentials.clientSecret!,
           code: callbackParams.code!,
@@ -81,8 +78,9 @@ export const gitlab: AppDefinition = {
       const tokenData = (await tokenRes.json()) as {
         access_token?: string;
         refresh_token?: string;
+        expires_in?: number;
+        created_at?: number;
         token_type?: string;
-        scope?: string;
         error?: string;
         error_description?: string;
       };
@@ -93,14 +91,17 @@ export const gitlab: AppDefinition = {
         );
       }
 
+      const expiresAt = tokenData.expires_in
+        ? Math.floor(Date.now() / 1000) + tokenData.expires_in
+        : undefined;
+
       const credentials: Record<string, unknown> = {
         access_token: tokenData.access_token,
+        refresh_token: tokenData.refresh_token,
         token_type: tokenData.token_type,
-        ...(tokenData.refresh_token && {
-          refresh_token: tokenData.refresh_token,
-        }),
+        expires_at: expiresAt,
       };
-      const scopes = tokenData.scope?.split(" ").filter(Boolean) ?? [];
+      const scopes: string[] = [];
 
       let metadata: Record<string, unknown> | undefined;
       const userRes = await fetch("https://gitlab.com/api/v4/user", {
@@ -139,9 +140,5 @@ export const gitlab: AppDefinition = {
         secret: true,
       },
     ],
-    envDefaults: {
-      clientId: "GITLAB_CLIENT_ID",
-      clientSecret: "GITLAB_CLIENT_SECRET",
-    },
   },
 };
