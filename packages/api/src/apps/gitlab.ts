@@ -4,7 +4,6 @@ export const gitlab: AppDefinition = {
   id: "gitlab",
   name: "GitLab",
   icon: "/icons/gitlab.svg",
-  darkIcon: "/icons/gitlab-light.svg",
   description: "Repositories, issues, merge requests, and CI/CD pipelines.",
   connectionMethod: {
     type: "oauth",
