@@ -15,7 +15,7 @@ import { getCrypto } from "../providers";
 import { logger } from "../lib/logger";
 
 const CA_CONTAINER_PATH = "/tmp/onecli-gateway-ca.pem";
-const CODEX_HOME_CONTAINER_PATH = "/tmp/onecli-codex";
+const CODEX_HOME_CONTAINER_PATH = "/home/node/.codex";
 
 /**
  * Mark the onboarding survey to record that the agent container is up.
