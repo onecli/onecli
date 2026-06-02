@@ -1,8 +1,9 @@
-//! Secret-to-injection mapping and Codex OAuth token refresh.
+//! Secret-to-injection mapping and OpenAI OAuth token refresh.
 //!
 //! Converts decrypted secret values into injection instructions based on the
-//! secret type (anthropic, openai, codex, generic). Also handles Codex OAuth
-//! token refresh and credential persistence.
+//! secret type (anthropic, openai, generic). OpenAI supports both API keys
+//! (plain string) and OAuth credentials (JSON with tokens). Also handles
+//! OpenAI OAuth token refresh and credential persistence.
 
 use tracing::{debug, warn};
 
@@ -16,6 +17,7 @@ pub(crate) fn build_injections(
     secret_type: &str,
     decrypted_value: &str,
     injection_config: Option<&serde_json::Value>,
+    metadata: Option<&serde_json::Value>,
 ) -> Vec<Injection> {
     match secret_type {
         "anthropic" => {
@@ -38,33 +40,51 @@ pub(crate) fn build_injections(
             }
         }
 
-        "openai" => vec![Injection::SetHeader {
-            name: "authorization".to_string(),
-            value: format!("Bearer {decrypted_value}"),
-        }],
+        "openai" => {
+            let is_oauth = metadata
+                .and_then(|m| m.get("authMode"))
+                .and_then(|v| v.as_str())
+                == Some("oauth");
 
-        "codex" => match serde_json::from_str::<serde_json::Value>(decrypted_value) {
-            Ok(auth) => {
-                let access_token = auth
-                    .get("tokens")
+            if is_oauth {
+                let auth: serde_json::Value = match serde_json::from_str(decrypted_value) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        warn!(error = %e, "openai oauth secret: failed to parse value");
+                        return vec![];
+                    }
+                };
+                let tokens = auth.get("tokens");
+                let access_token = tokens
                     .and_then(|t| t.get("access_token"))
                     .and_then(|v| v.as_str())
                     .unwrap_or("");
+                let account_id = tokens
+                    .and_then(|t| t.get("account_id"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
                 if access_token.is_empty() {
-                    warn!("codex secret: no access_token found in auth.json");
-                    vec![]
-                } else {
-                    vec![Injection::SetHeader {
-                        name: "authorization".to_string(),
-                        value: format!("Bearer {access_token}"),
-                    }]
+                    warn!("openai oauth secret: no access_token found");
+                    return vec![];
                 }
+                let mut injections = vec![Injection::SetHeader {
+                    name: "authorization".to_string(),
+                    value: format!("Bearer {access_token}"),
+                }];
+                if !account_id.is_empty() {
+                    injections.push(Injection::SetHeader {
+                        name: "chatgpt-account-id".to_string(),
+                        value: account_id.to_string(),
+                    });
+                }
+                injections
+            } else {
+                vec![Injection::SetHeader {
+                    name: "authorization".to_string(),
+                    value: format!("Bearer {decrypted_value}"),
+                }]
             }
-            Err(e) => {
-                warn!(error = %e, "codex secret: failed to parse auth.json");
-                vec![]
-            }
-        },
+        }
 
         "generic" => {
             let config = injection_config.and_then(|v| v.as_object());
@@ -118,10 +138,10 @@ pub(crate) fn build_injections(
     }
 }
 
-/// If the codex access_token is expired, refresh it and persist the updated
-/// credentials. Returns `Some(updated_json)` on successful refresh, or
-/// `None` to fall through with the original (possibly expired) value.
-pub(crate) async fn refresh_codex_if_expired(
+/// If the OpenAI OAuth access_token is expired, refresh it and persist the
+/// updated credentials. Returns `Some(updated_json)` on successful refresh,
+/// or `None` to fall through with the original (possibly expired) value.
+pub(crate) async fn refresh_openai_oauth_if_expired(
     crypto: &CryptoService,
     pool: &sqlx::PgPool,
     decrypted_json: &str,
@@ -141,9 +161,9 @@ pub(crate) async fn refresh_codex_if_expired(
     }
 
     let refresh_token = auth.get("tokens")?.get("refresh_token")?.as_str()?;
-    debug!(secret_id, "codex access_token expired, refreshing");
+    debug!(secret_id, "openai oauth access_token expired, refreshing");
 
-    match refresh_codex_token(refresh_token).await {
+    match refresh_openai_oauth_token(refresh_token).await {
         Ok((new_access, new_refresh)) => {
             auth["tokens"]["access_token"] = serde_json::Value::String(new_access);
             if let Some(rt) = new_refresh {
@@ -154,21 +174,23 @@ pub(crate) async fn refresh_codex_if_expired(
 
             if let Ok(encrypted) = crypto.encrypt(&updated_json).await {
                 if let Err(e) = db::update_secret_value(pool, secret_id, &encrypted).await {
-                    warn!(error = ?e, "failed to persist refreshed codex token");
+                    warn!(error = ?e, "failed to persist refreshed openai oauth token");
                 }
             }
 
             Some(updated_json)
         }
         Err(e) => {
-            warn!(error = ?e, "codex token refresh failed, using expired token");
+            warn!(error = ?e, "openai oauth token refresh failed, using expired token");
             None
         }
     }
 }
 
-/// Refresh a Codex OAuth access_token using the refresh_token.
-async fn refresh_codex_token(refresh_token: &str) -> anyhow::Result<(String, Option<String>)> {
+/// Refresh an OpenAI OAuth access_token using the refresh_token.
+async fn refresh_openai_oauth_token(
+    refresh_token: &str,
+) -> anyhow::Result<(String, Option<String>)> {
     let resp = reqwest::Client::new()
         .post("https://auth.openai.com/oauth/token")
         .timeout(std::time::Duration::from_secs(10))
@@ -178,25 +200,25 @@ async fn refresh_codex_token(refresh_token: &str) -> anyhow::Result<(String, Opt
         ])
         .send()
         .await
-        .map_err(|e| anyhow::anyhow!("codex token refresh request failed: {e}"))?;
+        .map_err(|e| anyhow::anyhow!("openai oauth token refresh request failed: {e}"))?;
 
     if !resp.status().is_success() {
         let status = resp.status();
         let body = resp.text().await.unwrap_or_default();
         return Err(anyhow::anyhow!(
-            "codex token refresh failed ({status}): {body}"
+            "openai oauth token refresh failed ({status}): {body}"
         ));
     }
 
     let body: serde_json::Value = resp
         .json()
         .await
-        .map_err(|e| anyhow::anyhow!("codex token refresh response parse failed: {e}"))?;
+        .map_err(|e| anyhow::anyhow!("openai oauth token refresh response parse failed: {e}"))?;
 
     let access_token = body
         .get("access_token")
         .and_then(|v| v.as_str())
-        .ok_or_else(|| anyhow::anyhow!("codex token refresh response missing access_token"))?
+        .ok_or_else(|| anyhow::anyhow!("openai oauth token refresh response missing access_token"))?
         .to_string();
 
     let refresh_token = body
@@ -215,7 +237,7 @@ mod tests {
 
     #[test]
     fn build_injections_anthropic_api_key() {
-        let injections = build_injections("anthropic", "sk-ant-api03-test", None);
+        let injections = build_injections("anthropic", "sk-ant-api03-test", None, None);
         assert_eq!(injections.len(), 2);
         assert_eq!(
             injections[0],
@@ -234,7 +256,7 @@ mod tests {
 
     #[test]
     fn build_injections_anthropic_oauth() {
-        let injections = build_injections("anthropic", "sk-ant-oat-test-token", None);
+        let injections = build_injections("anthropic", "sk-ant-oat-test-token", None, None);
         assert_eq!(injections.len(), 1);
         assert_eq!(
             injections[0],
@@ -249,7 +271,7 @@ mod tests {
 
     #[test]
     fn build_injections_openai() {
-        let injections = build_injections("openai", "sk-proj-abc123", None);
+        let injections = build_injections("openai", "sk-proj-abc123", None, None);
         assert_eq!(injections.len(), 1);
         assert_eq!(
             injections[0],
@@ -260,13 +282,14 @@ mod tests {
         );
     }
 
-    // ── build_injections: codex ────────────────────────────────────────
+    // ── build_injections: openai oauth ──────────────────────────────────
 
     #[test]
-    fn build_injections_codex_valid() {
+    fn build_injections_openai_oauth_valid() {
         let auth_json = r#"{"auth_mode":"chatgpt","tokens":{"access_token":"eyJhbGciOiJ","refresh_token":"rt_abc","account_id":"acc_123"},"last_refresh":"2025-01-01T00:00:00Z"}"#;
-        let injections = build_injections("codex", auth_json, None);
-        assert_eq!(injections.len(), 1);
+        let meta = serde_json::json!({"authMode": "oauth"});
+        let injections = build_injections("openai", auth_json, None, Some(&meta));
+        assert_eq!(injections.len(), 2);
         assert_eq!(
             injections[0],
             Injection::SetHeader {
@@ -274,18 +297,20 @@ mod tests {
                 value: "Bearer eyJhbGciOiJ".to_string(),
             }
         );
+        assert_eq!(
+            injections[1],
+            Injection::SetHeader {
+                name: "chatgpt-account-id".to_string(),
+                value: "acc_123".to_string(),
+            }
+        );
     }
 
     #[test]
-    fn build_injections_codex_missing_token() {
+    fn build_injections_openai_oauth_missing_token() {
         let auth_json = r#"{"auth_mode":"chatgpt","tokens":{}}"#;
-        let injections = build_injections("codex", auth_json, None);
-        assert!(injections.is_empty());
-    }
-
-    #[test]
-    fn build_injections_codex_invalid_json() {
-        let injections = build_injections("codex", "not-json", None);
+        let meta = serde_json::json!({"authMode": "oauth"});
+        let injections = build_injections("openai", auth_json, None, Some(&meta));
         assert!(injections.is_empty());
     }
 
@@ -297,7 +322,7 @@ mod tests {
             "headerName": "authorization",
             "valueFormat": "Bearer {value}"
         });
-        let injections = build_injections("generic", "my-secret", Some(&config));
+        let injections = build_injections("generic", "my-secret", Some(&config), None);
         assert_eq!(injections.len(), 1);
         assert_eq!(
             injections[0],
@@ -313,7 +338,7 @@ mod tests {
         let config = serde_json::json!({
             "headerName": "x-custom-key"
         });
-        let injections = build_injections("generic", "raw-value", Some(&config));
+        let injections = build_injections("generic", "raw-value", Some(&config), None);
         assert_eq!(injections.len(), 1);
         assert_eq!(
             injections[0],
@@ -327,13 +352,13 @@ mod tests {
     #[test]
     fn build_injections_generic_missing_header_name() {
         let config = serde_json::json!({});
-        let injections = build_injections("generic", "value", Some(&config));
+        let injections = build_injections("generic", "value", Some(&config), None);
         assert!(injections.is_empty());
     }
 
     #[test]
     fn build_injections_generic_no_config() {
-        let injections = build_injections("generic", "value", None);
+        let injections = build_injections("generic", "value", None, None);
         assert!(injections.is_empty());
     }
 
@@ -342,7 +367,7 @@ mod tests {
     #[test]
     fn build_injections_generic_param_name() {
         let config = serde_json::json!({ "paramName": "api_key" });
-        let injections = build_injections("generic", "my-secret", Some(&config));
+        let injections = build_injections("generic", "my-secret", Some(&config), None);
         assert_eq!(injections.len(), 1);
         assert_eq!(
             injections[0],
@@ -356,7 +381,7 @@ mod tests {
     #[test]
     fn build_injections_generic_param_name_with_format() {
         let config = serde_json::json!({ "paramName": "token", "paramFormat": "Bearer-{value}" });
-        let injections = build_injections("generic", "my-secret", Some(&config));
+        let injections = build_injections("generic", "my-secret", Some(&config), None);
         assert_eq!(injections.len(), 1);
         assert_eq!(
             injections[0],
@@ -373,7 +398,7 @@ mod tests {
             "headerName": "Authorization",
             "paramName": "api_key"
         });
-        let injections = build_injections("generic", "my-secret", Some(&config));
+        let injections = build_injections("generic", "my-secret", Some(&config), None);
         assert_eq!(injections.len(), 1);
         assert!(matches!(injections[0], Injection::SetHeader { .. }));
     }
@@ -382,7 +407,7 @@ mod tests {
 
     #[test]
     fn build_injections_unknown_type() {
-        let injections = build_injections("unknown", "value", None);
+        let injections = build_injections("unknown", "value", None, None);
         assert!(injections.is_empty());
     }
 }

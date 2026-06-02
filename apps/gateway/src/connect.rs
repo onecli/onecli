@@ -236,7 +236,20 @@ impl PolicyEngine {
 
         let matching: Vec<_> = secrets
             .into_iter()
-            .filter(|s| host_matches(hostname, &s.host_pattern))
+            .filter(|s| {
+                if host_matches(hostname, &s.host_pattern) {
+                    return true;
+                }
+                // OpenAI secrets cover chatgpt.com, api.openai.com, and their subdomains.
+                if s.type_ == "openai" {
+                    let h = hostname.split(':').next().unwrap_or(hostname);
+                    return h == "api.openai.com"
+                        || h == "chatgpt.com"
+                        || h.ends_with(".chatgpt.com")
+                        || h.ends_with(".openai.com");
+                }
+                false
+            })
             .collect();
 
         let has_platform = matching.iter().any(|s| s.is_platform);
@@ -256,8 +269,16 @@ impl PolicyEngine {
                 }
             };
 
-            let effective_value = if secret.type_ == "codex" {
-                match secret_inject::refresh_codex_if_expired(
+            let is_openai_oauth = secret.type_ == "openai"
+                && secret
+                    .metadata
+                    .as_ref()
+                    .and_then(|m| m.get("authMode"))
+                    .and_then(|v| v.as_str())
+                    == Some("oauth");
+
+            let effective_value = if is_openai_oauth {
+                match secret_inject::refresh_openai_oauth_if_expired(
                     &self.crypto,
                     &self.pool,
                     &decrypted,
@@ -276,6 +297,7 @@ impl PolicyEngine {
                 &secret.type_,
                 &effective_value,
                 secret.injection_config.as_ref(),
+                secret.metadata.as_ref(),
             );
 
             rules.push(InjectionRule {

@@ -202,6 +202,7 @@ pub(crate) fn is_llm_host(host: &str) -> bool {
     let h = host.split(':').next().unwrap_or(host);
     h.contains("anthropic.com")
         || h.contains("openai.com")
+        || h.contains("chatgpt.com")
         || h.contains("deepseek.com")
         || h.contains("groq.com")
         || h.contains("openrouter.ai")
@@ -768,6 +769,7 @@ mod tests {
     fn is_llm_host_matches_known_providers() {
         assert!(is_llm_host("api.anthropic.com"));
         assert!(is_llm_host("api.openai.com"));
+        assert!(is_llm_host("chatgpt.com"));
         assert!(is_llm_host("api.deepseek.com"));
         assert!(is_llm_host("api.groq.com"));
         assert!(is_llm_host("openrouter.ai"));

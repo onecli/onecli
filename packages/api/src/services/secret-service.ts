@@ -5,17 +5,31 @@ import type { ResourceScope } from "./resource-scope";
 import { scopeWhere, scopeCreate, scopeOwnership } from "./resource-scope";
 import {
   detectAnthropicAuthMode,
+  detectOpenaiAuthMode,
   isHeaderInjection,
   isParamInjection,
-  parseCodexAuthJson,
+  parseOpenaiAuthJson,
+  parseOpenaiOAuthJson,
   type CreateSecretInput,
   type UpdateSecretInput,
 } from "../validations/secret";
 
+const normalizeOpenaiValue = (
+  raw: string,
+): { value: string; hostPattern: string } => {
+  let value = raw;
+  const authJson = parseOpenaiAuthJson(value);
+  if (authJson?.mode === "api-key" && authJson.apiKey) {
+    value = authJson.apiKey;
+  }
+  const hostPattern =
+    detectOpenaiAuthMode(value) === "oauth" ? "chatgpt.com" : "api.openai.com";
+  return { value, hostPattern };
+};
+
 const SECRET_TYPE_LABELS: Record<string, string> = {
   anthropic: "Anthropic API Key",
-  openai: "OpenAI API Key",
-  codex: "OpenAI Codex (OAuth)",
+  openai: "OpenAI",
   generic: "Generic Secret",
 };
 
@@ -53,13 +67,11 @@ const buildMetadata = (
     } as Prisma.InputJsonValue;
   }
   if (type === "openai") {
-    return { authMode: "api-key" } as Prisma.InputJsonValue;
-  }
-  if (type === "codex") {
-    const parsed = parseCodexAuthJson(value);
+    const authMode = detectOpenaiAuthMode(value);
+    const parsed = authMode === "oauth" ? parseOpenaiOAuthJson(value) : null;
     return {
-      authMode: "oauth",
-      accountId: parsed?.tokens?.account_id ?? null,
+      authMode,
+      ...(parsed ? { accountId: parsed.tokens.account_id ?? null } : {}),
     } as Prisma.InputJsonValue;
   }
   return Prisma.JsonNull;
@@ -77,6 +89,7 @@ export const listSecrets = async (scope: ResourceScope) => {
       hostPattern: true,
       pathPattern: true,
       injectionConfig: true,
+      metadata: true,
       isPlatform: true,
       scope: true,
       createdAt: true,
@@ -102,20 +115,17 @@ export const createSecret = async (
     );
   }
 
-  const value = input.value.trim();
+  let value = input.value.trim();
   if (!value) throw new ServiceError("BAD_REQUEST", "Secret value is required");
 
-  const hostPattern = input.hostPattern.trim();
+  let hostPattern = input.hostPattern.trim();
   if (!hostPattern)
     throw new ServiceError("BAD_REQUEST", "Host pattern is required");
 
-  if (input.type === "codex") {
-    if (!parseCodexAuthJson(value)) {
-      throw new ServiceError(
-        "BAD_REQUEST",
-        "Codex value must be valid auth.json with tokens.access_token and tokens.refresh_token",
-      );
-    }
+  if (input.type === "openai") {
+    const normalized = normalizeOpenaiValue(value);
+    value = normalized.value;
+    hostPattern = normalized.hostPattern;
   }
 
   if (input.type === "generic") {
@@ -208,9 +218,16 @@ export const updateSecret = async (
   }
 
   if (input.value !== undefined) {
-    const value = input.value.trim();
+    let value = input.value.trim();
     if (!value)
       throw new ServiceError("BAD_REQUEST", "Secret value is required");
+
+    if (secret.type === "openai") {
+      const normalized = normalizeOpenaiValue(value);
+      value = normalized.value;
+      data.hostPattern = normalized.hostPattern;
+    }
+
     data.encryptedValue = await getCrypto().encrypt(value);
 
     if (secret.isPlatform) {
@@ -222,13 +239,7 @@ export const updateSecret = async (
         authMode: detectAnthropicAuthMode(value) ?? "api-key",
       } as Prisma.InputJsonValue;
     } else if (secret.type === "openai") {
-      data.metadata = { authMode: "api-key" } as Prisma.InputJsonValue;
-    } else if (secret.type === "codex") {
-      const parsed = parseCodexAuthJson(value);
-      data.metadata = {
-        authMode: "oauth",
-        accountId: parsed?.tokens?.account_id ?? null,
-      } as Prisma.InputJsonValue;
+      data.metadata = buildMetadata("openai", value);
     }
   }
 
