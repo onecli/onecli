@@ -1,5 +1,14 @@
 # Changelog
 
+## [1.34.0](https://github.com/onecli/onecli/compare/v1.33.0...v1.34.0) (2026-06-02)
+
+
+### Features
+
+* add GitLab integration with OAuth and gateway support ([#286](https://github.com/onecli/onecli/issues/286)) ([ce585fd](https://github.com/onecli/onecli/commit/ce585fd04ebe935a2ad3ce3dbcbb53683ec3d69d))
+* add Google Chat / Spaces integration ([#314](https://github.com/onecli/onecli/issues/314)) ([2b36f05](https://github.com/onecli/onecli/commit/2b36f051b431f38cdf979a42ecb0ceeab19a3582))
+* unify codex into openai secret type, add app categories and credential stubs ([#339](https://github.com/onecli/onecli/issues/339)) ([26f7c5e](https://github.com/onecli/onecli/commit/26f7c5e9bd6a5e780173d26791bf46950827cdc9))
+
 ## [1.33.0](https://github.com/onecli/onecli/compare/v1.32.3...v1.33.0) (2026-05-31)
 
 
