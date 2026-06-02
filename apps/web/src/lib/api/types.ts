@@ -24,6 +24,7 @@ export interface Secret {
   hostPattern: string;
   pathPattern: string | null;
   injectionConfig: unknown;
+  metadata: Record<string, unknown> | null;
   isPlatform: boolean;
   scope: string | null;
   createdAt: string;

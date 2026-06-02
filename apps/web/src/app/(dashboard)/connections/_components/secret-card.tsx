@@ -39,6 +39,7 @@ interface SecretCardProps {
     hostPattern: string;
     pathPattern: string | null;
     injectionConfig: unknown;
+    metadata: Record<string, unknown> | null;
     isPlatform: boolean;
     createdAt: Date;
   };

@@ -4,13 +4,18 @@ import type { ApiEnv } from "../types";
 import { authMiddleware, requireProjectId } from "../middleware/auth";
 import { GATEWAY_BASE_URL } from "../lib/env";
 import { loadCaCertificate } from "../lib/gateway-ca";
-import { parseAnthropicMetadata } from "../validations/secret";
+import {
+  parseAnthropicMetadata,
+  parseOpenaiMetadata,
+} from "../validations/secret";
+import { CODEX_OAUTH_STUB } from "../lib/codex-stubs";
 import { DEFAULT_AGENT_NAME, DEFAULT_AGENT_IDENTIFIER } from "../lib/constants";
 import { generateAccessToken } from "../services/agent-service";
 import { getCrypto } from "../providers";
 import { logger } from "../lib/logger";
 
 const CA_CONTAINER_PATH = "/tmp/onecli-gateway-ca.pem";
+const CODEX_HOME_CONTAINER_PATH = "/tmp/onecli-codex";
 
 /**
  * Mark the onboarding survey to record that the agent container is up.
@@ -129,6 +134,41 @@ export const containerConfigRoutes = () => {
           ? { CLAUDE_CODE_OAUTH_TOKEN: "placeholder" }
           : { ANTHROPIC_API_KEY: "placeholder" };
 
+      // Detect OpenAI auth mode for Codex container support.
+      const openaiSecret =
+        agent.secretMode === "selective"
+          ? await db.secret.findFirst({
+              where: {
+                type: "openai",
+                agentSecrets: { some: { agentId: agent.id } },
+              },
+              select: { metadata: true },
+            })
+          : await db.secret.findFirst({
+              where: { projectId, type: "openai" },
+              select: { metadata: true },
+            });
+
+      const openaiMeta = parseOpenaiMetadata(openaiSecret?.metadata);
+
+      const openaiEnv: Record<string, string> = {};
+      const credentialStubs: Array<{
+        containerPath: string;
+        content: string;
+      }> = [];
+
+      if (openaiSecret) {
+        if (openaiMeta?.authMode === "oauth") {
+          openaiEnv.CODEX_HOME = CODEX_HOME_CONTAINER_PATH;
+          credentialStubs.push({
+            containerPath: `${CODEX_HOME_CONTAINER_PATH}/auth.json`,
+            content: CODEX_OAUTH_STUB,
+          });
+        } else {
+          openaiEnv.OPENAI_API_KEY = "placeholder";
+        }
+      }
+
       const warnings: string[] = [];
       if (!anthropicSecret) {
         warnings.push(
@@ -163,9 +203,11 @@ export const containerConfigRoutes = () => {
           GIT_TERMINAL_PROMPT: "0",
           GIT_HTTP_PROXY_AUTHMETHOD: "basic",
           ...authEnv,
+          ...openaiEnv,
         },
         caCertificate,
         caCertificateContainerPath: CA_CONTAINER_PATH,
+        ...(credentialStubs.length > 0 && { credentialStubs }),
         ...(warnings.length > 0 && { warnings }),
       });
     } catch (err) {

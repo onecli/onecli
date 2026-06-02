@@ -34,6 +34,7 @@ import { gatewayUrlRoutes, gatewayCaRoutes } from "./routes/gateway";
 import { containerConfigRoutes } from "./routes/container-config";
 import { countsRoutes } from "./routes/counts";
 import { skillRoutes } from "./routes/skill";
+import { credentialStubRoutes } from "./routes/credential-stubs";
 import { migrateRoutes } from "./routes/migrate";
 import {
   authSessionRoutes,
@@ -92,6 +93,7 @@ export const createApiApp = (
   app.route("/container-config", containerConfigRoutes());
   app.route("/counts", countsRoutes());
   app.route("/skill", skillRoutes());
+  app.route("/credential-stubs", credentialStubRoutes());
   app.route("/migrate", migrateRoutes());
 
   if (options?.cloudRoutes) {

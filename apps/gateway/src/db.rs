@@ -43,7 +43,6 @@ pub(crate) struct SecretRow {
     pub path_pattern: Option<String>,
     pub injection_config: Option<serde_json::Value>,
     pub is_platform: bool,
-    #[allow(dead_code)]
     pub metadata: Option<serde_json::Value>,
 }
 

@@ -1,16 +1,28 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
-import { useRouter, usePathname } from "next/navigation";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useState,
+  useTransition,
+} from "react";
+import { useRouter, usePathname, useSearchParams } from "next/navigation";
 import {
   PROJECT_PATH_RE,
   ORG_PATH_RE,
   withProjectPrefix,
 } from "@/lib/navigation";
-import { ChevronRight } from "lucide-react";
+import { ChevronRight, Search, X } from "lucide-react";
 import { Button } from "@onecli/ui/components/button";
+import { Input } from "@onecli/ui/components/input";
 import { Skeleton } from "@onecli/ui/components/skeleton";
 import { cn } from "@onecli/ui/lib/utils";
+import {
+  APP_CATEGORIES,
+  CATEGORY_LABELS,
+  type AppCategory,
+} from "./app-categories";
 import type { AppDefinition } from "@onecli/api/apps/types";
 import type { getAppConnections as defaultGetConnections } from "@/lib/actions/connections";
 import { apiGet } from "@/lib/api";
@@ -49,6 +61,12 @@ export const AppsTab = ({
 }: AppsTabProps) => {
   const router = useRouter();
   const pathname = usePathname();
+  const searchParams = useSearchParams();
+  const [, startTransition] = useTransition();
+  const searchQuery = searchParams.get("q") ?? "";
+  const [localSearch, setLocalSearch] = useState(searchQuery);
+  const activeCategory =
+    (searchParams.get("category") as AppCategory | null) ?? "all";
   const [connectionCounts, setConnectionCounts] = useState<Map<string, number>>(
     () => new Map(),
   );
@@ -69,6 +87,19 @@ export const AppsTab = ({
   const [requestOpen, setRequestOpen] = useState(false);
   const [requestHostname, setRequestHostname] = useState("");
   const [requestAppName, setRequestAppName] = useState<string | undefined>();
+
+  const updateParam = useCallback(
+    (key: string, value: string | null) => {
+      const params = new URLSearchParams(searchParams.toString());
+      if (value) params.set(key, value);
+      else params.delete(key);
+      const qs = params.toString();
+      startTransition(() => {
+        router.replace(qs ? `${pathname}?${qs}` : pathname, { scroll: false });
+      });
+    },
+    [searchParams, router, pathname, startTransition],
+  );
 
   const fetchConnections = useCallback(async () => {
     try {
@@ -170,15 +201,26 @@ export const AppsTab = ({
     }, []),
   });
 
-  const sortedApps = useMemo(
-    () =>
-      [...getApps()].sort((a, b) => {
-        const aConnected = (connectionCounts.get(a.id) ?? 0) > 0 ? 1 : 0;
-        const bConnected = (connectionCounts.get(b.id) ?? 0) > 0 ? 1 : 0;
-        return bConnected - aConnected;
-      }),
-    [connectionCounts],
-  );
+  const filteredApps = useMemo(() => {
+    let apps = [...getApps()].sort((a, b) => {
+      const aConnected = (connectionCounts.get(a.id) ?? 0) > 0 ? 1 : 0;
+      const bConnected = (connectionCounts.get(b.id) ?? 0) > 0 ? 1 : 0;
+      return bConnected - aConnected;
+    });
+
+    if (activeCategory !== "all") {
+      apps = apps.filter((app) => APP_CATEGORIES[app.id] === activeCategory);
+    }
+
+    if (localSearch.trim()) {
+      const q = localSearch.toLowerCase();
+      apps = apps.filter((app) => app.name.toLowerCase().includes(q));
+    }
+
+    return apps;
+  }, [connectionCounts, activeCategory, localSearch]);
+
+  const hasActiveFilter = localSearch.trim() !== "" || activeCategory !== "all";
 
   const handleConnect = (e: React.MouseEvent, app: AppDefinition) => {
     e.stopPropagation();
@@ -199,55 +241,127 @@ export const AppsTab = ({
 
   return (
     <>
-      <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
-        <RequestAppSlot
-          requestOpen={requestOpen}
-          onRequestOpenChange={setRequestOpen}
-          initialName={requestAppName}
-          initialUrl={requestHostname}
-        />
-        {loading
-          ? Array.from({ length: 12 }, (_, i) => (
-              <div
-                key={i}
-                className="flex items-center justify-between rounded-xl border bg-card px-4 py-3"
-              >
-                <div className="flex items-center gap-3">
-                  <Skeleton className="size-9 rounded-lg" />
-                  <Skeleton className="h-4 w-24 rounded" />
-                </div>
-                <Skeleton className="h-7 w-16 rounded-md" />
+      <div className="flex items-center gap-2">
+        <div className="flex flex-1 flex-wrap gap-1.5">
+          {CATEGORY_LABELS.map(({ id, label }) => (
+            <button
+              key={id}
+              type="button"
+              onClick={() => updateParam("category", id === "all" ? null : id)}
+              className={cn(
+                "rounded-full border px-2.5 py-0.5 text-xs font-medium transition-colors",
+                activeCategory === id
+                  ? "border-foreground bg-foreground text-background"
+                  : "border-border text-muted-foreground hover:border-foreground/50 hover:text-foreground",
+              )}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
+        <div className="relative shrink-0">
+          <Search className="text-muted-foreground pointer-events-none absolute top-1/2 left-3 size-4 -translate-y-1/2" />
+          <Input
+            placeholder="Search..."
+            value={localSearch}
+            onChange={(e) => {
+              setLocalSearch(e.target.value);
+              updateParam("q", e.target.value || null);
+            }}
+            className="h-9 w-52 bg-card pl-9 text-sm"
+          />
+          {localSearch && (
+            <button
+              type="button"
+              onClick={() => {
+                setLocalSearch("");
+                updateParam("q", null);
+              }}
+              className="text-muted-foreground hover:text-foreground absolute top-1/2 right-3 -translate-y-1/2 transition-colors"
+            >
+              <X className="size-3" />
+            </button>
+          )}
+        </div>
+      </div>
+
+      <div className="mt-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+        {!hasActiveFilter && (
+          <RequestAppSlot
+            requestOpen={requestOpen}
+            onRequestOpenChange={setRequestOpen}
+            initialName={requestAppName}
+            initialUrl={requestHostname}
+          />
+        )}
+        {loading ? (
+          Array.from({ length: 12 }, (_, i) => (
+            <div
+              key={i}
+              className="flex items-center justify-between rounded-xl border bg-card px-4 py-3"
+            >
+              <div className="flex items-center gap-3">
+                <Skeleton className="size-9 rounded-lg" />
+                <Skeleton className="h-4 w-24 rounded" />
               </div>
-            ))
-          : sortedApps.map((app) => {
-              const count = connectionCounts.get(app.id) ?? 0;
-              const isLocked =
-                !app.available || (app.teamOnly === true && plan !== "team");
-              return (
-                <AppRow
-                  key={app.id}
-                  name={app.name}
-                  icon={app.icon}
-                  darkIcon={app.darkIcon}
-                  connectionCount={count}
-                  cloudOnly={isLocked}
-                  onConnect={(e) => handleConnect(e, app)}
-                  onClick={
-                    isLocked
-                      ? () => setProApp(app)
-                      : () =>
-                          router.push(
-                            basePath
-                              ? `${basePath}/apps/${app.id}`
-                              : withProjectPrefix(
-                                  pathname,
-                                  `/connections/apps/${app.id}`,
-                                ),
-                          )
-                  }
-                />
-              );
-            })}
+              <Skeleton className="h-7 w-16 rounded-md" />
+            </div>
+          ))
+        ) : filteredApps.length === 0 ? (
+          <div className="col-span-full flex flex-col items-center justify-center py-12 text-center">
+            <p className="text-muted-foreground text-sm">
+              No apps match your search.
+            </p>
+            <button
+              type="button"
+              onClick={() => {
+                setLocalSearch("");
+                const params = new URLSearchParams(searchParams.toString());
+                params.delete("q");
+                params.delete("category");
+                const qs = params.toString();
+                startTransition(() => {
+                  router.replace(qs ? `${pathname}?${qs}` : pathname, {
+                    scroll: false,
+                  });
+                });
+              }}
+              className="text-brand mt-2 text-sm font-medium hover:underline"
+            >
+              Clear filters
+            </button>
+          </div>
+        ) : (
+          filteredApps.map((app) => {
+            const count = connectionCounts.get(app.id) ?? 0;
+            const isLocked =
+              !app.available || (app.teamOnly === true && plan !== "team");
+            return (
+              <AppRow
+                key={app.id}
+                name={app.name}
+                icon={app.icon}
+                darkIcon={app.darkIcon}
+                connectionCount={count}
+                cloudOnly={isLocked}
+                onConnect={(e) => handleConnect(e, app)}
+                onClick={
+                  isLocked
+                    ? () => setProApp(app)
+                    : () =>
+                        router.push(
+                          basePath
+                            ? `${basePath}/apps/${app.id}`
+                            : withProjectPrefix(
+                                pathname,
+                                `/connections/apps/${app.id}`,
+                              ),
+                        )
+                }
+              />
+            );
+          })
+        )}
       </div>
 
       {connectApp && (

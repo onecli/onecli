@@ -38,4 +38,8 @@ export const queryKeys = {
     list: (filter?: string) =>
       [...queryKeys.activity.all(), "list", filter] as const,
   },
+  billing: {
+    all: () => ["billing", ...scope()] as const,
+    agentCost: () => [...queryKeys.billing.all(), "agentCost"] as const,
+  },
 };

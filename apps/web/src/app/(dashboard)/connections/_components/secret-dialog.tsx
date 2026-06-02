@@ -38,10 +38,10 @@ import {
   isParamInjection,
   looksLikeAnthropicKey,
   looksLikeOpenaiKey,
-  parseCodexAuthJson,
+  parseOpenaiAuthJson,
 } from "@onecli/api/validations/secret";
 
-type SecretType = "anthropic" | "openai" | "codex" | "generic";
+type SecretType = "anthropic" | "openai" | "generic";
 
 interface SecretTypeOption {
   value: SecretType;
@@ -88,7 +88,7 @@ const SECRET_TYPE_OPTIONS: SecretTypeOption[] = [
     value: "openai",
     label: "OpenAI",
     description:
-      "Inject an API key or Codex OAuth credentials into requests to api.openai.com",
+      "Inject an API key or Codex OAuth credentials into requests to OpenAI",
     icon: <OpenAIIcon className="size-5" />,
     hostDefault: "api.openai.com",
     nameDefault: "OpenAI Token",
@@ -111,6 +111,7 @@ export interface SecretItem {
   hostPattern: string;
   pathPattern: string | null;
   injectionConfig: unknown;
+  metadata: Record<string, unknown> | null;
   isPlatform: boolean;
 }
 
@@ -174,8 +175,7 @@ export const SecretDialog = ({
   const [paramFormat, setParamFormat] = useState("");
   const [advancedOpen, setAdvancedOpen] = useState("");
 
-  const effectiveType =
-    type === "openai" && openaiMode === "codex" ? "codex" : type;
+  const isOAuthMode = type === "openai" && openaiMode === "codex";
 
   const nameError = useMemo(() => validateDisplayName(name), [name]);
   const showNameError = nameTouched && nameError !== null;
@@ -202,9 +202,9 @@ export const SecretDialog = ({
       if (secret) {
         const config = secret.injectionConfig as InjectionConfig | null;
         setStep("form");
-        const secretType = secret.type === "codex" ? "openai" : secret.type;
-        setType(secretType as SecretType);
-        if (secret.type === "codex") setOpenaiMode("codex");
+        setType(secret.type as SecretType);
+        if (secret.type === "openai" && secret.metadata?.authMode === "oauth")
+          setOpenaiMode("codex");
         setName(secret.name);
         setValue("");
         setHostPattern(secret.hostPattern);
@@ -231,9 +231,8 @@ export const SecretDialog = ({
       } else if (prefill) {
         const isParam = !!prefill.paramName;
         setStep("form");
-        const prefillType = prefill.type === "codex" ? "openai" : prefill.type;
-        setType(prefillType as SecretType);
-        if (prefill.type === "codex") setOpenaiMode("codex");
+        setType(prefill.type as SecretType);
+        if (prefill.type === "openai") setOpenaiMode("codex");
         setName(prefill.name);
         setValue("");
         setHostPattern(prefill.hostPattern);
@@ -282,7 +281,7 @@ export const SecretDialog = ({
   };
 
   const hasInjectionTarget =
-    effectiveType !== "generic" ||
+    type !== "generic" ||
     (injectionTarget === "header" ? headerName.trim() : paramName.trim());
 
   const isPlatformEdit = isEdit && secret?.isPlatform;
@@ -301,7 +300,7 @@ export const SecretDialog = ({
     setSaving(true);
     try {
       const buildInjectionConfig = () => {
-        if (effectiveType !== "generic") return undefined;
+        if (type !== "generic") return undefined;
         if (injectionTarget === "param") {
           return { paramName, paramFormat: paramFormat || "{value}" };
         }
@@ -330,7 +329,7 @@ export const SecretDialog = ({
       } else {
         await createSecret({
           name,
-          type: effectiveType,
+          type,
           value,
           hostPattern,
           pathPattern: pathPattern || undefined,
@@ -365,14 +364,24 @@ export const SecretDialog = ({
     reader.onload = (ev) => {
       const contents = (ev.target?.result as string)?.trim();
       if (!contents) return;
-      if (!parseCodexAuthJson(contents)) {
+      const detected = parseOpenaiAuthJson(contents);
+      if (!detected) {
         toast.error(
-          "Invalid auth.json — must contain tokens.access_token and tokens.refresh_token",
+          "Invalid auth.json — must contain tokens.access_token/refresh_token or OPENAI_API_KEY",
         );
         return;
       }
-      setValue(contents);
-      if (!name.trim()) setName("Codex Token");
+      if (detected.mode === "api-key" && detected.apiKey) {
+        setValue(detected.apiKey);
+        setOpenaiMode("api-key");
+        setHostPattern("api.openai.com");
+        if (!name.trim()) setName("OpenAI API Key");
+      } else {
+        setValue(contents);
+        setOpenaiMode("codex");
+        setHostPattern("chatgpt.com");
+        if (!name.trim()) setName("Codex Token");
+      }
     };
     reader.readAsText(file);
     e.target.value = "";
@@ -405,10 +414,10 @@ export const SecretDialog = ({
                   : type === "anthropic"
                     ? "Your key will be encrypted and injected into requests to api.anthropic.com."
                     : type === "openai"
-                      ? "Inject credentials into requests to api.openai.com."
+                      ? `Inject credentials into requests to ${openaiMode === "codex" ? "chatgpt.com" : "api.openai.com"}.`
                       : "Configure a custom secret to inject as a header or URL parameter into matching requests."}
               </DialogDescription>
-              {effectiveType === "generic" && !isEdit && !prefill && (
+              {type === "generic" && !isEdit && !prefill && (
                 <div className="flex items-center gap-2 pt-1">
                   <span className="text-muted-foreground text-xs">
                     Try an example:
@@ -467,6 +476,7 @@ export const SecretDialog = ({
                       onClick={() => {
                         setOpenaiMode("api-key");
                         setName("OpenAI Token");
+                        setHostPattern("api.openai.com");
                         setValue("");
                       }}
                     >
@@ -485,6 +495,7 @@ export const SecretDialog = ({
                       onClick={() => {
                         setOpenaiMode("codex");
                         setName("Codex Token");
+                        setHostPattern("chatgpt.com");
                         setValue("");
                       }}
                     >
@@ -534,17 +545,35 @@ export const SecretDialog = ({
                 </div>
               )}
 
+              {type === "openai" && isEdit && isOAuthMode && (
+                <p className="text-muted-foreground text-xs">
+                  Run{" "}
+                  <code className="bg-muted rounded px-1 py-0.5 text-[11px]">
+                    codex login --device-auth
+                  </code>{" "}
+                  and upload the auth.json file.{" "}
+                  <a
+                    href="https://onecli.sh/docs/integrations/openai#setup-codex-oauth"
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="text-foreground underline underline-offset-2"
+                  >
+                    Setup guide
+                  </a>
+                </p>
+              )}
+
               {!isPlatformEdit && (
                 <div className="space-y-2">
                   <Label htmlFor="secret-name">Name</Label>
                   <Input
                     id="secret-name"
                     placeholder={
-                      effectiveType === "anthropic"
+                      type === "anthropic"
                         ? "e.g. Anthropic Production Key"
-                        : effectiveType === "codex"
+                        : isOAuthMode
                           ? "e.g. Codex Personal"
-                          : effectiveType === "openai"
+                          : type === "openai"
                             ? "e.g. OpenAI Production Key"
                             : "e.g. GitHub Token"
                     }
@@ -562,29 +591,37 @@ export const SecretDialog = ({
 
               <div className="space-y-2">
                 <Label htmlFor="secret-value">
-                  {isPlatformEdit
-                    ? "Your API key"
-                    : isEdit
-                      ? "New value"
-                      : effectiveType === "codex"
-                        ? "Token file"
-                        : "Secret value"}{" "}
-                  {isEdit && !isPlatformEdit && (
+                  {isPlatformEdit ? (
+                    "Your API key"
+                  ) : isOAuthMode ? (
+                    <>
+                      Token file{" "}
+                      <code className="bg-muted text-muted-foreground ml-1 select-all rounded px-1.5 py-0.5 text-xs font-normal">
+                        ~/.codex/auth.json
+                      </code>
+                    </>
+                  ) : isEdit ? (
+                    "New value"
+                  ) : (
+                    "Secret value"
+                  )}{" "}
+                  {isEdit && !isPlatformEdit && !isOAuthMode && (
                     <span className="text-muted-foreground font-normal">
                       (leave empty to keep current)
                     </span>
                   )}
                 </Label>
 
-                {effectiveType === "codex" ? (
+                <input
+                  ref={fileInputRef}
+                  type="file"
+                  accept=".json,application/json"
+                  className="hidden"
+                  onChange={handleFileUpload}
+                />
+
+                {isOAuthMode ? (
                   <>
-                    <input
-                      ref={fileInputRef}
-                      type="file"
-                      accept=".json,application/json"
-                      className="hidden"
-                      onChange={handleFileUpload}
-                    />
                     {value ? (
                       <div className="border-brand/30 bg-brand/5 flex items-center justify-between rounded-md border px-3 py-2.5">
                         <div className="flex items-center gap-2">
@@ -610,14 +647,9 @@ export const SecretDialog = ({
                         <div className="bg-muted flex size-8 shrink-0 items-center justify-center rounded-full">
                           <Upload className="text-muted-foreground size-4" />
                         </div>
-                        <div className="text-left">
-                          <span className="text-sm font-medium">
-                            Upload auth.json
-                          </span>
-                          <p className="text-muted-foreground text-xs">
-                            ~/.codex/auth.json
-                          </p>
-                        </div>
+                        <span className="text-sm font-medium">
+                          Upload auth.json
+                        </span>
                       </button>
                     )}
                   </>
@@ -627,9 +659,9 @@ export const SecretDialog = ({
                       ref={valueInputRef}
                       id="secret-value"
                       placeholder={
-                        effectiveType === "anthropic"
+                        type === "anthropic"
                           ? "sk-ant-api03-..."
-                          : effectiveType === "openai"
+                          : type === "openai"
                             ? "sk-proj-..."
                             : "Enter secret value"
                       }
@@ -637,21 +669,21 @@ export const SecretDialog = ({
                       onChange={(e) => {
                         const val = e.target.value;
                         setValue(val);
-                        if (effectiveType === "anthropic" && !name.trim()) {
+                        if (type === "anthropic" && !name.trim()) {
                           const detected = detectAnthropicAuthMode(val);
                           if (detected === "api-key")
                             setName("Anthropic API Key");
                           else if (detected === "oauth")
                             setName("Anthropic OAuth Token");
                         }
-                        if (effectiveType === "openai" && !name.trim()) {
+                        if (type === "openai" && !name.trim()) {
                           if (looksLikeOpenaiKey(val))
                             setName("OpenAI API Key");
                         }
                       }}
                     />
                     <div className="flex items-center gap-2">
-                      {effectiveType === "anthropic" &&
+                      {type === "anthropic" &&
                       value.trim() &&
                       !looksLikeAnthropicKey(value) ? (
                         <p className="text-xs text-amber-600 dark:text-amber-400">
@@ -665,7 +697,7 @@ export const SecretDialog = ({
                             </>
                           )}
                         </p>
-                      ) : effectiveType === "openai" &&
+                      ) : type === "openai" &&
                         value.trim() &&
                         !looksLikeOpenaiKey(value) ? (
                         <p className="text-xs text-amber-600 dark:text-amber-400">
@@ -683,14 +715,25 @@ export const SecretDialog = ({
                         </p>
                       ) : (
                         <p className="text-muted-foreground text-xs">
-                          {effectiveType === "anthropic"
-                            ? "Paste your API key or OAuth token from the Anthropic Console."
-                            : effectiveType === "openai"
-                              ? "Paste your API key from the OpenAI Dashboard."
-                              : "Encrypted at rest. You won\u2019t be able to view this value again."}
+                          {type === "anthropic" ? (
+                            "Paste your API key or OAuth token from the Anthropic Console."
+                          ) : type === "openai" ? (
+                            <>
+                              Paste your API key, or{" "}
+                              <button
+                                type="button"
+                                className="text-foreground underline underline-offset-2"
+                                onClick={() => fileInputRef.current?.click()}
+                              >
+                                upload auth.json
+                              </button>
+                            </>
+                          ) : (
+                            "Encrypted at rest. You won\u2019t be able to view this value again."
+                          )}
                         </p>
                       )}
-                      {effectiveType === "anthropic" && (
+                      {type === "anthropic" && (
                         <AnthropicKeyBadge value={value} />
                       )}
                     </div>
@@ -698,7 +741,7 @@ export const SecretDialog = ({
                 )}
               </div>
 
-              {effectiveType === "generic" && !prefill && (
+              {type === "generic" && !prefill && (
                 <div className="space-y-2">
                   <Label htmlFor="secret-host">Host pattern</Label>
                   <Input
@@ -739,7 +782,7 @@ export const SecretDialog = ({
                     </AccordionTrigger>
                     <AccordionContent className="pb-0">
                       <div className="space-y-4">
-                        {(effectiveType !== "generic" || !!prefill) && (
+                        {(type !== "generic" || !!prefill) && (
                           <div className="space-y-2">
                             <Label htmlFor="secret-host">Host pattern</Label>
                             <Input
@@ -762,7 +805,7 @@ export const SecretDialog = ({
                           </div>
                         )}
 
-                        {effectiveType === "generic" && (
+                        {type === "generic" && (
                           <div className="flex items-center gap-3">
                             <Label
                               id="inject-as-label"
@@ -831,7 +874,7 @@ export const SecretDialog = ({
                           </div>
                         )}
 
-                        {effectiveType === "generic" && (
+                        {type === "generic" && (
                           <div
                             key={`name-${injectionTarget}`}
                             className="animate-in fade-in duration-150 space-y-2"
@@ -887,7 +930,7 @@ export const SecretDialog = ({
                           />
                         </div>
 
-                        {effectiveType === "generic" && (
+                        {type === "generic" && (
                           <div
                             key={`format-${injectionTarget}`}
                             className="animate-in fade-in duration-150 space-y-2"

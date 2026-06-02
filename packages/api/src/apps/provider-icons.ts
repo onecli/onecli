@@ -40,6 +40,11 @@ const DOMAIN_ICON_MAP: Record<string, ProviderIcon> = {
     icon: "/icons/openai.svg",
     darkIcon: "/icons/openai-light.svg",
   },
+  "chatgpt.com": {
+    name: "ChatGPT",
+    icon: "/icons/openai.svg",
+    darkIcon: "/icons/openai-light.svg",
+  },
 };
 
 export const getProviderIcon = (provider: string): ProviderIcon | undefined => {

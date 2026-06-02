@@ -45,11 +45,21 @@ export const useConnectParam = ({
   useEffect(() => {
     if (loading || handled.current) return;
 
+    const clearActionParams = () => {
+      const preserved = new URLSearchParams();
+      for (const key of ["q", "category"]) {
+        const val = searchParams.get(key);
+        if (val) preserved.set(key, val);
+      }
+      const qs = preserved.toString();
+      router.replace(qs ? `${pathname}?${qs}` : pathname);
+    };
+
     const requestHost = searchParams.get("request");
     if (requestHost) {
       handled.current = true;
       const appName = safeDecode(searchParams.get("request_name"));
-      router.replace(pathname);
+      clearActionParams();
       onRequestApp(requestHost, appName);
       return;
     }
@@ -60,7 +70,7 @@ export const useConnectParam = ({
     handled.current = true;
     const app = getApps().find((a) => a.id === provider);
     if (!app) {
-      router.replace(pathname);
+      clearActionParams();
       return;
     }
 
@@ -69,7 +79,7 @@ export const useConnectParam = ({
         ? (safeDecode(searchParams.get("agent_name")) ?? "your agent")
         : undefined;
 
-    router.replace(pathname);
+    clearActionParams();
 
     const hasCredentials =
       envDefaultProviders.has(app.id) || configuredProviders.has(app.id);

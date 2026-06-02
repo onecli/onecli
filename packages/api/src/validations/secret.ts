@@ -56,7 +56,7 @@ const hostPatternSchema = z
 
 export const createSecretSchema = z.object({
   name: z.string().trim().min(1).max(255),
-  type: z.enum(["anthropic", "openai", "codex", "generic"]),
+  type: z.enum(["anthropic", "openai", "generic"]),
   value: z.string().min(1).max(10000),
   hostPattern: hostPatternSchema,
   pathPattern: z.string().max(1000).optional(),
@@ -123,7 +123,10 @@ export const looksLikeOpenaiKey = (value: string): boolean =>
   !value.startsWith("sk-ant-") &&
   value.length >= OPENAI_KEY_MIN_LENGTH;
 
-export interface CodexAuthJson {
+export const openaiAuthModes = ["api-key", "oauth"] as const;
+export type OpenaiAuthMode = (typeof openaiAuthModes)[number];
+
+export interface OpenaiOAuthJson {
   auth_mode?: string;
   tokens: {
     id_token?: string | null;
@@ -134,12 +137,12 @@ export interface CodexAuthJson {
   last_refresh?: string;
 }
 
-export interface CodexSecretMetadata {
-  authMode: "oauth";
+export interface OpenaiSecretMetadata {
+  authMode: OpenaiAuthMode;
   accountId?: string;
 }
 
-export const parseCodexAuthJson = (value: string): CodexAuthJson | null => {
+export const parseOpenaiOAuthJson = (value: string): OpenaiOAuthJson | null => {
   try {
     const parsed = JSON.parse(value) as Record<string, unknown>;
     const tokens = parsed.tokens as Record<string, unknown> | undefined;
@@ -148,10 +151,62 @@ export const parseCodexAuthJson = (value: string): CodexAuthJson | null => {
       typeof tokens.access_token === "string" &&
       typeof tokens.refresh_token === "string"
     ) {
-      return parsed as unknown as CodexAuthJson;
+      return parsed as unknown as OpenaiOAuthJson;
     }
     return null;
   } catch {
     return null;
   }
 };
+
+export interface OpenaiApiKeyJson {
+  auth_mode: "apikey";
+  OPENAI_API_KEY: string;
+}
+
+export const parseOpenaiApiKeyJson = (
+  value: string,
+): OpenaiApiKeyJson | null => {
+  try {
+    const parsed = JSON.parse(value) as Record<string, unknown>;
+    if (
+      parsed.auth_mode === "apikey" &&
+      typeof parsed.OPENAI_API_KEY === "string" &&
+      parsed.OPENAI_API_KEY.length > 0
+    ) {
+      return parsed as unknown as OpenaiApiKeyJson;
+    }
+    return null;
+  } catch {
+    return null;
+  }
+};
+
+export const parseOpenaiAuthJson = (
+  value: string,
+): { mode: OpenaiAuthMode; apiKey?: string } | null => {
+  const oauth = parseOpenaiOAuthJson(value);
+  if (oauth) return { mode: "oauth" };
+  const apiKey = parseOpenaiApiKeyJson(value);
+  if (apiKey) return { mode: "api-key", apiKey: apiKey.OPENAI_API_KEY };
+  return null;
+};
+
+export const parseOpenaiMetadata = (
+  metadata: unknown,
+): OpenaiSecretMetadata | null => {
+  if (
+    metadata &&
+    typeof metadata === "object" &&
+    "authMode" in metadata &&
+    openaiAuthModes.includes(
+      (metadata as { authMode: string }).authMode as OpenaiAuthMode,
+    )
+  ) {
+    return metadata as OpenaiSecretMetadata;
+  }
+  return null;
+};
+
+export const detectOpenaiAuthMode = (value: string): OpenaiAuthMode =>
+  parseOpenaiOAuthJson(value) !== null ? "oauth" : "api-key";

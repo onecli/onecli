@@ -40,11 +40,10 @@ export const GetStartedDialog = ({
     apiUrl: string;
   } | null>(null);
   const [loading, setLoading] = useState(false);
-  const [activeSection, setActiveSection] = useState<"agents" | "install">(
+  const [activeSection, setActiveSection] = useState<"agents" | "autonomous">(
     "agents",
   );
   const [selectedAgent, setSelectedAgent] = useState<AgentId>("claude-code");
-  const [installMode, setInstallMode] = useState<"new" | "migrate">("new");
 
   useEffect(() => {
     if (!open) return;
@@ -64,7 +63,6 @@ export const GetStartedDialog = ({
     return `curl -fsSL "${installInfo.apiUrl}/v1/${path}?${params.join("&")}" | sh`;
   };
 
-  const installCommand = buildCurlCommand("install/nanoclaw");
   const migrateCommand = buildCurlCommand("migrate/nanoclaw");
 
   const activeAgentDef = CODING_AGENTS.find((a) => a.id === selectedAgent)!;
@@ -103,16 +101,16 @@ export const GetStartedDialog = ({
               <SectionCard
                 icon={Bot}
                 title="Coding Agents"
-                description="Connect your AI coding assistant"
+                description="Connect a coding agent to OneCLI"
                 active={activeSection === "agents"}
                 onClick={() => setActiveSection("agents")}
               />
               <SectionCard
                 icon={Terminal}
-                title="Install NanoClaw"
-                description="Deploy an AI agent with OneCLI"
-                active={activeSection === "install"}
-                onClick={() => setActiveSection("install")}
+                title="Autonomous Agents"
+                description="Connect an autonomous agent to OneCLI"
+                active={activeSection === "autonomous"}
+                onClick={() => setActiveSection("autonomous")}
               />
             </div>
 
@@ -176,81 +174,31 @@ export const GetStartedDialog = ({
                 </div>
               )}
 
-              {activeSection === "install" && (
+              {activeSection === "autonomous" && (
                 <div className="space-y-3">
-                  {IS_CLOUD && (installCommand || migrateCommand) ? (
+                  {IS_CLOUD && migrateCommand ? (
                     <>
-                      <div className="flex gap-1 rounded-md border p-0.5">
-                        <button
-                          type="button"
-                          onClick={() => setInstallMode("new")}
-                          className={cn(
-                            "flex-1 rounded-sm px-2 py-1 text-xs font-medium transition-colors",
-                            installMode === "new"
-                              ? "bg-muted text-foreground"
-                              : "text-muted-foreground hover:text-foreground",
-                          )}
+                      <p className="text-muted-foreground text-xs">
+                        Already running NanoClaw? Migrate to OneCLI cloud:
+                      </p>
+                      <TryDemoCommand command={migrateCommand} />
+                      <p className="text-muted-foreground text-xs">
+                        This updates your CLI config, NanoClaw .env, and
+                        restarts the service. Secrets and app connections need
+                        to be re-added in the dashboard.
+                      </p>
+                      <p className="text-muted-foreground text-xs">
+                        Don&apos;t have NanoClaw yet?{" "}
+                        <a
+                          href="https://docs.nanoclaw.dev/introduction"
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="text-foreground font-medium underline underline-offset-2"
                         >
-                          New install
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => setInstallMode("migrate")}
-                          className={cn(
-                            "flex-1 rounded-sm px-2 py-1 text-xs font-medium transition-colors",
-                            installMode === "migrate"
-                              ? "bg-muted text-foreground"
-                              : "text-muted-foreground hover:text-foreground",
-                          )}
-                        >
-                          Migrate from local
-                        </button>
-                      </div>
-
-                      {installMode === "new" && installCommand && (
-                        <>
-                          <p className="text-muted-foreground text-xs">
-                            Run this in your terminal:
-                          </p>
-                          <TryDemoCommand command={installCommand} />
-                          <div className="text-muted-foreground space-y-1 text-xs">
-                            <p>Then complete setup:</p>
-                            <ol className="list-inside list-decimal space-y-0.5 pl-1">
-                              <li>
-                                <code className="bg-muted rounded px-1 py-0.5 text-[10px]">
-                                  cd nanoclaw
-                                </code>
-                              </li>
-                              <li>
-                                <code className="bg-muted rounded px-1 py-0.5 text-[10px]">
-                                  claude
-                                </code>
-                              </li>
-                              <li>
-                                Type{" "}
-                                <code className="bg-muted rounded px-1 py-0.5 text-[10px]">
-                                  /setup
-                                </code>{" "}
-                                and follow the prompts
-                              </li>
-                            </ol>
-                          </div>
-                        </>
-                      )}
-
-                      {installMode === "migrate" && migrateCommand && (
-                        <>
-                          <p className="text-muted-foreground text-xs">
-                            Already running OneCLI locally? Migrate to cloud:
-                          </p>
-                          <TryDemoCommand command={migrateCommand} />
-                          <p className="text-muted-foreground text-xs">
-                            This updates your CLI config, NanoClaw .env, and
-                            restarts the service. Secrets and app connections
-                            need to be re-added in the dashboard.
-                          </p>
-                        </>
-                      )}
+                          Get started here
+                        </a>
+                        , then come back to migrate.
+                      </p>
                     </>
                   ) : IS_CLOUD ? (
                     <div className="flex items-center justify-center py-6">
@@ -259,7 +207,7 @@ export const GetStartedDialog = ({
                   ) : (
                     <div className="rounded-lg border p-4">
                       <p className="text-sm">
-                        One-command install is available with{" "}
+                        Migration is available with{" "}
                         <a
                           href="https://app.onecli.sh"
                           target="_blank"
