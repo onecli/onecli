@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.34.1](https://github.com/onecli/onecli/compare/v1.34.0...v1.34.1) (2026-06-02)
+
+
+### Bug Fixes
+
+* use non-temp path for CODEX_HOME in container config ([#340](https://github.com/onecli/onecli/issues/340)) ([92b630e](https://github.com/onecli/onecli/commit/92b630e66f7c09fe1d14a1c45c9fa1886402390b))
+
 ## [1.34.0](https://github.com/onecli/onecli/compare/v1.33.0...v1.34.0) (2026-06-02)
 
 
