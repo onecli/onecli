@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.35.0](https://github.com/onecli/onecli/compare/v1.34.1...v1.35.0) (2026-06-03)
+
+
+### Features
+
+* add JFrog Artifactory integration with blocklist system ([#342](https://github.com/onecli/onecli/issues/342)) ([3f1d4ba](https://github.com/onecli/onecli/commit/3f1d4ba7e2a8c5b10ca64b0cf55d432184744f38))
+
 ## [1.34.1](https://github.com/onecli/onecli/compare/v1.34.0...v1.34.1) (2026-06-02)
 
 
