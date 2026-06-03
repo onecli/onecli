@@ -30,12 +30,9 @@ const signJwt = (privateKey: string, clientEmail: string): string => {
 const exchangeServiceAccount = async (
   fields: Record<string, string>,
 ): Promise<OAuthExchangeResult> => {
-  const { privateKey, clientEmail, projectId } = fields;
+  const { privateKey, clientEmail, quotaProjectId } = fields;
   if (!privateKey || !clientEmail) {
     throw new Error("Service account email and private key are required");
-  }
-  if (!projectId) {
-    throw new Error("GCP Project ID is required");
   }
 
   const jwt = signJwt(privateKey, clientEmail);
@@ -82,12 +79,12 @@ const exchangeServiceAccount = async (
       access_token: tokenData.access_token,
       private_key: privateKey,
       client_email: clientEmail,
-      project_id: projectId,
+      project_id: quotaProjectId,
       expires_at: expiresAt,
     },
     scopes: [CLOUD_PLATFORM_SCOPE],
     metadata: {
-      quotaProjectId: projectId,
+      quotaProjectId,
       username: clientEmail,
     },
   };
@@ -195,10 +192,11 @@ export const vertexAi: AppDefinition = {
         group: "service_account",
       },
       {
-        name: "projectId",
-        label: "GCP Project ID",
+        name: "quotaProjectId",
+        label: "GCP Project ID (optional)",
         description: "Google Cloud project ID for quota and billing",
         placeholder: "my-gcp-project",
+        optional: true,
         group: "service_account",
       },
       {
@@ -233,9 +231,10 @@ export const vertexAi: AppDefinition = {
       },
       {
         name: "quotaProjectId",
-        label: "GCP Project ID",
+        label: "GCP Project ID (optional)",
         description: "Google Cloud project ID for quota and billing",
         placeholder: "my-gcp-project",
+        optional: true,
         group: "authorized_user",
       },
     ],
@@ -246,7 +245,7 @@ export const vertexAi: AppDefinition = {
       keyMap: {
         private_key: "privateKey",
         client_email: "clientEmail",
-        project_id: "projectId",
+        project_id: "quotaProjectId",
         refresh_token: "refreshToken",
         client_id: "clientId",
         client_secret: "clientSecret",
@@ -256,18 +255,25 @@ export const vertexAi: AppDefinition = {
   },
   labelHint: 'e.g. "prod-project", "experiments"',
   available: true,
-  credentialStubs: [
-    {
-      path: "~/.config/gcloud/application_default_credentials.json",
-      content: {
-        account: "onecli-managed",
-        client_id: "onecli-managed",
-        client_secret: "onecli-managed",
-        quota_project_id: "onecli-managed",
-        refresh_token: "onecli-managed",
-        type: "authorized_user",
-        universe_domain: "googleapis.com",
+  credentialStubs: (credentials) => {
+    const stub: Record<string, unknown> = {
+      account: "onecli-managed",
+      client_id: "onecli-managed",
+      client_secret: "onecli-managed",
+      refresh_token: "onecli-managed",
+      type: "authorized_user",
+      universe_domain: "googleapis.com",
+    };
+
+    if (!credentials || credentials.quota_project_id) {
+      stub.quota_project_id = "onecli-managed";
+    }
+
+    return [
+      {
+        path: "~/.config/gcloud/application_default_credentials.json",
+        content: stub,
       },
-    },
-  ],
+    ];
+  },
 };

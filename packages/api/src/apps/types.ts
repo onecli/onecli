@@ -113,12 +113,19 @@ export interface AppDefinition {
   labelHint?: string;
   teamOnly?: boolean;
   /** Credential stubs for provisioners to write so MCP servers can boot. */
-  credentialStubs?: {
-    /** Full destination path (e.g., "~/.config/gcloud/application_default_credentials.json"). */
-    path: string;
-    /** Stub content with "onecli-managed" sentinel values. */
-    content: Record<string, unknown>;
-  }[];
+  credentialStubs?:
+    | {
+        /** Full destination path (e.g., "~/.config/gcloud/application_default_credentials.json"). */
+        path: string;
+        /** Stub content with "onecli-managed" sentinel values. */
+        content: Record<string, unknown>;
+      }[]
+    | ((credentials?: Record<string, unknown>) => {
+        /** Full destination path (e.g., "~/.config/gcloud/application_default_credentials.json"). */
+        path: string;
+        /** Stub content with "onecli-managed" sentinel values. */
+        content: Record<string, unknown>;
+      }[]);
   /** OAuth apps can be configured with custom credentials (BYOC). */
   configurable?: {
     fields: OAuthConfigField[];

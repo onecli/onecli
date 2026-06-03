@@ -89,7 +89,10 @@ export const appRoutes = () => {
               connectedAt: connection.connectedAt,
             }
           : null,
-        credentialStubs: a.credentialStubs ?? [],
+        credentialStubs:
+          typeof a.credentialStubs === "function"
+            ? a.credentialStubs()
+            : (a.credentialStubs ?? []),
       };
     });
 
@@ -235,7 +238,10 @@ export const appRoutes = () => {
             connectedAt: connection.connectedAt,
           }
         : null,
-      credentialStubs: appDef.credentialStubs ?? [],
+      credentialStubs:
+        typeof appDef.credentialStubs === "function"
+          ? appDef.credentialStubs()
+          : (appDef.credentialStubs ?? []),
       hint,
     });
   });
@@ -518,6 +524,7 @@ export const appRoutes = () => {
       appDef.connectionMethod.fields.some((f) => f.group)
     ) {
       requiredFields = appDef.connectionMethod.fields.filter((f) => {
+        if ("optional" in f && f.optional) return false;
         if (!f.group) return true;
         if (fields.privateKey) return f.group === "service_account";
         return f.group === "authorized_user";
