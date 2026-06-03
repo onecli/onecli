@@ -2,6 +2,7 @@
 
 import { db } from "@onecli/db";
 import { resolveProjectContext } from "@/lib/actions/resolve-user";
+import type { ResolveOptions } from "@/lib/actions/resolve-user";
 import { APP_URL, API_URL, GATEWAY_BASE_URL } from "@/lib/env";
 import {
   listSecrets,
@@ -22,8 +23,11 @@ export const getSecrets = async () => {
   return listSecrets({ projectId });
 };
 
-export const createSecret = async (input: CreateSecretInput) => {
-  const { userId, userEmail, projectId } = await resolveProjectContext();
+export const createSecret = async (
+  input: CreateSecretInput,
+  options?: ResolveOptions,
+) => {
+  const { userId, userEmail, projectId } = await resolveProjectContext(options);
   return withAudit(
     () => createSecretService({ projectId }, input),
     (secret) => ({
@@ -52,8 +56,8 @@ export const deleteSecret = async (secretId: string): Promise<void> => {
   );
 };
 
-export const getInstallInfo = async () => {
-  const { projectId, userId } = await resolveProjectContext();
+export const getInstallInfo = async (options?: ResolveOptions) => {
+  const { projectId, userId } = await resolveProjectContext(options);
 
   const [apiKey, agent] = await Promise.all([
     db.apiKey.findFirst({
@@ -75,8 +79,10 @@ export const getInstallInfo = async () => {
   };
 };
 
-export const hasAnthropicSecret = async (): Promise<boolean> => {
-  const { projectId } = await resolveProjectContext();
+export const hasAnthropicSecret = async (
+  options?: ResolveOptions,
+): Promise<boolean> => {
+  const { projectId } = await resolveProjectContext(options);
   const secret = await db.secret.findFirst({
     where: { projectId, type: "anthropic" },
     select: { id: true },

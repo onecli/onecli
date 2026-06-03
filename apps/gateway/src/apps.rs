@@ -64,6 +64,11 @@ pub(crate) struct HostRule {
     /// the cached access token instead of being forwarded upstream. Used for
     /// credential stub flows where the SDK tries to refresh dummy credentials.
     pub(crate) intercept: bool,
+    /// For suffix-pattern rules covering per-tenant hosts (e.g. `*.jfrog.io`),
+    /// the credential JSON field holding the connection's stored host.
+    /// Injection proceeds ONLY when the request host equals the stored value,
+    /// preventing token leakage to other tenants on the same suffix.
+    pub(crate) credential_host_field: Option<&'static str>,
 }
 
 impl HostPattern {
@@ -245,18 +250,21 @@ static APP_PROVIDERS: &[AppProvider] = &[
                 path_prefix: None,
                 strategy: AuthStrategy::Bearer,
                 intercept: false,
+                credential_host_field: None,
             },
             HostRule {
                 pattern: HostPattern::Exact("github.com"),
                 path_prefix: None,
                 strategy: AuthStrategy::BasicXAccessToken,
                 intercept: false,
+                credential_host_field: None,
             },
             HostRule {
                 pattern: HostPattern::Exact("raw.githubusercontent.com"),
                 path_prefix: None,
                 strategy: AuthStrategy::Bearer,
                 intercept: false,
+                credential_host_field: None,
             },
         ],
         refresh: None,
@@ -276,18 +284,21 @@ static APP_PROVIDERS: &[AppProvider] = &[
                 path_prefix: None,
                 strategy: AuthStrategy::Bearer,
                 intercept: false,
+                credential_host_field: None,
             },
             HostRule {
                 pattern: HostPattern::Exact("github.com"),
                 path_prefix: None,
                 strategy: AuthStrategy::BasicXAccessToken,
                 intercept: false,
+                credential_host_field: None,
             },
             HostRule {
                 pattern: HostPattern::Exact("raw.githubusercontent.com"),
                 path_prefix: None,
                 strategy: AuthStrategy::Bearer,
                 intercept: false,
+                credential_host_field: None,
             },
         ],
         refresh: None,
@@ -307,6 +318,7 @@ static APP_PROVIDERS: &[AppProvider] = &[
                 path_prefix: None,
                 strategy: AuthStrategy::Bearer,
                 intercept: false,
+                credential_host_field: None,
             },
             // Legacy endpoint — some clients still use www.googleapis.com/gmail/
             HostRule {
@@ -314,12 +326,14 @@ static APP_PROVIDERS: &[AppProvider] = &[
                 path_prefix: Some("/gmail/"),
                 strategy: AuthStrategy::Bearer,
                 intercept: false,
+                credential_host_field: None,
             },
             HostRule {
                 pattern: HostPattern::Exact("www.googleapis.com"),
                 path_prefix: Some("/batch/gmail/"),
                 strategy: AuthStrategy::Bearer,
                 intercept: false,
+                credential_host_field: None,
             },
         ],
         refresh: Some(&GOOGLE_REFRESH),
@@ -339,12 +353,14 @@ static APP_PROVIDERS: &[AppProvider] = &[
                 path_prefix: Some("/calendar/"),
                 strategy: AuthStrategy::Bearer,
                 intercept: false,
+                credential_host_field: None,
             },
             HostRule {
                 pattern: HostPattern::Exact("www.googleapis.com"),
                 path_prefix: Some("/batch/calendar/"),
                 strategy: AuthStrategy::Bearer,
                 intercept: false,
+                credential_host_field: None,
             },
         ],
         refresh: Some(&GOOGLE_REFRESH),
@@ -364,18 +380,21 @@ static APP_PROVIDERS: &[AppProvider] = &[
                 path_prefix: Some("/drive/"),
                 strategy: AuthStrategy::Bearer,
                 intercept: false,
+                credential_host_field: None,
             },
             HostRule {
                 pattern: HostPattern::Exact("www.googleapis.com"),
                 path_prefix: Some("/upload/drive/"),
                 strategy: AuthStrategy::Bearer,
                 intercept: false,
+                credential_host_field: None,
             },
             HostRule {
                 pattern: HostPattern::Exact("www.googleapis.com"),
                 path_prefix: Some("/batch/drive/"),
                 strategy: AuthStrategy::Bearer,
                 intercept: false,
+                credential_host_field: None,
             },
         ],
         refresh: Some(&GOOGLE_REFRESH),
@@ -394,6 +413,7 @@ static APP_PROVIDERS: &[AppProvider] = &[
             path_prefix: None,
             strategy: AuthStrategy::Bearer,
             intercept: false,
+            credential_host_field: None,
         }],
         refresh: Some(&GOOGLE_REFRESH),
         metadata_headers: &[],
@@ -411,6 +431,7 @@ static APP_PROVIDERS: &[AppProvider] = &[
             path_prefix: None,
             strategy: AuthStrategy::Bearer,
             intercept: false,
+            credential_host_field: None,
         }],
         refresh: Some(&GOOGLE_REFRESH),
         metadata_headers: &[],
@@ -428,6 +449,7 @@ static APP_PROVIDERS: &[AppProvider] = &[
             path_prefix: None,
             strategy: AuthStrategy::Bearer,
             intercept: false,
+            credential_host_field: None,
         }],
         refresh: Some(&GOOGLE_REFRESH),
         metadata_headers: &[],
@@ -445,6 +467,7 @@ static APP_PROVIDERS: &[AppProvider] = &[
             path_prefix: None,
             strategy: AuthStrategy::Bearer,
             intercept: false,
+            credential_host_field: None,
         }],
         refresh: Some(&GOOGLE_REFRESH),
         metadata_headers: &[],
@@ -462,6 +485,7 @@ static APP_PROVIDERS: &[AppProvider] = &[
             path_prefix: None,
             strategy: AuthStrategy::Bearer,
             intercept: false,
+            credential_host_field: None,
         }],
         refresh: Some(&GOOGLE_REFRESH),
         metadata_headers: &[],
@@ -479,6 +503,7 @@ static APP_PROVIDERS: &[AppProvider] = &[
             path_prefix: None,
             strategy: AuthStrategy::Bearer,
             intercept: false,
+            credential_host_field: None,
         }],
         refresh: Some(&GOOGLE_REFRESH),
         metadata_headers: &[],
@@ -496,6 +521,7 @@ static APP_PROVIDERS: &[AppProvider] = &[
             path_prefix: None,
             strategy: AuthStrategy::Bearer,
             intercept: false,
+            credential_host_field: None,
         }],
         refresh: Some(&GOOGLE_REFRESH),
         metadata_headers: &[],
@@ -513,6 +539,7 @@ static APP_PROVIDERS: &[AppProvider] = &[
             path_prefix: None,
             strategy: AuthStrategy::Bearer,
             intercept: false,
+            credential_host_field: None,
         }],
         refresh: Some(&GOOGLE_REFRESH),
         metadata_headers: &[],
@@ -530,6 +557,7 @@ static APP_PROVIDERS: &[AppProvider] = &[
             path_prefix: None,
             strategy: AuthStrategy::Bearer,
             intercept: false,
+            credential_host_field: None,
         }],
         refresh: Some(&GOOGLE_REFRESH),
         metadata_headers: &[],
@@ -548,12 +576,14 @@ static APP_PROVIDERS: &[AppProvider] = &[
                 path_prefix: None,
                 strategy: AuthStrategy::Bearer,
                 intercept: false,
+                credential_host_field: None,
             },
             HostRule {
                 pattern: HostPattern::Exact("www.googleapis.com"),
                 path_prefix: Some("/webmasters/"),
                 strategy: AuthStrategy::Bearer,
                 intercept: false,
+                credential_host_field: None,
             },
         ],
         refresh: Some(&GOOGLE_REFRESH),
@@ -572,6 +602,7 @@ static APP_PROVIDERS: &[AppProvider] = &[
             path_prefix: None,
             strategy: AuthStrategy::Bearer,
             intercept: false,
+            credential_host_field: None,
         }],
         refresh: Some(&GOOGLE_REFRESH),
         metadata_headers: &[],
@@ -589,6 +620,7 @@ static APP_PROVIDERS: &[AppProvider] = &[
             path_prefix: None,
             strategy: AuthStrategy::Bearer,
             intercept: false,
+            credential_host_field: None,
         }],
         refresh: Some(&GOOGLE_REFRESH),
         metadata_headers: &[],
@@ -607,12 +639,14 @@ static APP_PROVIDERS: &[AppProvider] = &[
                 path_prefix: Some("/ex/jira/"),
                 strategy: AuthStrategy::Bearer,
                 intercept: false,
+                credential_host_field: None,
             },
             HostRule {
                 pattern: HostPattern::Exact("api.atlassian.com"),
                 path_prefix: Some("/oauth/token/accessible-resources"),
                 strategy: AuthStrategy::Bearer,
                 intercept: false,
+                credential_host_field: None,
             },
         ],
         refresh: Some(&ATLASSIAN_REFRESH),
@@ -632,12 +666,14 @@ static APP_PROVIDERS: &[AppProvider] = &[
                 path_prefix: Some("/ex/confluence/"),
                 strategy: AuthStrategy::Bearer,
                 intercept: false,
+                credential_host_field: None,
             },
             HostRule {
                 pattern: HostPattern::Exact("api.atlassian.com"),
                 path_prefix: Some("/oauth/token/accessible-resources"),
                 strategy: AuthStrategy::Bearer,
                 intercept: false,
+                credential_host_field: None,
             },
         ],
         refresh: Some(&ATLASSIAN_REFRESH),
@@ -657,18 +693,21 @@ static APP_PROVIDERS: &[AppProvider] = &[
                 path_prefix: Some("/youtube/"),
                 strategy: AuthStrategy::Bearer,
                 intercept: false,
+                credential_host_field: None,
             },
             HostRule {
                 pattern: HostPattern::Exact("www.googleapis.com"),
                 path_prefix: Some("/upload/youtube/"),
                 strategy: AuthStrategy::Bearer,
                 intercept: false,
+                credential_host_field: None,
             },
             HostRule {
                 pattern: HostPattern::Exact("www.googleapis.com"),
                 path_prefix: Some("/batch/youtube/"),
                 strategy: AuthStrategy::Bearer,
                 intercept: false,
+                credential_host_field: None,
             },
         ],
         refresh: Some(&GOOGLE_REFRESH),
@@ -688,12 +727,14 @@ static APP_PROVIDERS: &[AppProvider] = &[
                 path_prefix: None,
                 strategy: AuthStrategy::Bearer,
                 intercept: false,
+                credential_host_field: None,
             },
             HostRule {
                 pattern: HostPattern::Exact("oauth2.googleapis.com"),
                 path_prefix: Some("/token"),
                 strategy: AuthStrategy::Bearer,
                 intercept: true,
+                credential_host_field: None,
             },
         ],
         refresh: Some(&GOOGLE_REFRESH),
@@ -715,6 +756,7 @@ static APP_PROVIDERS: &[AppProvider] = &[
             path_prefix: None,
             strategy: AuthStrategy::Bearer,
             intercept: false,
+            credential_host_field: None,
         }],
         refresh: Some(&TODOIST_REFRESH),
         metadata_headers: &[],
@@ -732,6 +774,7 @@ static APP_PROVIDERS: &[AppProvider] = &[
             path_prefix: None,
             strategy: AuthStrategy::Bearer,
             intercept: false,
+            credential_host_field: None,
         }],
         refresh: None,
         metadata_headers: &[],
@@ -749,6 +792,7 @@ static APP_PROVIDERS: &[AppProvider] = &[
             path_prefix: None,
             strategy: AuthStrategy::Bearer,
             intercept: false,
+            credential_host_field: None,
         }],
         refresh: None,
         metadata_headers: &[],
@@ -766,6 +810,7 @@ static APP_PROVIDERS: &[AppProvider] = &[
             path_prefix: None,
             strategy: AuthStrategy::Bearer,
             intercept: false,
+            credential_host_field: None,
         }],
         refresh: Some(&NOTION_REFRESH),
         metadata_headers: &[],
@@ -784,12 +829,14 @@ static APP_PROVIDERS: &[AppProvider] = &[
                 path_prefix: None,
                 strategy: AuthStrategy::Bearer,
                 intercept: false,
+                credential_host_field: None,
             },
             HostRule {
                 pattern: HostPattern::Exact("content.dropboxapi.com"),
                 path_prefix: None,
                 strategy: AuthStrategy::Bearer,
                 intercept: false,
+                credential_host_field: None,
             },
         ],
         refresh: Some(&DROPBOX_REFRESH),
@@ -809,12 +856,14 @@ static APP_PROVIDERS: &[AppProvider] = &[
                 path_prefix: None,
                 strategy: AuthStrategy::None,
                 intercept: false,
+                credential_host_field: None,
             },
             HostRule {
                 pattern: HostPattern::Suffix(".api.aws"),
                 path_prefix: None,
                 strategy: AuthStrategy::None,
                 intercept: false,
+                credential_host_field: None,
             },
         ],
         refresh: None,
@@ -846,6 +895,7 @@ static APP_PROVIDERS: &[AppProvider] = &[
             path_prefix: None,
             strategy: AuthStrategy::Bearer,
             intercept: false,
+            credential_host_field: None,
         }],
         refresh: None,
         metadata_headers: &[],
@@ -864,12 +914,14 @@ static APP_PROVIDERS: &[AppProvider] = &[
                 path_prefix: None,
                 strategy: AuthStrategy::Bearer,
                 intercept: false,
+                credential_host_field: None,
             },
             HostRule {
                 pattern: HostPattern::Exact("api.fly.io"),
                 path_prefix: None,
                 strategy: AuthStrategy::Bearer,
                 intercept: false,
+                credential_host_field: None,
             },
         ],
         refresh: None,
@@ -888,6 +940,7 @@ static APP_PROVIDERS: &[AppProvider] = &[
             path_prefix: None,
             strategy: AuthStrategy::Bearer,
             intercept: false,
+            credential_host_field: None,
         }],
         refresh: None,
         metadata_headers: &[],
@@ -905,6 +958,7 @@ static APP_PROVIDERS: &[AppProvider] = &[
             path_prefix: None,
             strategy: AuthStrategy::Bearer,
             intercept: false,
+            credential_host_field: None,
         }],
         refresh: None,
         metadata_headers: &[],
@@ -922,6 +976,7 @@ static APP_PROVIDERS: &[AppProvider] = &[
             path_prefix: None,
             strategy: AuthStrategy::Bearer,
             intercept: false,
+            credential_host_field: None,
         }],
         refresh: Some(&LINKEDIN_REFRESH),
         metadata_headers: &[],
@@ -939,6 +994,7 @@ static APP_PROVIDERS: &[AppProvider] = &[
             path_prefix: None,
             strategy: AuthStrategy::Bearer,
             intercept: false,
+            credential_host_field: None,
         }],
         refresh: None,
         metadata_headers: &[],
@@ -956,6 +1012,7 @@ static APP_PROVIDERS: &[AppProvider] = &[
             path_prefix: None,
             strategy: AuthStrategy::Bearer,
             intercept: false,
+            credential_host_field: None,
         }],
         refresh: Some(&SUPABASE_REFRESH),
         metadata_headers: &[],
@@ -973,6 +1030,7 @@ static APP_PROVIDERS: &[AppProvider] = &[
             path_prefix: None,
             strategy: AuthStrategy::None,
             intercept: false,
+            credential_host_field: None,
         }],
         refresh: None,
         metadata_headers: &[],
@@ -999,8 +1057,31 @@ static APP_PROVIDERS: &[AppProvider] = &[
             path_prefix: None,
             strategy: AuthStrategy::Bearer,
             intercept: false,
+            credential_host_field: None,
         }],
         refresh: Some(&GITLAB_REFRESH),
+        metadata_headers: &[],
+        credential_headers: &[],
+        credential_params: &[],
+        host_rewrite: None,
+        finalizer: None,
+        body_transform: None,
+    },
+    AppProvider {
+        provider: "jfrog-artifactory",
+        display_name: "JFrog Artifactory",
+        // Wildcard suffix: JFrog SaaS hosts are per-customer (`<name>.jfrog.io`).
+        // The bare suffix alone would inject the token into ANY `*.jfrog.io`
+        // host, so `credential_host_field` gates injection to the connection's
+        // exact stored subdomain (see connect.rs).
+        host_rules: &[HostRule {
+            pattern: HostPattern::Suffix(".jfrog.io"),
+            path_prefix: None,
+            strategy: AuthStrategy::Bearer,
+            intercept: false,
+            credential_host_field: Some("subdomain"),
+        }],
+        refresh: None,
         metadata_headers: &[],
         credential_headers: &[],
         credential_params: &[],
@@ -1286,6 +1367,40 @@ pub(crate) fn needs_access_token(provider: &str) -> bool {
                 .any(|r| !matches!(r.strategy, AuthStrategy::None))
         })
         .unwrap_or(false)
+}
+
+/// For a host-gated rule (e.g. JFrog's `*.jfrog.io`), return the credential
+/// JSON field holding the connection's stored host. `None` when no matching
+/// rule carries a host gate.
+#[must_use]
+pub(crate) fn credential_host_field(provider: &str, hostname: &str) -> Option<&'static str> {
+    all_providers()
+        .find(|p| p.provider == provider)
+        .and_then(|p| {
+            p.host_rules
+                .iter()
+                .find(|r| host_rule_matches(r, hostname))
+                .and_then(|r| r.credential_host_field)
+        })
+}
+
+/// Normalize a host for equality comparison: strip any `scheme://` prefix, cut
+/// at the first path separator, drop a trailing `:port`, and lowercase.
+/// Both the request host and the stored credential host are normalized before
+/// comparison so `"https://Nanos.JFrog.io/"` and `"nanos.jfrog.io"` match.
+#[must_use]
+pub(crate) fn normalize_host(s: &str) -> String {
+    let mut h = s.trim();
+    if let Some(idx) = h.find("://") {
+        h = &h[idx + 3..];
+    }
+    if let Some(idx) = h.find('/') {
+        h = &h[..idx];
+    }
+    if let Some(idx) = h.find(':') {
+        h = &h[..idx];
+    }
+    h.to_ascii_lowercase()
 }
 
 /// Check whether any provider matching this hostname has intercept rules.
@@ -2812,5 +2927,105 @@ mod tests {
     #[test]
     fn display_name_for_unknown_provider() {
         assert_eq!(display_name_for_provider("nonexistent"), None);
+    }
+
+    // ── JFrog Artifactory ─────────────────────────────────────────────
+
+    #[test]
+    fn providers_for_jfrog_host() {
+        assert_eq!(
+            providers_for_host("nanos.jfrog.io"),
+            vec!["jfrog-artifactory"]
+        );
+    }
+
+    #[test]
+    fn provider_for_host_jfrog() {
+        let result = provider_for_host("nanos.jfrog.io");
+        assert_eq!(result, Some(("jfrog-artifactory", "JFrog Artifactory")));
+    }
+
+    #[test]
+    fn jfrog_suffix_no_false_positives() {
+        // The bare apex must NOT match (suffix requires something before it).
+        assert!(providers_for_host("jfrog.io").is_empty());
+        assert!(providers_for_host(".jfrog.io").is_empty());
+    }
+
+    #[test]
+    fn jfrog_other_tenant_still_matches_provider_statically() {
+        // Any *.jfrog.io matches the provider at the static level — the
+        // per-connection host gate in connect.rs is what blocks injection to
+        // tenants other than the connection's stored subdomain.
+        assert_eq!(
+            providers_for_host("evil.jfrog.io"),
+            vec!["jfrog-artifactory"]
+        );
+    }
+
+    #[test]
+    fn jfrog_uses_bearer() {
+        let injections = build_app_injections("jfrog-artifactory", "nanos.jfrog.io", "t");
+        assert_eq!(injections.len(), 1);
+        assert_eq!(
+            injections[0],
+            Injection::SetHeader {
+                name: "authorization".to_string(),
+                value: "Bearer t".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn jfrog_needs_access_token() {
+        assert!(needs_access_token("jfrog-artifactory"));
+    }
+
+    #[test]
+    fn jfrog_has_no_refresh_config() {
+        assert!(refresh_config("jfrog-artifactory").is_none());
+    }
+
+    // ── credential_host_field ─────────────────────────────────────────
+
+    #[test]
+    fn jfrog_has_credential_host_field() {
+        assert_eq!(
+            credential_host_field("jfrog-artifactory", "nanos.jfrog.io"),
+            Some("subdomain")
+        );
+    }
+
+    #[test]
+    fn normal_providers_have_no_credential_host_field() {
+        assert_eq!(credential_host_field("github", "api.github.com"), None);
+        assert_eq!(credential_host_field("resend", "api.resend.com"), None);
+        assert_eq!(credential_host_field("nonexistent", "anything.com"), None);
+    }
+
+    // ── normalize_host ────────────────────────────────────────────────
+
+    #[test]
+    fn normalize_host_passthrough() {
+        assert_eq!(normalize_host("nanos.jfrog.io"), "nanos.jfrog.io");
+    }
+
+    #[test]
+    fn normalize_host_strips_scheme_path_port_and_lowercases() {
+        assert_eq!(
+            normalize_host("https://Nanos.JFrog.io/artifactory/api"),
+            "nanos.jfrog.io"
+        );
+        assert_eq!(normalize_host("nanos.jfrog.io:443"), "nanos.jfrog.io");
+        assert_eq!(
+            normalize_host("  HTTP://NANOS.JFROG.IO  "),
+            "nanos.jfrog.io"
+        );
+        assert_eq!(normalize_host("nanos.jfrog.io/"), "nanos.jfrog.io");
+    }
+
+    #[test]
+    fn normalize_host_empty() {
+        assert_eq!(normalize_host(""), "");
     }
 }

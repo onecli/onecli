@@ -60,6 +60,7 @@ interface ConnectionAccountCardProps {
   appName: string;
   onReconnect: (connectionId: string) => void;
   refetchConnections: () => void;
+  pageScope?: "project" | "organization";
 }
 
 export const ConnectionAccountCard = ({
@@ -67,11 +68,12 @@ export const ConnectionAccountCard = ({
   appName,
   onReconnect,
   refetchConnections,
+  pageScope = "project",
 }: ConnectionAccountCardProps) => {
   const [confirmOpen, setConfirmOpen] = useState(false);
   const [renameOpen, setRenameOpen] = useState(false);
   const [renameValue, setRenameValue] = useState("");
-  const disconnectMutation = useDisconnectConnection();
+  const disconnectMutation = useDisconnectConnection(pageScope);
   const renameMutation = useRenameConnection();
 
   const displayName =

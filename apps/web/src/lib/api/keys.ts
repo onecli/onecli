@@ -38,6 +38,11 @@ export const queryKeys = {
     list: (filter?: string) =>
       [...queryKeys.activity.all(), "list", filter] as const,
   },
+  appBlocklist: {
+    all: () => ["appBlocklist", ...scope()] as const,
+    byProvider: (provider: string) =>
+      [...queryKeys.appBlocklist.all(), provider] as const,
+  },
   billing: {
     all: () => ["billing", ...scope()] as const,
     agentCost: () => [...queryKeys.billing.all(), "agentCost"] as const,

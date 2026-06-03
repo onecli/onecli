@@ -267,7 +267,7 @@ pub(crate) async fn forward_request(
         inject::apply_injections(&mut headers, &mut upstream_path, &rules.injection_rules);
     let upstream_url = format!("{scheme}://{host}{upstream_path}");
 
-    if let Some(resp) = hooks::pre_forward(rules, proxy_ctx, cache, injection_count, host).await {
+    if let Some(resp) = hooks::pre_forward(rules, proxy_ctx, cache, injection_count).await {
         return Ok(resp);
     }
 

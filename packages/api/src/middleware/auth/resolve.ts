@@ -1,5 +1,4 @@
 import { db } from "@onecli/db";
-import { findUserDefaultProject } from "../../services/organization-service";
 
 export const resolveUserEmail = async (userId: string): Promise<string> => {
   const user = await db.user.findUnique({
@@ -9,7 +8,7 @@ export const resolveUserEmail = async (userId: string): Promise<string> => {
   return user?.email ?? "";
 };
 
-export const resolveOrganizationId = async (
+export const resolveOrganizationIdFromProject = async (
   projectId: string,
 ): Promise<string | null> => {
   const project = await db.project.findUnique({
@@ -19,37 +18,46 @@ export const resolveOrganizationId = async (
   return project?.organizationId ?? null;
 };
 
+export const resolveOrganizationId = async (
+  request: Request,
+  userId: string,
+): Promise<string | null> => {
+  const headerOrgId = request.headers.get("x-organization-id");
+  if (!headerOrgId) return null;
+
+  const membership = await db.organizationMember.findFirst({
+    where: { userId, organizationId: headerOrgId },
+    select: { organizationId: true },
+  });
+
+  return membership?.organizationId ?? null;
+};
+
 export const resolveProjectId = async (
   request: Request,
   userId: string,
 ): Promise<string | null> => {
   const headerProjectId = request.headers.get("x-project-id");
+  if (!headerProjectId) return null;
 
-  if (headerProjectId) {
-    const memberOrgIds = await db.user
-      .findUnique({
-        where: { id: userId },
-        select: {
-          organizationMemberships: {
-            select: { organizationId: true },
-          },
+  const memberOrgIds = await db.user
+    .findUnique({
+      where: { id: userId },
+      select: {
+        organizationMemberships: {
+          select: { organizationId: true },
         },
-      })
-      .then(
-        (u) => u?.organizationMemberships.map((m) => m.organizationId) ?? [],
-      );
-
-    const project = await db.project.findFirst({
-      where: {
-        id: headerProjectId,
-        organizationId: { in: memberOrgIds },
       },
-      select: { id: true },
-    });
+    })
+    .then((u) => u?.organizationMemberships.map((m) => m.organizationId) ?? []);
 
-    if (project) return project.id;
-  }
+  const project = await db.project.findFirst({
+    where: {
+      id: headerProjectId,
+      organizationId: { in: memberOrgIds },
+    },
+    select: { id: true },
+  });
 
-  const fallback = await findUserDefaultProject(userId);
-  return fallback?.id ?? null;
+  return project?.id ?? null;
 };

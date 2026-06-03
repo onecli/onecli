@@ -119,6 +119,12 @@ export interface AppDefinition {
     /** Stub content with "onecli-managed" sentinel values. */
     content: Record<string, unknown>;
   }[];
+  /** Hosts to block by default when this app is connected (e.g., public registries). */
+  blocklist?: {
+    id: string;
+    name: string;
+    hostPattern: string;
+  }[];
   /** OAuth apps can be configured with custom credentials (BYOC). */
   configurable?: {
     fields: OAuthConfigField[];

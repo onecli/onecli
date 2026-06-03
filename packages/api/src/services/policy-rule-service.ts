@@ -186,6 +186,7 @@ export const listAppPermissionRules = async (
       metadata: true,
       conditions: true,
       pathPattern: true,
+      method: true,
     },
   });
 };
@@ -196,10 +197,18 @@ export interface AppPermissionChange {
   tool: AppTool;
 }
 
-const allPatterns = (tool: AppTool): string[] => [
-  tool.pathPattern,
-  ...(tool.aliasPatterns ?? []),
-];
+interface RuleVariant {
+  pathPattern: string;
+  method: string | null;
+}
+
+const allRuleVariants = (tool: AppTool): RuleVariant[] => {
+  const paths = [tool.pathPattern, ...(tool.aliasPatterns ?? [])];
+  const methods: (string | null)[] = tool.methods ?? [tool.method ?? null];
+  return paths.flatMap((p) =>
+    methods.map((m) => ({ pathPattern: p, method: m })),
+  );
+};
 
 export const setAppPermissionsService = async (
   scope: ResourceScope,
@@ -229,6 +238,7 @@ export const setAppPermissionsService = async (
   const toCreateRules: {
     change: AppPermissionChange;
     pathPattern: string;
+    method: string | null;
   }[] = [];
   const toUpdate: { ruleId: string; action: string }[] = [];
   const toDelete: string[] = [];
@@ -247,17 +257,25 @@ export const setAppPermissionsService = async (
               toUpdate.push({ ruleId: rule.id, action: "allow" });
             }
           }
-          const existingPatterns = new Set(
-            existingRules.map((r) => r.pathPattern),
+          const existingKeys = new Set(
+            existingRules.map((r) => `${r.pathPattern}\0${r.method ?? ""}`),
           );
-          for (const pattern of allPatterns(change.tool)) {
-            if (!existingPatterns.has(pattern)) {
-              toCreateRules.push({ change, pathPattern: pattern });
+          for (const v of allRuleVariants(change.tool)) {
+            if (!existingKeys.has(`${v.pathPattern}\0${v.method ?? ""}`)) {
+              toCreateRules.push({
+                change,
+                pathPattern: v.pathPattern,
+                method: v.method,
+              });
             }
           }
         } else {
-          for (const pattern of allPatterns(change.tool)) {
-            toCreateRules.push({ change, pathPattern: pattern });
+          for (const v of allRuleVariants(change.tool)) {
+            toCreateRules.push({
+              change,
+              pathPattern: v.pathPattern,
+              method: v.method,
+            });
           }
         }
       } else {
@@ -277,15 +295,25 @@ export const setAppPermissionsService = async (
           toUpdate.push({ ruleId: rule.id, action: change.permission });
         }
       }
-      const existingPatterns = new Set(existingRules.map((r) => r.pathPattern));
-      for (const pattern of allPatterns(change.tool)) {
-        if (!existingPatterns.has(pattern)) {
-          toCreateRules.push({ change, pathPattern: pattern });
+      const existingKeys = new Set(
+        existingRules.map((r) => `${r.pathPattern}\0${r.method ?? ""}`),
+      );
+      for (const v of allRuleVariants(change.tool)) {
+        if (!existingKeys.has(`${v.pathPattern}\0${v.method ?? ""}`)) {
+          toCreateRules.push({
+            change,
+            pathPattern: v.pathPattern,
+            method: v.method,
+          });
         }
       }
     } else {
-      for (const pattern of allPatterns(change.tool)) {
-        toCreateRules.push({ change, pathPattern: pattern });
+      for (const v of allRuleVariants(change.tool)) {
+        toCreateRules.push({
+          change,
+          pathPattern: v.pathPattern,
+          method: v.method,
+        });
       }
     }
   }
@@ -316,7 +344,7 @@ export const setAppPermissionsService = async (
       });
     }
 
-    for (const { change, pathPattern } of toCreateRules) {
+    for (const { change, pathPattern, method } of toCreateRules) {
       await tx.policyRule.create({
         data: {
           ...scopeCreate(scope),
@@ -324,7 +352,7 @@ export const setAppPermissionsService = async (
           name: `${change.tool.name}`,
           hostPattern: change.tool.hostPattern,
           pathPattern,
-          method: change.tool.method ?? null,
+          method,
           action: change.permission,
           enabled: true,
           metadata: {

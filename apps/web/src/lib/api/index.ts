@@ -3,8 +3,9 @@ import * as secrets from "./secrets";
 import * as rules from "./rules";
 import * as connections from "./connections";
 import * as counts from "./counts";
+import * as appBlocklist from "./app-blocklist";
 
-export { agents, secrets, rules, connections, counts };
+export { agents, secrets, rules, connections, counts, appBlocklist };
 export type {
   Agent,
   CreatedAgent,

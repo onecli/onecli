@@ -2,7 +2,7 @@ import { Hono } from "hono";
 import { setCookie, getCookie, deleteCookie } from "hono/cookie";
 import { db } from "@onecli/db";
 import type { ApiEnv } from "../types";
-import { authMiddleware, requireProjectId } from "../middleware/auth";
+import { authMiddleware, requireProjectId, auth } from "../middleware/auth";
 import { getApp, getApps } from "../apps/registry";
 import { resolveAppCredentials } from "../apps/resolve-credentials";
 import { getOAuthOrg } from "../providers";
@@ -36,6 +36,15 @@ import {
   saveAppConfigWithoutDisconnect,
 } from "../services/app-config-service";
 import { configBodySchema } from "../validations/app-config";
+import {
+  initBlocklistDefaults,
+  getBlocklistState,
+  toggleBlocklistRule,
+  activateBlocklistHost,
+  addCustomBlocklistRule,
+  removeBlocklistRule,
+  removeAllBlocklistRules,
+} from "../services/app-blocklist-service";
 import { logger } from "../lib/logger";
 
 const docsBaseURL = "https://onecli.sh/docs/guides/credential-stubs";
@@ -134,7 +143,7 @@ export const appRoutes = () => {
             : []),
         ],
       },
-      select: { scope: true },
+      select: { scope: true, provider: true },
     });
     if (!connection) {
       return c.json({ error: "Connection not found" }, 404);
@@ -144,6 +153,15 @@ export const appRoutes = () => {
         ? { organizationId: auth.organizationId }
         : { projectId: requireProjectId(auth) };
     await deleteConnection(scope, connectionId);
+
+    const remaining = await listConnectionsByProvider(
+      scope,
+      connection.provider,
+    );
+    if (remaining.length === 0) {
+      await removeAllBlocklistRules(scope, connection.provider);
+    }
+
     invalidateGatewayCache(c.req.raw);
     return c.body(null, 204);
   });
@@ -241,71 +259,79 @@ export const appRoutes = () => {
   });
 
   // ── GET /apps/:provider/authorize ── OAuth redirect ────────────────────
-  app.get("/:provider/authorize", authMiddleware, async (c) => {
-    const provider = c.req.param("provider")!;
-    const auth = c.get("auth");
-    const projectId = requireProjectId(auth);
+  app.get(
+    "/:provider/authorize",
+    auth({ requireProject: false }),
+    async (c) => {
+      const provider = c.req.param("provider")!;
+      const auth = c.get("auth");
 
-    const orgResponse = await getOAuthOrg().tryHandleOrgAuthorize(
-      auth,
-      c,
-      provider,
-    );
-    if (orgResponse) return orgResponse;
-    const appDef = getApp(provider);
-
-    if (
-      !appDef ||
-      !appDef.available ||
-      appDef.connectionMethod.type !== "oauth"
-    ) {
-      return c.json({ error: `Provider "${provider}" is not available` }, 400);
-    }
-
-    const connectionId = c.req.query("connectionId");
-    const rawAgentName = c.req.query("agent_name");
-    const agentName = rawAgentName ? rawAgentName.slice(0, 128) : undefined;
-
-    const state = signOAuthState({
-      projectId,
-      provider,
-      nonce: generateNonce(),
-      ...(connectionId ? { connectionId } : {}),
-      ...(agentName ? { agentName } : {}),
-    });
-
-    const resolved = await resolveAppCredentials(projectId, appDef);
-    if (!resolved) {
-      return c.json(
-        {
-          error: `${appDef.name} is not configured. Missing required credentials.`,
-        },
-        400,
+      const orgResponse = await getOAuthOrg().tryHandleOrgAuthorize(
+        auth,
+        c,
+        provider,
       );
-    }
+      if (orgResponse) return orgResponse;
 
-    const { values: creds } = resolved;
+      const projectId = requireProjectId(auth);
+      const appDef = getApp(provider);
 
-    const redirectUri = `${getRequestOrigin(c.req.raw)}/v1/apps/${provider}/callback`;
-    const scopes = appDef.connectionMethod.defaultScopes ?? [];
+      if (
+        !appDef ||
+        !appDef.available ||
+        appDef.connectionMethod.type !== "oauth"
+      ) {
+        return c.json(
+          { error: `Provider "${provider}" is not available` },
+          400,
+        );
+      }
 
-    const authUrl = appDef.connectionMethod.buildAuthUrl({
-      appCredentials: creds,
-      redirectUri,
-      scopes,
-      state,
-    });
+      const connectionId = c.req.query("connectionId");
+      const rawAgentName = c.req.query("agent_name");
+      const agentName = rawAgentName ? rawAgentName.slice(0, 128) : undefined;
 
-    setCookie(c, "oauth_state", state, {
-      httpOnly: true,
-      secure: NODE_ENV === "production",
-      sameSite: "Lax",
-      path: `/v1/apps/${provider}/callback`,
-      maxAge: 600,
-    });
+      const state = signOAuthState({
+        projectId,
+        provider,
+        nonce: generateNonce(),
+        ...(connectionId ? { connectionId } : {}),
+        ...(agentName ? { agentName } : {}),
+      });
 
-    return c.redirect(authUrl);
-  });
+      const resolved = await resolveAppCredentials(projectId, appDef);
+      if (!resolved) {
+        return c.json(
+          {
+            error: `${appDef.name} is not configured. Missing required credentials.`,
+          },
+          400,
+        );
+      }
+
+      const { values: creds } = resolved;
+
+      const redirectUri = `${getRequestOrigin(c.req.raw)}/v1/apps/${provider}/callback`;
+      const scopes = appDef.connectionMethod.defaultScopes ?? [];
+
+      const authUrl = appDef.connectionMethod.buildAuthUrl({
+        appCredentials: creds,
+        redirectUri,
+        scopes,
+        state,
+      });
+
+      setCookie(c, "oauth_state", state, {
+        httpOnly: true,
+        secure: NODE_ENV === "production",
+        sameSite: "Lax",
+        path: `/v1/apps/${provider}/callback`,
+        maxAge: 600,
+      });
+
+      return c.redirect(authUrl);
+    },
+  );
 
   // ── GET /apps/:provider/callback ── OAuth callback ─────────────────────
   app.get("/:provider/callback", async (c) => {
@@ -452,6 +478,14 @@ export const appRoutes = () => {
         );
       }
 
+      if (appDef.blocklist?.length) {
+        await initBlocklistDefaults(
+          { projectId: state.projectId },
+          provider,
+          appDef.blocklist,
+        );
+      }
+
       invalidateGatewayCacheForAccount(state.projectId);
 
       const successParams = new URLSearchParams({ status: "success" });
@@ -475,9 +509,8 @@ export const appRoutes = () => {
   });
 
   // ── POST /apps/:provider/connect ── direct connect ─────────────────────
-  app.post("/:provider/connect", authMiddleware, async (c) => {
+  app.post("/:provider/connect", auth({ requireProject: false }), async (c) => {
     const auth = c.get("auth");
-    const projectId = requireProjectId(auth);
     const provider = c.req.param("provider")!;
     const appDef = getApp(provider);
 
@@ -577,6 +610,7 @@ export const appRoutes = () => {
     );
     if (orgResponse) return orgResponse;
 
+    const projectId = requireProjectId(auth);
     await getConnectionHooks().beforeConnect(auth.organizationId, appDef);
 
     if (body.connectionId) {
@@ -615,6 +649,10 @@ export const appRoutes = () => {
           connectionOpts,
         );
       }
+    }
+
+    if (appDef.blocklist?.length) {
+      await initBlocklistDefaults({ projectId }, provider, appDef.blocklist);
     }
 
     if (
@@ -688,6 +726,85 @@ export const appRoutes = () => {
     const auth = c.get("auth");
     const provider = c.req.param("provider")!;
     await deleteAppConfig({ projectId: requireProjectId(auth) }, provider);
+    invalidateGatewayCache(c.req.raw);
+    return c.body(null, 204);
+  });
+
+  // ── GET /apps/:provider/blocklist ── list blocklist state ─────────────
+  app.get("/:provider/blocklist", authMiddleware, async (c) => {
+    const auth = c.get("auth");
+    const projectId = requireProjectId(auth);
+    const provider = c.req.param("provider")!;
+    const appDef = getApp(provider);
+    if (!appDef) return c.json({ error: "Unknown provider" }, 404);
+
+    const states = await getBlocklistState(
+      { projectId, organizationId: auth.organizationId },
+      provider,
+      appDef.blocklist ?? [],
+    );
+    return c.json(states);
+  });
+
+  // ── POST /apps/:provider/blocklist ── activate predefined or add custom ─
+  app.post("/:provider/blocklist", authMiddleware, async (c) => {
+    const auth = c.get("auth");
+    const projectId = requireProjectId(auth);
+    const provider = c.req.param("provider")!;
+    const appDef = getApp(provider);
+    if (!appDef) return c.json({ error: "Unknown provider" }, 404);
+
+    const body = await c.req.json().catch(() => null);
+    if (!body) return c.json({ error: "Invalid request body" }, 400);
+
+    let result;
+    if (body.hostId) {
+      result = await activateBlocklistHost(
+        { projectId },
+        provider,
+        body.hostId,
+        appDef.blocklist ?? [],
+      );
+    } else if (body.name && body.hostPattern) {
+      result = await addCustomBlocklistRule(
+        { projectId },
+        provider,
+        body.name,
+        body.hostPattern,
+      );
+    } else {
+      return c.json(
+        { error: "Provide either { hostId } or { name, hostPattern }" },
+        400,
+      );
+    }
+
+    invalidateGatewayCache(c.req.raw);
+    return c.json(result, 201);
+  });
+
+  // ── PATCH /apps/:provider/blocklist/:ruleId ── toggle enabled ─────────
+  app.patch("/:provider/blocklist/:ruleId", authMiddleware, async (c) => {
+    const auth = c.get("auth");
+    const projectId = requireProjectId(auth);
+    const ruleId = c.req.param("ruleId")!;
+
+    const body = await c.req.json().catch(() => null);
+    if (body?.enabled === undefined)
+      return c.json({ error: "enabled is required" }, 400);
+
+    await toggleBlocklistRule({ projectId }, ruleId, body.enabled);
+    invalidateGatewayCache(c.req.raw);
+    return c.json({ success: true });
+  });
+
+  // ── DELETE /apps/:provider/blocklist/:ruleId ── remove blocklist rule ──
+  app.delete("/:provider/blocklist/:ruleId", authMiddleware, async (c) => {
+    const auth = c.get("auth");
+    const projectId = requireProjectId(auth);
+    const ruleId = c.req.param("ruleId")!;
+
+    await removeBlocklistRule({ projectId }, ruleId);
     invalidateGatewayCache(c.req.raw);
     return c.body(null, 204);
   });

@@ -22,6 +22,7 @@ import {
 import {
   getAppPermissionDefinition,
   mapRuleActionToPermission,
+  allGroupTools,
   type AppPermissionLevel,
 } from "@onecli/api/apps/app-permissions";
 import type { RuleCondition } from "@onecli/api/validations/policy-rule";
@@ -114,7 +115,7 @@ export const setAppPermissions = async (
   if (!def)
     throw new Error(`No permission definition for provider: ${provider}`);
 
-  const allTools = def.groups.flatMap((g) => g.tools);
+  const allTools = def.groups.flatMap(allGroupTools);
   const toolMap = new Map(allTools.map((t) => [t.id, t]));
 
   const resolvedChanges = changes.map((c) => {
@@ -167,7 +168,9 @@ export const getOverlappingRuleCountForApp = async (
   const def = getAppPermissionDefinition(provider);
   if (!def) return 0;
   const hostPatterns = [
-    ...new Set(def.groups.flatMap((g) => g.tools.map((t) => t.hostPattern))),
+    ...new Set(
+      def.groups.flatMap((g) => allGroupTools(g).map((t) => t.hostPattern)),
+    ),
   ];
   return countOverlappingRulesForHost({ projectId }, hostPatterns);
 };

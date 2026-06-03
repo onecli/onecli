@@ -1,6 +1,5 @@
 "use client";
 
-import { CircleCheck, Hand, Ban } from "lucide-react";
 import { cn } from "@onecli/ui/lib/utils";
 import {
   Tooltip,
@@ -14,6 +13,7 @@ import type {
 } from "@onecli/api/apps/app-permissions";
 import type { RuleCondition } from "@onecli/api/validations/policy-rule";
 import { resolveToolPermission } from "./resolve-tool-permission";
+import { PermissionButtons } from "./permission-buttons";
 
 interface AppPermissionRowProps {
   tool: AppTool;
@@ -23,17 +23,8 @@ interface AppPermissionRowProps {
   disabled?: boolean;
   orgPermission?: AppPermissionLevel;
   orgConditions?: RuleCondition[];
+  covered?: boolean;
 }
-
-const options: {
-  value: AppPermissionLevel;
-  label: string;
-  icon: typeof CircleCheck;
-}[] = [
-  { value: "allow", label: "Always allow", icon: CircleCheck },
-  { value: "manual_approval", label: "Needs approval", icon: Hand },
-  { value: "block", label: "Block", icon: Ban },
-];
 
 export const AppPermissionRow = ({
   tool,
@@ -43,6 +34,7 @@ export const AppPermissionRow = ({
   disabled,
   orgPermission,
   orgConditions,
+  covered,
 }: AppPermissionRowProps) => {
   const resolved = resolveToolPermission(
     permission,
@@ -59,7 +51,7 @@ export const AppPermissionRow = ({
     <div
       className={cn(
         "flex items-center gap-3 py-2.5 border-b border-border/50 last:border-b-0 -mx-3 px-3 rounded-lg transition-colors",
-        !isFullyLocked && "hover:bg-muted",
+        !isFullyLocked && !covered && "hover:bg-muted",
       )}
     >
       <div className="flex-1 min-w-0">
@@ -67,12 +59,12 @@ export const AppPermissionRow = ({
           <p
             className={cn(
               "text-sm transition-colors truncate",
-              isFullyLocked && "text-muted-foreground/60",
+              (isFullyLocked || covered) && "text-muted-foreground/60",
             )}
           >
             {tool.name}
           </p>
-          {isFullyLocked && (
+          {isFullyLocked && !covered && (
             <Tooltip>
               <TooltipTrigger asChild>
                 <Badge variant="outline" className="text-[10px] shrink-0">
@@ -103,44 +95,13 @@ export const AppPermissionRow = ({
           isFullyLocked && "opacity-50",
         )}
       >
-        {options.map((opt) => {
-          const isActive = effectivePermission === opt.value;
-          const isBlockActive = isActive && opt.value === "block";
-          const isApprovalActive = isActive && opt.value === "manual_approval";
-          const optDisabled = resolved.isOptionDisabled(opt.value);
-          return (
-            <Tooltip key={opt.value}>
-              <TooltipTrigger asChild>
-                <button
-                  type="button"
-                  onClick={() => onPermissionChange(opt.value)}
-                  disabled={disabled || optDisabled}
-                  className={cn(
-                    "flex items-center justify-center size-8 rounded-md transition-colors",
-                    isBlockActive
-                      ? "bg-destructive/10 text-destructive"
-                      : isApprovalActive
-                        ? "bg-blue-500/10 text-blue-500"
-                        : isActive
-                          ? "bg-brand/10 text-brand"
-                          : optDisabled
-                            ? "text-muted-foreground/50"
-                            : "text-muted-foreground/50 hover:text-muted-foreground hover:bg-muted/50",
-                    (disabled || optDisabled) &&
-                      "opacity-50 cursor-not-allowed",
-                  )}
-                >
-                  <opt.icon
-                    className={cn("size-4", isActive && "stroke-[2.5]")}
-                  />
-                </button>
-              </TooltipTrigger>
-              <TooltipContent side="top" className="text-xs">
-                {opt.label}
-              </TooltipContent>
-            </Tooltip>
-          );
-        })}
+        <PermissionButtons
+          activePermission={effectivePermission}
+          onSelect={onPermissionChange}
+          isOptionDisabled={resolved.isOptionDisabled}
+          covered={covered}
+          disabled={disabled}
+        />
       </div>
     </div>
   );

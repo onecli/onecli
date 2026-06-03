@@ -32,10 +32,12 @@ export const useRenameConnection = () => {
   });
 };
 
-export const useDisconnectConnection = () => {
+export const useDisconnectConnection = (
+  scope: "project" | "organization" = "project",
+) => {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: connections.disconnect,
+    mutationFn: (id: string) => connections.disconnect(id, scope),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: queryKeys.connections.all() });
       qc.invalidateQueries({ queryKey: queryKeys.counts.all() });

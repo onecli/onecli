@@ -5,10 +5,35 @@ export const gmailPermissions: AppPermissionDefinition = {
   groups: [
     {
       category: "read",
+      wildcard: {
+        id: "read_all",
+        name: "All read operations",
+        description:
+          "Search, read, and list emails, threads, drafts, labels, and settings",
+        hostPattern: "gmail.googleapis.com",
+        pathPattern: "/gmail/v1/*",
+        method: "GET",
+      },
       tools: [
         {
+          id: "search_messages",
+          name: "Search messages",
+          description: "Search and list messages matching a query",
+          hostPattern: "gmail.googleapis.com",
+          pathPattern: "/gmail/v1/users/*/messages",
+          method: "GET",
+        },
+        {
+          id: "get_message",
+          name: "Read message",
+          description: "Retrieve a specific email message",
+          hostPattern: "gmail.googleapis.com",
+          pathPattern: "/gmail/v1/users/*/messages/*",
+          method: "GET",
+        },
+        {
           id: "search_threads",
-          name: "Search email threads",
+          name: "Search threads",
           description: "Search for threads matching a query",
           hostPattern: "gmail.googleapis.com",
           pathPattern: "/gmail/v1/users/*/threads",
@@ -16,18 +41,18 @@ export const gmailPermissions: AppPermissionDefinition = {
         },
         {
           id: "get_thread",
-          name: "Read email thread",
+          name: "Read thread",
           description: "Retrieve a specific email thread",
           hostPattern: "gmail.googleapis.com",
           pathPattern: "/gmail/v1/users/*/threads/*",
           method: "GET",
         },
         {
-          id: "get_message",
-          name: "Read email message",
-          description: "Retrieve a specific email message",
+          id: "list_drafts",
+          name: "List drafts",
+          description: "List and read draft emails",
           hostPattern: "gmail.googleapis.com",
-          pathPattern: "/gmail/v1/users/*/messages/*",
+          pathPattern: "/gmail/v1/users/*/drafts",
           method: "GET",
         },
         {
@@ -42,6 +67,15 @@ export const gmailPermissions: AppPermissionDefinition = {
     },
     {
       category: "write",
+      wildcard: {
+        id: "write_all",
+        name: "All write operations",
+        description:
+          "Send, reply, create drafts, modify labels, and delete emails",
+        hostPattern: "gmail.googleapis.com",
+        pathPattern: "/gmail/v1/*",
+        methods: ["POST", "PUT", "PATCH", "DELETE"],
+      },
       tools: [
         {
           id: "send_email",
@@ -60,6 +94,14 @@ export const gmailPermissions: AppPermissionDefinition = {
           method: "POST",
         },
         {
+          id: "send_draft",
+          name: "Send draft",
+          description: "Send an existing draft email",
+          hostPattern: "gmail.googleapis.com",
+          pathPattern: "/gmail/v1/users/*/drafts/send",
+          method: "POST",
+        },
+        {
           id: "modify_message",
           name: "Modify message",
           description: "Add or remove labels on a message",
@@ -74,6 +116,14 @@ export const gmailPermissions: AppPermissionDefinition = {
           hostPattern: "gmail.googleapis.com",
           pathPattern: "/gmail/v1/users/*/messages/*/trash",
           method: "POST",
+        },
+        {
+          id: "delete_draft",
+          name: "Delete draft",
+          description: "Permanently delete a draft email",
+          hostPattern: "gmail.googleapis.com",
+          pathPattern: "/gmail/v1/users/*/drafts/*",
+          method: "DELETE",
         },
       ],
     },

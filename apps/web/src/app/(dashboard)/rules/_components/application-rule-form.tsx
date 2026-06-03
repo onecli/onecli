@@ -27,6 +27,7 @@ import { Separator } from "@onecli/ui/components/separator";
 import { getApps } from "@onecli/api/apps/registry";
 import {
   getAppPermissionDefinition,
+  allGroupTools,
   type AppPermissionLevel,
 } from "@onecli/api/apps/app-permissions";
 import type {
@@ -126,7 +127,9 @@ export const ApplicationRuleForm = ({
     if (!permDef) return [];
     return permDef.groups
       .filter((g) => scope === "all" || g.category === scope)
-      .flatMap((g) => g.tools.map((t) => ({ ...t, category: g.category })));
+      .flatMap((g) =>
+        allGroupTools(g).map((t) => ({ ...t, category: g.category })),
+      );
   }, [permDef, scope]);
 
   const groupedTools = useMemo(() => {
@@ -136,7 +139,7 @@ export const ApplicationRuleForm = ({
       .map((g) => ({
         category: g.category,
         label: g.category === "read" ? "Read" : "Write",
-        tools: g.tools,
+        tools: allGroupTools(g),
       }));
   }, [permDef, scope]);
 

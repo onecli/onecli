@@ -49,7 +49,7 @@ export const GetStartedDialog = ({
     if (!open) return;
     setLoading(true);
     setActiveSection("agents");
-    getInstallInfo()
+    getInstallInfo({ fallbackToDefault: true })
       .then(setInstallInfo)
       .finally(() => setLoading(false));
   }, [open]);

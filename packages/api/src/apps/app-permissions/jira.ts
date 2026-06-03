@@ -5,6 +5,15 @@ export const jiraPermissions: AppPermissionDefinition = {
   groups: [
     {
       category: "read",
+      wildcard: {
+        id: "read_all",
+        name: "All read operations",
+        description:
+          "Search, read, and list issues, projects, users, and metadata",
+        hostPattern: "api.atlassian.com",
+        pathPattern: "/ex/jira/*/rest/api/3/*",
+        method: "GET",
+      },
       tools: [
         {
           id: "search_issues",
@@ -17,7 +26,7 @@ export const jiraPermissions: AppPermissionDefinition = {
         {
           id: "get_issue",
           name: "Get issue",
-          description: "Retrieve a specific issue",
+          description: "Retrieve a specific issue and its sub-resources",
           hostPattern: "api.atlassian.com",
           pathPattern: "/ex/jira/*/rest/api/3/issue/*",
           method: "GET",
@@ -30,10 +39,26 @@ export const jiraPermissions: AppPermissionDefinition = {
           pathPattern: "/ex/jira/*/rest/api/3/project",
           method: "GET",
         },
+        {
+          id: "get_project",
+          name: "Get project",
+          description: "Retrieve a specific project's details",
+          hostPattern: "api.atlassian.com",
+          pathPattern: "/ex/jira/*/rest/api/3/project/*",
+          method: "GET",
+        },
       ],
     },
     {
       category: "write",
+      wildcard: {
+        id: "write_all",
+        name: "All write operations",
+        description: "Create, update, delete, transition, and assign issues",
+        hostPattern: "api.atlassian.com",
+        pathPattern: "/ex/jira/*/rest/api/3/*",
+        methods: ["POST", "PUT", "PATCH", "DELETE"],
+      },
       tools: [
         {
           id: "create_issue",
@@ -66,6 +91,22 @@ export const jiraPermissions: AppPermissionDefinition = {
           hostPattern: "api.atlassian.com",
           pathPattern: "/ex/jira/*/rest/api/3/issue/*/transitions",
           method: "POST",
+        },
+        {
+          id: "delete_issue",
+          name: "Delete issue",
+          description: "Delete an existing Jira issue",
+          hostPattern: "api.atlassian.com",
+          pathPattern: "/ex/jira/*/rest/api/3/issue/*",
+          method: "DELETE",
+        },
+        {
+          id: "assign_issue",
+          name: "Assign issue",
+          description: "Assign or unassign a user to an issue",
+          hostPattern: "api.atlassian.com",
+          pathPattern: "/ex/jira/*/rest/api/3/issue/*/assignee",
+          method: "PUT",
         },
       ],
     },

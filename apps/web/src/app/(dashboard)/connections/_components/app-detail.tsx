@@ -28,6 +28,7 @@ import { ConfigureCredentialsDialog } from "./configure-credentials-dialog";
 import { PermissionsList } from "./permissions-list";
 import { AppPermissions } from "./app-permissions";
 import { ConnectionAccountCard } from "./connection-account-card";
+import { AppBlocklist } from "./app-blocklist";
 
 const defaultGetConnections_ = () =>
   apiGet<{ connections: Awaited<ReturnType<typeof defaultGetConnections>> }>(
@@ -44,6 +45,7 @@ interface AppDetailProps {
     connectionType: "oauth" | "api_key" | "credentials_import" | "cloud_only";
     defaultScopes: string[];
     permissions: OAuthPermission[];
+    blocklist?: { id: string; name: string; hostPattern: string }[];
   };
   configurable?: {
     fields: {
@@ -271,6 +273,7 @@ export const AppDetail = ({
                     appName={app.name}
                     onReconnect={(id) => openConnectPopup(id, popupOpts)}
                     refetchConnections={fetchConnections}
+                    pageScope={pageScope}
                   />
                 ))}
                 {inheritedConnections.map((conn) => (
@@ -327,6 +330,15 @@ export const AppDetail = ({
           hasEnvDefaults={hasEnvDefaults}
           isConnected={isConnected}
           onConfigChange={refreshConfigStatus}
+        />
+      )}
+
+      {app.blocklist && app.blocklist.length > 0 && (
+        <AppBlocklist
+          provider={app.id}
+          hosts={app.blocklist}
+          isConnected={isConnected}
+          pageScope={pageScope}
         />
       )}
 

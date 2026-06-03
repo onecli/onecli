@@ -21,6 +21,7 @@ import type {
   AppToolGroup,
   AppPermissionLevel,
 } from "@onecli/api/apps/app-permissions";
+import { allGroupTools } from "@onecli/api/apps/app-permissions";
 import type { RuleCondition } from "@onecli/api/validations/policy-rule";
 import {
   getAppPermissionStates,
@@ -132,13 +133,96 @@ export const AppPermissions = ({
 
   const handleGroupChange = useCallback(
     (group: AppToolGroup, permission: AppPermissionLevel) => {
+      const { wildcard } = group;
+      const wildcardActive =
+        wildcard != null &&
+        states[wildcard.id]?.permission != null &&
+        states[wildcard.id]?.permission !== defaultPermission;
+
       const changes = group.tools.map((t) => ({
         toolId: t.id,
         permission,
       }));
-      applyChanges(changes);
+
+      if (wildcardActive && wildcard) {
+        changes.push({ toolId: wildcard.id, permission: defaultPermission });
+
+        let prev: Record<string, AppPermissionState> = {};
+        setStates((current) => {
+          prev = current;
+          const next = { ...current };
+          for (const t of group.tools) {
+            next[t.id] = { permission, conditions: [] };
+          }
+          delete next[wildcard.id];
+          return next;
+        });
+
+        setSaving(true);
+        applyPermissions(provider, changes)
+          .then(() => invalidateCache())
+          .catch(() => {
+            setStates(prev);
+            toast.error("Failed to update permissions");
+          })
+          .finally(() => setSaving(false));
+      } else {
+        applyChanges(changes);
+      }
     },
-    [applyChanges],
+    [
+      applyChanges,
+      states,
+      defaultPermission,
+      provider,
+      invalidateCache,
+      applyPermissions,
+    ],
+  );
+
+  const expandWildcard = useCallback(
+    (
+      group: AppToolGroup,
+      overrideToolId?: string,
+      overridePermission?: AppPermissionLevel,
+    ) => {
+      const { wildcard } = group;
+      if (!wildcard) return;
+
+      const changes: { toolId: string; permission: AppPermissionLevel }[] = [];
+      let prev: Record<string, AppPermissionState> = {};
+
+      setStates((current) => {
+        const wildcardPerm = current[wildcard.id]?.permission;
+        if (!wildcardPerm) return current;
+
+        prev = current;
+        const next = { ...current };
+        for (const t of group.tools) {
+          const perm =
+            t.id === overrideToolId && overridePermission
+              ? overridePermission
+              : wildcardPerm;
+          next[t.id] = { permission: perm, conditions: [] };
+          changes.push({ toolId: t.id, permission: perm });
+        }
+        delete next[wildcard.id];
+        changes.push({ toolId: wildcard.id, permission: defaultPermission });
+        return next;
+      });
+
+      if (changes.length === 0) return;
+
+      setSaving(true);
+      applyPermissions(provider, changes)
+        .then(() => invalidateCache())
+        .catch(() => {
+          setStates(prev);
+          toast.error("Failed to update permission");
+        })
+        .finally(() => setSaving(false));
+    },
+    [provider, invalidateCache, applyPermissions, defaultPermission],
   );
 
   const openConditionDialog = () => {
@@ -156,7 +240,7 @@ export const AppPermissions = ({
     );
 
   const handleSaveConditions = async () => {
-    const allTools = groups.flatMap((g) => g.tools);
+    const allTools = groups.flatMap(allGroupTools);
     const restrictedTools = allTools.filter((t) => {
       if (isLocked(t.id)) return false;
       const perm = states[t.id]?.permission ?? defaultPermission;
@@ -182,14 +266,12 @@ export const AppPermissions = ({
   const hasAnyConditions = Object.values(states).some(
     (s) => s.conditions.length > 0,
   );
-  const restrictedCount = groups
-    .flatMap((g) => g.tools)
-    .filter((t) => {
-      if (isLocked(t.id)) return false;
-      return (
-        (states[t.id]?.permission ?? defaultPermission) !== defaultPermission
-      );
-    }).length;
+  const restrictedCount = groups.flatMap(allGroupTools).filter((t) => {
+    if (isLocked(t.id)) return false;
+    return (
+      (states[t.id]?.permission ?? defaultPermission) !== defaultPermission
+    );
+  }).length;
 
   if (loading) {
     return (
@@ -250,6 +332,10 @@ export const AppPermissions = ({
             permissionStates={states}
             onPermissionChange={handlePermissionChange}
             onGroupChange={(perm) => handleGroupChange(group, perm)}
+            onWildcardReset={() => expandWildcard(group)}
+            onCoveredPermissionChange={(toolId, perm) =>
+              expandWildcard(group, toolId, perm)
+            }
             disabled={saving}
             orgStates={orgStates}
             orgConditions={orgConditions}

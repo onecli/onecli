@@ -1,5 +1,7 @@
 "use client";
 
+import { Layers } from "lucide-react";
+import { cn } from "@onecli/ui/lib/utils";
 import {
   AccordionContent,
   AccordionItem,
@@ -12,6 +14,11 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@onecli/ui/components/select";
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipTrigger,
+} from "@onecli/ui/components/tooltip";
 import type {
   AppToolGroup,
   AppPermissionLevel,
@@ -23,12 +30,18 @@ import {
   resolveToolPermission,
 } from "./resolve-tool-permission";
 import { AppPermissionRow } from "./app-permission-row";
+import { permissionOptions, PermissionButtons } from "./permission-buttons";
 
 interface AppPermissionGroupProps {
   group: AppToolGroup;
   permissionStates: Record<string, AppPermissionState>;
   onPermissionChange: (toolId: string, permission: AppPermissionLevel) => void;
   onGroupChange: (permission: AppPermissionLevel) => void;
+  onWildcardReset?: () => void;
+  onCoveredPermissionChange?: (
+    toolId: string,
+    permission: AppPermissionLevel,
+  ) => void;
   disabled?: boolean;
   orgStates?: Record<string, AppPermissionLevel>;
   orgConditions?: Record<string, unknown[]>;
@@ -38,12 +51,6 @@ interface AppPermissionGroupProps {
 const groupLabels: Record<string, string> = {
   read: "Read-only",
   write: "Write / delete",
-};
-
-const permissionLabels: Record<string, string> = {
-  allow: "Always allow",
-  manual_approval: "Needs approval",
-  block: "Block",
 };
 
 const getGroupPermission = (
@@ -62,11 +69,30 @@ export const AppPermissionGroup = ({
   permissionStates,
   onPermissionChange,
   onGroupChange,
+  onWildcardReset,
+  onCoveredPermissionChange,
   disabled,
   orgStates,
   orgConditions,
   defaultPermission = "allow",
 }: AppPermissionGroupProps) => {
+  const { wildcard } = group;
+  const wildcardPermission = wildcard
+    ? permissionStates[wildcard.id]?.permission
+    : undefined;
+  const isWildcardActive =
+    wildcardPermission != null && wildcardPermission !== defaultPermission;
+
+  const wildcardResolved = wildcard
+    ? resolveToolPermission(
+        wildcardPermission ?? defaultPermission,
+        [],
+        orgStates?.[wildcard.id],
+        (orgConditions?.[wildcard.id] ?? []) as RuleCondition[],
+      )
+    : null;
+  const wildcardLocked = wildcardResolved?.isFullyLocked ?? false;
+
   const groupPerm = getGroupPermission(
     group.tools,
     permissionStates,
@@ -123,13 +149,13 @@ export const AppPermissionGroup = ({
                 Custom
               </SelectItem>
             )}
-            {Object.entries(permissionLabels).map(([value, label]) => (
+            {permissionOptions.map((opt) => (
               <SelectItem
-                key={value}
-                value={value}
-                disabled={isGroupOptionDisabled(value as AppPermissionLevel)}
+                key={opt.value}
+                value={opt.value}
+                disabled={isGroupOptionDisabled(opt.value)}
               >
-                {label}
+                {opt.label}
               </SelectItem>
             ))}
           </SelectContent>
@@ -137,9 +163,83 @@ export const AppPermissionGroup = ({
       </div>
       <AccordionContent className="pb-2">
         <div className="ml-6">
+          {wildcard && (
+            <div
+              className={cn(
+                "flex items-center gap-3 py-2.5 border-b border-border/50 -mx-3 px-3 rounded-lg transition-colors",
+                !wildcardLocked && "hover:bg-muted",
+              )}
+            >
+              <div className="flex-1 min-w-0">
+                <div className="flex items-center gap-1.5">
+                  <Layers
+                    className={cn(
+                      "size-3.5 shrink-0",
+                      isWildcardActive
+                        ? "text-brand"
+                        : "text-muted-foreground/40",
+                    )}
+                  />
+                  <p
+                    className={cn(
+                      "text-sm transition-colors",
+                      isWildcardActive
+                        ? "font-medium"
+                        : "text-muted-foreground",
+                    )}
+                  >
+                    {wildcard.name}
+                  </p>
+                </div>
+              </div>
+              <div
+                className={cn(
+                  "flex items-center gap-1 shrink-0",
+                  wildcardLocked && "opacity-50",
+                )}
+              >
+                {isWildcardActive && onWildcardReset && (
+                  <>
+                    <Tooltip>
+                      <TooltipTrigger asChild>
+                        <button
+                          type="button"
+                          onClick={onWildcardReset}
+                          disabled={disabled}
+                          className="text-xs text-muted-foreground hover:text-foreground transition-colors disabled:opacity-50 px-1.5"
+                        >
+                          Clear
+                        </button>
+                      </TooltipTrigger>
+                      <TooltipContent side="top" className="text-xs">
+                        Remove and configure each endpoint individually
+                      </TooltipContent>
+                    </Tooltip>
+                    <div className="w-px h-4 bg-border mx-0.5" />
+                  </>
+                )}
+                <PermissionButtons
+                  activePermission={
+                    isWildcardActive ? wildcardPermission : null
+                  }
+                  onSelect={(perm) => {
+                    if (perm === defaultPermission && !isWildcardActive) {
+                      onGroupChange(perm);
+                    } else {
+                      onPermissionChange(wildcard.id, perm);
+                    }
+                  }}
+                  isOptionDisabled={wildcardResolved?.isOptionDisabled}
+                  disabled={disabled}
+                />
+              </div>
+            </div>
+          )}
           {group.tools.map((tool) => {
             const state = permissionStates[tool.id];
-            const permission = state?.permission ?? defaultPermission;
+            const permission = isWildcardActive
+              ? wildcardPermission
+              : (state?.permission ?? defaultPermission);
             const projectConditions = (state?.conditions ??
               []) as RuleCondition[];
             const toolOrgConditions = (orgConditions?.[tool.id] ??
@@ -150,10 +250,21 @@ export const AppPermissionGroup = ({
                 tool={tool}
                 permission={permission}
                 conditions={projectConditions}
-                onPermissionChange={(perm) => onPermissionChange(tool.id, perm)}
+                onPermissionChange={(perm) => {
+                  if (
+                    isWildcardActive &&
+                    perm !== wildcardPermission &&
+                    onCoveredPermissionChange
+                  ) {
+                    onCoveredPermissionChange(tool.id, perm);
+                  } else if (!isWildcardActive) {
+                    onPermissionChange(tool.id, perm);
+                  }
+                }}
                 disabled={disabled}
                 orgPermission={orgStates?.[tool.id]}
                 orgConditions={toolOrgConditions}
+                covered={isWildcardActive}
               />
             );
           })}

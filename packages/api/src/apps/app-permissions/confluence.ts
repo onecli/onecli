@@ -5,6 +5,15 @@ export const confluencePermissions: AppPermissionDefinition = {
   groups: [
     {
       category: "read",
+      wildcard: {
+        id: "read_all",
+        name: "All read operations",
+        description:
+          "Search, read, and list pages, spaces, comments, and attachments",
+        hostPattern: "api.atlassian.com",
+        pathPattern: "/wiki/api/v2/*",
+        method: "GET",
+      },
       tools: [
         {
           id: "get_page",
@@ -31,6 +40,14 @@ export const confluencePermissions: AppPermissionDefinition = {
           method: "GET",
         },
         {
+          id: "get_space",
+          name: "Get space",
+          description: "Retrieve a specific space's details",
+          hostPattern: "api.atlassian.com",
+          pathPattern: "/wiki/api/v2/spaces/*",
+          method: "GET",
+        },
+        {
           id: "list_pages",
           name: "List pages",
           description: "List pages in a space",
@@ -42,6 +59,14 @@ export const confluencePermissions: AppPermissionDefinition = {
     },
     {
       category: "write",
+      wildcard: {
+        id: "write_all",
+        name: "All write operations",
+        description: "Create, update, delete pages, and add comments",
+        hostPattern: "api.atlassian.com",
+        pathPattern: "/wiki/api/v2/*",
+        methods: ["POST", "PUT", "PATCH", "DELETE"],
+      },
       tools: [
         {
           id: "create_page",
@@ -66,6 +91,14 @@ export const confluencePermissions: AppPermissionDefinition = {
           hostPattern: "api.atlassian.com",
           pathPattern: "/wiki/api/v2/pages/*",
           method: "DELETE",
+        },
+        {
+          id: "create_comment",
+          name: "Add comment",
+          description: "Add a comment to a Confluence page",
+          hostPattern: "api.atlassian.com",
+          pathPattern: "/wiki/api/v2/pages/*/footer-comments",
+          method: "POST",
         },
       ],
     },

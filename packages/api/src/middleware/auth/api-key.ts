@@ -1,6 +1,6 @@
 import { db } from "@onecli/db";
 import type { AuthContext } from "../../providers";
-import { resolveUserEmail, resolveOrganizationId } from "./resolve";
+import { resolveUserEmail, resolveOrganizationIdFromProject } from "./resolve";
 
 export const authenticateApiKey = async (
   request: Request,
@@ -59,7 +59,9 @@ export const authenticateApiKey = async (
   });
   if (!apiKey || !apiKey.projectId) return null;
 
-  const organizationId = await resolveOrganizationId(apiKey.projectId);
+  const organizationId = await resolveOrganizationIdFromProject(
+    apiKey.projectId,
+  );
   if (!organizationId) return null;
 
   const userEmail = await resolveUserEmail(apiKey.userId);

@@ -555,6 +555,28 @@ impl PolicyEngine {
             }
         };
 
+        // Parse credentials once — reused below for the host gate, credential
+        // headers/params, and host rewrite.
+        let creds: Option<serde_json::Value> = serde_json::from_str(&decrypted_json)
+            .map_err(|e| {
+                warn!(provider = %conn.provider, error = %e, "failed to parse app connection credentials JSON");
+            })
+            .ok();
+
+        // For rules with `credential_host_field` (e.g. JFrog's wildcard
+        // `*.jfrog.io`), inject ONLY when the request host equals the
+        // connection's exact stored host. This runs BEFORE token resolution,
+        // rule building, and caching, so a mismatch yields no injection and
+        // writes no cache entry — the token can never leak to another tenant.
+        if credential_host_mismatch(&conn.provider, creds.as_ref(), hostname) {
+            debug!(
+                connection_id = %conn.id,
+                provider = %conn.provider,
+                "credential host mismatch: request host does not match stored host; no injection"
+            );
+            return Ok(AppConnectionResult::NoConnections);
+        }
+
         let needs_token = apps::needs_access_token(&conn.provider);
         let (token, expires_at) = if needs_token {
             let Some(resolved) = self
@@ -611,13 +633,6 @@ impl PolicyEngine {
                 }
             }
         }
-
-        // Parse credentials once for credential headers and host rewrite
-        let creds: Option<serde_json::Value> = serde_json::from_str(&decrypted_json)
-            .map_err(|e| {
-                warn!(provider = %conn.provider, error = %e, "failed to parse app connection credentials JSON");
-            })
-            .ok();
 
         // Inject credential-driven headers (e.g., DD-API-KEY from credentials.apiKey)
         if let Some(ref creds) = creds {
@@ -1073,6 +1088,32 @@ pub(crate) async fn resolve_from_cache(
 
 // ── Host matching ───────────────────────────────────────────────────────
 
+/// Returns `true` when the credential's stored host does not match the
+/// request host, meaning injection must be skipped.
+///
+/// For rules with `credential_host_field` (e.g. JFrog's `*.jfrog.io`),
+/// injection is allowed ONLY when the request host equals the stored host.
+/// Returns `false` for rules without `credential_host_field` (no check
+/// needed) and for rules whose stored host matches the request host.
+///
+/// The comparison is on the FULL normalized host — never a single DNS label —
+/// so `nanos.jfrog.io` does not match `evil.jfrog.io`.
+fn credential_host_mismatch(
+    provider: &str,
+    creds: Option<&serde_json::Value>,
+    hostname: &str,
+) -> bool {
+    let Some(field) = apps::credential_host_field(provider, hostname) else {
+        return false; // not a host-gated rule — injection always allowed
+    };
+    let stored = creds
+        .and_then(|c| c.get(field))
+        .and_then(|v| v.as_str())
+        .map(apps::normalize_host)
+        .unwrap_or_default();
+    stored.is_empty() || apps::normalize_host(hostname) != stored
+}
+
 /// Check if a requested hostname matches a secret's host pattern.
 /// Supports exact match and wildcard prefix (`*.example.com` matches `api.example.com`).
 fn host_matches(request_host: &str, pattern: &str) -> bool {
@@ -1234,5 +1275,94 @@ mod tests {
     #[test]
     fn host_wildcard_no_match_without_dot() {
         assert!(!host_matches("notexample.com", "*.example.com"));
+    }
+
+    // ── credential_host_mismatch ─────────────────────────────────────────
+
+    #[test]
+    fn credential_host_mismatch_skipped_for_non_gated_provider() {
+        // Rules without credential_host_field are never gated, even if the
+        // hostname looks unrelated to any stored credential.
+        let creds = serde_json::json!({ "access_token": "t" });
+        assert!(!credential_host_mismatch(
+            "github",
+            Some(&creds),
+            "api.github.com"
+        ));
+        assert!(!credential_host_mismatch("resend", None, "api.resend.com"));
+    }
+
+    #[test]
+    fn credential_host_mismatch_false_when_hosts_match() {
+        let creds = serde_json::json!({
+            "access_token": "t",
+            "token": "t",
+            "subdomain": "nanos.jfrog.io",
+        });
+        assert!(!credential_host_mismatch(
+            "jfrog-artifactory",
+            Some(&creds),
+            "nanos.jfrog.io"
+        ));
+    }
+
+    #[test]
+    fn credential_host_mismatch_false_with_scheme_and_case() {
+        // Stored value may be a full URL or differently-cased; both sides are
+        // normalized before comparison.
+        let creds = serde_json::json!({ "subdomain": "https://Nanos.JFrog.io/" });
+        assert!(!credential_host_mismatch(
+            "jfrog-artifactory",
+            Some(&creds),
+            "nanos.jfrog.io"
+        ));
+    }
+
+    #[test]
+    fn credential_host_mismatch_other_tenant() {
+        // A malicious dependency hitting evil.jfrog.io must NOT receive the
+        // token stored for nanos.jfrog.io.
+        let creds = serde_json::json!({ "subdomain": "nanos.jfrog.io" });
+        assert!(credential_host_mismatch(
+            "jfrog-artifactory",
+            Some(&creds),
+            "evil.jfrog.io"
+        ));
+    }
+
+    #[test]
+    fn credential_host_mismatch_missing_or_empty_subdomain() {
+        // No subdomain field at all.
+        let creds = serde_json::json!({ "access_token": "t" });
+        assert!(credential_host_mismatch(
+            "jfrog-artifactory",
+            Some(&creds),
+            "nanos.jfrog.io"
+        ));
+        // Empty subdomain.
+        let empty = serde_json::json!({ "subdomain": "" });
+        assert!(credential_host_mismatch(
+            "jfrog-artifactory",
+            Some(&empty),
+            "nanos.jfrog.io"
+        ));
+        // No credentials at all.
+        assert!(credential_host_mismatch(
+            "jfrog-artifactory",
+            None,
+            "nanos.jfrog.io"
+        ));
+    }
+
+    #[test]
+    fn credential_host_mismatch_similar_subdomain() {
+        // The gate compares the FULL host, so a stored host must not be matched
+        // by a similarly-named subdomain on the same suffix.
+        let creds = serde_json::json!({ "subdomain": "nanos.jfrog.io" });
+        assert!(credential_host_mismatch(
+            "jfrog-artifactory",
+            Some(&creds),
+            "nanos-clone.jfrog.io"
+        ));
     }
 }

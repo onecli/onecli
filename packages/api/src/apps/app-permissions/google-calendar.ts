@@ -5,6 +5,14 @@ export const googleCalendarPermissions: AppPermissionDefinition = {
   groups: [
     {
       category: "read",
+      wildcard: {
+        id: "read_all",
+        name: "All read operations",
+        description: "List and read events, calendars, and settings",
+        hostPattern: "www.googleapis.com",
+        pathPattern: "/calendar/v3/*",
+        method: "GET",
+      },
       tools: [
         {
           id: "list_events",
@@ -34,6 +42,14 @@ export const googleCalendarPermissions: AppPermissionDefinition = {
     },
     {
       category: "write",
+      wildcard: {
+        id: "write_all",
+        name: "All write operations",
+        description: "Create, update, and delete events and calendars",
+        hostPattern: "www.googleapis.com",
+        pathPattern: "/calendar/v3/*",
+        methods: ["POST", "PUT", "PATCH", "DELETE"],
+      },
       tools: [
         {
           id: "create_event",

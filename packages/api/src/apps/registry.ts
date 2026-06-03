@@ -1,5 +1,6 @@
 import type { AppDefinition } from "./types";
 import { getCloudApps } from "../providers";
+import { IS_CLOUD } from "../lib/env";
 import { confluence } from "./confluence";
 import { docker } from "./docker";
 import { github } from "./github";
@@ -36,6 +37,7 @@ import { linkedin } from "./linkedin";
 import { trello } from "./trello";
 import { monday } from "./monday";
 import { vercel } from "./vercel";
+import { jfrogArtifactory } from "./jfrog-artifactory";
 
 const staticApps: AppDefinition[] = [
   gmail,
@@ -74,12 +76,15 @@ const staticApps: AppDefinition[] = [
   linkedin,
   trello,
   vercel,
+  jfrogArtifactory,
 ];
 
-export const getApps = (): AppDefinition[] => [
-  ...staticApps,
-  ...getCloudApps(),
-];
+const CLOUD_HIDDEN_APPS = new Set(["jfrog-artifactory"]);
+
+export const getApps = (): AppDefinition[] => {
+  const apps = [...staticApps, ...getCloudApps()];
+  return IS_CLOUD ? apps.filter((a) => !CLOUD_HIDDEN_APPS.has(a.id)) : apps;
+};
 
 export const getApp = (id: string): AppDefinition | undefined =>
   getApps().find((app) => app.id === id);
