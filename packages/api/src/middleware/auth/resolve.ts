@@ -1,4 +1,6 @@
 import { db } from "@onecli/db";
+import { IS_CLOUD } from "../../lib/env";
+import { findUserDefaultProject } from "../../services/organization-service";
 
 export const resolveUserEmail = async (userId: string): Promise<string> => {
   const user = await db.user.findUnique({
@@ -38,7 +40,11 @@ export const resolveProjectId = async (
   userId: string,
 ): Promise<string | null> => {
   const headerProjectId = request.headers.get("x-project-id");
-  if (!headerProjectId) return null;
+  if (!headerProjectId) {
+    if (IS_CLOUD) return null;
+    const fallback = await findUserDefaultProject(userId);
+    return fallback?.id ?? null;
+  }
 
   const memberOrgIds = await db.user
     .findUnique({
