@@ -1,5 +1,14 @@
 # Changelog
 
+## [1.35.1](https://github.com/onecli/onecli/compare/v1.35.0...v1.35.1) (2026-06-04)
+
+
+### Bug Fixes
+
+* allow digit-leading agent identifiers and flag unknown agents ([#346](https://github.com/onecli/onecli/issues/346)) ([e553d90](https://github.com/onecli/onecli/commit/e553d90ae99ddb0aa276074400cf8fe76c39a3c9))
+* restore default project fallback for self-hosted auth ([#348](https://github.com/onecli/onecli/issues/348)) ([6b5cadf](https://github.com/onecli/onecli/commit/6b5cadf0e7607ceaed5e6d5e7220a2a0bd975e13))
+* show run command in Get Started dialog ([#350](https://github.com/onecli/onecli/issues/350)) ([8efdf12](https://github.com/onecli/onecli/commit/8efdf12cbe0c1faa9c7407e6927ddfafaf765021))
+
 ## [1.35.0](https://github.com/onecli/onecli/compare/v1.34.1...v1.35.0) (2026-06-03)
 
 
