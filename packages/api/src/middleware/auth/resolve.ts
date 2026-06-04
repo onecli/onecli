@@ -1,4 +1,6 @@
 import { db } from "@onecli/db";
+import { IS_CLOUD } from "../../lib/env";
+import { findUserDefaultProject } from "../../services/organization-service";
 
 export const resolveUserEmail = async (userId: string): Promise<string> => {
   const user = await db.user.findUnique({
@@ -38,7 +40,17 @@ export const resolveProjectId = async (
   userId: string,
 ): Promise<string | null> => {
   const headerProjectId = request.headers.get("x-project-id");
-  if (!headerProjectId) return null;
+
+  if (!headerProjectId) {
+    // Self-hosted/OSS dashboards have no `/p/<projectId>` URL scope to inject
+    // an `x-project-id` header (the proxy strips it), so project-scoped API
+    // calls arrive without one. Fall back to the user's default project (in
+    // OSS there is exactly one). Cloud keeps requiring an explicit project to
+    // avoid ambiguity across a user's multiple projects.
+    if (IS_CLOUD) return null;
+    const defaultProject = await findUserDefaultProject(userId);
+    return defaultProject?.id ?? null;
+  }
 
   const memberOrgIds = await db.user
     .findUnique({
