@@ -62,7 +62,7 @@ export const createAgent = async (
   if (!IDENTIFIER_REGEX.test(trimmedIdentifier)) {
     throw new ServiceError(
       "BAD_REQUEST",
-      "Identifier must be 1-50 characters, start with a letter, and contain only lowercase letters, numbers, and hyphens",
+      "Identifier must be 1-50 characters, start with a letter or number, and contain only lowercase letters, numbers, and hyphens",
     );
   }
 

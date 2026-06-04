@@ -62,7 +62,7 @@ export const CreateAgentDialog = ({
     setIdentifier(value.toLowerCase().replace(/[^a-z0-9-]/g, ""));
   };
 
-  const isValidIdentifier = /^[a-z][a-z0-9-]{0,49}$/.test(identifier);
+  const isValidIdentifier = /^[a-z0-9][a-z0-9-]{0,49}$/.test(identifier);
 
   const handleCreate = () => {
     if (!isNameValid || !isValidIdentifier) return;
@@ -177,7 +177,7 @@ export const CreateAgentDialog = ({
                   }`}
                 >
                   {identifier && !isValidIdentifier
-                    ? "Must start with a letter and contain only lowercase letters, numbers, and hyphens."
+                    ? "Must start with a letter or number and contain only lowercase letters, numbers, and hyphens."
                     : "Used to select this agent in the SDK. Lowercase letters, numbers, and hyphens."}
                 </p>
               </div>

@@ -76,8 +76,21 @@ export const containerConfigRoutes = () => {
           });
 
       if (!agent && agentIdentifier) {
+        // Fail loud: a container was started for an agent that isn't
+        // registered (its POST /api/agents create was rejected or never ran).
+        // Without this it manifests as a silent hang -- the container boots,
+        // never wires credentials, and never replies. Log it server-side and
+        // return an actionable, machine-detectable error so it's traceable.
+        logger.warn(
+          { projectId, agentIdentifier, route: "GET /v1/container-config" },
+          "container config requested for unregistered agent identifier",
+        );
         return c.json(
-          { error: "Agent with the given identifier not found." },
+          {
+            error: `No agent with identifier "${agentIdentifier}" exists in this project. Create it first via POST /api/agents, or omit the "agent" query parameter to use the project's default agent.`,
+            code: "AGENT_NOT_FOUND",
+            agentIdentifier,
+          },
           404,
         );
       }
