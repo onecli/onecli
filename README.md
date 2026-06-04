@@ -61,6 +61,8 @@ docker compose -f docker/docker-compose.yml up -d --wait
 
 Open **http://localhost:10254**, create an agent, add your secrets, and point your agent's HTTP gateway to `localhost:10255`.
 
+> The Quick Start runs OneCLI in **local mode** (single-user, no login), so no `.env` or `NEXTAUTH_SECRET` is required. To enable Google OAuth for multiple users, set `NEXTAUTH_SECRET` and the Google credentials (see [Configuration](#configuration)).
+
 ## Features
 
 - **Transparent credential injection**: agents make normal HTTP calls, the gateway handles auth
