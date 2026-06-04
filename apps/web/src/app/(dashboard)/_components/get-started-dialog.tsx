@@ -158,18 +158,27 @@ export const GetStartedDialog = ({
                       </div>
                     </div>
                   ) : (
-                    <p className="text-muted-foreground rounded-lg border p-4 text-sm">
-                      One-command install is available with{" "}
-                      <a
-                        href="https://app.onecli.sh"
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        className="text-foreground font-medium underline underline-offset-2"
-                      >
-                        OneCLI Cloud
-                      </a>
-                      .
-                    </p>
+                    <div className="space-y-3">
+                      <div className="space-y-2">
+                        <p className="text-muted-foreground text-xs">
+                          Run {activeAgentDef.name} through OneCLI:
+                        </p>
+                        <TryDemoCommand command={runCommand} />
+                      </div>
+                      <p className="text-muted-foreground text-xs">
+                        Requires the OneCLI CLI. One-command install is
+                        available with{" "}
+                        <a
+                          href="https://app.onecli.sh"
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="text-foreground font-medium underline underline-offset-2"
+                        >
+                          OneCLI Cloud
+                        </a>
+                        .
+                      </p>
+                    </div>
                   )}
                 </div>
               )}
