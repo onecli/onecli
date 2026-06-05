@@ -13,6 +13,7 @@ import { googleAnalytics } from "./google-analytics";
 import { googleCalendar } from "./google-calendar";
 import { googleChat } from "./google-chat";
 import { googleClassroom } from "./google-classroom";
+import { googleContacts } from "./google-contacts";
 import { googleDocs } from "./google-docs";
 import { googleDrive } from "./google-drive";
 import { googleForms } from "./google-forms";
@@ -47,6 +48,7 @@ const staticApps: AppDefinition[] = [
   googleDrive,
   googleCalendar,
   googleChat,
+  googleContacts,
   resend,
   googleAdmin,
   googleAnalytics,

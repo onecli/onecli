@@ -406,6 +406,24 @@ static APP_PROVIDERS: &[AppProvider] = &[
         body_transform: None,
     },
     AppProvider {
+        provider: "google-contacts",
+        display_name: "Google Contacts",
+        host_rules: &[HostRule {
+            pattern: HostPattern::Exact("people.googleapis.com"),
+            path_prefix: None,
+            strategy: AuthStrategy::Bearer,
+            intercept: false,
+            credential_host_field: None,
+        }],
+        refresh: Some(&GOOGLE_REFRESH),
+        metadata_headers: &[],
+        credential_headers: &[],
+        credential_params: &[],
+        host_rewrite: None,
+        finalizer: None,
+        body_transform: None,
+    },
+    AppProvider {
         provider: "google-docs",
         display_name: "Google Docs",
         host_rules: &[HostRule {
@@ -1959,6 +1977,29 @@ mod tests {
         assert_eq!(injections.len(), 1);
     }
 
+    // ── Google Contacts (People API) ─────────────────────────────────
+
+    #[test]
+    fn google_contacts_api_uses_bearer() {
+        let injections =
+            build_app_injections("google-contacts", "people.googleapis.com", "ya29.test");
+        assert_eq!(injections.len(), 1);
+        assert_eq!(
+            injections[0],
+            Injection::SetHeader {
+                name: "authorization".to_string(),
+                value: "Bearer ya29.test".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn provider_for_host_google_contacts() {
+        let result =
+            provider_for_host_and_path("people.googleapis.com", "/v1/people/me/connections");
+        assert_eq!(result, Some(("google-contacts", "Google Contacts")));
+    }
+
     // ── Google Calendar ──────────────────────────────────────────────
 
     #[test]
@@ -2023,6 +2064,10 @@ mod tests {
 
     #[test]
     fn providers_for_google_workspace_hosts() {
+        assert_eq!(
+            providers_for_host("people.googleapis.com"),
+            vec!["google-contacts"]
+        );
         assert_eq!(
             providers_for_host("docs.googleapis.com"),
             vec!["google-docs"]
@@ -2117,6 +2162,7 @@ mod tests {
     #[test]
     fn google_workspace_apps_use_bearer() {
         let hosts = [
+            ("google-contacts", "people.googleapis.com"),
             ("google-docs", "docs.googleapis.com"),
             ("google-sheets", "sheets.googleapis.com"),
             ("google-slides", "slides.googleapis.com"),
