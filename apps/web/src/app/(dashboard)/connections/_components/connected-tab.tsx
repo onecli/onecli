@@ -17,6 +17,7 @@ import { extractLabel } from "@onecli/api/services/connection-service";
 import { AppIcon } from "./app-icon";
 import { SecretDialog } from "./secret-dialog";
 import type { SecretActions } from "./types";
+import { labelForScope, type ScopeLabelMap } from "./scope-label";
 
 const defaultGetConnections_ = () =>
   apiGet<{ connections: Awaited<ReturnType<typeof defaultGetConnections>> }>(
@@ -36,6 +37,7 @@ interface ConnectedItem {
   providerCount?: number;
   href?: string;
   inherited?: boolean;
+  scope?: string | null;
   secretData?: {
     id: string;
     name: string;
@@ -70,7 +72,8 @@ interface ConnectedTabProps {
   getVaultConnections?: typeof defaultGetVaultConnections | null;
   basePath?: string;
   secretActions?: SecretActions;
-  pageScope?: "project" | "organization";
+  pageScope?: string;
+  scopeLabels?: ScopeLabelMap;
 }
 
 export const ConnectedTab = ({
@@ -80,6 +83,7 @@ export const ConnectedTab = ({
   basePath,
   secretActions,
   pageScope = "project",
+  scopeLabels,
 }: ConnectedTabProps) => {
   const router = useRouter();
   const pathname = usePathname();
@@ -120,8 +124,9 @@ export const ConnectedTab = ({
           icon: appDef?.icon ?? null,
           darkIcon: appDef?.darkIcon,
           type: "app" as const,
+          scope: c.scope,
           typeLabel: isInherited
-            ? "Organization"
+            ? labelForScope(c.scope, scopeLabels)
             : appDef?.connectionMethod.type === "oauth"
               ? "OAuth"
               : appDef?.connectionMethod.type === "credentials_import"
@@ -147,7 +152,10 @@ export const ConnectedTab = ({
           name: s.name,
           icon: null,
           type: "secret" as const,
-          typeLabel: isInherited ? "Organization" : s.typeLabel,
+          scope: s.scope,
+          typeLabel: isInherited
+            ? labelForScope(s.scope, scopeLabels)
+            : s.typeLabel,
           detail: `Host: ${s.hostPattern}`,
           inherited: isInherited,
           secretData: isInherited ? undefined : s,
@@ -180,6 +188,7 @@ export const ConnectedTab = ({
     getSecrets,
     getVaultConnections,
     pageScope,
+    scopeLabels,
   ]);
 
   useEffect(() => {
@@ -281,7 +290,7 @@ export const ConnectedTab = ({
               <div className="flex items-center gap-2 shrink-0">
                 {item.inherited ? (
                   <Badge variant="outline" className="text-[10px]">
-                    Organization
+                    {labelForScope(item.scope, scopeLabels)}
                   </Badge>
                 ) : (
                   <>

@@ -14,15 +14,20 @@ datasource db {
 // multiple organizations (today: one auto-created on signup; future: invited
 // to others, can create more). Projects under an org share its plan/quotas.
 model Organization {
-  id                 String   @id @default(uuid())
+  id                 String    @id @default(uuid())
   name               String
-  slug               String   @unique
-  stripeCustomerId   String?  @unique @map("stripe_customer_id")
-  subscriptionStatus String   @default("free") @map("subscription_status")
-  awsExternalId      String?  @map("aws_external_id")
-  policyMode         String   @default("allow") @map("policy_mode") // "allow" | "deny"
-  createdAt          DateTime @default(now()) @map("created_at")
-  updatedAt          DateTime @updatedAt @map("updated_at")
+  slug               String    @unique
+  stripeCustomerId   String?   @unique @map("stripe_customer_id")
+  subscriptionStatus String    @default("free") @map("subscription_status")
+  awsExternalId      String?   @map("aws_external_id")
+  policyMode         String    @default("allow") @map("policy_mode") // "allow" | "deny"
+  // Cloud-only (inert in OSS): set when this org was created by a Partner.
+  partnerId          String?   @map("partner_id")
+  // Cloud-only (inert in OSS): set when the org detaches from its partner —
+  // stops inheriting partner secrets but keeps partnerId for attribution.
+  partnerDetachedAt  DateTime? @map("partner_detached_at")
+  createdAt          DateTime  @default(now()) @map("created_at")
+  updatedAt          DateTime  @updatedAt @map("updated_at")
 
   projects       Project[]
   members        OrganizationMember[]
@@ -34,7 +39,10 @@ model Organization {
   policyRules    PolicyRule[]
   apiKeys        ApiKey[]
   auditLogs      AuditLog[]
+  partner        Partner?             @relation(fields: [partnerId], references: [id])
+  partnerClaim   PartnerClaim?
 
+  @@index([partnerId])
   @@map("organizations")
 }
 
@@ -124,6 +132,8 @@ model User {
   updatedAgentSecrets     AgentSecret[]        @relation("AgentSecretUpdater")
   provisionedAs           UserProvision?       @relation("ProvisionedUser")
   createdProvisions       UserProvision[]      @relation("ProvisionCreator")
+  partnerMemberships      PartnerMember[]
+  partnerPlaceholderClaim PartnerClaim?        @relation("PartnerPlaceholder")
 
   @@map("users")
 }
@@ -176,9 +186,10 @@ model Agent {
 
 model Secret {
   id              String        @id @default(uuid())
-  scope           String        @default("project") // "project" | "organization"
+  scope           String        @default("project") // "project" | "organization" | "partner"
   projectId       String?       @map("project_id")
   organizationId  String?       @map("organization_id")
+  partnerId       String?       @map("partner_id") // cloud-only: set when scope = "partner"
   name            String
   type            String // "anthropic", "generic"
   encryptedValue  String        @map("encrypted_value") // AES-256-GCM encrypted via CryptoService
@@ -191,20 +202,23 @@ model Secret {
   updatedAt       DateTime      @updatedAt @map("updated_at")
   project         Project?      @relation(fields: [projectId], references: [id])
   organization    Organization? @relation(fields: [organizationId], references: [id])
+  partner         Partner?      @relation(fields: [partnerId], references: [id])
 
   agentSecrets AgentSecret[]
 
   @@index([projectId])
   @@index([organizationId])
+  @@index([partnerId])
   @@index([scope])
   @@map("secrets")
 }
 
 model PolicyRule {
   id              String        @id @default(uuid())
-  scope           String        @default("project") // "project" | "organization"
+  scope           String        @default("project") // "project" | "organization" (partner reserved)
   projectId       String?       @map("project_id")
   organizationId  String?       @map("organization_id")
+  partnerId       String?       @map("partner_id") // cloud-only, reserved for future partner-level rules (inert)
   agentId         String?       @map("agent_id") // null = all agents, set = one agent only (project-scoped only)
   name            String
   hostPattern     String        @map("host_pattern") // "gmail.googleapis.com" or "*.googleapis.com"
@@ -221,9 +235,11 @@ model PolicyRule {
   project         Project?      @relation(fields: [projectId], references: [id])
   organization    Organization? @relation(fields: [organizationId], references: [id])
   agent           Agent?        @relation(fields: [agentId], references: [id], onDelete: Cascade)
+  partner         Partner?      @relation(fields: [partnerId], references: [id])
 
   @@index([projectId])
   @@index([organizationId])
+  @@index([partnerId])
   @@index([scope])
   @@map("policy_rules")
 }
@@ -320,9 +336,10 @@ model OnboardingSurvey {
 
 model AppConnection {
   id                  String               @id @default(uuid())
-  scope               String               @default("project") // "project" | "organization"
+  scope               String               @default("project") // "project" | "organization" (partner reserved)
   projectId           String?              @map("project_id")
   organizationId      String?              @map("organization_id")
+  partnerId           String?              @map("partner_id") // cloud-only, reserved for future partner-level app connections (inert)
   provider            String // "github", "gmail", "google-calendar", "google-drive", etc.
   label               String?              @map("label") // auto-populated from metadata (email/username)
   status              String               @default("connected")
@@ -333,10 +350,12 @@ model AppConnection {
   updatedAt           DateTime             @updatedAt @map("updated_at")
   project             Project?             @relation(fields: [projectId], references: [id])
   organization        Organization?        @relation(fields: [organizationId], references: [id])
+  partner             Partner?             @relation(fields: [partnerId], references: [id])
   agentAppConnections AgentAppConnection[]
 
   @@index([projectId, provider])
   @@index([organizationId, provider])
+  @@index([partnerId])
   @@index([scope])
   @@map("app_connections")
 }
@@ -356,9 +375,10 @@ model AgentAppConnection {
 
 model AppConfig {
   id             String        @id @default(uuid())
-  scope          String        @default("project") // "project" | "organization"
+  scope          String        @default("project") // "project" | "organization" (partner reserved)
   projectId      String?       @map("project_id")
   organizationId String?       @map("organization_id")
+  partnerId      String?       @map("partner_id") // cloud-only, reserved for future partner-level app config (inert)
   provider       String // "github", "gmail", "google-calendar", "google-drive"
   enabled        Boolean       @default(false)
   credentials    String?       @map("credentials") // encrypted (clientSecret)
@@ -367,9 +387,11 @@ model AppConfig {
   updatedAt      DateTime      @updatedAt @map("updated_at")
   project        Project?      @relation(fields: [projectId], references: [id])
   organization   Organization? @relation(fields: [organizationId], references: [id])
+  partner        Partner?      @relation(fields: [partnerId], references: [id])
 
   @@unique([projectId, provider])
   @@unique([organizationId, provider])
+  @@index([partnerId])
   @@index([scope])
   @@map("app_configs")
 }
@@ -399,6 +421,76 @@ model UserProvision {
   @@index([organizationId])
   @@index([expiresAt, status])
   @@map("user_provisions")
+}
+
+// ── Partner (cloud-only) ────────────────────────────────────────────────
+// A Partner is a reseller/agency that sits ABOVE Organization. It creates orgs
+// via the Partner API, provides inherited (lowest-priority) partner secrets, and
+// hands out claim links. Cloud-only behaviour; these tables/columns are inert in
+// OSS (no OSS code reads or writes them), mirroring CliAuthSession/UserProvision.
+
+model Partner {
+  id        String   @id @default(uuid())
+  name      String
+  slug      String   @unique
+  apiKey    String   @unique @map("api_key") // "oc_partner_" + 32 hex
+  status    String   @default("active") // "active" | "suspended"
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  members        PartnerMember[]
+  organizations  Organization[]
+  secrets        Secret[]
+  appConnections AppConnection[]
+  appConfigs     AppConfig[]
+  policyRules    PolicyRule[]
+  partnerClaims  PartnerClaim[]
+
+  @@map("partners")
+}
+
+// Links a Cognito user (User row) to a Partner for partner-portal access.
+// Mirrors OrganizationMember; supports multiple staff per partner.
+model PartnerMember {
+  partnerId String   @map("partner_id")
+  userId    String   @map("user_id")
+  userEmail String   @map("user_email")
+  role      String   @default("owner") // "owner" | "member" (partner-staff role)
+  createdAt DateTime @default(now()) @map("created_at")
+
+  partner Partner @relation(fields: [partnerId], references: [id])
+  user    User    @relation(fields: [userId], references: [id])
+
+  @@id([partnerId, userId])
+  @@index([userId])
+  @@map("partner_members")
+}
+
+// Claim record for a partner-pre-created (unclaimed) organization. Mirrors
+// UserProvision: a placeholder OWNER holds the org+project until a real Cognito
+// user claims it via the token and is promoted to OWNER.
+model PartnerClaim {
+  id                String    @id @default(uuid())
+  partnerId         String    @map("partner_id")
+  organizationId    String    @unique @map("organization_id")
+  projectId         String    @map("project_id")
+  placeholderUserId String?   @unique @map("placeholder_user_id")
+  token             String    @unique
+  status            String    @default("pending") // "pending" | "claimed" | "expired"
+  expiresAt         DateTime? @map("expires_at") // null = never expires (partner orgs are long-lived)
+  claimedAt         DateTime? @map("claimed_at")
+  claimedByUserId   String?   @map("claimed_by_user_id")
+  claimedByEmail    String?   @map("claimed_by_email")
+  createdAt         DateTime  @default(now()) @map("created_at")
+
+  partner      Partner      @relation(fields: [partnerId], references: [id])
+  organization Organization @relation(fields: [organizationId], references: [id])
+  placeholder  User?        @relation("PartnerPlaceholder", fields: [placeholderUserId], references: [id], onDelete: SetNull)
+
+  @@index([token])
+  @@index([partnerId])
+  @@index([status])
+  @@map("partner_claims")
 }
 
 // ── Standalone (no project scoping) ─────────────────────────────────────
