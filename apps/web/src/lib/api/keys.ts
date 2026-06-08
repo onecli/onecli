@@ -46,5 +46,6 @@ export const queryKeys = {
   billing: {
     all: () => ["billing", ...scope()] as const,
     agentCost: () => [...queryKeys.billing.all(), "agentCost"] as const,
+    planUsage: () => [...queryKeys.billing.all(), "planUsage"] as const,
   },
 };

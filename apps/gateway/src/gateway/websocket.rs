@@ -160,6 +160,12 @@ pub(super) async fn handle_websocket(
         PolicyDecision::Allow => {}
     }
 
+    // Claim mode: block non-LLM WebSocket upgrades until the project is claimed
+    // (cloud-only; no-op in OSS). injection_count is 0 here, so quota is skipped.
+    if let Some(resp) = hooks::pre_forward(rules, proxy_ctx, host, cache, 0).await {
+        return Ok(resp);
+    }
+
     let client_upgrade = hyper::upgrade::on(&mut req);
 
     let (parts, _body) = req.into_parts();

@@ -53,6 +53,7 @@ pub(crate) fn prepare_request(
 pub(crate) async fn pre_forward(
     _rules: &ResolvedRules,
     _proxy_ctx: &ProxyContext,
+    _host: &str,
     _cache: &dyn crate::cache::CacheStore,
     _injection_count: usize,
 ) -> Option<Response<ForwardResponseBody>> {

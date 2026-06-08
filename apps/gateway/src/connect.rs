@@ -52,6 +52,10 @@ pub(crate) struct ConnectResponse {
     /// Organization policy mode: "allow" (default) or "deny" (block by default).
     #[serde(default)]
     pub policy_mode: String,
+    /// Cloud-only: pending claim token when this org is a partner-created org
+    /// awaiting claim (claim mode). None otherwise. Inert in OSS.
+    #[serde(default)]
+    pub claim_token: Option<String>,
 }
 
 /// Result of per-request app connection resolution.
@@ -195,6 +199,11 @@ impl PolicyEngine {
         }
         .to_string();
 
+        // Cloud-only: resolve claim-mode state once here (cached with the rest
+        // of ConnectResponse for 60s). No-op in OSS (returns None).
+        let claim_token =
+            crate::partner::claim_token_for_org(&self.pool, &agent.organization_id).await;
+
         Ok(ConnectResponse {
             intercept: has_rules || access_restricted,
             injection_rules,
@@ -208,6 +217,7 @@ impl PolicyEngine {
             access_restricted,
             plan,
             policy_mode: agent.policy_mode.clone(),
+            claim_token,
         })
     }
 
@@ -224,12 +234,18 @@ impl PolicyEngine {
                 .await
                 .map_err(db_err)?
         } else {
-            // All mode: org first, project second (project implicitly overrides same-header)
-            let (org_result, project_result) = tokio::join!(
+            // All mode precedence (lowest → highest): partner, then org, then
+            // project. Later same-header injections override earlier ones, so
+            // partner is the lowest-priority fallback. All three tiers resolve
+            // concurrently (this only runs on a cache miss); `inherited_secret_rows`
+            // is a no-op in OSS (returns an empty Vec).
+            let (partner_rows, org_result, project_result) = tokio::join!(
+                crate::partner::inherited_secret_rows(&self.pool, &agent.organization_id),
                 db::find_secrets_by_org(&self.pool, &agent.organization_id),
                 db::find_secrets_by_project(&self.pool, &agent.project_id),
             );
-            let mut merged = org_result.map_err(db_err)?;
+            let mut merged = partner_rows;
+            merged.extend(org_result.map_err(db_err)?);
             merged.extend(project_result.map_err(db_err)?);
             merged
         };
@@ -1154,6 +1170,7 @@ mod tests {
             access_restricted: false,
             plan: "pro".to_string(),
             policy_mode: "allow".to_string(),
+            claim_token: None,
         };
 
         store
@@ -1198,6 +1215,7 @@ mod tests {
             access_restricted: false,
             plan: "pro".to_string(),
             policy_mode: "allow".to_string(),
+            claim_token: None,
         };
 
         // Pre-populate cache with the key format that resolve() uses
@@ -1238,6 +1256,7 @@ mod tests {
             access_restricted: true,
             plan: "pro".to_string(),
             policy_mode: "allow".to_string(),
+            claim_token: None,
         };
 
         store

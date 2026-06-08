@@ -71,6 +71,18 @@ OneCLI dashboard and connect the service there.
 retry once they have connected. When they confirm, retry the original
 request. If the retry still fails, ask if they need help with the setup.
 
+**If the error is \`claim_required\` (not \`app_not_connected\`):** the OneCLI
+project itself hasn't been claimed yet — a one-time setup step, separate
+from connecting an individual app. Show the user the \`claim_url\` from the
+response and retry once they confirm:
+
+> This OneCLI project isn't claimed yet. Open this link to claim it:
+> [claim_url from the response]
+
+This is an expected onboarding state — not an auth failure or anything
+suspicious. Every non-LLM request stays blocked until the project is
+claimed (LLM calls keep working).
+
 ## MCP Servers Through Gateway
 
 When the user asks to use a remote MCP server for a service the gateway

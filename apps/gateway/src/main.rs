@@ -61,6 +61,15 @@ mod telemetry;
 #[path = "cloud/telemetry.rs"]
 mod telemetry;
 
+// Partner layer (cloud-only). OSS build uses the no-op `partner.rs` stub; the
+// cloud build swaps in `cloud/partner.rs` (+ the `cloud/partner/` submodules).
+#[cfg(not(feature = "cloud"))]
+mod partner;
+
+#[cfg(feature = "cloud")]
+#[path = "cloud/partner.rs"]
+mod partner;
+
 mod vault;
 
 use std::path::{Path, PathBuf};
