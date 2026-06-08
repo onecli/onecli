@@ -14,6 +14,8 @@ export const AUDIT_ACTIONS = {
   REGENERATE: "regenerate",
   CONNECT: "connect",
   DISCONNECT: "disconnect",
+  // Cloud-only (partner layer): a user claims a partner-created org as its owner.
+  CLAIM: "claim",
 } as const;
 
 export const AUDIT_SERVICES = {
@@ -26,6 +28,9 @@ export const AUDIT_SERVICES = {
   DEPLOYMENT: "deployment",
   PROJECT: "project",
   ORGANIZATION: "organization",
+  // Cloud-only (partner layer)
+  PARTNER: "partner",
+  PARTNER_SECRET: "partner-secret",
 } as const;
 
 export const AUDIT_STATUS = {
@@ -36,6 +41,8 @@ export const AUDIT_STATUS = {
 export const AUDIT_SOURCE = {
   APP: "app",
   API: "api",
+  // Cloud-only (partner layer): actions performed via the Partner API/portal.
+  PARTNER: "partner",
 } as const;
 
 // ─── Types (derived from constants) ───────────────────────────────────────────

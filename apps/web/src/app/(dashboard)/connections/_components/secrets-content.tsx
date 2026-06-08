@@ -13,6 +13,7 @@ import { SecretCard } from "./secret-card";
 import { SecretDialog, type SecretPrefill } from "./secret-dialog";
 import type { SecretActions } from "./types";
 import { safeDecode } from "./safe-decode";
+import { labelForScope, type ScopeLabelMap } from "./scope-label";
 
 interface Secret {
   id: string;
@@ -32,7 +33,8 @@ interface SecretsContentProps {
   typeFilter: "generic" | "llm";
   getSecrets?: () => Promise<Secret[]>;
   secretActions?: SecretActions;
-  pageScope?: "project" | "organization";
+  pageScope?: string;
+  scopeLabels?: ScopeLabelMap;
   renderCreateButton?: (onCreate: () => void) => React.ReactNode;
 }
 
@@ -41,6 +43,7 @@ export const SecretsContent = ({
   getSecrets,
   secretActions,
   pageScope = "project",
+  scopeLabels,
   renderCreateButton,
 }: SecretsContentProps) => {
   const router = useRouter();
@@ -179,7 +182,7 @@ export const SecretsContent = ({
               key={`inherited-${secret.id}`}
               secret={secret}
               readOnly
-              badge="Organization"
+              badge={labelForScope(secret.scope, scopeLabels)}
             />
           ))}
         </>

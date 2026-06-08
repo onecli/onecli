@@ -209,6 +209,9 @@ pub(crate) struct ResolvedRules {
     pub body_transform: Option<crate::apps::BodyTransform>,
     /// Organization policy mode: "allow" (default) or "deny" (block by default).
     pub policy_mode: String,
+    /// Cloud-only: pending claim token when the org is in claim mode. Inert in OSS.
+    #[cfg_attr(not(feature = "cloud"), allow(dead_code))]
+    pub claim_token: Option<String>,
 }
 
 /// Result of per-request rule resolution including app connection disambiguation.
@@ -364,6 +367,7 @@ async fn resolve_rules(
             finalizer,
             body_transform,
             policy_mode: resp.policy_mode,
+            claim_token: resp.claim_token,
         },
         app_connections: resp.app_connections,
     })

@@ -1,9 +1,14 @@
 export interface ResourceScope {
   projectId?: string;
   organizationId?: string;
+  // Cloud-only: partner-scoped resources. Inert in OSS (never set there).
+  partnerId?: string;
 }
 
 export const scopeWhere = (scope: ResourceScope) => {
+  if (scope.partnerId) {
+    return { partnerId: scope.partnerId, scope: "partner" as const };
+  }
   if (scope.projectId && scope.organizationId) {
     return {
       OR: [
@@ -28,6 +33,9 @@ export const scopeWhere = (scope: ResourceScope) => {
 };
 
 export const scopeCreate = (scope: ResourceScope) => {
+  if (scope.partnerId) {
+    return { partnerId: scope.partnerId, scope: "partner" as const };
+  }
   if (scope.projectId && scope.organizationId) {
     throw new Error(
       "Cannot create a resource with both projectId and organizationId",
@@ -46,6 +54,9 @@ export const scopeCreate = (scope: ResourceScope) => {
 };
 
 export const scopeOwnership = (scope: ResourceScope, id: string) => {
+  if (scope.partnerId) {
+    return { id, partnerId: scope.partnerId, scope: "partner" as const };
+  }
   if (scope.organizationId) {
     return {
       id,

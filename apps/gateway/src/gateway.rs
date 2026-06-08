@@ -828,6 +828,7 @@ async fn handle_http_proxy(
         finalizer: resolved_finalizer,
         body_transform: resolved_body_transform,
         policy_mode: resolved.policy_mode,
+        claim_token: resolved.claim_token,
     };
 
     let http_client =
