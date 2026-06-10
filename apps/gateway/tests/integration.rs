@@ -330,3 +330,52 @@ fn ca_persists_across_restarts() {
     // Same CA cert across restarts
     assert_eq!(cert_content_1, cert_content_2, "CA cert should persist");
 }
+
+/// A Codex `onecli-managed` token refresh is answered by the gateway's default
+/// interception with a synthetic 200 — never forwarded to the real
+/// `auth.openai.com`. Exercised via the HTTP-proxy path (no TLS/CA/MITM needed),
+/// which reaches the same `forward_request` as the MITM path.
+#[test]
+fn codex_onecli_managed_refresh_is_intercepted() {
+    let tmp = tempfile::tempdir().expect("create temp dir");
+    let db_url = std::env::var("DATABASE_URL").unwrap_or_default();
+    if db_url.is_empty() {
+        eprintln!("skipping: DATABASE_URL not set");
+        return;
+    }
+    let key = std::env::var("SECRET_ENCRYPTION_KEY").unwrap_or_default();
+    if key.is_empty() {
+        eprintln!("skipping: SECRET_ENCRYPTION_KEY not set");
+        return;
+    }
+    let (port, mut child) = start_gateway_with_db(tmp.path(), &db_url, &key, &[]);
+
+    let mut stream = TcpStream::connect(format!("127.0.0.1:{port}")).expect("connect to gateway");
+    stream.set_read_timeout(Some(Duration::from_secs(5))).ok();
+
+    // HTTP-proxy POST (absolute URI) carrying the onecli-managed sentinel. The
+    // gateway short-circuits before forwarding, so no egress to auth.openai.com.
+    let body = r#"{"grant_type":"refresh_token","refresh_token":"onecli-managed","client_id":"app_EMoamEEZ73f0CkXaXp7hrann"}"#;
+    let req = format!(
+        "POST http://auth.openai.com/oauth/token HTTP/1.1\r\nHost: auth.openai.com\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        body.len(),
+        body,
+    );
+    stream.write_all(req.as_bytes()).expect("send request");
+
+    // Read to EOF (Connection: close) so the full synthetic body is captured.
+    let mut resp = String::new();
+    stream.read_to_string(&mut resp).ok();
+
+    assert!(
+        resp.contains("HTTP/1.1 200"),
+        "expected synthetic 200, got: {resp}"
+    );
+    assert!(
+        resp.contains("onecli-managed"),
+        "expected synthetic onecli-managed token body, got: {resp}"
+    );
+
+    child.kill().ok();
+    child.wait().ok();
+}

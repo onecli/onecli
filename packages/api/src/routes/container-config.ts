@@ -8,7 +8,7 @@ import {
   parseAnthropicMetadata,
   parseOpenaiMetadata,
 } from "../validations/secret";
-import { CODEX_OAUTH_STUB } from "../lib/codex-stubs";
+import { buildCodexOAuthStub } from "../lib/codex-stubs";
 import { DEFAULT_AGENT_NAME, DEFAULT_AGENT_IDENTIFIER } from "../lib/constants";
 import { generateAccessToken } from "../services/agent-service";
 import { getCrypto } from "../providers";
@@ -175,7 +175,7 @@ export const containerConfigRoutes = () => {
           openaiEnv.CODEX_HOME = CODEX_HOME_CONTAINER_PATH;
           credentialStubs.push({
             containerPath: `${CODEX_HOME_CONTAINER_PATH}/auth.json`,
-            content: CODEX_OAUTH_STUB,
+            content: buildCodexOAuthStub(),
           });
         } else {
           openaiEnv.OPENAI_API_KEY = "placeholder";

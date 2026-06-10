@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use futures_util::{StreamExt, TryStreamExt};
-use http_body_util::{Either, Full};
+use http_body_util::{BodyExt, Either, Full};
 use hyper::body::{Bytes, Frame, Incoming};
 use hyper::header::HeaderName;
 use hyper::{Request, Response, StatusCode};
@@ -18,6 +18,7 @@ use crate::approval::{
 };
 use crate::apps;
 use crate::cache::CacheStore;
+use crate::default_interceptions;
 use crate::inject;
 use crate::policy::{self, PolicyDecision};
 
@@ -61,6 +62,17 @@ fn is_forwarded_response_header(name: &HeaderName) -> bool {
     !HOP_BY_HOP_HEADERS.contains(&name.as_str())
 }
 
+/// Returns true if the request declares a `Content-Length` no larger than `max`.
+/// Absent or oversized `Content-Length` ⇒ false, so the request is left to
+/// forward normally rather than buffered for a default-interception check.
+fn content_length_at_most(headers: &hyper::HeaderMap, max: usize) -> bool {
+    headers
+        .get(hyper::header::CONTENT_LENGTH)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.parse::<usize>().ok())
+        .is_some_and(|n| n <= max)
+}
+
 // ── Request forwarding ──────────────────────────────────────────────────
 
 /// Forward a single HTTP request to the real upstream server and stream the response back.
@@ -85,6 +97,10 @@ const BODY_PREVIEW_BYTES: usize = 4096;
 /// Maximum response body to buffer when checking if a 400 is auth-related.
 /// Auth error messages are small JSON; no need to scan large bodies.
 const AUTH_CHECK_BODY_LIMIT: usize = 8192;
+
+/// Maximum request body we'll buffer to evaluate a default interception.
+/// OAuth refresh bodies are tiny; this only guards against pathological inputs.
+const MAX_DEFAULT_INTERCEPT_BODY: usize = 64 * 1024;
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn forward_request(
@@ -126,28 +142,50 @@ pub(crate) async fn forward_request(
                 "expires_in": intercept.expires_in,
                 "token_type": "Bearer",
             });
-            let bytes = Bytes::from(serde_json::to_vec(&body).expect("serializing JSON literal"));
-            let mut resp = Response::new(Either::Left(Full::new(bytes)));
-            *resp.status_mut() = StatusCode::OK;
-            resp.headers_mut().insert(
-                "content-type",
-                hyper::header::HeaderValue::from_static("application/json"),
-            );
-            return Ok(resp);
+            return Ok(response::json(StatusCode::OK, body));
         }
     }
 
-    // Buffer request body for condition matching if any rule has conditions.
-    // In OSS, needs_body_buffer() always returns false → zero overhead.
+    // Default interceptions: gateway-authored responses for predefined endpoints
+    // (e.g. Codex's onecli-managed OAuth refresh), independent of any connected
+    // secret or app. Cheap host/path/method pre-match for every request; only a
+    // matched, small request gets its body buffered and inspected below.
+    let default_target =
+        default_interceptions::match_target(super::strip_port(host), &path, &method)
+            .filter(|_| content_length_at_most(req.headers(), MAX_DEFAULT_INTERCEPT_BODY));
+
+    // Buffer request body for condition matching (cloud) or a matched default
+    // interception. In OSS, needs_body_buffer() is always false → zero overhead
+    // unless a default interception matched.
     let (condition_buffer, req) = if crate::condition_match::needs_body_buffer(&rules.policy_rules)
     {
         let (parts, incoming) = req.into_parts();
         let (buf, fwd_body) =
             crate::condition_match::prepare_body(incoming, method.as_str(), &url).await?;
         (buf, hyper::Request::from_parts(parts, fwd_body))
+    } else if default_target.is_some() {
+        // OSS-safe: fully buffer the known-small body, keeping the bytes for both
+        // the interception check and (if it declines) forwarding.
+        let (parts, incoming) = req.into_parts();
+        let bytes = incoming
+            .collect()
+            .await
+            .context("buffering request body for default interception")?
+            .to_bytes();
+        let req = hyper::Request::from_parts(parts, reqwest::Body::from(bytes.clone()));
+        (Some(bytes.to_vec()), req)
     } else {
         (None, req.map(reqwest::Body::wrap))
     };
+
+    // Answer a matched default interception before any forwarding. A handler that
+    // declines (e.g. a real refresh token) falls through to normal forwarding.
+    if let Some(target) = default_target {
+        if let Some(synth) = target.handle(condition_buffer.as_deref().unwrap_or(&[])) {
+            info!(method = %method, url = %url, "default interception — serving synthetic response");
+            return Ok(response::json(synth.status, synth.body));
+        }
+    }
 
     let has_injections = !rules.injection_rules.is_empty();
     let enforce_deny = has_injections && !policy::is_llm_host(host);
@@ -267,7 +305,9 @@ pub(crate) async fn forward_request(
         inject::apply_injections(&mut headers, &mut upstream_path, &rules.injection_rules);
     let upstream_url = format!("{scheme}://{host}{upstream_path}");
 
-    if let Some(resp) = hooks::pre_forward(rules, proxy_ctx, host, cache, injection_count).await {
+    if let Some(resp) =
+        hooks::pre_forward(rules, proxy_ctx, host, cache, pool, injection_count).await
+    {
         return Ok(resp);
     }
 
@@ -508,6 +548,11 @@ pub(crate) async fn forward_request(
         }
         None => forward_body,
     };
+
+    // ── Claim-mode request-body note (cloud) ──────────────────────
+    // For an unclaimed partner-created org, the cloud build injects a calm
+    // claim note into LLM requests; OSS is a passthrough no-op.
+    let forward_body = hooks::prepare_request_body(rules, host, forward_body).await;
 
     // ── Provider-specific request signing ─────────────────────────
     let forward_body = match rules
@@ -839,6 +884,7 @@ fn emit_policy_telemetry(
         connection_label: None,
         existing_log_id: None,
         log_id: None,
+        budget_charge: None,
     });
 }
 
@@ -893,6 +939,7 @@ fn emit_approval_telemetry(
         connection_label: None,
         existing_log_id,
         log_id,
+        budget_charge: None,
     });
 }
 

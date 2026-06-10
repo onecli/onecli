@@ -55,9 +55,20 @@ pub(crate) async fn pre_forward(
     _proxy_ctx: &ProxyContext,
     _host: &str,
     _cache: &dyn crate::cache::CacheStore,
+    _pool: &sqlx::PgPool,
     _injection_count: usize,
 ) -> Option<Response<ForwardResponseBody>> {
     None
+}
+
+/// Request-body transform hook. OSS: passthrough. The cloud build injects a
+/// claim note into LLM requests for unclaimed (partner-created) orgs.
+pub(crate) async fn prepare_request_body(
+    _rules: &ResolvedRules,
+    _host: &str,
+    body: reqwest::Body,
+) -> reqwest::Body {
+    body
 }
 
 pub(crate) fn track_and_wrap(
@@ -86,6 +97,7 @@ pub(crate) fn track_and_wrap(
         connection_label: meta.connection_label,
         existing_log_id: meta.existing_log_id,
         log_id: None,
+        budget_charge: None,
     });
     Box::pin(stream.map_ok(Frame::data))
 }

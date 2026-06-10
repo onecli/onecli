@@ -41,6 +41,7 @@ model Organization {
   auditLogs      AuditLog[]
   partner        Partner?             @relation(fields: [partnerId], references: [id])
   partnerClaim   PartnerClaim?
+  budgets        Budget[] // cloud-only: per-secret spend budgets for this org (inert in OSS)
 
   @@index([partnerId])
   @@map("organizations")
@@ -104,6 +105,7 @@ model Project {
   onboardingSurvey OnboardingSurvey?
   appConnections   AppConnection[]
   appConfigs       AppConfig[]
+  budgets          Budget[] // cloud-only: per-secret spend budgets for this project (inert in OSS)
 
   @@unique([organizationId, slug])
   @@index([organizationId])
@@ -205,6 +207,7 @@ model Secret {
   partner         Partner?      @relation(fields: [partnerId], references: [id])
 
   agentSecrets AgentSecret[]
+  budgets      Budget[] // cloud-only: spend budgets on this secret (inert in OSS)
 
   @@index([projectId])
   @@index([organizationId])
@@ -455,14 +458,16 @@ model PartnerMember {
   partnerId String   @map("partner_id")
   userId    String   @map("user_id")
   userEmail String   @map("user_email")
-  role      String   @default("owner") // "owner" | "member" (partner-staff role)
+  role      String   @default("owner") // "owner" | "admin" | "member" (partner-staff role)
   createdAt DateTime @default(now()) @map("created_at")
 
   partner Partner @relation(fields: [partnerId], references: [id])
   user    User    @relation(fields: [userId], references: [id])
 
   @@id([partnerId, userId])
-  @@index([userId])
+  // A user belongs to at most one partner (the portal / API-key resolution is
+  // single-partner). Unique — not just an index — enforces that at the DB level.
+  @@unique([userId])
   @@map("partner_members")
 }
 
@@ -491,6 +496,46 @@ model PartnerClaim {
   @@index([partnerId])
   @@index([status])
   @@map("partner_claims")
+}
+
+// Cloud-only (inert in OSS): a spend budget on a secret for a consuming scope.
+// Scope-agnostic — partner-ness is implied by the bound secret's scope, so the
+// same model serves a future non-partner flow (org/project capping its own key).
+// Now: secretId = a partner secret, organizationId = the consuming org.
+model Budget {
+  id             String   @id @default(uuid())
+  secretId       String   @map("secret_id")
+  organizationId String?  @map("organization_id")
+  projectId      String?  @map("project_id") // future non-partner scoping
+  limitCents     Int      @map("limit_cents")
+  period         String   @default("monthly") // "monthly" | "total"
+  createdBy      String   @map("created_by")
+  createdAt      DateTime @default(now()) @map("created_at")
+  updatedAt      DateTime @updatedAt @map("updated_at")
+
+  secret       Secret        @relation(fields: [secretId], references: [id], onDelete: Cascade)
+  organization Organization? @relation(fields: [organizationId], references: [id])
+  project      Project?      @relation(fields: [projectId], references: [id])
+
+  @@unique([secretId, organizationId]) // one budget per (secret, consuming org)
+  @@index([secretId])
+  @@index([organizationId])
+  @@map("budgets")
+}
+
+// Cloud-only (inert in OSS): durable accumulated spend, period-windowed to match
+// the gateway's Redis hot counter key. The Redis counter is the hot enforcement
+// source of truth; this is the durable floor (rehydrated into Redis on cache miss
+// so a flush can't silently refill a budget). `spentNanos` = nano-dollars (1e-9).
+model BudgetSpend {
+  secretId       String   @map("secret_id")
+  organizationId String   @map("organization_id")
+  period         String // "m:YYYY-MM" (monthly window) | "total"
+  spentNanos     BigInt   @default(0) @map("spent_nanos")
+  updatedAt      DateTime @updatedAt @map("updated_at")
+
+  @@id([secretId, organizationId, period])
+  @@map("budget_spends")
 }
 
 // ── Standalone (no project scoping) ─────────────────────────────────────

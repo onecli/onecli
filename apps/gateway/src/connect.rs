@@ -56,6 +56,10 @@ pub(crate) struct ConnectResponse {
     /// awaiting claim (claim mode). None otherwise. Inert in OSS.
     #[serde(default)]
     pub claim_token: Option<String>,
+    /// Cloud-only: spend budgets governing the effective credential for this
+    /// host (0/1 in practice — the response is per-host). Empty in OSS.
+    #[serde(default)]
+    pub budget_bindings: Vec<crate::budget::BudgetBinding>,
 }
 
 /// Result of per-request app connection resolution.
@@ -179,7 +183,7 @@ impl PolicyEngine {
         agent: &db::AgentRow,
         hostname: &str,
     ) -> Result<ConnectResponse, ConnectError> {
-        let (injection_rules, _has_platform) =
+        let (injection_rules, _has_platform, budget_bindings) =
             self.resolve_secret_injections(agent, hostname).await?;
         let app_connections = self.resolve_app_connections(agent, hostname).await?;
         let policy_rules = self.resolve_policy_rules(agent, hostname).await?;
@@ -218,6 +222,7 @@ impl PolicyEngine {
             plan,
             policy_mode: agent.policy_mode.clone(),
             claim_token,
+            budget_bindings,
         })
     }
 
@@ -227,7 +232,7 @@ impl PolicyEngine {
         &self,
         agent: &db::AgentRow,
         hostname: &str,
-    ) -> Result<(Vec<InjectionRule>, bool), ConnectError> {
+    ) -> Result<(Vec<InjectionRule>, bool, Vec<crate::budget::BudgetBinding>), ConnectError> {
         let secrets = if agent.secret_mode == SECRET_MODE_SELECTIVE {
             // Selective: agent_secrets join returns both project + org assigned secrets
             db::find_secrets_by_agent(&self.pool, &agent.id)
@@ -325,7 +330,13 @@ impl PolicyEngine {
             });
         }
 
-        Ok((rules, has_platform))
+        // Cloud-only: resolve spend budgets for the effective partner credential
+        // among the host-filtered secrets. The budget module owns which partner
+        // secret is effective (by scope, not shadowed). No-op in OSS.
+        let budget_bindings =
+            crate::budget::resolve_bindings(&self.pool, &agent.organization_id, &matching).await;
+
+        Ok((rules, has_platform, budget_bindings))
     }
 
     /// Fetch app connections matching providers for this host (deferred resolution).
@@ -1171,6 +1182,7 @@ mod tests {
             plan: "pro".to_string(),
             policy_mode: "allow".to_string(),
             claim_token: None,
+            budget_bindings: vec![],
         };
 
         store
@@ -1216,6 +1228,7 @@ mod tests {
             plan: "pro".to_string(),
             policy_mode: "allow".to_string(),
             claim_token: None,
+            budget_bindings: vec![],
         };
 
         // Pre-populate cache with the key format that resolve() uses
@@ -1257,6 +1270,7 @@ mod tests {
             plan: "pro".to_string(),
             policy_mode: "allow".to_string(),
             claim_token: None,
+            budget_bindings: vec![],
         };
 
         store

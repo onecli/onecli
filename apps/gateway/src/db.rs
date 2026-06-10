@@ -36,6 +36,12 @@ pub(crate) struct AgentRow {
 #[derive(Debug, FromRow)]
 pub(crate) struct SecretRow {
     pub id: String,
+    /// "project" | "organization" | "partner". Lets the budget layer identify the
+    /// partner-tier credential by its actual scope — regardless of how the secret
+    /// was resolved (inherited vs. selectively assigned to an agent). Read only by
+    /// the cloud budget module (`BudgetSecret` impl), hence the cfg'd allow.
+    #[cfg_attr(not(feature = "cloud"), allow(dead_code))]
+    pub scope: String,
     #[sqlx(rename = "type")]
     pub type_: String,
     pub encrypted_value: String,
@@ -213,7 +219,7 @@ pub(crate) async fn find_secrets_by_project(
     project_id: &str,
 ) -> Result<Vec<SecretRow>> {
     sqlx::query_as::<_, SecretRow>(
-        r#"SELECT id, type, encrypted_value, host_pattern, path_pattern, injection_config, is_platform, metadata FROM secrets WHERE project_id = $1"#,
+        r#"SELECT id, scope, type, encrypted_value, host_pattern, path_pattern, injection_config, is_platform, metadata FROM secrets WHERE project_id = $1"#,
     )
     .bind(project_id)
     .fetch_all(pool)
@@ -224,7 +230,7 @@ pub(crate) async fn find_secrets_by_project(
 /// Find secrets assigned to a specific agent (selective mode).
 pub(crate) async fn find_secrets_by_agent(pool: &PgPool, agent_id: &str) -> Result<Vec<SecretRow>> {
     sqlx::query_as::<_, SecretRow>(
-        r#"SELECT s.id, s.type, s.encrypted_value, s.host_pattern, s.path_pattern, s.injection_config, s.is_platform, s.metadata
+        r#"SELECT s.id, s.scope, s.type, s.encrypted_value, s.host_pattern, s.path_pattern, s.injection_config, s.is_platform, s.metadata
            FROM secrets s
            INNER JOIN agent_secrets as_ ON s.id = as_.secret_id
            WHERE as_.agent_id = $1"#,
@@ -241,7 +247,7 @@ pub(crate) async fn find_secrets_by_org(
     organization_id: &str,
 ) -> Result<Vec<SecretRow>> {
     sqlx::query_as::<_, SecretRow>(
-        r#"SELECT id, type, encrypted_value, host_pattern, path_pattern, injection_config, is_platform, metadata
+        r#"SELECT id, scope, type, encrypted_value, host_pattern, path_pattern, injection_config, is_platform, metadata
            FROM secrets
            WHERE organization_id = $1 AND scope = 'organization'"#,
     )

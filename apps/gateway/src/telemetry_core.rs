@@ -40,6 +40,18 @@ pub(crate) enum RequestDecision {
     BlockedByDefaultPolicy,
 }
 
+/// A metered spend charge attached to a request event (cloud budget feature).
+/// Plain data so this shared core stays independent of the swapped `budget`
+/// module; the cloud telemetry flush reads it to accumulate spend. `cost_nanos`
+/// is already priced by the meter — the flush stays provider-agnostic.
+#[allow(dead_code)] // read by cloud telemetry (budget flush), unused in OSS
+pub(crate) struct BudgetCharge {
+    pub secret_id: String,
+    pub organization_id: String,
+    pub period_key: String,
+    pub cost_nanos: i64,
+}
+
 pub(crate) struct RequestEvent {
     #[allow(dead_code)] // read by cloud telemetry (Redis counters), unused in OSS
     pub org_id: String,
@@ -65,6 +77,10 @@ pub(crate) struct RequestEvent {
     pub existing_log_id: Option<String>,
     #[allow(dead_code)] // read by cloud telemetry (pre-assigned INSERT id), unused in OSS
     pub log_id: Option<String>,
+    /// Cloud-only: a metered spend charge to accumulate in the budget flush.
+    /// `None` for non-budgeted requests; always `None` in OSS.
+    #[allow(dead_code)] // read by cloud telemetry (budget flush), unused in OSS
+    pub budget_charge: Option<BudgetCharge>,
 }
 
 pub(crate) static SENDER: OnceLock<mpsc::Sender<RequestEvent>> = OnceLock::new();
@@ -167,6 +183,7 @@ mod tests {
             connection_label: None,
             existing_log_id: None,
             log_id: None,
+            budget_charge: None,
         }
     }
 

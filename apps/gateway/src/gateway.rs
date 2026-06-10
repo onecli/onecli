@@ -21,10 +21,10 @@ mod finalizers;
 pub(crate) mod forward;
 mod hints;
 #[cfg(not(feature = "cloud"))]
-mod hooks;
+pub(crate) mod hooks;
 #[cfg(feature = "cloud")]
 #[path = "cloud/hooks.rs"]
-mod hooks;
+pub(crate) mod hooks;
 mod mitm;
 mod response;
 mod transforms;
@@ -829,6 +829,7 @@ async fn handle_http_proxy(
         body_transform: resolved_body_transform,
         policy_mode: resolved.policy_mode,
         claim_token: resolved.claim_token,
+        budget_bindings: resolved.budget_bindings,
     };
 
     let http_client =

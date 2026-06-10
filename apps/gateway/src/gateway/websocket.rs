@@ -90,6 +90,7 @@ pub(super) async fn handle_websocket(
     host: &str,
     rules: &ResolvedRules,
     cache: &dyn CacheStore,
+    pool: &sqlx::PgPool,
     proxy_ctx: &ProxyContext,
 ) -> Result<Response<Either<Full<Bytes>, http_body_util::StreamBody<hooks::BodyStream>>>> {
     let start = std::time::Instant::now();
@@ -162,7 +163,7 @@ pub(super) async fn handle_websocket(
 
     // Claim mode: block non-LLM WebSocket upgrades until the project is claimed
     // (cloud-only; no-op in OSS). injection_count is 0 here, so quota is skipped.
-    if let Some(resp) = hooks::pre_forward(rules, proxy_ctx, host, cache, 0).await {
+    if let Some(resp) = hooks::pre_forward(rules, proxy_ctx, host, cache, pool, 0).await {
         return Ok(resp);
     }
 
@@ -411,6 +412,7 @@ fn emit_telemetry(
             connection_label: None,
             existing_log_id: None,
             log_id: None,
+            budget_charge: None,
         });
     }
 }

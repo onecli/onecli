@@ -39,12 +39,10 @@ fn scoped_url(base: &str, path: &str, project_id: Option<&str>) -> String {
     }
 }
 
-/// Build a JSON error response with the given status code and body.
-/// Used by `forward_request` (MITM and HTTP proxy forwarding path).
-pub(super) fn json_error<S>(
-    status: StatusCode,
-    body: serde_json::Value,
-) -> Response<ForwardBody<S>> {
+/// Build a JSON response with the given status code and body.
+/// Used directly for gateway-authored success responses (token-endpoint and
+/// default interceptions) and via [`json_error`] for error responses.
+pub(super) fn json<S>(status: StatusCode, body: serde_json::Value) -> Response<ForwardBody<S>> {
     let json = body.to_string();
     let mut response = Response::new(Either::Left(Full::new(Bytes::from(json))));
     *response.status_mut() = status;
@@ -52,6 +50,15 @@ pub(super) fn json_error<S>(
         .headers_mut()
         .insert("content-type", HeaderValue::from_static("application/json"));
     response
+}
+
+/// Build a JSON error response with the given status code and body.
+/// Used by `forward_request` (MITM and HTTP proxy forwarding path).
+pub(super) fn json_error<S>(
+    status: StatusCode,
+    body: serde_json::Value,
+) -> Response<ForwardBody<S>> {
+    json(status, body)
 }
 
 /// Build a JSON error response with `axum::body::Body`.

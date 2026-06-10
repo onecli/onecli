@@ -31,6 +31,8 @@ export const AUDIT_SERVICES = {
   // Cloud-only (partner layer)
   PARTNER: "partner",
   PARTNER_SECRET: "partner-secret",
+  // Cloud-only (budget module): per-(secret, org) spend caps
+  BUDGET: "budget",
 } as const;
 
 export const AUDIT_STATUS = {

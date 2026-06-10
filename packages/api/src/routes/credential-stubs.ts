@@ -3,7 +3,7 @@ import { db } from "@onecli/db";
 import type { ApiEnv } from "../types";
 import { authMiddleware, requireProjectId } from "../middleware/auth";
 import { parseOpenaiMetadata } from "../validations/secret";
-import { CODEX_OAUTH_STUB, CODEX_APIKEY_STUB } from "../lib/codex-stubs";
+import { buildCodexOAuthStub, CODEX_APIKEY_STUB } from "../lib/codex-stubs";
 
 const resolveCodexStub = async (projectId: string, organizationId: string) => {
   const openaiSecrets = await db.secret.findMany({
@@ -27,7 +27,7 @@ const resolveCodexStub = async (projectId: string, organizationId: string) => {
   return {
     agent: "codex",
     filePath: "~/.codex/auth.json",
-    content: allApiKey ? CODEX_APIKEY_STUB : CODEX_OAUTH_STUB,
+    content: allApiKey ? CODEX_APIKEY_STUB : buildCodexOAuthStub(),
     authMode: allApiKey ? "api-key" : "oauth",
     permissions: "0600",
   };

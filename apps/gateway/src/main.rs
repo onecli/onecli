@@ -47,6 +47,7 @@ mod crypto;
 mod crypto;
 
 mod db;
+mod default_interceptions;
 mod gateway;
 mod inject;
 mod policy;
@@ -69,6 +70,15 @@ mod partner;
 #[cfg(feature = "cloud")]
 #[path = "cloud/partner.rs"]
 mod partner;
+
+// Budget layer (cloud-only). OSS build uses the no-op `budget.rs` stub; the
+// cloud build swaps in `cloud/budget.rs` (+ the `cloud/budget/` submodules).
+#[cfg(not(feature = "cloud"))]
+mod budget;
+
+#[cfg(feature = "cloud")]
+#[path = "cloud/budget.rs"]
+mod budget;
 
 mod vault;
 

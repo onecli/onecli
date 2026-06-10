@@ -111,6 +111,7 @@ pub(super) async fn mitm(
                                     effective_host,
                                     &rules,
                                     &*cache,
+                                    &engine.pool,
                                     &ctx,
                                 )
                                 .await
@@ -212,13 +213,20 @@ pub(crate) struct ResolvedRules {
     /// Cloud-only: pending claim token when the org is in claim mode. Inert in OSS.
     #[cfg_attr(not(feature = "cloud"), allow(dead_code))]
     pub claim_token: Option<String>,
+    /// Cloud-only: spend budgets governing the effective credential for this host
+    /// (0/1 in practice). Empty in OSS.
+    #[cfg_attr(not(feature = "cloud"), allow(dead_code))]
+    pub budget_bindings: Vec<crate::budget::BudgetBinding>,
 }
 
 /// Result of per-request rule resolution including app connection disambiguation.
 enum ResolveResult {
     /// Rules resolved successfully, with the raw app connections for the response header.
     Resolved {
-        rules: ResolvedRules,
+        /// Boxed: `ResolvedRules` is large, so inlining it makes this variant
+        /// dwarf the others (`clippy::large_enum_variant`). `Deref` keeps the box
+        /// transparent at the use sites.
+        rules: Box<ResolvedRules>,
         app_connections: Vec<db::AppConnectionRow>,
     },
     /// Multiple connections exist and no header was provided.
@@ -356,7 +364,7 @@ async fn resolve_rules(
     };
 
     Ok(ResolveResult::Resolved {
-        rules: ResolvedRules {
+        rules: Box::new(ResolvedRules {
             injection_rules,
             policy_rules: resp.policy_rules,
             access_restricted: resp.access_restricted,
@@ -368,7 +376,8 @@ async fn resolve_rules(
             body_transform,
             policy_mode: resp.policy_mode,
             claim_token: resp.claim_token,
-        },
+            budget_bindings: resp.budget_bindings,
+        }),
         app_connections: resp.app_connections,
     })
 }
