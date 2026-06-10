@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.36.0](https://github.com/onecli/onecli/compare/v1.35.1...v1.36.0) (2026-06-10)
+
+
+### Features
+
+* **gateway:** answer Codex onecli-managed token refresh with a synthetic 200 ([#363](https://github.com/onecli/onecli/issues/363)) ([53a2890](https://github.com/onecli/onecli/commit/53a289072dfe7fb4940e79a19d4ff815289be6ba))
+
 ## [1.35.1](https://github.com/onecli/onecli/compare/v1.35.0...v1.35.1) (2026-06-04)
 
 
