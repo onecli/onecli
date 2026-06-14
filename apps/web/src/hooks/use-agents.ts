@@ -10,27 +10,31 @@ import {
   renameAgent,
   regenerateAgentToken,
   setDefaultAgent,
-  getAgentSecrets,
-  updateAgentSecretMode,
-  updateAgentSecrets,
-  getAgentAppConnections,
-  updateAgentAppConnections,
 } from "@/lib/actions/agents";
 import { invalidateGatewayCache } from "@/lib/actions/gateway-cache";
 
 export const useAgents = () =>
   useQuery({ queryKey: queryKeys.agents.list(), queryFn: getAgents });
 
-export const useAgentSecrets = (agentId: string) =>
+export const useAgentGranularAccess = (enabled = true) =>
   useQuery({
-    queryKey: queryKeys.agents.secrets(agentId),
-    queryFn: () => getAgentSecrets(agentId),
+    queryKey: queryKeys.agents.granularAccess(),
+    queryFn: agents.granularAccess,
+    enabled,
   });
 
-export const useAgentConnections = (agentId: string) =>
+export const useAgentSecrets = (agentId: string, enabled = true) =>
+  useQuery({
+    queryKey: queryKeys.agents.secrets(agentId),
+    queryFn: () => agents.secrets(agentId),
+    enabled: enabled && agentId.length > 0,
+  });
+
+export const useAgentConnections = (agentId: string, enabled = true) =>
   useQuery({
     queryKey: queryKeys.agents.connections(agentId),
-    queryFn: () => getAgentAppConnections(agentId),
+    queryFn: () => agents.connections(agentId),
+    enabled: enabled && agentId.length > 0,
   });
 
 export const useCreateAgent = () => {
@@ -102,6 +106,11 @@ export const useSetDefaultAgent = () => {
   });
 };
 
+// Credential-access mutations. These invalidate only the React Query cache;
+// the audited API routes invalidate the gateway cache server-side (withAudit),
+// and the caller (the manage-access dialog) shows a single consolidated toast,
+// so these are intentionally headless (no gateway call, no per-hook toast).
+
 export const useUpdateSecretMode = () => {
   const qc = useQueryClient();
   return useMutation({
@@ -111,13 +120,11 @@ export const useUpdateSecretMode = () => {
     }: {
       agentId: string;
       mode: "all" | "selective";
-    }) => updateAgentSecretMode(agentId, mode),
+    }) => agents.updateSecretMode(agentId, mode),
     onSuccess: (_data, { agentId }) => {
-      qc.invalidateQueries({ queryKey: queryKeys.agents.all() });
       qc.invalidateQueries({ queryKey: queryKeys.agents.secrets(agentId) });
-      invalidateGatewayCache();
+      qc.invalidateQueries({ queryKey: queryKeys.agents.all() });
     },
-    onError: () => toast.error("Failed to update secret mode"),
   });
 };
 
@@ -130,13 +137,11 @@ export const useUpdateAgentSecrets = () => {
     }: {
       agentId: string;
       secretIds: string[];
-    }) => updateAgentSecrets(agentId, secretIds),
+    }) => agents.updateSecrets(agentId, secretIds),
     onSuccess: (_data, { agentId }) => {
       qc.invalidateQueries({ queryKey: queryKeys.agents.secrets(agentId) });
       qc.invalidateQueries({ queryKey: queryKeys.agents.all() });
-      invalidateGatewayCache();
     },
-    onError: () => toast.error("Failed to update agent secrets"),
   });
 };
 
@@ -152,14 +157,10 @@ export const useUpdateAgentConnections = () => {
         appConnectionId: string;
         sessionPolicy?: Record<string, unknown> | null;
       }[];
-    }) => updateAgentAppConnections(agentId, connections),
+    }) => agents.updateConnections(agentId, connections),
     onSuccess: (_data, { agentId }) => {
-      qc.invalidateQueries({
-        queryKey: queryKeys.agents.connections(agentId),
-      });
+      qc.invalidateQueries({ queryKey: queryKeys.agents.connections(agentId) });
       qc.invalidateQueries({ queryKey: queryKeys.agents.all() });
-      invalidateGatewayCache();
     },
-    onError: () => toast.error("Failed to update agent connections"),
   });
 };

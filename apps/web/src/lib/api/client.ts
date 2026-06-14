@@ -41,6 +41,18 @@ export const apiPatch = async <T>(path: string, body: unknown): Promise<T> => {
   return res.json();
 };
 
+export const apiPut = async <T>(path: string, body: unknown): Promise<T> => {
+  const res = await apiFetch(path, {
+    method: "PUT",
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    throw new Error(extractErrorMessage(data, res.status));
+  }
+  return res.json();
+};
+
 export const apiDelete = async (path: string): Promise<void> => {
   const res = await apiFetch(path, { method: "DELETE" });
   if (!res.ok) {

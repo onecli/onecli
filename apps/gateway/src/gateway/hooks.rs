@@ -50,6 +50,18 @@ pub(crate) fn prepare_request(
 ) {
 }
 
+/// Whether the request guard needs the buffered request body to make a
+/// decision. OSS has no request guard → never buffer.
+pub(crate) fn needs_request_body(
+    _rules: &ResolvedRules,
+    _host: &str,
+    _method: &str,
+    _path: &str,
+) -> bool {
+    false
+}
+
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn pre_forward(
     _rules: &ResolvedRules,
     _proxy_ctx: &ProxyContext,
@@ -57,6 +69,10 @@ pub(crate) async fn pre_forward(
     _cache: &dyn crate::cache::CacheStore,
     _pool: &sqlx::PgPool,
     _injection_count: usize,
+    _method: &str,
+    _path: &str,
+    _headers: &hyper::HeaderMap,
+    _body: Option<&[u8]>,
 ) -> Option<Response<ForwardResponseBody>> {
     None
 }

@@ -163,7 +163,22 @@ pub(super) async fn handle_websocket(
 
     // Claim mode: block non-LLM WebSocket upgrades until the project is claimed
     // (cloud-only; no-op in OSS). injection_count is 0 here, so quota is skipped.
-    if let Some(resp) = hooks::pre_forward(rules, proxy_ctx, host, cache, pool, 0).await {
+    // WebSocket upgrades are GET with no inspectable body (the resource guard
+    // is a no-op here; Dropbox/folder traffic never arrives over WebSocket).
+    if let Some(resp) = hooks::pre_forward(
+        rules,
+        proxy_ctx,
+        host,
+        cache,
+        pool,
+        0,
+        req.method().as_str(),
+        &path,
+        req.headers(),
+        None,
+    )
+    .await
+    {
         return Ok(resp);
     }
 

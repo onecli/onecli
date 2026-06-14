@@ -71,6 +71,14 @@ mod partner;
 #[path = "cloud/partner.rs"]
 mod partner;
 
+// Granular access (cloud-only): generic per-agent scoping for app connections —
+// token-level (e.g. GitHub repo-scoped tokens) or request-level (e.g. Dropbox
+// folder allowlist). No OSS stub: it is referenced only from other cloud-only
+// modules (`cloud/hooks.rs`, `cloud/cloud_apps.rs`).
+#[cfg(feature = "cloud")]
+#[path = "cloud/granular_access.rs"]
+mod granular_access;
+
 // Budget layer (cloud-only). OSS build uses the no-op `budget.rs` stub; the
 // cloud build swaps in `cloud/budget.rs` (+ the `cloud/budget/` submodules).
 #[cfg(not(feature = "cloud"))]

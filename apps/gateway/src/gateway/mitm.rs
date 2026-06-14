@@ -213,6 +213,11 @@ pub(crate) struct ResolvedRules {
     /// Cloud-only: pending claim token when the org is in claim mode. Inert in OSS.
     #[cfg_attr(not(feature = "cloud"), allow(dead_code))]
     pub claim_token: Option<String>,
+    /// Per-agent resource policy (e.g. Dropbox folder allowlist) for the
+    /// connection serving this host. Consumed by the cloud request guard to
+    /// enforce granular access; `None` in the common, unrestricted case.
+    #[cfg_attr(not(feature = "cloud"), allow(dead_code))]
+    pub session_policy: Option<serde_json::Value>,
     /// Cloud-only: spend budgets governing the effective credential for this host
     /// (0/1 in practice). Empty in OSS.
     #[cfg_attr(not(feature = "cloud"), allow(dead_code))]
@@ -220,6 +225,9 @@ pub(crate) struct ResolvedRules {
 }
 
 /// Result of per-request rule resolution including app connection disambiguation.
+// `Resolved` is the large, common variant; this value is built once per request
+// and consumed immediately, so boxing it would only add a hot-path allocation.
+#[allow(clippy::large_enum_variant)]
 enum ResolveResult {
     /// Rules resolved successfully, with the raw app connections for the response header.
     Resolved {
@@ -278,6 +286,8 @@ async fn resolve_rules(
     let mut connection_label: Option<String> = None;
     let mut finalizer: Option<crate::apps::RequestFinalizer> = None;
     let mut body_transform: Option<crate::apps::BodyTransform> = None;
+    // Granular-access policy of the connection that wins injection (if any).
+    let mut session_policy: Option<serde_json::Value> = None;
 
     // If no secret rules, try app connections (per-request disambiguation)
     if injection_rules.is_empty() && !resp.app_connections.is_empty() {
@@ -300,6 +310,7 @@ async fn resolve_rules(
                 connection_label: cl,
                 finalizer: f,
                 body_transform: bt,
+                session_policy: sp,
                 ..
             } => {
                 injection_rules = rules;
@@ -308,6 +319,7 @@ async fn resolve_rules(
                 connection_label = cl;
                 finalizer = f;
                 body_transform = bt;
+                session_policy = sp;
             }
             AppConnectionResult::Ambiguous { connections } => {
                 return Ok(ResolveResult::Ambiguous(connections));
@@ -376,6 +388,7 @@ async fn resolve_rules(
             body_transform,
             policy_mode: resp.policy_mode,
             claim_token: resp.claim_token,
+            session_policy,
             budget_bindings: resp.budget_bindings,
         }),
         app_connections: resp.app_connections,
