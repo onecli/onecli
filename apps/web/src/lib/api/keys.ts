@@ -11,6 +11,8 @@ export const queryKeys = {
       [...queryKeys.agents.all(), agentId, "secrets"] as const,
     connections: (agentId: string) =>
       [...queryKeys.agents.all(), agentId, "connections"] as const,
+    granularAccess: () =>
+      [...queryKeys.agents.all(), "granular-access"] as const,
   },
   secrets: {
     all: () => ["secrets", ...scope()] as const,
@@ -47,5 +49,12 @@ export const queryKeys = {
     all: () => ["billing", ...scope()] as const,
     agentCost: () => [...queryKeys.billing.all(), "agentCost"] as const,
     planUsage: () => [...queryKeys.billing.all(), "planUsage"] as const,
+    subscriptionStatus: () =>
+      [...queryKeys.billing.all(), "subscriptionStatus"] as const,
+  },
+  dropbox: {
+    all: () => ["dropbox", ...scope()] as const,
+    folders: (connectionId: string, path: string) =>
+      [...queryKeys.dropbox.all(), "folders", connectionId, path] as const,
   },
 };

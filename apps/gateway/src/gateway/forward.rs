@@ -154,10 +154,12 @@ pub(crate) async fn forward_request(
         default_interceptions::match_target(super::strip_port(host), &path, &method)
             .filter(|_| content_length_at_most(req.headers(), MAX_DEFAULT_INTERCEPT_BODY));
 
-    // Buffer request body for condition matching (cloud) or a matched default
-    // interception. In OSS, needs_body_buffer() is always false → zero overhead
-    // unless a default interception matched.
+    // Buffer the request body for condition matching, when the request guard needs
+    // to inspect it (e.g. Dropbox folder scoping reads the JSON body), or for a
+    // matched default interception. In OSS, both predicates return false → zero
+    // overhead unless a default interception matched.
     let (condition_buffer, req) = if crate::condition_match::needs_body_buffer(&rules.policy_rules)
+        || hooks::needs_request_body(rules, host, method.as_str(), &path)
     {
         let (parts, incoming) = req.into_parts();
         let (buf, fwd_body) =
@@ -305,8 +307,19 @@ pub(crate) async fn forward_request(
         inject::apply_injections(&mut headers, &mut upstream_path, &rules.injection_rules);
     let upstream_url = format!("{scheme}://{host}{upstream_path}");
 
-    if let Some(resp) =
-        hooks::pre_forward(rules, proxy_ctx, host, cache, pool, injection_count).await
+    if let Some(resp) = hooks::pre_forward(
+        rules,
+        proxy_ctx,
+        host,
+        cache,
+        pool,
+        injection_count,
+        method.as_str(),
+        &path,
+        &headers,
+        condition_buffer.as_deref(),
+    )
+    .await
     {
         return Ok(resp);
     }

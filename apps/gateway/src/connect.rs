@@ -79,6 +79,11 @@ pub(crate) enum AppConnectionResult {
         body_transform: Option<apps::BodyTransform>,
         /// Provider name of the resolved connection (e.g., "github-app", "datadog").
         provider: String,
+        /// Per-agent granular-access policy of THIS connection — the one that
+        /// won injection. Carried here (rather than re-derived by a provider
+        /// scan) so request-level enforcement applies the correct policy even
+        /// when an agent has several same-provider connections.
+        session_policy: Option<serde_json::Value>,
     },
     /// No app connections available for this provider.
     NoConnections,
@@ -468,6 +473,7 @@ impl PolicyEngine {
             let mut resolved_finalizer: Option<apps::RequestFinalizer> = None;
             let mut resolved_body_transform: Option<apps::BodyTransform> = None;
             let mut resolved_provider: Option<String> = None;
+            let mut resolved_session_policy: Option<serde_json::Value> = None;
             for conn in app_connections {
                 if let AppConnectionResult::Rules {
                     rules: r,
@@ -477,6 +483,7 @@ impl PolicyEngine {
                     finalizer,
                     body_transform,
                     provider,
+                    session_policy,
                 } = self
                     .resolve_connection_injections(
                         conn,
@@ -500,6 +507,17 @@ impl PolicyEngine {
                     if body_transform.is_some() {
                         resolved_body_transform = body_transform;
                     }
+                    // Tie the granular policy to the connection that actually
+                    // serves THIS host — not merely the first to yield rules. A
+                    // non-serving connection (e.g. a GitHub connection on a
+                    // Dropbox request) still returns `Rules` carrying its own
+                    // policy, so adopting the first would mis-apply it.
+                    let serves_host = request_path
+                        .map(|p| apps::provider_matches_host_and_path(&provider, hostname, p))
+                        .unwrap_or(false);
+                    if serves_host {
+                        resolved_session_policy = session_policy;
+                    }
                     if resolved_provider.is_none() {
                         resolved_provider = Some(provider);
                     }
@@ -518,6 +536,7 @@ impl PolicyEngine {
                 finalizer: resolved_finalizer,
                 body_transform: resolved_body_transform,
                 provider: resolved_provider.unwrap_or_default(),
+                session_policy: resolved_session_policy,
             });
         }
 
@@ -562,6 +581,7 @@ impl PolicyEngine {
                 finalizer: apps::finalizer_for_provider(&conn.provider),
                 body_transform: apps::body_transform_for_provider(&conn.provider),
                 provider: conn.provider.clone(),
+                session_policy: conn.session_policy.clone(),
             });
         }
 
@@ -723,6 +743,7 @@ impl PolicyEngine {
             finalizer: apps::finalizer_for_provider(&conn.provider),
             body_transform: apps::body_transform_for_provider(&conn.provider),
             provider: conn.provider.clone(),
+            session_policy: conn.session_policy.clone(),
         })
     }
 

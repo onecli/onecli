@@ -1,7 +1,6 @@
 "use client";
 
-import { useEffect, useState, useCallback, useMemo } from "react";
-import { useInvalidateGatewayCache } from "@/hooks/use-invalidate-cache";
+import { useEffect, useState, useCallback, useMemo, useRef } from "react";
 import { AppIcon } from "@/app/(dashboard)/connections/_components/app-icon";
 import {
   KeyRound,
@@ -25,20 +24,16 @@ import { Badge } from "@onecli/ui/components/badge";
 import { Checkbox } from "@onecli/ui/components/checkbox";
 import { ScrollArea } from "@onecli/ui/components/scroll-area";
 import { cn } from "@onecli/ui/lib/utils";
-import { useQueryClient } from "@tanstack/react-query";
 import {
-  secrets as secretsApi,
-  connections as connectionsApi,
-} from "@/lib/api";
+  useAgentSecrets,
+  useAgentConnections,
+  useUpdateSecretMode,
+  useUpdateAgentSecrets,
+  useUpdateAgentConnections,
+} from "@/hooks/use-agents";
+import { useSecrets } from "@/hooks/use-secrets";
+import { useConnections } from "@/hooks/use-connections";
 import type { Secret, Connection } from "@/lib/api";
-import { queryKeys } from "@/lib/api/keys";
-import {
-  getAgentSecrets,
-  updateAgentSecretMode,
-  updateAgentSecrets,
-  getAgentAppConnections,
-  updateAgentAppConnections,
-} from "@/lib/actions/agents";
 import { getApp } from "@onecli/api/apps/registry";
 import { extractLabel } from "@onecli/api/services/connection-service";
 import type { SecretMode } from "@onecli/api/services/agent-service";
@@ -62,22 +57,31 @@ export const ManageAccessDialog = ({
   onOpenChange,
   onUpdated,
 }: ManageAccessDialogProps) => {
-  const invalidateCache = useInvalidateGatewayCache();
-  const queryClient = useQueryClient();
+  // Reads via React Query. The shared secret/connection lists are cached and
+  // deduped; the agent's current assignments are gated on `open` so they don't
+  // fetch while the dialog is closed.
+  const { data: secretsList = [], isPending: secretsLoading } = useSecrets();
+  const { data: connectionsList = [], isPending: connectionsLoading } =
+    useConnections();
+  const { data: assignedSecretIds, isPending: assignedSecretsLoading } =
+    useAgentSecrets(agent.id, open);
+  const { data: assignedConnections, isPending: assignedConnectionsLoading } =
+    useAgentConnections(agent.id, open);
+
+  const updateSecretMode = useUpdateSecretMode();
+  const updateAgentSecrets = useUpdateAgentSecrets();
+  const updateAgentConnections = useUpdateAgentConnections();
+
+  // User-editable buffers, seeded from the agent's assignments on open.
   const [mode, setMode] = useState<SecretMode>(
     agent.secretMode === "selective" ? "selective" : "all",
   );
-  const [secrets, setSecrets] = useState<Secret[]>([]);
-  const [orgSecrets, setOrgSecrets] = useState<Secret[]>([]);
-  const [appConnections, setConnections] = useState<Connection[]>([]);
-  const [orgConnections, setOrgConnections] = useState<Connection[]>([]);
   const [selectedSecretIds, setSelectedSecretIds] = useState<Set<string>>(
     () => new Set(),
   );
   const [connectionPolicies, setConnectionPolicies] = useState<
     Map<string, Record<string, unknown> | null>
   >(() => new Map());
-  const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [search, setSearch] = useState("");
 
@@ -89,55 +93,57 @@ export const ManageAccessDialog = ({
     unknown
   > | null>(null);
 
-  const fetchData = useCallback(async () => {
-    setLoading(true);
-    try {
-      const [allSecrets, assignedSecretIds, allConnections, assignedConns] =
-        await Promise.all([
-          secretsApi.list(),
-          getAgentSecrets(agent.id),
-          connectionsApi.list(),
-          getAgentAppConnections(agent.id),
-        ]);
-      const projectSecrets: typeof allSecrets = [];
-      const orgSecretsList: typeof allSecrets = [];
-      for (const s of allSecrets) {
-        (s.scope === "organization" ? orgSecretsList : projectSecrets).push(s);
-      }
-      setSecrets(projectSecrets);
-      setOrgSecrets(orgSecretsList);
-      setSelectedSecretIds(new Set(assignedSecretIds));
-      const projectConns: typeof allConnections = [];
-      const orgConns: typeof allConnections = [];
-      for (const c of allConnections) {
-        if (c.status !== "connected") continue;
-        (c.scope === "organization" ? orgConns : projectConns).push(c);
-      }
-      setConnections(projectConns);
-      setOrgConnections(orgConns);
-      const policies = new Map<string, Record<string, unknown> | null>();
-      for (const ac of assignedConns) {
-        policies.set(
-          ac.appConnectionId,
-          ac.sessionPolicy as Record<string, unknown> | null,
-        );
-      }
-      setConnectionPolicies(policies);
-    } catch {
-      toast.error("Failed to load credentials");
-    } finally {
-      setLoading(false);
-    }
-  }, [agent.id]);
+  const loading =
+    secretsLoading ||
+    connectionsLoading ||
+    assignedSecretsLoading ||
+    assignedConnectionsLoading;
 
-  useEffect(() => {
-    if (open) {
-      setMode(agent.secretMode === "selective" ? "selective" : "all");
-      setSearch("");
-      setGranularDialogConnId(null);
-      fetchData();
+  // Split the shared lists into project/org buckets (connections must be live).
+  const { secrets, orgSecrets } = useMemo(() => {
+    const project: Secret[] = [];
+    const org: Secret[] = [];
+    for (const s of secretsList) {
+      (s.scope === "organization" ? org : project).push(s);
     }
-  }, [open, agent.secretMode, fetchData]);
+    return { secrets: project, orgSecrets: org };
+  }, [secretsList]);
+
+  const { appConnections, orgConnections } = useMemo(() => {
+    const project: Connection[] = [];
+    const org: Connection[] = [];
+    for (const c of connectionsList) {
+      if (c.status !== "connected") continue;
+      (c.scope === "organization" ? org : project).push(c);
+    }
+    return { appConnections: project, orgConnections: org };
+  }, [connectionsList]);
+
+  // Reset transient UI + mode whenever the dialog opens.
+  useEffect(() => {
+    if (!open) return;
+    setMode(agent.secretMode === "selective" ? "selective" : "all");
+    setSearch("");
+    setGranularDialogConnId(null);
+  }, [open, agent.secretMode]);
+
+  // Seed the edit buffers once per open, once the agent's assignments load —
+  // guarded so a background refetch can't clobber in-progress edits.
+  const seededRef = useRef(false);
+  useEffect(() => {
+    if (!open) {
+      seededRef.current = false;
+      return;
+    }
+    if (seededRef.current || !assignedSecretIds || !assignedConnections) return;
+    setSelectedSecretIds(new Set(assignedSecretIds));
+    setConnectionPolicies(
+      new Map(
+        assignedConnections.map((c) => [c.appConnectionId, c.sessionPolicy]),
+      ),
+    );
+    seededRef.current = true;
+  }, [open, assignedSecretIds, assignedConnections]);
 
   const filterSecrets = useCallback(
     (list: Secret[]) => {
@@ -248,7 +254,7 @@ export const ManageAccessDialog = ({
   const handleSave = async () => {
     setSaving(true);
     try {
-      await updateAgentSecretMode(agent.id, mode);
+      await updateSecretMode.mutateAsync({ agentId: agent.id, mode });
       if (mode === "selective") {
         const connPayload = Array.from(connectionPolicies.entries()).map(
           ([id, policy]) => ({
@@ -257,14 +263,18 @@ export const ManageAccessDialog = ({
           }),
         );
         await Promise.all([
-          updateAgentSecrets(agent.id, Array.from(selectedSecretIds)),
-          updateAgentAppConnections(agent.id, connPayload),
+          updateAgentSecrets.mutateAsync({
+            agentId: agent.id,
+            secretIds: Array.from(selectedSecretIds),
+          }),
+          updateAgentConnections.mutateAsync({
+            agentId: agent.id,
+            connections: connPayload,
+          }),
         ]);
       }
-      queryClient.invalidateQueries({ queryKey: queryKeys.agents.all() });
       onUpdated?.();
       onOpenChange(false);
-      invalidateCache();
       toast.success("Credential access updated");
     } catch {
       toast.error("Failed to update credential access");
@@ -427,9 +437,11 @@ export const ManageAccessDialog = ({
                 >
                   <config.Icon className="text-muted-foreground size-3" />
                   <span className="text-muted-foreground text-xs">
-                    {isAllItems
-                      ? `All ${config.itemLabel.plural}`
-                      : `${selectedItemIds.size} of ${policyItems.length} ${config.itemLabel.plural}`}
+                    {config.formatSummary
+                      ? config.formatSummary(policy ?? null, meta ?? {})
+                      : isAllItems
+                        ? `All ${config.itemLabel.plural}`
+                        : `${selectedItemIds.size} of ${policyItems.length} ${config.itemLabel.plural}`}
                   </span>
                   <span className="text-muted-foreground/30 text-xs">·</span>
                   <span className="text-muted-foreground text-xs font-medium">
@@ -675,6 +687,7 @@ export const ManageAccessDialog = ({
             </DialogHeader>
 
             <granularDialogConfig.PolicyDialogContent
+              connectionId={granularDialogConnId}
               metadata={granularDialogMeta}
               policy={editingPolicy}
               onPolicyChange={setEditingPolicy}

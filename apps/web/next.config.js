@@ -1,4 +1,29 @@
+import { readdirSync } from "node:fs";
+import path from "node:path";
+
 const isCloud = process.env.NEXT_PUBLIC_EDITION === "cloud";
+
+// Dashboard paths that cloud intentionally serves at the SAME bare URL as OSS (shared).
+// Empty today: cloud namespaces every dashboard feature under /p, /org, /account, so no
+// bare (dashboard) path is shared. Escape hatch if OSS ever adds a dashboard route cloud
+// also wants to keep bare — add it here and it won't be 404'd.
+const CLOUD_SHARED_DASHBOARD_PATHS = new Set([]);
+
+// Bare OSS dashboard route segments, read from the filesystem at build time so new OSS
+// dashboard routes are covered automatically with no list to maintain. Excludes route
+// groups "(x)", private "_x", dynamic "[x]", parallel "@x", and files via a positive
+// name pattern. process.cwd() is apps/web during `next dev`/`next build`.
+const getOssDashboardSegments = () => {
+  const dir = path.join(process.cwd(), "src", "app", "(dashboard)");
+  try {
+    return readdirSync(dir, { withFileTypes: true })
+      .filter((e) => e.isDirectory() && /^[a-z0-9][a-z0-9-]*$/.test(e.name))
+      .map((e) => `/${e.name}`)
+      .filter((p) => !CLOUD_SHARED_DASHBOARD_PATHS.has(p));
+  } catch {
+    return [];
+  }
+};
 
 /** @type {import('next').NextConfig} */
 const nextConfig = {
@@ -45,6 +70,19 @@ const nextConfig = {
           "@/lib/api-fetch": "@/cloud/api-fetch",
         }
       : {},
+  },
+  async rewrites() {
+    // Cloud ships the OSS bare dashboard routes too (cloud may only add files), but only
+    // serves them namespaced under /p, /org, /account. Shadow each bare path (and its
+    // subpaths) before the filesystem route matches, rewriting to Next's built-in
+    // not-found route ("/_not-found") so the existing app/not-found.tsx renders with a
+    // real 404 and the requested URL is preserved. OSS edition: no-op.
+    if (!isCloud) return [];
+    const beforeFiles = getOssDashboardSegments().flatMap((seg) => [
+      { source: seg, destination: "/_not-found" },
+      { source: `${seg}/:path*`, destination: "/_not-found" },
+    ]);
+    return { beforeFiles };
   },
 };
 

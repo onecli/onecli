@@ -28,3 +28,15 @@ export const secretModeSchema = z.object({
 export const updateAgentSecretsSchema = z.object({
   secretIds: z.array(z.string()),
 });
+
+export const updateAgentConnectionsSchema = z.object({
+  connections: z.array(
+    z.object({
+      appConnectionId: z.string(),
+      // Provider-specific granular-access policy (e.g. Dropbox folders, GitHub
+      // repos). Shape is validated per-provider in the service; here we only
+      // constrain the envelope.
+      sessionPolicy: z.record(z.string(), z.unknown()).nullable().optional(),
+    }),
+  ),
+});

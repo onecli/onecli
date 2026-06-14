@@ -1,10 +1,6 @@
 "use server";
 
 import { resolveProjectContext } from "@/lib/actions/resolve-user";
-import type {
-  SecretMode,
-  AgentAppConnectionInput,
-} from "@onecli/api/services/agent-service";
 import {
   listAgents,
   getDefaultAgent as getDefaultAgentService,
@@ -13,11 +9,6 @@ import {
   deleteAgent as deleteAgentService,
   renameAgent as renameAgentService,
   regenerateAgentToken as regenerateAgentTokenService,
-  getAgentSecrets as getAgentSecretsService,
-  updateAgentSecretMode as updateAgentSecretModeService,
-  updateAgentSecrets as updateAgentSecretsService,
-  getAgentAppConnections as getAgentAppConnectionsService,
-  updateAgentAppConnections as updateAgentAppConnectionsService,
 } from "@onecli/api/services/agent-service";
 import {
   withAudit,
@@ -109,70 +100,6 @@ export const regenerateAgentToken = async (agentId: string) => {
       action: AUDIT_ACTIONS.REGENERATE,
       service: AUDIT_SERVICES.AGENT,
       metadata: { agentId },
-    }),
-  );
-};
-
-export const getAgentSecrets = async (agentId: string) => {
-  const { projectId } = await resolveProjectContext();
-  return getAgentSecretsService(projectId, agentId);
-};
-
-export const updateAgentSecretMode = async (
-  agentId: string,
-  mode: SecretMode,
-): Promise<void> => {
-  const { userId, userEmail, projectId } = await resolveProjectContext();
-  return withAudit(
-    () => updateAgentSecretModeService(projectId, agentId, mode),
-    () => ({
-      projectId,
-      userId,
-      userEmail,
-      action: AUDIT_ACTIONS.UPDATE,
-      service: AUDIT_SERVICES.AGENT,
-      metadata: { agentId, secretMode: mode },
-    }),
-  );
-};
-
-export const updateAgentSecrets = async (
-  agentId: string,
-  secretIds: string[],
-): Promise<void> => {
-  const { userId, userEmail, projectId } = await resolveProjectContext();
-  return withAudit(
-    () => updateAgentSecretsService(projectId, agentId, secretIds),
-    () => ({
-      projectId,
-      userId,
-      userEmail,
-      action: AUDIT_ACTIONS.UPDATE,
-      service: AUDIT_SERVICES.AGENT,
-      metadata: { agentId, secretCount: secretIds.length },
-    }),
-  );
-};
-
-export const getAgentAppConnections = async (agentId: string) => {
-  const { projectId } = await resolveProjectContext();
-  return getAgentAppConnectionsService(projectId, agentId);
-};
-
-export const updateAgentAppConnections = async (
-  agentId: string,
-  connections: AgentAppConnectionInput[],
-): Promise<void> => {
-  const { userId, userEmail, projectId } = await resolveProjectContext();
-  return withAudit(
-    () => updateAgentAppConnectionsService(projectId, agentId, connections),
-    () => ({
-      projectId,
-      userId,
-      userEmail,
-      action: AUDIT_ACTIONS.UPDATE,
-      service: AUDIT_SERVICES.AGENT,
-      metadata: { agentId, appConnectionCount: connections.length },
     }),
   );
 };

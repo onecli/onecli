@@ -733,6 +733,8 @@ async fn handle_http_proxy(
     // Per-request app connection disambiguation
     let mut resolved_finalizer: Option<crate::apps::RequestFinalizer> = None;
     let mut resolved_body_transform: Option<crate::apps::BodyTransform> = None;
+    // Granular-access policy of the connection that wins injection (if any).
+    let mut resolved_session_policy: Option<serde_json::Value> = None;
     if resolved.injection_rules.is_empty() && !resolved.app_connections.is_empty() {
         let oid = resolved.organization_id.as_deref().unwrap_or("");
         let pid = resolved.project_id.as_deref().unwrap_or("");
@@ -754,11 +756,13 @@ async fn handle_http_proxy(
                 rules,
                 finalizer,
                 body_transform,
+                session_policy,
                 ..
             }) => {
                 resolved.injection_rules = rules;
                 resolved_finalizer = finalizer;
                 resolved_body_transform = body_transform;
+                resolved_session_policy = session_policy;
             }
             Ok(AppConnectionResult::Ambiguous { connections }) => {
                 return Ok(response::multiple_connections_axum(&connections));
@@ -829,6 +833,7 @@ async fn handle_http_proxy(
         body_transform: resolved_body_transform,
         policy_mode: resolved.policy_mode,
         claim_token: resolved.claim_token,
+        session_policy: resolved_session_policy,
         budget_bindings: resolved.budget_bindings,
     };
 

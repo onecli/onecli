@@ -6,7 +6,7 @@ import { useQuery } from "@tanstack/react-query";
 import { Plus, Settings2, Shield, ShieldOff } from "lucide-react";
 import { rules as rulesApi } from "@/lib/api";
 import { queryKeys } from "@/lib/api/keys";
-import { useAgents } from "@/hooks/use-agents";
+import { useAgents, useAgentGranularAccess } from "@/hooks/use-agents";
 import { useConnections } from "@/hooks/use-connections";
 import { Button } from "@onecli/ui/components/button";
 import { Card } from "@onecli/ui/components/card";
@@ -15,6 +15,7 @@ import { Separator } from "@onecli/ui/components/separator";
 import { RuleCard } from "./rule-card";
 import { RuleDialog } from "./rule-dialog";
 import { AppPermissionSummary } from "./app-permission-summary";
+import { GranularAccessSummary } from "./granular-access-summary";
 import type { PolicyMode } from "@onecli/api/validations/policy-rule";
 import type { AgentOption, PolicyRuleItem, RuleActions } from "./types";
 export type { PolicyRuleItem, AgentOption, RuleActions } from "./types";
@@ -51,6 +52,9 @@ export const RulesContent = ({
   const agents: AgentOption[] = useMemo(
     () => agentsList.map((a) => ({ id: a.id, name: a.name })),
     [agentsList],
+  );
+  const { data: granularEntries = [] } = useAgentGranularAccess(
+    pageScope === "project",
   );
   const { data: connectionsList = [] } = useConnections();
   const connectedProviders = useMemo(() => {
@@ -115,7 +119,9 @@ export const RulesContent = ({
         </Button>
       </div>
 
-      {customRules.length === 0 && appPermRules.length === 0 ? (
+      {customRules.length === 0 &&
+      appPermRules.length === 0 &&
+      granularEntries.length === 0 ? (
         <Card className="flex flex-col items-center justify-center py-16 text-center">
           {isDenyMode ? (
             <>
@@ -184,6 +190,21 @@ export const RulesContent = ({
                 pageScope={pageScope}
                 connectedProviders={connectedProviders}
               />
+            </>
+          )}
+
+          {granularEntries.length > 0 && (
+            <>
+              {(customRules.length > 0 || appPermRules.length > 0) && (
+                <div className="flex items-center gap-3 pt-2">
+                  <Separator className="flex-1" />
+                  <span className="text-muted-foreground shrink-0 text-xs">
+                    Granular access
+                  </span>
+                  <Separator className="flex-1" />
+                </div>
+              )}
+              <GranularAccessSummary entries={granularEntries} />
             </>
           )}
         </>

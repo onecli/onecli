@@ -16,6 +16,27 @@ export interface CreatedAgent {
   createdAt: string;
 }
 
+export interface AgentGranularAccess {
+  agentId: string;
+  agentName: string;
+  connectionId: string;
+  provider: string;
+  connectionLabel: string | null;
+  policy: Record<string, unknown>;
+}
+
+export interface AgentConnection {
+  appConnectionId: string;
+  sessionPolicy: Record<string, unknown> | null;
+}
+
+export interface DropboxFolder {
+  id: string;
+  name: string;
+  pathLower: string;
+  pathDisplay: string;
+}
+
 export interface Secret {
   id: string;
   name: string;

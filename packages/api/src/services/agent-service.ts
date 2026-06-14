@@ -349,6 +349,48 @@ export const getAgentAppConnections = async (
   }));
 };
 
+export interface AgentGranularAccessEntry {
+  agentId: string;
+  agentName: string;
+  connectionId: string;
+  provider: string;
+  connectionLabel: string | null;
+  policy: SessionPolicy;
+}
+
+/**
+ * Lists every agent→connection assignment in the project that carries a
+ * non-empty granular policy (e.g. GitHub repository or Dropbox folder scoping).
+ * Read-only overview for the Rules page; unrestricted assignments are skipped.
+ */
+export const listAgentGranularAccess = async (
+  projectId: string,
+): Promise<AgentGranularAccessEntry[]> => {
+  const rows = await db.agentAppConnection.findMany({
+    where: { agent: { projectId } },
+    select: {
+      sessionPolicy: true,
+      agent: { select: { id: true, name: true } },
+      appConnection: { select: { id: true, provider: true, label: true } },
+    },
+  });
+
+  const entries: AgentGranularAccessEntry[] = [];
+  for (const r of rows) {
+    const policy = r.sessionPolicy as SessionPolicy | null;
+    if (!policy || Object.keys(policy).length === 0) continue;
+    entries.push({
+      agentId: r.agent.id,
+      agentName: r.agent.name,
+      connectionId: r.appConnection.id,
+      provider: r.appConnection.provider,
+      connectionLabel: r.appConnection.label,
+      policy,
+    });
+  }
+  return entries;
+};
+
 export interface AgentAppConnectionInput {
   appConnectionId: string;
   sessionPolicy?: SessionPolicy | null;
