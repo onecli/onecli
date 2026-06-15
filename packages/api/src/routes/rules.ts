@@ -13,7 +13,6 @@ import {
   createPolicyRuleSchema,
   updatePolicyRuleSchema,
 } from "../validations/policy-rule";
-import { getResourceHooks } from "../providers";
 
 export const ruleRoutes = () => {
   const app = new Hono<ApiEnv>();
@@ -51,11 +50,6 @@ export const ruleRoutes = () => {
         400,
       );
     }
-
-    await getResourceHooks().beforeCreateRule(
-      auth.organizationId,
-      parsed.data.action,
-    );
 
     const rule = await createPolicyRule(
       { projectId: requireProjectId(auth) },

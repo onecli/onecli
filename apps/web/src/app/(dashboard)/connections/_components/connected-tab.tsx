@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { useRouter, usePathname } from "next/navigation";
-import { withProjectPrefix } from "@/lib/navigation";
+import { connectionsPath } from "@/lib/navigation";
 import { ChevronRight, KeyRound } from "lucide-react";
 import { Badge } from "@onecli/ui/components/badge";
 import { Card } from "@onecli/ui/components/card";
@@ -135,9 +135,7 @@ export const ConnectedTab = ({
           detail: label
             ? `Connected as ${label}`
             : `${c.scopes.length} scope${c.scopes.length !== 1 ? "s" : ""} granted`,
-          href: basePath
-            ? `${basePath}/apps/${c.provider}`
-            : withProjectPrefix(pathname, `/connections/apps/${c.provider}`),
+          href: connectionsPath({ pathname, basePath }, `/apps/${c.provider}`),
           providerCount: hasMultiple
             ? providerCounts.get(c.provider)
             : undefined,
@@ -170,9 +168,7 @@ export const ConnectedTab = ({
         type: "vault" as const,
         typeLabel: "External Vault",
         detail: v.status === "connected" ? "Connected" : "Paired",
-        href: basePath
-          ? `${basePath}/vaults/${v.provider}`
-          : withProjectPrefix(pathname, `/connections/vaults/${v.provider}`),
+        href: connectionsPath({ pathname, basePath }, `/vaults/${v.provider}`),
       }));
 
       setItems([...appItems, ...secretItems, ...vaultItems]);
@@ -195,7 +191,11 @@ export const ConnectedTab = ({
     fetchItems();
   }, [fetchItems]);
 
-  useAppMessages({ onConnected: fetchItems, onConfigure: router.push });
+  useAppMessages({
+    onConnected: fetchItems,
+    onConfigure: (provider) =>
+      router.push(connectionsPath({ pathname, basePath }, `/apps/${provider}`)),
+  });
 
   const handleItemClick = (item: ConnectedItem) => {
     if (item.inherited) return;
@@ -233,11 +233,7 @@ export const ConnectedTab = ({
         <p className="text-sm text-muted-foreground">
           No connected services yet. Head to the{" "}
           <button
-            onClick={() =>
-              router.push(
-                basePath ?? withProjectPrefix(pathname, "/connections"),
-              )
-            }
+            onClick={() => router.push(connectionsPath({ pathname, basePath }))}
             className="text-brand hover:underline font-medium"
           >
             Apps

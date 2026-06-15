@@ -44,6 +44,17 @@ export const getDefaultAgent = async (projectId: string) => {
   });
 };
 
+export const agentExistsByIdentifier = async (
+  projectId: string,
+  identifier: string,
+): Promise<boolean> => {
+  const existing = await db.agent.findFirst({
+    where: { projectId, identifier: identifier.trim() },
+    select: { id: true },
+  });
+  return existing !== null;
+};
+
 export const createAgent = async (
   projectId: string,
   name: string,

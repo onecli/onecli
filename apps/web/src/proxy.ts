@@ -61,12 +61,23 @@ export const proxy = (request: NextRequest) => {
 
   const requestHeaders = new Headers(request.headers);
 
-  const projectId = pathname.match(PROJECT_PATH_RE)?.[1];
+  // Scope normally comes from the URL path (/p/<id>, /org/<id>). The app-connect
+  // popup is a top-level window with no scoped path, so it carries scope in the
+  // query string instead — bridge that to the same headers here. The downstream
+  // resolveProjectContext still validates membership before trusting either source.
+  const { searchParams } = request.nextUrl;
+  const fromQuery = pathname.startsWith("/app-connect");
+
+  const projectId =
+    pathname.match(PROJECT_PATH_RE)?.[1] ||
+    (fromQuery ? searchParams.get("projectId") : null);
   if (projectId) {
     requestHeaders.set("x-project-id", projectId);
   }
 
-  const orgId = pathname.match(ORG_PATH_RE)?.[1];
+  const orgId =
+    pathname.match(ORG_PATH_RE)?.[1] ||
+    (fromQuery ? searchParams.get("orgId") : null);
   if (orgId) {
     requestHeaders.set("x-organization-id", orgId);
   }

@@ -193,6 +193,10 @@ impl GatewayServer {
                 hyper::header::CONTENT_TYPE,
                 hyper::header::AUTHORIZATION,
                 hyper::header::ACCEPT,
+                // Cloud scopes browser → gateway vault calls to the active
+                // project via this header; it must be allow-listed or the CORS
+                // preflight blocks the request. (OSS never sends it.)
+                hyper::header::HeaderName::from_static("x-project-id"),
             ])
             .allow_methods([
                 Method::GET,

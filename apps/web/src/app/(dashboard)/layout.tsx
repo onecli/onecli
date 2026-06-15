@@ -11,6 +11,7 @@ import { useAuth } from "@/providers/auth-provider";
 import { checkDashboardRedirect } from "@/lib/user-plan";
 import { getDashboardRedirect } from "@/lib/dashboard/session-redirect";
 import { apiFetch } from "@/lib/api-fetch";
+import { PlanGateProvider } from "@/lib/plan-gate";
 
 export default function DashboardLayout({
   children,
@@ -100,29 +101,31 @@ export default function DashboardLayout({
   }
 
   return (
-    <SidebarProvider
-      className="bg-background h-svh overflow-hidden"
-      style={{ "--sidebar-width-icon": "2rem" } as React.CSSProperties}
-    >
-      <DashboardSidebar />
-      <SidebarInset className="bg-background min-w-0 overflow-hidden rounded-none md:border md:rounded-xl md:peer-data-[variant=inset]:shadow-none md:peer-data-[variant=inset]:peer-data-[state=collapsed]:ml-1">
-        <header className="flex h-12 shrink-0 items-center border-b">
-          <DashboardHeader />
-        </header>
-        <div className="flex min-h-0 min-w-0 flex-1 overflow-hidden">
-          {isSettings && (
-            <aside className="hidden w-56 shrink-0 overflow-y-auto border-r px-6 pt-6 md:block">
-              <SettingsNav />
-            </aside>
-          )}
-          <div className="min-h-0 min-w-0 flex-1 overflow-y-auto overflow-x-hidden">
-            {isSettings && <SettingsMobileNav />}
-            <main className="mx-auto min-w-0 max-w-6xl p-4 sm:p-6">
-              {children}
-            </main>
+    <PlanGateProvider>
+      <SidebarProvider
+        className="bg-background h-svh overflow-hidden"
+        style={{ "--sidebar-width-icon": "2rem" } as React.CSSProperties}
+      >
+        <DashboardSidebar />
+        <SidebarInset className="bg-background min-w-0 overflow-hidden rounded-none md:border md:rounded-xl md:peer-data-[variant=inset]:shadow-none md:peer-data-[variant=inset]:peer-data-[state=collapsed]:ml-1">
+          <header className="flex h-12 shrink-0 items-center border-b">
+            <DashboardHeader />
+          </header>
+          <div className="flex min-h-0 min-w-0 flex-1 overflow-hidden">
+            {isSettings && (
+              <aside className="hidden w-56 shrink-0 overflow-y-auto border-r px-6 pt-6 md:block">
+                <SettingsNav />
+              </aside>
+            )}
+            <div className="min-h-0 min-w-0 flex-1 overflow-y-auto overflow-x-hidden">
+              {isSettings && <SettingsMobileNav />}
+              <main className="mx-auto min-w-0 max-w-6xl p-4 sm:p-6">
+                {children}
+              </main>
+            </div>
           </div>
-        </div>
-      </SidebarInset>
-    </SidebarProvider>
+        </SidebarInset>
+      </SidebarProvider>
+    </PlanGateProvider>
   );
 }

@@ -119,10 +119,16 @@ pub(crate) async fn find_user_by_external_auth_id(
         .context("querying user by external_auth_id")
 }
 
-/// Find the default project ID for a user.
+/// Find the default project ID for a user (OSS only).
 ///
 /// Resolves user → first organization → first project in that organization.
 /// Mirrors the web's `resolveUser()` (apps/web/src/lib/actions/resolve-user.ts).
+///
+/// OSS-only: the cloud edition is multi-project and never falls back to a
+/// default project — it requires an explicit `X-Project-Id` and validates it
+/// with [`user_can_access_project`]. Gating this `not(cloud)` makes that a
+/// compile-time guarantee (a cloud caller fails to build).
+#[cfg(not(feature = "cloud"))]
 pub(crate) async fn find_default_project_id_by_user(
     pool: &PgPool,
     user_id: &str,
@@ -183,6 +189,30 @@ pub(crate) async fn verify_project_in_org(
             .fetch_optional(pool)
             .await
             .context("verifying project belongs to organization")?;
+    Ok(row.is_some())
+}
+
+/// Verify that a user may access a project — i.e. the project belongs to an
+/// organization the user is a member of. Scopes cloud browser (Cognito)
+/// requests to the `X-Project-Id` they specify instead of a default project.
+#[cfg(feature = "cloud")]
+pub(crate) async fn user_can_access_project(
+    pool: &PgPool,
+    user_id: &str,
+    project_id: &str,
+) -> Result<bool> {
+    let row: Option<(String,)> = sqlx::query_as(
+        r#"SELECT p.id
+           FROM organization_members om
+           INNER JOIN projects p ON p.organization_id = om.organization_id
+           WHERE om.user_id = $1 AND p.id = $2
+           LIMIT 1"#,
+    )
+    .bind(user_id)
+    .bind(project_id)
+    .fetch_optional(pool)
+    .await
+    .context("verifying user has access to project")?;
     Ok(row.is_some())
 }
 

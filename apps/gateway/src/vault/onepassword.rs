@@ -39,7 +39,10 @@ const SESSION_IDLE_TIMEOUT: Duration = Duration::from_secs(1800);
 
 /// Persisted in `vault_connection.connection_data`. Rows written before the
 /// value-source refactor also carry a `mappings` key; serde ignores it.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+///
+/// Deliberately no `Debug`/`Clone`: the struct carries only a credential (the
+/// encrypted SA token), so it must not be `{:?}`-logged or cloned around.
+#[derive(Serialize, Deserialize)]
 pub(crate) struct OnePasswordConfig {
     pub encrypted_service_account_token: String,
 }
@@ -60,6 +63,17 @@ struct OnePasswordSession {
     error_until: Mutex<Option<Instant>>,
     /// Timestamp of the last successful connectivity check (positive `status` cache).
     last_ok: Mutex<Option<Instant>>,
+}
+
+impl OnePasswordSession {
+    /// Whether the session is still within its post-error cooldown window (set
+    /// when a `Transient` 1Password failure was last seen).
+    fn in_error_cooldown(&self) -> bool {
+        self.error_until
+            .lock()
+            .expect("session lock poisoned")
+            .is_some_and(|t| Instant::now() < t)
+    }
 }
 
 pub(crate) struct OnePasswordVaultProvider {
@@ -184,12 +198,7 @@ impl OnePasswordVaultProvider {
             session.ref_cache.remove(op_ref);
         }
 
-        if session
-            .error_until
-            .lock()
-            .expect("session lock poisoned")
-            .is_some_and(|t| Instant::now() < t)
-        {
+        if session.in_error_cooldown() {
             return Err(VaultError::Internal(
                 "1Password temporarily unavailable (cooldown)".into(),
             ));
@@ -381,12 +390,7 @@ impl VaultProvider for OnePasswordVaultProvider {
 /// Live connectivity check for `status`, gated by the error cooldown and a
 /// short positive TTL so dashboard polling doesn't hammer 1Password.
 async fn live_check(session: &OnePasswordSession) -> bool {
-    if session
-        .error_until
-        .lock()
-        .expect("session lock poisoned")
-        .is_some_and(|t| Instant::now() < t)
-    {
+    if session.in_error_cooldown() {
         return false;
     }
     if session

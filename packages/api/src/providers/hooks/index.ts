@@ -13,3 +13,9 @@ export {
   initPolicyValidator,
   getPolicyValidator,
 } from "./policy-validator";
+export {
+  type RuleActionGate,
+  type RuleWriteScope,
+  initRuleActionGate,
+  getRuleActionGate,
+} from "./rule-action-gate";

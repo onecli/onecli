@@ -5,6 +5,7 @@ import { invalidateGatewayCache } from "../lib/gateway-invalidate";
 import {
   listAgents,
   createAgent,
+  agentExistsByIdentifier,
   getDefaultAgent,
   setDefaultAgent,
   renameAgent,
@@ -63,10 +64,18 @@ export const agentRoutes = () => {
       );
     }
 
-    await getResourceHooks().beforeCreateAgent(auth.organizationId);
+    const projectId = requireProjectId(auth);
+
+    // The agent quota gates *new* agents only -- re-creating an existing
+    // identifier consumes no slot. Skip the quota check when it already exists
+    // so createAgent returns the canonical 409 instead of a 403 that shadows it
+    // at the cap and breaks idempotent ensureAgent. See onecli/node-sdk#40.
+    if (!(await agentExistsByIdentifier(projectId, parsed.data.identifier))) {
+      await getResourceHooks().beforeCreateAgent(auth.organizationId);
+    }
 
     const agent = await createAgent(
-      requireProjectId(auth),
+      projectId,
       parsed.data.name,
       parsed.data.identifier,
       parsed.data.parentIdentifier,

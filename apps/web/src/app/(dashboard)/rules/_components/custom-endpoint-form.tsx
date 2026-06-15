@@ -10,6 +10,7 @@ import {
   Hand,
   Check,
   Settings2,
+  Lock,
 } from "lucide-react";
 import { Button } from "@onecli/ui/components/button";
 import { Input } from "@onecli/ui/components/input";
@@ -39,6 +40,7 @@ import type { CreateRuleInput } from "@/lib/api";
 import { queryKeys } from "@/lib/api/keys";
 import type { RuleCondition } from "@onecli/api/validations/policy-rule";
 import { ConditionBuilder } from "@/lib/components/condition-builder";
+import { usePlanGate } from "@/lib/plan-gate";
 import type { AgentOption, PolicyRuleItem, RuleActions } from "./types";
 
 const METHOD_OPTIONS = [
@@ -90,6 +92,7 @@ export const CustomEndpointForm = ({
   const isEdit = !!rule;
   const invalidateCache = useInvalidateGatewayCache();
   const queryClient = useQueryClient();
+  const planGate = usePlanGate();
   const [saving, setSaving] = useState(false);
   const [step, setStep] = useState<Step>("endpoint");
   const [name, setName] = useState("");
@@ -441,7 +444,10 @@ export const CustomEndpointForm = ({
             )}
             <button
               type="button"
-              onClick={() => setAction("rate_limit")}
+              onClick={() => {
+                if (planGate.guard("policy.rate_limit")) return;
+                setAction("rate_limit");
+              }}
               className={cn(
                 "flex flex-col gap-1.5 rounded-md border p-3.5 text-left transition-colors",
                 action === "rate_limit"
@@ -457,6 +463,9 @@ export const CustomEndpointForm = ({
                   )}
                 />
                 Rate Limit
+                {planGate.isLocked("policy.rate_limit") && (
+                  <Lock className="text-muted-foreground ml-auto size-3.5" />
+                )}
               </span>
               <span className="text-muted-foreground text-xs">
                 Allow up to N requests, then block
@@ -464,7 +473,10 @@ export const CustomEndpointForm = ({
             </button>
             <button
               type="button"
-              onClick={() => setAction("manual_approval")}
+              onClick={() => {
+                if (planGate.guard("policy.manual_approval")) return;
+                setAction("manual_approval");
+              }}
               className={cn(
                 "flex flex-col gap-1.5 rounded-md border p-3.5 text-left transition-colors",
                 action === "manual_approval"
@@ -480,6 +492,9 @@ export const CustomEndpointForm = ({
                   )}
                 />
                 Manual Approval
+                {planGate.isLocked("policy.manual_approval") && (
+                  <Lock className="text-muted-foreground ml-auto size-3.5" />
+                )}
               </span>
               <span className="text-muted-foreground text-xs">
                 Require human approval before proceeding

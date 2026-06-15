@@ -26,4 +26,8 @@ export {
   type PolicyValidator,
   initPolicyValidator,
   getPolicyValidator,
+  type RuleActionGate,
+  type RuleWriteScope,
+  initRuleActionGate,
+  getRuleActionGate,
 } from "./hooks";

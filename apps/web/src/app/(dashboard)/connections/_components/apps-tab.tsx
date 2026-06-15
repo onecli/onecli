@@ -11,7 +11,7 @@ import { useRouter, usePathname, useSearchParams } from "next/navigation";
 import {
   PROJECT_PATH_RE,
   ORG_PATH_RE,
-  withProjectPrefix,
+  connectionsPath,
 } from "@/lib/navigation";
 import { ChevronRight, Search, X } from "lucide-react";
 import { Button } from "@onecli/ui/components/button";
@@ -137,16 +137,18 @@ export const AppsTab = ({
       invalidateCache();
       if (provider) {
         router.push(
-          basePath
-            ? `${basePath}/apps/${provider}`
-            : withProjectPrefix(pathname, `/connections/apps/${provider}`),
+          connectionsPath({ pathname, basePath }, `/apps/${provider}`),
         );
       }
     },
     [fetchConnections, invalidateCache, router, basePath, pathname],
   );
 
-  useAppMessages({ onConnected: handleConnected, onConfigure: router.push });
+  useAppMessages({
+    onConnected: handleConnected,
+    onConfigure: (provider) =>
+      router.push(connectionsPath({ pathname, basePath }, `/apps/${provider}`)),
+  });
 
   const openConnectPopup = (
     provider: string,
@@ -350,12 +352,10 @@ export const AppsTab = ({
                     ? () => setProApp(app)
                     : () =>
                         router.push(
-                          basePath
-                            ? `${basePath}/apps/${app.id}`
-                            : withProjectPrefix(
-                                pathname,
-                                `/connections/apps/${app.id}`,
-                              ),
+                          connectionsPath(
+                            { pathname, basePath },
+                            `/apps/${app.id}`,
+                          ),
                         )
                 }
               />
