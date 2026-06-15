@@ -1,9 +1,10 @@
 "use client";
 
 import { useState, useEffect, useRef, useMemo } from "react";
+import Image from "next/image";
 import { useInvalidateGatewayCache } from "@/hooks/use-invalidate-cache";
 import { toast } from "sonner";
-import { ArrowLeft, Key, Settings2, Upload } from "lucide-react";
+import { ArrowLeft, Key, Settings2, Upload, X } from "lucide-react";
 import { cn } from "@onecli/ui/lib/utils";
 import {
   Dialog,
@@ -16,6 +17,12 @@ import {
 import { Button } from "@onecli/ui/components/button";
 import { Input } from "@onecli/ui/components/input";
 import { Label } from "@onecli/ui/components/label";
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipProvider,
+  TooltipTrigger,
+} from "@onecli/ui/components/tooltip";
 import { SecretInput } from "@/components/secret-input";
 import {
   Accordion,
@@ -30,6 +37,12 @@ import { secrets } from "@/lib/api";
 import { queryKeys } from "@/lib/api/keys";
 import type { CreateSecretInput } from "@onecli/api/validations/secret";
 import type { SecretActions } from "./types";
+import {
+  OnePasswordPickerDialog,
+  type OpDisplay,
+  type OpSelection,
+} from "./onepassword-picker-dialog";
+import { useOnePasswordReady } from "@/hooks/use-onepassword-picker";
 import { validateDisplayName } from "@onecli/api/validations/display-name";
 import {
   type InjectionConfig,
@@ -108,12 +121,30 @@ export interface SecretItem {
   id: string;
   name: string;
   type: string;
+  valueSource?: string;
+  opRef?: string | null;
   hostPattern: string;
   pathPattern: string | null;
   injectionConfig: unknown;
   metadata: Record<string, unknown> | null;
   isPlatform: boolean;
 }
+
+/** Recover readable picker titles for an existing 1Password-sourced secret. */
+const readOpDisplay = (
+  metadata: Record<string, unknown> | null,
+  opRef: string,
+): OpDisplay => {
+  const d = metadata?.opDisplay as Partial<OpDisplay> | undefined;
+  if (d?.vault && d?.item && d?.field) {
+    return { vault: d.vault, item: d.item, field: d.field };
+  }
+  // Fallback to the raw reference IDs so something still renders.
+  const [vault = "1Password", item = "", field = ""] = opRef
+    .replace("op://", "")
+    .split("/");
+  return { vault, item, field };
+};
 
 export interface SecretPrefill {
   type: SecretType;
@@ -174,8 +205,19 @@ export const SecretDialog = ({
   const [paramName, setParamName] = useState("");
   const [paramFormat, setParamFormat] = useState("");
   const [advancedOpen, setAdvancedOpen] = useState("");
+  const [opSelection, setOpSelection] = useState<OpSelection | null>(null);
+  const [pickerOpen, setPickerOpen] = useState(false);
 
-  const isOAuthMode = type === "openai" && openaiMode === "codex";
+  // Only poll 1Password connectivity while the dialog is open; deduped across
+  // every mounted SecretDialog via the shared query key.
+  const { isReady: opConnected } = useOnePasswordReady(open);
+
+  // The value source is implied by whether a 1Password field is chosen — no
+  // separate mode toggle. OAuth file upload only applies to a typed OpenAI
+  // secret; a 1Password value is always a raw API key.
+  const fromOnePassword = !!opSelection;
+  const isOAuthMode =
+    type === "openai" && openaiMode === "codex" && !fromOnePassword;
 
   const nameError = useMemo(() => validateDisplayName(name), [name]);
   const showNameError = nameTouched && nameError !== null;
@@ -199,12 +241,20 @@ export const SecretDialog = ({
       setNameTouched(false);
       setAdvancedOpen("");
       setOpenaiMode("api-key");
+      setOpSelection(null);
+      setPickerOpen(false);
       if (secret) {
         const config = secret.injectionConfig as InjectionConfig | null;
         setStep("form");
         setType(secret.type as SecretType);
         if (secret.type === "openai" && secret.metadata?.authMode === "oauth")
           setOpenaiMode("codex");
+        if (secret.valueSource === "onepassword" && secret.opRef) {
+          setOpSelection({
+            opRef: secret.opRef,
+            opDisplay: readOpDisplay(secret.metadata, secret.opRef),
+          });
+        }
         setName(secret.name);
         setValue("");
         setHostPattern(secret.hostPattern);
@@ -290,7 +340,7 @@ export const SecretDialog = ({
     : isEdit
       ? hostPattern.trim() && !hostPatternError && hasInjectionTarget
       : isNameValid &&
-        value.trim() &&
+        (fromOnePassword || !!value.trim()) &&
         hostPattern.trim() &&
         !hostPatternError &&
         hasInjectionTarget;
@@ -319,7 +369,15 @@ export const SecretDialog = ({
             ? { value: value.trim() }
             : {
                 name: name !== secret.name ? name : undefined,
-                value: value.trim() || undefined,
+                ...(opSelection
+                  ? {
+                      valueSource: "onepassword" as const,
+                      opRef: opSelection.opRef,
+                      opDisplay: opSelection.opDisplay,
+                    }
+                  : value.trim()
+                    ? { valueSource: "inline" as const, value: value.trim() }
+                    : {}),
                 hostPattern,
                 pathPattern: pathPattern || null,
                 injectionConfig: buildInjectionConfig() ?? undefined,
@@ -327,14 +385,27 @@ export const SecretDialog = ({
         );
         toast.success("Secret updated");
       } else {
-        await createSecret({
-          name,
-          type,
-          value,
-          hostPattern,
-          pathPattern: pathPattern || undefined,
-          injectionConfig: buildInjectionConfig() ?? null,
-        });
+        await createSecret(
+          opSelection
+            ? {
+                name,
+                type,
+                valueSource: "onepassword",
+                opRef: opSelection.opRef,
+                opDisplay: opSelection.opDisplay,
+                hostPattern,
+                pathPattern: pathPattern || undefined,
+                injectionConfig: buildInjectionConfig() ?? null,
+              }
+            : {
+                name,
+                type,
+                value,
+                hostPattern,
+                pathPattern: pathPattern || undefined,
+                injectionConfig: buildInjectionConfig() ?? null,
+              },
+        );
         toast.success("Secret created");
       }
       queryClient.invalidateQueries({ queryKey: queryKeys.secrets.all() });
@@ -456,7 +527,7 @@ export const SecretDialog = ({
             </DialogHeader>
 
             <div className="min-h-0 space-y-4 overflow-y-auto py-2">
-              {type === "openai" && !isEdit && (
+              {type === "openai" && !isEdit && !fromOnePassword && (
                 <div className="space-y-2">
                   <div
                     className="flex w-full items-center gap-1 rounded-lg border p-1"
@@ -605,11 +676,14 @@ export const SecretDialog = ({
                   ) : (
                     "Secret value"
                   )}{" "}
-                  {isEdit && !isPlatformEdit && !isOAuthMode && (
-                    <span className="text-muted-foreground font-normal">
-                      (leave empty to keep current)
-                    </span>
-                  )}
+                  {isEdit &&
+                    !isPlatformEdit &&
+                    !isOAuthMode &&
+                    !fromOnePassword && (
+                      <span className="text-muted-foreground font-normal">
+                        (leave empty to keep current)
+                      </span>
+                    )}
                 </Label>
 
                 <input
@@ -620,7 +694,13 @@ export const SecretDialog = ({
                   onChange={handleFileUpload}
                 />
 
-                {isOAuthMode ? (
+                {opSelection ? (
+                  <OnePasswordSelectedField
+                    display={opSelection.opDisplay}
+                    onChange={() => setPickerOpen(true)}
+                    onClear={() => setOpSelection(null)}
+                  />
+                ) : isOAuthMode ? (
                   <>
                     {value ? (
                       <div className="border-brand/30 bg-brand/5 flex items-center justify-between rounded-md border px-3 py-2.5">
@@ -655,33 +735,42 @@ export const SecretDialog = ({
                   </>
                 ) : (
                   <>
-                    <SecretInput
-                      ref={valueInputRef}
-                      id="secret-value"
-                      placeholder={
-                        type === "anthropic"
-                          ? "sk-ant-api03-..."
-                          : type === "openai"
-                            ? "sk-proj-..."
-                            : "Enter secret value"
-                      }
-                      value={value}
-                      onChange={(e) => {
-                        const val = e.target.value;
-                        setValue(val);
-                        if (type === "anthropic" && !name.trim()) {
-                          const detected = detectAnthropicAuthMode(val);
-                          if (detected === "api-key")
-                            setName("Anthropic API Key");
-                          else if (detected === "oauth")
-                            setName("Anthropic OAuth Token");
-                        }
-                        if (type === "openai" && !name.trim()) {
-                          if (looksLikeOpenaiKey(val))
-                            setName("OpenAI API Key");
-                        }
-                      }}
-                    />
+                    <div className="flex items-center gap-2">
+                      <div className="flex-1">
+                        <SecretInput
+                          ref={valueInputRef}
+                          id="secret-value"
+                          placeholder={
+                            type === "anthropic"
+                              ? "sk-ant-api03-..."
+                              : type === "openai"
+                                ? "sk-proj-..."
+                                : "Enter secret value"
+                          }
+                          value={value}
+                          onChange={(e) => {
+                            const val = e.target.value;
+                            setValue(val);
+                            if (type === "anthropic" && !name.trim()) {
+                              const detected = detectAnthropicAuthMode(val);
+                              if (detected === "api-key")
+                                setName("Anthropic API Key");
+                              else if (detected === "oauth")
+                                setName("Anthropic OAuth Token");
+                            }
+                            if (type === "openai" && !name.trim()) {
+                              if (looksLikeOpenaiKey(val))
+                                setName("OpenAI API Key");
+                            }
+                          }}
+                        />
+                      </div>
+                      {opConnected && (
+                        <OnePasswordPickerButton
+                          onClick={() => setPickerOpen(true)}
+                        />
+                      )}
+                    </div>
                     <div className="flex items-center gap-2">
                       {type === "anthropic" &&
                       value.trim() &&
@@ -740,6 +829,19 @@ export const SecretDialog = ({
                   </>
                 )}
               </div>
+
+              <OnePasswordPickerDialog
+                open={pickerOpen}
+                onOpenChange={setPickerOpen}
+                onSelect={(selection) => {
+                  setOpSelection(selection);
+                  setPickerOpen(false);
+                  if (type === "openai") {
+                    setOpenaiMode("api-key");
+                    setHostPattern("api.openai.com");
+                  }
+                }}
+              />
 
               {type === "generic" && !prefill && (
                 <div className="space-y-2">
@@ -1067,3 +1169,74 @@ const AnthropicKeyBadge = ({ value }: { value: string }) => {
     </Badge>
   );
 };
+
+/** Trailing button on the value input that opens the 1Password field picker. */
+const OnePasswordPickerButton = ({ onClick }: { onClick: () => void }) => (
+  <TooltipProvider delayDuration={200}>
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <Button
+          type="button"
+          variant="outline"
+          size="icon"
+          onClick={onClick}
+          aria-label="Use a 1Password field"
+          className="size-9 shrink-0 transition-colors hover:border-[#1A8CFF]/40 hover:bg-[#1A8CFF]/5"
+        >
+          <Image src="/icons/onepassword.svg" alt="" width={20} height={20} />
+        </Button>
+      </TooltipTrigger>
+      <TooltipContent>Use a 1Password field</TooltipContent>
+    </Tooltip>
+  </TooltipProvider>
+);
+
+/** Read-only summary shown in place of the input once a 1Password field is chosen. */
+const OnePasswordSelectedField = ({
+  display,
+  onChange,
+  onClear,
+}: {
+  display: OpDisplay;
+  onChange: () => void;
+  onClear: () => void;
+}) => (
+  <div className="bg-muted/30 flex items-center justify-between gap-3 rounded-md border px-3 py-2">
+    <div className="flex min-w-0 items-center gap-2.5">
+      <Image
+        src="/icons/onepassword.svg"
+        alt="1Password"
+        width={30}
+        height={30}
+        className="shrink-0"
+      />
+      <div className="min-w-0 leading-tight">
+        <div className="truncate text-sm font-medium">{display.field}</div>
+        <div className="text-muted-foreground truncate font-mono text-xs">
+          {display.vault}/{display.item}
+        </div>
+      </div>
+    </div>
+    <div className="flex shrink-0 items-center gap-0.5">
+      <Button
+        type="button"
+        variant="ghost"
+        size="sm"
+        className="h-7 px-2 text-xs"
+        onClick={onChange}
+      >
+        Change
+      </Button>
+      <Button
+        type="button"
+        variant="ghost"
+        size="icon"
+        className="size-7"
+        onClick={onClear}
+        aria-label="Remove 1Password value"
+      >
+        <X className="size-3.5" />
+      </Button>
+    </div>
+  </div>
+);

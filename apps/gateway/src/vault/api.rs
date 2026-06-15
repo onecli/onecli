@@ -9,6 +9,7 @@ use axum::response::IntoResponse;
 use axum::Json;
 use tracing::{info_span, warn, Instrument};
 
+use super::VaultError;
 use crate::auth::AuthUser;
 use crate::gateway::GatewayState;
 
@@ -110,4 +111,49 @@ pub(crate) async fn vault_disconnect(
     }
     .instrument(span)
     .await
+}
+
+// ── 1Password picker (browse vaults → items → fields) ──────────────────
+// The browser drives the secret dialog's value picker through these; the SA
+// token and field values never leave the gateway / Node boundary.
+
+/// GET /v1/vault/onepassword/vaults
+pub(crate) async fn vault_op_vaults(
+    auth: AuthUser,
+    State(state): State<GatewayState>,
+) -> Result<impl IntoResponse, VaultError> {
+    let vaults = state
+        .policy_engine
+        .onepassword
+        .list_vaults(&auth.project_id)
+        .await?;
+    Ok(Json(vaults))
+}
+
+/// GET /v1/vault/onepassword/vaults/:vaultId/items
+pub(crate) async fn vault_op_items(
+    auth: AuthUser,
+    State(state): State<GatewayState>,
+    Path(vault_id): Path<String>,
+) -> Result<impl IntoResponse, VaultError> {
+    let items = state
+        .policy_engine
+        .onepassword
+        .list_items(&auth.project_id, &vault_id)
+        .await?;
+    Ok(Json(items))
+}
+
+/// GET /v1/vault/onepassword/items/:vaultId/:itemId/fields
+pub(crate) async fn vault_op_fields(
+    auth: AuthUser,
+    State(state): State<GatewayState>,
+    Path((vault_id, item_id)): Path<(String, String)>,
+) -> Result<impl IntoResponse, VaultError> {
+    let fields = state
+        .policy_engine
+        .onepassword
+        .list_fields(&auth.project_id, &vault_id, &item_id)
+        .await?;
+    Ok(Json(fields))
 }

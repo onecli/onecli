@@ -26,6 +26,18 @@ if [ "$NEXT_PUBLIC_EDITION" != "cloud" ] && [ -z "$SECRET_ENCRYPTION_KEY" ]; the
   SECRET_ENCRYPTION_KEY=$(cat "$SECRET_KEY_FILE")
 fi
 
+# Auto-generate GATEWAY_INTERNAL_SECRET for OSS if not provided. It only
+# authenticates the gateway -> Node API call inside THIS container, so unlike the
+# encryption key it needs no persistence — an ephemeral per-start value is fine
+# (nothing stored depends on it). Without it the 1Password integration fails
+# closed. Cloud injects it from Secrets Manager, where the gateway and api-server
+# are separate services.
+if [ "$NEXT_PUBLIC_EDITION" != "cloud" ] && [ -z "$GATEWAY_INTERNAL_SECRET" ]; then
+  echo "Generating gateway internal secret..."
+  GATEWAY_INTERNAL_SECRET=$(head -c 32 /dev/urandom | base64)
+  export GATEWAY_INTERNAL_SECRET
+fi
+
 # Write runtime config for Next.js (auth mode is determined at container start,
 # not at build time, so the same image works for local and OAuth modes).
 if [ "$NEXT_PUBLIC_EDITION" = "cloud" ]; then

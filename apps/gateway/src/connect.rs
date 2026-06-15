@@ -15,6 +15,7 @@ use crate::db;
 use crate::inject::{Injection, InjectionRule};
 use crate::policy::{PolicyAction, PolicyRule};
 use crate::secret_inject;
+use crate::vault::onepassword::OnePasswordVaultProvider;
 
 /// How long to cache resolved connect responses before re-checking.
 const CACHE_TTL_SECS: u64 = 60;
@@ -171,6 +172,10 @@ pub(crate) enum ConnectError {
 pub(crate) struct PolicyEngine {
     pub pool: sqlx::PgPool,
     pub crypto: Arc<CryptoService>,
+    /// Resolves `op://` references for secrets with `value_source = "onepassword"`.
+    /// The same `Arc` is also registered as a `VaultService` provider (where it
+    /// acts only as a connection holder — it never races on hostname).
+    pub onepassword: Arc<OnePasswordVaultProvider>,
 }
 
 impl PolicyEngine {
@@ -282,20 +287,17 @@ impl PolicyEngine {
 
         let mut rules = Vec::with_capacity(matching.len());
         for secret in &matching {
-            let decrypted = match self.crypto.decrypt(&secret.encrypted_value).await {
-                Ok(v) => v,
-                Err(e) => {
-                    warn!(
-                        host_pattern = %secret.host_pattern,
-                        secret_type = %secret.type_,
-                        error = ?e,
-                        "skipping secret: decryption failed (wrong key or format mismatch)"
-                    );
-                    continue;
-                }
+            // Resolve the value from its source (inline column or live 1Password
+            // reference); a failure skips the secret, exactly as a decrypt
+            // failure always has.
+            let Some(value) = self.resolve_secret_value(secret, &agent.project_id).await else {
+                continue;
             };
 
-            let is_openai_oauth = secret.type_ == "openai"
+            // OAuth token refresh applies only to inline OpenAI secrets; a
+            // 1Password-sourced value is always a raw API key (api-key metadata).
+            let is_openai_oauth = secret.value_source != "onepassword"
+                && secret.type_ == "openai"
                 && secret
                     .metadata
                     .as_ref()
@@ -307,16 +309,16 @@ impl PolicyEngine {
                 match secret_inject::refresh_openai_oauth_if_expired(
                     &self.crypto,
                     &self.pool,
-                    &decrypted,
+                    &value,
                     &secret.id,
                 )
                 .await
                 {
                     Some(refreshed) => refreshed,
-                    None => decrypted,
+                    None => value,
                 }
             } else {
-                decrypted
+                value
             };
 
             let injections = secret_inject::build_injections(
@@ -342,6 +344,63 @@ impl PolicyEngine {
             crate::budget::resolve_bindings(&self.pool, &agent.organization_id, &matching).await;
 
         Ok((rules, has_platform, budget_bindings))
+    }
+
+    /// Produce a secret's plaintext value from its source — the encrypted column
+    /// (inline) or a live 1Password reference. Returns `None` (after logging) when
+    /// the value can't be produced, so the caller skips the secret exactly as it
+    /// always has on a decrypt failure.
+    async fn resolve_secret_value(
+        &self,
+        secret: &db::SecretRow,
+        project_id: &str,
+    ) -> Option<String> {
+        match secret.value_source.as_str() {
+            "onepassword" => {
+                let Some(op_ref) = secret.op_ref.as_deref() else {
+                    warn!(
+                        host_pattern = %secret.host_pattern,
+                        secret_type = %secret.type_,
+                        "skipping 1Password secret: missing op_ref"
+                    );
+                    return None;
+                };
+                match self.onepassword.resolve_ref(project_id, op_ref).await {
+                    Ok(v) => Some(v),
+                    Err(e) => {
+                        warn!(
+                            host_pattern = %secret.host_pattern,
+                            secret_type = %secret.type_,
+                            error = %e,
+                            "skipping secret: 1Password resolution failed"
+                        );
+                        None
+                    }
+                }
+            }
+            _ => {
+                let Some(encrypted) = secret.encrypted_value.as_deref() else {
+                    warn!(
+                        host_pattern = %secret.host_pattern,
+                        secret_type = %secret.type_,
+                        "skipping secret: inline secret has no stored value"
+                    );
+                    return None;
+                };
+                match self.crypto.decrypt(encrypted).await {
+                    Ok(v) => Some(v),
+                    Err(e) => {
+                        warn!(
+                            host_pattern = %secret.host_pattern,
+                            secret_type = %secret.type_,
+                            error = ?e,
+                            "skipping secret: decryption failed (wrong key or format mismatch)"
+                        );
+                        None
+                    }
+                }
+            }
+        }
     }
 
     /// Fetch app connections matching providers for this host (deferred resolution).

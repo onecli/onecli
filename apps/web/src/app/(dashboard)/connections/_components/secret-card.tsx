@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from "react";
+import Image from "next/image";
 import { useQueryClient } from "@tanstack/react-query";
 import { useInvalidateGatewayCache } from "@/hooks/use-invalidate-cache";
 import { queryKeys } from "@/lib/api/keys";
@@ -36,6 +37,8 @@ interface SecretCardProps {
     name: string;
     type: string;
     typeLabel: string;
+    valueSource?: string;
+    opRef?: string | null;
     hostPattern: string;
     pathPattern: string | null;
     injectionConfig: unknown;
@@ -78,6 +81,12 @@ export const SecretCard = ({
   };
 
   const config = secret.injectionConfig as InjectionConfig | null;
+  const opDisplay =
+    secret.valueSource === "onepassword"
+      ? (secret.metadata?.opDisplay as
+          | { vault: string; item: string; field: string }
+          | undefined)
+      : undefined;
 
   return (
     <>
@@ -89,6 +98,17 @@ export const SecretCard = ({
               <Badge variant="secondary" className="text-xs">
                 {secret.typeLabel}
               </Badge>
+              {secret.valueSource === "onepassword" && (
+                <Badge variant="outline" className="gap-1 text-[10px]">
+                  <Image
+                    src="/icons/onepassword.svg"
+                    alt=""
+                    width={12}
+                    height={12}
+                  />
+                  1Password
+                </Badge>
+              )}
               {secret.isPlatform && (
                 <Badge variant="outline" className="text-xs text-brand">
                   Trial
@@ -108,6 +128,14 @@ export const SecretCard = ({
                   {secret.hostPattern}
                 </code>
               </span>
+              {opDisplay && (
+                <span className="text-muted-foreground">
+                  Value:{" "}
+                  <code className="bg-muted rounded px-1 py-0.5 font-mono">
+                    {opDisplay.vault} › {opDisplay.item} › {opDisplay.field}
+                  </code>
+                </span>
+              )}
               {secret.pathPattern && (
                 <span className="text-muted-foreground">
                   Path:{" "}

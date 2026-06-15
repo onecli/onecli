@@ -39,6 +39,7 @@ export const exportToCloud = async (
       select: {
         name: true,
         type: true,
+        valueSource: true,
         encryptedValue: true,
         hostPattern: true,
         pathPattern: true,
@@ -87,12 +88,25 @@ export const exportToCloud = async (
   }
 
   // ── Decrypt secrets ───────────────────────────────────────────
+  // 1Password-sourced secrets have no stored plaintext (the value lives in
+  // 1Password and its connection is environment-specific), so they can't be
+  // carried in the migration — skip and report them for the user to re-add.
+  const skippedExternal: MigrateSkipped[] = secrets
+    .filter((s) => s.valueSource === "onepassword")
+    .map((s) => ({
+      type: s.type,
+      name: s.name,
+      reason:
+        "Sourced from 1Password — reconnect 1Password and re-add this secret after migrating",
+    }));
 
   const decryptedSecrets = await Promise.all(
-    secrets.map(async ({ encryptedValue, ...rest }) => {
-      const value = await getCrypto().decrypt(encryptedValue);
-      return { ...rest, value };
-    }),
+    secrets
+      .filter((s) => s.valueSource !== "onepassword" && s.encryptedValue)
+      .map(async ({ encryptedValue, ...rest }) => {
+        const value = await getCrypto().decrypt(encryptedValue ?? "");
+        return { ...rest, value };
+      }),
   );
 
   // ── Build agent id→identifier map for rule references ─────────
@@ -172,5 +186,9 @@ export const exportToCloud = async (
     throw new ServiceError("BAD_REQUEST", `Cloud import failed: ${msg}`);
   }
 
-  return (await response.json()) as MigrateResult;
+  const result = (await response.json()) as MigrateResult;
+  return {
+    ...result,
+    skipped: [...skippedExternal, ...result.skipped],
+  };
 };

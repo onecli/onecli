@@ -5,7 +5,7 @@ import { toast } from "sonner";
 import { GATEWAY_API_URL, IS_CLOUD } from "@/lib/env";
 import { getGatewayFetchOptions } from "@/lib/gateway-auth";
 
-const getGatewayApiUrl = (): string => {
+export const getGatewayApiUrl = (): string => {
   if (IS_CLOUD) return GATEWAY_API_URL;
   return (
     (typeof window !== "undefined" &&
@@ -23,6 +23,10 @@ export interface VaultStatus<T = unknown> {
 
 export interface BitwardenStatusData {
   fingerprint: string;
+  last_error: string | null;
+}
+
+export interface OnePasswordStatusData {
   last_error: string | null;
 }
 

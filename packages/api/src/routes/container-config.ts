@@ -189,7 +189,9 @@ export const containerConfigRoutes = () => {
             (c.req.header("origin") ?? "") +
             "/secrets",
         );
-      } else {
+      } else if (anthropicSecret.encryptedValue) {
+        // 1Password-sourced secrets have no stored value to decrypt — the
+        // gateway resolves them live, so the decryptability check doesn't apply.
         try {
           await getCrypto().decrypt(anthropicSecret.encryptedValue);
         } catch {

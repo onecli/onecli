@@ -54,27 +54,88 @@ const hostPatternSchema = z
     message: "Host pattern must not contain spaces",
   });
 
-export const createSecretSchema = z.object({
-  name: z.string().trim().min(1).max(255),
-  type: z.enum(["anthropic", "openai", "generic"]),
-  value: z.string().min(1).max(10000),
-  hostPattern: hostPatternSchema,
-  pathPattern: z.string().max(1000).optional(),
-  injectionConfig: injectionConfigSchema,
-});
+export const valueSources = ["inline", "onepassword"] as const;
+
+// 1Password secret reference, op://vault/item/field (>= 3 path segments).
+const opRefSchema = z
+  .string()
+  .min(1)
+  .refine(
+    (v) =>
+      v.startsWith("op://") &&
+      v.slice(5).split("/").filter(Boolean).length >= 3,
+    { message: "Must be a 1Password reference (op://vault/item/field)" },
+  );
+
+// Human-readable labels of the picked vault/item/field, for display only.
+const opDisplaySchema = z
+  .object({ vault: z.string(), item: z.string(), field: z.string() })
+  .optional();
+
+export const createSecretSchema = z
+  .object({
+    name: z.string().trim().min(1).max(255),
+    type: z.enum(["anthropic", "openai", "generic"]),
+    valueSource: z.enum(valueSources).optional(),
+    value: z.string().max(10000).optional(),
+    opRef: opRefSchema.optional(),
+    opDisplay: opDisplaySchema,
+    hostPattern: hostPatternSchema,
+    pathPattern: z.string().max(1000).optional(),
+    injectionConfig: injectionConfigSchema,
+  })
+  .superRefine((data, ctx) => {
+    if (data.valueSource === "onepassword") {
+      if (!data.opRef) {
+        ctx.addIssue({
+          code: "custom",
+          path: ["opRef"],
+          message: "Select a 1Password field",
+        });
+      }
+    } else if (!data.value || data.value.length < 1) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["value"],
+        message: "Secret value is required",
+      });
+    }
+  });
 
 export type CreateSecretInput = z.infer<typeof createSecretSchema>;
 
 export const updateSecretSchema = z
   .object({
     name: z.string().trim().min(1).max(255).optional(),
-    value: z.string().min(1).max(10000).optional(),
+    valueSource: z.enum(valueSources).optional(),
+    value: z.string().max(10000).optional(),
+    opRef: opRefSchema.optional(),
+    opDisplay: opDisplaySchema,
     hostPattern: hostPatternSchema.optional(),
     pathPattern: z.string().max(1000).nullable().optional(),
     injectionConfig: injectionConfigSchema,
   })
   .refine((data) => Object.keys(data).length > 0, {
     message: "At least one field must be provided",
+  })
+  .superRefine((data, ctx) => {
+    if (data.valueSource === "onepassword" && !data.opRef) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["opRef"],
+        message: "Select a 1Password field",
+      });
+    }
+    if (
+      data.valueSource === "inline" &&
+      (!data.value || data.value.length < 1)
+    ) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["value"],
+        message: "Secret value is required",
+      });
+    }
   });
 
 export type UpdateSecretInput = z.infer<typeof updateSecretSchema>;

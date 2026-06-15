@@ -42,6 +42,8 @@ export interface Secret {
   name: string;
   type: string;
   typeLabel: string;
+  valueSource: string;
+  opRef: string | null;
   hostPattern: string;
   pathPattern: string | null;
   injectionConfig: unknown;
@@ -104,7 +106,10 @@ export interface CreateAgentInput {
 export interface CreateSecretInput {
   name: string;
   type: string;
-  value: string;
+  value?: string;
+  valueSource?: "inline" | "onepassword";
+  opRef?: string;
+  opDisplay?: { vault: string; item: string; field: string };
   hostPattern: string;
   pathPattern?: string;
   injectionConfig?: unknown;

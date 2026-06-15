@@ -6,9 +6,15 @@
 pub(crate) mod api;
 pub(crate) mod bitwarden;
 pub(crate) mod bitwarden_db;
+pub(crate) mod onepassword;
+pub(crate) mod onepassword_api;
+
+use std::sync::Arc;
 
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
+use axum::response::{IntoResponse, Response};
+use hyper::StatusCode;
 use sqlx::PgPool;
 
 use crate::db;
@@ -40,6 +46,40 @@ pub(crate) struct ProviderStatus {
     pub status_data: Option<serde_json::Value>,
 }
 
+// ── Errors ──────────────────────────────────────────────────────────────
+
+/// Error type for vault operations that maps cleanly to HTTP responses.
+#[derive(Debug)]
+pub(crate) enum VaultError {
+    BadRequest(String),
+    #[allow(dead_code)] // kept for future providers
+    Forbidden(String),
+    NotFound(String),
+    Internal(String),
+}
+
+impl std::fmt::Display for VaultError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::BadRequest(m) | Self::Forbidden(m) | Self::NotFound(m) | Self::Internal(m) => {
+                write!(f, "{m}")
+            }
+        }
+    }
+}
+
+impl IntoResponse for VaultError {
+    fn into_response(self) -> Response {
+        let (status, msg) = match self {
+            VaultError::BadRequest(m) => (StatusCode::BAD_REQUEST, m),
+            VaultError::Forbidden(m) => (StatusCode::FORBIDDEN, m),
+            VaultError::NotFound(m) => (StatusCode::NOT_FOUND, m),
+            VaultError::Internal(m) => (StatusCode::INTERNAL_SERVER_ERROR, m),
+        };
+        (status, axum::Json(serde_json::json!({ "error": msg }))).into_response()
+    }
+}
+
 // ── Trait ────────────────────────────────────────────────────────────────
 
 #[async_trait]
@@ -66,12 +106,12 @@ pub(crate) trait VaultProvider: Send + Sync {
 /// Provider-agnostic vault service. Routes operations to the correct provider
 /// by name, iterates all providers for credential lookups.
 pub(crate) struct VaultService {
-    providers: Vec<Box<dyn VaultProvider>>,
+    providers: Vec<Arc<dyn VaultProvider>>,
     pool: PgPool,
 }
 
 impl VaultService {
-    pub fn new(providers: Vec<Box<dyn VaultProvider>>, pool: PgPool) -> Self {
+    pub fn new(providers: Vec<Arc<dyn VaultProvider>>, pool: PgPool) -> Self {
         Self { providers, pool }
     }
 
