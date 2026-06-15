@@ -31,6 +31,7 @@
     "lint:fix": "eslint --fix --max-warnings 0"
   },
   "dependencies": {
+    "@1password/sdk": "^0.4.0",
     "@aws-sdk/client-kms": "^3.1014.0",
     "@aws-sdk/client-secrets-manager": "^3.1014.0",
     "@onecli/db": "workspace:*",

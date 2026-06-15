@@ -20,6 +20,8 @@ interface Secret {
   name: string;
   type: string;
   typeLabel: string;
+  valueSource?: string;
+  opRef?: string | null;
   hostPattern: string;
   pathPattern: string | null;
   injectionConfig: unknown;

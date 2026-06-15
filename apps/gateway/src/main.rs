@@ -102,7 +102,8 @@ use crate::ca::CertificateAuthority;
 use crate::connect::PolicyEngine;
 use crate::gateway::GatewayServer;
 use crate::vault::bitwarden::{BitwardenConfig, BitwardenVaultProvider};
-use crate::vault::VaultService;
+use crate::vault::onepassword::OnePasswordVaultProvider;
+use crate::vault::{VaultProvider, VaultService};
 
 #[derive(Parser)]
 #[command(
@@ -187,12 +188,21 @@ async fn main() -> Result<()> {
     let crypto = Arc::new(crypto::CryptoService::from_env().await?);
     info!("crypto service initialized");
 
+    // Build the 1Password provider once and share the Arc: the PolicyEngine
+    // resolves `op://` secret values through it, and the VaultService registers
+    // it as a provider (connection holder for pair/status/picker).
+    let onepassword = Arc::new(OnePasswordVaultProvider::new(
+        pool.clone(),
+        Arc::clone(&crypto),
+    ));
+
     let policy_engine = Arc::new(PolicyEngine {
         pool,
         crypto: Arc::clone(&crypto),
+        onepassword: Arc::clone(&onepassword),
     });
 
-    // Initialize vault service with Bitwarden provider
+    // Initialize vault service with Bitwarden + 1Password providers.
     let proxy_url = std::env::var("BITWARDEN_PROXY_URL")
         .unwrap_or_else(|_| "wss://ap.lesspassword.dev".to_string());
     let bitwarden = BitwardenVaultProvider::new(
@@ -200,10 +210,8 @@ async fn main() -> Result<()> {
         policy_engine.pool.clone(),
         Arc::clone(&crypto),
     );
-    let vault_service = Arc::new(VaultService::new(
-        vec![Box::new(bitwarden)],
-        policy_engine.pool.clone(),
-    ));
+    let providers: Vec<Arc<dyn VaultProvider>> = vec![Arc::new(bitwarden), onepassword];
+    let vault_service = Arc::new(VaultService::new(providers, policy_engine.pool.clone()));
     info!("vault service initialized");
 
     // Initialize cache store

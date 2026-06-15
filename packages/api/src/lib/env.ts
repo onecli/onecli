@@ -39,6 +39,10 @@ export const NEXTAUTH_SECRET = process.env.NEXTAUTH_SECRET ?? "";
 
 export const SECRET_ENCRYPTION_KEY = process.env.SECRET_ENCRYPTION_KEY ?? "";
 
+/** Shared secret the gateway presents to the internal `/v1/internal/*` endpoints. */
+export const GATEWAY_INTERNAL_SECRET =
+  process.env.GATEWAY_INTERNAL_SECRET ?? "";
+
 export const OAUTH_STATE_SECRET = process.env.OAUTH_STATE_SECRET ?? "";
 
 export const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID ?? "";

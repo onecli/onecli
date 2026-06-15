@@ -221,6 +221,19 @@ impl GatewayServer {
                 "/v1/vault/{provider}/pair",
                 axum::routing::delete(vault::api::vault_disconnect),
             )
+            // 1Password value picker (browse vaults → items → fields)
+            .route(
+                "/v1/vault/onepassword/vaults",
+                axum::routing::get(vault::api::vault_op_vaults),
+            )
+            .route(
+                "/v1/vault/onepassword/vaults/{vaultId}/items",
+                axum::routing::get(vault::api::vault_op_items),
+            )
+            .route(
+                "/v1/vault/onepassword/items/{vaultId}/{itemId}/fields",
+                axum::routing::get(vault::api::vault_op_fields),
+            )
             .route(
                 "/v1/cache/invalidate",
                 axum::routing::post(invalidate_cache),
@@ -245,6 +258,19 @@ impl GatewayServer {
             .route(
                 "/api/vault/{provider}/pair",
                 axum::routing::delete(vault::api::vault_disconnect),
+            )
+            // 1Password value picker (legacy /api alias)
+            .route(
+                "/api/vault/onepassword/vaults",
+                axum::routing::get(vault::api::vault_op_vaults),
+            )
+            .route(
+                "/api/vault/onepassword/vaults/{vaultId}/items",
+                axum::routing::get(vault::api::vault_op_items),
+            )
+            .route(
+                "/api/vault/onepassword/items/{vaultId}/{itemId}/fields",
+                axum::routing::get(vault::api::vault_op_fields),
             )
             .route(
                 "/api/cache/invalidate",

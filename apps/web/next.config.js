@@ -30,7 +30,7 @@ const nextConfig = {
   output: "standalone",
   poweredByHeader: false,
   compress: !isCloud, // Cloud: CloudFront handles compression at the edge; OSS: Next.js compresses
-  serverExternalPackages: ["@onecli/db"],
+  serverExternalPackages: ["@onecli/db", "@1password/sdk"],
   env: {
     NEXT_PUBLIC_EDITION: process.env.NEXT_PUBLIC_EDITION || "oss",
     NEXT_PUBLIC_API_URL: process.env.API_DOMAIN

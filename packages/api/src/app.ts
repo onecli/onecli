@@ -36,6 +36,7 @@ import { countsRoutes } from "./routes/counts";
 import { skillRoutes } from "./routes/skill";
 import { credentialStubRoutes } from "./routes/credential-stubs";
 import { migrateRoutes } from "./routes/migrate";
+import { internalRoutes } from "./routes/internal";
 import {
   authSessionRoutes,
   initSessionHooks,
@@ -95,6 +96,7 @@ export const createApiApp = (
   app.route("/skill", skillRoutes());
   app.route("/credential-stubs", credentialStubRoutes());
   app.route("/migrate", migrateRoutes());
+  app.route("/internal", internalRoutes());
 
   if (options?.cloudRoutes) {
     options.cloudRoutes(app);

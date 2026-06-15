@@ -194,7 +194,10 @@ model Secret {
   partnerId       String?       @map("partner_id") // cloud-only: set when scope = "partner"
   name            String
   type            String // "anthropic", "generic"
-  encryptedValue  String        @map("encrypted_value") // AES-256-GCM encrypted via CryptoService
+  // Value source: "inline" (encryptedValue) or "onepassword" (resolved from opRef at request time)
+  valueSource     String        @default("inline") @map("value_source")
+  encryptedValue  String?       @map("encrypted_value") // AES-256-GCM via CryptoService; null when valueSource = "onepassword"
+  opRef           String?       @map("op_ref") // 1Password reference op://vault/item/field (valueSource = "onepassword")
   hostPattern     String        @map("host_pattern") // "api.anthropic.com" or "*.example.com"
   pathPattern     String?       @map("path_pattern") // "/v1/*", null = all paths
   injectionConfig Json?         @map("injection_config") // type-specific config (generic: { headerName, valueFormat })

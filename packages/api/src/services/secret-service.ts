@@ -77,6 +77,19 @@ const buildMetadata = (
   return Prisma.JsonNull;
 };
 
+const buildOnePasswordMetadata = (
+  type: string,
+  opDisplay: CreateSecretInput["opDisplay"],
+): Prisma.InputJsonValue | typeof Prisma.JsonNull => {
+  const meta: Record<string, unknown> = {};
+  // LLM keys resolved from 1Password are always API-key mode (no value to inspect, no OAuth).
+  if (type === "anthropic" || type === "openai") meta.authMode = "api-key";
+  if (opDisplay) meta.opDisplay = opDisplay;
+  return Object.keys(meta).length > 0
+    ? (meta as Prisma.InputJsonValue)
+    : Prisma.JsonNull;
+};
+
 export type { CreateSecretInput, UpdateSecretInput };
 
 export const listSecrets = async (scope: ResourceScope) => {
@@ -86,6 +99,8 @@ export const listSecrets = async (scope: ResourceScope) => {
       id: true,
       name: true,
       type: true,
+      valueSource: true,
+      opRef: true,
       hostPattern: true,
       pathPattern: true,
       injectionConfig: true,
@@ -115,18 +130,9 @@ export const createSecret = async (
     );
   }
 
-  let value = input.value.trim();
-  if (!value) throw new ServiceError("BAD_REQUEST", "Secret value is required");
-
   let hostPattern = input.hostPattern.trim();
   if (!hostPattern)
     throw new ServiceError("BAD_REQUEST", "Host pattern is required");
-
-  if (input.type === "openai") {
-    const normalized = normalizeOpenaiValue(value);
-    value = normalized.value;
-    hostPattern = normalized.hostPattern;
-  }
 
   if (input.type === "generic") {
     const config = input.injectionConfig;
@@ -140,21 +146,70 @@ export const createSecret = async (
     }
   }
 
-  const encryptedValue = await getCrypto().encrypt(value);
-  const preview = buildPreview(value);
   const pathPattern = input.pathPattern?.trim() || null;
+  const injectionConfig =
+    input.type === "generic"
+      ? buildInjectionConfig(input.injectionConfig)
+      : Prisma.JsonNull;
+
+  // Default to "inline" so existing callers and API clients that omit
+  // valueSource keep storing the value in Postgres exactly as before.
+  const valueSource = input.valueSource ?? "inline";
+
+  // ── Value resolved from 1Password at request time (nothing stored in PG) ──
+  if (valueSource === "onepassword") {
+    if (!input.opRef) {
+      throw new ServiceError("BAD_REQUEST", "Select a 1Password field");
+    }
+    // LLM keys from 1Password are treated as plain API keys on their fixed host.
+    if (input.type === "anthropic") hostPattern = "api.anthropic.com";
+    if (input.type === "openai") hostPattern = "api.openai.com";
+
+    return db.secret.create({
+      data: {
+        name,
+        type: input.type,
+        valueSource: "onepassword",
+        encryptedValue: null,
+        opRef: input.opRef,
+        hostPattern,
+        pathPattern,
+        injectionConfig,
+        metadata: buildOnePasswordMetadata(input.type, input.opDisplay),
+        ...scopeCreate(scope),
+      },
+      select: {
+        id: true,
+        name: true,
+        type: true,
+        valueSource: true,
+        opRef: true,
+        hostPattern: true,
+        pathPattern: true,
+        createdAt: true,
+      },
+    });
+  }
+
+  // ── Inline value (encrypted at rest) ──
+  let value = (input.value ?? "").trim();
+  if (!value) throw new ServiceError("BAD_REQUEST", "Secret value is required");
+
+  if (input.type === "openai") {
+    const normalized = normalizeOpenaiValue(value);
+    value = normalized.value;
+    hostPattern = normalized.hostPattern;
+  }
 
   const secret = await db.secret.create({
     data: {
       name,
       type: input.type,
-      encryptedValue,
+      valueSource: "inline",
+      encryptedValue: await getCrypto().encrypt(value),
       hostPattern,
       pathPattern,
-      injectionConfig:
-        input.type === "generic"
-          ? buildInjectionConfig(input.injectionConfig)
-          : Prisma.JsonNull,
+      injectionConfig,
       metadata: buildMetadata(input.type, value),
       ...scopeCreate(scope),
     },
@@ -162,13 +217,15 @@ export const createSecret = async (
       id: true,
       name: true,
       type: true,
+      valueSource: true,
+      opRef: true,
       hostPattern: true,
       pathPattern: true,
       createdAt: true,
     },
   });
 
-  return { ...secret, preview };
+  return { ...secret, preview: buildPreview(value) };
 };
 
 export const deleteSecret = async (scope: ResourceScope, secretId: string) => {
@@ -205,7 +262,7 @@ export const updateSecret = async (
         "FORBIDDEN",
         "Only the value can be updated on platform secrets",
       );
-    if (input.value === undefined)
+    if (input.value === undefined && input.opRef === undefined)
       throw new ServiceError("BAD_REQUEST", "Value is required");
   }
 
@@ -217,7 +274,18 @@ export const updateSecret = async (
     data.name = name;
   }
 
-  if (input.value !== undefined) {
+  if (input.valueSource === "onepassword") {
+    // Switch to / update a value resolved from 1Password.
+    if (!input.opRef)
+      throw new ServiceError("BAD_REQUEST", "Select a 1Password field");
+    data.valueSource = "onepassword";
+    data.encryptedValue = null;
+    data.opRef = input.opRef;
+    if (secret.type === "anthropic") data.hostPattern = "api.anthropic.com";
+    if (secret.type === "openai") data.hostPattern = "api.openai.com";
+    data.metadata = buildOnePasswordMetadata(secret.type, input.opDisplay);
+    if (secret.isPlatform) data.isPlatform = false;
+  } else if (input.value !== undefined) {
     let value = input.value.trim();
     if (!value)
       throw new ServiceError("BAD_REQUEST", "Secret value is required");
@@ -228,18 +296,16 @@ export const updateSecret = async (
       data.hostPattern = normalized.hostPattern;
     }
 
+    data.valueSource = "inline";
     data.encryptedValue = await getCrypto().encrypt(value);
+    data.opRef = null;
 
     if (secret.isPlatform) {
       data.isPlatform = false;
     }
 
-    if (secret.type === "anthropic") {
-      data.metadata = {
-        authMode: detectAnthropicAuthMode(value) ?? "api-key",
-      } as Prisma.InputJsonValue;
-    } else if (secret.type === "openai") {
-      data.metadata = buildMetadata("openai", value);
+    if (secret.type === "anthropic" || secret.type === "openai") {
+      data.metadata = buildMetadata(secret.type, value);
     }
   }
 

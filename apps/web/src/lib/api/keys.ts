@@ -57,4 +57,13 @@ export const queryKeys = {
     folders: (connectionId: string, path: string) =>
       [...queryKeys.dropbox.all(), "folders", connectionId, path] as const,
   },
+  onepassword: {
+    all: () => ["onepassword", ...scope()] as const,
+    status: () => [...queryKeys.onepassword.all(), "status"] as const,
+    vaults: () => [...queryKeys.onepassword.all(), "vaults"] as const,
+    items: (vaultId: string) =>
+      [...queryKeys.onepassword.all(), "items", vaultId] as const,
+    fields: (vaultId: string, itemId: string) =>
+      [...queryKeys.onepassword.all(), "fields", vaultId, itemId] as const,
+  },
 };
