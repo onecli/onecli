@@ -201,7 +201,6 @@ export const ConnectFlow = ({
                   {
                     type: "app-configure",
                     provider: app.id,
-                    url: `/connections/apps/${app.id}`,
                   },
                   window.location.origin,
                 );

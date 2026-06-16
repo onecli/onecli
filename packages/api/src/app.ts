@@ -6,6 +6,7 @@ import type {
   ResourceHooks,
   RoleResolver,
   PolicyValidator,
+  RuleActionGate,
 } from "./providers";
 import type { CryptoService } from "./lib/crypto-types";
 import type { AppDefinition } from "./apps/types";
@@ -21,6 +22,7 @@ import {
   initSelfUrl,
   initRoleResolver,
   initPolicyValidator,
+  initRuleActionGate,
 } from "./providers";
 import { registerAppPermission } from "./apps/app-permissions";
 import { errorHandler, notFoundHandler } from "./middleware/error-handler";
@@ -54,6 +56,7 @@ export interface CreateApiAppOptions {
   selfUrl?: string;
   roleResolver?: RoleResolver;
   policyValidator?: PolicyValidator;
+  ruleActionGate?: RuleActionGate;
   sessionHooks?: Partial<SessionHooks>;
   version?: string;
 }
@@ -76,6 +79,7 @@ export const createApiApp = (
   if (options?.selfUrl) initSelfUrl(options.selfUrl);
   if (options?.roleResolver) initRoleResolver(options.roleResolver);
   if (options?.policyValidator) initPolicyValidator(options.policyValidator);
+  if (options?.ruleActionGate) initRuleActionGate(options.ruleActionGate);
   if (options?.sessionHooks) initSessionHooks(options.sessionHooks);
 
   const app = new Hono<ApiEnv>().basePath("/v1");

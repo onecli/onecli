@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useMemo } from "react";
-import { CircleCheck, Hand, ShieldBan, Settings2 } from "lucide-react";
+import { CircleCheck, Hand, ShieldBan, Settings2, Lock } from "lucide-react";
 import { toast } from "sonner";
 import { useInvalidateGatewayCache } from "@/hooks/use-invalidate-cache";
 import { cn } from "@onecli/ui/lib/utils";
@@ -36,6 +36,7 @@ import type {
 } from "@onecli/api/validations/policy-rule";
 import { setAppPermissions as defaultSetAppPermissions } from "@/lib/actions/rules";
 import { ConditionBuilder } from "@/lib/components/condition-builder";
+import { usePlanGate } from "@/lib/plan-gate";
 import type { RuleActions } from "./types";
 import { AppPickerGrid } from "./app-picker-grid";
 
@@ -92,6 +93,7 @@ export const ApplicationRuleForm = ({
 }: ApplicationRuleFormProps) => {
   const isDenyMode = policyMode === "deny";
   const invalidateCache = useInvalidateGatewayCache();
+  const planGate = usePlanGate();
   const [step, setStep] = useState<Step>("app");
   const [selectedProvider, setSelectedProvider] = useState<string | null>(null);
   const [scope, setScope] = useState<Scope>("all");
@@ -267,11 +269,21 @@ export const ApplicationRuleForm = ({
             <div className="grid grid-cols-3 gap-2">
               {POLICY_OPTIONS.map((opt) => {
                 const isSelected = policy === opt.value;
+                const locked =
+                  opt.value === "manual_approval" &&
+                  planGate.isLocked("policy.manual_approval");
                 return (
                   <button
                     key={opt.value}
                     type="button"
-                    onClick={() => setPolicy(opt.value)}
+                    onClick={() => {
+                      if (
+                        opt.value === "manual_approval" &&
+                        planGate.guard("policy.manual_approval")
+                      )
+                        return;
+                      setPolicy(opt.value);
+                    }}
                     className={cn(
                       "flex flex-col gap-1.5 rounded-md border p-3.5 text-left transition-colors",
                       isSelected
@@ -296,6 +308,9 @@ export const ApplicationRuleForm = ({
                         )}
                       />
                       {opt.label}
+                      {locked && (
+                        <Lock className="text-muted-foreground ml-auto size-3.5" />
+                      )}
                     </span>
                     <span className="text-muted-foreground text-xs">
                       {opt.description}

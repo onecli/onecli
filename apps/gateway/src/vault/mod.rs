@@ -52,7 +52,7 @@ pub(crate) struct ProviderStatus {
 #[derive(Debug)]
 pub(crate) enum VaultError {
     BadRequest(String),
-    #[allow(dead_code)] // kept for future providers
+    #[expect(dead_code, reason = "kept for future providers")]
     Forbidden(String),
     NotFound(String),
     Internal(String),

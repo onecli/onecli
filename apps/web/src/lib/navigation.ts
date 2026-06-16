@@ -34,3 +34,23 @@ export const withOrgPrefix = (
   if (!match) return targetPath;
   return `/org/${match[1]}${targetPath}`;
 };
+
+/**
+ * Resolve a path inside the connections section, scoped to the current edition
+ * and page. Single source of truth so callers never hardcode the bare OSS
+ * `/connections...` path (which 404s in the cloud edition under `/p` or `/org`).
+ *
+ * - OSS:           `/connections{sub}`
+ * - Cloud project: `/p/<id>/connections{sub}`   (derived from `pathname`)
+ * - Cloud org:     `<basePath>{sub}`            (basePath = `/org/<id>/global-connections`)
+ *
+ * `sub` is the path under the connections root, e.g. "" (root),
+ * `/apps/<provider>`, or `/vaults/<provider>`.
+ */
+export const connectionsPath = (
+  { pathname, basePath }: { pathname: string; basePath?: string },
+  sub = "",
+): string =>
+  basePath
+    ? `${basePath}${sub}`
+    : withProjectPrefix(pathname, `/connections${sub}`);

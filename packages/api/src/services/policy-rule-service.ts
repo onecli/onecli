@@ -14,6 +14,7 @@ import {
   type PolicyMode,
 } from "../validations/policy-rule";
 import type { AppTool, AppPermissionLevel } from "../apps/app-permissions";
+import { getRuleActionGate } from "../providers";
 
 export type { CreatePolicyRuleInput, UpdatePolicyRuleInput };
 
@@ -55,6 +56,8 @@ export const createPolicyRule = async (
   scope: ResourceScope,
   input: CreatePolicyRuleInput,
 ) => {
+  await getRuleActionGate().assertAllowed(scope, [input.action]);
+
   const name = input.name.trim();
   const orgScope = isOrgScope(scope);
 
@@ -106,6 +109,9 @@ export const updatePolicyRule = async (
   ruleId: string,
   input: UpdatePolicyRuleInput,
 ) => {
+  if (input.action !== undefined)
+    await getRuleActionGate().assertAllowed(scope, [input.action]);
+
   const rule = await db.policyRule.findFirst({
     where: scopeOwnership(scope, ruleId),
     select: { id: true },
@@ -218,6 +224,11 @@ export const setAppPermissionsService = async (
   conditions?: RuleCondition[],
   policyMode?: PolicyMode,
 ) => {
+  await getRuleActionGate().assertAllowed(
+    scope,
+    changes.map((c) => c.permission),
+  );
+
   const isDenyMode = policyMode === "deny";
   const existing = await listAppPermissionRules(scope, provider);
 

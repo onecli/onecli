@@ -4,6 +4,7 @@ import { useMemo, useTransition } from "react";
 import { usePathname, useRouter } from "next/navigation";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useAppMessages } from "@/hooks/use-app-connected";
+import { connectionsPath } from "@/lib/navigation";
 import {
   AnimatedTabs,
   AnimatedTabList,
@@ -98,7 +99,8 @@ export const ConnectionsTabs = ({
       queryClient.invalidateQueries({ queryKey: queryKeys.connections.all() });
       queryClient.invalidateQueries({ queryKey: queryKeys.secrets.all() });
     },
-    onConfigure: router.push,
+    onConfigure: (provider) =>
+      router.push(connectionsPath({ pathname, basePath }, `/apps/${provider}`)),
   });
 
   const handleTabChange = (value: string) => {

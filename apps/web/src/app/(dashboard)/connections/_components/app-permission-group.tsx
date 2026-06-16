@@ -1,6 +1,6 @@
 "use client";
 
-import { Layers } from "lucide-react";
+import { Layers, Lock } from "lucide-react";
 import { cn } from "@onecli/ui/lib/utils";
 import {
   AccordionContent,
@@ -31,6 +31,7 @@ import {
 } from "./resolve-tool-permission";
 import { AppPermissionRow } from "./app-permission-row";
 import { permissionOptions, PermissionButtons } from "./permission-buttons";
+import { usePlanGate } from "@/lib/plan-gate";
 
 interface AppPermissionGroupProps {
   group: AppToolGroup;
@@ -76,6 +77,7 @@ export const AppPermissionGroup = ({
   orgConditions,
   defaultPermission = "allow",
 }: AppPermissionGroupProps) => {
+  const planGate = usePlanGate();
   const { wildcard } = group;
   const wildcardPermission = wildcard
     ? permissionStates[wildcard.id]?.permission
@@ -134,9 +136,13 @@ export const AppPermissionGroup = ({
         <Select
           value={groupPerm === "custom" ? "custom" : groupPerm}
           onValueChange={(v) => {
-            if (v !== "custom") {
-              onGroupChange(v as AppPermissionLevel);
-            }
+            if (v === "custom") return;
+            if (
+              v === "manual_approval" &&
+              planGate.guard("policy.manual_approval")
+            )
+              return;
+            onGroupChange(v as AppPermissionLevel);
           }}
           disabled={disabled || allOrgEnforced}
         >
@@ -149,15 +155,25 @@ export const AppPermissionGroup = ({
                 Custom
               </SelectItem>
             )}
-            {permissionOptions.map((opt) => (
-              <SelectItem
-                key={opt.value}
-                value={opt.value}
-                disabled={isGroupOptionDisabled(opt.value)}
-              >
-                {opt.label}
-              </SelectItem>
-            ))}
+            {permissionOptions.map((opt) => {
+              const locked =
+                opt.value === "manual_approval" &&
+                planGate.isLocked("policy.manual_approval");
+              return (
+                <SelectItem
+                  key={opt.value}
+                  value={opt.value}
+                  disabled={isGroupOptionDisabled(opt.value)}
+                >
+                  <span className="flex items-center gap-1.5">
+                    {opt.label}
+                    {locked && (
+                      <Lock className="text-muted-foreground size-3.5" />
+                    )}
+                  </span>
+                </SelectItem>
+              );
+            })}
           </SelectContent>
         </Select>
       </div>

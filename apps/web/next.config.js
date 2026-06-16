@@ -60,6 +60,7 @@ const nextConfig = {
           "@/lib/dashboard/session-redirect":
             "@/cloud/dashboard/session-redirect",
           "@/lib/granular-access": "@/cloud/granular-access",
+          "@/lib/plan-gate": "@/cloud/billing/plan-gate",
 
           // Cloud initialization (api, server actions, client)
           "@/lib/init/api": "@/cloud/init/api",
