@@ -1,5 +1,14 @@
 # Changelog
 
+## [1.37.0](https://github.com/onecli/onecli/compare/v1.36.0...v1.37.0) (2026-06-16)
+
+
+### Features
+
+* per-agent granular access for app connections ([#366](https://github.com/onecli/onecli/issues/366)) ([622cb26](https://github.com/onecli/onecli/commit/622cb267c61e4769ed7bfd70499ad45bf816ea63))
+* sync shared changes from cloud ([#368](https://github.com/onecli/onecli/issues/368)) ([a05782b](https://github.com/onecli/onecli/commit/a05782b83c47b3025593a7c09459d37e0a36dc03))
+* **vault:** 1Password as a secret value source ([#113](https://github.com/onecli/onecli/issues/113)) ([ccdfe8d](https://github.com/onecli/onecli/commit/ccdfe8daf09203c169afc2f50d5b7d754c6a8dde))
+
 ## [1.36.0](https://github.com/onecli/onecli/compare/v1.35.1...v1.36.0) (2026-06-10)
 
 
