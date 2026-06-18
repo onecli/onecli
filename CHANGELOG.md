@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.38.0](https://github.com/onecli/onecli/compare/v1.37.0...v1.38.0) (2026-06-18)
+
+
+### Features
+
+* add Google Contacts (People API) provider ([#355](https://github.com/onecli/onecli/issues/355)) ([fec4f4d](https://github.com/onecli/onecli/commit/fec4f4de1eebfe4a868ff460f6b4da15d6e4bc46))
+
 ## [1.37.0](https://github.com/onecli/onecli/compare/v1.36.0...v1.37.0) (2026-06-16)
 
 
