@@ -57,6 +57,14 @@ export const googleContactsPermissions: AppPermissionDefinition = {
           method: "GET",
         },
         {
+          id: "list_directory",
+          name: "List directory people",
+          description: "List people in your organization's directory",
+          hostPattern: "people.googleapis.com",
+          pathPattern: "/v1/people:listDirectoryPeople",
+          method: "GET",
+        },
+        {
           id: "search_directory",
           name: "Search directory",
           description: "Search the organization's directory of coworkers",
@@ -74,7 +82,7 @@ export const googleContactsPermissions: AppPermissionDefinition = {
         description: "Create, update, and delete contacts",
         hostPattern: "people.googleapis.com",
         pathPattern: "/v1/*",
-        methods: ["POST", "PUT", "PATCH", "DELETE"],
+        methods: ["POST", "PATCH", "DELETE"],
       },
       tools: [
         {

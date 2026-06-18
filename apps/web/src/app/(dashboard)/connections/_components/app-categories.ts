@@ -21,6 +21,7 @@ export const APP_CATEGORIES: Record<string, AppCategory> = {
   gmail: "google",
   "google-drive": "google",
   "google-calendar": "google",
+  "google-contacts": "google",
   "google-docs": "google",
   "google-sheets": "google",
   "google-slides": "google",

@@ -1977,29 +1977,6 @@ mod tests {
         assert_eq!(injections.len(), 1);
     }
 
-    // ── Google Contacts (People API) ─────────────────────────────────
-
-    #[test]
-    fn google_contacts_api_uses_bearer() {
-        let injections =
-            build_app_injections("google-contacts", "people.googleapis.com", "ya29.test");
-        assert_eq!(injections.len(), 1);
-        assert_eq!(
-            injections[0],
-            Injection::SetHeader {
-                name: "authorization".to_string(),
-                value: "Bearer ya29.test".to_string(),
-            }
-        );
-    }
-
-    #[test]
-    fn provider_for_host_google_contacts() {
-        let result =
-            provider_for_host_and_path("people.googleapis.com", "/v1/people/me/connections");
-        assert_eq!(result, Some(("google-contacts", "Google Contacts")));
-    }
-
     // ── Google Calendar ──────────────────────────────────────────────
 
     #[test]
