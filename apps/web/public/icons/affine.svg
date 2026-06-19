@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none">
+  <defs>
+    <linearGradient id="affine-a" x1="3" y1="21" x2="21" y2="3" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#1E96EB"/>
+      <stop offset="1" stop-color="#8C9DF7"/>
+    </linearGradient>
+  </defs>
+  <path d="M13.96 2.5 21.5 21.5h-3.62l-1.62-4.2H7.74l-1.62 4.2H2.5L10.04 2.5h3.92Zm-1.96 4.9-2.98 7.7h5.96l-2.98-7.7Z" fill="url(#affine-a)"/>
+</svg>

@@ -54,9 +54,6 @@ pub(crate) enum HostPattern {
     /// at match time (e.g., `Env("AFFINE_HOST")` with `AFFINE_HOST=affine.example.com`).
     /// Used for self-hosted services whose hostname is deployment-specific.
     /// Never matches when the env var is unset or empty.
-    // `allow(dead_code)`: this variant has no provider consumer yet — the first
-    // (AFFiNE) lands in a follow-up PR. Matching/tests already exercise it.
-    #[allow(dead_code)]
     Env(&'static str),
 }
 
@@ -1109,6 +1106,28 @@ static APP_PROVIDERS: &[AppProvider] = &[
             strategy: AuthStrategy::Bearer,
             intercept: false,
             credential_host_field: Some("subdomain"),
+        }],
+        refresh: None,
+        metadata_headers: &[],
+        credential_headers: &[],
+        credential_params: &[],
+        host_rewrite: None,
+        finalizer: None,
+        body_transform: None,
+    },
+    AppProvider {
+        provider: "affine",
+        display_name: "AFFiNE",
+        // Self-hosted instances have deployment-specific hostnames, so the
+        // host is configured via the AFFINE_HOST env var. The stored `host`
+        // credential field additionally gates injection per connection so a
+        // token never leaks if AFFINE_HOST is repointed.
+        host_rules: &[HostRule {
+            pattern: HostPattern::Env("AFFINE_HOST"),
+            path_prefix: None,
+            strategy: AuthStrategy::Bearer,
+            intercept: false,
+            credential_host_field: Some("host"),
         }],
         refresh: None,
         metadata_headers: &[],
@@ -3042,6 +3061,48 @@ mod tests {
     #[test]
     fn jfrog_has_no_refresh_config() {
         assert!(refresh_config("jfrog-artifactory").is_none());
+    }
+
+    // ── AFFiNE ────────────────────────────────────────────────────────
+
+    // Single test for everything that depends on AFFINE_HOST: env vars are
+    // process-global and tests run in parallel, so only ONE test may touch
+    // this variable.
+    #[test]
+    fn affine_env_host_rule() {
+        // Unset → never matches.
+        std::env::remove_var("AFFINE_HOST");
+        assert!(providers_for_host("affine.example.com").is_empty());
+
+        std::env::set_var("AFFINE_HOST", "affine.example.com");
+
+        // Host matching: exact env value, case-insensitive, no other hosts.
+        assert_eq!(providers_for_host("affine.example.com"), vec!["affine"]);
+        assert_eq!(providers_for_host("AFFINE.example.com"), vec!["affine"]);
+        assert!(providers_for_host("other.example.com").is_empty());
+        assert_eq!(
+            provider_for_host("affine.example.com"),
+            Some(("affine", "AFFiNE"))
+        );
+
+        // Injection: Bearer auth.
+        let injections = build_app_injections("affine", "affine.example.com", "ut_test");
+        assert_eq!(injections.len(), 1);
+        assert_eq!(
+            injections[0],
+            Injection::SetHeader {
+                name: "authorization".to_string(),
+                value: "Bearer ut_test".to_string(),
+            }
+        );
+
+        // Per-connection host gate.
+        assert_eq!(
+            credential_host_field("affine", "affine.example.com"),
+            Some("host")
+        );
+
+        std::env::remove_var("AFFINE_HOST");
     }
 
     // ── credential_host_field ─────────────────────────────────────────

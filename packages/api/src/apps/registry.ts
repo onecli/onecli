@@ -39,6 +39,7 @@ import { trello } from "./trello";
 import { monday } from "./monday";
 import { vercel } from "./vercel";
 import { jfrogArtifactory } from "./jfrog-artifactory";
+import { affine } from "./affine";
 
 const staticApps: AppDefinition[] = [
   gmail,
@@ -79,6 +80,7 @@ const staticApps: AppDefinition[] = [
   trello,
   vercel,
   jfrogArtifactory,
+  affine,
 ];
 
 const CLOUD_HIDDEN_APPS = new Set(["jfrog-artifactory"]);
