@@ -50,6 +50,14 @@ pub(crate) enum HostPattern {
     /// Match any hostname ending with the suffix, strictly longer than the suffix
     /// (e.g., `"-aiplatform.googleapis.com"` matches `"us-central1-aiplatform.googleapis.com"`).
     Suffix(&'static str),
+    /// Match the hostname against the value of an environment variable, read
+    /// at match time (e.g., `Env("AFFINE_HOST")` with `AFFINE_HOST=affine.example.com`).
+    /// Used for self-hosted services whose hostname is deployment-specific.
+    /// Never matches when the env var is unset or empty.
+    // `allow(dead_code)`: this variant has no provider consumer yet — the first
+    // (AFFiNE) lands in a follow-up PR. Matching/tests already exercise it.
+    #[allow(dead_code)]
+    Env(&'static str),
 }
 
 /// A host pattern and its injection strategy for an app provider.
@@ -76,6 +84,9 @@ impl HostPattern {
         match self {
             Self::Exact(host) => *host == hostname,
             Self::Suffix(suffix) => hostname.ends_with(suffix) && hostname.len() > suffix.len(),
+            Self::Env(var) => std::env::var(var)
+                .ok()
+                .is_some_and(|v| !v.is_empty() && v.eq_ignore_ascii_case(hostname)),
         }
     }
 }
@@ -2746,6 +2757,7 @@ mod tests {
                 let host = match rule.pattern {
                     HostPattern::Exact(h) => h,
                     HostPattern::Suffix(_) => continue, // suffix rules don't share hosts
+                    HostPattern::Env(_) => continue,    // env rules are deployment-specific
                 };
                 let entry = hosts.entry(host).or_default();
                 if rule.path_prefix.is_some() {
@@ -2785,6 +2797,29 @@ mod tests {
     fn vertex_ai_suffix_no_false_positives() {
         assert!(providers_for_host("aiplatform.googleapis.com").is_empty());
         assert!(providers_for_host("-aiplatform.googleapis.com").is_empty());
+    }
+
+    // Uses a dedicated env var (not shared with any provider rule) so it can
+    // safely set/unset without racing other tests — env vars are process-global.
+    #[test]
+    fn host_pattern_env_matches() {
+        let pattern = HostPattern::Env("ONECLI_TEST_SELF_HOSTED_HOST");
+
+        // Unset → never matches.
+        std::env::remove_var("ONECLI_TEST_SELF_HOSTED_HOST");
+        assert!(!pattern.matches("svc.example.com"));
+
+        std::env::set_var("ONECLI_TEST_SELF_HOSTED_HOST", "svc.example.com");
+        // Exact match, case-insensitive; unrelated hosts do not match.
+        assert!(pattern.matches("svc.example.com"));
+        assert!(pattern.matches("SVC.Example.com"));
+        assert!(!pattern.matches("other.example.com"));
+
+        // Empty value → never matches (safe default).
+        std::env::set_var("ONECLI_TEST_SELF_HOSTED_HOST", "");
+        assert!(!pattern.matches("svc.example.com"));
+
+        std::env::remove_var("ONECLI_TEST_SELF_HOSTED_HOST");
     }
 
     #[test]
