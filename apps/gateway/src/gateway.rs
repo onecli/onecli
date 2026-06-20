@@ -103,11 +103,84 @@ pub struct GatewayServer {
 /// - Redirects are disabled so 3xx responses are forwarded to the client as-is.
 /// - `accept_invalid_certs` skips TLS certificate validation for upstream connections.
 fn build_http_client(accept_invalid_certs: bool) -> reqwest::Client {
-    reqwest::Client::builder()
+    let mut builder = reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
-        .danger_accept_invalid_certs(accept_invalid_certs)
-        .build()
-        .expect("build HTTP client")
+        .danger_accept_invalid_certs(accept_invalid_certs);
+    // Trust extra CA certificate(s) for UPSTREAM TLS verification (e.g. a
+    // self-hosted internal / Smallstep CA), so the gateway can forward to
+    // internal HTTPS services with full verification instead of skipping it.
+    // Public webpki roots stay trusted, so SaaS hosts are unaffected.
+    for cert in load_upstream_ca_certs() {
+        builder = builder.add_root_certificate(cert);
+    }
+    builder.build().expect("build HTTP client")
+}
+
+/// Extra trusted CA certificates for upstream TLS verification, loaded from
+/// `GATEWAY_UPSTREAM_CA_CERT` (a path to a PEM file, or inline PEM). Returns an
+/// empty vec when unset/empty. A bad path or unparseable cert is logged and
+/// skipped rather than crashing the gateway.
+fn load_upstream_ca_certs() -> Vec<reqwest::Certificate> {
+    let Ok(value) = std::env::var("GATEWAY_UPSTREAM_CA_CERT") else {
+        return Vec::new();
+    };
+    let value = value.trim();
+    if value.is_empty() {
+        return Vec::new();
+    }
+    let pem = if value.starts_with("-----BEGIN") {
+        value.as_bytes().to_vec()
+    } else {
+        match std::fs::read(value) {
+            Ok(bytes) => bytes,
+            Err(e) => {
+                warn!(path = %value, error = %e, "GATEWAY_UPSTREAM_CA_CERT: failed to read CA file");
+                return Vec::new();
+            }
+        }
+    };
+    let certs = parse_ca_pem_bundle(&pem);
+    if certs.is_empty() {
+        warn!("GATEWAY_UPSTREAM_CA_CERT set but no certificates were parsed");
+    } else {
+        info!(
+            count = certs.len(),
+            "trusting extra upstream CA certificate(s) from GATEWAY_UPSTREAM_CA_CERT"
+        );
+    }
+    certs
+}
+
+/// Parse a PEM bundle into individual reqwest certificates. Splits on
+/// `CERTIFICATE` blocks and parses each independently so one bad block doesn't
+/// discard the rest (and to avoid depending on a specific reqwest minor for
+/// bundle parsing).
+fn parse_ca_pem_bundle(pem: &[u8]) -> Vec<reqwest::Certificate> {
+    let text = String::from_utf8_lossy(pem);
+    let mut certs = Vec::new();
+    let mut current = String::new();
+    let mut in_cert = false;
+    for line in text.lines() {
+        if line.contains("BEGIN CERTIFICATE") {
+            in_cert = true;
+            current.clear();
+        }
+        if in_cert {
+            current.push_str(line);
+            current.push('\n');
+        }
+        if line.contains("END CERTIFICATE") {
+            in_cert = false;
+            match reqwest::Certificate::from_pem(current.as_bytes()) {
+                Ok(cert) => certs.push(cert),
+                Err(e) => {
+                    warn!(error = %e, "skipping unparseable certificate in GATEWAY_UPSTREAM_CA_CERT")
+                }
+            }
+            current.clear();
+        }
+    }
+    certs
 }
 
 /// Parse `GATEWAY_SKIP_VERIFY_HOSTS` into a list of hostname patterns.
@@ -921,6 +994,27 @@ pub(crate) fn strip_port(host: &str) -> &str {
 mod tests {
     use super::*;
     use std::net::TcpListener;
+
+    /// GATEWAY_UPSTREAM_CA_CERT parsing: a PEM bundle yields one cert per
+    /// CERTIFICATE block, and non-cert input yields none (and is not fatal).
+    #[test]
+    fn parse_ca_pem_bundle_handles_single_multiple_and_garbage() {
+        let c1 = rcgen::generate_simple_self_signed(vec!["a.test".to_string()])
+            .unwrap()
+            .cert
+            .pem();
+        let c2 = rcgen::generate_simple_self_signed(vec!["b.test".to_string()])
+            .unwrap()
+            .cert
+            .pem();
+
+        assert_eq!(parse_ca_pem_bundle(c1.as_bytes()).len(), 1);
+        let bundle = format!("{c1}\n{c2}");
+        assert_eq!(parse_ca_pem_bundle(bundle.as_bytes()).len(), 2);
+        // Non-PEM input (e.g. a wrong/empty file) yields nothing and never panics.
+        assert!(parse_ca_pem_bundle(b"not a pem at all").is_empty());
+        assert!(parse_ca_pem_bundle(b"").is_empty());
+    }
 
     /// Verify that the production HTTP client does not follow redirects.
     /// A proxy must forward 3xx responses to the client so the client's HTTP
