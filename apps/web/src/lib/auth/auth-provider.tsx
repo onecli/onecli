@@ -78,7 +78,11 @@ export const AuthProviderImpl = ({
   }
 
   return (
-    <SessionProvider>
+    // NextAuth route handlers are mounted at /v1/auth (not the default
+    // /api/auth), so the client must fetch the session from there too —
+    // otherwise getSession/useSession throw ClientFetchError in self-hosted
+    // OAuth deployments. See upstream issue #362.
+    <SessionProvider basePath="/v1/auth">
       <OAuthInner>{children}</OAuthInner>
     </SessionProvider>
   );
