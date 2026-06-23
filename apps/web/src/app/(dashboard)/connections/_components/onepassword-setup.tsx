@@ -104,6 +104,7 @@ export const OnePasswordSetup = () => {
                 <div className="grid gap-1.5">
                   <span>{lastError}</span>
                   <button
+                    type="button"
                     onClick={fetchStatus}
                     className="text-muted-foreground hover:text-foreground flex w-fit items-center gap-1 text-xs underline-offset-2 hover:underline"
                   >
