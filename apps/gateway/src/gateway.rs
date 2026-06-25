@@ -427,6 +427,7 @@ async fn get_pending_approvals(
                 "path": a.path,
                 "headers": a.headers,
                 "bodyPreview": a.body_preview,
+                "summary": a.summary,
                 "agent": { "id": a.agent_id, "name": a.agent_name, "externalId": a.agent_identifier },
                 "createdAt": format_unix_ts(a.created_at),
                 "expiresAt": format_unix_ts(a.expires_at),

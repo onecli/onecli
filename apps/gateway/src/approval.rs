@@ -45,6 +45,10 @@ pub(crate) struct PendingApproval {
     pub path: String,
     pub headers: HashMap<String, String>,
     pub body_preview: Option<String>,
+    /// Structured, human-readable summary of the request for approval cards.
+    /// `None` for older records; consumers fall back to `body_preview`.
+    #[serde(default)]
+    pub summary: Option<crate::summary::ApprovalSummary>,
     pub created_at: u64,
     pub expires_at: u64,
 }
@@ -401,6 +405,7 @@ mod tests {
             path: "/v1/send".to_string(),
             headers: HashMap::new(),
             body_preview: None,
+            summary: None,
             created_at: now,
             expires_at: now + APPROVAL_TIMEOUT_SECS,
         }
@@ -420,6 +425,7 @@ mod tests {
             path: "/v1/send".to_string(),
             headers: HashMap::new(),
             body_preview: None,
+            summary: None,
             created_at: 0,
             expires_at: 1, // expired long ago
         }

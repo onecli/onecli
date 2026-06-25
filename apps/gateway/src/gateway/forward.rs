@@ -1,6 +1,7 @@
 //! HTTP request forwarding: send requests upstream, apply injection/policy rules,
 //! stream responses back, and intercept auth failures for unconnected apps.
 
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
@@ -88,11 +89,13 @@ fn content_length_at_most(headers: &hyper::HeaderMap, max: usize) -> bool {
 ///    host belongs to a known app → return an actionable error for the agent
 /// 5. Stream response back to client
 ///
-/// For `ManualApproval`, the gateway peeks the first 4KB of the body for a
-/// preview (shown to the approver), then chains it back with the remaining
-/// stream for forwarding. No full-body buffering — the body stays in the
-/// TCP pipe during the approval wait.
-const BODY_PREVIEW_BYTES: usize = 4096;
+/// For `ManualApproval`, the gateway peeks a bounded prefix of the body to build
+/// a human-readable approval summary and a redacted preview, then chains it back
+/// with the remaining stream for forwarding. No full-body buffering — the body
+/// stays in the TCP pipe during the approval wait. 16 KB is enough to decode the
+/// RFC822 headers / first MIME part for the summary while staying tiny next to a
+/// multi-megabyte attachment.
+const APPROVAL_BODY_PEEK: usize = 16 * 1024;
 
 /// Maximum response body to buffer when checking if a 400 is auth-related.
 /// Auth error messages are small JSON; no need to scan large bodies.
@@ -343,23 +346,22 @@ pub(crate) async fn forward_request(
             let agent_id = proxy_ctx.agent_id.as_deref().unwrap_or("unknown");
             let agent_name = proxy_ctx.agent_name.as_deref().unwrap_or("Unknown Agent");
 
-            // Build body preview and forwarding body.
-            // If condition buffering already captured the body, reuse that buffer
-            // for the preview instead of peeking the stream a second time.
-            let (body_preview, fwd_body) = if let Some(ref buf) = condition_buffer {
-                let preview_len = buf.len().min(BODY_PREVIEW_BYTES);
-                let preview = if preview_len > 0 {
-                    Some(String::from_utf8_lossy(&buf[..preview_len]).into_owned())
-                } else {
-                    None
-                };
-                (preview, body)
+            // Peek a bounded prefix of the body for the summary + preview, then
+            // build the forwarding body. If condition buffering already captured
+            // the body, reuse that buffer instead of peeking the stream again.
+            let (summary_bytes, fwd_body): (Cow<'_, [u8]>, reqwest::Body) = if let Some(ref buf) =
+                condition_buffer
+            {
+                // Body already buffered for condition matching — borrow its prefix
+                // for the summary instead of copying it again.
+                let take = buf.len().min(APPROVAL_BODY_PEEK);
+                (Cow::Borrowed(&buf[..take]), body)
             } else {
                 let mut body_stream = Box::pin(http_body_util::BodyDataStream::new(body));
                 let mut peeked: Vec<Bytes> = Vec::new();
                 let mut peeked_len: usize = 0;
 
-                while peeked_len < BODY_PREVIEW_BYTES {
+                while peeked_len < APPROVAL_BODY_PEEK {
                     match body_stream.next().await {
                         Some(Ok(data)) => {
                             peeked_len += data.len();
@@ -372,29 +374,14 @@ pub(crate) async fn forward_request(
                     }
                 }
 
-                if peeked_len >= BODY_PREVIEW_BYTES {
-                    warn!(
-                        method = %method,
-                        url = %url,
-                        peeked = peeked_len,
-                        limit = BODY_PREVIEW_BYTES,
-                        "request body exceeds approval preview limit — preview truncated"
-                    );
-                }
-
-                let preview = if peeked.is_empty() {
-                    None
-                } else {
-                    let mut buf = Vec::with_capacity(peeked_len.min(BODY_PREVIEW_BYTES));
-                    for chunk in &peeked {
-                        let take = (BODY_PREVIEW_BYTES - buf.len()).min(chunk.len());
-                        buf.extend_from_slice(&chunk[..take]);
-                        if buf.len() >= BODY_PREVIEW_BYTES {
-                            break;
-                        }
+                let mut buf = Vec::with_capacity(peeked_len.min(APPROVAL_BODY_PEEK));
+                for chunk in &peeked {
+                    let take = (APPROVAL_BODY_PEEK - buf.len()).min(chunk.len());
+                    buf.extend_from_slice(&chunk[..take]);
+                    if buf.len() >= APPROVAL_BODY_PEEK {
+                        break;
                     }
-                    Some(String::from_utf8_lossy(&buf).into_owned())
-                };
+                }
 
                 let peeked_stream =
                     futures_util::stream::iter(peeked.into_iter().map(Ok::<_, std::io::Error>));
@@ -402,8 +389,33 @@ pub(crate) async fn forward_request(
                     body_stream.map(|r| r.map_err(|e| std::io::Error::other(e.to_string())));
                 let reassembled = reqwest::Body::wrap_stream(peeked_stream.chain(remaining_stream));
 
-                (preview, reassembled)
+                (Cow::Owned(buf), reassembled)
             };
+
+            // Resolve provider + content-type for the summarizer. Both degrade
+            // gracefully: unknown provider → generic summary, no content-type →
+            // best-effort sniffing. The summary/preview never embed raw base64 or
+            // oversized JSON, so the approval card can't overflow a chat client.
+            let (summary_provider, _) =
+                crate::apps::provider_for_host_and_path(super::strip_port(host), &path)
+                    .unwrap_or((host, host));
+            let content_type = parts
+                .headers
+                .get(hyper::header::CONTENT_TYPE)
+                .and_then(|v| v.to_str().ok());
+            let summary_body = (!summary_bytes.is_empty()).then_some(&*summary_bytes);
+            let approval_summary = crate::summary::summarize_request(
+                summary_provider,
+                method.as_str(),
+                &path,
+                content_type,
+                summary_body,
+            );
+            // `body_preview` carries the rendered summary so consumers that only
+            // read the legacy field still get a clean, bounded, human-readable
+            // card instead of raw JSON/base64. The structured `summary` is sent
+            // alongside for richer rendering.
+            let body_preview = Some(approval_summary.render_text());
 
             let now = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -424,6 +436,7 @@ pub(crate) async fn forward_request(
                 path: path.clone(),
                 headers: sanitized_headers.unwrap_or_default(),
                 body_preview,
+                summary: Some(approval_summary),
                 created_at: now,
                 expires_at: now + APPROVAL_TIMEOUT_SECS,
             };

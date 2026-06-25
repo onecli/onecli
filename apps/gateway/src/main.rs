@@ -52,6 +52,19 @@ mod gateway;
 mod inject;
 mod policy;
 mod secret_inject;
+mod summary;
+
+// Cloud-only request summarizers for manual-approval cards. OSS build uses the
+// no-op `cloud_summary.rs` stub; the cloud build swaps in `cloud/cloud_summary.rs`
+// (+ the `cloud/cloud_summary/` submodules). Mirrors the `cloud_apps` split, and
+// is the fall-through arm of `summary`'s per-provider dispatch.
+#[cfg(not(feature = "cloud"))]
+mod cloud_summary;
+
+#[cfg(feature = "cloud")]
+#[path = "cloud/cloud_summary.rs"]
+mod cloud_summary;
+
 mod telemetry_core;
 mod util;
 
