@@ -50,6 +50,11 @@ pub(crate) enum HostPattern {
     /// Match any hostname ending with the suffix, strictly longer than the suffix
     /// (e.g., `"-aiplatform.googleapis.com"` matches `"us-central1-aiplatform.googleapis.com"`).
     Suffix(&'static str),
+    /// Match the hostname against the value of an environment variable, read
+    /// at match time (e.g., `Env("AFFINE_HOST")` with `AFFINE_HOST=affine.example.com`).
+    /// Used for self-hosted services whose hostname is deployment-specific.
+    /// Never matches when the env var is unset or empty.
+    Env(&'static str),
 }
 
 /// A host pattern and its injection strategy for an app provider.
@@ -76,6 +81,9 @@ impl HostPattern {
         match self {
             Self::Exact(host) => *host == hostname,
             Self::Suffix(suffix) => hostname.ends_with(suffix) && hostname.len() > suffix.len(),
+            Self::Env(var) => std::env::var(var)
+                .ok()
+                .is_some_and(|v| !v.is_empty() && v.eq_ignore_ascii_case(hostname)),
         }
     }
 }
@@ -1098,6 +1106,28 @@ static APP_PROVIDERS: &[AppProvider] = &[
             strategy: AuthStrategy::Bearer,
             intercept: false,
             credential_host_field: Some("subdomain"),
+        }],
+        refresh: None,
+        metadata_headers: &[],
+        credential_headers: &[],
+        credential_params: &[],
+        host_rewrite: None,
+        finalizer: None,
+        body_transform: None,
+    },
+    AppProvider {
+        provider: "affine",
+        display_name: "AFFiNE",
+        // Self-hosted instances have deployment-specific hostnames, so the
+        // host is configured via the AFFINE_HOST env var. The stored `host`
+        // credential field additionally gates injection per connection so a
+        // token never leaks if AFFINE_HOST is repointed.
+        host_rules: &[HostRule {
+            pattern: HostPattern::Env("AFFINE_HOST"),
+            path_prefix: None,
+            strategy: AuthStrategy::Bearer,
+            intercept: false,
+            credential_host_field: Some("host"),
         }],
         refresh: None,
         metadata_headers: &[],
@@ -2746,6 +2776,7 @@ mod tests {
                 let host = match rule.pattern {
                     HostPattern::Exact(h) => h,
                     HostPattern::Suffix(_) => continue, // suffix rules don't share hosts
+                    HostPattern::Env(_) => continue,    // env rules are deployment-specific
                 };
                 let entry = hosts.entry(host).or_default();
                 if rule.path_prefix.is_some() {
@@ -2785,6 +2816,29 @@ mod tests {
     fn vertex_ai_suffix_no_false_positives() {
         assert!(providers_for_host("aiplatform.googleapis.com").is_empty());
         assert!(providers_for_host("-aiplatform.googleapis.com").is_empty());
+    }
+
+    // Uses a dedicated env var (not shared with any provider rule) so it can
+    // safely set/unset without racing other tests — env vars are process-global.
+    #[test]
+    fn host_pattern_env_matches() {
+        let pattern = HostPattern::Env("ONECLI_TEST_SELF_HOSTED_HOST");
+
+        // Unset → never matches.
+        std::env::remove_var("ONECLI_TEST_SELF_HOSTED_HOST");
+        assert!(!pattern.matches("svc.example.com"));
+
+        std::env::set_var("ONECLI_TEST_SELF_HOSTED_HOST", "svc.example.com");
+        // Exact match, case-insensitive; unrelated hosts do not match.
+        assert!(pattern.matches("svc.example.com"));
+        assert!(pattern.matches("SVC.Example.com"));
+        assert!(!pattern.matches("other.example.com"));
+
+        // Empty value → never matches (safe default).
+        std::env::set_var("ONECLI_TEST_SELF_HOSTED_HOST", "");
+        assert!(!pattern.matches("svc.example.com"));
+
+        std::env::remove_var("ONECLI_TEST_SELF_HOSTED_HOST");
     }
 
     #[test]
@@ -3007,6 +3061,48 @@ mod tests {
     #[test]
     fn jfrog_has_no_refresh_config() {
         assert!(refresh_config("jfrog-artifactory").is_none());
+    }
+
+    // ── AFFiNE ────────────────────────────────────────────────────────
+
+    // Single test for everything that depends on AFFINE_HOST: env vars are
+    // process-global and tests run in parallel, so only ONE test may touch
+    // this variable.
+    #[test]
+    fn affine_env_host_rule() {
+        // Unset → never matches.
+        std::env::remove_var("AFFINE_HOST");
+        assert!(providers_for_host("affine.example.com").is_empty());
+
+        std::env::set_var("AFFINE_HOST", "affine.example.com");
+
+        // Host matching: exact env value, case-insensitive, no other hosts.
+        assert_eq!(providers_for_host("affine.example.com"), vec!["affine"]);
+        assert_eq!(providers_for_host("AFFINE.example.com"), vec!["affine"]);
+        assert!(providers_for_host("other.example.com").is_empty());
+        assert_eq!(
+            provider_for_host("affine.example.com"),
+            Some(("affine", "AFFiNE"))
+        );
+
+        // Injection: Bearer auth.
+        let injections = build_app_injections("affine", "affine.example.com", "ut_test");
+        assert_eq!(injections.len(), 1);
+        assert_eq!(
+            injections[0],
+            Injection::SetHeader {
+                name: "authorization".to_string(),
+                value: "Bearer ut_test".to_string(),
+            }
+        );
+
+        // Per-connection host gate.
+        assert_eq!(
+            credential_host_field("affine", "affine.example.com"),
+            Some("host")
+        );
+
+        std::env::remove_var("AFFINE_HOST");
     }
 
     // ── credential_host_field ─────────────────────────────────────────
