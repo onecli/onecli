@@ -70,11 +70,13 @@ async fn update_batch(pool: &PgPool, events: &[RequestEvent]) {
                 approval_id,
                 triggered_at,
                 resolved_at,
+                approved_by,
             } => json!({
                 "decision": "approval_approved",
                 "approval_id": approval_id,
                 "triggered_at": triggered_at,
                 "resolved_at": resolved_at,
+                "approved_by": approved_by,
             })
             .to_string(),
             RequestDecision::ApprovalDenied {
@@ -82,12 +84,14 @@ async fn update_batch(pool: &PgPool, events: &[RequestEvent]) {
                 reason,
                 triggered_at,
                 resolved_at,
+                approved_by,
             } => json!({
                 "decision": "approval_denied",
                 "approval_id": approval_id,
                 "approval_reason": reason,
                 "triggered_at": triggered_at,
                 "resolved_at": resolved_at,
+                "approved_by": approved_by,
             })
             .to_string(),
             _ => "{}".to_string(),

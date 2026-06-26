@@ -11,7 +11,7 @@ export const confluencePermissions: AppPermissionDefinition = {
         description:
           "Search, read, and list pages, spaces, comments, and attachments",
         hostPattern: "api.atlassian.com",
-        pathPattern: "/wiki/api/v2/*",
+        pathPattern: "/ex/confluence/*/wiki/api/v2/*",
         method: "GET",
       },
       tools: [
@@ -20,7 +20,7 @@ export const confluencePermissions: AppPermissionDefinition = {
           name: "Get page",
           description: "Retrieve a specific Confluence page",
           hostPattern: "api.atlassian.com",
-          pathPattern: "/wiki/api/v2/pages/*",
+          pathPattern: "/ex/confluence/*/wiki/api/v2/pages/*",
           method: "GET",
         },
         {
@@ -28,7 +28,7 @@ export const confluencePermissions: AppPermissionDefinition = {
           name: "Search content",
           description: "Search for content using CQL",
           hostPattern: "api.atlassian.com",
-          pathPattern: "/wiki/api/v2/search",
+          pathPattern: "/ex/confluence/*/wiki/rest/api/search",
           method: "GET",
         },
         {
@@ -36,7 +36,7 @@ export const confluencePermissions: AppPermissionDefinition = {
           name: "List spaces",
           description: "List all spaces in Confluence",
           hostPattern: "api.atlassian.com",
-          pathPattern: "/wiki/api/v2/spaces",
+          pathPattern: "/ex/confluence/*/wiki/api/v2/spaces",
           method: "GET",
         },
         {
@@ -44,7 +44,7 @@ export const confluencePermissions: AppPermissionDefinition = {
           name: "Get space",
           description: "Retrieve a specific space's details",
           hostPattern: "api.atlassian.com",
-          pathPattern: "/wiki/api/v2/spaces/*",
+          pathPattern: "/ex/confluence/*/wiki/api/v2/spaces/*",
           method: "GET",
         },
         {
@@ -52,7 +52,7 @@ export const confluencePermissions: AppPermissionDefinition = {
           name: "List pages",
           description: "List pages in a space",
           hostPattern: "api.atlassian.com",
-          pathPattern: "/wiki/api/v2/spaces/*/pages",
+          pathPattern: "/ex/confluence/*/wiki/api/v2/spaces/*/pages",
           method: "GET",
         },
       ],
@@ -64,7 +64,7 @@ export const confluencePermissions: AppPermissionDefinition = {
         name: "All write operations",
         description: "Create, update, delete pages, and add comments",
         hostPattern: "api.atlassian.com",
-        pathPattern: "/wiki/api/v2/*",
+        pathPattern: "/ex/confluence/*/wiki/api/v2/*",
         methods: ["POST", "PUT", "PATCH", "DELETE"],
       },
       tools: [
@@ -73,7 +73,7 @@ export const confluencePermissions: AppPermissionDefinition = {
           name: "Create page",
           description: "Create a new Confluence page",
           hostPattern: "api.atlassian.com",
-          pathPattern: "/wiki/api/v2/pages",
+          pathPattern: "/ex/confluence/*/wiki/api/v2/pages",
           method: "POST",
         },
         {
@@ -81,7 +81,7 @@ export const confluencePermissions: AppPermissionDefinition = {
           name: "Update page",
           description: "Update an existing Confluence page",
           hostPattern: "api.atlassian.com",
-          pathPattern: "/wiki/api/v2/pages/*",
+          pathPattern: "/ex/confluence/*/wiki/api/v2/pages/*",
           method: "PUT",
         },
         {
@@ -89,7 +89,7 @@ export const confluencePermissions: AppPermissionDefinition = {
           name: "Delete page",
           description: "Delete a Confluence page",
           hostPattern: "api.atlassian.com",
-          pathPattern: "/wiki/api/v2/pages/*",
+          pathPattern: "/ex/confluence/*/wiki/api/v2/pages/*",
           method: "DELETE",
         },
         {
@@ -97,7 +97,7 @@ export const confluencePermissions: AppPermissionDefinition = {
           name: "Add comment",
           description: "Add a comment to a Confluence page",
           hostPattern: "api.atlassian.com",
-          pathPattern: "/wiki/api/v2/pages/*/footer-comments",
+          pathPattern: "/ex/confluence/*/wiki/api/v2/pages/*/footer-comments",
           method: "POST",
         },
       ],

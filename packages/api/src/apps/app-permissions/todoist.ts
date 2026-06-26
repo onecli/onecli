@@ -11,7 +11,7 @@ export const todoistPermissions: AppPermissionDefinition = {
           name: "List tasks",
           description: "List active tasks",
           hostPattern: "api.todoist.com",
-          pathPattern: "/rest/v2/tasks",
+          pathPattern: "/api/v1/tasks",
           method: "GET",
         },
         {
@@ -19,7 +19,7 @@ export const todoistPermissions: AppPermissionDefinition = {
           name: "Get task",
           description: "Retrieve a specific task",
           hostPattern: "api.todoist.com",
-          pathPattern: "/rest/v2/tasks/*",
+          pathPattern: "/api/v1/tasks/*",
           method: "GET",
         },
         {
@@ -27,7 +27,7 @@ export const todoistPermissions: AppPermissionDefinition = {
           name: "List projects",
           description: "List all projects",
           hostPattern: "api.todoist.com",
-          pathPattern: "/rest/v2/projects",
+          pathPattern: "/api/v1/projects",
           method: "GET",
         },
       ],
@@ -40,7 +40,7 @@ export const todoistPermissions: AppPermissionDefinition = {
           name: "Create task",
           description: "Create a new task",
           hostPattern: "api.todoist.com",
-          pathPattern: "/rest/v2/tasks",
+          pathPattern: "/api/v1/tasks",
           method: "POST",
         },
         {
@@ -48,7 +48,7 @@ export const todoistPermissions: AppPermissionDefinition = {
           name: "Update task",
           description: "Update an existing task",
           hostPattern: "api.todoist.com",
-          pathPattern: "/rest/v2/tasks/*",
+          pathPattern: "/api/v1/tasks/*",
           method: "POST",
         },
         {
@@ -56,7 +56,7 @@ export const todoistPermissions: AppPermissionDefinition = {
           name: "Close task",
           description: "Mark a task as complete",
           hostPattern: "api.todoist.com",
-          pathPattern: "/rest/v2/tasks/*/close",
+          pathPattern: "/api/v1/tasks/*/close",
           method: "POST",
         },
         {
@@ -64,7 +64,7 @@ export const todoistPermissions: AppPermissionDefinition = {
           name: "Delete task",
           description: "Delete a task",
           hostPattern: "api.todoist.com",
-          pathPattern: "/rest/v2/tasks/*",
+          pathPattern: "/api/v1/tasks/*",
           method: "DELETE",
         },
       ],

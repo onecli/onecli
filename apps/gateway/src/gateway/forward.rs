@@ -331,6 +331,9 @@ pub(crate) async fn forward_request(
     // Approval log_id + metadata are stored as locals so they can be
     // threaded to the telemetry section for the approved UPDATE.
 
+    // The deciding user (for the approved-path telemetry below) is captured
+    // here because the approve arm returns the body tuple, not the identity.
+    let mut approval_approved_by: Option<String> = None;
     let (forward_body, approval_log_id, approval_id_for_telemetry, approval_triggered_at) =
         if let PolicyDecision::ManualApproval { rule_id } = &decision {
             info!(method = %method, url = %url, rule_id = %rule_id, "MANUAL APPROVAL required");
@@ -493,19 +496,23 @@ pub(crate) async fn forward_request(
                 "holding request for approval"
             );
 
-            let approval_decision = decision_rx
+            let outcome = decision_rx
                 .wait(Duration::from_secs(APPROVAL_TIMEOUT_SECS))
                 .await;
 
             // Decision received (or timed out) — defuse guard, handle explicitly.
             guard.defuse();
 
-            match approval_decision {
+            let decision = outcome.as_ref().map(|o| o.decision);
+            let approved_by = outcome.and_then(|o| o.approved_by);
+
+            match decision {
                 Some(ApprovalDecision::Approve) => {
                     info!(url = %url, approval_id = %approval_id, "APPROVED — forwarding request");
                     approval_store
                         .remove(org_id, project_id, &approval_id)
                         .await;
+                    approval_approved_by = approved_by;
                     (
                         fwd_body,
                         Some(log_id),
@@ -537,6 +544,7 @@ pub(crate) async fn forward_request(
                             reason: reason.to_string(),
                             triggered_at,
                             resolved_at,
+                            approved_by,
                         },
                         None,
                         Some(log_id),
@@ -811,6 +819,7 @@ pub(crate) async fn forward_request(
                     approval_id: aid_val,
                     triggered_at: triggered,
                     resolved_at,
+                    approved_by: approval_approved_by,
                 })
             }
             _ => None,

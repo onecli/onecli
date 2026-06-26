@@ -48,7 +48,7 @@ export const youtubePermissions: AppPermissionDefinition = {
           name: "Insert video",
           description: "Upload a new video to YouTube",
           hostPattern: "www.googleapis.com",
-          pathPattern: "/youtube/v3/videos",
+          pathPattern: "/upload/youtube/v3/videos",
           method: "POST",
         },
         {

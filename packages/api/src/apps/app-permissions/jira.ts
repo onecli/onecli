@@ -20,8 +20,8 @@ export const jiraPermissions: AppPermissionDefinition = {
           name: "Search issues",
           description: "Search for issues using JQL",
           hostPattern: "api.atlassian.com",
-          pathPattern: "/ex/jira/*/rest/api/3/search",
-          method: "GET",
+          pathPattern: "/ex/jira/*/rest/api/3/search/jql",
+          methods: ["GET", "POST"],
         },
         {
           id: "get_issue",

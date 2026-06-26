@@ -65,7 +65,7 @@ export const googleCalendarPermissions: AppPermissionDefinition = {
           description: "Update an existing calendar event",
           hostPattern: "www.googleapis.com",
           pathPattern: "/calendar/v3/calendars/*/events/*",
-          method: "PATCH",
+          methods: ["PUT", "PATCH"],
         },
         {
           id: "delete_event",

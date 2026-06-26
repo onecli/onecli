@@ -141,6 +141,11 @@ export const ActivityDetailDialog = ({
             <Row label="Agent">
               <span>{log.agentName ?? log.agentId}</span>
             </Row>
+            {log.approvedBy && (
+              <Row label="Decided by">
+                <span>{log.approvedBy}</span>
+              </Row>
+            )}
             <Row label="Time">
               <span className="text-xs tabular-nums">
                 {new Date(log.createdAt).toLocaleString()}

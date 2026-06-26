@@ -33,7 +33,7 @@ const githubGroups: AppToolGroup[] = [
         name: "List pull requests",
         description: "List pull requests in a repository",
         hostPattern: "api.github.com",
-        pathPattern: "/repos/*/pulls",
+        pathPattern: "/repos/*/*/pulls",
         method: "GET",
       },
       {
@@ -41,7 +41,7 @@ const githubGroups: AppToolGroup[] = [
         name: "List issues",
         description: "List issues in a repository",
         hostPattern: "api.github.com",
-        pathPattern: "/repos/*/issues",
+        pathPattern: "/repos/*/*/issues",
         method: "GET",
       },
       {
@@ -71,7 +71,7 @@ const githubGroups: AppToolGroup[] = [
         name: "Create pull request",
         description: "Create a new pull request",
         hostPattern: "api.github.com",
-        pathPattern: "/repos/*/pulls",
+        pathPattern: "/repos/*/*/pulls",
         method: "POST",
       },
       {
@@ -79,7 +79,7 @@ const githubGroups: AppToolGroup[] = [
         name: "Create comment",
         description: "Comment on an issue or pull request",
         hostPattern: "api.github.com",
-        pathPattern: "/repos/*/issues/*/comments",
+        pathPattern: "/repos/*/*/issues/*/comments",
         method: "POST",
       },
       {
@@ -87,7 +87,7 @@ const githubGroups: AppToolGroup[] = [
         name: "Create issue",
         description: "Create a new issue in a repository",
         hostPattern: "api.github.com",
-        pathPattern: "/repos/*/issues",
+        pathPattern: "/repos/*/*/issues",
         method: "POST",
       },
       {
@@ -104,7 +104,7 @@ const githubGroups: AppToolGroup[] = [
         name: "Delete branch",
         description: "Delete a git branch reference",
         hostPattern: "api.github.com",
-        pathPattern: "/repos/*/git/refs/*",
+        pathPattern: "/repos/*/*/git/refs/*",
         method: "DELETE",
       },
     ],

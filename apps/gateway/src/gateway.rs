@@ -485,7 +485,13 @@ async fn submit_approval_decision(
 
         let delivered = state
             .approval_store
-            .submit_decision(&org_id, &auth.project_id, &approval_id, body.decision)
+            .submit_decision(
+                &org_id,
+                &auth.project_id,
+                &approval_id,
+                body.decision,
+                Some(auth.user_id),
+            )
             .await;
 
         if delivered {

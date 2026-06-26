@@ -12,6 +12,8 @@ export interface RequestLogEntry {
   latencyMs: number;
   injectionCount: number;
   extraData: unknown;
+  /** Display name of the user who approved/denied this request, if resolved. */
+  approvedBy: string | null;
   createdAt: string;
 }
 
@@ -90,6 +92,20 @@ export const getApprovalReason = (log: RequestLogEntry): string | null => {
   return typeof reason === "string" ? reason : null;
 };
 
+/** The gateway-assigned approval id linking a request log to its held approval. */
+export const getApprovalId = (log: RequestLogEntry): string | null => {
+  const data = log.extraData as Record<string, unknown> | null;
+  const id = data?.approval_id;
+  return typeof id === "string" ? id : null;
+};
+
+/** The user id the gateway stamped on a resolved approval (`approved_by`). */
+const approvedByUserId = (extraData: unknown): string | null => {
+  const data = extraData as Record<string, unknown> | null;
+  const by = data?.approved_by;
+  return typeof by === "string" ? by : null;
+};
+
 export const getConnectionLabel = (log: RequestLogEntry): string | null => {
   const data = log.extraData as Record<string, unknown> | null;
   const label = data?.connection_label;
@@ -119,25 +135,50 @@ const resolveAgentNames = async (
   return new Map(agents.map((a) => [a.id, a.name]));
 };
 
+/** Resolve approver user ids → a display name (name, falling back to email). */
+const resolveUserNames = async (
+  userIds: string[],
+): Promise<Map<string, string>> => {
+  if (userIds.length === 0) return new Map();
+  const users = await db.user.findMany({
+    where: { id: { in: userIds } },
+    select: { id: true, name: true, email: true },
+  });
+  return new Map(users.map((u) => [u.id, u.name ?? u.email]));
+};
+
+const collectApproverIds = (rows: { extraData: unknown }[]): string[] => [
+  ...new Set(
+    rows
+      .map((r) => approvedByUserId(r.extraData))
+      .filter((id): id is string => id !== null),
+  ),
+];
+
 type RequestLogRow = Prisma.RequestLogGetPayload<object>;
 
 const toEntry = (
   log: RequestLogRow,
   agentMap: Map<string, string>,
-): RequestLogEntry => ({
-  id: log.id,
-  agentId: log.agentId,
-  agentName: agentMap.get(log.agentId) ?? null,
-  method: log.method,
-  host: log.host,
-  path: log.path,
-  provider: log.provider,
-  status: log.status,
-  latencyMs: log.latencyMs,
-  injectionCount: log.injectionCount,
-  extraData: log.extraData,
-  createdAt: log.createdAt.toISOString(),
-});
+  userMap: Map<string, string>,
+): RequestLogEntry => {
+  const approverId = approvedByUserId(log.extraData);
+  return {
+    id: log.id,
+    agentId: log.agentId,
+    agentName: agentMap.get(log.agentId) ?? null,
+    method: log.method,
+    host: log.host,
+    path: log.path,
+    provider: log.provider,
+    status: log.status,
+    latencyMs: log.latencyMs,
+    injectionCount: log.injectionCount,
+    extraData: log.extraData,
+    approvedBy: approverId ? (userMap.get(approverId) ?? null) : null,
+    createdAt: log.createdAt.toISOString(),
+  };
+};
 
 export const getRecentRequestLogs = async (
   projectId: string,
@@ -150,9 +191,12 @@ export const getRecentRequestLogs = async (
   });
 
   const agentIds = [...new Set(logs.map((l) => l.agentId))];
-  const agentMap = await resolveAgentNames(projectId, agentIds);
+  const [agentMap, userMap] = await Promise.all([
+    resolveAgentNames(projectId, agentIds),
+    resolveUserNames(collectApproverIds(logs)),
+  ]);
 
-  return logs.map((l) => toEntry(l, agentMap));
+  return logs.map((l) => toEntry(l, agentMap, userMap));
 };
 
 export const getRequestLogs = async (
@@ -185,7 +229,10 @@ export const getRequestLogs = async (
   const page = hasMore ? logs.slice(0, limit) : logs;
 
   const agentIds = [...new Set(page.map((l) => l.agentId))];
-  const agentMap = await resolveAgentNames(projectId, agentIds);
+  const [agentMap, userMap] = await Promise.all([
+    resolveAgentNames(projectId, agentIds),
+    resolveUserNames(collectApproverIds(page)),
+  ]);
 
   const lastLog = page[page.length - 1];
   const nextCursor =
@@ -194,7 +241,7 @@ export const getRequestLogs = async (
       : null;
 
   return {
-    logs: page.map((l) => toEntry(l, agentMap)),
+    logs: page.map((l) => toEntry(l, agentMap, userMap)),
     nextCursor,
   };
 };

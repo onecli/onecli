@@ -22,6 +22,7 @@ import {
 } from "@onecli/ui/components/breadcrumb";
 import { navItems } from "@/lib/nav-config";
 import { GetStartedButton } from "./get-started-button";
+import { ApprovalsBell } from "@/lib/components/approvals";
 
 const GitHubIcon = ({ className }: { className?: string }) => (
   <svg
@@ -168,6 +169,7 @@ export const DashboardHeader = () => {
           className="mx-1 hidden h-4 md:block"
         />
         <GetStartedButton />
+        <ApprovalsBell />
         <Tooltip>
           <TooltipTrigger asChild>
             <Button

@@ -1221,19 +1221,34 @@ fn credential_host_mismatch(
     stored.is_empty() || apps::normalize_host(hostname) != stored
 }
 
-/// Check if a requested hostname matches a secret's host pattern.
-/// Supports exact match and wildcard prefix (`*.example.com` matches `api.example.com`).
+/// Check if a requested hostname matches a secret or policy host pattern.
+///
+/// Supports an exact match, or a single `*` wildcard anywhere in the pattern:
+/// - leading — `*.example.com` matches `api.example.com` (but not the apex
+///   `example.com`),
+/// - mid-string — `s3.*.amazonaws.com` matches `s3.us-east-1.amazonaws.com`
+///   (the region label).
+///
+/// The length guard keeps the prefix and suffix from overlapping, so the `*`
+/// must stand in for at least one character: the apex is still excluded for
+/// `*.example.com`, and a region is still required for `s3.*.amazonaws.com`.
+///
+/// Matching is case-insensitive, since DNS host names are.
 fn host_matches(request_host: &str, pattern: &str) -> bool {
-    if request_host == pattern {
-        return true;
+    match pattern.split_once('*') {
+        None => request_host.eq_ignore_ascii_case(pattern),
+        Some((prefix, suffix)) => {
+            // `get(..)` keeps the slices on char boundaries, so a non-ASCII
+            // host can never panic — it just won't match an ASCII pattern.
+            request_host.len() >= prefix.len() + suffix.len()
+                && request_host
+                    .get(..prefix.len())
+                    .is_some_and(|p| p.eq_ignore_ascii_case(prefix))
+                && request_host
+                    .get(request_host.len() - suffix.len()..)
+                    .is_some_and(|s| s.eq_ignore_ascii_case(suffix))
+        }
     }
-
-    if let Some(suffix) = pattern.strip_prefix('*') {
-        // "*.example.com" → suffix = ".example.com"
-        return request_host.ends_with(suffix) && request_host.len() > suffix.len();
-    }
-
-    false
 }
 
 // ── Tests ───────────────────────────────────────────────────────────────
@@ -1388,6 +1403,41 @@ mod tests {
     #[test]
     fn host_wildcard_no_match_without_dot() {
         assert!(!host_matches("notexample.com", "*.example.com"));
+    }
+
+    #[test]
+    fn host_midstring_wildcard() {
+        // Mid-string wildcard: the region label in AWS regional endpoints.
+        assert!(host_matches(
+            "s3.us-east-1.amazonaws.com",
+            "s3.*.amazonaws.com"
+        ));
+        assert!(host_matches(
+            "lambda.eu-west-1.amazonaws.com",
+            "lambda.*.amazonaws.com"
+        ));
+        // Wrong service prefix, or the apex with no region label, must not match.
+        assert!(!host_matches(
+            "ec2.us-east-1.amazonaws.com",
+            "s3.*.amazonaws.com"
+        ));
+        assert!(!host_matches("s3.amazonaws.com", "s3.*.amazonaws.com"));
+        // Exact patterns (no wildcard) still match only themselves.
+        assert!(host_matches("iam.amazonaws.com", "iam.amazonaws.com"));
+        assert!(!host_matches("s3.amazonaws.com", "iam.amazonaws.com"));
+    }
+
+    #[test]
+    fn host_matching_is_case_insensitive() {
+        // DNS host names are case-insensitive; a mixed-case CONNECT authority
+        // must still match a lowercase rule (exact, leading-*, and mid-string).
+        assert!(host_matches("API.GitHub.com", "api.github.com"));
+        assert!(host_matches("Api.Example.com", "*.example.com"));
+        assert!(host_matches(
+            "S3.US-EAST-1.AMAZONAWS.COM",
+            "s3.*.amazonaws.com"
+        ));
+        assert!(!host_matches("api.evil.com", "api.github.com"));
     }
 
     // ── credential_host_mismatch ─────────────────────────────────────────

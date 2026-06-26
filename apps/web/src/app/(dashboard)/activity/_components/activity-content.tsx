@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Loader2, Radio } from "lucide-react";
 import { Button } from "@onecli/ui/components/button";
 import { PageHeader } from "@dashboard/page-header";
@@ -8,6 +8,9 @@ import { getActivityPage } from "@/lib/actions/request-logs";
 import { ActivityTable } from "./activity-table";
 import { ActivityDetailDialog } from "./activity-detail-dialog";
 import type { RequestLogEntry } from "@onecli/api/services/request-log-service";
+import { usePendingApprovals } from "@/hooks/use-approvals";
+import { ApprovalDetailsDialog } from "@/lib/components/approvals";
+import type { PendingApproval } from "@/lib/api/approvals";
 
 type StatusFilter = "all" | "errors";
 
@@ -22,7 +25,15 @@ export const ActivityContent = () => {
   const [statusFilter, setStatusFilter] = useState<StatusFilter>("all");
   const [liveMode, setLiveMode] = useState(true);
   const [selected, setSelected] = useState<RequestLogEntry | null>(null);
+  const [approvalDetails, setApprovalDetails] =
+    useState<PendingApproval | null>(null);
   const initializedRef = useRef(false);
+
+  const { data: pendingApprovals = [] } = usePendingApprovals();
+  const liveApprovals = useMemo(
+    () => new Map(pendingApprovals.map((a) => [a.id, a])),
+    [pendingApprovals],
+  );
 
   const loadInitial = useCallback(async (filter: StatusFilter) => {
     setLoading(true);
@@ -126,7 +137,12 @@ export const ActivityContent = () => {
         </div>
       ) : (
         <>
-          <ActivityTable logs={logs} onRowClick={setSelected} />
+          <ActivityTable
+            logs={logs}
+            liveApprovals={liveApprovals}
+            onRowClick={setSelected}
+            onShowApproval={setApprovalDetails}
+          />
 
           {nextCursor && (
             <div className="flex justify-center">
@@ -145,6 +161,10 @@ export const ActivityContent = () => {
       )}
 
       <ActivityDetailDialog log={selected} onClose={() => setSelected(null)} />
+      <ApprovalDetailsDialog
+        approval={approvalDetails}
+        onClose={() => setApprovalDetails(null)}
+      />
     </div>
   );
 };

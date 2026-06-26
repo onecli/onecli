@@ -525,6 +525,109 @@ mod tests {
         ));
     }
 
+    /// Regression guard for app-permission catalog patterns: each pattern must
+    /// match the REAL request path its operation produces. A `*` matches exactly
+    /// one path segment, so a pattern with too few segments silently never
+    /// matches and the permission becomes a no-op. These cases encode endpoints
+    /// verified against official provider docs; see
+    /// `packages/api/src/apps/app-permissions/*`.
+    #[test]
+    fn app_permission_patterns_match_real_endpoints() {
+        // GitHub REST nests under /repos/{owner}/{repo}/... (two path params).
+        assert!(path_matches(
+            "/repos/octocat/hello/pulls",
+            "/repos/*/*/pulls"
+        ));
+        assert!(path_matches(
+            "/repos/octocat/hello/issues",
+            "/repos/*/*/issues"
+        ));
+        assert!(path_matches(
+            "/repos/octocat/hello/issues/42/comments",
+            "/repos/*/*/issues/*/comments"
+        ));
+        // Branch ref contains a slash (heads/<branch>); trailing * absorbs it.
+        assert!(path_matches(
+            "/repos/octocat/hello/git/refs/heads/main",
+            "/repos/*/*/git/refs/*"
+        ));
+        // The old one-param shapes must NOT match real two-param paths.
+        assert!(!path_matches(
+            "/repos/octocat/hello/pulls",
+            "/repos/*/pulls"
+        ));
+        assert!(!path_matches(
+            "/repos/octocat/hello/issues",
+            "/repos/*/issues"
+        ));
+        // GitHub git-over-HTTPS: POST to {owner}/{repo}.git/git-upload-pack.
+        assert!(path_matches(
+            "/octocat/hello.git/git-upload-pack",
+            "/*/*/git-upload-pack"
+        ));
+
+        // Confluence Cloud via OAuth 3LO is served under /ex/confluence/{cloudid}.
+        assert!(path_matches(
+            "/ex/confluence/abc123/wiki/api/v2/pages/77",
+            "/ex/confluence/*/wiki/api/v2/pages/*"
+        ));
+        assert!(path_matches(
+            "/ex/confluence/abc123/wiki/rest/api/search",
+            "/ex/confluence/*/wiki/rest/api/search"
+        ));
+        // Bare /wiki/... (missing the cloudid prefix) was the systemic bug.
+        assert!(!path_matches(
+            "/ex/confluence/abc123/wiki/api/v2/pages/77",
+            "/wiki/api/v2/pages/*"
+        ));
+
+        // Jira Cloud JQL search migrated from /search to /search/jql.
+        assert!(path_matches(
+            "/ex/jira/abc123/rest/api/3/search/jql",
+            "/ex/jira/*/rest/api/3/search/jql"
+        ));
+
+        // Sentry project issues nest under {org}/{project} (two slugs).
+        assert!(path_matches(
+            "/api/0/projects/acme/web/issues/",
+            "/api/0/projects/*/*/issues/"
+        ));
+        assert!(!path_matches(
+            "/api/0/projects/acme/web/issues/",
+            "/api/0/projects/*/issues/"
+        ));
+
+        // Docker Hub destructive ops live on /v2/repositories/{ns}/{repo}/.
+        assert!(path_matches(
+            "/v2/repositories/acme/app/",
+            "/v2/repositories/*/*"
+        ));
+        assert!(path_matches(
+            "/v2/repositories/acme/app/tags/latest/",
+            "/v2/repositories/*/*/tags/*"
+        ));
+
+        // Google Drive / YouTube media writes go to the /upload/... host path.
+        assert!(path_matches(
+            "/upload/drive/v3/files/file123",
+            "/upload/drive/v3/files/*"
+        ));
+        assert!(path_matches(
+            "/upload/youtube/v3/videos",
+            "/upload/youtube/v3/videos"
+        ));
+
+        // Todoist migrated to /api/v1/...; Outlook respond aliases.
+        assert!(path_matches(
+            "/api/v1/tasks/abc/close",
+            "/api/v1/tasks/*/close"
+        ));
+        assert!(path_matches(
+            "/v1.0/me/events/evt1/tentativelyAccept",
+            "/v1.0/me/events/*/tentativelyAccept"
+        ));
+    }
+
     #[test]
     fn path_matches_ignores_query_string() {
         assert!(path_matches("/v1/messages?api_key=sk-123", "/v1/messages"));

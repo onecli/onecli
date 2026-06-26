@@ -86,6 +86,21 @@ impl RequestSummarizer for Gmail {
                 return Some(s);
             }
         }
+        if m == "GET" {
+            if base.ends_with("/profile") {
+                return Some(ApprovalSummary::new("Read profile"));
+            }
+            if base.ends_with("/messages") {
+                return Some(ApprovalSummary::new("List messages"));
+            }
+            if base.contains("/messages/") {
+                let mut s = ApprovalSummary::new("Read email");
+                if let Some(id) = last_segment(base) {
+                    s.push("Message", id);
+                }
+                return Some(s);
+            }
+        }
         None
     }
 }
@@ -256,6 +271,31 @@ iVBORw0KGgoAAAANSUhEUg==\r\n\
             "newlines should be preserved, got: {body_detail:?}"
         );
         assert!(s.render_text().contains("Body:\nHey Jonathan,"));
+    }
+
+    #[test]
+    fn get_messages_lists() {
+        let s = super::super::summarize_request(
+            "gmail",
+            "GET",
+            "/gmail/v1/users/me/messages",
+            None,
+            None,
+        );
+        assert_eq!(s.action, "List messages");
+    }
+
+    #[test]
+    fn get_message_by_id_reads() {
+        let s = super::super::summarize_request(
+            "gmail",
+            "GET",
+            "/gmail/v1/users/me/messages/18abc",
+            None,
+            None,
+        );
+        assert_eq!(s.action, "Read email");
+        assert_eq!(detail(&s, "Message"), Some("18abc"));
     }
 
     #[test]
