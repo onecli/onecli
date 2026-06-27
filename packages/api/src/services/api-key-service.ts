@@ -1,6 +1,5 @@
 import { randomBytes } from "crypto";
 import { db } from "@onecli/db";
-import { ServiceError } from "./errors";
 import type { ResourceScope } from "./resource-scope";
 import { scopeWhere, scopeCreate, isOrgScope } from "./resource-scope";
 
@@ -15,9 +14,10 @@ export const getApiKey = async (userId: string, scope: ResourceScope) => {
     select: { key: true },
   });
 
-  if (!apiKey) throw new ServiceError("NOT_FOUND", "API key not found");
-
-  return { apiKey: apiKey.key };
+  // Not having generated a key yet is a normal state, not an error — return
+  // null so callers can render an empty / "generate" affordance instead of a
+  // 404/500. (Consumers read `result.apiKey ?? ""`.)
+  return { apiKey: apiKey?.key ?? null };
 };
 
 export const regenerateApiKey = async (
