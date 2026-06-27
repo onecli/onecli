@@ -1,6 +1,7 @@
 import { db } from "@onecli/db";
 import { IS_CLOUD } from "../../lib/env";
 import { findUserDefaultProject } from "../../services/organization-service";
+import { getRoleResolver, ROLE_HIERARCHY } from "../../providers";
 
 export const resolveUserEmail = async (userId: string): Promise<string> => {
   const user = await db.user.findUnique({
@@ -62,8 +63,24 @@ export const resolveProjectId = async (
       id: headerProjectId,
       organizationId: { in: memberOrgIds },
     },
-    select: { id: true },
+    select: { id: true, organizationId: true, createdByUserId: true },
   });
 
-  return project?.id ?? null;
+  if (!project) return null;
+
+  // Cloud: a member may only target projects they created; admins and owners
+  // may target any project in their org. OSS standalone registers no role
+  // resolver, so this gate is skipped and any in-org project is accepted, as
+  // before. Mirrors `canManageAllProjects` in the cloud authorization service.
+  if (IS_CLOUD && project.createdByUserId !== userId) {
+    const resolver = getRoleResolver();
+    const role = resolver
+      ? await resolver.getUserRole(userId, project.organizationId)
+      : null;
+    if (!role || ROLE_HIERARCHY[role] < ROLE_HIERARCHY.admin) {
+      return null;
+    }
+  }
+
+  return project.id;
 };

@@ -5,7 +5,8 @@ import {
   TooltipContent,
   TooltipTrigger,
 } from "@onecli/ui/components/tooltip";
-import { KeyRound } from "lucide-react";
+import { Info, KeyRound } from "lucide-react";
+import { Button } from "@onecli/ui/components/button";
 import {
   Table,
   TableBody,
@@ -26,8 +27,11 @@ import {
   isOwnKey,
   isRateLimitedRequest,
   getApprovalDecision,
+  getApprovalId,
   type RequestLogEntry,
 } from "@onecli/api/services/request-log-service";
+import { ApprovalActions } from "@/lib/components/approvals";
+import type { PendingApproval } from "@/lib/api/approvals";
 
 const localTz = Intl.DateTimeFormat().resolvedOptions().timeZone;
 
@@ -49,10 +53,17 @@ const DateCell = ({ dateStr }: { dateStr: string }) => (
 
 interface ActivityTableProps {
   logs: RequestLogEntry[];
+  liveApprovals: Map<string, PendingApproval>;
   onRowClick: (log: RequestLogEntry) => void;
+  onShowApproval: (approval: PendingApproval) => void;
 }
 
-export const ActivityTable = ({ logs, onRowClick }: ActivityTableProps) => (
+export const ActivityTable = ({
+  logs,
+  liveApprovals,
+  onRowClick,
+  onShowApproval,
+}: ActivityTableProps) => (
   <div className="rounded-lg border overflow-hidden">
     <Table>
       <TableHeader>
@@ -80,6 +91,11 @@ export const ActivityTable = ({ logs, onRowClick }: ActivityTableProps) => (
         ) : (
           logs.map((log) => {
             const providerInfo = getProviderIcon(log.provider);
+            const approvalId = getApprovalId(log);
+            const liveApproval = approvalId
+              ? liveApprovals.get(approvalId)
+              : undefined;
+            const decision = getApprovalDecision(log);
             return (
               <TableRow
                 key={log.id}
@@ -149,7 +165,43 @@ export const ActivityTable = ({ logs, onRowClick }: ActivityTableProps) => (
                   />
                 </TableCell>
                 <TableCell>
-                  <DecisionBadge decision={getApprovalDecision(log)} />
+                  {liveApproval ? (
+                    // Stop row-click (which opens the dialog) when acting here.
+                    <div
+                      onClick={(e) => e.stopPropagation()}
+                      className="flex items-center gap-1"
+                    >
+                      <Tooltip>
+                        <TooltipTrigger asChild>
+                          <Button
+                            variant="ghost"
+                            size="icon-xs"
+                            onClick={() => onShowApproval(liveApproval)}
+                            className="text-muted-foreground hover:text-foreground"
+                          >
+                            <Info className="size-3.5" />
+                            <span className="sr-only">Details</span>
+                          </Button>
+                        </TooltipTrigger>
+                        <TooltipContent>Details</TooltipContent>
+                      </Tooltip>
+                      <ApprovalActions approvalId={liveApproval.id} iconOnly />
+                    </div>
+                  ) : log.approvedBy ? (
+                    <Tooltip>
+                      <TooltipTrigger asChild>
+                        <span className="inline-flex cursor-default">
+                          <DecisionBadge decision={decision} />
+                        </span>
+                      </TooltipTrigger>
+                      <TooltipContent>
+                        {decision === "denied" ? "Denied" : "Approved"} by{" "}
+                        {log.approvedBy}
+                      </TooltipContent>
+                    </Tooltip>
+                  ) : (
+                    <DecisionBadge decision={decision} />
+                  )}
                 </TableCell>
                 <TableCell className="text-right">
                   <span className="text-muted-foreground font-mono text-xs tabular-nums">

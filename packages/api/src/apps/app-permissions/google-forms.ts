@@ -36,14 +36,6 @@ export const googleFormsPermissions: AppPermissionDefinition = {
           method: "POST",
         },
         {
-          id: "update_form",
-          name: "Update form",
-          description: "Update form info such as title and description",
-          hostPattern: "forms.googleapis.com",
-          pathPattern: "/v1/forms/*",
-          method: "PATCH",
-        },
-        {
           id: "batch_update_form",
           name: "Batch update form",
           description: "Apply a batch of updates to a form",

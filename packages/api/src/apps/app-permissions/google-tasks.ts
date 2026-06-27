@@ -49,7 +49,7 @@ export const googleTasksPermissions: AppPermissionDefinition = {
           description: "Update an existing task",
           hostPattern: "tasks.googleapis.com",
           pathPattern: "/tasks/v1/lists/*/tasks/*",
-          method: "PATCH",
+          methods: ["PUT", "PATCH"],
         },
         {
           id: "delete_task",

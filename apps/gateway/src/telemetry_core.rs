@@ -31,11 +31,15 @@ pub(crate) enum RequestDecision {
         reason: String,
         triggered_at: String,
         resolved_at: String,
+        /// The user who denied, or `None` for a system auto-deny (timeout).
+        approved_by: Option<String>,
     },
     ApprovalApproved {
         approval_id: String,
         triggered_at: String,
         resolved_at: String,
+        /// The user who approved the request.
+        approved_by: Option<String>,
     },
     BlockedByDefaultPolicy,
 }

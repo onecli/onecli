@@ -72,7 +72,7 @@ export const dockerPermissions: AppPermissionDefinition = {
           name: "Update repository",
           description: "Update repository settings",
           hostPattern: "hub.docker.com",
-          pathPattern: "/v2/namespaces/*/repositories/*",
+          pathPattern: "/v2/repositories/*/*",
           method: "PATCH",
         },
         {
@@ -80,7 +80,7 @@ export const dockerPermissions: AppPermissionDefinition = {
           name: "Delete repository",
           description: "Delete a repository",
           hostPattern: "hub.docker.com",
-          pathPattern: "/v2/namespaces/*/repositories/*",
+          pathPattern: "/v2/repositories/*/*",
           method: "DELETE",
         },
         {
@@ -88,7 +88,7 @@ export const dockerPermissions: AppPermissionDefinition = {
           name: "Delete tag",
           description: "Delete a tag from a repository",
           hostPattern: "hub.docker.com",
-          pathPattern: "/v2/namespaces/*/repositories/*/tags/*",
+          pathPattern: "/v2/repositories/*/*/tags/*",
           method: "DELETE",
         },
       ],

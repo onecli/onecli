@@ -35,7 +35,7 @@ export const supabasePermissions: AppPermissionDefinition = {
           name: "Get database config",
           description: "View database and pooler configuration",
           hostPattern: "api.supabase.com",
-          pathPattern: "/v1/projects/*/config/database",
+          pathPattern: "/v1/projects/*/config/database/*",
           method: "GET",
         },
         {
@@ -51,7 +51,7 @@ export const supabasePermissions: AppPermissionDefinition = {
           name: "Get PostgREST config",
           description: "View PostgREST API configuration",
           hostPattern: "api.supabase.com",
-          pathPattern: "/v1/projects/*/config/postgrest",
+          pathPattern: "/v1/projects/*/postgrest",
           method: "GET",
         },
         {

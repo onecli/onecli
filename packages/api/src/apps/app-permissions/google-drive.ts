@@ -49,6 +49,7 @@ export const googleDrivePermissions: AppPermissionDefinition = {
           description: "Upload a new file to Google Drive",
           hostPattern: "www.googleapis.com",
           pathPattern: "/drive/v3/files",
+          aliasPatterns: ["/upload/drive/v3/files"],
           method: "POST",
         },
         {
@@ -57,6 +58,7 @@ export const googleDrivePermissions: AppPermissionDefinition = {
           description: "Update an existing file in Google Drive",
           hostPattern: "www.googleapis.com",
           pathPattern: "/drive/v3/files/*",
+          aliasPatterns: ["/upload/drive/v3/files/*"],
           method: "PATCH",
         },
         {

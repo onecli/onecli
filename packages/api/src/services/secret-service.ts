@@ -158,6 +158,16 @@ export const createSecret = async (
 
   // ── Value resolved from 1Password at request time (nothing stored in PG) ──
   if (valueSource === "onepassword") {
+    // 1Password connections are per-project: the gateway resolves op:// refs via
+    // the requesting agent's project connection. An org/partner-scoped secret
+    // has no single project, so its value would silently fail to resolve —
+    // reject it here instead of creating a secret that can never inject.
+    if (!scope.projectId) {
+      throw new ServiceError(
+        "BAD_REQUEST",
+        "1Password is only available for project-scoped secrets",
+      );
+    }
     if (!input.opRef) {
       throw new ServiceError("BAD_REQUEST", "Select a 1Password field");
     }
@@ -275,7 +285,15 @@ export const updateSecret = async (
   }
 
   if (input.valueSource === "onepassword") {
-    // Switch to / update a value resolved from 1Password.
+    // Switch to / update a value resolved from 1Password. Per-project only, as in
+    // createSecret: the gateway resolves op:// refs via the agent's project
+    // connection, so org/partner scope has no connection to resolve through.
+    if (!scope.projectId) {
+      throw new ServiceError(
+        "BAD_REQUEST",
+        "1Password is only available for project-scoped secrets",
+      );
+    }
     if (!input.opRef)
       throw new ServiceError("BAD_REQUEST", "Select a 1Password field");
     data.valueSource = "onepassword";

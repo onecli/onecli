@@ -462,6 +462,7 @@ async fn get_pending_approvals(
                 "path": a.path,
                 "headers": a.headers,
                 "bodyPreview": a.body_preview,
+                "summary": a.summary,
                 "agent": { "id": a.agent_id, "name": a.agent_name, "externalId": a.agent_identifier },
                 "createdAt": format_unix_ts(a.created_at),
                 "expiresAt": format_unix_ts(a.expires_at),
@@ -519,7 +520,13 @@ async fn submit_approval_decision(
 
         let delivered = state
             .approval_store
-            .submit_decision(&org_id, &auth.project_id, &approval_id, body.decision)
+            .submit_decision(
+                &org_id,
+                &auth.project_id,
+                &approval_id,
+                body.decision,
+                Some(auth.user_id),
+            )
             .await;
 
         if delivered {
@@ -660,6 +667,7 @@ async fn handle_callback_decision(
                 &pending.project_id,
                 &approval_id,
                 decision,
+                Some("ntfy".to_string()),
             )
             .await;
 
@@ -896,6 +904,7 @@ async fn trigger_test_approval(
             body_preview: Some(
                 "Test approval from OneCLI → Settings → Approval Paths. Approve or Deny to confirm the callback works.".to_string(),
             ),
+            summary: None,
             created_at: now,
             expires_at: now + hold_secs,
         };

@@ -1,3 +1,4 @@
+import { parse } from "tldts";
 import { z } from "zod";
 
 const headerInjectionSchema = z
@@ -39,8 +40,24 @@ export const isParamInjection = (
   "paramName" in config &&
   typeof (config as Record<string, unknown>).paramName === "string";
 
-const hostPatternSchema = z
+// A secret's host pattern decides which hosts its credential is injected into.
+// A "*.X" wildcard is safe only when X is a single registrable domain; a wildcard
+// over a public suffix ("*.com", "*.s3.amazonaws.com") would inject the credential
+// across many unrelated owners. Returns true for that over-broad case.
+export const wildcardCoversPublicSuffix = (hostPattern: string): boolean => {
+  if (!hostPattern.startsWith("*.")) return false;
+  const { domain, isIcann, isPrivate } = parse(hostPattern.slice(2), {
+    allowPrivateDomains: true,
+  });
+  return domain === null && (isIcann === true || isPrivate === true);
+};
+
+export const hostPatternSchema = z
   .string()
+  // Trim before validating so the refines see exactly what gets stored: the
+  // service also trims on save, so trailing Unicode whitespace must not smuggle
+  // a public-suffix wildcard ("*.com " -> stored "*.com") past the checks.
+  .trim()
   .min(1, "Host pattern is required")
   .max(1000)
   .refine((v) => !v.includes("://"), {
@@ -52,6 +69,19 @@ const hostPatternSchema = z
   })
   .refine((v) => !v.includes(" "), {
     message: "Host pattern must not contain spaces",
+  })
+  // A credential is injected into every host its pattern matches, so only allow
+  // a single leading-subdomain wildcard ("*.example.com"). Reject mid-string
+  // ("api.*.com") and bare ("*") wildcards, which would inject into unintended
+  // hosts now that the gateway matches a `*` anywhere in the pattern.
+  .refine((v) => !v.includes("*") || /^\*\.[a-z0-9.-]+$/i.test(v), {
+    message:
+      "Wildcards are only allowed as a leading subdomain, e.g. *.example.com",
+  })
+  // ...and that wildcard must not cover a whole public suffix (see helper above).
+  .refine((v) => !wildcardCoversPublicSuffix(v), {
+    message:
+      "A wildcard can't cover a public suffix like *.com; use a specific domain, e.g. *.example.com",
   });
 
 export const valueSources = ["inline", "onepassword"] as const;
