@@ -87,5 +87,22 @@ export const appConfigKey = (scope: ResourceScope, provider: string) => {
   throw new Error("ResourceScope must have projectId or organizationId");
 };
 
+export const approvalPathKey = (scope: ResourceScope, channel: string) => {
+  if (scope.organizationId) {
+    return {
+      organizationId_channel: {
+        organizationId: scope.organizationId,
+        channel,
+      },
+    };
+  }
+  if (scope.projectId) {
+    return {
+      projectId_channel: { projectId: scope.projectId, channel },
+    };
+  }
+  throw new Error("ResourceScope must have projectId or organizationId");
+};
+
 export const isOrgScope = (scope: ResourceScope): boolean =>
   !!scope.organizationId && !scope.projectId;

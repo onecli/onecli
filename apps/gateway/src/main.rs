@@ -50,6 +50,7 @@ mod db;
 mod default_interceptions;
 mod gateway;
 mod inject;
+mod notify;
 mod policy;
 mod secret_inject;
 mod telemetry_core;

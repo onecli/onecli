@@ -28,6 +28,22 @@ const getOssDashboardSegments = () => {
 /** @type {import('next').NextConfig} */
 const nextConfig = {
   output: "standalone",
+  // `/settings` has no page of its own — it redirects to the first settings
+  // section. Do it at the routing layer instead of an in-render server
+  // `redirect()` in the page, which throws during render and can trip a React
+  // hook-count mismatch (#310) in Next's AppRouter on client soft-navigation.
+  // Cloud namespaces settings under /org/<id>, so this is OSS-only.
+  async redirects() {
+    return isCloud
+      ? []
+      : [
+          {
+            source: "/settings",
+            destination: "/settings/instance",
+            permanent: false,
+          },
+        ];
+  },
   poweredByHeader: false,
   compress: !isCloud, // Cloud: CloudFront handles compression at the edge; OSS: Next.js compresses
   serverExternalPackages: ["@onecli/db", "@1password/sdk"],

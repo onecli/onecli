@@ -19,8 +19,13 @@ use tracing::{debug, warn};
 
 // ── Constants ──────────────────────────────────────────────────────────
 
-/// How long a pending approval lives before auto-deny (seconds).
-pub(crate) const APPROVAL_TIMEOUT_SECS: u64 = 180;
+/// Default hold time before a pending approval auto-denies (seconds).
+///
+/// This is the fallback/baseline. The effective hold time per request is the
+/// longest `timeoutSeconds` among the project's enabled approval paths (see
+/// `forward.rs`), so it can be raised per channel (e.g. ntfy when away from
+/// the screen) without lowering it below this default.
+pub(crate) const APPROVAL_TIMEOUT_SECS: u64 = 120;
 
 /// How often the background task cleans up expired approvals (seconds).
 const CLEANUP_INTERVAL_SECS: u64 = 30;
