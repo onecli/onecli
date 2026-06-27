@@ -6,13 +6,21 @@ import { Button } from "@onecli/ui/components/button";
 import { PageHeader } from "@dashboard/page-header";
 import { getActivityPage } from "@/lib/actions/request-logs";
 import { ActivityTable } from "./activity-table";
+import { ActivityFilterControl } from "./activity-filter";
 import { ActivityDetailDialog } from "./activity-detail-dialog";
-import type { RequestLogEntry } from "@onecli/api/services/request-log-service";
+import type {
+  ActivityFilter,
+  RequestLogEntry,
+} from "@onecli/api/services/request-log-service";
 import { usePendingApprovals } from "@/hooks/use-approvals";
 import { ApprovalDetailsDialog } from "@/lib/components/approvals";
 import type { PendingApproval } from "@/lib/api/approvals";
 
-type StatusFilter = "all" | "errors";
+const EMPTY_MESSAGES: Record<ActivityFilter, string> = {
+  all: "No requests yet.",
+  "hide-llm": "No non-AI requests to show.",
+  blocked: "No blocked requests.",
+};
 
 export const ActivityContent = () => {
   const [logs, setLogs] = useState<RequestLogEntry[]>([]);
@@ -22,7 +30,7 @@ export const ActivityContent = () => {
   } | null>(null);
   const [loading, setLoading] = useState(true);
   const [loadingMore, setLoadingMore] = useState(false);
-  const [statusFilter, setStatusFilter] = useState<StatusFilter>("all");
+  const [filter, setFilter] = useState<ActivityFilter>("all");
   const [liveMode, setLiveMode] = useState(true);
   const [selected, setSelected] = useState<RequestLogEntry | null>(null);
   const [approvalDetails, setApprovalDetails] =
@@ -35,10 +43,10 @@ export const ActivityContent = () => {
     [pendingApprovals],
   );
 
-  const loadInitial = useCallback(async (filter: StatusFilter) => {
+  const loadInitial = useCallback(async (nextFilter: ActivityFilter) => {
     setLoading(true);
     try {
-      const data = await getActivityPage({ statusFilter: filter });
+      const data = await getActivityPage({ filter: nextFilter });
       setLogs(data.logs);
       setNextCursor(data.nextCursor);
       initializedRef.current = true;
@@ -49,15 +57,15 @@ export const ActivityContent = () => {
 
   useEffect(() => {
     initializedRef.current = false;
-    loadInitial(statusFilter);
-  }, [statusFilter, loadInitial]);
+    loadInitial(filter);
+  }, [filter, loadInitial]);
 
   useEffect(() => {
     if (!liveMode || loading) return;
     const id = setInterval(async () => {
       if (!initializedRef.current) return;
       try {
-        const data = await getActivityPage({ statusFilter });
+        const data = await getActivityPage({ filter });
         setLogs((prev) => {
           if (
             prev.length === data.logs.length &&
@@ -72,14 +80,14 @@ export const ActivityContent = () => {
       }
     }, 3000);
     return () => clearInterval(id);
-  }, [liveMode, statusFilter, loading]);
+  }, [liveMode, filter, loading]);
 
   const loadMore = async () => {
     if (!nextCursor) return;
     setLiveMode(false);
     setLoadingMore(true);
     try {
-      const data = await getActivityPage({ cursor: nextCursor, statusFilter });
+      const data = await getActivityPage({ cursor: nextCursor, filter });
       setLogs((prev) => [...prev, ...data.logs]);
       setNextCursor(data.nextCursor);
     } finally {
@@ -94,30 +102,7 @@ export const ActivityContent = () => {
         description="Request logs from your gateway. Bodies and query strings are never recorded."
       />
       <div className="flex items-center justify-between">
-        <div className="flex items-center gap-1 rounded-lg border p-1">
-          <button
-            type="button"
-            onClick={() => setStatusFilter("all")}
-            className={`rounded-md px-3 py-1 text-xs font-medium transition-colors ${
-              statusFilter === "all"
-                ? "bg-muted text-foreground"
-                : "text-muted-foreground hover:text-foreground"
-            }`}
-          >
-            All
-          </button>
-          <button
-            type="button"
-            onClick={() => setStatusFilter("errors")}
-            className={`rounded-md px-3 py-1 text-xs font-medium transition-colors ${
-              statusFilter === "errors"
-                ? "bg-muted text-foreground"
-                : "text-muted-foreground hover:text-foreground"
-            }`}
-          >
-            Blocked
-          </button>
-        </div>
+        <ActivityFilterControl value={filter} onChange={setFilter} />
 
         <button
           type="button"
@@ -142,6 +127,7 @@ export const ActivityContent = () => {
             liveApprovals={liveApprovals}
             onRowClick={setSelected}
             onShowApproval={setApprovalDetails}
+            emptyMessage={EMPTY_MESSAGES[filter]}
           />
 
           {nextCursor && (

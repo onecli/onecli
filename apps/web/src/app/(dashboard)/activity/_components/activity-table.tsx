@@ -56,6 +56,7 @@ interface ActivityTableProps {
   liveApprovals: Map<string, PendingApproval>;
   onRowClick: (log: RequestLogEntry) => void;
   onShowApproval: (approval: PendingApproval) => void;
+  emptyMessage?: string;
 }
 
 export const ActivityTable = ({
@@ -63,6 +64,7 @@ export const ActivityTable = ({
   liveApprovals,
   onRowClick,
   onShowApproval,
+  emptyMessage = "No requests yet.",
 }: ActivityTableProps) => (
   <div className="rounded-lg border overflow-hidden">
     <Table>
@@ -85,7 +87,7 @@ export const ActivityTable = ({
               colSpan={8}
               className="text-muted-foreground py-16 text-center text-sm"
             >
-              No requests yet.
+              {emptyMessage}
             </TableCell>
           </TableRow>
         ) : (
