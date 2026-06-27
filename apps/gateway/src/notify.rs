@@ -287,18 +287,33 @@ pub(crate) async fn publish_ntfy_approval(
          http, Deny, {deny_url}, method=POST, headers.Authorization=Bearer {callback_token}, clear=true"
     );
 
-    let title = format!("OneCLI: approve {} {}?", approval.method, approval.host);
-    let mut body = format!(
-        "Agent '{}' wants to {} {}://{}{}",
-        approval.agent_name, approval.method, approval.scheme, approval.host, approval.path
-    );
-    if let Some(preview) = approval.body_preview.as_deref() {
-        let snippet: String = preview.chars().take(PREVIEW_CHARS).collect();
-        if !snippet.trim().is_empty() {
-            body.push_str("\n\n");
-            body.push_str(&snippet);
-        }
-    }
+    // Prefer the gateway's structured request summary (same one the dashboard
+    // bell shows) so the push reads "Send email · To: … · Subject: …" rather
+    // than a bare method+URL. Fall back to the legacy body preview, then to a
+    // generic line. A footer always names the agent + target for context.
+    let title = match approval.summary.as_ref() {
+        Some(s) if !s.action.is_empty() => format!("OneCLI: {}?", s.action),
+        _ => format!("OneCLI: approve {} {}?", approval.method, approval.host),
+    };
+    let mut body = if let Some(summary) = approval.summary.as_ref() {
+        summary.render_text()
+    } else if let Some(preview) = approval
+        .body_preview
+        .as_deref()
+        .map(str::trim)
+        .filter(|p| !p.is_empty())
+    {
+        preview.chars().take(PREVIEW_CHARS).collect()
+    } else {
+        format!(
+            "Agent '{}' wants to {} {}://{}{}",
+            approval.agent_name, approval.method, approval.scheme, approval.host, approval.path
+        )
+    };
+    body.push_str(&format!(
+        "\n\n— {} · {} {}",
+        approval.agent_name, approval.method, approval.host
+    ));
 
     let url = format!("{server_url}/{topic}");
     let mut req = client

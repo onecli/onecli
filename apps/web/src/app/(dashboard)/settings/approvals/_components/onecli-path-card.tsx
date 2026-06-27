@@ -69,8 +69,9 @@ export const OneCliPathCard = ({
           <div className="space-y-1.5">
             <CardTitle className="select-text">OneCLI SDK</CardTitle>
             <CardDescription className="select-text">
-              Decisions are delivered to the OneCLI SDK / dashboard via
-              long-poll. This is the built-in path.
+              Held requests appear in the dashboard&apos;s approvals bell (and
+              to the OneCLI SDK) for in-app approve/deny. This is the built-in
+              path.
             </CardDescription>
           </div>
           <Switch

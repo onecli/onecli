@@ -496,12 +496,12 @@ async fn submit_approval_decision(
                 .unwrap_or_default();
 
         // O(1) lookup — verify approval exists and belongs to this project.
-        match state
+        let pending = match state
             .approval_store
             .get_pending(&org_id, &auth.project_id, &approval_id)
             .await
         {
-            Some(a) if a.project_id == auth.project_id => {}
+            Some(a) if a.project_id == auth.project_id => a,
             _ => {
                 warn!("approval decision rejected: not found or wrong project");
                 return (
@@ -509,7 +509,7 @@ async fn submit_approval_decision(
                     axum::Json(serde_json::json!({ "error": "approval_not_found" })),
                 );
             }
-        }
+        };
 
         let decision_str = match body.decision {
             ApprovalDecision::Approve => "approve",
@@ -533,6 +533,22 @@ async fn submit_approval_decision(
             // Remember it so a later ntfy callback for the same approval is
             // idempotent / conflict-aware rather than a bare 404.
             state.resolved_decisions.record(&approval_id, body.decision);
+            // Cross-channel confirmation: tell ntfy subscribers a dashboard/SDK
+            // decision resolved this request (default-on per reportSelection).
+            let ntfy_row =
+                db::find_approval_path(&state.policy_engine.pool, &auth.project_id, "ntfy")
+                    .await
+                    .ok()
+                    .flatten()
+                    .filter(|r| r.enabled);
+            spawn_confirmation_note(
+                &state,
+                ntfy_row.as_ref(),
+                &pending.agent_name,
+                pending.created_at,
+                body.decision,
+                Some("dashboard"),
+            );
             (
                 StatusCode::OK,
                 axum::Json(serde_json::json!({ "success": true })),
@@ -683,36 +699,16 @@ async fn handle_callback_decision(
                 format!("{verb} via ntfy callback (id={approval_id})"),
             );
 
-            // Confirmation note ("Report Selection to Topic", default on): iOS
-            // action buttons give no inline feedback, and a note also surfaces
-            // when someone ELSE resolved it. Off only when explicitly disabled.
-            let report_selection = ntfy_row.as_ref().is_some_and(|row| {
-                match row.settings.as_ref().and_then(|s| s.get("reportSelection")) {
-                    Some(serde_json::Value::Bool(b)) => *b,
-                    Some(serde_json::Value::String(s)) => s != "false",
-                    _ => true,
-                }
-            });
-            if let Some(ntfy_row) = ntfy_row.filter(|_| report_selection) {
-                let client = state.http_client.clone();
-                let crypto = Arc::clone(&state.policy_engine.crypto);
-                let tags = match decision {
-                    ApprovalDecision::Approve => "white_check_mark",
-                    ApprovalDecision::Deny => "no_entry",
-                };
-                let title = format!("OneCLI: {verb}");
-                let body = format!(
-                    "{verb}: {}\nRequested {}",
-                    pending.agent_name,
-                    format_unix_ts(pending.created_at),
-                );
-                tokio::spawn(async move {
-                    crate::notify::publish_ntfy_status(
-                        &client, &crypto, &ntfy_row, &title, &body, tags,
-                    )
-                    .await;
-                });
-            }
+            // Confirmation note — resolved via the ntfy tap (the expected path,
+            // so no "via" label).
+            spawn_confirmation_note(
+                &state,
+                ntfy_row.as_ref(),
+                &pending.agent_name,
+                pending.created_at,
+                decision,
+                None,
+            );
 
             (
                 StatusCode::OK,
@@ -747,6 +743,54 @@ async fn callback_token_of(state: &GatewayState, row: &db::ApprovalPathRow) -> O
         .and_then(|v| v.as_str())
         .filter(|s| !s.is_empty())
         .map(String::from)
+}
+
+/// Publish a "Report Selection to Topic" confirmation note for a resolved
+/// approval (default-on per the ntfy channel's `reportSelection` setting).
+/// Fires on ANY resolution — the ntfy callback OR a dashboard/SDK decision — so
+/// subscribers learn when someone else (e.g. via the dashboard bell) approved,
+/// and iOS gets the feedback its silent buttons don't. `via` names the channel
+/// that resolved it (omitted for the ntfy tap itself, the expected path).
+fn spawn_confirmation_note(
+    state: &GatewayState,
+    ntfy: Option<&db::ApprovalPathRow>,
+    agent_name: &str,
+    created_at: u64,
+    decision: ApprovalDecision,
+    via: Option<&str>,
+) {
+    let Some(ntfy) = ntfy else { return };
+    let report = match ntfy
+        .settings
+        .as_ref()
+        .and_then(|s| s.get("reportSelection"))
+    {
+        Some(serde_json::Value::Bool(b)) => *b,
+        Some(serde_json::Value::String(s)) => s != "false",
+        _ => true,
+    };
+    if !report {
+        return;
+    }
+    let (verb, tags) = match decision {
+        ApprovalDecision::Approve => ("APPROVED", "white_check_mark"),
+        ApprovalDecision::Deny => ("DENIED", "no_entry"),
+    };
+    let via = via
+        .filter(|s| !s.is_empty())
+        .map(|s| format!(" via {s}"))
+        .unwrap_or_default();
+    let title = format!("OneCLI: {verb}");
+    let body = format!(
+        "{verb}{via}: {agent_name}\nRequested {}",
+        format_unix_ts(created_at)
+    );
+    let client = state.http_client.clone();
+    let crypto = Arc::clone(&state.policy_engine.crypto);
+    let ntfy = ntfy.clone();
+    tokio::spawn(async move {
+        crate::notify::publish_ntfy_status(&client, &crypto, &ntfy, &title, &body, tags).await;
+    });
 }
 
 /// Human-readable label for a decision (used in callback JSON responses).
