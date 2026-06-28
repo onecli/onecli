@@ -129,6 +129,27 @@ pub(crate) fn build_injections(
                     name: param_name.to_string(),
                     value,
                 }]
+            } else if let Some(path_template) = config
+                .and_then(|c| c.get("pathTemplate"))
+                .and_then(|v| v.as_str())
+            {
+                vec![Injection::SetPath {
+                    template: path_template.to_string(),
+                    value: decrypted_value.to_string(),
+                }]
+            } else if let (Some(path_regex), Some(path_replacement)) = (
+                config
+                    .and_then(|c| c.get("pathRegex"))
+                    .and_then(|v| v.as_str()),
+                config
+                    .and_then(|c| c.get("pathReplacement"))
+                    .and_then(|v| v.as_str()),
+            ) {
+                vec![Injection::ReplacePathRegex {
+                    pattern: path_regex.to_string(),
+                    replacement: path_replacement.to_string(),
+                    value: decrypted_value.to_string(),
+                }]
             } else {
                 vec![]
             }
@@ -401,6 +422,48 @@ mod tests {
         let injections = build_injections("generic", "my-secret", Some(&config), None);
         assert_eq!(injections.len(), 1);
         assert!(matches!(injections[0], Injection::SetHeader { .. }));
+    }
+
+    // ── build_injections: path ─────────────────────────────────────────
+
+    #[test]
+    fn build_injections_generic_path_template() {
+        let config = serde_json::json!({ "pathTemplate": "/bot{value}" });
+        let injections = build_injections("generic", "123:ABC", Some(&config), None);
+        assert_eq!(injections.len(), 1);
+        assert_eq!(
+            injections[0],
+            Injection::SetPath {
+                template: "/bot{value}".to_string(),
+                value: "123:ABC".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn build_injections_generic_path_regex() {
+        let config = serde_json::json!({
+            "pathRegex": "^/bot[^/]+(/.*)?$",
+            "pathReplacement": "/bot{value}$1"
+        });
+        let injections = build_injections("generic", "123:ABC", Some(&config), None);
+        assert_eq!(injections.len(), 1);
+        assert_eq!(
+            injections[0],
+            Injection::ReplacePathRegex {
+                pattern: "^/bot[^/]+(/.*)?$".to_string(),
+                replacement: "/bot{value}$1".to_string(),
+                value: "123:ABC".to_string(),
+            }
+        );
+    }
+
+    /// Regex mode needs both keys; a lone `pathRegex` injects nothing.
+    #[test]
+    fn build_injections_generic_path_regex_missing_replacement() {
+        let config = serde_json::json!({ "pathRegex": "^/x$" });
+        let injections = build_injections("generic", "value", Some(&config), None);
+        assert!(injections.is_empty());
     }
 
     // ── build_injections: unknown ──────────────────────────────────────

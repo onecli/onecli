@@ -8,6 +8,10 @@ import {
   detectOpenaiAuthMode,
   isHeaderInjection,
   isParamInjection,
+  isPathInjection,
+  isPathRegexInjection,
+  isPathSafeValue,
+  isPathTemplateInjection,
   parseOpenaiAuthJson,
   parseOpenaiOAuthJson,
   type CreateSecretInput,
@@ -54,7 +58,40 @@ const buildInjectionConfig = (
       valueFormat: config.valueFormat?.trim() || "{value}",
     } as Prisma.InputJsonValue;
   }
+  if (isPathTemplateInjection(config)) {
+    return {
+      pathTemplate: config.pathTemplate.trim(),
+    } as Prisma.InputJsonValue;
+  }
+  if (isPathRegexInjection(config)) {
+    return {
+      pathRegex: config.pathRegex.trim(),
+      pathReplacement: config.pathReplacement.trim(),
+    } as Prisma.InputJsonValue;
+  }
   return Prisma.JsonNull;
+};
+
+// A path-injected secret is substituted into the URL path verbatim, so an inline
+// value containing a path-structural char would reshape the request. 1Password
+// values are resolved at request time and guarded by the gateway, so only inline
+// values are checked here; the gateway's `is_path_safe` is the authoritative guard.
+const assertPathValueSafe = (
+  config: CreateSecretInput["injectionConfig"],
+  valueSource: string | undefined,
+  value: string | undefined,
+): void => {
+  if (
+    isPathInjection(config) &&
+    valueSource !== "onepassword" &&
+    value &&
+    !isPathSafeValue(value.trim())
+  ) {
+    throw new ServiceError(
+      "BAD_REQUEST",
+      "Secret value can't contain / ? # % whitespace or control characters when injected into the URL path",
+    );
+  }
 };
 
 const buildMetadata = (
@@ -137,12 +174,14 @@ export const createSecret = async (
     const config = input.injectionConfig;
     const hasHeader = isHeaderInjection(config) && config.headerName.trim();
     const hasParam = isParamInjection(config) && config.paramName.trim();
-    if (!hasHeader && !hasParam) {
+    const hasPath = isPathInjection(config);
+    if (!hasHeader && !hasParam && !hasPath) {
       throw new ServiceError(
         "BAD_REQUEST",
-        "Header name or parameter name is required for generic secrets",
+        "Header name, parameter name, or URL path template is required for generic secrets",
       );
     }
+    assertPathValueSafe(config, input.valueSource, input.value);
   }
 
   const pathPattern = input.pathPattern?.trim() || null;
@@ -319,6 +358,7 @@ export const updateSecret = async (
 
   if (input.injectionConfig !== undefined && secret.type === "generic") {
     data.injectionConfig = buildInjectionConfig(input.injectionConfig);
+    assertPathValueSafe(input.injectionConfig, input.valueSource, input.value);
   }
 
   if (Object.keys(data).length === 0) {
