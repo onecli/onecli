@@ -215,6 +215,55 @@ pub(crate) async fn user_can_access_project(
     Ok(row.is_some())
 }
 
+/// Whether a user may manage a project — its creator, or an admin/owner of the
+/// project's organization. Re-checked on every API-key auth so a key stops
+/// working once its user loses access (e.g. demotion or removal). Cloud-only.
+#[cfg(feature = "cloud")]
+pub(crate) async fn user_can_manage_project(
+    pool: &PgPool,
+    user_id: &str,
+    project_id: &str,
+) -> Result<bool> {
+    let row: Option<(String,)> = sqlx::query_as(
+        r#"SELECT p.id
+           FROM projects p
+           LEFT JOIN organization_members om
+             ON om.organization_id = p.organization_id AND om.user_id = $1
+           WHERE p.id = $2
+             AND (p.created_by_user_id = $1 OR om.role IN ('owner', 'admin'))
+           LIMIT 1"#,
+    )
+    .bind(user_id)
+    .bind(project_id)
+    .fetch_optional(pool)
+    .await
+    .context("verifying user can manage project")?;
+    Ok(row.is_some())
+}
+
+/// Whether a user is an admin or owner of an organization. Re-checked on every
+/// org-scoped API-key auth so the key stops working after a demotion. Cloud-only.
+#[cfg(feature = "cloud")]
+pub(crate) async fn user_is_org_admin(
+    pool: &PgPool,
+    user_id: &str,
+    organization_id: &str,
+) -> Result<bool> {
+    let row: Option<(String,)> = sqlx::query_as(
+        r#"SELECT user_id
+           FROM organization_members
+           WHERE user_id = $1 AND organization_id = $2
+             AND role IN ('owner', 'admin')
+           LIMIT 1"#,
+    )
+    .bind(user_id)
+    .bind(organization_id)
+    .fetch_optional(pool)
+    .await
+    .context("verifying user is org admin")?;
+    Ok(row.is_some())
+}
+
 /// Look up an agent by its access token.
 pub(crate) async fn find_agent_by_token(
     pool: &PgPool,

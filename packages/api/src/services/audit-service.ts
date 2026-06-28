@@ -127,3 +127,19 @@ export const withAudit = async <T>(
     invalidateGatewayCacheForOrg(params.organizationId);
   return result;
 };
+
+/**
+ * Record a single audit event directly (status defaults to SUCCESS).
+ *
+ * Use when the audited state change is conditional or has already happened, so
+ * the `withAudit` HOF — which always logs and flushes the gateway cache around a
+ * wrapped call — doesn't fit. Example: auditing an API key only when it was
+ * actually minted during a read (`ensureApiKey`). Like `logAuditEvent`, it never
+ * throws — a failed audit write must not break the parent operation.
+ */
+export const recordAuditEvent = async (params: AuditParams): Promise<void> => {
+  await logAuditEvent({
+    ...params,
+    status: params.status ?? AUDIT_STATUS.SUCCESS,
+  });
+};

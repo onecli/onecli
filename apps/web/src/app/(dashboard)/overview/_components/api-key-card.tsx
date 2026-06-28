@@ -63,7 +63,7 @@ export const ApiKeyCard = () => {
       <CardHeader>
         <CardTitle>API Key</CardTitle>
         <CardDescription>
-          Your personal API key for OneCLI services.
+          Your personal API key for this project.
         </CardDescription>
       </CardHeader>
       <CardContent>

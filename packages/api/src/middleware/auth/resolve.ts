@@ -36,6 +36,26 @@ export const resolveOrganizationId = async (
   return membership?.organizationId ?? null;
 };
 
+/**
+ * Whether a user may access a project: its creator, or an admin/owner of the
+ * project's organization. OSS registers no role resolver and is single-user, so
+ * this is a no-op there (always allowed). Shared by `resolveProjectId` (session
+ * project resolution) and the API-key auth path so both gate access identically
+ * — and so a key keeps working only while its user still has access.
+ */
+export const canAccessProjectAsUser = async (
+  userId: string,
+  project: { createdByUserId: string | null; organizationId: string },
+): Promise<boolean> => {
+  if (!IS_CLOUD) return true;
+  if (project.createdByUserId === userId) return true;
+  const resolver = getRoleResolver();
+  const role = resolver
+    ? await resolver.getUserRole(userId, project.organizationId)
+    : null;
+  return !!role && ROLE_HIERARCHY[role] >= ROLE_HIERARCHY.admin;
+};
+
 export const resolveProjectId = async (
   request: Request,
   userId: string,
@@ -72,15 +92,7 @@ export const resolveProjectId = async (
   // may target any project in their org. OSS standalone registers no role
   // resolver, so this gate is skipped and any in-org project is accepted, as
   // before. Mirrors `canManageAllProjects` in the cloud authorization service.
-  if (IS_CLOUD && project.createdByUserId !== userId) {
-    const resolver = getRoleResolver();
-    const role = resolver
-      ? await resolver.getUserRole(userId, project.organizationId)
-      : null;
-    if (!role || ROLE_HIERARCHY[role] < ROLE_HIERARCHY.admin) {
-      return null;
-    }
-  }
+  if (!(await canAccessProjectAsUser(userId, project))) return null;
 
   return project.id;
 };

@@ -1,6 +1,8 @@
 import { db } from "@onecli/db";
 import type { AuthContext } from "../../providers";
-import { resolveUserEmail, resolveOrganizationIdFromProject } from "./resolve";
+import { getRoleResolver, ROLE_HIERARCHY } from "../../providers";
+import { IS_CLOUD } from "../../lib/env";
+import { resolveUserEmail, canAccessProjectAsUser } from "./resolve";
 
 export const authenticateApiKey = async (
   request: Request,
@@ -20,6 +22,17 @@ export const authenticateApiKey = async (
     });
     if (!apiKey || apiKey.scope !== "organization" || !apiKey.organizationId)
       return null;
+
+    // Org keys are an admin capability — re-check the key's user still holds
+    // admin/owner in the org (cloud only; OSS has neither org keys nor a role
+    // resolver). Closes the gap where a key keeps working after a demotion.
+    if (IS_CLOUD) {
+      const resolver = getRoleResolver();
+      const role = resolver
+        ? await resolver.getUserRole(apiKey.userId, apiKey.organizationId)
+        : null;
+      if (!role || ROLE_HIERARCHY[role] < ROLE_HIERARCHY.admin) return null;
+    }
 
     const userEmail = await resolveUserEmail(apiKey.userId);
     const headerProjectId = request.headers.get("x-project-id");
@@ -59,10 +72,16 @@ export const authenticateApiKey = async (
   });
   if (!apiKey || !apiKey.projectId) return null;
 
-  const organizationId = await resolveOrganizationIdFromProject(
-    apiKey.projectId,
-  );
-  if (!organizationId) return null;
+  const project = await db.project.findUnique({
+    where: { id: apiKey.projectId },
+    select: { createdByUserId: true, organizationId: true },
+  });
+  if (!project) return null;
+
+  // Re-check access at request time: the key authenticates only while its user
+  // still has access to the project (creator, or org admin/owner). OSS is a
+  // no-op (single-user, no role resolver). Mirrors resolveProjectId.
+  if (!(await canAccessProjectAsUser(apiKey.userId, project))) return null;
 
   const userEmail = await resolveUserEmail(apiKey.userId);
 
@@ -70,6 +89,6 @@ export const authenticateApiKey = async (
     userId: apiKey.userId,
     userEmail,
     projectId: apiKey.projectId,
-    organizationId,
+    organizationId: project.organizationId,
   };
 };
