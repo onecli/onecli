@@ -518,7 +518,37 @@ export const appRoutes = () => {
       return c.json({ error: `Provider "${provider}" is not available` }, 400);
     }
 
-    if (appDef.connectionMethod.type === "oauth") {
+    const body = (await c.req.json().catch(() => null)) as {
+      fields?: Record<string, string>;
+      connectionId?: string;
+      label?: string;
+      method?: string;
+    } | null;
+
+    // Resolve which connection method to use. Apps with `additionalMethods`
+    // (e.g. Attio: OAuth primary + API key alternate) pass `method` to select
+    // one; otherwise the primary `connectionMethod` is used. An explicit but
+    // unrecognized `method` is rejected rather than silently falling back.
+    const requestedMethod = body?.method;
+    const activeMethod = requestedMethod
+      ? ((appDef.additionalMethods ?? []).find(
+          (m) => m.type === requestedMethod,
+        ) ??
+        (appDef.connectionMethod.type === requestedMethod
+          ? appDef.connectionMethod
+          : undefined))
+      : appDef.connectionMethod;
+
+    if (!activeMethod) {
+      return c.json(
+        {
+          error: `Provider "${provider}" has no "${requestedMethod}" connection method`,
+        },
+        400,
+      );
+    }
+
+    if (activeMethod.type === "oauth") {
       return c.json(
         {
           error: `Provider "${provider}" uses OAuth flow, not direct credentials`,
@@ -527,18 +557,13 @@ export const appRoutes = () => {
       );
     }
 
-    if (appDef.connectionMethod.type === "cloud_only") {
+    if (activeMethod.type === "cloud_only") {
       return c.json(
         { error: `Provider "${provider}" is only available in OneCLI Cloud` },
         400,
       );
     }
 
-    const body = (await c.req.json().catch(() => null)) as {
-      fields?: Record<string, string>;
-      connectionId?: string;
-      label?: string;
-    } | null;
     if (!body?.fields) {
       return c.json({ error: "Missing fields in request body" }, 400);
     }
@@ -547,16 +572,16 @@ export const appRoutes = () => {
 
     let requiredFields: { name: string; label: string }[];
     if (
-      appDef.connectionMethod.type === "credentials_import" &&
-      appDef.connectionMethod.fields.some((f) => f.group)
+      activeMethod.type === "credentials_import" &&
+      activeMethod.fields.some((f) => f.group)
     ) {
-      requiredFields = appDef.connectionMethod.fields.filter((f) => {
+      requiredFields = activeMethod.fields.filter((f) => {
         if (!f.group) return true;
         if (fields.privateKey) return f.group === "service_account";
         return f.group === "authorized_user";
       });
     } else {
-      requiredFields = appDef.connectionMethod.fields.filter(
+      requiredFields = activeMethod.fields.filter(
         (f) => !("optional" in f && f.optional),
       );
     }
@@ -571,21 +596,32 @@ export const appRoutes = () => {
     let scopes: string[] | undefined;
     let metadata: Record<string, unknown> | undefined;
 
-    if (appDef.connectionMethod.type === "credentials_import") {
-      const result = await appDef.connectionMethod.exchangeCredentials(fields);
+    if (activeMethod.type === "credentials_import") {
+      const result = await activeMethod.exchangeCredentials(fields);
       credentials = result.credentials;
       scopes = result.scopes;
       metadata = result.metadata;
     } else {
-      const primaryField = appDef.connectionMethod.fields[0];
+      const primaryField = activeMethod.fields[0];
       credentials = {
         access_token: fields[primaryField!.name],
         ...fields,
       };
 
-      if (appDef.connectionMethod.resolveMetadata) {
-        metadata =
-          (await appDef.connectionMethod.resolveMetadata(fields)) ?? undefined;
+      if (activeMethod.resolveMetadata) {
+        try {
+          metadata = (await activeMethod.resolveMetadata(fields)) ?? undefined;
+        } catch (e) {
+          return c.json(
+            {
+              error:
+                e instanceof Error
+                  ? e.message
+                  : "Could not validate the provided credentials",
+            },
+            400,
+          );
+        }
       }
 
       if (!metadata) {
@@ -656,7 +692,7 @@ export const appRoutes = () => {
     }
 
     if (
-      appDef.connectionMethod.type === "credentials_import" &&
+      activeMethod.type === "credentials_import" &&
       !fields.privateKey &&
       fields.clientId &&
       fields.clientSecret

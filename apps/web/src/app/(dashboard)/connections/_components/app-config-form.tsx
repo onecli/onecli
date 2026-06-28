@@ -1,6 +1,13 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useImperativeHandle,
+  useRef,
+  useState,
+  type Ref,
+} from "react";
 import { Loader2, Settings2 } from "lucide-react";
 import { toast } from "sonner";
 import {
@@ -25,6 +32,7 @@ import { Card } from "@onecli/ui/components/card";
 import { Input } from "@onecli/ui/components/input";
 import { Label } from "@onecli/ui/components/label";
 import { Switch } from "@onecli/ui/components/switch";
+import { cn } from "@onecli/ui/lib/utils";
 import { SecretInput } from "@/components/secret-input";
 import {
   saveAppConfig,
@@ -34,6 +42,11 @@ import {
 } from "@/lib/actions/app-config";
 import { IS_CLOUD } from "@/lib/env";
 import { RedirectUri } from "./redirect-uri";
+
+export interface AppConfigFormHandle {
+  /** Open the Custom credentials section, scroll it into view, and briefly highlight it. */
+  reveal: () => void;
+}
 
 interface AppConfigFormProps {
   provider: string;
@@ -50,6 +63,8 @@ interface AppConfigFormProps {
   isConnected: boolean;
   /** Called after any config change that invalidates the connection (save, toggle, delete). */
   onConfigChange?: () => void;
+  /** Imperative handle so the page header can open + scroll to this section. */
+  ref?: Ref<AppConfigFormHandle>;
 }
 
 export const AppConfigForm = ({
@@ -60,6 +75,7 @@ export const AppConfigForm = ({
   hasEnvDefaults,
   isConnected,
   onConfigChange,
+  ref,
 }: AppConfigFormProps) => {
   const [values, setValues] = useState<Record<string, string>>({});
   const [hasCredentials, setHasCredentials] = useState(false);
@@ -69,6 +85,12 @@ export const AppConfigForm = ({
   const [pendingAction, setPendingAction] = useState<
     "save" | "toggle-on" | "toggle-off" | null
   >(null);
+  const [openValue, setOpenValue] = useState("");
+  const [highlight, setHighlight] = useState(false);
+  const rootRef = useRef<HTMLDivElement>(null);
+  const triggerRef = useRef<HTMLButtonElement>(null);
+  const didInitRef = useRef(false);
+  const wantScrollRef = useRef(false);
 
   const fetchConfig = useCallback(async () => {
     try {
@@ -82,16 +104,71 @@ export const AppConfigForm = ({
         setHasCredentials(false);
         setEnabled(false);
       }
+      // On first load, open the section by default when custom credentials are
+      // enabled or there are no platform defaults to fall back on. Batched with
+      // setLoading(false) so the section mounts already-open (no open/close
+      // flash); guarded so it never overrides an explicit reveal() or resets the
+      // open state on later refetches (save/toggle/delete).
+      if (!didInitRef.current) {
+        didInitRef.current = true;
+        setOpenValue(
+          (config?.enabled ?? false) || !hasEnvDefaults ? "credentials" : "",
+        );
+      }
     } catch {
       // Failed to fetch
     } finally {
       setLoading(false);
     }
-  }, [provider]);
+  }, [provider, hasEnvDefaults]);
 
   useEffect(() => {
     fetchConfig();
   }, [fetchConfig]);
+
+  const revealSection = useCallback(() => {
+    const prefersReduced = window.matchMedia(
+      "(prefers-reduced-motion: reduce)",
+    ).matches;
+    rootRef.current?.scrollIntoView({
+      behavior: prefersReduced ? "auto" : "smooth",
+      block: "start",
+    });
+    // Move focus to the section's disclosure trigger (without a second scroll) so
+    // keyboard and screen-reader users are taken here too — and hear its expanded
+    // state — matching the visual scroll for pointer users.
+    triggerRef.current?.focus({ preventScroll: true });
+  }, []);
+
+  useImperativeHandle(
+    ref,
+    () => ({
+      reveal: () => {
+        didInitRef.current = true;
+        setOpenValue("credentials");
+        setHighlight(true);
+        wantScrollRef.current = true;
+        // Let the accordion begin expanding before scrolling. If the section is
+        // still loading (no ref yet), the effect below scrolls once it mounts.
+        window.setTimeout(() => {
+          if (rootRef.current && wantScrollRef.current) {
+            wantScrollRef.current = false;
+            revealSection();
+          }
+        }, 150);
+        window.setTimeout(() => setHighlight(false), 2000);
+      },
+    }),
+    [revealSection],
+  );
+
+  // If reveal() fired before the section finished loading, reveal once it mounts.
+  useEffect(() => {
+    if (loading || !wantScrollRef.current) return;
+    wantScrollRef.current = false;
+    const t = window.setTimeout(revealSection, 150);
+    return () => window.clearTimeout(t);
+  }, [loading, revealSection]);
 
   const doSave = async () => {
     setSaving(true);
@@ -162,7 +239,6 @@ export const AppConfigForm = ({
   };
 
   const hasInput = fields.some((f) => !!values[f.name]);
-  const defaultOpen = enabled || !hasEnvDefaults;
 
   if (loading) {
     return (
@@ -174,12 +250,18 @@ export const AppConfigForm = ({
 
   return (
     <Accordion
+      ref={rootRef}
       type="single"
       collapsible
-      defaultValue={defaultOpen ? "credentials" : undefined}
+      value={openValue}
+      onValueChange={setOpenValue}
+      className={cn(
+        "scroll-mt-6 rounded-lg transition-shadow motion-reduce:transition-none",
+        highlight && "ring-2 ring-ring/70",
+      )}
     >
       <AccordionItem value="credentials" className="border-b-0 border-t">
-        <AccordionTrigger className="py-3 hover:no-underline">
+        <AccordionTrigger ref={triggerRef} className="py-3 hover:no-underline">
           <span className="text-muted-foreground flex items-center gap-2 text-xs font-normal">
             <Settings2 className="size-3.5" />
             Custom credentials

@@ -98,4 +98,22 @@ export const cloudApps: AppDefinition[] = [
     connectionMethod: { type: "cloud_only" },
     available: false,
   },
+  {
+    id: "attio",
+    name: "Attio",
+    icon: "/icons/attio.svg",
+    darkIcon: "/icons/attio-light.svg",
+    description: "Contacts, companies, deals, lists, notes, and tasks.",
+    connectionMethod: { type: "cloud_only" },
+    available: false,
+  },
+  {
+    id: "x",
+    name: "X",
+    icon: "/icons/x.svg",
+    darkIcon: "/icons/x-light.svg",
+    description: "Posts, timelines, DMs, and account management.",
+    connectionMethod: { type: "cloud_only" },
+    available: false,
+  },
 ];

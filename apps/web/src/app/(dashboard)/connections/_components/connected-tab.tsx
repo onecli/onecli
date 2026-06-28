@@ -47,7 +47,6 @@ interface ConnectedItem {
     pathPattern: string | null;
     injectionConfig: unknown;
     metadata: Record<string, unknown> | null;
-    isPlatform: boolean;
     createdAt: Date;
   };
 }
@@ -61,7 +60,6 @@ interface SecretItem {
   pathPattern: string | null;
   injectionConfig: unknown;
   metadata: Record<string, unknown> | null;
-  isPlatform: boolean;
   scope: string | null;
   createdAt: Date;
 }

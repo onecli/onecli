@@ -55,6 +55,10 @@ export type ConnectionMethod =
         optional?: boolean;
         /** When false, the field is shown as plain text instead of masked. */
         secret?: boolean;
+        /** Optional clickable link shown under the field (e.g. where to create the key). */
+        helpUrl?: string;
+        /** Label for the help link; defaults to "Learn more". */
+        helpLabel?: string;
       }[];
       /** Resolve metadata for the connection (e.g., org name, dashboard URL). */
       resolveMetadata?: (
@@ -108,6 +112,11 @@ export interface AppDefinition {
   darkIcon?: string;
   description: string;
   connectionMethod: ConnectionMethod;
+  /** Optional alternate connection methods offered alongside the primary
+   *  `connectionMethod` (e.g. an API-key option in addition to OAuth). The
+   *  connect UI lets the user pick; the connect route resolves the chosen one
+   *  via the request's `method` field. */
+  additionalMethods?: ConnectionMethod[];
   available: boolean;
   /** Custom hint for the connection label field (e.g. 'e.g. "staging", "my-org"'). */
   labelHint?: string;

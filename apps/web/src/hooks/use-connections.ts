@@ -5,7 +5,7 @@ import { toast } from "sonner";
 import { connections } from "@/lib/api";
 import { queryKeys } from "@/lib/api/keys";
 import { getVaultConnections } from "@/lib/actions/connections";
-import { invalidateGatewayCache } from "@/lib/actions/gateway-cache";
+import { invalidateGatewayCache } from "@/lib/api/cache";
 
 export const useConnections = () =>
   useQuery({

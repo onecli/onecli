@@ -74,5 +74,7 @@ export const APP_CATEGORIES: Record<string, AppCategory> = {
   zoom: "communication",
   hubspot: "communication",
   affinity: "communication",
+  attio: "communication",
   granola: "communication",
+  x: "communication",
 };

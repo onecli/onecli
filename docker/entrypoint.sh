@@ -1,6 +1,11 @@
 #!/bin/sh
 set -e
 
+# Entrypoint for the all-in-one image (docker/Dockerfile): runs the gateway and
+# the Next.js web server together in one container. The hosted cloud edition
+# deploys its services as separate images and never uses this script — so the
+# auth mode here is only ever "local" or "oauth", never "cloud".
+
 PRISMA="node /app/packages/db/node_modules/prisma/build/index.js"
 SCHEMA="--schema /app/packages/db/prisma/schema.prisma"
 
@@ -12,10 +17,9 @@ if ! $PRISMA migrate deploy $SCHEMA 2>&1; then
   $PRISMA migrate deploy $SCHEMA
 fi
 
-# Auto-generate SECRET_ENCRYPTION_KEY for OSS if not provided.
+# Auto-generate SECRET_ENCRYPTION_KEY if not provided.
 # Persisted to /app/data/ so encrypted secrets survive container restarts.
-# Cloud edition uses AWS KMS instead (key provided via env var / Secrets Manager).
-if [ "$NEXT_PUBLIC_EDITION" != "cloud" ] && [ -z "$SECRET_ENCRYPTION_KEY" ]; then
+if [ -z "$SECRET_ENCRYPTION_KEY" ]; then
   SECRET_KEY_FILE="/app/data/secret-encryption-key"
   if [ ! -f "$SECRET_KEY_FILE" ] || [ ! -s "$SECRET_KEY_FILE" ]; then
     echo "Generating secret encryption key..."
@@ -26,13 +30,11 @@ if [ "$NEXT_PUBLIC_EDITION" != "cloud" ] && [ -z "$SECRET_ENCRYPTION_KEY" ]; the
   SECRET_ENCRYPTION_KEY=$(cat "$SECRET_KEY_FILE")
 fi
 
-# Auto-generate GATEWAY_INTERNAL_SECRET for OSS if not provided. It only
-# authenticates the gateway -> Node API call inside THIS container, so unlike the
-# encryption key it needs no persistence — an ephemeral per-start value is fine
-# (nothing stored depends on it). Without it the 1Password integration fails
-# closed. Cloud injects it from Secrets Manager, where the gateway and api-server
-# are separate services.
-if [ "$NEXT_PUBLIC_EDITION" != "cloud" ] && [ -z "$GATEWAY_INTERNAL_SECRET" ]; then
+# Auto-generate GATEWAY_INTERNAL_SECRET if not provided. It only authenticates
+# the gateway -> Node API call inside THIS container, so unlike the encryption
+# key it needs no persistence — an ephemeral per-start value is fine (nothing
+# stored depends on it). Without it the 1Password integration fails closed.
+if [ -z "$GATEWAY_INTERNAL_SECRET" ]; then
   echo "Generating gateway internal secret..."
   GATEWAY_INTERNAL_SECRET=$(head -c 32 /dev/urandom | base64)
   export GATEWAY_INTERNAL_SECRET
@@ -40,16 +42,14 @@ fi
 
 # Write runtime config for Next.js (auth mode is determined at container start,
 # not at build time, so the same image works for local and OAuth modes).
-if [ "$NEXT_PUBLIC_EDITION" = "cloud" ]; then
-  AUTH_MODE="cloud"
-elif [ -n "$NEXTAUTH_SECRET" ]; then
+if [ -n "$NEXTAUTH_SECRET" ]; then
   AUTH_MODE="oauth"
 else
   AUTH_MODE="local"
 fi
 export AUTH_MODE
 OAUTH_CONFIGURED="false"
-if [ "$AUTH_MODE" = "cloud" ] || [ -n "$GOOGLE_CLIENT_ID" ]; then
+if [ -n "$GOOGLE_CLIENT_ID" ]; then
   OAUTH_CONFIGURED="true"
 fi
 printf '{"authMode":"%s","oauthConfigured":%s}\n' "$AUTH_MODE" "$OAUTH_CONFIGURED" > /app/data/runtime-config.json
