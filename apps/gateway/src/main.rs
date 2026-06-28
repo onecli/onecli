@@ -67,6 +67,7 @@ mod cloud_summary;
 
 mod telemetry_core;
 mod util;
+mod version;
 
 #[cfg(not(feature = "cloud"))]
 mod telemetry;

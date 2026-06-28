@@ -34,6 +34,15 @@ export const GATEWAY_API_URL =
 export const GATEWAY_BASE_URL =
   process.env.GATEWAY_BASE_URL ?? "host.docker.internal:10255";
 
+// ── Version ─────────────────────────────────────────────────────────────
+
+/**
+ * Build-time app version (e.g. `"1.38.0+f6cca6e5"`), shown in the UI and reported
+ * by `/v1/health`. Injected as `NEXT_PUBLIC_APP_VERSION` in `next.config.js`;
+ * `"dev"` for local/unstamped builds.
+ */
+export const APP_VERSION = process.env.NEXT_PUBLIC_APP_VERSION ?? "dev";
+
 // ── Edition ─────────────────────────────────────────────────────────────
 
 /** Build-time edition: `"cloud"` or `""` (OSS). */

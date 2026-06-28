@@ -1,7 +1,27 @@
-import { readdirSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
 import path from "node:path";
 
 const isCloud = process.env.NEXT_PUBLIC_EDITION === "cloud";
+
+// Build-time app version, exposed to the app as NEXT_PUBLIC_APP_VERSION (client +
+// server, inlined by Next). Cloud stamps APP_VERSION (semver + short git sha, e.g.
+// "1.38.0+f6cca6e5") as a build arg; OSS / self-host / local falls back to the
+// monorepo root package.json version, else "dev". process.cwd() is apps/web here.
+const resolveAppVersion = () => {
+  if (process.env.APP_VERSION) return process.env.APP_VERSION;
+  try {
+    const pkg = JSON.parse(
+      readFileSync(
+        path.join(process.cwd(), "..", "..", "package.json"),
+        "utf8",
+      ),
+    );
+    return pkg.version || "dev";
+  } catch {
+    return "dev";
+  }
+};
+const appVersion = resolveAppVersion();
 
 // Dashboard paths that cloud intentionally serves at the SAME bare URL as OSS (shared).
 // Empty today: cloud namespaces every dashboard feature under /p, /org, /account, so no
@@ -33,6 +53,7 @@ const nextConfig = {
   serverExternalPackages: ["@onecli/db", "@1password/sdk"],
   env: {
     NEXT_PUBLIC_EDITION: process.env.NEXT_PUBLIC_EDITION || "oss",
+    NEXT_PUBLIC_APP_VERSION: appVersion,
     NEXT_PUBLIC_API_URL: process.env.API_DOMAIN
       ? `${isCloud && process.env.NODE_ENV !== "development" ? "https" : "http"}://${process.env.API_DOMAIN}`
       : "http://localhost:10255",
