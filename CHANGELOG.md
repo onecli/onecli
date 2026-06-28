@@ -1,5 +1,16 @@
 # Changelog
 
+## [1.39.0](https://github.com/onecli/onecli/compare/v1.38.0...v1.39.0) (2026-06-28)
+
+
+### Features
+
+* add "Hide AI" activity filter and tolerate missing API keys ([#397](https://github.com/onecli/onecli/issues/397)) ([cf387ae](https://github.com/onecli/onecli/commit/cf387ae8cac197f4878b6045aced2a58e6b4d1ec))
+* **gateway:** agent-framework-aware gateway skill ([#385](https://github.com/onecli/onecli/issues/385)) ([fb1f357](https://github.com/onecli/onecli/commit/fb1f3571b37af8228f7ee6936b2e51295a253fc4))
+* **gateway:** pluggable per-app approval summaries ([#392](https://github.com/onecli/onecli/issues/392)) ([dd782e8](https://github.com/onecli/onecli/commit/dd782e8b1d8b20d8c355ba4b556c72f5a6fe4028))
+* live approval notifications, gateway summaries, and fixes ([#393](https://github.com/onecli/onecli/issues/393)) ([2bdc293](https://github.com/onecli/onecli/commit/2bdc29308f0cc276202df2e5ed36a82a8bebdcb0))
+* **web:** show build version on Overview and Settings ([#389](https://github.com/onecli/onecli/issues/389)) ([8d52c20](https://github.com/onecli/onecli/commit/8d52c20b57e1c54826387572fa87174e1ab0ef53))
+
 ## [1.38.0](https://github.com/onecli/onecli/compare/v1.37.0...v1.38.0) (2026-06-18)
 
 
