@@ -105,7 +105,6 @@ export const listSecrets = async (scope: ResourceScope) => {
       pathPattern: true,
       injectionConfig: true,
       metadata: true,
-      isPlatform: true,
       scope: true,
       createdAt: true,
     },
@@ -256,25 +255,10 @@ export const updateSecret = async (
 ) => {
   const secret = await db.secret.findFirst({
     where: scopeOwnership(scope, secretId),
-    select: { id: true, type: true, isPlatform: true },
+    select: { id: true, type: true },
   });
 
   if (!secret) throw new ServiceError("NOT_FOUND", "Secret not found");
-
-  if (secret.isPlatform) {
-    const hasNonValueFields =
-      input.name !== undefined ||
-      input.hostPattern !== undefined ||
-      input.pathPattern !== undefined ||
-      input.injectionConfig !== undefined;
-    if (hasNonValueFields)
-      throw new ServiceError(
-        "FORBIDDEN",
-        "Only the value can be updated on platform secrets",
-      );
-    if (input.value === undefined && input.opRef === undefined)
-      throw new ServiceError("BAD_REQUEST", "Value is required");
-  }
 
   const data: Record<string, unknown> = {};
 
@@ -302,7 +286,6 @@ export const updateSecret = async (
     if (secret.type === "anthropic") data.hostPattern = "api.anthropic.com";
     if (secret.type === "openai") data.hostPattern = "api.openai.com";
     data.metadata = buildOnePasswordMetadata(secret.type, input.opDisplay);
-    if (secret.isPlatform) data.isPlatform = false;
   } else if (input.value !== undefined) {
     let value = input.value.trim();
     if (!value)
@@ -317,10 +300,6 @@ export const updateSecret = async (
     data.valueSource = "inline";
     data.encryptedValue = await getCrypto().encrypt(value);
     data.opRef = null;
-
-    if (secret.isPlatform) {
-      data.isPlatform = false;
-    }
 
     if (secret.type === "anthropic" || secret.type === "openai") {
       data.metadata = buildMetadata(secret.type, value);

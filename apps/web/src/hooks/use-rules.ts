@@ -5,7 +5,7 @@ import { toast } from "sonner";
 import { rules } from "@/lib/api";
 import { queryKeys } from "@/lib/api/keys";
 import { updateRule, deleteRule } from "@/lib/actions/rules";
-import { invalidateGatewayCache } from "@/lib/actions/gateway-cache";
+import { invalidateGatewayCache } from "@/lib/api/cache";
 
 export const useRules = () =>
   useQuery({ queryKey: queryKeys.rules.list(), queryFn: rules.list });

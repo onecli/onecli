@@ -1,5 +1,5 @@
 import { useCallback } from "react";
-import { invalidateGatewayCache } from "@/lib/actions/gateway-cache";
+import { invalidateGatewayCache } from "@/lib/api/cache";
 
 /**
  * Returns a fire-and-forget function that invalidates the gateway's

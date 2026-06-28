@@ -43,7 +43,6 @@ interface SecretCardProps {
     pathPattern: string | null;
     injectionConfig: unknown;
     metadata: Record<string, unknown> | null;
-    isPlatform: boolean;
     createdAt: Date;
   };
   onUpdate?: () => void;
@@ -107,11 +106,6 @@ export const SecretCard = ({
                     height={12}
                   />
                   1Password
-                </Badge>
-              )}
-              {secret.isPlatform && (
-                <Badge variant="outline" className="text-xs text-brand">
-                  Trial
                 </Badge>
               )}
               {badge && (

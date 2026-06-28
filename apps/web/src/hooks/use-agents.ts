@@ -11,7 +11,7 @@ import {
   regenerateAgentToken,
   setDefaultAgent,
 } from "@/lib/actions/agents";
-import { invalidateGatewayCache } from "@/lib/actions/gateway-cache";
+import { invalidateGatewayCache } from "@/lib/api/cache";
 
 export const useAgents = () =>
   useQuery({ queryKey: queryKeys.agents.list(), queryFn: getAgents });

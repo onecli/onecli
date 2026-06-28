@@ -5,7 +5,7 @@ import { toast } from "sonner";
 import { appBlocklist } from "@/lib/api";
 import type { PageScope } from "@/lib/api/app-blocklist";
 import { queryKeys } from "@/lib/api/keys";
-import { invalidateGatewayCache } from "@/lib/actions/gateway-cache";
+import { invalidateGatewayCache } from "@/lib/api/cache";
 
 export const useAppBlocklist = (
   provider: string,

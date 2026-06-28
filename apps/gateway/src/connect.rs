@@ -193,7 +193,7 @@ impl PolicyEngine {
         agent: &db::AgentRow,
         hostname: &str,
     ) -> Result<ConnectResponse, ConnectError> {
-        let (injection_rules, _has_platform, budget_bindings) =
+        let (injection_rules, budget_bindings) =
             self.resolve_secret_injections(agent, hostname).await?;
         let app_connections = self.resolve_app_connections(agent, hostname).await?;
         let policy_rules = self.resolve_policy_rules(agent, hostname).await?;
@@ -237,12 +237,12 @@ impl PolicyEngine {
     }
 
     /// Build injection rules from secrets matching this host.
-    /// Returns `(rules, has_platform_secret)`.
+    /// Returns `(rules, budget_bindings)`.
     async fn resolve_secret_injections(
         &self,
         agent: &db::AgentRow,
         hostname: &str,
-    ) -> Result<(Vec<InjectionRule>, bool, Vec<crate::budget::BudgetBinding>), ConnectError> {
+    ) -> Result<(Vec<InjectionRule>, Vec<crate::budget::BudgetBinding>), ConnectError> {
         let secrets = if agent.secret_mode == SECRET_MODE_SELECTIVE {
             // Selective: agent_secrets join returns both project + org assigned secrets
             db::find_secrets_by_agent(&self.pool, &agent.id)
@@ -282,8 +282,6 @@ impl PolicyEngine {
                 false
             })
             .collect();
-
-        let has_platform = matching.iter().any(|s| s.is_platform);
 
         let mut rules = Vec::with_capacity(matching.len());
         for secret in &matching {
@@ -343,7 +341,7 @@ impl PolicyEngine {
         let budget_bindings =
             crate::budget::resolve_bindings(&self.pool, &agent.organization_id, &matching).await;
 
-        Ok((rules, has_platform, budget_bindings))
+        Ok((rules, budget_bindings))
     }
 
     /// Produce a secret's plaintext value from its source — the encrypted column
