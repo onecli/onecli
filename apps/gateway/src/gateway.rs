@@ -308,8 +308,11 @@ impl GatewayServer {
 
 // ── Axum route handlers ─────────────────────────────────────────────────
 
-async fn healthz() -> StatusCode {
-    StatusCode::OK
+async fn healthz() -> axum::Json<serde_json::Value> {
+    axum::Json(serde_json::json!({
+        "status": "ok",
+        "version": crate::version::app_version(),
+    }))
 }
 
 /// Protected: returns the authenticated user's ID.
@@ -928,6 +931,16 @@ pub(crate) fn strip_port(host: &str) -> &str {
 mod tests {
     use super::*;
     use std::net::TcpListener;
+
+    #[tokio::test]
+    async fn healthz_reports_status_and_version() {
+        let axum::Json(body) = healthz().await;
+        assert_eq!(body["status"], "ok");
+        assert!(
+            body["version"].as_str().is_some_and(|v| !v.is_empty()),
+            "healthz must report a non-empty version string",
+        );
+    }
 
     /// Verify that the production HTTP client does not follow redirects.
     /// A proxy must forward 3xx responses to the client so the client's HTTP
