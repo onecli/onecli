@@ -2,12 +2,18 @@
 //!
 //! This module handles:
 //! - Extracting agent tokens from `Proxy-Authorization` headers
-//! - Applying injection rules (set_header, remove_header, set_param) to forwarded requests
+//! - Applying injection rules (set_header, remove_header, set_param, set_path,
+//!   replace_path_regex) to forwarded requests
 //! - Path pattern matching for injection rules
 
+use std::borrow::Cow;
+use std::sync::{Arc, OnceLock};
+
 use base64::Engine;
+use dashmap::DashMap;
 use hyper::header::{HeaderName, HeaderValue};
 use hyper::Request;
+use regex::Regex;
 use serde::{Deserialize, Serialize};
 use tracing::warn;
 
@@ -37,6 +43,27 @@ pub(crate) enum Injection {
     /// Add or replace a URL query parameter.
     SetParam {
         name: String,
+        value: String,
+    },
+    /// Substitute the secret into a `{value}` hole in the URL path (template mode).
+    /// The agent emits the natural URL shape with any/empty filler in the secret's
+    /// slot; the gateway replaces that slot with `value`. Used for token-in-path
+    /// APIs like Telegram (`/bot<token>/sendMessage`).
+    SetPath {
+        /// Path template containing exactly one `{value}` hole, e.g. `/bot{value}`.
+        template: String,
+        /// The resolved secret value substituted into the hole.
+        value: String,
+    },
+    /// Rewrite the URL path via a regex (advanced mode). `replacement` may use
+    /// `$N` capture references and a literal `{value}` token for the secret.
+    ReplacePathRegex {
+        /// The regex matched against the request path (query stripped).
+        pattern: String,
+        /// Replacement template; `$N` are expanded from captures, then `{value}`
+        /// is replaced with the secret (so a `$` in the secret is never reinterpreted).
+        replacement: String,
+        /// The resolved secret value.
         value: String,
     },
 }
@@ -124,6 +151,20 @@ pub(crate) fn apply_injections(
                     apply_set_param(request_path, name, value);
                     count += 1;
                 }
+                Injection::SetPath { template, value } => {
+                    if apply_set_path(request_path, template, value) {
+                        count += 1;
+                    }
+                }
+                Injection::ReplacePathRegex {
+                    pattern,
+                    replacement,
+                    value,
+                } => {
+                    if apply_replace_path_regex(request_path, pattern, replacement, value) {
+                        count += 1;
+                    }
+                }
             }
         }
     }
@@ -195,6 +236,152 @@ fn apply_set_param(request_path: &mut String, name: &str, value: &str) {
 
     if let Some(frag) = fragment {
         request_path.push_str(&frag);
+    }
+}
+
+// ── Path injection ──────────────────────────────────────────────────────
+
+/// Reject secret values that would reshape the URL if substituted into the path
+/// raw. Path secrets are injected verbatim (so e.g. a Telegram token's `:`
+/// survives), so any path-structural delimiter, percent sign, space, or control
+/// character in the resolved value would corrupt or redirect the request — fail
+/// safe instead. Covers values whose source (e.g. 1Password) is unknown at write
+/// time, so this is the authoritative guard.
+fn is_path_safe(value: &str) -> bool {
+    !value
+        .chars()
+        .any(|c| matches!(c, '/' | '?' | '#' | '%' | ' ') || c.is_control())
+}
+
+/// Split a `path[?query][#fragment]` string into the path portion and the
+/// remainder, so path rewriting never touches the query or fragment.
+fn split_path_suffix(request_path: &str) -> (&str, &str) {
+    match request_path.find(['?', '#']) {
+        Some(pos) => request_path.split_at(pos),
+        None => (request_path, ""),
+    }
+}
+
+/// Template-mode path injection. Splits `template` on its single `{value}` hole,
+/// requires the request path to start with the literal prefix (and, if present,
+/// the literal suffix immediately after the hole), then replaces the hole — the
+/// run of characters up to the next `/` — with the secret. Substitution is raw
+/// (the secret must be path-safe). Returns `true` if the path was rewritten.
+fn apply_set_path(request_path: &mut String, template: &str, value: &str) -> bool {
+    const HOLE: &str = "{value}";
+
+    let mut parts = template.splitn(2, HOLE);
+    let prefix = parts.next().unwrap_or("");
+    let Some(suffix) = parts.next() else {
+        warn!("set_path skipped: template has no {{value}} placeholder");
+        return false;
+    };
+    if suffix.contains(HOLE) {
+        warn!("set_path skipped: template must contain exactly one {{value}} placeholder");
+        return false;
+    }
+    if !is_path_safe(value) {
+        warn!("set_path skipped: secret value is not path-safe");
+        return false;
+    }
+
+    let (path, rest) = split_path_suffix(request_path);
+
+    // The prefix is anchored at the start of the path.
+    let Some(after_prefix) = path.strip_prefix(prefix) else {
+        return false;
+    };
+    // The hole spans up to the next `/` (one segment / segment-suffix).
+    let hole_len = after_prefix.find('/').unwrap_or(after_prefix.len());
+    let after_hole = &after_prefix[hole_len..];
+    // A literal suffix in the template must follow the hole.
+    if !after_hole.starts_with(suffix) {
+        return false;
+    }
+
+    let new_path = format!("{prefix}{value}{after_hole}");
+    // Defense-in-depth: never emit a path that lost its leading `/`, which would
+    // fuse with the host when the upstream URL is built (`scheme://host{path}`).
+    if !new_path.starts_with('/') {
+        warn!("set_path skipped: rewritten path would not start with /");
+        return false;
+    }
+    *request_path = format!("{new_path}{rest}");
+    true
+}
+
+/// Process-global cache of compiled path-rewrite regexes. Patterns come from
+/// stored secrets (a small, finite set), so the cache stays bounded. Compile
+/// *failures* (`None`) are cached too, so an invalid pattern isn't recompiled on
+/// every request.
+fn regex_cache() -> &'static DashMap<String, Option<Arc<Regex>>> {
+    static CACHE: OnceLock<DashMap<String, Option<Arc<Regex>>>> = OnceLock::new();
+    CACHE.get_or_init(DashMap::new)
+}
+
+fn compiled_regex(pattern: &str) -> Option<Arc<Regex>> {
+    if let Some(entry) = regex_cache().get(pattern) {
+        return entry.clone();
+    }
+    let compiled = match Regex::new(pattern) {
+        Ok(re) => Some(Arc::new(re)),
+        Err(e) => {
+            warn!(error = %e, "replace_path_regex skipped: invalid pattern");
+            None
+        }
+    };
+    regex_cache().insert(pattern.to_string(), compiled.clone());
+    compiled
+}
+
+/// Regex-mode path injection (advanced). Applies `pattern`/`replacement` to the
+/// path portion only. The secret is substituted at the `{value}` positions of the
+/// replacement template, split out before `$N` expansion — so neither a `$` in the
+/// secret nor a `{value}` inside a captured group is ever reinterpreted. First
+/// match only. Returns `true` if the path was rewritten.
+fn apply_replace_path_regex(
+    request_path: &mut String,
+    pattern: &str,
+    replacement: &str,
+    value: &str,
+) -> bool {
+    if !is_path_safe(value) {
+        warn!("replace_path_regex skipped: secret value is not path-safe");
+        return false;
+    }
+    let Some(re) = compiled_regex(pattern) else {
+        return false;
+    };
+
+    let (path, rest) = split_path_suffix(request_path);
+    let rewritten = re.replace(path, |caps: &regex::Captures| {
+        // Substitute the secret only at the `{value}` positions of the replacement
+        // *template* — split out before `$N` expansion — so neither a `$` in the
+        // secret nor a `{value}` that appears inside a captured group is ever
+        // reinterpreted: the secret lands only where the operator put `{value}`.
+        let mut out = String::new();
+        for (i, segment) in replacement.split("{value}").enumerate() {
+            if i > 0 {
+                out.push_str(value);
+            }
+            caps.expand(segment, &mut out);
+        }
+        out
+    });
+
+    match rewritten {
+        // No match — the path is unchanged, so nothing was injected.
+        Cow::Borrowed(_) => false,
+        // Defense-in-depth: never emit a path that lost its leading `/`, which
+        // would fuse with the host when the upstream URL is built.
+        Cow::Owned(new_path) if !new_path.starts_with('/') => {
+            warn!("replace_path_regex skipped: rewritten path would not start with /");
+            false
+        }
+        Cow::Owned(new_path) => {
+            *request_path = format!("{new_path}{rest}");
+            true
+        }
     }
 }
 
@@ -1081,5 +1268,284 @@ mod tests {
         assert_eq!(count, 2);
         assert!(path.contains("api_key=sk-123"));
         assert_eq!(headers.get("x-custom").unwrap(), "value");
+    }
+
+    // ── SetPath (template mode) ────────────────────────────────────────
+
+    fn set_path(template: &str, value: &str) -> Injection {
+        Injection::SetPath {
+            template: template.to_string(),
+            value: value.to_string(),
+        }
+    }
+
+    /// The canonical Telegram case: the agent emits any filler in the token slot
+    /// and the gateway repairs it — and the token's `:` must survive un-encoded.
+    #[test]
+    fn inject_set_path_telegram() {
+        let mut headers = hyper::HeaderMap::new();
+        let mut path = "/botPLACEHOLDER/sendMessage".to_string();
+
+        let token = "123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11";
+        let rules = vec![make_rule("*", vec![set_path("/bot{value}", token)])];
+
+        let count = apply_injections(&mut headers, &mut path, &rules);
+        assert_eq!(count, 1);
+        assert_eq!(path, format!("/bot{token}/sendMessage"));
+        // The `:` is a valid path char and must NOT be percent-encoded.
+        assert!(path.contains(':'));
+    }
+
+    /// The agent can even send an empty token slot; the gateway fills it.
+    #[test]
+    fn inject_set_path_empty_filler() {
+        let mut headers = hyper::HeaderMap::new();
+        let mut path = "/bot/sendMessage".to_string();
+
+        let rules = vec![make_rule("*", vec![set_path("/bot{value}", "123:ABC")])];
+
+        let count = apply_injections(&mut headers, &mut path, &rules);
+        assert_eq!(count, 1);
+        assert_eq!(path, "/bot123:ABC/sendMessage");
+    }
+
+    #[test]
+    fn inject_set_path_preserves_query_and_fragment() {
+        let mut headers = hyper::HeaderMap::new();
+        let mut path = "/botX/sendMessage?chat_id=5#frag".to_string();
+
+        let rules = vec![make_rule("*", vec![set_path("/bot{value}", "123:ABC")])];
+
+        let count = apply_injections(&mut headers, &mut path, &rules);
+        assert_eq!(count, 1);
+        assert_eq!(path, "/bot123:ABC/sendMessage?chat_id=5#frag");
+    }
+
+    #[test]
+    fn inject_set_path_prefix_mismatch_is_noop() {
+        let mut headers = hyper::HeaderMap::new();
+        let mut path = "/v1/other".to_string();
+
+        let rules = vec![make_rule("*", vec![set_path("/bot{value}", "123:ABC")])];
+
+        let count = apply_injections(&mut headers, &mut path, &rules);
+        assert_eq!(count, 0);
+        assert_eq!(path, "/v1/other");
+    }
+
+    /// A literal suffix after the hole must match (so a template can pin a method).
+    #[test]
+    fn inject_set_path_literal_suffix_guard() {
+        let rules = vec![make_rule(
+            "*",
+            vec![set_path("/bot{value}/sendMessage", "123:ABC")],
+        )];
+
+        let mut matching = "/botX/sendMessage".to_string();
+        let mut headers = hyper::HeaderMap::new();
+        assert_eq!(apply_injections(&mut headers, &mut matching, &rules), 1);
+        assert_eq!(matching, "/bot123:ABC/sendMessage");
+
+        let mut other = "/botX/getUpdates".to_string();
+        assert_eq!(
+            apply_injections(&mut hyper::HeaderMap::new(), &mut other, &rules),
+            0
+        );
+        assert_eq!(other, "/botX/getUpdates");
+    }
+
+    /// A secret containing a path-structural char would reshape the URL — skip.
+    #[test]
+    fn inject_set_path_unsafe_value_skipped() {
+        let mut headers = hyper::HeaderMap::new();
+        let mut path = "/botX/sendMessage".to_string();
+
+        let rules = vec![make_rule("*", vec![set_path("/bot{value}", "12/34")])];
+
+        let count = apply_injections(&mut headers, &mut path, &rules);
+        assert_eq!(count, 0);
+        assert_eq!(path, "/botX/sendMessage");
+    }
+
+    #[test]
+    fn inject_set_path_missing_placeholder_skipped() {
+        let mut headers = hyper::HeaderMap::new();
+        let mut path = "/botX/sendMessage".to_string();
+
+        let rules = vec![make_rule("*", vec![set_path("/bot", "123:ABC")])];
+
+        let count = apply_injections(&mut headers, &mut path, &rules);
+        assert_eq!(count, 0);
+        assert_eq!(path, "/botX/sendMessage");
+    }
+
+    // ── ReplacePathRegex (advanced mode) ───────────────────────────────
+
+    fn replace_path_regex(pattern: &str, replacement: &str, value: &str) -> Injection {
+        Injection::ReplacePathRegex {
+            pattern: pattern.to_string(),
+            replacement: replacement.to_string(),
+            value: value.to_string(),
+        }
+    }
+
+    #[test]
+    fn inject_replace_path_regex_telegram() {
+        let mut headers = hyper::HeaderMap::new();
+        let mut path = "/botFAKE/sendMessage".to_string();
+
+        let rules = vec![make_rule(
+            "*",
+            vec![replace_path_regex(
+                r"^/bot[^/]+(/.*)?$",
+                "/bot{value}$1",
+                "123:ABC",
+            )],
+        )];
+
+        let count = apply_injections(&mut headers, &mut path, &rules);
+        assert_eq!(count, 1);
+        assert_eq!(path, "/bot123:ABC/sendMessage");
+    }
+
+    /// The capture group may be empty (no trailing path).
+    #[test]
+    fn inject_replace_path_regex_empty_capture() {
+        let mut headers = hyper::HeaderMap::new();
+        let mut path = "/botFAKE".to_string();
+
+        let rules = vec![make_rule(
+            "*",
+            vec![replace_path_regex(
+                r"^/bot[^/]+(/.*)?$",
+                "/bot{value}$1",
+                "123:ABC",
+            )],
+        )];
+
+        let count = apply_injections(&mut headers, &mut path, &rules);
+        assert_eq!(count, 1);
+        assert_eq!(path, "/bot123:ABC");
+    }
+
+    #[test]
+    fn inject_replace_path_regex_preserves_query() {
+        let mut headers = hyper::HeaderMap::new();
+        let mut path = "/botFAKE/sendMessage?chat_id=5".to_string();
+
+        let rules = vec![make_rule(
+            "*",
+            vec![replace_path_regex(
+                r"^/bot[^/]+(/.*)?$",
+                "/bot{value}$1",
+                "123:ABC",
+            )],
+        )];
+
+        let count = apply_injections(&mut headers, &mut path, &rules);
+        assert_eq!(count, 1);
+        assert_eq!(path, "/bot123:ABC/sendMessage?chat_id=5");
+    }
+
+    /// Security: a `$1` inside the secret must be inserted literally, never
+    /// reinterpreted as a capture reference (the secret is spliced in AFTER
+    /// `$N` expansion).
+    #[test]
+    fn inject_replace_path_regex_dollar_in_secret_is_literal() {
+        let mut headers = hyper::HeaderMap::new();
+        let mut path = "/botFAKE".to_string();
+
+        let rules = vec![make_rule(
+            "*",
+            vec![replace_path_regex(r"^/bot[^/]+$", "/bot{value}", "ab$1cd")],
+        )];
+
+        let count = apply_injections(&mut headers, &mut path, &rules);
+        assert_eq!(count, 1);
+        assert_eq!(path, "/botab$1cd");
+    }
+
+    /// Security: a `{value}` that lands inside a captured group must stay literal —
+    /// the secret is placed only where the operator wrote `{value}` in the
+    /// replacement, never in agent-controlled captured content.
+    #[test]
+    fn inject_replace_path_regex_value_in_capture_is_literal() {
+        let mut headers = hyper::HeaderMap::new();
+        let mut path = "/bot{value}".to_string();
+
+        let rules = vec![make_rule(
+            "*",
+            vec![replace_path_regex(
+                r"^/bot(.+)$",
+                "/bot{value}/$1",
+                "SECRET",
+            )],
+        )];
+
+        let count = apply_injections(&mut headers, &mut path, &rules);
+        assert_eq!(count, 1);
+        assert_eq!(path, "/botSECRET/{value}");
+    }
+
+    /// Defense-in-depth: a replacement that would strip the leading `/` (fusing
+    /// the path with the host) is skipped rather than emitted.
+    #[test]
+    fn inject_replace_path_regex_slashless_result_skipped() {
+        let mut headers = hyper::HeaderMap::new();
+        let mut path = "/botX".to_string();
+
+        let rules = vec![make_rule(
+            "*",
+            vec![replace_path_regex(r"^/bot[^/]+$", "bot{value}", "SECRET")],
+        )];
+
+        let count = apply_injections(&mut headers, &mut path, &rules);
+        assert_eq!(count, 0);
+        assert_eq!(path, "/botX");
+    }
+
+    #[test]
+    fn inject_replace_path_regex_invalid_pattern_skipped() {
+        let mut headers = hyper::HeaderMap::new();
+        let mut path = "/botFAKE/sendMessage".to_string();
+
+        let rules = vec![make_rule(
+            "*",
+            vec![replace_path_regex("[unclosed", "/bot{value}", "123:ABC")],
+        )];
+
+        let count = apply_injections(&mut headers, &mut path, &rules);
+        assert_eq!(count, 0);
+        assert_eq!(path, "/botFAKE/sendMessage");
+    }
+
+    #[test]
+    fn inject_replace_path_regex_no_match_is_noop() {
+        let mut headers = hyper::HeaderMap::new();
+        let mut path = "/other/path".to_string();
+
+        let rules = vec![make_rule(
+            "*",
+            vec![replace_path_regex(r"^/bot[^/]+$", "/bot{value}", "123:ABC")],
+        )];
+
+        let count = apply_injections(&mut headers, &mut path, &rules);
+        assert_eq!(count, 0);
+        assert_eq!(path, "/other/path");
+    }
+
+    #[test]
+    fn inject_replace_path_regex_unsafe_value_skipped() {
+        let mut headers = hyper::HeaderMap::new();
+        let mut path = "/botFAKE".to_string();
+
+        let rules = vec![make_rule(
+            "*",
+            vec![replace_path_regex(r"^/bot[^/]+$", "/bot{value}", "12#34")],
+        )];
+
+        let count = apply_injections(&mut headers, &mut path, &rules);
+        assert_eq!(count, 0);
+        assert_eq!(path, "/botFAKE");
     }
 }

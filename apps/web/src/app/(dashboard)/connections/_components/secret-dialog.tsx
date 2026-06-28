@@ -4,7 +4,7 @@ import { useState, useEffect, useRef, useMemo } from "react";
 import Image from "next/image";
 import { useInvalidateGatewayCache } from "@/hooks/use-invalidate-cache";
 import { toast } from "sonner";
-import { ArrowLeft, Key, Settings2, Upload, X } from "lucide-react";
+import { ArrowLeft, Copy, Key, Settings2, Upload, X } from "lucide-react";
 import { cn } from "@onecli/ui/lib/utils";
 import {
   Dialog,
@@ -49,6 +49,8 @@ import {
   detectAnthropicAuthMode,
   isHeaderInjection,
   isParamInjection,
+  isPathRegexInjection,
+  isPathTemplateInjection,
   looksLikeAnthropicKey,
   looksLikeOpenaiKey,
   parseOpenaiAuthJson,
@@ -110,12 +112,43 @@ const SECRET_TYPE_OPTIONS: SecretTypeOption[] = [
     value: "generic",
     label: "Generic Secret",
     description:
-      "Inject a custom header or URL parameter into matching requests",
+      "Inject a custom header, URL parameter, or URL path into matching requests",
     icon: <Key className="size-5" />,
     hostDefault: "",
     nameDefault: "",
   },
 ];
+
+const PATH_PREVIEW_MASK = "••••••";
+const PATH_PREVIEW_FILLER = "<token>";
+
+/**
+ * Build a masked before/after preview of a path-injection rewrite for the
+ * dialog. Mirrors the gateway's substitution shape without revealing the secret:
+ * template mode shows the request path with the `{value}` slot filled; regex mode
+ * shows the pattern and the masked replacement.
+ */
+const buildPathPreview = (
+  mode: "template" | "regex",
+  template: string,
+  regex: string,
+  replacement: string,
+): { before: string; after: string } | null => {
+  if (mode === "template") {
+    if (!template.includes("{value}")) return null;
+    const [prefix, suffix = ""] = template.split("{value}");
+    const tail = suffix || "/…";
+    return {
+      before: `${prefix}${PATH_PREVIEW_FILLER}${tail}`,
+      after: `${prefix}${PATH_PREVIEW_MASK}${tail}`,
+    };
+  }
+  if (!regex.trim() || !replacement.includes("{value}")) return null;
+  return {
+    before: regex,
+    after: replacement.replaceAll("{value}", PATH_PREVIEW_MASK),
+  };
+};
 
 export interface SecretItem {
   id: string;
@@ -196,13 +229,17 @@ export const SecretDialog = ({
   const [value, setValue] = useState("");
   const [hostPattern, setHostPattern] = useState("api.anthropic.com");
   const [pathPattern, setPathPattern] = useState("");
-  const [injectionTarget, setInjectionTarget] = useState<"header" | "param">(
-    "header",
-  );
+  const [injectionTarget, setInjectionTarget] = useState<
+    "header" | "param" | "path"
+  >("header");
   const [headerName, setHeaderName] = useState("Authorization");
   const [valueFormat, setValueFormat] = useState("Bearer {value}");
   const [paramName, setParamName] = useState("");
   const [paramFormat, setParamFormat] = useState("");
+  const [pathMode, setPathMode] = useState<"template" | "regex">("template");
+  const [pathTemplate, setPathTemplate] = useState("");
+  const [pathRegex, setPathRegex] = useState("");
+  const [pathReplacement, setPathReplacement] = useState("");
   const [advancedOpen, setAdvancedOpen] = useState("");
   const [opSelection, setOpSelection] = useState<OpSelection | null>(null);
   const [pickerOpen, setPickerOpen] = useState(false);
@@ -242,6 +279,12 @@ export const SecretDialog = ({
       setOpenaiMode("api-key");
       setOpSelection(null);
       setPickerOpen(false);
+      // Path-injection fields reset here; only the edit branches below repopulate
+      // them, so every other branch leaves them at these defaults.
+      setPathMode("template");
+      setPathTemplate("");
+      setPathRegex("");
+      setPathReplacement("");
       if (secret) {
         const config = secret.injectionConfig as InjectionConfig | null;
         setStep("form");
@@ -268,6 +311,23 @@ export const SecretDialog = ({
           setInjectionTarget("header");
           setHeaderName(config.headerName);
           setValueFormat(config.valueFormat ?? "Bearer {value}");
+          setParamName("");
+          setParamFormat("");
+        } else if (isPathTemplateInjection(config)) {
+          setInjectionTarget("path");
+          setPathMode("template");
+          setPathTemplate(config.pathTemplate);
+          setHeaderName("Authorization");
+          setValueFormat("Bearer {value}");
+          setParamName("");
+          setParamFormat("");
+        } else if (isPathRegexInjection(config)) {
+          setInjectionTarget("path");
+          setPathMode("regex");
+          setPathRegex(config.pathRegex);
+          setPathReplacement(config.pathReplacement);
+          setHeaderName("Authorization");
+          setValueFormat("Bearer {value}");
           setParamName("");
           setParamFormat("");
         } else {
@@ -329,9 +389,27 @@ export const SecretDialog = ({
     setStep("form");
   };
 
+  const hasPathTarget =
+    pathMode === "template"
+      ? pathTemplate.startsWith("/") &&
+        pathTemplate.split("{value}").length === 2
+      : pathRegex.trim().length > 0 && pathReplacement.includes("{value}");
+
   const hasInjectionTarget =
     type !== "generic" ||
-    (injectionTarget === "header" ? headerName.trim() : paramName.trim());
+    (injectionTarget === "header"
+      ? headerName.trim().length > 0
+      : injectionTarget === "param"
+        ? paramName.trim().length > 0
+        : hasPathTarget);
+
+  const pathPreview = useMemo(
+    () =>
+      injectionTarget === "path"
+        ? buildPathPreview(pathMode, pathTemplate, pathRegex, pathReplacement)
+        : null,
+    [injectionTarget, pathMode, pathTemplate, pathRegex, pathReplacement],
+  );
 
   const isValid = isEdit
     ? hostPattern.trim() && !hostPatternError && hasInjectionTarget
@@ -349,6 +427,11 @@ export const SecretDialog = ({
         if (type !== "generic") return undefined;
         if (injectionTarget === "param") {
           return { paramName, paramFormat: paramFormat || "{value}" };
+        }
+        if (injectionTarget === "path") {
+          return pathMode === "template"
+            ? { pathTemplate }
+            : { pathRegex, pathReplacement };
         }
         return { headerName, valueFormat: valueFormat || "{value}" };
       };
@@ -477,7 +560,7 @@ export const SecretDialog = ({
                     ? "Your key will be encrypted and injected into requests to api.anthropic.com."
                     : type === "openai"
                       ? `Inject credentials into requests to ${openaiMode === "codex" ? "chatgpt.com" : "api.openai.com"}.`
-                      : "Configure a custom secret to inject as a header or URL parameter into matching requests."}
+                      : "Configure a custom secret to inject as a header, URL parameter, or URL path into matching requests."}
               </DialogDescription>
               {type === "generic" && !isEdit && !prefill && (
                 <div className="flex items-center gap-2 pt-1">
@@ -512,6 +595,21 @@ export const SecretDialog = ({
                     }}
                   >
                     URL parameter
+                  </button>
+                  <span className="text-muted-foreground text-xs">|</span>
+                  <button
+                    type="button"
+                    className="text-xs text-green-600 hover:text-green-500 underline underline-offset-2 transition-colors dark:text-green-400 dark:hover:text-green-300"
+                    onClick={() => {
+                      setName("Telegram Bot Token");
+                      setHostPattern("api.telegram.org");
+                      setInjectionTarget("path");
+                      setPathMode("template");
+                      setPathTemplate("/bot{value}");
+                      setAdvancedOpen("advanced");
+                    }}
+                  >
+                    URL path
                   </button>
                 </div>
               )}
@@ -887,20 +985,22 @@ export const SecretDialog = ({
                         </div>
                       )}
 
-                      <div className="space-y-2">
-                        <Label htmlFor="secret-path">
-                          Path pattern{" "}
-                          <span className="text-muted-foreground font-normal">
-                            (optional)
-                          </span>
-                        </Label>
-                        <Input
-                          id="secret-path"
-                          placeholder="e.g. /v1/*"
-                          value={pathPattern}
-                          onChange={(e) => setPathPattern(e.target.value)}
-                        />
-                      </div>
+                      {injectionTarget !== "path" && (
+                        <div className="space-y-2">
+                          <Label htmlFor="secret-path">
+                            Path pattern{" "}
+                            <span className="text-muted-foreground font-normal">
+                              (optional)
+                            </span>
+                          </Label>
+                          <Input
+                            id="secret-path"
+                            placeholder="e.g. /v1/*"
+                            value={pathPattern}
+                            onChange={(e) => setPathPattern(e.target.value)}
+                          />
+                        </div>
+                      )}
 
                       {type === "generic" && (
                         <div className="flex items-center gap-3">
@@ -925,53 +1025,60 @@ export const SecretDialog = ({
                               )
                                 return;
                               e.preventDefault();
-                              const next =
-                                injectionTarget === "header"
-                                  ? "param"
-                                  : "header";
+                              const order = [
+                                "header",
+                                "param",
+                                "path",
+                              ] as const;
+                              const delta =
+                                e.key === "ArrowRight" || e.key === "ArrowDown"
+                                  ? 1
+                                  : -1;
+                              const nextIdx =
+                                (order.indexOf(injectionTarget) +
+                                  delta +
+                                  order.length) %
+                                order.length;
+                              const next = order[nextIdx];
+                              if (!next) return;
                               setInjectionTarget(next);
                               e.currentTarget
                                 .querySelectorAll<HTMLButtonElement>(
                                   '[role="radio"]',
                                 )
-                                [next === "header" ? 0 : 1]?.focus();
+                                [nextIdx]?.focus();
                             }}
                           >
-                            <button
-                              type="button"
-                              role="radio"
-                              aria-checked={injectionTarget === "header"}
-                              tabIndex={injectionTarget === "header" ? 0 : -1}
-                              className={cn(
-                                "border-input px-3 py-1.5 text-xs font-medium transition-colors",
-                                injectionTarget === "header"
-                                  ? "bg-accent text-foreground"
-                                  : "text-muted-foreground hover:bg-muted hover:text-foreground",
-                              )}
-                              onClick={() => setInjectionTarget("header")}
-                            >
-                              Header
-                            </button>
-                            <button
-                              type="button"
-                              role="radio"
-                              aria-checked={injectionTarget === "param"}
-                              tabIndex={injectionTarget === "param" ? 0 : -1}
-                              className={cn(
-                                "border-input border-l px-3 py-1.5 text-xs font-medium transition-colors",
-                                injectionTarget === "param"
-                                  ? "bg-accent text-foreground"
-                                  : "text-muted-foreground hover:bg-muted hover:text-foreground",
-                              )}
-                              onClick={() => setInjectionTarget("param")}
-                            >
-                              URL Parameter
-                            </button>
+                            {(
+                              [
+                                ["header", "Header"],
+                                ["param", "URL Parameter"],
+                                ["path", "URL Path"],
+                              ] as const
+                            ).map(([target, label], i) => (
+                              <button
+                                key={target}
+                                type="button"
+                                role="radio"
+                                aria-checked={injectionTarget === target}
+                                tabIndex={injectionTarget === target ? 0 : -1}
+                                className={cn(
+                                  "px-3 py-1.5 text-xs font-medium transition-colors",
+                                  i > 0 && "border-input border-l",
+                                  injectionTarget === target
+                                    ? "bg-accent text-foreground"
+                                    : "text-muted-foreground hover:bg-muted hover:text-foreground",
+                                )}
+                                onClick={() => setInjectionTarget(target)}
+                              >
+                                {label}
+                              </button>
+                            ))}
                           </div>
                         </div>
                       )}
 
-                      {type === "generic" && (
+                      {type === "generic" && injectionTarget !== "path" && (
                         <div
                           key={`name-${injectionTarget}`}
                           className="animate-in fade-in duration-150 space-y-2"
@@ -1012,7 +1119,166 @@ export const SecretDialog = ({
                         </div>
                       )}
 
-                      {type === "generic" && (
+                      {type === "generic" && injectionTarget === "path" && (
+                        <div className="animate-in fade-in duration-150 space-y-3">
+                          <div className="flex items-center gap-3">
+                            <Label
+                              id="path-mode-label"
+                              className="text-muted-foreground shrink-0 text-xs"
+                            >
+                              Mode
+                            </Label>
+                            <div
+                              className="border-input inline-flex overflow-hidden rounded-md border"
+                              role="radiogroup"
+                              aria-labelledby="path-mode-label"
+                            >
+                              {(
+                                [
+                                  ["template", "Template"],
+                                  ["regex", "Regex"],
+                                ] as const
+                              ).map(([mode, label], i) => (
+                                <button
+                                  key={mode}
+                                  type="button"
+                                  role="radio"
+                                  aria-checked={pathMode === mode}
+                                  className={cn(
+                                    "px-3 py-1.5 text-xs font-medium transition-colors",
+                                    i > 0 && "border-input border-l",
+                                    pathMode === mode
+                                      ? "bg-accent text-foreground"
+                                      : "text-muted-foreground hover:bg-muted hover:text-foreground",
+                                  )}
+                                  onClick={() => setPathMode(mode)}
+                                >
+                                  {label}
+                                </button>
+                              ))}
+                            </div>
+                          </div>
+
+                          {pathMode === "template" ? (
+                            <div className="space-y-2">
+                              <Label htmlFor="secret-path-template">
+                                Path template
+                              </Label>
+                              <Input
+                                id="secret-path-template"
+                                className="font-mono"
+                                placeholder="/bot{value}"
+                                value={pathTemplate}
+                                onChange={(e) =>
+                                  setPathTemplate(e.target.value)
+                                }
+                              />
+                              <p className="text-muted-foreground text-xs">
+                                Put <code className="text-xs">{"{value}"}</code>{" "}
+                                where the secret goes. The gateway replaces
+                                whatever your agent sends in that spot (up to
+                                the next <code className="text-xs">/</code>), so
+                                the agent never needs the real secret.
+                              </p>
+                            </div>
+                          ) : (
+                            <>
+                              <div className="space-y-2">
+                                <Label htmlFor="secret-path-regex">
+                                  Path pattern (regex)
+                                </Label>
+                                <Input
+                                  id="secret-path-regex"
+                                  className="font-mono"
+                                  placeholder="^/bot[^/]+(/.*)?$"
+                                  value={pathRegex}
+                                  onChange={(e) => setPathRegex(e.target.value)}
+                                />
+                              </div>
+                              <div className="space-y-2">
+                                <Label htmlFor="secret-path-replacement">
+                                  Replacement
+                                </Label>
+                                <Input
+                                  id="secret-path-replacement"
+                                  className="font-mono"
+                                  placeholder="/bot{value}$1"
+                                  value={pathReplacement}
+                                  onChange={(e) =>
+                                    setPathReplacement(e.target.value)
+                                  }
+                                />
+                                <p className="text-muted-foreground text-xs">
+                                  Use <code className="text-xs">$1</code> for
+                                  capture groups and{" "}
+                                  <code className="text-xs">{"{value}"}</code>{" "}
+                                  for the secret.
+                                </p>
+                              </div>
+                            </>
+                          )}
+
+                          {pathPreview && (
+                            <div className="bg-muted/40 space-y-1.5 rounded-md border p-3">
+                              <div className="flex items-center justify-between">
+                                <span className="text-muted-foreground text-[11px] font-medium tracking-wide uppercase">
+                                  Preview
+                                </span>
+                                {pathMode === "template" && (
+                                  <button
+                                    type="button"
+                                    className="text-muted-foreground hover:text-foreground flex items-center gap-1 text-[11px] transition-colors"
+                                    onClick={async () => {
+                                      const host =
+                                        hostPattern
+                                          .trim()
+                                          .replace(/^\*\./, "") ||
+                                        "api.example.com";
+                                      try {
+                                        await navigator.clipboard.writeText(
+                                          `https://${host}${pathPreview.before}`,
+                                        );
+                                        toast.success("Example call copied");
+                                      } catch {
+                                        toast.error(
+                                          "Couldn't copy to clipboard",
+                                        );
+                                      }
+                                    }}
+                                  >
+                                    <Copy className="size-3" />
+                                    Copy call
+                                  </button>
+                                )}
+                              </div>
+                              <div className="space-y-1 font-mono text-xs">
+                                <div className="flex gap-2">
+                                  <span className="text-muted-foreground w-24 shrink-0">
+                                    {pathMode === "template"
+                                      ? "Agent sends"
+                                      : "Matches"}
+                                  </span>
+                                  <span className="break-all">
+                                    {pathPreview.before}
+                                  </span>
+                                </div>
+                                <div className="flex gap-2">
+                                  <span className="text-muted-foreground w-24 shrink-0">
+                                    {pathMode === "template"
+                                      ? "Gateway sends"
+                                      : "Rewrites to"}
+                                  </span>
+                                  <span className="text-foreground break-all">
+                                    {pathPreview.after}
+                                  </span>
+                                </div>
+                              </div>
+                            </div>
+                          )}
+                        </div>
+                      )}
+
+                      {type === "generic" && injectionTarget !== "path" && (
                         <div
                           key={`format-${injectionTarget}`}
                           className="animate-in fade-in duration-150 space-y-2"
