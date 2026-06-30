@@ -1,5 +1,19 @@
 # Changelog
 
+## [1.40.0](https://github.com/onecli/onecli/compare/v1.39.0...v1.40.0) (2026-06-30)
+
+
+### Features
+
+* add URL path injection for path-embedded credentials ([#356](https://github.com/onecli/onecli/issues/356)) ([fa6d816](https://github.com/onecli/onecli/commit/fa6d816851da0b8b54772aa24a345c452bdde5bc))
+* introduce edition→capability layer ([#402](https://github.com/onecli/onecli/issues/402)) ([663da68](https://github.com/onecli/onecli/commit/663da68e3d8000b6acb17a22f7c2a677fafd055e))
+* support alternate connection methods and expand the app catalog ([#398](https://github.com/onecli/onecli/issues/398)) ([e816c76](https://github.com/onecli/onecli/commit/e816c76fb4b269f3decf00a00735c1970b8280db))
+
+
+### Bug Fixes
+
+* **api-key:** provision per-user keys on read; re-check access on use ([#400](https://github.com/onecli/onecli/issues/400)) ([c7d2432](https://github.com/onecli/onecli/commit/c7d243233c9f2a26ce30d0ab70ed341e4ab13039))
+
 ## [1.39.0](https://github.com/onecli/onecli/compare/v1.38.0...v1.39.0) (2026-06-28)
 
 
