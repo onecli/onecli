@@ -3,7 +3,7 @@
 //! Logs every credential-injected request to the `request_logs` table via a
 //! background batch INSERT. Zero latency impact on the request path.
 //!
-//! OSS: Postgres only. Cloud swaps this module via `#[cfg(feature = "cloud")]`
+//! OSS: Postgres only. Cloud swaps this module via `#[cfg(edition_cloud)]`
 //! to add PostHog analytics + Redis credit counters.
 
 use std::sync::Arc;

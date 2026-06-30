@@ -14,15 +14,15 @@
 //! - [`response`]: pre-built gateway error responses
 
 mod body;
-#[cfg(feature = "cloud")]
+#[cfg(edition_cloud)]
 #[path = "cloud/response.rs"]
 mod cloud_response;
 mod finalizers;
 pub(crate) mod forward;
 mod hints;
-#[cfg(not(feature = "cloud"))]
+#[cfg(edition_oss)]
 pub(crate) mod hooks;
-#[cfg(feature = "cloud")]
+#[cfg(edition_cloud)]
 #[path = "cloud/hooks.rs"]
 pub(crate) mod hooks;
 mod mitm;

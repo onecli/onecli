@@ -86,7 +86,19 @@ async-trait = "0.1"
 hex = "0.4"
 
 [features]
-cloud = ["dep:aws-sdk-kms", "dep:aws-config", "dep:redis", "dep:aws-sdk-sts"]
+# Edition selector. `cloud` is the only edition feature today; OSS is implicit
+# (no edition feature set, so `cargo build` with no features stays a valid OSS
+# build). build.rs maps the selected edition feature to a positive `edition_*`
+# cfg and guards against enabling more than one. Each edition bundles the
+# capability features it needs, so a future edition can pull a subset.
+cloud = ["kms", "aws-sts", "redis-cache"]
+
+# Capability features — enabled via an edition bundle; each pulls its optional
+# deps. The union under `cloud` is the same 4 deps as before (aws-sdk-kms,
+# aws-config, aws-sdk-sts, redis), so the cloud binary is unchanged.
+kms = ["dep:aws-sdk-kms", "dep:aws-config"]
+aws-sts = ["dep:aws-sdk-sts", "dep:aws-config"]
+redis-cache = ["dep:redis"]
 
 [dependencies.aws-sdk-kms]
 version = "1"

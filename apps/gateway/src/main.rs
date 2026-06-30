@@ -1,53 +1,54 @@
-#[cfg(not(feature = "cloud"))]
+#[cfg(edition_oss)]
 mod auth;
 
-#[cfg(feature = "cloud")]
+#[cfg(edition_cloud)]
 #[path = "cloud/auth.rs"]
 mod auth;
 
 mod ca;
 
-#[cfg(not(feature = "cloud"))]
+#[cfg(edition_oss)]
 mod cache;
 
-#[cfg(feature = "cloud")]
+#[cfg(edition_cloud)]
 #[path = "cloud/cache.rs"]
 mod cache;
 
-#[cfg(not(feature = "cloud"))]
+#[cfg(edition_oss)]
 mod approval;
 
-#[cfg(feature = "cloud")]
+#[cfg(edition_cloud)]
 #[path = "cloud/approval.rs"]
 mod approval;
 
 mod apps;
 
-#[cfg(not(feature = "cloud"))]
+#[cfg(edition_oss)]
 mod cloud_apps;
 
-#[cfg(feature = "cloud")]
+#[cfg(edition_cloud)]
 #[path = "cloud/cloud_apps.rs"]
 mod cloud_apps;
 
 mod connect;
 
-#[cfg(not(feature = "cloud"))]
+#[cfg(edition_oss)]
 mod condition_match;
 
-#[cfg(feature = "cloud")]
+#[cfg(edition_cloud)]
 #[path = "cloud/condition_match.rs"]
 mod condition_match;
 
-#[cfg(not(feature = "cloud"))]
+#[cfg(edition_oss)]
 mod crypto;
 
-#[cfg(feature = "cloud")]
+#[cfg(edition_cloud)]
 #[path = "cloud/crypto.rs"]
 mod crypto;
 
 mod db;
 mod default_interceptions;
+mod edition;
 mod gateway;
 mod inject;
 mod policy;
@@ -58,10 +59,10 @@ mod summary;
 // no-op `cloud_summary.rs` stub; the cloud build swaps in `cloud/cloud_summary.rs`
 // (+ the `cloud/cloud_summary/` submodules). Mirrors the `cloud_apps` split, and
 // is the fall-through arm of `summary`'s per-provider dispatch.
-#[cfg(not(feature = "cloud"))]
+#[cfg(edition_oss)]
 mod cloud_summary;
 
-#[cfg(feature = "cloud")]
+#[cfg(edition_cloud)]
 #[path = "cloud/cloud_summary.rs"]
 mod cloud_summary;
 
@@ -69,19 +70,19 @@ mod telemetry_core;
 mod util;
 mod version;
 
-#[cfg(not(feature = "cloud"))]
+#[cfg(edition_oss)]
 mod telemetry;
 
-#[cfg(feature = "cloud")]
+#[cfg(edition_cloud)]
 #[path = "cloud/telemetry.rs"]
 mod telemetry;
 
 // Partner layer (cloud-only). OSS build uses the no-op `partner.rs` stub; the
 // cloud build swaps in `cloud/partner.rs` (+ the `cloud/partner/` submodules).
-#[cfg(not(feature = "cloud"))]
+#[cfg(edition_oss)]
 mod partner;
 
-#[cfg(feature = "cloud")]
+#[cfg(edition_cloud)]
 #[path = "cloud/partner.rs"]
 mod partner;
 
@@ -89,16 +90,16 @@ mod partner;
 // token-level (e.g. GitHub repo-scoped tokens) or request-level (e.g. Dropbox
 // folder allowlist). No OSS stub: it is referenced only from other cloud-only
 // modules (`cloud/hooks.rs`, `cloud/cloud_apps.rs`).
-#[cfg(feature = "cloud")]
+#[cfg(edition_cloud)]
 #[path = "cloud/granular_access.rs"]
 mod granular_access;
 
 // Budget layer (cloud-only). OSS build uses the no-op `budget.rs` stub; the
 // cloud build swaps in `cloud/budget.rs` (+ the `cloud/budget/` submodules).
-#[cfg(not(feature = "cloud"))]
+#[cfg(edition_oss)]
 mod budget;
 
-#[cfg(feature = "cloud")]
+#[cfg(edition_cloud)]
 #[path = "cloud/budget.rs"]
 mod budget;
 
@@ -172,7 +173,12 @@ async fn main() -> Result<()> {
     // Expand ~ in data dir
     let data_dir = expand_tilde(&cli.data_dir);
 
-    info!(data_dir = %data_dir.display(), "starting onecli-gateway");
+    let caps = edition::capabilities();
+    info!(
+        data_dir = %data_dir.display(),
+        edition = ?caps.edition,
+        "starting onecli-gateway"
+    );
 
     // Load or generate CA
     let ca = CertificateAuthority::load_or_generate(&data_dir).await?;

@@ -78,6 +78,8 @@
     "HUBSPOT_CLIENT_SECRET",
     "LINEAR_CLIENT_ID",
     "LINEAR_CLIENT_SECRET",
+    "FATHOM_CLIENT_ID",
+    "FATHOM_CLIENT_SECRET",
     "RUST_LOG",
     "PORT",
     "ATLASSIAN_CLIENT_ID",
@@ -130,7 +132,9 @@
         "HUBSPOT_CLIENT_ID",
         "HUBSPOT_CLIENT_SECRET",
         "LINEAR_CLIENT_ID",
-        "LINEAR_CLIENT_SECRET"
+        "LINEAR_CLIENT_SECRET",
+        "FATHOM_CLIENT_ID",
+        "FATHOM_CLIENT_SECRET"
       ]
     },
     "@onecli/gateway#check": {

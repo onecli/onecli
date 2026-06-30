@@ -70,11 +70,13 @@ export const APP_CATEGORIES: Record<string, AppCategory> = {
 
   // Communication
   resend: "communication",
+  slack: "communication",
   linkedin: "communication",
   zoom: "communication",
   hubspot: "communication",
   affinity: "communication",
   attio: "communication",
   granola: "communication",
+  fathom: "communication",
   x: "communication",
 };

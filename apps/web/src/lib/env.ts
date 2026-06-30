@@ -9,6 +9,8 @@
  * both client and server as long as the literal string appears in source.
  */
 
+import { capabilitiesFor, parseEdition } from "@onecli/api/lib/edition";
+
 // ── App URLs ────────────────────────────────────────────────────────────
 
 /** Web app base URL (e.g., `https://app.onecli.sh` or `http://localhost:10254`). */
@@ -45,11 +47,20 @@ export const APP_VERSION = process.env.NEXT_PUBLIC_APP_VERSION ?? "dev";
 
 // ── Edition ─────────────────────────────────────────────────────────────
 
-/** Build-time edition: `"cloud"` or `""` (OSS). */
+/** Parsed build edition + variant (single source of truth). */
+export const EDITION_INFO = parseEdition(process.env.NEXT_PUBLIC_EDITION);
+
+/** Capability set derived from the current edition. */
+export const CAPS = capabilitiesFor(EDITION_INFO);
+
+/**
+ * @deprecated Use `EDITION_INFO.edition`. Raw build-time edition string
+ * (`"cloud"` or `""` for OSS); kept for back-compat with existing call-sites.
+ */
 export const EDITION = process.env.NEXT_PUBLIC_EDITION ?? "";
 
 /** Convenience flag for cloud-specific logic. */
-export const IS_CLOUD = EDITION === "cloud";
+export const IS_CLOUD = EDITION_INFO.edition === "cloud";
 
 // ── Auth & Encryption ───────────────────────────────────────────────────
 

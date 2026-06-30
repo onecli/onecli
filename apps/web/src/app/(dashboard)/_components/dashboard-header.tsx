@@ -21,6 +21,7 @@ import {
   BreadcrumbSeparator,
 } from "@onecli/ui/components/breadcrumb";
 import { navItems } from "@/lib/nav-config";
+import { PROJECT_PATH_RE } from "@/lib/navigation";
 import { GetStartedButton } from "./get-started-button";
 import { ApprovalsBell } from "@/lib/components/approvals";
 
@@ -49,6 +50,7 @@ const DiscordIcon = ({ className }: { className?: string }) => (
 export const DashboardHeader = () => {
   const pathname = usePathname();
   const { resolvedTheme, setTheme } = useTheme();
+  const onProjectPage = PROJECT_PATH_RE.test(pathname);
 
   const navItem = navItems.find((item) => pathname.startsWith(item.url));
   const title = navItem?.title ?? "Dashboard";
@@ -64,7 +66,7 @@ export const DashboardHeader = () => {
   return (
     <div className="flex w-full items-center gap-2 px-4">
       <SidebarTrigger className="-ml-1" />
-      <Separator orientation="vertical" className="mr-2 h-4" />
+      <Separator orientation="vertical" className="mr-2 h-4!" />
       <Breadcrumb className="min-w-0 flex-1 overflow-hidden">
         <BreadcrumbList className="flex-nowrap overflow-hidden">
           {subSegments.length > 0 ? (
@@ -164,12 +166,20 @@ export const DashboardHeader = () => {
           </TooltipTrigger>
           <TooltipContent>Discord</TooltipContent>
         </Tooltip>
+        {onProjectPage && (
+          <>
+            <Separator
+              orientation="vertical"
+              className="mx-1 hidden h-4! md:block"
+            />
+            <ApprovalsBell />
+          </>
+        )}
         <Separator
           orientation="vertical"
-          className="mx-1 hidden h-4 md:block"
+          className="mx-1 hidden h-4! md:block"
         />
         <GetStartedButton />
-        <ApprovalsBell />
         <Tooltip>
           <TooltipTrigger asChild>
             <Button

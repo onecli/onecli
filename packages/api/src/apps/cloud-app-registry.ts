@@ -116,4 +116,21 @@ export const cloudApps: AppDefinition[] = [
     connectionMethod: { type: "cloud_only" },
     available: false,
   },
+  {
+    id: "fathom",
+    name: "Fathom",
+    icon: "/icons/fathom.svg",
+    darkIcon: "/icons/fathom-light.svg",
+    description: "AI meeting notes: recordings, transcripts, and summaries.",
+    connectionMethod: { type: "cloud_only" },
+    available: false,
+  },
+  {
+    id: "slack",
+    name: "Slack",
+    icon: "/icons/slack.svg",
+    description: "Channels, messages, people, and reactions in your workspace.",
+    connectionMethod: { type: "cloud_only" },
+    available: false,
+  },
 ];

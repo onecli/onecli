@@ -6,6 +6,8 @@
  * standalone Node.js (where plain env vars are used).
  */
 
+import { capabilitiesFor, parseEdition } from "./edition";
+
 // ── App URLs ────────────────────────────────────────────────────────────
 
 export const APP_URL =
@@ -28,10 +30,23 @@ export const GATEWAY_BASE_URL =
 
 // ── Edition ─────────────────────────────────────────────────────────────
 
+/** Parsed build edition + variant (single source of truth). */
+export const EDITION_INFO = parseEdition(
+  process.env.EDITION ?? process.env.NEXT_PUBLIC_EDITION,
+);
+
+/** Capability set derived from the current edition. */
+export const CAPS = capabilitiesFor(EDITION_INFO);
+
+/**
+ * @deprecated Use `EDITION_INFO.edition`. Raw build-time edition string
+ * (`"cloud"`, `"oss"`, or `""`); kept for back-compat with existing call-sites.
+ */
 export const EDITION =
   process.env.EDITION ?? process.env.NEXT_PUBLIC_EDITION ?? "";
 
-export const IS_CLOUD = EDITION === "cloud";
+/** Convenience flag for cloud-specific logic. */
+export const IS_CLOUD = EDITION_INFO.edition === "cloud";
 
 // ── Auth & Encryption ───────────────────────────────────────────────────
 

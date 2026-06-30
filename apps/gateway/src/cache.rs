@@ -1,7 +1,7 @@
 //! Generic key-value cache with TTL.
 //!
 //! OSS uses an in-memory `DashMap` backend. Cloud swaps this module
-//! via `#[cfg(feature = "cloud")]` to use Redis.
+//! via `#[cfg(edition_cloud)]` to use Redis.
 //!
 //! All values are serialized to JSON — the `CacheStore` trait is
 //! type-agnostic. Consumers use namespaced keys to avoid collisions

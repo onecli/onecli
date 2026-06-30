@@ -40,7 +40,7 @@ pub(crate) struct SecretRow {
     /// partner-tier credential by its actual scope — regardless of how the secret
     /// was resolved (inherited vs. selectively assigned to an agent). Read only by
     /// the cloud budget module (`BudgetSecret` impl), hence the cfg'd allow.
-    #[cfg_attr(not(feature = "cloud"), allow(dead_code))]
+    #[cfg_attr(edition_oss, allow(dead_code))]
     pub scope: String,
     #[sqlx(rename = "type")]
     pub type_: String,
@@ -86,7 +86,7 @@ pub(crate) struct ApiKeyRow {
 }
 
 /// An org-scoped API key row from the `api_keys` table.
-#[cfg(feature = "cloud")]
+#[cfg(edition_cloud)]
 #[derive(Debug, FromRow)]
 pub(crate) struct OrgApiKeyRow {
     pub user_id: String,
@@ -127,7 +127,7 @@ pub(crate) async fn find_user_by_external_auth_id(
 /// default project — it requires an explicit `X-Project-Id` and validates it
 /// with [`user_can_access_project`]. Gating this `not(cloud)` makes that a
 /// compile-time guarantee (a cloud caller fails to build).
-#[cfg(not(feature = "cloud"))]
+#[cfg(edition_oss)]
 pub(crate) async fn find_default_project_id_by_user(
     pool: &PgPool,
     user_id: &str,
@@ -160,7 +160,7 @@ pub(crate) async fn find_api_key(pool: &PgPool, key: &str) -> Result<Option<ApiK
 }
 
 /// Look up an org-scoped API key (`oc_org_...`) and return its user_id and organization_id.
-#[cfg(feature = "cloud")]
+#[cfg(edition_cloud)]
 pub(crate) async fn find_org_api_key(pool: &PgPool, key: &str) -> Result<Option<OrgApiKeyRow>> {
     sqlx::query_as::<_, OrgApiKeyRow>(
         r#"SELECT user_id, organization_id
@@ -175,7 +175,7 @@ pub(crate) async fn find_org_api_key(pool: &PgPool, key: &str) -> Result<Option<
 }
 
 /// Verify that a project belongs to the given organization.
-#[cfg(feature = "cloud")]
+#[cfg(edition_cloud)]
 pub(crate) async fn verify_project_in_org(
     pool: &PgPool,
     project_id: &str,
@@ -194,7 +194,7 @@ pub(crate) async fn verify_project_in_org(
 /// Verify that a user may access a project — i.e. the project belongs to an
 /// organization the user is a member of. Scopes cloud browser (Cognito)
 /// requests to the `X-Project-Id` they specify instead of a default project.
-#[cfg(feature = "cloud")]
+#[cfg(edition_cloud)]
 pub(crate) async fn user_can_access_project(
     pool: &PgPool,
     user_id: &str,
@@ -218,7 +218,7 @@ pub(crate) async fn user_can_access_project(
 /// Whether a user may manage a project — its creator, or an admin/owner of the
 /// project's organization. Re-checked on every API-key auth so a key stops
 /// working once its user loses access (e.g. demotion or removal). Cloud-only.
-#[cfg(feature = "cloud")]
+#[cfg(edition_cloud)]
 pub(crate) async fn user_can_manage_project(
     pool: &PgPool,
     user_id: &str,
@@ -243,7 +243,7 @@ pub(crate) async fn user_can_manage_project(
 
 /// Whether a user is an admin or owner of an organization. Re-checked on every
 /// org-scoped API-key auth so the key stops working after a demotion. Cloud-only.
-#[cfg(feature = "cloud")]
+#[cfg(edition_cloud)]
 pub(crate) async fn user_is_org_admin(
     pool: &PgPool,
     user_id: &str,

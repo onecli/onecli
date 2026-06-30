@@ -11,6 +11,9 @@ export const dropbox: AppDefinition = {
       "account_info.read",
       "files.metadata.read",
       "files.content.read",
+      "files.content.write",
+      "sharing.read",
+      "sharing.write",
     ],
     permissions: [
       {
@@ -26,12 +29,6 @@ export const dropbox: AppDefinition = {
         access: "read",
       },
       {
-        scope: "files.metadata.write",
-        name: "Organize files",
-        description: "Move, rename, and delete files and folders",
-        access: "write",
-      },
-      {
         scope: "files.content.read",
         name: "Download files",
         description: "Read and download file content",
@@ -39,8 +36,9 @@ export const dropbox: AppDefinition = {
       },
       {
         scope: "files.content.write",
-        name: "Upload files",
-        description: "Upload and update file content",
+        name: "Edit files",
+        description:
+          "Upload, update, move, rename, delete, and create files and folders",
         access: "write",
       },
       {
