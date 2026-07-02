@@ -803,6 +803,26 @@ static APP_PROVIDERS: &[AppProvider] = &[
         body_transform: None,
     },
     AppProvider {
+        provider: "fireflies",
+        display_name: "Fireflies.ai",
+        // Single GraphQL endpoint authenticated with a personal API key sent
+        // as a Bearer token.
+        host_rules: &[HostRule {
+            pattern: HostPattern::Exact("api.fireflies.ai"),
+            path_prefix: None,
+            strategy: AuthStrategy::Bearer,
+            intercept: false,
+            credential_host_field: None,
+        }],
+        refresh: None,
+        metadata_headers: &[],
+        credential_headers: &[],
+        credential_params: &[],
+        host_rewrite: None,
+        finalizer: None,
+        body_transform: None,
+    },
+    AppProvider {
         provider: "cloudflare",
         display_name: "Cloudflare",
         host_rules: &[HostRule {
