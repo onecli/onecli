@@ -105,6 +105,16 @@ const AUTH_CHECK_BODY_LIMIT: usize = 8192;
 /// OAuth refresh bodies are tiny; this only guards against pathological inputs.
 const MAX_DEFAULT_INTERCEPT_BODY: usize = 64 * 1024;
 
+/// Read a channel's `timeoutSeconds` from its settings JSON (stored as a string
+/// by the web form, but tolerant of a numeric value too).
+pub(super) fn approval_path_timeout(path: &crate::db::ApprovalPathRow) -> Option<u64> {
+    let value = path.settings.as_ref()?.get("timeoutSeconds")?;
+    if let Some(n) = value.as_u64() {
+        return Some(n);
+    }
+    value.as_str()?.trim().parse::<u64>().ok()
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn forward_request(
     req: Request<Incoming>,
@@ -116,6 +126,8 @@ pub(crate) async fn forward_request(
     proxy_ctx: &ProxyContext,
     approval_store: &Arc<dyn ApprovalStore>,
     pool: &sqlx::PgPool,
+    crypto: &Arc<crate::crypto::CryptoService>,
+    approval_log: &Arc<crate::notify::ApprovalEventLog>,
 ) -> Result<Response<hooks::ForwardResponseBody>> {
     let start = std::time::Instant::now();
     let method = req.method().clone();
@@ -349,6 +361,27 @@ pub(crate) async fn forward_request(
             let agent_id = proxy_ctx.agent_id.as_deref().unwrap_or("unknown");
             let agent_name = proxy_ctx.agent_name.as_deref().unwrap_or("Unknown Agent");
 
+            // Resolve the enabled approval channels for this project. The held
+            // request gets one expiry = the longest timeout among enabled
+            // channels (most lenient wins), with the default as a baseline.
+            let enabled_paths = crate::db::find_approval_paths(pool, project_id)
+                .await
+                .unwrap_or_default();
+            let onecli_enabled =
+                crate::db::approval_channel_enabled(pool, project_id, "onecli", true).await;
+            if !onecli_enabled && enabled_paths.is_empty() {
+                warn!(
+                    url = %url,
+                    "manual approval fired but no approval path is enabled — request will auto-deny at timeout"
+                );
+            }
+            let mut hold_secs = APPROVAL_TIMEOUT_SECS;
+            for p in &enabled_paths {
+                if let Some(secs) = approval_path_timeout(p) {
+                    hold_secs = hold_secs.max(secs);
+                }
+            }
+
             // Peek a bounded prefix of the body for the summary + preview, then
             // build the forwarding body. If condition buffering already captured
             // the body, reuse that buffer instead of peeking the stream again.
@@ -441,7 +474,7 @@ pub(crate) async fn forward_request(
                 body_preview,
                 summary: Some(approval_summary),
                 created_at: now,
-                expires_at: now + APPROVAL_TIMEOUT_SECS,
+                expires_at: now + hold_secs,
             };
 
             let decision_rx = approval_store
@@ -464,6 +497,20 @@ pub(crate) async fn forward_request(
                     .remove(org_id, project_id, &approval_id)
                     .await;
                 return Ok(response::approval_store_unavailable());
+            }
+
+            // Out-of-band push: if an ntfy channel is enabled, publish an
+            // Approve/Deny notification. Best-effort — never blocks the hold.
+            if let Some(ntfy) = enabled_paths.iter().find(|p| p.channel == "ntfy") {
+                let client = http_client.clone();
+                let crypto = Arc::clone(crypto);
+                let log = Arc::clone(approval_log);
+                let ntfy = ntfy.clone();
+                let approval = approval.clone();
+                tokio::spawn(async move {
+                    crate::notify::publish_ntfy_approval(&client, &crypto, &log, &ntfy, &approval)
+                        .await;
+                });
             }
 
             let telemetry_path = path.split('?').next().unwrap_or(&path);
@@ -496,9 +543,7 @@ pub(crate) async fn forward_request(
                 "holding request for approval"
             );
 
-            let outcome = decision_rx
-                .wait(Duration::from_secs(APPROVAL_TIMEOUT_SECS))
-                .await;
+            let outcome = decision_rx.wait(Duration::from_secs(hold_secs)).await;
 
             // Decision received (or timed out) — defuse guard, handle explicitly.
             guard.defuse();

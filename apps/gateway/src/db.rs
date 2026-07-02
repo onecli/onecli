@@ -419,6 +419,70 @@ pub(crate) async fn find_app_config(
     .context("querying app_config by project_id + provider")
 }
 
+// ── Approval path queries ──────────────────────────────────────────────
+
+/// An `approval_paths` row — a delivery channel for manual-approval decisions.
+#[derive(Debug, Clone, FromRow)]
+pub(crate) struct ApprovalPathRow {
+    pub channel: String,
+    pub enabled: bool,
+    pub settings: Option<serde_json::Value>,
+    pub credentials: Option<String>,
+}
+
+/// All **enabled** approval paths for a project.
+pub(crate) async fn find_approval_paths(
+    pool: &PgPool,
+    project_id: &str,
+) -> Result<Vec<ApprovalPathRow>> {
+    sqlx::query_as::<_, ApprovalPathRow>(
+        r#"SELECT channel, enabled, settings, credentials FROM approval_paths
+           WHERE project_id = $1 AND enabled = true"#,
+    )
+    .bind(project_id)
+    .fetch_all(pool)
+    .await
+    .context("querying approval_paths by project_id")
+}
+
+/// A single approval path (regardless of `enabled`), used by the ntfy callback
+/// to load the channel's stored callback token.
+pub(crate) async fn find_approval_path(
+    pool: &PgPool,
+    project_id: &str,
+    channel: &str,
+) -> Result<Option<ApprovalPathRow>> {
+    sqlx::query_as::<_, ApprovalPathRow>(
+        r#"SELECT channel, enabled, settings, credentials FROM approval_paths
+           WHERE project_id = $1 AND channel = $2 LIMIT 1"#,
+    )
+    .bind(project_id)
+    .bind(channel)
+    .fetch_optional(pool)
+    .await
+    .context("querying approval_path by project_id + channel")
+}
+
+/// Whether a channel is enabled, applying `default_enabled` when no row exists.
+/// "onecli" passes `true` (default-on, no-break); other channels pass `false`.
+pub(crate) async fn approval_channel_enabled(
+    pool: &PgPool,
+    project_id: &str,
+    channel: &str,
+    default_enabled: bool,
+) -> bool {
+    let row: Option<(bool,)> = sqlx::query_as(
+        r#"SELECT enabled FROM approval_paths
+           WHERE project_id = $1 AND channel = $2 LIMIT 1"#,
+    )
+    .bind(project_id)
+    .bind(channel)
+    .fetch_optional(pool)
+    .await
+    .unwrap_or(None);
+    row.map(|(enabled,)| enabled).unwrap_or(default_enabled)
+}
+
 // ── App connection queries ─────────────────────────────────────────────
 
 /// An app connection row from the `app_connections` table.
