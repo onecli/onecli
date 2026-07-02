@@ -2,7 +2,7 @@
 mod auth;
 
 #[cfg(edition_cloud)]
-#[path = "cloud/auth.rs"]
+#[path = "ee/auth.rs"]
 mod auth;
 
 mod ca;
@@ -11,24 +11,24 @@ mod ca;
 mod cache;
 
 #[cfg(edition_cloud)]
-#[path = "cloud/cache.rs"]
+#[path = "ee/cache.rs"]
 mod cache;
 
 #[cfg(not(edition_cloud))]
 mod approval;
 
 #[cfg(edition_cloud)]
-#[path = "cloud/approval.rs"]
+#[path = "ee/approval.rs"]
 mod approval;
 
 mod apps;
 
 #[cfg(edition_oss)]
-mod cloud_apps;
+mod ee_apps;
 
 #[cfg(not(edition_oss))]
-#[path = "cloud/cloud_apps.rs"]
-mod cloud_apps;
+#[path = "ee/ee_apps.rs"]
+mod ee_apps;
 
 mod connect;
 
@@ -36,14 +36,14 @@ mod connect;
 mod condition_match;
 
 #[cfg(edition_cloud)]
-#[path = "cloud/condition_match.rs"]
+#[path = "ee/condition_match.rs"]
 mod condition_match;
 
 #[cfg(not(edition_cloud))]
 mod crypto;
 
 #[cfg(edition_cloud)]
-#[path = "cloud/crypto.rs"]
+#[path = "ee/crypto.rs"]
 mod crypto;
 
 mod db;
@@ -56,14 +56,14 @@ mod secret_inject;
 mod summary;
 
 // Cloud-only request summarizers for manual-approval cards. OSS build uses the
-// no-op `cloud_summary.rs` stub; the cloud build swaps in `cloud/cloud_summary.rs`
-// (+ the `cloud/cloud_summary/` submodules). Mirrors the `cloud_apps` split, and
+// no-op `cloud_summary.rs` stub; the cloud build swaps in `ee/cloud_summary.rs`
+// (+ the `ee/cloud_summary/` submodules). Mirrors the `ee_apps` split, and
 // is the fall-through arm of `summary`'s per-provider dispatch.
 #[cfg(not(edition_cloud))]
 mod cloud_summary;
 
 #[cfg(edition_cloud)]
-#[path = "cloud/cloud_summary.rs"]
+#[path = "ee/cloud_summary.rs"]
 mod cloud_summary;
 
 mod telemetry_core;
@@ -74,33 +74,33 @@ mod version;
 mod telemetry;
 
 #[cfg(edition_cloud)]
-#[path = "cloud/telemetry.rs"]
+#[path = "ee/telemetry.rs"]
 mod telemetry;
 
 // Partner layer (cloud-only). OSS build uses the no-op `partner.rs` stub; the
-// cloud build swaps in `cloud/partner.rs` (+ the `cloud/partner/` submodules).
+// cloud build swaps in `ee/partner.rs` (+ the `ee/partner/` submodules).
 #[cfg(not(edition_cloud))]
 mod partner;
 
 #[cfg(edition_cloud)]
-#[path = "cloud/partner.rs"]
+#[path = "ee/partner.rs"]
 mod partner;
 
 // Granular access (EE — cloud + onprem): generic per-agent scoping for app
 // connections — token-level (e.g. GitHub repo-scoped tokens) or request-level
 // (e.g. Dropbox folder allowlist). No OSS stub: referenced only from the cloud/
-// onprem hooks + cloud_apps modules, which are all cfg'd out for oss.
+// onprem hooks + ee_apps modules, which are all cfg'd out for oss.
 #[cfg(not(edition_oss))]
-#[path = "cloud/granular_access.rs"]
+#[path = "ee/granular_access.rs"]
 mod granular_access;
 
 // Budget layer (cloud-only). OSS build uses the no-op `budget.rs` stub; the
-// cloud build swaps in `cloud/budget.rs` (+ the `cloud/budget/` submodules).
+// cloud build swaps in `ee/budget.rs` (+ the `ee/budget/` submodules).
 #[cfg(not(edition_cloud))]
 mod budget;
 
 #[cfg(edition_cloud)]
-#[path = "cloud/budget.rs"]
+#[path = "ee/budget.rs"]
 mod budget;
 
 mod vault;

@@ -1,1 +1,1 @@
-// OSS: no server-side cloud initialization needed.
+// OSS: no server-side EE initialization needed.

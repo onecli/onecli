@@ -6,7 +6,7 @@ export interface RuleWriteScope {
 
 /**
  * Authorizes which policy-rule actions an org may write. The OSS default allows
- * everything; cloud injects a plan-based implementation via `createApiApp`.
+ * everything; the cloud edition injects a plan-based implementation via `createApiApp`.
  *
  * Called by the policy-rule service itself, so every write path — HTTP routes,
  * server actions, project scope and org scope — is gated in one place and no

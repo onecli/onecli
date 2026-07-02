@@ -15,18 +15,18 @@
 
 mod body;
 #[cfg(edition_cloud)]
-#[path = "cloud/response.rs"]
-mod cloud_response;
+#[path = "ee/response.rs"]
+mod ee_response;
 mod finalizers;
 pub(crate) mod forward;
 mod hints;
 #[cfg(edition_oss)]
 pub(crate) mod hooks;
 #[cfg(any(edition_onprem_slim, edition_onprem_full))]
-#[path = "onprem/hooks.rs"]
+#[path = "ee/onprem/hooks.rs"]
 pub(crate) mod hooks;
 #[cfg(edition_cloud)]
-#[path = "cloud/hooks.rs"]
+#[path = "ee/hooks.rs"]
 pub(crate) mod hooks;
 mod mitm;
 mod response;

@@ -14,7 +14,7 @@ export const AUDIT_ACTIONS = {
   REGENERATE: "regenerate",
   CONNECT: "connect",
   DISCONNECT: "disconnect",
-  // Cloud-only (partner layer): a user claims a partner-created org as its owner.
+  // EE-only (partner layer): a user claims a partner-created org as its owner.
   CLAIM: "claim",
 } as const;
 
@@ -28,10 +28,10 @@ export const AUDIT_SERVICES = {
   DEPLOYMENT: "deployment",
   PROJECT: "project",
   ORGANIZATION: "organization",
-  // Cloud-only (partner layer)
+  // EE-only (partner layer)
   PARTNER: "partner",
   PARTNER_SECRET: "partner-secret",
-  // Cloud-only (budget module): per-(secret, org) spend caps
+  // EE-only (budget module): per-(secret, org) spend caps
   BUDGET: "budget",
 } as const;
 
@@ -43,7 +43,7 @@ export const AUDIT_STATUS = {
 export const AUDIT_SOURCE = {
   APP: "app",
   API: "api",
-  // Cloud-only (partner layer): actions performed via the Partner API/portal.
+  // EE-only (partner layer): actions performed via the Partner API/portal.
   PARTNER: "partner",
 } as const;
 

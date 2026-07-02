@@ -12,7 +12,7 @@ export {
 
 export { initSession, getSessionProvider } from "./session";
 export { initCrypto, getCrypto } from "./crypto";
-export { initCloudApps, getCloudApps } from "./cloud-apps";
+export { initEeApps, getEeApps } from "./ee-apps";
 export { initOAuthOrg, getOAuthOrg } from "./oauth-org";
 export { initSelfUrl, getSelfUrl } from "./self-url";
 export { initRoleResolver, getRoleResolver } from "./role-resolver";

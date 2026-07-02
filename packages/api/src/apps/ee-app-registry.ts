@@ -1,6 +1,6 @@
 import type { AppDefinition } from "./types";
 
-export const cloudApps: AppDefinition[] = [
+export const eeApps: AppDefinition[] = [
   {
     id: "datadog",
     name: "Datadog",

@@ -45,7 +45,7 @@ export const findUserDefaultProject = async (
  * Called by:
  *   - `GET /v1/auth/session` (cloud + OSS)
  *   - `ensureLocalUser()` (OSS local-auth mode)
- *   - `ensureUserDefaultOrgAndProject()` (cloud project management)
+ *   - `ensureUserDefaultOrgAndProject()` (EE project management)
  */
 export const bootstrapOrganization = async (
   userId: string,

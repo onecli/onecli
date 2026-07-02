@@ -52,46 +52,46 @@ const getOssDashboardSegments = () => {
 // key→value map lives here directly. The onprem-full edition selects a curated
 // subset below (ONPREM_FULL_ALIASES).
 const CLOUD_ALIASES = {
-  "@/lib/auth/auth-provider": "@/cloud/auth/cognito-provider",
-  "@/lib/auth/auth-server": "@/cloud/auth/cognito-server",
-  "@/lib/actions/resolve-user": "@/cloud/auth/resolve-user",
-  "@/lib/nav-config": "@/cloud/nav-config",
-  "@dashboard/dashboard-sidebar": "@/cloud/dashboard/dashboard-sidebar",
-  "@dashboard/dashboard-header": "@/cloud/dashboard/dashboard-header",
-  "@/lib/gateway-auth": "@/cloud/gateway-auth",
-  "@/lib/auth/login-content": "@/cloud/auth/login-content",
-  "@/lib/user-plan": "@/cloud/user-plan",
-  "@/lib/components/request-app-slot": "@/cloud/apps/request-app-slot",
-  "@/lib/home-redirect": "@/cloud/home-redirect",
-  "@/lib/components/pro-app-dialog": "@/cloud/apps/pro-app-dialog",
-  "@/lib/components/condition-builder": "@/cloud/components/condition-builder",
-  "@/lib/dashboard/session-redirect": "@/cloud/dashboard/session-redirect",
-  "@/lib/granular-access": "@/cloud/granular-access",
-  "@/lib/plan-gate": "@/cloud/billing/plan-gate",
+  "@/lib/auth/auth-provider": "@/ee/auth/cognito-provider",
+  "@/lib/auth/auth-server": "@/ee/auth/cognito-server",
+  "@/lib/actions/resolve-user": "@/ee/auth/resolve-user",
+  "@/lib/nav-config": "@/ee/nav-config",
+  "@dashboard/dashboard-sidebar": "@/ee/dashboard/dashboard-sidebar",
+  "@dashboard/dashboard-header": "@/ee/dashboard/dashboard-header",
+  "@/lib/gateway-auth": "@/ee/gateway-auth",
+  "@/lib/auth/login-content": "@/ee/auth/login-content",
+  "@/lib/user-plan": "@/ee/user-plan",
+  "@/lib/components/request-app-slot": "@/ee/apps/request-app-slot",
+  "@/lib/home-redirect": "@/ee/home-redirect",
+  "@/lib/components/pro-app-dialog": "@/ee/apps/pro-app-dialog",
+  "@/lib/components/condition-builder": "@/ee/components/condition-builder",
+  "@/lib/dashboard/session-redirect": "@/ee/dashboard/session-redirect",
+  "@/lib/granular-access": "@/ee/granular-access",
+  "@/lib/plan-gate": "@/ee/billing/plan-gate",
 
   // Cloud initialization (api, server actions, client)
-  "@/lib/init/api": "@/cloud/init/api",
-  "@/lib/init/server": "@/cloud/init/server",
-  "@/lib/init/client": "@/cloud/init/client",
+  "@/lib/init/api": "@/ee/init/api",
+  "@/lib/init/server": "@/ee/init/server",
+  "@/lib/init/client": "@/ee/init/client",
 
   // Cloud API fetch (Bearer token auth for external api-server)
-  "@/lib/api-fetch": "@/cloud/api-fetch",
+  "@/lib/api-fetch": "@/ee/api-fetch",
 };
 
 // Both onprem editions inject the real cloud app definitions via an onprem init seam
 // (api/server/client) so the cloud-only apps are connectable with the customer's own
 // OAuth credentials (BYO), while keeping local crypto/auth (no KMS/Cognito/cloud routes).
 const ONPREM_INIT_ALIASES = {
-  "@/lib/init/api": "@/onprem/init/api",
-  "@/lib/init/server": "@/onprem/init/server",
-  "@/lib/init/client": "@/onprem/init/client",
+  "@/lib/init/api": "@/ee/onprem/init/api",
+  "@/lib/init/server": "@/ee/onprem/init/server",
+  "@/lib/init/client": "@/ee/onprem/init/client",
 };
 
 // Both onprem editions are the fully-entitled enterprise edition: report the top
 // plan (so premium/teamOnly apps + features aren't shown as locked) and get the
 // granular-access policy dialogs. The backend already allows everything for onprem.
 const ONPREM_ENTITLEMENT_ALIASES = {
-  "@/lib/user-plan": "@/onprem/user-plan",
+  "@/lib/user-plan": "@/ee/onprem/user-plan",
   "@/lib/granular-access": CLOUD_ALIASES["@/lib/granular-access"],
 };
 
@@ -113,7 +113,7 @@ const ONPREM_FULL_ALIASES = {
     CLOUD_ALIASES["@/lib/dashboard/session-redirect"],
   "@/lib/home-redirect": CLOUD_ALIASES["@/lib/home-redirect"],
   // onprem-specific: local cookie auth + project-scoped headers
-  "@/lib/api-fetch": "@/onprem/api-fetch",
+  "@/lib/api-fetch": "@/ee/onprem/api-fetch",
 };
 
 // onprem-slim keeps the flat OSS surface (local auth, OSS api-fetch) + only adds the

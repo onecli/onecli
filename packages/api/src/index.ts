@@ -12,7 +12,7 @@ export type { CryptoService } from "./lib/crypto-types";
 export type { ApiEnv } from "./types";
 export {
   initSession,
-  initCloudApps,
+  initEeApps,
   initCrypto,
   initRoleResolver,
   initRuleActionGate,

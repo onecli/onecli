@@ -1,3 +1,3 @@
 import type { CreateApiAppOptions } from "@onecli/api";
 
-export const cloudOverrides: CreateApiAppOptions | undefined = undefined;
+export const eeOverrides: CreateApiAppOptions | undefined = undefined;

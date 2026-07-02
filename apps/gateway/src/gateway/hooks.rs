@@ -1,7 +1,7 @@
 //! Forward hooks — extension points for the request forwarding pipeline.
 //!
 //! OSS version: all hooks are no-ops. The cloud build swaps this module
-//! via `#[path = "cloud/hooks.rs"]` to add cloud-specific telemetry.
+//! via `#[path = "ee/hooks.rs"]` to add cloud-specific telemetry.
 
 use std::pin::Pin;
 

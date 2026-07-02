@@ -968,7 +968,7 @@ impl PolicyEngine {
 
         // Any non-empty session policy means scoped access is required.
         // Provider-specific interpretation (e.g. GitHub repos) is handled by
-        // cloud_apps::try_refresh_credentials, not here.
+        // ee_apps::try_refresh_credentials, not here.
         let needs_scoped_token = session_policy
             .and_then(|sp| sp.as_object())
             .is_some_and(|obj| !obj.is_empty());
@@ -985,8 +985,7 @@ impl PolicyEngine {
 
                 // Try cloud-specific refresh first, then shared credential types
                 let refresh_result = if let Some(r) =
-                    crate::cloud_apps::try_refresh_credentials(cred_type, &creds, session_policy)
-                        .await
+                    crate::ee_apps::try_refresh_credentials(cred_type, &creds, session_policy).await
                 {
                     Some(r)
                 } else {

@@ -1,7 +1,7 @@
-//! Cloud granular-access stub — replaced by cloud overlay.
+//! Cloud granular-access stub — replaced by the EE overlay.
 //!
 //! This file exists so `cargo fmt` can resolve the
-//! `#[path = "cloud/granular_access.rs"]` module declaration in `main.rs`.
+//! `#[path = "ee/granular_access.rs"]` module declaration in `main.rs`.
 //! The real implementation lives in the cloud repo.
 //!
 //! Unlike the other cloud stubs there is nothing to re-export: the module is

@@ -33,7 +33,7 @@ export const navItems: NavItem[] = [
 ];
 
 export const getSettingsSections = (
-  // Cloud override uses orgId to prefix URLs with /org/<id>
+  // The EE org-UI override uses orgId to prefix URLs with /org/<id>
   // eslint-disable-next-line @typescript-eslint/no-unused-vars
   orgId?: string,
 ): SettingsNavSection[] => [

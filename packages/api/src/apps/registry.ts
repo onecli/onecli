@@ -1,5 +1,5 @@
 import type { AppDefinition } from "./types";
-import { getCloudApps } from "../providers";
+import { getEeApps } from "../providers";
 import { IS_CLOUD } from "../lib/env";
 import { confluence } from "./confluence";
 import { docker } from "./docker";
@@ -84,7 +84,7 @@ const staticApps: AppDefinition[] = [
 const CLOUD_HIDDEN_APPS = new Set(["jfrog-artifactory"]);
 
 export const getApps = (): AppDefinition[] => {
-  const apps = [...staticApps, ...getCloudApps()];
+  const apps = [...staticApps, ...getEeApps()];
   return IS_CLOUD ? apps.filter((a) => !CLOUD_HIDDEN_APPS.has(a.id)) : apps;
 };
 

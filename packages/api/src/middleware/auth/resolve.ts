@@ -91,7 +91,7 @@ export const resolveProjectId = async (
   // Multi-org (cloud): a member may only target projects they created; admins
   // and owners may target any project in their org. Non-multi-org editions
   // register no role resolver, so this gate is skipped and any in-org project is
-  // accepted, as before. Mirrors `canManageAllProjects` in the cloud authz service.
+  // accepted, as before. Mirrors `canManageAllProjects` in the EE authz service.
   if (!(await canAccessProjectAsUser(userId, project))) return null;
 
   return project.id;

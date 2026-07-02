@@ -150,7 +150,7 @@ static GOOGLE_CALENDAR: google_calendar::GoogleCalendar = google_calendar::Googl
 
 /// Resolve the summarizer for a OneCLI provider id. OSS providers match here;
 /// unknown ids fall through to the cloud registry (an empty stub in OSS builds),
-/// mirroring `apps::all_providers` chaining `cloud_apps::providers`.
+/// mirroring `apps::all_providers` chaining `ee_apps::providers`.
 fn summarizer(provider: &str) -> Option<&'static dyn RequestSummarizer> {
     match provider {
         "gmail" => Some(&GMAIL),

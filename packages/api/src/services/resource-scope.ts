@@ -1,7 +1,7 @@
 export interface ResourceScope {
   projectId?: string;
   organizationId?: string;
-  // Cloud-only: partner-scoped resources. Inert in OSS (never set there).
+  // EE-only: partner-scoped resources. Inert in OSS (never set there).
   partnerId?: string;
 }
 

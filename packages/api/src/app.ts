@@ -15,7 +15,7 @@ import type { ApiEnv } from "./types";
 import {
   initSession,
   initCrypto,
-  initCloudApps,
+  initEeApps,
   initOAuthOrg,
   initConnectionHooks,
   initResourceHooks,
@@ -46,10 +46,10 @@ import {
 } from "./routes/auth-session";
 
 export interface CreateApiAppOptions {
-  cloudRoutes?: (app: Hono<ApiEnv>) => void;
+  eeRoutes?: (app: Hono<ApiEnv>) => void;
   crypto?: CryptoService;
-  cloudApps?: AppDefinition[];
-  cloudAppPermissions?: AppPermissionDefinition[];
+  eeApps?: AppDefinition[];
+  eeAppPermissions?: AppPermissionDefinition[];
   oauthOrg?: OAuthOrgHandlers;
   connectionHooks?: ConnectionHooks;
   resourceHooks?: ResourceHooks;
@@ -67,9 +67,9 @@ export const createApiApp = (
 ) => {
   initSession(session);
   if (options?.crypto) initCrypto(options.crypto);
-  if (options?.cloudApps) initCloudApps(options.cloudApps);
-  if (options?.cloudAppPermissions) {
-    for (const perm of options.cloudAppPermissions) {
+  if (options?.eeApps) initEeApps(options.eeApps);
+  if (options?.eeAppPermissions) {
+    for (const perm of options.eeAppPermissions) {
       registerAppPermission(perm);
     }
   }
@@ -102,8 +102,8 @@ export const createApiApp = (
   app.route("/migrate", migrateRoutes());
   app.route("/internal", internalRoutes());
 
-  if (options?.cloudRoutes) {
-    options.cloudRoutes(app);
+  if (options?.eeRoutes) {
+    options.eeRoutes(app);
   }
 
   return app;
