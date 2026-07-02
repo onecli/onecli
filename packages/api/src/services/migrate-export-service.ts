@@ -2,6 +2,7 @@ import { db } from "@onecli/db";
 import { getCrypto } from "../providers";
 import { ServiceError } from "./errors";
 import { logger } from "../lib/logger";
+import type { InjectionConfig } from "../validations/secret";
 
 interface MigrateImported {
   secrets: number;
@@ -128,10 +129,9 @@ export const exportToCloud = async (
       value: s.value,
       hostPattern: s.hostPattern,
       pathPattern: s.pathPattern,
-      injectionConfig: s.injectionConfig as {
-        headerName: string;
-        valueFormat?: string;
-      } | null,
+      // Pass the stored config through faithfully — it is already canonical
+      // (normalized by buildInjectionConfig on create): header, param, or path.
+      injectionConfig: s.injectionConfig as InjectionConfig | null,
       metadata: s.metadata as Record<string, unknown> | null,
     })),
     agents: agents

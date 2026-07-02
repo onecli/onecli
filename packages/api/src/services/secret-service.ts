@@ -8,6 +8,10 @@ import {
   detectOpenaiAuthMode,
   isHeaderInjection,
   isParamInjection,
+  isPathInjection,
+  isPathRegexInjection,
+  isPathSafeValue,
+  isPathTemplateInjection,
   parseOpenaiAuthJson,
   parseOpenaiOAuthJson,
   type CreateSecretInput,
@@ -54,7 +58,40 @@ const buildInjectionConfig = (
       valueFormat: config.valueFormat?.trim() || "{value}",
     } as Prisma.InputJsonValue;
   }
+  if (isPathTemplateInjection(config)) {
+    return {
+      pathTemplate: config.pathTemplate.trim(),
+    } as Prisma.InputJsonValue;
+  }
+  if (isPathRegexInjection(config)) {
+    return {
+      pathRegex: config.pathRegex.trim(),
+      pathReplacement: config.pathReplacement.trim(),
+    } as Prisma.InputJsonValue;
+  }
   return Prisma.JsonNull;
+};
+
+// A path-injected secret is substituted into the URL path verbatim, so an inline
+// value containing a path-structural char would reshape the request. 1Password
+// values are resolved at request time and guarded by the gateway, so only inline
+// values are checked here; the gateway's `is_path_safe` is the authoritative guard.
+const assertPathValueSafe = (
+  config: CreateSecretInput["injectionConfig"],
+  valueSource: string | undefined,
+  value: string | undefined,
+): void => {
+  if (
+    isPathInjection(config) &&
+    valueSource !== "onepassword" &&
+    value &&
+    !isPathSafeValue(value.trim())
+  ) {
+    throw new ServiceError(
+      "BAD_REQUEST",
+      "Secret value can't contain / ? # % whitespace or control characters when injected into the URL path",
+    );
+  }
 };
 
 const buildMetadata = (
@@ -105,7 +142,6 @@ export const listSecrets = async (scope: ResourceScope) => {
       pathPattern: true,
       injectionConfig: true,
       metadata: true,
-      isPlatform: true,
       scope: true,
       createdAt: true,
     },
@@ -138,12 +174,14 @@ export const createSecret = async (
     const config = input.injectionConfig;
     const hasHeader = isHeaderInjection(config) && config.headerName.trim();
     const hasParam = isParamInjection(config) && config.paramName.trim();
-    if (!hasHeader && !hasParam) {
+    const hasPath = isPathInjection(config);
+    if (!hasHeader && !hasParam && !hasPath) {
       throw new ServiceError(
         "BAD_REQUEST",
-        "Header name or parameter name is required for generic secrets",
+        "Header name, parameter name, or URL path template is required for generic secrets",
       );
     }
+    assertPathValueSafe(config, input.valueSource, input.value);
   }
 
   const pathPattern = input.pathPattern?.trim() || null;
@@ -256,25 +294,10 @@ export const updateSecret = async (
 ) => {
   const secret = await db.secret.findFirst({
     where: scopeOwnership(scope, secretId),
-    select: { id: true, type: true, isPlatform: true },
+    select: { id: true, type: true },
   });
 
   if (!secret) throw new ServiceError("NOT_FOUND", "Secret not found");
-
-  if (secret.isPlatform) {
-    const hasNonValueFields =
-      input.name !== undefined ||
-      input.hostPattern !== undefined ||
-      input.pathPattern !== undefined ||
-      input.injectionConfig !== undefined;
-    if (hasNonValueFields)
-      throw new ServiceError(
-        "FORBIDDEN",
-        "Only the value can be updated on platform secrets",
-      );
-    if (input.value === undefined && input.opRef === undefined)
-      throw new ServiceError("BAD_REQUEST", "Value is required");
-  }
 
   const data: Record<string, unknown> = {};
 
@@ -302,7 +325,6 @@ export const updateSecret = async (
     if (secret.type === "anthropic") data.hostPattern = "api.anthropic.com";
     if (secret.type === "openai") data.hostPattern = "api.openai.com";
     data.metadata = buildOnePasswordMetadata(secret.type, input.opDisplay);
-    if (secret.isPlatform) data.isPlatform = false;
   } else if (input.value !== undefined) {
     let value = input.value.trim();
     if (!value)
@@ -317,10 +339,6 @@ export const updateSecret = async (
     data.valueSource = "inline";
     data.encryptedValue = await getCrypto().encrypt(value);
     data.opRef = null;
-
-    if (secret.isPlatform) {
-      data.isPlatform = false;
-    }
 
     if (secret.type === "anthropic" || secret.type === "openai") {
       data.metadata = buildMetadata(secret.type, value);
@@ -340,6 +358,7 @@ export const updateSecret = async (
 
   if (input.injectionConfig !== undefined && secret.type === "generic") {
     data.injectionConfig = buildInjectionConfig(input.injectionConfig);
+    assertPathValueSafe(input.injectionConfig, input.valueSource, input.value);
   }
 
   if (Object.keys(data).length === 0) {

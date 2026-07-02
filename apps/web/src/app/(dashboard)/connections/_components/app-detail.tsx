@@ -1,9 +1,9 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { ArrowLeft, Loader2 } from "lucide-react";
+import { ArrowLeft, Loader2, Settings2 } from "lucide-react";
 import { Button } from "@onecli/ui/components/button";
 import { Skeleton } from "@onecli/ui/components/skeleton";
 import type { getAppConnections as defaultGetConnections } from "@/lib/actions/connections";
@@ -23,7 +23,7 @@ import {
   type AppPermissionLevel,
 } from "@onecli/api/apps/app-permissions";
 import { AppIcon } from "./app-icon";
-import { AppConfigForm } from "./app-config-form";
+import { AppConfigForm, type AppConfigFormHandle } from "./app-config-form";
 import { ConfigureCredentialsDialog } from "./configure-credentials-dialog";
 import { PermissionsList } from "./permissions-list";
 import { AppPermissions } from "./app-permissions";
@@ -104,6 +104,7 @@ export const AppDetail = ({
   const [configDialogOpen, setConfigDialogOpen] = useState(false);
   const [configVersion, setConfigVersion] = useState(0);
   const [appConfigured, setAppConfigured] = useState(hasAppConfig);
+  const configFormRef = useRef<AppConfigFormHandle>(null);
 
   const fetchConnections = useCallback(async () => {
     try {
@@ -237,13 +238,31 @@ export const AppDetail = ({
         </div>
 
         {/* Actions in header */}
-        {loading ? (
-          <Skeleton className="h-9 w-32 shrink-0 rounded-md" />
-        ) : !isConnected ? (
-          <Button size="sm" onClick={handleConnect} className="shrink-0">
-            Connect {app.name}
-          </Button>
-        ) : null}
+        <div className="flex items-center gap-2 shrink-0">
+          {loading ? (
+            <Skeleton className="h-8 w-32 rounded-md" />
+          ) : (
+            <>
+              {configurable && (
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => configFormRef.current?.reveal()}
+                  aria-label="Custom credentials"
+                  className="shrink-0"
+                >
+                  <Settings2 className="size-3.5" aria-hidden="true" />
+                  <span className="hidden sm:inline">Custom credentials</span>
+                </Button>
+              )}
+              {!isConnected && (
+                <Button size="sm" onClick={handleConnect} className="shrink-0">
+                  Connect {app.name}
+                </Button>
+              )}
+            </>
+          )}
+        </div>
       </div>
 
       {loading ? (
@@ -323,6 +342,7 @@ export const AppDetail = ({
       {configurable && (
         <AppConfigForm
           key={configVersion}
+          ref={configFormRef}
           provider={app.id}
           appName={app.name}
           fields={configurable.fields}

@@ -1,6 +1,15 @@
 import { describe, expect, it } from "vitest";
 
-import { hostPatternSchema, wildcardCoversPublicSuffix } from "./secret";
+import {
+  createSecretSchema,
+  hostPatternSchema,
+  injectionConfigSchema,
+  isPathInjection,
+  isPathRegexInjection,
+  isPathSafeValue,
+  isPathTemplateInjection,
+  wildcardCoversPublicSuffix,
+} from "./secret";
 
 const accepts = (host: string) => hostPatternSchema.safeParse(host).success;
 
@@ -55,5 +64,100 @@ describe("wildcardCoversPublicSuffix", () => {
     expect(wildcardCoversPublicSuffix("*.example.com")).toBe(false);
     expect(wildcardCoversPublicSuffix("*.amazonaws.com")).toBe(false);
     expect(wildcardCoversPublicSuffix("api.github.com")).toBe(false);
+  });
+});
+
+const acceptsConfig = (injectionConfig: unknown) =>
+  createSecretSchema.safeParse({
+    name: "Telegram Bot Token",
+    type: "generic",
+    hostPattern: "api.telegram.org",
+    value: "123456:ABC-DEF",
+    injectionConfig,
+  }).success;
+
+describe("path injection config validation", () => {
+  it("accepts a path template with one {value}", () => {
+    expect(acceptsConfig({ pathTemplate: "/bot{value}" })).toBe(true);
+  });
+
+  it("accepts a path regex with a {value} replacement", () => {
+    expect(
+      acceptsConfig({
+        pathRegex: "^/bot[^/]+(/.*)?$",
+        pathReplacement: "/bot{value}$1",
+      }),
+    ).toBe(true);
+  });
+
+  it.each([
+    ["template without {value}", { pathTemplate: "/bot" }],
+    ["template with two {value}", { pathTemplate: "/{value}/{value}" }],
+    ["template not starting with /", { pathTemplate: "bot{value}" }],
+    ["extra key (strict)", { pathTemplate: "/bot{value}", extra: "x" }],
+    [
+      "regex replacement missing {value}",
+      { pathRegex: "^/bot.+$", pathReplacement: "/bot$1" },
+    ],
+    [
+      "invalid regex",
+      { pathRegex: "[unclosed", pathReplacement: "/bot{value}" },
+    ],
+  ])("rejects %s", (_name, config) => {
+    expect(acceptsConfig(config)).toBe(false);
+  });
+});
+
+describe("injection config type guards", () => {
+  it("classifies path template and regex configs", () => {
+    expect(isPathTemplateInjection({ pathTemplate: "/bot{value}" })).toBe(true);
+    expect(isPathRegexInjection({ pathRegex: "x", pathReplacement: "y" })).toBe(
+      true,
+    );
+    expect(isPathInjection({ pathTemplate: "/bot{value}" })).toBe(true);
+    expect(isPathInjection({ pathRegex: "x", pathReplacement: "y" })).toBe(
+      true,
+    );
+    expect(isPathInjection({ headerName: "Authorization" })).toBe(false);
+    expect(isPathInjection(null)).toBe(false);
+  });
+});
+
+// migrate-import.ts validates incoming secrets with this exact union, so this
+// proves param- and path-injected secrets survive an org->project migration.
+describe("injectionConfigSchema (shared union, used by migrate import)", () => {
+  it.each([
+    ["header", { headerName: "Authorization", valueFormat: "Bearer {value}" }],
+    ["param", { paramName: "api_key", paramFormat: "{value}" }],
+    ["path template", { pathTemplate: "/bot{value}" }],
+    [
+      "path regex",
+      { pathRegex: "^/bot[^/]+$", pathReplacement: "/bot{value}" },
+    ],
+    ["null", null],
+  ])("accepts a %s config", (_name, config) => {
+    expect(injectionConfigSchema.safeParse(config).success).toBe(true);
+  });
+});
+
+describe("isPathSafeValue", () => {
+  it("accepts a Telegram-style token", () => {
+    expect(isPathSafeValue("123456:ABC-DEF1234ghIkl-zyx_57W2")).toBe(true);
+  });
+
+  it.each([
+    ["slash", "a/b"],
+    ["question mark", "a?b"],
+    ["hash", "a#b"],
+    ["percent", "a%b"],
+    ["space", "a b"],
+  ])("rejects a value containing a %s", (_name, value) => {
+    expect(isPathSafeValue(value)).toBe(false);
+  });
+
+  it("rejects tab, control, and DEL characters", () => {
+    expect(isPathSafeValue("a" + String.fromCharCode(0x09) + "b")).toBe(false);
+    expect(isPathSafeValue("a" + String.fromCharCode(0x07) + "b")).toBe(false);
+    expect(isPathSafeValue("a" + String.fromCharCode(0x7f) + "b")).toBe(false);
   });
 });

@@ -1,5 +1,7 @@
 import { db, Prisma } from "@onecli/db";
 
+import { LLM_HOST_FRAGMENTS } from "../lib/llm-hosts";
+
 export interface RequestLogEntry {
   id: string;
   agentId: string;
@@ -117,10 +119,12 @@ export interface RequestLogPage {
   nextCursor: { createdAt: string; id: string } | null;
 }
 
+export type ActivityFilter = "all" | "hide-llm" | "blocked";
+
 export interface ActivityPageParams {
   cursor?: { createdAt: string; id: string };
   limit?: number;
-  statusFilter?: "all" | "errors";
+  filter?: ActivityFilter;
 }
 
 const resolveAgentNames = async (
@@ -199,17 +203,30 @@ export const getRecentRequestLogs = async (
   return logs.map((l) => toEntry(l, agentMap, userMap));
 };
 
-export const getRequestLogs = async (
+/**
+ * Build the Prisma `where` for an activity query: project scope, the selected
+ * {@link ActivityFilter}, and the keyset-pagination cursor. Pure and synchronous
+ * so it can be unit-tested without a database.
+ */
+export const buildActivityWhere = (
   projectId: string,
-  params: ActivityPageParams = {},
-): Promise<RequestLogPage> => {
-  const limit = Math.min(params.limit ?? 50, 200);
-  const { cursor, statusFilter } = params;
-
+  params: Pick<ActivityPageParams, "cursor" | "filter"> = {},
+): Prisma.RequestLogWhereInput => {
+  const { cursor, filter = "all" } = params;
   const where: Prisma.RequestLogWhereInput = { projectId };
 
-  if (statusFilter === "errors") {
+  if (filter === "blocked") {
     where.status = { gte: 400 };
+  } else if (filter === "hide-llm") {
+    // Exclude AI-provider traffic: keep rows whose host contains none of the
+    // known LLM host fragments (mirrors the gateway's is_llm_host).
+    where.NOT = {
+      OR: LLM_HOST_FRAGMENTS.map(
+        (fragment): Prisma.RequestLogWhereInput => ({
+          host: { contains: fragment, mode: "insensitive" },
+        }),
+      ),
+    };
   }
 
   if (cursor) {
@@ -218,6 +235,16 @@ export const getRequestLogs = async (
       { createdAt: new Date(cursor.createdAt), id: { lt: cursor.id } },
     ];
   }
+
+  return where;
+};
+
+export const getRequestLogs = async (
+  projectId: string,
+  params: ActivityPageParams = {},
+): Promise<RequestLogPage> => {
+  const limit = Math.min(params.limit ?? 50, 200);
+  const where = buildActivityWhere(projectId, params);
 
   const logs = await db.requestLog.findMany({
     where,

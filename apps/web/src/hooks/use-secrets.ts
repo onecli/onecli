@@ -5,7 +5,7 @@ import { toast } from "sonner";
 import { secrets } from "@/lib/api";
 import { queryKeys } from "@/lib/api/keys";
 import { deleteSecret, updateSecret } from "@/lib/actions/secrets";
-import { invalidateGatewayCache } from "@/lib/actions/gateway-cache";
+import { invalidateGatewayCache } from "@/lib/api/cache";
 
 export const useSecrets = () =>
   useQuery({ queryKey: queryKeys.secrets.list(), queryFn: secrets.list });

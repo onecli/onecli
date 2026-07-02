@@ -1,7 +1,7 @@
 {
   "$schema": "https://v2-7-6.turborepo.dev/schema.json",
   "ui": "tui",
-  "globalEnv": ["NODE_ENV", "NEXT_PUBLIC_EDITION"],
+  "globalEnv": ["NODE_ENV", "NEXT_PUBLIC_EDITION", "APP_VERSION"],
   "globalPassThroughEnv": [
     "DATABASE_URL",
     "EDITION",
@@ -71,12 +71,16 @@
     "TRELLO_API_SECRET",
     "MONDAY_CLIENT_ID",
     "MONDAY_CLIENT_SECRET",
+    "ATTIO_CLIENT_ID",
+    "ATTIO_CLIENT_SECRET",
     "SENTRY_CLIENT_ID",
     "SENTRY_CLIENT_SECRET",
     "HUBSPOT_CLIENT_ID",
     "HUBSPOT_CLIENT_SECRET",
     "LINEAR_CLIENT_ID",
     "LINEAR_CLIENT_SECRET",
+    "FATHOM_CLIENT_ID",
+    "FATHOM_CLIENT_SECRET",
     "RUST_LOG",
     "PORT",
     "ATLASSIAN_CLIENT_ID",
@@ -122,12 +126,16 @@
         "LINKEDIN_CLIENT_SECRET",
         "MONDAY_CLIENT_ID",
         "MONDAY_CLIENT_SECRET",
+        "ATTIO_CLIENT_ID",
+        "ATTIO_CLIENT_SECRET",
         "SENTRY_CLIENT_ID",
         "SENTRY_CLIENT_SECRET",
         "HUBSPOT_CLIENT_ID",
         "HUBSPOT_CLIENT_SECRET",
         "LINEAR_CLIENT_ID",
-        "LINEAR_CLIENT_SECRET"
+        "LINEAR_CLIENT_SECRET",
+        "FATHOM_CLIENT_ID",
+        "FATHOM_CLIENT_SECRET"
       ]
     },
     "@onecli/gateway#check": {

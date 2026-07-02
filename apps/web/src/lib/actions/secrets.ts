@@ -12,8 +12,10 @@ import {
   type CreateSecretInput,
   type UpdateSecretInput,
 } from "@onecli/api/services/secret-service";
+import { ensureApiKey } from "@onecli/api/services/api-key-service";
 import {
   withAudit,
+  recordAuditEvent,
   AUDIT_ACTIONS,
   AUDIT_SERVICES,
 } from "@onecli/api/services/audit-service";
@@ -57,21 +59,29 @@ export const deleteSecret = async (secretId: string): Promise<void> => {
 };
 
 export const getInstallInfo = async (options?: ResolveOptions) => {
-  const { projectId, userId } = await resolveProjectContext(options);
+  const { projectId, userId, userEmail } = await resolveProjectContext(options);
 
-  const [apiKey, agent] = await Promise.all([
-    db.apiKey.findFirst({
-      where: { userId, projectId },
-      select: { key: true },
-    }),
+  const [keyResult, agent] = await Promise.all([
+    ensureApiKey(userId, { projectId }),
     db.agent.findFirst({
       where: { projectId, isDefault: true },
       select: { accessToken: true },
     }),
   ]);
 
+  if (keyResult.created) {
+    await recordAuditEvent({
+      projectId,
+      userId,
+      userEmail,
+      action: AUDIT_ACTIONS.CREATE,
+      service: AUDIT_SERVICES.API_KEY,
+      metadata: { scope: "project", autoProvisioned: true },
+    });
+  }
+
   return {
-    apiKey: apiKey?.key ?? null,
+    apiKey: keyResult.apiKey,
     agentToken: agent?.accessToken ?? null,
     gatewayUrl: GATEWAY_BASE_URL,
     appUrl: APP_URL,

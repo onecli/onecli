@@ -39,6 +39,13 @@ export default async function ConnectPage({ params, searchParams }: Props) {
     // Auth may not be resolved; treat as false
   }
 
+  // An app may offer an API-key alternate alongside its primary OAuth flow.
+  const apiKeyMethod = app.additionalMethods?.find((m) => m.type === "api_key");
+  const apiKeyFields =
+    apiKeyMethod && apiKeyMethod.type === "api_key"
+      ? apiKeyMethod.fields
+      : undefined;
+
   return (
     <ConnectFlow
       app={{
@@ -57,6 +64,7 @@ export default async function ConnectPage({ params, searchParams }: Props) {
           app.connectionMethod.type === "credentials_import"
             ? app.connectionMethod.fileImport
             : undefined,
+        apiKeyFields,
       }}
       hasDefaults={hasEnvDefaults || hasAppConfig}
       status={status === "success" || status === "error" ? status : undefined}

@@ -1,6 +1,19 @@
 import { parse } from "tldts";
 import { z } from "zod";
 
+// Best-effort write-time check that a path-injection regex is syntactically
+// valid. The gateway's Rust `regex` crate is the authoritative validator (its
+// syntax differs slightly), so a pattern accepted here but rejected there just
+// skips at inject time rather than corrupting a request.
+const isValidRegex = (pattern: string): boolean => {
+  try {
+    new RegExp(pattern);
+    return true;
+  } catch {
+    return false;
+  }
+};
+
 const headerInjectionSchema = z
   .object({
     headerName: z.string().min(1),
@@ -15,14 +28,62 @@ const paramInjectionSchema = z
   })
   .strict();
 
-const injectionConfigSchema = z
-  .union([headerInjectionSchema, paramInjectionSchema])
+// URL-path injection (template mode): the secret is substituted into the
+// `{value}` hole in the path, e.g. `/bot{value}` for the Telegram Bot API.
+const pathTemplateInjectionSchema = z
+  .object({
+    pathTemplate: z
+      .string()
+      .min(1)
+      .refine((v) => v.startsWith("/"), {
+        message: "Path template must start with /",
+      })
+      .refine((v) => v.split("{value}").length === 2, {
+        message: "Path template must contain {value} exactly once",
+      }),
+  })
+  .strict();
+
+// URL-path injection (advanced regex mode): the path is rewritten via a regex;
+// `pathReplacement` uses $N capture references and a `{value}` token for the secret.
+const pathRegexInjectionSchema = z
+  .object({
+    pathRegex: z
+      .string()
+      .min(1)
+      .refine((v) => isValidRegex(v), {
+        message: "Invalid regular expression",
+      }),
+    pathReplacement: z
+      .string()
+      .min(1)
+      .refine((v) => v.includes("{value}"), {
+        message: "Replacement must include {value} (where the secret goes)",
+      }),
+  })
+  .strict();
+
+export const injectionConfigSchema = z
+  .union([
+    headerInjectionSchema,
+    paramInjectionSchema,
+    pathTemplateInjectionSchema,
+    pathRegexInjectionSchema,
+  ])
   .nullable()
   .optional();
 
 export type HeaderInjectionConfig = z.infer<typeof headerInjectionSchema>;
 export type ParamInjectionConfig = z.infer<typeof paramInjectionSchema>;
-export type InjectionConfig = HeaderInjectionConfig | ParamInjectionConfig;
+export type PathTemplateInjectionConfig = z.infer<
+  typeof pathTemplateInjectionSchema
+>;
+export type PathRegexInjectionConfig = z.infer<typeof pathRegexInjectionSchema>;
+export type InjectionConfig =
+  | HeaderInjectionConfig
+  | ParamInjectionConfig
+  | PathTemplateInjectionConfig
+  | PathRegexInjectionConfig;
 
 export const isHeaderInjection = (
   config: unknown,
@@ -39,6 +100,41 @@ export const isParamInjection = (
   typeof config === "object" &&
   "paramName" in config &&
   typeof (config as Record<string, unknown>).paramName === "string";
+
+export const isPathTemplateInjection = (
+  config: unknown,
+): config is PathTemplateInjectionConfig =>
+  config !== null &&
+  typeof config === "object" &&
+  "pathTemplate" in config &&
+  typeof (config as Record<string, unknown>).pathTemplate === "string";
+
+export const isPathRegexInjection = (
+  config: unknown,
+): config is PathRegexInjectionConfig =>
+  config !== null &&
+  typeof config === "object" &&
+  "pathRegex" in config &&
+  typeof (config as Record<string, unknown>).pathRegex === "string";
+
+export const isPathInjection = (
+  config: unknown,
+): config is PathTemplateInjectionConfig | PathRegexInjectionConfig =>
+  isPathTemplateInjection(config) || isPathRegexInjection(config);
+
+// Mirror of the gateway's `is_path_safe` (apps/gateway/src/inject.rs): a path
+// secret is substituted into the URL path verbatim, so a path-structural
+// delimiter, percent sign, whitespace, or control character in the value would
+// reshape the request. The gateway is the authoritative guard (it also covers
+// 1Password-sourced values unknown at write time); this gives inline values
+// immediate feedback at write time.
+export const isPathSafeValue = (value: string): boolean =>
+  ![...value].some((ch) => {
+    const code = ch.codePointAt(0) ?? 0;
+    return (
+      "/?#% ".includes(ch) || code < 0x20 || (code >= 0x7f && code <= 0x9f)
+    );
+  });
 
 // A secret's host pattern decides which hosts its credential is injected into.
 // A "*.X" wildcard is safe only when X is a single registrable domain; a wildcard

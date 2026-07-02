@@ -28,12 +28,25 @@ interface ConnectFlowProps {
       secret?: boolean;
       optional?: boolean;
       group?: string;
+      helpUrl?: string;
+      helpLabel?: string;
     }[];
     fileImport?: {
       label: string;
       accept: string;
       keyMap: Record<string, string>;
     };
+    apiKeyFields?: {
+      name: string;
+      label: string;
+      description?: string;
+      placeholder: string;
+      secret?: boolean;
+      optional?: boolean;
+      group?: string;
+      helpUrl?: string;
+      helpLabel?: string;
+    }[];
   };
   hasDefaults: boolean;
   status?: "success" | "error";
@@ -64,6 +77,8 @@ export const ConnectFlow = ({
   const [error, setError] = useState(errorMessage ?? "");
   const [countdown, setCountdown] = useState(3);
   const redirectedRef = useRef(false);
+  const [mode, setMode] = useState<"oauth" | "apikey">("oauth");
+  const hasApiKeyAlternate = !!app.apiKeyFields?.length;
 
   const doRedirect = useCallback(async () => {
     if (redirectedRef.current) return;
@@ -88,6 +103,9 @@ export const ConnectFlow = ({
   useEffect(() => {
     if (state !== "ready" || !hasDefaults) return;
     if (app.connectionType !== "oauth") return;
+    // When an API-key alternate is offered, let the user choose instead of
+    // auto-redirecting to OAuth.
+    if (hasApiKeyAlternate) return;
 
     setCountdown(3);
     const interval = setInterval(() => {
@@ -102,7 +120,7 @@ export const ConnectFlow = ({
     }, 1000);
 
     return () => clearInterval(interval);
-  }, [state, hasDefaults, app.connectionType, doRedirect]);
+  }, [state, hasDefaults, app.connectionType, hasApiKeyAlternate, doRedirect]);
 
   if (state === "success") {
     return (
@@ -119,6 +137,29 @@ export const ConnectFlow = ({
           agentName={agentName}
         />
       </ConnectLayout>
+    );
+  }
+
+  // API key alternate for an OAuth-primary app (e.g. Attio) when the user
+  // chose "Use an API key instead".
+  if (mode === "apikey" && app.apiKeyFields?.length && state !== "error") {
+    return (
+      <CredentialsFlow
+        app={{ ...app, connectionType: "api_key" }}
+        fields={app.apiKeyFields}
+        method="api_key"
+        connectionId={connectionId}
+        preContent={preContent}
+        hiddenFields={hiddenFields}
+        projectId={explicitProjectId}
+        orgId={orgId}
+        onBack={() => setMode("oauth")}
+        onSuccess={() => setState("success")}
+        onError={(msg) => {
+          setError(msg);
+          setState("error");
+        }}
+      />
     );
   }
 
@@ -212,6 +253,15 @@ export const ConnectFlow = ({
           >
             Configure credentials
           </Button>
+          {hasApiKeyAlternate && (
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => setMode("apikey")}
+            >
+              Use an API key instead
+            </Button>
+          )}
           {!IS_CLOUD && (
             <>
               <div className="flex items-center gap-3 pt-1">
@@ -286,6 +336,15 @@ export const ConnectFlow = ({
               <p className="text-center text-xs text-muted-foreground/60">
                 Auto-connecting in {countdown}s
               </p>
+            )}
+            {hasApiKeyAlternate && (
+              <button
+                type="button"
+                onClick={() => setMode("apikey")}
+                className="w-full text-center text-xs text-muted-foreground underline decoration-muted-foreground/40 underline-offset-2 transition-colors hover:text-foreground hover:decoration-foreground/60"
+              >
+                Use an API key instead
+              </button>
             )}
           </div>
         )}

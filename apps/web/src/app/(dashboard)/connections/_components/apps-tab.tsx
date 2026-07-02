@@ -4,6 +4,7 @@ import {
   useCallback,
   useEffect,
   useMemo,
+  useRef,
   useState,
   useTransition,
 } from "react";
@@ -65,6 +66,29 @@ export const AppsTab = ({
   const [, startTransition] = useTransition();
   const searchQuery = searchParams.get("q") ?? "";
   const [localSearch, setLocalSearch] = useState(searchQuery);
+  const searchInputRef = useRef<HTMLInputElement>(null);
+
+  // Intercept Ctrl/Cmd+F on the apps page to focus the search field instead of
+  // the browser's native find. Mirrors the window keydown + cleanup pattern
+  // used in the dashboard header.
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      // Only the bare Ctrl/Cmd+F chord triggers the browser's native find;
+      // Shift/Alt variants mean other things, so don't hijack them.
+      if (
+        (e.ctrlKey || e.metaKey) &&
+        !e.shiftKey &&
+        !e.altKey &&
+        e.key.toLowerCase() === "f"
+      ) {
+        e.preventDefault();
+        searchInputRef.current?.focus();
+        searchInputRef.current?.select();
+      }
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, []);
   const activeCategory =
     (searchParams.get("category") as AppCategory | null) ?? "all";
   const [connectionCounts, setConnectionCounts] = useState<Map<string, number>>(
@@ -264,6 +288,7 @@ export const AppsTab = ({
         <div className="relative shrink-0">
           <Search className="text-muted-foreground pointer-events-none absolute top-1/2 left-3 size-4 -translate-y-1/2" />
           <Input
+            ref={searchInputRef}
             placeholder="Search..."
             value={localSearch}
             onChange={(e) => {

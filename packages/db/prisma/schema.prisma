@@ -204,7 +204,6 @@ model Secret {
   pathPattern     String?       @map("path_pattern") // "/v1/*", null = all paths
   injectionConfig Json?         @map("injection_config") // type-specific config (generic: { headerName, valueFormat })
   metadata        Json? // type-specific metadata (anthropic: { authMode: "api-key" | "oauth" })
-  isPlatform      Boolean       @default(false) @map("is_platform")
   createdAt       DateTime      @default(now()) @map("created_at")
   updatedAt       DateTime      @updatedAt @map("updated_at")
   project         Project?      @relation(fields: [projectId], references: [id])

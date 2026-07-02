@@ -2,7 +2,13 @@ import { Hono } from "hono";
 import type { ApiEnv } from "../types";
 import { authMiddleware, requireProjectId } from "../middleware/auth";
 import { getUser, updateProfile } from "../services/user-service";
-import { getApiKey, regenerateApiKey } from "../services/api-key-service";
+import { ensureApiKey, regenerateApiKey } from "../services/api-key-service";
+import {
+  recordAuditEvent,
+  AUDIT_ACTIONS,
+  AUDIT_SERVICES,
+  AUDIT_SOURCE,
+} from "../services/audit-service";
 import { updateProfileSchema } from "../validations/user";
 
 export const userRoutes = () => {
@@ -35,10 +41,20 @@ export const userRoutes = () => {
   // GET /user/api-key
   app.get("/api-key", async (c) => {
     const auth = c.get("auth");
-    const result = await getApiKey(auth.userId, {
-      projectId: requireProjectId(auth),
-    });
-    return c.json(result);
+    const projectId = requireProjectId(auth);
+    const { apiKey, created } = await ensureApiKey(auth.userId, { projectId });
+    if (created) {
+      await recordAuditEvent({
+        projectId,
+        userId: auth.userId,
+        userEmail: auth.userEmail,
+        action: AUDIT_ACTIONS.CREATE,
+        service: AUDIT_SERVICES.API_KEY,
+        source: AUDIT_SOURCE.API,
+        metadata: { scope: "project", autoProvisioned: true },
+      });
+    }
+    return c.json({ apiKey });
   });
 
   // POST /user/api-key/regenerate

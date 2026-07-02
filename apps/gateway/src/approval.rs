@@ -5,7 +5,7 @@
 //! pending approvals and submits decisions via the gateway API.
 //!
 //! OSS uses an in-memory `DashMap` backend with `tokio::sync` channels.
-//! Cloud swaps this module via `#[cfg(feature = "cloud")]` to use Redis.
+//! Cloud swaps this module via `#[cfg(edition_cloud)]` to use Redis.
 
 use std::collections::HashMap;
 use std::sync::Arc;

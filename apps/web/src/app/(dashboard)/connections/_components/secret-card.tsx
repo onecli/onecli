@@ -28,6 +28,8 @@ import {
   type InjectionConfig,
   isHeaderInjection,
   isParamInjection,
+  isPathRegexInjection,
+  isPathTemplateInjection,
 } from "@onecli/api/validations/secret";
 import { SecretDialog } from "./secret-dialog";
 
@@ -43,7 +45,6 @@ interface SecretCardProps {
     pathPattern: string | null;
     injectionConfig: unknown;
     metadata: Record<string, unknown> | null;
-    isPlatform: boolean;
     createdAt: Date;
   };
   onUpdate?: () => void;
@@ -109,11 +110,6 @@ export const SecretCard = ({
                   1Password
                 </Badge>
               )}
-              {secret.isPlatform && (
-                <Badge variant="outline" className="text-xs text-brand">
-                  Trial
-                </Badge>
-              )}
               {badge && (
                 <Badge variant="outline" className="text-[10px]">
                   {badge}
@@ -161,6 +157,26 @@ export const SecretCard = ({
                     Query param{" "}
                     <code className="bg-muted rounded px-1 py-0.5 font-mono">
                       ?{config.paramName}
+                    </code>
+                  </span>
+                )}
+              {secret.type === "generic" &&
+                config &&
+                isPathTemplateInjection(config) && (
+                  <span className="text-muted-foreground">
+                    URL path{" "}
+                    <code className="bg-muted rounded px-1 py-0.5 font-mono">
+                      {config.pathTemplate}
+                    </code>
+                  </span>
+                )}
+              {secret.type === "generic" &&
+                config &&
+                isPathRegexInjection(config) && (
+                  <span className="text-muted-foreground">
+                    URL path{" "}
+                    <code className="bg-muted rounded px-1 py-0.5 font-mono">
+                      {config.pathRegex}
                     </code>
                   </span>
                 )}

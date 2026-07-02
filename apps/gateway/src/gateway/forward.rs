@@ -648,7 +648,7 @@ pub(crate) async fn forward_request(
             )
             .await?
         }
-        #[cfg(feature = "cloud")]
+        #[cfg(edition_cloud)]
         Some(crate::apps::RequestFinalizer::AwsAssumeRole) => {
             super::finalizers::aws_sts::finalize_request(
                 host,

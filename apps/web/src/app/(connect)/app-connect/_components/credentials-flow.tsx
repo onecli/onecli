@@ -29,6 +29,8 @@ interface CredentialsFlowField {
   secret?: boolean;
   optional?: boolean;
   group?: string;
+  helpUrl?: string;
+  helpLabel?: string;
 }
 
 export interface CredentialsFlowProps {
@@ -49,6 +51,10 @@ export interface CredentialsFlowProps {
   onError: (message: string) => void;
   projectId?: string;
   orgId?: string;
+  /** Connection method to connect with, when the app offers more than one. */
+  method?: string;
+  /** When set, shows a link to return to the app's primary (OAuth) flow. */
+  onBack?: () => void;
 }
 
 export const CredentialsFlow = ({
@@ -62,6 +68,8 @@ export const CredentialsFlow = ({
   onError,
   projectId,
   orgId,
+  method,
+  onBack,
 }: CredentialsFlowProps) => {
   const [values, setValues] = useState<Record<string, string>>({});
   const [connectionLabel, setConnectionLabel] = useState("");
@@ -135,6 +143,7 @@ export const CredentialsFlow = ({
           fields: { ...values, ...hiddenFields },
           connectionId,
           ...(connectionLabel.trim() ? { label: connectionLabel.trim() } : {}),
+          ...(method ? { method } : {}),
         }),
         headers: {
           ...(projectId ? { "X-Project-Id": projectId } : {}),
@@ -142,8 +151,14 @@ export const CredentialsFlow = ({
         },
       });
       if (!resp.ok) {
-        const data = (await resp.json()) as { error?: string };
-        throw new Error(data.error ?? "Failed to connect");
+        const data = (await resp.json().catch(() => null)) as {
+          error?: string | { message?: string };
+        } | null;
+        const message =
+          typeof data?.error === "string"
+            ? data.error
+            : (data?.error?.message ?? "Failed to connect");
+        throw new Error(message);
       }
       onSuccess();
     } catch (err) {
@@ -273,6 +288,17 @@ export const CredentialsFlow = ({
             </button>
           </p>
         )}
+        {onBack && (
+          <p className="text-center text-xs text-muted-foreground">
+            <button
+              type="button"
+              className="underline decoration-muted-foreground/40 underline-offset-2 transition-colors hover:text-foreground hover:decoration-foreground/60"
+              onClick={onBack}
+            >
+              Use OAuth instead
+            </button>
+          </p>
+        )}
       </div>
     </ConnectLayout>
   );
@@ -298,6 +324,16 @@ const FieldInput = ({
     </Label>
     {field.description && (
       <p className="text-xs text-muted-foreground">{field.description}</p>
+    )}
+    {field.helpUrl && (
+      <a
+        href={field.helpUrl}
+        target="_blank"
+        rel="noopener noreferrer"
+        className="w-fit text-xs text-muted-foreground underline decoration-muted-foreground/40 underline-offset-2 transition-colors hover:text-foreground hover:decoration-foreground/60"
+      >
+        {field.helpLabel ?? "Learn more"}
+      </a>
     )}
     {field.secret === true ||
     (field.secret === undefined && connectionType === "api_key") ? (

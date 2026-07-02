@@ -3,7 +3,7 @@
 import { useState } from "react";
 import { ChevronsUpDown, Loader2, LogOut } from "lucide-react";
 
-import pkg from "../../../../../../package.json";
+import { APP_VERSION } from "@/lib/env";
 import { useAuth } from "@/providers/auth-provider";
 import { Avatar, AvatarFallback } from "@onecli/ui/components/avatar";
 import {
@@ -66,7 +66,7 @@ export const NavUser = () => {
                     {displayName}
                   </p>
                   <span className="text-muted-foreground text-[10px]">
-                    v{pkg.version}
+                    v{APP_VERSION}
                   </span>
                 </div>
                 <p className="text-muted-foreground text-xs leading-none">

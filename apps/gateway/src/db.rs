@@ -40,7 +40,7 @@ pub(crate) struct SecretRow {
     /// partner-tier credential by its actual scope — regardless of how the secret
     /// was resolved (inherited vs. selectively assigned to an agent). Read only by
     /// the cloud budget module (`BudgetSecret` impl), hence the cfg'd allow.
-    #[cfg_attr(not(feature = "cloud"), allow(dead_code))]
+    #[cfg_attr(edition_oss, allow(dead_code))]
     pub scope: String,
     #[sqlx(rename = "type")]
     pub type_: String,
@@ -54,7 +54,6 @@ pub(crate) struct SecretRow {
     pub host_pattern: String,
     pub path_pattern: Option<String>,
     pub injection_config: Option<serde_json::Value>,
-    pub is_platform: bool,
     pub metadata: Option<serde_json::Value>,
 }
 
@@ -87,7 +86,7 @@ pub(crate) struct ApiKeyRow {
 }
 
 /// An org-scoped API key row from the `api_keys` table.
-#[cfg(feature = "cloud")]
+#[cfg(edition_cloud)]
 #[derive(Debug, FromRow)]
 pub(crate) struct OrgApiKeyRow {
     pub user_id: String,
@@ -128,7 +127,7 @@ pub(crate) async fn find_user_by_external_auth_id(
 /// default project — it requires an explicit `X-Project-Id` and validates it
 /// with [`user_can_access_project`]. Gating this `not(cloud)` makes that a
 /// compile-time guarantee (a cloud caller fails to build).
-#[cfg(not(feature = "cloud"))]
+#[cfg(edition_oss)]
 pub(crate) async fn find_default_project_id_by_user(
     pool: &PgPool,
     user_id: &str,
@@ -161,7 +160,7 @@ pub(crate) async fn find_api_key(pool: &PgPool, key: &str) -> Result<Option<ApiK
 }
 
 /// Look up an org-scoped API key (`oc_org_...`) and return its user_id and organization_id.
-#[cfg(feature = "cloud")]
+#[cfg(edition_cloud)]
 pub(crate) async fn find_org_api_key(pool: &PgPool, key: &str) -> Result<Option<OrgApiKeyRow>> {
     sqlx::query_as::<_, OrgApiKeyRow>(
         r#"SELECT user_id, organization_id
@@ -176,7 +175,7 @@ pub(crate) async fn find_org_api_key(pool: &PgPool, key: &str) -> Result<Option<
 }
 
 /// Verify that a project belongs to the given organization.
-#[cfg(feature = "cloud")]
+#[cfg(edition_cloud)]
 pub(crate) async fn verify_project_in_org(
     pool: &PgPool,
     project_id: &str,
@@ -195,7 +194,7 @@ pub(crate) async fn verify_project_in_org(
 /// Verify that a user may access a project — i.e. the project belongs to an
 /// organization the user is a member of. Scopes cloud browser (Cognito)
 /// requests to the `X-Project-Id` they specify instead of a default project.
-#[cfg(feature = "cloud")]
+#[cfg(edition_cloud)]
 pub(crate) async fn user_can_access_project(
     pool: &PgPool,
     user_id: &str,
@@ -213,6 +212,55 @@ pub(crate) async fn user_can_access_project(
     .fetch_optional(pool)
     .await
     .context("verifying user has access to project")?;
+    Ok(row.is_some())
+}
+
+/// Whether a user may manage a project — its creator, or an admin/owner of the
+/// project's organization. Re-checked on every API-key auth so a key stops
+/// working once its user loses access (e.g. demotion or removal). Cloud-only.
+#[cfg(edition_cloud)]
+pub(crate) async fn user_can_manage_project(
+    pool: &PgPool,
+    user_id: &str,
+    project_id: &str,
+) -> Result<bool> {
+    let row: Option<(String,)> = sqlx::query_as(
+        r#"SELECT p.id
+           FROM projects p
+           LEFT JOIN organization_members om
+             ON om.organization_id = p.organization_id AND om.user_id = $1
+           WHERE p.id = $2
+             AND (p.created_by_user_id = $1 OR om.role IN ('owner', 'admin'))
+           LIMIT 1"#,
+    )
+    .bind(user_id)
+    .bind(project_id)
+    .fetch_optional(pool)
+    .await
+    .context("verifying user can manage project")?;
+    Ok(row.is_some())
+}
+
+/// Whether a user is an admin or owner of an organization. Re-checked on every
+/// org-scoped API-key auth so the key stops working after a demotion. Cloud-only.
+#[cfg(edition_cloud)]
+pub(crate) async fn user_is_org_admin(
+    pool: &PgPool,
+    user_id: &str,
+    organization_id: &str,
+) -> Result<bool> {
+    let row: Option<(String,)> = sqlx::query_as(
+        r#"SELECT user_id
+           FROM organization_members
+           WHERE user_id = $1 AND organization_id = $2
+             AND role IN ('owner', 'admin')
+           LIMIT 1"#,
+    )
+    .bind(user_id)
+    .bind(organization_id)
+    .fetch_optional(pool)
+    .await
+    .context("verifying user is org admin")?;
     Ok(row.is_some())
 }
 
@@ -255,7 +303,7 @@ pub(crate) async fn find_secrets_by_project(
     project_id: &str,
 ) -> Result<Vec<SecretRow>> {
     sqlx::query_as::<_, SecretRow>(
-        r#"SELECT id, scope, type, value_source, encrypted_value, op_ref, host_pattern, path_pattern, injection_config, is_platform, metadata FROM secrets WHERE project_id = $1"#,
+        r#"SELECT id, scope, type, value_source, encrypted_value, op_ref, host_pattern, path_pattern, injection_config, metadata FROM secrets WHERE project_id = $1"#,
     )
     .bind(project_id)
     .fetch_all(pool)
@@ -266,7 +314,7 @@ pub(crate) async fn find_secrets_by_project(
 /// Find secrets assigned to a specific agent (selective mode).
 pub(crate) async fn find_secrets_by_agent(pool: &PgPool, agent_id: &str) -> Result<Vec<SecretRow>> {
     sqlx::query_as::<_, SecretRow>(
-        r#"SELECT s.id, s.scope, s.type, s.value_source, s.encrypted_value, s.op_ref, s.host_pattern, s.path_pattern, s.injection_config, s.is_platform, s.metadata
+        r#"SELECT s.id, s.scope, s.type, s.value_source, s.encrypted_value, s.op_ref, s.host_pattern, s.path_pattern, s.injection_config, s.metadata
            FROM secrets s
            INNER JOIN agent_secrets as_ ON s.id = as_.secret_id
            WHERE as_.agent_id = $1"#,
@@ -283,7 +331,7 @@ pub(crate) async fn find_secrets_by_org(
     organization_id: &str,
 ) -> Result<Vec<SecretRow>> {
     sqlx::query_as::<_, SecretRow>(
-        r#"SELECT id, scope, type, value_source, encrypted_value, op_ref, host_pattern, path_pattern, injection_config, is_platform, metadata
+        r#"SELECT id, scope, type, value_source, encrypted_value, op_ref, host_pattern, path_pattern, injection_config, metadata
            FROM secrets
            WHERE organization_id = $1 AND scope = 'organization'"#,
     )
