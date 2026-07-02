@@ -1,4 +1,4 @@
-#[cfg(edition_oss)]
+#[cfg(not(edition_cloud))]
 mod auth;
 
 #[cfg(edition_cloud)]
@@ -7,14 +7,14 @@ mod auth;
 
 mod ca;
 
-#[cfg(edition_oss)]
+#[cfg(not(edition_cloud))]
 mod cache;
 
 #[cfg(edition_cloud)]
 #[path = "cloud/cache.rs"]
 mod cache;
 
-#[cfg(edition_oss)]
+#[cfg(not(edition_cloud))]
 mod approval;
 
 #[cfg(edition_cloud)]
@@ -26,20 +26,20 @@ mod apps;
 #[cfg(edition_oss)]
 mod cloud_apps;
 
-#[cfg(edition_cloud)]
+#[cfg(not(edition_oss))]
 #[path = "cloud/cloud_apps.rs"]
 mod cloud_apps;
 
 mod connect;
 
-#[cfg(edition_oss)]
+#[cfg(not(edition_cloud))]
 mod condition_match;
 
 #[cfg(edition_cloud)]
 #[path = "cloud/condition_match.rs"]
 mod condition_match;
 
-#[cfg(edition_oss)]
+#[cfg(not(edition_cloud))]
 mod crypto;
 
 #[cfg(edition_cloud)]
@@ -59,7 +59,7 @@ mod summary;
 // no-op `cloud_summary.rs` stub; the cloud build swaps in `cloud/cloud_summary.rs`
 // (+ the `cloud/cloud_summary/` submodules). Mirrors the `cloud_apps` split, and
 // is the fall-through arm of `summary`'s per-provider dispatch.
-#[cfg(edition_oss)]
+#[cfg(not(edition_cloud))]
 mod cloud_summary;
 
 #[cfg(edition_cloud)]
@@ -70,7 +70,7 @@ mod telemetry_core;
 mod util;
 mod version;
 
-#[cfg(edition_oss)]
+#[cfg(not(edition_cloud))]
 mod telemetry;
 
 #[cfg(edition_cloud)]
@@ -79,24 +79,24 @@ mod telemetry;
 
 // Partner layer (cloud-only). OSS build uses the no-op `partner.rs` stub; the
 // cloud build swaps in `cloud/partner.rs` (+ the `cloud/partner/` submodules).
-#[cfg(edition_oss)]
+#[cfg(not(edition_cloud))]
 mod partner;
 
 #[cfg(edition_cloud)]
 #[path = "cloud/partner.rs"]
 mod partner;
 
-// Granular access (cloud-only): generic per-agent scoping for app connections —
-// token-level (e.g. GitHub repo-scoped tokens) or request-level (e.g. Dropbox
-// folder allowlist). No OSS stub: it is referenced only from other cloud-only
-// modules (`cloud/hooks.rs`, `cloud/cloud_apps.rs`).
-#[cfg(edition_cloud)]
+// Granular access (EE — cloud + onprem): generic per-agent scoping for app
+// connections — token-level (e.g. GitHub repo-scoped tokens) or request-level
+// (e.g. Dropbox folder allowlist). No OSS stub: referenced only from the cloud/
+// onprem hooks + cloud_apps modules, which are all cfg'd out for oss.
+#[cfg(not(edition_oss))]
 #[path = "cloud/granular_access.rs"]
 mod granular_access;
 
 // Budget layer (cloud-only). OSS build uses the no-op `budget.rs` stub; the
 // cloud build swaps in `cloud/budget.rs` (+ the `cloud/budget/` submodules).
-#[cfg(edition_oss)]
+#[cfg(not(edition_cloud))]
 mod budget;
 
 #[cfg(edition_cloud)]

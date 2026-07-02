@@ -196,7 +196,7 @@ pub(crate) struct ResolvedRules {
     /// cached token that should be served instead of forwarding.
     pub intercept_token: Option<InterceptToken>,
     /// Normalized plan name for quota enforcement ("free", "pro", "team").
-    #[cfg_attr(edition_oss, allow(dead_code))]
+    #[cfg_attr(not(edition_cloud), allow(dead_code))]
     pub plan: String,
     /// Rewritten upstream host (e.g., Datadog us5 → api.us5.datadoghq.com).
     pub rewrite_host: Option<String>,
@@ -211,16 +211,16 @@ pub(crate) struct ResolvedRules {
     /// Organization policy mode: "allow" (default) or "deny" (block by default).
     pub policy_mode: String,
     /// Cloud-only: pending claim token when the org is in claim mode. Inert in OSS.
-    #[cfg_attr(edition_oss, allow(dead_code))]
+    #[cfg_attr(not(edition_cloud), allow(dead_code))]
     pub claim_token: Option<String>,
     /// Per-agent resource policy (e.g. Dropbox folder allowlist) for the
     /// connection serving this host. Consumed by the cloud request guard to
     /// enforce granular access; `None` in the common, unrestricted case.
-    #[cfg_attr(edition_oss, allow(dead_code))]
+    #[cfg_attr(not(edition_cloud), allow(dead_code))]
     pub session_policy: Option<serde_json::Value>,
     /// Cloud-only: spend budgets governing the effective credential for this host
     /// (0/1 in practice). Empty in OSS.
-    #[cfg_attr(edition_oss, allow(dead_code))]
+    #[cfg_attr(not(edition_cloud), allow(dead_code))]
     pub budget_bindings: Vec<crate::budget::BudgetBinding>,
 }
 

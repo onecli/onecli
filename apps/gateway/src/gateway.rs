@@ -22,6 +22,9 @@ pub(crate) mod forward;
 mod hints;
 #[cfg(edition_oss)]
 pub(crate) mod hooks;
+#[cfg(any(edition_onprem_slim, edition_onprem_full))]
+#[path = "onprem/hooks.rs"]
+pub(crate) mod hooks;
 #[cfg(edition_cloud)]
 #[path = "cloud/hooks.rs"]
 pub(crate) mod hooks;

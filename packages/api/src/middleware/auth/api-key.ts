@@ -1,7 +1,7 @@
 import { db } from "@onecli/db";
 import type { AuthContext } from "../../providers";
 import { getRoleResolver, ROLE_HIERARCHY } from "../../providers";
-import { IS_CLOUD } from "../../lib/env";
+import { CAPS } from "../../lib/env";
 import { resolveUserEmail, canAccessProjectAsUser } from "./resolve";
 
 export const authenticateApiKey = async (
@@ -24,9 +24,9 @@ export const authenticateApiKey = async (
       return null;
 
     // Org keys are an admin capability — re-check the key's user still holds
-    // admin/owner in the org (cloud only; OSS has neither org keys nor a role
-    // resolver). Closes the gap where a key keeps working after a demotion.
-    if (IS_CLOUD) {
+    // admin/owner in the org (only when RBAC is active; non-RBAC editions enforce
+    // no roles). Closes the gap where a key keeps working after a demotion.
+    if (CAPS.rbac) {
       const resolver = getRoleResolver();
       const role = resolver
         ? await resolver.getUserRole(apiKey.userId, apiKey.organizationId)

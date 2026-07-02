@@ -1,12 +1,14 @@
 import { NextResponse } from "next/server";
 import type { NextRequest } from "next/server";
 import {
+  CAPS,
   IS_CLOUD,
   GOOGLE_CLIENT_ID,
   NEXTAUTH_SECRET,
   SECRET_ENCRYPTION_KEY,
 } from "@/lib/env";
 import { PROJECT_PATH_RE, ORG_PATH_RE } from "@/lib/navigation";
+import { isConnectOnlyAllowed } from "@/lib/connect-surface";
 
 type SetupErrorCode = "oauth-misconfigured" | "missing-encryption-key";
 
@@ -47,7 +49,16 @@ export const proxy = (request: NextRequest) => {
     );
   }
 
-  if (!IS_CLOUD) {
+  // Connect-only editions (onprem-slim) expose only the app-connection surface —
+  // redirect anything outside it to the connect landing.
+  if (CAPS.webSurface === "connect-only" && !isConnectOnlyAllowed(pathname)) {
+    return NextResponse.redirect(new URL("/app-connect", request.url));
+  }
+
+  // Flat editions (oss, onprem-slim) don't namespace URLs by org/project — strip any
+  // /p/<id> or /org/<id> prefix. Org-scoped editions (cloud, onprem-full) keep the
+  // namespacing and fall through to the header-injection below.
+  if (!CAPS.orgScopedUI) {
     const scopeStripped = pathname
       .replace(PROJECT_PATH_RE, "")
       .replace(ORG_PATH_RE, "");

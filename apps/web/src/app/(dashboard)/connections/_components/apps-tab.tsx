@@ -31,7 +31,7 @@ import {
   getConfiguredProviders as defaultGetConfiguredProviders,
   getAvailableEnvDefaults,
 } from "@/lib/actions/app-config";
-import { getApps } from "@onecli/api/apps/registry";
+import { getApps, getApp } from "@onecli/api/apps/registry";
 import { RequestAppSlot } from "@/lib/components/request-app-slot";
 import { useAppMessages } from "@/hooks/use-app-connected";
 import { useInvalidateGatewayCache } from "@/hooks/use-invalidate-cache";
@@ -52,6 +52,11 @@ interface AppsTabProps {
   getConfiguredProviders?: typeof defaultGetConfiguredProviders;
   pageScope?: "project" | "organization";
   basePath?: string;
+  /**
+   * Connect-only surface (onprem-slim): the per-app detail pages don't exist, so the
+   * row connects directly and "View details" / post-connect navigation are suppressed.
+   */
+  connectOnly?: boolean;
 }
 
 export const AppsTab = ({
@@ -59,6 +64,7 @@ export const AppsTab = ({
   getConfiguredProviders = defaultGetConfiguredProviders,
   pageScope = "project",
   basePath,
+  connectOnly = false,
 }: AppsTabProps) => {
   const router = useRouter();
   const pathname = usePathname();
@@ -159,19 +165,32 @@ export const AppsTab = ({
     ({ provider }: { provider?: string }) => {
       fetchConnections();
       invalidateCache();
-      if (provider) {
+      if (provider && !connectOnly) {
         router.push(
           connectionsPath({ pathname, basePath }, `/apps/${provider}`),
         );
       }
     },
-    [fetchConnections, invalidateCache, router, basePath, pathname],
+    [
+      fetchConnections,
+      invalidateCache,
+      router,
+      basePath,
+      pathname,
+      connectOnly,
+    ],
   );
 
   useAppMessages({
     onConnected: handleConnected,
-    onConfigure: (provider) =>
-      router.push(connectionsPath({ pathname, basePath }, `/apps/${provider}`)),
+    onConfigure: (provider) => {
+      // Connect-only has no detail page — open the config dialog in place instead.
+      if (connectOnly) {
+        setConfigApp(getApp(provider) ?? null);
+        return;
+      }
+      router.push(connectionsPath({ pathname, basePath }, `/apps/${provider}`));
+    },
   });
 
   const openConnectPopup = (
@@ -248,8 +267,11 @@ export const AppsTab = ({
 
   const hasActiveFilter = localSearch.trim() !== "" || activeCategory !== "all";
 
-  const handleConnect = (e: React.MouseEvent, app: AppDefinition) => {
-    e.stopPropagation();
+  const handleConnect = (
+    e: React.MouseEvent | undefined,
+    app: AppDefinition,
+  ) => {
+    e?.stopPropagation();
     const hasCredentials =
       envDefaultProviders.has(app.id) || configuredProviders.has(app.id);
     if (
@@ -371,17 +393,20 @@ export const AppsTab = ({
                 darkIcon={app.darkIcon}
                 connectionCount={count}
                 cloudOnly={isLocked}
+                hideDetails={connectOnly}
                 onConnect={(e) => handleConnect(e, app)}
                 onClick={
                   isLocked
                     ? () => setProApp(app)
-                    : () =>
-                        router.push(
-                          connectionsPath(
-                            { pathname, basePath },
-                            `/apps/${app.id}`,
-                          ),
-                        )
+                    : connectOnly
+                      ? () => handleConnect(undefined, app)
+                      : () =>
+                          router.push(
+                            connectionsPath(
+                              { pathname, basePath },
+                              `/apps/${app.id}`,
+                            ),
+                          )
                 }
               />
             );
@@ -455,6 +480,7 @@ interface AppRowProps {
   darkIcon?: string;
   connectionCount: number;
   cloudOnly?: boolean;
+  hideDetails?: boolean;
   onConnect: (e: React.MouseEvent) => void;
   onClick: () => void;
 }
@@ -465,6 +491,7 @@ const AppRow = ({
   darkIcon,
   connectionCount,
   cloudOnly,
+  hideDetails,
   onConnect,
   onClick,
 }: AppRowProps) => {
@@ -483,7 +510,7 @@ const AppRow = ({
         </div>
         <div className="min-w-0">
           <span className="text-sm font-medium">{name}</span>
-          {!cloudOnly && (
+          {!cloudOnly && !hideDetails && (
             <p className="text-[11px] text-muted-foreground group-hover:underline group-hover:text-foreground group-has-[button:hover]:no-underline group-has-[button:hover]:text-muted-foreground transition-colors">
               View details
             </p>
@@ -523,7 +550,9 @@ const AppRow = ({
         </span>
       ) : (
         <div className="flex items-center gap-2 shrink-0">
-          <ChevronRight className="size-4 text-muted-foreground transition-all group-hover:text-foreground group-hover:translate-x-0.5 group-has-[button:hover]:text-muted-foreground group-has-[button:hover]:translate-x-0" />
+          {!hideDetails && (
+            <ChevronRight className="size-4 text-muted-foreground transition-all group-hover:text-foreground group-hover:translate-x-0.5 group-has-[button:hover]:text-muted-foreground group-has-[button:hover]:translate-x-0" />
+          )}
           <div className="border-l pl-2 min-w-20 flex justify-center">
             {connected ? (
               <div className="flex flex-col items-center">

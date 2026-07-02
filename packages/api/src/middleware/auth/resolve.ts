@@ -1,5 +1,5 @@
 import { db } from "@onecli/db";
-import { IS_CLOUD } from "../../lib/env";
+import { CAPS } from "../../lib/env";
 import { findUserDefaultProject } from "../../services/organization-service";
 import { getRoleResolver, ROLE_HIERARCHY } from "../../providers";
 
@@ -38,16 +38,16 @@ export const resolveOrganizationId = async (
 
 /**
  * Whether a user may access a project: its creator, or an admin/owner of the
- * project's organization. OSS registers no role resolver and is single-user, so
+ * project's organization. Non-RBAC editions (oss, onprem) enforce no roles, so
  * this is a no-op there (always allowed). Shared by `resolveProjectId` (session
- * project resolution) and the API-key auth path so both gate access identically
- * — and so a key keeps working only while its user still has access.
+ * project resolution) and the API-key auth path so both gate access identically —
+ * and so a key keeps working only while its user still has access.
  */
 export const canAccessProjectAsUser = async (
   userId: string,
   project: { createdByUserId: string | null; organizationId: string },
 ): Promise<boolean> => {
-  if (!IS_CLOUD) return true;
+  if (!CAPS.rbac) return true;
   if (project.createdByUserId === userId) return true;
   const resolver = getRoleResolver();
   const role = resolver
@@ -62,7 +62,7 @@ export const resolveProjectId = async (
 ): Promise<string | null> => {
   const headerProjectId = request.headers.get("x-project-id");
   if (!headerProjectId) {
-    if (IS_CLOUD) return null;
+    if (CAPS.tenancy === "multi-org") return null;
     const fallback = await findUserDefaultProject(userId);
     return fallback?.id ?? null;
   }
@@ -88,10 +88,10 @@ export const resolveProjectId = async (
 
   if (!project) return null;
 
-  // Cloud: a member may only target projects they created; admins and owners
-  // may target any project in their org. OSS standalone registers no role
-  // resolver, so this gate is skipped and any in-org project is accepted, as
-  // before. Mirrors `canManageAllProjects` in the cloud authorization service.
+  // Multi-org (cloud): a member may only target projects they created; admins
+  // and owners may target any project in their org. Non-multi-org editions
+  // register no role resolver, so this gate is skipped and any in-org project is
+  // accepted, as before. Mirrors `canManageAllProjects` in the cloud authz service.
   if (!(await canAccessProjectAsUser(userId, project))) return null;
 
   return project.id;

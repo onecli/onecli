@@ -2,6 +2,8 @@ import { readdirSync, readFileSync } from "node:fs";
 import path from "node:path";
 
 const isCloud = process.env.NEXT_PUBLIC_EDITION === "cloud";
+const isOnpremFull = process.env.NEXT_PUBLIC_EDITION === "onprem-full";
+const isOnpremSlim = process.env.NEXT_PUBLIC_EDITION === "onprem-slim";
 
 // Build-time app version, exposed to the app as NEXT_PUBLIC_APP_VERSION (client +
 // server, inlined by Next). Cloud stamps APP_VERSION (semver + short git sha, e.g.
@@ -46,10 +48,9 @@ const getOssDashboardSegments = () => {
 };
 
 // Cloud edition swaps these web import paths to cloud implementations (turbopack
-// resolveAlias, applied only when isCloud). The canonical key list is mirrored in
-// packages/api/src/lib/edition.ts (CLOUD_ALIAS_KEYS) — kept here too because this
-// config runs in plain Node and can't import that TypeScript module. A future
-// onprem edition would select a subset of these here.
+// resolveAlias, applied only when isCloud). This config runs in plain Node, so the
+// key→value map lives here directly. The onprem-full edition selects a curated
+// subset below (ONPREM_FULL_ALIASES).
 const CLOUD_ALIASES = {
   "@/lib/auth/auth-provider": "@/cloud/auth/cognito-provider",
   "@/lib/auth/auth-server": "@/cloud/auth/cognito-server",
@@ -77,6 +78,51 @@ const CLOUD_ALIASES = {
   "@/lib/api-fetch": "@/cloud/api-fetch",
 };
 
+// Both onprem editions inject the real cloud app definitions via an onprem init seam
+// (api/server/client) so the cloud-only apps are connectable with the customer's own
+// OAuth credentials (BYO), while keeping local crypto/auth (no KMS/Cognito/cloud routes).
+const ONPREM_INIT_ALIASES = {
+  "@/lib/init/api": "@/onprem/init/api",
+  "@/lib/init/server": "@/onprem/init/server",
+  "@/lib/init/client": "@/onprem/init/client",
+};
+
+// Both onprem editions are the fully-entitled enterprise edition: report the top
+// plan (so premium/teamOnly apps + features aren't shown as locked) and get the
+// granular-access policy dialogs. The backend already allows everything for onprem.
+const ONPREM_ENTITLEMENT_ALIASES = {
+  "@/lib/user-plan": "@/onprem/user-plan",
+  "@/lib/granular-access": CLOUD_ALIASES["@/lib/granular-access"],
+};
+
+// The onprem-full edition reuses the cloud ORG-UI implementations + the org-aware home
+// redirect (org routes, nav, dashboard chrome) but keeps the OSS defaults for auth
+// (local), resolve-user (its project context already works for a single org), and billing
+// (none). It adds the onprem init seam (cloud app defs) + one onprem-specific module:
+// api-fetch (local cookie auth + project-scoped headers, no bearer token). The cloud
+// org-context helpers are imported directly by the org pages and work as-is for onprem
+// (members are "owner").
+const ONPREM_FULL_ALIASES = {
+  ...ONPREM_INIT_ALIASES,
+  ...ONPREM_ENTITLEMENT_ALIASES,
+  // org-UI + org-aware redirect → cloud implementations (reuse the cloud mappings above)
+  "@/lib/nav-config": CLOUD_ALIASES["@/lib/nav-config"],
+  "@dashboard/dashboard-sidebar": CLOUD_ALIASES["@dashboard/dashboard-sidebar"],
+  "@dashboard/dashboard-header": CLOUD_ALIASES["@dashboard/dashboard-header"],
+  "@/lib/dashboard/session-redirect":
+    CLOUD_ALIASES["@/lib/dashboard/session-redirect"],
+  "@/lib/home-redirect": CLOUD_ALIASES["@/lib/home-redirect"],
+  // onprem-specific: local cookie auth + project-scoped headers
+  "@/lib/api-fetch": "@/onprem/api-fetch",
+};
+
+// onprem-slim keeps the flat OSS surface (local auth, OSS api-fetch) + only adds the
+// onprem init seam so cloud apps are connectable via BYO.
+const ONPREM_SLIM_ALIASES = {
+  ...ONPREM_INIT_ALIASES,
+  ...ONPREM_ENTITLEMENT_ALIASES,
+};
+
 /** @type {import('next').NextConfig} */
 const nextConfig = {
   output: "standalone",
@@ -94,15 +140,22 @@ const nextConfig = {
       : "http://localhost:10255",
   },
   turbopack: {
-    resolveAlias: isCloud ? CLOUD_ALIASES : {},
+    resolveAlias: isCloud
+      ? CLOUD_ALIASES
+      : isOnpremFull
+        ? ONPREM_FULL_ALIASES
+        : isOnpremSlim
+          ? ONPREM_SLIM_ALIASES
+          : {},
   },
   async rewrites() {
-    // Cloud ships the OSS bare dashboard routes too (cloud may only add files), but only
-    // serves them namespaced under /p, /org, /account. Shadow each bare path (and its
-    // subpaths) before the filesystem route matches, rewriting to Next's built-in
-    // not-found route ("/_not-found") so the existing app/not-found.tsx renders with a
-    // real 404 and the requested URL is preserved. OSS edition: no-op.
-    if (!isCloud) return [];
+    // Cloud and onprem-full ship the OSS bare dashboard routes too (they may only add
+    // files), but only serve them namespaced under /p, /org, /account. Shadow each bare
+    // path (and its subpaths) before the filesystem route matches, rewriting to Next's
+    // built-in not-found route ("/_not-found") so the existing app/not-found.tsx renders
+    // with a real 404 and the requested URL is preserved. Flat editions (oss,
+    // onprem-slim): no-op.
+    if (!isCloud && !isOnpremFull) return [];
     const beforeFiles = getOssDashboardSegments().flatMap((seg) => [
       { source: seg, destination: "/_not-found" },
       { source: `${seg}/:path*`, destination: "/_not-found" },

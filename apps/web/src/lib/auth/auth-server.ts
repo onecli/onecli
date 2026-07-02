@@ -3,16 +3,12 @@ import { db } from "@onecli/db";
 import {
   findUserDefaultProject,
   bootstrapOrganization,
+  joinSharedOrganization,
 } from "@onecli/api/services/organization-service";
+import { CAPS } from "@/lib/env";
 import { getAuthMode } from "./auth-mode";
 import type { AuthUser } from "./types";
-
-const LOCAL_AUTH_ID = "local-admin";
-const LOCAL_USER: AuthUser = {
-  id: LOCAL_AUTH_ID,
-  email: "admin@localhost",
-  name: "Admin",
-};
+import { LOCAL_AUTH_ID, LOCAL_USER } from "./local-user";
 
 let localUserEnsured = false;
 
@@ -32,7 +28,15 @@ const ensureLocalUser = async () => {
 
   const existing = await findUserDefaultProject(user.id);
   if (!existing) {
-    await bootstrapOrganization(user.id, LOCAL_USER.email, LOCAL_USER.name);
+    // Mirror the /v1/auth/session gate: onprem (single shared org) joins the one
+    // shared org — which also seeds the bootstrap org API key — while OSS keeps a
+    // per-user org. Without this, local auth always bootstraps the OSS way and the
+    // onprem org key is never seeded.
+    if (CAPS.tenancy === "single-org-shared") {
+      await joinSharedOrganization(user.id, LOCAL_USER.email);
+    } else {
+      await bootstrapOrganization(user.id, LOCAL_USER.email, LOCAL_USER.name);
+    }
   }
 
   localUserEnsured = true;

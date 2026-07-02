@@ -93,6 +93,11 @@ hex = "0.4"
 # capability features it needs, so a future edition can pull a subset.
 cloud = ["kms", "aws-sts", "redis-cache"]
 
+# Onprem editions (slim / full). Local substrate only — no cloud deps; they
+# behave like the OSS build today (single-org / connect-only land in later steps).
+onprem-slim = []
+onprem-full = []
+
 # Capability features — enabled via an edition bundle; each pulls its optional
 # deps. The union under `cloud` is the same 4 deps as before (aws-sdk-kms,
 # aws-config, aws-sdk-sts, redis), so the cloud binary is unchanged.

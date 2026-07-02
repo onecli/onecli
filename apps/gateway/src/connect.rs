@@ -4,6 +4,7 @@
 //! the database directly via SQLx. Responses are cached per (agent_token, host)
 //! with a configurable TTL.
 
+use std::borrow::Cow;
 use std::sync::Arc;
 
 use tracing::{debug, warn};
@@ -476,6 +477,15 @@ impl PolicyEngine {
                 .resolve_connection_injections(conn, hostname, organization_id, project_id, cache)
                 .await;
         }
+
+        // On path-scoped shared hosts (e.g. www.googleapis.com, where Gmail,
+        // Calendar and Drive coexist by path), narrow to the connections whose
+        // provider serves THIS request path before the ambiguity check — so two
+        // same-provider connections (e.g. two Gmail accounts) don't make
+        // Calendar/Drive requests, which are unambiguous by path, falsely
+        // ambiguous. Dedicated hosts and no-path cases fall through unchanged.
+        let candidates = narrow_connections_by_path(app_connections, hostname, request_path);
+        let app_connections: &[db::AppConnectionRow] = &candidates;
 
         // Single connection — use it directly
         if app_connections.len() == 1 {
@@ -1191,6 +1201,49 @@ pub(crate) async fn resolve_from_cache(
     Ok(response)
 }
 
+// ── Connection narrowing ─────────────────────────────────────────────────
+
+/// Narrow app connections to those whose provider serves THIS request path,
+/// but only on shared, path-scoped hosts (e.g. `www.googleapis.com`, where
+/// Gmail, Calendar and Drive coexist by path prefix).
+///
+/// Without this, two connections of a single provider (e.g. two Gmail accounts)
+/// make *every* path on the shared host ambiguous — including Calendar/Drive
+/// requests that are unambiguous by path — forcing an `x-onecli-connection-id`
+/// header on requests that need none. Dedicated hosts (`gmail.googleapis.com`,
+/// no path prefix) are not path-scoped, so the full set is returned unchanged.
+///
+/// Returns the full set (borrowed) when there is no request path, the host is
+/// not path-scoped, or no connection serves the path — preserving prior
+/// behavior in every case except the shared-host mismatch this fixes.
+fn narrow_connections_by_path<'a>(
+    connections: &'a [db::AppConnectionRow],
+    hostname: &str,
+    request_path: Option<&str>,
+) -> Cow<'a, [db::AppConnectionRow]> {
+    // Narrowing can only change the outcome with at least two connections to
+    // disambiguate; skip the work — and the clone — for the common 0/1 case.
+    if connections.len() <= 1 {
+        return Cow::Borrowed(connections);
+    }
+    let Some(path) = request_path else {
+        return Cow::Borrowed(connections);
+    };
+    if !apps::host_has_path_scoped_providers(hostname) {
+        return Cow::Borrowed(connections);
+    }
+    let narrowed: Vec<db::AppConnectionRow> = connections
+        .iter()
+        .filter(|c| apps::provider_matches_host_and_path(&c.provider, hostname, path))
+        .cloned()
+        .collect();
+    if narrowed.is_empty() {
+        Cow::Borrowed(connections)
+    } else {
+        Cow::Owned(narrowed)
+    }
+}
+
 // ── Host matching ───────────────────────────────────────────────────────
 
 /// Returns `true` when the credential's stored host does not match the
@@ -1525,5 +1578,108 @@ mod tests {
             Some(&creds),
             "nanos-clone.jfrog.io"
         ));
+    }
+
+    // ── narrow_connections_by_path ────────────────────────────────────────
+
+    fn conn(id: &str, provider: &str) -> db::AppConnectionRow {
+        db::AppConnectionRow {
+            id: id.into(),
+            provider: provider.into(),
+            credentials: None,
+            label: None,
+            metadata: None,
+            session_policy: None,
+        }
+    }
+
+    fn ids(conns: &[db::AppConnectionRow]) -> Vec<&str> {
+        conns.iter().map(|c| c.id.as_str()).collect()
+    }
+
+    #[test]
+    fn narrow_calendar_request_selects_calendar_connection() {
+        // The bug: with two Gmail accounts, every www.googleapis.com path was
+        // ambiguous. A Calendar request must narrow to the single Calendar
+        // connection so it injects without an x-onecli-connection-id header.
+        let conns = vec![
+            conn("gmail1", "gmail"),
+            conn("gmail2", "gmail"),
+            conn("cal1", "google-calendar"),
+            conn("drive1", "google-drive"),
+        ];
+        let narrowed = narrow_connections_by_path(
+            &conns,
+            "www.googleapis.com",
+            Some("/calendar/v3/calendars/primary/events"),
+        );
+        assert_eq!(ids(&narrowed), vec!["cal1"]);
+    }
+
+    #[test]
+    fn narrow_gmail_request_keeps_both_gmail_accounts() {
+        // A Gmail request with two Gmail accounts stays genuinely ambiguous —
+        // narrowing keeps both so the caller still asks for a connection-id.
+        let conns = vec![
+            conn("gmail1", "gmail"),
+            conn("gmail2", "gmail"),
+            conn("cal1", "google-calendar"),
+        ];
+        let narrowed = narrow_connections_by_path(
+            &conns,
+            "www.googleapis.com",
+            Some("/gmail/v1/users/me/messages"),
+        );
+        assert_eq!(ids(&narrowed), vec!["gmail1", "gmail2"]);
+    }
+
+    #[test]
+    fn narrow_falls_back_to_full_set_when_nothing_serves_path() {
+        // No connection serves the path → return the full set unchanged rather
+        // than an empty set, preserving prior behavior for that edge case.
+        let conns = vec![conn("gmail1", "gmail"), conn("gmail2", "gmail")];
+        let narrowed =
+            narrow_connections_by_path(&conns, "www.googleapis.com", Some("/calendar/v3"));
+        assert_eq!(ids(&narrowed), vec!["gmail1", "gmail2"]);
+    }
+
+    #[test]
+    fn narrow_leaves_dedicated_host_untouched() {
+        // gmail.googleapis.com is not path-scoped (single provider, no path
+        // prefix), so the full set is returned — two Gmail accounts stay
+        // ambiguous there, which is correct.
+        let conns = vec![conn("gmail1", "gmail"), conn("gmail2", "gmail")];
+        let narrowed = narrow_connections_by_path(
+            &conns,
+            "gmail.googleapis.com",
+            Some("/gmail/v1/users/me/messages"),
+        );
+        assert_eq!(ids(&narrowed), vec!["gmail1", "gmail2"]);
+    }
+
+    #[test]
+    fn narrow_without_request_path_returns_full_set() {
+        let conns = vec![conn("gmail1", "gmail"), conn("cal1", "google-calendar")];
+        let narrowed = narrow_connections_by_path(&conns, "www.googleapis.com", None);
+        assert_eq!(ids(&narrowed), vec!["gmail1", "cal1"]);
+    }
+
+    #[test]
+    fn narrow_leaves_non_google_host_untouched() {
+        let conns = vec![conn("github1", "github")];
+        let narrowed = narrow_connections_by_path(&conns, "api.github.com", Some("/repos/foo/bar"));
+        assert_eq!(ids(&narrowed), vec!["github1"]);
+    }
+
+    #[test]
+    fn narrow_single_connection_is_returned_borrowed_unchanged() {
+        // A single connection can't be disambiguated: it is returned as-is and
+        // without a clone (Borrowed), even on a path-scoped host it does not
+        // serve — the common single-account case stays on the zero-copy path.
+        let conns = vec![conn("gmail1", "gmail")];
+        let narrowed =
+            narrow_connections_by_path(&conns, "www.googleapis.com", Some("/calendar/v3"));
+        assert_eq!(ids(&narrowed), vec!["gmail1"]);
+        assert!(matches!(narrowed, Cow::Borrowed(_)));
     }
 }

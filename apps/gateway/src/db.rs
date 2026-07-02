@@ -40,7 +40,7 @@ pub(crate) struct SecretRow {
     /// partner-tier credential by its actual scope — regardless of how the secret
     /// was resolved (inherited vs. selectively assigned to an agent). Read only by
     /// the cloud budget module (`BudgetSecret` impl), hence the cfg'd allow.
-    #[cfg_attr(edition_oss, allow(dead_code))]
+    #[cfg_attr(not(edition_cloud), allow(dead_code))]
     pub scope: String,
     #[sqlx(rename = "type")]
     pub type_: String,
@@ -127,7 +127,7 @@ pub(crate) async fn find_user_by_external_auth_id(
 /// default project — it requires an explicit `X-Project-Id` and validates it
 /// with [`user_can_access_project`]. Gating this `not(cloud)` makes that a
 /// compile-time guarantee (a cloud caller fails to build).
-#[cfg(edition_oss)]
+#[cfg(not(edition_cloud))]
 pub(crate) async fn find_default_project_id_by_user(
     pool: &PgPool,
     user_id: &str,

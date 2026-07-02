@@ -6,6 +6,7 @@ import Image from "next/image";
 import { Button } from "@onecli/ui/components/button";
 import { useAuth } from "@/providers/auth-provider";
 import { apiFetch } from "@/lib/api-fetch";
+import { CAPS } from "@/lib/env";
 
 export const LoginContent = () => {
   const router = useRouter();
@@ -20,6 +21,10 @@ export const LoginContent = () => {
         const res = await apiFetch("/v1/auth/session");
         if (res.ok) {
           const data = (await res.json()) as { projectId?: string };
+          if (CAPS.webSurface === "connect-only") {
+            router.replace("/app-connect");
+            return;
+          }
           router.replace(
             data.projectId ? `/p/${data.projectId}/overview` : "/overview",
           );

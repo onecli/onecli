@@ -5,8 +5,10 @@ import { logger } from "../lib/logger";
 import {
   findUserDefaultProject,
   bootstrapOrganization,
+  joinSharedOrganization,
   ensureProjectSeeds,
 } from "../services/organization-service";
+import { CAPS } from "../lib/env";
 
 /** Extra attributes to spread into the user upsert (create + update). */
 export type SessionAttributes = Record<string, unknown>;
@@ -89,11 +91,14 @@ export const authSessionRoutes = () => {
         !existingUser &&
         _hooks.shouldBootstrapOrg(c.req.raw)
       ) {
-        const result = await bootstrapOrganization(
-          dbUser.id,
-          dbUser.email,
-          dbUser.name ?? undefined,
-        );
+        const result =
+          CAPS.tenancy === "single-org-shared"
+            ? await joinSharedOrganization(dbUser.id, dbUser.email)
+            : await bootstrapOrganization(
+                dbUser.id,
+                dbUser.email,
+                dbUser.name ?? undefined,
+              );
         defaultProject = result.project;
         _hooks.onUserCreated({ email: dbUser.email, name: dbUser.name }, extra);
       }
