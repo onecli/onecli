@@ -30,6 +30,7 @@ import {
   isParamInjection,
   isPathRegexInjection,
   isPathTemplateInjection,
+  parseGoogleServiceAccountMetadata,
 } from "@onecli/api/validations/secret";
 import { SecretDialog } from "./secret-dialog";
 
@@ -88,6 +89,10 @@ export const SecretCard = ({
           | { vault: string; item: string; field: string }
           | undefined)
       : undefined;
+  const saMeta =
+    secret.type === "google_service_account"
+      ? parseGoogleServiceAccountMetadata(secret.metadata)
+      : null;
 
   return (
     <>
@@ -129,6 +134,14 @@ export const SecretCard = ({
                   Value:{" "}
                   <code className="bg-muted rounded px-1 py-0.5 font-mono">
                     {opDisplay.vault} › {opDisplay.item} › {opDisplay.field}
+                  </code>
+                </span>
+              )}
+              {saMeta && (
+                <span className="text-muted-foreground">
+                  Email:{" "}
+                  <code className="bg-muted rounded px-1 py-0.5 font-mono">
+                    {saMeta.clientEmail}
                   </code>
                 </span>
               )}

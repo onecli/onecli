@@ -57,8 +57,9 @@ export const SecretsContent = ({
   const [prefill, setPrefill] = useState<SecretPrefill | undefined>();
   const paramHandled = useRef(false);
 
+  const LLM_TYPES = new Set(["anthropic", "openai"]);
   const allFiltered = secrets.filter((s: Secret) =>
-    typeFilter === "generic" ? s.type === "generic" : s.type !== "generic",
+    typeFilter === "llm" ? LLM_TYPES.has(s.type) : !LLM_TYPES.has(s.type),
   );
   const ownSecrets = allFiltered.filter(
     (s: Secret) => s.scope === pageScope || !s.scope,
@@ -196,9 +197,11 @@ export const SecretsContent = ({
           if (!open) setPrefill(undefined);
         }}
         prefill={prefill}
-        defaultType={typeFilter === "generic" ? "generic" : undefined}
+        defaultType={undefined}
         allowedTypes={
-          typeFilter === "llm" ? ["anthropic", "openai"] : undefined
+          typeFilter === "llm"
+            ? ["anthropic", "openai"]
+            : ["generic", "google_service_account"]
         }
         secretActions={secretActions}
       />

@@ -12,6 +12,7 @@ import {
   isPathRegexInjection,
   isPathSafeValue,
   isPathTemplateInjection,
+  parseGoogleServiceAccountJson,
   parseOpenaiAuthJson,
   parseOpenaiOAuthJson,
   type CreateSecretInput,
@@ -31,10 +32,20 @@ const normalizeOpenaiValue = (
   return { value, hostPattern };
 };
 
+const validateGoogleServiceAccountValue = (raw: string): void => {
+  if (!parseGoogleServiceAccountJson(raw)) {
+    throw new ServiceError(
+      "BAD_REQUEST",
+      'Invalid service account JSON: must contain type "service_account", private_key, and client_email',
+    );
+  }
+};
+
 const SECRET_TYPE_LABELS: Record<string, string> = {
   anthropic: "Anthropic API Key",
   openai: "OpenAI",
   generic: "Generic Secret",
+  google_service_account: "Google Service Account",
 };
 
 const buildPreview = (plaintext: string): string => {
@@ -110,6 +121,15 @@ const buildMetadata = (
       authMode,
       ...(parsed ? { accountId: parsed.tokens.account_id ?? null } : {}),
     } as Prisma.InputJsonValue;
+  }
+  if (type === "google_service_account") {
+    const sa = parseGoogleServiceAccountJson(value);
+    if (sa) {
+      return {
+        clientEmail: sa.client_email,
+        ...(sa.project_id ? { projectId: sa.project_id } : {}),
+      } as Prisma.InputJsonValue;
+    }
   }
   return Prisma.JsonNull;
 };
@@ -210,6 +230,7 @@ export const createSecret = async (
       throw new ServiceError("BAD_REQUEST", "Select a 1Password field");
     }
     // LLM keys from 1Password are treated as plain API keys on their fixed host.
+    // Google SA secrets use the schema-defaulted hostPattern (which callers may override).
     if (input.type === "anthropic") hostPattern = "api.anthropic.com";
     if (input.type === "openai") hostPattern = "api.openai.com";
 
@@ -247,6 +268,10 @@ export const createSecret = async (
     const normalized = normalizeOpenaiValue(value);
     value = normalized.value;
     hostPattern = normalized.hostPattern;
+  }
+
+  if (input.type === "google_service_account") {
+    validateGoogleServiceAccountValue(value);
   }
 
   const secret = await db.secret.create({
@@ -324,6 +349,8 @@ export const updateSecret = async (
     data.opRef = input.opRef;
     if (secret.type === "anthropic") data.hostPattern = "api.anthropic.com";
     if (secret.type === "openai") data.hostPattern = "api.openai.com";
+    // SA: preserve existing hostPattern — users may have set a custom host
+    // (e.g. storage.googleapis.com). anthropic/openai have fixed hosts.
     data.metadata = buildOnePasswordMetadata(secret.type, input.opDisplay);
   } else if (input.value !== undefined) {
     let value = input.value.trim();
@@ -336,11 +363,19 @@ export const updateSecret = async (
       data.hostPattern = normalized.hostPattern;
     }
 
+    if (secret.type === "google_service_account") {
+      validateGoogleServiceAccountValue(value);
+    }
+
     data.valueSource = "inline";
     data.encryptedValue = await getCrypto().encrypt(value);
     data.opRef = null;
 
-    if (secret.type === "anthropic" || secret.type === "openai") {
+    if (
+      secret.type === "anthropic" ||
+      secret.type === "openai" ||
+      secret.type === "google_service_account"
+    ) {
       data.metadata = buildMetadata(secret.type, value);
     }
   }
