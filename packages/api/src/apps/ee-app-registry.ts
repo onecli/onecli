@@ -133,4 +133,12 @@ export const eeApps: AppDefinition[] = [
     connectionMethod: { type: "cloud_only" },
     available: false,
   },
+  {
+    id: "fireflies",
+    name: "Fireflies",
+    icon: "/icons/fireflies.svg",
+    description: "AI meeting transcripts, summaries, and action items.",
+    connectionMethod: { type: "cloud_only" },
+    available: false,
+  },
 ];

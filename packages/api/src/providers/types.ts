@@ -46,7 +46,11 @@ export interface OAuthOrgHandlers {
     request: Request,
     provider: string,
     credentials: Record<string, unknown>,
-    options?: { scopes?: string[]; metadata?: Record<string, unknown> },
+    options?: {
+      scopes?: string[];
+      metadata?: Record<string, unknown>;
+      label?: string;
+    },
     connectionId?: string,
     fields?: Record<string, string>,
   ) => Promise<Response | null>;

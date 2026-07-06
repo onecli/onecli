@@ -1,22 +1,32 @@
-import { apiGet, apiPatch, apiDelete } from "./client";
-import type { Connection } from "./types";
+import { apiGet, apiPatch, apiPut, apiDelete } from "./client";
+import type { PageScope } from "./scope";
+import type { Connection, ConnectionAgentAccess } from "./types";
 
-export type ConnectionScope = "project" | "organization";
+const connectionsPath = (scope: PageScope) =>
+  scope === "organization" ? "/v1/org/connections" : "/v1/connections";
 
-const connectionsPath = (scope: ConnectionScope) =>
-  scope === "organization"
-    ? "/v1/org/apps/connections"
-    : "/v1/apps/connections";
+export const list = (scope: PageScope = "project") =>
+  apiGet<Connection[]>(connectionsPath(scope));
 
-export const list = () =>
-  apiGet<{ connections: Connection[] }>("/v1/apps/connections").then(
-    (r) => r.connections,
-  );
-
-export const rename = (id: string, label: string) =>
-  apiPatch<{ id: string; label: string }>(`/v1/apps/connections/${id}`, {
+export const rename = (
+  id: string,
+  label: string,
+  scope: PageScope = "project",
+) =>
+  apiPatch<{ id: string; label: string }>(`${connectionsPath(scope)}/${id}`, {
     label,
   });
 
-export const disconnect = (id: string, scope: ConnectionScope = "project") =>
+export const disconnect = (id: string, scope: PageScope = "project") =>
   apiDelete(`${connectionsPath(scope)}/${id}`);
+
+// Reverse of agents.connections/updateConnections — the agents that can use a
+// connection, keyed from the connection side. Project surface only (agents are
+// project-scoped), so no scope switching.
+export const agents = (connectionId: string) =>
+  apiGet<ConnectionAgentAccess[]>(`/v1/connections/${connectionId}/agents`);
+
+export const setAgents = (connectionId: string, agentIds: string[]) =>
+  apiPut<{ success: boolean }>(`/v1/connections/${connectionId}/agents`, {
+    agentIds,
+  });

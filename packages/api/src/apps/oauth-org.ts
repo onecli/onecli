@@ -19,7 +19,11 @@ export const tryHandleOrgConnect = async (
   _request: Request,
   _provider: string,
   _credentials: Record<string, unknown>,
-  _options?: { scopes?: string[]; metadata?: Record<string, unknown> },
+  _options?: {
+    scopes?: string[];
+    metadata?: Record<string, unknown>;
+    label?: string;
+  },
   _connectionId?: string,
   _fields?: Record<string, string>,
 ): Promise<Response | null> => null;

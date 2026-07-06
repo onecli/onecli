@@ -479,3 +479,156 @@ export const updateAgentAppConnections = async (
     ),
   ]);
 };
+
+export type ConnectionAccessLevel = "full" | "assigned" | "none";
+
+export interface ConnectionAgentAccess {
+  id: string;
+  name: string;
+  access: ConnectionAccessLevel;
+  // True when an "assigned" agent's grant carries a granular session policy
+  // (e.g. specific GitHub repos). Surfaced read-only so the connection-first UI
+  // can flag it — the policy itself is managed on the agent side.
+  scoped: boolean;
+}
+
+// Confirms a connection is visible to the project — a project-owned row, or an
+// org-scoped row in the project's org (project members manage org rows via the
+// project surface). Mirrors the OR-clause in updateAgentAppConnections.
+const assertConnectionVisible = async (
+  projectId: string,
+  connectionId: string,
+): Promise<void> => {
+  const project = await db.project.findUnique({
+    where: { id: projectId },
+    select: { organizationId: true },
+  });
+
+  const connection = await db.appConnection.findFirst({
+    where: {
+      id: connectionId,
+      OR: [
+        { projectId },
+        ...(project?.organizationId
+          ? [{ organizationId: project.organizationId, scope: "organization" }]
+          : []),
+      ],
+    },
+    select: { id: true },
+  });
+
+  if (!connection) throw new ServiceError("NOT_FOUND", "Connection not found");
+};
+
+/**
+ * Reverse view of agent↔connection access: every agent in the project and
+ * whether it can use this connection. "all"-mode agents implicitly reach every
+ * connection ("full"); "selective" agents reach only the connections they hold
+ * a row for ("assigned"), otherwise "none".
+ */
+export const listConnectionAgents = async (
+  projectId: string,
+  connectionId: string,
+): Promise<ConnectionAgentAccess[]> => {
+  await assertConnectionVisible(projectId, connectionId);
+
+  const agents = await db.agent.findMany({
+    where: { projectId },
+    select: { id: true, name: true, secretMode: true },
+    orderBy: [{ isDefault: "desc" }, { createdAt: "desc" }],
+  });
+
+  const rows = await db.agentAppConnection.findMany({
+    where: { appConnectionId: connectionId, agent: { projectId } },
+    select: { agentId: true, sessionPolicy: true },
+  });
+  const scopedByAgent = new Map(
+    rows.map((r) => {
+      const policy = r.sessionPolicy as SessionPolicy | null;
+      return [r.agentId, !!policy && Object.keys(policy).length > 0] as const;
+    }),
+  );
+
+  return agents.map((a) => {
+    const access: ConnectionAccessLevel =
+      a.secretMode !== "selective"
+        ? "full"
+        : scopedByAgent.has(a.id)
+          ? "assigned"
+          : "none";
+    return {
+      id: a.id,
+      name: a.name,
+      access,
+      scoped: access === "assigned" && (scopedByAgent.get(a.id) ?? false),
+    };
+  });
+};
+
+/**
+ * Sets exactly which selective agents are granted this connection, keyed from
+ * the connection side. Only ever adds/removes rows for the given selective
+ * agents; unchanged rows (and their granular sessionPolicy) are left untouched.
+ * "all"-mode agents already reach every connection and cannot be granted or
+ * revoked here — passing one is rejected.
+ */
+export const setConnectionAgents = async (
+  projectId: string,
+  connectionId: string,
+  agentIds: string[],
+): Promise<{ added: number; removed: number }> => {
+  await assertConnectionVisible(projectId, connectionId);
+
+  const targetIds = [...new Set(agentIds)];
+
+  if (targetIds.length > 0) {
+    const targets = await db.agent.findMany({
+      where: { id: { in: targetIds }, projectId },
+      select: { id: true, secretMode: true },
+    });
+    const selective = new Set(
+      targets.filter((a) => a.secretMode === "selective").map((a) => a.id),
+    );
+    const invalid = targetIds.filter((id) => !selective.has(id));
+    if (invalid.length > 0) {
+      throw new ServiceError(
+        "BAD_REQUEST",
+        "One or more agents are not selective agents in this project",
+      );
+    }
+  }
+
+  const target = new Set(targetIds);
+  const currentRows = await db.agentAppConnection.findMany({
+    where: {
+      appConnectionId: connectionId,
+      agent: { projectId, secretMode: "selective" },
+    },
+    select: { agentId: true },
+  });
+  const current = new Set(currentRows.map((r) => r.agentId));
+
+  const toAdd = [...target].filter((id) => !current.has(id));
+  const toRemove = [...current].filter((id) => !target.has(id));
+
+  if (toAdd.length === 0 && toRemove.length === 0) {
+    return { added: 0, removed: 0 };
+  }
+
+  await db.$transaction([
+    db.agentAppConnection.deleteMany({
+      where: { appConnectionId: connectionId, agentId: { in: toRemove } },
+    }),
+    // skipDuplicates makes a concurrent double-grant idempotent (composite PK)
+    // instead of surfacing a P2002.
+    db.agentAppConnection.createMany({
+      data: toAdd.map((agentId) => ({
+        agentId,
+        appConnectionId: connectionId,
+      })),
+      skipDuplicates: true,
+    }),
+  ]);
+
+  return { added: toAdd.length, removed: toRemove.length };
+};

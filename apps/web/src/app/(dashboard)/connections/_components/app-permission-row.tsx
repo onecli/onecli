@@ -8,7 +8,7 @@ import {
 } from "@onecli/ui/components/tooltip";
 import { Badge } from "@onecli/ui/components/badge";
 import type {
-  AppTool,
+  AppToolSummary,
   AppPermissionLevel,
 } from "@onecli/api/apps/app-permissions";
 import type { RuleCondition } from "@onecli/api/validations/policy-rule";
@@ -16,7 +16,7 @@ import { resolveToolPermission } from "./resolve-tool-permission";
 import { PermissionButtons } from "./permission-buttons";
 
 interface AppPermissionRowProps {
-  tool: AppTool;
+  tool: AppToolSummary;
   permission: AppPermissionLevel;
   conditions: RuleCondition[];
   onPermissionChange: (permission: AppPermissionLevel) => void;
@@ -24,6 +24,12 @@ interface AppPermissionRowProps {
   orgPermission?: AppPermissionLevel;
   orgConditions?: RuleCondition[];
   covered?: boolean;
+  /** Agent view: value comes from the all-agents layer (no override yet). */
+  inherited?: boolean;
+  inheritedLabel?: string;
+  /** Agent view: this agent has an explicit override for the tool. */
+  overridden?: boolean;
+  onRevert?: () => void;
 }
 
 export const AppPermissionRow = ({
@@ -35,6 +41,10 @@ export const AppPermissionRow = ({
   orgPermission,
   orgConditions,
   covered,
+  inherited,
+  inheritedLabel,
+  overridden,
+  onRevert,
 }: AppPermissionRowProps) => {
   const resolved = resolveToolPermission(
     permission,
@@ -59,7 +69,8 @@ export const AppPermissionRow = ({
           <p
             className={cn(
               "text-sm transition-colors truncate",
-              (isFullyLocked || covered) && "text-muted-foreground/60",
+              (isFullyLocked || covered || inherited) &&
+                "text-muted-foreground/60",
             )}
           >
             {tool.name}
@@ -76,11 +87,21 @@ export const AppPermissionRow = ({
               </TooltipContent>
             </Tooltip>
           )}
+          {overridden && !isFullyLocked && (
+            <span className="text-[10px] font-medium text-brand shrink-0">
+              Overridden
+            </span>
+          )}
         </div>
         {firstCondition ? (
           <p className="text-[11px] text-muted-foreground/70 mt-0.5">
             when {firstCondition.target} {firstCondition.operator} &ldquo;
             {firstCondition.value}&rdquo;
+          </p>
+        ) : null}
+        {inherited && !isFullyLocked && inheritedLabel ? (
+          <p className="text-[11px] text-muted-foreground/70 mt-0.5">
+            {inheritedLabel}
           </p>
         ) : null}
         {orgLine ? (
@@ -95,11 +116,31 @@ export const AppPermissionRow = ({
           isFullyLocked && "opacity-50",
         )}
       >
+        {overridden && !isFullyLocked && onRevert && (
+          <>
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <button
+                  type="button"
+                  onClick={onRevert}
+                  disabled={disabled}
+                  className="text-xs text-muted-foreground hover:text-foreground transition-colors disabled:opacity-50 px-1.5"
+                >
+                  Reset
+                </button>
+              </TooltipTrigger>
+              <TooltipContent side="top" className="text-xs">
+                Return to inherited setting
+              </TooltipContent>
+            </Tooltip>
+            <div className="w-px h-4 bg-border mx-0.5" />
+          </>
+        )}
         <PermissionButtons
           activePermission={effectivePermission}
           onSelect={onPermissionChange}
           isOptionDisabled={resolved.isOptionDisabled}
-          covered={covered}
+          covered={covered || inherited}
           disabled={disabled}
         />
       </div>

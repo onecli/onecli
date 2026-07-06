@@ -1,10 +1,20 @@
 import { Hono } from "hono";
 import { setCookie, getCookie, deleteCookie } from "hono/cookie";
+import { z } from "zod";
 import { db } from "@onecli/db";
 import type { ApiEnv } from "../types";
 import { authMiddleware, requireProjectId, auth } from "../middleware/auth";
 import { getApp, getApps } from "../apps/registry";
+import {
+  getAppPermissionDefinition,
+  getAppPermissionDefinitions,
+  toAppPermissionDefinitionSummary,
+} from "../apps/app-permissions";
 import { resolveAppCredentials } from "../apps/resolve-credentials";
+import {
+  resolveConnectCredentials,
+  type ConnectRequestBody,
+} from "../apps/connect-credentials";
 import { getOAuthOrg } from "../providers";
 import {
   signOAuthState,
@@ -25,17 +35,27 @@ import {
   reconnectConnection,
   listConnectionsByProvider,
   extractLabel,
-  deleteConnection,
-  updateConnectionLabel,
 } from "../services/connection-service";
+import {
+  disconnectOwnedConnection,
+  renameOwnedConnection,
+} from "./connections";
 import { getConnectionHooks } from "../providers";
 import {
   getAppConfig,
   upsertAppConfig,
   deleteAppConfig,
   saveAppConfigWithoutDisconnect,
+  toggleAppConfigEnabled,
+  listConfiguredProviders,
 } from "../services/app-config-service";
-import { configBodySchema } from "../validations/app-config";
+import { parseConfigBody } from "../validations/app-config";
+import {
+  withAudit,
+  AUDIT_ACTIONS,
+  AUDIT_SERVICES,
+  AUDIT_SOURCE,
+} from "../services/audit-service";
 import {
   initBlocklistDefaults,
   getBlocklistState,
@@ -43,11 +63,12 @@ import {
   activateBlocklistHost,
   addCustomBlocklistRule,
   removeBlocklistRule,
-  removeAllBlocklistRules,
 } from "../services/app-blocklist-service";
 import { logger } from "../lib/logger";
 
 const docsBaseURL = "https://onecli.sh/docs/guides/credential-stubs";
+
+const toggleSchema = z.object({ enabled: z.boolean() });
 
 export const appRoutes = () => {
   const app = new Hono<ApiEnv>();
@@ -74,6 +95,12 @@ export const appRoutes = () => {
     const connectionMap = new Map(
       connections.map((conn) => [conn.provider, conn]),
     );
+    const connectionsByProvider = new Map<string, typeof connections>();
+    for (const conn of connections) {
+      const list = connectionsByProvider.get(conn.provider) ?? [];
+      list.push(conn);
+      connectionsByProvider.set(conn.provider, list);
+    }
 
     const result = getApps().map((a) => {
       const config = configMap.get(a.id);
@@ -91,6 +118,8 @@ export const appRoutes = () => {
               enabled: config.enabled,
             }
           : null,
+        // Deprecated: first connection only — misleading for multi-account
+        // providers. Kept verbatim for deployed CLIs; use `connections`.
         connection: connection
           ? {
               status: connection.status,
@@ -98,6 +127,13 @@ export const appRoutes = () => {
               connectedAt: connection.connectedAt,
             }
           : null,
+        connections: (connectionsByProvider.get(a.id) ?? []).map((conn) => ({
+          id: conn.id,
+          label: conn.label,
+          status: conn.status,
+          scopes: conn.scopes,
+          connectedAt: conn.connectedAt,
+        })),
         credentialStubs: a.credentialStubs ?? [],
       };
     });
@@ -130,43 +166,20 @@ export const appRoutes = () => {
   });
 
   // ── DELETE /apps/connections/:connectionId ── disconnect ───────────────
+  // Legacy alias of DELETE /v1/connections/:connectionId — same core, kept
+  // for deployed CLIs. Remove once all clients (CLI ≥ next release) migrate.
   app.delete("/connections/:connectionId", authMiddleware, async (c) => {
     const auth = c.get("auth");
     const connectionId = c.req.param("connectionId");
-    const connection = await db.appConnection.findFirst({
-      where: {
-        id: connectionId,
-        OR: [
-          { projectId: requireProjectId(auth) },
-          ...(auth.organizationId
-            ? [{ organizationId: auth.organizationId }]
-            : []),
-        ],
-      },
-      select: { scope: true, provider: true },
-    });
-    if (!connection) {
+    const deleted = await disconnectOwnedConnection(auth, connectionId);
+    if (!deleted) {
       return c.json({ error: "Connection not found" }, 404);
     }
-    const scope =
-      connection.scope === "organization"
-        ? { organizationId: auth.organizationId }
-        : { projectId: requireProjectId(auth) };
-    await deleteConnection(scope, connectionId);
-
-    const remaining = await listConnectionsByProvider(
-      scope,
-      connection.provider,
-    );
-    if (remaining.length === 0) {
-      await removeAllBlocklistRules(scope, connection.provider);
-    }
-
-    invalidateGatewayCache(c.req.raw);
     return c.body(null, 204);
   });
 
   // ── PATCH /apps/connections/:connectionId ── rename ─────────────────────
+  // Legacy alias of PATCH /v1/connections/:connectionId — same core.
   app.patch("/connections/:connectionId", authMiddleware, async (c) => {
     const auth = c.get("auth");
     const connectionId = c.req.param("connectionId");
@@ -179,30 +192,55 @@ export const appRoutes = () => {
       return c.json({ error: "Label is required" }, 400);
     }
 
-    const connection = await db.appConnection.findFirst({
-      where: {
-        id: connectionId,
-        OR: [
-          { projectId: requireProjectId(auth) },
-          ...(auth.organizationId
-            ? [{ organizationId: auth.organizationId }]
-            : []),
-        ],
-      },
-      select: { scope: true },
-    });
-    if (!connection) {
+    const updated = await renameOwnedConnection(auth, connectionId, label);
+    if (!updated) {
       return c.json({ error: "Connection not found" }, 404);
     }
-
-    const scope =
-      connection.scope === "organization"
-        ? { organizationId: auth.organizationId }
-        : { projectId: requireProjectId(auth) };
-
-    const updated = await updateConnectionLabel(scope, connectionId, label);
     return c.json(updated);
   });
+
+  // ── GET /apps/configured ── providers with an enabled app config ───────
+  // Registered before GET /:provider so the static path isn't swallowed by
+  // the param route.
+  app.get("/configured", authMiddleware, async (c) => {
+    const auth = c.get("auth");
+    const providers = await listConfiguredProviders({
+      projectId: requireProjectId(auth),
+    });
+    return c.json(providers);
+  });
+
+  // ── GET /apps/env-defaults ── providers with platform default creds ────
+  // Reports this API process's env — the same env resolveAppCredentials
+  // reads during the OAuth flows.
+  app.get("/env-defaults", auth({ requireProject: false }), async (c) => {
+    const providers = getApps()
+      .filter((appDef) => {
+        const envDefaults = appDef.configurable?.envDefaults;
+        if (!envDefaults) return false;
+        return Object.values(envDefaults).every(
+          (envVar) => !!process.env[envVar],
+        );
+      })
+      .map((appDef) => appDef.id);
+    return c.json(providers);
+  });
+
+  // ── GET /apps/permission-definitions ── tool catalogs (all providers) ──
+  // Public projection only (id/name/description per tool); the endpoint
+  // mapping never leaves the server. Registered before the /:provider param
+  // routes; filtered through getApp so editions that register a permission
+  // definition without its app (e.g. onprem's aws-role) don't advertise it.
+  app.get(
+    "/permission-definitions",
+    auth({ requireProject: false }),
+    async (c) => {
+      const definitions = getAppPermissionDefinitions()
+        .filter((def) => getApp(def.provider))
+        .map(toAppPermissionDefinitionSummary);
+      return c.json(definitions);
+    },
+  );
 
   // ── GET /apps/:provider ── single app detail ───────────────────────────
   app.get("/:provider", authMiddleware, async (c) => {
@@ -214,11 +252,13 @@ export const appRoutes = () => {
       return c.json({ error: `Unknown provider: ${provider}` }, 404);
     }
 
-    const [config, connection] = await Promise.all([
+    const [config, providerConnections] = await Promise.all([
       getAppConfig({ projectId }, provider),
-      db.appConnection.findFirst({
+      db.appConnection.findMany({
         where: { projectId, provider },
         select: {
+          id: true,
+          label: true,
           status: true,
           scopes: true,
           connectedAt: true,
@@ -226,6 +266,7 @@ export const appRoutes = () => {
         orderBy: { connectedAt: "desc" },
       }),
     ]);
+    const connection = providerConnections[0] ?? null;
 
     const isConfigured =
       (config !== null && config.hasCredentials) || connection !== null;
@@ -246,6 +287,8 @@ export const appRoutes = () => {
             enabled: config.enabled,
           }
         : null,
+      // Deprecated: latest connection only — misleading for multi-account
+      // providers. Kept verbatim for deployed CLIs; use `connections`.
       connection: connection
         ? {
             status: connection.status,
@@ -253,6 +296,7 @@ export const appRoutes = () => {
             connectedAt: connection.connectedAt,
           }
         : null,
+      connections: providerConnections,
       credentialStubs: appDef.credentialStubs ?? [],
       hint,
     });
@@ -272,6 +316,18 @@ export const appRoutes = () => {
         provider,
       );
       if (orgResponse) return orgResponse;
+
+      // Fail loud: an explicit org context with no wired org handler must not
+      // silently fall through to a project-scoped connection.
+      if (c.req.query("_org")) {
+        return c.json(
+          {
+            error:
+              "Organization-scoped connections are not supported on this server",
+          },
+          400,
+        );
+      }
 
       const projectId = requireProjectId(auth);
       const appDef = getApp(provider);
@@ -518,121 +574,20 @@ export const appRoutes = () => {
       return c.json({ error: `Provider "${provider}" is not available` }, 400);
     }
 
-    const body = (await c.req.json().catch(() => null)) as {
-      fields?: Record<string, string>;
-      connectionId?: string;
-      label?: string;
-      method?: string;
-    } | null;
+    const body = (await c.req
+      .json()
+      .catch(() => null)) as ConnectRequestBody | null;
 
-    // Resolve which connection method to use. Apps with `additionalMethods`
-    // (e.g. Attio: OAuth primary + API key alternate) pass `method` to select
-    // one; otherwise the primary `connectionMethod` is used. An explicit but
-    // unrecognized `method` is rejected rather than silently falling back.
-    const requestedMethod = body?.method;
-    const activeMethod = requestedMethod
-      ? ((appDef.additionalMethods ?? []).find(
-          (m) => m.type === requestedMethod,
-        ) ??
-        (appDef.connectionMethod.type === requestedMethod
-          ? appDef.connectionMethod
-          : undefined))
-      : appDef.connectionMethod;
-
-    if (!activeMethod) {
-      return c.json(
-        {
-          error: `Provider "${provider}" has no "${requestedMethod}" connection method`,
-        },
-        400,
-      );
+    const resolved = await resolveConnectCredentials(provider, appDef, body);
+    if (!resolved.ok) {
+      return c.json({ error: resolved.error }, 400);
     }
-
-    if (activeMethod.type === "oauth") {
-      return c.json(
-        {
-          error: `Provider "${provider}" uses OAuth flow, not direct credentials`,
-        },
-        400,
-      );
-    }
-
-    if (activeMethod.type === "cloud_only") {
-      return c.json(
-        { error: `Provider "${provider}" is only available in OneCLI Cloud` },
-        400,
-      );
-    }
-
-    if (!body?.fields) {
-      return c.json({ error: "Missing fields in request body" }, 400);
-    }
-
-    const { fields } = body;
-
-    let requiredFields: { name: string; label: string }[];
-    if (
-      activeMethod.type === "credentials_import" &&
-      activeMethod.fields.some((f) => f.group)
-    ) {
-      requiredFields = activeMethod.fields.filter((f) => {
-        if (!f.group) return true;
-        if (fields.privateKey) return f.group === "service_account";
-        return f.group === "authorized_user";
-      });
-    } else {
-      requiredFields = activeMethod.fields.filter(
-        (f) => !("optional" in f && f.optional),
-      );
-    }
-
-    for (const field of requiredFields) {
-      if (!fields[field.name]?.trim()) {
-        return c.json({ error: `${field.label} is required` }, 400);
-      }
-    }
-
-    let credentials: Record<string, unknown>;
-    let scopes: string[] | undefined;
-    let metadata: Record<string, unknown> | undefined;
-
-    if (activeMethod.type === "credentials_import") {
-      const result = await activeMethod.exchangeCredentials(fields);
-      credentials = result.credentials;
-      scopes = result.scopes;
-      metadata = result.metadata;
-    } else {
-      const primaryField = activeMethod.fields[0];
-      credentials = {
-        access_token: fields[primaryField!.name],
-        ...fields,
-      };
-
-      if (activeMethod.resolveMetadata) {
-        try {
-          metadata = (await activeMethod.resolveMetadata(fields)) ?? undefined;
-        } catch (e) {
-          return c.json(
-            {
-              error:
-                e instanceof Error
-                  ? e.message
-                  : "Could not validate the provided credentials",
-            },
-            400,
-          );
-        }
-      }
-
-      if (!metadata) {
-        metadata = { name: "API Key" };
-      }
-    }
+    const { credentials, scopes, metadata, activeMethod, fields } = resolved;
 
     const connectionOpts = {
       scopes,
       metadata,
-      label: body.label?.trim() || undefined,
+      label: body?.label?.trim() || undefined,
     };
 
     const orgResponse = await getOAuthOrg().tryHandleOrgConnect(
@@ -641,15 +596,28 @@ export const appRoutes = () => {
       provider,
       credentials,
       connectionOpts,
-      body.connectionId,
+      body?.connectionId,
       fields,
     );
     if (orgResponse) return orgResponse;
 
+    // Fail loud: the caller explicitly asked for an org-scoped connection but
+    // no org handler is wired on this server — reject instead of silently
+    // creating a project-scoped connection.
+    if (c.req.header("x-organization-id")) {
+      return c.json(
+        {
+          error:
+            "Organization-scoped connections are not supported on this server",
+        },
+        400,
+      );
+    }
+
     const projectId = requireProjectId(auth);
     await getConnectionHooks().beforeConnect(auth.organizationId, appDef);
 
-    if (body.connectionId) {
+    if (body?.connectionId) {
       await reconnectConnection(
         { projectId },
         body.connectionId,
@@ -710,6 +678,29 @@ export const appRoutes = () => {
     return c.json({ success: true });
   });
 
+  // ── GET /apps/:provider/permission-definition ── tool catalog ──────────
+  // The static permission catalog (groups + toolIds) that
+  // GET/PUT /rules/permissions/:provider operate on. Global data — no project
+  // context required, so org-key callers work without X-Project-Id.
+  app.get(
+    "/:provider/permission-definition",
+    auth({ requireProject: false }),
+    async (c) => {
+      const provider = c.req.param("provider")!;
+      if (!getApp(provider)) {
+        return c.json({ error: `Unknown provider: ${provider}` }, 404);
+      }
+      const def = getAppPermissionDefinition(provider);
+      if (!def) {
+        return c.json(
+          { error: `No permission definition for provider: ${provider}` },
+          404,
+        );
+      }
+      return c.json(toAppPermissionDefinitionSummary(def));
+    },
+  );
+
   // ── GET /apps/:provider/config ── get app config ───────────────────────
   app.get("/:provider/config", authMiddleware, async (c) => {
     const auth = c.get("auth");
@@ -727,15 +718,6 @@ export const appRoutes = () => {
     const auth = c.get("auth");
     const provider = c.req.param("provider")!;
 
-    const body = await c.req.json().catch(() => null);
-    const parsed = configBodySchema.safeParse(body);
-    if (!parsed.success) {
-      return c.json(
-        { error: parsed.error.issues[0]?.message ?? "Invalid request body" },
-        400,
-      );
-    }
-
     const appDef = getApp(provider);
     if (!appDef?.configurable) {
       return c.json(
@@ -744,15 +726,31 @@ export const appRoutes = () => {
       );
     }
 
-    const { clientId, clientSecret } = parsed.data;
-    await upsertAppConfig(
-      { projectId: requireProjectId(auth) },
-      provider,
-      { clientId, clientSecret },
-      appDef.configurable.fields,
-    );
+    const body = await c.req.json().catch(() => null);
+    const values = parseConfigBody(body, appDef.configurable.fields);
+    if (!values) {
+      return c.json({ error: "Invalid request body" }, 400);
+    }
 
-    invalidateGatewayCache(c.req.raw);
+    const projectId = requireProjectId(auth);
+    await withAudit(
+      () =>
+        upsertAppConfig(
+          { projectId },
+          provider,
+          values,
+          appDef.configurable!.fields,
+        ),
+      () => ({
+        projectId,
+        userId: auth.userId,
+        userEmail: auth.userEmail,
+        action: AUDIT_ACTIONS.UPDATE,
+        service: AUDIT_SERVICES.APP_CONFIG,
+        source: AUDIT_SOURCE.API,
+        metadata: { provider },
+      }),
+    );
 
     return c.json({ success: true }, 201);
   });
@@ -761,9 +759,49 @@ export const appRoutes = () => {
   app.delete("/:provider/config", authMiddleware, async (c) => {
     const auth = c.get("auth");
     const provider = c.req.param("provider")!;
-    await deleteAppConfig({ projectId: requireProjectId(auth) }, provider);
-    invalidateGatewayCache(c.req.raw);
+    const projectId = requireProjectId(auth);
+    await withAudit(
+      () => deleteAppConfig({ projectId }, provider),
+      () => ({
+        projectId,
+        userId: auth.userId,
+        userEmail: auth.userEmail,
+        action: AUDIT_ACTIONS.DELETE,
+        service: AUDIT_SERVICES.APP_CONFIG,
+        source: AUDIT_SOURCE.API,
+        metadata: { provider },
+      }),
+    );
     return c.body(null, 204);
+  });
+
+  // ── PATCH /apps/:provider/config/toggle ── enable/disable app config ───
+  app.patch("/:provider/config/toggle", authMiddleware, async (c) => {
+    const auth = c.get("auth");
+    const provider = c.req.param("provider")!;
+    const body = await c.req.json().catch(() => null);
+    const parsed = toggleSchema.safeParse(body);
+    if (!parsed.success) {
+      return c.json(
+        { error: parsed.error.issues[0]?.message ?? "Invalid request body" },
+        400,
+      );
+    }
+    const projectId = requireProjectId(auth);
+    await withAudit(
+      () =>
+        toggleAppConfigEnabled({ projectId }, provider, parsed.data.enabled),
+      () => ({
+        projectId,
+        userId: auth.userId,
+        userEmail: auth.userEmail,
+        action: AUDIT_ACTIONS.UPDATE,
+        service: AUDIT_SERVICES.APP_CONFIG,
+        source: AUDIT_SOURCE.API,
+        metadata: { provider, enabled: parsed.data.enabled },
+      }),
+    );
+    return c.json({ success: true });
   });
 
   // ── GET /apps/:provider/blocklist ── list blocklist state ─────────────

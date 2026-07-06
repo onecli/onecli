@@ -20,11 +20,11 @@ import {
   TooltipTrigger,
 } from "@onecli/ui/components/tooltip";
 import type {
-  AppToolGroup,
+  AppToolGroupSummary,
   AppPermissionLevel,
 } from "@onecli/api/apps/app-permissions";
 import type { RuleCondition } from "@onecli/api/validations/policy-rule";
-import type { AppPermissionState } from "@/lib/actions/rules";
+import type { AppPermissionState } from "@/lib/api";
 import {
   isToolFullyLocked,
   resolveToolPermission,
@@ -34,7 +34,7 @@ import { permissionOptions, PermissionButtons } from "./permission-buttons";
 import { usePlanGate } from "@/lib/plan-gate";
 
 interface AppPermissionGroupProps {
-  group: AppToolGroup;
+  group: AppToolGroupSummary;
   permissionStates: Record<string, AppPermissionState>;
   onPermissionChange: (toolId: string, permission: AppPermissionLevel) => void;
   onGroupChange: (permission: AppPermissionLevel) => void;
@@ -47,6 +47,14 @@ interface AppPermissionGroupProps {
   orgStates?: Record<string, AppPermissionLevel>;
   orgConditions?: Record<string, unknown[]>;
   defaultPermission?: AppPermissionLevel;
+  /**
+   * Agent view: `permissionStates` holds one agent's overrides; rows without
+   * an override inherit their value from `baseStates` (or the base wildcard).
+   */
+  agentView?: boolean;
+  baseStates?: Record<string, AppPermissionState>;
+  onToolRevert?: (toolId: string) => void;
+  onGroupInherit?: () => void;
 }
 
 const groupLabels: Record<string, string> = {
@@ -55,7 +63,7 @@ const groupLabels: Record<string, string> = {
 };
 
 const getGroupPermission = (
-  tools: AppToolGroup["tools"],
+  tools: AppToolGroupSummary["tools"],
   states: Record<string, AppPermissionState>,
   fallback: AppPermissionLevel = "allow",
 ): AppPermissionLevel | "custom" => {
@@ -76,14 +84,62 @@ export const AppPermissionGroup = ({
   orgStates,
   orgConditions,
   defaultPermission = "allow",
+  agentView = false,
+  baseStates,
+  onToolRevert,
+  onGroupInherit,
 }: AppPermissionGroupProps) => {
   const planGate = usePlanGate();
   const { wildcard } = group;
-  const wildcardPermission = wildcard
-    ? permissionStates[wildcard.id]?.permission
-    : undefined;
+  const wildcardPermission =
+    wildcard && !agentView
+      ? permissionStates[wildcard.id]?.permission
+      : undefined;
   const isWildcardActive =
     wildcardPermission != null && wildcardPermission !== defaultPermission;
+
+  // Agent view: the value a tool falls back to when the agent has no override
+  // — the base wildcard's setting when active, else the base per-tool setting.
+  const baseWildcardPermission = wildcard
+    ? baseStates?.[wildcard.id]?.permission
+    : undefined;
+  const baseWildcardActive =
+    baseWildcardPermission != null &&
+    baseWildcardPermission !== defaultPermission;
+  const baseInherited = (
+    toolId: string,
+  ): { permission: AppPermissionLevel; conditions: RuleCondition[] } => {
+    if (baseWildcardActive && wildcard) {
+      return {
+        permission: baseWildcardPermission,
+        conditions: (baseStates?.[wildcard.id]?.conditions ??
+          []) as RuleCondition[],
+      };
+    }
+    const state = baseStates?.[toolId];
+    return {
+      permission: state?.permission ?? defaultPermission,
+      conditions: (state?.conditions ?? []) as RuleCondition[],
+    };
+  };
+
+  const getAgentGroupPermission = ():
+    | AppPermissionLevel
+    | "inherit"
+    | "custom" => {
+    const first = group.tools[0]
+      ? permissionStates[group.tools[0].id]?.permission
+      : undefined;
+    let allInherit = true;
+    let uniform = true;
+    for (const tool of group.tools) {
+      const perm = permissionStates[tool.id]?.permission;
+      if (perm != null) allInherit = false;
+      if (perm !== first) uniform = false;
+    }
+    if (allInherit) return "inherit";
+    return uniform && first != null ? first : "custom";
+  };
 
   const wildcardResolved = wildcard
     ? resolveToolPermission(
@@ -95,11 +151,9 @@ export const AppPermissionGroup = ({
     : null;
   const wildcardLocked = wildcardResolved?.isFullyLocked ?? false;
 
-  const groupPerm = getGroupPermission(
-    group.tools,
-    permissionStates,
-    defaultPermission,
-  );
+  const groupPerm = agentView
+    ? getAgentGroupPermission()
+    : getGroupPermission(group.tools, permissionStates, defaultPermission);
 
   const isGroupOptionDisabled = (opt: AppPermissionLevel) =>
     group.tools.some((t) =>
@@ -137,6 +191,10 @@ export const AppPermissionGroup = ({
           value={groupPerm === "custom" ? "custom" : groupPerm}
           onValueChange={(v) => {
             if (v === "custom") return;
+            if (v === "inherit") {
+              onGroupInherit?.();
+              return;
+            }
             if (
               v === "manual_approval" &&
               planGate.guard("policy.manual_approval")
@@ -155,6 +213,7 @@ export const AppPermissionGroup = ({
                 Custom
               </SelectItem>
             )}
+            {agentView && <SelectItem value="inherit">Inherit</SelectItem>}
             {permissionOptions.map((opt) => {
               const locked =
                 opt.value === "manual_approval" &&
@@ -179,7 +238,7 @@ export const AppPermissionGroup = ({
       </div>
       <AccordionContent className="pb-2">
         <div className="ml-6">
-          {wildcard && (
+          {wildcard && !agentView && (
             <div
               className={cn(
                 "flex items-center gap-3 py-2.5 border-b border-border/50 -mx-3 px-3 rounded-lg transition-colors",
@@ -253,13 +312,28 @@ export const AppPermissionGroup = ({
           )}
           {group.tools.map((tool) => {
             const state = permissionStates[tool.id];
-            const permission = isWildcardActive
-              ? wildcardPermission
-              : (state?.permission ?? defaultPermission);
-            const projectConditions = (state?.conditions ??
-              []) as RuleCondition[];
+            const inherited = agentView ? baseInherited(tool.id) : null;
+            const permission = inherited
+              ? (state?.permission ?? inherited.permission)
+              : isWildcardActive
+                ? wildcardPermission
+                : (state?.permission ?? defaultPermission);
+            const projectConditions = inherited
+              ? state
+                ? ((state.conditions ?? []) as RuleCondition[])
+                : inherited.conditions
+              : ((state?.conditions ?? []) as RuleCondition[]);
             const toolOrgConditions = (orgConditions?.[tool.id] ??
               []) as RuleCondition[];
+            const isOverridden = agentView && state != null;
+            const inheritedLabel =
+              inherited && !isOverridden
+                ? `Inherited · ${
+                    permissionOptions.find(
+                      (o) => o.value === inherited.permission,
+                    )?.label ?? inherited.permission
+                  }`
+                : undefined;
             return (
               <AppPermissionRow
                 key={tool.id}
@@ -267,7 +341,9 @@ export const AppPermissionGroup = ({
                 permission={permission}
                 conditions={projectConditions}
                 onPermissionChange={(perm) => {
-                  if (
+                  if (agentView) {
+                    onPermissionChange(tool.id, perm);
+                  } else if (
                     isWildcardActive &&
                     perm !== wildcardPermission &&
                     onCoveredPermissionChange
@@ -280,7 +356,15 @@ export const AppPermissionGroup = ({
                 disabled={disabled}
                 orgPermission={orgStates?.[tool.id]}
                 orgConditions={toolOrgConditions}
-                covered={isWildcardActive}
+                covered={!agentView && isWildcardActive}
+                inherited={agentView && !isOverridden}
+                inheritedLabel={inheritedLabel}
+                overridden={isOverridden}
+                onRevert={
+                  isOverridden && onToolRevert
+                    ? () => onToolRevert(tool.id)
+                    : undefined
+                }
               />
             );
           })}

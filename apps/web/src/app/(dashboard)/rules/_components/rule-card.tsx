@@ -1,11 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import { useQueryClient } from "@tanstack/react-query";
-import { useInvalidateGatewayCache } from "@/hooks/use-invalidate-cache";
-import { queryKeys } from "@/lib/api/keys";
 import { Pencil, Trash2 } from "lucide-react";
-import { toast } from "sonner";
 import { Card } from "@onecli/ui/components/card";
 import { Button } from "@onecli/ui/components/button";
 import { Badge } from "@onecli/ui/components/badge";
@@ -21,14 +17,12 @@ import {
   AlertDialogTitle,
   AlertDialogTrigger,
 } from "@onecli/ui/components/alert-dialog";
-import {
-  deleteRule as defaultDeleteRule,
-  updateRule as defaultUpdateRule,
-} from "@/lib/actions/rules";
 import { cn } from "@onecli/ui/lib/utils";
+import { useUpdateRule, useDeleteRule } from "@/hooks/use-rules";
+import type { PageScope } from "@/lib/api";
 import { RuleDialog } from "./rule-dialog";
 import type { PolicyMode } from "@onecli/api/validations/policy-rule";
-import type { AgentOption, PolicyRuleItem, RuleActions } from "./types";
+import type { AgentOption, PolicyRuleItem } from "./types";
 
 interface RuleCardProps {
   rule: PolicyRuleItem;
@@ -36,7 +30,7 @@ interface RuleCardProps {
   onUpdate?: () => void;
   readOnly?: boolean;
   badge?: string;
-  ruleActions?: RuleActions;
+  pageScope?: PageScope;
   policyMode?: PolicyMode;
 }
 
@@ -46,16 +40,12 @@ export const RuleCard = ({
   onUpdate,
   readOnly,
   badge,
-  ruleActions,
+  pageScope = "project",
   policyMode,
 }: RuleCardProps) => {
-  const deleteRule = ruleActions?.deleteRule ?? defaultDeleteRule;
-  const updateRule = ruleActions?.updateRule ?? defaultUpdateRule;
-  const invalidateCache = useInvalidateGatewayCache();
-  const queryClient = useQueryClient();
-  const [deleting, setDeleting] = useState(false);
+  const updateMutation = useUpdateRule(pageScope);
+  const deleteMutation = useDeleteRule(pageScope);
   const [editOpen, setEditOpen] = useState(false);
-  const [toggling, setToggling] = useState(false);
 
   const agentName = rule.agentId
     ? agents.find((a) => a.id === rule.agentId)?.name
@@ -76,37 +66,22 @@ export const RuleCard = ({
         }`
       : null;
 
-  const invalidateRulesCache = () => {
-    queryClient.invalidateQueries({ queryKey: queryKeys.rules.all() });
-    queryClient.invalidateQueries({ queryKey: queryKeys.counts.all() });
-  };
-
+  // The mutation hooks own invalidation and toasts; errors are surfaced there.
   const handleDelete = async () => {
-    setDeleting(true);
     try {
-      await deleteRule(rule.id);
-      invalidateRulesCache();
+      await deleteMutation.mutateAsync(rule.id);
       onUpdate?.();
-      invalidateCache();
-      toast.success("Rule deleted");
     } catch {
-      toast.error("Failed to delete rule");
-    } finally {
-      setDeleting(false);
+      // handled by the hook's onError toast
     }
   };
 
   const handleToggle = async (enabled: boolean) => {
-    setToggling(true);
     try {
-      await updateRule(rule.id, { enabled });
-      invalidateRulesCache();
+      await updateMutation.mutateAsync({ ruleId: rule.id, input: { enabled } });
       onUpdate?.();
-      invalidateCache();
     } catch {
-      toast.error("Failed to update rule");
-    } finally {
-      setToggling(false);
+      // handled by the hook's onError toast
     }
   };
 
@@ -199,7 +174,7 @@ export const RuleCard = ({
               <Switch
                 checked={rule.enabled}
                 onCheckedChange={handleToggle}
-                disabled={toggling}
+                disabled={updateMutation.isPending}
                 aria-label={rule.enabled ? "Disable rule" : "Enable rule"}
               />
 
@@ -231,9 +206,9 @@ export const RuleCard = ({
                     <AlertDialogAction
                       variant="destructive"
                       onClick={handleDelete}
-                      disabled={deleting}
+                      disabled={deleteMutation.isPending}
                     >
-                      {deleting ? "Deleting..." : "Delete"}
+                      {deleteMutation.isPending ? "Deleting..." : "Delete"}
                     </AlertDialogAction>
                   </AlertDialogFooter>
                 </AlertDialogContent>
@@ -250,7 +225,7 @@ export const RuleCard = ({
           rule={rule}
           agents={agents}
           onSaved={onUpdate}
-          ruleActions={ruleActions}
+          pageScope={pageScope}
           policyMode={policyMode}
         />
       )}

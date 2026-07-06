@@ -884,7 +884,8 @@ impl PolicyEngine {
     }
 
     /// Resolve policy rules (block / rate-limit) for this agent + host.
-    /// Merges org rules (enforced, all agents) with project rules (agent-filtered).
+    /// Merges org rules (enforced, all agents) with project rules
+    /// (agent-filtered, with agent overrides shadowing all-agents rules).
     async fn resolve_policy_rules(
         &self,
         agent: &db::AgentRow,
@@ -894,50 +895,12 @@ impl PolicyEngine {
             db::find_policy_rules_by_org(&self.pool, &agent.organization_id),
             db::find_policy_rules_by_project(&self.pool, &agent.project_id),
         );
-        let mut all_rules = org_result.map_err(db_err)?;
-        all_rules.extend(project_result.map_err(db_err)?);
-
-        let rules = all_rules
-            .into_iter()
-            .filter(|r| {
-                host_matches(hostname, &r.host_pattern)
-                    && (r.agent_id.is_none() || r.agent_id.as_deref() == Some(&agent.id))
-            })
-            .filter_map(|r| {
-                let action = match r.action.as_str() {
-                    "block" => PolicyAction::Block,
-                    "rate_limit" => {
-                        let max_requests = r.rate_limit.filter(|&v| v > 0)? as u64;
-                        let window = r.rate_limit_window.as_deref()?;
-                        let window_secs = match window {
-                            "minute" => 60,
-                            "hour" => 3600,
-                            "day" => 86400,
-                            _ => return None,
-                        };
-                        PolicyAction::RateLimit {
-                            rule_id: r.id.clone(),
-                            max_requests,
-                            window_secs,
-                        }
-                    }
-                    "manual_approval" => PolicyAction::ManualApproval {
-                        rule_id: r.id.clone(),
-                    },
-                    "allow" => PolicyAction::Allow,
-                    _ => return None,
-                };
-                Some(PolicyRule {
-                    name: r.name.clone(),
-                    path_pattern: r.path_pattern.unwrap_or_else(|| "*".to_string()),
-                    method: r.method,
-                    action,
-                    conditions_raw: r.conditions,
-                })
-            })
-            .collect();
-
-        Ok(rules)
+        Ok(assemble_policy_rules(
+            org_result.map_err(db_err)?,
+            project_result.map_err(db_err)?,
+            &agent.id,
+            hostname,
+        ))
     }
 
     /// Extract access token from decrypted credentials JSON, refreshing if expired.
@@ -1301,6 +1264,106 @@ fn host_matches(request_host: &str, pattern: &str) -> bool {
     }
 }
 
+/// Endpoint signature used for agent-override shadowing: hosts are
+/// case-insensitive (DNS), methods are uppercased, and a NULL path is
+/// normalized to "*" to match the resolve-time mapping below.
+type EndpointSignature = (String, String, Option<String>);
+
+fn endpoint_signature(rule: &db::PolicyRuleRow) -> EndpointSignature {
+    (
+        rule.host_pattern.to_ascii_lowercase(),
+        rule.path_pattern.clone().unwrap_or_else(|| "*".to_string()),
+        rule.method.as_ref().map(|m| m.to_ascii_uppercase()),
+    )
+}
+
+/// Full-override shadowing within the project rule set: an agent-scoped rule
+/// replaces every all-agents rule sharing its endpoint signature, so a
+/// per-agent app-permission override can loosen as well as tighten the
+/// all-agents setting. Operates on rules that already survived
+/// `row_to_policy_rule`, so a malformed row (e.g. a rate rule with no config)
+/// that will never be evaluated can never shadow anything. Org rules must
+/// never be passed here — org enforcement cannot be overridden per agent.
+fn shadow_all_agents_rules(rules: Vec<(EndpointSignature, bool, PolicyRule)>) -> Vec<PolicyRule> {
+    let agent_signatures: std::collections::HashSet<EndpointSignature> = rules
+        .iter()
+        .filter(|(_, agent_scoped, _)| *agent_scoped)
+        .map(|(signature, _, _)| signature.clone())
+        .collect();
+    rules
+        .into_iter()
+        .filter(|(signature, agent_scoped, _)| {
+            *agent_scoped || !agent_signatures.contains(signature)
+        })
+        .map(|(_, _, rule)| rule)
+        .collect()
+}
+
+/// Map a policy rule row to a resolved rule, dropping rows with unknown
+/// actions or invalid rate-limit configs.
+fn row_to_policy_rule(r: db::PolicyRuleRow) -> Option<PolicyRule> {
+    let action = match r.action.as_str() {
+        "block" => PolicyAction::Block,
+        "rate_limit" => {
+            let max_requests = r.rate_limit.filter(|&v| v > 0)? as u64;
+            let window = r.rate_limit_window.as_deref()?;
+            let window_secs = match window {
+                "minute" => 60,
+                "hour" => 3600,
+                "day" => 86400,
+                _ => return None,
+            };
+            PolicyAction::RateLimit {
+                rule_id: r.id,
+                max_requests,
+                window_secs,
+            }
+        }
+        "manual_approval" => PolicyAction::ManualApproval { rule_id: r.id },
+        "allow" => PolicyAction::Allow,
+        _ => return None,
+    };
+    Some(PolicyRule {
+        name: r.name,
+        path_pattern: r.path_pattern.unwrap_or_else(|| "*".to_string()),
+        method: r.method,
+        action,
+        conditions_raw: r.conditions,
+    })
+}
+
+/// Filter org + project rows for this agent and host, map them to resolved
+/// rules, and shadow the project set — org rules first, preserving today's
+/// evaluation order.
+fn assemble_policy_rules(
+    org_rows: Vec<db::PolicyRuleRow>,
+    project_rows: Vec<db::PolicyRuleRow>,
+    agent_id: &str,
+    hostname: &str,
+) -> Vec<PolicyRule> {
+    let relevant = |r: &db::PolicyRuleRow| {
+        host_matches(hostname, &r.host_pattern)
+            && (r.agent_id.is_none() || r.agent_id.as_deref() == Some(agent_id))
+    };
+    let project_rules = shadow_all_agents_rules(
+        project_rows
+            .into_iter()
+            .filter(&relevant)
+            .filter_map(|r| {
+                let signature = endpoint_signature(&r);
+                let agent_scoped = r.agent_id.is_some();
+                row_to_policy_rule(r).map(|rule| (signature, agent_scoped, rule))
+            })
+            .collect(),
+    );
+    org_rows
+        .into_iter()
+        .filter(&relevant)
+        .filter_map(row_to_policy_rule)
+        .chain(project_rules)
+        .collect()
+}
+
 // ── Tests ───────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -1308,6 +1371,369 @@ mod tests {
     use super::*;
     async fn new_store() -> std::sync::Arc<dyn crate::cache::CacheStore> {
         crate::cache::create_store().await.unwrap()
+    }
+
+    // ── Agent-override shadowing ──────────────────────────────────────
+
+    fn rule_row(
+        host: &str,
+        path: Option<&str>,
+        method: Option<&str>,
+        agent: Option<&str>,
+        action: &str,
+    ) -> db::PolicyRuleRow {
+        db::PolicyRuleRow {
+            id: format!("rule-{action}-{}", agent.unwrap_or("all")),
+            name: format!("Test {action} rule"),
+            host_pattern: host.to_string(),
+            path_pattern: path.map(|p| p.to_string()),
+            method: method.map(|m| m.to_string()),
+            agent_id: agent.map(|a| a.to_string()),
+            action: action.to_string(),
+            rate_limit: None,
+            rate_limit_window: None,
+            conditions: None,
+        }
+    }
+
+    /// Evaluate `rules` for GET /v1/a with a fresh store — the fixed request
+    /// every shadowing test uses.
+    async fn decide(
+        rules: &[PolicyRule],
+        policy_mode: &str,
+        enforce_deny: bool,
+    ) -> crate::policy::PolicyDecision {
+        let store = new_store().await;
+        crate::policy::evaluate(
+            "org1",
+            "proj1",
+            "GET",
+            "/v1/a",
+            None,
+            rules,
+            "tok",
+            store.as_ref(),
+            policy_mode,
+            enforce_deny,
+        )
+        .await
+    }
+
+    #[test]
+    fn shadow_removes_all_agents_rule_with_same_signature() {
+        let rules = assemble_policy_rules(
+            vec![],
+            vec![
+                rule_row("api.x.com", Some("/v1/a"), Some("GET"), None, "block"),
+                rule_row(
+                    "api.x.com",
+                    Some("/v1/a"),
+                    Some("GET"),
+                    Some("agent-1"),
+                    "allow",
+                ),
+            ],
+            "agent-1",
+            "api.x.com",
+        );
+        assert_eq!(rules.len(), 1);
+        assert!(matches!(rules[0].action, PolicyAction::Allow));
+    }
+
+    #[test]
+    fn shadow_keeps_all_agents_rules_with_different_signatures() {
+        let rules = assemble_policy_rules(
+            vec![],
+            vec![
+                rule_row("api.x.com", Some("/v1/b"), Some("GET"), None, "block"),
+                rule_row("api.x.com", Some("/v1/a"), Some("POST"), None, "block"),
+                rule_row("api.x.com", Some("/v1/a"), Some("GET"), None, "allow"),
+                rule_row(
+                    "api.x.com",
+                    Some("/v1/a"),
+                    Some("GET"),
+                    Some("agent-1"),
+                    "allow",
+                ),
+            ],
+            "agent-1",
+            "api.x.com",
+        );
+        // Only the same-signature all-agents rule is shadowed.
+        assert_eq!(rules.len(), 3);
+    }
+
+    #[test]
+    fn shadow_is_identity_without_agent_rules() {
+        let rules = assemble_policy_rules(
+            vec![],
+            vec![
+                rule_row("api.x.com", Some("/v1/a"), Some("GET"), None, "block"),
+                rule_row("api.x.com", None, None, None, "manual_approval"),
+            ],
+            "agent-1",
+            "api.x.com",
+        );
+        assert_eq!(rules.len(), 2);
+    }
+
+    #[test]
+    fn shadow_keeps_multiple_agent_rules_with_same_signature() {
+        let rules = assemble_policy_rules(
+            vec![],
+            vec![
+                rule_row("api.x.com", Some("/v1/a"), Some("GET"), None, "allow"),
+                rule_row(
+                    "api.x.com",
+                    Some("/v1/a"),
+                    Some("GET"),
+                    Some("agent-1"),
+                    "block",
+                ),
+                rule_row(
+                    "api.x.com",
+                    Some("/v1/a"),
+                    Some("GET"),
+                    Some("agent-1"),
+                    "manual_approval",
+                ),
+            ],
+            "agent-1",
+            "api.x.com",
+        );
+        assert_eq!(rules.len(), 2);
+        assert!(!rules
+            .iter()
+            .any(|r| matches!(r.action, PolicyAction::Allow)));
+    }
+
+    #[test]
+    fn shadow_signature_is_case_insensitive_for_host_and_method() {
+        let rules = assemble_policy_rules(
+            vec![],
+            vec![
+                rule_row("API.X.com", Some("/v1/a"), Some("get"), None, "block"),
+                rule_row(
+                    "api.x.com",
+                    Some("/v1/a"),
+                    Some("GET"),
+                    Some("agent-1"),
+                    "allow",
+                ),
+            ],
+            "agent-1",
+            "api.x.com",
+        );
+        assert_eq!(rules.len(), 1);
+        assert!(matches!(rules[0].action, PolicyAction::Allow));
+    }
+
+    #[test]
+    fn shadow_null_path_equals_star_pattern() {
+        let rules = assemble_policy_rules(
+            vec![],
+            vec![
+                rule_row("api.x.com", None, Some("GET"), None, "block"),
+                rule_row(
+                    "api.x.com",
+                    Some("*"),
+                    Some("GET"),
+                    Some("agent-1"),
+                    "allow",
+                ),
+            ],
+            "agent-1",
+            "api.x.com",
+        );
+        assert_eq!(rules.len(), 1);
+        assert!(matches!(rules[0].action, PolicyAction::Allow));
+    }
+
+    #[test]
+    fn shadow_requires_a_rule_that_survives_mapping() {
+        // A malformed agent rate rule (no rate config) is dropped by
+        // row_to_policy_rule; it must not shadow the all-agents block —
+        // otherwise the agent would be left with no rule at all (fail-open).
+        let rules = assemble_policy_rules(
+            vec![],
+            vec![
+                rule_row("api.x.com", Some("/v1/a"), Some("GET"), None, "block"),
+                rule_row(
+                    "api.x.com",
+                    Some("/v1/a"),
+                    Some("GET"),
+                    Some("agent-1"),
+                    "rate_limit",
+                ),
+            ],
+            "agent-1",
+            "api.x.com",
+        );
+        assert_eq!(rules.len(), 1);
+        assert!(matches!(rules[0].action, PolicyAction::Block));
+    }
+
+    #[tokio::test]
+    async fn assemble_agent_allow_overrides_all_agents_block() {
+        let rules = assemble_policy_rules(
+            vec![],
+            vec![
+                rule_row("api.x.com", Some("/v1/a"), Some("GET"), None, "block"),
+                rule_row(
+                    "api.x.com",
+                    Some("/v1/a"),
+                    Some("GET"),
+                    Some("agent-1"),
+                    "allow",
+                ),
+            ],
+            "agent-1",
+            "api.x.com",
+        );
+        let decision = decide(&rules, "allow", false).await;
+        assert!(matches!(decision, crate::policy::PolicyDecision::Allow));
+    }
+
+    #[tokio::test]
+    async fn assemble_agent_approval_overrides_all_agents_block() {
+        let rules = assemble_policy_rules(
+            vec![],
+            vec![
+                rule_row("api.x.com", Some("/v1/a"), Some("GET"), None, "block"),
+                rule_row(
+                    "api.x.com",
+                    Some("/v1/a"),
+                    Some("GET"),
+                    Some("agent-1"),
+                    "manual_approval",
+                ),
+            ],
+            "agent-1",
+            "api.x.com",
+        );
+        let decision = decide(&rules, "allow", false).await;
+        assert!(matches!(
+            decision,
+            crate::policy::PolicyDecision::ManualApproval { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn assemble_agent_rate_limit_overrides_all_agents_block() {
+        let mut rate_rule = rule_row(
+            "api.x.com",
+            Some("/v1/a"),
+            Some("GET"),
+            Some("agent-1"),
+            "rate_limit",
+        );
+        rate_rule.rate_limit = Some(100);
+        rate_rule.rate_limit_window = Some("hour".to_string());
+        let rules = assemble_policy_rules(
+            vec![],
+            vec![
+                rule_row("api.x.com", Some("/v1/a"), Some("GET"), None, "block"),
+                rate_rule,
+            ],
+            "agent-1",
+            "api.x.com",
+        );
+        // The block row is shadowed; under the limit the request goes through.
+        let decision = decide(&rules, "allow", false).await;
+        assert!(matches!(decision, crate::policy::PolicyDecision::Allow));
+    }
+
+    #[tokio::test]
+    async fn assemble_org_block_not_shadowed_by_agent_allow() {
+        let rules = assemble_policy_rules(
+            vec![rule_row(
+                "api.x.com",
+                Some("/v1/a"),
+                Some("GET"),
+                None,
+                "block",
+            )],
+            vec![rule_row(
+                "api.x.com",
+                Some("/v1/a"),
+                Some("GET"),
+                Some("agent-1"),
+                "allow",
+            )],
+            "agent-1",
+            "api.x.com",
+        );
+        let decision = decide(&rules, "allow", false).await;
+        assert!(matches!(
+            decision,
+            crate::policy::PolicyDecision::Blocked { .. }
+        ));
+    }
+
+    #[test]
+    fn assemble_drops_foreign_agent_rules_and_other_hosts() {
+        let rules = assemble_policy_rules(
+            vec![],
+            vec![
+                rule_row(
+                    "api.x.com",
+                    Some("/v1/a"),
+                    Some("GET"),
+                    Some("agent-2"),
+                    "block",
+                ),
+                rule_row("other.com", Some("/v1/a"), Some("GET"), None, "block"),
+                rule_row("api.x.com", Some("/v1/a"), Some("GET"), None, "block"),
+            ],
+            "agent-1",
+            "api.x.com",
+        );
+        assert_eq!(rules.len(), 1);
+        assert!(matches!(rules[0].action, PolicyAction::Block));
+    }
+
+    #[tokio::test]
+    async fn assemble_agent_allow_row_satisfies_deny_mode() {
+        let rules = assemble_policy_rules(
+            vec![],
+            vec![rule_row(
+                "api.x.com",
+                Some("/v1/a"),
+                Some("GET"),
+                Some("agent-1"),
+                "allow",
+            )],
+            "agent-1",
+            "api.x.com",
+        );
+        let decision = decide(&rules, "deny", true).await;
+        assert!(matches!(decision, crate::policy::PolicyDecision::Allow));
+    }
+
+    #[tokio::test]
+    async fn assemble_agent_block_overrides_all_agents_allow_in_deny_mode() {
+        let rules = assemble_policy_rules(
+            vec![],
+            vec![
+                rule_row("api.x.com", Some("/v1/a"), Some("GET"), None, "allow"),
+                rule_row(
+                    "api.x.com",
+                    Some("/v1/a"),
+                    Some("GET"),
+                    Some("agent-1"),
+                    "block",
+                ),
+            ],
+            "agent-1",
+            "api.x.com",
+        );
+        // The allow row is truly gone — not merely outvoted by pass order.
+        assert_eq!(rules.len(), 1);
+        let decision = decide(&rules, "deny", true).await;
+        assert!(matches!(
+            decision,
+            crate::policy::PolicyDecision::Blocked { .. }
+        ));
     }
 
     #[tokio::test]

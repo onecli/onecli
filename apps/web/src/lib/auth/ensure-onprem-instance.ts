@@ -29,5 +29,10 @@ export const ensureOnpremInstance = async (): Promise<void> => {
     select: { id: true, email: true },
   });
 
-  await ensureSharedOrgWithKey(user.id, user.email);
+  const org = await ensureSharedOrgWithKey(user.id, user.email);
+
+  // Operators need the org id for org-scoped API calls (e.g. the authorize
+  // `?org=` override) — surface it once per boot, next to the org API key
+  // logs from the seed above.
+  console.info(`[onecli] Shared organization id: ${org.id}`);
 };

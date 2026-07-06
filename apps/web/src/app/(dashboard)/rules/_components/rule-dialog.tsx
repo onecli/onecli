@@ -14,7 +14,8 @@ import {
   AnimatedTabContent,
 } from "@onecli/ui/components/animated-tabs";
 import type { PolicyMode } from "@onecli/api/validations/policy-rule";
-import type { AgentOption, PolicyRuleItem, RuleActions } from "./types";
+import type { PageScope } from "@/lib/api";
+import type { AgentOption, PolicyRuleItem } from "./types";
 import { ApplicationRuleForm } from "./application-rule-form";
 import { CustomEndpointForm } from "./custom-endpoint-form";
 
@@ -25,7 +26,7 @@ interface RuleDialogProps {
   agents: AgentOption[];
   rule?: PolicyRuleItem;
   showAgentField?: boolean;
-  ruleActions?: RuleActions;
+  pageScope?: PageScope;
   connectedProviders?: Map<string, string[]>;
   policyMode?: PolicyMode;
 }
@@ -37,7 +38,7 @@ export const RuleDialog = ({
   agents,
   rule,
   showAgentField = true,
-  ruleActions,
+  pageScope = "project",
   connectedProviders,
   policyMode,
 }: RuleDialogProps) => {
@@ -64,7 +65,7 @@ export const RuleDialog = ({
               agents={agents}
               rule={rule}
               showAgentField={showAgentField}
-              ruleActions={ruleActions}
+              pageScope={pageScope}
               policyMode={policyMode}
             />
           </div>
@@ -88,7 +89,9 @@ export const RuleDialog = ({
               <ApplicationRuleForm
                 onSaved={onSaved}
                 onClose={handleClose}
-                ruleActions={ruleActions}
+                agents={agents}
+                showAgentField={showAgentField}
+                pageScope={pageScope}
                 connectedProviders={connectedProviders}
                 policyMode={policyMode}
               />
@@ -102,7 +105,7 @@ export const RuleDialog = ({
                 onClose={handleClose}
                 agents={agents}
                 showAgentField={showAgentField}
-                ruleActions={ruleActions}
+                pageScope={pageScope}
                 policyMode={policyMode}
               />
             </AnimatedTabContent>

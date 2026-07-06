@@ -1,39 +1,33 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
+import { useQueryClient } from "@tanstack/react-query";
 import { ArrowLeft, Loader2, Settings2 } from "lucide-react";
 import { Button } from "@onecli/ui/components/button";
 import { Skeleton } from "@onecli/ui/components/skeleton";
-import type { getAppConnections as defaultGetConnections } from "@/lib/actions/connections";
-import { apiGet } from "@/lib/api";
-import { checkAppConfigExists as defaultCheckConfig } from "@/lib/actions/app-config";
-import { Card } from "@onecli/ui/components/card";
+import type { Connection, PageScope } from "@/lib/api";
+import { queryKeys } from "@/lib/api/keys";
 import { useAppMessages } from "@/hooks/use-app-connected";
-import { useInvalidateGatewayCache } from "@/hooks/use-invalidate-cache";
+import { useConnections } from "@/hooks/use-connections";
+import { useAppConfigStatus } from "@/hooks/use-app-config";
 import {
   PROJECT_PATH_RE,
   ORG_PATH_RE,
   withProjectPrefix,
 } from "@/lib/navigation";
 import type { OAuthPermission } from "@onecli/api/apps/types";
-import {
-  getAppPermissionDefinition,
-  type AppPermissionLevel,
-} from "@onecli/api/apps/app-permissions";
+import type { AppPermissionLevel } from "@onecli/api/apps/app-permissions";
+import { useAppPermissionDefinitions } from "@/hooks/use-app-permissions";
 import { AppIcon } from "./app-icon";
 import { AppConfigForm, type AppConfigFormHandle } from "./app-config-form";
 import { ConfigureCredentialsDialog } from "./configure-credentials-dialog";
 import { PermissionsList } from "./permissions-list";
 import { AppPermissions } from "./app-permissions";
 import { ConnectionAccountCard } from "./connection-account-card";
+import { InheritedConnectionCard } from "./inherited-connection-card";
 import { AppBlocklist } from "./app-blocklist";
-
-const defaultGetConnections_ = () =>
-  apiGet<{ connections: Awaited<ReturnType<typeof defaultGetConnections>> }>(
-    "/v1/apps/connections",
-  ).then((r) => r.connections);
 
 interface AppDetailProps {
   app: {
@@ -60,99 +54,71 @@ interface AppDetailProps {
   };
   hasEnvDefaults: boolean;
   hasAppConfig: boolean;
-  getConnections?: typeof defaultGetConnections;
-  checkAppConfig?: typeof defaultCheckConfig;
-  pageScope?: "project" | "organization";
+  pageScope?: PageScope;
   backPath?: string;
-  permissionActions?: React.ComponentProps<typeof AppPermissions>["actions"];
   orgPermissionStates?: Record<string, AppPermissionLevel>;
   orgConditions?: Record<string, unknown[]>;
   policyMode?: "allow" | "deny";
 }
 
-interface ConnectionData {
-  id: string;
-  label: string | null;
-  provider: string;
-  status: string;
-  scopes: string[];
-  scope?: string;
+type ConnectionData = Omit<Connection, "metadata"> & {
   metadata: Record<string, unknown> | null;
-  connectedAt: Date;
-}
+};
 
 export const AppDetail = ({
   app,
   configurable,
   hasEnvDefaults,
   hasAppConfig,
-  getConnections = defaultGetConnections_,
-  checkAppConfig = defaultCheckConfig,
   pageScope = "project",
   backPath,
-  permissionActions,
   orgPermissionStates,
   orgConditions,
   policyMode,
 }: AppDetailProps) => {
   const pathname = usePathname();
-  const [connections, setConnections] = useState<ConnectionData[]>([]);
-  const [inheritedConnections, setInheritedConnections] = useState<
-    ConnectionData[]
-  >([]);
-  const [loading, setLoading] = useState(true);
+  const queryClient = useQueryClient();
   const [configDialogOpen, setConfigDialogOpen] = useState(false);
-  const [configVersion, setConfigVersion] = useState(0);
-  const [appConfigured, setAppConfigured] = useState(hasAppConfig);
   const configFormRef = useRef<AppConfigFormHandle>(null);
 
-  const fetchConnections = useCallback(async () => {
-    try {
-      const allConnections = await getConnections();
-      const forProvider = allConnections
-        .filter((c) => c.provider === app.id && c.status === "connected")
-        .map((c) => ({
-          ...c,
-          metadata: c.metadata as Record<string, unknown> | null,
-        }));
-      setConnections(
-        forProvider.filter((c) => c.scope === pageScope || !c.scope),
-      );
-      setInheritedConnections(
-        forProvider.filter((c) => c.scope && c.scope !== pageScope),
-      );
-    } catch {
-      // Connection fetch failed — show as disconnected
-    } finally {
-      setLoading(false);
-    }
-  }, [app.id, getConnections, pageScope]);
-
-  useEffect(() => {
-    fetchConnections();
-  }, [fetchConnections]);
-
-  const invalidateCache = useInvalidateGatewayCache();
+  const { data: allConnections = [], isPending: loading } =
+    useConnections(pageScope);
+  const { connections, inheritedConnections } = useMemo(() => {
+    const forProvider: ConnectionData[] = allConnections
+      .filter((c) => c.provider === app.id && c.status === "connected")
+      .map((c) => ({
+        ...c,
+        metadata: c.metadata as Record<string, unknown> | null,
+      }));
+    return {
+      connections: forProvider.filter((c) => c.scope === pageScope || !c.scope),
+      inheritedConnections: forProvider.filter(
+        (c) => c.scope && c.scope !== pageScope,
+      ),
+    };
+  }, [allConnections, app.id, pageScope]);
 
   const handleConnected = useCallback(() => {
-    fetchConnections();
-    invalidateCache();
-  }, [fetchConnections, invalidateCache]);
+    queryClient.invalidateQueries({ queryKey: queryKeys.connections.all() });
+    queryClient.invalidateQueries({ queryKey: queryKeys.counts.all() });
+  }, [queryClient]);
 
   useAppMessages({ onConnected: handleConnected });
 
-  const refreshConfigStatus = useCallback(async () => {
-    fetchConnections();
-    try {
-      const exists = await checkAppConfig(app.id);
-      setAppConfigured(exists);
-    } catch {
-      // ignore
-    }
-  }, [app.id, fetchConnections, checkAppConfig]);
+  // The RSC page seeds the very first render; the query converges after.
+  const { data: configStatus } = useAppConfigStatus(
+    app.id,
+    pageScope,
+    !!configurable,
+  );
+  const appConfigured = configStatus?.enabled ?? hasAppConfig;
 
   const hasCredentials = hasEnvDefaults || appConfigured;
-  const permissionDefinition = getAppPermissionDefinition(app.id);
+  const { data: permissionDefinitions, isPending: permissionsPending } =
+    useAppPermissionDefinitions();
+  const permissionDefinition = permissionDefinitions?.find(
+    (def) => def.provider === app.id,
+  );
 
   const openConnectPopup = (
     connectionId?: string,
@@ -192,6 +158,10 @@ export const AppDetail = ({
 
   const connectionCount = connections.length + inheritedConnections.length;
   const isConnected = connectionCount > 0;
+  // Hold the OAuth-scopes fallback until the catalog resolves, so it doesn't
+  // flash before being replaced by the permissions editor.
+  const showOAuthScopesList =
+    !permissionsPending && isConnected && app.permissions.length > 0;
 
   return (
     <div className="space-y-6">
@@ -291,24 +261,16 @@ export const AppDetail = ({
                     connection={conn}
                     appName={app.name}
                     onReconnect={(id) => openConnectPopup(id, popupOpts)}
-                    refetchConnections={fetchConnections}
                     pageScope={pageScope}
                   />
                 ))}
                 {inheritedConnections.map((conn) => (
-                  <Card
+                  <InheritedConnectionCard
                     key={conn.id}
-                    className="flex-row items-center justify-between gap-3 px-4 py-3 opacity-60 border-dashed"
-                  >
-                    <div className="min-w-0">
-                      <p className="text-sm font-medium truncate">
-                        {conn.label ?? "Connected account"}
-                      </p>
-                      <p className="text-xs text-muted-foreground mt-0.5">
-                        Organization
-                      </p>
-                    </div>
-                  </Card>
+                    connection={conn}
+                    appName={app.name}
+                    pageScope={pageScope}
+                  />
                 ))}
               </div>
             </div>
@@ -319,12 +281,12 @@ export const AppDetail = ({
               provider={app.id}
               appName={app.name}
               groups={permissionDefinition.groups}
-              actions={permissionActions}
               orgStates={orgPermissionStates}
               orgConditions={orgConditions}
               policyMode={policyMode}
+              pageScope={pageScope}
             />
-          ) : isConnected && app.permissions.length > 0 ? (
+          ) : showOAuthScopesList ? (
             <PermissionsList
               permissions={app.permissions}
               grantedScopes={[
@@ -341,7 +303,6 @@ export const AppDetail = ({
 
       {configurable && (
         <AppConfigForm
-          key={configVersion}
           ref={configFormRef}
           provider={app.id}
           appName={app.name}
@@ -349,7 +310,7 @@ export const AppDetail = ({
           hint={configurable.hint}
           hasEnvDefaults={hasEnvDefaults}
           isConnected={isConnected}
-          onConfigChange={refreshConfigStatus}
+          pageScope={pageScope}
         />
       )}
 
@@ -372,10 +333,9 @@ export const AppDetail = ({
           hint={configurable.hint}
           open={configDialogOpen}
           onOpenChange={setConfigDialogOpen}
+          pageScope={pageScope}
           onConfigured={() => {
             setConfigDialogOpen(false);
-            setConfigVersion((v) => v + 1);
-            setAppConfigured(true);
             openConnectPopup(undefined, popupOpts);
           }}
         />

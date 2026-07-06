@@ -37,33 +37,51 @@ export const auth = (options?: AuthOptions) => {
   const minimumRole = options?.role;
 
   return createMiddleware<ApiEnv>(async (c, next) => {
-    let authResult: AuthContext | null = null;
-
-    // 1. API key (project or org)
-    authResult = await authenticateApiKey(c.req.raw, requireProject);
-
-    // 2. JWT from Authorization header
-    if (!authResult) {
-      authResult = await authenticateSession(c.req.raw, requireProject);
+    // A browser navigation that can't set request headers — the app-connect →
+    // GET /v1/apps/:provider/authorize redirect — carries its scope in the query
+    // string (_token/_project/_org). Bridge it into the headers every auth path
+    // reads, ONCE up front, so the ambient local session (onprem-slim: no _token
+    // JWT) resolves the popup's project too — not only the query-token (cloud)
+    // path. Never override a real header/Authorization, so an API key or a
+    // header-scoped request keeps precedence; resolveProjectId still validates
+    // org membership before trusting x-project-id.
+    let request = c.req.raw;
+    const queryToken = c.req.query("_token");
+    const queryProject = c.req.query("_project");
+    const queryOrg = c.req.query("_org");
+    if (queryToken || queryProject || queryOrg) {
+      try {
+        const headers = new Headers(request.headers);
+        if (queryToken && !headers.has("authorization")) {
+          headers.set("authorization", `Bearer ${queryToken}`);
+        }
+        if (queryProject && !headers.has("x-project-id")) {
+          headers.set("x-project-id", queryProject);
+        }
+        if (queryOrg && !headers.has("x-organization-id")) {
+          headers.set("x-organization-id", queryOrg);
+        }
+        // Header-only clone for the auth resolvers; c.req (the route handler's
+        // request, incl. its body) is left untouched.
+        request = new Request(c.req.url, { headers });
+      } catch {
+        // A scope param that isn't a valid Latin-1 header value (e.g. a
+        // non-Latin1 char) makes Headers.set throw; fall back to the original
+        // request (no bridge) rather than surfacing a 500 — auth then resolves
+        // as if the param were absent.
+        request = c.req.raw;
+      }
     }
 
-    // 3. JWT from query params (browser navigations)
-    if (!authResult) {
-      const url = new URL(c.req.url);
-      const queryToken = url.searchParams.get("_token");
-      if (queryToken) {
-        const headers = new Headers(c.req.raw.headers);
-        headers.set("authorization", `Bearer ${queryToken}`);
-        const queryProject = url.searchParams.get("_project");
-        if (queryProject) headers.set("x-project-id", queryProject);
-        const queryOrg = url.searchParams.get("_org");
-        if (queryOrg) headers.set("x-organization-id", queryOrg);
+    // 1. API key (project or org)
+    let authResult: AuthContext | null = await authenticateApiKey(
+      request,
+      requireProject,
+    );
 
-        authResult = await authenticateSession(
-          new Request(c.req.url, { headers }),
-          requireProject,
-        );
-      }
+    // 2. Session — cloud reads the JWT from Authorization; local/onprem is ambient
+    if (!authResult) {
+      authResult = await authenticateSession(request, requireProject);
     }
 
     if (!authResult) {

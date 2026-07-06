@@ -25,16 +25,17 @@ import {
   type AppCategory,
 } from "./app-categories";
 import type { AppDefinition } from "@onecli/api/apps/types";
-import type { getAppConnections as defaultGetConnections } from "@/lib/actions/connections";
-import { apiGet } from "@/lib/api";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
+import type { PageScope } from "@/lib/api";
+import { queryKeys } from "@/lib/api/keys";
+import { useConnections } from "@/hooks/use-connections";
 import {
-  getConfiguredProviders as defaultGetConfiguredProviders,
-  getAvailableEnvDefaults,
-} from "@/lib/actions/app-config";
+  useConfiguredProviders,
+  useEnvDefaultProviders,
+} from "@/hooks/use-app-config";
 import { getApps, getApp } from "@onecli/api/apps/registry";
 import { RequestAppSlot } from "@/lib/components/request-app-slot";
 import { useAppMessages } from "@/hooks/use-app-connected";
-import { useInvalidateGatewayCache } from "@/hooks/use-invalidate-cache";
 import { getCurrentPlan } from "@/lib/user-plan";
 import { ProAppDialog } from "@/lib/components/pro-app-dialog";
 import { AppIcon } from "./app-icon";
@@ -42,15 +43,8 @@ import { ConnectAppDialog } from "./connect-app-dialog";
 import { ConfigureCredentialsDialog } from "./configure-credentials-dialog";
 import { useConnectParam } from "./use-connect-param";
 
-const defaultGetConnections_ = () =>
-  apiGet<{ connections: Awaited<ReturnType<typeof defaultGetConnections>> }>(
-    "/v1/apps/connections",
-  ).then((r) => r.connections);
-
 interface AppsTabProps {
-  getConnections?: typeof defaultGetConnections;
-  getConfiguredProviders?: typeof defaultGetConfiguredProviders;
-  pageScope?: "project" | "organization";
+  pageScope?: PageScope;
   basePath?: string;
   /**
    * Connect-only surface (onprem-slim): the per-app detail pages don't exist, so the
@@ -60,8 +54,6 @@ interface AppsTabProps {
 }
 
 export const AppsTab = ({
-  getConnections = defaultGetConnections_,
-  getConfiguredProviders = defaultGetConfiguredProviders,
   pageScope = "project",
   basePath,
   connectOnly = false,
@@ -97,23 +89,12 @@ export const AppsTab = ({
   }, []);
   const activeCategory =
     (searchParams.get("category") as AppCategory | null) ?? "all";
-  const [connectionCounts, setConnectionCounts] = useState<Map<string, number>>(
-    () => new Map(),
-  );
-  const [configuredProviders, setConfiguredProviders] = useState<Set<string>>(
-    () => new Set(),
-  );
-  const [envDefaultProviders, setEnvDefaultProviders] = useState<Set<string>>(
-    () => new Set(),
-  );
   const [configApp, setConfigApp] = useState<AppDefinition | null>(null);
   const [connectApp, setConnectApp] = useState<AppDefinition | null>(null);
   const [connectAgentName, setConnectAgentName] = useState<
     string | undefined
   >();
   const [premiumApp, setProApp] = useState<AppDefinition | null>(null);
-  const [plan, setPlan] = useState<string | null>(null);
-  const [loading, setLoading] = useState(true);
   const [requestOpen, setRequestOpen] = useState(false);
   const [requestHostname, setRequestHostname] = useState("");
   const [requestAppName, setRequestAppName] = useState<string | undefined>();
@@ -131,54 +112,54 @@ export const AppsTab = ({
     [searchParams, router, pathname, startTransition],
   );
 
-  const fetchConnections = useCallback(async () => {
-    try {
-      const [connections, availableDefaults, configured, currentPlan] =
-        await Promise.all([
-          getConnections(),
-          getAvailableEnvDefaults(),
-          getConfiguredProviders().catch(() => [] as string[]),
-          getCurrentPlan(),
-        ]);
-      const counts = new Map<string, number>();
-      for (const c of connections.filter((c) => c.status === "connected")) {
-        counts.set(c.provider, (counts.get(c.provider) ?? 0) + 1);
-      }
-      setConnectionCounts(counts);
-      setEnvDefaultProviders(new Set(availableDefaults));
-      setConfiguredProviders(new Set(configured));
-      setPlan(currentPlan);
-    } catch {
-      // Silently fail — grid still works without connection status
-    } finally {
-      setLoading(false);
+  const queryClient = useQueryClient();
+  const connectionsQuery = useConnections(pageScope);
+  const configuredQuery = useConfiguredProviders(pageScope);
+  const envDefaultsQuery = useEnvDefaultProviders();
+  const planQuery = useQuery({
+    queryKey: queryKeys.userPlan.all(),
+    queryFn: getCurrentPlan,
+  });
+
+  const connectionCounts = useMemo(() => {
+    const counts = new Map<string, number>();
+    for (const c of (connectionsQuery.data ?? []).filter(
+      (c) => c.status === "connected",
+    )) {
+      counts.set(c.provider, (counts.get(c.provider) ?? 0) + 1);
     }
-  }, [getConnections, getConfiguredProviders]);
-
-  useEffect(() => {
-    fetchConnections();
-  }, [fetchConnections]);
-
-  const invalidateCache = useInvalidateGatewayCache();
+    return counts;
+  }, [connectionsQuery.data]);
+  const configuredProviders = useMemo(
+    () => new Set(configuredQuery.data ?? []),
+    [configuredQuery.data],
+  );
+  const envDefaultProviders = useMemo(
+    () => new Set(envDefaultsQuery.data ?? []),
+    [envDefaultsQuery.data],
+  );
+  const plan = planQuery.data ?? null;
+  const loading =
+    connectionsQuery.isPending ||
+    configuredQuery.isPending ||
+    envDefaultsQuery.isPending ||
+    planQuery.isPending;
 
   const handleConnected = useCallback(
     ({ provider }: { provider?: string }) => {
-      fetchConnections();
-      invalidateCache();
+      queryClient.invalidateQueries({ queryKey: queryKeys.connections.all() });
+      // A credentials-import connect can implicitly save an app config.
+      queryClient.invalidateQueries({
+        queryKey: queryKeys.appConfig.configured(pageScope),
+      });
+      queryClient.invalidateQueries({ queryKey: queryKeys.counts.all() });
       if (provider && !connectOnly) {
         router.push(
           connectionsPath({ pathname, basePath }, `/apps/${provider}`),
         );
       }
     },
-    [
-      fetchConnections,
-      invalidateCache,
-      router,
-      basePath,
-      pathname,
-      connectOnly,
-    ],
+    [queryClient, pageScope, router, basePath, pathname, connectOnly],
   );
 
   useAppMessages({
@@ -462,9 +443,9 @@ export const AppsTab = ({
           onOpenChange={(open) => {
             if (!open) setConfigApp(null);
           }}
+          pageScope={pageScope}
           onConfigured={() => {
             const provider = configApp.id;
-            setConfiguredProviders((prev) => new Set([...prev, provider]));
             setConfigApp(null);
             openConnectPopup(provider);
           }}

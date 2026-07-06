@@ -34,12 +34,13 @@ import { Label } from "@onecli/ui/components/label";
 import { Switch } from "@onecli/ui/components/switch";
 import { cn } from "@onecli/ui/lib/utils";
 import { SecretInput } from "@/components/secret-input";
+import type { PageScope } from "@/lib/api";
 import {
-  saveAppConfig,
-  getAppConfigStatus,
-  deleteAppConfigAction,
-  setAppConfigEnabled,
-} from "@/lib/actions/app-config";
+  useAppConfigStatus,
+  useSaveAppConfig,
+  useDeleteAppConfig,
+  useToggleAppConfig,
+} from "@/hooks/use-app-config";
 import { IS_CLOUD } from "@/lib/env";
 import { RedirectUri } from "./redirect-uri";
 
@@ -61,8 +62,7 @@ interface AppConfigFormProps {
   hint?: string;
   hasEnvDefaults: boolean;
   isConnected: boolean;
-  /** Called after any config change that invalidates the connection (save, toggle, delete). */
-  onConfigChange?: () => void;
+  pageScope?: PageScope;
   /** Imperative handle so the page header can open + scroll to this section. */
   ref?: Ref<AppConfigFormHandle>;
 }
@@ -74,57 +74,48 @@ export const AppConfigForm = ({
   hint,
   hasEnvDefaults,
   isConnected,
-  onConfigChange,
+  pageScope = "project",
   ref,
 }: AppConfigFormProps) => {
   const [values, setValues] = useState<Record<string, string>>({});
-  const [hasCredentials, setHasCredentials] = useState(false);
-  const [enabled, setEnabled] = useState(false);
-  const [loading, setLoading] = useState(true);
-  const [saving, setSaving] = useState(false);
   const [pendingAction, setPendingAction] = useState<
     "save" | "toggle-on" | "toggle-off" | null
   >(null);
   const [openValue, setOpenValue] = useState("");
+  const [openInitialized, setOpenInitialized] = useState(false);
   const [highlight, setHighlight] = useState(false);
   const rootRef = useRef<HTMLDivElement>(null);
   const triggerRef = useRef<HTMLButtonElement>(null);
-  const didInitRef = useRef(false);
   const wantScrollRef = useRef(false);
 
-  const fetchConfig = useCallback(async () => {
-    try {
-      const config = await getAppConfigStatus(provider);
-      if (config) {
-        setValues(config.settings);
-        setHasCredentials(config.hasCredentials);
-        setEnabled(config.enabled);
-      } else {
-        setValues({});
-        setHasCredentials(false);
-        setEnabled(false);
-      }
-      // On first load, open the section by default when custom credentials are
-      // enabled or there are no platform defaults to fall back on. Batched with
-      // setLoading(false) so the section mounts already-open (no open/close
-      // flash); guarded so it never overrides an explicit reveal() or resets the
-      // open state on later refetches (save/toggle/delete).
-      if (!didInitRef.current) {
-        didInitRef.current = true;
-        setOpenValue(
-          (config?.enabled ?? false) || !hasEnvDefaults ? "credentials" : "",
-        );
-      }
-    } catch {
-      // Failed to fetch
-    } finally {
-      setLoading(false);
-    }
-  }, [provider, hasEnvDefaults]);
+  const statusQuery = useAppConfigStatus(provider, pageScope);
+  const saveMutation = useSaveAppConfig(provider, pageScope);
+  const deleteMutation = useDeleteAppConfig(provider, pageScope);
+  const toggleMutation = useToggleAppConfig(provider, pageScope);
 
+  const loading = statusQuery.isPending;
+  const hasCredentials = statusQuery.data?.hasCredentials ?? false;
+  const enabled = statusQuery.data?.enabled ?? false;
+
+  // Keep the editable fields in sync with the fetched settings (also clears
+  // them after a delete, once the invalidated query settles). Keyed on the
+  // settings reference — not the whole payload — so the optimistic toggle
+  // (which replaces the payload but spreads the same settings object) can't
+  // wipe in-progress edits.
+  const settings = statusQuery.data?.settings;
+  const hasStatus = !!statusQuery.data;
   useEffect(() => {
-    fetchConfig();
-  }, [fetchConfig]);
+    if (hasStatus) setValues(settings ?? {});
+  }, [hasStatus, settings]);
+
+  // On first load, open the section by default when custom credentials are
+  // enabled or there are no platform defaults to fall back on. Adjusted during
+  // render (guarded) so the section mounts already-open — no open/close flash;
+  // never overrides an explicit reveal() or later refetches.
+  if (!loading && !openInitialized) {
+    setOpenInitialized(true);
+    if (enabled || !hasEnvDefaults) setOpenValue("credentials");
+  }
 
   const revealSection = useCallback(() => {
     const prefersReduced = window.matchMedia(
@@ -144,7 +135,7 @@ export const AppConfigForm = ({
     ref,
     () => ({
       reveal: () => {
-        didInitRef.current = true;
+        setOpenInitialized(true);
         setOpenValue("credentials");
         setHighlight(true);
         wantScrollRef.current = true;
@@ -171,16 +162,11 @@ export const AppConfigForm = ({
   }, [loading, revealSection]);
 
   const doSave = async () => {
-    setSaving(true);
     try {
-      await saveAppConfig(provider, values);
+      await saveMutation.mutateAsync(values);
       toast.success("Credentials saved");
-      await fetchConfig();
-      onConfigChange?.();
     } catch {
       toast.error("Failed to save credentials");
-    } finally {
-      setSaving(false);
     }
   };
 
@@ -192,25 +178,20 @@ export const AppConfigForm = ({
     }
   };
 
-  const doToggle = async (checked: boolean) => {
-    setEnabled(checked);
-    try {
-      await setAppConfigEnabled(provider, checked);
-      toast.success(
-        checked ? "Custom credentials enabled" : "Custom credentials disabled",
-      );
-      onConfigChange?.();
-    } catch {
-      setEnabled(!checked);
-      toast.error("Failed to update");
-    }
+  const doToggle = (checked: boolean) => {
+    toggleMutation.mutate(checked, {
+      onSuccess: () =>
+        toast.success(
+          checked
+            ? "Custom credentials enabled"
+            : "Custom credentials disabled",
+        ),
+      onError: () => toast.error("Failed to update"),
+    });
   };
 
   const handleToggle = (checked: boolean) => {
-    if (checked && !hasCredentials) {
-      setEnabled(false);
-      return;
-    }
+    if (checked && !hasCredentials) return;
     if (isConnected) {
       setPendingAction(checked ? "toggle-on" : "toggle-off");
     } else {
@@ -220,12 +201,8 @@ export const AppConfigForm = ({
 
   const doDelete = async () => {
     try {
-      await deleteAppConfigAction(provider);
-      setValues({});
-      setHasCredentials(false);
-      setEnabled(false);
+      await deleteMutation.mutateAsync();
       toast.success("Credentials removed");
-      onConfigChange?.();
     } catch {
       toast.error("Failed to remove credentials");
     }
@@ -233,12 +210,13 @@ export const AppConfigForm = ({
 
   const handleConfirmAction = async () => {
     if (pendingAction === "save") await doSave();
-    else if (pendingAction === "toggle-on") await doToggle(true);
-    else if (pendingAction === "toggle-off") await doToggle(false);
+    else if (pendingAction === "toggle-on") doToggle(true);
+    else if (pendingAction === "toggle-off") doToggle(false);
     setPendingAction(null);
   };
 
   const hasInput = fields.some((f) => !!values[f.name]);
+  const saving = saveMutation.isPending;
 
   if (loading) {
     return (

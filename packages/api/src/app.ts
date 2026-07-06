@@ -32,6 +32,8 @@ import { secretRoutes } from "./routes/secrets";
 import { ruleRoutes } from "./routes/rules";
 import { userRoutes } from "./routes/user";
 import { appRoutes } from "./routes/apps";
+import { connectionRoutes } from "./routes/connections";
+import { vaultRoutes } from "./routes/vaults";
 import { gatewayUrlRoutes, gatewayCaRoutes } from "./routes/gateway";
 import { containerConfigRoutes } from "./routes/container-config";
 import { countsRoutes } from "./routes/counts";
@@ -93,6 +95,8 @@ export const createApiApp = (
   app.route("/rules", ruleRoutes());
   app.route("/user", userRoutes());
   app.route("/apps", appRoutes());
+  app.route("/connections", connectionRoutes());
+  app.route("/vaults", vaultRoutes());
   app.route("/gateway-url", gatewayUrlRoutes());
   app.route("/gateway", gatewayCaRoutes());
   app.route("/container-config", containerConfigRoutes());

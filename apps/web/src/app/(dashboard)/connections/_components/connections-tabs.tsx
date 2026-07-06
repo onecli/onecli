@@ -11,12 +11,9 @@ import {
   AnimatedTabTrigger,
 } from "@onecli/ui/components/animated-tabs";
 import { Badge } from "@onecli/ui/components/badge";
-import {
-  connections as connectionsApi,
-  secrets as secretsApi,
-} from "@/lib/api";
+import { secrets as secretsApi, type PageScope } from "@/lib/api";
 import { queryKeys } from "@/lib/api/keys";
-import { getVaultConnections as defaultGetVaults } from "@/lib/actions/connections";
+import { useConnections, useVaultConnections } from "@/hooks/use-connections";
 
 const getTabRoutes = (pathname: string): Record<string, string> => {
   const idx = pathname.indexOf("/connections");
@@ -41,24 +38,21 @@ const pathToTab = (pathname: string): string => {
 };
 
 interface ConnectionsTabsProps {
-  getConnections?: () => Promise<{ status: string }[]>;
   getSecrets?: () => Promise<unknown[]>;
-  getVaultConnections?: (() => Promise<unknown[]>) | null;
   showVaults?: boolean;
   basePath?: string;
+  pageScope?: PageScope;
 }
 
 export const ConnectionsTabs = ({
-  getConnections,
   getSecrets,
-  getVaultConnections = defaultGetVaults,
   showVaults = true,
   basePath,
+  pageScope = "project",
 }: ConnectionsTabsProps) => {
   const pathname = usePathname();
   const router = useRouter();
   const queryClient = useQueryClient();
-  const scope = basePath ? "org" : "project";
   const activeTab = basePath
     ? pathToTab(pathname.replace(basePath, "/connections"))
     : pathToTab(pathname);
@@ -73,19 +67,14 @@ export const ConnectionsTabs = ({
     : getTabRoutes(pathname);
   const [, startTransition] = useTransition();
 
-  const { data: connectionsList = [] } = useQuery({
-    queryKey: [...queryKeys.connections.list(), scope],
-    queryFn: getConnections ?? connectionsApi.list,
-  });
+  const { data: connectionsList = [] } = useConnections(pageScope);
   const { data: secretsList = [] } = useQuery({
-    queryKey: [...queryKeys.secrets.list(), scope],
+    queryKey: [...queryKeys.secrets.list(), pageScope],
     queryFn: getSecrets ?? secretsApi.list,
   });
-  const { data: vaultsList = [] } = useQuery({
-    queryKey: [...queryKeys.vaults.list(), scope],
-    queryFn: getVaultConnections ?? (() => Promise.resolve([])),
-    enabled: showVaults && !!getVaultConnections,
-  });
+  const { data: vaultsList = [] } = useVaultConnections(
+    showVaults && pageScope === "project",
+  );
 
   const connectedCount = useMemo(() => {
     const appCount = connectionsList.filter(

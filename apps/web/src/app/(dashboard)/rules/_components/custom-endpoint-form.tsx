@@ -1,7 +1,6 @@
 "use client";
 
 import { useState, useEffect, useMemo } from "react";
-import { useInvalidateGatewayCache } from "@/hooks/use-invalidate-cache";
 import { toast } from "sonner";
 import {
   ShieldBan,
@@ -33,15 +32,14 @@ import {
 } from "@onecli/ui/components/select";
 import { DialogFooter } from "@onecli/ui/components/dialog";
 import type { PolicyMode } from "@onecli/api/validations/policy-rule";
-import { updateRule as defaultUpdateRule } from "@/lib/actions/rules";
 import { useQueryClient } from "@tanstack/react-query";
-import { rules } from "@/lib/api";
-import type { CreateRuleInput } from "@/lib/api";
+import { rules, type PageScope } from "@/lib/api";
 import { queryKeys } from "@/lib/api/keys";
 import type { RuleCondition } from "@onecli/api/validations/policy-rule";
+import { AgentScopeSelect } from "@/lib/components/agent-scope-select";
 import { ConditionBuilder } from "@/lib/components/condition-builder";
 import { usePlanGate } from "@/lib/plan-gate";
-import type { AgentOption, PolicyRuleItem, RuleActions } from "./types";
+import type { AgentOption, PolicyRuleItem } from "./types";
 
 const METHOD_OPTIONS = [
   { value: "", label: "All methods" },
@@ -75,7 +73,7 @@ interface CustomEndpointFormProps {
   agents: AgentOption[];
   rule?: PolicyRuleItem;
   showAgentField?: boolean;
-  ruleActions?: RuleActions;
+  pageScope?: PageScope;
   policyMode?: PolicyMode;
 }
 
@@ -85,12 +83,11 @@ export const CustomEndpointForm = ({
   agents,
   rule,
   showAgentField = true,
-  ruleActions,
+  pageScope = "project",
   policyMode = "allow",
 }: CustomEndpointFormProps) => {
   const isDenyMode = policyMode === "deny";
   const isEdit = !!rule;
-  const invalidateCache = useInvalidateGatewayCache();
   const queryClient = useQueryClient();
   const planGate = usePlanGate();
   const [saving, setSaving] = useState(false);
@@ -157,52 +154,53 @@ export const CustomEndpointForm = ({
       conditionsChanged
     : true;
 
-  const createRule =
-    ruleActions?.createRule ??
-    ((input: unknown) => rules.create(input as CreateRuleInput));
-  const updateRule = ruleActions?.updateRule ?? defaultUpdateRule;
-
   const handleSave = async () => {
     if (!isValid) return;
     setSaving(true);
     try {
       if (isEdit) {
-        await updateRule(rule.id, {
-          name: name.trim(),
-          hostPattern: hostPattern.trim(),
-          pathPattern: pathPattern.trim() || null,
-          method:
-            (method as "GET" | "POST" | "PUT" | "PATCH" | "DELETE") || null,
-          agentId: agentId || null,
-          action,
-          rateLimit: action === "rate_limit" ? rateLimit : null,
-          rateLimitWindow: action === "rate_limit" ? rateLimitWindow : null,
-          conditions: conditions.length > 0 ? conditions : null,
-        });
+        await rules.update(
+          rule.id,
+          {
+            name: name.trim(),
+            hostPattern: hostPattern.trim(),
+            pathPattern: pathPattern.trim() || null,
+            method:
+              (method as "GET" | "POST" | "PUT" | "PATCH" | "DELETE") || null,
+            agentId: agentId || null,
+            action,
+            rateLimit: action === "rate_limit" ? rateLimit : null,
+            rateLimitWindow: action === "rate_limit" ? rateLimitWindow : null,
+            conditions: conditions.length > 0 ? conditions : null,
+          },
+          pageScope,
+        );
         toast.success("Rule updated");
       } else {
-        await createRule({
-          name: name.trim(),
-          hostPattern: hostPattern.trim(),
-          pathPattern: pathPattern.trim() || undefined,
-          method:
-            (method as "GET" | "POST" | "PUT" | "PATCH" | "DELETE") ||
-            undefined,
-          action,
-          enabled,
-          agentId: agentId || undefined,
-          rateLimit: action === "rate_limit" ? rateLimit : undefined,
-          rateLimitWindow:
-            action === "rate_limit" ? rateLimitWindow : undefined,
-          conditions: conditions.length > 0 ? conditions : undefined,
-        });
+        await rules.create(
+          {
+            name: name.trim(),
+            hostPattern: hostPattern.trim(),
+            pathPattern: pathPattern.trim() || undefined,
+            method:
+              (method as "GET" | "POST" | "PUT" | "PATCH" | "DELETE") ||
+              undefined,
+            action,
+            enabled,
+            agentId: agentId || undefined,
+            rateLimit: action === "rate_limit" ? rateLimit : undefined,
+            rateLimitWindow:
+              action === "rate_limit" ? rateLimitWindow : undefined,
+            conditions: conditions.length > 0 ? conditions : undefined,
+          },
+          pageScope,
+        );
         toast.success("Rule created");
       }
       queryClient.invalidateQueries({ queryKey: queryKeys.rules.all() });
       queryClient.invalidateQueries({ queryKey: queryKeys.counts.all() });
       onSaved?.();
       onClose();
-      invalidateCache();
     } catch (err) {
       toast.error(
         err instanceof Error
@@ -360,22 +358,11 @@ export const CustomEndpointForm = ({
             {showAgentField && (
               <div className="space-y-2">
                 <Label>Scope</Label>
-                <Select
-                  value={agentId || "_all"}
-                  onValueChange={(v) => setAgentId(v === "_all" ? "" : v)}
-                >
-                  <SelectTrigger className="w-full">
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="_all">All agents</SelectItem>
-                    {agents.map((agent) => (
-                      <SelectItem key={agent.id} value={agent.id}>
-                        {agent.name}
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
+                <AgentScopeSelect
+                  agents={agents}
+                  value={agentId}
+                  onChange={setAgentId}
+                />
               </div>
             )}
           </div>
