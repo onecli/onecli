@@ -142,6 +142,21 @@ export const isAwsInjection = (config: unknown): config is AwsInjectionConfig =>
   "region" in config &&
   typeof (config as Record<string, unknown>).region === "string";
 
+// An `aws` secret's inline value is JSON carrying the two IAM keys the gateway
+// signs with (see secret_inject.rs `"aws"`); `sessionToken` is optional. The
+// gateway also rejects empty keys, so both must be non-empty here.
+export const isValidAwsValueJson = (value: string): boolean => {
+  try {
+    const parsed = JSON.parse(value) as {
+      accessKeyId?: unknown;
+      secretAccessKey?: unknown;
+    } | null;
+    return !!parsed?.accessKeyId && !!parsed?.secretAccessKey;
+  } catch {
+    return false;
+  }
+};
+
 // Mirror of the gateway's `is_path_safe` (apps/gateway/src/inject.rs): a path
 // secret is substituted into the URL path verbatim, so a path-structural
 // delimiter, percent sign, whitespace, or control character in the value would
@@ -257,25 +272,17 @@ export const createSecretSchema = z
       }
       // 1Password-sourced AWS creds are resolved at request time, so only
       // validate the JSON shape for inline values.
-      if (data.valueSource !== "onepassword" && data.value) {
-        try {
-          const parsed = JSON.parse(data.value);
-          if (!parsed?.accessKeyId || !parsed?.secretAccessKey) {
-            ctx.addIssue({
-              code: "custom",
-              path: ["value"],
-              message:
-                "AWS value must be JSON with accessKeyId and secretAccessKey",
-            });
-          }
-        } catch {
-          ctx.addIssue({
-            code: "custom",
-            path: ["value"],
-            message:
-              "AWS value must be JSON with accessKeyId and secretAccessKey",
-          });
-        }
+      if (
+        data.valueSource !== "onepassword" &&
+        data.value &&
+        !isValidAwsValueJson(data.value)
+      ) {
+        ctx.addIssue({
+          code: "custom",
+          path: ["value"],
+          message:
+            "AWS value must be JSON with accessKeyId and secretAccessKey",
+        });
       }
     }
   });

@@ -8,6 +8,7 @@ import {
   isPathRegexInjection,
   isPathSafeValue,
   isPathTemplateInjection,
+  isValidAwsValueJson,
   wildcardCoversPublicSuffix,
 } from "./secret";
 
@@ -137,6 +138,30 @@ describe("aws secret validation", () => {
     expect(awsSecret({ value: JSON.stringify({ accessKeyId: "AKIA" }) })).toBe(
       false,
     );
+  });
+});
+
+// The create schema and updateSecret both gate an aws value through this, so a
+// value that survives create can't slip past an update (the original gap).
+describe("isValidAwsValueJson", () => {
+  it("accepts JSON with both non-empty keys", () => {
+    expect(
+      isValidAwsValueJson(
+        JSON.stringify({ accessKeyId: "AKIA", secretAccessKey: "secret" }),
+      ),
+    ).toBe(true);
+  });
+
+  it.each([
+    ["not JSON", "AKIAsecret"],
+    ["only accessKeyId", JSON.stringify({ accessKeyId: "AKIA" })],
+    [
+      "empty secret",
+      JSON.stringify({ accessKeyId: "AKIA", secretAccessKey: "" }),
+    ],
+    ["empty object", "{}"],
+  ])("rejects %s", (_name, value) => {
+    expect(isValidAwsValueJson(value)).toBe(false);
   });
 });
 

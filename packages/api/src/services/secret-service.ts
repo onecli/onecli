@@ -7,6 +7,7 @@ import {
   detectAnthropicAuthMode,
   detectOpenaiAuthMode,
   isAwsInjection,
+  isValidAwsValueJson,
   isHeaderInjection,
   isParamInjection,
   isPathInjection,
@@ -345,6 +346,13 @@ export const updateSecret = async (
     if (!value)
       throw new ServiceError("BAD_REQUEST", "Secret value is required");
 
+    if (secret.type === "aws" && !isValidAwsValueJson(value)) {
+      throw new ServiceError(
+        "BAD_REQUEST",
+        "AWS value must be JSON with accessKeyId and secretAccessKey",
+      );
+    }
+
     if (secret.type === "openai") {
       const normalized = normalizeOpenaiValue(value);
       value = normalized.value;
@@ -375,6 +383,12 @@ export const updateSecret = async (
     input.injectionConfig !== undefined &&
     (secret.type === "generic" || secret.type === "aws")
   ) {
+    if (secret.type === "aws" && !isAwsInjection(input.injectionConfig)) {
+      throw new ServiceError(
+        "BAD_REQUEST",
+        "AWS secrets require a region in injectionConfig",
+      );
+    }
     data.injectionConfig = buildInjectionConfig(input.injectionConfig);
     assertPathValueSafe(input.injectionConfig, input.valueSource, input.value);
   }
