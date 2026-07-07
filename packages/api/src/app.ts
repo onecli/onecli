@@ -2,6 +2,7 @@ import { Hono } from "hono";
 import type {
   SessionProvider,
   OAuthOrgHandlers,
+  OrgAppConfigProvider,
   ConnectionHooks,
   ResourceHooks,
   RoleResolver,
@@ -17,12 +18,14 @@ import {
   initCrypto,
   initEeApps,
   initOAuthOrg,
+  initOrgAppConfig,
   initConnectionHooks,
   initResourceHooks,
   initSelfUrl,
   initRoleResolver,
   initPolicyValidator,
   initRuleActionGate,
+  initStrictApiKeyAuth,
 } from "./providers";
 import { registerAppPermission } from "./apps/app-permissions";
 import { errorHandler, notFoundHandler } from "./middleware/error-handler";
@@ -53,6 +56,7 @@ export interface CreateApiAppOptions {
   eeApps?: AppDefinition[];
   eeAppPermissions?: AppPermissionDefinition[];
   oauthOrg?: OAuthOrgHandlers;
+  orgAppConfig?: OrgAppConfigProvider;
   connectionHooks?: ConnectionHooks;
   resourceHooks?: ResourceHooks;
   selfUrl?: string;
@@ -60,6 +64,12 @@ export interface CreateApiAppOptions {
   policyValidator?: PolicyValidator;
   ruleActionGate?: RuleActionGate;
   sessionHooks?: Partial<SessionHooks>;
+  /**
+   * Commit `oc_` bearers to API-key auth: when set, a failed API-key
+   * authentication returns 401 instead of falling through to session auth.
+   * EE editions enable it; the OSS default keeps today's fallthrough.
+   */
+  strictApiKeyAuth?: boolean;
   version?: string;
 }
 
@@ -76,6 +86,7 @@ export const createApiApp = (
     }
   }
   if (options?.oauthOrg) initOAuthOrg(options.oauthOrg);
+  if (options?.orgAppConfig) initOrgAppConfig(options.orgAppConfig);
   if (options?.connectionHooks) initConnectionHooks(options.connectionHooks);
   if (options?.resourceHooks) initResourceHooks(options.resourceHooks);
   if (options?.selfUrl) initSelfUrl(options.selfUrl);
@@ -83,6 +94,7 @@ export const createApiApp = (
   if (options?.policyValidator) initPolicyValidator(options.policyValidator);
   if (options?.ruleActionGate) initRuleActionGate(options.ruleActionGate);
   if (options?.sessionHooks) initSessionHooks(options.sessionHooks);
+  if (options?.strictApiKeyAuth) initStrictApiKeyAuth(options.strictApiKeyAuth);
 
   const app = new Hono<ApiEnv>().basePath("/v1");
   app.onError(errorHandler);

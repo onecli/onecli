@@ -47,11 +47,19 @@ const getOssDashboardSegments = () => {
   }
 };
 
+// All EE editions (cloud + both onprems) resolve app credentials project →
+// org → env; the RSC/server-action seed (`checkAppConfigExists`) must see the
+// same org tier, so the action is swapped for an org-aware variant.
+const ORG_APP_CONFIG_ALIASES = {
+  "@/lib/actions/app-config": "@/ee/actions/app-config",
+};
+
 // Cloud edition swaps these web import paths to cloud implementations (turbopack
 // resolveAlias, applied only when isCloud). This config runs in plain Node, so the
 // key→value map lives here directly. The onprem-full edition selects a curated
 // subset below (ONPREM_FULL_ALIASES).
 const CLOUD_ALIASES = {
+  ...ORG_APP_CONFIG_ALIASES,
   "@/lib/auth/auth-provider": "@/ee/auth/cognito-provider",
   "@/lib/auth/auth-server": "@/ee/auth/cognito-server",
   "@/lib/actions/resolve-user": "@/ee/auth/resolve-user",
@@ -105,6 +113,7 @@ const ONPREM_ENTITLEMENT_ALIASES = {
 const ONPREM_FULL_ALIASES = {
   ...ONPREM_INIT_ALIASES,
   ...ONPREM_ENTITLEMENT_ALIASES,
+  ...ORG_APP_CONFIG_ALIASES,
   // org-UI + org-aware redirect → cloud implementations (reuse the cloud mappings above)
   "@/lib/nav-config": CLOUD_ALIASES["@/lib/nav-config"],
   "@dashboard/dashboard-sidebar": CLOUD_ALIASES["@dashboard/dashboard-sidebar"],
@@ -121,6 +130,7 @@ const ONPREM_FULL_ALIASES = {
 const ONPREM_SLIM_ALIASES = {
   ...ONPREM_INIT_ALIASES,
   ...ONPREM_ENTITLEMENT_ALIASES,
+  ...ORG_APP_CONFIG_ALIASES,
 };
 
 /** @type {import('next').NextConfig} */

@@ -1,6 +1,10 @@
 import { createMiddleware } from "hono/factory";
 import type { AuthContext, OrgRole } from "../providers";
-import { getRoleResolver, ROLE_HIERARCHY } from "../providers";
+import {
+  getRoleResolver,
+  getStrictApiKeyAuth,
+  ROLE_HIERARCHY,
+} from "../providers";
 import { ServiceError } from "../services/errors";
 import type { ApiEnv } from "../types";
 import { authenticateApiKey } from "./auth/api-key";
@@ -14,6 +18,13 @@ export interface AuthOptions {
 const UNAUTHORIZED = {
   error: {
     message: "Invalid API key or token.",
+    type: "authentication_error",
+  },
+} as const;
+
+const MISSING_PROJECT_HEADER = {
+  error: {
+    message: "X-Project-Id header is required",
     type: "authentication_error",
   },
 } as const;
@@ -74,10 +85,24 @@ export const auth = (options?: AuthOptions) => {
     }
 
     // 1. API key (project or org)
-    let authResult: AuthContext | null = await authenticateApiKey(
-      request,
-      requireProject,
-    );
+    const apiKeyAuth = await authenticateApiKey(request, requireProject);
+    let authResult: AuthContext | null =
+      typeof apiKeyAuth === "string" ? null : apiKeyAuth;
+
+    // Strict API-key mode (EE editions): an `oc_` bearer commits to API-key
+    // auth — a failed key authentication 401s instead of falling through to
+    // session auth, where onprem's ambient local session would silently
+    // resolve the caller to the user's default project. OSS keeps the
+    // fallthrough (flag off), where both sentinels degrade to the plain null
+    // they always were.
+    if (getStrictApiKeyAuth()) {
+      if (apiKeyAuth === "missing-project") {
+        return c.json(MISSING_PROJECT_HEADER, 401);
+      }
+      if (apiKeyAuth === "invalid-key") {
+        return c.json(UNAUTHORIZED, 401);
+      }
+    }
 
     // 2. Session — cloud reads the JWT from Authorization; local/onprem is ambient
     if (!authResult) {

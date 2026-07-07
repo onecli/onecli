@@ -6,6 +6,20 @@ export interface AppConfigStatus {
   settings?: Record<string, string>;
   hasCredentials: boolean;
   enabled: boolean;
+  /**
+   * `"organization"` when the project has no enabled config row of its own and
+   * the status reports the org-level config instead (EE editions). There is no
+   * project row behind it — nothing to edit, toggle, or delete at this scope.
+   */
+  source?: "organization";
+  /**
+   * Connections that removing or replacing this config would disconnect — the
+   * blast radius shown in the org admin's confirm dialog. Present only on the
+   * org config surface; project responses omit it. `orgConnections` are the
+   * config's own org-scoped connections; `projectConnections` are the project
+   * connections it minted across every project.
+   */
+  dependents?: { orgConnections: number; projectConnections: number };
 }
 
 export const get = (provider: string, scope: PageScope = "project") =>

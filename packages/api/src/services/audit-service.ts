@@ -33,6 +33,8 @@ export const AUDIT_SERVICES = {
   PARTNER_SECRET: "partner-secret",
   // EE-only (budget module): per-(secret, org) spend caps
   BUDGET: "budget",
+  // EE-only (identity linking): auth-identity relink decisions
+  AUTH: "auth",
 } as const;
 
 export const AUDIT_STATUS = {

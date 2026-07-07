@@ -42,6 +42,16 @@ export const googleDrivePermissions: AppPermissionDefinition = {
     },
     {
       category: "write",
+      wildcard: {
+        id: "write_all",
+        name: "All write operations",
+        description: "Create, update, delete, and share files in Google Drive",
+        hostPattern: "www.googleapis.com",
+        pathPattern: "/drive/v3/*",
+        // Uploads (create/update with media) go through the /upload/ host path.
+        aliasPatterns: ["/upload/drive/v3/*"],
+        methods: ["POST", "PUT", "PATCH", "DELETE"],
+      },
       tools: [
         {
           id: "create_file",

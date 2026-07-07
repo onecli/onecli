@@ -47,6 +47,13 @@ export default function DashboardLayout({
           signOutRef.current();
           return;
         }
+        if (res.status === 409) {
+          // Identity conflict (relink rejected) — not transient, don't retry.
+          // Sign out; the login page re-derives and shows the reason on the
+          // next attempt.
+          signOutRef.current();
+          return;
+        }
         if (res.ok) {
           sessionData = await res.json();
           break;

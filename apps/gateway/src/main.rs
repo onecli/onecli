@@ -1,4 +1,8 @@
-#[cfg(not(edition_cloud))]
+#[cfg(edition_oss)]
+mod auth;
+
+#[cfg(any(edition_onprem_slim, edition_onprem_full))]
+#[path = "ee/onprem/auth.rs"]
 mod auth;
 
 #[cfg(edition_cloud)]
@@ -29,6 +33,13 @@ mod ee_apps;
 #[cfg(not(edition_oss))]
 #[path = "ee/ee_apps.rs"]
 mod ee_apps;
+
+#[cfg(edition_oss)]
+mod org_routes;
+
+#[cfg(not(edition_oss))]
+#[path = "ee/org_routes.rs"]
+mod org_routes;
 
 mod connect;
 

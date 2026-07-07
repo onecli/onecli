@@ -86,7 +86,11 @@ pub(crate) struct ApiKeyRow {
 }
 
 /// An org-scoped API key row from the `api_keys` table.
-#[cfg(edition_cloud)]
+///
+/// EE-only (cloud + onprem): org keys are mintable only via the cloud UI and
+/// the onprem bootstrap, and only those editions' auth forks consult them —
+/// gating them out keeps org-key auth out of the OSS build entirely.
+#[cfg(not(edition_oss))]
 #[derive(Debug, FromRow)]
 pub(crate) struct OrgApiKeyRow {
     pub user_id: String,
@@ -160,7 +164,7 @@ pub(crate) async fn find_api_key(pool: &PgPool, key: &str) -> Result<Option<ApiK
 }
 
 /// Look up an org-scoped API key (`oc_org_...`) and return its user_id and organization_id.
-#[cfg(edition_cloud)]
+#[cfg(not(edition_oss))]
 pub(crate) async fn find_org_api_key(pool: &PgPool, key: &str) -> Result<Option<OrgApiKeyRow>> {
     sqlx::query_as::<_, OrgApiKeyRow>(
         r#"SELECT user_id, organization_id
@@ -175,7 +179,7 @@ pub(crate) async fn find_org_api_key(pool: &PgPool, key: &str) -> Result<Option<
 }
 
 /// Verify that a project belongs to the given organization.
-#[cfg(edition_cloud)]
+#[cfg(not(edition_oss))]
 pub(crate) async fn verify_project_in_org(
     pool: &PgPool,
     project_id: &str,
@@ -242,8 +246,8 @@ pub(crate) async fn user_can_manage_project(
 }
 
 /// Whether a user is an admin or owner of an organization. Re-checked on every
-/// org-scoped API-key auth so the key stops working after a demotion. Cloud-only.
-#[cfg(edition_cloud)]
+/// org-scoped API-key auth so the key stops working after a demotion.
+#[cfg(not(edition_oss))]
 pub(crate) async fn user_is_org_admin(
     pool: &PgPool,
     user_id: &str,
@@ -417,6 +421,61 @@ pub(crate) async fn find_app_config(
     .fetch_optional(pool)
     .await
     .context("querying app_config by project_id + provider")
+}
+
+/// Find an enabled org-level BYOC app config for an organization + provider.
+///
+/// EE-only (cloud + onprem): org-level app configs are writable only through
+/// the EE org surface (`POST /v1/org/apps/:provider/config`); OSS has no way
+/// to create them, so its build carries no org lookup.
+#[cfg(not(edition_oss))]
+pub(crate) async fn find_app_config_by_org(
+    pool: &PgPool,
+    organization_id: &str,
+    provider: &str,
+) -> Result<Option<AppConfigRow>> {
+    sqlx::query_as::<_, AppConfigRow>(
+        r#"SELECT settings, credentials FROM app_configs
+           WHERE organization_id = $1 AND provider = $2
+             AND scope = 'organization' AND enabled = true
+           LIMIT 1"#,
+    )
+    .bind(organization_id)
+    .bind(provider)
+    .fetch_optional(pool)
+    .await
+    .context("querying app_config by organization_id + provider")
+}
+
+/// Find the enabled BYOC app config that minted a specific connection, via the
+/// provenance link `app_connections.app_config_id`.
+///
+/// A connection's OAuth refresh token is bound to the client that minted it, so
+/// refresh must reuse exactly that config — even when the resolver's tier order
+/// (project → org) would now select a different row. Returns `None` when the
+/// link is null (env-minted, a no-config method, or pre-dating the link), or the
+/// config has since been disabled/removed, or (defence-in-depth) points at a
+/// different provider. The `provider` guard keeps a mislinked FK from ever
+/// handing one provider's client secret to another provider's token endpoint;
+/// every writer links same-provider by construction, so it only ever excludes
+/// corrupt data. Shared across editions: project-tier links exist in OSS; org
+/// rows simply never exist there.
+pub(crate) async fn find_app_config_by_connection(
+    pool: &PgPool,
+    connection_id: &str,
+    provider: &str,
+) -> Result<Option<AppConfigRow>> {
+    sqlx::query_as::<_, AppConfigRow>(
+        r#"SELECT ac.settings, ac.credentials FROM app_configs ac
+           JOIN app_connections c ON c.app_config_id = ac.id
+           WHERE c.id = $1 AND ac.provider = $2 AND ac.enabled = true
+           LIMIT 1"#,
+    )
+    .bind(connection_id)
+    .bind(provider)
+    .fetch_optional(pool)
+    .await
+    .context("querying app_config by connection provenance link")
 }
 
 // ── App connection queries ─────────────────────────────────────────────

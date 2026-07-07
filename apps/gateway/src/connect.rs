@@ -210,6 +210,7 @@ impl PolicyEngine {
         let plan = match agent.subscription_status.as_str() {
             "pro" => "pro",
             "team" => "team",
+            "enterprise" => "enterprise",
             _ => "free",
         }
         .to_string();
@@ -980,7 +981,9 @@ impl PolicyEngine {
                 {
                     // Authorized user / default: refresh via OAuth refresh_token
                     if let Some(config) = apps::refresh_config(provider) {
-                        let byoc = self.resolve_byoc_credentials(project_id, provider).await;
+                        let byoc = self
+                            .resolve_byoc_credentials(project_id, provider, connection_id)
+                            .await;
                         let (byoc_id, byoc_secret) = match &byoc {
                             Some((id, secret)) => (Some(id.as_str()), Some(secret.as_str())),
                             None => (None, None),
@@ -1051,18 +1054,60 @@ impl PolicyEngine {
         }
     }
 
-    /// Resolve BYOC client credentials from AppConfig for a given project + provider.
-    /// Returns `Some((client_id, client_secret))` if an enabled config exists, `None` otherwise.
+    /// Resolve BYOC client credentials for refreshing a connection.
+    ///
+    /// Prefers the config that *minted* the connection (the provenance link):
+    /// its refresh token is bound to that OAuth client, so refresh must reuse it
+    /// even when the tier order below would now pick a different row (e.g. an
+    /// org-minted connection whose project later added its own config). Falls
+    /// back to the project's own AppConfig row, then the organization-level row
+    /// (EE editions only), for connections with no link (env-minted, no-config
+    /// methods, or pre-dating the link) *and* for a link that resolves but
+    /// yields no usable pair (config disabled, wrong provider, or missing
+    /// clientId/clientSecret). The org tier is consulted whenever the project
+    /// tier yields no usable pair — row absent OR present but missing
+    /// clientId/clientSecret — the same completeness semantics as the Node
+    /// resolver's project → org chain. Returns
+    /// `Some((client_id, client_secret))` when a usable pair exists.
     async fn resolve_byoc_credentials(
         &self,
         project_id: &str,
         provider: &str,
+        connection_id: &str,
     ) -> Option<(String, String)> {
-        let config = db::find_app_config(&self.pool, project_id, provider)
+        let linked_row = db::find_app_config_by_connection(&self.pool, connection_id, provider)
             .await
+            .map_err(|e| warn!(error = %e, "failed to query linked BYOC app config"))
             .ok()
-            .flatten()?;
+            .flatten();
+        if let Some(row) = linked_row {
+            if let Some(pair) = self.extract_byoc_pair(row).await {
+                return Some(pair);
+            }
+            debug!(
+                connection_id = %connection_id,
+                provider = %provider,
+                "linked app config yielded no usable BYOC pair; falling back to project/org chain"
+            );
+        }
 
+        let project_row = db::find_app_config(&self.pool, project_id, provider)
+            .await
+            .map_err(|e| warn!(error = %e, "failed to query BYOC app config"))
+            .ok()
+            .flatten();
+        if let Some(row) = project_row {
+            if let Some(pair) = self.extract_byoc_pair(row).await {
+                return Some(pair);
+            }
+        }
+
+        let org_row = self.find_org_app_config(project_id, provider).await?;
+        self.extract_byoc_pair(org_row).await
+    }
+
+    /// Extract a usable `(client_id, client_secret)` pair from an AppConfig row.
+    async fn extract_byoc_pair(&self, config: db::AppConfigRow) -> Option<(String, String)> {
         // clientId is in settings (plain JSON)
         let client_id = config
             .settings
@@ -1088,6 +1133,36 @@ impl PolicyEngine {
             .map(String::from)?;
 
         Some((client_id, client_secret))
+    }
+
+    /// Org-level BYOC fallback: the app config of the project's organization.
+    /// EE editions only — OSS has no way to create org-level app configs.
+    #[cfg(not(edition_oss))]
+    async fn find_org_app_config(
+        &self,
+        project_id: &str,
+        provider: &str,
+    ) -> Option<db::AppConfigRow> {
+        let organization_id = db::find_organization_id_by_project(&self.pool, project_id)
+            .await
+            .map_err(|e| warn!(error = %e, "failed to resolve org for BYOC fallback"))
+            .ok()
+            .flatten()?;
+        db::find_app_config_by_org(&self.pool, &organization_id, provider)
+            .await
+            .map_err(|e| warn!(error = %e, "failed to query org BYOC app config"))
+            .ok()
+            .flatten()
+    }
+
+    /// OSS: no org tier — org-level app configs are an EE surface.
+    #[cfg(edition_oss)]
+    async fn find_org_app_config(
+        &self,
+        _project_id: &str,
+        _provider: &str,
+    ) -> Option<db::AppConfigRow> {
+        None
     }
 }
 

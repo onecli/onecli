@@ -15,7 +15,7 @@ import {
   resolveConnectCredentials,
   type ConnectRequestBody,
 } from "../apps/connect-credentials";
-import { getOAuthOrg } from "../providers";
+import { getOAuthOrg, getOrgAppConfig } from "../providers";
 import {
   signOAuthState,
   verifyOAuthState,
@@ -33,6 +33,7 @@ import {
   listConnections,
   createConnection,
   reconnectConnection,
+  linkConnectionToAppConfig,
   listConnectionsByProvider,
   extractLabel,
 } from "../services/connection-service";
@@ -78,7 +79,9 @@ export const appRoutes = () => {
     const auth = c.get("auth");
     const projectId = requireProjectId(auth);
 
-    const [configs, connections] = await Promise.all([
+    // EE (orgAppConfig seam): org-level configs surface on apps that have no
+    // project row, marked `source: "organization"`. OSS: no seam — empty map.
+    const [configs, connections, orgConfigsResult] = await Promise.all([
       db.appConfig.findMany({
         where: { projectId },
         select: {
@@ -89,9 +92,12 @@ export const appRoutes = () => {
         },
       }),
       listConnections({ projectId }),
+      getOrgAppConfig()?.listEnabledConfigs(auth.organizationId),
     ]);
+    const orgConfigs = orgConfigsResult ?? {};
 
     const configMap = new Map(configs.map((cfg) => [cfg.provider, cfg]));
+
     const connectionMap = new Map(
       connections.map((conn) => [conn.provider, conn]),
     );
@@ -104,6 +110,7 @@ export const appRoutes = () => {
 
     const result = getApps().map((a) => {
       const config = configMap.get(a.id);
+      const orgConfig = orgConfigs[a.id];
       const connection = connectionMap.get(a.id);
 
       return {
@@ -117,7 +124,13 @@ export const appRoutes = () => {
               hasCredentials: !!config.credentials,
               enabled: config.enabled,
             }
-          : null,
+          : orgConfig
+            ? {
+                hasCredentials: orgConfig.hasCredentials,
+                enabled: true,
+                source: "organization",
+              }
+            : null,
         // Deprecated: first connection only — misleading for multi-account
         // providers. Kept verbatim for deployed CLIs; use `connections`.
         connection: connection
@@ -204,10 +217,14 @@ export const appRoutes = () => {
   // the param route.
   app.get("/configured", authMiddleware, async (c) => {
     const auth = c.get("auth");
-    const providers = await listConfiguredProviders({
-      projectId: requireProjectId(auth),
-    });
-    return c.json(providers);
+    // EE (orgAppConfig seam): org-level configs count as configured for every
+    // project in the org. OSS: no seam — project rows only, as before.
+    const [providers, orgConfigs] = await Promise.all([
+      listConfiguredProviders({ projectId: requireProjectId(auth) }),
+      getOrgAppConfig()?.listEnabledConfigs(auth.organizationId),
+    ]);
+    if (!orgConfigs) return c.json(providers);
+    return c.json([...new Set([...providers, ...Object.keys(orgConfigs)])]);
   });
 
   // ── GET /apps/env-defaults ── providers with platform default creds ────
@@ -268,8 +285,20 @@ export const appRoutes = () => {
     ]);
     const connection = providerConnections[0] ?? null;
 
+    // EE (orgAppConfig seam): an org-level config stands in when the project
+    // has no row of its own (inventory-faithful: a project row, even disabled,
+    // is shown as-is). OSS: no seam — always null.
+    const orgConfig = config
+      ? null
+      : ((await getOrgAppConfig()?.getEnabledConfig(
+          auth.organizationId,
+          provider,
+        )) ?? null);
+
     const isConfigured =
-      (config !== null && config.hasCredentials) || connection !== null;
+      (config !== null && config.hasCredentials) ||
+      orgConfig !== null ||
+      connection !== null;
 
     const hint = isConfigured
       ? `Your MCP server needs local credential stub files to start. Create them in the format and location the MCP server expects, but use 'onecli-managed' as a placeholder for all secrets. See ${docsBaseURL}/${provider}.md for examples (fallback: ${docsBaseURL}/general-app.md ). The OneCLI gateway handles real OAuth token exchange at request time.`
@@ -286,7 +315,13 @@ export const appRoutes = () => {
             hasCredentials: config.hasCredentials,
             enabled: config.enabled,
           }
-        : null,
+        : orgConfig
+          ? {
+              hasCredentials: orgConfig.hasCredentials,
+              enabled: true,
+              source: "organization",
+            }
+          : null,
       // Deprecated: latest connection only — misleading for multi-account
       // providers. Kept verbatim for deployed CLIs; use `connections`.
       connection: connection
@@ -355,7 +390,11 @@ export const appRoutes = () => {
         ...(agentName ? { agentName } : {}),
       });
 
-      const resolved = await resolveAppCredentials(projectId, appDef);
+      const resolved = await resolveAppCredentials(
+        projectId,
+        appDef,
+        auth.organizationId,
+      );
       if (!resolved) {
         return c.json(
           {
@@ -474,7 +513,11 @@ export const appRoutes = () => {
         }
       }
 
-      const resolved = await resolveAppCredentials(state.projectId, appDef);
+      const resolved = await resolveAppCredentials(
+        state.projectId,
+        appDef,
+        stateOrgId,
+      );
       if (!resolved) {
         return errorRedirect(`${appDef.name} is not configured`);
       }
@@ -519,6 +562,7 @@ export const appRoutes = () => {
           {
             scopes,
             metadata,
+            appConfigId: resolved.appConfigId,
           },
         );
       } else {
@@ -530,6 +574,7 @@ export const appRoutes = () => {
           {
             scopes,
             metadata,
+            appConfigId: resolved.appConfigId,
           },
         );
       }
@@ -617,12 +662,20 @@ export const appRoutes = () => {
     const projectId = requireProjectId(auth);
     await getConnectionHooks().beforeConnect(auth.organizationId, appDef);
 
+    // Project-scoped connect starts with no config link — body-provided
+    // credentials have no minting config. The credentials-import branch below
+    // re-links to the project config it saves; the explicit `undefined` also
+    // clears any stale link when reconnecting an existing connection.
+    const projectConnectionOpts = { ...connectionOpts, appConfigId: undefined };
+
+    let connection: { id: string };
+
     if (body?.connectionId) {
-      await reconnectConnection(
+      connection = await reconnectConnection(
         { projectId },
         body.connectionId,
         credentials,
-        connectionOpts,
+        projectConnectionOpts,
       );
     } else {
       const existing = await listConnectionsByProvider({ projectId }, provider);
@@ -638,19 +691,19 @@ export const appRoutes = () => {
         : existing[0];
 
       if (duplicate) {
-        await reconnectConnection(
+        connection = await reconnectConnection(
           { projectId },
           duplicate.id,
           credentials,
-          connectionOpts,
+          projectConnectionOpts,
         );
       } else {
         await getConnectionHooks().beforeCreate(auth.organizationId);
-        await createConnection(
+        connection = await createConnection(
           { projectId },
           provider,
           credentials,
-          connectionOpts,
+          projectConnectionOpts,
         );
       }
     }
@@ -665,11 +718,18 @@ export const appRoutes = () => {
       fields.clientId &&
       fields.clientSecret
     ) {
-      await saveAppConfigWithoutDisconnect(
+      const savedConfig = await saveAppConfigWithoutDisconnect(
         { projectId },
         provider,
         fields.clientId,
         fields.clientSecret,
+      );
+      // This connection was imported alongside its own project config — record
+      // that provenance so config removal/refresh can find it.
+      await linkConnectionToAppConfig(
+        { projectId },
+        connection.id,
+        savedConfig.id,
       );
     }
 
@@ -709,6 +769,23 @@ export const appRoutes = () => {
       { projectId: requireProjectId(auth) },
       provider,
     );
+    if (config?.enabled) return c.json(config);
+
+    // EE (orgAppConfig seam): no enabled project row — report the org-level
+    // config as configured, marked `source: "organization"` so the project
+    // config form knows there is no project row to edit. Org settings are
+    // deliberately not exposed on the project surface.
+    const orgConfig = await getOrgAppConfig()?.getEnabledConfig(
+      auth.organizationId,
+      provider,
+    );
+    if (orgConfig) {
+      return c.json({
+        hasCredentials: orgConfig.hasCredentials,
+        enabled: true,
+        source: "organization",
+      });
+    }
 
     return c.json(config ?? { hasCredentials: false, enabled: false });
   });

@@ -1,6 +1,7 @@
 import { Hono } from "hono";
 import { db } from "@onecli/db";
 import { getSessionProvider } from "../providers";
+import type { SessionUser } from "../providers/types";
 import { logger } from "../lib/logger";
 import {
   findUserDefaultProject,
@@ -13,6 +14,17 @@ import { CAPS } from "../lib/env";
 /** Extra attributes to spread into the user upsert (create + update). */
 export type SessionAttributes = Record<string, unknown>;
 
+/** The DB user a conflicting session's email already belongs to. */
+export interface ExistingIdentity {
+  id: string;
+  email: string;
+  externalAuthId: string;
+}
+
+/** Single user-facing message for a rejected identity relink (409). */
+export const IDENTITY_CONFLICT_ERROR =
+  "This email is already associated with a different sign-in identity. Sign in with your original method.";
+
 export interface SessionHooks {
   getSessionAttributes(request: Request): SessionAttributes;
   onUserCreated(
@@ -21,6 +33,17 @@ export interface SessionHooks {
   ): void;
   shouldBootstrapOrg(request: Request): boolean;
   augmentSessionResponse(userId: string): Promise<Record<string, unknown>>;
+  /**
+   * Decide what happens when a session's email already belongs to a user with
+   * a DIFFERENT auth identity (`externalAuthId` mismatch): "link" re-points
+   * the user to the session's identity; "reject" refuses the sign-in (409).
+   * The default preserves the historical behavior (always link) — editions
+   * with untrusted identity sources override this with a real policy.
+   */
+  resolveIdentityConflict(
+    existing: ExistingIdentity,
+    session: SessionUser,
+  ): "link" | "reject" | Promise<"link" | "reject">;
 }
 
 const defaultHooks: SessionHooks = {
@@ -28,6 +51,7 @@ const defaultHooks: SessionHooks = {
   onUserCreated: () => {},
   shouldBootstrapOrg: () => true,
   augmentSessionResponse: async () => ({}),
+  resolveIdentityConflict: () => "link",
 };
 
 let _hooks: SessionHooks = defaultHooks;
@@ -63,8 +87,18 @@ export const authSessionRoutes = () => {
 
       const existingUser = await db.user.findUnique({
         where: { email: user.email },
-        select: { id: true },
+        select: { id: true, email: true, externalAuthId: true },
       });
+
+      if (existingUser && existingUser.externalAuthId !== user.id) {
+        const decision = await _hooks.resolveIdentityConflict(
+          existingUser,
+          user,
+        );
+        if (decision === "reject") {
+          return c.json({ error: IDENTITY_CONFLICT_ERROR }, 409);
+        }
+      }
 
       const dbUser = await db.user.upsert({
         where: { email: user.email },

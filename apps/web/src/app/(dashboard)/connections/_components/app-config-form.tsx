@@ -94,8 +94,44 @@ export const AppConfigForm = ({
   const toggleMutation = useToggleAppConfig(provider, pageScope);
 
   const loading = statusQuery.isPending;
-  const hasCredentials = statusQuery.data?.hasCredentials ?? false;
-  const enabled = statusQuery.data?.enabled ?? false;
+  // An org-inherited status (`source: "organization"`) means there is no
+  // project row behind it — the credentials live on the organization, and the
+  // delete/toggle mutations would 404 here. For this editor that is the same
+  // as "not configured yet": show the add-credentials state.
+  const orgInherited = statusQuery.data?.source === "organization";
+  const hasCredentials =
+    !orgInherited && (statusQuery.data?.hasCredentials ?? false);
+  const enabled = !orgInherited && (statusQuery.data?.enabled ?? false);
+
+  // Blast radius of removing/replacing these credentials — present only on the
+  // org config surface (project responses omit `dependents`). Drives the confirm
+  // gating and the precise counts in the dialogs; zero on the project page, so
+  // that flow stays keyed on `isConnected` alone.
+  const dependents = statusQuery.data?.dependents;
+  const dependentTotal =
+    (dependents?.orgConnections ?? 0) + (dependents?.projectConnections ?? 0);
+  const dependentSentence = (() => {
+    if (!dependents || dependentTotal === 0) return null;
+    const parts: string[] = [];
+    if (dependents.orgConnections > 0) {
+      parts.push(
+        `${dependents.orgConnections} organization ${
+          dependents.orgConnections === 1 ? "connection" : "connections"
+        }`,
+      );
+    }
+    if (dependents.projectConnections > 0) {
+      parts.push(
+        `${dependents.projectConnections} project ${
+          dependents.projectConnections === 1 ? "connection" : "connections"
+        }`,
+      );
+    }
+    // Passive voice reads correctly both after the Remove dialog's lead-in
+    // ("…platform defaults. N connections will be disconnected.") and as the
+    // opening of the disconnect dialog — avoiding a stacked "This will …".
+    return `${parts.join(" and ")} will be disconnected.`;
+  })();
 
   // Keep the editable fields in sync with the fetched settings (also clears
   // them after a delete, once the invalidated query settles). Keyed on the
@@ -114,7 +150,11 @@ export const AppConfigForm = ({
   // never overrides an explicit reveal() or later refetches.
   if (!loading && !openInitialized) {
     setOpenInitialized(true);
-    if (enabled || !hasEnvDefaults) setOpenValue("credentials");
+    // Org-inherited credentials behave like platform defaults here: the app is
+    // usable without project-level setup, so the section stays collapsed.
+    if (enabled || (!hasEnvDefaults && !orgInherited)) {
+      setOpenValue("credentials");
+    }
   }
 
   const revealSection = useCallback(() => {
@@ -171,7 +211,7 @@ export const AppConfigForm = ({
   };
 
   const handleSave = () => {
-    if (isConnected) {
+    if (isConnected || dependentTotal > 0) {
       setPendingAction("save");
     } else {
       doSave();
@@ -192,7 +232,7 @@ export const AppConfigForm = ({
 
   const handleToggle = (checked: boolean) => {
     if (checked && !hasCredentials) return;
-    if (isConnected) {
+    if (isConnected || dependentTotal > 0) {
       setPendingAction(checked ? "toggle-on" : "toggle-off");
     } else {
       doToggle(checked);
@@ -355,6 +395,7 @@ export const AppConfigForm = ({
                         {hasEnvDefaults
                           ? `This will delete your credentials. ${appName} will fall back to platform defaults.`
                           : `This will delete your credentials. ${appName} will no longer be available until reconfigured.`}
+                        {dependentSentence ? ` ${dependentSentence}` : ""}
                       </AlertDialogDescription>
                     </AlertDialogHeader>
                     <AlertDialogFooter>
@@ -385,8 +426,9 @@ export const AppConfigForm = ({
           <AlertDialogHeader>
             <AlertDialogTitle>This will disconnect {appName}</AlertDialogTitle>
             <AlertDialogDescription>
-              Changing credentials will disconnect your current {appName}{" "}
-              connection. You&apos;ll need to reconnect afterward.
+              {dependentSentence
+                ? `${dependentSentence} You'll need to reconnect afterward.`
+                : `Changing credentials will disconnect your current ${appName} connection. You'll need to reconnect afterward.`}
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>

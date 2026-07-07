@@ -216,12 +216,23 @@ pub(crate) trait ApprovalStore: Send + Sync {
     /// List all non-expired pending approvals for a project.
     async fn list_pending(&self, org_id: &str, project_id: &str) -> Vec<PendingApproval>;
 
+    /// List all non-expired pending approvals across every project in an org.
+    /// Backs the cloud + onprem org poll (`GET /v1/org/approvals/pending`); OSS
+    /// has no org scope, so the method is compiled out there.
+    #[cfg(not(edition_oss))]
+    async fn list_pending_for_org(&self, org_id: &str) -> Vec<PendingApproval>;
+
     /// Remove a pending approval (after decision or expiry).
     async fn remove(&self, org_id: &str, project_id: &str, id: &str);
 
     /// Block until a new approval arrives for this project, or timeout.
     /// Returns `true` if notified, `false` on timeout.
     async fn wait_for_new(&self, org_id: &str, project_id: &str, timeout: Duration) -> bool;
+
+    /// Block until a new approval arrives in any of the org's projects, or
+    /// timeout. Org-scoped counterpart of [`wait_for_new`]; OSS-excluded.
+    #[cfg(not(edition_oss))]
+    async fn wait_for_new_for_org(&self, org_id: &str, timeout: Duration) -> bool;
 
     /// Submit a decision for a pending approval. Wakes the held request.
     /// `approved_by` is the deciding user, or `None` for a system auto-deny.
@@ -276,6 +287,13 @@ impl ApprovalStore for InMemoryApprovalStore {
             let _ = sender.send(()); // ok if no receivers
         }
 
+        // Wake a cross-project org poll too (keyed by org only — distinct from
+        // the "{org}:{project}" per-project key, so the two never collide).
+        #[cfg(not(edition_oss))]
+        if let Some(sender) = self.new_notify.get(&approval.organization_id) {
+            let _ = sender.send(());
+        }
+
         Ok(())
     }
 
@@ -304,6 +322,16 @@ impl ApprovalStore for InMemoryApprovalStore {
             .collect()
     }
 
+    #[cfg(not(edition_oss))]
+    async fn list_pending_for_org(&self, org_id: &str) -> Vec<PendingApproval> {
+        let now = unix_now();
+        self.pending
+            .iter()
+            .filter(|e| e.organization_id == org_id && e.expires_at > now)
+            .map(|e| e.value().clone())
+            .collect()
+    }
+
     async fn remove(&self, _org_id: &str, _project_id: &str, id: &str) {
         self.pending.remove(id);
         self.decisions.remove(id);
@@ -320,6 +348,21 @@ impl ApprovalStore for InMemoryApprovalStore {
                 .or_insert_with(|| broadcast::channel(BROADCAST_CAPACITY).0);
             sender.subscribe()
         }; // guard dropped here — safe to await
+
+        tokio::time::timeout(timeout, rx.recv()).await.is_ok()
+    }
+
+    #[cfg(not(edition_oss))]
+    async fn wait_for_new_for_org(&self, org_id: &str, timeout: Duration) -> bool {
+        // Org-scoped notify keyed by the bare org id (see `store`). Never held
+        // across an await: subscribe under the guard, drop it, then wait.
+        let mut rx = {
+            let sender = self
+                .new_notify
+                .entry(org_id.to_string())
+                .or_insert_with(|| broadcast::channel(BROADCAST_CAPACITY).0);
+            sender.subscribe()
+        };
 
         tokio::time::timeout(timeout, rx.recv()).await.is_ok()
     }
@@ -680,5 +723,87 @@ mod tests {
             .wait_for_new(TEST_ORG, "acc-1", Duration::from_millis(100))
             .await;
         assert!(!got_new);
+    }
+
+    // ── Org-scoped listing / long-poll (cloud + onprem; OSS-excluded) ───────
+
+    #[cfg(not(edition_oss))]
+    fn make_approval_in_org(id: &str, org_id: &str, project_id: &str) -> PendingApproval {
+        PendingApproval {
+            organization_id: org_id.to_string(),
+            ..make_approval(id, project_id)
+        }
+    }
+
+    #[cfg(not(edition_oss))]
+    #[tokio::test]
+    async fn list_pending_for_org_unions_projects() {
+        let store = new_store().await;
+        let a1 = make_approval("a1", "proj-1");
+        let a2 = make_approval("a2", "proj-2");
+
+        let _ = store.prepare_wait(TEST_ORG, "proj-1", "a1").await;
+        store.store(&a1).await.unwrap();
+        let _ = store.prepare_wait(TEST_ORG, "proj-2", "a2").await;
+        store.store(&a2).await.unwrap();
+
+        let mut pending = store.list_pending_for_org(TEST_ORG).await;
+        pending.sort_by(|a, b| a.id.cmp(&b.id));
+        assert_eq!(pending.len(), 2);
+        assert_eq!((&*pending[0].id, &*pending[0].project_id), ("a1", "proj-1"));
+        assert_eq!((&*pending[1].id, &*pending[1].project_id), ("a2", "proj-2"));
+    }
+
+    #[cfg(not(edition_oss))]
+    #[tokio::test]
+    async fn list_pending_for_org_isolates_orgs() {
+        let store = new_store().await;
+        let mine = make_approval_in_org("a1", "org-1", "proj-1");
+        let other = make_approval_in_org("a2", "org-2", "proj-9");
+
+        let _ = store.prepare_wait("org-1", "proj-1", "a1").await;
+        store.store(&mine).await.unwrap();
+        let _ = store.prepare_wait("org-2", "proj-9", "a2").await;
+        store.store(&other).await.unwrap();
+
+        let pending = store.list_pending_for_org("org-1").await;
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].id, "a1");
+    }
+
+    #[cfg(not(edition_oss))]
+    #[tokio::test]
+    async fn list_pending_for_org_filters_expired() {
+        let store = new_store().await;
+        let valid = make_approval("a1", "proj-1");
+        let expired = make_expired_approval("a2", "proj-2");
+
+        let _ = store.prepare_wait(TEST_ORG, "proj-1", "a1").await;
+        store.store(&valid).await.unwrap();
+        let _ = store.prepare_wait(TEST_ORG, "proj-2", "a2").await;
+        store.store(&expired).await.unwrap();
+
+        let pending = store.list_pending_for_org(TEST_ORG).await;
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].id, "a1");
+    }
+
+    #[cfg(not(edition_oss))]
+    #[tokio::test]
+    async fn wait_for_new_for_org_notified_on_store_in_any_project() {
+        let store = new_store().await;
+
+        let store2 = Arc::clone(&store);
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            let approval = make_approval("a1", "proj-7");
+            let _ = store2.prepare_wait(TEST_ORG, "proj-7", "a1").await;
+            store2.store(&approval).await.unwrap();
+        });
+
+        let got_new = store
+            .wait_for_new_for_org(TEST_ORG, Duration::from_secs(5))
+            .await;
+        assert!(got_new);
     }
 }

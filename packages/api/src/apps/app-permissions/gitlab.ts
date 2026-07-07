@@ -66,6 +66,15 @@ export const gitlabPermissions: AppPermissionDefinition = {
     },
     {
       category: "write",
+      wildcard: {
+        id: "write_all",
+        name: "All write operations",
+        description:
+          "Create, update, delete, and merge issues, merge requests, branches, and comments",
+        hostPattern: "gitlab.com",
+        pathPattern: "/api/v4/*",
+        methods: ["POST", "PUT", "PATCH", "DELETE"],
+      },
       tools: [
         {
           id: "create_issue",

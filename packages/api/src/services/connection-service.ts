@@ -54,6 +54,8 @@ export const createConnection = async (
     scopes?: string[];
     metadata?: Record<string, unknown>;
     label?: string;
+    /** AppConfig row that minted these credentials; null for env/no-config. */
+    appConfigId?: string;
   },
 ) => {
   const encryptedCredentials = await getCrypto().encrypt(
@@ -69,6 +71,7 @@ export const createConnection = async (
       credentials: encryptedCredentials,
       scopes: options?.scopes ?? [],
       metadata: (options?.metadata as Prisma.InputJsonValue) ?? undefined,
+      appConfigId: options?.appConfigId ?? null,
     },
     select: { id: true, provider: true, status: true, label: true },
   });
@@ -82,6 +85,8 @@ export const reconnectConnection = async (
     scopes?: string[];
     metadata?: Record<string, unknown>;
     label?: string;
+    /** AppConfig row that minted these credentials; null for env/no-config. */
+    appConfigId?: string;
   },
 ) => {
   const existing = await db.appConnection.findFirst({
@@ -97,6 +102,15 @@ export const reconnectConnection = async (
     JSON.stringify(credentials),
   );
 
+  // Provenance is rewritten only when the caller expresses one: a re-mint
+  // passes `appConfigId` (a value to link, or `undefined` to clear a stale
+  // link); a bare token-persist omits the key entirely so the existing link is
+  // preserved (Prisma treats an absent field as "leave unchanged").
+  const provenanceUpdate =
+    options && "appConfigId" in options
+      ? { appConfigId: options.appConfigId ?? null }
+      : {};
+
   return db.appConnection.update({
     where: { id: existing.id },
     data: {
@@ -106,8 +120,25 @@ export const reconnectConnection = async (
       credentials: encryptedCredentials,
       scopes: options?.scopes ?? undefined,
       metadata: (options?.metadata as Prisma.InputJsonValue) ?? undefined,
+      ...provenanceUpdate,
     },
     select: { id: true, provider: true, status: true, label: true },
+  });
+};
+
+/**
+ * Record which AppConfig minted a connection, after the fact — used by the
+ * credentials-import path, where the project config row is saved only after the
+ * connection is created. Scope-guarded so it can only touch the caller's own row.
+ */
+export const linkConnectionToAppConfig = async (
+  scope: ResourceScope,
+  connectionId: string,
+  appConfigId: string,
+) => {
+  await db.appConnection.updateMany({
+    where: scopeOwnership(scope, connectionId),
+    data: { appConfigId },
   });
 };
 

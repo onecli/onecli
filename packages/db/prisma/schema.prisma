@@ -345,6 +345,10 @@ model AppConnection {
   projectId           String?              @map("project_id")
   organizationId      String?              @map("organization_id")
   partnerId           String?              @map("partner_id") // cloud-only, reserved for future partner-level app connections (inert)
+  // The AppConfig whose credentials minted this connection (OAuth refresh
+  // tokens are bound to that client). Null = platform/env credentials, a
+  // connection method that needs no config, or minted before this link.
+  appConfigId         String?              @map("app_config_id")
   provider            String // "github", "gmail", "google-calendar", "google-drive", etc.
   label               String?              @map("label") // auto-populated from metadata (email/username)
   status              String               @default("connected")
@@ -356,12 +360,14 @@ model AppConnection {
   project             Project?             @relation(fields: [projectId], references: [id])
   organization        Organization?        @relation(fields: [organizationId], references: [id])
   partner             Partner?             @relation(fields: [partnerId], references: [id])
+  appConfig           AppConfig?           @relation(fields: [appConfigId], references: [id], onDelete: SetNull)
   agentAppConnections AgentAppConnection[]
 
   @@index([projectId, provider])
   @@index([organizationId, provider])
   @@index([partnerId])
   @@index([scope])
+  @@index([appConfigId])
   @@map("app_connections")
 }
 
@@ -379,20 +385,22 @@ model AgentAppConnection {
 }
 
 model AppConfig {
-  id             String        @id @default(uuid())
-  scope          String        @default("project") // "project" | "organization" (partner reserved)
-  projectId      String?       @map("project_id")
-  organizationId String?       @map("organization_id")
-  partnerId      String?       @map("partner_id") // cloud-only, reserved for future partner-level app config (inert)
+  id             String          @id @default(uuid())
+  scope          String          @default("project") // "project" | "organization" (partner reserved)
+  projectId      String?         @map("project_id")
+  organizationId String?         @map("organization_id")
+  partnerId      String?         @map("partner_id") // cloud-only, reserved for future partner-level app config (inert)
   provider       String // "github", "gmail", "google-calendar", "google-drive"
-  enabled        Boolean       @default(false)
-  credentials    String?       @map("credentials") // encrypted (clientSecret)
+  enabled        Boolean         @default(false)
+  credentials    String?         @map("credentials") // encrypted (clientSecret)
   settings       Json? // plain (clientId, scopes)
-  createdAt      DateTime      @default(now()) @map("created_at")
-  updatedAt      DateTime      @updatedAt @map("updated_at")
-  project        Project?      @relation(fields: [projectId], references: [id])
-  organization   Organization? @relation(fields: [organizationId], references: [id])
-  partner        Partner?      @relation(fields: [partnerId], references: [id])
+  createdAt      DateTime        @default(now()) @map("created_at")
+  updatedAt      DateTime        @updatedAt @map("updated_at")
+  project        Project?        @relation(fields: [projectId], references: [id])
+  organization   Organization?   @relation(fields: [organizationId], references: [id])
+  partner        Partner?        @relation(fields: [partnerId], references: [id])
+  // Connections minted with this config's credentials (see AppConnection.appConfigId).
+  connections    AppConnection[]
 
   @@unique([projectId, provider])
   @@unique([organizationId, provider])

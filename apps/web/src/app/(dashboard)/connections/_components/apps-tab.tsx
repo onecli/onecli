@@ -365,7 +365,10 @@ export const AppsTab = ({
           filteredApps.map((app) => {
             const count = connectionCounts.get(app.id) ?? 0;
             const isLocked =
-              !app.available || (app.teamOnly === true && plan !== "team");
+              !app.available ||
+              (app.teamOnly === true &&
+                plan !== "team" &&
+                plan !== "enterprise");
             return (
               <AppRow
                 key={app.id}
