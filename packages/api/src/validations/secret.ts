@@ -21,6 +21,17 @@ const headerInjectionSchema = z
   })
   .strict();
 
+// AWS SigV4 signing (used by `aws`-type secrets). The gateway signs the
+// request with the stored keys instead of injecting a static header, so
+// S3-compatible endpoints (Hetzner, Cloudflare R2, Backblaze B2, MinIO) work.
+// `service` defaults to "s3" at signing time when omitted.
+const awsInjectionSchema = z
+  .object({
+    region: z.string().min(1),
+    service: z.string().min(1).optional(),
+  })
+  .strict();
+
 const paramInjectionSchema = z
   .object({
     paramName: z.string().min(1),
@@ -69,6 +80,7 @@ export const injectionConfigSchema = z
     paramInjectionSchema,
     pathTemplateInjectionSchema,
     pathRegexInjectionSchema,
+    awsInjectionSchema,
   ])
   .nullable()
   .optional();
@@ -79,11 +91,13 @@ export type PathTemplateInjectionConfig = z.infer<
   typeof pathTemplateInjectionSchema
 >;
 export type PathRegexInjectionConfig = z.infer<typeof pathRegexInjectionSchema>;
+export type AwsInjectionConfig = z.infer<typeof awsInjectionSchema>;
 export type InjectionConfig =
   | HeaderInjectionConfig
   | ParamInjectionConfig
   | PathTemplateInjectionConfig
-  | PathRegexInjectionConfig;
+  | PathRegexInjectionConfig
+  | AwsInjectionConfig;
 
 export const isHeaderInjection = (
   config: unknown,
@@ -121,6 +135,12 @@ export const isPathInjection = (
   config: unknown,
 ): config is PathTemplateInjectionConfig | PathRegexInjectionConfig =>
   isPathTemplateInjection(config) || isPathRegexInjection(config);
+
+export const isAwsInjection = (config: unknown): config is AwsInjectionConfig =>
+  config !== null &&
+  typeof config === "object" &&
+  "region" in config &&
+  typeof (config as Record<string, unknown>).region === "string";
 
 // Mirror of the gateway's `is_path_safe` (apps/gateway/src/inject.rs): a path
 // secret is substituted into the URL path verbatim, so a path-structural
@@ -201,7 +221,7 @@ const opDisplaySchema = z
 export const createSecretSchema = z
   .object({
     name: z.string().trim().min(1).max(255),
-    type: z.enum(["anthropic", "openai", "generic"]),
+    type: z.enum(["anthropic", "openai", "generic", "aws"]),
     valueSource: z.enum(valueSources).optional(),
     value: z.string().max(10000).optional(),
     opRef: opRefSchema.optional(),
@@ -225,6 +245,38 @@ export const createSecretSchema = z
         path: ["value"],
         message: "Secret value is required",
       });
+    }
+
+    if (data.type === "aws") {
+      if (!isAwsInjection(data.injectionConfig)) {
+        ctx.addIssue({
+          code: "custom",
+          path: ["injectionConfig"],
+          message: "AWS secrets require a region",
+        });
+      }
+      // 1Password-sourced AWS creds are resolved at request time, so only
+      // validate the JSON shape for inline values.
+      if (data.valueSource !== "onepassword" && data.value) {
+        try {
+          const parsed = JSON.parse(data.value);
+          if (!parsed?.accessKeyId || !parsed?.secretAccessKey) {
+            ctx.addIssue({
+              code: "custom",
+              path: ["value"],
+              message:
+                "AWS value must be JSON with accessKeyId and secretAccessKey",
+            });
+          }
+        } catch {
+          ctx.addIssue({
+            code: "custom",
+            path: ["value"],
+            message:
+              "AWS value must be JSON with accessKeyId and secretAccessKey",
+          });
+        }
+      }
     }
   });
 

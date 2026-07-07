@@ -6,6 +6,7 @@ import { scopeWhere, scopeCreate, scopeOwnership } from "./resource-scope";
 import {
   detectAnthropicAuthMode,
   detectOpenaiAuthMode,
+  isAwsInjection,
   isHeaderInjection,
   isParamInjection,
   isPathInjection,
@@ -35,6 +36,7 @@ const SECRET_TYPE_LABELS: Record<string, string> = {
   anthropic: "Anthropic API Key",
   openai: "OpenAI",
   generic: "Generic Secret",
+  aws: "AWS / S3-compatible",
 };
 
 const buildPreview = (plaintext: string): string => {
@@ -67,6 +69,12 @@ const buildInjectionConfig = (
     return {
       pathRegex: config.pathRegex.trim(),
       pathReplacement: config.pathReplacement.trim(),
+    } as Prisma.InputJsonValue;
+  }
+  if (isAwsInjection(config)) {
+    return {
+      region: config.region.trim(),
+      ...(config.service?.trim() ? { service: config.service.trim() } : {}),
     } as Prisma.InputJsonValue;
   }
   return Prisma.JsonNull;
@@ -184,9 +192,16 @@ export const createSecret = async (
     assertPathValueSafe(config, input.valueSource, input.value);
   }
 
+  if (input.type === "aws" && !isAwsInjection(input.injectionConfig)) {
+    throw new ServiceError(
+      "BAD_REQUEST",
+      "AWS secrets require a region in injectionConfig",
+    );
+  }
+
   const pathPattern = input.pathPattern?.trim() || null;
   const injectionConfig =
-    input.type === "generic"
+    input.type === "generic" || input.type === "aws"
       ? buildInjectionConfig(input.injectionConfig)
       : Prisma.JsonNull;
 
@@ -356,7 +371,10 @@ export const updateSecret = async (
     data.pathPattern = input.pathPattern?.trim() || null;
   }
 
-  if (input.injectionConfig !== undefined && secret.type === "generic") {
+  if (
+    input.injectionConfig !== undefined &&
+    (secret.type === "generic" || secret.type === "aws")
+  ) {
     data.injectionConfig = buildInjectionConfig(input.injectionConfig);
     assertPathValueSafe(input.injectionConfig, input.valueSource, input.value);
   }

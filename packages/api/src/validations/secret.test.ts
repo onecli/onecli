@@ -108,6 +108,38 @@ describe("path injection config validation", () => {
   });
 });
 
+const awsSecret = (over: Record<string, unknown> = {}) =>
+  createSecretSchema.safeParse({
+    name: "Hetzner bucket",
+    type: "aws",
+    hostPattern: "nbg1.your-objectstorage.com",
+    value: JSON.stringify({ accessKeyId: "AKIA", secretAccessKey: "secret" }),
+    injectionConfig: { region: "eu-central-1", service: "s3" },
+    ...over,
+  }).success;
+
+describe("aws secret validation", () => {
+  it("accepts JSON keys plus a region", () => {
+    expect(awsSecret()).toBe(true);
+  });
+
+  it("accepts an omitted service (defaults to s3 at signing time)", () => {
+    expect(awsSecret({ injectionConfig: { region: "us-east-1" } })).toBe(true);
+  });
+
+  it("rejects a missing region", () => {
+    expect(awsSecret({ injectionConfig: {} })).toBe(false);
+    expect(awsSecret({ injectionConfig: undefined })).toBe(false);
+  });
+
+  it("rejects a value that isn't JSON with both keys", () => {
+    expect(awsSecret({ value: "not json" })).toBe(false);
+    expect(awsSecret({ value: JSON.stringify({ accessKeyId: "AKIA" }) })).toBe(
+      false,
+    );
+  });
+});
+
 describe("injection config type guards", () => {
   it("classifies path template and regex configs", () => {
     expect(isPathTemplateInjection({ pathTemplate: "/bot{value}" })).toBe(true);
