@@ -1,5 +1,19 @@
 # Changelog
 
+## [1.41.0](https://github.com/onecli/onecli/compare/v1.40.0...v1.41.0) (2026-07-07)
+
+
+### Features
+
+* API-first connections/rules/vaults + per-connection agent access ([#412](https://github.com/onecli/onecli/issues/412)) ([71f13ee](https://github.com/onecli/onecli/commit/71f13eef11ee10cd280c020f21d34a738985c840))
+* edition variants, connect-only web surface, shared-org bootstrap ([#407](https://github.com/onecli/onecli/issues/407)) ([405077c](https://github.com/onecli/onecli/commit/405077c34334fff36f259aa182917d5244e6b60f))
+* org app-config provider, identity-conflict hook, org-routes seam, connection provenance ([#415](https://github.com/onecli/onecli/issues/415)) ([3c8dc9e](https://github.com/onecli/onecli/commit/3c8dc9e8e2d6f50caa138590523961fe901c0622))
+
+
+### Bug Fixes
+
+* **auth:** serve NextAuth at /api/auth so self-hosted OAuth login works ([#362](https://github.com/onecli/onecli/issues/362)) ([#406](https://github.com/onecli/onecli/issues/406)) ([b708697](https://github.com/onecli/onecli/commit/b7086974879548b2e51525dc0d9e68128f40ccc1))
+
 ## [1.40.0](https://github.com/onecli/onecli/compare/v1.39.0...v1.40.0) (2026-06-30)
 
 
