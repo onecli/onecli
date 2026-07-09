@@ -1,9 +1,15 @@
 "use client";
 
 import { useState, useMemo } from "react";
-import { CircleCheck, Hand, ShieldBan, Settings2, Lock } from "lucide-react";
+import {
+  CircleCheck,
+  Hand,
+  Loader2,
+  ShieldBan,
+  Settings2,
+  Lock,
+} from "lucide-react";
 import { toast } from "sonner";
-import { useInvalidateGatewayCache } from "@/hooks/use-invalidate-cache";
 import { cn } from "@onecli/ui/lib/utils";
 import { Button } from "@onecli/ui/components/button";
 import { Label } from "@onecli/ui/components/label";
@@ -25,24 +31,25 @@ import {
 } from "@onecli/ui/components/accordion";
 import { Separator } from "@onecli/ui/components/separator";
 import { getApps } from "@onecli/api/apps/registry";
-import {
-  getAppPermissionDefinition,
-  allGroupTools,
-  type AppPermissionLevel,
-} from "@onecli/api/apps/app-permissions";
+import { allGroupTools } from "@onecli/api/apps/app-permissions/types";
+import type { AppPermissionLevel } from "@onecli/api/apps/app-permissions";
 import type {
   RuleCondition,
   PolicyMode,
 } from "@onecli/api/validations/policy-rule";
-import { setAppPermissions as defaultSetAppPermissions } from "@/lib/actions/rules";
+import { useQueryClient } from "@tanstack/react-query";
+import { rules as rulesApi, type PageScope } from "@/lib/api";
+import { queryKeys } from "@/lib/api/keys";
+import { useAppPermissionDefinitions } from "@/hooks/use-app-permissions";
+import { AgentScopeSelect } from "@/lib/components/agent-scope-select";
 import { ConditionBuilder } from "@/lib/components/condition-builder";
 import { usePlanGate } from "@/lib/plan-gate";
-import type { RuleActions } from "./types";
+import type { AgentOption } from "./types";
 import { AppPickerGrid } from "./app-picker-grid";
 
-type Scope = "all" | "read" | "write";
+type Access = "all" | "read" | "write";
 
-const SCOPE_OPTIONS: { value: Scope; label: string }[] = [
+const ACCESS_OPTIONS: { value: Access; label: string }[] = [
   { value: "all", label: "All" },
   { value: "read", label: "Read-only" },
   { value: "write", label: "Write-only" },
@@ -79,7 +86,9 @@ type Step = "app" | "configure";
 interface ApplicationRuleFormProps {
   onSaved?: () => void;
   onClose: () => void;
-  ruleActions?: RuleActions;
+  agents: AgentOption[];
+  showAgentField?: boolean;
+  pageScope?: PageScope;
   connectedProviders?: Map<string, string[]>;
   policyMode?: PolicyMode;
 }
@@ -87,17 +96,20 @@ interface ApplicationRuleFormProps {
 export const ApplicationRuleForm = ({
   onSaved,
   onClose,
-  ruleActions,
+  agents,
+  showAgentField = true,
+  pageScope = "project",
   connectedProviders,
   policyMode = "allow",
 }: ApplicationRuleFormProps) => {
   const isDenyMode = policyMode === "deny";
-  const invalidateCache = useInvalidateGatewayCache();
+  const queryClient = useQueryClient();
   const planGate = usePlanGate();
   const [step, setStep] = useState<Step>("app");
   const [selectedProvider, setSelectedProvider] = useState<string | null>(null);
-  const [scope, setScope] = useState<Scope>("all");
+  const [access, setAccess] = useState<Access>("all");
   const [selectedToolId, setSelectedToolId] = useState<string | null>(null);
+  const [agentId, setAgentId] = useState("");
   const [policy, setPolicy] = useState<AppPermissionLevel>(
     isDenyMode ? "block" : "allow",
   );
@@ -109,9 +121,15 @@ export const ApplicationRuleForm = ({
     [connectedProviders],
   );
 
+  const { data: permissionDefinitions, isPending: definitionsPending } =
+    useAppPermissionDefinitions();
+
   const appsWithPermissions = useMemo(() => {
-    const apps = getApps().filter(
-      (app) => getAppPermissionDefinition(app.id) !== undefined,
+    const providersWithDefinitions = new Set(
+      (permissionDefinitions ?? []).map((def) => def.provider),
+    );
+    const apps = getApps().filter((app) =>
+      providersWithDefinitions.has(app.id),
     );
     return apps.sort((a, b) => {
       const aConnected = connectedProviderIds.has(a.id);
@@ -119,47 +137,45 @@ export const ApplicationRuleForm = ({
       if (aConnected === bConnected) return a.name.localeCompare(b.name);
       return aConnected ? -1 : 1;
     });
-  }, [connectedProviderIds]);
+  }, [connectedProviderIds, permissionDefinitions]);
 
   const permDef = selectedProvider
-    ? getAppPermissionDefinition(selectedProvider)
+    ? permissionDefinitions?.find((def) => def.provider === selectedProvider)
     : undefined;
 
   const toolsInScope = useMemo(() => {
     if (!permDef) return [];
     return permDef.groups
-      .filter((g) => scope === "all" || g.category === scope)
+      .filter((g) => access === "all" || g.category === access)
       .flatMap((g) =>
         allGroupTools(g).map((t) => ({ ...t, category: g.category })),
       );
-  }, [permDef, scope]);
+  }, [permDef, access]);
 
   const groupedTools = useMemo(() => {
     if (!permDef) return [];
     return permDef.groups
-      .filter((g) => scope === "all" || g.category === scope)
+      .filter((g) => access === "all" || g.category === access)
       .map((g) => ({
         category: g.category,
         label: g.category === "read" ? "Read" : "Write",
         tools: allGroupTools(g),
       }));
-  }, [permDef, scope]);
+  }, [permDef, access]);
 
   const handleSelectApp = (id: string) => {
     setSelectedProvider(id);
-    setScope("all");
+    setAccess("all");
     setSelectedToolId(null);
+    setAgentId("");
     setPolicy("allow");
     setConditions([]);
   };
 
-  const handleScopeChange = (newScope: Scope) => {
-    setScope(newScope);
+  const handleAccessChange = (newAccess: Access) => {
+    setAccess(newAccess);
     setSelectedToolId(null);
   };
-
-  const applyPermissions =
-    ruleActions?.setAppPermissions ?? defaultSetAppPermissions;
 
   const handleSave = async () => {
     if (!selectedProvider || !permDef) return;
@@ -169,15 +185,20 @@ export const ApplicationRuleForm = ({
         ? [{ toolId: selectedToolId, permission: policy }]
         : toolsInScope.map((t) => ({ toolId: t.id, permission: policy }));
 
-      await applyPermissions(
+      await rulesApi.setPermissions(
         selectedProvider,
-        changes,
-        conditions.length > 0 ? conditions : undefined,
+        {
+          changes,
+          conditions: conditions.length > 0 ? conditions : undefined,
+          agentId: agentId || undefined,
+        },
+        pageScope,
       );
       toast.success("Permissions updated");
+      queryClient.invalidateQueries({ queryKey: queryKeys.rules.all() });
+      queryClient.invalidateQueries({ queryKey: queryKeys.counts.all() });
       onSaved?.();
       onClose();
-      invalidateCache();
     } catch (err) {
       toast.error(
         err instanceof Error ? err.message : "Failed to update permissions",
@@ -192,31 +213,36 @@ export const ApplicationRuleForm = ({
   return (
     <>
       {/* ── Step 1: Application ────────────────────────────────── */}
-      {step === "app" && (
-        <div>
-          <AppPickerGrid
-            apps={appsWithPermissions}
-            selectedId={selectedProvider}
-            onSelect={handleSelectApp}
-          />
-        </div>
-      )}
+      {step === "app" &&
+        (definitionsPending ? (
+          <div className="flex items-center justify-center py-12">
+            <Loader2 className="text-muted-foreground size-5 animate-spin" />
+          </div>
+        ) : (
+          <div>
+            <AppPickerGrid
+              apps={appsWithPermissions}
+              selectedId={selectedProvider}
+              onSelect={handleSelectApp}
+            />
+          </div>
+        ))}
 
       {/* ── Step 2: Configure ─────────────────────────────────── */}
       {step === "configure" && permDef && (
         <div className="space-y-3 pt-3">
-          {/* ── Scope ──────────────────────────────────────────── */}
+          {/* ── Access ─────────────────────────────────────────── */}
           <div className="space-y-2">
-            <Label>Scope</Label>
+            <Label>Access</Label>
             <div className="flex gap-1.5">
-              {SCOPE_OPTIONS.map((opt) => (
+              {ACCESS_OPTIONS.map((opt) => (
                 <button
                   key={opt.value}
                   type="button"
-                  onClick={() => handleScopeChange(opt.value)}
+                  onClick={() => handleAccessChange(opt.value)}
                   className={cn(
                     "rounded-md border px-3.5 py-1.5 text-xs font-medium transition-colors",
-                    scope === opt.value
+                    access === opt.value
                       ? "border-brand bg-brand/5 text-brand"
                       : "text-muted-foreground hover:bg-muted/50 hover:border-foreground/20",
                   )}
@@ -241,9 +267,9 @@ export const ApplicationRuleForm = ({
               </SelectTrigger>
               <SelectContent>
                 <SelectItem value="_all">
-                  {scope === "read"
+                  {access === "read"
                     ? "All read permissions"
-                    : scope === "write"
+                    : access === "write"
                       ? "All write permissions"
                       : "All permissions"}
                 </SelectItem>
@@ -262,6 +288,22 @@ export const ApplicationRuleForm = ({
           </div>
 
           <Separator />
+
+          {/* ── Scope (agents) ─────────────────────────────────── */}
+          {showAgentField && agents.length > 0 && (
+            <>
+              <div className="space-y-2">
+                <Label>Scope</Label>
+                <AgentScopeSelect
+                  agents={agents}
+                  value={agentId}
+                  onChange={setAgentId}
+                />
+              </div>
+
+              <Separator />
+            </>
+          )}
 
           {/* ── Policy ─────────────────────────────────────────── */}
           <div className="space-y-2">

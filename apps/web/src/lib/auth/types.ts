@@ -6,6 +6,12 @@ export interface AuthUser {
   // redirects to land on /p/[projectId]/... rather than the unscoped legacy
   // /overview URL.
   projectId?: string;
+  // Whether the auth provider proved ownership of `email` (e.g. a verified
+  // email claim). Optional — adapters that don't know leave it unset.
+  emailVerified?: boolean;
+  // Federated IdP name for this session (e.g. "Google"); null/unset for
+  // native sign-ins.
+  federatedProvider?: string | null;
 }
 
 export type EmailOtpStep = "CONFIRM_SIGN_UP" | "CONFIRM_SIGN_IN" | "DONE";

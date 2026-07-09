@@ -82,6 +82,15 @@ export const supabasePermissions: AppPermissionDefinition = {
     },
     {
       category: "write",
+      wildcard: {
+        id: "write_all",
+        name: "All write operations",
+        description:
+          "Run SQL and create or modify projects, edge functions, and secrets",
+        hostPattern: "api.supabase.com",
+        pathPattern: "/v1/*",
+        methods: ["POST", "PUT", "PATCH", "DELETE"],
+      },
       tools: [
         {
           id: "run_query",

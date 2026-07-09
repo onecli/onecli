@@ -2,12 +2,10 @@
 
 import { useMemo, useState } from "react";
 import Link from "next/link";
-import { useQuery } from "@tanstack/react-query";
 import { Plus, Settings2, Shield, ShieldOff } from "lucide-react";
-import { rules as rulesApi } from "@/lib/api";
-import { queryKeys } from "@/lib/api/keys";
 import { useAgents, useAgentGranularAccess } from "@/hooks/use-agents";
 import { useConnections } from "@/hooks/use-connections";
+import { useRules } from "@/hooks/use-rules";
 import { Button } from "@onecli/ui/components/button";
 import { Card } from "@onecli/ui/components/card";
 import { Skeleton } from "@onecli/ui/components/skeleton";
@@ -17,13 +15,12 @@ import { RuleDialog } from "./rule-dialog";
 import { AppPermissionSummary } from "./app-permission-summary";
 import { GranularAccessSummary } from "./granular-access-summary";
 import type { PolicyMode } from "@onecli/api/validations/policy-rule";
-import type { AgentOption, PolicyRuleItem, RuleActions } from "./types";
-export type { PolicyRuleItem, AgentOption, RuleActions } from "./types";
+import type { PageScope } from "@/lib/api";
+import type { AgentOption, PolicyRuleItem } from "./types";
+export type { PolicyRuleItem, AgentOption } from "./types";
 
 interface RulesContentProps {
-  getRules?: () => Promise<PolicyRuleItem[]>;
-  ruleActions?: RuleActions;
-  pageScope?: "project" | "organization";
+  pageScope?: PageScope;
   showAgentField?: boolean;
   policyMode?: PolicyMode;
   settingsHref?: string;
@@ -36,19 +33,16 @@ const isAppPermissionRule = (rule: PolicyRuleItem) =>
   rule.metadata.source === "app_permission";
 
 export const RulesContent = ({
-  getRules,
-  ruleActions,
   pageScope = "project",
   showAgentField = true,
   policyMode = "allow",
   settingsHref,
 }: RulesContentProps) => {
   const isDenyMode = policyMode === "deny";
-  const { data: rules = [], isPending: loading } = useQuery<PolicyRuleItem[]>({
-    queryKey: [...queryKeys.rules.list(), pageScope],
-    queryFn: (getRules ?? rulesApi.list) as () => Promise<PolicyRuleItem[]>,
-  });
-  const { data: agentsList = [] } = useAgents();
+  const { data: rules = [], isPending: loading } = useRules(pageScope);
+  // Agents are project-scoped and org rules are agent-less — on the org page
+  // this query would POST a project-scoped server action and 500.
+  const { data: agentsList = [] } = useAgents(pageScope === "project");
   const agents: AgentOption[] = useMemo(
     () => agentsList.map((a) => ({ id: a.id, name: a.name })),
     [agentsList],
@@ -56,7 +50,7 @@ export const RulesContent = ({
   const { data: granularEntries = [] } = useAgentGranularAccess(
     pageScope === "project",
   );
-  const { data: connectionsList = [] } = useConnections();
+  const { data: connectionsList = [] } = useConnections(pageScope);
   const connectedProviders = useMemo(() => {
     const map = new Map<string, string[]>();
     for (const c of connectionsList) {
@@ -167,7 +161,7 @@ export const RulesContent = ({
                   agents={agents}
                   readOnly={isInherited(rule)}
                   badge={isInherited(rule) ? "Organization" : undefined}
-                  ruleActions={ruleActions}
+                  pageScope={pageScope}
                   policyMode={policyMode}
                 />
               ))}
@@ -189,6 +183,8 @@ export const RulesContent = ({
                 rules={appPermRules}
                 pageScope={pageScope}
                 connectedProviders={connectedProviders}
+                agents={agents}
+                policyMode={policyMode}
               />
             </>
           )}
@@ -215,7 +211,7 @@ export const RulesContent = ({
         onOpenChange={setCreateOpen}
         agents={showAgentField ? agents : []}
         showAgentField={showAgentField}
-        ruleActions={ruleActions}
+        pageScope={pageScope}
         connectedProviders={connectedProviders}
         policyMode={policyMode}
       />

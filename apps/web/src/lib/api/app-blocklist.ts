@@ -1,6 +1,7 @@
 import { apiGet, apiPost, apiPatch, apiDelete } from "./client";
+import { appsPath, type PageScope } from "./scope";
 
-export type PageScope = "project" | "organization";
+export type { PageScope } from "./scope";
 
 export interface BlocklistHostState {
   hostId: string;
@@ -13,9 +14,7 @@ export interface BlocklistHostState {
 }
 
 const basePath = (provider: string, scope: PageScope) =>
-  scope === "organization"
-    ? `/v1/org/apps/${provider}/blocklist`
-    : `/v1/apps/${provider}/blocklist`;
+  appsPath(scope, `/${provider}/blocklist`);
 
 export const list = (provider: string, scope: PageScope = "project") =>
   apiGet<BlocklistHostState[]>(basePath(provider, scope));

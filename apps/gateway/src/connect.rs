@@ -4,6 +4,7 @@
 //! the database directly via SQLx. Responses are cached per (agent_token, host)
 //! with a configurable TTL.
 
+use std::borrow::Cow;
 use std::sync::Arc;
 
 use tracing::{debug, warn};
@@ -209,6 +210,7 @@ impl PolicyEngine {
         let plan = match agent.subscription_status.as_str() {
             "pro" => "pro",
             "team" => "team",
+            "enterprise" => "enterprise",
             _ => "free",
         }
         .to_string();
@@ -476,6 +478,15 @@ impl PolicyEngine {
                 .resolve_connection_injections(conn, hostname, organization_id, project_id, cache)
                 .await;
         }
+
+        // On path-scoped shared hosts (e.g. www.googleapis.com, where Gmail,
+        // Calendar and Drive coexist by path), narrow to the connections whose
+        // provider serves THIS request path before the ambiguity check — so two
+        // same-provider connections (e.g. two Gmail accounts) don't make
+        // Calendar/Drive requests, which are unambiguous by path, falsely
+        // ambiguous. Dedicated hosts and no-path cases fall through unchanged.
+        let candidates = narrow_connections_by_path(app_connections, hostname, request_path);
+        let app_connections: &[db::AppConnectionRow] = &candidates;
 
         // Single connection — use it directly
         if app_connections.len() == 1 {
@@ -874,7 +885,8 @@ impl PolicyEngine {
     }
 
     /// Resolve policy rules (block / rate-limit) for this agent + host.
-    /// Merges org rules (enforced, all agents) with project rules (agent-filtered).
+    /// Merges org rules (enforced, all agents) with project rules
+    /// (agent-filtered, with agent overrides shadowing all-agents rules).
     async fn resolve_policy_rules(
         &self,
         agent: &db::AgentRow,
@@ -884,50 +896,12 @@ impl PolicyEngine {
             db::find_policy_rules_by_org(&self.pool, &agent.organization_id),
             db::find_policy_rules_by_project(&self.pool, &agent.project_id),
         );
-        let mut all_rules = org_result.map_err(db_err)?;
-        all_rules.extend(project_result.map_err(db_err)?);
-
-        let rules = all_rules
-            .into_iter()
-            .filter(|r| {
-                host_matches(hostname, &r.host_pattern)
-                    && (r.agent_id.is_none() || r.agent_id.as_deref() == Some(&agent.id))
-            })
-            .filter_map(|r| {
-                let action = match r.action.as_str() {
-                    "block" => PolicyAction::Block,
-                    "rate_limit" => {
-                        let max_requests = r.rate_limit.filter(|&v| v > 0)? as u64;
-                        let window = r.rate_limit_window.as_deref()?;
-                        let window_secs = match window {
-                            "minute" => 60,
-                            "hour" => 3600,
-                            "day" => 86400,
-                            _ => return None,
-                        };
-                        PolicyAction::RateLimit {
-                            rule_id: r.id.clone(),
-                            max_requests,
-                            window_secs,
-                        }
-                    }
-                    "manual_approval" => PolicyAction::ManualApproval {
-                        rule_id: r.id.clone(),
-                    },
-                    "allow" => PolicyAction::Allow,
-                    _ => return None,
-                };
-                Some(PolicyRule {
-                    name: r.name.clone(),
-                    path_pattern: r.path_pattern.unwrap_or_else(|| "*".to_string()),
-                    method: r.method,
-                    action,
-                    conditions_raw: r.conditions,
-                })
-            })
-            .collect();
-
-        Ok(rules)
+        Ok(assemble_policy_rules(
+            org_result.map_err(db_err)?,
+            project_result.map_err(db_err)?,
+            &agent.id,
+            hostname,
+        ))
     }
 
     /// Extract access token from decrypted credentials JSON, refreshing if expired.
@@ -958,7 +932,7 @@ impl PolicyEngine {
 
         // Any non-empty session policy means scoped access is required.
         // Provider-specific interpretation (e.g. GitHub repos) is handled by
-        // cloud_apps::try_refresh_credentials, not here.
+        // ee_apps::try_refresh_credentials, not here.
         let needs_scoped_token = session_policy
             .and_then(|sp| sp.as_object())
             .is_some_and(|obj| !obj.is_empty());
@@ -975,8 +949,7 @@ impl PolicyEngine {
 
                 // Try cloud-specific refresh first, then shared credential types
                 let refresh_result = if let Some(r) =
-                    crate::cloud_apps::try_refresh_credentials(cred_type, &creds, session_policy)
-                        .await
+                    crate::ee_apps::try_refresh_credentials(cred_type, &creds, session_policy).await
                 {
                     Some(r)
                 } else {
@@ -1008,7 +981,9 @@ impl PolicyEngine {
                 {
                     // Authorized user / default: refresh via OAuth refresh_token
                     if let Some(config) = apps::refresh_config(provider) {
-                        let byoc = self.resolve_byoc_credentials(project_id, provider).await;
+                        let byoc = self
+                            .resolve_byoc_credentials(project_id, provider, connection_id)
+                            .await;
                         let (byoc_id, byoc_secret) = match &byoc {
                             Some((id, secret)) => (Some(id.as_str()), Some(secret.as_str())),
                             None => (None, None),
@@ -1079,18 +1054,60 @@ impl PolicyEngine {
         }
     }
 
-    /// Resolve BYOC client credentials from AppConfig for a given project + provider.
-    /// Returns `Some((client_id, client_secret))` if an enabled config exists, `None` otherwise.
+    /// Resolve BYOC client credentials for refreshing a connection.
+    ///
+    /// Prefers the config that *minted* the connection (the provenance link):
+    /// its refresh token is bound to that OAuth client, so refresh must reuse it
+    /// even when the tier order below would now pick a different row (e.g. an
+    /// org-minted connection whose project later added its own config). Falls
+    /// back to the project's own AppConfig row, then the organization-level row
+    /// (EE editions only), for connections with no link (env-minted, no-config
+    /// methods, or pre-dating the link) *and* for a link that resolves but
+    /// yields no usable pair (config disabled, wrong provider, or missing
+    /// clientId/clientSecret). The org tier is consulted whenever the project
+    /// tier yields no usable pair — row absent OR present but missing
+    /// clientId/clientSecret — the same completeness semantics as the Node
+    /// resolver's project → org chain. Returns
+    /// `Some((client_id, client_secret))` when a usable pair exists.
     async fn resolve_byoc_credentials(
         &self,
         project_id: &str,
         provider: &str,
+        connection_id: &str,
     ) -> Option<(String, String)> {
-        let config = db::find_app_config(&self.pool, project_id, provider)
+        let linked_row = db::find_app_config_by_connection(&self.pool, connection_id, provider)
             .await
+            .map_err(|e| warn!(error = %e, "failed to query linked BYOC app config"))
             .ok()
-            .flatten()?;
+            .flatten();
+        if let Some(row) = linked_row {
+            if let Some(pair) = self.extract_byoc_pair(row).await {
+                return Some(pair);
+            }
+            debug!(
+                connection_id = %connection_id,
+                provider = %provider,
+                "linked app config yielded no usable BYOC pair; falling back to project/org chain"
+            );
+        }
 
+        let project_row = db::find_app_config(&self.pool, project_id, provider)
+            .await
+            .map_err(|e| warn!(error = %e, "failed to query BYOC app config"))
+            .ok()
+            .flatten();
+        if let Some(row) = project_row {
+            if let Some(pair) = self.extract_byoc_pair(row).await {
+                return Some(pair);
+            }
+        }
+
+        let org_row = self.find_org_app_config(project_id, provider).await?;
+        self.extract_byoc_pair(org_row).await
+    }
+
+    /// Extract a usable `(client_id, client_secret)` pair from an AppConfig row.
+    async fn extract_byoc_pair(&self, config: db::AppConfigRow) -> Option<(String, String)> {
         // clientId is in settings (plain JSON)
         let client_id = config
             .settings
@@ -1116,6 +1133,36 @@ impl PolicyEngine {
             .map(String::from)?;
 
         Some((client_id, client_secret))
+    }
+
+    /// Org-level BYOC fallback: the app config of the project's organization.
+    /// EE editions only — OSS has no way to create org-level app configs.
+    #[cfg(not(edition_oss))]
+    async fn find_org_app_config(
+        &self,
+        project_id: &str,
+        provider: &str,
+    ) -> Option<db::AppConfigRow> {
+        let organization_id = db::find_organization_id_by_project(&self.pool, project_id)
+            .await
+            .map_err(|e| warn!(error = %e, "failed to resolve org for BYOC fallback"))
+            .ok()
+            .flatten()?;
+        db::find_app_config_by_org(&self.pool, &organization_id, provider)
+            .await
+            .map_err(|e| warn!(error = %e, "failed to query org BYOC app config"))
+            .ok()
+            .flatten()
+    }
+
+    /// OSS: no org tier — org-level app configs are an EE surface.
+    #[cfg(edition_oss)]
+    async fn find_org_app_config(
+        &self,
+        _project_id: &str,
+        _provider: &str,
+    ) -> Option<db::AppConfigRow> {
+        None
     }
 }
 
@@ -1191,6 +1238,49 @@ pub(crate) async fn resolve_from_cache(
     Ok(response)
 }
 
+// ── Connection narrowing ─────────────────────────────────────────────────
+
+/// Narrow app connections to those whose provider serves THIS request path,
+/// but only on shared, path-scoped hosts (e.g. `www.googleapis.com`, where
+/// Gmail, Calendar and Drive coexist by path prefix).
+///
+/// Without this, two connections of a single provider (e.g. two Gmail accounts)
+/// make *every* path on the shared host ambiguous — including Calendar/Drive
+/// requests that are unambiguous by path — forcing an `x-onecli-connection-id`
+/// header on requests that need none. Dedicated hosts (`gmail.googleapis.com`,
+/// no path prefix) are not path-scoped, so the full set is returned unchanged.
+///
+/// Returns the full set (borrowed) when there is no request path, the host is
+/// not path-scoped, or no connection serves the path — preserving prior
+/// behavior in every case except the shared-host mismatch this fixes.
+fn narrow_connections_by_path<'a>(
+    connections: &'a [db::AppConnectionRow],
+    hostname: &str,
+    request_path: Option<&str>,
+) -> Cow<'a, [db::AppConnectionRow]> {
+    // Narrowing can only change the outcome with at least two connections to
+    // disambiguate; skip the work — and the clone — for the common 0/1 case.
+    if connections.len() <= 1 {
+        return Cow::Borrowed(connections);
+    }
+    let Some(path) = request_path else {
+        return Cow::Borrowed(connections);
+    };
+    if !apps::host_has_path_scoped_providers(hostname) {
+        return Cow::Borrowed(connections);
+    }
+    let narrowed: Vec<db::AppConnectionRow> = connections
+        .iter()
+        .filter(|c| apps::provider_matches_host_and_path(&c.provider, hostname, path))
+        .cloned()
+        .collect();
+    if narrowed.is_empty() {
+        Cow::Borrowed(connections)
+    } else {
+        Cow::Owned(narrowed)
+    }
+}
+
 // ── Host matching ───────────────────────────────────────────────────────
 
 /// Returns `true` when the credential's stored host does not match the
@@ -1249,6 +1339,106 @@ fn host_matches(request_host: &str, pattern: &str) -> bool {
     }
 }
 
+/// Endpoint signature used for agent-override shadowing: hosts are
+/// case-insensitive (DNS), methods are uppercased, and a NULL path is
+/// normalized to "*" to match the resolve-time mapping below.
+type EndpointSignature = (String, String, Option<String>);
+
+fn endpoint_signature(rule: &db::PolicyRuleRow) -> EndpointSignature {
+    (
+        rule.host_pattern.to_ascii_lowercase(),
+        rule.path_pattern.clone().unwrap_or_else(|| "*".to_string()),
+        rule.method.as_ref().map(|m| m.to_ascii_uppercase()),
+    )
+}
+
+/// Full-override shadowing within the project rule set: an agent-scoped rule
+/// replaces every all-agents rule sharing its endpoint signature, so a
+/// per-agent app-permission override can loosen as well as tighten the
+/// all-agents setting. Operates on rules that already survived
+/// `row_to_policy_rule`, so a malformed row (e.g. a rate rule with no config)
+/// that will never be evaluated can never shadow anything. Org rules must
+/// never be passed here — org enforcement cannot be overridden per agent.
+fn shadow_all_agents_rules(rules: Vec<(EndpointSignature, bool, PolicyRule)>) -> Vec<PolicyRule> {
+    let agent_signatures: std::collections::HashSet<EndpointSignature> = rules
+        .iter()
+        .filter(|(_, agent_scoped, _)| *agent_scoped)
+        .map(|(signature, _, _)| signature.clone())
+        .collect();
+    rules
+        .into_iter()
+        .filter(|(signature, agent_scoped, _)| {
+            *agent_scoped || !agent_signatures.contains(signature)
+        })
+        .map(|(_, _, rule)| rule)
+        .collect()
+}
+
+/// Map a policy rule row to a resolved rule, dropping rows with unknown
+/// actions or invalid rate-limit configs.
+fn row_to_policy_rule(r: db::PolicyRuleRow) -> Option<PolicyRule> {
+    let action = match r.action.as_str() {
+        "block" => PolicyAction::Block,
+        "rate_limit" => {
+            let max_requests = r.rate_limit.filter(|&v| v > 0)? as u64;
+            let window = r.rate_limit_window.as_deref()?;
+            let window_secs = match window {
+                "minute" => 60,
+                "hour" => 3600,
+                "day" => 86400,
+                _ => return None,
+            };
+            PolicyAction::RateLimit {
+                rule_id: r.id,
+                max_requests,
+                window_secs,
+            }
+        }
+        "manual_approval" => PolicyAction::ManualApproval { rule_id: r.id },
+        "allow" => PolicyAction::Allow,
+        _ => return None,
+    };
+    Some(PolicyRule {
+        name: r.name,
+        path_pattern: r.path_pattern.unwrap_or_else(|| "*".to_string()),
+        method: r.method,
+        action,
+        conditions_raw: r.conditions,
+    })
+}
+
+/// Filter org + project rows for this agent and host, map them to resolved
+/// rules, and shadow the project set — org rules first, preserving today's
+/// evaluation order.
+fn assemble_policy_rules(
+    org_rows: Vec<db::PolicyRuleRow>,
+    project_rows: Vec<db::PolicyRuleRow>,
+    agent_id: &str,
+    hostname: &str,
+) -> Vec<PolicyRule> {
+    let relevant = |r: &db::PolicyRuleRow| {
+        host_matches(hostname, &r.host_pattern)
+            && (r.agent_id.is_none() || r.agent_id.as_deref() == Some(agent_id))
+    };
+    let project_rules = shadow_all_agents_rules(
+        project_rows
+            .into_iter()
+            .filter(&relevant)
+            .filter_map(|r| {
+                let signature = endpoint_signature(&r);
+                let agent_scoped = r.agent_id.is_some();
+                row_to_policy_rule(r).map(|rule| (signature, agent_scoped, rule))
+            })
+            .collect(),
+    );
+    org_rows
+        .into_iter()
+        .filter(&relevant)
+        .filter_map(row_to_policy_rule)
+        .chain(project_rules)
+        .collect()
+}
+
 // ── Tests ───────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -1256,6 +1446,369 @@ mod tests {
     use super::*;
     async fn new_store() -> std::sync::Arc<dyn crate::cache::CacheStore> {
         crate::cache::create_store().await.unwrap()
+    }
+
+    // ── Agent-override shadowing ──────────────────────────────────────
+
+    fn rule_row(
+        host: &str,
+        path: Option<&str>,
+        method: Option<&str>,
+        agent: Option<&str>,
+        action: &str,
+    ) -> db::PolicyRuleRow {
+        db::PolicyRuleRow {
+            id: format!("rule-{action}-{}", agent.unwrap_or("all")),
+            name: format!("Test {action} rule"),
+            host_pattern: host.to_string(),
+            path_pattern: path.map(|p| p.to_string()),
+            method: method.map(|m| m.to_string()),
+            agent_id: agent.map(|a| a.to_string()),
+            action: action.to_string(),
+            rate_limit: None,
+            rate_limit_window: None,
+            conditions: None,
+        }
+    }
+
+    /// Evaluate `rules` for GET /v1/a with a fresh store — the fixed request
+    /// every shadowing test uses.
+    async fn decide(
+        rules: &[PolicyRule],
+        policy_mode: &str,
+        enforce_deny: bool,
+    ) -> crate::policy::PolicyDecision {
+        let store = new_store().await;
+        crate::policy::evaluate(
+            "org1",
+            "proj1",
+            "GET",
+            "/v1/a",
+            None,
+            rules,
+            "tok",
+            store.as_ref(),
+            policy_mode,
+            enforce_deny,
+        )
+        .await
+    }
+
+    #[test]
+    fn shadow_removes_all_agents_rule_with_same_signature() {
+        let rules = assemble_policy_rules(
+            vec![],
+            vec![
+                rule_row("api.x.com", Some("/v1/a"), Some("GET"), None, "block"),
+                rule_row(
+                    "api.x.com",
+                    Some("/v1/a"),
+                    Some("GET"),
+                    Some("agent-1"),
+                    "allow",
+                ),
+            ],
+            "agent-1",
+            "api.x.com",
+        );
+        assert_eq!(rules.len(), 1);
+        assert!(matches!(rules[0].action, PolicyAction::Allow));
+    }
+
+    #[test]
+    fn shadow_keeps_all_agents_rules_with_different_signatures() {
+        let rules = assemble_policy_rules(
+            vec![],
+            vec![
+                rule_row("api.x.com", Some("/v1/b"), Some("GET"), None, "block"),
+                rule_row("api.x.com", Some("/v1/a"), Some("POST"), None, "block"),
+                rule_row("api.x.com", Some("/v1/a"), Some("GET"), None, "allow"),
+                rule_row(
+                    "api.x.com",
+                    Some("/v1/a"),
+                    Some("GET"),
+                    Some("agent-1"),
+                    "allow",
+                ),
+            ],
+            "agent-1",
+            "api.x.com",
+        );
+        // Only the same-signature all-agents rule is shadowed.
+        assert_eq!(rules.len(), 3);
+    }
+
+    #[test]
+    fn shadow_is_identity_without_agent_rules() {
+        let rules = assemble_policy_rules(
+            vec![],
+            vec![
+                rule_row("api.x.com", Some("/v1/a"), Some("GET"), None, "block"),
+                rule_row("api.x.com", None, None, None, "manual_approval"),
+            ],
+            "agent-1",
+            "api.x.com",
+        );
+        assert_eq!(rules.len(), 2);
+    }
+
+    #[test]
+    fn shadow_keeps_multiple_agent_rules_with_same_signature() {
+        let rules = assemble_policy_rules(
+            vec![],
+            vec![
+                rule_row("api.x.com", Some("/v1/a"), Some("GET"), None, "allow"),
+                rule_row(
+                    "api.x.com",
+                    Some("/v1/a"),
+                    Some("GET"),
+                    Some("agent-1"),
+                    "block",
+                ),
+                rule_row(
+                    "api.x.com",
+                    Some("/v1/a"),
+                    Some("GET"),
+                    Some("agent-1"),
+                    "manual_approval",
+                ),
+            ],
+            "agent-1",
+            "api.x.com",
+        );
+        assert_eq!(rules.len(), 2);
+        assert!(!rules
+            .iter()
+            .any(|r| matches!(r.action, PolicyAction::Allow)));
+    }
+
+    #[test]
+    fn shadow_signature_is_case_insensitive_for_host_and_method() {
+        let rules = assemble_policy_rules(
+            vec![],
+            vec![
+                rule_row("API.X.com", Some("/v1/a"), Some("get"), None, "block"),
+                rule_row(
+                    "api.x.com",
+                    Some("/v1/a"),
+                    Some("GET"),
+                    Some("agent-1"),
+                    "allow",
+                ),
+            ],
+            "agent-1",
+            "api.x.com",
+        );
+        assert_eq!(rules.len(), 1);
+        assert!(matches!(rules[0].action, PolicyAction::Allow));
+    }
+
+    #[test]
+    fn shadow_null_path_equals_star_pattern() {
+        let rules = assemble_policy_rules(
+            vec![],
+            vec![
+                rule_row("api.x.com", None, Some("GET"), None, "block"),
+                rule_row(
+                    "api.x.com",
+                    Some("*"),
+                    Some("GET"),
+                    Some("agent-1"),
+                    "allow",
+                ),
+            ],
+            "agent-1",
+            "api.x.com",
+        );
+        assert_eq!(rules.len(), 1);
+        assert!(matches!(rules[0].action, PolicyAction::Allow));
+    }
+
+    #[test]
+    fn shadow_requires_a_rule_that_survives_mapping() {
+        // A malformed agent rate rule (no rate config) is dropped by
+        // row_to_policy_rule; it must not shadow the all-agents block —
+        // otherwise the agent would be left with no rule at all (fail-open).
+        let rules = assemble_policy_rules(
+            vec![],
+            vec![
+                rule_row("api.x.com", Some("/v1/a"), Some("GET"), None, "block"),
+                rule_row(
+                    "api.x.com",
+                    Some("/v1/a"),
+                    Some("GET"),
+                    Some("agent-1"),
+                    "rate_limit",
+                ),
+            ],
+            "agent-1",
+            "api.x.com",
+        );
+        assert_eq!(rules.len(), 1);
+        assert!(matches!(rules[0].action, PolicyAction::Block));
+    }
+
+    #[tokio::test]
+    async fn assemble_agent_allow_overrides_all_agents_block() {
+        let rules = assemble_policy_rules(
+            vec![],
+            vec![
+                rule_row("api.x.com", Some("/v1/a"), Some("GET"), None, "block"),
+                rule_row(
+                    "api.x.com",
+                    Some("/v1/a"),
+                    Some("GET"),
+                    Some("agent-1"),
+                    "allow",
+                ),
+            ],
+            "agent-1",
+            "api.x.com",
+        );
+        let decision = decide(&rules, "allow", false).await;
+        assert!(matches!(decision, crate::policy::PolicyDecision::Allow));
+    }
+
+    #[tokio::test]
+    async fn assemble_agent_approval_overrides_all_agents_block() {
+        let rules = assemble_policy_rules(
+            vec![],
+            vec![
+                rule_row("api.x.com", Some("/v1/a"), Some("GET"), None, "block"),
+                rule_row(
+                    "api.x.com",
+                    Some("/v1/a"),
+                    Some("GET"),
+                    Some("agent-1"),
+                    "manual_approval",
+                ),
+            ],
+            "agent-1",
+            "api.x.com",
+        );
+        let decision = decide(&rules, "allow", false).await;
+        assert!(matches!(
+            decision,
+            crate::policy::PolicyDecision::ManualApproval { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn assemble_agent_rate_limit_overrides_all_agents_block() {
+        let mut rate_rule = rule_row(
+            "api.x.com",
+            Some("/v1/a"),
+            Some("GET"),
+            Some("agent-1"),
+            "rate_limit",
+        );
+        rate_rule.rate_limit = Some(100);
+        rate_rule.rate_limit_window = Some("hour".to_string());
+        let rules = assemble_policy_rules(
+            vec![],
+            vec![
+                rule_row("api.x.com", Some("/v1/a"), Some("GET"), None, "block"),
+                rate_rule,
+            ],
+            "agent-1",
+            "api.x.com",
+        );
+        // The block row is shadowed; under the limit the request goes through.
+        let decision = decide(&rules, "allow", false).await;
+        assert!(matches!(decision, crate::policy::PolicyDecision::Allow));
+    }
+
+    #[tokio::test]
+    async fn assemble_org_block_not_shadowed_by_agent_allow() {
+        let rules = assemble_policy_rules(
+            vec![rule_row(
+                "api.x.com",
+                Some("/v1/a"),
+                Some("GET"),
+                None,
+                "block",
+            )],
+            vec![rule_row(
+                "api.x.com",
+                Some("/v1/a"),
+                Some("GET"),
+                Some("agent-1"),
+                "allow",
+            )],
+            "agent-1",
+            "api.x.com",
+        );
+        let decision = decide(&rules, "allow", false).await;
+        assert!(matches!(
+            decision,
+            crate::policy::PolicyDecision::Blocked { .. }
+        ));
+    }
+
+    #[test]
+    fn assemble_drops_foreign_agent_rules_and_other_hosts() {
+        let rules = assemble_policy_rules(
+            vec![],
+            vec![
+                rule_row(
+                    "api.x.com",
+                    Some("/v1/a"),
+                    Some("GET"),
+                    Some("agent-2"),
+                    "block",
+                ),
+                rule_row("other.com", Some("/v1/a"), Some("GET"), None, "block"),
+                rule_row("api.x.com", Some("/v1/a"), Some("GET"), None, "block"),
+            ],
+            "agent-1",
+            "api.x.com",
+        );
+        assert_eq!(rules.len(), 1);
+        assert!(matches!(rules[0].action, PolicyAction::Block));
+    }
+
+    #[tokio::test]
+    async fn assemble_agent_allow_row_satisfies_deny_mode() {
+        let rules = assemble_policy_rules(
+            vec![],
+            vec![rule_row(
+                "api.x.com",
+                Some("/v1/a"),
+                Some("GET"),
+                Some("agent-1"),
+                "allow",
+            )],
+            "agent-1",
+            "api.x.com",
+        );
+        let decision = decide(&rules, "deny", true).await;
+        assert!(matches!(decision, crate::policy::PolicyDecision::Allow));
+    }
+
+    #[tokio::test]
+    async fn assemble_agent_block_overrides_all_agents_allow_in_deny_mode() {
+        let rules = assemble_policy_rules(
+            vec![],
+            vec![
+                rule_row("api.x.com", Some("/v1/a"), Some("GET"), None, "allow"),
+                rule_row(
+                    "api.x.com",
+                    Some("/v1/a"),
+                    Some("GET"),
+                    Some("agent-1"),
+                    "block",
+                ),
+            ],
+            "agent-1",
+            "api.x.com",
+        );
+        // The allow row is truly gone — not merely outvoted by pass order.
+        assert_eq!(rules.len(), 1);
+        let decision = decide(&rules, "deny", true).await;
+        assert!(matches!(
+            decision,
+            crate::policy::PolicyDecision::Blocked { .. }
+        ));
     }
 
     #[tokio::test]
@@ -1525,5 +2078,108 @@ mod tests {
             Some(&creds),
             "nanos-clone.jfrog.io"
         ));
+    }
+
+    // ── narrow_connections_by_path ────────────────────────────────────────
+
+    fn conn(id: &str, provider: &str) -> db::AppConnectionRow {
+        db::AppConnectionRow {
+            id: id.into(),
+            provider: provider.into(),
+            credentials: None,
+            label: None,
+            metadata: None,
+            session_policy: None,
+        }
+    }
+
+    fn ids(conns: &[db::AppConnectionRow]) -> Vec<&str> {
+        conns.iter().map(|c| c.id.as_str()).collect()
+    }
+
+    #[test]
+    fn narrow_calendar_request_selects_calendar_connection() {
+        // The bug: with two Gmail accounts, every www.googleapis.com path was
+        // ambiguous. A Calendar request must narrow to the single Calendar
+        // connection so it injects without an x-onecli-connection-id header.
+        let conns = vec![
+            conn("gmail1", "gmail"),
+            conn("gmail2", "gmail"),
+            conn("cal1", "google-calendar"),
+            conn("drive1", "google-drive"),
+        ];
+        let narrowed = narrow_connections_by_path(
+            &conns,
+            "www.googleapis.com",
+            Some("/calendar/v3/calendars/primary/events"),
+        );
+        assert_eq!(ids(&narrowed), vec!["cal1"]);
+    }
+
+    #[test]
+    fn narrow_gmail_request_keeps_both_gmail_accounts() {
+        // A Gmail request with two Gmail accounts stays genuinely ambiguous —
+        // narrowing keeps both so the caller still asks for a connection-id.
+        let conns = vec![
+            conn("gmail1", "gmail"),
+            conn("gmail2", "gmail"),
+            conn("cal1", "google-calendar"),
+        ];
+        let narrowed = narrow_connections_by_path(
+            &conns,
+            "www.googleapis.com",
+            Some("/gmail/v1/users/me/messages"),
+        );
+        assert_eq!(ids(&narrowed), vec!["gmail1", "gmail2"]);
+    }
+
+    #[test]
+    fn narrow_falls_back_to_full_set_when_nothing_serves_path() {
+        // No connection serves the path → return the full set unchanged rather
+        // than an empty set, preserving prior behavior for that edge case.
+        let conns = vec![conn("gmail1", "gmail"), conn("gmail2", "gmail")];
+        let narrowed =
+            narrow_connections_by_path(&conns, "www.googleapis.com", Some("/calendar/v3"));
+        assert_eq!(ids(&narrowed), vec!["gmail1", "gmail2"]);
+    }
+
+    #[test]
+    fn narrow_leaves_dedicated_host_untouched() {
+        // gmail.googleapis.com is not path-scoped (single provider, no path
+        // prefix), so the full set is returned — two Gmail accounts stay
+        // ambiguous there, which is correct.
+        let conns = vec![conn("gmail1", "gmail"), conn("gmail2", "gmail")];
+        let narrowed = narrow_connections_by_path(
+            &conns,
+            "gmail.googleapis.com",
+            Some("/gmail/v1/users/me/messages"),
+        );
+        assert_eq!(ids(&narrowed), vec!["gmail1", "gmail2"]);
+    }
+
+    #[test]
+    fn narrow_without_request_path_returns_full_set() {
+        let conns = vec![conn("gmail1", "gmail"), conn("cal1", "google-calendar")];
+        let narrowed = narrow_connections_by_path(&conns, "www.googleapis.com", None);
+        assert_eq!(ids(&narrowed), vec!["gmail1", "cal1"]);
+    }
+
+    #[test]
+    fn narrow_leaves_non_google_host_untouched() {
+        let conns = vec![conn("github1", "github")];
+        let narrowed = narrow_connections_by_path(&conns, "api.github.com", Some("/repos/foo/bar"));
+        assert_eq!(ids(&narrowed), vec!["github1"]);
+    }
+
+    #[test]
+    fn narrow_single_connection_is_returned_borrowed_unchanged() {
+        // A single connection can't be disambiguated: it is returned as-is and
+        // without a clone (Borrowed), even on a path-scoped host it does not
+        // serve — the common single-account case stays on the zero-copy path.
+        let conns = vec![conn("gmail1", "gmail")];
+        let narrowed =
+            narrow_connections_by_path(&conns, "www.googleapis.com", Some("/calendar/v3"));
+        assert_eq!(ids(&narrowed), vec!["gmail1"]);
+        assert!(matches!(narrowed, Cow::Borrowed(_)));
     }
 }

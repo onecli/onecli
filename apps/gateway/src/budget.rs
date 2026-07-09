@@ -1,15 +1,15 @@
 //! Budget layer — stub for the OSS build. All functions are no-ops; the cloud
-//! build swaps this module for `cloud/budget.rs` via `#[path]` in `main.rs`.
+//! build swaps this module for `ee/budget.rs` via `#[path]` in `main.rs`.
 //!
 //! The shared types (`BudgetBinding`, `BudgetPeriod`) and `resolve_bindings` are
 //! referenced by the shared `connect.rs`/`gateway/mitm.rs` threading, so they
 //! exist in both builds with the same surface — inert in OSS
 //! (`resolve_bindings` always returns an empty Vec, so the threaded field stays
-//! empty and the cloud-only enforcement/metering in `cloud/hooks.rs` never runs).
+//! empty and the cloud-only enforcement/metering in `ee/hooks.rs` never runs).
 
 use serde::{Deserialize, Serialize};
 
-// ⚠ KEEP THE TYPES BELOW IDENTICAL to `cloud/budget.rs`. Only one of the two
+// ⚠ KEEP THE TYPES BELOW IDENTICAL to `ee/budget.rs`. Only one of the two
 // modules compiles per build (feature swap), so a field added to one and not the
 // other will NOT fail compilation — the shared threading in `connect.rs`/
 // `gateway/mitm.rs` just uses whichever copy is active. Treat them as one type.

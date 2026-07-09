@@ -1,11 +1,13 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { AlertTriangle, Loader2, Settings2 } from "lucide-react";
 import { toast } from "sonner";
-import { useInvalidateGatewayCache } from "@/hooks/use-invalidate-cache";
+import { useQueryClient } from "@tanstack/react-query";
+import { useAgents } from "@/hooks/use-agents";
+import { queryKeys } from "@/lib/api/keys";
 import { withProjectPrefix } from "@/lib/navigation";
 import { Button } from "@onecli/ui/components/button";
 import { Accordion } from "@onecli/ui/components/accordion";
@@ -18,110 +20,175 @@ import {
   DialogTitle,
 } from "@onecli/ui/components/dialog";
 import type {
-  AppToolGroup,
+  AppToolGroupSummary,
   AppPermissionLevel,
+  AppPermissionSetting,
 } from "@onecli/api/apps/app-permissions";
-import { allGroupTools } from "@onecli/api/apps/app-permissions";
+import { allGroupTools } from "@onecli/api/apps/app-permissions/types";
 import type { RuleCondition } from "@onecli/api/validations/policy-rule";
 import {
-  getAppPermissionStates,
-  setAppPermissions,
-  getOverlappingRuleCountForApp,
-  type AppPermissionState,
-} from "@/lib/actions/rules";
+  rules as rulesApi,
+  type PageScope,
+  type AppPermissionStatesResult,
+} from "@/lib/api";
+import { AgentScopeSelect } from "@/lib/components/agent-scope-select";
 import { ConditionBuilder } from "@/lib/components/condition-builder";
 import { isToolFullyLocked as checkToolFullyLocked } from "./resolve-tool-permission";
 import { AppPermissionGroup } from "./app-permission-group";
 
-interface AppPermissionActions {
-  getStates: (provider: string) => Promise<Record<string, AppPermissionState>>;
-  setPermissions: (
-    provider: string,
-    changes: { toolId: string; permission: AppPermissionLevel }[],
-    conditions?: RuleCondition[],
-  ) => Promise<void>;
-  getOverlappingRuleCount: (provider: string) => Promise<number>;
-}
-
 interface AppPermissionsProps {
   provider: string;
   appName: string;
-  groups: AppToolGroup[];
-  actions?: AppPermissionActions;
+  groups: AppToolGroupSummary[];
   orgStates?: Record<string, AppPermissionLevel>;
   orgConditions?: Record<string, unknown[]>;
   policyMode?: "allow" | "deny";
+  pageScope?: PageScope;
 }
+
+const EMPTY_LAYERS: AppPermissionStatesResult = { defaults: {}, byAgent: {} };
+
+/** Agent-override chips shown before collapsing into a "+N more" pill. */
+const CHIP_LIMIT = 4;
 
 export const AppPermissions = ({
   provider,
   appName,
   groups,
-  actions,
   orgStates,
   orgConditions,
   policyMode = "allow",
+  pageScope = "project",
 }: AppPermissionsProps) => {
+  // The per-agent scope switcher only exists at project scope — org rules are
+  // agent-less.
+  const agentScoping = pageScope === "project";
   const defaultPermission: AppPermissionLevel =
     policyMode === "deny" ? "block" : "allow";
   const pathname = usePathname();
-  const [states, setStates] = useState<Record<string, AppPermissionState>>({});
+  const [layers, setLayers] = useState<AppPermissionStatesResult>(EMPTY_LAYERS);
+  const [scopeAgentId, setScopeAgentId] = useState("");
+  const [allChipsShown, setAllChipsShown] = useState(false);
   const [overlappingRuleCount, setOverlappingRuleCount] = useState(0);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [conditionDialogOpen, setConditionDialogOpen] = useState(false);
+  const [conditionScopeAgentId, setConditionScopeAgentId] = useState("");
   const [editingConditions, setEditingConditions] = useState<RuleCondition[]>(
     [],
   );
-  const invalidateCache = useInvalidateGatewayCache();
+  const queryClient = useQueryClient();
+  const { data: agentsList = [] } = useAgents(agentScoping);
 
-  const fetchStates = actions?.getStates ?? getAppPermissionStates;
-  const fetchOverlappingCount =
-    actions?.getOverlappingRuleCount ?? getOverlappingRuleCountForApp;
-  const applyPermissions = actions?.setPermissions ?? setAppPermissions;
+  // Every optimistic write bumps this; an in-flight background refetch that
+  // started earlier is stale and must not clobber the newer optimistic state.
+  const layersVersionRef = useRef(0);
+
+  const fetchLayers = useCallback(async () => {
+    const version = ++layersVersionRef.current;
+    const [s, { count }] = await Promise.all([
+      rulesApi.permissionStates(provider, pageScope),
+      rulesApi.overlapCount(provider, pageScope),
+    ]);
+    if (version !== layersVersionRef.current) return;
+    setLayers(s);
+    setOverlappingRuleCount(count);
+  }, [provider, pageScope]);
 
   useEffect(() => {
-    Promise.all([fetchStates(provider), fetchOverlappingCount(provider)])
-      .then(([s, count]) => {
-        setStates(s);
-        setOverlappingRuleCount(count);
-      })
+    fetchLayers()
       .catch(() => toast.error("Failed to load permission states"))
       .finally(() => setLoading(false));
-  }, [provider, fetchStates, fetchOverlappingCount]);
+  }, [fetchLayers]);
+
+  const agents = useMemo(
+    () => agentsList.map((a) => ({ id: a.id, name: a.name })),
+    [agentsList],
+  );
+  // Self-heals when the selected agent is deleted: falls back to All agents.
+  const activeAgentId = agents.some((a) => a.id === scopeAgentId)
+    ? scopeAgentId
+    : "";
+  const activeAgent = agents.find((a) => a.id === activeAgentId);
+  const baseStates = layers.defaults;
+  const agentStates = useMemo(
+    () => (activeAgentId ? (layers.byAgent[activeAgentId] ?? {}) : {}),
+    [activeAgentId, layers.byAgent],
+  );
+  const activeLayerStates = activeAgentId ? agentStates : baseStates;
+
+  const overrideCounts = useMemo(() => {
+    const counts: Record<string, number> = {};
+    for (const agent of agents) {
+      const n = Object.keys(layers.byAgent[agent.id] ?? {}).length;
+      if (n > 0) counts[agent.id] = n;
+    }
+    return counts;
+  }, [agents, layers.byAgent]);
+  const agentsWithOverrides = agents.filter(
+    (a) => (overrideCounts[a.id] ?? 0) > 0,
+  );
 
   const applyChanges = useCallback(
     async (
-      changes: { toolId: string; permission: AppPermissionLevel }[],
+      changes: { toolId: string; permission: AppPermissionSetting }[],
       conditions?: RuleCondition[],
     ): Promise<boolean> => {
-      let prev: Record<string, AppPermissionState> = {};
-      setStates((current) => {
+      let prev: AppPermissionStatesResult = EMPTY_LAYERS;
+      setLayers((current) => {
         prev = current;
-        const next = { ...current };
-        for (const c of changes) {
-          next[c.toolId] = {
-            permission: c.permission,
-            conditions: conditions ?? current[c.toolId]?.conditions ?? [],
-          };
+        if (!activeAgentId) {
+          const defaults = { ...current.defaults };
+          for (const c of changes) {
+            if (c.permission === "inherit") continue; // base layer never inherits
+            defaults[c.toolId] = {
+              permission: c.permission,
+              conditions:
+                conditions ?? current.defaults[c.toolId]?.conditions ?? [],
+            };
+          }
+          return { ...current, defaults };
         }
-        return next;
+        const layer = { ...(current.byAgent[activeAgentId] ?? {}) };
+        for (const c of changes) {
+          if (c.permission === "inherit") {
+            delete layer[c.toolId];
+          } else {
+            layer[c.toolId] = {
+              permission: c.permission,
+              conditions: conditions ?? layer[c.toolId]?.conditions ?? [],
+            };
+          }
+        }
+        return {
+          ...current,
+          byAgent: { ...current.byAgent, [activeAgentId]: layer },
+        };
       });
 
       setSaving(true);
       try {
-        await applyPermissions(provider, changes, conditions);
-        invalidateCache();
+        await rulesApi.setPermissions(
+          provider,
+          { changes, conditions, agentId: activeAgentId || undefined },
+          pageScope,
+        );
+        queryClient.invalidateQueries({ queryKey: queryKeys.rules.all() });
+        queryClient.invalidateQueries({ queryKey: queryKeys.counts.all() });
+        // Server-side reconciliation can reshape rows beyond the optimistic
+        // update (wildcard expansion). Awaiting keeps `saving` true through
+        // the re-sync, so no other write can interleave with it.
+        await fetchLayers().catch(() => {});
         return true;
       } catch {
-        setStates(prev);
+        setLayers(prev);
         toast.error("Failed to update permissions");
         return false;
       } finally {
         setSaving(false);
       }
     },
-    [provider, invalidateCache, applyPermissions],
+    [provider, pageScope, activeAgentId, queryClient, fetchLayers],
   );
 
   const handlePermissionChange = useCallback(
@@ -131,38 +198,58 @@ export const AppPermissions = ({
     [applyChanges],
   );
 
-  const handleGroupChange = useCallback(
-    (group: AppToolGroup, permission: AppPermissionLevel) => {
-      const { wildcard } = group;
-      const wildcardActive =
-        wildcard != null &&
-        states[wildcard.id]?.permission != null &&
-        states[wildcard.id]?.permission !== defaultPermission;
+  const handleRevert = useCallback(
+    (toolIds: string[]) => {
+      void applyChanges(
+        toolIds.map((toolId) => ({ toolId, permission: "inherit" as const })),
+      );
+    },
+    [applyChanges],
+  );
 
+  const handleGroupChange = useCallback(
+    (group: AppToolGroupSummary, permission: AppPermissionLevel) => {
       const changes = group.tools.map((t) => ({
         toolId: t.id,
         permission,
       }));
 
+      if (activeAgentId) {
+        // Agent layers hold no wildcard rows — a group change is per-tool.
+        applyChanges(changes);
+        return;
+      }
+
+      const { wildcard } = group;
+      const wildcardActive =
+        wildcard != null &&
+        baseStates[wildcard.id]?.permission != null &&
+        baseStates[wildcard.id]?.permission !== defaultPermission;
+
       if (wildcardActive && wildcard) {
         changes.push({ toolId: wildcard.id, permission: defaultPermission });
 
-        let prev: Record<string, AppPermissionState> = {};
-        setStates((current) => {
+        let prev: AppPermissionStatesResult = EMPTY_LAYERS;
+        setLayers((current) => {
           prev = current;
-          const next = { ...current };
+          const defaults = { ...current.defaults };
           for (const t of group.tools) {
-            next[t.id] = { permission, conditions: [] };
+            defaults[t.id] = { permission, conditions: [] };
           }
-          delete next[wildcard.id];
-          return next;
+          delete defaults[wildcard.id];
+          return { ...current, defaults };
         });
 
         setSaving(true);
-        applyPermissions(provider, changes)
-          .then(() => invalidateCache())
+        rulesApi
+          .setPermissions(provider, { changes }, pageScope)
+          .then(() => {
+            queryClient.invalidateQueries({ queryKey: queryKeys.rules.all() });
+            queryClient.invalidateQueries({ queryKey: queryKeys.counts.all() });
+            return fetchLayers().catch(() => {});
+          })
           .catch(() => {
-            setStates(prev);
+            setLayers(prev);
             toast.error("Failed to update permissions");
           })
           .finally(() => setSaving(false));
@@ -172,17 +259,19 @@ export const AppPermissions = ({
     },
     [
       applyChanges,
-      states,
+      activeAgentId,
+      baseStates,
       defaultPermission,
       provider,
-      invalidateCache,
-      applyPermissions,
+      pageScope,
+      queryClient,
+      fetchLayers,
     ],
   );
 
   const expandWildcard = useCallback(
     (
-      group: AppToolGroup,
+      group: AppToolGroupSummary,
       overrideToolId?: string,
       overridePermission?: AppPermissionLevel,
     ) => {
@@ -190,46 +279,52 @@ export const AppPermissions = ({
       if (!wildcard) return;
 
       const changes: { toolId: string; permission: AppPermissionLevel }[] = [];
-      let prev: Record<string, AppPermissionState> = {};
+      let prev: AppPermissionStatesResult = EMPTY_LAYERS;
 
-      setStates((current) => {
-        const wildcardPerm = current[wildcard.id]?.permission;
+      setLayers((current) => {
+        const wildcardPerm = current.defaults[wildcard.id]?.permission;
         if (!wildcardPerm) return current;
 
         prev = current;
-        const next = { ...current };
+        const defaults = { ...current.defaults };
         for (const t of group.tools) {
           const perm =
             t.id === overrideToolId && overridePermission
               ? overridePermission
               : wildcardPerm;
-          next[t.id] = { permission: perm, conditions: [] };
+          defaults[t.id] = { permission: perm, conditions: [] };
           changes.push({ toolId: t.id, permission: perm });
         }
-        delete next[wildcard.id];
+        delete defaults[wildcard.id];
         changes.push({ toolId: wildcard.id, permission: defaultPermission });
-        return next;
+        return { ...current, defaults };
       });
 
       if (changes.length === 0) return;
 
       setSaving(true);
-      applyPermissions(provider, changes)
-        .then(() => invalidateCache())
+      rulesApi
+        .setPermissions(provider, { changes }, pageScope)
+        .then(() => {
+          queryClient.invalidateQueries({ queryKey: queryKeys.rules.all() });
+          queryClient.invalidateQueries({ queryKey: queryKeys.counts.all() });
+          return fetchLayers().catch(() => {});
+        })
         .catch(() => {
-          setStates(prev);
+          setLayers(prev);
           toast.error("Failed to update permission");
         })
         .finally(() => setSaving(false));
     },
-    [provider, invalidateCache, applyPermissions, defaultPermission],
+    [provider, pageScope, defaultPermission, queryClient, fetchLayers],
   );
 
   const openConditionDialog = () => {
-    const firstCondition = Object.values(states).find(
+    const firstCondition = Object.values(activeLayerStates).find(
       (s) => s.conditions.length > 0,
     );
     setEditingConditions((firstCondition?.conditions as RuleCondition[]) ?? []);
+    setConditionScopeAgentId(activeAgentId);
     setConditionDialogOpen(true);
   };
 
@@ -239,39 +334,48 @@ export const AppPermissions = ({
       (orgConditions?.[toolId] ?? []) as RuleCondition[],
     );
 
-  const handleSaveConditions = async () => {
-    const allTools = groups.flatMap(allGroupTools);
-    const restrictedTools = allTools.filter((t) => {
-      if (isLocked(t.id)) return false;
-      const perm = states[t.id]?.permission ?? defaultPermission;
-      return perm !== defaultPermission;
-    });
+  // Tools the condition dialog targets: the active agent's overrides, or the
+  // base layer's restricted (non-default) tools.
+  const conditionTargetTools = groups.flatMap(allGroupTools).filter((t) => {
+    if (isLocked(t.id)) return false;
+    if (activeAgentId) return agentStates[t.id] != null;
+    return (
+      (baseStates[t.id]?.permission ?? defaultPermission) !== defaultPermission
+    );
+  });
 
-    if (restrictedTools.length === 0) {
+  const handleSaveConditions = async () => {
+    // The scope may have changed while the dialog was open (e.g. the selected
+    // agent was deleted and the view self-healed) — never retarget the edit.
+    if (conditionScopeAgentId !== activeAgentId) {
+      setConditionDialogOpen(false);
+      return;
+    }
+    if (conditionTargetTools.length === 0) {
       setConditionDialogOpen(false);
       return;
     }
 
-    const changes = restrictedTools.map((t) => ({
+    const changes = conditionTargetTools.map((t) => ({
       toolId: t.id,
-      permission: states[t.id]?.permission ?? ("block" as AppPermissionLevel),
+      permission:
+        activeLayerStates[t.id]?.permission ?? ("block" as AppPermissionLevel),
     }));
 
     const ok = await applyChanges(changes, editingConditions);
     if (!ok) return;
     setConditionDialogOpen(false);
-    toast.success("Conditions updated for all restricted tools");
+    toast.success(
+      activeAgentId
+        ? "Conditions updated for all overridden tools"
+        : "Conditions updated for all restricted tools",
+    );
   };
 
-  const hasAnyConditions = Object.values(states).some(
+  const hasAnyConditions = Object.values(activeLayerStates).some(
     (s) => s.conditions.length > 0,
   );
-  const restrictedCount = groups.flatMap(allGroupTools).filter((t) => {
-    if (isLocked(t.id)) return false;
-    return (
-      (states[t.id]?.permission ?? defaultPermission) !== defaultPermission
-    );
-  }).length;
+  const conditionTargetCount = conditionTargetTools.length;
 
   if (loading) {
     return (
@@ -285,29 +389,79 @@ export const AppPermissions = ({
   }
 
   const rulesHref = withProjectPrefix(pathname, "/rules");
+  const showScopeSelect = agentScoping && agents.length > 0;
 
   return (
     <div className="space-y-3">
-      <div className="flex items-center justify-between">
+      <div className="flex items-center justify-between gap-3">
         <div>
           <h3 className="text-sm font-medium">Permissions</h3>
           <p className="text-xs text-muted-foreground mt-0.5">
-            Control what agents can do with {appName}. Applied to all connected
-            accounts.
+            {activeAgent
+              ? `Control what ${activeAgent.name} can do with ${appName}. Overrides apply to this agent only.`
+              : `Control what agents can do with ${appName}. Applied to all connected accounts.`}
           </p>
         </div>
-        {restrictedCount > 0 && (
-          <Button
-            variant="ghost"
-            size="sm"
-            className="text-xs text-muted-foreground gap-1.5"
-            onClick={openConditionDialog}
-          >
-            <Settings2 className="size-3.5" />
-            {hasAnyConditions ? "Edit condition" : "Add condition"}
-          </Button>
-        )}
+        <div className="flex items-center gap-1.5 shrink-0">
+          {conditionTargetCount > 0 && (
+            <Button
+              variant="ghost"
+              size="sm"
+              className="text-xs text-muted-foreground gap-1.5"
+              onClick={openConditionDialog}
+            >
+              <Settings2 className="size-3.5" />
+              {hasAnyConditions ? "Edit condition" : "Add condition"}
+            </Button>
+          )}
+          {showScopeSelect && (
+            <AgentScopeSelect
+              agents={agents}
+              value={activeAgentId}
+              onChange={setScopeAgentId}
+              overrideCounts={overrideCounts}
+              disabled={saving}
+              triggerClassName="h-7 w-auto gap-1.5 bg-card px-2.5 text-xs"
+              ariaLabel="Agent scope"
+            />
+          )}
+        </div>
       </div>
+      {!activeAgentId && agentsWithOverrides.length > 0 && (
+        <div className="flex flex-wrap items-center gap-1.5">
+          <span className="text-[11px] text-muted-foreground">
+            Agent overrides:
+          </span>
+          {(allChipsShown
+            ? agentsWithOverrides
+            : agentsWithOverrides.slice(0, CHIP_LIMIT)
+          ).map((a) => (
+            <button
+              key={a.id}
+              type="button"
+              onClick={() => setScopeAgentId(a.id)}
+              className="rounded-full border px-2 py-0.5 text-[11px] text-muted-foreground hover:text-foreground hover:border-foreground/20 transition-colors"
+            >
+              {a.name}{" "}
+              <span className="text-muted-foreground/60">
+                · {overrideCounts[a.id]}
+              </span>
+            </button>
+          ))}
+          {agentsWithOverrides.length > CHIP_LIMIT && (
+            <button
+              type="button"
+              aria-expanded={allChipsShown}
+              onClick={() => setAllChipsShown((shown) => !shown)}
+              className="rounded-full border px-2 py-0.5 text-[11px] text-muted-foreground hover:text-foreground hover:border-foreground/20 transition-colors"
+            >
+              {allChipsShown
+                ? "Show less"
+                : `+${agentsWithOverrides.length - CHIP_LIMIT} more`}
+            </button>
+          )}
+        </div>
+      )}
       {overlappingRuleCount > 0 && (
         <div className="flex items-center gap-2 rounded-md border border-amber-500/20 bg-amber-500/5 px-3 py-2">
           <AlertTriangle className="size-3.5 text-amber-500 shrink-0" />
@@ -329,12 +483,20 @@ export const AppPermissions = ({
           <AppPermissionGroup
             key={group.category}
             group={group}
-            permissionStates={states}
+            permissionStates={activeLayerStates}
+            agentView={!!activeAgentId}
+            baseStates={activeAgentId ? baseStates : undefined}
             onPermissionChange={handlePermissionChange}
             onGroupChange={(perm) => handleGroupChange(group, perm)}
-            onWildcardReset={() => expandWildcard(group)}
-            onCoveredPermissionChange={(toolId, perm) =>
-              expandWildcard(group, toolId, perm)
+            onGroupInherit={() => handleRevert(group.tools.map((t) => t.id))}
+            onToolRevert={(toolId) => handleRevert([toolId])}
+            onWildcardReset={
+              activeAgentId ? undefined : () => expandWildcard(group)
+            }
+            onCoveredPermissionChange={
+              activeAgentId
+                ? undefined
+                : (toolId, perm) => expandWildcard(group, toolId, perm)
             }
             disabled={saving}
             orgStates={orgStates}
@@ -349,8 +511,13 @@ export const AppPermissions = ({
           <DialogHeader>
             <DialogTitle>Edit condition</DialogTitle>
             <DialogDescription>
-              This condition applies to all {restrictedCount} restricted{" "}
-              {restrictedCount === 1 ? "tool" : "tools"} for {appName}.
+              {activeAgent
+                ? `This condition applies to all ${conditionTargetCount} overridden ${
+                    conditionTargetCount === 1 ? "tool" : "tools"
+                  } for ${activeAgent.name}.`
+                : `This condition applies to all ${conditionTargetCount} restricted ${
+                    conditionTargetCount === 1 ? "tool" : "tools"
+                  } for ${appName}.`}
             </DialogDescription>
           </DialogHeader>
           <ConditionBuilder

@@ -11,6 +11,15 @@ import { getSelfUrl } from "../providers/self-url";
 export const getRequestOrigin = (request: Request): string => {
   if (IS_CLOUD) return getSelfUrl();
 
+  // Self-hosted: honor an explicitly configured public URL (APP_URL) so OAuth
+  // redirect URIs stay stable behind a proxy — matches the Public URL shown in
+  // Settings → Instance. Read raw env (undefined when unset) so default deploys
+  // keep the Host-based behavior below.
+  const configured = (
+    process.env.APP_URL ?? process.env.NEXT_PUBLIC_APP_URL
+  )?.replace(/\/+$/, "");
+  if (configured) return configured;
+
   const headers = request.headers;
 
   const forwardedHost = headers.get("x-forwarded-host");

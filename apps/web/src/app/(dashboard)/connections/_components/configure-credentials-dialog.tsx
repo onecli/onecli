@@ -12,7 +12,8 @@ import { Button } from "@onecli/ui/components/button";
 import { Input } from "@onecli/ui/components/input";
 import { Label } from "@onecli/ui/components/label";
 import { SecretInput } from "@/components/secret-input";
-import { saveAppConfig, setAppConfigEnabled } from "@/lib/actions/app-config";
+import type { PageScope } from "@/lib/api";
+import { useSaveAppConfig } from "@/hooks/use-app-config";
 import type { OAuthConfigField } from "@onecli/api/apps/types";
 import { IS_CLOUD } from "@/lib/env";
 import { AppIcon } from "./app-icon";
@@ -28,6 +29,7 @@ interface ConfigureCredentialsDialogProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   onConfigured: () => void;
+  pageScope?: PageScope;
 }
 
 export const ConfigureCredentialsDialog = ({
@@ -40,24 +42,23 @@ export const ConfigureCredentialsDialog = ({
   open,
   onOpenChange,
   onConfigured,
+  pageScope = "project",
 }: ConfigureCredentialsDialogProps) => {
   const [values, setValues] = useState<Record<string, string>>({});
-  const [saving, setSaving] = useState(false);
+  const saveMutation = useSaveAppConfig(provider, pageScope);
+  const saving = saveMutation.isPending;
 
   const allFilled = fields.every((f) => !!values[f.name]?.trim());
 
   const handleSave = async () => {
     if (!allFilled) return;
-    setSaving(true);
     try {
-      await saveAppConfig(provider, values);
-      await setAppConfigEnabled(provider, true);
+      // upsertAppConfig enables the config on save — no separate toggle call.
+      await saveMutation.mutateAsync(values);
       setValues({});
       onConfigured();
     } catch {
       toast.error("Failed to save credentials");
-    } finally {
-      setSaving(false);
     }
   };
 

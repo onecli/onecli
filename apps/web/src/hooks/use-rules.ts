@@ -1,30 +1,21 @@
 "use client";
 
+// Headless on the gateway cache: every rules mutation route audits, and the
+// audit auto-flushes the gateway server-side — no client-side flush needed.
+// (Create lives in the rule forms, which own their dialog/toast sequencing.)
+
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
-import { rules } from "@/lib/api";
+import { rules, type PageScope, type UpdateRuleInput } from "@/lib/api";
 import { queryKeys } from "@/lib/api/keys";
-import { updateRule, deleteRule } from "@/lib/actions/rules";
-import { invalidateGatewayCache } from "@/lib/api/cache";
 
-export const useRules = () =>
-  useQuery({ queryKey: queryKeys.rules.list(), queryFn: rules.list });
-
-export const useCreateRule = () => {
-  const qc = useQueryClient();
-  return useMutation({
-    mutationFn: rules.create,
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: queryKeys.rules.all() });
-      qc.invalidateQueries({ queryKey: queryKeys.counts.all() });
-      invalidateGatewayCache();
-    },
-    onError: (err) =>
-      toast.error(err instanceof Error ? err.message : "Failed to create rule"),
+export const useRules = (scope: PageScope = "project") =>
+  useQuery({
+    queryKey: queryKeys.rules.list(scope),
+    queryFn: () => rules.list(scope),
   });
-};
 
-export const useUpdateRule = () => {
+export const useUpdateRule = (scope: PageScope = "project") => {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: ({
@@ -32,24 +23,23 @@ export const useUpdateRule = () => {
       input,
     }: {
       ruleId: string;
-      input: Parameters<typeof updateRule>[1];
-    }) => updateRule(ruleId, input),
+      input: UpdateRuleInput;
+    }) => rules.update(ruleId, input, scope),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: queryKeys.rules.all() });
-      invalidateGatewayCache();
+      qc.invalidateQueries({ queryKey: queryKeys.counts.all() });
     },
     onError: () => toast.error("Failed to update rule"),
   });
 };
 
-export const useDeleteRule = () => {
+export const useDeleteRule = (scope: PageScope = "project") => {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: deleteRule,
+    mutationFn: (ruleId: string) => rules.remove(ruleId, scope),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: queryKeys.rules.all() });
       qc.invalidateQueries({ queryKey: queryKeys.counts.all() });
-      invalidateGatewayCache();
       toast.success("Rule deleted");
     },
     onError: () => toast.error("Failed to delete rule"),

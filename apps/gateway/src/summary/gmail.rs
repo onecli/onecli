@@ -1,9 +1,10 @@
 //! Gmail — manual-approval summaries.
 //!
 //! Send / draft-create carry a base64url RFC822 message in the JSON `raw` field;
-//! we decode the peeked prefix and lift To/Cc/Subject/attachments/body onto the
-//! card (never echoing the base64). Other actions (trash, label edits, delete)
-//! summarize from the path and a small JSON body.
+//! we decode the peeked prefix and lift fields onto the card (never echoing the
+//! base64): a thread indicator first when the send targets an existing thread,
+//! then To/Cc/Bcc/Subject, attachments, and the body. Other actions (trash,
+//! label edits, delete) summarize from the path and a small JSON body.
 //!
 //! Registered as the `"gmail"` summarizer in [`super::summarizer`].
 
@@ -28,8 +29,14 @@ impl RequestSummarizer for Gmail {
             } else {
                 "Create draft"
             });
+            // `threadId` sits alongside `raw` (top-level for a send, nested under
+            // `message` for a draft); the substring scan finds it either way.
+            let has_thread_id = req
+                .body
+                .and_then(|b| json_string_value_prefix(b, "threadId"))
+                .is_some();
             if let Some(raw) = req.body.and_then(|b| json_string_value_prefix(b, "raw")) {
-                populate_from_mime(&mut s, &mime::decode_b64_prefix(raw));
+                populate_from_mime(&mut s, &mime::decode_b64_prefix(raw), has_thread_id);
             }
             if s.details.is_empty() {
                 s.push("Note", "email contents not in preview");
@@ -105,16 +112,35 @@ impl RequestSummarizer for Gmail {
     }
 }
 
-/// Map a parsed RFC822 message onto the summary's detail fields.
-fn populate_from_mime(s: &mut ApprovalSummary, decoded: &[u8]) {
+/// Map a parsed RFC822 message onto the summary's detail fields. `has_thread_id`
+/// is true when the send/draft request carried a Gmail `threadId`.
+fn populate_from_mime(s: &mut ApprovalSummary, decoded: &[u8], has_thread_id: bool) {
     let msg = mime::parse(decoded);
+    // Thread context leads — it frames the recipients and body that follow. A
+    // send is threaded when Gmail's `threadId` is set or the message carries a
+    // reply header. The original thread title comes from the Subject line — the
+    // summarizer does no I/O, so Gmail's stored subject isn't reachable.
+    if has_thread_id || msg.is_reply {
+        match msg
+            .subject
+            .as_deref()
+            .map(mime::original_subject)
+            .filter(|t| !t.is_empty())
+        {
+            Some(title) => s.push("Thread", format!("\"{title}\" (reply)")),
+            None => s.push("Thread", "reply on an existing thread"),
+        }
+    }
     if let Some(to) = msg.to {
         s.push("To", to);
     }
     if let Some(cc) = msg.cc {
         s.push("Cc", cc);
     }
-    if let Some(subject) = msg.subject {
+    if let Some(bcc) = msg.bcc {
+        s.push("Bcc", bcc);
+    }
+    if let Some(subject) = msg.subject.as_deref() {
         s.push("Subject", subject);
     }
     if !msg.attachments.is_empty() {
@@ -306,5 +332,110 @@ iVBORw0KGgoAAAANSUhEUg==\r\n\
         assert_eq!(detail(&s, "Message"), Some("42"));
         assert_eq!(detail(&s, "Add labels"), Some("IMPORTANT"));
         assert_eq!(detail(&s, "Remove labels"), Some("INBOX, UNREAD"));
+    }
+
+    #[test]
+    fn send_shows_bcc_recipients() {
+        let mime = "To: a@b.com\r\nCc: c@b.com\r\nBcc: hidden@x.com\r\n\
+Subject: Hi\r\nContent-Type: text/plain\r\n\r\nbody";
+        let body = format!("{{\"raw\":\"{}\"}}", b64url(mime.as_bytes()));
+        let s = summarize(
+            "POST",
+            "/gmail/v1/users/me/messages/send",
+            Some(body.as_bytes()),
+        );
+        assert_eq!(detail(&s, "Bcc"), Some("hidden@x.com"));
+    }
+
+    #[test]
+    fn send_reply_shows_thread_with_original_title() {
+        let mime = "To: a@b.com\r\nSubject: Re: Q3 report\r\nIn-Reply-To: <prev@mail>\r\n\
+Content-Type: text/plain\r\n\r\nthanks";
+        let body = format!("{{\"raw\":\"{}\"}}", b64url(mime.as_bytes()));
+        let s = summarize(
+            "POST",
+            "/gmail/v1/users/me/messages/send",
+            Some(body.as_bytes()),
+        );
+        assert_eq!(detail(&s, "Thread"), Some("\"Q3 report\" (reply)"));
+        // The literal Subject line is still shown verbatim alongside it.
+        assert_eq!(detail(&s, "Subject"), Some("Re: Q3 report"));
+    }
+
+    #[test]
+    fn thread_row_leads_when_threaded() {
+        // When threaded, the Thread row sits first — directly under the action —
+        // so the approver sees the thread context before To/Cc/Bcc/Subject.
+        let mime = "To: a@b.com\r\nCc: c@b.com\r\nBcc: hidden@x.com\r\n\
+Subject: Re: Q3 report\r\nIn-Reply-To: <prev@mail>\r\n\
+Content-Type: text/plain\r\n\r\nthanks";
+        let body = format!("{{\"raw\":\"{}\"}}", b64url(mime.as_bytes()));
+        let s = summarize(
+            "POST",
+            "/gmail/v1/users/me/messages/send",
+            Some(body.as_bytes()),
+        );
+        assert_eq!(s.details.first().map(|d| d.label.as_str()), Some("Thread"));
+        // ...and it precedes every recipient/subject row.
+        let pos = |label: &str| s.details.iter().position(|d| d.label == label).unwrap();
+        assert!(pos("Thread") < pos("To"));
+        assert!(pos("To") < pos("Subject"));
+    }
+
+    #[test]
+    fn send_with_thread_id_shows_thread_even_without_reply_header() {
+        // Fresh-looking Subject (no "Re:"), but threadId marks it as threaded.
+        let mime = "To: a@b.com\r\nSubject: Q3 report\r\nContent-Type: text/plain\r\n\r\nmore";
+        let body = format!(
+            "{{\"raw\":\"{}\",\"threadId\":\"t123\"}}",
+            b64url(mime.as_bytes())
+        );
+        let s = summarize(
+            "POST",
+            "/gmail/v1/users/me/messages/send",
+            Some(body.as_bytes()),
+        );
+        assert_eq!(detail(&s, "Thread"), Some("\"Q3 report\" (reply)"));
+    }
+
+    #[test]
+    fn send_without_thread_has_no_thread_row() {
+        let mime = "To: a@b.com\r\nSubject: Fresh email\r\nContent-Type: text/plain\r\n\r\nhello";
+        let body = format!("{{\"raw\":\"{}\"}}", b64url(mime.as_bytes()));
+        let s = summarize(
+            "POST",
+            "/gmail/v1/users/me/messages/send",
+            Some(body.as_bytes()),
+        );
+        assert_eq!(detail(&s, "Thread"), None);
+    }
+
+    #[test]
+    fn threaded_without_subject_shows_indicator_only() {
+        let mime = "To: a@b.com\r\nIn-Reply-To: <prev@mail>\r\n\
+Content-Type: text/plain\r\n\r\nreply body";
+        let body = format!("{{\"raw\":\"{}\"}}", b64url(mime.as_bytes()));
+        let s = summarize(
+            "POST",
+            "/gmail/v1/users/me/messages/send",
+            Some(body.as_bytes()),
+        );
+        assert_eq!(detail(&s, "Thread"), Some("reply on an existing thread"));
+    }
+
+    #[test]
+    fn draft_create_finds_nested_thread_id() {
+        // Draft-create nests the message under `message`; the flat substring scan
+        // still finds both `raw` and `threadId`. The Subject has no "Re:" marker,
+        // so only the threadId proves the draft targets an existing thread.
+        let mime =
+            "To: a@b.com\r\nSubject: Q3 report\r\nContent-Type: text/plain\r\n\r\ndraft body";
+        let body = format!(
+            "{{\"message\":{{\"raw\":\"{}\",\"threadId\":\"t1\"}}}}",
+            b64url(mime.as_bytes())
+        );
+        let s = summarize("POST", "/gmail/v1/users/me/drafts", Some(body.as_bytes()));
+        assert_eq!(s.action, "Create draft");
+        assert_eq!(detail(&s, "Thread"), Some("\"Q3 report\" (reply)"));
     }
 }

@@ -1,7 +1,8 @@
 //! Minimal, best-effort RFC822/MIME extraction for approval previews.
 //!
-//! Reads only what an approver needs — To/Cc/Subject, attachment names, and a
-//! `text/plain` body snippet — from a (possibly truncated) decoded message.
+//! Reads only what an approver needs — To/Cc/Bcc/Subject, reply/thread headers,
+//! attachment names, and a `text/plain` body snippet — from a (possibly
+//! truncated) decoded message.
 //! Assumes UTF-8 (decoded lossily); HTML-only bodies and non-UTF-8 charsets are
 //! intentionally not handled. Never allocates beyond the input prefix.
 //!
@@ -17,7 +18,11 @@ use super::{clamp, MAX_ATTACHMENTS, MAX_SNIPPET_LEN};
 pub(crate) struct ParsedMessage {
     pub to: Option<String>,
     pub cc: Option<String>,
+    pub bcc: Option<String>,
     pub subject: Option<String>,
+    /// True when the message is a reply on an existing thread — i.e. it carries a
+    /// non-empty `In-Reply-To` or `References` header.
+    pub is_reply: bool,
     /// Attachment filenames found in part headers (may be empty).
     pub attachments: Vec<String>,
     /// True when the top-level type is `multipart/mixed`, even if no filename was
@@ -34,7 +39,11 @@ pub(crate) fn parse(decoded: &[u8]) -> ParsedMessage {
     ParsedMessage {
         to: header_value(&headers, "to").map(decode_rfc2047),
         cc: header_value(&headers, "cc").map(decode_rfc2047),
+        bcc: header_value(&headers, "bcc").map(decode_rfc2047),
         subject: header_value(&headers, "subject").map(decode_rfc2047),
+        is_reply: ["in-reply-to", "references"]
+            .iter()
+            .any(|h| header_value(&headers, h).is_some_and(|v| !v.trim().is_empty())),
         attachments: attachments(&text),
         has_attachments: content_type
             .to_ascii_lowercase()
@@ -90,6 +99,25 @@ fn header_value<'a>(headers: &'a [(String, String)], name: &str) -> Option<&'a s
         .iter()
         .find(|(n, _)| n == name)
         .map(|(_, v)| v.as_str())
+}
+
+/// Recover the original thread subject by stripping leading reply/forward
+/// markers (`Re:`, `Fwd:`, `Fw:` — case-insensitive, possibly repeated). Returns
+/// the trimmed remainder, which is empty when the subject was only markers.
+pub(crate) fn original_subject(subject: &str) -> &str {
+    let mut s = subject.trim();
+    while let Some((head, tail)) = s.split_once(':') {
+        let head = head.trim();
+        if ["re", "fwd", "fw"]
+            .iter()
+            .any(|m| head.eq_ignore_ascii_case(m))
+        {
+            s = tail.trim_start();
+        } else {
+            break;
+        }
+    }
+    s
 }
 
 /// Collect attachment filenames, scanning **only** `Content-Disposition` /
@@ -386,5 +414,53 @@ Content-Disposition: attachment; filename=\"a.png\"\n\n--B--\n";
         assert!(body.contains("Hello,\n\nLine two."));
         // 3+ blank lines collapse to a single blank line.
         assert!(!body.contains("\n\n\n"));
+    }
+
+    #[test]
+    fn bcc_header_is_parsed_and_decoded() {
+        let msg = "To: a@b.com\r\n\
+Bcc: hidden@x.com, =?UTF-8?Q?Jos=C3=A9?= <jose@x.com>\r\n\
+Subject: Hi\r\n\r\nbody";
+        assert_eq!(
+            parse(msg.as_bytes()).bcc.as_deref(),
+            Some("hidden@x.com, José <jose@x.com>")
+        );
+        // No Bcc header → None.
+        let msg2 = "To: a@b.com\r\nSubject: Hi\r\n\r\nbody";
+        assert_eq!(parse(msg2.as_bytes()).bcc, None);
+    }
+
+    #[test]
+    fn is_reply_detects_reply_headers() {
+        let with_irt = "To: a@b.com\r\nIn-Reply-To: <msg-123@mail>\r\nSubject: Re: Hi\r\n\r\nbody";
+        assert!(parse(with_irt.as_bytes()).is_reply);
+
+        let with_refs =
+            "To: a@b.com\r\nReferences: <a@mail> <b@mail>\r\nSubject: Re: Hi\r\n\r\nbody";
+        assert!(parse(with_refs.as_bytes()).is_reply);
+
+        let fresh = "To: a@b.com\r\nSubject: Hi\r\n\r\nbody";
+        assert!(!parse(fresh.as_bytes()).is_reply);
+
+        // An empty reply header does not count.
+        let empty_irt = "To: a@b.com\r\nIn-Reply-To: \r\nSubject: Hi\r\n\r\nbody";
+        assert!(!parse(empty_irt.as_bytes()).is_reply);
+    }
+
+    #[test]
+    fn original_subject_strips_reply_and_forward_markers() {
+        assert_eq!(original_subject("Re: Q3 report"), "Q3 report");
+        assert_eq!(original_subject("RE: Q3 report"), "Q3 report");
+        assert_eq!(original_subject("Fwd: Re: Q3 report"), "Q3 report");
+        assert_eq!(original_subject("Fw: Q3 report"), "Q3 report");
+        assert_eq!(original_subject("Q3 report"), "Q3 report");
+        // Only-marker subjects reduce to empty.
+        assert_eq!(original_subject("Re:"), "");
+        // A colon that isn't a reply marker is left intact.
+        assert_eq!(original_subject("Meeting: agenda"), "Meeting: agenda");
+        assert_eq!(
+            original_subject("Reply: not a marker"),
+            "Reply: not a marker"
+        );
     }
 }

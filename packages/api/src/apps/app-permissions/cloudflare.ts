@@ -74,6 +74,15 @@ export const cloudflarePermissions: AppPermissionDefinition = {
     },
     {
       category: "write",
+      wildcard: {
+        id: "write_all",
+        name: "All write operations",
+        description:
+          "Create, update, and delete DNS records, Workers, KV, D1, and cache",
+        hostPattern: "api.cloudflare.com",
+        pathPattern: "/client/v4/*",
+        methods: ["POST", "PUT", "PATCH", "DELETE"],
+      },
       tools: [
         {
           id: "create_dns_record",

@@ -1,7 +1,7 @@
 //! Cloud-only request summarizers (OSS stub — none registered).
 //!
-//! The cloud build swaps in `cloud/cloud_summary.rs`, which registers summarizers
-//! for cloud-only apps (Outlook, …). This mirrors the `cloud_apps` OSS-stub /
+//! The cloud build swaps in `ee/cloud_summary.rs`, which registers summarizers
+//! for cloud apps (Outlook, …). This mirrors the `ee_apps` OSS-stub /
 //! cloud-override split, and is the fall-through arm of [`crate::summary`]'s
 //! dispatch — so an OSS build simply has no cloud-only summarizers and uses the
 //! generic fallback for those providers.

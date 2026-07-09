@@ -65,9 +65,10 @@ export interface CreatedSecret {
 export interface PolicyRule {
   id: string;
   name: string;
-  hostPattern: string;
-  pathPattern: string | null;
-  method: string | null;
+  /** Custom rules only — app-permission rules omit the endpoint fields. */
+  hostPattern?: string;
+  pathPattern?: string | null;
+  method?: string | null;
   action: string;
   enabled: boolean;
   agentId: string | null;
@@ -88,6 +89,20 @@ export interface Connection {
   scope: string | null;
   metadata: unknown;
   connectedAt: string;
+}
+
+export type ConnectionAccessLevel = "full" | "assigned" | "none";
+
+// Reverse view of agent↔connection access: an agent and whether it can use a
+// given connection. "full" = all-mode agent (implicit access, read-only here);
+// "assigned" = selective agent granted this connection; "none" = neither.
+// `scoped` flags an assigned agent whose grant carries a granular session
+// policy (managed on the agent side; shown read-only here).
+export interface ConnectionAgentAccess {
+  id: string;
+  name: string;
+  access: ConnectionAccessLevel;
+  scoped: boolean;
 }
 
 export interface ResourceCounts {
@@ -126,3 +141,8 @@ export interface CreateRuleInput {
   rateLimitWindow?: string | null;
   conditions?: unknown[];
 }
+
+// `conditions: null` clears existing conditions on update.
+export type UpdateRuleInput = Partial<Omit<CreateRuleInput, "conditions">> & {
+  conditions?: unknown[] | null;
+};

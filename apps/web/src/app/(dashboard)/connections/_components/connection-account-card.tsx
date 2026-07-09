@@ -12,6 +12,7 @@ import {
   Settings,
   Unplug,
   User,
+  Users,
 } from "lucide-react";
 import { Card } from "@onecli/ui/components/card";
 import { Badge } from "@onecli/ui/components/badge";
@@ -46,7 +47,10 @@ import {
   useDisconnectConnection,
   useRenameConnection,
 } from "@/hooks/use-connections";
+import type { PageScope } from "@/lib/api";
 import { extractLabel } from "@onecli/api/services/connection-service";
+import { ConnectionAgentAccessSummary } from "./connection-agent-access-summary";
+import { ConnectionAgentAccessDialog } from "./connection-agent-access-dialog";
 
 interface ConnectionAccountCardProps {
   connection: {
@@ -55,26 +59,28 @@ interface ConnectionAccountCardProps {
     status: string;
     scopes: string[];
     metadata: Record<string, unknown> | null;
-    connectedAt: Date;
+    connectedAt: string;
   };
   appName: string;
   onReconnect: (connectionId: string) => void;
-  refetchConnections: () => void;
-  pageScope?: "project" | "organization";
+  pageScope?: PageScope;
 }
 
 export const ConnectionAccountCard = ({
   connection,
   appName,
   onReconnect,
-  refetchConnections,
   pageScope = "project",
 }: ConnectionAccountCardProps) => {
   const [confirmOpen, setConfirmOpen] = useState(false);
   const [renameOpen, setRenameOpen] = useState(false);
   const [renameValue, setRenameValue] = useState("");
+  const [agentDialogOpen, setAgentDialogOpen] = useState(false);
   const disconnectMutation = useDisconnectConnection(pageScope);
-  const renameMutation = useRenameConnection();
+  const renameMutation = useRenameConnection(pageScope);
+
+  // Agents are project-scoped, so agent access only applies on the project page.
+  const showAgentAccess = pageScope === "project";
 
   const displayName =
     connection.label ??
@@ -92,7 +98,6 @@ export const ConnectionAccountCard = ({
       { id: connection.id, label: trimmed },
       {
         onSuccess: () => {
-          refetchConnections();
           toast.success("Connection renamed");
           setRenameOpen(false);
         },
@@ -103,7 +108,6 @@ export const ConnectionAccountCard = ({
   const handleDisconnect = () => {
     disconnectMutation.mutate(connection.id, {
       onSuccess: () => {
-        refetchConnections();
         toast.success(`${appName} account disconnected`);
       },
     });
@@ -186,6 +190,12 @@ export const ConnectionAccountCard = ({
                 <Pencil className="size-4" />
                 Rename
               </DropdownMenuItem>
+              {showAgentAccess && (
+                <DropdownMenuItem onClick={() => setAgentDialogOpen(true)}>
+                  <Users className="size-4" />
+                  Manage agent access
+                </DropdownMenuItem>
+              )}
               <DropdownMenuSeparator />
               <DropdownMenuItem
                 onClick={() => setConfirmOpen(true)}
@@ -204,6 +214,13 @@ export const ConnectionAccountCard = ({
             </DropdownMenuContent>
           </DropdownMenu>
         </div>
+
+        {showAgentAccess && (
+          <ConnectionAgentAccessSummary
+            connectionId={connection.id}
+            onManage={() => setAgentDialogOpen(true)}
+          />
+        )}
 
         {tags.length > 0 && (
           <div className="flex flex-wrap gap-1.5">
@@ -277,6 +294,16 @@ export const ConnectionAccountCard = ({
           </DialogFooter>
         </DialogContent>
       </Dialog>
+
+      {showAgentAccess && (
+        <ConnectionAgentAccessDialog
+          connectionId={connection.id}
+          connectionLabel={displayName}
+          appName={appName}
+          open={agentDialogOpen}
+          onOpenChange={setAgentDialogOpen}
+        />
+      )}
     </>
   );
 };

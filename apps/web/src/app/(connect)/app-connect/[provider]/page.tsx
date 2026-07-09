@@ -31,10 +31,11 @@ export default async function ConnectPage({ params, searchParams }: Props) {
       defaults.length > 0 && defaults.every((envVar) => !!process.env[envVar]);
   }
 
-  // Check if user has custom AppConfig
+  // Check if user has custom AppConfig (org-scoped when the popup carries an
+  // orgId — the org connect flow resolves org-level credentials).
   let hasAppConfig = false;
   try {
-    hasAppConfig = await checkAppConfigExists(provider);
+    hasAppConfig = await checkAppConfigExists(provider, orgId);
   } catch {
     // Auth may not be resolved; treat as false
   }

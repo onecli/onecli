@@ -659,7 +659,7 @@ export const ManageAccessDialog = ({
         </DialogContent>
       </Dialog>
 
-      {/* Granular access policy dialog (cloud) */}
+      {/* Granular access policy dialog (EE) */}
       {granularDialogConnId && granularDialogConfig?.PolicyDialogContent && (
         <Dialog open onOpenChange={() => setGranularDialogConnId(null)}>
           <DialogContent className="gap-0 overflow-hidden p-0 sm:max-w-sm">

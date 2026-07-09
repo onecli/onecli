@@ -2,9 +2,17 @@ export type {
   AppTool,
   AppToolGroup,
   AppPermissionLevel,
+  AppPermissionSetting,
   AppPermissionDefinition,
+  AppToolSummary,
+  AppToolGroupSummary,
+  AppPermissionDefinitionSummary,
 } from "./types";
-export { mapRuleActionToPermission, allGroupTools } from "./types";
+export {
+  mapRuleActionToPermission,
+  allGroupTools,
+  toAppPermissionDefinitionSummary,
+} from "./types";
 
 import type { AppPermissionDefinition } from "./types";
 import { awsPermissions } from "./aws";
@@ -53,6 +61,10 @@ const register = (def: AppPermissionDefinition) => {
 export const getAppPermissionDefinition = (
   provider: string,
 ): AppPermissionDefinition | undefined => permissionRegistry.get(provider);
+
+export const getAppPermissionDefinitions = (): AppPermissionDefinition[] => [
+  ...permissionRegistry.values(),
+];
 
 export const registerAppPermission = register;
 

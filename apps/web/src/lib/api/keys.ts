@@ -1,4 +1,5 @@
 import { getProjectId, getOrganizationId } from "@/lib/api-fetch";
+import type { PageScope } from "./scope";
 
 const scope = () =>
   [getOrganizationId() ?? "default", getProjectId() ?? "default"] as const;
@@ -20,16 +21,37 @@ export const queryKeys = {
   },
   rules: {
     all: () => ["rules", ...scope()] as const,
-    list: () => [...queryKeys.rules.all(), "list"] as const,
+    list: (pageScope: PageScope = "project") =>
+      [...queryKeys.rules.all(), "list", pageScope] as const,
   },
   connections: {
     all: () => ["connections", ...scope()] as const,
-    list: () => [...queryKeys.connections.all(), "list"] as const,
+    list: (pageScope: PageScope = "project") =>
+      [...queryKeys.connections.all(), "list", pageScope] as const,
     byProvider: (provider: string) =>
       [...queryKeys.connections.all(), "provider", provider] as const,
+    agents: (connectionId: string) =>
+      [...queryKeys.connections.all(), connectionId, "agents"] as const,
+  },
+  appPermissionDefinitions: {
+    // Global static catalog (identical across orgs/projects) — deliberately
+    // not scope-keyed.
+    all: () => ["app-permission-definitions"] as const,
+    list: () => [...queryKeys.appPermissionDefinitions.all(), "list"] as const,
+  },
+  appConfig: {
+    all: () => ["appConfig", ...scope()] as const,
+    status: (provider: string, pageScope: PageScope) =>
+      [...queryKeys.appConfig.all(), provider, pageScope] as const,
+    configured: (pageScope: PageScope) =>
+      [...queryKeys.appConfig.all(), "configured", pageScope] as const,
+    envDefaults: () => [...queryKeys.appConfig.all(), "envDefaults"] as const,
   },
   counts: {
     all: () => ["counts", ...scope()] as const,
+  },
+  userPlan: {
+    all: () => ["user-plan", ...scope()] as const,
   },
   vaults: {
     all: () => ["vaults", ...scope()] as const,
@@ -55,6 +77,8 @@ export const queryKeys = {
     planUsage: () => [...queryKeys.billing.all(), "planUsage"] as const,
     subscriptionStatus: () =>
       [...queryKeys.billing.all(), "subscriptionStatus"] as const,
+    prorationPreview: (plan: string) =>
+      [...queryKeys.billing.all(), "prorationPreview", plan] as const,
   },
   dropbox: {
     all: () => ["dropbox", ...scope()] as const,

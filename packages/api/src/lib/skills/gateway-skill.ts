@@ -9,7 +9,7 @@ description: >-
 compatibility: Only active when HTTPS_PROXY contains aoc_ (automatic when launched via \`onecli run\`)
 metadata:
   author: onecli
-  version: "0.7.0"
+  version: "0.8.0"
 ---`;
 
 const FRONTMATTER_BROAD = `---
@@ -23,7 +23,7 @@ description: >-
 compatibility: Only active when HTTPS_PROXY contains aoc_ (automatic when launched via \`onecli run\`)
 metadata:
   author: onecli
-  version: "0.7.0"
+  version: "0.8.0"
 ---`;
 
 const SKILL_BODY = `
@@ -63,7 +63,16 @@ curl -s "https://api.stripe.com/v1/charges?limit=5"
 
 Standard HTTP clients (curl, fetch, requests, axios, Go net/http, git) all
 honor the \`HTTPS_PROXY\` environment variable automatically. You do not need
-to set any auth headers.
+to set any auth headers. Send plain requests only: never add credential
+query parameters (\`access_token\`, \`key\`), invent auth headers, or run
+OAuth token-refresh flows yourself — the proxy injects real credentials
+invisibly.
+
+Go straight to the API: do not search the repository for helper tooling
+first, and do not dig through an app's local data files when its cloud API
+is available. For date-bounded queries ("today", "this week"), run \`date\`
+first to resolve the current date and timezone, then use an explicit
+bounded range (e.g. Gmail \`q=after:2026/07/02 before:2026/07/03\`).
 
 ## When Built-In Tools Need Local Credentials
 

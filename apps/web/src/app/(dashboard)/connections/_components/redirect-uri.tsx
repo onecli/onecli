@@ -8,6 +8,10 @@ import { APP_URL, IS_CLOUD } from "@/lib/env";
 
 const useBaseUrl = () => {
   if (IS_CLOUD) return API_ORIGIN || APP_URL;
+  // Self-hosted: prefer an explicitly configured public URL (matches the server's
+  // redirect_uri); otherwise fall back to the current origin.
+  const configured = process.env.NEXT_PUBLIC_APP_URL?.replace(/\/+$/, "");
+  if (configured) return configured;
   return typeof window !== "undefined" ? window.location.origin : APP_URL;
 };
 

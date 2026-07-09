@@ -15,12 +15,18 @@ compile_error!("at most one OneCLI edition feature may be enabled at a time (e.g
 pub enum Edition {
     Oss,
     Cloud,
+    OnpremSlim,
+    OnpremFull,
 }
 
 /// The edition selected at build time.
 pub const fn edition() -> Edition {
     if cfg!(edition_cloud) {
         Edition::Cloud
+    } else if cfg!(edition_onprem_slim) {
+        Edition::OnpremSlim
+    } else if cfg!(edition_onprem_full) {
+        Edition::OnpremFull
     } else {
         Edition::Oss
     }
@@ -49,5 +55,9 @@ mod tests {
         assert_eq!(edition(), Edition::Cloud);
         #[cfg(edition_oss)]
         assert_eq!(edition(), Edition::Oss);
+        #[cfg(edition_onprem_slim)]
+        assert_eq!(edition(), Edition::OnpremSlim);
+        #[cfg(edition_onprem_full)]
+        assert_eq!(edition(), Edition::OnpremFull);
     }
 }

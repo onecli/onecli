@@ -15,15 +15,18 @@
 
 mod body;
 #[cfg(edition_cloud)]
-#[path = "cloud/response.rs"]
-mod cloud_response;
+#[path = "ee/response.rs"]
+mod ee_response;
 mod finalizers;
 pub(crate) mod forward;
 mod hints;
 #[cfg(edition_oss)]
 pub(crate) mod hooks;
+#[cfg(any(edition_onprem_slim, edition_onprem_full))]
+#[path = "ee/onprem/hooks.rs"]
+pub(crate) mod hooks;
 #[cfg(edition_cloud)]
-#[path = "cloud/hooks.rs"]
+#[path = "ee/hooks.rs"]
 pub(crate) mod hooks;
 mod mitm;
 mod response;
@@ -308,7 +311,12 @@ impl GatewayServer {
             .route(
                 "/api/approvals/{id}/decision",
                 axum::routing::post(submit_approval_decision),
-            )
+            );
+
+        // Org-scoped routes are mounted via an edition-swapped seam
+        // (`ee/org_routes.rs` for cloud + onprem, an identity stub for OSS — see
+        // `main.rs`), so the org handler never reaches the OSS build.
+        let axum_router = crate::org_routes::mount(axum_router)
             .layer(cors_layer)
             .fallback(fallback)
             .with_state(self.state.clone());
@@ -387,12 +395,13 @@ async fn invalidate_cache(
 }
 
 /// Query parameters for the pending approvals endpoint.
+/// `pub(crate)` so the org route in `org_routes` can reuse the same shape.
 #[derive(serde::Deserialize)]
-struct PendingParams {
+pub(crate) struct PendingParams {
     /// Comma-separated approval IDs to exclude (already being processed by the SDK).
     /// Allows the server to enter long-poll when all pending approvals are in-flight.
     #[serde(default)]
-    exclude: String,
+    pub(crate) exclude: String,
 }
 
 /// Long-poll for pending manual approval requests.
@@ -459,6 +468,7 @@ async fn get_pending_approvals(
         axum::Json(serde_json::json!({
             "requests": pending.iter().map(|a| serde_json::json!({
                 "id": a.id,
+                "projectId": a.project_id,
                 "method": a.method,
                 "url": format!("{}://{}{}", a.scheme, a.host, a.path),
                 "host": a.host,
@@ -1405,7 +1415,8 @@ async fn handle_http_proxy(
 
 /// Format a unix timestamp (seconds) as an ISO 8601 UTC string.
 /// Falls back to epoch if the timestamp is invalid.
-fn format_unix_ts(secs: u64) -> String {
+/// `pub(crate)` so the org route in `org_routes` can render timestamps identically.
+pub(crate) fn format_unix_ts(secs: u64) -> String {
     use std::time::{Duration, UNIX_EPOCH};
     let dt = UNIX_EPOCH + Duration::from_secs(secs);
     // time crate is already a dependency (for certificate validity)

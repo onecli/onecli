@@ -1,16 +1,17 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useMemo, useState } from "react";
 import { useRouter, usePathname } from "next/navigation";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { connectionsPath } from "@/lib/navigation";
 import { ChevronRight, KeyRound } from "lucide-react";
 import { Badge } from "@onecli/ui/components/badge";
 import { Card } from "@onecli/ui/components/card";
 import { cn } from "@onecli/ui/lib/utils";
 import { Skeleton } from "@onecli/ui/components/skeleton";
-import type { getAppConnections as defaultGetConnections } from "@/lib/actions/connections";
-import { getVaultConnections as defaultGetVaultConnections } from "@/lib/actions/connections";
-import { apiGet } from "@/lib/api";
+import { apiGet, type PageScope } from "@/lib/api";
+import { queryKeys } from "@/lib/api/keys";
+import { useConnections, useVaultConnections } from "@/hooks/use-connections";
 import { getApp } from "@onecli/api/apps/registry";
 import { useAppMessages } from "@/hooks/use-app-connected";
 import { extractLabel } from "@onecli/api/services/connection-service";
@@ -19,10 +20,6 @@ import { SecretDialog } from "./secret-dialog";
 import type { SecretActions } from "./types";
 import { labelForScope, type ScopeLabelMap } from "./scope-label";
 
-const defaultGetConnections_ = () =>
-  apiGet<{ connections: Awaited<ReturnType<typeof defaultGetConnections>> }>(
-    "/v1/apps/connections",
-  ).then((r) => r.connections);
 const defaultGetSecrets_ = () => apiGet<SecretItem[]>("/v1/secrets");
 
 interface ConnectedItem {
@@ -65,19 +62,15 @@ interface SecretItem {
 }
 
 interface ConnectedTabProps {
-  getConnections?: typeof defaultGetConnections;
   getSecrets?: () => Promise<SecretItem[]>;
-  getVaultConnections?: typeof defaultGetVaultConnections | null;
   basePath?: string;
   secretActions?: SecretActions;
-  pageScope?: string;
+  pageScope?: PageScope;
   scopeLabels?: ScopeLabelMap;
 }
 
 export const ConnectedTab = ({
-  getConnections = defaultGetConnections_,
   getSecrets = defaultGetSecrets_,
-  getVaultConnections = defaultGetVaultConnections,
   basePath,
   secretActions,
   pageScope = "project",
@@ -85,112 +78,112 @@ export const ConnectedTab = ({
 }: ConnectedTabProps) => {
   const router = useRouter();
   const pathname = usePathname();
-  const [items, setItems] = useState<ConnectedItem[]>([]);
-  const [loading, setLoading] = useState(true);
+  const queryClient = useQueryClient();
   const [editingSecret, setEditingSecret] = useState<
     ConnectedItem["secretData"] | null
   >(null);
 
-  const fetchItems = useCallback(async () => {
-    try {
-      const [connections, secrets, vaults] = await Promise.all([
-        getConnections(),
-        getSecrets(),
-        getVaultConnections ? getVaultConnections() : Promise.resolve([]),
-      ]);
+  const connectionsQuery = useConnections(pageScope);
+  // The extra "connected" key segment keeps this apart from the tab bar's
+  // secrets query, whose injected fetcher may differ (partner-merged list).
+  const secretsQuery = useQuery({
+    queryKey: [...queryKeys.secrets.list(), pageScope, "connected"],
+    queryFn: getSecrets,
+  });
+  const vaultsQuery = useVaultConnections(pageScope === "project");
 
-      const connectedApps = connections.filter((c) => c.status === "connected");
-      const providerCounts = new Map<string, number>();
-      connectedApps.forEach((c) =>
-        providerCounts.set(
-          c.provider,
-          (providerCounts.get(c.provider) ?? 0) + 1,
-        ),
-      );
+  const loading =
+    connectionsQuery.isPending ||
+    secretsQuery.isPending ||
+    (pageScope === "project" && vaultsQuery.isPending);
 
-      const appItems: ConnectedItem[] = connectedApps.map((c) => {
-        const appDef = getApp(c.provider);
-        const metadata = c.metadata as Record<string, unknown> | null;
-        const label = c.label ?? extractLabel(metadata ?? undefined);
-        const baseName = appDef?.name ?? c.provider;
-        const hasMultiple = (providerCounts.get(c.provider) ?? 0) > 1;
-        const isInherited = !!c.scope && c.scope !== pageScope;
-        return {
-          id: `app-${c.id}`,
-          name: hasMultiple && label ? `${baseName} - ${label}` : baseName,
-          label,
-          icon: appDef?.icon ?? null,
-          darkIcon: appDef?.darkIcon,
-          type: "app" as const,
-          scope: c.scope,
-          typeLabel: isInherited
-            ? labelForScope(c.scope, scopeLabels)
-            : appDef?.connectionMethod.type === "oauth"
-              ? "OAuth"
-              : appDef?.connectionMethod.type === "credentials_import"
-                ? "Credentials"
-                : "API Key",
-          detail: label
-            ? `Connected as ${label}`
-            : `${c.scopes.length} scope${c.scopes.length !== 1 ? "s" : ""} granted`,
-          href: connectionsPath({ pathname, basePath }, `/apps/${c.provider}`),
-          providerCount: hasMultiple
-            ? providerCounts.get(c.provider)
-            : undefined,
-          inherited: isInherited,
-        };
-      });
+  const items = useMemo(() => {
+    const connections = connectionsQuery.data ?? [];
+    const secrets = secretsQuery.data ?? [];
+    const vaults = pageScope === "project" ? (vaultsQuery.data ?? []) : [];
 
-      const secretItems: ConnectedItem[] = secrets.map((s) => {
-        const isInherited = !!s.scope && s.scope !== pageScope;
-        return {
-          id: `secret-${s.id}`,
-          name: s.name,
-          icon: null,
-          type: "secret" as const,
-          scope: s.scope,
-          typeLabel: isInherited
-            ? labelForScope(s.scope, scopeLabels)
-            : s.typeLabel,
-          detail: `Host: ${s.hostPattern}`,
-          inherited: isInherited,
-          secretData: isInherited ? undefined : s,
-        };
-      });
+    const connectedApps = connections.filter((c) => c.status === "connected");
+    const providerCounts = new Map<string, number>();
+    connectedApps.forEach((c) =>
+      providerCounts.set(c.provider, (providerCounts.get(c.provider) ?? 0) + 1),
+    );
 
-      const vaultItems: ConnectedItem[] = vaults.map((v) => ({
-        id: `vault-${v.provider}`,
-        name:
-          v.name ?? v.provider.charAt(0).toUpperCase() + v.provider.slice(1),
-        icon: `/icons/${v.provider}.svg`,
-        type: "vault" as const,
-        typeLabel: "External Vault",
-        detail: v.status === "connected" ? "Connected" : "Paired",
-        href: connectionsPath({ pathname, basePath }, `/vaults/${v.provider}`),
-      }));
+    const appItems: ConnectedItem[] = connectedApps.map((c) => {
+      const appDef = getApp(c.provider);
+      const metadata = c.metadata as Record<string, unknown> | null;
+      const label = c.label ?? extractLabel(metadata ?? undefined);
+      const baseName = appDef?.name ?? c.provider;
+      const hasMultiple = (providerCounts.get(c.provider) ?? 0) > 1;
+      const isInherited = !!c.scope && c.scope !== pageScope;
+      return {
+        id: `app-${c.id}`,
+        name: hasMultiple && label ? `${baseName} - ${label}` : baseName,
+        label,
+        icon: appDef?.icon ?? null,
+        darkIcon: appDef?.darkIcon,
+        type: "app" as const,
+        scope: c.scope,
+        typeLabel: isInherited
+          ? labelForScope(c.scope, scopeLabels)
+          : appDef?.connectionMethod.type === "oauth"
+            ? "OAuth"
+            : appDef?.connectionMethod.type === "credentials_import"
+              ? "Credentials"
+              : "API Key",
+        detail: label
+          ? `Connected as ${label}`
+          : `${c.scopes.length} scope${c.scopes.length !== 1 ? "s" : ""} granted`,
+        href: connectionsPath({ pathname, basePath }, `/apps/${c.provider}`),
+        providerCount: hasMultiple ? providerCounts.get(c.provider) : undefined,
+        inherited: isInherited,
+      };
+    });
 
-      setItems([...appItems, ...secretItems, ...vaultItems]);
-    } catch {
-      // Silently fail
-    } finally {
-      setLoading(false);
-    }
+    const secretItems: ConnectedItem[] = secrets.map((s) => {
+      const isInherited = !!s.scope && s.scope !== pageScope;
+      return {
+        id: `secret-${s.id}`,
+        name: s.name,
+        icon: null,
+        type: "secret" as const,
+        scope: s.scope,
+        typeLabel: isInherited
+          ? labelForScope(s.scope, scopeLabels)
+          : s.typeLabel,
+        detail: `Host: ${s.hostPattern}`,
+        inherited: isInherited,
+        secretData: isInherited ? undefined : s,
+      };
+    });
+
+    const vaultItems: ConnectedItem[] = vaults.map((v) => ({
+      id: `vault-${v.provider}`,
+      name: v.name ?? v.provider.charAt(0).toUpperCase() + v.provider.slice(1),
+      icon: `/icons/${v.provider}.svg`,
+      type: "vault" as const,
+      typeLabel: "External Vault",
+      detail: v.status === "connected" ? "Connected" : "Paired",
+      href: connectionsPath({ pathname, basePath }, `/vaults/${v.provider}`),
+    }));
+
+    return [...appItems, ...secretItems, ...vaultItems];
   }, [
+    connectionsQuery.data,
+    secretsQuery.data,
+    vaultsQuery.data,
     pathname,
     basePath,
-    getConnections,
-    getSecrets,
-    getVaultConnections,
     pageScope,
     scopeLabels,
   ]);
 
-  useEffect(() => {
-    fetchItems();
-  }, [fetchItems]);
+  const refreshItems = () => {
+    queryClient.invalidateQueries({ queryKey: queryKeys.connections.all() });
+    queryClient.invalidateQueries({ queryKey: queryKeys.secrets.all() });
+  };
 
   useAppMessages({
-    onConnected: fetchItems,
+    onConnected: refreshItems,
     onConfigure: (provider) =>
       router.push(connectionsPath({ pathname, basePath }, `/apps/${provider}`)),
   });
@@ -312,7 +305,7 @@ export const ConnectedTab = ({
         onOpenChange={(open) => {
           if (!open) setEditingSecret(null);
         }}
-        onSaved={fetchItems}
+        onSaved={refreshItems}
         secret={editingSecret ?? undefined}
         secretActions={secretActions}
       />

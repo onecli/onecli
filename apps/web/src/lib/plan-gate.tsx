@@ -19,7 +19,7 @@ const OSS_GATE: PlanGate = {
 };
 
 /**
- * OSS default: nothing is gated. Cloud overrides this module via the
+ * OSS default: nothing is gated. The cloud edition overrides this module via the
  * `@/lib/plan-gate` turbopack alias (see next.config.js) to gate premium
  * features behind paid plans.
  */

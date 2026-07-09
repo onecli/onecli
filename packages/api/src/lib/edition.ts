@@ -11,8 +11,8 @@
  * (client, server, edge). Keep it that way.
  */
 
-/** Distribution edition. (A future `onprem` edition lands here.) */
-export type Edition = "oss" | "cloud";
+/** Distribution edition. */
+export type Edition = "oss" | "cloud" | "onprem";
 
 /** Sub-variant of an edition (e.g. a future onprem `slim` vs `full`). `null` when N/A. */
 export type Variant = "slim" | "full" | null;
@@ -23,18 +23,24 @@ export interface EditionInfo {
   variant: Variant;
 }
 
+/** Parse the optional `-<variant>` segment (e.g. the `slim` in `onprem-slim`). */
+const parseVariant = (raw: string | undefined): Variant =>
+  raw === "slim" || raw === "full" ? raw : null;
+
 /**
  * Normalize the raw `*_EDITION` env value into `{ edition, variant }`.
  *
- * Editions may carry a variant as `"<edition>-<variant>"` (e.g. a future
- * `"onprem-slim"`); today only the edition segment is meaningful, so `variant`
- * is always `null`. Empty, `"oss"`, or any unrecognized value → `oss`.
+ * Accepts `"<edition>"` or `"<edition>-<variant>"` (e.g. `"onprem-slim"`).
+ * `oss` and `cloud` carry no variant; empty, `"oss"`, or any unrecognized
+ * value → `oss`.
  */
 export const parseEdition = (raw: string | undefined | null): EditionInfo => {
-  const edition = (raw ?? "").trim().toLowerCase().split("-")[0];
+  const [edition, variant] = (raw ?? "").trim().toLowerCase().split("-");
   switch (edition) {
     case "cloud":
       return { edition: "cloud", variant: null };
+    case "onprem":
+      return { edition: "onprem", variant: parseVariant(variant) };
     default:
       return { edition: "oss", variant: null };
   }
@@ -48,50 +54,68 @@ export interface Capabilities {
   /** Identity backend. */
   auth: "cognito" | "local";
   /** Tenancy model. */
-  tenancy: "multi-org" | "org-per-user";
+  tenancy: "multi-org" | "org-per-user" | "single-org-shared";
   /** Whether billing / plan-gating is active. */
   billing: boolean;
+  /**
+   * Whether the web serves the org-scoped surface (org routes/nav/chrome, namespaced
+   * URLs) rather than the flat one. This is the one capability that varies by VARIANT:
+   * `onprem-full` shows it; `onprem-slim` (connect-only) and `oss` do not.
+   */
+  orgScopedUI: boolean;
+  /**
+   * Which web surface the edition serves: `"connect-only"` = just the app-connection
+   * flow (onprem-slim's tiny web); `"full"` = the whole product UI. Variant-driven for
+   * onprem (slim = connect-only, full = full); oss + cloud are full.
+   */
+  webSurface: "connect-only" | "full";
+  /**
+   * Role-based access control is active — role enforcement in the access checks
+   * (project access, org-admin guard, api-key) AND the member/role management UI
+   * (the Team screen). Cloud only for now; onprem flips it true when it gains RBAC.
+   * Distinct from `multi-org` (how many orgs) and the `tenancy` model.
+   */
+  rbac: boolean;
 }
 
 const CAPABILITIES: Record<Edition, Capabilities> = {
-  oss: { auth: "local", tenancy: "org-per-user", billing: false },
-  cloud: { auth: "cognito", tenancy: "multi-org", billing: true },
+  oss: {
+    auth: "local",
+    tenancy: "org-per-user",
+    billing: false,
+    orgScopedUI: false,
+    webSurface: "full",
+    rbac: false,
+  },
+  cloud: {
+    auth: "cognito",
+    tenancy: "multi-org",
+    billing: true,
+    orgScopedUI: true,
+    webSurface: "full",
+    rbac: true,
+  },
+  onprem: {
+    auth: "local",
+    tenancy: "single-org-shared",
+    billing: false,
+    orgScopedUI: false,
+    webSurface: "connect-only",
+    rbac: false,
+  },
 };
 
-/** The capability set for a parsed edition. */
-export const capabilitiesFor = (info: EditionInfo): Capabilities =>
-  CAPABILITIES[info.edition];
+/**
+ * The capability set for a parsed edition. Variant-aware: `onprem-full` extends the
+ * onprem base with the org-scoped web surface; `onprem-slim` keeps the flat one.
+ */
+export const capabilitiesFor = (info: EditionInfo): Capabilities => {
+  const base = CAPABILITIES[info.edition];
+  if (info.edition === "onprem" && info.variant === "full") {
+    return { ...base, orgScopedUI: true, webSurface: "full" };
+  }
+  return base;
+};
 
 /** Capabilities by edition (exported for tests / introspection). */
 export { CAPABILITIES };
-
-/**
- * The web import paths the cloud edition swaps to cloud implementations via
- * turbopack `resolveAlias` in `apps/web/next.config.js`. Declared here as the
- * canonical, drift-tested set; `next.config.js` keeps the actual key→value map
- * because it runs in plain Node and cannot import this TypeScript module.
- *
- * Keep in sync with `apps/web/next.config.js` (the edition test guards this).
- */
-export const CLOUD_ALIAS_KEYS: readonly string[] = [
-  "@/lib/auth/auth-provider",
-  "@/lib/auth/auth-server",
-  "@/lib/actions/resolve-user",
-  "@/lib/nav-config",
-  "@dashboard/dashboard-sidebar",
-  "@dashboard/dashboard-header",
-  "@/lib/gateway-auth",
-  "@/lib/auth/login-content",
-  "@/lib/user-plan",
-  "@/lib/components/request-app-slot",
-  "@/lib/home-redirect",
-  "@/lib/components/pro-app-dialog",
-  "@/lib/components/condition-builder",
-  "@/lib/dashboard/session-redirect",
-  "@/lib/granular-access",
-  "@/lib/plan-gate",
-  "@/lib/init/api",
-  "@/lib/init/server",
-  "@/lib/init/client",
-  "@/lib/api-fetch",
-];

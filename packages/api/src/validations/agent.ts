@@ -40,3 +40,9 @@ export const updateAgentConnectionsSchema = z.object({
     }),
   ),
 });
+
+// Reverse of updateAgentConnectionsSchema: the set of selective agents granted
+// a given connection, keyed from the connection side.
+export const setConnectionAgentsSchema = z.object({
+  agentIds: z.array(z.string()),
+});
