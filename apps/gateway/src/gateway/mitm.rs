@@ -51,6 +51,7 @@ pub(super) async fn mitm(
     proxy_ctx: Arc<ProxyContext>,
     approval_store: Arc<dyn ApprovalStore>,
     policy_engine: Arc<PolicyEngine>,
+    approval_log: Arc<crate::notify::ApprovalEventLog>,
 ) -> Result<()> {
     let hostname = super::strip_port(host);
 
@@ -80,6 +81,7 @@ pub(super) async fn mitm(
                 let ctx = Arc::clone(&proxy_ctx);
                 let approvals = Arc::clone(&approval_store);
                 let engine = Arc::clone(&policy_engine);
+                let approval_log = Arc::clone(&approval_log);
                 let vault_rules = Arc::clone(&vault_injection_rules);
                 async move {
                     let is_ws = super::websocket::is_websocket_upgrade(&req);
@@ -139,6 +141,8 @@ pub(super) async fn mitm(
                                     &ctx,
                                     &approvals,
                                     &engine.pool,
+                                    &engine.crypto,
+                                    &approval_log,
                                 )
                                 .await
                                 {

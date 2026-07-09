@@ -62,6 +62,7 @@ mod default_interceptions;
 mod edition;
 mod gateway;
 mod inject;
+mod notify;
 mod policy;
 mod secret_inject;
 mod summary;

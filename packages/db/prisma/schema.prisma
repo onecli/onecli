@@ -36,6 +36,7 @@ model Organization {
   secrets        Secret[]
   appConnections AppConnection[]
   appConfigs     AppConfig[]
+  approvalPaths  ApprovalPath[]
   policyRules    PolicyRule[]
   apiKeys        ApiKey[]
   auditLogs      AuditLog[]
@@ -105,6 +106,7 @@ model Project {
   onboardingSurvey OnboardingSurvey?
   appConnections   AppConnection[]
   appConfigs       AppConfig[]
+  approvalPaths    ApprovalPath[]
   budgets          Budget[] // cloud-only: per-secret spend budgets for this project (inert in OSS)
 
   @@unique([organizationId, slug])
@@ -407,6 +409,31 @@ model AppConfig {
   @@index([partnerId])
   @@index([scope])
   @@map("app_configs")
+}
+
+// ── Approval paths ──────────────────────────────────────────────────────
+// A delivery channel for manual-approval decisions (OneCLI SDK long-poll,
+// ntfy push, …). Independently toggleable; multiple may be enabled at once.
+// "onecli" is treated as enabled when no row exists (default-on, no-break);
+// other channels (e.g. "ntfy") are absent = disabled until configured.
+model ApprovalPath {
+  id             String        @id @default(uuid())
+  scope          String        @default("project") // "project" | "organization"
+  projectId      String?       @map("project_id")
+  organizationId String?       @map("organization_id")
+  channel        String // "onecli" | "ntfy"
+  enabled        Boolean       @default(false)
+  settings       Json? // non-secret channel config (serverUrl, topic, timeoutSeconds, …)
+  credentials    String? // encrypted JSON of secret fields (publishToken, callbackToken)
+  createdAt      DateTime      @default(now()) @map("created_at")
+  updatedAt      DateTime      @updatedAt @map("updated_at")
+  project        Project?      @relation(fields: [projectId], references: [id])
+  organization   Organization? @relation(fields: [organizationId], references: [id])
+
+  @@unique([projectId, channel])
+  @@unique([organizationId, channel])
+  @@index([scope])
+  @@map("approval_paths")
 }
 
 // ── Provisioned users ───────────────────────────────────────────────────

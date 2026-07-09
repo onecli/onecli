@@ -25,6 +25,7 @@ export const AUDIT_SERVICES = {
   API_KEY: "api-key",
   APP_CONNECTION: "app-connection",
   APP_CONFIG: "app-config",
+  APPROVAL_PATH: "approval-path",
   DEPLOYMENT: "deployment",
   PROJECT: "project",
   ORGANIZATION: "organization",

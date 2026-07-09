@@ -48,9 +48,9 @@ use hyper_util::rt::TokioIo;
 use tokio::net::{TcpListener, TcpStream};
 use tower::ServiceExt;
 use tower_http::cors::CorsLayer;
-use tracing::{info, info_span, warn, Instrument};
+use tracing::{debug, info, info_span, warn, Instrument};
 
-use crate::approval::{ApprovalDecision, ApprovalStore, APPROVAL_TIMEOUT_SECS};
+use crate::approval::{ApprovalDecision, ApprovalStore, PendingApproval, APPROVAL_TIMEOUT_SECS};
 use crate::auth::AuthUser;
 use crate::ca::CertificateAuthority;
 use crate::cache::CacheStore;
@@ -92,6 +92,10 @@ pub(crate) struct GatewayState {
     pub vault_service: Arc<vault::VaultService>,
     /// Manual approval store for held requests.
     pub approval_store: Arc<dyn ApprovalStore>,
+    /// Recent approval-pipeline events, surfaced by the dashboard test/debug view.
+    pub approval_log: Arc<crate::notify::ApprovalEventLog>,
+    /// Short-lived memory of resolved decisions for idempotent/conflict-aware callbacks.
+    pub resolved_decisions: Arc<crate::notify::ResolvedDecisions>,
 }
 
 // ── GatewayServer ───────────────────────────────────────────────────────
@@ -174,6 +178,8 @@ impl GatewayServer {
             cache,
             vault_service,
             approval_store,
+            approval_log: Arc::new(crate::notify::ApprovalEventLog::default()),
+            resolved_decisions: Arc::new(crate::notify::ResolvedDecisions::from_env()),
         };
 
         Self { state, port }
@@ -253,6 +259,21 @@ impl GatewayServer {
                 "/v1/approvals/{id}/decision",
                 axum::routing::post(submit_approval_decision),
             )
+            // ntfy push callback — token-guarded, no session/API-key auth.
+            .route(
+                "/v1/approvals/{id}/approve",
+                axum::routing::post(approve_via_callback),
+            )
+            .route(
+                "/v1/approvals/{id}/deny",
+                axum::routing::post(deny_via_callback),
+            )
+            // Dashboard debug: trigger a test approval + read the recent log.
+            .route(
+                "/v1/approvals/test",
+                axum::routing::post(trigger_test_approval),
+            )
+            .route("/v1/approvals/log", axum::routing::get(get_approval_log))
             // /api legacy routes (backwards compatibility)
             .route(
                 "/api/vault/{provider}/pair",
@@ -402,6 +423,20 @@ async fn get_pending_approvals(
             .flatten()
             .unwrap_or_default();
 
+        // The SDK long-poll is gated by the "onecli" approval path (default-on
+        // when no row exists). When explicitly disabled, serve nothing — but
+        // still pause for the poll interval so the SDK doesn't busy-loop.
+        if !db::approval_channel_enabled(&state.policy_engine.pool, &auth.project_id, "onecli", true)
+            .await
+        {
+            info!("approval poll: onecli channel disabled — returning empty");
+            tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+            return axum::Json(serde_json::json!({
+                "requests": [],
+                "timeoutSeconds": APPROVAL_TIMEOUT_SECS,
+            }));
+        }
+
         let exclude: std::collections::HashSet<&str> = params
             .exclude
             .split(',')
@@ -474,12 +509,12 @@ async fn submit_approval_decision(
                 .unwrap_or_default();
 
         // O(1) lookup — verify approval exists and belongs to this project.
-        match state
+        let pending = match state
             .approval_store
             .get_pending(&org_id, &auth.project_id, &approval_id)
             .await
         {
-            Some(a) if a.project_id == auth.project_id => {}
+            Some(a) if a.project_id == auth.project_id => a,
             _ => {
                 warn!("approval decision rejected: not found or wrong project");
                 return (
@@ -487,7 +522,7 @@ async fn submit_approval_decision(
                     axum::Json(serde_json::json!({ "error": "approval_not_found" })),
                 );
             }
-        }
+        };
 
         let decision_str = match body.decision {
             ApprovalDecision::Approve => "approve",
@@ -508,6 +543,25 @@ async fn submit_approval_decision(
             .await;
 
         if delivered {
+            // Remember it so a later ntfy callback for the same approval is
+            // idempotent / conflict-aware rather than a bare 404.
+            state.resolved_decisions.record(&approval_id, body.decision);
+            // Cross-channel confirmation: tell ntfy subscribers a dashboard/SDK
+            // decision resolved this request (default-on per reportSelection).
+            let ntfy_row =
+                db::find_approval_path(&state.policy_engine.pool, &auth.project_id, "ntfy")
+                    .await
+                    .ok()
+                    .flatten()
+                    .filter(|r| r.enabled);
+            spawn_confirmation_note(
+                &state,
+                ntfy_row.as_ref(),
+                &pending.agent_name,
+                pending.created_at,
+                body.decision,
+                Some("dashboard"),
+            );
             (
                 StatusCode::OK,
                 axum::Json(serde_json::json!({ "success": true })),
@@ -532,6 +586,443 @@ async fn submit_approval_decision(
 #[derive(serde::Deserialize)]
 struct DecisionBody {
     decision: ApprovalDecision,
+}
+
+// ── ntfy approval callback ──────────────────────────────────────────────
+// The Approve/Deny buttons in an ntfy notification POST here. Unlike the SDK
+// decision endpoint, these are NOT session/API-key authenticated — they're
+// guarded by the per-project ntfy `callbackToken`, fired from the user's phone.
+
+/// `POST /v1/approvals/{id}/approve` — resolve a held request (ntfy Approve).
+async fn approve_via_callback(
+    State(state): State<GatewayState>,
+    axum::extract::Path(approval_id): axum::extract::Path<String>,
+    headers: axum::http::HeaderMap,
+) -> impl axum::response::IntoResponse {
+    handle_callback_decision(state, approval_id, headers, ApprovalDecision::Approve).await
+}
+
+/// `POST /v1/approvals/{id}/deny` — drop a held request (ntfy Deny).
+async fn deny_via_callback(
+    State(state): State<GatewayState>,
+    axum::extract::Path(approval_id): axum::extract::Path<String>,
+    headers: axum::http::HeaderMap,
+) -> impl axum::response::IntoResponse {
+    handle_callback_decision(state, approval_id, headers, ApprovalDecision::Deny).await
+}
+
+/// Shared callback logic. Fails closed on a bad token (401). Once the approval
+/// is gone it is conflict-aware via the resolved-decision memory: the SAME
+/// decision again → 200 `already_resolved` (idempotent, since mobile clients
+/// retry and users double-tap); the OPPOSITE decision → 410 `already_decided`
+/// (the window closed — you can't flip an approve to a deny); unknown or past
+/// the remember-window → 408 `approval_timed_out`. None of these post-resolution
+/// paths change state. Window length: `APPROVAL_RESOLVED_TTL_SECS` (default 600).
+async fn handle_callback_decision(
+    state: GatewayState,
+    approval_id: String,
+    headers: axum::http::HeaderMap,
+    decision: ApprovalDecision,
+) -> (StatusCode, axum::Json<serde_json::Value>) {
+    let span = info_span!("approval_callback", approval_id = %approval_id);
+    async move {
+        // Look up the held request (in-memory store keys only on the id).
+        // Already gone ⇒ consult the resolved-decision memory so a benign retry
+        // (same decision) is idempotent, while a conflicting late tap (opposite
+        // decision) reports 410 Gone instead of pretending to succeed.
+        let Some(pending) = state.approval_store.get_pending("", "", &approval_id).await else {
+            return post_resolution_response(&state, &approval_id, decision);
+        };
+
+        // The tap reached the gateway — surface it in the dashboard log so a
+        // user can confirm the callback arrived (iOS gives no inline feedback).
+        state.approval_log.record(
+            &pending.project_id,
+            format!("callback received: {} (id={approval_id})", decision_label(decision)),
+        );
+
+        // Load this project's ntfy path (kept for the confirmation note below)
+        // and verify the bearer against its callback token.
+        let ntfy_row =
+            match db::find_approval_path(&state.policy_engine.pool, &pending.project_id, "ntfy")
+                .await
+            {
+                Ok(Some(row)) if row.enabled => Some(row),
+                _ => None,
+            };
+        let expected = match &ntfy_row {
+            Some(row) => callback_token_of(&state, row).await,
+            None => None,
+        };
+        let Some(expected) = expected else {
+            warn!("approval callback: no ntfy callback token configured for project");
+            state
+                .approval_log
+                .record(&pending.project_id, "callback REJECTED: no callback token configured");
+            return (
+                StatusCode::UNAUTHORIZED,
+                axum::Json(serde_json::json!({ "error": "unauthorized" })),
+            );
+        };
+        let provided = headers
+            .get(hyper::header::AUTHORIZATION)
+            .and_then(|v| v.to_str().ok())
+            .and_then(|s| {
+                s.strip_prefix("Bearer ")
+                    .or_else(|| s.strip_prefix("bearer "))
+            });
+        if !provided.map(|p| ct_eq(p, &expected)).unwrap_or(false) {
+            // Distinguish "no header" (a redirect/proxy likely stripped it) from
+            // a genuine token mismatch — the two need very different fixes.
+            let reason = if provided.is_none() {
+                "no Authorization header (a redirect/proxy may have stripped it — use the https callback URL directly)"
+            } else {
+                "token mismatch (re-enter the callback token and Save)"
+            };
+            warn!(reason, "approval callback: rejected");
+            state
+                .approval_log
+                .record(&pending.project_id, format!("callback REJECTED: {reason}"));
+            return (
+                StatusCode::UNAUTHORIZED,
+                axum::Json(serde_json::json!({ "error": "unauthorized" })),
+            );
+        }
+
+        let delivered = state
+            .approval_store
+            .submit_decision(
+                &pending.organization_id,
+                &pending.project_id,
+                &approval_id,
+                decision,
+                Some("ntfy".to_string()),
+            )
+            .await;
+
+        if delivered {
+            info!(decision = ?decision, "approval callback delivered");
+            state.resolved_decisions.record(&approval_id, decision);
+            let verb = match decision {
+                ApprovalDecision::Approve => "APPROVED",
+                ApprovalDecision::Deny => "DENIED",
+            };
+            state.approval_log.record(
+                &pending.project_id,
+                format!("{verb} via ntfy callback (id={approval_id})"),
+            );
+
+            // Confirmation note — resolved via the ntfy tap (the expected path,
+            // so no "via" label).
+            spawn_confirmation_note(
+                &state,
+                ntfy_row.as_ref(),
+                &pending.agent_name,
+                pending.created_at,
+                decision,
+                None,
+            );
+
+            (
+                StatusCode::OK,
+                axum::Json(serde_json::json!({ "success": true })),
+            )
+        } else {
+            // Raced with another resolver between get_pending and submit (an
+            // explicit decision, another channel, or a timeout). Resolve the
+            // response the same way as the already-gone path — so if it was a
+            // timeout (not recorded), both buttons get 408.
+            debug!("approval callback: decision not delivered (resolved meanwhile)");
+            post_resolution_response(&state, &approval_id, decision)
+        }
+    }
+    .instrument(span)
+    .await
+}
+
+/// Decrypt and return the ntfy `callbackToken` from an approval-path row.
+async fn callback_token_of(state: &GatewayState, row: &db::ApprovalPathRow) -> Option<String> {
+    let encrypted = row.credentials.as_deref()?;
+    let decrypted = state
+        .policy_engine
+        .crypto
+        .decrypt(encrypted)
+        .await
+        .map_err(|e| warn!(error = %e, "failed to decrypt ntfy credentials"))
+        .ok()?;
+    let creds: serde_json::Value = serde_json::from_str(&decrypted).ok()?;
+    creds
+        .get("callbackToken")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .map(String::from)
+}
+
+/// Publish a "Report Selection to Topic" confirmation note for a resolved
+/// approval (default-on per the ntfy channel's `reportSelection` setting).
+/// Fires on ANY resolution — the ntfy callback OR a dashboard/SDK decision — so
+/// subscribers learn when someone else (e.g. via the dashboard bell) approved,
+/// and iOS gets the feedback its silent buttons don't. `via` names the channel
+/// that resolved it (omitted for the ntfy tap itself, the expected path).
+fn spawn_confirmation_note(
+    state: &GatewayState,
+    ntfy: Option<&db::ApprovalPathRow>,
+    agent_name: &str,
+    created_at: u64,
+    decision: ApprovalDecision,
+    via: Option<&str>,
+) {
+    let Some(ntfy) = ntfy else { return };
+    let report = match ntfy
+        .settings
+        .as_ref()
+        .and_then(|s| s.get("reportSelection"))
+    {
+        Some(serde_json::Value::Bool(b)) => *b,
+        Some(serde_json::Value::String(s)) => s != "false",
+        _ => true,
+    };
+    if !report {
+        return;
+    }
+    let (verb, tags) = match decision {
+        ApprovalDecision::Approve => ("APPROVED", "white_check_mark"),
+        ApprovalDecision::Deny => ("DENIED", "no_entry"),
+    };
+    let via = via
+        .filter(|s| !s.is_empty())
+        .map(|s| format!(" via {s}"))
+        .unwrap_or_default();
+    let title = format!("OneCLI: {verb}");
+    let body = format!(
+        "{verb}{via}: {agent_name}\nRequested {}",
+        format_unix_ts(created_at)
+    );
+    let client = state.http_client.clone();
+    let crypto = Arc::clone(&state.policy_engine.crypto);
+    let ntfy = ntfy.clone();
+    tokio::spawn(async move {
+        crate::notify::publish_ntfy_status(&client, &crypto, &ntfy, &title, &body, tags).await;
+    });
+}
+
+/// Human-readable label for a decision (used in callback JSON responses).
+fn decision_label(decision: ApprovalDecision) -> &'static str {
+    match decision {
+        ApprovalDecision::Approve => "approve",
+        ApprovalDecision::Deny => "deny",
+    }
+}
+
+/// Response for a callback whose approval is no longer pending. Consults the
+/// resolved-decision memory:
+/// - same decision again → 200 `already_resolved` (idempotent retry)
+/// - opposite decision → 410 `already_decided` (can't flip a made decision)
+/// - no record (timed out, or unknown/expired) → 408 `approval_timed_out`
+///
+/// A timeout auto-deny is deliberately NOT recorded as a decision, so once the
+/// hold window passes a late tap of EITHER button lands here as 408 — not a
+/// false "already denied".
+fn post_resolution_response(
+    state: &GatewayState,
+    approval_id: &str,
+    decision: ApprovalDecision,
+) -> (StatusCode, axum::Json<serde_json::Value>) {
+    match state.resolved_decisions.get(approval_id) {
+        Some(prev) if prev == decision => {
+            debug!("approval callback: idempotent repeat of the same decision");
+            (
+                StatusCode::OK,
+                axum::Json(serde_json::json!({
+                    "status": "already_resolved",
+                    "decision": decision_label(prev),
+                })),
+            )
+        }
+        Some(prev) => {
+            debug!(
+                prior = decision_label(prev),
+                attempted = decision_label(decision),
+                "approval callback: conflicting decision after resolution"
+            );
+            (
+                StatusCode::GONE,
+                axum::Json(serde_json::json!({
+                    "status": "already_decided",
+                    "decision": decision_label(prev),
+                    "attempted": decision_label(decision),
+                })),
+            )
+        }
+        None => {
+            debug!("approval callback: timed out / unknown — too late");
+            (
+                StatusCode::REQUEST_TIMEOUT,
+                axum::Json(serde_json::json!({
+                    "status": "approval_timed_out",
+                    "rememberWindowSeconds": state.resolved_decisions.ttl_secs(),
+                })),
+            )
+        }
+    }
+}
+
+/// Constant-time string comparison for token verification.
+fn ct_eq(a: &str, b: &str) -> bool {
+    let (a, b) = (a.as_bytes(), b.as_bytes());
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut diff = 0u8;
+    for (x, y) in a.iter().zip(b.iter()) {
+        diff |= x ^ y;
+    }
+    diff == 0
+}
+
+// ── Approval test + debug log ───────────────────────────────────────────
+// Lets a user verify the ntfy connection from the dashboard without sending a
+// real agent request: synthesize a held approval, publish it, and surface the
+// recent approval events so the publish + Approve/Deny round-trip is visible.
+
+/// `POST /v1/approvals/test` — publish a synthetic approval over the project's
+/// enabled ntfy channel. The real callback resolves it; it auto-expires if
+/// untouched. Session/API-key authenticated (a dashboard action).
+async fn trigger_test_approval(
+    auth: AuthUser,
+    State(state): State<GatewayState>,
+) -> impl axum::response::IntoResponse {
+    let span = info_span!("approval_test", project_id = %auth.project_id);
+    async move {
+        let project_id = auth.project_id.clone();
+
+        let ntfy = match db::find_approval_path(&state.policy_engine.pool, &project_id, "ntfy").await
+        {
+            Ok(Some(row)) if row.enabled => row,
+            _ => {
+                state
+                    .approval_log
+                    .record(&project_id, "test approval skipped: ntfy channel not enabled");
+                return (
+                    StatusCode::BAD_REQUEST,
+                    axum::Json(serde_json::json!({ "error": "ntfy_not_enabled" })),
+                );
+            }
+        };
+
+        let org_id =
+            db::find_organization_id_by_project(&state.policy_engine.pool, &project_id)
+                .await
+                .ok()
+                .flatten()
+                .unwrap_or_default();
+
+        let hold_secs = forward::approval_path_timeout(&ntfy).unwrap_or(APPROVAL_TIMEOUT_SECS);
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        let approval_id = uuid::Uuid::new_v4().to_string();
+
+        // Describe the test against the real callback host (from the configured
+        // callbackBaseUrl) rather than a fake "onecli.test", so the notification
+        // shows a recognizable URL.
+        let callback_base = ntfy
+            .settings
+            .as_ref()
+            .and_then(|s| s.get("callbackBaseUrl"))
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .unwrap_or("");
+        let (test_scheme, test_host) = match callback_base.split_once("://") {
+            Some((scheme, rest)) => (
+                scheme.to_string(),
+                rest.trim_end_matches('/').to_string(),
+            ),
+            None if !callback_base.is_empty() => {
+                ("https".to_string(), callback_base.trim_end_matches('/').to_string())
+            }
+            None => ("https".to_string(), "onecli".to_string()),
+        };
+
+        let approval = PendingApproval {
+            id: approval_id.clone(),
+            organization_id: org_id.clone(),
+            project_id: project_id.clone(),
+            agent_id: "approval-path-test".to_string(),
+            agent_name: "Approval Path Test".to_string(),
+            agent_identifier: None,
+            method: "POST".to_string(),
+            scheme: test_scheme,
+            host: test_host,
+            path: "/v1/approvals/test".to_string(),
+            headers: std::collections::HashMap::new(),
+            body_preview: Some(
+                "Test approval from OneCLI → Settings → Approval Paths. Approve or Deny to confirm the callback works.".to_string(),
+            ),
+            summary: None,
+            created_at: now,
+            expires_at: now + hold_secs,
+        };
+
+        // prepare_wait before store (store() contract); no waiter here — the
+        // callback's submit_decision resolves it, or cleanup expires it.
+        let _ = state
+            .approval_store
+            .prepare_wait(&org_id, &project_id, &approval_id)
+            .await;
+        if let Err(e) = state.approval_store.store(&approval).await {
+            warn!(error = ?e, "failed to store test approval");
+            state
+                .approval_log
+                .record(&project_id, "test approval failed: store unavailable");
+            return (
+                StatusCode::BAD_GATEWAY,
+                axum::Json(serde_json::json!({ "error": "store_unavailable" })),
+            );
+        }
+
+        state
+            .approval_log
+            .record(&project_id, format!("test approval created (id={approval_id})"));
+        crate::notify::publish_ntfy_approval(
+            &state.http_client,
+            &state.policy_engine.crypto,
+            &state.approval_log,
+            &ntfy,
+            &approval,
+        )
+        .await;
+
+        (
+            StatusCode::OK,
+            axum::Json(serde_json::json!({
+                "approvalId": approval_id,
+                "expiresInSeconds": hold_secs,
+            })),
+        )
+    }
+    .instrument(span)
+    .await
+}
+
+/// Query params for the approval debug log.
+#[derive(serde::Deserialize)]
+struct ApprovalLogParams {
+    #[serde(default)]
+    limit: Option<usize>,
+}
+
+/// `GET /v1/approvals/log` — recent approval-pipeline events for this project.
+async fn get_approval_log(
+    auth: AuthUser,
+    State(state): State<GatewayState>,
+    axum::extract::Query(params): axum::extract::Query<ApprovalLogParams>,
+) -> impl axum::response::IntoResponse {
+    let limit = params.limit.unwrap_or(3).clamp(1, 50);
+    let entries = state.approval_log.recent(&auth.project_id, limit);
+    axum::Json(serde_json::json!({ "entries": entries }))
 }
 
 /// Reject non-proxy, non-CONNECT requests to unknown routes with 400 Bad Request.
@@ -715,6 +1206,7 @@ async fn handle_connect(
                             proxy_ctx,
                             approval_store,
                             Arc::clone(&state.policy_engine),
+                            Arc::clone(&state.approval_log),
                         )
                         .await
                     } else {
@@ -905,6 +1397,8 @@ async fn handle_http_proxy(
             &proxy_ctx,
             &state.approval_store,
             &state.policy_engine.pool,
+            &state.policy_engine.crypto,
+            &state.approval_log,
         )
         .await
     }

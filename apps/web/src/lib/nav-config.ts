@@ -9,6 +9,7 @@ import {
   KeyRound,
   ShieldCheck,
   Globe,
+  BellRing,
 } from "lucide-react";
 import type { NavItem } from "@/app/(dashboard)/_components/nav-main";
 
@@ -52,6 +53,11 @@ export const getSettingsSections = (
     label: "Security",
     items: [
       { title: "Policy", url: "/settings/policy", icon: Shield },
+      {
+        title: "Approval Paths",
+        url: "/settings/approvals",
+        icon: BellRing,
+      },
       { title: "Encryption", url: "/settings/encryption", icon: ShieldCheck },
     ],
   },
