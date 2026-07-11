@@ -9,7 +9,7 @@ import {
 } from "next-auth/react";
 import { AuthContext } from "@/providers/auth-provider";
 import type { AuthUser, AuthContextValue } from "@/lib/auth/types";
-import type { AuthMode } from "@/lib/auth/auth-mode";
+import type { AuthMode, AuthProviderInfo } from "@/lib/auth/auth-mode";
 
 const LOCAL_USER: AuthUser = {
   id: "local-admin",
@@ -25,6 +25,8 @@ const LocalAuthProvider = ({ children }: { children: ReactNode }) => {
       user: LOCAL_USER,
       signIn: async () => {},
       signOut: async () => {},
+      authProviderId: "",
+      authProviderName: "",
     }),
     [],
   );
@@ -32,7 +34,13 @@ const LocalAuthProvider = ({ children }: { children: ReactNode }) => {
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;
 };
 
-const OAuthInner = ({ children }: { children: ReactNode }) => {
+const OAuthInner = ({
+  children,
+  authProvider,
+}: {
+  children: ReactNode;
+  authProvider: AuthProviderInfo;
+}) => {
   const { data: session, status } = useSession();
 
   const user = useMemo<AuthUser | null>(() => {
@@ -45,8 +53,8 @@ const OAuthInner = ({ children }: { children: ReactNode }) => {
   }, [session]);
 
   const signIn = useCallback(async () => {
-    await nextAuthSignIn("google");
-  }, []);
+    await nextAuthSignIn(authProvider.id);
+  }, [authProvider.id]);
 
   const signOut = useCallback(async () => {
     await nextAuthSignOut({ callbackUrl: "/auth/login" });
@@ -59,8 +67,10 @@ const OAuthInner = ({ children }: { children: ReactNode }) => {
       user,
       signIn,
       signOut,
+      authProviderId: authProvider.id,
+      authProviderName: authProvider.name,
     }),
-    [status, user, signIn, signOut],
+    [status, user, signIn, signOut, authProvider.id, authProvider.name],
   );
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;
@@ -69,9 +79,11 @@ const OAuthInner = ({ children }: { children: ReactNode }) => {
 export const AuthProviderImpl = ({
   children,
   authMode,
+  authProvider,
 }: {
   children: ReactNode;
   authMode: AuthMode;
+  authProvider: AuthProviderInfo;
 }) => {
   if (authMode === "local") {
     return <LocalAuthProvider>{children}</LocalAuthProvider>;
@@ -79,7 +91,7 @@ export const AuthProviderImpl = ({
 
   return (
     <SessionProvider>
-      <OAuthInner>{children}</OAuthInner>
+      <OAuthInner authProvider={authProvider}>{children}</OAuthInner>
     </SessionProvider>
   );
 };

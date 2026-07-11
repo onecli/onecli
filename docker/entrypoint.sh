@@ -48,11 +48,20 @@ else
   AUTH_MODE="local"
 fi
 export AUTH_MODE
+# Pick the active login provider: Google first (back-compat), then generic OIDC.
 OAUTH_CONFIGURED="false"
+AUTH_PROVIDER_ID=""
+AUTH_PROVIDER_NAME=""
 if [ -n "$GOOGLE_CLIENT_ID" ]; then
   OAUTH_CONFIGURED="true"
+  AUTH_PROVIDER_ID="google"
+  AUTH_PROVIDER_NAME="Google"
+elif [ -n "$OIDC_ISSUER" ] && [ -n "$OIDC_CLIENT_ID" ] && [ -n "$OIDC_CLIENT_SECRET" ]; then
+  OAUTH_CONFIGURED="true"
+  AUTH_PROVIDER_ID="oidc"
+  AUTH_PROVIDER_NAME="${OIDC_PROVIDER_NAME:-SSO}"
 fi
-printf '{"authMode":"%s","oauthConfigured":%s}\n' "$AUTH_MODE" "$OAUTH_CONFIGURED" > /app/data/runtime-config.json
+printf '{"authMode":"%s","oauthConfigured":%s,"authProviderId":"%s","authProviderName":"%s"}\n' "$AUTH_MODE" "$OAUTH_CONFIGURED" "$AUTH_PROVIDER_ID" "$AUTH_PROVIDER_NAME" > /app/data/runtime-config.json
 
 # Start gateway in background
 echo "Starting gateway on port ${GATEWAY_PORT:-10255}..."

@@ -3,7 +3,7 @@
 import "@/lib/init/client";
 import { createContext, useContext, type ReactNode } from "react";
 import type { AuthContextValue } from "@/lib/auth/types";
-import type { AuthMode } from "@/lib/auth/auth-mode";
+import type { AuthMode, AuthProviderInfo } from "@/lib/auth/auth-mode";
 import { AuthProviderImpl } from "@/lib/auth/auth-provider";
 
 export type { AuthUser, AuthContextValue } from "@/lib/auth/types";
@@ -23,7 +23,13 @@ export const useAuth = () => {
 export const AuthProvider = ({
   children,
   authMode,
+  authProvider,
 }: {
   children: ReactNode;
   authMode: AuthMode;
-}) => <AuthProviderImpl authMode={authMode}>{children}</AuthProviderImpl>;
+  authProvider: AuthProviderInfo;
+}) => (
+  <AuthProviderImpl authMode={authMode} authProvider={authProvider}>
+    {children}
+  </AuthProviderImpl>
+);
