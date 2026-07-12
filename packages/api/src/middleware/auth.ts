@@ -106,7 +106,22 @@ export const auth = (options?: AuthOptions) => {
 
     // 2. Session — cloud reads the JWT from Authorization; local/onprem is ambient
     if (!authResult) {
-      authResult = await authenticateSession(request, requireProject);
+      const sessionAuth = await authenticateSession(request, requireProject);
+      if (sessionAuth && "denied" in sessionAuth) {
+        // The edition's session enforcer rejected a valid session (e.g.
+        // enterprise "require SSO") — explicit 401, never the generic one.
+        return c.json(
+          {
+            error: {
+              message: sessionAuth.denied.error,
+              type: "authentication_error",
+              code: sessionAuth.denied.code,
+            },
+          },
+          401,
+        );
+      }
+      authResult = sessionAuth;
     }
 
     if (!authResult) {

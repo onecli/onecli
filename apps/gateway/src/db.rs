@@ -140,7 +140,7 @@ pub(crate) async fn find_default_project_id_by_user(
         r#"SELECT p.id
            FROM organization_members om
            INNER JOIN projects p ON p.organization_id = om.organization_id
-           WHERE om.user_id = $1
+           WHERE om.user_id = $1 AND om.status <> 'suspended'
            ORDER BY om.created_at ASC, p.created_at ASC
            LIMIT 1"#,
     )
@@ -209,6 +209,7 @@ pub(crate) async fn user_can_access_project(
            FROM organization_members om
            INNER JOIN projects p ON p.organization_id = om.organization_id
            WHERE om.user_id = $1 AND p.id = $2
+             AND om.status <> 'suspended'
            LIMIT 1"#,
     )
     .bind(user_id)
@@ -219,9 +220,19 @@ pub(crate) async fn user_can_access_project(
     Ok(row.is_some())
 }
 
-/// Whether a user may manage a project — its creator, or an admin/owner of the
-/// project's organization. Re-checked on every API-key auth so a key stops
-/// working once its user loses access (e.g. demotion or removal). Cloud-only.
+/// Whether a project API key's user may still USE its project — re-checked on
+/// every project-key auth so a key stops working once its user loses access
+/// (demotion, suspension, removal, or an unshared project).
+///
+/// Named `manage` for historical reasons; it is really the project-key *usage*
+/// gate, and it mirrors the web's `canAccessProjectAsUser`
+/// (`packages/api/src/middleware/auth/resolve.ts`) exactly: the user must be an
+/// ACTIVE (non-suspended) member of the project's organization, and then either
+/// an org admin/owner, or the holder of a `ProjectAccess` binding — directly
+/// (`user_id`) or through a group they belong to. Bindings are the sole
+/// per-project grant since step 13b; `created_by_user_id` is no longer read
+/// (pure provenance), so a creator who is no longer an active member — suspended
+/// or removed — is denied like anyone else. Cloud-only.
 #[cfg(edition_cloud)]
 pub(crate) async fn user_can_manage_project(
     pool: &PgPool,
@@ -229,24 +240,42 @@ pub(crate) async fn user_can_manage_project(
     project_id: &str,
 ) -> Result<bool> {
     let row: Option<(String,)> = sqlx::query_as(
+        // Active-membership INNER JOIN is the suspension/removal gate (mirrors
+        // `if (!role) return false`); then admin-or-binding. The two EXISTS are
+        // the two `projectAccessBindingArms` — a direct user binding, or one via
+        // a group the user is a member of.
         r#"SELECT p.id
            FROM projects p
-           LEFT JOIN organization_members om
-             ON om.organization_id = p.organization_id AND om.user_id = $1
+           INNER JOIN organization_members om
+             ON om.organization_id = p.organization_id
+            AND om.user_id = $1
+            AND om.status <> 'suspended'
            WHERE p.id = $2
-             AND (p.created_by_user_id = $1 OR om.role IN ('owner', 'admin'))
+             AND (
+               om.role IN ('owner', 'admin')
+               OR EXISTS (
+                 SELECT 1 FROM project_access pa
+                 WHERE pa.project_id = p.id AND pa.user_id = $1
+               )
+               OR EXISTS (
+                 SELECT 1 FROM project_access pa
+                 JOIN group_members gm ON gm.group_id = pa.group_id
+                 WHERE pa.project_id = p.id AND gm.user_id = $1
+               )
+             )
            LIMIT 1"#,
     )
     .bind(user_id)
     .bind(project_id)
     .fetch_optional(pool)
     .await
-    .context("verifying user can manage project")?;
+    .context("verifying project-key user still has access to project")?;
     Ok(row.is_some())
 }
 
 /// Whether a user is an admin or owner of an organization. Re-checked on every
-/// org-scoped API-key auth so the key stops working after a demotion.
+/// org-scoped API-key auth so the key stops working after a demotion or
+/// suspension.
 #[cfg(not(edition_oss))]
 pub(crate) async fn user_is_org_admin(
     pool: &PgPool,
@@ -258,6 +287,7 @@ pub(crate) async fn user_is_org_admin(
            FROM organization_members
            WHERE user_id = $1 AND organization_id = $2
              AND role IN ('owner', 'admin')
+             AND status <> 'suspended'
            LIMIT 1"#,
     )
     .bind(user_id)

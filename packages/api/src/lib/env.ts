@@ -119,6 +119,4 @@ export const LOG_LEVEL = process.env.LOG_LEVEL ?? "info";
 
 export const NODE_ENV = process.env.NODE_ENV ?? "development";
 
-export const NEXT_RUNTIME = process.env.NEXT_RUNTIME ?? "";
-
 export const HOME = process.env.HOME ?? "";

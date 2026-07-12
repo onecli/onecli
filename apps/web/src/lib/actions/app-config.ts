@@ -19,9 +19,9 @@ export const checkAppConfigExists = async (
   if (orgId) {
     const membership = await db.organizationMember.findUnique({
       where: { organizationId_userId: { organizationId: orgId, userId } },
-      select: { organizationId: true },
+      select: { organizationId: true, status: true },
     });
-    if (!membership) return false;
+    if (!membership || membership.status === "suspended") return false;
     return hasAppConfigService({ organizationId: orgId }, provider);
   }
 

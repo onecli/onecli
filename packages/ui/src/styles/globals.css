@@ -46,7 +46,7 @@
   --brand-foreground: #ffffff;
 }
 
-/* Dark mode (default) — OneCLI terminal aesthetic */
+/* Dark mode — OneCLI terminal aesthetic */
 .dark {
   --background: #1f1e1d;
   --foreground: oklch(0.985 0 0);
@@ -64,8 +64,8 @@
   --accent-foreground: oklch(0.985 0 0);
   --destructive: oklch(0.55 0.2 27.325);
   --destructive-foreground: oklch(0.75 0.18 25.331);
-  --border: oklch(0.3 0 0);
-  --input: oklch(0.3 0 0);
+  --border: oklch(0.4 0 0);
+  --input: oklch(0.4 0 0);
   --ring: oklch(0.4 0 0);
   --chart-1: #19ba5d;
   --chart-2: oklch(0.75 0.15 200);

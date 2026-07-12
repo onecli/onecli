@@ -70,6 +70,7 @@ const CLOUD_ALIASES = {
   "@/lib/auth/login-content": "@/ee/auth/login-content",
   "@/lib/user-plan": "@/ee/user-plan",
   "@/lib/components/request-app-slot": "@/ee/apps/request-app-slot",
+  "@/lib/components/agent-group-field": "@/ee/groups/agent-group-field",
   "@/lib/home-redirect": "@/ee/home-redirect",
   "@/lib/components/pro-app-dialog": "@/ee/apps/pro-app-dialog",
   "@/lib/components/condition-builder": "@/ee/components/condition-builder",
@@ -141,6 +142,11 @@ const nextConfig = {
   serverExternalPackages: ["@onecli/db", "@1password/sdk"],
   env: {
     NEXT_PUBLIC_EDITION: process.env.NEXT_PUBLIC_EDITION || "oss",
+    // Baked in at build time (like EDITION): the slim-demo image is built with
+    // this set to "1", inlining the demo caps into the bundle so a runtime
+    // `-e NEXT_PUBLIC_ONECLI_DEMO=…` cannot lift them. Every other build leaves
+    // it "0" and the demo asserts are no-ops.
+    NEXT_PUBLIC_ONECLI_DEMO: process.env.NEXT_PUBLIC_ONECLI_DEMO || "0",
     NEXT_PUBLIC_APP_VERSION: appVersion,
     NEXT_PUBLIC_API_URL: process.env.API_DOMAIN
       ? `${isCloud && process.env.NODE_ENV !== "development" ? "https" : "http"}://${process.env.API_DOMAIN}`

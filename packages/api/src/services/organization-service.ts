@@ -11,6 +11,18 @@ export const slugify = (raw: string) =>
     .replace(/^-|-$/g, "");
 
 /**
+ * Membership filter every ACCESS-GRANTING read applies: suspended members are
+ * treated as non-members by all authorization checks (the write-side lives in
+ * the EE team service; nothing sets "suspended" in OSS, so this is inert
+ * there). Deliberately NOT applied to display lists, seat counts, or the
+ * provisioning/JIT existence guards — filtering those would re-mint
+ * memberships for suspended users.
+ */
+export const activeMembershipWhere = {
+  status: { not: "suspended" },
+} as const;
+
+/**
  * Resolve the user's default project: first organization → first project.
  * Returns null when the user has no organization or no project (pre-bootstrap).
  *
@@ -21,7 +33,7 @@ export const findUserDefaultProject = async (
   userId: string,
 ): Promise<{ id: string; organizationId: string } | null> => {
   const membership = await db.organizationMember.findFirst({
-    where: { userId },
+    where: { userId, ...activeMembershipWhere },
     select: { organizationId: true },
     orderBy: { createdAt: "asc" },
   });
@@ -36,6 +48,25 @@ export const findUserDefaultProject = async (
     orderBy: { createdAt: "asc" },
   });
 };
+
+/**
+ * The nested-write seeds every user-facing project is born with: one API
+ * key + the default agent. The single definition all provision sites
+ * spread into their `project.create` data (bootstrap, project creation,
+ * membership provisioning) — the guarded split-write variant for existing
+ * projects is `ensureProjectSeeds` below.
+ */
+export const defaultProjectSeed = (userId: string, userEmail: string) => ({
+  apiKeys: { create: { key: generateApiKey(), userId, userEmail } },
+  agents: {
+    create: {
+      name: DEFAULT_AGENT_NAME,
+      identifier: DEFAULT_AGENT_IDENTIFIER,
+      accessToken: generateAccessToken(),
+      isDefault: true,
+    },
+  },
+});
 
 /**
  * Create an organization with a default project, API key, and default agent
@@ -74,15 +105,11 @@ export const bootstrapOrganization = async (
       organizationId: org.id,
       createdByUserId: userId,
       createdByUserEmail: userEmail,
-      apiKeys: { create: { key: generateApiKey(), userId, userEmail } },
-      agents: {
-        create: {
-          name: DEFAULT_AGENT_NAME,
-          identifier: DEFAULT_AGENT_IDENTIFIER,
-          accessToken: generateAccessToken(),
-          isDefault: true,
-        },
-      },
+      ...defaultProjectSeed(userId, userEmail),
+      // Creator's ProjectAccess binding (step 13), seeded owner (13c) with the
+      // project. Inert in OSS (nothing reads bindings without RBAC); load-bearing
+      // in cloud.
+      accessBindings: { create: { userId, role: "owner" } },
     },
     select: { id: true, organizationId: true },
   });
@@ -181,6 +208,8 @@ export const joinSharedOrganization = async (
         organizationId: org.id,
         createdByUserId: userId,
         createdByUserEmail: userEmail,
+        // Creator's ProjectAccess binding (step 13), seeded owner (13c). Inert in OSS.
+        accessBindings: { create: { userId, role: "owner" } },
       },
       select: { id: true, organizationId: true },
     });

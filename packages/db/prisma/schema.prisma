@@ -26,22 +26,35 @@ model Organization {
   // Cloud-only (inert in OSS): set when the org detaches from its partner —
   // stops inheriting partner secrets but keeps partnerId for attribution.
   partnerDetachedAt  DateTime? @map("partner_detached_at")
+  // Cloud-only (inert in OSS): members of this org's verified domains must
+  // sign in through the org's SSO connection (break-glass via
+  // OrganizationMember.ssoExempt).
+  ssoRequired        Boolean   @default(false) @map("sso_required")
+  // Cloud-only (inert in OSS): first SSO login on a verified domain
+  // auto-joins the org as a member.
+  jitEnabled         Boolean   @default(true) @map("jit_enabled")
   createdAt          DateTime  @default(now()) @map("created_at")
   updatedAt          DateTime  @updatedAt @map("updated_at")
 
-  projects       Project[]
-  members        OrganizationMember[]
-  invitations    Invitation[]
-  userProvisions UserProvision[]
-  secrets        Secret[]
-  appConnections AppConnection[]
-  appConfigs     AppConfig[]
-  policyRules    PolicyRule[]
-  apiKeys        ApiKey[]
-  auditLogs      AuditLog[]
-  partner        Partner?             @relation(fields: [partnerId], references: [id])
-  partnerClaim   PartnerClaim?
-  budgets        Budget[] // cloud-only: per-secret spend budgets for this org (inert in OSS)
+  projects          Project[]
+  members           OrganizationMember[]
+  invitations       Invitation[]
+  userProvisions    UserProvision[]
+  secrets           Secret[]
+  appConnections    AppConnection[]
+  appConfigs        AppConfig[]
+  policyRules       PolicyRule[]
+  apiKeys           ApiKey[]
+  auditLogs         AuditLog[]
+  partner           Partner?                    @relation(fields: [partnerId], references: [id])
+  partnerClaim      PartnerClaim?
+  budgets           Budget[] // cloud-only: per-secret spend budgets for this org (inert in OSS)
+  domains           OrganizationDomain[]
+  ssoConnections    OrganizationSsoConnection[]
+  scimTokens        OrganizationScimToken[]
+  groups            Group[]
+  agentGroups       AgentGroup[]
+  groupRoleMappings GroupRoleMapping[]
 
   @@index([partnerId])
   @@map("organizations")
@@ -49,11 +62,18 @@ model Organization {
 
 // Cloud-only: links a User to an Organization with a role.
 model OrganizationMember {
-  organizationId String   @map("organization_id")
-  userId         String   @map("user_id")
-  userEmail      String   @map("user_email")
+  organizationId String    @map("organization_id")
+  userId         String    @map("user_id")
+  userEmail      String    @map("user_email")
   role           String // "owner" | "admin" | "member"
-  createdAt      DateTime @default(now()) @map("created_at")
+  // Cloud-only (inert in OSS): "active" | "suspended" — suspended members are
+  // treated as non-members by every authorization check (SCIM deprovisioning).
+  status         String    @default("active")
+  suspendedAt    DateTime? @map("suspended_at")
+  // Cloud-only (inert in OSS): break-glass exemption from the org's
+  // ssoRequired policy (e.g. an owner who keeps a non-SSO sign-in).
+  ssoExempt      Boolean   @default(false) @map("sso_exempt")
+  createdAt      DateTime  @default(now()) @map("created_at")
 
   organization Organization @relation(fields: [organizationId], references: [id])
   user         User         @relation(fields: [userId], references: [id])
@@ -83,6 +103,72 @@ model Invitation {
   @@map("invitations")
 }
 
+// Cloud-only (inert in OSS): an email domain claimed by an organization and
+// proven via DNS TXT — the trust root for SSO home-realm discovery, JIT
+// membership, and identity linking. `verifiedAt` null = claimed but pending;
+// every trust decision checks verifiedAt, never mere existence.
+model OrganizationDomain {
+  id                String    @id @default(uuid())
+  organizationId    String    @map("organization_id")
+  domain            String    @unique
+  verificationToken String    @map("verification_token")
+  verifiedAt        DateTime? @map("verified_at")
+  createdByUserId   String?   @map("created_by_user_id")
+  createdAt         DateTime  @default(now()) @map("created_at")
+  updatedAt         DateTime  @updatedAt @map("updated_at")
+
+  organization  Organization @relation(fields: [organizationId], references: [id])
+  createdByUser User?        @relation("OrganizationDomainCreator", fields: [createdByUserId], references: [id])
+
+  @@index([organizationId])
+  @@map("organization_domains")
+}
+
+// Cloud-only (inert in OSS): a per-organization enterprise SSO connection —
+// the app-side record of an identity provider registered with the auth
+// backend. Secrets (e.g. an OIDC client secret) live in `credentials`
+// (encrypted), never in `config`.
+model OrganizationSsoConnection {
+  id                  String   @id @default(uuid())
+  organizationId      String   @map("organization_id")
+  type                String // "saml" | "oidc"
+  status              String   @default("pending") // "pending" | "active" | "disabled"
+  cognitoProviderName String   @unique @map("cognito_provider_name")
+  displayName         String   @map("display_name")
+  config              Json? // non-secret settings (metadata URL/XML digest, issuer, client id)
+  credentials         String? // encrypted
+  createdByUserId     String?  @map("created_by_user_id")
+  createdAt           DateTime @default(now()) @map("created_at")
+  updatedAt           DateTime @updatedAt @map("updated_at")
+
+  organization  Organization @relation(fields: [organizationId], references: [id])
+  createdByUser User?        @relation("OrganizationSsoConnectionCreator", fields: [createdByUserId], references: [id])
+
+  @@index([organizationId])
+  @@map("organization_sso_connections")
+}
+
+// Cloud-only (inert in OSS): hashed bearer tokens for the org's SCIM
+// provisioning endpoint. Plaintext is shown once at creation and never
+// stored; revocation is soft (row kept for the audit trail).
+model OrganizationScimToken {
+  id              String    @id @default(uuid())
+  organizationId  String    @map("organization_id")
+  tokenHash       String    @unique @map("token_hash") // sha-256
+  label           String
+  lastUsedAt      DateTime? @map("last_used_at")
+  revokedAt       DateTime? @map("revoked_at")
+  createdByUserId String?   @map("created_by_user_id")
+  createdAt       DateTime  @default(now()) @map("created_at")
+  updatedAt       DateTime  @updatedAt @map("updated_at")
+
+  organization  Organization @relation(fields: [organizationId], references: [id])
+  createdByUser User?        @relation("OrganizationScimTokenCreator", fields: [createdByUserId], references: [id])
+
+  @@index([organizationId])
+  @@map("organization_scim_tokens")
+}
+
 model Project {
   id                 String   @id @default(uuid())
   name               String?
@@ -106,6 +192,7 @@ model Project {
   appConnections   AppConnection[]
   appConfigs       AppConfig[]
   budgets          Budget[] // cloud-only: per-secret spend budgets for this project (inert in OSS)
+  accessBindings   ProjectAccess[]
 
   @@unique([organizationId, slug])
   @@index([organizationId])
@@ -116,26 +203,42 @@ model User {
   id                    String    @id @default(uuid())
   email                 String    @unique
   name                  String?
+  // Cloud-only (inert in OSS): the SCIM `name` object (formatted/givenName/
+  // familyName/…) stored losslessly so IdP-provisioned attributes round-trip;
+  // `name` above stays the display string.
+  nameComponents        Json?     @map("name_components")
   externalAuthId        String    @unique @map("external_auth_id")
   countryCode           String?   @map("country_code")
   country               String?   @map("country")
   lastLoginAt           DateTime? @map("last_login_at")
   onboardingCompletedAt DateTime? @map("onboarding_completed_at")
+  // Cloud-only (inert in OSS): identity-level deactivation timestamp, set
+  // alongside the auth-provider disable when the org owns the identity
+  // (e.g. SCIM deprovisioning).
+  deactivatedAt         DateTime? @map("deactivated_at")
   createdAt             DateTime  @default(now()) @map("created_at")
   updatedAt             DateTime  @updatedAt @map("updated_at")
 
-  organizationMemberships OrganizationMember[]
-  sentInvitations         Invitation[]         @relation("InvitationCreator")
-  apiKeys                 ApiKey[]
-  auditLogs               AuditLog[]
-  createdProjects         Project[]            @relation("ProjectCreator")
-  onboardingSurveys       OnboardingSurvey[]
-  createdAgentSecrets     AgentSecret[]        @relation("AgentSecretCreator")
-  updatedAgentSecrets     AgentSecret[]        @relation("AgentSecretUpdater")
-  provisionedAs           UserProvision?       @relation("ProvisionedUser")
-  createdProvisions       UserProvision[]      @relation("ProvisionCreator")
-  partnerMemberships      PartnerMember[]
-  partnerPlaceholderClaim PartnerClaim?        @relation("PartnerPlaceholder")
+  organizationMemberships  OrganizationMember[]
+  sentInvitations          Invitation[]                @relation("InvitationCreator")
+  apiKeys                  ApiKey[]
+  auditLogs                AuditLog[]
+  createdProjects          Project[]                   @relation("ProjectCreator")
+  onboardingSurveys        OnboardingSurvey[]
+  createdAgentSecrets      AgentSecret[]               @relation("AgentSecretCreator")
+  updatedAgentSecrets      AgentSecret[]               @relation("AgentSecretUpdater")
+  provisionedAs            UserProvision?              @relation("ProvisionedUser")
+  createdProvisions        UserProvision[]             @relation("ProvisionCreator")
+  partnerMemberships       PartnerMember[]
+  partnerPlaceholderClaim  PartnerClaim?               @relation("PartnerPlaceholder")
+  createdDomains           OrganizationDomain[]        @relation("OrganizationDomainCreator")
+  createdSsoConnections    OrganizationSsoConnection[] @relation("OrganizationSsoConnectionCreator")
+  createdScimTokens        OrganizationScimToken[]     @relation("OrganizationScimTokenCreator")
+  groupMemberships         GroupMember[]               @relation("GroupMemberUser")
+  createdGroupMembers      GroupMember[]               @relation("GroupMemberCreator")
+  createdAgentGroupMembers AgentGroupMember[]          @relation("AgentGroupMemberCreator")
+  projectAccess            ProjectAccess[]             @relation("ProjectAccessUser")
+  createdProjectAccess     ProjectAccess[]             @relation("ProjectAccessCreator")
 
   @@map("users")
 }
@@ -177,9 +280,10 @@ model Agent {
   updatedAt   DateTime @updatedAt @map("updated_at")
   project     Project  @relation(fields: [projectId], references: [id])
 
-  agentSecrets        AgentSecret[]
-  agentAppConnections AgentAppConnection[]
-  policyRules         PolicyRule[]
+  agentSecrets          AgentSecret[]
+  agentAppConnections   AgentAppConnection[]
+  policyRules           PolicyRule[]
+  agentGroupMemberships AgentGroupMember[]
 
   @@unique([projectId, identifier])
   @@index([projectId])
@@ -407,6 +511,130 @@ model AppConfig {
   @@index([partnerId])
   @@index([scope])
   @@map("app_configs")
+}
+
+// ── Groups, project access & role mappings ───────────────────────────────
+// Human principals (user | group) and machine principals (agent | agentGroup)
+// for the enterprise directory. Groups gate project access (ProjectAccess) and
+// drive org roles (GroupRoleMapping); agent groups organize workloads.
+
+// A human group — manually managed, or provisioned from the customer IdP via
+// SCIM (source "scim" rows are locked to IdP management).
+model Group {
+  id             String   @id @default(uuid())
+  organizationId String   @map("organization_id")
+  name           String
+  source         String   @default("manual") // "manual" | "scim"
+  externalId     String?  @map("external_id") // IdP correlation id (SCIM)
+  createdAt      DateTime @default(now()) @map("created_at")
+  updatedAt      DateTime @updatedAt @map("updated_at")
+
+  organization Organization @relation(fields: [organizationId], references: [id])
+
+  members       GroupMember[]
+  projectAccess ProjectAccess[]
+  roleMapping   GroupRoleMapping?
+
+  @@unique([organizationId, name])
+  @@unique([organizationId, source, externalId])
+  @@index([organizationId])
+  @@map("groups")
+}
+
+model GroupMember {
+  groupId         String   @map("group_id")
+  userId          String   @map("user_id")
+  createdByUserId String?  @map("created_by_user_id") // null = SCIM/system write
+  createdAt       DateTime @default(now()) @map("created_at")
+  updatedAt       DateTime @updatedAt @map("updated_at")
+
+  group         Group @relation(fields: [groupId], references: [id], onDelete: Cascade)
+  user          User  @relation("GroupMemberUser", fields: [userId], references: [id], onDelete: Cascade)
+  createdByUser User? @relation("GroupMemberCreator", fields: [createdByUserId], references: [id])
+
+  @@id([groupId, userId])
+  @@index([userId])
+  @@map("group_members")
+}
+
+// A group of agents — OneCLI-native and org-scoped (the workload-grouping
+// layer; SCIM never touches these).
+model AgentGroup {
+  id             String   @id @default(uuid())
+  organizationId String   @map("organization_id")
+  name           String
+  createdAt      DateTime @default(now()) @map("created_at")
+  updatedAt      DateTime @updatedAt @map("updated_at")
+
+  organization Organization @relation(fields: [organizationId], references: [id])
+
+  members AgentGroupMember[]
+
+  @@unique([organizationId, name])
+  @@index([organizationId])
+  @@map("agent_groups")
+}
+
+model AgentGroupMember {
+  agentGroupId    String   @map("agent_group_id")
+  agentId         String   @map("agent_id")
+  createdByUserId String?  @map("created_by_user_id")
+  createdAt       DateTime @default(now()) @map("created_at")
+  updatedAt       DateTime @updatedAt @map("updated_at")
+
+  agentGroup    AgentGroup @relation(fields: [agentGroupId], references: [id], onDelete: Cascade)
+  agent         Agent      @relation(fields: [agentId], references: [id], onDelete: Cascade)
+  createdByUser User?      @relation("AgentGroupMemberCreator", fields: [createdByUserId], references: [id])
+
+  @@id([agentGroupId, agentId])
+  @@index([agentId])
+  @@map("agent_group_members")
+}
+
+// Project access bindings — the project's human gate (GRANT semantics: a row
+// grants access; agents live in projects, so no machine columns here).
+// Exactly one of userId/groupId per row (DB CHECK).
+model ProjectAccess {
+  id              String   @id @default(uuid())
+  projectId       String   @map("project_id")
+  userId          String?  @map("user_id")
+  groupId         String?  @map("group_id")
+  // Management role on a USER binding (step 13c): "owner" may rename/share/delete
+  // the project; "member" is a plain use grant. Group bindings stay role-less in
+  // v1 (member). Only consulted for management — usage (13b) is role-blind.
+  role            String   @default("member") // "owner" | "member"
+  createdByUserId String?  @map("created_by_user_id") // null = system write (creator seed)
+  createdAt       DateTime @default(now()) @map("created_at")
+  updatedAt       DateTime @updatedAt @map("updated_at")
+
+  project       Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  user          User?   @relation("ProjectAccessUser", fields: [userId], references: [id], onDelete: Cascade)
+  group         Group?  @relation(fields: [groupId], references: [id], onDelete: Cascade)
+  createdByUser User?   @relation("ProjectAccessCreator", fields: [createdByUserId], references: [id])
+
+  @@unique([projectId, userId])
+  @@unique([projectId, groupId])
+  @@index([userId])
+  @@index([groupId])
+  @@map("project_access")
+}
+
+// Group → org-role mapping (priority-ordered; the highest-priority mapping
+// among a user's groups wins; unmatched users keep their current role).
+model GroupRoleMapping {
+  id             String   @id @default(uuid())
+  organizationId String   @map("organization_id")
+  groupId        String   @unique @map("group_id")
+  role           String // "admin" | "member"
+  priority       Int
+  createdAt      DateTime @default(now()) @map("created_at")
+  updatedAt      DateTime @updatedAt @map("updated_at")
+
+  organization Organization @relation(fields: [organizationId], references: [id])
+  group        Group        @relation(fields: [groupId], references: [id], onDelete: Cascade)
+
+  @@index([organizationId])
+  @@map("group_role_mappings")
 }
 
 // ── Provisioned users ───────────────────────────────────────────────────

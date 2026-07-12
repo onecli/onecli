@@ -12,6 +12,10 @@ export interface AuthUser {
   // Federated IdP name for this session (e.g. "Google"); null/unset for
   // native sign-ins.
   federatedProvider?: string | null;
+  // ALL federated IdP names on this session's identity, in token order —
+  // multi-linked profiles carry every provider here while federatedProvider
+  // only sees the first. Empty/unset for native sign-ins.
+  identityProviders?: string[];
 }
 
 export type EmailOtpStep = "CONFIRM_SIGN_UP" | "CONFIRM_SIGN_IN" | "DONE";
@@ -27,4 +31,9 @@ export interface AuthContextValue {
   signInWithEmail?: (email: string) => Promise<EmailOtpStep>;
   confirmEmailSignUp?: (email: string, code: string) => Promise<boolean>;
   confirmEmailSignIn?: (code: string) => Promise<boolean>;
+  // Enterprise SSO redirect (cloud-only, undefined in OSS mode)
+  signInWithSso?: (provider: string) => Promise<void>;
+  // Last federated sign-in failure (e.g. an org IdP misconfiguration),
+  // surfaced by the auth provider for the login page to render.
+  authError?: string | null;
 }

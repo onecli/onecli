@@ -1,6 +1,6 @@
 import { Hono } from "hono";
 import { db } from "@onecli/db";
-import { getSessionProvider } from "../providers";
+import { getSessionProvider, getSessionEnforcer } from "../providers";
 import type { SessionUser } from "../providers/types";
 import { logger } from "../lib/logger";
 import {
@@ -12,7 +12,7 @@ import {
 import { CAPS } from "../lib/env";
 
 /** Extra attributes to spread into the user upsert (create + update). */
-export type SessionAttributes = Record<string, unknown>;
+type SessionAttributes = Record<string, unknown>;
 
 /** The DB user a conflicting session's email already belongs to. */
 export interface ExistingIdentity {
@@ -44,6 +44,16 @@ export interface SessionHooks {
     existing: ExistingIdentity,
     session: SessionUser,
   ): "link" | "reject" | Promise<"link" | "reject">;
+  /**
+   * Ensure edition-specific org membership for the session's identity (e.g.
+   * enterprise-SSO JIT join) before the default org-bootstrap decision. Runs
+   * on every session and must be idempotent and non-throwing — membership is
+   * best-effort; session resolution is not. The default is a no-op.
+   */
+  ensureSessionMembership(
+    session: SessionUser,
+    user: { id: string; email: string; name: string | null },
+  ): Promise<void>;
 }
 
 const defaultHooks: SessionHooks = {
@@ -52,6 +62,7 @@ const defaultHooks: SessionHooks = {
   shouldBootstrapOrg: () => true,
   augmentSessionResponse: async () => ({}),
   resolveIdentityConflict: () => "link",
+  ensureSessionMembership: async () => {},
 };
 
 let _hooks: SessionHooks = defaultHooks;
@@ -117,6 +128,22 @@ export const authSessionRoutes = () => {
         },
         select: { id: true, email: true, name: true },
       });
+
+      // Edition membership (e.g. SSO JIT join) runs before the default
+      // project resolution so a just-created membership's project is what
+      // the session lands on — and the bootstrap branch below self-skips.
+      await _hooks.ensureSessionMembership(user, dbUser);
+
+      // Edition session policy (e.g. enterprise "require SSO") — after JIT
+      // so a first SSO login joins and then trivially passes. Denials MUST
+      // return inline: a throw would land in the catch below as a 500.
+      const enforcer = getSessionEnforcer();
+      if (enforcer) {
+        const denial = await enforcer(user, dbUser);
+        if (denial) {
+          return c.json({ error: denial.error, code: denial.code }, 401);
+        }
+      }
 
       let defaultProject = await findUserDefaultProject(dbUser.id);
 
