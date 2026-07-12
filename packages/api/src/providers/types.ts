@@ -10,12 +10,20 @@ export const ROLE_HIERARCHY: Record<OrgRole, number> = {
   member: 1,
 };
 
+/**
+ * How the caller authenticated. A `project` key is bound to a single project and
+ * is confined to it on project-management routes; `organization` keys and user
+ * `session`s carry the user's full org-wide authority. Set by the auth middleware.
+ */
+export type AuthScope = "project" | "organization" | "session";
+
 export interface AuthContext {
   userId: string;
   userEmail: string;
   projectId?: string;
   organizationId: string;
   role?: OrgRole;
+  scope?: AuthScope;
 }
 
 export interface SessionUser {
@@ -32,6 +40,13 @@ export interface SessionUser {
    * native sign-ins or providers that don't distinguish.
    */
   federatedProvider?: string | null;
+  /**
+   * ALL federated IdP names attached to this session's identity, in token
+   * order. A profile linked to several IdPs carries every provider here
+   * while `federatedProvider` only sees the first — consumers deciding on
+   * identity trust must scan this array. Empty/unset for native sign-ins.
+   */
+  identityProviders?: string[];
 }
 
 export interface SessionProvider {
@@ -41,6 +56,23 @@ export interface SessionProvider {
 export interface RoleResolver {
   getUserRole(userId: string, organizationId: string): Promise<OrgRole | null>;
 }
+
+/** An explicit session rejection: the message shown to the user + a stable code. */
+export interface SessionDenial {
+  error: string;
+  code: string;
+}
+
+/**
+ * Edition policy applied to every AUTHENTICATED session at resolution time
+ * (e.g. enterprise "require SSO"). Runs after the user upsert/JIT membership;
+ * returning a denial rejects the session with 401 + the denial body. Never
+ * registered in OSS — sessions are always allowed there.
+ */
+export type SessionEnforcer = (
+  session: SessionUser,
+  user: { id: string; email: string },
+) => Promise<SessionDenial | null>;
 
 export interface OAuthOrgHandlers {
   tryHandleOrgAuthorize: (

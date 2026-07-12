@@ -13,8 +13,8 @@ export const ThemeColorSync = () => {
 
   useEffect(() => {
     const color =
-      THEME_COLORS[(resolvedTheme as keyof typeof THEME_COLORS) ?? "dark"] ??
-      THEME_COLORS.dark;
+      THEME_COLORS[(resolvedTheme as keyof typeof THEME_COLORS) ?? "light"] ??
+      THEME_COLORS.light;
 
     let meta = document.querySelector(
       'meta[name="theme-color"]',

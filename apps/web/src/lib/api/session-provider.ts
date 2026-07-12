@@ -11,6 +11,7 @@ export const nextSessionProvider: SessionProvider = {
       name: session.name,
       emailVerified: session.emailVerified,
       federatedProvider: session.federatedProvider,
+      identityProviders: session.identityProviders,
     };
   },
 };

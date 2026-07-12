@@ -54,7 +54,7 @@ vi.mock("../services/organization-service", () => ({
   ensureProjectSeeds: async () => {},
 }));
 
-import { initSession } from "../providers";
+import { initSession, initSessionEnforcer } from "../providers";
 import { authSessionRoutes, initSessionHooks } from "./auth-session";
 
 initSession({
@@ -73,6 +73,7 @@ afterEach(() => {
   // _hooks is module-global — restore the defaults so later suites in the
   // same worker never inherit a rejecting hook.
   initSessionHooks({});
+  initSessionEnforcer(null);
 });
 
 describe("GET /auth/session identity-conflict seam", () => {
@@ -139,5 +140,78 @@ describe("GET /auth/session identity-conflict seam", () => {
     const res = await app.request("/");
     expect(res.status).toBe(200);
     expect(consulted).toBe(false);
+  });
+});
+
+describe("GET /auth/session ensureSessionMembership seam", () => {
+  it("calls the hook with the session and the upserted user, before project resolution", async () => {
+    const calls: Array<{ sessionId: string; userId: string }> = [];
+    initSessionHooks({
+      ensureSessionMembership: async (session, user) => {
+        calls.push({ sessionId: session.id, userId: user.id });
+      },
+    });
+    state.session = { id: "sso-sub", email: "guy@acme.com", name: "Guy" };
+    state.dbUser = null;
+
+    const res = await app.request("/");
+    expect(res.status).toBe(200);
+    expect(calls).toEqual([{ sessionId: "sso-sub", userId: "user-1" }]);
+  });
+
+  it("default hook is a no-op (existing sessions unaffected)", async () => {
+    state.session = { id: "same-sub", email: "guy@acme.com" };
+    state.dbUser = {
+      id: "user-1",
+      email: "guy@acme.com",
+      externalAuthId: "same-sub",
+    };
+
+    const res = await app.request("/");
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { projectId?: string };
+    expect(body.projectId).toBe("proj-1");
+  });
+});
+
+describe("GET /auth/session sessionEnforcer seam", () => {
+  it("returns 401 with the denial body when the enforcer rejects (after the upsert/JIT, never a 500)", async () => {
+    initSessionEnforcer(async () => ({
+      error: "Your organization requires single sign-on.",
+      code: "sso_required",
+    }));
+    state.session = { id: "same-sub", email: "guy@acme.com" };
+    state.dbUser = {
+      id: "user-1",
+      email: "guy@acme.com",
+      externalAuthId: "same-sub",
+    };
+
+    const res = await app.request("/");
+    expect(res.status).toBe(401);
+    const body = (await res.json()) as { error: string; code: string };
+    expect(body.code).toBe("sso_required");
+    expect(body.error).toContain("single sign-on");
+    // Placement proof: the upsert already ran — enforcement is post-identity,
+    // pre-project.
+    expect(state.upserts).toHaveLength(1);
+  });
+
+  it("an allowing enforcer leaves the session untouched", async () => {
+    const seen: string[] = [];
+    initSessionEnforcer(async (_session, user) => {
+      seen.push(user.id);
+      return null;
+    });
+    state.session = { id: "same-sub", email: "guy@acme.com" };
+    state.dbUser = {
+      id: "user-1",
+      email: "guy@acme.com",
+      externalAuthId: "same-sub",
+    };
+
+    const res = await app.request("/");
+    expect(res.status).toBe(200);
+    expect(seen).toEqual(["user-1"]);
   });
 });

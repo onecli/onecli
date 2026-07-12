@@ -78,6 +78,7 @@ export const authenticateApiKey = async (
         userEmail,
         projectId: project.id,
         organizationId: apiKey.organizationId,
+        scope: "organization",
       };
     }
 
@@ -86,6 +87,7 @@ export const authenticateApiKey = async (
       userEmail,
       projectId: undefined,
       organizationId: apiKey.organizationId,
+      scope: "organization",
     };
   }
 
@@ -98,13 +100,14 @@ export const authenticateApiKey = async (
 
   const project = await db.project.findUnique({
     where: { id: apiKey.projectId },
-    select: { createdByUserId: true, organizationId: true },
+    select: { id: true, organizationId: true },
   });
   if (!project) return "invalid-key";
 
   // Re-check access at request time: the key authenticates only while its user
-  // still has access to the project (creator, or org admin/owner). OSS is a
-  // no-op (single-user, no role resolver). Mirrors resolveProjectId.
+  // still has access to the project (org admin/owner, or a ProjectAccess binding
+  // — the creator arm was dropped in step 13b). OSS is a no-op (single-user, no
+  // role resolver). Mirrors resolveProjectId.
   if (!(await canAccessProjectAsUser(apiKey.userId, project)))
     return "invalid-key";
 
@@ -115,5 +118,6 @@ export const authenticateApiKey = async (
     userEmail,
     projectId: apiKey.projectId,
     organizationId: project.organizationId,
+    scope: "project",
   };
 };

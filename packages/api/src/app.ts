@@ -1,6 +1,7 @@
 import { Hono } from "hono";
 import type {
   SessionProvider,
+  SessionEnforcer,
   OAuthOrgHandlers,
   OrgAppConfigProvider,
   ConnectionHooks,
@@ -23,6 +24,7 @@ import {
   initResourceHooks,
   initSelfUrl,
   initRoleResolver,
+  initSessionEnforcer,
   initPolicyValidator,
   initRuleActionGate,
   initStrictApiKeyAuth,
@@ -61,6 +63,12 @@ export interface CreateApiAppOptions {
   resourceHooks?: ResourceHooks;
   selfUrl?: string;
   roleResolver?: RoleResolver;
+  /**
+   * Edition policy over authenticated sessions (e.g. enterprise "require
+   * SSO"): consulted at session resolution; a denial rejects with 401 + the
+   * denial body. OSS never sets it — sessions are always allowed.
+   */
+  sessionEnforcer?: SessionEnforcer;
   policyValidator?: PolicyValidator;
   ruleActionGate?: RuleActionGate;
   sessionHooks?: Partial<SessionHooks>;
@@ -91,6 +99,7 @@ export const createApiApp = (
   if (options?.resourceHooks) initResourceHooks(options.resourceHooks);
   if (options?.selfUrl) initSelfUrl(options.selfUrl);
   if (options?.roleResolver) initRoleResolver(options.roleResolver);
+  if (options?.sessionEnforcer) initSessionEnforcer(options.sessionEnforcer);
   if (options?.policyValidator) initPolicyValidator(options.policyValidator);
   if (options?.ruleActionGate) initRuleActionGate(options.ruleActionGate);
   if (options?.sessionHooks) initSessionHooks(options.sessionHooks);

@@ -38,11 +38,18 @@ pub const fn edition() -> Edition {
 #[derive(Debug, Clone, Copy)]
 pub struct Capabilities {
     pub edition: Edition,
+    /// Whether demo-mode hard caps are baked in (the `demo` Cargo feature).
+    /// Orthogonal to `edition` — only ever combined with `onprem-slim` to build
+    /// the `slim-poc` image. A runtime env var cannot change it.
+    pub demo: bool,
 }
 
 /// Capabilities for the current build edition.
 pub const fn capabilities() -> Capabilities {
-    Capabilities { edition: edition() }
+    Capabilities {
+        edition: edition(),
+        demo: cfg!(demo_enabled),
+    }
 }
 
 #[cfg(test)]
@@ -59,5 +66,10 @@ mod tests {
         assert_eq!(edition(), Edition::OnpremSlim);
         #[cfg(edition_onprem_full)]
         assert_eq!(edition(), Edition::OnpremFull);
+    }
+
+    #[test]
+    fn demo_matches_build() {
+        assert_eq!(capabilities().demo, cfg!(demo_enabled));
     }
 }

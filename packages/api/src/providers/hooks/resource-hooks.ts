@@ -1,5 +1,5 @@
 export interface ResourceHooks {
-  beforeCreateAgent(organizationId: string): Promise<void>;
+  beforeCreateAgent(organizationId: string, projectId: string): Promise<void>;
   beforeCreateSecret(organizationId: string): Promise<void>;
 }
 
