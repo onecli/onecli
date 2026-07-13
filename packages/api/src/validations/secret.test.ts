@@ -8,6 +8,7 @@ import {
   isPathRegexInjection,
   isPathSafeValue,
   isPathTemplateInjection,
+  isValidAwsValueJson,
   wildcardCoversPublicSuffix,
 } from "./secret";
 
@@ -105,6 +106,62 @@ describe("path injection config validation", () => {
     ],
   ])("rejects %s", (_name, config) => {
     expect(acceptsConfig(config)).toBe(false);
+  });
+});
+
+const awsSecret = (over: Record<string, unknown> = {}) =>
+  createSecretSchema.safeParse({
+    name: "Hetzner bucket",
+    type: "aws",
+    hostPattern: "nbg1.your-objectstorage.com",
+    value: JSON.stringify({ accessKeyId: "AKIA", secretAccessKey: "secret" }),
+    injectionConfig: { region: "eu-central-1", service: "s3" },
+    ...over,
+  }).success;
+
+describe("aws secret validation", () => {
+  it("accepts JSON keys plus a region", () => {
+    expect(awsSecret()).toBe(true);
+  });
+
+  it("accepts an omitted service (defaults to s3 at signing time)", () => {
+    expect(awsSecret({ injectionConfig: { region: "us-east-1" } })).toBe(true);
+  });
+
+  it("rejects a missing region", () => {
+    expect(awsSecret({ injectionConfig: {} })).toBe(false);
+    expect(awsSecret({ injectionConfig: undefined })).toBe(false);
+  });
+
+  it("rejects a value that isn't JSON with both keys", () => {
+    expect(awsSecret({ value: "not json" })).toBe(false);
+    expect(awsSecret({ value: JSON.stringify({ accessKeyId: "AKIA" }) })).toBe(
+      false,
+    );
+  });
+});
+
+// The create schema and updateSecret both gate an aws value through this, so a
+// value that survives create can't slip past an update (the original gap).
+describe("isValidAwsValueJson", () => {
+  it("accepts JSON with both non-empty keys", () => {
+    expect(
+      isValidAwsValueJson(
+        JSON.stringify({ accessKeyId: "AKIA", secretAccessKey: "secret" }),
+      ),
+    ).toBe(true);
+  });
+
+  it.each([
+    ["not JSON", "AKIAsecret"],
+    ["only accessKeyId", JSON.stringify({ accessKeyId: "AKIA" })],
+    [
+      "empty secret",
+      JSON.stringify({ accessKeyId: "AKIA", secretAccessKey: "" }),
+    ],
+    ["empty object", "{}"],
+  ])("rejects %s", (_name, value) => {
+    expect(isValidAwsValueJson(value)).toBe(false);
   });
 });
 

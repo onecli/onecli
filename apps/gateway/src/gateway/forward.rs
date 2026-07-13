@@ -589,10 +589,19 @@ pub(crate) async fn forward_request(
     let forward_body = hooks::prepare_request_body(rules, host, forward_body).await;
 
     // ── Provider-specific request signing ─────────────────────────
+    // Resolution order: connection finalizer, then host-based lookup (AWS
+    // hosts), then secret-injected AWS credential headers. The last case lets
+    // an `aws`-type secret sign requests to S3-compatible endpoints on any
+    // host; `finalize_request` is a no-op when the headers are absent, so this
+    // never affects non-AWS traffic.
     let forward_body = match rules
         .finalizer
         .or_else(|| crate::apps::finalizer_for_host(host.split(':').next().unwrap_or(host)))
-    {
+        .or_else(|| {
+            headers
+                .contains_key("x-onecli-aws-access-key-id")
+                .then_some(crate::apps::RequestFinalizer::AwsSigV4)
+        }) {
         Some(crate::apps::RequestFinalizer::AwsSigV4) => {
             super::finalizers::aws_sigv4::finalize_request(
                 host,

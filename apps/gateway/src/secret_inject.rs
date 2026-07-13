@@ -86,6 +86,76 @@ pub(crate) fn build_injections(
             }
         }
 
+        "aws" => {
+            // Value is JSON: { accessKeyId, secretAccessKey, sessionToken? }.
+            // injectionConfig carries { region, service? } (service defaults to
+            // "s3"). We emit the internal x-onecli-aws-* headers the SigV4
+            // finalizer consumes; the explicit service header lets it sign for
+            // S3-compatible endpoints (Hetzner, R2, B2, MinIO) whose hostnames
+            // can't be parsed like AWS's.
+            let creds: serde_json::Value = match serde_json::from_str(decrypted_value) {
+                Ok(v) => v,
+                Err(e) => {
+                    warn!(error = %e, "aws secret: failed to parse value JSON");
+                    return vec![];
+                }
+            };
+            let access_key_id = creds
+                .get("accessKeyId")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let secret_access_key = creds
+                .get("secretAccessKey")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            if access_key_id.is_empty() || secret_access_key.is_empty() {
+                warn!("aws secret: missing accessKeyId or secretAccessKey");
+                return vec![];
+            }
+
+            let config = injection_config.and_then(|v| v.as_object());
+            let region = config
+                .and_then(|c| c.get("region"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            if region.is_empty() {
+                warn!("aws secret: missing region in injectionConfig");
+                return vec![];
+            }
+            let service = config
+                .and_then(|c| c.get("service"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("s3");
+
+            let mut injections = vec![
+                Injection::SetHeader {
+                    name: "x-onecli-aws-access-key-id".to_string(),
+                    value: access_key_id.to_string(),
+                },
+                Injection::SetHeader {
+                    name: "x-onecli-aws-secret-access-key".to_string(),
+                    value: secret_access_key.to_string(),
+                },
+                Injection::SetHeader {
+                    name: "x-onecli-aws-region".to_string(),
+                    value: region.to_string(),
+                },
+                Injection::SetHeader {
+                    name: "x-onecli-aws-service".to_string(),
+                    value: service.to_string(),
+                },
+            ];
+            if let Some(token) = creds.get("sessionToken").and_then(|v| v.as_str()) {
+                if !token.is_empty() {
+                    injections.push(Injection::SetHeader {
+                        name: "x-onecli-aws-session-token".to_string(),
+                        value: token.to_string(),
+                    });
+                }
+            }
+            injections
+        }
+
         "generic" => {
             let config = injection_config.and_then(|v| v.as_object());
 
@@ -253,6 +323,58 @@ async fn refresh_openai_oauth_token(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── build_injections: aws ──────────────────────────────────────────
+
+    #[test]
+    fn build_injections_aws_s3_compatible() {
+        let value = r#"{"accessKeyId":"AKIA...","secretAccessKey":"secret..."}"#;
+        let config = serde_json::json!({ "region": "eu-central-1", "service": "s3" });
+        let injections = build_injections("aws", value, Some(&config), None);
+        assert_eq!(injections.len(), 4);
+        assert_eq!(
+            injections[0],
+            Injection::SetHeader {
+                name: "x-onecli-aws-access-key-id".to_string(),
+                value: "AKIA...".to_string(),
+            }
+        );
+        assert_eq!(
+            injections[3],
+            Injection::SetHeader {
+                name: "x-onecli-aws-service".to_string(),
+                value: "s3".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn build_injections_aws_defaults_service_and_includes_session_token() {
+        let value = r#"{"accessKeyId":"A","secretAccessKey":"S","sessionToken":"T"}"#;
+        let config = serde_json::json!({ "region": "us-east-1" });
+        let injections = build_injections("aws", value, Some(&config), None);
+        assert!(injections.contains(&Injection::SetHeader {
+            name: "x-onecli-aws-service".to_string(),
+            value: "s3".to_string(),
+        }));
+        assert!(injections.contains(&Injection::SetHeader {
+            name: "x-onecli-aws-session-token".to_string(),
+            value: "T".to_string(),
+        }));
+    }
+
+    #[test]
+    fn build_injections_aws_missing_region_is_rejected() {
+        let value = r#"{"accessKeyId":"A","secretAccessKey":"S"}"#;
+        assert!(build_injections("aws", value, None, None).is_empty());
+    }
+
+    #[test]
+    fn build_injections_aws_missing_keys_is_rejected() {
+        let config = serde_json::json!({ "region": "us-east-1" });
+        assert!(build_injections("aws", "{}", Some(&config), None).is_empty());
+        assert!(build_injections("aws", "not json", Some(&config), None).is_empty());
+    }
 
     // ── build_injections: anthropic ────────────────────────────────────
 
