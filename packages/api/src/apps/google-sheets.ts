@@ -3,6 +3,7 @@ import {
   buildGoogleAuthUrl,
   exchangeGoogleCode,
   googleConfigFields,
+  googleEnvDefaults,
 } from "./oauth/google";
 
 export const googleSheets: AppDefinition = {
@@ -51,5 +52,6 @@ export const googleSheets: AppDefinition = {
   available: true,
   configurable: {
     fields: googleConfigFields,
+    envDefaults: googleEnvDefaults,
   },
 };

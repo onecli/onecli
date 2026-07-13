@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { Hono } from "hono";
 import type { ApiEnv } from "../types";
 
@@ -46,6 +46,7 @@ vi.mock("@onecli/db", () => ({
 
 import { auth } from "./auth";
 import { initSession } from "../providers/session";
+import { initSessionEnforcer } from "../providers/session-enforcer";
 
 const makeApp = () => {
   const app = new Hono<ApiEnv>();
@@ -120,5 +121,42 @@ describe("auth middleware — scope query-param bridge", () => {
       const res = await makeApp().request(`/echo?_project=${TARGET_PROJECT}`);
       expect(res.status).toBe(401);
     });
+  });
+});
+
+describe("auth middleware — session-enforcer denial", () => {
+  beforeEach(() => {
+    initSession({
+      getSession: async () => ({
+        id: "local-admin",
+        email: "admin@localhost",
+      }),
+    });
+  });
+
+  afterEach(() => {
+    initSessionEnforcer(null);
+  });
+
+  it("maps an enforcer denial to an explicit 401 with the reason + code", async () => {
+    initSessionEnforcer(async () => ({
+      error: "Your organization requires single sign-on.",
+      code: "sso_required",
+    }));
+
+    const res = await makeApp().request("/echo");
+    expect(res.status).toBe(401);
+    const body = (await res.json()) as {
+      error: { message: string; type: string; code?: string };
+    };
+    expect(body.error.code).toBe("sso_required");
+    expect(body.error.message).toContain("single sign-on");
+    expect(body.error.type).toBe("authentication_error");
+  });
+
+  it("an allowing enforcer authenticates normally", async () => {
+    initSessionEnforcer(async () => null);
+    const res = await makeApp().request("/echo");
+    expect(res.status).toBe(200);
   });
 });

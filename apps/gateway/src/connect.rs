@@ -48,7 +48,8 @@ pub(crate) struct ConnectResponse {
     /// a more helpful error ("grant access") instead of "connect the app".
     #[serde(default)]
     pub access_restricted: bool,
-    /// Normalized plan name for quota enforcement ("free", "pro", "team").
+    /// Normalized plan name for quota enforcement ("free", "pro", "team",
+    /// "enterprise").
     #[serde(default)]
     pub plan: String,
     /// Organization policy mode: "allow" (default) or "deny" (block by default).

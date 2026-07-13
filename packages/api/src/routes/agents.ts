@@ -71,7 +71,10 @@ export const agentRoutes = () => {
     // so createAgent returns the canonical 409 instead of a 403 that shadows it
     // at the cap and breaks idempotent ensureAgent. See onecli/node-sdk#40.
     if (!(await agentExistsByIdentifier(projectId, parsed.data.identifier))) {
-      await getResourceHooks().beforeCreateAgent(auth.organizationId);
+      await getResourceHooks().beforeCreateAgent(
+        auth.organizationId,
+        projectId,
+      );
     }
 
     const agent = await createAgent(

@@ -16,6 +16,8 @@ fn main() {
     println!("cargo::rustc-check-cfg=cfg(edition_onprem_slim)");
     println!("cargo::rustc-check-cfg=cfg(edition_onprem_full)");
     println!("cargo::rustc-check-cfg=cfg(edition_conflict)");
+    // Demo mode is an orthogonal build-time flag, not an edition (see below).
+    println!("cargo::rustc-check-cfg=cfg(demo_enabled)");
 
     // (Cargo feature env var, edition cfg). Editions are mutually exclusive; add
     // new ones here with a matching `rerun-if-env-changed` below.
@@ -39,9 +41,18 @@ fn main() {
         _ => println!("cargo::rustc-cfg=edition_conflict"),
     }
 
+    // Demo mode is an orthogonal build-time flag, not an edition: the `demo`
+    // feature bakes the hard caps into the binary (surfaced as
+    // `capabilities().demo`), so a runtime env var cannot lift them. Only
+    // meaningful combined with an onprem edition (the `slim-poc` image).
+    if std::env::var_os("CARGO_FEATURE_DEMO").is_some() {
+        println!("cargo::rustc-cfg=demo_enabled");
+    }
+
     // Re-run only when this script or the edition feature set changes.
     println!("cargo::rerun-if-changed=build.rs");
     println!("cargo::rerun-if-env-changed=CARGO_FEATURE_CLOUD");
     println!("cargo::rerun-if-env-changed=CARGO_FEATURE_ONPREM_SLIM");
     println!("cargo::rerun-if-env-changed=CARGO_FEATURE_ONPREM_FULL");
+    println!("cargo::rerun-if-env-changed=CARGO_FEATURE_DEMO");
 }

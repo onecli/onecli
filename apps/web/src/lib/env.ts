@@ -7,6 +7,10 @@
  *
  * NEXT_PUBLIC_* vars are inlined at build time by Next.js — they work on
  * both client and server as long as the literal string appears in source.
+ *
+ * `NEXT_RUNTIME` is deliberately NOT re-exported here: it must be read as the
+ * literal `process.env.NEXT_RUNTIME` at its call-site so Next.js can inline it
+ * per-runtime and dead-code-eliminate runtime-specific branches.
  */
 
 import { capabilitiesFor, parseEdition } from "@onecli/api/lib/edition";
@@ -128,8 +132,6 @@ export const GATEWAY_CA_PEM_FILE = process.env.GATEWAY_CA_PEM_FILE ?? "";
 export const LOG_LEVEL = process.env.LOG_LEVEL ?? "info";
 
 export const NODE_ENV = process.env.NODE_ENV ?? "development";
-
-export const NEXT_RUNTIME = process.env.NEXT_RUNTIME ?? "";
 
 /** User home directory (system). */
 export const HOME = process.env.HOME ?? "";

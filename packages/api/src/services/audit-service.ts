@@ -12,10 +12,12 @@ export const AUDIT_ACTIONS = {
   UPDATE: "update",
   DELETE: "delete",
   REGENERATE: "regenerate",
-  CONNECT: "connect",
   DISCONNECT: "disconnect",
   // EE-only (partner layer): a user claims a partner-created org as its owner.
   CLAIM: "claim",
+  // EE-only (identity): a claimed resource passed its ownership proof
+  // (e.g. an org domain's DNS TXT check).
+  VERIFY: "verify",
 } as const;
 
 export const AUDIT_SERVICES = {
@@ -25,7 +27,6 @@ export const AUDIT_SERVICES = {
   API_KEY: "api-key",
   APP_CONNECTION: "app-connection",
   APP_CONFIG: "app-config",
-  DEPLOYMENT: "deployment",
   PROJECT: "project",
   ORGANIZATION: "organization",
   // EE-only (partner layer)
@@ -35,6 +36,21 @@ export const AUDIT_SERVICES = {
   BUDGET: "budget",
   // EE-only (identity linking): auth-identity relink decisions
   AUTH: "auth",
+  // EE-only (identity): org email domains (claim / verify / remove)
+  DOMAIN: "domain",
+  // EE-only (identity): org SSO/IdP connections
+  SSO_CONNECTION: "sso-connection",
+  // EE-only (identity): org membership rows (e.g. SSO JIT joins)
+  MEMBER: "member",
+  // EE-only (directory): human groups (manual + SCIM-provisioned)
+  GROUP: "group",
+  // EE-only (directory): OneCLI-native agent groups
+  AGENT_GROUP: "agent-group",
+  // EE-only (directory): group→org-role mappings (the mapping config itself;
+  // the member role changes it drives are audited under MEMBER).
+  ROLE_MAPPING: "role-mapping",
+  // EE-only (directory): bearer tokens for the org's SCIM endpoint
+  SCIM_TOKEN: "scim-token",
 } as const;
 
 export const AUDIT_STATUS = {
@@ -47,6 +63,16 @@ export const AUDIT_SOURCE = {
   API: "api",
   // EE-only (partner layer): actions performed via the Partner API/portal.
   PARTNER: "partner",
+  // EE-only (identity): state created by an SSO login itself (JIT joins,
+  // connection activation) rather than by an interactive admin action.
+  SSO_JIT: "sso-jit",
+  // EE-only (identity): a group→role mapping re-applied at SSO login (step 15) —
+  // distinct from SSO_JIT (a first-time join) since it re-resolves an existing
+  // member's role.
+  SSO_LOGIN: "sso-login",
+  // EE-only (directory): writes pushed by the customer's IdP through the
+  // SCIM endpoint (attributed to the org owner — SCIM has no acting user).
+  SCIM: "scim",
 } as const;
 
 // ─── Types (derived from constants) ───────────────────────────────────────────

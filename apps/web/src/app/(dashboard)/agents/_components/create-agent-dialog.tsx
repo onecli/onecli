@@ -17,6 +17,10 @@ import { Label } from "@onecli/ui/components/label";
 import { cn } from "@onecli/ui/lib/utils";
 import { useCopyToClipboard } from "@/hooks/use-copy-to-clipboard";
 import { useCreateAgent } from "@/hooks/use-agents";
+import {
+  AgentGroupField,
+  assignAgentToGroup,
+} from "@/lib/components/agent-group-field";
 import { validateDisplayName } from "@onecli/api/validations/display-name";
 
 interface CreateAgentDialogProps {
@@ -43,6 +47,7 @@ export const CreateAgentDialog = ({
   const [createdIdentifier, setCreatedIdentifier] = useState<string | null>(
     null,
   );
+  const [groupId, setGroupId] = useState<string | null>(null);
   const { copied, copy } = useCopyToClipboard();
   const createAgent = useCreateAgent();
 
@@ -72,6 +77,13 @@ export const CreateAgentDialog = ({
         onSuccess: (agent) => {
           setCreatedIdentifier(agent.identifier);
           toast.success("Agent created");
+          // Group assignment is best-effort: the agent exists either way
+          // (no-op in editions without agent groups).
+          if (groupId) {
+            void assignAgentToGroup(agent.id, groupId).catch(() =>
+              toast.error("Agent created, but adding it to the group failed"),
+            );
+          }
         },
       },
     );
@@ -84,6 +96,7 @@ export const CreateAgentDialog = ({
       setIdentifier("");
       setIdentifierTouched(false);
       setCreatedIdentifier(null);
+      setGroupId(null);
     }
     onOpenChange(value);
   };
@@ -181,6 +194,7 @@ export const CreateAgentDialog = ({
                     : "Used to select this agent in the SDK. Lowercase letters, numbers, and hyphens."}
                 </p>
               </div>
+              <AgentGroupField value={groupId} onChange={setGroupId} />
             </div>
             <DialogFooter>
               <Button variant="ghost" onClick={() => handleClose(false)}>

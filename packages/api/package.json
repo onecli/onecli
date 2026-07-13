@@ -23,16 +23,19 @@
     "./ee/apps/app-permissions/*": "./src/ee/apps/app-permissions/*.ts",
     "./ee/auth/*": "./src/ee/auth/*.ts",
     "./ee/partner/*": "./src/ee/partner/*.ts",
-    "./ee/granular-access": "./src/ee/granular-access/index.ts"
+    "./ee/granular-access": "./src/ee/granular-access/index.ts",
+    "./ee/scim": "./src/ee/scim/index.ts"
   },
   "scripts": {
     "check-types": "tsc --noEmit",
     "lint": "eslint --max-warnings 0",
     "lint:fix": "eslint --fix --max-warnings 0",
-    "test": "vitest run"
+    "test": "vitest run",
+    "test:scim": "vitest run src/ee/scim src/ee/services/org-directory-service.test.ts src/ee/routes/org-scim-tokens.test.ts"
   },
   "dependencies": {
     "@1password/sdk": "^0.4.0",
+    "@aws-sdk/client-cognito-identity-provider": "^3.1014.0",
     "@aws-sdk/client-kms": "^3.1014.0",
     "@aws-sdk/client-secrets-manager": "^3.1014.0",
     "@onecli/db": "workspace:*",

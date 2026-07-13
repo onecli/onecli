@@ -162,6 +162,10 @@ describe("joinSharedOrganization", () => {
     expect(project.organizationId).toBe(organization.id);
     expect(store.members).toHaveLength(1);
     expect(store.projects).toHaveLength(1);
+    // The creator's ProjectAccess binding is seeded owner (step 13c) with the project.
+    expect(
+      (store.projects[0] as { accessBindings?: unknown }).accessBindings,
+    ).toEqual({ create: { userId: "user-aaaaaaaa", role: "owner" } });
   });
 
   it("puts a second user in the SAME org with a distinct project", async () => {

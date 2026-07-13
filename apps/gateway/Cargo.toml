@@ -98,6 +98,13 @@ cloud = ["kms", "aws-sts", "redis-cache"]
 onprem-slim = []
 onprem-full = []
 
+# Demo mode — an orthogonal build-time flag, not an edition. Bakes the hard
+# caps (10 projects/org, 10 agents/project) into the binary for the `slim-poc`
+# image; only ever combined with `onprem-slim`. build.rs maps it to a
+# `demo_enabled` cfg surfaced as `capabilities().demo`, so tweaking a runtime
+# env var cannot lift the limits.
+demo = []
+
 # Capability features — enabled via an edition bundle; each pulls its optional
 # deps. The union under `cloud` is the same 4 deps as before (aws-sdk-kms,
 # aws-config, aws-sdk-sts, redis), so the cloud binary is unchanged.

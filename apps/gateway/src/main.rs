@@ -188,6 +188,7 @@ async fn main() -> Result<()> {
     info!(
         data_dir = %data_dir.display(),
         edition = ?caps.edition,
+        demo = caps.demo,
         "starting onecli-gateway"
     );
 

@@ -5,6 +5,8 @@ export {
   type SessionUser,
   type SessionProvider,
   type RoleResolver,
+  type SessionDenial,
+  type SessionEnforcer,
   type OAuthOrgHandlers,
   type OrgAppConfigProvider,
   type CryptoService,
@@ -19,6 +21,7 @@ export { initOrgAppConfig, getOrgAppConfig } from "./org-app-config";
 export { initStrictApiKeyAuth, getStrictApiKeyAuth } from "./strict-api-keys";
 export { initSelfUrl, getSelfUrl } from "./self-url";
 export { initRoleResolver, getRoleResolver } from "./role-resolver";
+export { initSessionEnforcer, getSessionEnforcer } from "./session-enforcer";
 export {
   type ResourceHooks,
   initResourceHooks,

@@ -24,6 +24,48 @@ export const queryKeys = {
     list: (pageScope: PageScope = "project") =>
       [...queryKeys.rules.all(), "list", pageScope] as const,
   },
+  domains: {
+    all: () => ["domains", ...scope()] as const,
+    list: () => [...queryKeys.domains.all(), "list"] as const,
+  },
+  groups: {
+    all: () => ["groups", ...scope()] as const,
+    list: () => [...queryKeys.groups.all(), "list"] as const,
+    members: (groupId: string) =>
+      [...queryKeys.groups.all(), groupId, "members"] as const,
+  },
+  agentGroups: {
+    all: () => ["agent-groups", ...scope()] as const,
+    list: () => [...queryKeys.agentGroups.all(), "list"] as const,
+    members: (groupId: string) =>
+      [...queryKeys.agentGroups.all(), groupId, "members"] as const,
+    forAgent: (agentId: string) =>
+      [...queryKeys.agentGroups.all(), "agent", agentId] as const,
+  },
+  roleMappings: {
+    all: () => ["role-mappings", ...scope()] as const,
+    list: () => [...queryKeys.roleMappings.all(), "list"] as const,
+  },
+  orgMembers: {
+    all: () => ["org-members", ...scope()] as const,
+    list: () => [...queryKeys.orgMembers.all(), "list"] as const,
+  },
+  orgAgents: {
+    all: () => ["org-agents", ...scope()] as const,
+    list: () => [...queryKeys.orgAgents.all(), "list"] as const,
+  },
+  ssoConnections: {
+    all: () => ["sso-connections", ...scope()] as const,
+    list: () => [...queryKeys.ssoConnections.all(), "list"] as const,
+  },
+  ssoEnforcement: {
+    all: () => ["sso-enforcement", ...scope()] as const,
+    get: () => [...queryKeys.ssoEnforcement.all(), "get"] as const,
+  },
+  scimTokens: {
+    all: () => ["scim-tokens", ...scope()] as const,
+    list: () => [...queryKeys.scimTokens.all(), "list"] as const,
+  },
   connections: {
     all: () => ["connections", ...scope()] as const,
     list: (pageScope: PageScope = "project") =>
@@ -32,6 +74,11 @@ export const queryKeys = {
       [...queryKeys.connections.all(), "provider", provider] as const,
     agents: (connectionId: string) =>
       [...queryKeys.connections.all(), connectionId, "agents"] as const,
+  },
+  projectAccess: {
+    all: () => ["project-access", ...scope()] as const,
+    list: (projectId: string) =>
+      [...queryKeys.projectAccess.all(), projectId] as const,
   },
   appPermissionDefinitions: {
     // Global static catalog (identical across orgs/projects) — deliberately
@@ -73,12 +120,11 @@ export const queryKeys = {
   },
   billing: {
     all: () => ["billing", ...scope()] as const,
-    agentCost: () => [...queryKeys.billing.all(), "agentCost"] as const,
     planUsage: () => [...queryKeys.billing.all(), "planUsage"] as const,
     subscriptionStatus: () =>
       [...queryKeys.billing.all(), "subscriptionStatus"] as const,
-    prorationPreview: (plan: string) =>
-      [...queryKeys.billing.all(), "prorationPreview", plan] as const,
+    prorationPreview: (plan: string, interval: string) =>
+      [...queryKeys.billing.all(), "prorationPreview", plan, interval] as const,
   },
   dropbox: {
     all: () => ["dropbox", ...scope()] as const,

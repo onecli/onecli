@@ -1,4 +1,4 @@
-import { NEXT_RUNTIME, NODE_ENV, LOG_LEVEL, CAPS } from "@/lib/env";
+import { NODE_ENV, LOG_LEVEL, CAPS } from "@/lib/env";
 
 /**
  * Next.js instrumentation hook — runs once when the server starts.
@@ -12,7 +12,11 @@ import { NEXT_RUNTIME, NODE_ENV, LOG_LEVEL, CAPS } from "@/lib/env";
  * our explicit logger calls, and Next.js dev output stays readable).
  */
 export async function register() {
-  if (NEXT_RUNTIME === "nodejs" && NODE_ENV === "production") {
+  // NEXT_RUNTIME is read literally (not via @/lib/env) so Next.js can inline it
+  // per-runtime and the Edge compile drops this whole Node-only branch — via the
+  // env re-export the branch survives DCE and the dynamic imports below get
+  // traced into node:crypto/node:fs, warning on every Edge build.
+  if (process.env.NEXT_RUNTIME === "nodejs" && NODE_ENV === "production") {
     const pino = (await import("pino")).default;
     const logger = pino({
       level: LOG_LEVEL,

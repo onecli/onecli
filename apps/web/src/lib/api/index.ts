@@ -2,6 +2,17 @@ import * as agents from "./agents";
 import * as secrets from "./secrets";
 import * as rules from "./rules";
 import * as connections from "./connections";
+import * as projects from "./projects";
+import * as projectAccess from "./project-access";
+import * as domains from "./domains";
+import * as orgMembers from "./org-members";
+import * as groups from "./groups";
+import * as agentGroups from "./agent-groups";
+import * as roleMappings from "./role-mappings";
+import * as orgAgents from "./org-agents";
+import * as ssoConnections from "./sso-connections";
+import * as ssoEnforcement from "./sso-enforcement";
+import * as scimTokens from "./scim-tokens";
 import * as counts from "./counts";
 import * as appBlocklist from "./app-blocklist";
 import * as appConfig from "./app-config";
@@ -14,6 +25,17 @@ export {
   secrets,
   rules,
   connections,
+  projects,
+  projectAccess,
+  domains,
+  orgMembers,
+  groups,
+  agentGroups,
+  roleMappings,
+  orgAgents,
+  ssoConnections,
+  ssoEnforcement,
+  scimTokens,
   counts,
   appBlocklist,
   appConfig,
@@ -30,6 +52,33 @@ export type {
   Connection,
   ConnectionAgentAccess,
   ConnectionAccessLevel,
+  Project,
+  ProjectAccessBindings,
+  ProjectAccessUserRow,
+  ProjectAccessGroupRow,
+  SetProjectAccessInput,
+  OrgDomain,
+  OrgSsoEnforcement,
+  OrgMemberRow,
+  UpdateOrgMemberInput,
+  DirectoryPage,
+  DirectoryListParams,
+  GroupRow,
+  GroupMemberRow,
+  RoleMappingRow,
+  CreateRoleMappingInput,
+  UpdateRoleMappingInput,
+  RoleMappingImpact,
+  AgentGroupRow,
+  AgentGroupMemberRow,
+  OrgAgentRow,
+  OrgMemberListRow,
+  OrgSsoConnection,
+  SsoTestResult,
+  CreateSsoConnectionInput,
+  UpdateSsoConnectionInput,
+  ScimToken,
+  CreatedScimToken,
   ResourceCounts,
   CreateAgentInput,
   CreateSecretInput,
