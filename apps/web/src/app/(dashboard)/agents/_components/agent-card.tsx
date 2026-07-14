@@ -8,6 +8,10 @@ import {
   KeyRound,
   Pencil,
   Star,
+  Eye,
+  EyeOff,
+  Copy,
+  Check,
 } from "lucide-react";
 import { Card } from "@onecli/ui/components/card";
 import { Button } from "@onecli/ui/components/button";
@@ -34,6 +38,7 @@ import {
 import {
   Dialog,
   DialogContent,
+  DialogDescription,
   DialogFooter,
   DialogHeader,
   DialogTitle,
@@ -49,6 +54,7 @@ import {
   useRenameAgent,
   useSetDefaultAgent,
 } from "@/hooks/use-agents";
+import { useCopyToClipboard } from "@/hooks/use-copy-to-clipboard";
 import type { SecretMode } from "@onecli/api/services/agent-service";
 import { ManageAccessDialog } from "./manage-access-dialog";
 
@@ -79,8 +85,28 @@ export const AgentCard = ({ agent, autoOpenAccess }: AgentCardProps) => {
   const [secretsDialogOpen, setSecretsDialogOpen] = useState(
     autoOpenAccess ?? false,
   );
+  const [tokenDialogOpen, setTokenDialogOpen] = useState(false);
+  // The token shown in the dialog: the agent's current token when revealing, or
+  // the freshly minted one after a rotate (only returned to the client once).
+  const [revealedToken, setRevealedToken] = useState(agent.accessToken);
+  const [tokenIsNew, setTokenIsNew] = useState(false);
+  const [showToken, setShowToken] = useState(false);
+  const { copied, copy } = useCopyToClipboard();
 
-  const handleRegenerate = () => regenerateMutation.mutate(agent.id);
+  const openTokenDialog = (token: string, isNew: boolean) => {
+    setRevealedToken(token);
+    setTokenIsNew(isNew);
+    setShowToken(false);
+    setTokenDialogOpen(true);
+  };
+
+  const handleRegenerate = () =>
+    regenerateMutation.mutate(agent.id, {
+      onSuccess: (data) => {
+        setRotateDialogOpen(false);
+        openTokenDialog(data.accessToken, true);
+      },
+    });
 
   const handleDelete = () => deleteMutation.mutate(agent.id);
 
@@ -154,6 +180,12 @@ export const AgentCard = ({ agent, autoOpenAccess }: AgentCardProps) => {
             <DropdownMenuItem onSelect={() => setSecretsDialogOpen(true)}>
               <KeyRound className="size-4" />
               Manage access
+            </DropdownMenuItem>
+            <DropdownMenuItem
+              onSelect={() => openTokenDialog(agent.accessToken, false)}
+            >
+              <Eye className="size-4" />
+              Show access token
             </DropdownMenuItem>
             <DropdownMenuItem onSelect={() => setRotateDialogOpen(true)}>
               <RotateCw className="size-4" />
@@ -298,6 +330,69 @@ export const AgentCard = ({ agent, autoOpenAccess }: AgentCardProps) => {
         open={secretsDialogOpen}
         onOpenChange={setSecretsDialogOpen}
       />
+
+      <Dialog
+        open={tokenDialogOpen}
+        onOpenChange={(value) => {
+          setTokenDialogOpen(value);
+          if (!value) setShowToken(false);
+        }}
+      >
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>
+              {tokenIsNew ? "Token rotated" : "Access token"}
+            </DialogTitle>
+            <DialogDescription>
+              {tokenIsNew
+                ? "Copy your new token now. The previous token no longer works."
+                : "Treat this like a password — anyone with it can act as this agent."}
+            </DialogDescription>
+          </DialogHeader>
+          <div className="py-2">
+            <div className="bg-muted flex items-center justify-between gap-3 rounded-lg border px-4 py-3">
+              <code className="min-w-0 break-all font-mono text-sm font-medium">
+                {showToken
+                  ? revealedToken
+                  : `${revealedToken.slice(0, 4)}${"•".repeat(40)}`}
+              </code>
+              <div className="flex shrink-0 items-center gap-1">
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  className="size-7"
+                  onClick={() => setShowToken((v) => !v)}
+                  aria-label={showToken ? "Hide token" : "Show token"}
+                >
+                  {showToken ? (
+                    <EyeOff className="size-3.5" />
+                  ) : (
+                    <Eye className="size-3.5" />
+                  )}
+                </Button>
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  className="size-7"
+                  onClick={() => copy(revealedToken)}
+                  aria-label="Copy token"
+                >
+                  {copied ? (
+                    <Check className="size-3.5 text-brand" />
+                  ) : (
+                    <Copy className="size-3.5" />
+                  )}
+                </Button>
+              </div>
+            </div>
+          </div>
+          <DialogFooter>
+            <Button onClick={() => setTokenDialogOpen(false)} className="w-full">
+              Done
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </Card>
   );
 };
