@@ -178,6 +178,10 @@ pub(crate) struct PolicyEngine {
     /// The same `Arc` is also registered as a `VaultService` provider (where it
     /// acts only as a connection holder — it never races on hostname).
     pub onepassword: Arc<OnePasswordVaultProvider>,
+    /// Shared cache for SA token caching and other in-flight state. The same
+    /// `Arc` backs the top-level connect-response cache; holding it here lets
+    /// `resolve_secret_injections` cache SA access tokens with their own TTL.
+    pub cache: Arc<dyn CacheStore>,
 }
 
 impl PolicyEngine {
@@ -288,6 +292,20 @@ impl PolicyEngine {
 
         let mut rules = Vec::with_capacity(matching.len());
         for secret in &matching {
+            // Guard: never inject SA credentials on the token exchange endpoint.
+            // This prevents circular injection if a user sets a broad hostPattern
+            // (e.g. `*.googleapis.com`).
+            if secret.type_ == "google_service_account" {
+                let h = hostname.split(':').next().unwrap_or(hostname);
+                if h == "oauth2.googleapis.com" {
+                    debug!(
+                        secret_id = %secret.id,
+                        "skipping google_service_account injection for oauth2.googleapis.com"
+                    );
+                    continue;
+                }
+            }
+
             // Resolve the value from its source (inline column or live 1Password
             // reference); a failure skips the secret, exactly as a decrypt
             // failure always has.
@@ -306,6 +324,8 @@ impl PolicyEngine {
                     .and_then(|v| v.as_str())
                     == Some("oauth");
 
+            let is_google_sa = secret.type_ == "google_service_account";
+
             let effective_value = if is_openai_oauth {
                 match secret_inject::refresh_openai_oauth_if_expired(
                     &self.crypto,
@@ -317,6 +337,18 @@ impl PolicyEngine {
                 {
                     Some(refreshed) => refreshed,
                     None => value,
+                }
+            } else if is_google_sa {
+                // Resolve SA JSON → access token via JWT exchange + cache.
+                match secret_inject::resolve_google_sa_token(
+                    self.cache.as_ref(),
+                    &value,
+                    &secret.id,
+                )
+                .await
+                {
+                    Some(token) => token,
+                    None => continue,
                 }
             } else {
                 value

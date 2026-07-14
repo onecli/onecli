@@ -46,6 +46,7 @@ import { useOnePasswordReady } from "@/hooks/use-onepassword-picker";
 import { validateDisplayName } from "@onecli/api/validations/display-name";
 import {
   type InjectionConfig,
+  GOOGLE_SA_DEFAULT_HOST,
   detectAnthropicAuthMode,
   isHeaderInjection,
   isParamInjection,
@@ -53,10 +54,11 @@ import {
   isPathTemplateInjection,
   looksLikeAnthropicKey,
   looksLikeOpenaiKey,
+  parseGoogleServiceAccountJson,
   parseOpenaiAuthJson,
 } from "@onecli/api/validations/secret";
 
-type SecretType = "anthropic" | "openai" | "generic";
+type SecretType = "anthropic" | "openai" | "generic" | "google_service_account";
 
 interface SecretTypeOption {
   value: SecretType;
@@ -90,6 +92,20 @@ const OpenAIIcon = ({ className }: { className?: string }) => (
   </svg>
 );
 
+const GoogleIcon = ({ className }: { className?: string }) => (
+  <svg
+    xmlns="http://www.w3.org/2000/svg"
+    viewBox="0 0 24 24"
+    fill="currentColor"
+    className={className}
+  >
+    <path d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92a5.06 5.06 0 0 1-2.2 3.32v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.1z" />
+    <path d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z" />
+    <path d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l2.85-2.22.81-.62z" />
+    <path d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z" />
+  </svg>
+);
+
 const SECRET_TYPE_OPTIONS: SecretTypeOption[] = [
   {
     value: "anthropic",
@@ -107,6 +123,15 @@ const SECRET_TYPE_OPTIONS: SecretTypeOption[] = [
     icon: <OpenAIIcon className="size-5" />,
     hostDefault: "api.openai.com",
     nameDefault: "OpenAI Token",
+  },
+  {
+    value: "google_service_account",
+    label: "Google Service Account",
+    description:
+      "Inject a Google SA Bearer token into requests to googleapis.com",
+    icon: <GoogleIcon className="size-5" />,
+    hostDefault: GOOGLE_SA_DEFAULT_HOST,
+    nameDefault: "Google Service Account",
   },
   {
     value: "generic",
@@ -224,6 +249,7 @@ export const SecretDialog = ({
   const [type, setType] = useState<SecretType>("anthropic");
   const [openaiMode, setOpenaiMode] = useState<"api-key" | "codex">("api-key");
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const saFileInputRef = useRef<HTMLInputElement>(null);
   const [name, setName] = useState("");
   const [nameTouched, setNameTouched] = useState(false);
   const [value, setValue] = useState("");
@@ -254,6 +280,15 @@ export const SecretDialog = ({
   const fromOnePassword = !!opSelection;
   const isOAuthMode =
     type === "openai" && openaiMode === "codex" && !fromOnePassword;
+
+  const isGoogleSA = type === "google_service_account";
+  const parsedSA = useMemo(
+    () =>
+      isGoogleSA && value.trim()
+        ? parseGoogleServiceAccountJson(value.trim())
+        : null,
+    [isGoogleSA, value],
+  );
 
   const nameError = useMemo(() => validateDisplayName(name), [name]);
   const showNameError = nameTouched && nameError !== null;
@@ -386,6 +421,10 @@ export const SecretDialog = ({
     const option = SECRET_TYPE_OPTIONS.find((o) => o.value === selected);
     setHostPattern(option?.hostDefault ?? "");
     setName(option?.nameDefault ?? "");
+    if (selected === "google_service_account") {
+      setOpSelection(null);
+      setValue("");
+    }
     setStep("form");
   };
 
@@ -403,6 +442,8 @@ export const SecretDialog = ({
         ? paramName.trim().length > 0
         : hasPathTarget);
 
+  const saValueValid = !isGoogleSA || !value.trim() || !!parsedSA;
+
   const pathPreview = useMemo(
     () =>
       injectionTarget === "path"
@@ -412,19 +453,23 @@ export const SecretDialog = ({
   );
 
   const isValid = isEdit
-    ? hostPattern.trim() && !hostPatternError && hasInjectionTarget
+    ? hostPattern.trim() &&
+      !hostPatternError &&
+      hasInjectionTarget &&
+      saValueValid
     : isNameValid &&
-      (fromOnePassword || !!value.trim()) &&
+      ((!isGoogleSA && fromOnePassword) || !!value.trim()) &&
       hostPattern.trim() &&
       !hostPatternError &&
-      hasInjectionTarget;
+      hasInjectionTarget &&
+      saValueValid;
 
   const handleSave = async () => {
     if (!isValid) return;
     setSaving(true);
     try {
       const buildInjectionConfig = () => {
-        if (type !== "generic") return undefined;
+        if (type !== "generic") return null;
         if (injectionTarget === "param") {
           return { paramName, paramFormat: paramFormat || "{value}" };
         }
@@ -532,6 +577,26 @@ export const SecretDialog = ({
     e.target.value = "";
   };
 
+  const handleSaFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = (ev) => {
+      const contents = (ev.target?.result as string)?.trim();
+      if (!contents) return;
+      const sa = parseGoogleServiceAccountJson(contents);
+      if (!sa) {
+        toast.error(
+          'Invalid service account JSON — must contain type "service_account", private_key, and client_email',
+        );
+        return;
+      }
+      setValue(contents);
+    };
+    reader.readAsText(file);
+    e.target.value = "";
+  };
+
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="sm:max-w-lg max-h-[calc(100dvh-2rem)] grid-rows-[auto_1fr_auto]">
@@ -560,7 +625,9 @@ export const SecretDialog = ({
                     ? "Your key will be encrypted and injected into requests to api.anthropic.com."
                     : type === "openai"
                       ? `Inject credentials into requests to ${openaiMode === "codex" ? "chatgpt.com" : "api.openai.com"}.`
-                      : "Configure a custom secret to inject as a header, URL parameter, or URL path into matching requests."}
+                      : isGoogleSA
+                        ? "Upload a service account JSON key. The gateway will sign JWTs and inject Bearer tokens automatically."
+                        : "Configure a custom secret to inject as a header, URL parameter, or URL path into matching requests."}
               </DialogDescription>
               {type === "generic" && !isEdit && !prefill && (
                 <div className="flex items-center gap-2 pt-1">
@@ -749,7 +816,9 @@ export const SecretDialog = ({
 
               <div className="space-y-2">
                 <Label htmlFor="secret-value">
-                  {isOAuthMode ? (
+                  {isGoogleSA ? (
+                    "Service account JSON key"
+                  ) : isOAuthMode ? (
                     <>
                       Token file{" "}
                       <code className="bg-muted text-muted-foreground ml-1 select-all rounded px-1.5 py-0.5 text-xs font-normal">
@@ -761,11 +830,14 @@ export const SecretDialog = ({
                   ) : (
                     "Secret value"
                   )}{" "}
-                  {isEdit && !isOAuthMode && !fromOnePassword && (
-                    <span className="text-muted-foreground font-normal">
-                      (leave empty to keep current)
-                    </span>
-                  )}
+                  {isEdit &&
+                    !isGoogleSA &&
+                    !isOAuthMode &&
+                    !fromOnePassword && (
+                      <span className="text-muted-foreground font-normal">
+                        (leave empty to keep current)
+                      </span>
+                    )}
                 </Label>
 
                 <input
@@ -775,6 +847,13 @@ export const SecretDialog = ({
                   className="hidden"
                   onChange={handleFileUpload}
                 />
+                <input
+                  ref={saFileInputRef}
+                  type="file"
+                  accept=".json,application/json"
+                  className="hidden"
+                  onChange={handleSaFileUpload}
+                />
 
                 {opSelection ? (
                   <OnePasswordSelectedField
@@ -782,6 +861,70 @@ export const SecretDialog = ({
                     onChange={() => setPickerOpen(true)}
                     onClear={() => setOpSelection(null)}
                   />
+                ) : isGoogleSA ? (
+                  <>
+                    <textarea
+                      id="secret-value"
+                      className={cn(
+                        "border-input bg-background placeholder:text-muted-foreground flex min-h-[120px] w-full rounded-md border px-3 py-2 font-mono text-xs shadow-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring",
+                        value.trim() && !parsedSA && "border-destructive",
+                      )}
+                      placeholder="Paste your service account JSON key or upload the .json file..."
+                      value={value}
+                      onChange={(e) => setValue(e.target.value)}
+                    />
+                    <div className="flex items-center gap-2">
+                      <button
+                        type="button"
+                        className="text-muted-foreground hover:text-foreground flex items-center gap-1.5 text-xs transition-colors"
+                        onClick={() => saFileInputRef.current?.click()}
+                      >
+                        <Upload className="size-3" />
+                        Upload .json file
+                      </button>
+                    </div>
+                    {value.trim() && !parsedSA && (
+                      <p className="text-xs text-red-500">
+                        Invalid JSON — must contain{" "}
+                        <code className="text-[11px]">
+                          type: &quot;service_account&quot;
+                        </code>
+                        , <code className="text-[11px]">private_key</code>, and{" "}
+                        <code className="text-[11px]">client_email</code>.
+                      </p>
+                    )}
+                    {parsedSA && (
+                      <div className="bg-muted/40 space-y-1 rounded-md border p-3">
+                        <span className="text-muted-foreground text-[11px] font-medium tracking-wide uppercase">
+                          Detected
+                        </span>
+                        <div className="space-y-0.5 text-xs">
+                          <div>
+                            <span className="text-muted-foreground">
+                              Email:{" "}
+                            </span>
+                            <code className="text-foreground">
+                              {parsedSA.client_email}
+                            </code>
+                          </div>
+                          {parsedSA.project_id && (
+                            <div>
+                              <span className="text-muted-foreground">
+                                Project:{" "}
+                              </span>
+                              <code className="text-foreground">
+                                {parsedSA.project_id}
+                              </code>
+                            </div>
+                          )}
+                        </div>
+                      </div>
+                    )}
+                    <p className="text-muted-foreground text-xs">
+                      MVP: Drive read-only access (drive.readonly). Broader
+                      scopes coming soon.
+                    </p>
+                  </>
                 ) : isOAuthMode ? (
                   <>
                     {value ? (

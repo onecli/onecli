@@ -84,7 +84,7 @@ struct CachedEntry {
 /// Expired entries are evicted lazily on read — no background reaper.
 /// Acceptable for the gateway's bounded key space (one entry per
 /// agent×host pair), but not suitable for unbounded key sets.
-struct InMemoryCacheStore {
+pub(crate) struct InMemoryCacheStore {
     map: DashMap<String, CachedEntry>,
 }
 

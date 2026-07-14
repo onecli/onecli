@@ -220,6 +220,11 @@ async fn main() -> Result<()> {
     let crypto = Arc::new(crypto::CryptoService::from_env().await?);
     info!("crypto service initialized");
 
+    // Initialize cache store (before PolicyEngine — SA token resolution needs it).
+    // OSS: in-memory DashMap. Cloud: Redis (ElastiCache with TLS + AUTH).
+    let cache = cache::create_store().await?;
+    info!("cache store created");
+
     // Build the 1Password provider once and share the Arc: the PolicyEngine
     // resolves `op://` secret values through it, and the VaultService registers
     // it as a provider (connection holder for pair/status/picker).
@@ -232,6 +237,7 @@ async fn main() -> Result<()> {
         pool,
         crypto: Arc::clone(&crypto),
         onepassword: Arc::clone(&onepassword),
+        cache: Arc::clone(&cache),
     });
 
     // Initialize vault service with Bitwarden + 1Password providers.
@@ -245,11 +251,6 @@ async fn main() -> Result<()> {
     let providers: Vec<Arc<dyn VaultProvider>> = vec![Arc::new(bitwarden), onepassword];
     let vault_service = Arc::new(VaultService::new(providers, policy_engine.pool.clone()));
     info!("vault service initialized");
-
-    // Initialize cache store
-    // OSS: in-memory DashMap. Cloud: Redis (ElastiCache with TLS + AUTH).
-    let cache = cache::create_store().await?;
-    info!("cache store created");
 
     // Initialize approval store for manual approval policy action
     // OSS: in-memory DashMap + tokio channels. Cloud: Redis + BLPOP.

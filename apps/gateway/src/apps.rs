@@ -1614,6 +1614,89 @@ pub(crate) async fn refresh_via_service_account(
     Ok((access_token, now + expires_in))
 }
 
+/// JWT claims for Google SA secrets — no `sub` claim (unlike
+/// `ServiceAccountClaims` used by the Vertex AI app-connection path).
+///
+/// The `sub` claim triggers domain-wide delegation. Without DWD configured,
+/// including `sub` causes `invalid_grant` errors. The Vertex AI path
+/// tolerates it because it uses `cloud-platform` scope on GCP projects,
+/// but the generic SA secret type must omit it.
+#[derive(serde::Serialize)]
+struct GoogleSaSecretClaims<'a> {
+    iss: &'a str,
+    aud: &'static str,
+    scope: &'static str,
+    iat: i64,
+    exp: i64,
+}
+
+/// Refresh an access token for a Google SA *secret* (not app-connection).
+///
+/// Differs from `refresh_via_service_account`:
+/// - No `sub` claim (avoids DWD / `invalid_grant` issues)
+/// - Uses `drive.readonly` scope (not `cloud-platform`)
+pub(crate) async fn refresh_google_sa_secret_token(
+    private_key_pem: &str,
+    client_email: &str,
+) -> anyhow::Result<(String, i64)> {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("system clock before UNIX epoch")
+        .as_secs() as i64;
+
+    let claims = GoogleSaSecretClaims {
+        iss: client_email,
+        aud: "https://oauth2.googleapis.com/token",
+        scope: "https://www.googleapis.com/auth/drive.readonly",
+        iat: now,
+        exp: now + 3600,
+    };
+
+    let key = jsonwebtoken::EncodingKey::from_rsa_pem(private_key_pem.as_bytes())
+        .map_err(|e| anyhow::anyhow!("invalid RSA private key: {e}"))?;
+
+    let assertion = jsonwebtoken::encode(
+        &jsonwebtoken::Header::new(jsonwebtoken::Algorithm::RS256),
+        &claims,
+        &key,
+    )
+    .map_err(|e| anyhow::anyhow!("JWT signing failed: {e}"))?;
+
+    let resp = reqwest::Client::new()
+        .post("https://oauth2.googleapis.com/token")
+        .form(&[
+            ("grant_type", "urn:ietf:params:oauth:grant-type:jwt-bearer"),
+            ("assertion", assertion.as_str()),
+        ])
+        .send()
+        .await
+        .map_err(|e| anyhow::anyhow!("service account token request failed: {e}"))?;
+
+    let body: serde_json::Value = resp
+        .json()
+        .await
+        .map_err(|e| anyhow::anyhow!("service account token response parse failed: {e}"))?;
+
+    let access_token = body
+        .get("access_token")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| {
+            let error = body
+                .get("error")
+                .and_then(|v| v.as_str())
+                .unwrap_or("unknown");
+            anyhow::anyhow!("service account token exchange failed: {error}")
+        })?
+        .to_string();
+
+    let expires_in = body
+        .get("expires_in")
+        .and_then(|v| v.as_i64())
+        .unwrap_or(3600);
+
+    Ok((access_token, now + expires_in))
+}
+
 /// Refresh an access token using the OAuth 2.0 client_credentials grant.
 /// Used by providers like MongoDB Atlas Service Accounts that store a
 /// client_id/client_secret pair and exchange them for short-lived Bearer tokens.
