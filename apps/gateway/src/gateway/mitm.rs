@@ -289,8 +289,11 @@ async fn resolve_rules(
     // Granular-access policy of the connection that wins injection (if any).
     let mut session_policy: Option<serde_json::Value> = None;
 
-    // If no secret rules, try app connections (per-request disambiguation)
-    if injection_rules.is_empty() && !resp.app_connections.is_empty() {
+    // Resolve app connections and MERGE with any secret rules. A shared host
+    // (e.g. www.googleapis.com) can carry both an API-key secret (/youtube/*)
+    // and OAuth app connections (/calendar/*, /drive/*); both are path-scoped
+    // and must coexist rather than the secret preempting the OAuth apps.
+    if !resp.app_connections.is_empty() {
         match engine
             .resolve_app_injection_for_request(
                 &resp.app_connections,
@@ -313,7 +316,7 @@ async fn resolve_rules(
                 session_policy: sp,
                 ..
             } => {
-                injection_rules = rules;
+                injection_rules.extend(rules);
                 token_expires_at = exp;
                 rewrite_host = rh;
                 connection_label = cl;

@@ -785,7 +785,7 @@ async fn handle_http_proxy(
     let mut resolved_body_transform: Option<crate::apps::BodyTransform> = None;
     // Granular-access policy of the connection that wins injection (if any).
     let mut resolved_session_policy: Option<serde_json::Value> = None;
-    if resolved.injection_rules.is_empty() && !resolved.app_connections.is_empty() {
+    if !resolved.app_connections.is_empty() {
         let oid = resolved.organization_id.as_deref().unwrap_or("");
         let pid = resolved.project_id.as_deref().unwrap_or("");
         let request_path = req.uri().path_and_query().map(|pq| pq.as_str());
@@ -809,7 +809,7 @@ async fn handle_http_proxy(
                 session_policy,
                 ..
             }) => {
-                resolved.injection_rules = rules;
+                resolved.injection_rules.extend(rules);
                 resolved_finalizer = finalizer;
                 resolved_body_transform = body_transform;
                 resolved_session_policy = session_policy;
