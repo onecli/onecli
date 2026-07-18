@@ -22,7 +22,11 @@ const getSetupError = (): SetupErrorCode | null => {
   if (IS_CLOUD) return null;
 
   // NEXTAUTH_SECRET is set but no login provider (Google or OIDC) is configured
-  const oidcConfigured = OIDC_ISSUER && OIDC_CLIENT_ID && OIDC_CLIENT_SECRET;
+  const oidcConfigured = !!(
+    OIDC_ISSUER &&
+    OIDC_CLIENT_ID &&
+    OIDC_CLIENT_SECRET
+  );
   if (NEXTAUTH_SECRET && !GOOGLE_CLIENT_ID && !oidcConfigured) {
     return "oauth-misconfigured";
   }

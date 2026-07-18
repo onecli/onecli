@@ -59,7 +59,9 @@ if [ -n "$GOOGLE_CLIENT_ID" ]; then
 elif [ -n "$OIDC_ISSUER" ] && [ -n "$OIDC_CLIENT_ID" ] && [ -n "$OIDC_CLIENT_SECRET" ]; then
   OAUTH_CONFIGURED="true"
   AUTH_PROVIDER_ID="oidc"
-  AUTH_PROVIDER_NAME="${OIDC_PROVIDER_NAME:-SSO}"
+  # Escape backslashes and double quotes so the value stays valid inside the
+  # JSON string below (the label is free-form, e.g. Corp "IT" SSO).
+  AUTH_PROVIDER_NAME=$(printf '%s' "${OIDC_PROVIDER_NAME:-SSO}" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g')
 fi
 printf '{"authMode":"%s","oauthConfigured":%s,"authProviderId":"%s","authProviderName":"%s"}\n' "$AUTH_MODE" "$OAUTH_CONFIGURED" "$AUTH_PROVIDER_ID" "$AUTH_PROVIDER_NAME" > /app/data/runtime-config.json
 
