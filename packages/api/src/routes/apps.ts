@@ -21,7 +21,7 @@ import {
   verifyOAuthState,
   generateNonce,
 } from "../lib/oauth-state";
-import { APP_URL, NODE_ENV } from "../lib/env";
+import { NODE_ENV } from "../lib/env";
 import { dashboardUrl } from "../lib/dashboard-url";
 import { getRequestOrigin } from "../lib/request-origin";
 import { buildFragmentBridgeHtml } from "../lib/fragment-bridge";
@@ -432,7 +432,9 @@ export const appRoutes = () => {
   app.get("/:provider/callback", async (c) => {
     const provider = c.req.param("provider")!;
     const apiOrigin = getRequestOrigin(c.req.raw);
-    const appOrigin = APP_URL || apiOrigin;
+    // getRequestOrigin already reads raw APP_URL (undefined when unset) and
+    // falls back to the request-derived origin, so apiOrigin is sufficient.
+    const appOrigin = apiOrigin;
 
     const appDef = getApp(provider);
     if (
