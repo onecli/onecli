@@ -78,6 +78,17 @@ export const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID ?? "";
 
 export const GOOGLE_CLIENT_SECRET = process.env.GOOGLE_CLIENT_SECRET ?? "";
 
+// ── Auth: generic OIDC ──────────────────────────────────────────────────
+
+export const OIDC_ISSUER = process.env.OIDC_ISSUER ?? "";
+
+export const OIDC_CLIENT_ID = process.env.OIDC_CLIENT_ID ?? "";
+
+export const OIDC_CLIENT_SECRET = process.env.OIDC_CLIENT_SECRET ?? "";
+
+/** Label shown on the OIDC login button (e.g. "Okta", "Keycloak"). */
+export const OIDC_PROVIDER_NAME = process.env.OIDC_PROVIDER_NAME ?? "SSO";
+
 // ── Cloud: Cognito ──────────────────────────────────────────────────────
 
 export const COGNITO_CLIENT_ID =
