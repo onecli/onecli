@@ -208,6 +208,12 @@ pub(crate) async fn refresh_openai_oauth_if_expired(
     }
 }
 
+/// Public OAuth client id of the Codex CLI (the app that issued the vaulted
+/// ChatGPT session). auth.openai.com rejects refresh_token grants that omit
+/// `client_id` with 400 "Missing 'client_id'", so it must accompany every
+/// refresh. Not a secret — it is hardcoded in the open-source Codex CLI.
+const OPENAI_CODEX_CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
+
 /// Refresh an OpenAI OAuth access_token using the refresh_token.
 async fn refresh_openai_oauth_token(
     refresh_token: &str,
@@ -216,6 +222,7 @@ async fn refresh_openai_oauth_token(
         .post("https://auth.openai.com/oauth/token")
         .timeout(std::time::Duration::from_secs(10))
         .form(&[
+            ("client_id", OPENAI_CODEX_CLIENT_ID),
             ("grant_type", "refresh_token"),
             ("refresh_token", refresh_token),
         ])
