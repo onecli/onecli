@@ -3,6 +3,8 @@ import { generateApiKey, ensureBootstrapOrgApiKey } from "./api-key-service";
 import { generateAccessToken } from "./agent-service";
 import { DEFAULT_AGENT_NAME, DEFAULT_AGENT_IDENTIFIER } from "../lib/constants";
 import { generateProjectId, generateOrganizationId } from "../lib/ids";
+import { getNewOrgPolicySeeder } from "../providers";
+import { logger } from "../lib/logger";
 
 export const slugify = (raw: string) =>
   raw
@@ -114,6 +116,17 @@ export const bootstrapOrganization = async (
     select: { id: true, organizationId: true },
   });
 
+  // Seed the new org's initial published policy (cloud: a secure-by-default org
+  // Default Rule) so it lands on the new model directly rather than the legacy
+  // read path. Best-effort + inert until POLICY_ENFORCE_V2 flips — a hiccup must
+  // not fail onboarding, and the backfill verifier flags any unseeded org. OSS
+  // default is a no-op.
+  try {
+    await getNewOrgPolicySeeder().seed(org.id, project.id);
+  } catch (err) {
+    logger.warn({ err, organizationId: org.id }, "new-org policy seed failed");
+  }
+
   return { project, organization: org };
 };
 
@@ -174,6 +187,18 @@ export const ensureSharedOrgWithKey = async (
   // ONECLI_ORG_API_KEY / _FILE, else generated). Idempotent — no-ops once seeded.
   await ensureBootstrapOrgApiKey({ organizationId: org.id, userId, userEmail });
 
+  // Seed the shared org's initial published policy (step 9.5 — onprem rides
+  // the EE engine, so a fresh instance starts on v2 directly). Best-effort +
+  // idempotent, like the per-user-org bootstrap above.
+  try {
+    await getNewOrgPolicySeeder().seed(org.id);
+  } catch (err) {
+    logger.warn(
+      { err, organizationId: org.id },
+      "shared-org policy seed failed",
+    );
+  }
+
   return org;
 };
 
@@ -213,6 +238,17 @@ export const joinSharedOrganization = async (
       },
       select: { id: true, organizationId: true },
     });
+    // Seed the new project's initial published policy (step 9.5) — a no-op
+    // for the org-scope EE seeder (idempotent on the org's existing
+    // generation), load-bearing where the seeder is project-scoped.
+    try {
+      await getNewOrgPolicySeeder().seed(org.id, project.id);
+    } catch (err) {
+      logger.warn(
+        { err, organizationId: org.id, projectId: project.id },
+        "shared-org project policy seed failed",
+      );
+    }
   }
 
   return { project, organization: org };

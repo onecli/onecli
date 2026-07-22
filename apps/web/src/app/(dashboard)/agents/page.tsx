@@ -1,6 +1,7 @@
 import { Suspense } from "react";
 import type { Metadata } from "next";
 import { PageHeader } from "@dashboard/page-header";
+import { POLICY_EDITING_ENABLED } from "@/lib/env";
 import { AgentsContent } from "./_components/agents-content";
 
 export const metadata: Metadata = {
@@ -15,7 +16,10 @@ export default function AgentsPage() {
         description="Manage agents that connect to the gateway and receive injected credentials."
       />
       <Suspense>
-        <AgentsContent />
+        {/* Step 9.7b: flips the credential-access editor to a read-only
+            Policy reflection in the EE editions; OSS keeps its legacy editor
+            (the reflection seam resolves to a null stub there). */}
+        <AgentsContent policyEditingEnabled={POLICY_EDITING_ENABLED} />
       </Suspense>
     </div>
   );

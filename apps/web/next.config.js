@@ -54,12 +54,53 @@ const ORG_APP_CONFIG_ALIASES = {
   "@/lib/actions/app-config": "@/ee/actions/app-config",
 };
 
+// All EE editions (cloud + both onprems) carry the v2 translator, so they run
+// the boot policy data passes (the instrumentation hook): the step-5 backfill
+// pre-cutover (editing off) and the app-permission ADOPTION pass post-cutover
+// (editing on) — swap both OSS no-op seams for the real ee/ implementations.
+// OSS keeps the no-ops and migrates/adopts at its own cutover (step 9.5).
+const POLICY_MIGRATE_ALIASES = {
+  "@/lib/policy-migrate": "@/ee/policy-migrate",
+  "@/lib/policy-adopt": "@/ee/policy-adopt",
+  "@/lib/policy-compact": "@/ee/policy-compact",
+};
+
+// All EE editions get the step-9.7b read-only reflection dialogs behind the
+// POLICY_EDITING_ENABLED flag (the flag can flip on onprem too, so a cloud-only
+// alias would render the null stub there). OSS renders its own real stubs
+// since step 9.5 (the per-app "managed as policy rules" card + the legacy
+// equipment editors, which stay live through the OSS bridge until step 10).
+const POLICY_REFLECT_ALIASES = {
+  "@/lib/components/policy-reflect": "@/ee/policy-reflect",
+};
+
+// The shared project policy editor (step 9.5) with its EE-differentiating
+// chrome behind seams: the staged publish surface + org guardrails + directory
+// names, the org identity picker, and the granular resource-scope editor. OSS
+// uses the lib modules (immediate apply; locked "available in OneCLI Cloud"
+// hints); every EE edition swaps in the real implementations.
+const POLICY_EDITOR_ALIASES = {
+  "@/lib/policy-editor/editor-chrome": "@/ee/policy-editor/editor-chrome",
+  "@/lib/policy-editor/identity-picker": "@/ee/policy-editor/identity-picker",
+  "@/lib/policy-editor/resource-scope": "@/ee/policy-editor/resource-scope",
+  "@/lib/policy-editor/publish-mode": "@/ee/policy-editor/publish-mode",
+  // The behavioral-conditions builder rides with the editor seam: every EE
+  // edition is entitled (onprem now ENFORCES conditions via the EE
+  // condition_match arm, so it must author them too); the OSS module stays
+  // the locked upsell card. Cloud also carries this key in CLOUD_ALIASES;
+  // duplicating it here is how both onprem maps get it.
+  "@/lib/components/condition-builder": "@/ee/components/condition-builder",
+};
+
 // Cloud edition swaps these web import paths to cloud implementations (turbopack
 // resolveAlias, applied only when isCloud). This config runs in plain Node, so the
 // key→value map lives here directly. The onprem-full edition selects a curated
 // subset below (ONPREM_FULL_ALIASES).
 const CLOUD_ALIASES = {
   ...ORG_APP_CONFIG_ALIASES,
+  ...POLICY_MIGRATE_ALIASES,
+  ...POLICY_REFLECT_ALIASES,
+  ...POLICY_EDITOR_ALIASES,
   "@/lib/auth/auth-provider": "@/ee/auth/cognito-provider",
   "@/lib/auth/auth-server": "@/ee/auth/cognito-server",
   "@/lib/actions/resolve-user": "@/ee/auth/resolve-user",
@@ -115,6 +156,9 @@ const ONPREM_FULL_ALIASES = {
   ...ONPREM_INIT_ALIASES,
   ...ONPREM_ENTITLEMENT_ALIASES,
   ...ORG_APP_CONFIG_ALIASES,
+  ...POLICY_MIGRATE_ALIASES,
+  ...POLICY_REFLECT_ALIASES,
+  ...POLICY_EDITOR_ALIASES,
   // org-UI + org-aware redirect → cloud implementations (reuse the cloud mappings above)
   "@/lib/nav-config": CLOUD_ALIASES["@/lib/nav-config"],
   "@dashboard/dashboard-sidebar": CLOUD_ALIASES["@dashboard/dashboard-sidebar"],
@@ -132,6 +176,9 @@ const ONPREM_SLIM_ALIASES = {
   ...ONPREM_INIT_ALIASES,
   ...ONPREM_ENTITLEMENT_ALIASES,
   ...ORG_APP_CONFIG_ALIASES,
+  ...POLICY_MIGRATE_ALIASES,
+  ...POLICY_REFLECT_ALIASES,
+  ...POLICY_EDITOR_ALIASES,
 };
 
 /** @type {import('next').NextConfig} */

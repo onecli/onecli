@@ -874,6 +874,8 @@ async fn handle_http_proxy(
     let rules = mitm::ResolvedRules {
         injection_rules: resolved.injection_rules,
         policy_rules: resolved.policy_rules,
+        policy_rules_v2: resolved.policy_rules_v2,
+        available_apps: resolved.available_apps,
         access_restricted: resolved.access_restricted,
         intercept_token: None,
         plan: resolved.plan,
@@ -897,7 +899,8 @@ async fn handle_http_proxy(
     let mut resp = async {
         forward::forward_request(
             req,
-            &authority,
+            &authority, // forward target (the HTTP-proxy path never host-rewrites)
+            &hostname,  // policy_host: host the rules were assembled from
             scheme,
             http_client,
             &rules,

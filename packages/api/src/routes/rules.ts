@@ -4,6 +4,10 @@ import { db } from "@onecli/db";
 import type { ApiEnv } from "../types";
 import { authMiddleware, requireProjectId } from "../middleware/auth";
 import {
+  denyLegacyAppPermissionWriteWhenV2,
+  denyLegacyRuleWriteWhenV2,
+} from "../middleware/legacy-rule-write-gate";
+import {
   listPolicyRules,
   getPolicyRule,
   createPolicyRule,
@@ -71,82 +75,88 @@ export const ruleRoutes = () => {
   // ── PUT /rules/permissions/:provider ── set app permissions (layered) ──
   // Accepts the agent-layer semantics: `agentId` targets one agent's override
   // layer, and "inherit" deletes that agent's rows for a tool. The layered
-  // reconciliation itself lives in setAppPermissionsService.
-  app.put("/permissions/:provider", async (c) => {
-    const auth = c.get("auth");
-    const provider = c.req.param("provider");
-    const def = getAppPermissionDefinition(provider);
-    if (!def) {
-      return c.json(
-        { error: `No permission definition for provider: ${provider}` },
-        400,
+  // reconciliation itself lives in setAppPermissionsService. 410s once v2
+  // editing is live: the rules were adopted as custom policy rules and the
+  // bridge no longer re-derives this write (see the gate's docstring).
+  app.put(
+    "/permissions/:provider",
+    denyLegacyAppPermissionWriteWhenV2,
+    async (c) => {
+      const auth = c.get("auth");
+      const provider = c.req.param("provider");
+      const def = getAppPermissionDefinition(provider);
+      if (!def) {
+        return c.json(
+          { error: `No permission definition for provider: ${provider}` },
+          400,
+        );
+      }
+
+      const body = await c.req.json().catch(() => null);
+      const parsed = setPermissionsSchema.safeParse(body);
+      if (!parsed.success) {
+        return c.json(
+          { error: parsed.error.issues[0]?.message ?? "Invalid request body" },
+          400,
+        );
+      }
+
+      const resolution = resolvePermissionChanges(def, parsed.data.changes);
+      if ("unknownToolId" in resolution) {
+        return c.json(
+          { error: `Unknown tool: ${resolution.unknownToolId}` },
+          400,
+        );
+      }
+
+      const projectId = requireProjectId(auth);
+      const agentId = parsed.data.agentId;
+      const appName = providerDisplayName(provider);
+
+      const [org, agent] = await Promise.all([
+        db.organization.findUniqueOrThrow({
+          where: { id: auth.organizationId },
+          select: { policyMode: true },
+        }),
+        agentId
+          ? db.agent.findFirst({
+              where: { id: agentId, projectId },
+              select: { name: true },
+            })
+          : null,
+      ]);
+
+      const result = await withAudit(
+        () =>
+          setAppPermissionsService(
+            { projectId },
+            provider,
+            appName,
+            resolution.resolved,
+            parsed.data.conditions,
+            org.policyMode as PolicyMode,
+            agentId,
+          ),
+        (setResult) => ({
+          projectId,
+          userId: auth.userId,
+          userEmail: auth.userEmail,
+          action: AUDIT_ACTIONS.UPDATE,
+          service: AUDIT_SERVICES.RULE,
+          source: AUDIT_SOURCE.API,
+          metadata: {
+            source: "app_permission",
+            provider,
+            agentId: agentId ?? null,
+            ...(agent ? { agentName: agent.name } : {}),
+            changes: parsed.data.changes,
+            ...setResult,
+          },
+        }),
       );
-    }
-
-    const body = await c.req.json().catch(() => null);
-    const parsed = setPermissionsSchema.safeParse(body);
-    if (!parsed.success) {
-      return c.json(
-        { error: parsed.error.issues[0]?.message ?? "Invalid request body" },
-        400,
-      );
-    }
-
-    const resolution = resolvePermissionChanges(def, parsed.data.changes);
-    if ("unknownToolId" in resolution) {
-      return c.json(
-        { error: `Unknown tool: ${resolution.unknownToolId}` },
-        400,
-      );
-    }
-
-    const projectId = requireProjectId(auth);
-    const agentId = parsed.data.agentId;
-    const appName = providerDisplayName(provider);
-
-    const [org, agent] = await Promise.all([
-      db.organization.findUniqueOrThrow({
-        where: { id: auth.organizationId },
-        select: { policyMode: true },
-      }),
-      agentId
-        ? db.agent.findFirst({
-            where: { id: agentId, projectId },
-            select: { name: true },
-          })
-        : null,
-    ]);
-
-    const result = await withAudit(
-      () =>
-        setAppPermissionsService(
-          { projectId },
-          provider,
-          appName,
-          resolution.resolved,
-          parsed.data.conditions,
-          org.policyMode as PolicyMode,
-          agentId,
-        ),
-      (setResult) => ({
-        projectId,
-        userId: auth.userId,
-        userEmail: auth.userEmail,
-        action: AUDIT_ACTIONS.UPDATE,
-        service: AUDIT_SERVICES.RULE,
-        source: AUDIT_SOURCE.API,
-        metadata: {
-          source: "app_permission",
-          provider,
-          agentId: agentId ?? null,
-          ...(agent ? { agentName: agent.name } : {}),
-          changes: parsed.data.changes,
-          ...setResult,
-        },
-      }),
-    );
-    return c.json(result);
-  });
+      return c.json(result);
+    },
+  );
 
   // ── GET /rules/overlap/:provider ── custom rules overlapping an app ────
   app.get("/overlap/:provider", async (c) => {
@@ -171,7 +181,7 @@ export const ruleRoutes = () => {
   });
 
   // POST /rules
-  app.post("/", async (c) => {
+  app.post("/", denyLegacyRuleWriteWhenV2, async (c) => {
     const auth = c.get("auth");
     const body = await c.req.json().catch(() => null);
     const parsed = createPolicyRuleSchema.safeParse(body);
@@ -203,7 +213,7 @@ export const ruleRoutes = () => {
   });
 
   // PATCH /rules/:ruleId
-  app.patch("/:ruleId", async (c) => {
+  app.patch("/:ruleId", denyLegacyRuleWriteWhenV2, async (c) => {
     const auth = c.get("auth");
     const ruleId = c.req.param("ruleId");
     const body = await c.req.json().catch(() => null);
@@ -232,7 +242,7 @@ export const ruleRoutes = () => {
   });
 
   // DELETE /rules/:ruleId
-  app.delete("/:ruleId", async (c) => {
+  app.delete("/:ruleId", denyLegacyRuleWriteWhenV2, async (c) => {
     const auth = c.get("auth");
     const ruleId = c.req.param("ruleId");
     const projectId = requireProjectId(auth);

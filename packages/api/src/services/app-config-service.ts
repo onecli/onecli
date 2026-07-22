@@ -10,6 +10,7 @@ import {
   appConfigKey,
   isOrgScope,
 } from "./resource-scope";
+import { notifyPolicyCoherence } from "./policy-coherence-notify";
 
 const disconnectIfConnected = async (
   scope: ResourceScope,
@@ -18,30 +19,57 @@ const disconnectIfConnected = async (
   // their existence check), pass its id to skip re-resolving it for the sweep.
   knownConfigId?: string,
 ) => {
-  await db.appConnection.deleteMany({
-    where: { ...scopeWhere(scope), provider },
-  });
-
   // Org-scope removal also drops the project connections this config minted:
   // their OAuth refresh tokens are bound to the client credentials being
   // removed, so refresh would fail against a different client. The provenance
   // FK finds exactly those — across every project, and nothing this config
   // didn't mint. OSS never has org rows, so this arm is inert there.
-  if (isOrgScope(scope)) {
-    const configId =
-      knownConfigId ??
+  const orgConfigId = isOrgScope(scope)
+    ? (knownConfigId ??
       (
         await db.appConfig.findUnique({
           where: appConfigKey(scope, provider),
           select: { id: true },
         })
-      )?.id;
-    if (configId) {
-      await db.appConnection.deleteMany({
-        where: { appConfigId: configId, scope: "project" },
-      });
-    }
+      )?.id)
+    : undefined;
+
+  // Step 8: capture the projects whose agents are assigned any connection about
+  // to be deleted BEFORE the delete cascades their agent_app_connections + the
+  // equipment rules' connection targets — those scopes must re-materialize so no
+  // orphaned (target-less) equipment rule lingers. Mirrors deleteConnection, but
+  // for the bulk (fan-out-across-projects) app-config disconnect path.
+  const doomed = await db.appConnection.findMany({
+    where: {
+      OR: [
+        { ...scopeWhere(scope), provider },
+        ...(orgConfigId
+          ? [{ appConfigId: orgConfigId, scope: "project" }]
+          : []),
+      ],
+    },
+    select: { id: true },
+  });
+  const affected = doomed.length
+    ? await db.agentAppConnection.findMany({
+        where: { appConnectionId: { in: doomed.map((c) => c.id) } },
+        select: { agent: { select: { projectId: true } } },
+      })
+    : [];
+
+  await db.appConnection.deleteMany({
+    where: { ...scopeWhere(scope), provider },
+  });
+  if (orgConfigId) {
+    await db.appConnection.deleteMany({
+      where: { appConfigId: orgConfigId, scope: "project" },
+    });
   }
+
+  const projectIds = [...new Set(affected.map((a) => a.agent.projectId))];
+  await Promise.all(
+    projectIds.map((projectId) => notifyPolicyCoherence({ projectId })),
+  );
 };
 
 export const getAppConfig = async (scope: ResourceScope, provider: string) => {

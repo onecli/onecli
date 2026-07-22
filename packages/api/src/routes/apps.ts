@@ -15,7 +15,7 @@ import {
   resolveConnectCredentials,
   type ConnectRequestBody,
 } from "../apps/connect-credentials";
-import { getOAuthOrg, getOrgAppConfig } from "../providers";
+import { getOAuthOrg, getOrgAppConfig, getAppAvailability } from "../providers";
 import {
   signOAuthState,
   verifyOAuthState,
@@ -225,6 +225,28 @@ export const appRoutes = () => {
     ]);
     if (!orgConfigs) return c.json(providers);
     return c.json([...new Set([...providers, ...Object.keys(orgConfigs)])]);
+  });
+
+  // ── GET /apps/available ── app-availability allowlist for this project ──
+  // Backs the connect-picker filter (policy-engine step 7). `restricted:false`
+  // (OSS — no seam — or an "open" org) means every app is available and the
+  // picker is unfiltered; `restricted:true` carries the exact provider set a
+  // project may connect, mirroring the gateway's runtime availability read.
+  // Registered before /:provider so "available" is not captured as a provider.
+  app.get("/available", authMiddleware, async (c) => {
+    const auth = c.get("auth");
+    const projectId = requireProjectId(auth);
+    const providers = await getAppAvailability()?.getAvailableProviders(
+      projectId,
+      auth.organizationId,
+    );
+    // `undefined` (no seam / OSS) and `null` (org in "open" mode) both mean
+    // unrestricted — never leak an empty allowlist as "nothing available".
+    return c.json(
+      providers == null
+        ? { restricted: false, providers: [] as string[] }
+        : { restricted: true, providers },
+    );
   });
 
   // ── GET /apps/env-defaults ── providers with platform default creds ────

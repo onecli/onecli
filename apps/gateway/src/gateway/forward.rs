@@ -22,6 +22,7 @@ use crate::cache::CacheStore;
 use crate::default_interceptions;
 use crate::inject;
 use crate::policy::{self, PolicyDecision};
+use crate::policy_engine;
 
 use super::hooks;
 use super::mitm::ResolvedRules;
@@ -109,6 +110,11 @@ const MAX_DEFAULT_INTERCEPT_BODY: usize = 64 * 1024;
 pub(crate) async fn forward_request(
     req: Request<Incoming>,
     host: &str,
+    // The original, pre-rewrite host the live policy rules were assembled from —
+    // the host policy must match against. Differs from `host` only when an app
+    // rewrites the upstream to a provider-specific site; `host` stays the actual
+    // forward target (URL, `is_llm_host`, interception).
+    policy_host: &str,
     scheme: &str,
     http_client: reqwest::Client,
     rules: &ResolvedRules,
@@ -162,6 +168,7 @@ pub(crate) async fn forward_request(
     // matched default interception. In OSS, both predicates return false → zero
     // overhead unless a default interception matched.
     let (condition_buffer, req) = if crate::condition_match::needs_body_buffer(&rules.policy_rules)
+        || crate::policy_engine::needs_body_buffer(&rules.policy_rules_v2)
         || hooks::needs_request_body(rules, host, method.as_str(), &path)
     {
         let (parts, incoming) = req.into_parts();
@@ -198,19 +205,77 @@ pub(crate) async fn forward_request(
     let org_id = proxy_ctx.organization_id.as_deref().unwrap_or("");
     let pid = proxy_ctx.project_id.as_deref().unwrap_or("");
 
-    let decision = policy::evaluate(
-        org_id,
-        pid,
+    // Step-7 app-availability pre-check (DB-free — the set was resolved at
+    // connect). Governs ONLY identifiable app providers, so raw/unknown hosts and
+    // the LLM host are structurally never blocked (the enforce-deny carve). "Open"
+    // orgs / OSS / enforcement-off resolve to unrestricted → a no-op here.
+    // Matches on `policy_host` (pre-rewrite + port-stripped — the host the
+    // provider registry knows), NOT the port-bearing / possibly-rewritten `host`,
+    // which would silently identify no provider and never block.
+    if let Some(provider) =
+        crate::apps::app_availability_block(policy_host, &path, &rules.available_apps)
+    {
+        info!(method = %method, host = %policy_host, provider = %provider, "app unavailable to project — refusing request");
+        return Ok(response::app_unavailable(
+            &provider,
+            method.as_str(),
+            &path,
+            policy_host,
+        ));
+    }
+
+    // The first-match engine over the published `policy_rules_v2` decides when
+    // `POLICY_ENFORCE_V2` is on and the project has cut over; otherwise — or on
+    // any v2 load error — it returns `None` and the legacy strictest-wins path
+    // stays authoritative. `policy_host` is the pre-rewrite rule-match host;
+    // `is_llm_host(host)` is the effective host (the deny-default carve),
+    // matching how the legacy path computes `enforce_deny`.
+    let (decision, matched_rule) = match policy_engine::evaluate(
+        proxy_ctx,
+        policy_host,
         method.as_str(),
         &path,
         condition_buffer.as_deref(),
-        &rules.policy_rules,
-        agent_token,
+        has_injections,
+        policy::is_llm_host(host),
         cache,
-        &rules.policy_mode,
-        enforce_deny,
+        &rules.policy_rules_v2,
     )
-    .await;
+    .await
+    {
+        Some((decision, matched)) => (decision, matched),
+        None => (
+            policy::evaluate(
+                org_id,
+                pid,
+                method.as_str(),
+                &path,
+                condition_buffer.as_deref(),
+                &rules.policy_rules,
+                agent_token,
+                cache,
+                &rules.policy_mode,
+                enforce_deny,
+            )
+            .await,
+            // Legacy rules carry no logical id — never attributed.
+            None,
+        ),
+    };
+
+    // Edition observation seam — a no-op in OSS. Never blocks, stores, or
+    // enforces.
+    policy_engine::observe(
+        proxy_ctx,
+        policy_host,
+        method.as_str(),
+        &path,
+        condition_buffer.as_deref(),
+        has_injections,
+        policy::is_llm_host(host),
+        &rules.policy_mode,
+        pool,
+    );
 
     // ── Early return for block / rate-limit / default-deny (no body needed) ───
     match &decision {
@@ -224,6 +289,7 @@ pub(crate) async fn forward_request(
                 start,
                 StatusCode::FORBIDDEN,
                 crate::telemetry_core::RequestDecision::BlockedByDefaultPolicy,
+                matched_rule.clone(),
             );
             return Ok(response::blocked_by_default_policy(
                 method.as_str(),
@@ -244,6 +310,7 @@ pub(crate) async fn forward_request(
                 crate::telemetry_core::RequestDecision::Blocked {
                     rule_name: rule_name.clone(),
                 },
+                matched_rule.clone(),
             );
             return Ok(response::blocked_by_policy(
                 method.as_str(),
@@ -269,6 +336,7 @@ pub(crate) async fn forward_request(
                 crate::telemetry_core::RequestDecision::RateLimited {
                     rule_name: rule_name.clone(),
                 },
+                matched_rule.clone(),
             );
             return Ok(response::rate_limited(*limit, window, *retry_after_secs));
         }
@@ -486,6 +554,9 @@ pub(crate) async fn forward_request(
                 },
                 Some(log_id.clone()),
                 None,
+                // The pending INSERT is what persists the column (approval
+                // resolution is an UPDATE that never writes it).
+                matched_rule.clone(),
             );
 
             info!(
@@ -548,6 +619,7 @@ pub(crate) async fn forward_request(
                         },
                         None,
                         Some(log_id),
+                        matched_rule.clone(),
                     );
                     return Ok(response::manual_approval_denied(&approval_id, reason));
                 }
@@ -850,6 +922,7 @@ pub(crate) async fn forward_request(
             connection_label: rules.connection_label.clone(),
             existing_log_id: approval_log_id,
             decision: approval_decision,
+            matched_rule,
         };
 
         hooks::track_and_wrap(meta, rules, &resp_headers, upstream_resp.bytes_stream())
@@ -870,6 +943,7 @@ pub(crate) async fn forward_request(
     Ok(response)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn emit_policy_telemetry(
     proxy_ctx: &super::ProxyContext,
     host: &str,
@@ -878,6 +952,7 @@ fn emit_policy_telemetry(
     start: std::time::Instant,
     status: StatusCode,
     decision: crate::telemetry_core::RequestDecision,
+    matched_rule: Option<crate::policy::MatchedRule>,
 ) {
     let (pid, aid) = match (
         proxy_ctx.project_id.as_deref(),
@@ -920,6 +995,7 @@ fn emit_policy_telemetry(
         existing_log_id: None,
         log_id: None,
         budget_charge: None,
+        matched_rule,
     });
 }
 
@@ -934,6 +1010,7 @@ fn emit_approval_telemetry(
     decision: crate::telemetry_core::RequestDecision,
     log_id: Option<String>,
     existing_log_id: Option<String>,
+    matched_rule: Option<crate::policy::MatchedRule>,
 ) {
     let (pid, aid) = match (
         proxy_ctx.project_id.as_deref(),
@@ -975,6 +1052,7 @@ fn emit_approval_telemetry(
         existing_log_id,
         log_id,
         budget_charge: None,
+        matched_rule,
     });
 }
 

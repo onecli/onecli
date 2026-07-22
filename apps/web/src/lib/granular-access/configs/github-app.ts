@@ -2,7 +2,15 @@ import { GitBranch } from "lucide-react";
 import type { GranularAccessConfig } from "../types";
 
 export const githubAppConfig: GranularAccessConfig = {
-  isSupported: (meta) => Array.isArray(meta.repos) && meta.repos.length > 0,
+  // Granular repo scoping applies whenever the connection can be scoped: an
+  // installation that grants ALL repositories (`repositorySelection: "all"` —
+  // its concrete `repos` list may be empty or not enumerated), or one that
+  // already lists specific repos. Both show "All repositories · Manage"
+  // (defaulting to unrestricted); only a connection with neither signal is
+  // genuinely un-scopable and stays hidden.
+  isSupported: (meta) =>
+    meta.repositorySelection === "all" ||
+    (Array.isArray(meta.repos) && meta.repos.length > 0),
   getItems: (meta) =>
     ((meta.repos as string[]) ?? []).map((repo) => ({
       id: repo,

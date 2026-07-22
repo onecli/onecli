@@ -3,6 +3,7 @@ import { getCrypto } from "../providers";
 import { ServiceError } from "./errors";
 import type { ResourceScope } from "./resource-scope";
 import { scopeWhere, scopeCreate, scopeOwnership } from "./resource-scope";
+import { notifyPolicyCoherence } from "./policy-coherence-notify";
 
 export const extractLabel = (
   metadata?: Record<string, unknown>,
@@ -176,7 +177,21 @@ export const deleteConnection = async (
     throw new ServiceError("NOT_FOUND", "Connection not found");
   }
 
+  // Step 8: capture the projects whose agents are assigned this connection BEFORE
+  // the delete cascades their `agent_app_connections` (and any equipment rule's
+  // connection target) — those scopes must re-materialize so no orphaned
+  // equipment rule lingers.
+  const affected = await db.agentAppConnection.findMany({
+    where: { appConnectionId: connection.id },
+    select: { agent: { select: { projectId: true } } },
+  });
+
   await db.appConnection.delete({
     where: { id: connection.id },
   });
+
+  const projectIds = [...new Set(affected.map((a) => a.agent.projectId))];
+  await Promise.all(
+    projectIds.map((projectId) => notifyPolicyCoherence({ projectId })),
+  );
 };

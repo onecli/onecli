@@ -25,6 +25,10 @@ import { AppConfigForm, type AppConfigFormHandle } from "./app-config-form";
 import { ConfigureCredentialsDialog } from "./configure-credentials-dialog";
 import { PermissionsList } from "./permissions-list";
 import { AppPermissions } from "./app-permissions";
+// The step-9.7b read-only reflection. Resolves to a null stub in OSS and to
+// the real EE surface under the POLICY_REFLECT alias; the RSC page threads
+// `policyEditingEnabled` either way.
+import { AppPermissionsReflection } from "@/lib/components/policy-reflect";
 import { ConnectionAccountCard } from "./connection-account-card";
 import { InheritedConnectionCard } from "./inherited-connection-card";
 import { AppBlocklist } from "./app-blocklist";
@@ -59,6 +63,11 @@ interface AppDetailProps {
   orgPermissionStates?: Record<string, AppPermissionLevel>;
   orgConditions?: Record<string, unknown[]>;
   policyMode?: "allow" | "deny";
+  /** Step 9.7b: when the v2 policy console is live (`POLICY_EDITING_ENABLED`,
+   * threaded from the RSC page — server-only env), the equipment editors on
+   * this page render as read-only Policy reflections instead. Absent/false →
+   * today's editors, unchanged. */
+  policyEditingEnabled?: boolean;
 }
 
 type ConnectionData = Omit<Connection, "metadata"> & {
@@ -75,6 +84,7 @@ export const AppDetail = ({
   orgPermissionStates,
   orgConditions,
   policyMode,
+  policyEditingEnabled = false,
 }: AppDetailProps) => {
   const pathname = usePathname();
   const queryClient = useQueryClient();
@@ -262,6 +272,7 @@ export const AppDetail = ({
                     appName={app.name}
                     onReconnect={(id) => openConnectPopup(id, popupOpts)}
                     pageScope={pageScope}
+                    policyEditingEnabled={policyEditingEnabled}
                   />
                 ))}
                 {inheritedConnections.map((conn) => (
@@ -270,6 +281,7 @@ export const AppDetail = ({
                     connection={conn}
                     appName={app.name}
                     pageScope={pageScope}
+                    policyEditingEnabled={policyEditingEnabled}
                   />
                 ))}
               </div>
@@ -277,15 +289,23 @@ export const AppDetail = ({
           )}
 
           {permissionDefinition ? (
-            <AppPermissions
-              provider={app.id}
-              appName={app.name}
-              groups={permissionDefinition.groups}
-              orgStates={orgPermissionStates}
-              orgConditions={orgConditions}
-              policyMode={policyMode}
-              pageScope={pageScope}
-            />
+            policyEditingEnabled ? (
+              <AppPermissionsReflection
+                provider={app.id}
+                appName={app.name}
+                pageScope={pageScope}
+              />
+            ) : (
+              <AppPermissions
+                provider={app.id}
+                appName={app.name}
+                groups={permissionDefinition.groups}
+                orgStates={orgPermissionStates}
+                orgConditions={orgConditions}
+                policyMode={policyMode}
+                pageScope={pageScope}
+              />
+            )
           ) : showOAuthScopesList ? (
             <PermissionsList
               permissions={app.permissions}
