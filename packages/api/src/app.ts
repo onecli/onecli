@@ -4,11 +4,14 @@ import type {
   SessionEnforcer,
   OAuthOrgHandlers,
   OrgAppConfigProvider,
+  AppAvailabilityProvider,
   ConnectionHooks,
   ResourceHooks,
   RoleResolver,
   PolicyValidator,
   RuleActionGate,
+  NewOrgPolicySeeder,
+  PolicyCoherenceBridge,
 } from "./providers";
 import type { CryptoService } from "./lib/crypto-types";
 import type { AppDefinition } from "./apps/types";
@@ -20,6 +23,7 @@ import {
   initEeApps,
   initOAuthOrg,
   initOrgAppConfig,
+  initAppAvailability,
   initConnectionHooks,
   initResourceHooks,
   initSelfUrl,
@@ -27,6 +31,8 @@ import {
   initSessionEnforcer,
   initPolicyValidator,
   initRuleActionGate,
+  initNewOrgPolicySeeder,
+  initPolicyCoherenceBridge,
   initStrictApiKeyAuth,
 } from "./providers";
 import { registerAppPermission } from "./apps/app-permissions";
@@ -35,6 +41,7 @@ import { healthRoutes } from "./routes/health";
 import { agentRoutes } from "./routes/agents";
 import { secretRoutes } from "./routes/secrets";
 import { ruleRoutes } from "./routes/rules";
+import { policyRoutes } from "./routes/policy";
 import { userRoutes } from "./routes/user";
 import { appRoutes } from "./routes/apps";
 import { connectionRoutes } from "./routes/connections";
@@ -59,6 +66,7 @@ export interface CreateApiAppOptions {
   eeAppPermissions?: AppPermissionDefinition[];
   oauthOrg?: OAuthOrgHandlers;
   orgAppConfig?: OrgAppConfigProvider;
+  appAvailability?: AppAvailabilityProvider;
   connectionHooks?: ConnectionHooks;
   resourceHooks?: ResourceHooks;
   selfUrl?: string;
@@ -71,6 +79,17 @@ export interface CreateApiAppOptions {
   sessionEnforcer?: SessionEnforcer;
   policyValidator?: PolicyValidator;
   ruleActionGate?: RuleActionGate;
+  /**
+   * Seeds a new org's initial published policy on bootstrap (cloud: a
+   * secure-by-default org Default Rule). OSS never sets it — new orgs stay on
+   * the old model until step 9.
+   */
+  newOrgPolicySeeder?: NewOrgPolicySeeder;
+  /**
+   * Re-materializes app-permission/blocklist v2 rules after an old-model write
+   * (step-5 coherence bridge, retired step 7). OSS never sets it — no-op.
+   */
+  policyCoherenceBridge?: PolicyCoherenceBridge;
   sessionHooks?: Partial<SessionHooks>;
   /**
    * Commit `oc_` bearers to API-key auth: when set, a failed API-key
@@ -95,6 +114,7 @@ export const createApiApp = (
   }
   if (options?.oauthOrg) initOAuthOrg(options.oauthOrg);
   if (options?.orgAppConfig) initOrgAppConfig(options.orgAppConfig);
+  if (options?.appAvailability) initAppAvailability(options.appAvailability);
   if (options?.connectionHooks) initConnectionHooks(options.connectionHooks);
   if (options?.resourceHooks) initResourceHooks(options.resourceHooks);
   if (options?.selfUrl) initSelfUrl(options.selfUrl);
@@ -102,6 +122,10 @@ export const createApiApp = (
   if (options?.sessionEnforcer) initSessionEnforcer(options.sessionEnforcer);
   if (options?.policyValidator) initPolicyValidator(options.policyValidator);
   if (options?.ruleActionGate) initRuleActionGate(options.ruleActionGate);
+  if (options?.newOrgPolicySeeder)
+    initNewOrgPolicySeeder(options.newOrgPolicySeeder);
+  if (options?.policyCoherenceBridge)
+    initPolicyCoherenceBridge(options.policyCoherenceBridge);
   if (options?.sessionHooks) initSessionHooks(options.sessionHooks);
   if (options?.strictApiKeyAuth) initStrictApiKeyAuth(options.strictApiKeyAuth);
 
@@ -114,6 +138,7 @@ export const createApiApp = (
   app.route("/agents", agentRoutes());
   app.route("/secrets", secretRoutes());
   app.route("/rules", ruleRoutes());
+  app.route("/policy", policyRoutes());
   app.route("/user", userRoutes());
   app.route("/apps", appRoutes());
   app.route("/connections", connectionRoutes());

@@ -27,9 +27,17 @@ export const IDENTITY_CONFLICT_ERROR =
 
 export interface SessionHooks {
   getSessionAttributes(request: Request): SessionAttributes;
+  /**
+   * Fires once when the session upsert created a new user row — for every
+   * flow, not just organic signups. `context.bootstrappedOrg` says whether
+   * the default org bootstrap ran for this user; editions use it (and the
+   * request) to tell organic signups apart from users who join an existing
+   * org (invitation, claim link, JIT membership).
+   */
   onUserCreated(
     user: { email: string; name: string | null },
     attributes: SessionAttributes,
+    context: { request: Request; bootstrappedOrg: boolean },
   ): void;
   shouldBootstrapOrg(request: Request): boolean;
   augmentSessionResponse(userId: string): Promise<Record<string, unknown>>;
@@ -147,11 +155,12 @@ export const authSessionRoutes = () => {
 
       let defaultProject = await findUserDefaultProject(dbUser.id);
 
-      if (
+      const bootstrappedOrg =
         !defaultProject &&
         !existingUser &&
-        _hooks.shouldBootstrapOrg(c.req.raw)
-      ) {
+        _hooks.shouldBootstrapOrg(c.req.raw);
+
+      if (bootstrappedOrg) {
         const result =
           CAPS.tenancy === "single-org-shared"
             ? await joinSharedOrganization(dbUser.id, dbUser.email)
@@ -161,7 +170,17 @@ export const authSessionRoutes = () => {
                 dbUser.name ?? undefined,
               );
         defaultProject = result.project;
-        _hooks.onUserCreated({ email: dbUser.email, name: dbUser.name }, extra);
+      }
+
+      // No user row existed for this email before the upsert → it was created
+      // by this request. Fires outside the bootstrap branch so non-bootstrap
+      // signups (invitation/claim flows) reach the hook too.
+      if (!existingUser) {
+        _hooks.onUserCreated(
+          { email: dbUser.email, name: dbUser.name },
+          extra,
+          { request: c.req.raw, bootstrappedOrg },
+        );
       }
 
       if (defaultProject) {

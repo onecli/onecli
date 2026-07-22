@@ -60,9 +60,21 @@ pub(crate) struct ConnectResponse {
     #[serde(default)]
     pub claim_token: Option<String>,
     /// Cloud-only: spend budgets governing the effective credential for this
-    /// host (0/1 in practice — the response is per-host). Empty in OSS.
+    /// host (0/1 in practice — the response is per-host).
     #[serde(default)]
     pub budget_bindings: Vec<crate::budget::BudgetBinding>,
+    /// Cloud-only: the published new-model policy rules for this connection (org
+    /// and project scopes), loaded here (cached ~60s with the rest of this
+    /// response) so the per-request decision path is DB-free. Empty when
+    /// the engine is off, or before the org is backfilled.
+    #[serde(default)]
+    pub policy_rules_v2: db::PolicyV2Rules,
+    /// Cloud-only: the apps this connection's project may reach (step 7), resolved
+    /// here (cached ~60s with the rest of this response) so the per-request app
+    /// pre-check is DB-free. Unrestricted (every app available) in OSS, when the
+    /// org's availability mode is "open", or when enforcement is off.
+    #[serde(default)]
+    pub available_apps: db::AvailableApps,
 }
 
 /// Result of per-request app connection resolution.
@@ -195,9 +207,29 @@ impl PolicyEngine {
         agent: &db::AgentRow,
         hostname: &str,
     ) -> Result<ConnectResponse, ConnectError> {
-        let (injection_rules, budget_bindings) =
-            self.resolve_secret_injections(agent, hostname).await?;
-        let app_connections = self.resolve_app_connections(agent, hostname).await?;
+        // Load the published new-model policy for this connection's scopes FIRST
+        // (cached with the rest of ConnectResponse, so the per-request path never
+        // touches the DB). Step 8: the inject-selection derives from these rules
+        // which specific credentials the agent's rules allow — the connect-time
+        // SELECTION that replaces the equipment join for a selective agent. Empty
+        // in OSS / when the engine is off → the selection is empty → the resolvers
+        // fall back to the legacy equipment path (the fail-safe).
+        let policy_rules_v2 = crate::policy_engine::load_connect_v2(
+            &self.pool,
+            &agent.organization_id,
+            &agent.project_id,
+            &agent.id,
+        )
+        .await;
+        let inject_selection =
+            crate::policy_engine::derive_inject_selection(&policy_rules_v2, &agent.id);
+
+        let (injection_rules, budget_bindings) = self
+            .resolve_secret_injections(agent, hostname, &inject_selection)
+            .await?;
+        let app_connections = self
+            .resolve_app_connections(agent, hostname, &inject_selection)
+            .await?;
         let policy_rules = self.resolve_policy_rules(agent, hostname).await?;
         let has_rules =
             !injection_rules.is_empty() || !app_connections.is_empty() || !policy_rules.is_empty();
@@ -221,6 +253,16 @@ impl PolicyEngine {
         let claim_token =
             crate::partner::claim_token_for_org(&self.pool, &agent.organization_id).await;
 
+        // Cloud-only: resolve which apps this project may connect (step 7), cached
+        // here so the per-request pre-check is DB-free. "All available" in OSS,
+        // when the org's availability mode is "open", or when enforcement is off.
+        let available_apps = crate::policy_engine::load_available_apps(
+            &self.pool,
+            &agent.organization_id,
+            &agent.project_id,
+        )
+        .await;
+
         Ok(ConnectResponse {
             intercept: has_rules || access_restricted,
             injection_rules,
@@ -236,6 +278,8 @@ impl PolicyEngine {
             policy_mode: agent.policy_mode.clone(),
             claim_token,
             budget_bindings,
+            policy_rules_v2,
+            available_apps,
         })
     }
 
@@ -245,9 +289,38 @@ impl PolicyEngine {
         &self,
         agent: &db::AgentRow,
         hostname: &str,
+        selection: &db::InjectSelection,
     ) -> Result<(Vec<InjectionRule>, Vec<crate::budget::BudgetBinding>), ConnectError> {
-        let secrets = if agent.secret_mode == SECRET_MODE_SELECTIVE {
-            // Selective: agent_secrets join returns both project + org assigned secrets
+        let secrets = if agent.secret_mode == SECRET_MODE_SELECTIVE
+            && (!selection.secret_ids.is_empty() || !selection.secret_scopes.is_empty())
+        {
+            // Step 8 (rule-driven): a SELECTIVE agent's allow rules name specific
+            // secrets (`secret_ids`) and/or "all secrets at a level"
+            // (`secret_scopes`). Gated on `secret_mode` — `secret_mode` stays the
+            // all-vs-selective SWITCH, so an ALL-mode agent always takes the full
+            // merge below and a rule can never NARROW it (dropping its partner /
+            // budget-metered / other host-matched secrets); the v2 selection only
+            // picks WHICH secrets for an already-selective agent.
+            // Fetch the ORG/PROJECT-fenced candidate pool and NARROW to the named
+            // ids OR the named levels (a secret's own `scope` — "organization" /
+            // "project"). The org-fence is on the FETCH, so a rule naming another
+            // org's secret can't pull it (the id simply isn't in the pool). Partner
+            // is excluded (a rule can only name a project/org secret or level, per
+            // `assertTargetsValid`), matching legacy selective mode (also no partner).
+            let (org_result, project_result) = tokio::join!(
+                db::find_secrets_by_org(&self.pool, &agent.organization_id),
+                db::find_secrets_by_project(&self.pool, &agent.project_id),
+            );
+            let mut merged = org_result.map_err(db_err)?;
+            merged.extend(project_result.map_err(db_err)?);
+            merged.retain(|s| {
+                selection.secret_ids.contains(&s.id) || selection.secret_scopes.contains(&s.scope)
+            });
+            merged
+        } else if agent.secret_mode == SECRET_MODE_SELECTIVE {
+            // Fail-safe / legacy selective: no rule-driven selection (engine off,
+            // not yet materialized, or no granted secrets) → the agent_secrets join,
+            // exactly as before.
             db::find_secrets_by_agent(&self.pool, &agent.id)
                 .await
                 .map_err(db_err)?
@@ -414,6 +487,7 @@ impl PolicyEngine {
         &self,
         agent: &db::AgentRow,
         hostname: &str,
+        selection: &db::InjectSelection,
     ) -> Result<Vec<db::AppConnectionRow>, ConnectError> {
         let providers = apps::providers_for_host(hostname);
         if providers.is_empty() {
@@ -422,7 +496,40 @@ impl PolicyEngine {
         }
         debug!(host = %hostname, providers = ?providers, "app_connections: matched providers");
 
-        let connections = if agent.secret_mode == SECRET_MODE_SELECTIVE {
+        let connections = if agent.secret_mode == SECRET_MODE_SELECTIVE
+            && (!selection.connections.is_empty() || !selection.app_scopes.is_empty())
+        {
+            // Step 8 (rule-driven): a SELECTIVE agent's allow rules name SPECIFIC
+            // connections (`kind=connection`) and/or ALL connections of a provider
+            // at a level (`kind=app` + `connection_scope`). Gated on `secret_mode`
+            // — an ALL-mode agent always takes the full merge below, so a rule can
+            // never narrow it. Fetch the ORG/PROJECT-fenced pool and keep the
+            // connections a rule selects: a named id, or a (provider, scope) match.
+            // Attach the per-connection sessionPolicy only for the SPECIFIC ones
+            // (the "all-at-level" ones are unscoped, like all-mode). Org-fence on
+            // the FETCH → a foreign id/scope can't pull a foreign connection.
+            let (org_result, project_result) = tokio::join!(
+                db::find_app_connections_by_org(&self.pool, &agent.organization_id),
+                db::find_app_connections_by_project(&self.pool, &agent.project_id),
+            );
+            let mut merged = org_result.map_err(db_err)?;
+            merged.extend(project_result.map_err(db_err)?);
+            merged.retain(|c| {
+                selection.connections.contains_key(&c.id)
+                    || selection
+                        .app_scopes
+                        .iter()
+                        .any(|(provider, scope)| *provider == c.provider && *scope == c.scope)
+            });
+            for c in &mut merged {
+                if let Some(policy) = selection.connections.get(&c.id) {
+                    c.session_policy = policy.clone();
+                }
+            }
+            merged
+        } else if agent.secret_mode == SECRET_MODE_SELECTIVE {
+            // Fail-safe / legacy selective: the agent_app_connections join (carries
+            // its own session_policy), exactly as before.
             db::find_app_connections_by_agent(&self.pool, &agent.id)
                 .await
                 .map_err(db_err)?
@@ -1323,7 +1430,10 @@ fn credential_host_mismatch(
 /// `*.example.com`, and a region is still required for `s3.*.amazonaws.com`.
 ///
 /// Matching is case-insensitive, since DNS host names are.
-fn host_matches(request_host: &str, pattern: &str) -> bool {
+///
+/// `pub(crate)` so the policy engine reuses the exact host matcher for its
+/// network targets. Behavior is unchanged.
+pub(crate) fn host_matches(request_host: &str, pattern: &str) -> bool {
     match pattern.split_once('*') {
         None => request_host.eq_ignore_ascii_case(pattern),
         Some((prefix, suffix)) => {
@@ -1411,7 +1521,11 @@ fn row_to_policy_rule(r: db::PolicyRuleRow) -> Option<PolicyRule> {
 /// Filter org + project rows for this agent and host, map them to resolved
 /// rules, and shadow the project set — org rules first, preserving today's
 /// evaluation order.
-fn assemble_policy_rules(
+///
+/// `pub(crate)` so the EE editions' engine can reuse the exact assembly
+/// (host + agent filter, agent-override shadowing, org-first order). Behavior
+/// is unchanged.
+pub(crate) fn assemble_policy_rules(
     org_rows: Vec<db::PolicyRuleRow>,
     project_rows: Vec<db::PolicyRuleRow>,
     agent_id: &str,
@@ -1830,6 +1944,8 @@ mod tests {
             policy_mode: "allow".to_string(),
             claim_token: None,
             budget_bindings: vec![],
+            policy_rules_v2: db::PolicyV2Rules::default(),
+            available_apps: db::AvailableApps::default(),
         };
 
         store
@@ -1876,6 +1992,8 @@ mod tests {
             policy_mode: "allow".to_string(),
             claim_token: None,
             budget_bindings: vec![],
+            policy_rules_v2: db::PolicyV2Rules::default(),
+            available_apps: db::AvailableApps::default(),
         };
 
         // Pre-populate cache with the key format that resolve() uses
@@ -1918,6 +2036,8 @@ mod tests {
             policy_mode: "allow".to_string(),
             claim_token: None,
             budget_bindings: vec![],
+            policy_rules_v2: db::PolicyV2Rules::default(),
+            available_apps: db::AvailableApps::default(),
         };
 
         store
@@ -2087,6 +2207,7 @@ mod tests {
         db::AppConnectionRow {
             id: id.into(),
             provider: provider.into(),
+            scope: "project".into(),
             credentials: None,
             label: None,
             metadata: None,

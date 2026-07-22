@@ -9,6 +9,7 @@ export {
   type SessionEnforcer,
   type OAuthOrgHandlers,
   type OrgAppConfigProvider,
+  type AppAvailabilityProvider,
   type CryptoService,
   type AppDefinition,
 } from "./types";
@@ -18,6 +19,7 @@ export { initCrypto, getCrypto } from "./crypto";
 export { initEeApps, getEeApps } from "./ee-apps";
 export { initOAuthOrg, getOAuthOrg } from "./oauth-org";
 export { initOrgAppConfig, getOrgAppConfig } from "./org-app-config";
+export { initAppAvailability, getAppAvailability } from "./app-availability";
 export { initStrictApiKeyAuth, getStrictApiKeyAuth } from "./strict-api-keys";
 export { initSelfUrl, getSelfUrl } from "./self-url";
 export { initRoleResolver, getRoleResolver } from "./role-resolver";
@@ -36,4 +38,10 @@ export {
   type RuleWriteScope,
   initRuleActionGate,
   getRuleActionGate,
+  type NewOrgPolicySeeder,
+  initNewOrgPolicySeeder,
+  getNewOrgPolicySeeder,
+  type PolicyCoherenceBridge,
+  initPolicyCoherenceBridge,
+  getPolicyCoherenceBridge,
 } from "./hooks";

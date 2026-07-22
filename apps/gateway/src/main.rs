@@ -43,10 +43,14 @@ mod org_routes;
 
 mod connect;
 
-#[cfg(not(edition_cloud))]
+// Body-condition matcher (step 9.5): the real matcher rides with the full EE
+// engine — onprem included, else a v2 `body contains` block rule would never
+// see a body there and fail OPEN. The OSS arm stays the no-op (conditions are
+// carried but never evaluated in OSS, matching its legacy behavior).
+#[cfg(edition_oss)]
 mod condition_match;
 
-#[cfg(edition_cloud)]
+#[cfg(not(edition_oss))]
 #[path = "ee/condition_match.rs"]
 mod condition_match;
 
@@ -113,6 +117,17 @@ mod budget;
 #[cfg(edition_cloud)]
 #[path = "ee/budget.rs"]
 mod budget;
+
+// Policy engine (step 9.5): OSS compiles the minimal project-only first-match
+// core (src/policy_engine.rs + src/policy_engine/); every EE edition — cloud AND
+// both onprems — swaps in the full engine (ee/policy_engine.rs, org scope +
+// principals + availability).
+#[cfg(edition_oss)]
+mod policy_engine;
+
+#[cfg(not(edition_oss))]
+#[path = "ee/policy_engine.rs"]
+mod policy_engine;
 
 mod vault;
 

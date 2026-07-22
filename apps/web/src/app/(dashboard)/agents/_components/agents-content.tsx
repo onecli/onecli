@@ -12,10 +12,14 @@ import { CreateAgentDialog } from "./create-agent-dialog";
 
 interface AgentsContentProps {
   renderCreateButton?: (onCreate: () => void) => React.ReactNode;
+  /** Step 9.7b: threaded from the RSC page (server-only env) down to the
+   * cards, whose credential-access editor becomes a read-only reflection. */
+  policyEditingEnabled?: boolean;
 }
 
 export const AgentsContent = ({
   renderCreateButton,
+  policyEditingEnabled = false,
 }: AgentsContentProps = {}) => {
   const searchParams = useSearchParams();
   const manageAgentId = searchParams.get("manage");
@@ -75,6 +79,7 @@ export const AgentsContent = ({
             autoOpenAccess={
               !!manageAgentId && agent.id.startsWith(manageAgentId)
             }
+            policyEditingEnabled={policyEditingEnabled}
           />
         ))
       )}

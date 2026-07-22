@@ -1,0 +1,3434 @@
+{
+  "aws": {
+    "cloudformation_access": {
+      "hostPattern": "cloudformation.*.amazonaws.com",
+      "paths": [
+        "/*"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "cloudwatch_logs_access": {
+      "hostPattern": "logs.*.amazonaws.com",
+      "paths": [
+        "/*"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "dynamodb_access": {
+      "hostPattern": "dynamodb.*.amazonaws.com",
+      "paths": [
+        "/*"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "ec2_access": {
+      "hostPattern": "ec2.*.amazonaws.com",
+      "paths": [
+        "/*"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "iam_access": {
+      "hostPattern": "iam.amazonaws.com",
+      "paths": [
+        "/*"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "lambda_delete": {
+      "hostPattern": "lambda.*.amazonaws.com",
+      "paths": [
+        "/2015-03-31/functions/*"
+      ],
+      "methods": [
+        "DELETE"
+      ]
+    },
+    "lambda_get_function": {
+      "hostPattern": "lambda.*.amazonaws.com",
+      "paths": [
+        "/2015-03-31/functions/*"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "lambda_invoke": {
+      "hostPattern": "lambda.*.amazonaws.com",
+      "paths": [
+        "/2015-03-31/functions/*/invocations"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "lambda_list_functions": {
+      "hostPattern": "lambda.*.amazonaws.com",
+      "paths": [
+        "/2015-03-31/functions"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "s3_delete": {
+      "hostPattern": "s3.*.amazonaws.com",
+      "paths": [
+        "/*"
+      ],
+      "methods": [
+        "DELETE"
+      ]
+    },
+    "s3_list_buckets": {
+      "hostPattern": "s3.*.amazonaws.com",
+      "paths": [
+        "/"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "s3_read_objects": {
+      "hostPattern": "s3.*.amazonaws.com",
+      "paths": [
+        "/*"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "s3_upload": {
+      "hostPattern": "s3.*.amazonaws.com",
+      "paths": [
+        "/*"
+      ],
+      "methods": [
+        "PUT"
+      ]
+    },
+    "secrets_manager_access": {
+      "hostPattern": "secretsmanager.*.amazonaws.com",
+      "paths": [
+        "/*"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "ses_send": {
+      "hostPattern": "email.*.amazonaws.com",
+      "paths": [
+        "/v2/email/outbound-emails"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "sts_access": {
+      "hostPattern": "sts.*.amazonaws.com",
+      "paths": [
+        "/*"
+      ],
+      "methods": [
+        "POST"
+      ]
+    }
+  },
+  "cloudflare": {
+    "create_dns_record": {
+      "hostPattern": "api.cloudflare.com",
+      "paths": [
+        "/client/v4/zones/*/dns_records"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "delete_dns_record": {
+      "hostPattern": "api.cloudflare.com",
+      "paths": [
+        "/client/v4/zones/*/dns_records/*"
+      ],
+      "methods": [
+        "DELETE"
+      ]
+    },
+    "delete_worker": {
+      "hostPattern": "api.cloudflare.com",
+      "paths": [
+        "/client/v4/accounts/*/workers/scripts/*"
+      ],
+      "methods": [
+        "DELETE"
+      ]
+    },
+    "deploy_worker": {
+      "hostPattern": "api.cloudflare.com",
+      "paths": [
+        "/client/v4/accounts/*/workers/scripts/*"
+      ],
+      "methods": [
+        "PUT"
+      ]
+    },
+    "get_zone": {
+      "hostPattern": "api.cloudflare.com",
+      "paths": [
+        "/client/v4/zones/*"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_d1_databases": {
+      "hostPattern": "api.cloudflare.com",
+      "paths": [
+        "/client/v4/accounts/*/d1/database"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_dns_records": {
+      "hostPattern": "api.cloudflare.com",
+      "paths": [
+        "/client/v4/zones/*/dns_records"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_kv_namespaces": {
+      "hostPattern": "api.cloudflare.com",
+      "paths": [
+        "/client/v4/accounts/*/storage/kv/namespaces"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_pages_projects": {
+      "hostPattern": "api.cloudflare.com",
+      "paths": [
+        "/client/v4/accounts/*/pages/projects"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_r2_buckets": {
+      "hostPattern": "api.cloudflare.com",
+      "paths": [
+        "/client/v4/accounts/*/r2/buckets"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_workers": {
+      "hostPattern": "api.cloudflare.com",
+      "paths": [
+        "/client/v4/accounts/*/workers/scripts"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_zones": {
+      "hostPattern": "api.cloudflare.com",
+      "paths": [
+        "/client/v4/zones"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "purge_cache": {
+      "hostPattern": "api.cloudflare.com",
+      "paths": [
+        "/client/v4/zones/*/purge_cache"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "query_d1": {
+      "hostPattern": "api.cloudflare.com",
+      "paths": [
+        "/client/v4/accounts/*/d1/database/*/query"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "update_dns_record": {
+      "hostPattern": "api.cloudflare.com",
+      "paths": [
+        "/client/v4/zones/*/dns_records/*"
+      ],
+      "methods": [
+        "PUT"
+      ]
+    },
+    "write_all": {
+      "hostPattern": "api.cloudflare.com",
+      "paths": [
+        "/client/v4/*"
+      ],
+      "methods": [
+        "POST",
+        "PUT",
+        "PATCH",
+        "DELETE"
+      ]
+    },
+    "write_kv": {
+      "hostPattern": "api.cloudflare.com",
+      "paths": [
+        "/client/v4/accounts/*/storage/kv/namespaces/*/values/*"
+      ],
+      "methods": [
+        "PUT"
+      ]
+    }
+  },
+  "confluence": {
+    "create_comment": {
+      "hostPattern": "api.atlassian.com",
+      "paths": [
+        "/ex/confluence/*/wiki/api/v2/pages/*/footer-comments"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "create_page": {
+      "hostPattern": "api.atlassian.com",
+      "paths": [
+        "/ex/confluence/*/wiki/api/v2/pages"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "delete_page": {
+      "hostPattern": "api.atlassian.com",
+      "paths": [
+        "/ex/confluence/*/wiki/api/v2/pages/*"
+      ],
+      "methods": [
+        "DELETE"
+      ]
+    },
+    "get_page": {
+      "hostPattern": "api.atlassian.com",
+      "paths": [
+        "/ex/confluence/*/wiki/api/v2/pages/*"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "get_space": {
+      "hostPattern": "api.atlassian.com",
+      "paths": [
+        "/ex/confluence/*/wiki/api/v2/spaces/*"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_pages": {
+      "hostPattern": "api.atlassian.com",
+      "paths": [
+        "/ex/confluence/*/wiki/api/v2/spaces/*/pages"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_spaces": {
+      "hostPattern": "api.atlassian.com",
+      "paths": [
+        "/ex/confluence/*/wiki/api/v2/spaces"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "read_all": {
+      "hostPattern": "api.atlassian.com",
+      "paths": [
+        "/ex/confluence/*/wiki/api/v2/*"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "search_content": {
+      "hostPattern": "api.atlassian.com",
+      "paths": [
+        "/ex/confluence/*/wiki/rest/api/search"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "update_page": {
+      "hostPattern": "api.atlassian.com",
+      "paths": [
+        "/ex/confluence/*/wiki/api/v2/pages/*"
+      ],
+      "methods": [
+        "PUT"
+      ]
+    },
+    "write_all": {
+      "hostPattern": "api.atlassian.com",
+      "paths": [
+        "/ex/confluence/*/wiki/api/v2/*"
+      ],
+      "methods": [
+        "POST",
+        "PUT",
+        "PATCH",
+        "DELETE"
+      ]
+    }
+  },
+  "docker": {
+    "create_repository": {
+      "hostPattern": "hub.docker.com",
+      "paths": [
+        "/v2/namespaces/*/repositories"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "delete_repository": {
+      "hostPattern": "hub.docker.com",
+      "paths": [
+        "/v2/repositories/*/*"
+      ],
+      "methods": [
+        "DELETE"
+      ]
+    },
+    "delete_tag": {
+      "hostPattern": "hub.docker.com",
+      "paths": [
+        "/v2/repositories/*/*/tags/*"
+      ],
+      "methods": [
+        "DELETE"
+      ]
+    },
+    "get_namespace": {
+      "hostPattern": "hub.docker.com",
+      "paths": [
+        "/v2/namespaces/*"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "get_repository": {
+      "hostPattern": "hub.docker.com",
+      "paths": [
+        "/v2/namespaces/*/repositories/*"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "get_user": {
+      "hostPattern": "hub.docker.com",
+      "paths": [
+        "/v2/users/*"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_orgs": {
+      "hostPattern": "hub.docker.com",
+      "paths": [
+        "/v2/user/orgs"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_repositories": {
+      "hostPattern": "hub.docker.com",
+      "paths": [
+        "/v2/namespaces/*/repositories"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_tags": {
+      "hostPattern": "hub.docker.com",
+      "paths": [
+        "/v2/namespaces/*/repositories/*/tags"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "update_repository": {
+      "hostPattern": "hub.docker.com",
+      "paths": [
+        "/v2/repositories/*/*"
+      ],
+      "methods": [
+        "PATCH"
+      ]
+    }
+  },
+  "dropbox": {
+    "create_folder": {
+      "hostPattern": "api.dropboxapi.com",
+      "paths": [
+        "/2/files/create_folder_v2"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "create_shared_link": {
+      "hostPattern": "api.dropboxapi.com",
+      "paths": [
+        "/2/sharing/create_shared_link_with_settings"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "delete_file": {
+      "hostPattern": "api.dropboxapi.com",
+      "paths": [
+        "/2/files/delete_v2"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "download_file": {
+      "hostPattern": "content.dropboxapi.com",
+      "paths": [
+        "/2/files/download"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "get_current_account": {
+      "hostPattern": "api.dropboxapi.com",
+      "paths": [
+        "/2/users/get_current_account"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "get_metadata": {
+      "hostPattern": "api.dropboxapi.com",
+      "paths": [
+        "/2/files/get_metadata"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "list_folder": {
+      "hostPattern": "api.dropboxapi.com",
+      "paths": [
+        "/2/files/list_folder*"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "list_shared_links": {
+      "hostPattern": "api.dropboxapi.com",
+      "paths": [
+        "/2/sharing/list_shared_links"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "move_file": {
+      "hostPattern": "api.dropboxapi.com",
+      "paths": [
+        "/2/files/move_v2"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "search_files": {
+      "hostPattern": "api.dropboxapi.com",
+      "paths": [
+        "/2/files/search_v2"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "upload_file": {
+      "hostPattern": "content.dropboxapi.com",
+      "paths": [
+        "/2/files/upload"
+      ],
+      "methods": [
+        "POST"
+      ]
+    }
+  },
+  "flyio": {
+    "create_app": {
+      "hostPattern": "api.machines.dev",
+      "paths": [
+        "/v1/apps"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "create_machine": {
+      "hostPattern": "api.machines.dev",
+      "paths": [
+        "/v1/apps/*/machines"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "create_volume": {
+      "hostPattern": "api.machines.dev",
+      "paths": [
+        "/v1/apps/*/volumes"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "delete_app": {
+      "hostPattern": "api.machines.dev",
+      "paths": [
+        "/v1/apps/*"
+      ],
+      "methods": [
+        "DELETE"
+      ]
+    },
+    "delete_machine": {
+      "hostPattern": "api.machines.dev",
+      "paths": [
+        "/v1/apps/*/machines/*"
+      ],
+      "methods": [
+        "DELETE"
+      ]
+    },
+    "delete_volume": {
+      "hostPattern": "api.machines.dev",
+      "paths": [
+        "/v1/apps/*/volumes/*"
+      ],
+      "methods": [
+        "DELETE"
+      ]
+    },
+    "get_app": {
+      "hostPattern": "api.machines.dev",
+      "paths": [
+        "/v1/apps/*"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "get_machine": {
+      "hostPattern": "api.machines.dev",
+      "paths": [
+        "/v1/apps/*/machines/*"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "get_volume": {
+      "hostPattern": "api.machines.dev",
+      "paths": [
+        "/v1/apps/*/volumes/*"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_apps": {
+      "hostPattern": "api.machines.dev",
+      "paths": [
+        "/v1/apps"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_machines": {
+      "hostPattern": "api.machines.dev",
+      "paths": [
+        "/v1/apps/*/machines"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_volumes": {
+      "hostPattern": "api.machines.dev",
+      "paths": [
+        "/v1/apps/*/volumes"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "manage_secrets": {
+      "hostPattern": "api.machines.dev",
+      "paths": [
+        "/v1/apps/*/secrets"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "start_machine": {
+      "hostPattern": "api.machines.dev",
+      "paths": [
+        "/v1/apps/*/machines/*/start"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "stop_machine": {
+      "hostPattern": "api.machines.dev",
+      "paths": [
+        "/v1/apps/*/machines/*/stop"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "update_machine": {
+      "hostPattern": "api.machines.dev",
+      "paths": [
+        "/v1/apps/*/machines/*"
+      ],
+      "methods": [
+        "POST"
+      ]
+    }
+  },
+  "github": {
+    "create_comment": {
+      "hostPattern": "api.github.com",
+      "paths": [
+        "/repos/*/*/issues/*/comments"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "create_issue": {
+      "hostPattern": "api.github.com",
+      "paths": [
+        "/repos/*/*/issues"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "create_pull": {
+      "hostPattern": "api.github.com",
+      "paths": [
+        "/repos/*/*/pulls"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "delete_branch": {
+      "hostPattern": "api.github.com",
+      "paths": [
+        "/repos/*/*/git/refs/*"
+      ],
+      "methods": [
+        "DELETE"
+      ]
+    },
+    "get_repo": {
+      "hostPattern": "api.github.com",
+      "paths": [
+        "/repos/*/*"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "git_clone": {
+      "hostPattern": "github.com",
+      "paths": [
+        "/*/*/git-upload-pack"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "git_push": {
+      "hostPattern": "github.com",
+      "paths": [
+        "/*/*/git-receive-pack"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "graphql_mutation": {
+      "hostPattern": "api.github.com",
+      "paths": [
+        "/graphql"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "graphql_query": {
+      "hostPattern": "api.github.com",
+      "paths": [
+        "/graphql"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "list_issues": {
+      "hostPattern": "api.github.com",
+      "paths": [
+        "/repos/*/*/issues"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_pulls": {
+      "hostPattern": "api.github.com",
+      "paths": [
+        "/repos/*/*/pulls"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_repos": {
+      "hostPattern": "api.github.com",
+      "paths": [
+        "/user/repos"
+      ],
+      "methods": [
+        "GET"
+      ]
+    }
+  },
+  "github-app": {
+    "create_comment": {
+      "hostPattern": "api.github.com",
+      "paths": [
+        "/repos/*/*/issues/*/comments"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "create_issue": {
+      "hostPattern": "api.github.com",
+      "paths": [
+        "/repos/*/*/issues"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "create_pull": {
+      "hostPattern": "api.github.com",
+      "paths": [
+        "/repos/*/*/pulls"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "delete_branch": {
+      "hostPattern": "api.github.com",
+      "paths": [
+        "/repos/*/*/git/refs/*"
+      ],
+      "methods": [
+        "DELETE"
+      ]
+    },
+    "get_repo": {
+      "hostPattern": "api.github.com",
+      "paths": [
+        "/repos/*/*"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "git_clone": {
+      "hostPattern": "github.com",
+      "paths": [
+        "/*/*/git-upload-pack"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "git_push": {
+      "hostPattern": "github.com",
+      "paths": [
+        "/*/*/git-receive-pack"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "graphql_mutation": {
+      "hostPattern": "api.github.com",
+      "paths": [
+        "/graphql"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "graphql_query": {
+      "hostPattern": "api.github.com",
+      "paths": [
+        "/graphql"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "list_issues": {
+      "hostPattern": "api.github.com",
+      "paths": [
+        "/repos/*/*/issues"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_pulls": {
+      "hostPattern": "api.github.com",
+      "paths": [
+        "/repos/*/*/pulls"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_repos": {
+      "hostPattern": "api.github.com",
+      "paths": [
+        "/user/repos"
+      ],
+      "methods": [
+        "GET"
+      ]
+    }
+  },
+  "gitlab": {
+    "create_branch": {
+      "hostPattern": "gitlab.com",
+      "paths": [
+        "/api/v4/projects/*/repository/branches"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "create_issue": {
+      "hostPattern": "gitlab.com",
+      "paths": [
+        "/api/v4/projects/*/issues"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "create_issue_note": {
+      "hostPattern": "gitlab.com",
+      "paths": [
+        "/api/v4/projects/*/issues/*/notes"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "create_merge_request": {
+      "hostPattern": "gitlab.com",
+      "paths": [
+        "/api/v4/projects/*/merge_requests"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "create_mr_note": {
+      "hostPattern": "gitlab.com",
+      "paths": [
+        "/api/v4/projects/*/merge_requests/*/notes"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "delete_branch": {
+      "hostPattern": "gitlab.com",
+      "paths": [
+        "/api/v4/projects/*/repository/branches/*"
+      ],
+      "methods": [
+        "DELETE"
+      ]
+    },
+    "get_issue": {
+      "hostPattern": "gitlab.com",
+      "paths": [
+        "/api/v4/projects/*/issues/*"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "get_merge_request": {
+      "hostPattern": "gitlab.com",
+      "paths": [
+        "/api/v4/projects/*/merge_requests/*"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "get_project": {
+      "hostPattern": "gitlab.com",
+      "paths": [
+        "/api/v4/projects/*"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_branches": {
+      "hostPattern": "gitlab.com",
+      "paths": [
+        "/api/v4/projects/*/repository/branches"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_issues": {
+      "hostPattern": "gitlab.com",
+      "paths": [
+        "/api/v4/projects/*/issues"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_merge_requests": {
+      "hostPattern": "gitlab.com",
+      "paths": [
+        "/api/v4/projects/*/merge_requests"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_projects": {
+      "hostPattern": "gitlab.com",
+      "paths": [
+        "/api/v4/projects"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "merge_merge_request": {
+      "hostPattern": "gitlab.com",
+      "paths": [
+        "/api/v4/projects/*/merge_requests/*/merge"
+      ],
+      "methods": [
+        "PUT"
+      ]
+    },
+    "update_issue": {
+      "hostPattern": "gitlab.com",
+      "paths": [
+        "/api/v4/projects/*/issues/*"
+      ],
+      "methods": [
+        "PUT"
+      ]
+    },
+    "update_merge_request": {
+      "hostPattern": "gitlab.com",
+      "paths": [
+        "/api/v4/projects/*/merge_requests/*"
+      ],
+      "methods": [
+        "PUT"
+      ]
+    },
+    "write_all": {
+      "hostPattern": "gitlab.com",
+      "paths": [
+        "/api/v4/*"
+      ],
+      "methods": [
+        "POST",
+        "PUT",
+        "PATCH",
+        "DELETE"
+      ]
+    }
+  },
+  "gmail": {
+    "batch_delete_messages": {
+      "hostPattern": "gmail.googleapis.com",
+      "paths": [
+        "/gmail/v1/users/*/messages/batchDelete"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "batch_modify_messages": {
+      "hostPattern": "gmail.googleapis.com",
+      "paths": [
+        "/gmail/v1/users/*/messages/batchModify"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "create_draft": {
+      "hostPattern": "gmail.googleapis.com",
+      "paths": [
+        "/gmail/v1/users/*/drafts"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "delete_draft": {
+      "hostPattern": "gmail.googleapis.com",
+      "paths": [
+        "/gmail/v1/users/*/drafts/*"
+      ],
+      "methods": [
+        "DELETE"
+      ]
+    },
+    "delete_message": {
+      "hostPattern": "gmail.googleapis.com",
+      "paths": [
+        "/gmail/v1/users/*/messages/*"
+      ],
+      "methods": [
+        "DELETE"
+      ]
+    },
+    "delete_thread": {
+      "hostPattern": "gmail.googleapis.com",
+      "paths": [
+        "/gmail/v1/users/*/threads/*"
+      ],
+      "methods": [
+        "DELETE"
+      ]
+    },
+    "get_message": {
+      "hostPattern": "gmail.googleapis.com",
+      "paths": [
+        "/gmail/v1/users/*/messages/*"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "get_thread": {
+      "hostPattern": "gmail.googleapis.com",
+      "paths": [
+        "/gmail/v1/users/*/threads/*"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "import_message": {
+      "hostPattern": "gmail.googleapis.com",
+      "paths": [
+        "/gmail/v1/users/*/messages/import"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "insert_message": {
+      "hostPattern": "gmail.googleapis.com",
+      "paths": [
+        "/gmail/v1/users/*/messages"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "list_drafts": {
+      "hostPattern": "gmail.googleapis.com",
+      "paths": [
+        "/gmail/v1/users/*/drafts"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_labels": {
+      "hostPattern": "gmail.googleapis.com",
+      "paths": [
+        "/gmail/v1/users/*/labels"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "modify_message": {
+      "hostPattern": "gmail.googleapis.com",
+      "paths": [
+        "/gmail/v1/users/*/messages/*/modify"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "modify_thread": {
+      "hostPattern": "gmail.googleapis.com",
+      "paths": [
+        "/gmail/v1/users/*/threads/*/modify"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "read_all": {
+      "hostPattern": "gmail.googleapis.com",
+      "paths": [
+        "/gmail/v1/*"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "search_messages": {
+      "hostPattern": "gmail.googleapis.com",
+      "paths": [
+        "/gmail/v1/users/*/messages"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "search_threads": {
+      "hostPattern": "gmail.googleapis.com",
+      "paths": [
+        "/gmail/v1/users/*/threads"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "send_draft": {
+      "hostPattern": "gmail.googleapis.com",
+      "paths": [
+        "/gmail/v1/users/*/drafts/send"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "send_email": {
+      "hostPattern": "gmail.googleapis.com",
+      "paths": [
+        "/gmail/v1/users/*/messages/send"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "trash_message": {
+      "hostPattern": "gmail.googleapis.com",
+      "paths": [
+        "/gmail/v1/users/*/messages/*/trash"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "trash_thread": {
+      "hostPattern": "gmail.googleapis.com",
+      "paths": [
+        "/gmail/v1/users/*/threads/*/trash"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "untrash_message": {
+      "hostPattern": "gmail.googleapis.com",
+      "paths": [
+        "/gmail/v1/users/*/messages/*/untrash"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "untrash_thread": {
+      "hostPattern": "gmail.googleapis.com",
+      "paths": [
+        "/gmail/v1/users/*/threads/*/untrash"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "update_draft": {
+      "hostPattern": "gmail.googleapis.com",
+      "paths": [
+        "/gmail/v1/users/*/drafts/*"
+      ],
+      "methods": [
+        "PUT"
+      ]
+    },
+    "write_all": {
+      "hostPattern": "gmail.googleapis.com",
+      "paths": [
+        "/gmail/v1/*",
+        "/upload/gmail/v1/*"
+      ],
+      "methods": [
+        "POST",
+        "PUT",
+        "PATCH",
+        "DELETE"
+      ]
+    }
+  },
+  "google-admin": {
+    "create_user": {
+      "hostPattern": "admin.googleapis.com",
+      "paths": [
+        "/admin/directory/v1/users"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "delete_user": {
+      "hostPattern": "admin.googleapis.com",
+      "paths": [
+        "/admin/directory/v1/users/*"
+      ],
+      "methods": [
+        "DELETE"
+      ]
+    },
+    "get_user": {
+      "hostPattern": "admin.googleapis.com",
+      "paths": [
+        "/admin/directory/v1/users/*"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_groups": {
+      "hostPattern": "admin.googleapis.com",
+      "paths": [
+        "/admin/directory/v1/groups"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_users": {
+      "hostPattern": "admin.googleapis.com",
+      "paths": [
+        "/admin/directory/v1/users"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "update_user": {
+      "hostPattern": "admin.googleapis.com",
+      "paths": [
+        "/admin/directory/v1/users/*"
+      ],
+      "methods": [
+        "PUT"
+      ]
+    }
+  },
+  "google-analytics": {
+    "batch_run_reports": {
+      "hostPattern": "analyticsdata.googleapis.com",
+      "paths": [
+        "/v1beta/properties/*:batchRunReports"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "get_metadata": {
+      "hostPattern": "analyticsdata.googleapis.com",
+      "paths": [
+        "/v1beta/properties/*/metadata"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "run_report": {
+      "hostPattern": "analyticsdata.googleapis.com",
+      "paths": [
+        "/v1beta/properties/*:runReport"
+      ],
+      "methods": [
+        "POST"
+      ]
+    }
+  },
+  "google-calendar": {
+    "create_event": {
+      "hostPattern": "www.googleapis.com",
+      "paths": [
+        "/calendar/v3/calendars/*/events"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "delete_event": {
+      "hostPattern": "www.googleapis.com",
+      "paths": [
+        "/calendar/v3/calendars/*/events/*"
+      ],
+      "methods": [
+        "DELETE"
+      ]
+    },
+    "get_event": {
+      "hostPattern": "www.googleapis.com",
+      "paths": [
+        "/calendar/v3/calendars/*/events/*"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_calendars": {
+      "hostPattern": "www.googleapis.com",
+      "paths": [
+        "/calendar/v3/users/me/calendarList"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_events": {
+      "hostPattern": "www.googleapis.com",
+      "paths": [
+        "/calendar/v3/calendars/*/events"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "read_all": {
+      "hostPattern": "www.googleapis.com",
+      "paths": [
+        "/calendar/v3/*"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "update_event": {
+      "hostPattern": "www.googleapis.com",
+      "paths": [
+        "/calendar/v3/calendars/*/events/*"
+      ],
+      "methods": [
+        "PUT",
+        "PATCH"
+      ]
+    },
+    "write_all": {
+      "hostPattern": "www.googleapis.com",
+      "paths": [
+        "/calendar/v3/*"
+      ],
+      "methods": [
+        "POST",
+        "PUT",
+        "PATCH",
+        "DELETE"
+      ]
+    }
+  },
+  "google-chat": {
+    "create_member": {
+      "hostPattern": "chat.googleapis.com",
+      "paths": [
+        "/v1/spaces/*/members"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "create_message": {
+      "hostPattern": "chat.googleapis.com",
+      "paths": [
+        "/v1/spaces/*/messages"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "create_space": {
+      "hostPattern": "chat.googleapis.com",
+      "paths": [
+        "/v1/spaces"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "delete_member": {
+      "hostPattern": "chat.googleapis.com",
+      "paths": [
+        "/v1/spaces/*/members/*"
+      ],
+      "methods": [
+        "DELETE"
+      ]
+    },
+    "delete_message": {
+      "hostPattern": "chat.googleapis.com",
+      "paths": [
+        "/v1/spaces/*/messages/*"
+      ],
+      "methods": [
+        "DELETE"
+      ]
+    },
+    "delete_space": {
+      "hostPattern": "chat.googleapis.com",
+      "paths": [
+        "/v1/spaces/*"
+      ],
+      "methods": [
+        "DELETE"
+      ]
+    },
+    "get_member": {
+      "hostPattern": "chat.googleapis.com",
+      "paths": [
+        "/v1/spaces/*/members/*"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "get_message": {
+      "hostPattern": "chat.googleapis.com",
+      "paths": [
+        "/v1/spaces/*/messages/*"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "get_space": {
+      "hostPattern": "chat.googleapis.com",
+      "paths": [
+        "/v1/spaces/*"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_members": {
+      "hostPattern": "chat.googleapis.com",
+      "paths": [
+        "/v1/spaces/*/members"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_messages": {
+      "hostPattern": "chat.googleapis.com",
+      "paths": [
+        "/v1/spaces/*/messages"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_spaces": {
+      "hostPattern": "chat.googleapis.com",
+      "paths": [
+        "/v1/spaces"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "update_message": {
+      "hostPattern": "chat.googleapis.com",
+      "paths": [
+        "/v1/spaces/*/messages/*"
+      ],
+      "methods": [
+        "PATCH"
+      ]
+    },
+    "update_space": {
+      "hostPattern": "chat.googleapis.com",
+      "paths": [
+        "/v1/spaces/*"
+      ],
+      "methods": [
+        "PATCH"
+      ]
+    }
+  },
+  "google-classroom": {
+    "create_course": {
+      "hostPattern": "classroom.googleapis.com",
+      "paths": [
+        "/v1/courses"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "create_coursework": {
+      "hostPattern": "classroom.googleapis.com",
+      "paths": [
+        "/v1/courses/*/courseWork"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "get_course": {
+      "hostPattern": "classroom.googleapis.com",
+      "paths": [
+        "/v1/courses/*"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_courses": {
+      "hostPattern": "classroom.googleapis.com",
+      "paths": [
+        "/v1/courses"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_students": {
+      "hostPattern": "classroom.googleapis.com",
+      "paths": [
+        "/v1/courses/*/students"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "update_course": {
+      "hostPattern": "classroom.googleapis.com",
+      "paths": [
+        "/v1/courses/*"
+      ],
+      "methods": [
+        "PATCH"
+      ]
+    }
+  },
+  "google-contacts": {
+    "create_contact": {
+      "hostPattern": "people.googleapis.com",
+      "paths": [
+        "/v1/people:createContact"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "delete_contact": {
+      "hostPattern": "people.googleapis.com",
+      "paths": [
+        "/v1/people/*:deleteContact"
+      ],
+      "methods": [
+        "DELETE"
+      ]
+    },
+    "get_person": {
+      "hostPattern": "people.googleapis.com",
+      "paths": [
+        "/v1/people/*"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_connections": {
+      "hostPattern": "people.googleapis.com",
+      "paths": [
+        "/v1/people/me/connections"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_directory": {
+      "hostPattern": "people.googleapis.com",
+      "paths": [
+        "/v1/people:listDirectoryPeople"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_other_contacts": {
+      "hostPattern": "people.googleapis.com",
+      "paths": [
+        "/v1/otherContacts"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "read_all": {
+      "hostPattern": "people.googleapis.com",
+      "paths": [
+        "/v1/*"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "search_contacts": {
+      "hostPattern": "people.googleapis.com",
+      "paths": [
+        "/v1/people:searchContacts"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "search_directory": {
+      "hostPattern": "people.googleapis.com",
+      "paths": [
+        "/v1/people:searchDirectoryPeople"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "search_other_contacts": {
+      "hostPattern": "people.googleapis.com",
+      "paths": [
+        "/v1/otherContacts:search"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "update_contact": {
+      "hostPattern": "people.googleapis.com",
+      "paths": [
+        "/v1/people/*:updateContact"
+      ],
+      "methods": [
+        "PATCH"
+      ]
+    },
+    "write_all": {
+      "hostPattern": "people.googleapis.com",
+      "paths": [
+        "/v1/*"
+      ],
+      "methods": [
+        "POST",
+        "PATCH",
+        "DELETE"
+      ]
+    }
+  },
+  "google-docs": {
+    "batch_update_document": {
+      "hostPattern": "docs.googleapis.com",
+      "paths": [
+        "/v1/documents/*:batchUpdate"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "create_document": {
+      "hostPattern": "docs.googleapis.com",
+      "paths": [
+        "/v1/documents"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "get_document": {
+      "hostPattern": "docs.googleapis.com",
+      "paths": [
+        "/v1/documents/*"
+      ],
+      "methods": [
+        "GET"
+      ]
+    }
+  },
+  "google-drive": {
+    "create_file": {
+      "hostPattern": "www.googleapis.com",
+      "paths": [
+        "/drive/v3/files",
+        "/upload/drive/v3/files"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "delete_file": {
+      "hostPattern": "www.googleapis.com",
+      "paths": [
+        "/drive/v3/files/*"
+      ],
+      "methods": [
+        "DELETE"
+      ]
+    },
+    "get_file": {
+      "hostPattern": "www.googleapis.com",
+      "paths": [
+        "/drive/v3/files/*"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "get_file_metadata": {
+      "hostPattern": "www.googleapis.com",
+      "paths": [
+        "/drive/v3/files/*"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_files": {
+      "hostPattern": "www.googleapis.com",
+      "paths": [
+        "/drive/v3/files"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "search_files": {
+      "hostPattern": "www.googleapis.com",
+      "paths": [
+        "/drive/v3/files"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "share_file": {
+      "hostPattern": "www.googleapis.com",
+      "paths": [
+        "/drive/v3/files/*/permissions"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "update_file": {
+      "hostPattern": "www.googleapis.com",
+      "paths": [
+        "/drive/v3/files/*",
+        "/upload/drive/v3/files/*"
+      ],
+      "methods": [
+        "PATCH"
+      ]
+    },
+    "write_all": {
+      "hostPattern": "www.googleapis.com",
+      "paths": [
+        "/drive/v3/*",
+        "/upload/drive/v3/*"
+      ],
+      "methods": [
+        "POST",
+        "PUT",
+        "PATCH",
+        "DELETE"
+      ]
+    }
+  },
+  "google-forms": {
+    "batch_update_form": {
+      "hostPattern": "forms.googleapis.com",
+      "paths": [
+        "/v1/forms/*:batchUpdate"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "create_form": {
+      "hostPattern": "forms.googleapis.com",
+      "paths": [
+        "/v1/forms"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "get_form": {
+      "hostPattern": "forms.googleapis.com",
+      "paths": [
+        "/v1/forms/*"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_responses": {
+      "hostPattern": "forms.googleapis.com",
+      "paths": [
+        "/v1/forms/*/responses"
+      ],
+      "methods": [
+        "GET"
+      ]
+    }
+  },
+  "google-meet": {
+    "create_space": {
+      "hostPattern": "meet.googleapis.com",
+      "paths": [
+        "/v2/spaces"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "end_call": {
+      "hostPattern": "meet.googleapis.com",
+      "paths": [
+        "/v2/spaces/*:endActiveConference"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "get_space": {
+      "hostPattern": "meet.googleapis.com",
+      "paths": [
+        "/v2/spaces/*"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_recordings": {
+      "hostPattern": "meet.googleapis.com",
+      "paths": [
+        "/v2/conferenceRecords/*/recordings"
+      ],
+      "methods": [
+        "GET"
+      ]
+    }
+  },
+  "google-photos": {
+    "batch_add_to_album": {
+      "hostPattern": "photoslibrary.googleapis.com",
+      "paths": [
+        "/v1/albums/*:batchAddMediaItems"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "create_album": {
+      "hostPattern": "photoslibrary.googleapis.com",
+      "paths": [
+        "/v1/albums"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "get_media_item": {
+      "hostPattern": "photoslibrary.googleapis.com",
+      "paths": [
+        "/v1/mediaItems/*"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_albums": {
+      "hostPattern": "photoslibrary.googleapis.com",
+      "paths": [
+        "/v1/albums"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_media_items": {
+      "hostPattern": "photoslibrary.googleapis.com",
+      "paths": [
+        "/v1/mediaItems"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "upload_media": {
+      "hostPattern": "photoslibrary.googleapis.com",
+      "paths": [
+        "/v1/uploads"
+      ],
+      "methods": [
+        "POST"
+      ]
+    }
+  },
+  "google-search-console": {
+    "add_site": {
+      "hostPattern": "searchconsole.googleapis.com",
+      "paths": [
+        "/webmasters/v3/sites/*"
+      ],
+      "methods": [
+        "PUT"
+      ]
+    },
+    "delete_site": {
+      "hostPattern": "searchconsole.googleapis.com",
+      "paths": [
+        "/webmasters/v3/sites/*"
+      ],
+      "methods": [
+        "DELETE"
+      ]
+    },
+    "get_site": {
+      "hostPattern": "searchconsole.googleapis.com",
+      "paths": [
+        "/webmasters/v3/sites/*"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_sites": {
+      "hostPattern": "searchconsole.googleapis.com",
+      "paths": [
+        "/webmasters/v3/sites"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "search_analytics_query": {
+      "hostPattern": "searchconsole.googleapis.com",
+      "paths": [
+        "/webmasters/v3/sites/*/searchAnalytics/query"
+      ],
+      "methods": [
+        "POST"
+      ]
+    }
+  },
+  "google-sheets": {
+    "append_values": {
+      "hostPattern": "sheets.googleapis.com",
+      "paths": [
+        "/v4/spreadsheets/*/values/*:append"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "batch_get_values": {
+      "hostPattern": "sheets.googleapis.com",
+      "paths": [
+        "/v4/spreadsheets/*/values:batchGet"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "batch_update_values": {
+      "hostPattern": "sheets.googleapis.com",
+      "paths": [
+        "/v4/spreadsheets/*/values:batchUpdate"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "create_spreadsheet": {
+      "hostPattern": "sheets.googleapis.com",
+      "paths": [
+        "/v4/spreadsheets"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "get_spreadsheet": {
+      "hostPattern": "sheets.googleapis.com",
+      "paths": [
+        "/v4/spreadsheets/*"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "get_values": {
+      "hostPattern": "sheets.googleapis.com",
+      "paths": [
+        "/v4/spreadsheets/*/values/*"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "update_values": {
+      "hostPattern": "sheets.googleapis.com",
+      "paths": [
+        "/v4/spreadsheets/*/values/*"
+      ],
+      "methods": [
+        "PUT"
+      ]
+    }
+  },
+  "google-slides": {
+    "batch_update_presentation": {
+      "hostPattern": "slides.googleapis.com",
+      "paths": [
+        "/v1/presentations/*:batchUpdate"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "create_presentation": {
+      "hostPattern": "slides.googleapis.com",
+      "paths": [
+        "/v1/presentations"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "get_page": {
+      "hostPattern": "slides.googleapis.com",
+      "paths": [
+        "/v1/presentations/*/pages/*"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "get_presentation": {
+      "hostPattern": "slides.googleapis.com",
+      "paths": [
+        "/v1/presentations/*"
+      ],
+      "methods": [
+        "GET"
+      ]
+    }
+  },
+  "google-tasks": {
+    "create_task": {
+      "hostPattern": "tasks.googleapis.com",
+      "paths": [
+        "/tasks/v1/lists/*/tasks"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "delete_task": {
+      "hostPattern": "tasks.googleapis.com",
+      "paths": [
+        "/tasks/v1/lists/*/tasks/*"
+      ],
+      "methods": [
+        "DELETE"
+      ]
+    },
+    "get_task": {
+      "hostPattern": "tasks.googleapis.com",
+      "paths": [
+        "/tasks/v1/lists/*/tasks/*"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_task_lists": {
+      "hostPattern": "tasks.googleapis.com",
+      "paths": [
+        "/tasks/v1/users/@me/lists"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_tasks": {
+      "hostPattern": "tasks.googleapis.com",
+      "paths": [
+        "/tasks/v1/lists/*/tasks"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "update_task": {
+      "hostPattern": "tasks.googleapis.com",
+      "paths": [
+        "/tasks/v1/lists/*/tasks/*"
+      ],
+      "methods": [
+        "PUT",
+        "PATCH"
+      ]
+    }
+  },
+  "jira": {
+    "add_comment": {
+      "hostPattern": "api.atlassian.com",
+      "paths": [
+        "/ex/jira/*/rest/api/3/issue/*/comment"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "assign_issue": {
+      "hostPattern": "api.atlassian.com",
+      "paths": [
+        "/ex/jira/*/rest/api/3/issue/*/assignee"
+      ],
+      "methods": [
+        "PUT"
+      ]
+    },
+    "create_issue": {
+      "hostPattern": "api.atlassian.com",
+      "paths": [
+        "/ex/jira/*/rest/api/3/issue"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "delete_issue": {
+      "hostPattern": "api.atlassian.com",
+      "paths": [
+        "/ex/jira/*/rest/api/3/issue/*"
+      ],
+      "methods": [
+        "DELETE"
+      ]
+    },
+    "get_issue": {
+      "hostPattern": "api.atlassian.com",
+      "paths": [
+        "/ex/jira/*/rest/api/3/issue/*"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "get_project": {
+      "hostPattern": "api.atlassian.com",
+      "paths": [
+        "/ex/jira/*/rest/api/3/project/*"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_projects": {
+      "hostPattern": "api.atlassian.com",
+      "paths": [
+        "/ex/jira/*/rest/api/3/project"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "read_all": {
+      "hostPattern": "api.atlassian.com",
+      "paths": [
+        "/ex/jira/*/rest/api/3/*"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "search_issues": {
+      "hostPattern": "api.atlassian.com",
+      "paths": [
+        "/ex/jira/*/rest/api/3/search/jql"
+      ],
+      "methods": [
+        "GET",
+        "POST"
+      ]
+    },
+    "transition_issue": {
+      "hostPattern": "api.atlassian.com",
+      "paths": [
+        "/ex/jira/*/rest/api/3/issue/*/transitions"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "update_issue": {
+      "hostPattern": "api.atlassian.com",
+      "paths": [
+        "/ex/jira/*/rest/api/3/issue/*"
+      ],
+      "methods": [
+        "PUT"
+      ]
+    },
+    "write_all": {
+      "hostPattern": "api.atlassian.com",
+      "paths": [
+        "/ex/jira/*/rest/api/3/*"
+      ],
+      "methods": [
+        "POST",
+        "PUT",
+        "PATCH",
+        "DELETE"
+      ]
+    }
+  },
+  "linkedin": {
+    "create_comment": {
+      "hostPattern": "api.linkedin.com",
+      "paths": [
+        "/rest/socialActions/*/comments",
+        "/v2/socialActions/*/comments"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "create_post": {
+      "hostPattern": "api.linkedin.com",
+      "paths": [
+        "/rest/posts",
+        "/v2/ugcPosts",
+        "/v2/shares"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "create_reaction": {
+      "hostPattern": "api.linkedin.com",
+      "paths": [
+        "/rest/reactions*",
+        "/rest/socialActions/*/likes",
+        "/v2/socialActions/*/likes"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "delete_comment": {
+      "hostPattern": "api.linkedin.com",
+      "paths": [
+        "/rest/socialActions/*/comments/*",
+        "/v2/socialActions/*/comments/*"
+      ],
+      "methods": [
+        "DELETE"
+      ]
+    },
+    "delete_post": {
+      "hostPattern": "api.linkedin.com",
+      "paths": [
+        "/rest/posts/*",
+        "/v2/ugcPosts/*",
+        "/v2/shares/*"
+      ],
+      "methods": [
+        "DELETE"
+      ]
+    },
+    "delete_reaction": {
+      "hostPattern": "api.linkedin.com",
+      "paths": [
+        "/rest/reactions/*",
+        "/rest/socialActions/*/likes/*",
+        "/v2/socialActions/*/likes/*"
+      ],
+      "methods": [
+        "DELETE"
+      ]
+    },
+    "get_posts": {
+      "hostPattern": "api.linkedin.com",
+      "paths": [
+        "/rest/posts*",
+        "/v2/ugcPosts*",
+        "/v2/shares*"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "get_profile": {
+      "hostPattern": "api.linkedin.com",
+      "paths": [
+        "/v2/userinfo",
+        "/v2/me"
+      ],
+      "methods": [
+        "GET"
+      ]
+    }
+  },
+  "monday": {
+    "manage_webhooks": {
+      "hostPattern": "api.monday.com",
+      "paths": [
+        "/v2"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "mutate_boards": {
+      "hostPattern": "api.monday.com",
+      "paths": [
+        "/v2"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "mutate_docs": {
+      "hostPattern": "api.monday.com",
+      "paths": [
+        "/v2"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "mutate_updates": {
+      "hostPattern": "api.monday.com",
+      "paths": [
+        "/v2"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "query_boards": {
+      "hostPattern": "api.monday.com",
+      "paths": [
+        "/v2"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "query_docs": {
+      "hostPattern": "api.monday.com",
+      "paths": [
+        "/v2"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "query_updates": {
+      "hostPattern": "api.monday.com",
+      "paths": [
+        "/v2"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "query_users": {
+      "hostPattern": "api.monday.com",
+      "paths": [
+        "/v2"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "query_workspaces": {
+      "hostPattern": "api.monday.com",
+      "paths": [
+        "/v2"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "send_notifications": {
+      "hostPattern": "api.monday.com",
+      "paths": [
+        "/v2"
+      ],
+      "methods": [
+        "POST"
+      ]
+    }
+  },
+  "mongodb-atlas": {
+    "add_access_list": {
+      "hostPattern": "cloud.mongodb.com",
+      "paths": [
+        "/api/atlas/v2/groups/*/accessList"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "create_cluster": {
+      "hostPattern": "cloud.mongodb.com",
+      "paths": [
+        "/api/atlas/v2/groups/*/clusters"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "create_db_user": {
+      "hostPattern": "cloud.mongodb.com",
+      "paths": [
+        "/api/atlas/v2/groups/*/databaseUsers"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "create_project": {
+      "hostPattern": "cloud.mongodb.com",
+      "paths": [
+        "/api/atlas/v2/groups"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "delete_access_list": {
+      "hostPattern": "cloud.mongodb.com",
+      "paths": [
+        "/api/atlas/v2/groups/*/accessList/*"
+      ],
+      "methods": [
+        "DELETE"
+      ]
+    },
+    "delete_cluster": {
+      "hostPattern": "cloud.mongodb.com",
+      "paths": [
+        "/api/atlas/v2/groups/*/clusters/*"
+      ],
+      "methods": [
+        "DELETE"
+      ]
+    },
+    "delete_db_user": {
+      "hostPattern": "cloud.mongodb.com",
+      "paths": [
+        "/api/atlas/v2/groups/*/databaseUsers/*/*"
+      ],
+      "methods": [
+        "DELETE"
+      ]
+    },
+    "get_cluster": {
+      "hostPattern": "cloud.mongodb.com",
+      "paths": [
+        "/api/atlas/v2/groups/*/clusters/*"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "get_project": {
+      "hostPattern": "cloud.mongodb.com",
+      "paths": [
+        "/api/atlas/v2/groups/*"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_access_list": {
+      "hostPattern": "cloud.mongodb.com",
+      "paths": [
+        "/api/atlas/v2/groups/*/accessList"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_alerts": {
+      "hostPattern": "cloud.mongodb.com",
+      "paths": [
+        "/api/atlas/v2/groups/*/alertConfigs"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_clusters": {
+      "hostPattern": "cloud.mongodb.com",
+      "paths": [
+        "/api/atlas/v2/groups/*/clusters"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_db_users": {
+      "hostPattern": "cloud.mongodb.com",
+      "paths": [
+        "/api/atlas/v2/groups/*/databaseUsers"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_orgs": {
+      "hostPattern": "cloud.mongodb.com",
+      "paths": [
+        "/api/atlas/v2/orgs"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_projects": {
+      "hostPattern": "cloud.mongodb.com",
+      "paths": [
+        "/api/atlas/v2/groups"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "update_cluster": {
+      "hostPattern": "cloud.mongodb.com",
+      "paths": [
+        "/api/atlas/v2/groups/*/clusters/*"
+      ],
+      "methods": [
+        "PATCH"
+      ]
+    },
+    "update_db_user": {
+      "hostPattern": "cloud.mongodb.com",
+      "paths": [
+        "/api/atlas/v2/groups/*/databaseUsers/*/*"
+      ],
+      "methods": [
+        "PATCH"
+      ]
+    }
+  },
+  "notion": {
+    "append_blocks": {
+      "hostPattern": "api.notion.com",
+      "paths": [
+        "/v1/blocks/*/children"
+      ],
+      "methods": [
+        "PATCH"
+      ]
+    },
+    "create_comment": {
+      "hostPattern": "api.notion.com",
+      "paths": [
+        "/v1/comments"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "create_page": {
+      "hostPattern": "api.notion.com",
+      "paths": [
+        "/v1/pages"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "delete_block": {
+      "hostPattern": "api.notion.com",
+      "paths": [
+        "/v1/blocks/*"
+      ],
+      "methods": [
+        "DELETE"
+      ]
+    },
+    "get_block_children": {
+      "hostPattern": "api.notion.com",
+      "paths": [
+        "/v1/blocks/*/children"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "get_database": {
+      "hostPattern": "api.notion.com",
+      "paths": [
+        "/v1/databases/*"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "get_page": {
+      "hostPattern": "api.notion.com",
+      "paths": [
+        "/v1/pages/*"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_comments": {
+      "hostPattern": "api.notion.com",
+      "paths": [
+        "/v1/comments"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_users": {
+      "hostPattern": "api.notion.com",
+      "paths": [
+        "/v1/users"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "query_database": {
+      "hostPattern": "api.notion.com",
+      "paths": [
+        "/v1/databases/*/query"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "search": {
+      "hostPattern": "api.notion.com",
+      "paths": [
+        "/v1/search"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "update_block": {
+      "hostPattern": "api.notion.com",
+      "paths": [
+        "/v1/blocks/*"
+      ],
+      "methods": [
+        "PATCH"
+      ]
+    },
+    "update_page": {
+      "hostPattern": "api.notion.com",
+      "paths": [
+        "/v1/pages/*"
+      ],
+      "methods": [
+        "PATCH"
+      ]
+    }
+  },
+  "resend": {
+    "create_batch": {
+      "hostPattern": "api.resend.com",
+      "paths": [
+        "/emails/batch"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "get_email": {
+      "hostPattern": "api.resend.com",
+      "paths": [
+        "/emails/*"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_emails": {
+      "hostPattern": "api.resend.com",
+      "paths": [
+        "/emails"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "send_email": {
+      "hostPattern": "api.resend.com",
+      "paths": [
+        "/emails"
+      ],
+      "methods": [
+        "POST"
+      ]
+    }
+  },
+  "supabase": {
+    "create_function": {
+      "hostPattern": "api.supabase.com",
+      "paths": [
+        "/v1/projects/*/functions"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "create_project": {
+      "hostPattern": "api.supabase.com",
+      "paths": [
+        "/v1/projects"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "create_secrets": {
+      "hostPattern": "api.supabase.com",
+      "paths": [
+        "/v1/projects/*/secrets"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "delete_function": {
+      "hostPattern": "api.supabase.com",
+      "paths": [
+        "/v1/projects/*/functions/*"
+      ],
+      "methods": [
+        "DELETE"
+      ]
+    },
+    "get_auth_config": {
+      "hostPattern": "api.supabase.com",
+      "paths": [
+        "/v1/projects/*/config/auth"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "get_database_config": {
+      "hostPattern": "api.supabase.com",
+      "paths": [
+        "/v1/projects/*/config/database/*"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "get_postgrest_config": {
+      "hostPattern": "api.supabase.com",
+      "paths": [
+        "/v1/projects/*/postgrest"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "get_project": {
+      "hostPattern": "api.supabase.com",
+      "paths": [
+        "/v1/projects/*"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_functions": {
+      "hostPattern": "api.supabase.com",
+      "paths": [
+        "/v1/projects/*/functions"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_organizations": {
+      "hostPattern": "api.supabase.com",
+      "paths": [
+        "/v1/organizations"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_projects": {
+      "hostPattern": "api.supabase.com",
+      "paths": [
+        "/v1/projects"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_secrets": {
+      "hostPattern": "api.supabase.com",
+      "paths": [
+        "/v1/projects/*/secrets"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_storage_buckets": {
+      "hostPattern": "api.supabase.com",
+      "paths": [
+        "/v1/projects/*/storage/buckets"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "run_query": {
+      "hostPattern": "api.supabase.com",
+      "paths": [
+        "/v1/projects/*/database/query"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "update_auth_config": {
+      "hostPattern": "api.supabase.com",
+      "paths": [
+        "/v1/projects/*/config/auth"
+      ],
+      "methods": [
+        "PATCH"
+      ]
+    },
+    "update_function": {
+      "hostPattern": "api.supabase.com",
+      "paths": [
+        "/v1/projects/*/functions/*"
+      ],
+      "methods": [
+        "PATCH"
+      ]
+    },
+    "write_all": {
+      "hostPattern": "api.supabase.com",
+      "paths": [
+        "/v1/*"
+      ],
+      "methods": [
+        "POST",
+        "PUT",
+        "PATCH",
+        "DELETE"
+      ]
+    }
+  },
+  "todoist": {
+    "close_task": {
+      "hostPattern": "api.todoist.com",
+      "paths": [
+        "/api/v1/tasks/*/close"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "create_task": {
+      "hostPattern": "api.todoist.com",
+      "paths": [
+        "/api/v1/tasks"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "delete_task": {
+      "hostPattern": "api.todoist.com",
+      "paths": [
+        "/api/v1/tasks/*"
+      ],
+      "methods": [
+        "DELETE"
+      ]
+    },
+    "get_task": {
+      "hostPattern": "api.todoist.com",
+      "paths": [
+        "/api/v1/tasks/*"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_projects": {
+      "hostPattern": "api.todoist.com",
+      "paths": [
+        "/api/v1/projects"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_tasks": {
+      "hostPattern": "api.todoist.com",
+      "paths": [
+        "/api/v1/tasks"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "update_task": {
+      "hostPattern": "api.todoist.com",
+      "paths": [
+        "/api/v1/tasks/*"
+      ],
+      "methods": [
+        "POST"
+      ]
+    }
+  },
+  "trello": {
+    "create_board": {
+      "hostPattern": "api.trello.com",
+      "paths": [
+        "/1/boards"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "create_card": {
+      "hostPattern": "api.trello.com",
+      "paths": [
+        "/1/cards"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "create_list": {
+      "hostPattern": "api.trello.com",
+      "paths": [
+        "/1/lists"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "delete_card": {
+      "hostPattern": "api.trello.com",
+      "paths": [
+        "/1/cards/*"
+      ],
+      "methods": [
+        "DELETE"
+      ]
+    },
+    "get_board": {
+      "hostPattern": "api.trello.com",
+      "paths": [
+        "/1/boards/*"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "get_card": {
+      "hostPattern": "api.trello.com",
+      "paths": [
+        "/1/cards/*"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "get_cards": {
+      "hostPattern": "api.trello.com",
+      "paths": [
+        "/1/lists/*/cards"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "get_lists": {
+      "hostPattern": "api.trello.com",
+      "paths": [
+        "/1/boards/*/lists"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_boards": {
+      "hostPattern": "api.trello.com",
+      "paths": [
+        "/1/members/*/boards"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "update_card": {
+      "hostPattern": "api.trello.com",
+      "paths": [
+        "/1/cards/*"
+      ],
+      "methods": [
+        "PUT"
+      ]
+    }
+  },
+  "vercel": {
+    "add_domain": {
+      "hostPattern": "api.vercel.com",
+      "paths": [
+        "/v7/domains"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "create_deployment": {
+      "hostPattern": "api.vercel.com",
+      "paths": [
+        "/v13/deployments"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "create_env_var": {
+      "hostPattern": "api.vercel.com",
+      "paths": [
+        "/v10/projects/*/env"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "delete_env_var": {
+      "hostPattern": "api.vercel.com",
+      "paths": [
+        "/v9/projects/*/env/*"
+      ],
+      "methods": [
+        "DELETE"
+      ]
+    },
+    "get_deployment": {
+      "hostPattern": "api.vercel.com",
+      "paths": [
+        "/v13/deployments/*"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "get_project": {
+      "hostPattern": "api.vercel.com",
+      "paths": [
+        "/v9/projects/*"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "get_user": {
+      "hostPattern": "api.vercel.com",
+      "paths": [
+        "/v2/user"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_deployments": {
+      "hostPattern": "api.vercel.com",
+      "paths": [
+        "/v7/deployments"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_domains": {
+      "hostPattern": "api.vercel.com",
+      "paths": [
+        "/v5/domains"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_env_vars": {
+      "hostPattern": "api.vercel.com",
+      "paths": [
+        "/v10/projects/*/env"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_projects": {
+      "hostPattern": "api.vercel.com",
+      "paths": [
+        "/v10/projects"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_teams": {
+      "hostPattern": "api.vercel.com",
+      "paths": [
+        "/v2/teams"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "remove_domain": {
+      "hostPattern": "api.vercel.com",
+      "paths": [
+        "/v6/domains/*"
+      ],
+      "methods": [
+        "DELETE"
+      ]
+    },
+    "update_env_var": {
+      "hostPattern": "api.vercel.com",
+      "paths": [
+        "/v9/projects/*/env/*"
+      ],
+      "methods": [
+        "PATCH"
+      ]
+    }
+  },
+  "vertex-ai": {
+    "generate_content": {
+      "hostPattern": "*-aiplatform.googleapis.com",
+      "paths": [
+        "/v1/projects/*/locations/*/publishers/*/models/*:generateContent"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "get_model": {
+      "hostPattern": "*-aiplatform.googleapis.com",
+      "paths": [
+        "/v1/projects/*/locations/*/models/*"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_models": {
+      "hostPattern": "*-aiplatform.googleapis.com",
+      "paths": [
+        "/v1/projects/*/locations/*/models"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "predict": {
+      "hostPattern": "*-aiplatform.googleapis.com",
+      "paths": [
+        "/v1/projects/*/locations/*/endpoints/*:predict"
+      ],
+      "methods": [
+        "POST"
+      ]
+    }
+  },
+  "youtube": {
+    "delete_video": {
+      "hostPattern": "www.googleapis.com",
+      "paths": [
+        "/youtube/v3/videos"
+      ],
+      "methods": [
+        "DELETE"
+      ]
+    },
+    "insert_comment": {
+      "hostPattern": "www.googleapis.com",
+      "paths": [
+        "/youtube/v3/commentThreads"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "insert_video": {
+      "hostPattern": "www.googleapis.com",
+      "paths": [
+        "/upload/youtube/v3/videos"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "list_channels": {
+      "hostPattern": "www.googleapis.com",
+      "paths": [
+        "/youtube/v3/channels"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_playlists": {
+      "hostPattern": "www.googleapis.com",
+      "paths": [
+        "/youtube/v3/playlists"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_videos": {
+      "hostPattern": "www.googleapis.com",
+      "paths": [
+        "/youtube/v3/videos"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "search": {
+      "hostPattern": "www.googleapis.com",
+      "paths": [
+        "/youtube/v3/search"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "update_video": {
+      "hostPattern": "www.googleapis.com",
+      "paths": [
+        "/youtube/v3/videos"
+      ],
+      "methods": [
+        "PUT"
+      ]
+    }
+  }
+}

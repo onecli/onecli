@@ -1,6 +1,7 @@
 import { db, Prisma } from "@onecli/db";
 import { ServiceError } from "./errors";
 import type { ResourceScope } from "./resource-scope";
+import { notifyPolicyCoherence } from "./policy-coherence-notify";
 import {
   scopeWhere,
   scopeCreate,
@@ -702,6 +703,8 @@ export const setAppPermissionsService = async (
       });
     }
   });
+
+  await notifyPolicyCoherence(scope);
 
   return {
     created: toCreate.length,

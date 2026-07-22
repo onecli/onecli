@@ -24,6 +24,15 @@ export const queryKeys = {
     list: (pageScope: PageScope = "project") =>
       [...queryKeys.rules.all(), "list", pageScope] as const,
   },
+  policy: {
+    all: () => ["policy", ...scope()] as const,
+    rules: (pageScope: PageScope = "project") =>
+      [...queryKeys.policy.all(), "rules", pageScope] as const,
+    default: (pageScope: PageScope = "project") =>
+      [...queryKeys.policy.all(), "default", pageScope] as const,
+    lastPublish: (pageScope: PageScope = "project") =>
+      [...queryKeys.policy.all(), "last-publish", pageScope] as const,
+  },
   domains: {
     all: () => ["domains", ...scope()] as const,
     list: () => [...queryKeys.domains.all(), "list"] as const,
@@ -93,6 +102,10 @@ export const queryKeys = {
     configured: (pageScope: PageScope) =>
       [...queryKeys.appConfig.all(), "configured", pageScope] as const,
     envDefaults: () => [...queryKeys.appConfig.all(), "envDefaults"] as const,
+  },
+  appAvailability: {
+    all: () => ["appAvailability", ...scope()] as const,
+    available: () => [...queryKeys.appAvailability.all(), "available"] as const,
   },
   counts: {
     all: () => ["counts", ...scope()] as const,

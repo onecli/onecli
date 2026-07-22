@@ -1,6 +1,7 @@
 import { notFound } from "next/navigation";
 import { getApp } from "@onecli/api/apps/registry";
 import { checkAppConfigExists } from "@/lib/actions/app-config";
+import { POLICY_EDITING_ENABLED } from "@/lib/env";
 import { AppDetail } from "../../_components/app-detail";
 
 interface Props {
@@ -49,6 +50,10 @@ export default async function AppDetailPage({ params }: Props) {
       configurable={app.configurable}
       hasEnvDefaults={hasEnvDefaults}
       hasAppConfig={hasAppConfig}
+      // Step 9.7b: flips the equipment editors to read-only Policy reflections
+      // in the EE editions; OSS keeps its legacy editors (the reflection seam
+      // resolves to null stubs there).
+      policyEditingEnabled={POLICY_EDITING_ENABLED}
     />
   );
 }
