@@ -15,6 +15,11 @@ use serde::de::DeserializeOwned;
 use serde::Serialize;
 use tracing::warn;
 
+#[cfg(feature = "redis-cache")]
+use redis::aio::ConnectionManager;
+#[cfg(feature = "redis-cache")]
+use redis::AsyncCommands;
+
 /// Generic key-value cache with TTL.
 ///
 /// Implementations must be `Send + Sync` for use in async contexts.
@@ -67,8 +72,19 @@ impl dyn CacheStore + '_ {
 }
 
 /// Create the cache store for this build.
-/// OSS: in-memory DashMap. Cloud: Redis (swapped via `#[cfg]`).
+/// Production (`redis-cache` feature): Redis-backed store via `REDIS_URL` env var.
+/// Default (OSS): in-memory DashMap. Cloud: Redis (swapped via `#[cfg]`).
+/// Tests: always in-memory so existing test suites are not affected.
 pub(crate) async fn create_store() -> anyhow::Result<std::sync::Arc<dyn CacheStore>> {
+    #[cfg(all(not(test), feature = "redis-cache"))]
+    {
+        let redis_url =
+            std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1:6379".to_string());
+        let store = RedisCacheStore::new(&redis_url).await?;
+        Ok(std::sync::Arc::new(store))
+    }
+
+    #[cfg(not(all(not(test), feature = "redis-cache")))]
     Ok(std::sync::Arc::new(InMemoryCacheStore::new()))
 }
 
@@ -89,6 +105,7 @@ struct InMemoryCacheStore {
 }
 
 impl InMemoryCacheStore {
+    #[allow(dead_code)]
     pub fn new() -> Self {
         Self {
             map: DashMap::new(),
@@ -149,6 +166,69 @@ impl CacheStore for InMemoryCacheStore {
 
         let count: u64 = entry.data.parse().unwrap_or(0) + 1;
         entry.data = count.to_string();
+        Some(count)
+    }
+}
+
+// ── Redis implementation (behind `redis-cache` feature) ───────────────────
+
+/// Redis-backed cache store using a connection manager for automatic
+/// reconnection. Enabled at build time with `--features redis-cache`.
+///
+/// Key namespace is caller-managed (same as the in-memory backend).
+/// TTL is enforced by Redis expiry (no lazy eviction needed).
+#[cfg(feature = "redis-cache")]
+pub(crate) struct RedisCacheStore {
+    conn: ConnectionManager,
+}
+
+#[cfg(feature = "redis-cache")]
+impl RedisCacheStore {
+    pub(crate) async fn new(redis_url: &str) -> anyhow::Result<Self> {
+        let client = redis::Client::open(redis_url)
+            .map_err(|e| anyhow::anyhow!("failed to open Redis connection: {e}"))?;
+        let conn = ConnectionManager::new(client)
+            .await
+            .map_err(|e| anyhow::anyhow!("failed to create Redis connection manager: {e}"))?;
+        Ok(Self { conn })
+    }
+}
+
+#[cfg(feature = "redis-cache")]
+#[async_trait]
+impl CacheStore for RedisCacheStore {
+    async fn get_raw(&self, key: &str) -> Option<String> {
+        let mut conn = self.conn.clone();
+        conn.get(key).await.ok()
+    }
+
+    async fn set_raw(&self, key: &str, value: &str, ttl_secs: u64) {
+        let mut conn = self.conn.clone();
+        let _: Result<(), _> = conn.set_ex(key, value, ttl_secs).await;
+    }
+
+    async fn del(&self, key: &str) {
+        let mut conn = self.conn.clone();
+        let _: Result<(), _> = conn.del(key).await;
+    }
+
+    async fn del_by_prefix(&self, prefix: &str) {
+        let mut conn = self.conn.clone();
+        let pattern = format!("{}*", prefix);
+        if let Ok(keys) = conn.keys::<&str, Vec<String>>(&pattern).await {
+            if !keys.is_empty() {
+                let _: Result<(), _> = conn.del(keys).await;
+            }
+        }
+    }
+
+    async fn incr(&self, key: &str, ttl_secs: u64) -> Option<u64> {
+        let mut conn = self.conn.clone();
+        let exists: bool = conn.exists(key).await.ok()?;
+        let count: u64 = conn.incr(key, 1).await.ok()?;
+        if !exists {
+            let _: Result<(), _> = conn.expire(key, ttl_secs as i64).await;
+        }
         Some(count)
     }
 }
@@ -244,6 +324,114 @@ mod tests {
         };
         store.set("typed", &data, 60).await;
         let result: Option<MyData> = store.get("typed").await;
+        assert_eq!(result, Some(data));
+    }
+}
+
+#[cfg(all(test, feature = "redis-cache"))]
+mod redis_tests {
+    use super::*;
+    use std::sync::Arc;
+
+    fn redis_url() -> String {
+        std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1:6379".to_string())
+    }
+
+    async fn redis_available() -> bool {
+        RedisCacheStore::new(&redis_url()).await.is_ok()
+    }
+
+    async fn new_redis_store() -> Arc<dyn CacheStore> {
+        Arc::new(RedisCacheStore::new(&redis_url()).await.unwrap())
+    }
+
+    #[tokio::test]
+    async fn set_and_get_round_trip() {
+        if !redis_available().await {
+            let url = redis_url();
+            eprintln!("skipping Redis test — no Redis available at {url}");
+            return;
+        }
+        let store = new_redis_store().await;
+        store.set("redis-test:roundtrip", &"hello redis", 60).await;
+        let result: Option<String> = store.get("redis-test:roundtrip").await;
+        assert_eq!(result.as_deref(), Some("hello redis"));
+    }
+
+    #[tokio::test]
+    async fn get_returns_none_on_miss() {
+        if !redis_available().await {
+            eprintln!("skipping Redis test — no Redis available");
+            return;
+        }
+        let store = new_redis_store().await;
+        let result: Option<String> = store.get("redis-test:missing").await;
+        assert!(result.is_none());
+    }
+
+    #[tokio::test]
+    async fn set_respects_ttl() {
+        if !redis_available().await {
+            eprintln!("skipping Redis test — no Redis available");
+            return;
+        }
+        let store = new_redis_store().await;
+        store.set("redis-test:ttl", &"short", 1).await;
+        let before: Option<String> = store.get("redis-test:ttl").await;
+        assert_eq!(before.as_deref(), Some("short"));
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        let after: Option<String> = store.get("redis-test:ttl").await;
+        assert!(after.is_none());
+    }
+
+    #[tokio::test]
+    async fn del_removes_entry() {
+        if !redis_available().await {
+            eprintln!("skipping Redis test — no Redis available");
+            return;
+        }
+        let store = new_redis_store().await;
+        store.set("redis-test:del-key", &"delete me", 60).await;
+        store.del("redis-test:del-key").await;
+        let result: Option<String> = store.get("redis-test:del-key").await;
+        assert!(result.is_none());
+    }
+
+    #[tokio::test]
+    async fn incr_creates_and_increments() {
+        if !redis_available().await {
+            eprintln!("skipping Redis test — no Redis available");
+            return;
+        }
+        let store = new_redis_store().await;
+        store.del("redis-test:incr").await;
+        let one = store.incr("redis-test:incr", 60).await;
+        assert_eq!(one, Some(1));
+        let two = store.incr("redis-test:incr", 60).await;
+        assert_eq!(two, Some(2));
+        let three = store.incr("redis-test:incr", 60).await;
+        assert_eq!(three, Some(3));
+    }
+
+    #[tokio::test]
+    async fn typed_round_trip() {
+        if !redis_available().await {
+            eprintln!("skipping Redis test — no Redis available");
+            return;
+        }
+        #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+        struct MyData {
+            name: String,
+            count: u32,
+        }
+
+        let store = new_redis_store().await;
+        let data = MyData {
+            name: "redis-test".to_string(),
+            count: 99,
+        };
+        store.set("redis-test:typed", &data, 60).await;
+        let result: Option<MyData> = store.get("redis-test:typed").await;
         assert_eq!(result, Some(data));
     }
 }
