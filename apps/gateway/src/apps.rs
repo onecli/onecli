@@ -40,6 +40,9 @@ pub(crate) enum RequestFinalizer {
 pub(crate) enum BodyTransform {
     /// Inject agent identity trailer into GitHub commit messages.
     GitHubCommitTrailer,
+    /// Right-size the `model` field on outbound LLM completion requests using
+    /// Nadir's complexity classifier. Opt-in per project.
+    NadirModelRoute,
 }
 
 /// How a host rule matches incoming hostnames.
@@ -803,6 +806,30 @@ static APP_PROVIDERS: &[AppProvider] = &[
         body_transform: None,
     },
     AppProvider {
+        provider: "nadir",
+        display_name: "Nadir",
+        host_rules: &[HostRule {
+            pattern: HostPattern::Exact("api.getnadir.com"),
+            path_prefix: None,
+            // Nadir authenticates with `X-API-Key`, not `Authorization`.
+            strategy: AuthStrategy::None,
+            intercept: false,
+            credential_host_field: None,
+        }],
+        refresh: None,
+        metadata_headers: &[],
+        credential_headers: &[CredentialHeader {
+            credential_field: "apiKey",
+            header_name: "x-api-key",
+        }],
+        credential_params: &[],
+        host_rewrite: None,
+        finalizer: None,
+        // Rewrites the `model` field on outbound LLM requests. Attached to the
+        // LLM hosts (not to `api.getnadir.com`) via `body_transform_for_host`.
+        body_transform: None,
+    },
+    AppProvider {
         provider: "cloudflare",
         display_name: "Cloudflare",
         host_rules: &[HostRule {
@@ -1135,6 +1162,18 @@ pub(crate) fn finalizer_for_host(hostname: &str) -> Option<RequestFinalizer> {
 #[must_use]
 pub(crate) fn finalizer_for_provider(provider: &str) -> Option<RequestFinalizer> {
     all_providers().find_map(|p| (p.provider == provider).then_some(p.finalizer).flatten())
+}
+
+/// Return the body transform for a hostname, mirroring `finalizer_for_host`.
+#[must_use]
+pub(crate) fn body_transform_for_host(hostname: &str) -> Option<BodyTransform> {
+    all_providers().find_map(|p| {
+        p.host_rules
+            .iter()
+            .any(|r| host_rule_matches(r, hostname))
+            .then_some(p.body_transform)
+            .flatten()
+    })
 }
 
 #[must_use]
@@ -2424,6 +2463,37 @@ mod tests {
                 value: "Bearer vca_test123".to_string(),
             }
         );
+    }
+
+    // ── Nadir ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn providers_for_nadir_host() {
+        assert_eq!(providers_for_host("api.getnadir.com"), vec!["nadir"]);
+    }
+
+    #[test]
+    fn nadir_injects_api_key_header() {
+        let headers = credential_headers("nadir");
+        assert_eq!(headers.len(), 1);
+        assert_eq!(headers[0].credential_field, "apiKey");
+        assert_eq!(headers[0].header_name, "x-api-key");
+    }
+
+    /// Nadir authenticates with `X-API-Key`, so it must not also acquire an
+    /// `Authorization` header — that would leak the key into a second slot.
+    #[test]
+    fn nadir_does_not_need_access_token() {
+        assert!(!needs_access_token("nadir"));
+        assert!(build_app_injections("nadir", "api.getnadir.com", "sk-test123").is_empty());
+    }
+
+    /// Model routing hangs off the LLM host, never off Nadir's own host, so
+    /// the registry entry must not carry a body transform.
+    #[test]
+    fn nadir_host_carries_no_body_transform() {
+        assert_eq!(body_transform_for_host("api.getnadir.com"), None);
+        assert_eq!(body_transform_for_provider("nadir"), None);
     }
 
     // ── Resend ────────────────────────────────────────────────────────
