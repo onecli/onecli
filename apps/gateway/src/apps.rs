@@ -1352,6 +1352,56 @@ pub(crate) fn provider_matches_host_and_path(provider: &str, hostname: &str, pat
         })
 }
 
+/// Like [`provider_matches_host_and_path`], but matches ONLY through a
+/// **path-scoped** host rule (`path_prefix` set and the request path under it) —
+/// never a bare host/suffix rule. Path-scoped rules mark a legacy/mirror
+/// endpoint of a specific API surface (e.g. Gmail's `www.googleapis.com/gmail/`
+/// mirror of `gmail.googleapis.com`), so they are safe to fold into a
+/// TOOL-scoped policy match; a broad credential-zone rule (e.g. AWS's bare
+/// `*.amazonaws.com`) is deliberately excluded so a tool-scoped rule can't bleed
+/// across sibling services on the same zone.
+#[must_use]
+pub(crate) fn provider_matches_path_scoped(provider: &str, hostname: &str, path: &str) -> bool {
+    all_providers()
+        .find(|p| p.provider == provider)
+        .is_some_and(|app| {
+            app.host_rules.iter().any(|r| {
+                host_rule_matches(r, hostname)
+                    && r.path_prefix.is_some_and(|pfx| path.starts_with(pfx))
+            })
+        })
+}
+
+/// Test helper: a representative `(provider, host, path)` for every host rule
+/// that attaches a credential to a FORWARDED request — a concrete host matching
+/// the rule's pattern and a path under its prefix. Excludes intercept rules
+/// (synthetic-token, never forwarded) and per-tenant suffix rules gated on a
+/// stored credential host — as SAMPLES only; the runtime matcher
+/// (`provider_matches_host_and_path`) intentionally still covers those hosts, so
+/// a whole-app rule governs them too (enforcement ⊇ injection, monotonic — a
+/// per-tenant/intercept host can't be sampled statically, not that it's
+/// unenforced). Backs the enforcement-⊇-injection invariant test.
+#[cfg(test)]
+pub(crate) fn injection_surface_samples() -> Vec<(&'static str, String, String)> {
+    let mut out = Vec::new();
+    for p in all_providers() {
+        for r in p.host_rules {
+            if r.intercept || r.credential_host_field.is_some() {
+                continue;
+            }
+            let host = match r.pattern {
+                HostPattern::Exact(h) => h.to_string(),
+                HostPattern::Suffix(s) => format!("probe{s}"),
+            };
+            let path = r
+                .path_prefix
+                .map_or_else(|| "/".to_string(), |pfx| format!("{pfx}probe"));
+            out.push((p.provider, host, path));
+        }
+    }
+    out
+}
+
 /// Look up the display name for a provider slug (e.g., "jira" -> "Jira").
 #[must_use]
 pub(crate) fn display_name_for_provider(provider: &str) -> Option<&'static str> {

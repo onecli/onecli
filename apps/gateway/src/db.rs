@@ -532,7 +532,8 @@ pub(crate) struct PolicyV2Rules {
     pub principals: PrincipalSet,
     /// The org+project custom secrets' host patterns (step 8), so a `secret` target
     /// can permit/deny its host DB-free per request. Empty unless a loaded rule has
-    /// a secret target (lazy). Only cloud ever populates it.
+    /// a secret target (lazy). Populated by both the OSS core and the EE engine
+    /// (`find_secret_hosts` is shared) whenever `POLICY_ENFORCE_V2` is on.
     #[serde(default)]
     pub secret_hosts: SecretHosts,
     /// The org+project app connections' providers, so a `connection` target can
@@ -547,15 +548,18 @@ pub(crate) struct PolicyV2Rules {
 /// connection resolution (cached with `PolicyV2Rules`) so the block/allow engine
 /// can let a `secret` target PERMIT/deny its host DB-free per request (step 8).
 /// `by_id` serves a specific `secret_id` target; `project_hosts`/`org_hosts` serve
-/// a `secret_scope` ("all secrets at a level") target. Empty in OSS and whenever no
-/// loaded rule has a secret target (the lazy skip). Only cloud ever populates it.
+/// a `secret_scope` ("all secrets at a level") target. Each secret contributes ALL
+/// the hosts its credential injects on (`secret_inject::secret_host_patterns`) — a
+/// list, because a typed secret (OpenAI) is valid on several hosts — so enforcement
+/// covers exactly the injection surface. Populated whenever a loaded rule has a
+/// secret target (the lazy skip leaves it empty otherwise).
 #[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub(crate) struct SecretHosts {
-    /// A specific secret's id → its `host_pattern`.
-    pub by_id: std::collections::HashMap<String, String>,
-    /// Every PROJECT-scoped secret's `host_pattern` (for `secret_scope="project"`).
+    /// A specific secret's id → every host pattern its credential injects on.
+    pub by_id: std::collections::HashMap<String, Vec<String>>,
+    /// Every PROJECT-scoped secret's host patterns (for `secret_scope="project"`).
     pub project_hosts: Vec<String>,
-    /// Every ORG-scoped secret's `host_pattern` (for `secret_scope="organization"`).
+    /// Every ORG-scoped secret's host patterns (for `secret_scope="organization"`).
     pub org_hosts: Vec<String>,
 }
 
@@ -658,6 +662,8 @@ struct SecretHostRow {
     id: String,
     host_pattern: String,
     scope: String,
+    #[sqlx(rename = "type")]
+    type_: String,
 }
 
 /// Resolve the host patterns of the acting org+project custom secrets so the
@@ -676,7 +682,7 @@ pub(crate) async fn find_secret_hosts(
 ) -> Result<SecretHosts> {
     let rows: Vec<SecretHostRow> = sqlx::query_as::<_, SecretHostRow>(
         r#"
-        SELECT id, host_pattern, scope FROM secrets
+        SELECT id, host_pattern, scope, type FROM secrets
         WHERE project_id = $2
            OR (organization_id = $1 AND scope = 'organization')
         "#,
@@ -689,12 +695,15 @@ pub(crate) async fn find_secret_hosts(
 
     let mut hosts = SecretHosts::default();
     for row in rows {
+        // Expand each secret to EVERY host its credential injects on (a typed
+        // secret like OpenAI covers several), so enforcement == injection.
+        let patterns = crate::secret_inject::secret_host_patterns(&row.type_, &row.host_pattern);
         match row.scope.as_str() {
-            "project" => hosts.project_hosts.push(row.host_pattern.clone()),
-            "organization" => hosts.org_hosts.push(row.host_pattern.clone()),
+            "project" => hosts.project_hosts.extend(patterns.iter().cloned()),
+            "organization" => hosts.org_hosts.extend(patterns.iter().cloned()),
             _ => {}
         }
-        hosts.by_id.insert(row.id, row.host_pattern);
+        hosts.by_id.insert(row.id, patterns);
     }
     Ok(hosts)
 }
