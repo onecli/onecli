@@ -53,6 +53,15 @@ const githubGroups: AppToolGroup[] = [
         pathPattern: "/graphql",
         method: "POST",
       },
+      {
+        id: "read_raw_content",
+        name: "Read raw file content",
+        description:
+          "Fetch raw file contents directly from raw.githubusercontent.com (the legacy/CDN read host).",
+        hostPattern: "raw.githubusercontent.com",
+        pathPattern: "/*",
+        method: "GET",
+      },
     ],
   },
   {

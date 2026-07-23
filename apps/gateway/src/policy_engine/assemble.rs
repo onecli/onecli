@@ -26,7 +26,7 @@ fn decode_identities(rows: &[PolicyIdentityRow]) -> Vec<Identity> {
 /// load, so a forged/foreign id resolves to nothing.
 fn secret_target_hosts(r: &PolicyTargetRow, secret_hosts: &SecretHosts) -> Vec<String> {
     if let Some(id) = &r.secret_id {
-        secret_hosts.by_id.get(id).cloned().into_iter().collect()
+        secret_hosts.by_id.get(id).cloned().unwrap_or_default()
     } else if let Some(scope) = &r.secret_scope {
         match scope.as_str() {
             "project" => secret_hosts.project_hosts.clone(),
@@ -221,7 +221,7 @@ mod tests {
         let mut hosts = SecretHosts::default();
         hosts
             .by_id
-            .insert("s1".to_string(), "api.example.com".to_string());
+            .insert("s1".to_string(), vec!["api.example.com".to_string()]);
         hosts.project_hosts.push("p.example.com".to_string());
         let rows = vec![row(|r| {
             r.targets = Json(vec![
@@ -239,6 +239,35 @@ mod tests {
         );
         assert!(
             matches!(&rules[0].targets[2], Target::Secret { host_patterns } if host_patterns.is_empty())
+        );
+    }
+
+    #[test]
+    fn openai_secret_target_resolves_every_injected_host() {
+        // `find_secret_hosts` expands an OpenAI secret to its full injection
+        // surface (`secret_host_patterns`); a specific-secret rule then enforces
+        // on ALL of them — so a block/approval rule can't be dodged via ChatGPT /
+        // the other OpenAI hosts the one credential is injected on.
+        let mut hosts = SecretHosts::default();
+        hosts.by_id.insert(
+            "s1".to_string(),
+            crate::secret_inject::secret_host_patterns("openai", "api.openai.com"),
+        );
+        let rows = vec![row(|r| {
+            r.targets = Json(vec![target(json!({"kind": "secret", "secretId": "s1"}))]);
+        })];
+        let rules = assemble(&rows, &hosts, &ConnectionProviders::default());
+        let Target::Secret { host_patterns } = &rules[0].targets[0] else {
+            panic!("expected a secret target");
+        };
+        assert_eq!(
+            host_patterns,
+            &[
+                "api.openai.com".to_string(),
+                "chatgpt.com".to_string(),
+                "*.chatgpt.com".to_string(),
+                "*.openai.com".to_string(),
+            ]
         );
     }
 

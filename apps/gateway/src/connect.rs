@@ -344,18 +344,13 @@ impl PolicyEngine {
         let matching: Vec<_> = secrets
             .into_iter()
             .filter(|s| {
-                if host_matches(hostname, &s.host_pattern) {
-                    return true;
-                }
-                // OpenAI secrets cover chatgpt.com, api.openai.com, and their subdomains.
-                if s.type_ == "openai" {
-                    let h = hostname.split(':').next().unwrap_or(hostname);
-                    return h == "api.openai.com"
-                        || h == "chatgpt.com"
-                        || h.ends_with(".chatgpt.com")
-                        || h.ends_with(".openai.com");
-                }
-                false
+                // Injection covers every host this secret's credential is valid on —
+                // the SAME set enforcement resolves (`db::find_secret_hosts`), so a
+                // policy rule on the secret can never fall short of injection (the
+                // OpenAI multi-host bypass class).
+                secret_inject::secret_host_patterns(&s.type_, &s.host_pattern)
+                    .iter()
+                    .any(|p| host_matches(hostname, p))
             })
             .collect();
 
@@ -930,10 +925,11 @@ impl PolicyEngine {
         // Check 1: project or org has manual secrets matching this host
         match db::find_secrets_by_project(&self.pool, &agent.project_id).await {
             Ok(secrets) => {
-                if secrets
-                    .iter()
-                    .any(|s| host_matches(hostname, &s.host_pattern))
-                {
+                if secrets.iter().any(|s| {
+                    secret_inject::secret_host_patterns(&s.type_, &s.host_pattern)
+                        .iter()
+                        .any(|p| host_matches(hostname, p))
+                }) {
                     return true;
                 }
             }
@@ -945,10 +941,11 @@ impl PolicyEngine {
         // Also check org-level secrets
         match db::find_secrets_by_org(&self.pool, &agent.organization_id).await {
             Ok(secrets) => {
-                if secrets
-                    .iter()
-                    .any(|s| host_matches(hostname, &s.host_pattern))
-                {
+                if secrets.iter().any(|s| {
+                    secret_inject::secret_host_patterns(&s.type_, &s.host_pattern)
+                        .iter()
+                        .any(|p| host_matches(hostname, p))
+                }) {
                     return true;
                 }
             }

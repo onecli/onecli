@@ -37,6 +37,20 @@ fn catalog() -> &'static Catalog {
     CATALOG.get_or_init(|| serde_json::from_str(BASE_CATALOG_JSON).expect("parse base catalog"))
 }
 
+/// Whether ALL of a provider's catalog tools share a single `host_pattern`. For
+/// such an app every host it injects on is the same API served under a twin host
+/// (a regional/apex mirror), so a tool-scoped rule may safely fold the app's full
+/// injection surface. For a MULTI-host-family app (AWS's per-service subdomains),
+/// the host discriminates which tool, so folding would let a tool rule bleed
+/// across sibling services — those are excluded.
+fn single_host_family(provider_tools: &HashMap<String, CatalogTool>) -> bool {
+    let mut hosts = provider_tools.values().map(|t| t.host_pattern.as_str());
+    match hosts.next() {
+        Some(first) => hosts.all(|h| h == first),
+        None => false,
+    }
+}
+
 /// A throwaway `policy::PolicyRule` so one path×method variant routes through
 /// the gateway's exact `matches_request` (the action is irrelevant to
 /// matching). Conditions ride from the owning rule — vacuous in OSS, where the
@@ -55,11 +69,28 @@ fn variant_rule(
     }
 }
 
-/// Does the request hit the app target? Named tools match when the request host
-/// matches the tool's host AND any of its path×method variants matches. An
-/// EMPTY tool set is the WHOLE app: host-only against every catalog tool host
-/// of the provider (any path/method). Unknown provider or tool id → false
-/// (fail-closed).
+/// Does the request hit the app target? The host decision defers to the
+/// **injection registry** (`crate::apps`), the authority for what traffic is the
+/// app's — so a rule governs exactly the hosts the app's credential is injected
+/// on and can't fall short of it (the class where a request is credentialed but
+/// no rule matches it, e.g. Gmail's legacy `www.googleapis.com/gmail/` mirror of
+/// `gmail.googleapis.com`). It is a UNION with the catalog's own tool host, so it
+/// only ever widens matching (never drops an existing match) and still covers a
+/// catalog provider absent from the injection registry. Unknown provider or tool
+/// id → false (fail-closed).
+///
+/// - **Whole-app** (empty tools): matches any host the app injects on — the app's
+///   FULL injection surface, including a broad credential zone like AWS's
+///   `*.amazonaws.com`.
+/// - **Tool-scoped**: a tool matches on its own catalog host OR an injection
+///   **mirror** of the app — a path-scoped mirror (`www.googleapis.com/gmail/`),
+///   or, for a single-host-family app (all tools on one host), any host the app
+///   injects on (its regional/apex twins, e.g. datadog `.datadoghq.eu`, sentry
+///   apex) — then its path×method. It deliberately does NOT fold a MULTI-host
+///   injection zone (AWS's per-service `*.amazonaws.com`), so a tool rule can't
+///   bleed across sibling services. A truly distinct endpoint host (github
+///   `raw.githubusercontent.com`, fly.io GraphQL) is a separate catalog tool of
+///   its own; whole-app rules also cover it.
 pub(super) fn app_target_matches(
     provider: &str,
     tools: &[String],
@@ -75,13 +106,30 @@ pub(super) fn app_target_matches(
     if tools.is_empty() {
         return provider_tools
             .values()
-            .any(|tool| host_matches(request_host, &tool.host_pattern));
+            .any(|tool| host_matches(request_host, &tool.host_pattern))
+            || crate::apps::provider_matches_host_and_path(provider, request_host, request_path);
     }
+    // The host is the app's per-tool catalog host OR an injection MIRROR of the
+    // app (tool-independent → computed once): a path-scoped mirror (Gmail's
+    // `www.googleapis.com/gmail/`), or — for a single-host-family app (all its
+    // tools on one host, so its other injection hosts are regional/apex twins of
+    // the same API, e.g. datadog `.datadoghq.eu`, sentry apex) — any host the app
+    // injects on. A multi-host-family app (AWS's per-service `ec2.*`/`s3.*`/…) is
+    // excluded, so a tool rule can never bleed across sibling services on a
+    // shared credential zone.
+    let host_via_mirror =
+        crate::apps::provider_matches_path_scoped(provider, request_host, request_path)
+            || (single_host_family(provider_tools)
+                && crate::apps::provider_matches_host_and_path(
+                    provider,
+                    request_host,
+                    request_path,
+                ));
     tools.iter().any(|tool_id| {
         let Some(tool) = provider_tools.get(tool_id) else {
             return false;
         };
-        if !host_matches(request_host, &tool.host_pattern) {
+        if !host_matches(request_host, &tool.host_pattern) && !host_via_mirror {
             return false;
         }
         let methods: Vec<Option<&str>> = if tool.methods.is_empty() {
@@ -155,5 +203,150 @@ mod tests {
             "GET",
             "/"
         ));
+    }
+
+    // ── Injection-surface coverage (credential-injection bypass fix) ──────────
+    // The host decision folds in the injection registry so a rule governs every
+    // host the app's credential is injected on — closing the legacy-alias class
+    // (`www.googleapis.com/gmail/...`) where a request was credentialed but no
+    // rule matched it.
+
+    #[test]
+    fn gmail_rule_covers_the_legacy_www_endpoint() {
+        // The reported bypass: Gmail injects on gmail.googleapis.com AND the
+        // legacy www.googleapis.com/gmail/*, but the catalog lists only the
+        // former. Both a whole-app and a tool-scoped Gmail rule must now match
+        // the legacy host (so a Block rule denies it), while the primary host
+        // still matches unchanged.
+        let path = "/gmail/v1/users/me/drafts";
+        // Whole-app.
+        assert!(matches("gmail", &[], "www.googleapis.com", "POST", path));
+        assert!(matches("gmail", &[], "gmail.googleapis.com", "POST", path));
+        // Tool-scoped (create_draft = POST /gmail/v1/users/*/drafts).
+        assert!(matches(
+            "gmail",
+            &["create_draft"],
+            "www.googleapis.com",
+            "POST",
+            path
+        ));
+        assert!(matches(
+            "gmail",
+            &["create_draft"],
+            "gmail.googleapis.com",
+            "POST",
+            path
+        ));
+        // A non-Gmail path on the shared host is NOT Gmail's traffic.
+        assert!(!matches(
+            "gmail",
+            &[],
+            "www.googleapis.com",
+            "GET",
+            "/calendar/v3/calendars"
+        ));
+    }
+
+    #[test]
+    fn aws_whole_app_covers_uncataloged_services_but_tool_scope_stays_precise() {
+        // AWS injects SigV4 on the whole `*.amazonaws.com` zone, but the catalog
+        // lists only ~10 services. A WHOLE-APP AWS rule must cover an
+        // uncataloged service (rds) — closing the highest-impact bypass...
+        assert!(matches(
+            "aws",
+            &[],
+            "rds.us-east-1.amazonaws.com",
+            "POST",
+            "/"
+        ));
+        // ...but a TOOL-scoped AWS rule must NOT bleed onto a sibling service
+        // (AWS's rule is a bare suffix with no path prefix), even though the
+        // tool's path pattern is a wildcard. It still matches its own service.
+        assert!(!matches(
+            "aws",
+            &["ec2_access"],
+            "rds.us-east-1.amazonaws.com",
+            "POST",
+            "/"
+        ));
+        assert!(matches(
+            "aws",
+            &["ec2_access"],
+            "ec2.us-east-1.amazonaws.com",
+            "POST",
+            "/"
+        ));
+    }
+
+    #[test]
+    fn catalog_only_provider_is_unaffected() {
+        // A provider matched purely via its catalog host (no broader injection
+        // surface) keeps matching exactly as before — the union never narrows.
+        assert!(matches(
+            "github",
+            &["create_issue"],
+            "api.github.com",
+            "POST",
+            "/repos/o/r/issues"
+        ));
+        assert!(!matches(
+            "github",
+            &["create_issue"],
+            "example.com",
+            "POST",
+            "/repos/o/r/issues"
+        ));
+    }
+
+    #[test]
+    fn distinct_endpoint_hosts_are_now_their_own_tools() {
+        // The alternate-access hosts are cataloged as their own tools, so a
+        // TOOL-scoped rule can target them (and whole-app/wildcard cover them).
+        // github raw file content — reading a private file via raw is governed.
+        assert!(matches(
+            "github",
+            &["read_raw_content"],
+            "raw.githubusercontent.com",
+            "GET",
+            "/owner/repo/main/secrets.txt"
+        ));
+        // The raw tool does not leak onto the API host (different tool there).
+        assert!(!matches(
+            "github",
+            &["read_raw_content"],
+            "api.github.com",
+            "GET",
+            "/repos/o/r/contents/x"
+        ));
+        // fly.io GraphQL control-plane endpoint.
+        assert!(matches(
+            "flyio",
+            &["graphql"],
+            "api.fly.io",
+            "POST",
+            "/graphql"
+        ));
+    }
+
+    /// The invariant (enforcement ⊇ injection): for EVERY provider the gateway
+    /// injects credentials for, a WHOLE-APP rule for that provider must match a
+    /// request on each host it injects on. This is the structural guarantee that
+    /// the two host lists can't diverge into a bypass again — it fails if the
+    /// engine regresses to catalog-only matching, or an injection host is added
+    /// that the app-target matcher can't reach.
+    #[test]
+    fn whole_app_rules_cover_the_entire_injection_surface() {
+        for (provider, host, path) in crate::apps::injection_surface_samples() {
+            // Only providers with a permission catalog are targetable by an
+            // app/connection rule (no tools → no rule); the rest have no
+            // enforcement surface to diverge from.
+            if catalog().get(provider).is_none() {
+                continue;
+            }
+            assert!(
+                app_target_matches(provider, &[], &host, "POST", &path, None, &None),
+                "whole-app rule for `{provider}` must cover its injection host `{host}` (path `{path}`)"
+            );
+        }
     }
 }

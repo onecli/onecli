@@ -682,6 +682,15 @@
         "GET"
       ]
     },
+    "graphql": {
+      "hostPattern": "api.fly.io",
+      "paths": [
+        "/graphql"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
     "list_apps": {
       "hostPattern": "api.machines.dev",
       "paths": [
@@ -854,6 +863,15 @@
       "methods": [
         "GET"
       ]
+    },
+    "read_raw_content": {
+      "hostPattern": "raw.githubusercontent.com",
+      "paths": [
+        "/*"
+      ],
+      "methods": [
+        "GET"
+      ]
     }
   },
   "github-app": {
@@ -960,6 +978,15 @@
       "hostPattern": "api.github.com",
       "paths": [
         "/user/repos"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "read_raw_content": {
+      "hostPattern": "raw.githubusercontent.com",
+      "paths": [
+        "/*"
       ],
       "methods": [
         "GET"

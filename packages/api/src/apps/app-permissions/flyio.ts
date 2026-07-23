@@ -139,6 +139,15 @@ export const flyioPermissions: AppPermissionDefinition = {
           pathPattern: "/v1/apps/*/secrets",
           method: "POST",
         },
+        {
+          id: "graphql",
+          name: "GraphQL API",
+          description:
+            "Query or mutate via the Fly.io GraphQL API (api.fly.io/graphql — the legacy control-plane endpoint).",
+          hostPattern: "api.fly.io",
+          pathPattern: "/graphql",
+          method: "POST",
+        },
       ],
     },
   ],
