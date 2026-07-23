@@ -73,6 +73,7 @@ Open **http://localhost:10254**, create an agent, add your secrets, and point yo
 - **Two auth modes**: single-user (no login) for local use, or Google OAuth for teams
 - **Rust gateway**: fast, memory-safe HTTP gateway with MITM interception for HTTPS
 - **[Vault integration](docs/vault-integration.md)**: connect Bitwarden (or other password managers) for on-demand credential injection without storing secrets on the server
+- **[Model routing](docs/nadir-integration.md)**: opt-in, right-size the model on outbound LLM calls so agents stop paying top-tier prices for trivial prompts
 
 ## Project Structure
 
@@ -127,13 +128,14 @@ Dashboard at **http://localhost:10254**, gateway at **http://localhost:10255**.
 
 All environment variables are optional for local development:
 
-| Variable                | Description                       | Default            |
-| ----------------------- | --------------------------------- | ------------------ |
-| `DATABASE_URL`          | PostgreSQL connection string      | See `.env.example` |
-| `NEXTAUTH_SECRET`       | Enables Google OAuth (multi-user) | Single-user mode   |
-| `GOOGLE_CLIENT_ID`      | Google OAuth client ID            | —                  |
-| `GOOGLE_CLIENT_SECRET`  | Google OAuth client secret        | —                  |
-| `SECRET_ENCRYPTION_KEY` | AES-256-GCM encryption key        | Auto-generated     |
+| Variable                | Description                                            | Default            |
+| ----------------------- | ------------------------------------------------------ | ------------------ |
+| `DATABASE_URL`          | PostgreSQL connection string                           | See `.env.example` |
+| `NEXTAUTH_SECRET`       | Enables Google OAuth (multi-user)                      | Single-user mode   |
+| `GOOGLE_CLIENT_ID`      | Google OAuth client ID                                 | —                  |
+| `GOOGLE_CLIENT_SECRET`  | Google OAuth client secret                             | —                  |
+| `SECRET_ENCRYPTION_KEY` | AES-256-GCM encryption key                             | Auto-generated     |
+| `NADIR_MODEL_ROUTING`   | Enables LLM [model routing](docs/nadir-integration.md) | Off                |
 
 ## Contributing
 

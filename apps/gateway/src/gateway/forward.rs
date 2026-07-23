@@ -629,7 +629,25 @@ pub(crate) async fn forward_request(
         };
 
     // ── Provider-specific body transformation ────────────────────
-    let forward_body = match rules.body_transform {
+    let forward_body = match rules
+        .body_transform
+        .or_else(|| crate::apps::body_transform_for_host(super::strip_port(host)))
+        .or_else(|| super::transforms::nadir_model_route::transform_for_host(host))
+    {
+        Some(crate::apps::BodyTransform::NadirModelRoute) => {
+            // Unlike the arm below, a failure here must not swallow the body:
+            // the only error `try_route_model` returns is an unbufferable
+            // request, which cannot be forwarded at all. Every other failure
+            // (classifier down, timeout, unmapped model) already returns the
+            // original bytes, so `?` only fires on the unrecoverable case.
+            super::transforms::nadir_model_route::try_route_model(
+                host,
+                &method,
+                &path,
+                forward_body,
+            )
+            .await?
+        }
         Some(crate::apps::BodyTransform::GitHubCommitTrailer) => {
             if let (Some(agent_name), Some(project_id)) = (
                 proxy_ctx.agent_name.as_deref(),
