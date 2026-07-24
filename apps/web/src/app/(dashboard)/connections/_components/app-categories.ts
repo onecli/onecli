@@ -33,6 +33,7 @@ export const APP_CATEGORIES: Record<string, AppCategory> = {
   "google-classroom": "google",
   "google-search-console": "google",
   "google-analytics": "google",
+  "google-fit": "google",
   youtube: "google",
 
   // Microsoft
