@@ -107,6 +107,22 @@ export const DISCORD_WEBHOOK_URL = process.env.DISCORD_WEBHOOK_URL ?? "";
 
 export const ENVIRONMENT = process.env.ENVIRONMENT ?? "dev";
 
+/**
+ * Whether v2 policy editing is live on this deployment (mirrors the api
+ * package's `policyEditingEnabled()`). An explicit `POLICY_EDITING_ENABLED`
+ * always wins ("1"/"true" on, anything else off — the rollback switch); unset
+ * resolves by edition (step 9.5, release-as-cutover): ON for every non-cloud
+ * edition (OSS + onprem ship cut over) and OFF for cloud, whose deploys set it
+ * explicitly. Server-only runtime read; the edition fallback uses the
+ * build-inlined `NEXT_PUBLIC_EDITION`.
+ */
+export const POLICY_EDITING_ENABLED =
+  process.env.POLICY_EDITING_ENABLED !== undefined
+    ? process.env.POLICY_EDITING_ENABLED === "1" ||
+      process.env.POLICY_EDITING_ENABLED === "true"
+    : (process.env.NEXT_PUBLIC_EDITION ?? "oss").trim().toLowerCase() !==
+      "cloud";
+
 // ── Cloud: KMS ──────────────────────────────────────────────────────────
 
 export const KMS_KEY_ARN = process.env.KMS_KEY_ARN ?? "";

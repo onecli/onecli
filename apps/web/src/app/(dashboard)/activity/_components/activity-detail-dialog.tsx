@@ -25,6 +25,8 @@ import {
   isRateLimitedRequest,
   getBlockedByRule,
   getConnectionLabel,
+  getMatchedRuleName,
+  getMatchedRuleScope,
   type RequestLogEntry,
 } from "@onecli/api/services/request-log-service";
 
@@ -55,6 +57,8 @@ export const ActivityDetailDialog = ({
   const defaultDenied = log ? isDefaultDenied(log) : false;
   const rateLimited = log ? isRateLimitedRequest(log) : false;
   const blockedByRule = log ? getBlockedByRule(log) : null;
+  const matchedRuleName = log ? getMatchedRuleName(log) : null;
+  const matchedRuleScope = log ? getMatchedRuleScope(log) : null;
   const connectionLabel = log ? getConnectionLabel(log) : null;
   const rulesUrl = withProjectPrefix(pathname, "/rules");
 
@@ -133,6 +137,32 @@ export const ActivityDetailDialog = ({
                 </Link>
               </Row>
             )}
+            {matchedRuleName && !blockedByRule && !defaultDenied && (
+              // The v2 engine's attribution (step 9) for decisions no other
+              // row already names — allowed and approval requests. Blocked/
+              // rate-limited rows show "Blocked/Limited by"; default-denied
+              // rows show the "Reason" row instead.
+              <Row label="Decided by rule">
+                <Link
+                  href={rulesUrl}
+                  className="hover:text-foreground/80 underline underline-offset-4 transition-colors"
+                >
+                  {matchedRuleName}
+                </Link>
+              </Row>
+            )}
+            {!matchedRuleName &&
+              matchedRuleScope === "organization" &&
+              !blockedByRule &&
+              !defaultDenied && (
+                // An org rule decided, but its details are org-admin-only —
+                // the server redacted the name (the simulator's contract).
+                <Row label="Decided by rule">
+                  <span className="text-muted-foreground">
+                    An organization rule
+                  </span>
+                </Row>
+              )}
             <Row label="Latency">
               <span className="font-mono text-xs tabular-nums">
                 {log.latencyMs}ms

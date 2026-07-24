@@ -38,6 +38,21 @@ pub(crate) struct PolicyRule {
     pub conditions_raw: Option<serde_json::Value>,
 }
 
+/// The v2 rule that decided a request — recorded into telemetry so Activity
+/// can say "decided by rule X". `logical_id` is the generation-stable identity
+/// (row ids regenerate on every publish); the name is a display snapshot;
+/// `scope` ("organization" | "project") lets the read side apply per-viewer
+/// visibility to org rule names. Legacy decisions carry `None` (old-model
+/// rules have no logical id).
+#[derive(Debug, Clone)]
+pub(crate) struct MatchedRule {
+    pub(crate) logical_id: String,
+    #[allow(dead_code)] // read by cloud telemetry (extra_data), unused in OSS
+    pub(crate) name: String,
+    #[allow(dead_code)] // read by cloud telemetry (extra_data), unused in OSS
+    pub(crate) scope: String,
+}
+
 /// Result of policy evaluation for a single request.
 #[derive(Debug)]
 pub(crate) enum PolicyDecision {
@@ -59,6 +74,60 @@ pub(crate) enum PolicyDecision {
 }
 
 // ── Evaluation ──────────────────────────────────────────────────────────
+
+/// Increment the sliding-window rate counter for a matched rate-limit rule and
+/// return a `RateLimited` decision if the request is now over the limit (else
+/// `None` = under limit → allow through). Shared by `evaluate` (Pass 3) and the
+/// step-5 first-match engine so the key STRUCTURE and window math are identical.
+/// The `rule_id` component is the caller's rule identity — a stable
+/// `policy_rules_v2.logical_id` for the v2 engine and `policy_rules.id` for
+/// legacy — so a v2 rule's counter survives republishes; the one-time cutover
+/// flip (legacy id → logical id) resets it. Only one path decides per request, so
+/// there is never a live double-count.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn check_rate_limit(
+    org_id: &str,
+    project_id: &str,
+    rule_id: &str,
+    rule_name: &str,
+    max_requests: u64,
+    window_secs: u64,
+    agent_token: &str,
+    cache: &dyn CacheStore,
+) -> Option<PolicyDecision> {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let window_id = now / window_secs.max(1);
+    let key = format!("rate:{org_id}:{project_id}:{rule_id}:{agent_token}:{window_id}");
+
+    match cache.incr(&key, window_secs).await {
+        Some(count) if count > max_requests => {
+            let window_end = (window_id + 1) * window_secs;
+            Some(PolicyDecision::RateLimited {
+                rule_name: rule_name.to_string(),
+                limit: max_requests,
+                window: rate_window_name(window_secs),
+                retry_after_secs: window_end.saturating_sub(now),
+            })
+        }
+        Some(_) => None,
+        None => {
+            warn!(rule = %rule_name, "policy: rate limit cache unavailable, allowing through");
+            None
+        }
+    }
+}
+
+fn rate_window_name(window_secs: u64) -> &'static str {
+    match window_secs {
+        60 => "minute",
+        3600 => "hour",
+        86400 => "day",
+        _ => "window",
+    }
+}
 
 /// Evaluate all policy rules against a request.
 ///
@@ -114,32 +183,19 @@ pub(crate) async fn evaluate(
             window_secs,
         } = &rule.action
         {
-            let now = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs();
-            let window_id = now / (*window_secs).max(1);
-            let key = format!("rate:{org_id}:{project_id}:{rule_id}:{agent_token}:{window_id}");
-
-            if let Some(count) = cache.incr(&key, *window_secs).await {
-                if count > *max_requests {
-                    let window_end = (window_id + 1) * window_secs;
-                    let retry_after = window_end.saturating_sub(now);
-                    let window_name = match *window_secs {
-                        60 => "minute",
-                        3600 => "hour",
-                        86400 => "day",
-                        _ => "window",
-                    };
-                    return PolicyDecision::RateLimited {
-                        rule_name: rule.name.clone(),
-                        limit: *max_requests,
-                        window: window_name,
-                        retry_after_secs: retry_after,
-                    };
-                }
-            } else {
-                warn!(rule = %rule.name, "policy: rate limit cache unavailable, allowing through");
+            if let Some(decision) = check_rate_limit(
+                org_id,
+                project_id,
+                rule_id,
+                &rule.name,
+                *max_requests,
+                *window_secs,
+                agent_token,
+                cache,
+            )
+            .await
+            {
+                return decision;
             }
         }
     }
@@ -167,7 +223,17 @@ pub(crate) async fn evaluate(
 }
 
 /// Check if a rule matches the request method, path, and conditions.
-fn matches_request(rule: &PolicyRule, method: &str, path: &str, body: Option<&[u8]>) -> bool {
+///
+/// `pub(crate)` so the policy engine can reuse the exact same request matcher
+/// — path glob, method, conditions, and the git-receive-pack discovery bridge —
+/// rather than duplicating it and risking drift from the live decision.
+/// Behavior is unchanged.
+pub(crate) fn matches_request(
+    rule: &PolicyRule,
+    method: &str,
+    path: &str,
+    body: Option<&[u8]>,
+) -> bool {
     let direct = path_matches(path, &rule.path_pattern)
         && rule
             .method

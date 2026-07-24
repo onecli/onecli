@@ -71,6 +71,23 @@ vi.mock("@onecli/db", () => ({
         store.countWheres.push(where);
         return store.connections.filter((c) => matches(c, where)).length;
       },
+      // Step 8: the coherence pre-capture reads the doomed connections (via an
+      // OR of the two delete predicates) before deleting them.
+      findMany: async ({
+        where,
+      }: {
+        where: { OR?: ConnWhere[] } & ConnWhere;
+      }) => {
+        const conds = where.OR ?? [where];
+        return store.connections
+          .filter((c) => conds.some((w) => matches(c, w)))
+          .map((c) => ({ id: c.id }));
+      },
+    },
+    // No agents are assigned in these tests → no affected projects → the coherence
+    // trigger no-ops (empty Promise.all), so the delete sequence is unchanged.
+    agentAppConnection: {
+      findMany: async () => [] as { agent: { projectId: string } }[],
     },
   },
 }));

@@ -116,6 +116,10 @@ const SLIM_KEYAPP = {
         name: "All read operations",
         description: "Everything read",
       },
+      // read_one's "/alias/one" alias escapes the "/api/*" wildcard, so the
+      // umbrella isn't a true superset — the server marks it incomplete and the
+      // picker won't offer it.
+      wildcardComplete: false,
       tools: [{ id: "read_one", name: "Read one", description: "Reads one" }],
     },
   ],

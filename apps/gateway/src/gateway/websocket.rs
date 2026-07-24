@@ -88,6 +88,9 @@ fn is_websocket_forwarded_header(name: &HeaderName) -> bool {
 pub(super) async fn handle_websocket(
     mut req: Request<Incoming>,
     host: &str,
+    // The original, pre-rewrite host the policy rules match against (the effective
+    // `host` may be app-rewritten) — mirrors `forward_request`'s `policy_host`.
+    policy_host: &str,
     rules: &ResolvedRules,
     cache: &dyn CacheStore,
     pool: &sqlx::PgPool,
@@ -107,19 +110,58 @@ pub(super) async fn handle_websocket(
     let org_id = proxy_ctx.organization_id.as_deref().unwrap_or("");
     let pid = proxy_ctx.project_id.as_deref().unwrap_or("");
 
-    let decision = policy::evaluate(
-        org_id,
-        pid,
+    // Step-7 app-availability pre-check (DB-free — resolved at connect; see
+    // forward.rs). Governs only identifiable app providers, so raw/LLM hosts are
+    // never blocked. WebSocket upgrades are GET. Matches on `policy_host`
+    // (pre-rewrite + port-stripped), NOT the port-bearing/rewritten `host`.
+    if let Some(provider) =
+        crate::apps::app_availability_block(policy_host, &path, &rules.available_apps)
+    {
+        warn!(host = %policy_host, path = %path, provider = %provider, "WebSocket app unavailable to project — refusing request");
+        return Ok(response::app_unavailable(
+            &provider,
+            "GET",
+            &path,
+            policy_host,
+        ));
+    }
+
+    // Step-5 cutover: the new first-match engine decides when POLICY_ENFORCE_V2
+    // is on and the project has cut over; otherwise — or on a v2 load error — it
+    // returns `None` and the legacy path stays authoritative.
+    // WebSocket blocks emit no telemetry today, so the matched rule the v2
+    // engine returns is not attributed here (allow-attribution for ws is out
+    // of scope) — only the decision is consumed.
+    let decision = match crate::policy_engine::evaluate(
+        proxy_ctx,
+        policy_host,
         "GET",
         &path,
         None,
-        &rules.policy_rules,
-        agent_token,
+        has_injections,
+        policy::is_llm_host(host),
         cache,
-        &rules.policy_mode,
-        enforce_deny,
+        &rules.policy_rules_v2,
     )
-    .await;
+    .await
+    {
+        Some((decision, _matched)) => decision,
+        None => {
+            policy::evaluate(
+                org_id,
+                pid,
+                "GET",
+                &path,
+                None,
+                &rules.policy_rules,
+                agent_token,
+                cache,
+                &rules.policy_mode,
+                enforce_deny,
+            )
+            .await
+        }
+    };
 
     match &decision {
         PolicyDecision::BlockedByDefaultPolicy => {
@@ -428,6 +470,7 @@ fn emit_telemetry(
             existing_log_id: None,
             log_id: None,
             budget_charge: None,
+            matched_rule: None,
         });
     }
 }

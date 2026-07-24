@@ -6,7 +6,7 @@
 
 use anyhow::{Context, Result};
 use sqlx::postgres::PgPoolOptions;
-use sqlx::{FromRow, PgPool};
+use sqlx::{types::Json, FromRow, PgPool};
 
 /// Create a PostgreSQL connection pool from `DATABASE_URL`.
 pub(crate) async fn create_pool(database_url: &str) -> Result<PgPool> {
@@ -426,6 +426,321 @@ pub(crate) async fn find_policy_rules_by_org(
     .context("querying policy_rules by organization_id")
 }
 
+// ── New-model policy queries (policy_rules_v2) ─────────────────────────────
+//
+// Shared since step 9.5: every edition's engine loads the ACTIVE published
+// generation of a scope's rules with their identities + targets aggregated as
+// JSON (parsed by the engine's assembler), ordered by `priority` (first-match
+// order). The differentiating loaders (org scope, principal set, availability)
+// live in the EE overlay (`ee/policy_engine/loaders.rs`) and are never part of
+// the OSS build.
+
+/// One aggregated identity (from `json_agg`, camelCase keys). Exactly one of the
+/// four principal columns is set per row (the DB `one_principal` CHECK); the
+/// engine decodes it to the matching `Identity` variant. The non-agent kinds
+/// are cloud/EE-only (OSS decodes them fail-closed).
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct PolicyIdentityRow {
+    pub agent_id: Option<String>,
+    pub agent_group_id: Option<String>,
+    pub user_id: Option<String>,
+    pub group_id: Option<String>,
+}
+
+/// One aggregated target (camelCase keys). `app_connection_id`/`secret_id`
+/// (step 8) name a specific credential to INJECT at connect — and the block/allow
+/// engine ALSO gates their hosts: a secret target by its resolved host pattern,
+/// a connection target by its provider's catalog hosts (permit on allow, block on
+/// block — the app/secret symmetry).
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct PolicyTargetRow {
+    pub kind: String,
+    pub app_provider: Option<String>,
+    #[serde(default)]
+    pub app_tools: Vec<String>,
+    /// kind=app (step 8): "organization" | "project" → inject ALL the agent's
+    /// connections of `app_provider` at that level; NULL = the app-permission
+    /// block/allow rule (no injection).
+    pub app_connection_scope: Option<String>,
+    pub app_connection_id: Option<String>,
+    pub secret_id: Option<String>,
+    /// kind=secret (step 8): "organization" | "project" → inject ALL the agent's
+    /// secrets at that level; NULL = a specific `secret_id` target.
+    pub secret_scope: Option<String>,
+    pub host_pattern: Option<String>,
+    pub path_pattern: Option<String>,
+    pub method: Option<String>,
+}
+
+/// A published `policy_rules_v2` rule with its identity + target rows aggregated
+/// into JSON arrays, DECODED into typed vectors at load (`Json<Vec<…>>`). Serde so
+/// it rides in `ConnectResponse` — loaded once at connection resolution (cached
+/// 60s), so the per-request decision path never touches the DB and, because the
+/// JSON is parsed here at load, never re-parses the aggregate per request either.
+#[derive(Debug, Clone, PartialEq, FromRow, serde::Serialize, serde::Deserialize)]
+pub(crate) struct PolicyRuleV2Row {
+    pub id: String,
+    /// Generation-stable identity — the rate counter keys on it (survives republishes).
+    pub logical_id: String,
+    pub name: String,
+    /// Rule origin (custom | app_permission | blocklist | default | equipment).
+    /// `equipment` (step 8) rules are INJECTION-ONLY — the block/allow assembler
+    /// drops them; the connect-time inject-selection reads them.
+    pub source: String,
+    pub priority: i32,
+    pub is_default: bool,
+    pub action: String,
+    pub rate_limit: Option<i32>,
+    pub rate_limit_window: Option<String>,
+    pub require_approval: bool,
+    pub conditions: Option<serde_json::Value>,
+    pub identities: Json<Vec<PolicyIdentityRow>>,
+    pub targets: Json<Vec<PolicyTargetRow>>,
+}
+
+/// The agent's principal context for a connection — a cloud/EE-only shape,
+/// resolved by the EE loaders at connection resolution. Always empty in OSS
+/// (agent-only identities); part of the shared `ConnectResponse` so both
+/// builds serialize the same struct.
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+pub(crate) struct PrincipalSet {
+    /// Agent-groups the agent belongs to (org-scoped).
+    pub agent_group_ids: Vec<String>,
+    /// Human users the agent's project grants via ProjectAccess — directly, or as
+    /// members of a granted group.
+    pub user_ids: Vec<String>,
+    /// Directory groups to match: those granted to the project directly, plus
+    /// every group the inherited users belong to (org-fenced).
+    pub group_ids: Vec<String>,
+}
+
+/// The published new-model rules for a connection's org + project scopes, loaded
+/// during connection resolution (cached with `ConnectResponse`). Empty when the
+/// engine is off, the org isn't backfilled, or a load errored — the enforce seam
+/// then reverts to the legacy path. Shared so `ConnectResponse` can carry it;
+/// only cloud ever populates it.
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+pub(crate) struct PolicyV2Rules {
+    pub org: Vec<PolicyRuleV2Row>,
+    pub project: Vec<PolicyRuleV2Row>,
+    /// The connection's resolved principal set (step 6). Empty unless some loaded
+    /// rule targets an agent-group/user/group identity (lazy). Only cloud ever
+    /// populates it.
+    #[serde(default)]
+    pub principals: PrincipalSet,
+    /// The org+project custom secrets' host patterns (step 8), so a `secret` target
+    /// can permit/deny its host DB-free per request. Empty unless a loaded rule has
+    /// a secret target (lazy). Populated by both the OSS core and the EE engine
+    /// (`find_secret_hosts` is shared) whenever `POLICY_ENFORCE_V2` is on.
+    #[serde(default)]
+    pub secret_hosts: SecretHosts,
+    /// The org+project app connections' providers, so a `connection` target can
+    /// resolve to its provider's catalog hosts and permit/deny them DB-free per
+    /// request (the step-8 secret symmetry). Empty unless a loaded rule has a
+    /// connection target (lazy). Only cloud ever populates it.
+    #[serde(default)]
+    pub connection_providers: ConnectionProviders,
+}
+
+/// The host patterns of the acting org+project custom secrets, resolved ONCE at
+/// connection resolution (cached with `PolicyV2Rules`) so the block/allow engine
+/// can let a `secret` target PERMIT/deny its host DB-free per request (step 8).
+/// `by_id` serves a specific `secret_id` target; `project_hosts`/`org_hosts` serve
+/// a `secret_scope` ("all secrets at a level") target. Each secret contributes ALL
+/// the hosts its credential injects on (`secret_inject::secret_host_patterns`) — a
+/// list, because a typed secret (OpenAI) is valid on several hosts — so enforcement
+/// covers exactly the injection surface. Populated whenever a loaded rule has a
+/// secret target (the lazy skip leaves it empty otherwise).
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+pub(crate) struct SecretHosts {
+    /// A specific secret's id → every host pattern its credential injects on.
+    pub by_id: std::collections::HashMap<String, Vec<String>>,
+    /// Every PROJECT-scoped secret's host patterns (for `secret_scope="project"`).
+    pub project_hosts: Vec<String>,
+    /// Every ORG-scoped secret's host patterns (for `secret_scope="organization"`).
+    pub org_hosts: Vec<String>,
+}
+
+/// The providers of the acting org+project app connections, resolved ONCE at
+/// connection resolution (cached with `PolicyV2Rules`) so the block/allow engine
+/// can decode a `connection` target to its provider — whose catalog hosts it then
+/// permits/denies, symmetric with a `secret` target (step 8). Fenced at load
+/// (`find_connection_providers`), so a forged/foreign connection id resolves to
+/// nothing (the target never matches — fail-closed, like a deleted secret). Empty
+/// in OSS and whenever no loaded rule has a connection target (the lazy skip).
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+pub(crate) struct ConnectionProviders {
+    /// A connection's id → its `provider` (e.g. "gmail").
+    pub by_id: std::collections::HashMap<String, String>,
+}
+
+/// The specific credentials (step 8) the connect's published v2 rules ALLOW the
+/// requesting agent to have injected — derived ONCE at connect-resolution from the
+/// already-loaded `PolicyV2Rules` (pure, DB-free). This is the connect-time
+/// SELECTION that replaces the `agent_secrets` / `agent_app_connections` join for
+/// a SELECTIVE agent; `secretMode` stays the all-vs-selective switch. Empty in OSS
+/// and when the engine is off, so the gateway keeps the legacy equipment
+/// resolution (the fail-safe). NOT cached on its own — it feeds the resolvers
+/// whose output (`injection_rules` / `app_connections`) is what rides
+/// `ConnectResponse`.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct InjectSelection {
+    /// Specific `Secret` ids named by the agent's matching `kind=secret` allow
+    /// targets.
+    pub secret_ids: std::collections::HashSet<String>,
+    /// Specific `AppConnection` id → its `sessionPolicy` (the matching rule's
+    /// conditions — the granular guard) for `kind=connection` allow targets.
+    pub connections: std::collections::HashMap<String, Option<serde_json::Value>>,
+    /// (provider, level) pairs from `kind=app` allow targets carrying a
+    /// `connection_scope` (step 8): inject ALL the agent's connections of
+    /// `provider` at that org/project `level` (a provider+level selection, no
+    /// per-connection sessionPolicy — "all" is unscoped, like all-mode).
+    pub app_scopes: Vec<(String, String)>,
+    /// Levels ("organization" | "project") from `kind=secret` allow targets
+    /// carrying a `secret_scope` (step 8): inject ALL the agent's secrets at that
+    /// level (a level selection, no per-secret guard — "all", like all-mode).
+    pub secret_scopes: Vec<String>,
+}
+
+/// The apps a connection's project may reach (a cloud/EE-only posture,
+/// resolved by the EE loaders at connection resolution). `restricted = false`
+/// — the default, and always in OSS — means EVERY app is available and the
+/// per-request pre-check is a no-op.
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+pub(crate) struct AvailableApps {
+    pub restricted: bool,
+    pub providers: Vec<String>,
+}
+
+pub(crate) const POLICY_V2_SELECT: &str = r#"
+    SELECT r.id, r.logical_id, r.name, r.source, r.priority, r.is_default, r.action,
+           r.rate_limit, r.rate_limit_window, r.require_approval, r.conditions,
+           COALESCE((
+             SELECT json_agg(json_build_object(
+               'agentId', i.agent_id, 'agentGroupId', i.agent_group_id,
+               'userId', i.user_id, 'groupId', i.group_id))
+             FROM policy_rule_identities i WHERE i.rule_id = r.id
+           ), '[]'::json) AS identities,
+           COALESCE((
+             SELECT json_agg(json_build_object(
+               'kind', t.kind, 'appProvider', t.app_provider, 'appTools', t.app_tools,
+               'appConnectionScope', t.app_connection_scope,
+               'appConnectionId', t.app_connection_id, 'secretId', t.secret_id,
+               'secretScope', t.secret_scope,
+               'hostPattern', t.host_pattern, 'pathPattern', t.path_pattern,
+               'method', t.method))
+             FROM policy_rule_targets t WHERE t.rule_id = r.id
+           ), '[]'::json) AS targets
+    FROM policy_rules_v2 r
+"#;
+
+/// Active published project-scope rules (max published generation), first-match
+/// ordered.
+pub(crate) async fn find_published_policy_rules_v2_by_project(
+    pool: &PgPool,
+    project_id: &str,
+) -> Result<Vec<PolicyRuleV2Row>> {
+    sqlx::query_as::<_, PolicyRuleV2Row>(&format!(
+        r#"{POLICY_V2_SELECT}
+           WHERE r.project_id = $1 AND r.scope = 'project'
+             AND r.status = 'published' AND r.enabled = true
+             AND r.generation = (
+               SELECT max(generation) FROM policy_rules_v2
+               WHERE project_id = $1 AND scope = 'project' AND status = 'published')
+           ORDER BY r.priority, r.id"#
+    ))
+    .bind(project_id)
+    .fetch_all(pool)
+    .await
+    .context("querying policy_rules_v2 by project_id")
+}
+
+#[derive(sqlx::FromRow)]
+struct SecretHostRow {
+    id: String,
+    host_pattern: String,
+    scope: String,
+    #[sqlx(rename = "type")]
+    type_: String,
+}
+
+/// Resolve the host patterns of the acting org+project custom secrets so the
+/// block/allow engine can let a `secret` target permit/deny its host (step 8).
+/// ORG+PROJECT-FENCED on every arm — a project secret via `project_id = $2` (a
+/// project id is unique and belongs to one org, mirroring `find_secrets_by_project`),
+/// an org secret via `organization_id = $1 AND scope = 'organization'` — so a
+/// forged/foreign `secret_id` or scope can NEVER pull another org's host (it simply
+/// isn't in the fenced set). Partner secrets are excluded (custom secrets are
+/// project/org). Run once at connect (cached with `PolicyV2Rules`); the per-request
+/// path never touches the DB.
+pub(crate) async fn find_secret_hosts(
+    pool: &PgPool,
+    organization_id: &str,
+    project_id: &str,
+) -> Result<SecretHosts> {
+    let rows: Vec<SecretHostRow> = sqlx::query_as::<_, SecretHostRow>(
+        r#"
+        SELECT id, host_pattern, scope, type FROM secrets
+        WHERE project_id = $2
+           OR (organization_id = $1 AND scope = 'organization')
+        "#,
+    )
+    .bind(organization_id)
+    .bind(project_id)
+    .fetch_all(pool)
+    .await
+    .context("resolving secret hosts")?;
+
+    let mut hosts = SecretHosts::default();
+    for row in rows {
+        // Expand each secret to EVERY host its credential injects on (a typed
+        // secret like OpenAI covers several), so enforcement == injection.
+        let patterns = crate::secret_inject::secret_host_patterns(&row.type_, &row.host_pattern);
+        match row.scope.as_str() {
+            "project" => hosts.project_hosts.extend(patterns.iter().cloned()),
+            "organization" => hosts.org_hosts.extend(patterns.iter().cloned()),
+            _ => {}
+        }
+        hosts.by_id.insert(row.id, patterns);
+    }
+    Ok(hosts)
+}
+
+/// Resolve the providers of the acting org+project app connections so the
+/// block/allow engine can decode a `connection` target to its provider's catalog
+/// hosts (the secret symmetry). ORG+PROJECT-FENCED exactly like
+/// `find_secret_hosts` — a project connection via `project_id = $2`, an org
+/// connection via `organization_id = $1 AND scope = 'organization'` — so a
+/// forged/foreign connection id can NEVER resolve (it simply isn't in the fenced
+/// set → the target never matches). No status filter: the row's existence is the
+/// reference (deletion cascades the target row away; this map only covers the
+/// ~60s cache window). Run once at connect (cached with `PolicyV2Rules`); the
+/// per-request path never touches the DB.
+pub(crate) async fn find_connection_providers(
+    pool: &PgPool,
+    organization_id: &str,
+    project_id: &str,
+) -> Result<ConnectionProviders> {
+    let rows: Vec<(String, String)> = sqlx::query_as(
+        r#"
+        SELECT id, provider FROM app_connections
+        WHERE project_id = $2
+           OR (organization_id = $1 AND scope = 'organization')
+        "#,
+    )
+    .bind(organization_id)
+    .bind(project_id)
+    .fetch_all(pool)
+    .await
+    .context("resolving connection providers")?;
+
+    Ok(ConnectionProviders {
+        by_id: rows.into_iter().collect(),
+    })
+}
+
 // ── App config queries (BYOC credentials) ─────────────────────────────
 
 /// An app config row from the `app_configs` table.
@@ -515,6 +830,9 @@ pub(crate) async fn find_app_config_by_connection(
 pub(crate) struct AppConnectionRow {
     pub id: String,
     pub provider: String,
+    /// "organization" | "project" — the connection's level, so a step-8 app
+    /// target scoped to "all connections at level L" can match by it.
+    pub scope: String,
     pub credentials: Option<String>,
     pub label: Option<String>,
     pub metadata: Option<serde_json::Value>,
@@ -527,7 +845,7 @@ pub(crate) async fn find_app_connections_by_project(
     project_id: &str,
 ) -> Result<Vec<AppConnectionRow>> {
     sqlx::query_as::<_, AppConnectionRow>(
-        r#"SELECT id, provider, credentials, label, metadata, NULL::jsonb AS session_policy FROM app_connections WHERE project_id = $1 AND status = 'connected'"#,
+        r#"SELECT id, provider, scope, credentials, label, metadata, NULL::jsonb AS session_policy FROM app_connections WHERE project_id = $1 AND status = 'connected'"#,
     )
     .bind(project_id)
     .fetch_all(pool)
@@ -541,7 +859,7 @@ pub(crate) async fn find_app_connections_by_agent(
     agent_id: &str,
 ) -> Result<Vec<AppConnectionRow>> {
     sqlx::query_as::<_, AppConnectionRow>(
-        r#"SELECT ac.id, ac.provider, ac.credentials, ac.label, ac.metadata, aac.session_policy
+        r#"SELECT ac.id, ac.provider, ac.scope, ac.credentials, ac.label, ac.metadata, aac.session_policy
            FROM app_connections ac
            INNER JOIN agent_app_connections aac ON ac.id = aac.app_connection_id
            WHERE aac.agent_id = $1 AND ac.status = 'connected'"#,
@@ -558,7 +876,7 @@ pub(crate) async fn find_app_connections_by_org(
     organization_id: &str,
 ) -> Result<Vec<AppConnectionRow>> {
     sqlx::query_as::<_, AppConnectionRow>(
-        r#"SELECT id, provider, credentials, label, metadata, NULL::jsonb AS session_policy
+        r#"SELECT id, provider, scope, credentials, label, metadata, NULL::jsonb AS session_policy
            FROM app_connections
            WHERE organization_id = $1 AND scope = 'organization' AND status = 'connected'"#,
     )

@@ -122,4 +122,24 @@ export interface OrgAppConfigProvider {
   ): Promise<Record<string, { hasCredentials: boolean }>>;
 }
 
+/**
+ * App-availability reads backing the connect-picker filter (policy-engine
+ * step 7). EE-only: the org allowlist (toggle + per-principal grants) lives in
+ * the EE org surface, so OSS never registers a provider and every app is
+ * available (the picker is unfiltered, unchanged). The TS mirror of the
+ * gateway's availability read — the same enforcement the gateway
+ * applies at runtime, surfaced to the UI.
+ */
+export interface AppAvailabilityProvider {
+  /**
+   * The app-provider ids available to a project, or `null` when availability is
+   * unrestricted (the org is in "open" mode) — the caller then treats every app
+   * as available. Scoped to the acting org; never leaks other orgs' grants.
+   */
+  getAvailableProviders(
+    projectId: string,
+    organizationId: string,
+  ): Promise<string[] | null>;
+}
+
 export type { CryptoService, AppDefinition };

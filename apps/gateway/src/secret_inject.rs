@@ -159,6 +159,34 @@ pub(crate) fn build_injections(
     }
 }
 
+/// The host-match patterns a secret of `secret_type` injects its credential on,
+/// given its stored `host_pattern`. Single source of truth shared by the
+/// connect-time injection filter (`connect::resolve_secret_injections`) AND policy
+/// enforcement (`db::find_secret_hosts` → v2 `Target::Secret`), so injection
+/// coverage == enforcement coverage BY CONSTRUCTION — the secret analog of the
+/// provider-registry host fix. Every secret covers its own stored `host_pattern`;
+/// only `openai` adds the extra hosts one OpenAI credential is valid across
+/// (`api.openai.com`, ChatGPT, and their subdomains) regardless of which host it
+/// was stored under. Returned as `host_matches` patterns, so `*.openai.com` covers
+/// every `.openai.com` subdomain.
+#[must_use]
+pub(crate) fn secret_host_patterns(secret_type: &str, host_pattern: &str) -> Vec<String> {
+    let mut patterns = vec![host_pattern.to_string()];
+    if secret_type == "openai" {
+        for extra in [
+            "api.openai.com",
+            "chatgpt.com",
+            "*.chatgpt.com",
+            "*.openai.com",
+        ] {
+            if !patterns.iter().any(|p| p == extra) {
+                patterns.push(extra.to_string());
+            }
+        }
+    }
+    patterns
+}
+
 /// If the OpenAI OAuth access_token is expired, refresh it and persist the
 /// updated credentials. Returns `Some(updated_json)` on successful refresh,
 /// or `None` to fall through with the original (possibly expired) value.
@@ -472,5 +500,49 @@ mod tests {
     fn build_injections_unknown_type() {
         let injections = build_injections("unknown", "value", None, None);
         assert!(injections.is_empty());
+    }
+
+    // ── secret_host_patterns (injection == enforcement, the OpenAI bypass) ────
+
+    #[test]
+    fn secret_host_patterns_openai_covers_all_its_hosts() {
+        // One OpenAI credential is valid across api.openai.com, ChatGPT, and the
+        // subdomains — enforcement must resolve the same set injection does.
+        assert_eq!(
+            secret_host_patterns("openai", "api.openai.com"),
+            vec![
+                "api.openai.com".to_string(),
+                "chatgpt.com".to_string(),
+                "*.chatgpt.com".to_string(),
+                "*.openai.com".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn secret_host_patterns_openai_dedups_the_stored_host() {
+        // Stored under chatgpt.com (Codex/OAuth mode): same set, no duplicate.
+        assert_eq!(
+            secret_host_patterns("openai", "chatgpt.com"),
+            vec![
+                "chatgpt.com".to_string(),
+                "api.openai.com".to_string(),
+                "*.chatgpt.com".to_string(),
+                "*.openai.com".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn secret_host_patterns_other_types_are_just_their_host() {
+        // No expansion for symmetric types — enforcement already == injection.
+        assert_eq!(
+            secret_host_patterns("anthropic", "api.anthropic.com"),
+            vec!["api.anthropic.com".to_string()]
+        );
+        assert_eq!(
+            secret_host_patterns("generic", "internal.example.com"),
+            vec!["internal.example.com".to_string()]
+        );
     }
 }
