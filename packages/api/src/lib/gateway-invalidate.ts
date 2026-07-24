@@ -1,5 +1,5 @@
 import { db } from "@onecli/db";
-import { GATEWAY_API_URL } from "./env";
+import { GATEWAY_SERVICE_URL } from "./env";
 
 export const invalidateGatewayCache = (request: Request) => {
   const authorization = request.headers.get("authorization");
@@ -16,7 +16,7 @@ export const invalidateGatewayCache = (request: Request) => {
   if (cookie) headers["cookie"] = cookie;
   if (projectId) headers["x-project-id"] = projectId;
 
-  fetch(`${GATEWAY_API_URL}/v1/cache/invalidate`, {
+  fetch(`${GATEWAY_SERVICE_URL}/v1/cache/invalidate`, {
     method: "POST",
     headers,
   }).catch(() => {});
@@ -29,7 +29,7 @@ export const invalidateGatewayCache = (request: Request) => {
  */
 export const invalidateGatewayCacheForKeys = (keys: string[]) => {
   for (const key of keys) {
-    fetch(`${GATEWAY_API_URL}/v1/cache/invalidate`, {
+    fetch(`${GATEWAY_SERVICE_URL}/v1/cache/invalidate`, {
       method: "POST",
       headers: { authorization: `Bearer ${key}` },
     }).catch(() => {});
