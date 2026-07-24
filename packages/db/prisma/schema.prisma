@@ -14,47 +14,58 @@ datasource db {
 // multiple organizations (today: one auto-created on signup; future: invited
 // to others, can create more). Projects under an org share its plan/quotas.
 model Organization {
-  id                 String    @id @default(uuid())
-  name               String
-  slug               String    @unique
-  stripeCustomerId   String?   @unique @map("stripe_customer_id")
-  subscriptionStatus String    @default("free") @map("subscription_status")
-  awsExternalId      String?   @map("aws_external_id")
-  policyMode         String    @default("allow") @map("policy_mode") // "allow" | "deny"
+  id                  String    @id @default(uuid())
+  name                String
+  slug                String    @unique
+  stripeCustomerId    String?   @unique @map("stripe_customer_id")
+  subscriptionStatus  String    @default("free") @map("subscription_status")
+  // Cloud-only (inert in OSS): ops-set per-org agent-cap override (SQL only,
+  // no UI) — lets a self-serve org exceed its plan's maxAgents without moving
+  // to the sales-managed enterprise plan. Null = plan default.
+  maxAgentsOverride   Int?      @map("max_agents_override")
+  awsExternalId       String?   @map("aws_external_id")
+  policyMode          String    @default("allow") @map("policy_mode") // "allow" | "deny"
+  // App-availability posture (step 7): "open" = every app connectable (default,
+  // = today's behavior); "restricted" = allowlist — an app is available to a
+  // project when an AppAvailabilityRule that grants it names one of the project's
+  // ProjectAccess people. Cloud/EE-only (directory-dependent); inert in OSS.
+  appAvailabilityMode String    @default("open") @map("app_availability_mode") // "open" | "restricted"
   // Cloud-only (inert in OSS): set when this org was created by a Partner.
-  partnerId          String?   @map("partner_id")
+  partnerId           String?   @map("partner_id")
   // Cloud-only (inert in OSS): set when the org detaches from its partner —
   // stops inheriting partner secrets but keeps partnerId for attribution.
-  partnerDetachedAt  DateTime? @map("partner_detached_at")
+  partnerDetachedAt   DateTime? @map("partner_detached_at")
   // Cloud-only (inert in OSS): members of this org's verified domains must
   // sign in through the org's SSO connection (break-glass via
   // OrganizationMember.ssoExempt).
-  ssoRequired        Boolean   @default(false) @map("sso_required")
+  ssoRequired         Boolean   @default(false) @map("sso_required")
   // Cloud-only (inert in OSS): first SSO login on a verified domain
   // auto-joins the org as a member.
-  jitEnabled         Boolean   @default(true) @map("jit_enabled")
-  createdAt          DateTime  @default(now()) @map("created_at")
-  updatedAt          DateTime  @updatedAt @map("updated_at")
+  jitEnabled          Boolean   @default(true) @map("jit_enabled")
+  createdAt           DateTime  @default(now()) @map("created_at")
+  updatedAt           DateTime  @updatedAt @map("updated_at")
 
-  projects          Project[]
-  members           OrganizationMember[]
-  invitations       Invitation[]
-  userProvisions    UserProvision[]
-  secrets           Secret[]
-  appConnections    AppConnection[]
-  appConfigs        AppConfig[]
-  policyRules       PolicyRule[]
-  apiKeys           ApiKey[]
-  auditLogs         AuditLog[]
-  partner           Partner?                    @relation(fields: [partnerId], references: [id])
-  partnerClaim      PartnerClaim?
-  budgets           Budget[] // cloud-only: per-secret spend budgets for this org (inert in OSS)
-  domains           OrganizationDomain[]
-  ssoConnections    OrganizationSsoConnection[]
-  scimTokens        OrganizationScimToken[]
-  groups            Group[]
-  agentGroups       AgentGroup[]
-  groupRoleMappings GroupRoleMapping[]
+  projects             Project[]
+  members              OrganizationMember[]
+  invitations          Invitation[]
+  userProvisions       UserProvision[]
+  secrets              Secret[]
+  appConnections       AppConnection[]
+  appConfigs           AppConfig[]
+  policyRules          PolicyRule[]
+  policyRulesV2        PolicyRuleV2[]
+  apiKeys              ApiKey[]
+  auditLogs            AuditLog[]
+  partner              Partner?                    @relation(fields: [partnerId], references: [id])
+  partnerClaim         PartnerClaim?
+  budgets              Budget[] // cloud-only: per-secret spend budgets for this org (inert in OSS)
+  domains              OrganizationDomain[]
+  ssoConnections       OrganizationSsoConnection[]
+  scimTokens           OrganizationScimToken[]
+  groups               Group[]
+  agentGroups          AgentGroup[]
+  appAvailabilityRules AppAvailabilityRule[]
+  groupRoleMappings    GroupRoleMapping[]
 
   @@index([partnerId])
   @@map("organizations")
@@ -186,6 +197,7 @@ model Project {
   agents           Agent[]
   secrets          Secret[]
   policyRules      PolicyRule[]
+  policyRulesV2    PolicyRuleV2[]
   auditLogs        AuditLog[]
   vaultConnections VaultConnection[]
   onboardingSurvey OnboardingSurvey?
@@ -219,26 +231,30 @@ model User {
   createdAt             DateTime  @default(now()) @map("created_at")
   updatedAt             DateTime  @updatedAt @map("updated_at")
 
-  organizationMemberships  OrganizationMember[]
-  sentInvitations          Invitation[]                @relation("InvitationCreator")
-  apiKeys                  ApiKey[]
-  auditLogs                AuditLog[]
-  createdProjects          Project[]                   @relation("ProjectCreator")
-  onboardingSurveys        OnboardingSurvey[]
-  createdAgentSecrets      AgentSecret[]               @relation("AgentSecretCreator")
-  updatedAgentSecrets      AgentSecret[]               @relation("AgentSecretUpdater")
-  provisionedAs            UserProvision?              @relation("ProvisionedUser")
-  createdProvisions        UserProvision[]             @relation("ProvisionCreator")
-  partnerMemberships       PartnerMember[]
-  partnerPlaceholderClaim  PartnerClaim?               @relation("PartnerPlaceholder")
-  createdDomains           OrganizationDomain[]        @relation("OrganizationDomainCreator")
-  createdSsoConnections    OrganizationSsoConnection[] @relation("OrganizationSsoConnectionCreator")
-  createdScimTokens        OrganizationScimToken[]     @relation("OrganizationScimTokenCreator")
-  groupMemberships         GroupMember[]               @relation("GroupMemberUser")
-  createdGroupMembers      GroupMember[]               @relation("GroupMemberCreator")
-  createdAgentGroupMembers AgentGroupMember[]          @relation("AgentGroupMemberCreator")
-  projectAccess            ProjectAccess[]             @relation("ProjectAccessUser")
-  createdProjectAccess     ProjectAccess[]             @relation("ProjectAccessCreator")
+  organizationMemberships       OrganizationMember[]
+  sentInvitations               Invitation[]                  @relation("InvitationCreator")
+  apiKeys                       ApiKey[]
+  auditLogs                     AuditLog[]
+  createdProjects               Project[]                     @relation("ProjectCreator")
+  onboardingSurveys             OnboardingSurvey[]
+  createdAgentSecrets           AgentSecret[]                 @relation("AgentSecretCreator")
+  updatedAgentSecrets           AgentSecret[]                 @relation("AgentSecretUpdater")
+  provisionedAs                 UserProvision?                @relation("ProvisionedUser")
+  createdProvisions             UserProvision[]               @relation("ProvisionCreator")
+  partnerMemberships            PartnerMember[]
+  partnerPlaceholderClaim       PartnerClaim?                 @relation("PartnerPlaceholder")
+  createdDomains                OrganizationDomain[]          @relation("OrganizationDomainCreator")
+  createdSsoConnections         OrganizationSsoConnection[]   @relation("OrganizationSsoConnectionCreator")
+  createdScimTokens             OrganizationScimToken[]       @relation("OrganizationScimTokenCreator")
+  groupMemberships              GroupMember[]                 @relation("GroupMemberUser")
+  createdGroupMembers           GroupMember[]                 @relation("GroupMemberCreator")
+  createdAgentGroupMembers      AgentGroupMember[]            @relation("AgentGroupMemberCreator")
+  projectAccess                 ProjectAccess[]               @relation("ProjectAccessUser")
+  createdProjectAccess          ProjectAccess[]               @relation("ProjectAccessCreator")
+  createdPolicyRulesV2          PolicyRuleV2[]                @relation("PolicyRuleV2Creator")
+  policyRuleIdentities          PolicyRuleIdentity[]          @relation("PolicyRuleIdentityUser")
+  appAvailabilityRuleIdentities AppAvailabilityRuleIdentity[] @relation("AppAvailabilityRuleIdentityUser")
+  createdAppAvailabilityRules   AppAvailabilityRule[]         @relation("AppAvailabilityRuleCreator")
 
   @@map("users")
 }
@@ -284,6 +300,7 @@ model Agent {
   agentAppConnections   AgentAppConnection[]
   policyRules           PolicyRule[]
   agentGroupMemberships AgentGroupMember[]
+  policyRuleIdentities  PolicyRuleIdentity[]
 
   @@unique([projectId, identifier])
   @@index([projectId])
@@ -312,8 +329,9 @@ model Secret {
   organization    Organization? @relation(fields: [organizationId], references: [id])
   partner         Partner?      @relation(fields: [partnerId], references: [id])
 
-  agentSecrets AgentSecret[]
-  budgets      Budget[] // cloud-only: spend budgets on this secret (inert in OSS)
+  agentSecrets      AgentSecret[]
+  budgets           Budget[] // cloud-only: spend budgets on this secret (inert in OSS)
+  policyRuleTargets PolicyRuleTarget[]
 
   @@index([projectId])
   @@index([organizationId])
@@ -351,6 +369,125 @@ model PolicyRule {
   @@index([partnerId])
   @@index([scope])
   @@map("policy_rules")
+}
+
+// ── Unified policy engine (Step 1: inert schema — no consumers yet) ────────
+// Priority-ordered, first-match rules (plans/policy-engine.md). Coexists with
+// the live `policy_rules` above until step 9 renames policy_rules_v2 → it.
+// Empty + unread in this step: additive/expand-only, deploy-safe.
+
+model PolicyRuleV2 {
+  id              String   @id @default(uuid())
+  scope           String // "organization" | "project"
+  organizationId  String?  @map("organization_id")
+  projectId       String?  @map("project_id")
+  status          String   @default("draft") // "draft" | "published" (gateway reads published)
+  generation      Int      @default(0) // published snapshot number (rollback)
+  priority        Int // first-match order within a scope (lower = earlier)
+  enabled         Boolean  @default(true)
+  isDefault       Boolean  @default(false) @map("is_default") // terminal Default Rule
+  // A generation-stable identity: a draft's `logicalId` is copied onto each of its
+  // published snapshots, so the gateway's rate-limit counter (keyed on it) survives
+  // republishes — unlike the per-generation row `id`. Distinct rules get distinct
+  // values (defaulted); a snapshot copies its source draft's.
+  logicalId       String   @default(dbgenerated("gen_random_uuid()")) @map("logical_id")
+  // Origin of the rule: "custom" (authored) | "app_permission" | "blocklist"
+  // (materialized from the old model by the step-5 coherence bridge, until the
+  // old editors retire at step 7) | "default" (the terminal posture rule) |
+  // "equipment" (step 8, injection-only, derived from the live equipment
+  // model). The bridge re-materializes only the app_permission/blocklist/
+  // equipment rows, leaving custom + default untouched.
+  source          String   @default("custom")
+  name            String
+  description     String?
+  action          String // "allow" | "block"
+  rateLimit       Int?     @map("rate_limit") // modifier on allow
+  rateLimitWindow String?  @map("rate_limit_window") // "minute" | "hour" | "day"
+  requireApproval Boolean  @default(false) @map("require_approval") // modifier on allow
+  conditions      Json?
+  createdByUserId String?  @map("created_by_user_id")
+  createdAt       DateTime @default(now()) @map("created_at")
+  updatedAt       DateTime @updatedAt @map("updated_at")
+
+  organization  Organization?        @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  project       Project?             @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  createdByUser User?                @relation("PolicyRuleV2Creator", fields: [createdByUserId], references: [id])
+  identities    PolicyRuleIdentity[]
+  targets       PolicyRuleTarget[]
+
+  @@index([scope, organizationId, projectId, status, priority])
+  @@index([organizationId])
+  @@index([projectId])
+  @@map("policy_rules_v2")
+}
+
+// One identity row per (rule, principal). Empty set on a rule = "any identity".
+// Exactly one of the four principal columns is set (DB CHECK).
+model PolicyRuleIdentity {
+  id           String  @id @default(uuid())
+  ruleId       String  @map("rule_id")
+  agentId      String? @map("agent_id")
+  agentGroupId String? @map("agent_group_id")
+  userId       String? @map("user_id")
+  groupId      String? @map("group_id")
+
+  rule       PolicyRuleV2 @relation(fields: [ruleId], references: [id], onDelete: Cascade)
+  agent      Agent?       @relation(fields: [agentId], references: [id], onDelete: Cascade)
+  agentGroup AgentGroup?  @relation(fields: [agentGroupId], references: [id], onDelete: Cascade)
+  user       User?        @relation("PolicyRuleIdentityUser", fields: [userId], references: [id], onDelete: Cascade)
+  group      Group?       @relation(fields: [groupId], references: [id], onDelete: Cascade)
+
+  // A rule binds each principal at most once (mirrors the sibling access tables).
+  @@unique([ruleId, agentId])
+  @@unique([ruleId, agentGroupId])
+  @@unique([ruleId, userId])
+  @@unique([ruleId, groupId])
+  @@index([agentId])
+  @@index([agentGroupId])
+  @@index([userId])
+  @@index([groupId])
+  @@map("policy_rule_identities")
+}
+
+// One target row per (rule, destination). Empty set on a rule = "any
+// destination". `kind` selects which columns are populated (DB CHECK).
+model PolicyRuleTarget {
+  id                 String   @id @default(uuid())
+  ruleId             String   @map("rule_id")
+  kind               String // "app" | "connection" | "secret" | "network"
+  appProvider        String?  @map("app_provider") // kind = app
+  // Narrow which endpoints the rule matches; EMPTY = the WHOLE app (host-only
+  // on the provider's catalog hosts — permit on allow / block on block). On a
+  // kind = connection target the tools narrow the connection's provider app the
+  // same way; injection still injects the whole connection regardless.
+  appTools           String[] @default([]) @map("app_tools")
+  // kind = app (step 8): "organization" | "project" → inject ALL the agent's
+  // connections of `appProvider` at that level. NULL = the app-permission
+  // block/allow rule (no injection). Only set when kind = "app".
+  appConnectionScope String?  @map("app_connection_scope")
+  appConnectionId    String?  @map("app_connection_id") // kind = connection
+  secretId           String?  @map("secret_id") // kind = secret
+  // kind = secret (step 8): "organization" | "project" → inject ALL the agent's
+  // secrets at that level ("all secrets"). Mutually exclusive with `secretId`
+  // (specific secret). Only set when kind = "secret".
+  secretScope        String?  @map("secret_scope")
+  hostPattern        String?  @map("host_pattern") // kind = network
+  pathPattern        String?  @map("path_pattern")
+  method             String?
+
+  rule          PolicyRuleV2   @relation(fields: [ruleId], references: [id], onDelete: Cascade)
+  appConnection AppConnection? @relation(fields: [appConnectionId], references: [id], onDelete: Cascade)
+  secret        Secret?        @relation(fields: [secretId], references: [id], onDelete: Cascade)
+
+  // A rule references a given connection / secret at most once (app + network
+  // rows are polymorphic — deduped in the app layer, per the plan §2.2).
+  @@unique([ruleId, appConnectionId])
+  @@unique([ruleId, secretId])
+  @@index([ruleId])
+  @@index([appConnectionId])
+  @@index([secretId])
+  @@index([appProvider])
+  @@map("policy_rule_targets")
 }
 
 model AgentSecret {
@@ -391,18 +528,23 @@ model AuditLog {
 }
 
 model RequestLog {
-  id             String   @id @default(uuid())
-  projectId      String   @map("project_id")
-  agentId        String   @map("agent_id")
-  method         String
-  host           String
-  path           String
-  provider       String
-  status         Int
-  latencyMs      Int      @map("latency_ms")
-  injectionCount Int      @map("injection_count")
-  extraData      Json?    @map("extra_data")
-  createdAt      DateTime @default(now()) @map("created_at")
+  id                   String   @id @default(uuid())
+  projectId            String   @map("project_id")
+  agentId              String   @map("agent_id")
+  method               String
+  host                 String
+  path                 String
+  provider             String
+  status               Int
+  latencyMs            Int      @map("latency_ms")
+  injectionCount       Int      @map("injection_count")
+  extraData            Json?    @map("extra_data")
+  // The generation-stable logicalId of the v2 policy rule that decided the
+  // request (step 9 visibility) — null for legacy decisions, plain allows,
+  // pre-v2 rows, and OSS (its writer never binds it). The display NAME rides
+  // extra_data.matched_rule_name (survives rule deletion).
+  matchedRuleLogicalId String?  @map("matched_rule_logical_id")
+  createdAt            DateTime @default(now()) @map("created_at")
 
   @@index([projectId, createdAt])
   @@map("request_logs")
@@ -466,6 +608,7 @@ model AppConnection {
   partner             Partner?             @relation(fields: [partnerId], references: [id])
   appConfig           AppConfig?           @relation(fields: [appConfigId], references: [id], onDelete: SetNull)
   agentAppConnections AgentAppConnection[]
+  policyRuleTargets   PolicyRuleTarget[]
 
   @@index([projectId, provider])
   @@index([organizationId, provider])
@@ -531,9 +674,11 @@ model Group {
 
   organization Organization @relation(fields: [organizationId], references: [id])
 
-  members       GroupMember[]
-  projectAccess ProjectAccess[]
-  roleMapping   GroupRoleMapping?
+  members                       GroupMember[]
+  projectAccess                 ProjectAccess[]
+  roleMapping                   GroupRoleMapping?
+  policyRuleIdentities          PolicyRuleIdentity[]
+  appAvailabilityRuleIdentities AppAvailabilityRuleIdentity[]
 
   @@unique([organizationId, name])
   @@unique([organizationId, source, externalId])
@@ -568,7 +713,8 @@ model AgentGroup {
 
   organization Organization @relation(fields: [organizationId], references: [id])
 
-  members AgentGroupMember[]
+  members              AgentGroupMember[]
+  policyRuleIdentities PolicyRuleIdentity[]
 
   @@unique([organizationId, name])
   @@index([organizationId])
@@ -617,6 +763,49 @@ model ProjectAccess {
   @@index([userId])
   @@index([groupId])
   @@map("project_access")
+}
+
+// Org-scoped app-availability rules (step 7): a named rule grants a SET of apps
+// to a SET of human principals (users | groups), applied when the org's
+// appAvailabilityMode is "restricted". Mirrors the PolicyRuleV2 +
+// PolicyRuleIdentity shape but is a SEPARATE axis (the provisioning gate, not
+// agent runtime policy). Cloud/EE-only; inert in OSS.
+model AppAvailabilityRule {
+  id              String   @id @default(uuid())
+  organizationId  String   @map("organization_id")
+  name            String? // optional label, e.g. "People-management apps"
+  providers       String[] @default([]) // granted apps = AppDefinition.ids (empty = no-op)
+  createdByUserId String?  @map("created_by_user_id") // null = system write
+  createdAt       DateTime @default(now()) @map("created_at")
+  updatedAt       DateTime @updatedAt @map("updated_at")
+
+  organization  Organization                  @relation(fields: [organizationId], references: [id])
+  createdByUser User?                         @relation("AppAvailabilityRuleCreator", fields: [createdByUserId], references: [id])
+  identities    AppAvailabilityRuleIdentity[]
+
+  @@index([organizationId])
+  @@map("app_availability_rules")
+}
+
+// One identity row per (rule, principal). Exactly one of userId/groupId is set
+// (DB CHECK). Mirrors PolicyRuleIdentity.
+model AppAvailabilityRuleIdentity {
+  id      String  @id @default(uuid())
+  ruleId  String  @map("rule_id")
+  userId  String? @map("user_id")
+  groupId String? @map("group_id")
+
+  rule  AppAvailabilityRule @relation(fields: [ruleId], references: [id], onDelete: Cascade)
+  user  User?               @relation("AppAvailabilityRuleIdentityUser", fields: [userId], references: [id], onDelete: Cascade)
+  group Group?              @relation(fields: [groupId], references: [id], onDelete: Cascade)
+
+  // A rule binds each principal at most once.
+  @@unique([ruleId, userId])
+  @@unique([ruleId, groupId])
+  @@index([ruleId])
+  @@index([userId])
+  @@index([groupId])
+  @@map("app_availability_rule_identities")
 }
 
 // Group → org-role mapping (priority-ordered; the highest-priority mapping

@@ -51,6 +51,12 @@ import {
 } from "@/hooks/use-agents";
 import type { SecretMode } from "@onecli/api/services/agent-service";
 import { ManageAccessDialog } from "./manage-access-dialog";
+// The step-9.7b read-only reflection (null stub in OSS; real under the
+// POLICY_REFLECT alias) — rendered only when the flag is threaded in.
+import {
+  CredentialAccessReflection,
+  REFLECTIONS_AVAILABLE,
+} from "@/lib/components/policy-reflect";
 
 interface AgentCardProps {
   agent: {
@@ -64,9 +70,16 @@ interface AgentCardProps {
     _count: { agentSecrets: number; agentAppConnections: number };
   };
   autoOpenAccess?: boolean;
+  /** Step 9.7b: flag-ON, the credential-access editor renders as the
+   * read-only Policy reflection instead (threaded from the RSC page). */
+  policyEditingEnabled?: boolean;
 }
 
-export const AgentCard = ({ agent, autoOpenAccess }: AgentCardProps) => {
+export const AgentCard = ({
+  agent,
+  autoOpenAccess,
+  policyEditingEnabled = false,
+}: AgentCardProps) => {
   const deleteMutation = useDeleteAgent();
   const regenerateMutation = useRegenerateToken();
   const renameMutation = useRenameAgent();
@@ -95,6 +108,10 @@ export const AgentCard = ({ agent, autoOpenAccess }: AgentCardProps) => {
   const handleSetDefault = () => setDefaultMutation.mutate(agent.id);
 
   const accessLabel = (() => {
+    // Flag-ON, Policy rules can grant credentials beyond the equipment
+    // counts — the counts would under-report, so the label goes neutral and
+    // the reflection dialog carries the full truth.
+    if (policyEditingEnabled) return "Credential access";
     if (agent.secretMode !== "selective") return "All credentials";
     const s = agent._count.agentSecrets;
     const a = agent._count.agentAppConnections;
@@ -153,7 +170,7 @@ export const AgentCard = ({ agent, autoOpenAccess }: AgentCardProps) => {
             </DropdownMenuItem>
             <DropdownMenuItem onSelect={() => setSecretsDialogOpen(true)}>
               <KeyRound className="size-4" />
-              Manage access
+              {policyEditingEnabled ? "Credential access" : "Manage access"}
             </DropdownMenuItem>
             <DropdownMenuItem onSelect={() => setRotateDialogOpen(true)}>
               <RotateCw className="size-4" />
@@ -293,11 +310,19 @@ export const AgentCard = ({ agent, autoOpenAccess }: AgentCardProps) => {
         </DialogContent>
       </Dialog>
 
-      <ManageAccessDialog
-        agent={agent}
-        open={secretsDialogOpen}
-        onOpenChange={setSecretsDialogOpen}
-      />
+      {policyEditingEnabled && REFLECTIONS_AVAILABLE ? (
+        <CredentialAccessReflection
+          agent={{ id: agent.id, name: agent.name }}
+          open={secretsDialogOpen}
+          onOpenChange={setSecretsDialogOpen}
+        />
+      ) : (
+        <ManageAccessDialog
+          agent={agent}
+          open={secretsDialogOpen}
+          onOpenChange={setSecretsDialogOpen}
+        />
+      )}
     </Card>
   );
 };

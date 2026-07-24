@@ -2,6 +2,7 @@ import { randomBytes } from "crypto";
 import { db, Prisma } from "@onecli/db";
 import { ServiceError } from "./errors";
 import { getPolicyValidator } from "../providers/hooks/policy-validator";
+import { notifyPolicyCoherence } from "./policy-coherence-notify";
 import { IDENTIFIER_REGEX } from "../validations/agent";
 
 export type SecretMode = "all" | "selective";
@@ -158,6 +159,9 @@ export const createAgent = async (
       });
     }
 
+    // Step 8: a new (selective) agent's inherited/seeded equipment materializes
+    // into the project's v2 injection rules. Best-effort + OSS no-op.
+    await notifyPolicyCoherence({ projectId });
     return agent;
   } catch (err) {
     if (
@@ -203,6 +207,9 @@ export const deleteAgent = async (projectId: string, agentId: string) => {
     throw new ServiceError("BAD_REQUEST", "Cannot delete the default agent");
 
   await db.agent.delete({ where: { id: agentId } });
+  // Step 8: drop the agent's equipment rules from the v2 set — its identity rows
+  // cascade on delete, which would otherwise leave them orphaned (identity-less).
+  await notifyPolicyCoherence({ projectId });
 };
 
 export const renameAgent = async (
@@ -285,6 +292,9 @@ export const updateAgentSecretMode = async (
     where: { id: agentId },
     data: { secretMode: mode },
   });
+  // Step 8: an equipment change re-materializes the project's v2 injection rules
+  // (source="equipment"). Best-effort + OSS no-op; inert until the flag flips.
+  await notifyPolicyCoherence({ projectId });
 };
 
 export const updateAgentSecrets = async (
@@ -329,6 +339,8 @@ export const updateAgentSecrets = async (
       db.agentSecret.create({ data: { agentId, secretId } }),
     ),
   ]);
+  // Step 8: re-materialize the project's v2 injection rules from the new equipment.
+  await notifyPolicyCoherence({ projectId });
 };
 
 export type SessionPolicy = Record<string, unknown>;
@@ -478,6 +490,9 @@ export const updateAgentAppConnections = async (
       }),
     ),
   ]);
+  // Step 8: re-materialize the project's v2 injection rules (the connection
+  // sessionPolicy rides the equipment rule's conditions).
+  await notifyPolicyCoherence({ projectId });
 };
 
 export type ConnectionAccessLevel = "full" | "assigned" | "none";
@@ -630,5 +645,7 @@ export const setConnectionAgents = async (
     }),
   ]);
 
+  // Step 8: re-materialize the project's v2 injection rules from the new grants.
+  await notifyPolicyCoherence({ projectId });
   return { added: toAdd.length, removed: toRemove.length };
 };

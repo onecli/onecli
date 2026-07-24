@@ -1,5 +1,17 @@
 # Changelog
 
+## [1.42.0](https://github.com/onecli/onecli/compare/v1.41.0...v1.42.0) (2026-07-23)
+
+
+### Features
+
+* unified first-match policy engine with automatic migration ([#436](https://github.com/onecli/onecli/issues/436)) ([21b015b](https://github.com/onecli/onecli/commit/21b015b6621346d8d43ea0b96c571bc2f24e8b10))
+
+
+### Bug Fixes
+
+* **policy:** close credential-injection host-enforcement bypass ([#438](https://github.com/onecli/onecli/issues/438)) ([1633c21](https://github.com/onecli/onecli/commit/1633c21e20874f7d9add80f2d566c7c5424070d4))
+
 ## [1.41.0](https://github.com/onecli/onecli/compare/v1.40.0...v1.41.0) (2026-07-07)
 
 

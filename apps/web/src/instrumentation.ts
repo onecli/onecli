@@ -52,5 +52,38 @@ export async function register() {
         );
       }
     }
+
+    // Boot policy passes (after the entrypoint's `prisma migrate deploy`),
+    // sequenced migrate → adopt → compact in the background, best-effort — a
+    // failure logs loudly but never crashes the web. WHICH pass does work is decided
+    // INSIDE the aliased impls (step 9.5), each self-gated on the editing flag,
+    // so every edition keeps its exact pre-9.5 behavior:
+    //
+    // - EE editions (via resolveAlias): editing OFF → the real backfill
+    //   (`@/ee/policy-migrate` — prepares v2; the enforce flip is gated on its
+    //   "verify clean" log); editing ON → the adoption pass
+    //   (`@/ee/policy-adopt` — re-tags app_permission rules as custom,
+    //   idempotent, self-healing across deploy windows).
+    // - OSS: `@/lib/policy-migrate` is the release-as-cutover pass (translate
+    //   the legacy project state → one atomic published generation per project
+    //   → verify; the published generation is the gateway's per-project
+    //   enable signal), self-gated so the flag-off rollback posture is pure
+    //   legacy. OSS adoption is folded into its translation (`@/lib/policy-adopt`
+    //   stays a no-op).
+    //
+    // Concurrent replicas + reboots stay safe (per-scope advisory lock +
+    // published-generation idempotency in every pass).
+    void import("@/lib/policy-migrate")
+      .then(({ runPolicyMigration }) => runPolicyMigration())
+      .catch((err) => console.error("[policy-migrate] failed:", err))
+      .then(() => import("@/lib/policy-adopt"))
+      .then(({ runPolicyAdoption }) => runPolicyAdoption())
+      .catch((err) => console.error("[policy-adopt] failed:", err))
+      // Compaction MUST follow adoption — it keys on the draft↔published
+      // logicalId parity the adoption pass establishes (EE editions; the OSS
+      // impl stays a no-op — its cutover groups at translation time).
+      .then(() => import("@/lib/policy-compact"))
+      .then(({ runPolicyCompaction }) => runPolicyCompaction())
+      .catch((err) => console.error("[policy-compact] failed:", err));
   }
 }

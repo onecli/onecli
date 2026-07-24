@@ -2,6 +2,7 @@ import { db } from "@onecli/db";
 import type { ResourceScope } from "./resource-scope";
 import { scopeWhere, scopeCreate, isOrgScope } from "./resource-scope";
 import { ServiceError } from "./errors";
+import { notifyPolicyCoherence } from "./policy-coherence-notify";
 
 export interface BlocklistHostState {
   hostId: string;
@@ -85,6 +86,8 @@ export const initBlocklistDefaults = async (
       });
     }
   });
+
+  await notifyPolicyCoherence(scope);
 };
 
 export const getBlocklistState = async (
@@ -156,6 +159,8 @@ export const toggleBlocklistRule = async (
     where: { id: ruleId },
     data: { enabled },
   });
+
+  await notifyPolicyCoherence(scope);
 };
 
 export const activateBlocklistHost = async (
@@ -184,6 +189,7 @@ export const activateBlocklistHost = async (
         where: { id: duplicate.id },
         data: { enabled: true },
       });
+      await notifyPolicyCoherence(scope);
     }
     return {
       hostId,
@@ -217,6 +223,8 @@ export const activateBlocklistHost = async (
     },
     select: { id: true },
   });
+
+  await notifyPolicyCoherence(scope);
 
   return {
     hostId,
@@ -278,6 +286,8 @@ export const addCustomBlocklistRule = async (
     select: { id: true, enabled: true },
   });
 
+  await notifyPolicyCoherence(scope);
+
   return {
     hostId,
     ruleId: rule.id,
@@ -304,6 +314,8 @@ export const removeBlocklistRule = async (
   if (!rule) throw new ServiceError("NOT_FOUND", "Blocklist rule not found");
 
   await db.policyRule.delete({ where: { id: ruleId } });
+
+  await notifyPolicyCoherence(scope);
 };
 
 export const removeAllBlocklistRules = async (
@@ -319,4 +331,6 @@ export const removeAllBlocklistRules = async (
       ],
     },
   });
+
+  await notifyPolicyCoherence(scope);
 };

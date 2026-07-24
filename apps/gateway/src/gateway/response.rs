@@ -390,7 +390,7 @@ pub(crate) fn blocked_by_default_policy<S>(
         serde_json::json!({
             "error": "blocked_by_default_policy",
             "message": format!(
-                "Your organization's default-deny policy blocked this request. \
+                "A default-deny policy blocked this request. \
                  {method} {hostname}{path} requires an explicit allow rule. \
                  Create one in your OneCLI dashboard."
             ),
@@ -398,6 +398,34 @@ pub(crate) fn blocked_by_default_policy<S>(
             "host": hostname,
             "path": path,
             "dashboard_url": format!("{base}/rules?create=allow&host={encoded_host}"),
+        }),
+    ))
+}
+
+/// 403 Forbidden — the request targets an app that is not available to this
+/// project (the org's app-availability allowlist, step 7). Availability is an
+/// org-level, admin-managed posture, so — unlike the project-scoped policy
+/// blocks — there is no per-project dashboard deep link here.
+pub(crate) fn app_unavailable<S>(
+    provider: &str,
+    method: &str,
+    path: &str,
+    host: &str,
+) -> Response<ForwardBody<S>> {
+    let hostname = host.split(':').next().unwrap_or(host);
+    with_no_retry(json_error(
+        StatusCode::FORBIDDEN,
+        serde_json::json!({
+            "error": "app_unavailable",
+            "message": format!(
+                "The \"{provider}\" app is not available to this project. \
+                 {method} {hostname}{path} was blocked. An organization admin \
+                 can grant access on the App Availability page."
+            ),
+            "provider": provider,
+            "method": method,
+            "host": hostname,
+            "path": path,
         }),
     ))
 }
