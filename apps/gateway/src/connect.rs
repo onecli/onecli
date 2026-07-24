@@ -118,6 +118,13 @@ struct CachedAppInjection {
     connection_label: Option<String>,
 }
 
+fn requires_eager_client_credentials_refresh(credential_type: &str) -> bool {
+    // Airbyte application tokens can be revoked independently of their stored
+    // expiry. On a cold/cache-miss resolution, mint from the durable client
+    // credentials first; the resulting injection is then cached normally.
+    credential_type == "airbyte_client_credentials"
+}
+
 /// A single app connection option returned in disambiguation responses.
 #[derive(Debug, Clone, serde::Serialize)]
 pub(crate) struct ConnectionChoice {
@@ -1069,6 +1076,10 @@ impl PolicyEngine {
             .map(String::from);
 
         let mut effective_expires_at = creds.get("expires_at").and_then(|v| v.as_i64());
+        let credential_type = creds.get("type").and_then(|v| v.as_str()).unwrap_or("");
+        if requires_eager_client_credentials_refresh(credential_type) {
+            effective_expires_at = Some(0);
+        }
 
         // Any non-empty session policy means scoped access is required.
         // Provider-specific interpretation (e.g. GitHub repos) is handled by
@@ -1085,7 +1096,7 @@ impl PolicyEngine {
                 .as_secs() as i64;
 
             if expires_at < now || needs_scoped_token {
-                let cred_type = creds.get("type").and_then(|v| v.as_str()).unwrap_or("");
+                let cred_type = credential_type;
 
                 // Try cloud-specific refresh first, then shared credential types
                 let refresh_result = if let Some(r) =
@@ -2484,6 +2495,15 @@ mod tests {
             ),
             None
         );
+    }
+
+    #[test]
+    fn airbyte_client_credentials_refresh_eagerly_on_cache_miss() {
+        assert!(requires_eager_client_credentials_refresh(
+            "airbyte_client_credentials"
+        ));
+        assert!(!requires_eager_client_credentials_refresh("oauth"));
+        assert!(!requires_eager_client_credentials_refresh(""));
     }
 
     #[test]
