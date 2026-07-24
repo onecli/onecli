@@ -36,7 +36,10 @@ rcgen = "0.13"
 ring = "0.17"
 
 # HTTP client (for upstream forwarding in MITM mode)
-reqwest = { version = "0.12", features = ["json", "rustls-tls", "stream"], default-features = false }
+# Hickory performs A and AAAA lookups independently. Its dual-stack resolver
+# keeps the successful family when the other returns SERVFAIL or times out,
+# instead of failing an otherwise reachable upstream host.
+reqwest = { version = "0.12", features = ["json", "rustls-tls", "stream", "hickory-dns"], default-features = false }
 
 # CLI
 clap = { version = "4", features = ["derive"] }
