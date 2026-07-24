@@ -1086,6 +1086,20 @@ static APP_PROVIDERS: &[AppProvider] = &[
         body_transform: None,
     },
     AppProvider {
+        provider: "airbyte",
+        display_name: "Airbyte (Self-Managed)",
+        // Airbyte hosts are configured per connection and matched from metadata
+        // in connect.rs. Static wildcard host rules would risk token leakage.
+        host_rules: &[],
+        refresh: None,
+        metadata_headers: &[],
+        credential_headers: &[],
+        credential_params: &[],
+        host_rewrite: None,
+        finalizer: None,
+        body_transform: None,
+    },
+    AppProvider {
         provider: "jfrog-artifactory",
         display_name: "JFrog Artifactory",
         // Wildcard suffix: JFrog SaaS hosts are per-customer (`<name>.jfrog.io`).
@@ -1228,9 +1242,22 @@ pub(crate) fn providers_for_host(hostname: &str) -> Vec<&'static str> {
 /// blocked), or when the targeted provider IS available. Pure + DB-free — the
 /// available set was resolved once at connection resolution.
 #[must_use]
+#[cfg(test)]
 pub(crate) fn app_availability_block(
     host: &str,
     path: &str,
+    available: &crate::db::AvailableApps,
+) -> Option<String> {
+    app_availability_block_for_provider(host, path, None, available)
+}
+
+/// Availability check with an optional provider identified from connection
+/// metadata (for apps such as self-managed Airbyte with dynamic authorities).
+#[must_use]
+pub(crate) fn app_availability_block_for_provider(
+    host: &str,
+    path: &str,
+    dynamic_provider: Option<&str>,
     available: &crate::db::AvailableApps,
 ) -> Option<String> {
     if !available.restricted {
@@ -1246,10 +1273,13 @@ pub(crate) fn app_availability_block(
     // `restricted: false` path returned above), so the allocation is off the
     // prod/OSS hot path. (The port strip is a hard-won regression lesson.)
     let host = crate::gateway::strip_port(host).to_ascii_lowercase();
-    match provider_for_host_and_path(&host, path) {
-        Some((provider, _)) if !available.providers.iter().any(|p| p == provider) => {
-            Some(provider.to_string())
-        }
+    let provider = dynamic_provider
+        .map(|provider| provider.to_string())
+        .or_else(|| {
+            provider_for_host_and_path(&host, path).map(|(provider, _)| provider.to_string())
+        });
+    match provider {
+        Some(provider) if !available.providers.iter().any(|p| p == &provider) => Some(provider),
         _ => None,
     }
 }
@@ -1462,6 +1492,9 @@ pub(crate) fn rewrite_host(
 /// Returns true if the provider has any host rule that injects an Authorization header.
 /// Providers using only credential_headers (e.g., Datadog) return false.
 pub(crate) fn needs_access_token(provider: &str) -> bool {
+    if provider == "airbyte" {
+        return true;
+    }
     all_providers()
         .find(|p| p.provider == provider)
         .map(|p| {
@@ -1504,6 +1537,41 @@ pub(crate) fn normalize_host(s: &str) -> String {
         h = &h[..idx];
     }
     h.to_ascii_lowercase()
+}
+
+#[must_use]
+pub(crate) fn normalize_airbyte_base_path(base_path: &str) -> Option<String> {
+    let trimmed = base_path.trim();
+    let mut normalized = if trimmed.starts_with('/') {
+        trimmed.to_string()
+    } else {
+        format!("/{trimmed}")
+    };
+    while normalized.len() > 1 && normalized.ends_with('/') {
+        normalized.pop();
+    }
+    if normalized == "/api/v1" {
+        normalized = "/api/public/v1".to_string();
+    }
+    (normalized == "/api/public/v1").then_some(normalized)
+}
+
+#[must_use]
+pub(crate) fn airbyte_injection_rules(
+    base_path: &str,
+    token: &str,
+) -> Vec<(String, Vec<Injection>)> {
+    let Some(base_path) = normalize_airbyte_base_path(base_path) else {
+        return vec![];
+    };
+    let bearer = || Injection::SetHeader {
+        name: "authorization".to_string(),
+        value: format!("Bearer {token}"),
+    };
+    vec![
+        (base_path.clone(), vec![bearer()]),
+        (format!("{base_path}/*"), vec![bearer()]),
+    ]
 }
 
 /// Check whether any provider matching this hostname has intercept rules.
@@ -1847,6 +1915,113 @@ pub(crate) async fn refresh_github_app_token(
     Ok((token, expires_at))
 }
 
+async fn request_airbyte_client_credentials(
+    client: &reqwest::Client,
+    token_url: &str,
+    client_id: &str,
+    client_secret: &str,
+    grant_field: &str,
+) -> anyhow::Result<(reqwest::StatusCode, serde_json::Value)> {
+    let payload = if grant_field == "grant_type" {
+        serde_json::json!({
+            "client_id": client_id,
+            "client_secret": client_secret,
+            "grant_type": "client_credentials",
+        })
+    } else {
+        serde_json::json!({
+            "client_id": client_id,
+            "client_secret": client_secret,
+            "grant-type": "client_credentials",
+        })
+    };
+    let response = client
+        .post(token_url)
+        .header("Accept", "application/json")
+        .json(&payload)
+        .send()
+        .await
+        .map_err(|e| anyhow::anyhow!("Airbyte token request failed: {e}"))?;
+    let status = response.status();
+    let body = response
+        .text()
+        .await
+        .map_err(|e| anyhow::anyhow!("Airbyte token response read failed: {e}"))?;
+    let data = serde_json::from_str(&body).unwrap_or_else(|_| serde_json::json!({}));
+    Ok((status, data))
+}
+
+pub(crate) async fn refresh_airbyte_client_credentials(
+    token_url: &str,
+    client_id: &str,
+    client_secret: &str,
+) -> anyhow::Result<(String, i64)> {
+    let parsed = reqwest::Url::parse(token_url)
+        .map_err(|_| anyhow::anyhow!("Airbyte token URL is invalid"))?;
+    if parsed.scheme() != "https" {
+        return Err(anyhow::anyhow!("Airbyte token URL must use HTTPS"));
+    }
+
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .map_err(|e| anyhow::anyhow!("Airbyte HTTP client setup failed: {e}"))?;
+
+    let mut result = request_airbyte_client_credentials(
+        &client,
+        token_url,
+        client_id,
+        client_secret,
+        "grant-type",
+    )
+    .await?;
+    if matches!(result.0.as_u16(), 400 | 422) {
+        result = request_airbyte_client_credentials(
+            &client,
+            token_url,
+            client_id,
+            client_secret,
+            "grant_type",
+        )
+        .await?;
+    }
+
+    if !result.0.is_success() {
+        let detail = result
+            .1
+            .get("error_description")
+            .or_else(|| result.1.get("error"))
+            .and_then(|value| value.as_str())
+            .unwrap_or("unknown error");
+        let detail = detail
+            .replace(client_secret, "[REDACTED]")
+            .replace(client_id, "[REDACTED]");
+        let detail: String = detail.chars().take(500).collect();
+        return Err(anyhow::anyhow!(
+            "Airbyte token exchange failed ({}): {detail}",
+            result.0
+        ));
+    }
+
+    let access_token = result
+        .1
+        .get("access_token")
+        .and_then(|value| value.as_str())
+        .ok_or_else(|| anyhow::anyhow!("Airbyte token response missing access_token"))?
+        .to_string();
+    let expires_in = result
+        .1
+        .get("expires_in")
+        .and_then(|value| value.as_i64())
+        .unwrap_or(3600);
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("system clock before UNIX epoch")
+        .as_secs() as i64;
+    Ok((access_token, now + (expires_in - 30).max(1)))
+}
+
 /// Attempt to refresh credentials for a known credential type.
 /// Returns `None` if the type is not recognized (falls through to standard OAuth refresh).
 pub(crate) async fn try_refresh_credentials(
@@ -1875,6 +2050,17 @@ pub(crate) async fn try_refresh_credentials(
                 )));
             };
             Some(refresh_via_service_account(pk, email).await)
+        }
+        "airbyte_client_credentials" => {
+            let id = creds.get("client_id").and_then(|v| v.as_str());
+            let secret = creds.get("client_secret").and_then(|v| v.as_str());
+            let url = creds.get("token_url").and_then(|v| v.as_str());
+            let (Some(id), Some(secret), Some(url)) = (id, secret, url) else {
+                return Some(Err(anyhow::anyhow!(
+                    "Airbyte client credentials are incomplete"
+                )));
+            };
+            Some(refresh_airbyte_client_credentials(url, id, secret).await)
         }
         "client_credentials" => {
             let id = creds.get("client_id").and_then(|v| v.as_str());
@@ -2845,6 +3031,31 @@ mod tests {
     }
 
     #[test]
+    fn app_availability_block_enforces_dynamic_provider() {
+        let denied = available(true, &["github"]);
+        assert_eq!(
+            app_availability_block_for_provider(
+                "airbyte.internal:8443",
+                "/api/public/v1/workspaces",
+                Some("airbyte"),
+                &denied,
+            ),
+            Some("airbyte".to_string())
+        );
+
+        let allowed = available(true, &["airbyte"]);
+        assert_eq!(
+            app_availability_block_for_provider(
+                "airbyte.internal:8443",
+                "/api/public/v1/workspaces",
+                Some("airbyte"),
+                &allowed,
+            ),
+            None
+        );
+    }
+
+    #[test]
     fn app_availability_block_never_blocks_raw_or_llm_hosts() {
         // Restricted with an empty allowlist: even so, un-managed raw hosts and the
         // LLM host resolve to no provider, so they are structurally never blocked
@@ -3232,6 +3443,58 @@ mod tests {
     #[test]
     fn jfrog_has_no_refresh_config() {
         assert!(refresh_config("jfrog-artifactory").is_none());
+    }
+
+    // ── Airbyte (self-managed) ────────────────────────────────────────
+
+    #[test]
+    fn airbyte_is_dynamic_and_needs_access_token() {
+        assert!(providers_for_host("airbyte.example.com").is_empty());
+        assert!(needs_access_token("airbyte"));
+    }
+
+    #[test]
+    fn airbyte_base_path_normalization_is_boundary_safe() {
+        assert_eq!(
+            normalize_airbyte_base_path("api/public/v1/"),
+            Some("/api/public/v1".to_string())
+        );
+        assert_eq!(
+            normalize_airbyte_base_path("/api/v1"),
+            Some("/api/public/v1".to_string())
+        );
+        assert_eq!(normalize_airbyte_base_path("  "), None);
+        assert_eq!(normalize_airbyte_base_path("/proxy/api/public/v1"), None);
+        assert_eq!(normalize_airbyte_base_path("/api/public/v10"), None);
+    }
+
+    #[test]
+    fn airbyte_injection_rules_cover_exact_and_descendant_paths() {
+        let rules = airbyte_injection_rules("/api/public/v1/", "token");
+        assert_eq!(rules.len(), 2);
+        assert_eq!(rules[0].0, "/api/public/v1");
+        assert_eq!(rules[1].0, "/api/public/v1/*");
+        for (_, injections) in rules {
+            assert_eq!(
+                injections,
+                vec![Injection::SetHeader {
+                    name: "authorization".to_string(),
+                    value: "Bearer token".to_string(),
+                }]
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn incomplete_airbyte_credentials_fail_without_network_access() {
+        let result = try_refresh_credentials(
+            "airbyte_client_credentials",
+            &serde_json::json!({ "client_id": "id" }),
+            None,
+        )
+        .await
+        .expect("known credential type");
+        assert!(result.is_err());
     }
 
     // ── credential_host_field ─────────────────────────────────────────

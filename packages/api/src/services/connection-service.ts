@@ -4,6 +4,7 @@ import { ServiceError } from "./errors";
 import type { ResourceScope } from "./resource-scope";
 import { scopeWhere, scopeCreate, scopeOwnership } from "./resource-scope";
 import { notifyPolicyCoherence } from "./policy-coherence-notify";
+import type { AppDefinition } from "../apps/types";
 
 export const extractLabel = (
   metadata?: Record<string, unknown>,
@@ -15,6 +16,58 @@ export const extractLabel = (
   if (typeof username === "string" && username) return username;
   if (typeof name === "string" && name) return name;
   return null;
+};
+
+type ExistingConnectionLike = {
+  id: string;
+  label: string | null;
+  metadata: unknown;
+};
+
+const normalizeConnectionIdentity = (
+  value: unknown,
+  mode: "exact" | "lowercase-trim" = "exact",
+): string | null => {
+  if (typeof value !== "string" || !value.trim()) return null;
+  return mode === "lowercase-trim" ? value.trim().toLowerCase() : value;
+};
+
+export const findDuplicateConnection = (
+  appDef: AppDefinition,
+  existing: ExistingConnectionLike[],
+  metadata: Record<string, unknown> | undefined,
+  explicitLabel: string | undefined,
+): ExistingConnectionLike | undefined => {
+  const identity = appDef.connectionIdentity;
+  if (identity) {
+    const target = normalizeConnectionIdentity(
+      metadata?.[identity.metadataKey],
+      identity.normalize,
+    );
+    if (target) {
+      return existing.find((connection) => {
+        const connectionMetadata =
+          connection.metadata && typeof connection.metadata === "object"
+            ? (connection.metadata as Record<string, unknown>)
+            : undefined;
+        return (
+          normalizeConnectionIdentity(
+            connectionMetadata?.[identity.metadataKey],
+            identity.normalize,
+          ) === target
+        );
+      });
+    }
+  }
+
+  const effectiveLabel = explicitLabel || extractLabel(metadata) || null;
+  return effectiveLabel
+    ? existing.find(
+        (connection) =>
+          connection.label?.toLowerCase().trim() ===
+          effectiveLabel.toLowerCase().trim(),
+      )
+    : existing[0];
 };
 
 const CONNECTION_SELECT = {

@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import type { AppDefinition } from "../apps/types";
 
 vi.hoisted(() => {
   process.env.NEXT_PUBLIC_EDITION = "onprem-slim";
@@ -47,12 +48,85 @@ import {
   createConnection,
   reconnectConnection,
   linkConnectionToAppConfig,
+  findDuplicateConnection,
 } from "./connection-service";
 
 beforeEach(() => {
   store.createData = null;
   store.updateData = null;
   store.updateManyArgs = null;
+});
+
+describe("findDuplicateConnection", () => {
+  const appDef: AppDefinition = {
+    id: "airbyte",
+    name: "Airbyte (Self-Managed)",
+    icon: "/icons/airbyte.svg",
+    description: "test",
+    connectionMethod: {
+      type: "api_key",
+      fields: [],
+    },
+    connectionIdentity: {
+      metadataKey: "apiBaseUrl",
+      normalize: "exact",
+    },
+    available: true,
+  };
+
+  it("matches the same self-managed endpoint by metadata identity", () => {
+    const duplicate = findDuplicateConnection(
+      appDef,
+      [
+        {
+          id: "first",
+          label: "production",
+          metadata: { apiBaseUrl: "https://one.example/api/public/v1" },
+        },
+        {
+          id: "second",
+          label: "production",
+          metadata: { apiBaseUrl: "https://two.example/api/public/v1" },
+        },
+      ],
+      { apiBaseUrl: "https://two.example/api/public/v1" },
+      "production",
+    );
+
+    expect(duplicate?.id).toBe("second");
+  });
+
+  it("does not reconnect a different endpoint merely because its label matches", () => {
+    const duplicate = findDuplicateConnection(
+      appDef,
+      [
+        {
+          id: "first",
+          label: "production",
+          metadata: { apiBaseUrl: "https://one.example/api/public/v1" },
+        },
+      ],
+      { apiBaseUrl: "https://two.example/api/public/v1" },
+      "production",
+    );
+
+    expect(duplicate).toBeUndefined();
+  });
+
+  it("preserves label and first-connection fallback for normal providers", () => {
+    const normalApp = { ...appDef, connectionIdentity: undefined };
+    const existing = [
+      { id: "first", label: "one", metadata: null },
+      { id: "second", label: "Two", metadata: null },
+    ];
+
+    expect(
+      findDuplicateConnection(normalApp, existing, undefined, " two ")?.id,
+    ).toBe("second");
+    expect(
+      findDuplicateConnection(normalApp, existing, undefined, undefined)?.id,
+    ).toBe("first");
+  });
 });
 
 describe("createConnection persists provenance", () => {

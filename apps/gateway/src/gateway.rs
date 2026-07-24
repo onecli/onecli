@@ -615,7 +615,7 @@ async fn handle_connect(
     // per request inside the MITM tunnel from cache (see mitm.rs).
     let (mut intercept, project_id, organization_id, agent_id, agent_name, agent_identifier) =
         if let Some(ref token) = agent_token {
-            match connect::resolve(token, &hostname, &state.policy_engine, &*state.cache).await {
+            match connect::resolve(token, &host, &state.policy_engine, &*state.cache).await {
                 Ok(resp) => (
                     resp.intercept,
                     resp.project_id,
@@ -765,7 +765,7 @@ async fn handle_http_proxy(
     let connection_id = connect::extract_connection_id(req.headers());
 
     let mut resolved = if let Some(ref token) = agent_token {
-        match connect::resolve(token, &hostname, &state.policy_engine, &*state.cache).await {
+        match connect::resolve(token, &authority, &state.policy_engine, &*state.cache).await {
             Ok(resp) => resp,
             Err(ConnectError::InvalidToken) => {
                 warn!(peer = %peer_addr, host = %authority, "HTTP proxy rejected: invalid agent token");
@@ -785,6 +785,10 @@ async fn handle_http_proxy(
     let mut resolved_body_transform: Option<crate::apps::BodyTransform> = None;
     // Granular-access policy of the connection that wins injection (if any).
     let mut resolved_session_policy: Option<serde_json::Value> = None;
+    let dynamic_provider = req.uri().path_and_query().and_then(|path| {
+        connect::dynamic_provider_for_request(&resolved.app_connections, &authority, path.as_str())
+            .map(str::to_string)
+    });
     if resolved.injection_rules.is_empty() && !resolved.app_connections.is_empty() {
         let oid = resolved.organization_id.as_deref().unwrap_or("");
         let pid = resolved.project_id.as_deref().unwrap_or("");
@@ -793,7 +797,7 @@ async fn handle_http_proxy(
             .policy_engine
             .resolve_app_injection_for_request(
                 &resolved.app_connections,
-                &hostname,
+                &authority,
                 request_path,
                 connection_id.as_deref(),
                 oid,
@@ -876,6 +880,7 @@ async fn handle_http_proxy(
         policy_rules: resolved.policy_rules,
         policy_rules_v2: resolved.policy_rules_v2,
         available_apps: resolved.available_apps,
+        dynamic_provider,
         access_restricted: resolved.access_restricted,
         intercept_token: None,
         plan: resolved.plan,

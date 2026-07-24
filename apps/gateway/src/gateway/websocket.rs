@@ -114,9 +114,12 @@ pub(super) async fn handle_websocket(
     // forward.rs). Governs only identifiable app providers, so raw/LLM hosts are
     // never blocked. WebSocket upgrades are GET. Matches on `policy_host`
     // (pre-rewrite + port-stripped), NOT the port-bearing/rewritten `host`.
-    if let Some(provider) =
-        crate::apps::app_availability_block(policy_host, &path, &rules.available_apps)
-    {
+    if let Some(provider) = crate::apps::app_availability_block_for_provider(
+        policy_host,
+        &path,
+        rules.dynamic_provider.as_deref(),
+        &rules.available_apps,
+    ) {
         warn!(host = %policy_host, path = %path, provider = %provider, "WebSocket app unavailable to project — refusing request");
         return Ok(response::app_unavailable(
             &provider,

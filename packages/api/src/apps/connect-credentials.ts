@@ -25,6 +25,18 @@ export type ResolvedConnectCredentials =
       fields: Record<string, string>;
     };
 
+export const shouldPersistImportedClientCredentials = (
+  activeMethod: DirectConnectionMethod,
+  fields: Record<string, string>,
+): fields is Record<string, string> & {
+  clientId: string;
+  clientSecret: string;
+} =>
+  activeMethod.type === "credentials_import" &&
+  activeMethod.persistClientCredentialsAsAppConfig !== false &&
+  !fields.privateKey &&
+  Boolean(fields.clientId && fields.clientSecret);
+
 /**
  * Resolve a direct-connect request body into stored credentials: pick the
  * connection method, validate the submitted fields, and exchange/shape them
