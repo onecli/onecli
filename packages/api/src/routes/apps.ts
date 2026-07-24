@@ -13,15 +13,21 @@ import {
 import { resolveAppCredentials } from "../apps/resolve-credentials";
 import {
   resolveConnectCredentials,
+  shouldPersistImportedClientCredentials,
   type ConnectRequestBody,
 } from "../apps/connect-credentials";
-import { getOAuthOrg, getOrgAppConfig, getAppAvailability } from "../providers";
+import {
+  getOAuthOrg,
+  getOrgAppConfig,
+  getAppAvailability,
+  getRoleResolver,
+} from "../providers";
 import {
   signOAuthState,
   verifyOAuthState,
   generateNonce,
 } from "../lib/oauth-state";
-import { APP_URL, NODE_ENV } from "../lib/env";
+import { APP_URL, NODE_ENV, CAPS } from "../lib/env";
 import { dashboardUrl } from "../lib/dashboard-url";
 import { getRequestOrigin } from "../lib/request-origin";
 import { buildFragmentBridgeHtml } from "../lib/fragment-bridge";
@@ -36,6 +42,7 @@ import {
   linkConnectionToAppConfig,
   listConnectionsByProvider,
   extractLabel,
+  findDuplicateConnection,
 } from "../services/connection-service";
 import {
   disconnectOwnedConnection,
@@ -641,6 +648,42 @@ export const appRoutes = () => {
       return c.json({ error: `Provider "${provider}" is not available` }, 400);
     }
 
+    // URL-backed credentials can reach private infrastructure. Keep the first
+    // implementation project-scoped so the OSS and EE creation paths share one
+    // audited authorization/persistence boundary.
+    if (appDef.privilegedConnect && c.req.header("x-organization-id")) {
+      return c.json(
+        {
+          error: "This connection is currently supported at project scope only",
+        },
+        400,
+      );
+    }
+
+    let privilegedProjectId: string | undefined;
+    if (appDef.privilegedConnect) {
+      // Validate scope and authority before exchangeCredentials can make an
+      // outbound request to the configured private HTTPS origin.
+      privilegedProjectId = requireProjectId(auth);
+      if (CAPS.rbac) {
+        const role =
+          auth.role ??
+          (await getRoleResolver()?.getUserRole(
+            auth.userId,
+            auth.organizationId,
+          ));
+        if (role !== "admin" && role !== "owner") {
+          return c.json(
+            {
+              error:
+                "Only organization admins or owners can configure this connection",
+            },
+            403,
+          );
+        }
+      }
+    }
+
     const body = (await c.req
       .json()
       .catch(() => null)) as ConnectRequestBody | null;
@@ -681,7 +724,7 @@ export const appRoutes = () => {
       );
     }
 
-    const projectId = requireProjectId(auth);
+    const projectId = privilegedProjectId ?? requireProjectId(auth);
     await getConnectionHooks().beforeConnect(auth.organizationId, appDef);
 
     // Project-scoped connect starts with no config link — body-provided
@@ -701,16 +744,12 @@ export const appRoutes = () => {
       );
     } else {
       const existing = await listConnectionsByProvider({ projectId }, provider);
-      const effectiveLabel =
-        connectionOpts.label || extractLabel(metadata) || null;
-
-      const duplicate = effectiveLabel
-        ? existing.find(
-            (conn) =>
-              conn.label?.toLowerCase().trim() ===
-              effectiveLabel.toLowerCase().trim(),
-          )
-        : existing[0];
+      const duplicate = findDuplicateConnection(
+        appDef,
+        existing,
+        metadata,
+        connectionOpts.label,
+      );
 
       if (duplicate) {
         connection = await reconnectConnection(
@@ -734,12 +773,7 @@ export const appRoutes = () => {
       await initBlocklistDefaults({ projectId }, provider, appDef.blocklist);
     }
 
-    if (
-      activeMethod.type === "credentials_import" &&
-      !fields.privateKey &&
-      fields.clientId &&
-      fields.clientSecret
-    ) {
+    if (shouldPersistImportedClientCredentials(activeMethod, fields)) {
       const savedConfig = await saveAppConfigWithoutDisconnect(
         { projectId },
         provider,

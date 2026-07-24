@@ -81,6 +81,8 @@ export type ConnectionMethod =
       exchangeCredentials: (
         fields: Record<string, string>,
       ) => Promise<OAuthExchangeResult>;
+      /** Persist clientId/clientSecret as provider-wide AppConfig credentials. Defaults to true. */
+      persistClientCredentialsAsAppConfig?: boolean;
       /** Optional file import to auto-fill fields from a JSON file. */
       fileImport?: {
         /** Button label (e.g., "Import from credentials file"). */
@@ -120,6 +122,16 @@ export interface AppDefinition {
   available: boolean;
   /** Custom hint for the connection label field (e.g. 'e.g. "staging", "my-org"'). */
   labelHint?: string;
+  /** Optional metadata-backed identity used to reconnect the same logical endpoint. */
+  connectionIdentity?: {
+    metadataKey: string;
+    normalize?: "exact" | "lowercase-trim";
+  };
+  /**
+   * Only organization admins/owners may create this connection when RBAC is active.
+   * OSS installations do not resolve roles, so their trusted operators are unaffected.
+   */
+  privilegedConnect?: boolean;
   teamOnly?: boolean;
   /** Credential stubs for provisioners to write so MCP servers can boot. */
   credentialStubs?: {

@@ -212,9 +212,12 @@ pub(crate) async fn forward_request(
     // Matches on `policy_host` (pre-rewrite + port-stripped — the host the
     // provider registry knows), NOT the port-bearing / possibly-rewritten `host`,
     // which would silently identify no provider and never block.
-    if let Some(provider) =
-        crate::apps::app_availability_block(policy_host, &path, &rules.available_apps)
-    {
+    if let Some(provider) = crate::apps::app_availability_block_for_provider(
+        policy_host,
+        &path,
+        rules.dynamic_provider.as_deref(),
+        &rules.available_apps,
+    ) {
         info!(method = %method, host = %policy_host, provider = %provider, "app unavailable to project — refusing request");
         return Ok(response::app_unavailable(
             &provider,

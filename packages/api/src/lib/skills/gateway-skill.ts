@@ -74,6 +74,14 @@ is available. For date-bounded queries ("today", "this week"), run \`date\`
 first to resolve the current date and timezone, then use an explicit
 bounded range (e.g. Gmail \`q=after:2026/07/02 before:2026/07/03\`).
 
+### Self-managed Airbyte
+
+For an Airbyte connection, call the configured self-managed instance's
+\`/api/public/v1\` endpoints directly without an Authorization header.
+OneCLI scopes injection to that exact configured host and Public API path
+and refreshes the short-lived Bearer token automatically. This connection
+does not apply to Airbyte Cloud or to other hosts and paths.
+
 ## When Built-In Tools Need Local Credentials
 
 Some tools and integrations check for local credential files (token.json,

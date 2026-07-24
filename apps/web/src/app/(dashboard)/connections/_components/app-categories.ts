@@ -60,6 +60,7 @@ export const APP_CATEGORIES: Record<string, AppCategory> = {
   monday: "project-management",
 
   // Cloud & Data
+  airbyte: "cloud-data",
   aws: "cloud-data",
   "aws-role": "cloud-data",
   supabase: "cloud-data",
