@@ -8,11 +8,11 @@ import {
 } from "@onecli/api/services/request-log-service";
 
 export const getRecentActivity = async () => {
-  const { projectId } = await resolveProjectContext();
-  return getRecentRequestLogs(projectId, 5);
+  const { projectId, userId, organizationId } = await resolveProjectContext();
+  return getRecentRequestLogs(projectId, 5, { userId, organizationId });
 };
 
 export const getActivityPage = async (params: ActivityPageParams = {}) => {
-  const { projectId } = await resolveProjectContext();
-  return getRequestLogs(projectId, params);
+  const { projectId, userId, organizationId } = await resolveProjectContext();
+  return getRequestLogs(projectId, params, { userId, organizationId });
 };

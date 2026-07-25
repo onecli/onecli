@@ -20,6 +20,8 @@ const state = vi.hoisted(() => ({
     externalAuthId: string;
   } | null,
   upserts: [] as Record<string, unknown>[],
+  defaultProject: null as { id: string; organizationId: string } | null,
+  bootstraps: 0,
 }));
 
 vi.mock("@onecli/db", () => ({
@@ -42,20 +44,22 @@ vi.mock("@onecli/db", () => ({
   },
 }));
 
-// The org/project side is out of scope here — return a project so the route
-// takes the established-user path (no bootstrap).
+// The org/project side is stateful: the default (proj-1) takes the
+// established-user path (no bootstrap); onUserCreated-seam tests null it to
+// drive the bootstrap decision.
 vi.mock("../services/organization-service", () => ({
-  findUserDefaultProject: async () => ({
-    id: "proj-1",
-    organizationId: "org-1",
-  }),
-  bootstrapOrganization: async () => ({ project: null }),
+  findUserDefaultProject: async () => state.defaultProject,
+  bootstrapOrganization: async () => {
+    state.bootstraps += 1;
+    return { project: { id: "boot-proj", organizationId: "boot-org" } };
+  },
   joinSharedOrganization: async () => ({ project: null }),
   ensureProjectSeeds: async () => {},
 }));
 
 import { initSession, initSessionEnforcer } from "../providers";
 import { authSessionRoutes, initSessionHooks } from "./auth-session";
+import type { SessionHooks } from "./auth-session";
 
 initSession({
   getSession: async () => state.session,
@@ -67,6 +71,8 @@ beforeEach(() => {
   state.session = null;
   state.dbUser = null;
   state.upserts = [];
+  state.defaultProject = { id: "proj-1", organizationId: "org-1" };
+  state.bootstraps = 0;
 });
 
 afterEach(() => {
@@ -171,6 +177,92 @@ describe("GET /auth/session ensureSessionMembership seam", () => {
     expect(res.status).toBe(200);
     const body = (await res.json()) as { projectId?: string };
     expect(body.projectId).toBe("proj-1");
+  });
+});
+
+describe("GET /auth/session onUserCreated seam", () => {
+  type CreatedCall = {
+    email: string;
+    bootstrappedOrg: boolean;
+    hasRequest: boolean;
+  };
+
+  const recordCreated = (
+    calls: CreatedCall[],
+    extra: Partial<SessionHooks> = {},
+  ) => {
+    initSessionHooks({
+      ...extra,
+      onUserCreated: (user, _attrs, context) => {
+        calls.push({
+          email: user.email,
+          bootstrappedOrg: context.bootstrappedOrg,
+          hasRequest: context.request instanceof Request,
+        });
+      },
+    });
+  };
+
+  it("fires with bootstrappedOrg=true on the organic path", async () => {
+    const calls: CreatedCall[] = [];
+    recordCreated(calls);
+    state.session = { id: "new-sub", email: "new@acme.com" };
+    state.dbUser = null;
+    state.defaultProject = null;
+
+    const res = await app.request("/");
+    expect(res.status).toBe(200);
+    // The upsert mock always returns guy@acme.com — the assertion pins that
+    // the hook sees the upserted user, not the session.
+    expect(calls).toEqual([
+      { email: "guy@acme.com", bootstrappedOrg: true, hasRequest: true },
+    ]);
+    expect(state.bootstraps).toBe(1);
+  });
+
+  it("fires without bootstrap when shouldBootstrapOrg declines", async () => {
+    const calls: CreatedCall[] = [];
+    recordCreated(calls, { shouldBootstrapOrg: () => false });
+    state.session = { id: "new-sub", email: "new@acme.com" };
+    state.dbUser = null;
+    state.defaultProject = null;
+
+    const res = await app.request("/?fromInvitation=1");
+    expect(res.status).toBe(200);
+    expect(calls).toEqual([
+      { email: "guy@acme.com", bootstrappedOrg: false, hasRequest: true },
+    ]);
+    expect(state.bootstraps).toBe(0);
+  });
+
+  it("fires with bootstrappedOrg=false when a project already exists (JIT-membership shape)", async () => {
+    const calls: CreatedCall[] = [];
+    recordCreated(calls);
+    state.session = { id: "sso-sub", email: "new@acme.com" };
+    state.dbUser = null;
+    // defaultProject stays proj-1: created-without-bootstrap still notifies.
+
+    const res = await app.request("/");
+    expect(res.status).toBe(200);
+    expect(calls).toEqual([
+      { email: "guy@acme.com", bootstrappedOrg: false, hasRequest: true },
+    ]);
+    expect(state.bootstraps).toBe(0);
+  });
+
+  it("does not fire for an existing user", async () => {
+    const calls: CreatedCall[] = [];
+    recordCreated(calls);
+    state.session = { id: "same-sub", email: "guy@acme.com" };
+    state.dbUser = {
+      id: "user-1",
+      email: "guy@acme.com",
+      externalAuthId: "same-sub",
+    };
+
+    const res = await app.request("/");
+    expect(res.status).toBe(200);
+    expect(calls).toEqual([]);
   });
 });
 

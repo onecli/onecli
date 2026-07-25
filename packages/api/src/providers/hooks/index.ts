@@ -19,3 +19,8 @@ export {
   initRuleActionGate,
   getRuleActionGate,
 } from "./rule-action-gate";
+export {
+  type NewOrgPolicySeeder,
+  initNewOrgPolicySeeder,
+  getNewOrgPolicySeeder,
+} from "./new-org-policy-seeder";

@@ -4,9 +4,10 @@ export interface Agent {
   identifier: string;
   accessToken: string;
   isDefault: boolean;
+  /** The all-vs-selective injection switch the gateway reads per request. Not
+   * editable from the console since step 10 — policy rules decide access. */
   secretMode: string;
   createdAt: string;
-  _count: { agentSecrets: number; agentAppConnections: number };
 }
 
 export interface CreatedAgent {
@@ -14,20 +15,6 @@ export interface CreatedAgent {
   name: string;
   identifier: string;
   createdAt: string;
-}
-
-export interface AgentGranularAccess {
-  agentId: string;
-  agentName: string;
-  connectionId: string;
-  provider: string;
-  connectionLabel: string | null;
-  policy: Record<string, unknown>;
-}
-
-export interface AgentConnection {
-  appConnectionId: string;
-  sessionPolicy: Record<string, unknown> | null;
 }
 
 export interface DropboxFolder {
@@ -62,24 +49,6 @@ export interface CreatedSecret {
   preview: string;
 }
 
-export interface PolicyRule {
-  id: string;
-  name: string;
-  /** Custom rules only — app-permission rules omit the endpoint fields. */
-  hostPattern?: string;
-  pathPattern?: string | null;
-  method?: string | null;
-  action: string;
-  enabled: boolean;
-  agentId: string | null;
-  rateLimit: number | null;
-  rateLimitWindow: string | null;
-  scope: string | null;
-  metadata: unknown;
-  conditions: unknown;
-  createdAt: string;
-}
-
 export interface Connection {
   id: string;
   provider: string;
@@ -89,20 +58,6 @@ export interface Connection {
   scope: string | null;
   metadata: unknown;
   connectedAt: string;
-}
-
-export type ConnectionAccessLevel = "full" | "assigned" | "none";
-
-// Reverse view of agent↔connection access: an agent and whether it can use a
-// given connection. "full" = all-mode agent (implicit access, read-only here);
-// "assigned" = selective agent granted this connection; "none" = neither.
-// `scoped` flags an assigned agent whose grant carries a granular session
-// policy (managed on the agent side; shown read-only here).
-export interface ConnectionAgentAccess {
-  id: string;
-  name: string;
-  access: ConnectionAccessLevel;
-  scoped: boolean;
 }
 
 // A project row as returned by the project CRUD routes (rename / create).
@@ -269,24 +224,6 @@ export interface CreateSecretInput {
   injectionConfig?: unknown;
 }
 
-export interface CreateRuleInput {
-  name: string;
-  hostPattern: string;
-  pathPattern?: string | null;
-  method?: string | null;
-  action: string;
-  enabled?: boolean;
-  agentId?: string | null;
-  rateLimit?: number | null;
-  rateLimitWindow?: string | null;
-  conditions?: unknown[];
-}
-
-// `conditions: null` clears existing conditions on update.
-export type UpdateRuleInput = Partial<Omit<CreateRuleInput, "conditions">> & {
-  conditions?: unknown[] | null;
-};
-
 // ── Org directory (§3.5 contract: groups, agent groups, members, agents) ──
 
 /** Cursor envelope shared by every directory-scale list. */
@@ -382,4 +319,102 @@ export interface OrgMemberListRow {
   status: string;
   ssoExempt: boolean;
   joinedAt: string;
+}
+
+// ── Shared policy identity/condition shapes ──────────────────────────────────
+// Used by the editor's PolicyRuleV2. Project rules target a specific agent or
+// "any" (empty); org rules target directory identities (agent-group / user /
+// user-group). Conditions are body-contains.
+
+export type ProjectionIdentity =
+  | { type: "agent"; id: string }
+  | { type: "agentGroup"; id: string }
+  | { type: "user"; id: string }
+  | { type: "group"; id: string };
+
+export interface ProjectionCondition {
+  target: string;
+  operator: string;
+  value: string;
+}
+
+// ── Editable policy rules (policy_rules_v2) ──────────────────────────────────
+// The editor's data (GET /rules → PolicyRuleDto): rows carry an `id` (for
+// PATCH/DELETE), `enabled`, and are single-scope. Targets can be
+// app/connection/secret/network — the dialog authors all four (an app target
+// with no tools is the "All connections" whole-app shape; specific connections
+// become `connection` targets).
+export type PolicyRuleTarget =
+  | {
+      kind: "app";
+      provider: string;
+      // Named tools → the exact tool fan-out; EMPTY → the whole app (its
+      // catalog hosts — permit on allow / block on block).
+      tools: string[];
+      // "All connections at a level" injection scope; null = no injection.
+      // Injection-only — never affects matching.
+      connectionScope: "organization" | "project" | null;
+    }
+  // Injects the connection and matches its provider's app — narrowed to `tools`
+  // when set, else the whole app (empty = today's whole-app behavior).
+  | { kind: "connection"; connectionId: string; tools: string[] }
+  | {
+      kind: "secret";
+      // Step 8: a specific `secretId`, OR a `secretScope` ("all secrets at a
+      // level") — exactly one is set.
+      secretId: string | null;
+      secretScope: "organization" | "project" | null;
+    }
+  | {
+      kind: "network";
+      hostPattern: string;
+      pathPattern: string | null;
+      method: string | null;
+    };
+
+export type PolicyRuleSource =
+  | "custom"
+  | "app_permission"
+  | "blocklist"
+  | "default"
+  // Injection-only rules materialized from the equipment model (step 8); the
+  // editor hides them (managed via the agent access UI).
+  | "equipment";
+
+export interface PolicyRuleV2 {
+  id: string;
+  scope: "organization" | "project";
+  status: "draft" | "published";
+  generation: number;
+  priority: number;
+  enabled: boolean;
+  isDefault: boolean;
+  /** Generation-stable identity — the key for diffing draft vs published
+   * (the row `id` regenerates on every publish). Empty on a virtual default. */
+  logicalId: string;
+  source: PolicyRuleSource;
+  name: string;
+  description: string | null;
+  action: "allow" | "block";
+  rateLimit: number | null;
+  rateLimitWindow: "minute" | "hour" | "day" | null;
+  requireApproval: boolean;
+  conditions: ProjectionCondition[] | null;
+  identities: ProjectionIdentity[];
+  targets: PolicyRuleTarget[];
+  createdAt: string;
+}
+
+export interface PublishResult {
+  generation: number;
+  ruleCount: number;
+}
+
+/** The scope's most recent publish. `appliedBy` null = a system publish (the
+ * boot seeder); a null response = never published. */
+export interface LastPublish {
+  generation: number;
+  ruleCount: number;
+  appliedAt: string;
+  appliedBy: { name: string | null; email: string } | null;
 }

@@ -54,12 +54,43 @@ const ORG_APP_CONFIG_ALIASES = {
   "@/lib/actions/app-config": "@/ee/actions/app-config",
 };
 
+// The boot-policy seam, swapped per edition. OSS converts a pre-cutover
+// instance's legacy policy into v2 and then runs the read-only guard
+// (`services/policy-legacy-migration/` — TEMPORARY, see its README); every EE
+// edition swaps that away for the guard alone, since cloud has nothing to
+// convert and an onprem instance in that state should surface the report to an
+// operator rather than be rewritten unattended. This alias is what keeps the
+// conversion out of every EE build.
+const POLICY_MIGRATE_ALIASES = {
+  "@/lib/policy-migrate": "@/ee/policy-migrate",
+};
+
+// The shared project policy editor (step 9.5) with its EE-differentiating
+// chrome behind seams: the staged publish surface + org guardrails + directory
+// names, the org identity picker, and the granular resource-scope editor. OSS
+// uses the lib modules (immediate apply; locked "available in OneCLI Cloud"
+// hints); every EE edition swaps in the real implementations.
+const POLICY_EDITOR_ALIASES = {
+  "@/lib/policy-editor/editor-chrome": "@/ee/policy-editor/editor-chrome",
+  "@/lib/policy-editor/identity-picker": "@/ee/policy-editor/identity-picker",
+  "@/lib/policy-editor/resource-scope": "@/ee/policy-editor/resource-scope",
+  "@/lib/policy-editor/publish-mode": "@/ee/policy-editor/publish-mode",
+  // The behavioral-conditions builder rides with the editor seam: every EE
+  // edition is entitled (onprem now ENFORCES conditions via the EE
+  // condition_match arm, so it must author them too); the OSS module stays
+  // the locked upsell card. Cloud also carries this key in CLOUD_ALIASES;
+  // duplicating it here is how both onprem maps get it.
+  "@/lib/components/condition-builder": "@/ee/components/condition-builder",
+};
+
 // Cloud edition swaps these web import paths to cloud implementations (turbopack
 // resolveAlias, applied only when isCloud). This config runs in plain Node, so the
 // key→value map lives here directly. The onprem-full edition selects a curated
 // subset below (ONPREM_FULL_ALIASES).
 const CLOUD_ALIASES = {
   ...ORG_APP_CONFIG_ALIASES,
+  ...POLICY_MIGRATE_ALIASES,
+  ...POLICY_EDITOR_ALIASES,
   "@/lib/auth/auth-provider": "@/ee/auth/cognito-provider",
   "@/lib/auth/auth-server": "@/ee/auth/cognito-server",
   "@/lib/actions/resolve-user": "@/ee/auth/resolve-user",
@@ -115,6 +146,8 @@ const ONPREM_FULL_ALIASES = {
   ...ONPREM_INIT_ALIASES,
   ...ONPREM_ENTITLEMENT_ALIASES,
   ...ORG_APP_CONFIG_ALIASES,
+  ...POLICY_MIGRATE_ALIASES,
+  ...POLICY_EDITOR_ALIASES,
   // org-UI + org-aware redirect → cloud implementations (reuse the cloud mappings above)
   "@/lib/nav-config": CLOUD_ALIASES["@/lib/nav-config"],
   "@dashboard/dashboard-sidebar": CLOUD_ALIASES["@dashboard/dashboard-sidebar"],
@@ -132,6 +165,8 @@ const ONPREM_SLIM_ALIASES = {
   ...ONPREM_INIT_ALIASES,
   ...ONPREM_ENTITLEMENT_ALIASES,
   ...ORG_APP_CONFIG_ALIASES,
+  ...POLICY_MIGRATE_ALIASES,
+  ...POLICY_EDITOR_ALIASES,
 };
 
 /** @type {import('next').NextConfig} */
@@ -163,6 +198,20 @@ const nextConfig = {
         : isOnpremSlim
           ? ONPREM_SLIM_ALIASES
           : {},
+  },
+  async redirects() {
+    // The legacy Rules page and the policyMode toggle retired at step 10; their
+    // routes are gone, so a bookmark would 404. Send them to the console that
+    // replaced them. FLAT editions only: cloud and onprem-full namespace the
+    // console under /p/:id, and their `beforeFiles` rewrite below already 404s
+    // every bare dashboard path — redirecting there would just bounce a bookmark
+    // to a different 404. Redirects are evaluated BEFORE those rewrites, so this
+    // has to be gated rather than relying on the rewrite to catch it.
+    if (isCloud || isOnpremFull) return [];
+    return [
+      { source: "/rules", destination: "/policy", permanent: true },
+      { source: "/settings/policy", destination: "/policy", permanent: true },
+    ];
   },
   async rewrites() {
     // Cloud and onprem-full ship the OSS bare dashboard routes too (they may only add

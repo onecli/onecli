@@ -18,13 +18,14 @@ import {
   withProjectPrefix,
 } from "@/lib/navigation";
 import type { OAuthPermission } from "@onecli/api/apps/types";
-import type { AppPermissionLevel } from "@onecli/api/apps/app-permissions";
 import { useAppPermissionDefinitions } from "@/hooks/use-app-permissions";
 import { AppIcon } from "./app-icon";
 import { AppConfigForm, type AppConfigFormHandle } from "./app-config-form";
 import { ConfigureCredentialsDialog } from "./configure-credentials-dialog";
 import { PermissionsList } from "./permissions-list";
-import { AppPermissions } from "./app-permissions";
+// The read-only app-permissions reflection, which reads the v2 policy engine.
+// Shared since step 10 — every edition renders it.
+import { AppPermissionsReflection } from "@/lib/components/policy-reflect";
 import { ConnectionAccountCard } from "./connection-account-card";
 import { InheritedConnectionCard } from "./inherited-connection-card";
 import { AppBlocklist } from "./app-blocklist";
@@ -56,9 +57,6 @@ interface AppDetailProps {
   hasAppConfig: boolean;
   pageScope?: PageScope;
   backPath?: string;
-  orgPermissionStates?: Record<string, AppPermissionLevel>;
-  orgConditions?: Record<string, unknown[]>;
-  policyMode?: "allow" | "deny";
 }
 
 type ConnectionData = Omit<Connection, "metadata"> & {
@@ -72,9 +70,6 @@ export const AppDetail = ({
   hasAppConfig,
   pageScope = "project",
   backPath,
-  orgPermissionStates,
-  orgConditions,
-  policyMode,
 }: AppDetailProps) => {
   const pathname = usePathname();
   const queryClient = useQueryClient();
@@ -277,13 +272,9 @@ export const AppDetail = ({
           )}
 
           {permissionDefinition ? (
-            <AppPermissions
+            <AppPermissionsReflection
               provider={app.id}
               appName={app.name}
-              groups={permissionDefinition.groups}
-              orgStates={orgPermissionStates}
-              orgConditions={orgConditions}
-              policyMode={policyMode}
               pageScope={pageScope}
             />
           ) : showOAuthScopesList ? (

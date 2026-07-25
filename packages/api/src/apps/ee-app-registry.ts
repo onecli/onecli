@@ -141,4 +141,13 @@ export const eeApps: AppDefinition[] = [
     connectionMethod: { type: "cloud_only" },
     available: false,
   },
+  {
+    id: "granola",
+    name: "Granola",
+    icon: "/icons/granola.svg",
+    description:
+      "AI meeting notes — search and retrieve your notes and folders.",
+    connectionMethod: { type: "cloud_only" },
+    available: false,
+  },
 ];

@@ -33,6 +33,7 @@ import {
   useConfiguredProviders,
   useEnvDefaultProviders,
 } from "@/hooks/use-app-config";
+import { useAvailableApps } from "@/hooks/use-available-apps";
 import { getApps, getApp } from "@onecli/api/apps/registry";
 import { RequestAppSlot } from "@/lib/components/request-app-slot";
 import { useAppMessages } from "@/hooks/use-app-connected";
@@ -116,6 +117,7 @@ export const AppsTab = ({
   const connectionsQuery = useConnections(pageScope);
   const configuredQuery = useConfiguredProviders(pageScope);
   const envDefaultsQuery = useEnvDefaultProviders();
+  const availableQuery = useAvailableApps(pageScope);
   const planQuery = useQuery({
     queryKey: queryKeys.userPlan.all(),
     queryFn: getCurrentPlan,
@@ -227,12 +229,21 @@ export const AppsTab = ({
     }, []),
   });
 
+  const availableApps = availableQuery.data;
   const filteredApps = useMemo(() => {
     let apps = [...getApps()].sort((a, b) => {
       const aConnected = (connectionCounts.get(a.id) ?? 0) > 0 ? 1 : 0;
       const bConnected = (connectionCounts.get(b.id) ?? 0) > 0 ? 1 : 0;
       return bConnected - aConnected;
     });
+
+    // Availability (policy-engine step 7): when the org restricts availability,
+    // hide the apps this project may not connect. `restricted:false` (an "open"
+    // org, or OSS) leaves the picker unfiltered — no behavior change.
+    if (availableApps?.restricted) {
+      const allowed = new Set(availableApps.providers);
+      apps = apps.filter((app) => allowed.has(app.id));
+    }
 
     if (activeCategory !== "all") {
       apps = apps.filter((app) => APP_CATEGORIES[app.id] === activeCategory);
@@ -244,7 +255,7 @@ export const AppsTab = ({
     }
 
     return apps;
-  }, [connectionCounts, activeCategory, localSearch]);
+  }, [connectionCounts, activeCategory, localSearch, availableApps]);
 
   const hasActiveFilter = localSearch.trim() !== "" || activeCategory !== "all";
 

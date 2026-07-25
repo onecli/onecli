@@ -19,6 +19,9 @@ export const useGroups = (enabled = true) =>
     queryFn: () =>
       fetchAllPages((cursor) => groups.list({ limit: PAGE_LIMIT, cursor })),
     enabled,
+    // Directory routes are admin-only; a non-admin gets a deterministic 403,
+    // which is expected, not retryable (mirrors useAgentGroups).
+    retry: false,
   });
 
 // Drained fully (not one page): the members dialog saves a replace-set, so a

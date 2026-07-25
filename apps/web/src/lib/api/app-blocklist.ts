@@ -7,6 +7,9 @@ export interface BlocklistHostState {
   hostId: string;
   ruleId: string | null;
   enabled: boolean;
+  /** Always false since step 10 — arbitrary hosts are blocked with a policy
+   * rule, so every entry here is one the app itself declares. Kept so existing
+   * clients keep parsing. */
   custom: boolean;
   name: string;
   hostPattern: string;
@@ -24,17 +27,6 @@ export const activateHost = (
   hostId: string,
   scope: PageScope = "project",
 ) => apiPost<BlocklistHostState>(basePath(provider, scope), { hostId });
-
-export const addCustom = (
-  provider: string,
-  name: string,
-  hostPattern: string,
-  scope: PageScope = "project",
-) =>
-  apiPost<BlocklistHostState>(basePath(provider, scope), {
-    name,
-    hostPattern,
-  });
 
 export const toggle = (
   provider: string,

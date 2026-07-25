@@ -1,6 +1,7 @@
 import { db, Prisma } from "@onecli/db";
 
 import { LLM_HOST_FRAGMENTS } from "../lib/llm-hosts";
+import { getRoleResolver } from "../providers";
 
 export interface RequestLogEntry {
   id: string;
@@ -14,6 +15,10 @@ export interface RequestLogEntry {
   latencyMs: number;
   injectionCount: number;
   extraData: unknown;
+  /** The generation-stable logicalId of the v2 rule that decided this request
+   * (step 9) — the future filter/link key; the display name rides
+   * `extra_data.matched_rule_name` (see {@link getMatchedRuleName}). */
+  matchedRuleLogicalId: string | null;
   /** Display name of the user who approved/denied this request, if resolved. */
   approvedBy: string | null;
   createdAt: string;
@@ -114,6 +119,65 @@ export const getConnectionLabel = (log: RequestLogEntry): string | null => {
   return typeof label === "string" ? label : null;
 };
 
+/** The display name of the v2 policy rule that decided this request (step 9
+ * visibility) — a snapshot that survives rule deletion. Null pre-v2, for
+ * legacy decisions, for plain allows, and for ORG rules redacted from a
+ * non-admin viewer (the scope then still reads "organization" — see
+ * {@link getMatchedRuleScope}). The typed `matched_rule_logical_id` column
+ * rides the row itself. */
+export const getMatchedRuleName = (log: RequestLogEntry): string | null => {
+  const data = log.extraData as Record<string, unknown> | null;
+  const name = data?.matched_rule_name;
+  return typeof name === "string" ? name : null;
+};
+
+/** The deciding rule's level ("organization" | "project"), recorded beside the
+ * name. Survives redaction, so the UI can still say "decided by an
+ * organization rule" without the name. */
+export const getMatchedRuleScope = (log: RequestLogEntry): string | null => {
+  const data = log.extraData as Record<string, unknown> | null;
+  const scope = data?.matched_rule_scope;
+  return typeof scope === "string" ? scope : null;
+};
+
+/** Who is reading the logs — drives the org-rule redaction below. */
+export interface RequestLogViewer {
+  userId: string;
+  organizationId: string;
+}
+
+/** Org-rule details are org-admin-only.
+ * A null resolver/role — OSS, or an unknown membership — fails SAFE to
+ * non-admin; OSS rows never carry org-scoped matched rules anyway. */
+const viewerSeesOrgRules = async (
+  viewer: RequestLogViewer | undefined,
+): Promise<boolean> => {
+  if (!viewer) return false;
+  const role = await getRoleResolver()?.getUserRole(
+    viewer.userId,
+    viewer.organizationId,
+  );
+  return role === "admin" || role === "owner";
+};
+
+/** Strip an ORG-decided rule's identifying details for a non-admin viewer:
+ * the display name leaves `extra_data` (this object IS the raw payload the
+ * client receives, including the detail dialog's raw dump) and the logical id
+ * leaves the row DTO; `matched_rule_scope` stays so the UI can render
+ * "decided by an organization rule". A v2 BLOCK/RATE decision carries the SAME
+ * org rule's name in `blocked_by_rule` too — scrubbed with it (Activity is a
+ * browsable bulk surface, held to the stricter admin-only visibility even
+ * though the one-shot live 403/429 names the rule to the caller). Legacy
+ * (old-model) rows carry no `matched_rule_scope`, so their `blocked_by_rule`
+ * — always project-level — is untouched, as are project-scoped attributions. */
+const redactOrgMatchedRule = (entry: RequestLogEntry): RequestLogEntry => {
+  if (getMatchedRuleScope(entry) !== "organization") return entry;
+  const data = { ...(entry.extraData as Record<string, unknown>) };
+  delete data.matched_rule_name;
+  delete data[BLOCKED_BY_RULE_KEY];
+  return { ...entry, extraData: data, matchedRuleLogicalId: null };
+};
+
 export interface RequestLogPage {
   logs: RequestLogEntry[];
   nextCursor: { createdAt: string; id: string } | null;
@@ -179,6 +243,7 @@ const toEntry = (
     latencyMs: log.latencyMs,
     injectionCount: log.injectionCount,
     extraData: log.extraData,
+    matchedRuleLogicalId: log.matchedRuleLogicalId,
     approvedBy: approverId ? (userMap.get(approverId) ?? null) : null,
     createdAt: log.createdAt.toISOString(),
   };
@@ -187,6 +252,7 @@ const toEntry = (
 export const getRecentRequestLogs = async (
   projectId: string,
   limit = 5,
+  viewer?: RequestLogViewer,
 ): Promise<RequestLogEntry[]> => {
   const logs = await db.requestLog.findMany({
     where: { projectId },
@@ -195,12 +261,14 @@ export const getRecentRequestLogs = async (
   });
 
   const agentIds = [...new Set(logs.map((l) => l.agentId))];
-  const [agentMap, userMap] = await Promise.all([
+  const [agentMap, userMap, seesOrgRules] = await Promise.all([
     resolveAgentNames(projectId, agentIds),
     resolveUserNames(collectApproverIds(logs)),
+    viewerSeesOrgRules(viewer),
   ]);
 
-  return logs.map((l) => toEntry(l, agentMap, userMap));
+  const entries = logs.map((l) => toEntry(l, agentMap, userMap));
+  return seesOrgRules ? entries : entries.map(redactOrgMatchedRule);
 };
 
 /**
@@ -242,6 +310,7 @@ export const buildActivityWhere = (
 export const getRequestLogs = async (
   projectId: string,
   params: ActivityPageParams = {},
+  viewer?: RequestLogViewer,
 ): Promise<RequestLogPage> => {
   const limit = Math.min(params.limit ?? 50, 200);
   const where = buildActivityWhere(projectId, params);
@@ -256,9 +325,10 @@ export const getRequestLogs = async (
   const page = hasMore ? logs.slice(0, limit) : logs;
 
   const agentIds = [...new Set(page.map((l) => l.agentId))];
-  const [agentMap, userMap] = await Promise.all([
+  const [agentMap, userMap, seesOrgRules] = await Promise.all([
     resolveAgentNames(projectId, agentIds),
     resolveUserNames(collectApproverIds(page)),
+    viewerSeesOrgRules(viewer),
   ]);
 
   const lastLog = page[page.length - 1];
@@ -267,8 +337,9 @@ export const getRequestLogs = async (
       ? { createdAt: lastLog.createdAt.toISOString(), id: lastLog.id }
       : null;
 
+  const entries = page.map((l) => toEntry(l, agentMap, userMap));
   return {
-    logs: page.map((l) => toEntry(l, agentMap, userMap)),
+    logs: seesOrgRules ? entries : entries.map(redactOrgMatchedRule),
     nextCursor,
   };
 };

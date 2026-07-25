@@ -5,7 +5,7 @@
 //! - **Rate limit**: allows up to N requests per time window, then 429
 //! - **Allow**: explicitly permits a request (used in deny-by-default mode)
 
-use tracing::{debug, warn};
+use tracing::warn;
 
 use crate::cache::CacheStore;
 use crate::inject::path_matches;
@@ -38,6 +38,21 @@ pub(crate) struct PolicyRule {
     pub conditions_raw: Option<serde_json::Value>,
 }
 
+/// The v2 rule that decided a request — recorded into telemetry so Activity
+/// can say "decided by rule X". `logical_id` is the generation-stable identity
+/// (row ids regenerate on every publish); the name is a display snapshot;
+/// `scope` ("organization" | "project") lets the read side apply per-viewer
+/// visibility to org rule names. Legacy decisions carry `None` (old-model
+/// rules have no logical id).
+#[derive(Debug, Clone)]
+pub(crate) struct MatchedRule {
+    pub(crate) logical_id: String,
+    #[allow(dead_code)] // read by cloud telemetry (extra_data), unused in OSS
+    pub(crate) name: String,
+    #[allow(dead_code)] // read by cloud telemetry (extra_data), unused in OSS
+    pub(crate) scope: String,
+}
+
 /// Result of policy evaluation for a single request.
 #[derive(Debug)]
 pub(crate) enum PolicyDecision {
@@ -60,114 +75,72 @@ pub(crate) enum PolicyDecision {
 
 // ── Evaluation ──────────────────────────────────────────────────────────
 
-/// Evaluate all policy rules against a request.
-///
-/// Priority: Block > ManualApproval > RateLimit > Allow.
-/// Each pass checks only one action type to enforce strict ordering.
+/// Increment the sliding-window rate counter for a matched rate-limit rule and
+/// return a `RateLimited` decision if the request is now over the limit (else
+/// `None` = under limit → allow through). Shared by `evaluate` (Pass 3) and the
+/// step-5 first-match engine so the key STRUCTURE and window math are identical.
+/// The `rule_id` component is the caller's rule identity — a stable
+/// `policy_rules_v2.logical_id` for the v2 engine and `policy_rules.id` for
+/// legacy — so a v2 rule's counter survives republishes; the one-time cutover
+/// flip (legacy id → logical id) resets it. Only one path decides per request, so
+/// there is never a live double-count.
 #[allow(clippy::too_many_arguments)]
-pub(crate) async fn evaluate(
+pub(crate) async fn check_rate_limit(
     org_id: &str,
     project_id: &str,
-    request_method: &str,
-    request_path: &str,
-    request_body: Option<&[u8]>,
-    rules: &[PolicyRule],
+    rule_id: &str,
+    rule_name: &str,
+    max_requests: u64,
+    window_secs: u64,
     agent_token: &str,
     cache: &dyn CacheStore,
-    policy_mode: &str,
-    enforce_deny: bool,
-) -> PolicyDecision {
-    // Pass 1: block rules (absolute deny, highest priority)
-    for rule in rules {
-        if !matches_request(rule, request_method, request_path, request_body) {
-            continue;
+) -> Option<PolicyDecision> {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let window_id = now / window_secs.max(1);
+    let key = format!("rate:{org_id}:{project_id}:{rule_id}:{agent_token}:{window_id}");
+
+    match cache.incr(&key, window_secs).await {
+        Some(count) if count > max_requests => {
+            let window_end = (window_id + 1) * window_secs;
+            Some(PolicyDecision::RateLimited {
+                rule_name: rule_name.to_string(),
+                limit: max_requests,
+                window: rate_window_name(window_secs),
+                retry_after_secs: window_end.saturating_sub(now),
+            })
         }
-        if matches!(rule.action, PolicyAction::Block) {
-            debug!(rule = %rule.name, method = request_method, path = request_path, "policy: block rule matched");
-            return PolicyDecision::Blocked {
-                rule_name: rule.name.clone(),
-            };
+        Some(_) => None,
+        None => {
+            warn!(rule = %rule_name, "policy: rate limit cache unavailable, allowing through");
+            None
         }
     }
+}
 
-    // Pass 2: manual approval rules
-    for rule in rules {
-        if !matches_request(rule, request_method, request_path, request_body) {
-            continue;
-        }
-        if let PolicyAction::ManualApproval { rule_id } = &rule.action {
-            debug!(rule = %rule.name, rule_id = %rule_id, method = request_method, path = request_path, "policy: manual approval rule matched");
-            return PolicyDecision::ManualApproval {
-                rule_id: rule_id.clone(),
-            };
-        }
+fn rate_window_name(window_secs: u64) -> &'static str {
+    match window_secs {
+        60 => "minute",
+        3600 => "hour",
+        86400 => "day",
+        _ => "window",
     }
-
-    // Pass 3: rate limit rules
-    for rule in rules {
-        if !matches_request(rule, request_method, request_path, request_body) {
-            continue;
-        }
-        if let PolicyAction::RateLimit {
-            rule_id,
-            max_requests,
-            window_secs,
-        } = &rule.action
-        {
-            let now = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs();
-            let window_id = now / (*window_secs).max(1);
-            let key = format!("rate:{org_id}:{project_id}:{rule_id}:{agent_token}:{window_id}");
-
-            if let Some(count) = cache.incr(&key, *window_secs).await {
-                if count > *max_requests {
-                    let window_end = (window_id + 1) * window_secs;
-                    let retry_after = window_end.saturating_sub(now);
-                    let window_name = match *window_secs {
-                        60 => "minute",
-                        3600 => "hour",
-                        86400 => "day",
-                        _ => "window",
-                    };
-                    return PolicyDecision::RateLimited {
-                        rule_name: rule.name.clone(),
-                        limit: *max_requests,
-                        window: window_name,
-                        retry_after_secs: retry_after,
-                    };
-                }
-            } else {
-                warn!(rule = %rule.name, "policy: rate limit cache unavailable, allowing through");
-            }
-        }
-    }
-
-    // Pass 4: in deny mode, require an explicit allow rule when enforced.
-    if policy_mode == "deny" && enforce_deny {
-        let has_allow = rules.iter().any(|rule| {
-            matches_request(rule, request_method, request_path, request_body)
-                && matches!(
-                    rule.action,
-                    PolicyAction::Allow | PolicyAction::RateLimit { .. }
-                )
-        });
-        if !has_allow {
-            debug!(
-                method = request_method,
-                path = request_path,
-                "policy: no allow rule matched in deny-by-default mode"
-            );
-            return PolicyDecision::BlockedByDefaultPolicy;
-        }
-    }
-
-    PolicyDecision::Allow
 }
 
 /// Check if a rule matches the request method, path, and conditions.
-fn matches_request(rule: &PolicyRule, method: &str, path: &str, body: Option<&[u8]>) -> bool {
+///
+/// `pub(crate)` so the policy engine can reuse the exact same request matcher
+/// — path glob, method, conditions, and the git-receive-pack discovery bridge —
+/// rather than duplicating it and risking drift from the live decision.
+/// Behavior is unchanged.
+pub(crate) fn matches_request(
+    rule: &PolicyRule,
+    method: &str,
+    path: &str,
+    body: Option<&[u8]>,
+) -> bool {
     let direct = path_matches(path, &rule.path_pattern)
         && rule
             .method
@@ -211,7 +184,9 @@ pub(crate) fn is_llm_host(host: &str) -> bool {
 }
 
 /// Check if a request should be blocked by any policy rule (sync, block-only).
-/// Used in tests; production code uses `evaluate()`.
+/// A test-only helper asserting the shared `matches_request` block-matching (path
+/// glob, method, git-receive-pack bridge); the live decision path is the v2
+/// engine (`policy_engine::evaluate`).
 #[allow(dead_code)]
 pub(crate) fn is_blocked(
     request_method: &str,
@@ -237,20 +212,6 @@ mod tests {
             path_pattern: path.to_string(),
             method: method.map(|m| m.to_string()),
             action: PolicyAction::Block,
-            conditions_raw: None,
-        }
-    }
-
-    fn rate_rule(path: &str, method: Option<&str>, max: u64, window: u64) -> PolicyRule {
-        PolicyRule {
-            name: "Test rate rule".to_string(),
-            path_pattern: path.to_string(),
-            method: method.map(|m| m.to_string()),
-            action: PolicyAction::RateLimit {
-                rule_id: "test-rule".to_string(),
-                max_requests: max,
-                window_secs: window,
-            },
             conditions_raw: None,
         }
     }
@@ -346,202 +307,6 @@ mod tests {
         assert!(is_blocked("POST", "/danger/path", None, &rules));
     }
 
-    // ── Rate limit tests ─────────────────────────────────────────────────
-
-    #[tokio::test]
-    async fn rate_limit_allows_under_limit() {
-        let store = crate::cache::create_store().await.unwrap();
-        let rules = vec![rate_rule("*", Some("POST"), 5, 3600)];
-        let decision = evaluate(
-            "org1", "proj1", "POST", "/path", None, &rules, "agent1", &*store, "allow", false,
-        )
-        .await;
-        assert!(matches!(decision, PolicyDecision::Allow));
-    }
-
-    #[tokio::test]
-    async fn rate_limit_blocks_over_limit() {
-        let store = crate::cache::create_store().await.unwrap();
-        let rules = vec![rate_rule("*", Some("POST"), 2, 3600)];
-
-        // First 2 requests allowed
-        let d1 = evaluate(
-            "org1", "proj1", "POST", "/path", None, &rules, "agent1", &*store, "allow", false,
-        )
-        .await;
-        assert!(matches!(d1, PolicyDecision::Allow));
-        let d2 = evaluate(
-            "org1", "proj1", "POST", "/path", None, &rules, "agent1", &*store, "allow", false,
-        )
-        .await;
-        assert!(matches!(d2, PolicyDecision::Allow));
-
-        // Third request rate limited
-        let d3 = evaluate(
-            "org1", "proj1", "POST", "/path", None, &rules, "agent1", &*store, "allow", false,
-        )
-        .await;
-        assert!(matches!(d3, PolicyDecision::RateLimited { .. }));
-    }
-
-    #[tokio::test]
-    async fn rate_limit_per_agent_isolation() {
-        let store = crate::cache::create_store().await.unwrap();
-        let rules = vec![rate_rule("*", Some("POST"), 1, 3600)];
-
-        // Agent1 hits limit
-        evaluate(
-            "org1", "proj1", "POST", "/path", None, &rules, "agent1", &*store, "allow", false,
-        )
-        .await;
-        let d = evaluate(
-            "org1", "proj1", "POST", "/path", None, &rules, "agent1", &*store, "allow", false,
-        )
-        .await;
-        assert!(matches!(d, PolicyDecision::RateLimited { .. }));
-
-        // Agent2 is unaffected
-        let d = evaluate(
-            "org1", "proj1", "POST", "/path", None, &rules, "agent2", &*store, "allow", false,
-        )
-        .await;
-        assert!(matches!(d, PolicyDecision::Allow));
-    }
-
-    #[tokio::test]
-    async fn block_takes_precedence_over_rate_limit() {
-        let store = crate::cache::create_store().await.unwrap();
-        let rules = vec![
-            block_rule("/danger/*", Some("POST")),
-            rate_rule("/danger/*", Some("POST"), 100, 3600),
-        ];
-        let d = evaluate(
-            "org1",
-            "proj1",
-            "POST",
-            "/danger/path",
-            None,
-            &rules,
-            "agent1",
-            &*store,
-            "allow",
-            false,
-        )
-        .await;
-        assert!(matches!(d, PolicyDecision::Blocked { .. }));
-    }
-
-    #[tokio::test]
-    async fn evaluate_allows_non_matching_rules() {
-        let store = crate::cache::create_store().await.unwrap();
-        let rules = vec![block_rule("/blocked/*", Some("POST"))];
-        let d = evaluate(
-            "org1",
-            "proj1",
-            "GET",
-            "/safe/path",
-            None,
-            &rules,
-            "agent1",
-            &*store,
-            "allow",
-            false,
-        )
-        .await;
-        assert!(matches!(d, PolicyDecision::Allow));
-    }
-
-    // ── Manual approval tests ────────────────────────────────────────
-
-    fn approval_rule(path: &str, method: Option<&str>) -> PolicyRule {
-        PolicyRule {
-            name: "Test approval rule".to_string(),
-            path_pattern: path.to_string(),
-            method: method.map(|m| m.to_string()),
-            action: PolicyAction::ManualApproval {
-                rule_id: "test-approval".to_string(),
-            },
-            conditions_raw: None,
-        }
-    }
-
-    #[tokio::test]
-    async fn manual_approval_matches_path_and_method() {
-        let store = crate::cache::create_store().await.unwrap();
-        let rules = vec![approval_rule("/send/*", Some("POST"))];
-        let d = evaluate(
-            "org1",
-            "proj1",
-            "POST",
-            "/send/email",
-            None,
-            &rules,
-            "agent1",
-            &*store,
-            "allow",
-            false,
-        )
-        .await;
-        assert!(matches!(d, PolicyDecision::ManualApproval { .. }));
-    }
-
-    #[tokio::test]
-    async fn manual_approval_no_match_different_method() {
-        let store = crate::cache::create_store().await.unwrap();
-        let rules = vec![approval_rule("/send/*", Some("POST"))];
-        let d = evaluate(
-            "org1",
-            "proj1",
-            "GET",
-            "/send/email",
-            None,
-            &rules,
-            "agent1",
-            &*store,
-            "allow",
-            false,
-        )
-        .await;
-        assert!(matches!(d, PolicyDecision::Allow));
-    }
-
-    #[tokio::test]
-    async fn block_takes_precedence_over_manual_approval() {
-        let store = crate::cache::create_store().await.unwrap();
-        let rules = vec![
-            approval_rule("/danger/*", Some("POST")),
-            block_rule("/danger/*", Some("POST")),
-        ];
-        let d = evaluate(
-            "org1",
-            "proj1",
-            "POST",
-            "/danger/path",
-            None,
-            &rules,
-            "agent1",
-            &*store,
-            "allow",
-            false,
-        )
-        .await;
-        assert!(matches!(d, PolicyDecision::Blocked { .. }));
-    }
-
-    #[tokio::test]
-    async fn manual_approval_takes_precedence_over_rate_limit() {
-        let store = crate::cache::create_store().await.unwrap();
-        let rules = vec![
-            rate_rule("/v1/*", Some("POST"), 100, 3600),
-            approval_rule("/v1/*", Some("POST")),
-        ];
-        let d = evaluate(
-            "org1", "proj1", "POST", "/v1/send", None, &rules, "agent1", &*store, "allow", false,
-        )
-        .await;
-        assert!(matches!(d, PolicyDecision::ManualApproval { .. }));
-    }
-
     // ── Git push discovery tests ────────────────────────────────────
 
     #[test]
@@ -575,192 +340,6 @@ mod tests {
             None,
             &rules
         ));
-    }
-
-    // ── Deny-by-default mode tests ──────────────────────────────────
-
-    fn allow_rule(path: &str, method: Option<&str>) -> PolicyRule {
-        PolicyRule {
-            name: "Test allow rule".to_string(),
-            path_pattern: path.to_string(),
-            method: method.map(|m| m.to_string()),
-            action: PolicyAction::Allow,
-            conditions_raw: None,
-        }
-    }
-
-    #[tokio::test]
-    async fn deny_mode_blocks_when_no_allow_rule() {
-        let store = crate::cache::create_store().await.unwrap();
-        let rules: Vec<PolicyRule> = vec![];
-        let d = evaluate(
-            "org1",
-            "proj1",
-            "POST",
-            "/api/v1/messages",
-            None,
-            &rules,
-            "agent1",
-            &*store,
-            "deny",
-            true,
-        )
-        .await;
-        assert!(matches!(d, PolicyDecision::BlockedByDefaultPolicy));
-    }
-
-    #[tokio::test]
-    async fn deny_mode_allows_with_explicit_allow_rule() {
-        let store = crate::cache::create_store().await.unwrap();
-        let rules = vec![allow_rule("/api/*", Some("POST"))];
-        let d = evaluate(
-            "org1",
-            "proj1",
-            "POST",
-            "/api/v1/messages",
-            None,
-            &rules,
-            "agent1",
-            &*store,
-            "deny",
-            true,
-        )
-        .await;
-        assert!(matches!(d, PolicyDecision::Allow));
-    }
-
-    #[tokio::test]
-    async fn deny_mode_block_overrides_allow() {
-        let store = crate::cache::create_store().await.unwrap();
-        let rules = vec![
-            allow_rule("/api/*", Some("POST")),
-            block_rule("/api/v1/danger", Some("POST")),
-        ];
-        let d = evaluate(
-            "org1",
-            "proj1",
-            "POST",
-            "/api/v1/danger",
-            None,
-            &rules,
-            "agent1",
-            &*store,
-            "deny",
-            true,
-        )
-        .await;
-        assert!(matches!(d, PolicyDecision::Blocked { .. }));
-    }
-
-    #[tokio::test]
-    async fn deny_mode_rate_limit_implicit_allow() {
-        let store = crate::cache::create_store().await.unwrap();
-        let rules = vec![rate_rule("/api/*", Some("POST"), 100, 3600)];
-        let d = evaluate(
-            "org1",
-            "proj1",
-            "POST",
-            "/api/v1/send",
-            None,
-            &rules,
-            "agent1",
-            &*store,
-            "deny",
-            true,
-        )
-        .await;
-        assert!(matches!(d, PolicyDecision::Allow));
-    }
-
-    #[tokio::test]
-    async fn deny_mode_manual_approval_implicit_allow() {
-        let store = crate::cache::create_store().await.unwrap();
-        let rules = vec![approval_rule("/send/*", Some("POST"))];
-        let d = evaluate(
-            "org1",
-            "proj1",
-            "POST",
-            "/send/email",
-            None,
-            &rules,
-            "agent1",
-            &*store,
-            "deny",
-            true,
-        )
-        .await;
-        assert!(matches!(d, PolicyDecision::ManualApproval { .. }));
-    }
-
-    #[tokio::test]
-    async fn deny_mode_non_matching_allow_still_blocks() {
-        let store = crate::cache::create_store().await.unwrap();
-        let rules = vec![allow_rule("/api/*", Some("GET"))];
-        let d = evaluate(
-            "org1",
-            "proj1",
-            "POST",
-            "/api/v1/send",
-            None,
-            &rules,
-            "agent1",
-            &*store,
-            "deny",
-            true,
-        )
-        .await;
-        assert!(matches!(d, PolicyDecision::BlockedByDefaultPolicy));
-    }
-
-    #[tokio::test]
-    async fn allow_mode_ignores_allow_rules() {
-        let store = crate::cache::create_store().await.unwrap();
-        let rules = vec![allow_rule("/api/*", Some("POST"))];
-        let d = evaluate(
-            "org1",
-            "proj1",
-            "POST",
-            "/other/path",
-            None,
-            &rules,
-            "agent1",
-            &*store,
-            "allow",
-            false,
-        )
-        .await;
-        assert!(matches!(d, PolicyDecision::Allow));
-    }
-
-    #[tokio::test]
-    async fn deny_mode_allows_without_injections() {
-        let store = crate::cache::create_store().await.unwrap();
-        let rules: Vec<PolicyRule> = vec![];
-        let d = evaluate(
-            "org1",
-            "proj1",
-            "POST",
-            "/api/v1/messages",
-            None,
-            &rules,
-            "agent1",
-            &*store,
-            "deny",
-            false,
-        )
-        .await;
-        assert!(matches!(d, PolicyDecision::Allow));
-    }
-
-    #[tokio::test]
-    async fn allow_mode_empty_string_same_as_allow() {
-        let store = crate::cache::create_store().await.unwrap();
-        let rules: Vec<PolicyRule> = vec![];
-        let d = evaluate(
-            "org1", "proj1", "POST", "/path", None, &rules, "agent1", &*store, "", false,
-        )
-        .await;
-        assert!(matches!(d, PolicyDecision::Allow));
     }
 
     // ── LLM host detection tests ────────────────────────────────────

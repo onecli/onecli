@@ -13,6 +13,8 @@ export const AUDIT_ACTIONS = {
   DELETE: "delete",
   REGENERATE: "regenerate",
   DISCONNECT: "disconnect",
+  // Policy engine: snapshot the draft policy set into the published set.
+  PUBLISH: "publish",
   // EE-only (partner layer): a user claims a partner-created org as its owner.
   CLAIM: "claim",
   // EE-only (identity): a claimed resource passed its ownership proof
@@ -23,10 +25,16 @@ export const AUDIT_ACTIONS = {
 export const AUDIT_SERVICES = {
   AGENT: "agent",
   SECRET: "secret",
-  RULE: "rule",
+  // Unified policy engine (policy_rules_v2): the priority-ordered rule model.
+  // (The legacy `rule` service retired with the old model at step 10; historical
+  // audit rows carrying it still render — the log table maps the raw string.)
+  POLICY: "policy",
   API_KEY: "api-key",
   APP_CONNECTION: "app-connection",
   APP_CONFIG: "app-config",
+  // EE-only (policy-engine step 7): the org app-availability allowlist
+  // (toggle + per-principal grants).
+  APP_AVAILABILITY: "app-availability",
   PROJECT: "project",
   ORGANIZATION: "organization",
   // EE-only (partner layer)

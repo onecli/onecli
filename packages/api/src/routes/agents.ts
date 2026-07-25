@@ -12,11 +12,6 @@ import {
   deleteAgent,
   regenerateAgentToken,
   updateAgentSecretMode,
-  getAgentSecrets,
-  updateAgentSecrets,
-  getAgentAppConnections,
-  updateAgentAppConnections,
-  listAgentGranularAccess,
 } from "../services/agent-service";
 import {
   withAudit,
@@ -28,8 +23,6 @@ import {
   createAgentSchema,
   renameAgentSchema,
   secretModeSchema,
-  updateAgentSecretsSchema,
-  updateAgentConnectionsSchema,
 } from "../validations/agent";
 import { getResourceHooks } from "../providers";
 
@@ -42,14 +35,6 @@ export const agentRoutes = () => {
     const auth = c.get("auth");
     const agents = await listAgents(requireProjectId(auth));
     return c.json(agents);
-  });
-
-  // GET /agents/granular-access — read-only overview of per-agent granular
-  // policies (GitHub repos, Dropbox folders) across the project.
-  app.get("/granular-access", async (c) => {
-    const auth = c.get("auth");
-    const entries = await listAgentGranularAccess(requireProjectId(auth));
-    return c.json(entries);
   });
 
   // POST /agents
@@ -165,88 +150,6 @@ export const agentRoutes = () => {
         service: AUDIT_SERVICES.AGENT,
         source: AUDIT_SOURCE.API,
         metadata: { agentId, secretMode: parsed.data.mode },
-      }),
-    );
-    return c.json({ success: true });
-  });
-
-  // GET /agents/:agentId/secrets
-  app.get("/:agentId/secrets", async (c) => {
-    const auth = c.get("auth");
-    const agentId = c.req.param("agentId");
-    const secretIds = await getAgentSecrets(requireProjectId(auth), agentId);
-    return c.json(secretIds);
-  });
-
-  // PUT /agents/:agentId/secrets
-  app.put("/:agentId/secrets", async (c) => {
-    const auth = c.get("auth");
-    const agentId = c.req.param("agentId");
-    const body = await c.req.json().catch(() => null);
-    const parsed = updateAgentSecretsSchema.safeParse(body);
-    if (!parsed.success) {
-      return c.json(
-        { error: parsed.error.issues[0]?.message ?? "Invalid request body" },
-        400,
-      );
-    }
-
-    const projectId = requireProjectId(auth);
-    await withAudit(
-      () => updateAgentSecrets(projectId, agentId, parsed.data.secretIds),
-      () => ({
-        projectId,
-        userId: auth.userId,
-        userEmail: auth.userEmail,
-        action: AUDIT_ACTIONS.UPDATE,
-        service: AUDIT_SERVICES.AGENT,
-        source: AUDIT_SOURCE.API,
-        metadata: { agentId, secretCount: parsed.data.secretIds.length },
-      }),
-    );
-    return c.json({ success: true });
-  });
-
-  // GET /agents/:agentId/connections
-  app.get("/:agentId/connections", async (c) => {
-    const auth = c.get("auth");
-    const agentId = c.req.param("agentId");
-    const connections = await getAgentAppConnections(
-      requireProjectId(auth),
-      agentId,
-    );
-    return c.json(connections);
-  });
-
-  // PUT /agents/:agentId/connections — replace the agent's app-connection
-  // assignments and their per-connection granular-access policies.
-  app.put("/:agentId/connections", async (c) => {
-    const auth = c.get("auth");
-    const agentId = c.req.param("agentId");
-    const body = await c.req.json().catch(() => null);
-    const parsed = updateAgentConnectionsSchema.safeParse(body);
-    if (!parsed.success) {
-      return c.json(
-        { error: parsed.error.issues[0]?.message ?? "Invalid request body" },
-        400,
-      );
-    }
-
-    const projectId = requireProjectId(auth);
-    await withAudit(
-      () =>
-        updateAgentAppConnections(projectId, agentId, parsed.data.connections),
-      () => ({
-        projectId,
-        userId: auth.userId,
-        userEmail: auth.userEmail,
-        action: AUDIT_ACTIONS.UPDATE,
-        service: AUDIT_SERVICES.AGENT,
-        source: AUDIT_SOURCE.API,
-        metadata: {
-          agentId,
-          appConnectionCount: parsed.data.connections.length,
-        },
       }),
     );
     return c.json({ success: true });

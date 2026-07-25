@@ -1,6 +1,6 @@
 import * as agents from "./agents";
 import * as secrets from "./secrets";
-import * as rules from "./rules";
+import * as policy from "./policy";
 import * as connections from "./connections";
 import * as projects from "./projects";
 import * as projectAccess from "./project-access";
@@ -16,6 +16,7 @@ import * as scimTokens from "./scim-tokens";
 import * as counts from "./counts";
 import * as appBlocklist from "./app-blocklist";
 import * as appConfig from "./app-config";
+import * as appAvailability from "./app-availability";
 import * as appPermissions from "./app-permissions";
 import * as vaults from "./vaults";
 import * as dropbox from "./dropbox";
@@ -23,7 +24,7 @@ import * as dropbox from "./dropbox";
 export {
   agents,
   secrets,
-  rules,
+  policy,
   connections,
   projects,
   projectAccess,
@@ -39,6 +40,7 @@ export {
   counts,
   appBlocklist,
   appConfig,
+  appAvailability,
   appPermissions,
   vaults,
   dropbox,
@@ -48,10 +50,7 @@ export type {
   CreatedAgent,
   Secret,
   CreatedSecret,
-  PolicyRule,
   Connection,
-  ConnectionAgentAccess,
-  ConnectionAccessLevel,
   Project,
   ProjectAccessBindings,
   ProjectAccessUserRow,
@@ -82,18 +81,19 @@ export type {
   ResourceCounts,
   CreateAgentInput,
   CreateSecretInput,
-  CreateRuleInput,
-  UpdateRuleInput,
+  ProjectionIdentity,
+  ProjectionCondition,
+  PolicyRuleV2,
+  PolicyRuleTarget,
+  PolicyRuleSource,
+  PublishResult,
 } from "./types";
+export type { CreatePolicyRuleInput, UpdatePolicyRuleInput } from "./policy";
 export { appsPath } from "./scope";
 export type { PageScope } from "./scope";
 export type { AppConfigStatus } from "./app-config";
+export type { AvailableApps } from "./app-availability";
 export type { VaultConnection } from "./vaults";
-export type { SetAppPermissionsInput } from "./rules";
-export type {
-  AppPermissionState,
-  AppPermissionStatesResult,
-} from "@onecli/api/services/policy-rule-service";
 export type {
   AppToolSummary,
   AppToolGroupSummary,

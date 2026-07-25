@@ -88,6 +88,9 @@ fn is_websocket_forwarded_header(name: &HeaderName) -> bool {
 pub(super) async fn handle_websocket(
     mut req: Request<Incoming>,
     host: &str,
+    // The original, pre-rewrite host the policy rules match against (the effective
+    // `host` may be app-rewritten) — mirrors `forward_request`'s `policy_host`.
+    policy_host: &str,
     rules: &ResolvedRules,
     cache: &dyn CacheStore,
     pool: &sqlx::PgPool,
@@ -100,24 +103,37 @@ pub(super) async fn handle_websocket(
         .map(|pq| pq.as_str().to_string())
         .unwrap_or_else(|| "/".to_string());
 
-    let agent_token = proxy_ctx.agent_token.as_deref().unwrap_or("");
     let has_injections = !rules.injection_rules.is_empty();
-    let enforce_deny = has_injections && !policy::is_llm_host(host);
 
-    let org_id = proxy_ctx.organization_id.as_deref().unwrap_or("");
-    let pid = proxy_ctx.project_id.as_deref().unwrap_or("");
+    // Step-7 app-availability pre-check (DB-free — resolved at connect; see
+    // forward.rs). Governs only identifiable app providers, so raw/LLM hosts are
+    // never blocked. WebSocket upgrades are GET. Matches on `policy_host`
+    // (pre-rewrite + port-stripped), NOT the port-bearing/rewritten `host`.
+    if let Some(provider) =
+        crate::apps::app_availability_block(policy_host, &path, &rules.available_apps)
+    {
+        warn!(host = %policy_host, path = %path, provider = %provider, "WebSocket app unavailable to project — refusing request");
+        return Ok(response::app_unavailable(
+            &provider,
+            "GET",
+            &path,
+            policy_host,
+        ));
+    }
 
-    let decision = policy::evaluate(
-        org_id,
-        pid,
+    // The first-match engine over `policy_rules_v2` is authoritative. WebSocket
+    // blocks emit no telemetry today, so the matched rule is not attributed here
+    // (allow-attribution for ws is out of scope) — only the decision is consumed.
+    let (decision, _matched) = crate::policy_engine::evaluate(
+        proxy_ctx,
+        policy_host,
         "GET",
         &path,
         None,
-        &rules.policy_rules,
-        agent_token,
+        has_injections,
+        policy::is_llm_host(host),
         cache,
-        &rules.policy_mode,
-        enforce_deny,
+        &rules.policy_rules_v2,
     )
     .await;
 
@@ -428,6 +444,7 @@ fn emit_telemetry(
             existing_log_id: None,
             log_id: None,
             budget_charge: None,
+            matched_rule: None,
         });
     }
 }

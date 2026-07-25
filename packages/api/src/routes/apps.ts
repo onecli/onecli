@@ -15,13 +15,13 @@ import {
   resolveConnectCredentials,
   type ConnectRequestBody,
 } from "../apps/connect-credentials";
-import { getOAuthOrg, getOrgAppConfig } from "../providers";
+import { getOAuthOrg, getOrgAppConfig, getAppAvailability } from "../providers";
 import {
   signOAuthState,
   verifyOAuthState,
   generateNonce,
 } from "../lib/oauth-state";
-import { NODE_ENV } from "../lib/env";
+import { APP_URL, NODE_ENV } from "../lib/env";
 import { dashboardUrl } from "../lib/dashboard-url";
 import { getRequestOrigin } from "../lib/request-origin";
 import { buildFragmentBridgeHtml } from "../lib/fragment-bridge";
@@ -62,7 +62,6 @@ import {
   getBlocklistState,
   toggleBlocklistRule,
   activateBlocklistHost,
-  addCustomBlocklistRule,
   removeBlocklistRule,
 } from "../services/app-blocklist-service";
 import { logger } from "../lib/logger";
@@ -225,6 +224,28 @@ export const appRoutes = () => {
     ]);
     if (!orgConfigs) return c.json(providers);
     return c.json([...new Set([...providers, ...Object.keys(orgConfigs)])]);
+  });
+
+  // ── GET /apps/available ── app-availability allowlist for this project ──
+  // Backs the connect-picker filter (policy-engine step 7). `restricted:false`
+  // (OSS — no seam — or an "open" org) means every app is available and the
+  // picker is unfiltered; `restricted:true` carries the exact provider set a
+  // project may connect, mirroring the gateway's runtime availability read.
+  // Registered before /:provider so "available" is not captured as a provider.
+  app.get("/available", authMiddleware, async (c) => {
+    const auth = c.get("auth");
+    const projectId = requireProjectId(auth);
+    const providers = await getAppAvailability()?.getAvailableProviders(
+      projectId,
+      auth.organizationId,
+    );
+    // `undefined` (no seam / OSS) and `null` (org in "open" mode) both mean
+    // unrestricted — never leak an empty allowlist as "nothing available".
+    return c.json(
+      providers == null
+        ? { restricted: false, providers: [] as string[] }
+        : { restricted: true, providers },
+    );
   });
 
   // ── GET /apps/env-defaults ── providers with platform default creds ────
@@ -432,9 +453,7 @@ export const appRoutes = () => {
   app.get("/:provider/callback", async (c) => {
     const provider = c.req.param("provider")!;
     const apiOrigin = getRequestOrigin(c.req.raw);
-    // getRequestOrigin already reads raw APP_URL (undefined when unset) and
-    // falls back to the request-derived origin, so apiOrigin is sufficient.
-    const appOrigin = apiOrigin;
+    const appOrigin = APP_URL || apiOrigin;
 
     const appDef = getApp(provider);
     if (
@@ -899,7 +918,7 @@ export const appRoutes = () => {
     return c.json(states);
   });
 
-  // ── POST /apps/:provider/blocklist ── activate predefined or add custom ─
+  // ── POST /apps/:provider/blocklist ── activate one of the app's hosts ──
   app.post("/:provider/blocklist", authMiddleware, async (c) => {
     const auth = c.get("auth");
     const projectId = requireProjectId(auth);
@@ -910,27 +929,17 @@ export const appRoutes = () => {
     const body = await c.req.json().catch(() => null);
     if (!body) return c.json({ error: "Invalid request body" }, 400);
 
-    let result;
-    if (body.hostId) {
-      result = await activateBlocklistHost(
-        { projectId },
-        provider,
-        body.hostId,
-        appDef.blocklist ?? [],
-      );
-    } else if (body.name && body.hostPattern) {
-      result = await addCustomBlocklistRule(
-        { projectId },
-        provider,
-        body.name,
-        body.hostPattern,
-      );
-    } else {
-      return c.json(
-        { error: "Provide either { hostId } or { name, hostPattern }" },
-        400,
-      );
+    // Blocking an arbitrary host is a policy rule (POST /v1/policy/rules) now;
+    // this surface only toggles the hosts the app itself declares.
+    if (!body.hostId) {
+      return c.json({ error: "Provide { hostId }" }, 400);
     }
+    const result = await activateBlocklistHost(
+      { projectId },
+      provider,
+      body.hostId,
+      appDef.blocklist ?? [],
+    );
 
     invalidateGatewayCache(c.req.raw);
     return c.json(result, 201);

@@ -1,10 +1,12 @@
 "use client";
 
 import { useState } from "react";
+import { ChevronRight, Users } from "lucide-react";
 import { Card } from "@onecli/ui/components/card";
 import type { PageScope } from "@/lib/api";
-import { ConnectionAgentAccessSummary } from "./connection-agent-access-summary";
-import { ConnectionAgentAccessDialog } from "./connection-agent-access-dialog";
+// The read-only agent-access reflection, which reads the v2 policy engine.
+// Shared since step 10 — every edition renders it.
+import { ConnectionAgentsReflection } from "@/lib/components/policy-reflect";
 
 interface InheritedConnectionCardProps {
   connection: { id: string; label: string | null };
@@ -37,15 +39,26 @@ export const InheritedConnectionCard = ({
           </div>
         </div>
         {showAgentAccess && (
-          <ConnectionAgentAccessSummary
-            connectionId={connection.id}
-            onManage={() => setDialogOpen(true)}
-          />
+          // A neutral opener: policy rules decide agent access, so a summary
+          // line can't state it without the reflection's own evaluation.
+          <button
+            type="button"
+            onClick={() => setDialogOpen(true)}
+            aria-label="View agent access"
+            className="flex min-w-0 items-center gap-1.5 rounded-sm text-xs text-muted-foreground transition-colors hover:text-foreground focus-visible:ring-ring focus-visible:ring-2 focus-visible:outline-none"
+          >
+            <Users className="size-3.5 shrink-0" aria-hidden="true" />
+            <span className="truncate">Agent access</span>
+            <ChevronRight
+              className="size-3 shrink-0 opacity-60"
+              aria-hidden="true"
+            />
+          </button>
         )}
       </Card>
 
       {showAgentAccess && (
-        <ConnectionAgentAccessDialog
+        <ConnectionAgentsReflection
           connectionId={connection.id}
           connectionLabel={displayName}
           appName={appName}

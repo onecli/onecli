@@ -108,7 +108,8 @@ pub(super) async fn mitm(
                             if is_ws {
                                 match super::websocket::handle_websocket(
                                     req,
-                                    effective_host,
+                                    effective_host, // forward target (may be host-rewritten)
+                                    hostname, // policy_host: pre-rewrite host the rules match
                                     &rules,
                                     &*cache,
                                     &engine.pool,
@@ -131,7 +132,8 @@ pub(super) async fn mitm(
                             } else {
                                 match forward::forward_request(
                                     req,
-                                    effective_host,
+                                    effective_host, // forward target (may be host-rewritten)
+                                    hostname, // policy_host: pre-rewrite host the rules were assembled from
                                     "https",
                                     client,
                                     &rules,
@@ -190,7 +192,6 @@ pub(crate) struct InterceptToken {
 #[derive(Debug)]
 pub(crate) struct ResolvedRules {
     pub injection_rules: Vec<InjectionRule>,
-    pub policy_rules: Vec<crate::policy::PolicyRule>,
     pub access_restricted: bool,
     /// Ready-to-use interception data when the resolved connection has a
     /// cached token that should be served instead of forwarding.
@@ -208,8 +209,6 @@ pub(crate) struct ResolvedRules {
     /// Provider-specific body transform resolved from the app connection.
     /// The handler decides per-request whether to act.
     pub body_transform: Option<crate::apps::BodyTransform>,
-    /// Organization policy mode: "allow" (default) or "deny" (block by default).
-    pub policy_mode: String,
     /// Cloud-only: pending claim token when the org is in claim mode. Inert in OSS.
     #[cfg_attr(not(edition_cloud), allow(dead_code))]
     pub claim_token: Option<String>,
@@ -219,9 +218,17 @@ pub(crate) struct ResolvedRules {
     #[cfg_attr(not(edition_cloud), allow(dead_code))]
     pub session_policy: Option<serde_json::Value>,
     /// Cloud-only: spend budgets governing the effective credential for this host
-    /// (0/1 in practice). Empty in OSS.
+    /// (0/1 in practice).
     #[cfg_attr(not(edition_cloud), allow(dead_code))]
     pub budget_bindings: Vec<crate::budget::BudgetBinding>,
+    /// The published new-model policy rules for this connection (from
+    /// `ConnectResponse`), passed to the enforce seam. Empty when the
+    /// engine is off, or before the org is backfilled.
+    pub policy_rules_v2: crate::db::PolicyV2Rules,
+    /// The apps this connection's project may reach (from `ConnectResponse`), for
+    /// the per-request availability pre-check. Unrestricted (all available) in
+    /// OSS, when the org is "open", or when enforcement is off.
+    pub available_apps: crate::db::AvailableApps,
 }
 
 /// Result of per-request rule resolution including app connection disambiguation.
@@ -378,7 +385,8 @@ async fn resolve_rules(
     Ok(ResolveResult::Resolved {
         rules: Box::new(ResolvedRules {
             injection_rules,
-            policy_rules: resp.policy_rules,
+            policy_rules_v2: resp.policy_rules_v2,
+            available_apps: resp.available_apps,
             access_restricted: resp.access_restricted,
             intercept_token,
             plan: resp.plan,
@@ -386,7 +394,6 @@ async fn resolve_rules(
             connection_label,
             finalizer,
             body_transform,
-            policy_mode: resp.policy_mode,
             claim_token: resp.claim_token,
             session_policy,
             budget_bindings: resp.budget_bindings,

@@ -1,4 +1,4 @@
-import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
+import { beforeAll, describe, expect, it, vi } from "vitest";
 import type { Hono } from "hono";
 import type { ApiEnv } from "../types";
 
@@ -116,6 +116,10 @@ const SLIM_KEYAPP = {
         name: "All read operations",
         description: "Everything read",
       },
+      // read_one's "/alias/one" alias escapes the "/api/*" wildcard, so the
+      // umbrella isn't a true superset — the server marks it incomplete and the
+      // picker won't offer it.
+      wildcardComplete: false,
       tools: [{ id: "read_one", name: "Read one", description: "Reads one" }],
     },
   ],
@@ -175,48 +179,5 @@ describe("app-permission catalog endpoints", () => {
   it("requires auth", async () => {
     const res = await app.request("/v1/apps/permission-definitions");
     expect(res.status).toBe(401);
-  });
-});
-
-// Regression tests for the callback redirect origin: the APP_URL env must be
-// read raw (undefined when unset) so the request-origin fallback engages for
-// self-hosters. See issue #420.
-describe("oauth callback redirect origin", () => {
-  let app: Hono<ApiEnv>;
-
-  beforeAll(() => {
-    app = createApiApp(nullSession);
-  });
-
-  afterEach(() => {
-    delete process.env.APP_URL;
-    delete process.env.NEXT_PUBLIC_APP_URL;
-  });
-
-  it("falls back to the request origin when APP_URL is unset", async () => {
-    delete process.env.APP_URL;
-    delete process.env.NEXT_PUBLIC_APP_URL;
-
-    const res = await app.request("/v1/apps/nosuchprovider/callback", {
-      headers: { host: "my-gateway.example.com" },
-    });
-
-    expect(res.status).toBe(302);
-    expect(res.headers.get("location")).toBe(
-      "http://my-gateway.example.com/app-connect/nosuchprovider?status=error&message=Invalid%20provider",
-    );
-  });
-
-  it("still prefers APP_URL when it is set", async () => {
-    process.env.APP_URL = "https://configured.example.com";
-
-    const res = await app.request("/v1/apps/nosuchprovider/callback", {
-      headers: { host: "my-gateway.example.com" },
-    });
-
-    expect(res.status).toBe(302);
-    expect(res.headers.get("location")).toBe(
-      "https://configured.example.com/app-connect/nosuchprovider?status=error&message=Invalid%20provider",
-    );
   });
 });

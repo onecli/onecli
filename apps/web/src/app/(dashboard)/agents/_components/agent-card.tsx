@@ -49,8 +49,9 @@ import {
   useRenameAgent,
   useSetDefaultAgent,
 } from "@/hooks/use-agents";
-import type { SecretMode } from "@onecli/api/services/agent-service";
-import { ManageAccessDialog } from "./manage-access-dialog";
+// The read-only credential-access reflection, which reads the v2 policy
+// engine. Shared since step 10 — every edition renders it.
+import { CredentialAccessReflection } from "@/lib/components/policy-reflect";
 
 interface AgentCardProps {
   agent: {
@@ -59,9 +60,7 @@ interface AgentCardProps {
     identifier: string;
     accessToken: string;
     isDefault: boolean;
-    secretMode: SecretMode;
     createdAt: Date;
-    _count: { agentSecrets: number; agentAppConnections: number };
   };
   autoOpenAccess?: boolean;
 }
@@ -94,16 +93,6 @@ export const AgentCard = ({ agent, autoOpenAccess }: AgentCardProps) => {
 
   const handleSetDefault = () => setDefaultMutation.mutate(agent.id);
 
-  const accessLabel = (() => {
-    if (agent.secretMode !== "selective") return "All credentials";
-    const s = agent._count.agentSecrets;
-    const a = agent._count.agentAppConnections;
-    const parts: string[] = [];
-    if (s > 0) parts.push(`${s} ${s === 1 ? "secret" : "secrets"}`);
-    if (a > 0) parts.push(`${a} ${a === 1 ? "app" : "apps"}`);
-    return parts.length > 0 ? parts.join(", ") : "No credentials";
-  })();
-
   return (
     <Card className="p-5">
       <div className="flex items-start justify-between gap-4">
@@ -130,7 +119,7 @@ export const AgentCard = ({ agent, autoOpenAccess }: AgentCardProps) => {
               className="text-muted-foreground hover:text-foreground inline-flex items-center gap-1.5 transition-colors"
             >
               <KeyRound className="size-3" />
-              {accessLabel}
+              Credential access
             </button>
           </div>
         </div>
@@ -153,7 +142,7 @@ export const AgentCard = ({ agent, autoOpenAccess }: AgentCardProps) => {
             </DropdownMenuItem>
             <DropdownMenuItem onSelect={() => setSecretsDialogOpen(true)}>
               <KeyRound className="size-4" />
-              Manage access
+              Credential access
             </DropdownMenuItem>
             <DropdownMenuItem onSelect={() => setRotateDialogOpen(true)}>
               <RotateCw className="size-4" />
@@ -293,8 +282,8 @@ export const AgentCard = ({ agent, autoOpenAccess }: AgentCardProps) => {
         </DialogContent>
       </Dialog>
 
-      <ManageAccessDialog
-        agent={agent}
+      <CredentialAccessReflection
+        agent={{ id: agent.id, name: agent.name }}
         open={secretsDialogOpen}
         onOpenChange={setSecretsDialogOpen}
       />

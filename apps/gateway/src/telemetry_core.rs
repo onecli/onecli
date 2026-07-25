@@ -85,6 +85,9 @@ pub(crate) struct RequestEvent {
     /// `None` for non-budgeted requests; always `None` in OSS.
     #[allow(dead_code)] // read by cloud telemetry (budget flush), unused in OSS
     pub budget_charge: Option<BudgetCharge>,
+    /// The v2 policy rule that decided this request (rule- or default-decided).
+    /// `None` for plain allows and whenever the legacy path decided.
+    pub matched_rule: Option<crate::policy::MatchedRule>,
 }
 
 pub(crate) static SENDER: OnceLock<mpsc::Sender<RequestEvent>> = OnceLock::new();
@@ -140,6 +143,8 @@ pub(crate) struct BatchColumns {
     pub statuses: Vec<i32>,
     pub latencies: Vec<i32>,
     pub injections: Vec<i32>,
+    #[allow(dead_code)] // bound only by the cloud INSERT; the OSS column stays NULL
+    pub matched_rule_logical_ids: Vec<Option<String>>,
 }
 
 pub(crate) fn extract_columns(events: &[&RequestEvent]) -> BatchColumns {
@@ -161,6 +166,10 @@ pub(crate) fn extract_columns(events: &[&RequestEvent]) -> BatchColumns {
         statuses: events.iter().map(|e| e.status as i32).collect(),
         latencies: events.iter().map(|e| e.latency_ms as i32).collect(),
         injections: events.iter().map(|e| e.injection_count as i32).collect(),
+        matched_rule_logical_ids: events
+            .iter()
+            .map(|e| e.matched_rule.as_ref().map(|m| m.logical_id.clone()))
+            .collect(),
     }
 }
 
@@ -188,6 +197,7 @@ mod tests {
             existing_log_id: None,
             log_id: None,
             budget_charge: None,
+            matched_rule: None,
         }
     }
 
