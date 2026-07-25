@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.43.1](https://github.com/onecli/onecli/compare/v1.43.0...v1.43.1) (2026-07-25)
+
+
+### Bug Fixes
+
+* **gateway:** send client_id on OpenAI OAuth token refresh ([#434](https://github.com/onecli/onecli/issues/434)) ([f8179ac](https://github.com/onecli/onecli/commit/f8179ac80e003dacd16a0e4dfee2f0db330211bb))
+* resolve public URLs from what we configured, not from request headers ([#451](https://github.com/onecli/onecli/issues/451)) ([a9799ca](https://github.com/onecli/onecli/commit/a9799ca0b4a7fb91ed29f7f7241f29f418090496))
+
 ## [1.43.0](https://github.com/onecli/onecli/compare/v1.42.0...v1.43.0) (2026-07-25)
 
 
