@@ -28,6 +28,23 @@ export const GATEWAY_API_URL =
 export const GATEWAY_BASE_URL =
   process.env.GATEWAY_BASE_URL ?? "host.docker.internal:10255";
 
+// The URL the API server itself uses to reach the gateway for server-to-server
+// calls (e.g. cache invalidation) — the gateway's own service endpoint. This is
+// distinct from GATEWAY_API_URL, which is the URL *advertised* to outside
+// callers (the SDK's approval poller and the browser). The two coincide unless
+// an operator remaps host ports to run two stacks on one host: then the API
+// still reaches the co-located gateway on its fixed in-container port, while the
+// advertised URL tracks the host mapping. Falls back to GATEWAY_API_URL so
+// single-stack self-hosted and remote-gateway deployments (the hosted "cloud"
+// edition, or a self-hosted split gateway) are unaffected.
+//
+// NOTE: a cleaner fix would rename GATEWAY_API_URL -> GATEWAY_PUBLIC_URL, since
+// what that var really holds is the *advertised* URL and this new one is the
+// true "gateway API URL". That is a bigger, breaking-ish change — it repurposes
+// a public env var the cloud edition sets — so this stays additive instead.
+export const GATEWAY_SERVICE_URL =
+  process.env.GATEWAY_SERVICE_URL ?? GATEWAY_API_URL;
+
 // ── Edition ─────────────────────────────────────────────────────────────
 
 /** Parsed build edition + variant (single source of truth). */

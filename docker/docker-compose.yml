@@ -35,7 +35,19 @@ services:
       DATABASE_URL: postgresql://${POSTGRES_USER:-onecli}:${POSTGRES_PASSWORD:-onecli}@postgres:5432/${POSTGRES_DB:-onecli}
       NEXTAUTH_SECRET: ${NEXTAUTH_SECRET:-}
       APP_URL: http://${ONECLI_BIND_HOST:-127.0.0.1}:${ONECLI_APP_PORT:-10254}
+      # URL advertised to *outside* callers (SDK approval poller, browser).
+      # Tracks the host-published gateway port.
       GATEWAY_API_URL: http://${ONECLI_BIND_HOST:-127.0.0.1}:${ONECLI_GATEWAY_PORT:-10255}
+      # Host:port the agent containers put in HTTPS_PROXY. Reaches this host via
+      # host.docker.internal on the *published* port, so it must track
+      # ONECLI_GATEWAY_PORT — otherwise agents in a port-offset second stack dial
+      # the default 10255 and hit nothing.
+      GATEWAY_BASE_URL: host.docker.internal:${ONECLI_GATEWAY_PORT:-10255}
+      # Where the API server reaches the gateway for server-to-server calls
+      # (cache invalidation). The gateway always listens on 10255 inside this
+      # container regardless of host port remapping, so this stays fixed and is
+      # independent of ONECLI_GATEWAY_PORT.
+      GATEWAY_SERVICE_URL: http://127.0.0.1:10255
     volumes:
       - app-data:/app/data
     env_file:
