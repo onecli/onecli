@@ -136,7 +136,7 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use clap::Parser;
-use tracing::info;
+use tracing::{info, warn};
 use tracing_subscriber::EnvFilter;
 
 use crate::ca::CertificateAuthority;
@@ -206,6 +206,20 @@ async fn main() -> Result<()> {
         demo = caps.demo,
         "starting onecli-gateway"
     );
+
+    // The gateway puts absolute links into the responses agents relay to humans
+    // ("open this URL to connect the app"). It answers proxy traffic, so unlike
+    // the web app it has no incoming browser request to derive its own address
+    // from — APP_URL is the only thing that can tell it. Say so once, loudly,
+    // rather than emitting links that look real and go nowhere.
+    if !gateway::response::app_url_is_configured() {
+        warn!(
+            fallback = gateway::response::DASHBOARD_URL_FALLBACK,
+            "APP_URL is not set — links in agent-facing responses will point at \
+             the fallback and will not open for anyone reaching OneCLI on a \
+             different address. Set APP_URL to the URL users browse to."
+        );
+    }
 
     // Load or generate CA
     let ca = CertificateAuthority::load_or_generate(&data_dir).await?;

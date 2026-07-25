@@ -29,7 +29,9 @@ pub(crate) mod hooks;
 #[path = "ee/hooks.rs"]
 pub(crate) mod hooks;
 mod mitm;
-mod response;
+// `pub(crate)` so `main` can report at startup whether dashboard links will be
+// built from a configured APP_URL or from the fallback.
+pub(crate) mod response;
 mod transforms;
 mod tunnel;
 mod websocket;

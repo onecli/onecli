@@ -20,15 +20,40 @@ pub(super) fn proxy_auth_required() -> Response<axum::body::Body> {
 /// Response body type used by [`super::forward::forward_request`].
 pub(crate) type ForwardBody<S> = Either<Full<Bytes>, S>;
 
-/// Resolve the OneCLI dashboard base URL from `APP_URL`,
-/// falling back to `http://localhost:10254`. Cached after first call.
+/// Where dashboard links point when `APP_URL` says nothing. Right for a
+/// loopback install, wrong for anyone reaching OneCLI on another address —
+/// which is why `main` warns at startup rather than letting it pass silently.
+pub(crate) const DASHBOARD_URL_FALLBACK: &str = "http://localhost:10254";
+
+/// The configured public URL, or `None` when there isn't one.
+///
+/// Present-but-blank counts as absent: an `APP_URL=` line, or a compose
+/// passthrough that resolved to nothing, must not read as configuration. Mirrors
+/// `configuredAppUrl()` on the Node side so both halves agree on what "set"
+/// means. Split out from [`dashboard_url`] so it is testable — that one caches
+/// in a `OnceLock` and cannot be re-evaluated under a different environment.
+fn normalize_app_url(raw: Option<&str>) -> Option<String> {
+    let trimmed = raw?.trim().trim_end_matches('/');
+    (!trimmed.is_empty()).then(|| trimmed.to_string())
+}
+
+/// Whether the dashboard links are built from a configured `APP_URL` or from
+/// the fallback. Drives the startup warning in `main`.
+///
+/// Deliberately derived from [`dashboard_url`] rather than re-reading the
+/// environment: the warning then describes the value actually in use, and cannot
+/// drift from it if the env changes after the cache is populated.
+pub(crate) fn app_url_is_configured() -> bool {
+    dashboard_url() != DASHBOARD_URL_FALLBACK
+}
+
+/// Resolve the OneCLI dashboard base URL from `APP_URL`, falling back to
+/// [`DASHBOARD_URL_FALLBACK`]. Cached after first call.
 pub(crate) fn dashboard_url() -> &'static str {
     static URL: std::sync::OnceLock<String> = std::sync::OnceLock::new();
     URL.get_or_init(|| {
-        std::env::var("APP_URL")
-            .unwrap_or_else(|_| "http://localhost:10254".to_string())
-            .trim_end_matches('/')
-            .to_string()
+        normalize_app_url(std::env::var("APP_URL").ok().as_deref())
+            .unwrap_or_else(|| DASHBOARD_URL_FALLBACK.to_string())
     })
 }
 
@@ -465,6 +490,50 @@ mod tests {
 
     type TestBody =
         ForwardBody<futures_util::stream::Empty<Result<hyper::body::Frame<Bytes>, reqwest::Error>>>;
+
+    // A blank value must read as "unconfigured", not as a configured empty
+    // string — otherwise every dashboard link becomes "/connections" with no
+    // host, and the startup warning that would have flagged it stays quiet.
+    #[test]
+    fn normalize_app_url_treats_blank_as_unset() {
+        assert_eq!(normalize_app_url(None), None);
+        assert_eq!(normalize_app_url(Some("")), None);
+        assert_eq!(normalize_app_url(Some("   ")), None);
+        assert_eq!(normalize_app_url(Some("\t\n")), None);
+        // A lone slash trims to nothing; it is not a URL.
+        assert_eq!(normalize_app_url(Some("/")), None);
+    }
+
+    #[test]
+    fn normalize_app_url_trims_whitespace_and_trailing_slashes() {
+        assert_eq!(
+            normalize_app_url(Some("  https://onecli.example.com//  ")),
+            Some("https://onecli.example.com".to_string())
+        );
+        assert_eq!(
+            normalize_app_url(Some("http://172.17.0.1:10254")),
+            Some("http://172.17.0.1:10254".to_string())
+        );
+    }
+
+    // `main` branches on this to decide whether to warn. Asserting the two agree
+    // is what keeps the warning honest: if `dashboard_url` ever resolved the
+    // fallback while this reported "configured", the operator would be told
+    // nothing while every link pointed at localhost.
+    //
+    // Env-free: `dashboard_url` caches in a `OnceLock`, so whichever value this
+    // process resolved first is the one under test either way — and mutating
+    // APP_URL here would race the rest of the suite.
+    #[test]
+    fn app_url_is_configured_agrees_with_the_url_actually_in_use() {
+        assert_eq!(
+            app_url_is_configured(),
+            dashboard_url() != DASHBOARD_URL_FALLBACK
+        );
+        if !app_url_is_configured() {
+            assert_eq!(dashboard_url(), DASHBOARD_URL_FALLBACK);
+        }
+    }
 
     #[test]
     fn proxy_auth_required_has_correct_status_and_header() {

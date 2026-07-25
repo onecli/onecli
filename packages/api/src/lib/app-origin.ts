@@ -66,6 +66,31 @@ export const configuredAppUrl = (): string | undefined =>
   )?.replace(/\/+$/, "");
 
 /**
+ * Validate an origin that reached us as data rather than as request headers —
+ * today, the one signed into the OAuth state at `/authorize`.
+ *
+ * Returns the normalized `scheme://host[:port]`, or `undefined` for anything
+ * that is not a well-formed http(s) origin (including non-strings). Same host
+ * rules as `originFromHeaders`, so the two agree on what an origin may look
+ * like, and `javascript:`/`data:` can never survive into a redirect.
+ *
+ * Fail-*soft* on purpose: a bad value falls through to the caller's next
+ * fallback rather than stranding the user mid-connect. Tampering is not the
+ * threat model here — a modified state fails its HMAC long before this runs, so
+ * a malformed value means we signed something malformed, which is our bug.
+ */
+export const normalizeOrigin = (value: unknown): string | undefined => {
+  if (typeof value !== "string") return undefined;
+  const match = /^(https?):\/\/(.+)$/i.exec(value.trim().replace(/\/+$/, ""));
+  const [, scheme, host] = match ?? [];
+  // `HOST_PATTERN` allows no `/`, `@` or `?`, so a path, query, or `user:pass@`
+  // prefix lands in `host` and is rejected here rather than surviving into a
+  // redirect — the greedy `.+` above exists to make that happen.
+  if (!scheme || !host || !HOST_PATTERN.test(host)) return undefined;
+  return `${scheme.toLowerCase()}://${host}`;
+};
+
+/**
  * Origin (scheme + host) the client used to reach us, or `undefined` when the
  * headers carry no usable host.
  *

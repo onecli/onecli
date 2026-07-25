@@ -35,11 +35,15 @@ vi.hoisted(() => {
 vi.mock("@onecli/db", () => ({ Prisma: {}, db: {} }));
 
 vi.mock("../apps/registry", () => ({
-  getApp: () => undefined,
+  getApp: (id: string) =>
+    id === "signedapp"
+      ? { id, name: id, available: true, connectionMethod: { type: "oauth" } }
+      : undefined,
   getApps: () => [],
 }));
 
 import { createApiApp } from "../app";
+import { signOAuthState, generateNonce } from "../lib/oauth-state";
 
 describe("oauth callback redirect origin (split API/dashboard hosts)", () => {
   let app: Hono<ApiEnv>;
@@ -64,6 +68,28 @@ describe("oauth callback redirect origin (split API/dashboard hosts)", () => {
     expect(res.status).toBe(302);
     expect(res.headers.get("location")).toBe(
       `${APP_ORIGIN}/app-connect/nosuchprovider?status=error&message=Invalid%20provider`,
+    );
+    expect(res.headers.get("location")).not.toContain(API_ORIGIN);
+  });
+
+  // An origin signed into the state must not become a back door around the one
+  // setting that makes this deployment shape work. Even if a future change
+  // signed the API origin here, the configured APP_URL has to keep winning.
+  it("keeps APP_URL ahead of an origin signed into the state", async () => {
+    const state = signOAuthState({
+      provider: "signedapp",
+      nonce: generateNonce(),
+      origin: API_ORIGIN,
+    });
+
+    const res = await app.request(
+      `/v1/apps/signedapp/callback?state=${encodeURIComponent(state)}`,
+      { headers: { host: "api.example.com" } },
+    );
+
+    expect(res.status).toBe(302);
+    expect(res.headers.get("location")).toBe(
+      `${APP_ORIGIN}/app-connect/signedapp?status=error&message=Missing%20project%20in%20state`,
     );
     expect(res.headers.get("location")).not.toContain(API_ORIGIN);
   });

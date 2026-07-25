@@ -410,10 +410,14 @@ export const appRoutes = () => {
       const rawAgentName = c.req.query("agent_name");
       const agentName = rawAgentName ? rawAgentName.slice(0, 128) : undefined;
 
+      // Decide where the browser goes *after* consent here, at the authenticated
+      // end, and sign it: the callback is unauthenticated, so re-deriving it
+      // there from request headers lets the caller influence the destination.
       const state = signOAuthState({
         projectId,
         provider,
         nonce: generateNonce(),
+        origin: getAppOrigin(c.req.raw),
         ...(connectionId ? { connectionId } : {}),
         ...(agentName ? { agentName } : {}),
       });
@@ -460,11 +464,30 @@ export const appRoutes = () => {
   app.get("/:provider/callback", async (c) => {
     const provider = c.req.param("provider")!;
     const apiOrigin = getRequestOrigin(c.req.raw);
+
+    // Resolve the state before anything else can redirect or render. It arrives
+    // in the query, or in the `oauth_state` cookie `/authorize` set on this exact
+    // path (SameSite=Lax, so the provider's top-level GET still carries it) —
+    // which is why the fragment-bridge branch below can rely on it even though
+    // its provider returns everything else in the URL fragment. That branch
+    // renders the origin inside a <script>, so it is the last place that should
+    // be trusting request headers.
+    const stateParam = c.req.query("state") ?? getCookie(c, "oauth_state");
+    const state = stateParam ? verifyOAuthState(stateParam) : null;
+    // Only a state this request would actually accept gets to choose the
+    // destination — never one we are about to reject as belonging to another
+    // provider.
+    const signedOrigin =
+      state?.provider === provider ? state.origin : undefined;
+
     // Two different questions, and conflating them is what broke this before.
     // `apiOrigin` is who answered the callback — it must build the redirect_uri
     // for the token exchange below. `appOrigin` is where the browser goes next,
-    // which is a dashboard page and may live on another host entirely.
-    const appOrigin = getAppOrigin(c.req.raw);
+    // which is a dashboard page and may live on another host entirely, so it
+    // comes from the origin committed to at `/authorize` rather than from this
+    // unauthenticated request's headers. A state minted before that field
+    // existed leaves it undefined and resolves exactly as it did before.
+    const appOrigin = getAppOrigin(c.req.raw, signedOrigin);
 
     const appDef = getApp(provider);
     if (
@@ -499,12 +522,11 @@ export const appRoutes = () => {
         return errorRedirect("Invalid provider");
       }
 
-      const stateParam = c.req.query("state") ?? getCookie(c, "oauth_state");
+      // Both resolved at the top so `appOrigin` could be derived from the state;
+      // the checks stay here so the error responses are unchanged.
       if (!stateParam) {
         return errorRedirect("Missing state parameter");
       }
-
-      const state = verifyOAuthState(stateParam);
       if (!state || state.provider !== provider) {
         return errorRedirect("Invalid state parameter");
       }

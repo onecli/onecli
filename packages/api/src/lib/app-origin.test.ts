@@ -1,5 +1,9 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { configuredAppUrl, originFromHeaders } from "./app-origin";
+import {
+  configuredAppUrl,
+  normalizeOrigin,
+  originFromHeaders,
+} from "./app-origin";
 
 describe("configuredAppUrl", () => {
   const orig = {
@@ -48,6 +52,64 @@ describe("configuredAppUrl", () => {
     process.env.APP_URL = "";
     process.env.NEXT_PUBLIC_APP_URL = "https://public.example.com";
     expect(configuredAppUrl()).toBe("https://public.example.com");
+  });
+});
+
+describe("normalizeOrigin", () => {
+  it("accepts http and https origins, with ports and IP literals", () => {
+    expect(normalizeOrigin("https://onecli.example.com")).toBe(
+      "https://onecli.example.com",
+    );
+    expect(normalizeOrigin("http://192.168.1.5:10254")).toBe(
+      "http://192.168.1.5:10254",
+    );
+    expect(normalizeOrigin("http://[::1]:10254")).toBe("http://[::1]:10254");
+  });
+
+  it("strips trailing slashes and lowercases the scheme", () => {
+    expect(normalizeOrigin("HTTPS://onecli.example.com//")).toBe(
+      "https://onecli.example.com",
+    );
+  });
+
+  // Non-strings reach here whenever a state was signed by another release, or
+  // simply never carried an origin — `undefined` is the normal, expected answer.
+  it("is undefined for anything that is not a string", () => {
+    for (const bad of [undefined, null, 42, {}, ["https://x.example"]]) {
+      expect(normalizeOrigin(bad)).toBeUndefined();
+    }
+  });
+
+  it("rejects non-http(s) schemes and bare hosts", () => {
+    for (const bad of [
+      "javascript:alert(1)",
+      "data:text/html,<script>alert(1)</script>",
+      "ftp://example.com",
+      "onecli.example.com",
+      "//example.com",
+      "",
+    ]) {
+      expect(normalizeOrigin(bad)).toBeUndefined();
+    }
+  });
+
+  // Same host rules as originFromHeaders, so a value that would be rejected
+  // coming from a header cannot sneak in via the state instead.
+  it("rejects hosts that aren't syntactically hosts", () => {
+    for (const bad of [
+      "https://evil</script><script>alert(1)</script>",
+      'https://evil"+alert(1)+"',
+      "https://evil.com/path",
+      "https://evil com",
+      // userinfo — the classic "looks like our host" phishing shape
+      "https://onecli.example.com@evil.com",
+      "https://user:pass@evil.com",
+      // a query or fragment would otherwise ride along into the redirect
+      "https://evil.com?next=x",
+      "https://evil.com#x",
+    ]) {
+      expect(normalizeOrigin(bad)).toBeUndefined();
+    }
   });
 });
 

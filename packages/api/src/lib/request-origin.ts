@@ -1,6 +1,10 @@
 import { IS_CLOUD } from "./env";
 import { getSelfUrl } from "../providers/self-url";
-import { configuredAppUrl, originFromHeaders } from "./app-origin";
+import {
+  configuredAppUrl,
+  normalizeOrigin,
+  originFromHeaders,
+} from "./app-origin";
 
 /**
  * Derive the public origin (scheme + host) from an incoming HTTP request.
@@ -44,6 +48,20 @@ export const getRequestOrigin = (request: Request): string => {
  *
  * Reach for this, not `getRequestOrigin`, whenever the result becomes a
  * `Location` header or a link a human will click.
+ *
+ * `signedOrigin` is an origin recovered from data we signed earlier in the same
+ * flow — the OAuth state minted at the authenticated `/authorize`. Preferring it
+ * over `request` matters because the OAuth *callback* is unauthenticated: taking
+ * the answer decided at the trusted end keeps a forged `X-Forwarded-Host` on the
+ * callback from steering where the browser lands. It still loses to a configured
+ * `APP_URL`, which is the only thing that can be right when the API and the
+ * dashboard are on different hosts. Absent, unparseable, or signed by a release
+ * that predates it, it drops out and the behavior is exactly as before.
  */
-export const getAppOrigin = (request: Request): string =>
-  configuredAppUrl() ?? getRequestOrigin(request);
+export const getAppOrigin = (
+  request: Request,
+  signedOrigin?: unknown,
+): string =>
+  configuredAppUrl() ??
+  normalizeOrigin(signedOrigin) ??
+  getRequestOrigin(request);
