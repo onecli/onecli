@@ -19,6 +19,7 @@ const AWS_ACCESS_KEY_HEADER: &str = "x-onecli-aws-access-key-id";
 const AWS_SECRET_KEY_HEADER: &str = "x-onecli-aws-secret-access-key";
 const AWS_SESSION_TOKEN_HEADER: &str = "x-onecli-aws-session-token";
 const AWS_REGION_HEADER: &str = "x-onecli-aws-region";
+const AWS_SERVICE_HEADER: &str = "x-onecli-aws-service";
 
 #[derive(Clone)]
 pub(crate) struct AwsCredentials {
@@ -26,6 +27,10 @@ pub(crate) struct AwsCredentials {
     pub secret_access_key: String,
     pub session_token: Option<String>,
     pub region: String,
+    /// Explicit signing service (e.g. `s3`). When set, it overrides hostname
+    /// parsing so S3-compatible endpoints (Hetzner, R2, B2, MinIO) can be
+    /// signed. `None` for AWS hosts, which are parsed from the hostname.
+    pub service: Option<String>,
 }
 
 /// Extract and remove AWS credentials from internal headers.
@@ -49,6 +54,10 @@ pub(crate) fn extract_credentials(headers: &mut hyper::HeaderMap) -> Option<AwsC
         .remove(AWS_SESSION_TOKEN_HEADER)
         .and_then(|v| v.to_str().ok().map(|s| s.to_string()));
 
+    let service = headers
+        .remove(AWS_SERVICE_HEADER)
+        .and_then(|v| v.to_str().ok().map(|s| s.to_string()));
+
     headers.remove(AWS_ACCESS_KEY_HEADER);
     headers.remove(AWS_SECRET_KEY_HEADER);
     headers.remove(AWS_REGION_HEADER);
@@ -58,6 +67,7 @@ pub(crate) fn extract_credentials(headers: &mut hyper::HeaderMap) -> Option<AwsC
         secret_access_key,
         session_token,
         region,
+        service,
     })
 }
 
@@ -128,7 +138,10 @@ pub(crate) fn sign_request(
     creds: &AwsCredentials,
     hostname: &str,
 ) -> anyhow::Result<()> {
-    let (service, region) = parse_service_region(hostname, &creds.region);
+    let (service, region) = match creds.service.as_deref() {
+        Some(service) if !service.is_empty() => (service, creds.region.as_str()),
+        _ => parse_service_region(hostname, &creds.region),
+    };
 
     headers.remove("authorization");
     headers.remove("x-amz-date");
@@ -297,6 +310,70 @@ mod tests {
     }
 
     #[test]
+    fn sign_s3_compatible_host_with_explicit_service() {
+        // A non-AWS S3 endpoint (Hetzner) whose hostname can't be parsed for
+        // service/region: the explicit `service` overrides hostname parsing so
+        // the request is signed as S3 in the configured region.
+        let creds = AwsCredentials {
+            access_key_id: "AKIAIOSFODNN7EXAMPLE".to_string(),
+            secret_access_key: "wJalrXUtnFEMI".to_string(),
+            session_token: None,
+            region: "eu-central-1".to_string(),
+            service: Some("s3".to_string()),
+        };
+        let mut headers = hyper::HeaderMap::new();
+        sign_request(
+            "GET",
+            "https://nbg1.your-objectstorage.com/bucket/key",
+            &mut headers,
+            b"",
+            &creds,
+            "nbg1.your-objectstorage.com",
+        )
+        .expect("signing should succeed");
+
+        let auth = headers
+            .get("authorization")
+            .and_then(|v| v.to_str().ok())
+            .expect("authorization header present");
+        // Credential scope must name the S3 service in the configured region,
+        // proving the explicit service won over hostname parsing.
+        assert!(
+            auth.contains("/eu-central-1/s3/aws4_request"),
+            "unexpected credential scope: {auth}"
+        );
+        // S3 requires the payload hash header.
+        assert!(headers.contains_key("x-amz-content-sha256"));
+    }
+
+    #[test]
+    fn explicit_service_overrides_aws_hostname() {
+        // Even on an AWS-looking host, an explicit service is honored verbatim.
+        let creds = AwsCredentials {
+            access_key_id: "AKIAIOSFODNN7EXAMPLE".to_string(),
+            secret_access_key: "wJalrXUtnFEMI".to_string(),
+            session_token: None,
+            region: "us-west-2".to_string(),
+            service: Some("s3".to_string()),
+        };
+        let mut headers = hyper::HeaderMap::new();
+        sign_request(
+            "GET",
+            "https://example.s3.amazonaws.com/o",
+            &mut headers,
+            b"",
+            &creds,
+            "example.s3.amazonaws.com",
+        )
+        .expect("signing should succeed");
+        let auth = headers
+            .get("authorization")
+            .and_then(|v| v.to_str().ok())
+            .unwrap();
+        assert!(auth.contains("/us-west-2/s3/aws4_request"), "{auth}");
+    }
+
+    #[test]
     fn extract_credentials_removes_headers() {
         let mut headers = hyper::HeaderMap::new();
         headers.insert(
@@ -308,6 +385,7 @@ mod tests {
             HeaderValue::from_static("wJalrXUtnFEMI"),
         );
         headers.insert(AWS_REGION_HEADER, HeaderValue::from_static("us-east-1"));
+        headers.insert(AWS_SERVICE_HEADER, HeaderValue::from_static("s3"));
         headers.insert("content-type", HeaderValue::from_static("application/json"));
 
         let creds = extract_credentials(&mut headers).expect("should extract");
@@ -315,11 +393,13 @@ mod tests {
         assert_eq!(creds.secret_access_key, "wJalrXUtnFEMI");
         assert_eq!(creds.session_token, None);
         assert_eq!(creds.region, "us-east-1");
+        assert_eq!(creds.service.as_deref(), Some("s3"));
 
         assert!(!headers.contains_key(AWS_ACCESS_KEY_HEADER));
         assert!(!headers.contains_key(AWS_SESSION_TOKEN_HEADER));
         assert!(!headers.contains_key(AWS_SECRET_KEY_HEADER));
         assert!(!headers.contains_key(AWS_REGION_HEADER));
+        assert!(!headers.contains_key(AWS_SERVICE_HEADER));
         assert!(headers.contains_key("content-type"));
     }
 
