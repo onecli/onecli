@@ -1,5 +1,17 @@
 # Changelog
 
+## [1.43.0](https://github.com/onecli/onecli/compare/v1.42.0...v1.43.0) (2026-07-25)
+
+
+### Features
+
+* drop the legacy policy model, convert to v2 rules on boot ([#448](https://github.com/onecli/onecli/issues/448)) ([345ac58](https://github.com/onecli/onecli/commit/345ac585fdcd7dc4b05b36236022cbb4d4367b91))
+
+
+### Bug Fixes
+
+* **api:** resolve the OAuth callback's app origin from configured APP_URL ([#421](https://github.com/onecli/onecli/issues/421)) ([8d11172](https://github.com/onecli/onecli/commit/8d111722c0cab2a019c4727d6fd42fdb90946806))
+
 ## [1.42.0](https://github.com/onecli/onecli/compare/v1.41.0...v1.42.0) (2026-07-23)
 
 
