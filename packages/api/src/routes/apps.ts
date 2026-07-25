@@ -21,9 +21,9 @@ import {
   verifyOAuthState,
   generateNonce,
 } from "../lib/oauth-state";
-import { APP_URL, NODE_ENV } from "../lib/env";
+import { NODE_ENV } from "../lib/env";
 import { dashboardUrl } from "../lib/dashboard-url";
-import { getRequestOrigin } from "../lib/request-origin";
+import { getRequestOrigin, getAppOrigin } from "../lib/request-origin";
 import { buildFragmentBridgeHtml } from "../lib/fragment-bridge";
 import {
   invalidateGatewayCache,
@@ -323,7 +323,14 @@ export const appRoutes = () => {
 
     const hint = isConfigured
       ? `Your MCP server needs local credential stub files to start. Create them in the format and location the MCP server expects, but use 'onecli-managed' as a placeholder for all secrets. See ${docsBaseURL}/${provider}.md for examples (fallback: ${docsBaseURL}/general-app.md ). The OneCLI gateway handles real OAuth token exchange at request time.`
-      : `This app is not configured yet. Go to ${dashboardUrl(`/connections?connect=${provider}`, { projectId })} to set up your credentials.`;
+      : // The caller's origin is the fallback so an unconfigured self-hosted
+        // instance hands out a link that actually resolves for them, rather
+        // than the localhost default nobody but a local dev can open.
+        `This app is not configured yet. Go to ${dashboardUrl(
+          `/connections?connect=${provider}`,
+          { projectId },
+          getRequestOrigin(c.req.raw),
+        )} to set up your credentials.`;
 
     return c.json({
       id: appDef.id,
@@ -453,7 +460,11 @@ export const appRoutes = () => {
   app.get("/:provider/callback", async (c) => {
     const provider = c.req.param("provider")!;
     const apiOrigin = getRequestOrigin(c.req.raw);
-    const appOrigin = APP_URL || apiOrigin;
+    // Two different questions, and conflating them is what broke this before.
+    // `apiOrigin` is who answered the callback — it must build the redirect_uri
+    // for the token exchange below. `appOrigin` is where the browser goes next,
+    // which is a dashboard page and may live on another host entirely.
+    const appOrigin = getAppOrigin(c.req.raw);
 
     const appDef = getApp(provider);
     if (
