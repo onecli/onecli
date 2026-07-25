@@ -62,7 +62,6 @@ import {
   getBlocklistState,
   toggleBlocklistRule,
   activateBlocklistHost,
-  addCustomBlocklistRule,
   removeBlocklistRule,
 } from "../services/app-blocklist-service";
 import { logger } from "../lib/logger";
@@ -919,7 +918,7 @@ export const appRoutes = () => {
     return c.json(states);
   });
 
-  // ── POST /apps/:provider/blocklist ── activate predefined or add custom ─
+  // ── POST /apps/:provider/blocklist ── activate one of the app's hosts ──
   app.post("/:provider/blocklist", authMiddleware, async (c) => {
     const auth = c.get("auth");
     const projectId = requireProjectId(auth);
@@ -930,27 +929,17 @@ export const appRoutes = () => {
     const body = await c.req.json().catch(() => null);
     if (!body) return c.json({ error: "Invalid request body" }, 400);
 
-    let result;
-    if (body.hostId) {
-      result = await activateBlocklistHost(
-        { projectId },
-        provider,
-        body.hostId,
-        appDef.blocklist ?? [],
-      );
-    } else if (body.name && body.hostPattern) {
-      result = await addCustomBlocklistRule(
-        { projectId },
-        provider,
-        body.name,
-        body.hostPattern,
-      );
-    } else {
-      return c.json(
-        { error: "Provide either { hostId } or { name, hostPattern }" },
-        400,
-      );
+    // Blocking an arbitrary host is a policy rule (POST /v1/policy/rules) now;
+    // this surface only toggles the hosts the app itself declares.
+    if (!body.hostId) {
+      return c.json({ error: "Provide { hostId }" }, 400);
     }
+    const result = await activateBlocklistHost(
+      { projectId },
+      provider,
+      body.hostId,
+      appDef.blocklist ?? [],
+    );
 
     invalidateGatewayCache(c.req.raw);
     return c.json(result, 201);

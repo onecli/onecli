@@ -119,14 +119,13 @@ export const PolicyEditor = ({ scope }: PolicyEditorProps) => {
 
   const editableRules = useMemo(
     // Equipment rules (source="equipment") are INJECTION-ONLY — the block/allow
-    // engine drops them BY SOURCE (assemble_v2 / the simulator's load), so their
-    // connection/secret targets never decide — and they are managed via the
-    // agent access UI, not here. Hide them from the block/allow console so
-    // they don't render as unlabeled, un-editable "allow" rows.
-    () =>
-      rules
-        .filter((r) => !r.isDefault && r.source !== "equipment")
-        .filter(matches),
+    // engine drops them BY SOURCE (assemble_v2 / the injection load keeps them,
+    // the decision load doesn't), so their connection/secret targets never
+    // decide. They used to be hidden here because the agent-access dialogs
+    // managed them; those are gone, so hiding them would leave a live credential
+    // grant with no way to revoke it. They render labelled "Credential grant",
+    // not editable, but disable/delete are available.
+    () => rules.filter((r) => !r.isDefault).filter(matches),
     [rules, matches],
   );
 

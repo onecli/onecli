@@ -1,8 +1,9 @@
 "use client";
 
-import { useState } from "react";
-import { Globe, Loader2, Plus, ShieldBan, X } from "lucide-react";
+import { Globe, Loader2, ShieldBan, X } from "lucide-react";
 import { Badge } from "@onecli/ui/components/badge";
+import Link from "next/link";
+import { usePathname } from "next/navigation";
 import { toast } from "sonner";
 import {
   Accordion,
@@ -12,17 +13,13 @@ import {
 } from "@onecli/ui/components/accordion";
 import { Button } from "@onecli/ui/components/button";
 import { Card } from "@onecli/ui/components/card";
-import { Input } from "@onecli/ui/components/input";
-import { Label } from "@onecli/ui/components/label";
-import { Separator } from "@onecli/ui/components/separator";
 import { Switch } from "@onecli/ui/components/switch";
 import {
   useAppBlocklist,
   useToggleBlocklistRule,
   useActivateBlocklistHost,
-  useAddBlocklistRule,
-  useRemoveBlocklistRule,
 } from "@/hooks/use-app-blocklist";
+import { withProjectPrefix } from "@/lib/navigation";
 import type { BlocklistHostState } from "@/lib/api/app-blocklist";
 
 interface AppBlocklistProps {
@@ -104,100 +101,6 @@ const PreviewRow = ({
   </div>
 );
 
-const AddHostForm = ({
-  onAdd,
-  isPending,
-}: {
-  onAdd: (name: string, hostPattern: string) => void;
-  isPending: boolean;
-}) => {
-  const [open, setOpen] = useState(false);
-  const [name, setName] = useState("");
-  const [host, setHost] = useState("");
-
-  const canSubmit = name.trim().length > 0 && host.trim().length > 0;
-
-  const handleSubmit = () => {
-    if (!canSubmit) return;
-    onAdd(name.trim(), host.trim());
-    setName("");
-    setHost("");
-    setOpen(false);
-  };
-
-  if (!open) {
-    return (
-      <button
-        type="button"
-        onClick={() => setOpen(true)}
-        className="flex w-full items-center gap-2 rounded-md border border-dashed border-border/60 px-3 py-2.5 text-sm text-muted-foreground transition-colors hover:border-border hover:text-foreground hover:bg-muted/50"
-      >
-        <Plus className="size-3.5" />
-        Add custom host
-      </button>
-    );
-  }
-
-  return (
-    <div className="rounded-md border bg-muted/30 p-3 space-y-3">
-      <div className="grid grid-cols-2 gap-3">
-        <div className="space-y-1.5">
-          <Label htmlFor="blocklist-name" className="text-xs">
-            Display name
-          </Label>
-          <Input
-            id="blocklist-name"
-            placeholder="e.g. RubyGems"
-            value={name}
-            onChange={(e) => setName(e.target.value)}
-            className="h-8 text-sm"
-            autoFocus
-          />
-        </div>
-        <div className="space-y-1.5">
-          <Label htmlFor="blocklist-host" className="text-xs">
-            Host pattern
-          </Label>
-          <Input
-            id="blocklist-host"
-            placeholder="e.g. rubygems.org"
-            value={host}
-            onChange={(e) => setHost(e.target.value)}
-            className="h-8 text-sm font-mono"
-            onKeyDown={(e) => {
-              if (e.key === "Enter") handleSubmit();
-              if (e.key === "Escape") setOpen(false);
-            }}
-          />
-        </div>
-      </div>
-      <div className="flex items-center justify-end gap-2">
-        <Button
-          variant="ghost"
-          size="sm"
-          className="h-7 text-xs"
-          onClick={() => {
-            setOpen(false);
-            setName("");
-            setHost("");
-          }}
-        >
-          Cancel
-        </Button>
-        <Button
-          size="sm"
-          className="h-7 text-xs"
-          onClick={handleSubmit}
-          disabled={!canSubmit || isPending}
-          loading={isPending}
-        >
-          Block host
-        </Button>
-      </div>
-    </div>
-  );
-};
-
 export const AppBlocklist = ({
   provider,
   hosts,
@@ -209,13 +112,9 @@ export const AppBlocklist = ({
     pageScope,
     isConnected,
   );
+  const pathname = usePathname();
   const toggleMutation = useToggleBlocklistRule(provider, pageScope);
   const activateMutation = useActivateBlocklistHost(provider, pageScope);
-  const addMutation = useAddBlocklistRule(provider, pageScope);
-  const removeMutation = useRemoveBlocklistRule(provider, pageScope);
-
-  const predefinedHosts = states.filter((s) => !s.custom);
-  const customHosts = states.filter((s) => s.custom);
 
   const isOrgLocked = (host: BlocklistHostState) =>
     pageScope === "project" && host.scope === "organization";
@@ -238,25 +137,7 @@ export const AppBlocklist = ({
     }
   };
 
-  const handleAdd = (name: string, hostPattern: string) => {
-    addMutation.mutate(
-      { name, hostPattern },
-      { onSuccess: () => toast.success(`Blocking ${name}`) },
-    );
-  };
-
-  const handleRemove = (host: BlocklistHostState) => {
-    if (!host.ruleId) return;
-    removeMutation.mutate(host.ruleId, {
-      onSuccess: () => toast.success(`Removed ${host.name}`),
-    });
-  };
-
-  const isMutating =
-    toggleMutation.isPending ||
-    activateMutation.isPending ||
-    addMutation.isPending ||
-    removeMutation.isPending;
+  const isMutating = toggleMutation.isPending || activateMutation.isPending;
 
   return (
     <Accordion
@@ -298,7 +179,7 @@ export const AppBlocklist = ({
             ) : (
               <>
                 <div className="divide-y">
-                  {predefinedHosts.map((host) => (
+                  {states.map((host) => (
                     <HostRow
                       key={host.hostId}
                       host={host}
@@ -307,26 +188,17 @@ export const AppBlocklist = ({
                       orgLocked={isOrgLocked(host)}
                     />
                   ))}
-                  {customHosts.length > 0 && (
-                    <>
-                      <Separator />
-                      {customHosts.map((host) => (
-                        <HostRow
-                          key={host.hostId}
-                          host={host}
-                          onToggle={handleToggle}
-                          onRemove={handleRemove}
-                          disabled={isMutating}
-                          orgLocked={isOrgLocked(host)}
-                        />
-                      ))}
-                    </>
-                  )}
                 </div>
-                <AddHostForm
-                  onAdd={handleAdd}
-                  isPending={addMutation.isPending}
-                />
+                <p className="text-muted-foreground text-xs">
+                  To block any other host, add a rule on the{" "}
+                  <Link
+                    href={withProjectPrefix(pathname, "/policy")}
+                    className="underline underline-offset-2 hover:text-foreground"
+                  >
+                    Policy
+                  </Link>{" "}
+                  page.
+                </p>
               </>
             )}
           </Card>

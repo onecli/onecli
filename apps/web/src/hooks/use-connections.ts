@@ -46,33 +46,3 @@ export const useDisconnectConnection = (scope: PageScope = "project") => {
     onError: () => toast.error("Failed to disconnect"),
   });
 };
-
-// Reverse view of agent↔connection access, keyed from the connection side.
-export const useConnectionAgents = (connectionId: string, enabled = true) =>
-  useQuery({
-    queryKey: queryKeys.connections.agents(connectionId),
-    queryFn: () => connections.agents(connectionId),
-    enabled: enabled && connectionId.length > 0,
-  });
-
-// Headless on the gateway cache (the audited API route flushes it server-side
-// via withAudit); the caller shows a single consolidated toast. Invalidates the
-// reverse view plus the agents list, whose "N apps" count changes.
-export const useSetConnectionAgents = () => {
-  const qc = useQueryClient();
-  return useMutation({
-    mutationFn: ({
-      connectionId,
-      agentIds,
-    }: {
-      connectionId: string;
-      agentIds: string[];
-    }) => connections.setAgents(connectionId, agentIds),
-    onSuccess: (_data, { connectionId }) => {
-      qc.invalidateQueries({
-        queryKey: queryKeys.connections.agents(connectionId),
-      });
-      qc.invalidateQueries({ queryKey: queryKeys.agents.all() });
-    },
-  });
-};

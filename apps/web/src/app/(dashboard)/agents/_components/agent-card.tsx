@@ -49,14 +49,9 @@ import {
   useRenameAgent,
   useSetDefaultAgent,
 } from "@/hooks/use-agents";
-import type { SecretMode } from "@onecli/api/services/agent-service";
-import { ManageAccessDialog } from "./manage-access-dialog";
-// The step-9.7b read-only reflection (null stub in OSS; real under the
-// POLICY_REFLECT alias) — rendered only when the flag is threaded in.
-import {
-  CredentialAccessReflection,
-  REFLECTIONS_AVAILABLE,
-} from "@/lib/components/policy-reflect";
+// The read-only credential-access reflection, which reads the v2 policy
+// engine. Shared since step 10 — every edition renders it.
+import { CredentialAccessReflection } from "@/lib/components/policy-reflect";
 
 interface AgentCardProps {
   agent: {
@@ -65,21 +60,12 @@ interface AgentCardProps {
     identifier: string;
     accessToken: string;
     isDefault: boolean;
-    secretMode: SecretMode;
     createdAt: Date;
-    _count: { agentSecrets: number; agentAppConnections: number };
   };
   autoOpenAccess?: boolean;
-  /** Step 9.7b: flag-ON, the credential-access editor renders as the
-   * read-only Policy reflection instead (threaded from the RSC page). */
-  policyEditingEnabled?: boolean;
 }
 
-export const AgentCard = ({
-  agent,
-  autoOpenAccess,
-  policyEditingEnabled = false,
-}: AgentCardProps) => {
+export const AgentCard = ({ agent, autoOpenAccess }: AgentCardProps) => {
   const deleteMutation = useDeleteAgent();
   const regenerateMutation = useRegenerateToken();
   const renameMutation = useRenameAgent();
@@ -107,20 +93,6 @@ export const AgentCard = ({
 
   const handleSetDefault = () => setDefaultMutation.mutate(agent.id);
 
-  const accessLabel = (() => {
-    // Flag-ON, Policy rules can grant credentials beyond the equipment
-    // counts — the counts would under-report, so the label goes neutral and
-    // the reflection dialog carries the full truth.
-    if (policyEditingEnabled) return "Credential access";
-    if (agent.secretMode !== "selective") return "All credentials";
-    const s = agent._count.agentSecrets;
-    const a = agent._count.agentAppConnections;
-    const parts: string[] = [];
-    if (s > 0) parts.push(`${s} ${s === 1 ? "secret" : "secrets"}`);
-    if (a > 0) parts.push(`${a} ${a === 1 ? "app" : "apps"}`);
-    return parts.length > 0 ? parts.join(", ") : "No credentials";
-  })();
-
   return (
     <Card className="p-5">
       <div className="flex items-start justify-between gap-4">
@@ -147,7 +119,7 @@ export const AgentCard = ({
               className="text-muted-foreground hover:text-foreground inline-flex items-center gap-1.5 transition-colors"
             >
               <KeyRound className="size-3" />
-              {accessLabel}
+              Credential access
             </button>
           </div>
         </div>
@@ -170,7 +142,7 @@ export const AgentCard = ({
             </DropdownMenuItem>
             <DropdownMenuItem onSelect={() => setSecretsDialogOpen(true)}>
               <KeyRound className="size-4" />
-              {policyEditingEnabled ? "Credential access" : "Manage access"}
+              Credential access
             </DropdownMenuItem>
             <DropdownMenuItem onSelect={() => setRotateDialogOpen(true)}>
               <RotateCw className="size-4" />
@@ -310,19 +282,11 @@ export const AgentCard = ({
         </DialogContent>
       </Dialog>
 
-      {policyEditingEnabled && REFLECTIONS_AVAILABLE ? (
-        <CredentialAccessReflection
-          agent={{ id: agent.id, name: agent.name }}
-          open={secretsDialogOpen}
-          onOpenChange={setSecretsDialogOpen}
-        />
-      ) : (
-        <ManageAccessDialog
-          agent={agent}
-          open={secretsDialogOpen}
-          onOpenChange={setSecretsDialogOpen}
-        />
-      )}
+      <CredentialAccessReflection
+        agent={{ id: agent.id, name: agent.name }}
+        open={secretsDialogOpen}
+        onOpenChange={setSecretsDialogOpen}
+      />
     </Card>
   );
 };

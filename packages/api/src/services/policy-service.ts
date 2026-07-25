@@ -1,6 +1,6 @@
 import { db, Prisma } from "@onecli/db";
 import { ServiceError } from "./errors";
-import { bridgeDerivedSources, isOssEdition } from "../lib/policy-flags";
+import { isOssEdition } from "../lib/policy-flags";
 import { type ResourceScope } from "./resource-scope";
 import { getPolicyValidator, getRuleActionGate } from "../providers";
 import type {
@@ -27,7 +27,7 @@ const RULE_INCLUDE = {
 type RuleRow = Prisma.PolicyRuleV2GetPayload<{ include: typeof RULE_INCLUDE }>;
 
 /** A full policy rule row (identities + targets included) — the currency of the
- * publish/generation machinery, exported for the coherence bridge. */
+ * publish/generation machinery. */
 export type PolicyRuleRow = RuleRow;
 
 export interface PolicyRuleDto {
@@ -106,7 +106,7 @@ const scopeKeyOf = (base: PolicyScopeBase) =>
 // Serialize per-scope publish/default mutations so concurrent callers can't
 // double-create a generation or a second Default Rule. (A partial-unique index
 // on the default is the durable guard — a follow-up hardening.) Exported so the
-// coherence bridge can read + write under one lock.
+// callers can read + write under one lock.
 export const lockScope = (
   tx: Prisma.TransactionClient,
   base: PolicyScopeBase,
@@ -728,7 +728,7 @@ export const createPolicyRule = async (
   );
   try {
     // The max-read + insert run under the per-scope advisory lock every other
-    // priority writer (reorder / publish / rematerialize) takes — without the
+    // priority writer (reorder / publish) takes — without the
     // retired auto-resort re-densifying after every write, an unlocked
     // read-then-append could mint DUPLICATE priorities under concurrency, and
     // tied priorities make the gateway's first-match order nondeterministic.
@@ -950,8 +950,8 @@ export const reorderPolicyRules = async (
   try {
     await db.$transaction(async (tx) => {
       // Validate + write under the per-scope advisory lock publish and the
-      // coherence bridge take, so a reorder can't interleave with a concurrent
-      // snapshot or rematerialization rewriting the same draft.
+      // publish path takes, so a reorder can't interleave with a concurrent
+      // snapshot rewriting the same draft.
       await lockScope(tx, base);
       const draft = await tx.policyRuleV2.findMany({
         where: { ...base, status: "draft", isDefault: false },
@@ -1244,7 +1244,7 @@ export type BackfillTargetInput =
 export interface BackfillRuleInput {
   priority: number;
   isDefault: boolean;
-  /** Rule origin — the coherence bridge re-materializes only the DERIVED sources
+  /** Rule origin — the DERIVED sources
    * (app_permission / blocklist / equipment); custom/default are kept. */
   source: "custom" | "app_permission" | "blocklist" | "default" | "equipment";
   name: string;
@@ -1308,39 +1308,20 @@ export interface BackfillResult {
  * materializes EXISTING, already-entitled policy (not a new user edit), so it
  * bypasses the `RuleActionGate`. Not for user writes — those go through
  * create/update/publish. Callers preserve the translator's `priority` order.
- *
- * `replace: true` is the pre-cutover HEAL path: instead of skipping an
- * already-published scope, it DISCARDS the scope's stored v2 (draft + every
- * published generation) and re-writes it fresh from the current translation. Used
- * to correct a scope diverged by the source-classification bug — an app-permission
- * that falls back to a network target was tagged `source="custom"`, so the bridge
- * both kept it and re-derived it → runaway duplication (root-fixed in the
- * EE translation; this re-tags the already-stored rows). Safe only
- * pre-cutover — the sole caller runs from the boot hook, which fires only while
- * `POLICY_EDITING_ENABLED` is off (after cutover the console, not the old model,
- * is authoritative).
  */
 export const backfillPublishScope = async (
   scope: ResourceScope,
   rules: BackfillRuleInput[],
-  opts?: { replace?: boolean },
 ): Promise<BackfillResult> => {
   const base = policyScope(scope);
   return db.$transaction(
     async (tx) => {
       await lockScope(tx, base);
-      if (opts?.replace) {
-        // Discard the scope's stored v2 (draft + every published generation) so the
-        // fresh translation fully replaces it; identities/targets cascade via their
-        // FK (onDelete: Cascade).
-        await tx.policyRuleV2.deleteMany({ where: base });
-      } else {
-        const published = await tx.policyRuleV2.count({
-          where: { ...base, status: "published" },
-        });
-        if (published > 0) {
-          return { skipped: true, generation: null, ruleCount: 0 };
-        }
+      const published = await tx.policyRuleV2.count({
+        where: { ...base, status: "published" },
+      });
+      if (published > 0) {
+        return { skipped: true, generation: null, ruleCount: 0 };
       }
       for (const r of rules) {
         const common = {
@@ -1400,30 +1381,12 @@ export const backfillPublishScope = async (
   );
 };
 
-// ── Step-5 coherence bridge (persist half) ───────────────────────────────────
-
-/** A derived rule to re-materialize, carrying BOTH priorities: `priority` for
- * the draft insert (interleaved against the DRAFT customs) and
- * `publishPriority` for the published generation (interleaved against the
- * PUBLISHED customs — the two custom sets can differ while edits are staged). */
-export type RematerializedDerivedInput = BackfillRuleInput & {
-  publishPriority: number;
-};
-
-/** The publish half of a rematerialization plan: the CURRENT published
- * generation's rows (read under the same lock) + the new priorities for its
- * custom rows once the fresh derived rules interleave among them. */
-export interface RematerializedPublishPlan {
-  publishedRows: PolicyRuleRow[];
-  publishedCustomPriorities: { id: string; priority: number }[];
-}
-
 export interface LastPublishDto {
   generation: number;
   ruleCount: number;
   appliedAt: Date;
-  /** Who clicked Apply — null for a system publish (the coherence bridge's
-   * rematerialization) or a pre-provenance generation. */
+  /** Who clicked Apply — null for a system publish (the new-scope seeder) or a
+   * pre-provenance generation. */
   appliedBy: { name: string | null; email: string } | null;
 }
 
@@ -1456,255 +1419,4 @@ export const getLastPublish = async (
       ? { name: newest.createdByUser.name, email: newest.createdByUser.email }
       : null,
   };
-};
-
-/** Read the scope's current (max-generation) published rule set. Empty rows +
- * generation 0 when the scope has never published. */
-export const readCurrentPublishedGeneration = async (
-  tx: Prisma.TransactionClient,
-  base: PolicyScopeBase,
-): Promise<{ generation: number; rows: RuleRow[] }> => {
-  const maxGen = await tx.policyRuleV2.aggregate({
-    where: { ...base, status: "published" },
-    _max: { generation: true },
-  });
-  const generation = maxGen._max.generation ?? 0;
-  if (generation === 0) return { generation: 0, rows: [] };
-  const rows = await tx.policyRuleV2.findMany({
-    where: { ...base, status: "published", generation },
-    include: RULE_INCLUDE,
-    orderBy: [{ priority: "asc" }, { id: "asc" }],
-  });
-  return { generation, rows };
-};
-
-/**
- * Build the publish set for a rematerialization — PURE, so it's directly
- * unit-testable. The set is the CURRENT PUBLISHED generation's KEPT rows —
- * everything whose source is NOT in `derivedSources` (customs + the default,
- * and post-adoption any straggler `app_permission` row awaiting its re-tag) —
- * re-prioritized to interleave with the fresh derived (the default's content
- * carried verbatim with its priority normalized below — absent stays absent,
- * which ≡ Allow under the uniform per-level law) plus the fresh derived rows
- * at their publish priorities. The kept set is the COMPLEMENT of the derived
- * list so the two partitions can never disagree. The DRAFT never enters: a
- * user's staged edits cannot reach the published set through a
- * rematerialization — only "Apply Changes" publishes the draft.
- */
-export const buildRematerializedPublishSet = (
-  publishedRows: PolicyRuleRow[],
-  publishedCustomPriorities: { id: string; priority: number }[],
-  freshDerived: { row: PolicyRuleRow; publishPriority: number }[],
-  derivedSources: string[],
-): PolicyRuleRow[] => {
-  const priorityById = new Map(
-    publishedCustomPriorities.map((p) => [p.id, p.priority]),
-  );
-  const kept = publishedRows.filter((r) => !derivedSources.includes(r.source));
-  // The Default Rule is selected by flag, never by priority — but its priority
-  // must still be UNIQUE within the generation: a tie with an explicit row
-  // would make the read-back order (ORDER BY priority) nondeterministic and
-  // silently defeat the skip-if-unchanged compare. One slot past every
-  // explicit priority is deterministic and collision-free.
-  const explicitPriorities = [
-    ...kept
-      .filter((r) => !r.isDefault)
-      .map((r) => priorityById.get(r.id) ?? r.priority),
-    ...freshDerived.map((f) => f.publishPriority),
-  ];
-  const defaultPriority =
-    explicitPriorities.length > 0 ? Math.max(...explicitPriorities) + 1 : 0;
-  const keptRows = kept.map((r) => ({
-    ...r,
-    priority: r.isDefault
-      ? defaultPriority
-      : (priorityById.get(r.id) ?? r.priority),
-  }));
-  const derived = freshDerived.map(({ row, publishPriority }) => ({
-    ...row,
-    priority: publishPriority,
-  }));
-  return [...keptRows, ...derived];
-};
-
-/**
- * The identity-tuple key every rule content signature shares
- * (`publishSetSignature`, the adoption pass's `adoptionRowSignature`, the
- * compaction pass's group key) — ONE definition so the identity model can
- * never silently diverge between them.
- */
-export const identityRowKeys = (
-  identities: {
-    agentId: string | null;
-    agentGroupId: string | null;
-    userId: string | null;
-    groupId: string | null;
-  }[],
-): string[] =>
-  identities
-    .map(
-      (x) =>
-        `${x.agentId ?? ""}|${x.agentGroupId ?? ""}|${x.userId ?? ""}|${x.groupId ?? ""}`,
-    )
-    .sort();
-
-/**
- * Canonical behavior signature of a publish set — PURE. Two sets with the same
- * signature are indistinguishable to the engine, so re-publishing is a no-op.
- * Order is captured positionally (sorted by priority, values then dropped, so
- * absolute renumbering doesn't churn); row `id`s, `logicalId`s (derived ones
- * are regenerated every rematerialization), timestamps, and the publish author
- * are excluded.
- */
-export const publishSetSignature = (rows: PolicyRuleRow[]): string =>
-  JSON.stringify(
-    rows
-      .slice()
-      // The Default Rule's position is meaningless (the engine selects it by
-      // flag) and its stored priority varies by era (backfill: after the
-      // explicit rules; a user Apply: 0) — pin defaults last so a
-      // position-only difference of the default never defeats the skip.
-      .sort((a, b) =>
-        a.isDefault === b.isDefault
-          ? a.priority - b.priority
-          : a.isDefault
-            ? 1
-            : -1,
-      )
-      .map((r) => ({
-        s: r.source,
-        d: r.isDefault,
-        e: r.enabled,
-        n: r.name,
-        de: r.description ?? null,
-        a: r.action,
-        rl: r.rateLimit,
-        rw: r.rateLimitWindow,
-        ra: r.requireApproval,
-        c: r.conditions ?? null,
-        i: identityRowKeys(r.identities),
-        t: r.targets
-          .map((t) =>
-            JSON.stringify({
-              k: t.kind,
-              ap: t.appProvider,
-              at: t.appTools,
-              acs: t.appConnectionScope,
-              ac: t.appConnectionId,
-              si: t.secretId,
-              ss: t.secretScope,
-              h: t.hostPattern,
-              p: t.pathPattern,
-              m: t.method,
-            }),
-          )
-          .sort(),
-      })),
-  );
-
-/**
- * The bridge's persist half — runs INSIDE the caller's transaction (the coherence
- * service holds `lockScope` and reads the old model + kept custom rules under the
- * SAME lock, so the write reflects the state at lock time — no read-then-write
- * race). Replaces the scope's bridge-owned draft rules (`app_permission`/
- * `blocklist`/`equipment`), re-priorities the kept DRAFT custom rules to slot
- * the fresh derived rules around them while preserving the customs' MANUAL
- * relative order (the pinned merge), and publishes a fresh generation
- * built from the CURRENT PUBLISHED customs + default + the fresh derived rules
- * — never from the draft, so a user's staged edits stay staged until they
- * explicitly Apply (`publishPolicy`). Skips the publish entirely when the new
- * set's behavior signature equals the current generation's (no more no-op
- * generations churning the rollback window). Gate-less because it materializes
- * EXISTING, already-entitled policy, not a new user edit.
- *
- * Note: derived rules are delete+re-inserted each run, so each gets a fresh
- * `logicalId`. Blocklist rules never carry a rate limit; app-permission rows CAN
- * (`collapseAction` maps old rate_limit rows to allow+rateLimit) — while they
- * were bridge-derived their counters reset on re-materialization (a pre-existing,
- * window-bounded property); post-adoption they are kept rows with stable
- * logicalIds. Kept rows keep their ids (only priority is updated), so a kept
- * rate rule's counter stays stable.
- */
-export const applyRematerialization = async (
-  tx: Prisma.TransactionClient,
-  base: PolicyScopeBase,
-  derived: RematerializedDerivedInput[],
-  customPriorities: { id: string; priority: number }[],
-  publish: RematerializedPublishPlan,
-): Promise<PublishResult> => {
-  // Replace only the bridge-owned draft rules (the DERIVED sources — see
-  // `bridgeDerivedSources`); everything else stays put. `equipment` (step 8)
-  // is derived from the live equipment model. At EDITING=1 `app_permission`
-  // leaves the derived set (adopted as user-owned custom rules), so straggler
-  // app_permission rows are preserved verbatim, never deleted here.
-  await tx.policyRuleV2.deleteMany({
-    where: {
-      ...base,
-      status: "draft",
-      source: { in: bridgeDerivedSources() },
-    },
-  });
-  const createdIds: string[] = [];
-  for (const d of derived) {
-    const created = await tx.policyRuleV2.create({
-      data: {
-        ...base,
-        status: "draft",
-        generation: 0,
-        priority: d.priority,
-        isDefault: d.isDefault,
-        source: d.source,
-        enabled: true,
-        name: d.name,
-        action: d.action,
-        rateLimit: d.rateLimit ?? null,
-        rateLimitWindow: d.rateLimitWindow ?? null,
-        requireApproval: d.requireApproval,
-        conditions: jsonInput(d.conditions),
-        identities: { create: d.identities.map(identityCreate) },
-        targets: { create: d.targets.map(backfillTargetCreate) },
-      },
-    });
-    createdIds.push(created.id);
-  }
-  // Re-priority the kept custom rules to interleave with the new derived ones.
-  for (const { id, priority } of customPriorities) {
-    await tx.policyRuleV2.update({ where: { id }, data: { priority } });
-  }
-  // Don't create a project default here: under the uniform per-level law an
-  // absent project default ≡ Allow, and the project default is user-owned
-  // (setPolicyDefaultAction) — a persisted one survives rematerialization
-  // untouched (the deleteMany above only clears derived sources). The org
-  // default is ensured because the org terminal must always exist.
-  if (base.scope === "organization") {
-    await ensureDefault(tx, base);
-  }
-  // Publish set = current published customs+default + the fresh derived rows
-  // (re-read with their relations, aligned to the input order by created id).
-  const freshRows = await tx.policyRuleV2.findMany({
-    where: { ...base, id: { in: createdIds } },
-    include: RULE_INCLUDE,
-  });
-  const rowById = new Map(freshRows.map((r) => [r.id, r]));
-  const freshDerived = derived.map((d, i) => {
-    const id = createdIds[i];
-    const row = id === undefined ? undefined : rowById.get(id);
-    if (!row) throw new Error("rematerialized derived row disappeared mid-tx");
-    return { row, publishPriority: d.publishPriority };
-  });
-  const publishRows = buildRematerializedPublishSet(
-    publish.publishedRows,
-    publish.publishedCustomPriorities,
-    freshDerived,
-    bridgeDerivedSources(),
-  );
-  // Skip the no-op publish: identical behavior → keep the current generation.
-  if (
-    publishSetSignature(publishRows) ===
-    publishSetSignature(publish.publishedRows)
-  ) {
-    const generation = publish.publishedRows[0]?.generation ?? 0;
-    return { generation, ruleCount: publish.publishedRows.length };
-  }
-  return snapshotDraftRules(tx, base, publishRows, null);
 };

@@ -1,23 +1,24 @@
-import { policyEditingEnabled } from "@onecli/api/lib/policy-flags";
+import { runLegacyPolicyMigration } from "@onecli/api/services/policy-legacy-migration";
+import { guardUnmigratedPolicy } from "@onecli/api/services/policy-migration-guard";
 
 /**
- * The OSS boot seam — since step 9.5, the REAL release-as-cutover pass: every
- * boot translates any not-yet-cut project's legacy policy state (custom rules
- * + app-permission rows + blocklist + equipment + the org-row `policyMode`)
- * into one atomic published v2 generation, verifies it, and runs the
- * blocklist/equipment bridge sweep. Idempotent (published-generation
- * skip-if-done); the published generation is the gateway's per-project enable
- * signal, so backfill → verify → enforce is structural.
+ * The OSS boot policy seam. `policy_rules_v2` is the only model the gateway
+ * reads since step 10, and it decides Allow on an empty rule set — so an
+ * instance upgrading from a pre-cutover release has to be converted before it
+ * serves a request, or its blocks would silently stop applying.
  *
- * The EE editions (cloud + both onprems) swap this file for the EE backfill
- * (`@/ee/policy-migrate`) via `resolveAlias`; instrumentation calls the seam
- * unconditionally and each impl self-gates on the editing flag —
- * `POLICY_EDITING_ENABLED=0` is the OSS operator rollback (pure legacy, this
- * pass no-ops).
+ * The migration is idempotent (a project with a published generation is
+ * skipped), so this is a no-op on every boot after the first, and it is
+ * TEMPORARY — `services/policy-legacy-migration/README.md` carries the removal
+ * checklist. The guard runs after it as an assertion: anything still carrying
+ * legacy rules with no materialized v2 policy is reported loudly.
+ *
+ * Every EE edition aliases this file away for its own seam, so neither the
+ * conversion nor the guard runs there: cloud was converted in 2026-07 and has
+ * nothing left to carry over. This path is what a self-hosted OSS instance
+ * upgrading across the cutover relies on.
  */
 export const runPolicyMigration = async (): Promise<void> => {
-  if (!policyEditingEnabled()) return;
-  const { runOssPolicyCutover } =
-    await import("@onecli/api/services/policy-oss-cutover");
-  await runOssPolicyCutover();
+  await runLegacyPolicyMigration();
+  await guardUnmigratedPolicy();
 };

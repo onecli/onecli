@@ -41,7 +41,4 @@ export {
   type NewOrgPolicySeeder,
   initNewOrgPolicySeeder,
   getNewOrgPolicySeeder,
-  type PolicyCoherenceBridge,
-  initPolicyCoherenceBridge,
-  getPolicyCoherenceBridge,
 } from "./hooks";

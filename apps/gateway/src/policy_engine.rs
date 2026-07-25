@@ -28,7 +28,5 @@ mod types;
 #[path = "ee/policy_engine/oss_parity_test.rs"]
 mod oss_parity_test;
 
-pub(crate) use enforce::{
-    evaluate, load_available_apps, load_connect_v2, needs_body_buffer, observe,
-};
+pub(crate) use enforce::{evaluate, load_available_apps, load_connect_v2, needs_body_buffer};
 pub(crate) use inject_select::derive_inject_selection;

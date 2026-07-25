@@ -30,8 +30,17 @@ import { IdentityCell } from "./policy-preview/policy-identity-cell";
 import { TargetCell } from "./policy-preview/policy-target-cell";
 
 const SOURCE_LABEL: Partial<Record<PolicyRuleSource, string>> = {
+  // Legacy: the App Permissions editor is gone and the adoption pass that
+  // re-tagged these to `custom` retired with it, so any row left on an
+  // un-adopted instance still DECIDES (only `equipment` is dropped by
+  // `assemble_v2`). Revocable for the same reason credential grants are — a
+  // live rule must never be unreachable.
   app_permission: "App Permissions",
   blocklist: "Blocklist",
+  // Injection-only: grants a credential without permitting its host, so the
+  // block/allow engine never sees it. Shown so the grant is at least visible
+  // and revocable — the dialogs that used to manage these are gone.
+  equipment: "Credential grant",
 };
 
 export interface EditableRuleRowProps {
@@ -41,6 +50,9 @@ export interface EditableRuleRowProps {
   identityName: (id: string) => string;
   /** Custom rules in the editing scope are editable; derived + org rows aren't. */
   editable: boolean;
+  /** Not editable, but may be disabled or deleted — a derived rule the user must
+   * still be able to revoke (credential grants have no editor of their own). */
+  revocable?: boolean;
   /** The section supports reordering — reserves the grip gutter on every row. */
   sortColumn?: boolean;
   /** This row is draggable (a custom rule in a reorderable section). */
@@ -64,9 +76,10 @@ export interface EditableRuleRowProps {
  * editing scope (including the former App Permissions rules, adopted as customs
  * at the editing cutover) get a drag grip (reorder), a name button (opens the
  * drawer) + a kebab (Edit / Move up / Move down / Enable-disable / Delete);
- * derived rules (blocklist, plus any mid-deploy app_permission straggler
- * awaiting adoption) and org guardrails render read-only with a provenance
- * badge and hold their position. A disabled rule keeps its row but wears a
+ * derived rules (blocklist, and any legacy app_permission row) and org guardrails
+ * render read-only with a provenance badge and hold their position — the two
+ * that still decide or inject (app_permission, equipment) keep a kebab so they
+ * can be disabled or deleted. A disabled rule keeps its row but wears a
  * "Disabled" tag and reads muted.
  */
 export const EditableRuleRow = ({
@@ -74,6 +87,7 @@ export const EditableRuleRow = ({
   position,
   identityName,
   editable,
+  revocable = false,
   sortColumn = false,
   sortable = false,
   sortLocked = false,
@@ -221,7 +235,7 @@ export const EditableRuleRow = ({
         <ActionVerdict rule={rule} />
       </TableCell>
       <TableCell className="pr-3 text-right">
-        {editable && (
+        {(editable || revocable) && (
           <DropdownMenu>
             <DropdownMenuTrigger asChild>
               <Button
@@ -234,10 +248,12 @@ export const EditableRuleRow = ({
               </Button>
             </DropdownMenuTrigger>
             <DropdownMenuContent align="end" className="w-44">
-              <DropdownMenuItem onClick={() => onEdit(rule)}>
-                <Pencil className="size-4" />
-                Edit
-              </DropdownMenuItem>
+              {editable && (
+                <DropdownMenuItem onClick={() => onEdit(rule)}>
+                  <Pencil className="size-4" />
+                  Edit
+                </DropdownMenuItem>
+              )}
               {sortable && (
                 <>
                   <DropdownMenuItem
@@ -275,7 +291,7 @@ export const EditableRuleRow = ({
                 onClick={() => onDelete(rule)}
               >
                 <Trash2 className="size-4" />
-                Delete
+                {rule.source === "equipment" ? "Revoke" : "Delete"}
               </DropdownMenuItem>
             </DropdownMenuContent>
           </DropdownMenu>

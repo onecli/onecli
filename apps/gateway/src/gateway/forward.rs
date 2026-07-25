@@ -131,7 +131,6 @@ pub(crate) async fn forward_request(
         .map(|pq| pq.as_str().to_string())
         .unwrap_or_else(|| "/".to_string());
     let url = format!("{scheme}://{host}{path}");
-    let agent_token = proxy_ctx.agent_token.as_deref().unwrap_or("");
 
     // Token endpoint interception: when a client SDK tries to refresh its
     // own OAuth token through the proxy, serve the cached access token from
@@ -167,8 +166,7 @@ pub(crate) async fn forward_request(
     // to inspect it (e.g. Dropbox folder scoping reads the JSON body), or for a
     // matched default interception. In OSS, both predicates return false → zero
     // overhead unless a default interception matched.
-    let (condition_buffer, req) = if crate::condition_match::needs_body_buffer(&rules.policy_rules)
-        || crate::policy_engine::needs_body_buffer(&rules.policy_rules_v2)
+    let (condition_buffer, req) = if crate::policy_engine::needs_body_buffer(&rules.policy_rules_v2)
         || hooks::needs_request_body(rules, host, method.as_str(), &path)
     {
         let (parts, incoming) = req.into_parts();
@@ -200,10 +198,6 @@ pub(crate) async fn forward_request(
     }
 
     let has_injections = !rules.injection_rules.is_empty();
-    let enforce_deny = has_injections && !policy::is_llm_host(host);
-
-    let org_id = proxy_ctx.organization_id.as_deref().unwrap_or("");
-    let pid = proxy_ctx.project_id.as_deref().unwrap_or("");
 
     // Step-7 app-availability pre-check (DB-free — the set was resolved at
     // connect). Governs ONLY identifiable app providers, so raw/unknown hosts and
@@ -224,13 +218,10 @@ pub(crate) async fn forward_request(
         ));
     }
 
-    // The first-match engine over the published `policy_rules_v2` decides when
-    // `POLICY_ENFORCE_V2` is on and the project has cut over; otherwise — or on
-    // any v2 load error — it returns `None` and the legacy strictest-wins path
-    // stays authoritative. `policy_host` is the pre-rewrite rule-match host;
-    // `is_llm_host(host)` is the effective host (the deny-default carve),
-    // matching how the legacy path computes `enforce_deny`.
-    let (decision, matched_rule) = match policy_engine::evaluate(
+    // The first-match engine over the published `policy_rules_v2` is authoritative.
+    // `policy_host` is the pre-rewrite rule-match host; `is_llm_host(host)` is the
+    // effective host for the deny-default carve.
+    let (decision, matched_rule) = policy_engine::evaluate(
         proxy_ctx,
         policy_host,
         method.as_str(),
@@ -241,41 +232,7 @@ pub(crate) async fn forward_request(
         cache,
         &rules.policy_rules_v2,
     )
-    .await
-    {
-        Some((decision, matched)) => (decision, matched),
-        None => (
-            policy::evaluate(
-                org_id,
-                pid,
-                method.as_str(),
-                &path,
-                condition_buffer.as_deref(),
-                &rules.policy_rules,
-                agent_token,
-                cache,
-                &rules.policy_mode,
-                enforce_deny,
-            )
-            .await,
-            // Legacy rules carry no logical id — never attributed.
-            None,
-        ),
-    };
-
-    // Edition observation seam — a no-op in OSS. Never blocks, stores, or
-    // enforces.
-    policy_engine::observe(
-        proxy_ctx,
-        policy_host,
-        method.as_str(),
-        &path,
-        condition_buffer.as_deref(),
-        has_injections,
-        policy::is_llm_host(host),
-        &rules.policy_mode,
-        pool,
-    );
+    .await;
 
     // ── Early return for block / rate-limit / default-deny (no body needed) ───
     match &decision {
@@ -739,7 +696,6 @@ pub(crate) async fn forward_request(
                 status,
                 provider,
                 display_name,
-                proxy_ctx.agent_id.as_deref(),
                 proxy_ctx.project_id.as_deref(),
             ));
         }
@@ -800,7 +756,6 @@ pub(crate) async fn forward_request(
                     StatusCode::BAD_REQUEST,
                     provider,
                     display_name,
-                    proxy_ctx.agent_id.as_deref(),
                     proxy_ctx.project_id.as_deref(),
                 ));
             }

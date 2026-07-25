@@ -187,19 +187,17 @@ pub(crate) fn access_restricted<S>(
     status: StatusCode,
     provider: &str,
     display_name: &str,
-    agent_id: Option<&str>,
     project_id: Option<&str>,
 ) -> Response<ForwardBody<S>> {
-    let base = scoped_url(dashboard_url(), "", project_id);
-    let manage_url = match agent_id {
-        Some(id) => format!("{base}/agents?manage={}", id.get(..8).unwrap_or(id)),
-        None => format!("{base}/agents"),
-    };
+    // Point at the policy console: since step 10 credential access is granted by
+    // policy rules, so the agent surface can only SHOW effective access, not
+    // change it — sending the user there would dead-end on a read-only dialog.
+    let manage_url = scoped_url(dashboard_url(), "/policy", project_id);
     with_no_retry(json_error(
         status,
         serde_json::json!({
             "error": "access_restricted",
-            "message": format!("{display_name} credentials exist in OneCLI but this agent does not have access. Ask the user to grant access: {manage_url}"),
+            "message": format!("{display_name} credentials exist in OneCLI but this agent does not have access. Ask the user to grant it with a policy rule: {manage_url}"),
             "provider": provider,
             "manage_url": manage_url,
         }),
@@ -357,7 +355,7 @@ pub(crate) fn blocked_by_policy<S>(
     rule_name: &str,
     project_id: Option<&str>,
 ) -> Response<ForwardBody<S>> {
-    let rules_url = scoped_url(dashboard_url(), "/rules", project_id);
+    let policy_url = scoped_url(dashboard_url(), "/policy", project_id);
     with_no_retry(json_error(
         StatusCode::FORBIDDEN,
         serde_json::json!({
@@ -370,7 +368,7 @@ pub(crate) fn blocked_by_policy<S>(
             "rule_name": rule_name,
             "method": method,
             "path": path,
-            "dashboard_url": rules_url,
+            "dashboard_url": policy_url,
         }),
     ))
 }
@@ -384,7 +382,6 @@ pub(crate) fn blocked_by_default_policy<S>(
 ) -> Response<ForwardBody<S>> {
     let base = scoped_url(dashboard_url(), "", project_id);
     let hostname = host.split(':').next().unwrap_or(host);
-    let encoded_host = utf8_percent_encode(hostname, NON_ALPHANUMERIC);
     with_no_retry(json_error(
         StatusCode::FORBIDDEN,
         serde_json::json!({
@@ -397,7 +394,7 @@ pub(crate) fn blocked_by_default_policy<S>(
             "method": method,
             "host": hostname,
             "path": path,
-            "dashboard_url": format!("{base}/rules?create=allow&host={encoded_host}"),
+            "dashboard_url": format!("{base}/policy"),
         }),
     ))
 }
@@ -624,13 +621,8 @@ mod tests {
 
     #[test]
     fn access_restricted_preserves_status() {
-        let resp: Response<TestBody> = access_restricted(
-            StatusCode::FORBIDDEN,
-            "resend",
-            "Resend",
-            Some("abc12345-def"),
-            None,
-        );
+        let resp: Response<TestBody> =
+            access_restricted(StatusCode::FORBIDDEN, "resend", "Resend", None);
         assert_eq!(resp.status(), StatusCode::FORBIDDEN);
         assert_eq!(
             resp.headers().get("content-type").unwrap(),
@@ -640,14 +632,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn access_restricted_body_with_agent_id() {
-        let resp: Response<TestBody> = access_restricted(
-            StatusCode::UNAUTHORIZED,
-            "resend",
-            "Resend",
-            Some("abc12345-long-id"),
-            None,
-        );
+    async fn access_restricted_body_points_at_the_policy_console() {
+        let resp: Response<TestBody> =
+            access_restricted(StatusCode::UNAUTHORIZED, "resend", "Resend", None);
         use http_body_util::BodyExt;
         let body = match resp.into_body() {
             Either::Left(full) => full.collect().await.expect("collect full body").to_bytes(),
@@ -660,40 +647,9 @@ mod tests {
             .as_str()
             .unwrap()
             .contains("does not have access"));
-        assert!(json["manage_url"]
-            .as_str()
-            .unwrap()
-            .contains("/agents?manage=abc12345"));
-    }
-
-    #[tokio::test]
-    async fn access_restricted_body_without_agent_id() {
-        let resp: Response<TestBody> =
-            access_restricted(StatusCode::FORBIDDEN, "github", "GitHub", None, None);
-        use http_body_util::BodyExt;
-        let body = match resp.into_body() {
-            Either::Left(full) => full.collect().await.expect("collect full body").to_bytes(),
-            Either::Right(_) => panic!("expected Left"),
-        };
-        let json: serde_json::Value = serde_json::from_slice(&body).expect("valid JSON");
-        assert_eq!(json["error"], "access_restricted");
-        assert!(json["manage_url"].as_str().unwrap().ends_with("/agents"));
-    }
-
-    #[tokio::test]
-    async fn access_restricted_short_agent_id() {
-        let resp: Response<TestBody> =
-            access_restricted(StatusCode::FORBIDDEN, "resend", "Resend", Some("abc"), None);
-        use http_body_util::BodyExt;
-        let body = match resp.into_body() {
-            Either::Left(full) => full.collect().await.expect("collect full body").to_bytes(),
-            Either::Right(_) => panic!("expected Left"),
-        };
-        let json: serde_json::Value = serde_json::from_slice(&body).expect("valid JSON");
-        assert!(json["manage_url"]
-            .as_str()
-            .unwrap()
-            .contains("/agents?manage=abc"));
+        // Credential access is granted by policy rules now, so the remediation
+        // link must reach the policy console, not the read-only agent dialog.
+        assert!(json["manage_url"].as_str().unwrap().ends_with("/policy"));
     }
 
     #[tokio::test]
