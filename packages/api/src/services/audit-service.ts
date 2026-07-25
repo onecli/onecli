@@ -25,8 +25,9 @@ export const AUDIT_ACTIONS = {
 export const AUDIT_SERVICES = {
   AGENT: "agent",
   SECRET: "secret",
-  RULE: "rule",
   // Unified policy engine (policy_rules_v2): the priority-ordered rule model.
+  // (The legacy `rule` service retired with the old model at step 10; historical
+  // audit rows carrying it still render — the log table maps the raw string.)
   POLICY: "policy",
   API_KEY: "api-key",
   APP_CONNECTION: "app-connection",

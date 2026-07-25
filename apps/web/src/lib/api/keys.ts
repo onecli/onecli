@@ -8,21 +8,10 @@ export const queryKeys = {
   agents: {
     all: () => ["agents", ...scope()] as const,
     list: () => [...queryKeys.agents.all(), "list"] as const,
-    secrets: (agentId: string) =>
-      [...queryKeys.agents.all(), agentId, "secrets"] as const,
-    connections: (agentId: string) =>
-      [...queryKeys.agents.all(), agentId, "connections"] as const,
-    granularAccess: () =>
-      [...queryKeys.agents.all(), "granular-access"] as const,
   },
   secrets: {
     all: () => ["secrets", ...scope()] as const,
     list: () => [...queryKeys.secrets.all(), "list"] as const,
-  },
-  rules: {
-    all: () => ["rules", ...scope()] as const,
-    list: (pageScope: PageScope = "project") =>
-      [...queryKeys.rules.all(), "list", pageScope] as const,
   },
   policy: {
     all: () => ["policy", ...scope()] as const,
@@ -81,8 +70,6 @@ export const queryKeys = {
       [...queryKeys.connections.all(), "list", pageScope] as const,
     byProvider: (provider: string) =>
       [...queryKeys.connections.all(), "provider", provider] as const,
-    agents: (connectionId: string) =>
-      [...queryKeys.connections.all(), connectionId, "agents"] as const,
   },
   projectAccess: {
     all: () => ["project-access", ...scope()] as const,

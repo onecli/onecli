@@ -22,37 +22,54 @@ export interface DeleteRuleDialogProps {
   loading: boolean;
 }
 
-/** Destructive-confirm for removing a custom rule. Deletion stages into the draft
- * like any edit — it takes effect on the next Publish. */
+/** Destructive-confirm for removing a rule. Deletion stages into the draft like
+ * any edit — it takes effect on the next Publish.
+ *
+ * An `equipment` rule is a credential GRANT, not a permission: deleting it takes
+ * a credential away from an agent, which the generic "delete this rule" wording
+ * gives no hint of. It gets its own copy. */
 export const DeleteRuleDialog = ({
   rule,
   onOpenChange,
   onConfirm,
   loading,
-}: DeleteRuleDialogProps) => (
-  <AlertDialog open={rule !== null} onOpenChange={onOpenChange}>
-    <AlertDialogContent>
-      <AlertDialogHeader>
-        <AlertDialogTitle>Delete this rule?</AlertDialogTitle>
-        <AlertDialogDescription>
-          {rule
-            ? `“${rule.name}” will be removed from the draft. It takes effect when you publish.`
-            : ""}
-        </AlertDialogDescription>
-      </AlertDialogHeader>
-      <AlertDialogFooter>
-        <AlertDialogCancel disabled={loading}>Cancel</AlertDialogCancel>
-        <AlertDialogAction
-          onClick={(e) => {
-            e.preventDefault();
-            onConfirm();
-          }}
-          disabled={loading}
-          className={cn(buttonVariants({ variant: "destructive" }))}
-        >
-          {loading ? "Deleting…" : "Delete Rule"}
-        </AlertDialogAction>
-      </AlertDialogFooter>
-    </AlertDialogContent>
-  </AlertDialog>
-);
+}: DeleteRuleDialogProps) => {
+  const isGrant = rule?.source === "equipment";
+  return (
+    <AlertDialog open={rule !== null} onOpenChange={onOpenChange}>
+      <AlertDialogContent>
+        <AlertDialogHeader>
+          <AlertDialogTitle>
+            {isGrant ? "Revoke this credential grant?" : "Delete this rule?"}
+          </AlertDialogTitle>
+          <AlertDialogDescription>
+            {!rule
+              ? ""
+              : isGrant
+                ? `The agents named by “${rule.name}” will stop receiving this credential — requests that need it will fail. It takes effect when you publish.`
+                : `“${rule.name}” will be removed from the draft. It takes effect when you publish.`}
+          </AlertDialogDescription>
+        </AlertDialogHeader>
+        <AlertDialogFooter>
+          <AlertDialogCancel disabled={loading}>Cancel</AlertDialogCancel>
+          <AlertDialogAction
+            onClick={(e) => {
+              e.preventDefault();
+              onConfirm();
+            }}
+            disabled={loading}
+            className={cn(buttonVariants({ variant: "destructive" }))}
+          >
+            {loading
+              ? isGrant
+                ? "Revoking…"
+                : "Deleting…"
+              : isGrant
+                ? "Revoke Grant"
+                : "Delete Rule"}
+          </AlertDialogAction>
+        </AlertDialogFooter>
+      </AlertDialogContent>
+    </AlertDialog>
+  );
+};

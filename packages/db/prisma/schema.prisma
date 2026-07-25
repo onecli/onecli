@@ -24,6 +24,10 @@ model Organization {
   // to the sales-managed enterprise plan. Null = plan default.
   maxAgentsOverride   Int?      @map("max_agents_override")
   awsExternalId       String?   @map("aws_external_id")
+  /// DEPRECATED (policy engine step 10, 2026-07). Frozen: the default posture
+  /// lives on each scope's Default Rule in `policy_rules_v2`. Never written; the
+  /// only reader is `services/policy-legacy-migration/`, which seeds a converted
+  /// project's Default Rule from it. Goes with that directory and the tables.
   policyMode          String    @default("allow") @map("policy_mode") // "allow" | "deny"
   // App-availability posture (step 7): "open" = every app connectable (default,
   // = today's behavior); "restricted" = allowlist — an app is available to a
@@ -291,6 +295,10 @@ model Agent {
   identifier  String // user-provided machine-readable ID, unique per project
   accessToken String   @unique @map("access_token") // "aoc_..." prefix, used for gateway auth
   isDefault   Boolean  @default(false) @map("is_default")
+  /// LIVE. The all-vs-rules injection switch, read by the gateway on every
+  /// request: "all" injects the whole fenced credential pool, "selective"
+  /// injects only what policy rules grant. Not deprecated — see the plan's
+  /// eliminate-all-mode follow-up, which retires it properly.
   secretMode  String   @default("all") @map("secret_mode") // "all" or "selective"
   createdAt   DateTime @default(now()) @map("created_at")
   updatedAt   DateTime @updatedAt @map("updated_at")
@@ -340,6 +348,19 @@ model Secret {
   @@map("secrets")
 }
 
+/// DEPRECATED (policy engine step 10, 2026-07). The gateway and the console both
+/// run on `policy_rules_v2`. Nothing reads these rows to decide or inject, and
+/// nothing writes a policy here any more — the app blocklist was ported to
+/// `policy_rules_v2` in the same step.
+/// REMAINING COUPLING (the drop checklist — plans/policy-engine.md §10.5):
+///   1. `services/policy-legacy-migration/` READS these rows on every OSS boot
+///      and converts them (the grace-period migration — its README is the
+///      removal checklist). The whole directory goes with the table.
+///   2. `services/policy-migration-guard.ts` counts rows here on boot to report
+///      anything the conversion did not cover. Delete with the table.
+///   3. `ee/services/{project,organization}-service.ts` `deleteMany` here so a
+///      project/org delete isn't blocked by the FK. Delete with the table.
+/// Scheduled for removal in ~2027 (plans/policy-engine.md §10.5).
 model PolicyRule {
   id              String        @id @default(uuid())
   scope           String        @default("project") // "project" | "organization" (partner reserved)
@@ -371,10 +392,10 @@ model PolicyRule {
   @@map("policy_rules")
 }
 
-// ── Unified policy engine (Step 1: inert schema — no consumers yet) ────────
-// Priority-ordered, first-match rules (plans/policy-engine.md). Coexists with
-// the live `policy_rules` above until step 9 renames policy_rules_v2 → it.
-// Empty + unread in this step: additive/expand-only, deploy-safe.
+// ── Unified policy engine (plans/policy-engine.md) ─────────────────────────
+// Priority-ordered, first-match rules — the LIVE policy model since the step-5
+// cutover. The deprecated `policy_rules` above is frozen; the rename to
+// `policy_rules` happens when that table is dropped (§10.5).
 
 model PolicyRuleV2 {
   id              String   @id @default(uuid())
@@ -490,6 +511,23 @@ model PolicyRuleTarget {
   @@map("policy_rule_targets")
 }
 
+/// DEPRECATED (policy engine step 10, 2026-07). Per-agent credential grants are
+/// `source="equipment"` rules in `policy_rules_v2` now. These rows are frozen at
+/// whatever the last bridge run left. NOTHING in the serving path reads them —
+/// the gateway's `inject_select`, the console reflections, the simulator and
+/// `routes/container-config.ts` were all re-sourced onto the v2 rules in step 10.
+/// REMAINING COUPLING (the drop checklist — plans/policy-engine.md §10.5):
+///   1. `services/policy-legacy-migration/read-legacy.ts` READS these on every
+///      OSS boot to convert them into equipment rules (the grace-period
+///      migration). The whole directory goes with the table.
+///   2. `ee/services/project-service.ts` `deleteMany`s these on project delete
+///      (FK), and `apps/web/src/ee/account/actions.ts` NULLs
+///      `created_by_user_id` / `updated_by_user_id` on account delete (FK).
+///      Both go with the table.
+///   3. `ee/routes/migrate-import.ts` still ACCEPTS an `agentSecrets` payload arm
+///      from an older self-hosted exporter — it only reports them as skipped and
+///      never writes here, so it is independent of this table's lifetime.
+/// Scheduled for removal in ~2027.
 model AgentSecret {
   agentId         String   @map("agent_id")
   secretId        String   @map("secret_id")
@@ -618,6 +656,16 @@ model AppConnection {
   @@map("app_connections")
 }
 
+/// DEPRECATED (policy engine step 10, 2026-07). Per-agent connection grants are
+/// `source="equipment"` rules in `policy_rules_v2` now, and their
+/// `session_policy` resource scoping rides those rules' `conditions` (the bridge
+/// carried it verbatim; `ee/policy_engine/inject_select.rs` reads it from there).
+/// These rows are frozen and nothing in the serving path reads them — same
+/// re-sourcing as `AgentSecret` above.
+/// REMAINING COUPLING: `services/policy-legacy-migration/read-legacy.ts` reads
+/// them on OSS boot to convert them, and `ee/services/project-service.ts`
+/// `deleteMany`s them on project delete (FK). Both go with the table.
+/// Scheduled for removal in ~2027 (plans/policy-engine.md §10.5).
 model AgentAppConnection {
   agentId         String        @map("agent_id")
   appConnectionId String        @map("app_connection_id")

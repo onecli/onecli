@@ -117,9 +117,8 @@ export const bootstrapOrganization = async (
   });
 
   // Seed the new org's initial published policy (cloud: a secure-by-default org
-  // Default Rule) so it lands on the new model directly rather than the legacy
-  // read path. Best-effort + inert until POLICY_ENFORCE_V2 flips — a hiccup must
-  // not fail onboarding, and the backfill verifier flags any unseeded org. OSS
+  // Default Rule). Best-effort — a hiccup must not fail onboarding; the org then
+  // has no published generation and the engine allows until one is authored. OSS
   // default is a no-op.
   try {
     await getNewOrgPolicySeeder().seed(org.id, project.id);

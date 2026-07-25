@@ -4,9 +4,10 @@ export interface Agent {
   identifier: string;
   accessToken: string;
   isDefault: boolean;
+  /** The all-vs-selective injection switch the gateway reads per request. Not
+   * editable from the console since step 10 — policy rules decide access. */
   secretMode: string;
   createdAt: string;
-  _count: { agentSecrets: number; agentAppConnections: number };
 }
 
 export interface CreatedAgent {
@@ -14,20 +15,6 @@ export interface CreatedAgent {
   name: string;
   identifier: string;
   createdAt: string;
-}
-
-export interface AgentGranularAccess {
-  agentId: string;
-  agentName: string;
-  connectionId: string;
-  provider: string;
-  connectionLabel: string | null;
-  policy: Record<string, unknown>;
-}
-
-export interface AgentConnection {
-  appConnectionId: string;
-  sessionPolicy: Record<string, unknown> | null;
 }
 
 export interface DropboxFolder {
@@ -62,24 +49,6 @@ export interface CreatedSecret {
   preview: string;
 }
 
-export interface PolicyRule {
-  id: string;
-  name: string;
-  /** Custom rules only — app-permission rules omit the endpoint fields. */
-  hostPattern?: string;
-  pathPattern?: string | null;
-  method?: string | null;
-  action: string;
-  enabled: boolean;
-  agentId: string | null;
-  rateLimit: number | null;
-  rateLimitWindow: string | null;
-  scope: string | null;
-  metadata: unknown;
-  conditions: unknown;
-  createdAt: string;
-}
-
 export interface Connection {
   id: string;
   provider: string;
@@ -89,20 +58,6 @@ export interface Connection {
   scope: string | null;
   metadata: unknown;
   connectedAt: string;
-}
-
-export type ConnectionAccessLevel = "full" | "assigned" | "none";
-
-// Reverse view of agent↔connection access: an agent and whether it can use a
-// given connection. "full" = all-mode agent (implicit access, read-only here);
-// "assigned" = selective agent granted this connection; "none" = neither.
-// `scoped` flags an assigned agent whose grant carries a granular session
-// policy (managed on the agent side; shown read-only here).
-export interface ConnectionAgentAccess {
-  id: string;
-  name: string;
-  access: ConnectionAccessLevel;
-  scoped: boolean;
 }
 
 // A project row as returned by the project CRUD routes (rename / create).
@@ -268,24 +223,6 @@ export interface CreateSecretInput {
   pathPattern?: string;
   injectionConfig?: unknown;
 }
-
-export interface CreateRuleInput {
-  name: string;
-  hostPattern: string;
-  pathPattern?: string | null;
-  method?: string | null;
-  action: string;
-  enabled?: boolean;
-  agentId?: string | null;
-  rateLimit?: number | null;
-  rateLimitWindow?: string | null;
-  conditions?: unknown[];
-}
-
-// `conditions: null` clears existing conditions on update.
-export type UpdateRuleInput = Partial<Omit<CreateRuleInput, "conditions">> & {
-  conditions?: unknown[] | null;
-};
 
 // ── Org directory (§3.5 contract: groups, agent groups, members, agents) ──
 
@@ -474,7 +411,7 @@ export interface PublishResult {
 }
 
 /** The scope's most recent publish. `appliedBy` null = a system publish (the
- * coherence bridge); a null response = never published. */
+ * boot seeder); a null response = never published. */
 export interface LastPublish {
   generation: number;
   ruleCount: number;

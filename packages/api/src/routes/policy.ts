@@ -5,7 +5,6 @@ import type { AuthContext } from "../providers";
 import type { ResourceScope } from "../services/resource-scope";
 import { authMiddleware, requireProjectId } from "../middleware/auth";
 import { ServiceError } from "../services/errors";
-import { policyEditingEnabled } from "../lib/policy-flags";
 import {
   listPolicyRules,
   getPolicyRule,
@@ -69,19 +68,6 @@ export const registerPolicyRoutes = (
   app: Hono<ApiEnv>,
   cfg: PolicyRouteScope,
 ) => {
-  // Gate the mutating methods behind the editing flag; reads (and OPTIONS/HEAD
-  // preflight) stay open.
-  const MUTATING = new Set(["POST", "PUT", "PATCH", "DELETE"]);
-  app.use("*", async (c, next) => {
-    if (MUTATING.has(c.req.method) && !policyEditingEnabled()) {
-      throw new ServiceError(
-        "FORBIDDEN",
-        "Policy editing is not enabled for this deployment yet.",
-      );
-    }
-    return next();
-  });
-
   const auditBase = (auth: AuthContext) => ({
     ...cfg.auditScope(auth),
     userId: auth.userId,

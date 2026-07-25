@@ -103,12 +103,7 @@ pub(super) async fn handle_websocket(
         .map(|pq| pq.as_str().to_string())
         .unwrap_or_else(|| "/".to_string());
 
-    let agent_token = proxy_ctx.agent_token.as_deref().unwrap_or("");
     let has_injections = !rules.injection_rules.is_empty();
-    let enforce_deny = has_injections && !policy::is_llm_host(host);
-
-    let org_id = proxy_ctx.organization_id.as_deref().unwrap_or("");
-    let pid = proxy_ctx.project_id.as_deref().unwrap_or("");
 
     // Step-7 app-availability pre-check (DB-free — resolved at connect; see
     // forward.rs). Governs only identifiable app providers, so raw/LLM hosts are
@@ -126,13 +121,10 @@ pub(super) async fn handle_websocket(
         ));
     }
 
-    // Step-5 cutover: the new first-match engine decides when POLICY_ENFORCE_V2
-    // is on and the project has cut over; otherwise — or on a v2 load error — it
-    // returns `None` and the legacy path stays authoritative.
-    // WebSocket blocks emit no telemetry today, so the matched rule the v2
-    // engine returns is not attributed here (allow-attribution for ws is out
-    // of scope) — only the decision is consumed.
-    let decision = match crate::policy_engine::evaluate(
+    // The first-match engine over `policy_rules_v2` is authoritative. WebSocket
+    // blocks emit no telemetry today, so the matched rule is not attributed here
+    // (allow-attribution for ws is out of scope) — only the decision is consumed.
+    let (decision, _matched) = crate::policy_engine::evaluate(
         proxy_ctx,
         policy_host,
         "GET",
@@ -143,25 +135,7 @@ pub(super) async fn handle_websocket(
         cache,
         &rules.policy_rules_v2,
     )
-    .await
-    {
-        Some((decision, _matched)) => decision,
-        None => {
-            policy::evaluate(
-                org_id,
-                pid,
-                "GET",
-                &path,
-                None,
-                &rules.policy_rules,
-                agent_token,
-                cache,
-                &rules.policy_mode,
-                enforce_deny,
-            )
-            .await
-        }
-    };
+    .await;
 
     match &decision {
         PolicyDecision::BlockedByDefaultPolicy => {

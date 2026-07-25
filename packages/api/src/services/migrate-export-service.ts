@@ -34,7 +34,16 @@ export const exportToCloud = async (
 ): Promise<MigrateResult> => {
   // ── Gather data ───────────────────────────────────────────────
 
-  const [secrets, agents, agentSecrets, rules] = await Promise.all([
+  // Secrets + agents only. The legacy per-agent grant tables and the legacy
+  // `policy_rules` are frozen (step 10) — nothing enforces them here either, so
+  // carrying them across would migrate dead rows, and the cloud importer rejects
+  // them outright.
+  //
+  // The LIVE policy (`policy_rules_v2`) has no import contract yet, so it does
+  // not travel. It is counted below and reported in `skipped[]` rather than
+  // dropped in silence: a customer with rules would otherwise see a clean
+  // success and land on a destination that enforces nothing they authored.
+  const [secrets, agents, policyRuleCount] = await Promise.all([
     db.secret.findMany({
       where: { projectId },
       select: {
@@ -51,40 +60,43 @@ export const exportToCloud = async (
     db.agent.findMany({
       where: { projectId },
       select: {
-        id: true,
         name: true,
         identifier: true,
         isDefault: true,
         secretMode: true,
       },
     }),
-    db.agentSecret.findMany({
-      where: { agent: { projectId } },
-      select: {
-        agent: { select: { identifier: true } },
-        secret: { select: { name: true } },
-      },
-    }),
-    db.policyRule.findMany({
-      where: { projectId },
-      select: {
-        name: true,
-        hostPattern: true,
-        pathPattern: true,
-        method: true,
-        action: true,
-        enabled: true,
-        agentId: true,
-        rateLimit: true,
-        rateLimitWindow: true,
+    // The project's own enabled draft rules — what the user authored, minus the
+    // Default Rule and the rows their own surface owns (blocklist) or that are
+    // credential grants rather than policy (equipment).
+    db.policyRuleV2.count({
+      where: {
+        scope: "project",
+        projectId,
+        status: "draft",
+        isDefault: false,
+        source: { notIn: ["blocklist", "equipment"] },
       },
     }),
   ]);
 
-  if (secrets.length === 0 && agents.length === 0 && rules.length === 0) {
+  const skippedPolicy: MigrateSkipped[] =
+    policyRuleCount > 0
+      ? [
+          {
+            type: "policy",
+            name: `${policyRuleCount} policy rule${policyRuleCount === 1 ? "" : "s"}`,
+            reason:
+              "Not migrated — policy does not travel with a migration yet. " +
+              "Re-author these rules in the destination's Policy console.",
+          },
+        ]
+      : [];
+
+  if (secrets.length === 0 && agents.length === 0) {
     return {
       imported: { secrets: 0, agents: 0, agentSecrets: 0, rules: 0 },
-      skipped: [],
+      skipped: skippedPolicy,
     };
   }
 
@@ -110,15 +122,6 @@ export const exportToCloud = async (
       }),
   );
 
-  // ── Build agent id→identifier map for rule references ─────────
-
-  const agentIdToIdentifier = new Map<string, string>();
-  for (const agent of agents) {
-    if (agent.identifier) {
-      agentIdToIdentifier.set(agent.id, agent.identifier);
-    }
-  }
-
   // ── Build payload ─────────────────────────────────────────────
 
   const payload = {
@@ -142,25 +145,6 @@ export const exportToCloud = async (
         isDefault: a.isDefault,
         secretMode: a.secretMode as "all" | "selective",
       })),
-    agentSecrets: agentSecrets
-      .filter((m) => m.agent.identifier)
-      .map((m) => ({
-        agentIdentifier: m.agent.identifier!,
-        secretName: m.secret.name,
-      })),
-    rules: rules.map((r) => ({
-      name: r.name,
-      hostPattern: r.hostPattern,
-      pathPattern: r.pathPattern,
-      method: r.method,
-      action: r.action as "block" | "rate_limit" | "manual_approval",
-      enabled: r.enabled,
-      agentIdentifier: r.agentId
-        ? (agentIdToIdentifier.get(r.agentId) ?? null)
-        : null,
-      rateLimit: r.rateLimit,
-      rateLimitWindow: r.rateLimitWindow as "minute" | "hour" | "day" | null,
-    })),
   };
 
   // ── Send to cloud ─────────────────────────────────────────────
@@ -189,6 +173,6 @@ export const exportToCloud = async (
   const result = (await response.json()) as MigrateResult;
   return {
     ...result,
-    skipped: [...skippedExternal, ...result.skipped],
+    skipped: [...skippedExternal, ...skippedPolicy, ...result.skipped],
   };
 };
