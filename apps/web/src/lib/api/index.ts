@@ -1,6 +1,5 @@
 import * as agents from "./agents";
 import * as secrets from "./secrets";
-import * as rules from "./rules";
 import * as policy from "./policy";
 import * as connections from "./connections";
 import * as projects from "./projects";
@@ -25,7 +24,6 @@ import * as dropbox from "./dropbox";
 export {
   agents,
   secrets,
-  rules,
   policy,
   connections,
   projects,
@@ -52,10 +50,7 @@ export type {
   CreatedAgent,
   Secret,
   CreatedSecret,
-  PolicyRule,
   Connection,
-  ConnectionAgentAccess,
-  ConnectionAccessLevel,
   Project,
   ProjectAccessBindings,
   ProjectAccessUserRow,
@@ -86,8 +81,6 @@ export type {
   ResourceCounts,
   CreateAgentInput,
   CreateSecretInput,
-  CreateRuleInput,
-  UpdateRuleInput,
   ProjectionIdentity,
   ProjectionCondition,
   PolicyRuleV2,
@@ -101,11 +94,6 @@ export type { PageScope } from "./scope";
 export type { AppConfigStatus } from "./app-config";
 export type { AvailableApps } from "./app-availability";
 export type { VaultConnection } from "./vaults";
-export type { SetAppPermissionsInput } from "./rules";
-export type {
-  AppPermissionState,
-  AppPermissionStatesResult,
-} from "@onecli/api/services/policy-rule-service";
 export type {
   AppToolSummary,
   AppToolGroupSummary,

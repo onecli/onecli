@@ -24,8 +24,3 @@ export {
   initNewOrgPolicySeeder,
   getNewOrgPolicySeeder,
 } from "./new-org-policy-seeder";
-export {
-  type PolicyCoherenceBridge,
-  initPolicyCoherenceBridge,
-  getPolicyCoherenceBridge,
-} from "./policy-coherence-bridge";

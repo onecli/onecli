@@ -14,7 +14,9 @@ export const ActionVerdict = ({ rule }: { rule: PolicyRuleView }) => {
   const { Icon, label, className } = actionMeta(rule);
   // Modifiers only qualify an allow; guard so a future "block + modifier" can
   // never render a contradictory verdict.
-  const isAllow = rule.action === "allow";
+  // An equipment rule carries no decision at all — rate/approval on one would
+  // be as misleading as the "Allow" verdict it already does not get.
+  const isAllow = rule.action === "allow" && rule.source !== "equipment";
   const rate = isAllow ? rateLimitLabel(rule) : null;
   return (
     <div className="flex flex-wrap items-center gap-x-2.5 gap-y-1">

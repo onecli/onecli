@@ -29,7 +29,9 @@ pub(crate) mod hooks;
 #[path = "ee/hooks.rs"]
 pub(crate) mod hooks;
 mod mitm;
-mod response;
+// `pub(crate)` so `main` can report at startup whether dashboard links will be
+// built from a configured APP_URL or from the fallback.
+pub(crate) mod response;
 mod transforms;
 mod tunnel;
 mod websocket;
@@ -858,7 +860,6 @@ async fn handle_http_proxy(
         parent: &session_span,
         scheme = %scheme,
         injection_count = resolved.injection_rules.len(),
-        policy_count = resolved.policy_rules.len(),
         "HTTP_PROXY"
     );
 
@@ -873,7 +874,6 @@ async fn handle_http_proxy(
 
     let rules = mitm::ResolvedRules {
         injection_rules: resolved.injection_rules,
-        policy_rules: resolved.policy_rules,
         policy_rules_v2: resolved.policy_rules_v2,
         available_apps: resolved.available_apps,
         access_restricted: resolved.access_restricted,
@@ -883,7 +883,6 @@ async fn handle_http_proxy(
         connection_label: None,
         finalizer: resolved_finalizer,
         body_transform: resolved_body_transform,
-        policy_mode: resolved.policy_mode,
         claim_token: resolved.claim_token,
         session_policy: resolved_session_policy,
         budget_bindings: resolved.budget_bindings,

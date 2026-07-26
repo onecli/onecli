@@ -1,0 +1,1335 @@
+[
+  {
+    "name": "custom block matches exact host+path",
+    "rules": [
+      {
+        "scope": "project",
+        "priority": 0,
+        "isDefault": false,
+        "source": "custom",
+        "name": "block admin",
+        "identities": [],
+        "targets": [
+          {
+            "kind": "network",
+            "hostPattern": "api.example.com",
+            "pathPattern": "/admin",
+            "method": null
+          }
+        ],
+        "action": "block",
+        "requireApproval": false,
+        "rateLimit": null,
+        "rateLimitWindow": null,
+        "conditions": null
+      }
+    ],
+    "request": {
+      "host": "api.example.com",
+      "path": "/admin",
+      "method": "GET",
+      "agentId": "agent-1",
+      "hasInjections": false,
+      "isLlmHost": false
+    },
+    "expected": {
+      "action": "block"
+    }
+  },
+  {
+    "name": "custom block does not match a different path",
+    "rules": [
+      {
+        "scope": "project",
+        "priority": 0,
+        "isDefault": false,
+        "source": "custom",
+        "name": "block admin",
+        "identities": [],
+        "targets": [
+          {
+            "kind": "network",
+            "hostPattern": "api.example.com",
+            "pathPattern": "/admin",
+            "method": null
+          }
+        ],
+        "action": "block",
+        "requireApproval": false,
+        "rateLimit": null,
+        "rateLimitWindow": null,
+        "conditions": null
+      }
+    ],
+    "request": {
+      "host": "api.example.com",
+      "path": "/public",
+      "method": "GET",
+      "agentId": "agent-1",
+      "hasInjections": false,
+      "isLlmHost": false
+    },
+    "expected": {
+      "action": "allow"
+    }
+  },
+  {
+    "name": "deny-default org rule + injected non-LLM \u2192 blocked by default",
+    "rules": [
+      {
+        "scope": "organization",
+        "priority": 100,
+        "isDefault": true,
+        "source": "default",
+        "name": "Default Rule",
+        "identities": [],
+        "targets": [],
+        "action": "block",
+        "requireApproval": false,
+        "rateLimit": null,
+        "rateLimitWindow": null,
+        "conditions": null
+      }
+    ],
+    "request": {
+      "host": "api.example.com",
+      "path": "/anything",
+      "method": "POST",
+      "agentId": "agent-1",
+      "hasInjections": true,
+      "isLlmHost": false
+    },
+    "expected": {
+      "action": "block",
+      "byDefault": true
+    }
+  },
+  {
+    "name": "deny-default org rule + no injections \u2192 allow (enforce_deny false)",
+    "rules": [
+      {
+        "scope": "organization",
+        "priority": 100,
+        "isDefault": true,
+        "source": "default",
+        "name": "Default Rule",
+        "identities": [],
+        "targets": [],
+        "action": "block",
+        "requireApproval": false,
+        "rateLimit": null,
+        "rateLimitWindow": null,
+        "conditions": null
+      }
+    ],
+    "request": {
+      "host": "api.example.com",
+      "path": "/anything",
+      "method": "POST",
+      "agentId": "agent-1",
+      "hasInjections": false,
+      "isLlmHost": false
+    },
+    "expected": {
+      "action": "allow"
+    }
+  },
+  {
+    "name": "deny-default org rule + LLM host \u2192 allow (enforce_deny false)",
+    "rules": [
+      {
+        "scope": "organization",
+        "priority": 100,
+        "isDefault": true,
+        "source": "default",
+        "name": "Default Rule",
+        "identities": [],
+        "targets": [],
+        "action": "block",
+        "requireApproval": false,
+        "rateLimit": null,
+        "rateLimitWindow": null,
+        "conditions": null
+      }
+    ],
+    "request": {
+      "host": "api.anthropic.com",
+      "path": "/v1/messages",
+      "method": "POST",
+      "agentId": "agent-1",
+      "hasInjections": true,
+      "isLlmHost": true
+    },
+    "expected": {
+      "action": "allow"
+    }
+  },
+  {
+    "name": "allow + requireApproval modifier",
+    "rules": [
+      {
+        "scope": "project",
+        "priority": 1,
+        "isDefault": false,
+        "source": "custom",
+        "name": "approve send",
+        "identities": [],
+        "targets": [
+          {
+            "kind": "network",
+            "hostPattern": "api.example.com",
+            "pathPattern": "/send",
+            "method": "POST"
+          }
+        ],
+        "action": "allow",
+        "requireApproval": true,
+        "rateLimit": null,
+        "rateLimitWindow": null,
+        "conditions": null
+      }
+    ],
+    "request": {
+      "host": "api.example.com",
+      "path": "/send",
+      "method": "POST",
+      "agentId": "agent-1",
+      "hasInjections": false,
+      "isLlmHost": false
+    },
+    "expected": {
+      "action": "allow",
+      "requireApproval": true
+    }
+  },
+  {
+    "name": "allow + rate-limit modifier",
+    "rules": [
+      {
+        "scope": "project",
+        "priority": 2,
+        "isDefault": false,
+        "source": "custom",
+        "name": "rate api",
+        "identities": [],
+        "targets": [
+          {
+            "kind": "network",
+            "hostPattern": "api.example.com",
+            "pathPattern": "/api/*",
+            "method": null
+          }
+        ],
+        "action": "allow",
+        "requireApproval": false,
+        "rateLimit": 100,
+        "rateLimitWindow": "hour",
+        "conditions": null
+      }
+    ],
+    "request": {
+      "host": "api.example.com",
+      "path": "/api/v1/send",
+      "method": "GET",
+      "agentId": "agent-1",
+      "hasInjections": false,
+      "isLlmHost": false
+    },
+    "expected": {
+      "action": "allow",
+      "rateLimit": 100,
+      "rateLimitWindow": "hour"
+    }
+  },
+  {
+    "name": "strictest-wins: a block priority beats a co-matching approval",
+    "rules": [
+      {
+        "scope": "project",
+        "priority": 0,
+        "isDefault": false,
+        "source": "custom",
+        "name": "block danger",
+        "identities": [],
+        "targets": [
+          {
+            "kind": "network",
+            "hostPattern": "api.example.com",
+            "pathPattern": "/danger",
+            "method": "POST"
+          }
+        ],
+        "action": "block",
+        "requireApproval": false,
+        "rateLimit": null,
+        "rateLimitWindow": null,
+        "conditions": null
+      },
+      {
+        "scope": "project",
+        "priority": 1,
+        "isDefault": false,
+        "source": "custom",
+        "name": "approve danger",
+        "identities": [],
+        "targets": [
+          {
+            "kind": "network",
+            "hostPattern": "api.example.com",
+            "pathPattern": "/danger",
+            "method": "POST"
+          }
+        ],
+        "action": "allow",
+        "requireApproval": true,
+        "rateLimit": null,
+        "rateLimitWindow": null,
+        "conditions": null
+      }
+    ],
+    "request": {
+      "host": "api.example.com",
+      "path": "/danger",
+      "method": "POST",
+      "agentId": "agent-1",
+      "hasInjections": false,
+      "isLlmHost": false
+    },
+    "expected": {
+      "action": "block"
+    }
+  },
+  {
+    "name": "git receive-pack block also blocks the GET discovery",
+    "rules": [
+      {
+        "scope": "project",
+        "priority": 0,
+        "isDefault": false,
+        "source": "custom",
+        "name": "block push",
+        "identities": [],
+        "targets": [
+          {
+            "kind": "network",
+            "hostPattern": "github.com",
+            "pathPattern": "/*/*/git-receive-pack",
+            "method": "POST"
+          }
+        ],
+        "action": "block",
+        "requireApproval": false,
+        "rateLimit": null,
+        "rateLimitWindow": null,
+        "conditions": null
+      }
+    ],
+    "request": {
+      "host": "github.com",
+      "path": "/owner/repo.git/info/refs?service=git-receive-pack",
+      "method": "GET",
+      "agentId": "agent-1",
+      "hasInjections": false,
+      "isLlmHost": false
+    },
+    "expected": {
+      "action": "block"
+    }
+  },
+  {
+    "name": "org block is not overridable by a project all-agents allow",
+    "rules": [
+      {
+        "scope": "organization",
+        "priority": 0,
+        "isDefault": false,
+        "source": "custom",
+        "name": "org block admin",
+        "identities": [],
+        "targets": [
+          {
+            "kind": "network",
+            "hostPattern": "api.example.com",
+            "pathPattern": "/admin",
+            "method": null
+          }
+        ],
+        "action": "block",
+        "requireApproval": false,
+        "rateLimit": null,
+        "rateLimitWindow": null,
+        "conditions": null
+      },
+      {
+        "scope": "project",
+        "priority": 0,
+        "isDefault": false,
+        "source": "custom",
+        "name": "project allow admin",
+        "identities": [],
+        "targets": [
+          {
+            "kind": "network",
+            "hostPattern": "api.example.com",
+            "pathPattern": "/admin",
+            "method": null
+          }
+        ],
+        "action": "allow",
+        "requireApproval": false,
+        "rateLimit": null,
+        "rateLimitWindow": null,
+        "conditions": null
+      }
+    ],
+    "request": {
+      "host": "api.example.com",
+      "path": "/admin",
+      "method": "GET",
+      "agentId": "agent-1",
+      "hasInjections": false,
+      "isLlmHost": false
+    },
+    "expected": {
+      "action": "block"
+    }
+  },
+  {
+    "name": "strictest-wins across scopes: org allow + project block \u2192 block",
+    "rules": [
+      {
+        "scope": "organization",
+        "priority": 3,
+        "isDefault": false,
+        "source": "custom",
+        "name": "org allow x",
+        "identities": [],
+        "targets": [
+          {
+            "kind": "network",
+            "hostPattern": "api.example.com",
+            "pathPattern": "/x",
+            "method": null
+          }
+        ],
+        "action": "allow",
+        "requireApproval": false,
+        "rateLimit": null,
+        "rateLimitWindow": null,
+        "conditions": null
+      },
+      {
+        "scope": "project",
+        "priority": 0,
+        "isDefault": false,
+        "source": "custom",
+        "name": "project block x",
+        "identities": [],
+        "targets": [
+          {
+            "kind": "network",
+            "hostPattern": "api.example.com",
+            "pathPattern": "/x",
+            "method": null
+          }
+        ],
+        "action": "block",
+        "requireApproval": false,
+        "rateLimit": null,
+        "rateLimitWindow": null,
+        "conditions": null
+      }
+    ],
+    "request": {
+      "host": "api.example.com",
+      "path": "/x",
+      "method": "GET",
+      "agentId": "agent-1",
+      "hasInjections": false,
+      "isLlmHost": false
+    },
+    "expected": {
+      "action": "block"
+    }
+  },
+  {
+    "name": "project agent-scoped allow loosens an all-agents block (higher priority)",
+    "rules": [
+      {
+        "scope": "project",
+        "priority": 0,
+        "isDefault": false,
+        "source": "custom",
+        "name": "agent-1 allow send",
+        "identities": [
+          {
+            "type": "agent",
+            "id": "agent-1"
+          }
+        ],
+        "targets": [
+          {
+            "kind": "network",
+            "hostPattern": "api.example.com",
+            "pathPattern": "/send",
+            "method": "POST"
+          }
+        ],
+        "action": "allow",
+        "requireApproval": false,
+        "rateLimit": null,
+        "rateLimitWindow": null,
+        "conditions": null
+      },
+      {
+        "scope": "project",
+        "priority": 1,
+        "isDefault": false,
+        "source": "custom",
+        "name": "all-agents block send",
+        "identities": [],
+        "targets": [
+          {
+            "kind": "network",
+            "hostPattern": "api.example.com",
+            "pathPattern": "/send",
+            "method": "POST"
+          }
+        ],
+        "action": "block",
+        "requireApproval": false,
+        "rateLimit": null,
+        "rateLimitWindow": null,
+        "conditions": null
+      }
+    ],
+    "request": {
+      "host": "api.example.com",
+      "path": "/send",
+      "method": "POST",
+      "agentId": "agent-1",
+      "hasInjections": false,
+      "isLlmHost": false
+    },
+    "expected": {
+      "action": "allow"
+    }
+  },
+  {
+    "name": "the same all-agents block still applies to a different agent",
+    "rules": [
+      {
+        "scope": "project",
+        "priority": 0,
+        "isDefault": false,
+        "source": "custom",
+        "name": "agent-1 allow send",
+        "identities": [
+          {
+            "type": "agent",
+            "id": "agent-1"
+          }
+        ],
+        "targets": [
+          {
+            "kind": "network",
+            "hostPattern": "api.example.com",
+            "pathPattern": "/send",
+            "method": "POST"
+          }
+        ],
+        "action": "allow",
+        "requireApproval": false,
+        "rateLimit": null,
+        "rateLimitWindow": null,
+        "conditions": null
+      },
+      {
+        "scope": "project",
+        "priority": 1,
+        "isDefault": false,
+        "source": "custom",
+        "name": "all-agents block send",
+        "identities": [],
+        "targets": [
+          {
+            "kind": "network",
+            "hostPattern": "api.example.com",
+            "pathPattern": "/send",
+            "method": "POST"
+          }
+        ],
+        "action": "block",
+        "requireApproval": false,
+        "rateLimit": null,
+        "rateLimitWindow": null,
+        "conditions": null
+      }
+    ],
+    "request": {
+      "host": "api.example.com",
+      "path": "/send",
+      "method": "POST",
+      "agentId": "agent-2",
+      "hasInjections": false,
+      "isLlmHost": false
+    },
+    "expected": {
+      "action": "block"
+    }
+  },
+  {
+    "name": "a host-wide block rule blocks the whole host",
+    "rules": [
+      {
+        "scope": "project",
+        "priority": 0,
+        "isDefault": false,
+        "source": "blocklist",
+        "name": "Block evil.com",
+        "identities": [],
+        "targets": [
+          {
+            "kind": "network",
+            "hostPattern": "evil.com",
+            "pathPattern": null,
+            "method": null
+          }
+        ],
+        "action": "block",
+        "requireApproval": false,
+        "rateLimit": null,
+        "rateLimitWindow": null,
+        "conditions": null
+      }
+    ],
+    "request": {
+      "host": "evil.com",
+      "path": "/anything/here",
+      "method": "GET",
+      "agentId": "agent-1",
+      "hasInjections": false,
+      "isLlmHost": false
+    },
+    "expected": {
+      "action": "block"
+    }
+  },
+  {
+    "name": "body-contains condition gates a block (matches)",
+    "rules": [
+      {
+        "scope": "project",
+        "priority": 0,
+        "isDefault": false,
+        "source": "custom",
+        "name": "block deletes",
+        "identities": [],
+        "targets": [
+          {
+            "kind": "network",
+            "hostPattern": "api.example.com",
+            "pathPattern": "/graphql",
+            "method": "POST"
+          }
+        ],
+        "action": "block",
+        "requireApproval": false,
+        "rateLimit": null,
+        "rateLimitWindow": null,
+        "conditions": [
+          {
+            "target": "body",
+            "operator": "contains",
+            "value": "DELETE"
+          }
+        ]
+      }
+    ],
+    "request": {
+      "host": "api.example.com",
+      "path": "/graphql",
+      "method": "POST",
+      "body": "mutation { delete(id: 1) }",
+      "agentId": "agent-1",
+      "hasInjections": false,
+      "isLlmHost": false
+    },
+    "expected": {
+      "action": "block"
+    }
+  },
+  {
+    "name": "body-contains condition does not match \u2192 allow",
+    "rules": [
+      {
+        "scope": "project",
+        "priority": 0,
+        "isDefault": false,
+        "source": "custom",
+        "name": "block deletes",
+        "identities": [],
+        "targets": [
+          {
+            "kind": "network",
+            "hostPattern": "api.example.com",
+            "pathPattern": "/graphql",
+            "method": "POST"
+          }
+        ],
+        "action": "block",
+        "requireApproval": false,
+        "rateLimit": null,
+        "rateLimitWindow": null,
+        "conditions": [
+          {
+            "target": "body",
+            "operator": "contains",
+            "value": "DELETE"
+          }
+        ]
+      }
+    ],
+    "request": {
+      "host": "api.example.com",
+      "path": "/graphql",
+      "method": "POST",
+      "body": "query { list }",
+      "agentId": "agent-1",
+      "hasInjections": false,
+      "isLlmHost": false
+    },
+    "expected": {
+      "action": "allow"
+    }
+  },
+  {
+    "name": "grouped tool rules: the union approves the second tool's endpoint",
+    "rules": [
+      {
+        "scope": "project",
+        "priority": 0,
+        "isDefault": false,
+        "source": "app_permission",
+        "name": "gmail list tool",
+        "identities": [],
+        "targets": [
+          {
+            "kind": "network",
+            "hostPattern": "gmail.googleapis.com",
+            "pathPattern": "/gmail/v1/users/*/messages",
+            "method": "GET"
+          }
+        ],
+        "action": "allow",
+        "requireApproval": true,
+        "rateLimit": null,
+        "rateLimitWindow": null,
+        "conditions": null
+      },
+      {
+        "scope": "project",
+        "priority": 1,
+        "isDefault": false,
+        "source": "app_permission",
+        "name": "gmail send tool",
+        "identities": [],
+        "targets": [
+          {
+            "kind": "network",
+            "hostPattern": "gmail.googleapis.com",
+            "pathPattern": "/gmail/v1/users/*/messages/send",
+            "method": "POST"
+          }
+        ],
+        "action": "allow",
+        "requireApproval": true,
+        "rateLimit": null,
+        "rateLimitWindow": null,
+        "conditions": null
+      },
+      {
+        "scope": "project",
+        "priority": 2,
+        "isDefault": false,
+        "source": "app_permission",
+        "name": "github repos tool",
+        "identities": [],
+        "targets": [
+          {
+            "kind": "network",
+            "hostPattern": "api.github.com",
+            "pathPattern": "/repos/*",
+            "method": "GET"
+          }
+        ],
+        "action": "allow",
+        "requireApproval": false,
+        "rateLimit": null,
+        "rateLimitWindow": null,
+        "conditions": null
+      }
+    ],
+    "request": {
+      "host": "gmail.googleapis.com",
+      "path": "/gmail/v1/users/me/messages/send",
+      "method": "POST",
+      "agentId": "agent-1",
+      "hasInjections": false,
+      "isLlmHost": false
+    },
+    "expected": {
+      "action": "allow",
+      "requireApproval": true
+    }
+  },
+  {
+    "name": "an agent-scoped tool allow shadows an all-agents block (higher priority)",
+    "rules": [
+      {
+        "scope": "project",
+        "priority": 0,
+        "isDefault": false,
+        "source": "app_permission",
+        "name": "agent-1 gmail read tool",
+        "identities": [
+          {
+            "type": "agent",
+            "id": "agent-1"
+          }
+        ],
+        "targets": [
+          {
+            "kind": "network",
+            "hostPattern": "gmail.googleapis.com",
+            "pathPattern": "/gmail/v1/users/*/messages",
+            "method": "GET"
+          }
+        ],
+        "action": "allow",
+        "requireApproval": false,
+        "rateLimit": null,
+        "rateLimitWindow": null,
+        "conditions": null
+      },
+      {
+        "scope": "project",
+        "priority": 1,
+        "isDefault": false,
+        "source": "app_permission",
+        "name": "agent-1 gmail send tool",
+        "identities": [
+          {
+            "type": "agent",
+            "id": "agent-1"
+          }
+        ],
+        "targets": [
+          {
+            "kind": "network",
+            "hostPattern": "gmail.googleapis.com",
+            "pathPattern": "/gmail/v1/users/*/messages/send",
+            "method": "POST"
+          }
+        ],
+        "action": "allow",
+        "requireApproval": false,
+        "rateLimit": null,
+        "rateLimitWindow": null,
+        "conditions": null
+      },
+      {
+        "scope": "project",
+        "priority": 2,
+        "isDefault": false,
+        "source": "custom",
+        "name": "all-agents block gmail sends",
+        "identities": [],
+        "targets": [
+          {
+            "kind": "network",
+            "hostPattern": "gmail.googleapis.com",
+            "pathPattern": "/gmail/v1/users/*/messages/send",
+            "method": "POST"
+          }
+        ],
+        "action": "block",
+        "requireApproval": false,
+        "rateLimit": null,
+        "rateLimitWindow": null,
+        "conditions": null
+      },
+      {
+        "scope": "project",
+        "priority": 3,
+        "isDefault": false,
+        "source": "app_permission",
+        "name": "all-agents gmail drafts rate tool",
+        "identities": [],
+        "targets": [
+          {
+            "kind": "network",
+            "hostPattern": "gmail.googleapis.com",
+            "pathPattern": "/gmail/v1/users/*/drafts",
+            "method": "POST"
+          }
+        ],
+        "action": "allow",
+        "requireApproval": false,
+        "rateLimit": 10,
+        "rateLimitWindow": "hour",
+        "conditions": null
+      }
+    ],
+    "request": {
+      "host": "gmail.googleapis.com",
+      "path": "/gmail/v1/users/me/messages/send",
+      "method": "POST",
+      "agentId": "agent-1",
+      "hasInjections": false,
+      "isLlmHost": false
+    },
+    "expected": {
+      "action": "allow"
+    }
+  },
+  {
+    "name": "ORG FLOOR: a lone project allow cannot open the org deny-default",
+    "rules": [
+      {
+        "scope": "organization",
+        "priority": 100,
+        "isDefault": true,
+        "source": "default",
+        "name": "Default Rule",
+        "identities": [],
+        "targets": [],
+        "action": "block",
+        "requireApproval": false,
+        "rateLimit": null,
+        "rateLimitWindow": null,
+        "conditions": null
+      },
+      {
+        "scope": "project",
+        "priority": 0,
+        "isDefault": false,
+        "source": "custom",
+        "name": "project allow x",
+        "identities": [],
+        "targets": [
+          {
+            "kind": "network",
+            "hostPattern": "api.example.com",
+            "pathPattern": "/x",
+            "method": null
+          }
+        ],
+        "action": "allow",
+        "requireApproval": false,
+        "rateLimit": null,
+        "rateLimitWindow": null,
+        "conditions": null
+      }
+    ],
+    "request": {
+      "host": "api.example.com",
+      "path": "/x",
+      "method": "GET",
+      "agentId": "agent-1",
+      "hasInjections": true,
+      "isLlmHost": false
+    },
+    "expected": {
+      "action": "block",
+      "byDefault": true
+    }
+  },
+  {
+    "name": "ORG FLOOR is carved: same rules, no injections \u2192 the project allow stands",
+    "rules": [
+      {
+        "scope": "organization",
+        "priority": 100,
+        "isDefault": true,
+        "source": "default",
+        "name": "Default Rule",
+        "identities": [],
+        "targets": [],
+        "action": "block",
+        "requireApproval": false,
+        "rateLimit": null,
+        "rateLimitWindow": null,
+        "conditions": null
+      },
+      {
+        "scope": "project",
+        "priority": 0,
+        "isDefault": false,
+        "source": "custom",
+        "name": "project allow x",
+        "identities": [],
+        "targets": [
+          {
+            "kind": "network",
+            "hostPattern": "api.example.com",
+            "pathPattern": "/x",
+            "method": null
+          }
+        ],
+        "action": "allow",
+        "requireApproval": false,
+        "rateLimit": null,
+        "rateLimitWindow": null,
+        "conditions": null
+      }
+    ],
+    "request": {
+      "host": "api.example.com",
+      "path": "/x",
+      "method": "GET",
+      "agentId": "agent-1",
+      "hasInjections": false,
+      "isLlmHost": false
+    },
+    "expected": {
+      "action": "allow"
+    }
+  },
+  {
+    "name": "ORG FLOOR is carved on an LLM host \u2192 the project allow stands",
+    "rules": [
+      {
+        "scope": "organization",
+        "priority": 100,
+        "isDefault": true,
+        "source": "default",
+        "name": "Default Rule",
+        "identities": [],
+        "targets": [],
+        "action": "block",
+        "requireApproval": false,
+        "rateLimit": null,
+        "rateLimitWindow": null,
+        "conditions": null
+      },
+      {
+        "scope": "project",
+        "priority": 0,
+        "isDefault": false,
+        "source": "custom",
+        "name": "project allow x",
+        "identities": [],
+        "targets": [
+          {
+            "kind": "network",
+            "hostPattern": "api.example.com",
+            "pathPattern": "/x",
+            "method": null
+          }
+        ],
+        "action": "allow",
+        "requireApproval": false,
+        "rateLimit": null,
+        "rateLimitWindow": null,
+        "conditions": null
+      }
+    ],
+    "request": {
+      "host": "api.example.com",
+      "path": "/x",
+      "method": "GET",
+      "agentId": "agent-1",
+      "hasInjections": true,
+      "isLlmHost": true
+    },
+    "expected": {
+      "action": "allow"
+    }
+  },
+  {
+    "name": "PROJECT FLOOR: a lone org allow cannot open the project deny-default",
+    "rules": [
+      {
+        "scope": "project",
+        "priority": 100,
+        "isDefault": true,
+        "source": "default",
+        "name": "Default Rule",
+        "identities": [],
+        "targets": [],
+        "action": "block",
+        "requireApproval": false,
+        "rateLimit": null,
+        "rateLimitWindow": null,
+        "conditions": null
+      },
+      {
+        "scope": "organization",
+        "priority": 0,
+        "isDefault": false,
+        "source": "custom",
+        "name": "org allow x",
+        "identities": [],
+        "targets": [
+          {
+            "kind": "network",
+            "hostPattern": "api.example.com",
+            "pathPattern": "/x",
+            "method": null
+          }
+        ],
+        "action": "allow",
+        "requireApproval": false,
+        "rateLimit": null,
+        "rateLimitWindow": null,
+        "conditions": null
+      }
+    ],
+    "request": {
+      "host": "api.example.com",
+      "path": "/x",
+      "method": "GET",
+      "agentId": "agent-1",
+      "hasInjections": true,
+      "isLlmHost": false
+    },
+    "expected": {
+      "action": "block",
+      "byDefault": true
+    }
+  },
+  {
+    "name": "an org BLOCK still applies under a project deny-default (explicit beats default)",
+    "rules": [
+      {
+        "scope": "project",
+        "priority": 100,
+        "isDefault": true,
+        "source": "default",
+        "name": "Default Rule",
+        "identities": [],
+        "targets": [],
+        "action": "block",
+        "requireApproval": false,
+        "rateLimit": null,
+        "rateLimitWindow": null,
+        "conditions": null
+      },
+      {
+        "scope": "organization",
+        "priority": 0,
+        "isDefault": false,
+        "source": "custom",
+        "name": "org block x",
+        "identities": [],
+        "targets": [
+          {
+            "kind": "network",
+            "hostPattern": "api.example.com",
+            "pathPattern": "/x",
+            "method": null
+          }
+        ],
+        "action": "block",
+        "requireApproval": false,
+        "rateLimit": null,
+        "rateLimitWindow": null,
+        "conditions": null
+      }
+    ],
+    "request": {
+      "host": "api.example.com",
+      "path": "/x",
+      "method": "GET",
+      "agentId": "agent-1",
+      "hasInjections": true,
+      "isLlmHost": false
+    },
+    "expected": {
+      "action": "block"
+    }
+  },
+  {
+    "name": "cross-scope strictness: an org rate limit beats a project plain allow",
+    "rules": [
+      {
+        "scope": "organization",
+        "priority": 0,
+        "isDefault": false,
+        "source": "custom",
+        "name": "org rate x",
+        "identities": [],
+        "targets": [
+          {
+            "kind": "network",
+            "hostPattern": "api.example.com",
+            "pathPattern": "/x",
+            "method": null
+          }
+        ],
+        "action": "allow",
+        "requireApproval": false,
+        "rateLimit": 100,
+        "rateLimitWindow": "hour",
+        "conditions": null
+      },
+      {
+        "scope": "project",
+        "priority": 0,
+        "isDefault": false,
+        "source": "custom",
+        "name": "project allow x",
+        "identities": [],
+        "targets": [
+          {
+            "kind": "network",
+            "hostPattern": "api.example.com",
+            "pathPattern": "/x",
+            "method": null
+          }
+        ],
+        "action": "allow",
+        "requireApproval": false,
+        "rateLimit": null,
+        "rateLimitWindow": null,
+        "conditions": null
+      }
+    ],
+    "request": {
+      "host": "api.example.com",
+      "path": "/x",
+      "method": "GET",
+      "agentId": "agent-1",
+      "hasInjections": false,
+      "isLlmHost": false
+    },
+    "expected": {
+      "action": "allow",
+      "rateLimit": 100,
+      "rateLimitWindow": "hour"
+    }
+  },
+  {
+    "name": "cross-scope strictness: an org approval beats a project plain allow",
+    "rules": [
+      {
+        "scope": "organization",
+        "priority": 0,
+        "isDefault": false,
+        "source": "custom",
+        "name": "org approval x",
+        "identities": [],
+        "targets": [
+          {
+            "kind": "network",
+            "hostPattern": "api.example.com",
+            "pathPattern": "/x",
+            "method": null
+          }
+        ],
+        "action": "allow",
+        "requireApproval": true,
+        "rateLimit": null,
+        "rateLimitWindow": null,
+        "conditions": null
+      },
+      {
+        "scope": "project",
+        "priority": 0,
+        "isDefault": false,
+        "source": "custom",
+        "name": "project allow x",
+        "identities": [],
+        "targets": [
+          {
+            "kind": "network",
+            "hostPattern": "api.example.com",
+            "pathPattern": "/x",
+            "method": null
+          }
+        ],
+        "action": "allow",
+        "requireApproval": false,
+        "rateLimit": null,
+        "rateLimitWindow": null,
+        "conditions": null
+      }
+    ],
+    "request": {
+      "host": "api.example.com",
+      "path": "/x",
+      "method": "GET",
+      "agentId": "agent-1",
+      "hasInjections": false,
+      "isLlmHost": false
+    },
+    "expected": {
+      "action": "allow",
+      "requireApproval": true
+    }
+  },
+  {
+    "name": "an org block is not overridable by a project AGENT-SCOPED allow",
+    "rules": [
+      {
+        "scope": "organization",
+        "priority": 0,
+        "isDefault": false,
+        "source": "custom",
+        "name": "org block x",
+        "identities": [],
+        "targets": [
+          {
+            "kind": "network",
+            "hostPattern": "api.example.com",
+            "pathPattern": "/x",
+            "method": null
+          }
+        ],
+        "action": "block",
+        "requireApproval": false,
+        "rateLimit": null,
+        "rateLimitWindow": null,
+        "conditions": null
+      },
+      {
+        "scope": "project",
+        "priority": 0,
+        "isDefault": false,
+        "source": "custom",
+        "name": "agent allow x",
+        "identities": [
+          {
+            "type": "agent",
+            "id": "agent-1"
+          }
+        ],
+        "targets": [
+          {
+            "kind": "network",
+            "hostPattern": "api.example.com",
+            "pathPattern": "/x",
+            "method": null
+          }
+        ],
+        "action": "allow",
+        "requireApproval": false,
+        "rateLimit": null,
+        "rateLimitWindow": null,
+        "conditions": null
+      }
+    ],
+    "request": {
+      "host": "api.example.com",
+      "path": "/x",
+      "method": "GET",
+      "agentId": "agent-1",
+      "hasInjections": false,
+      "isLlmHost": false
+    },
+    "expected": {
+      "action": "block"
+    }
+  }
+]

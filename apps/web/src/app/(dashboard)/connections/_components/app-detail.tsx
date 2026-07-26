@@ -18,16 +18,13 @@ import {
   withProjectPrefix,
 } from "@/lib/navigation";
 import type { OAuthPermission } from "@onecli/api/apps/types";
-import type { AppPermissionLevel } from "@onecli/api/apps/app-permissions";
 import { useAppPermissionDefinitions } from "@/hooks/use-app-permissions";
 import { AppIcon } from "./app-icon";
 import { AppConfigForm, type AppConfigFormHandle } from "./app-config-form";
 import { ConfigureCredentialsDialog } from "./configure-credentials-dialog";
 import { PermissionsList } from "./permissions-list";
-import { AppPermissions } from "./app-permissions";
-// The step-9.7b read-only reflection. Resolves to a null stub in OSS and to
-// the real EE surface under the POLICY_REFLECT alias; the RSC page threads
-// `policyEditingEnabled` either way.
+// The read-only app-permissions reflection, which reads the v2 policy engine.
+// Shared since step 10 — every edition renders it.
 import { AppPermissionsReflection } from "@/lib/components/policy-reflect";
 import { ConnectionAccountCard } from "./connection-account-card";
 import { InheritedConnectionCard } from "./inherited-connection-card";
@@ -60,14 +57,6 @@ interface AppDetailProps {
   hasAppConfig: boolean;
   pageScope?: PageScope;
   backPath?: string;
-  orgPermissionStates?: Record<string, AppPermissionLevel>;
-  orgConditions?: Record<string, unknown[]>;
-  policyMode?: "allow" | "deny";
-  /** Step 9.7b: when the v2 policy console is live (`POLICY_EDITING_ENABLED`,
-   * threaded from the RSC page — server-only env), the equipment editors on
-   * this page render as read-only Policy reflections instead. Absent/false →
-   * today's editors, unchanged. */
-  policyEditingEnabled?: boolean;
 }
 
 type ConnectionData = Omit<Connection, "metadata"> & {
@@ -81,10 +70,6 @@ export const AppDetail = ({
   hasAppConfig,
   pageScope = "project",
   backPath,
-  orgPermissionStates,
-  orgConditions,
-  policyMode,
-  policyEditingEnabled = false,
 }: AppDetailProps) => {
   const pathname = usePathname();
   const queryClient = useQueryClient();
@@ -272,7 +257,6 @@ export const AppDetail = ({
                     appName={app.name}
                     onReconnect={(id) => openConnectPopup(id, popupOpts)}
                     pageScope={pageScope}
-                    policyEditingEnabled={policyEditingEnabled}
                   />
                 ))}
                 {inheritedConnections.map((conn) => (
@@ -281,7 +265,6 @@ export const AppDetail = ({
                     connection={conn}
                     appName={app.name}
                     pageScope={pageScope}
-                    policyEditingEnabled={policyEditingEnabled}
                   />
                 ))}
               </div>
@@ -289,23 +272,11 @@ export const AppDetail = ({
           )}
 
           {permissionDefinition ? (
-            policyEditingEnabled ? (
-              <AppPermissionsReflection
-                provider={app.id}
-                appName={app.name}
-                pageScope={pageScope}
-              />
-            ) : (
-              <AppPermissions
-                provider={app.id}
-                appName={app.name}
-                groups={permissionDefinition.groups}
-                orgStates={orgPermissionStates}
-                orgConditions={orgConditions}
-                policyMode={policyMode}
-                pageScope={pageScope}
-              />
-            )
+            <AppPermissionsReflection
+              provider={app.id}
+              appName={app.name}
+              pageScope={pageScope}
+            />
           ) : showOAuthScopesList ? (
             <PermissionsList
               permissions={app.permissions}

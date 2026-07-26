@@ -192,7 +192,6 @@ pub(crate) struct InterceptToken {
 #[derive(Debug)]
 pub(crate) struct ResolvedRules {
     pub injection_rules: Vec<InjectionRule>,
-    pub policy_rules: Vec<crate::policy::PolicyRule>,
     pub access_restricted: bool,
     /// Ready-to-use interception data when the resolved connection has a
     /// cached token that should be served instead of forwarding.
@@ -210,8 +209,6 @@ pub(crate) struct ResolvedRules {
     /// Provider-specific body transform resolved from the app connection.
     /// The handler decides per-request whether to act.
     pub body_transform: Option<crate::apps::BodyTransform>,
-    /// Organization policy mode: "allow" (default) or "deny" (block by default).
-    pub policy_mode: String,
     /// Cloud-only: pending claim token when the org is in claim mode. Inert in OSS.
     #[cfg_attr(not(edition_cloud), allow(dead_code))]
     pub claim_token: Option<String>,
@@ -388,7 +385,6 @@ async fn resolve_rules(
     Ok(ResolveResult::Resolved {
         rules: Box::new(ResolvedRules {
             injection_rules,
-            policy_rules: resp.policy_rules,
             policy_rules_v2: resp.policy_rules_v2,
             available_apps: resp.available_apps,
             access_restricted: resp.access_restricted,
@@ -398,7 +394,6 @@ async fn resolve_rules(
             connection_label,
             finalizer,
             body_transform,
-            policy_mode: resp.policy_mode,
             claim_token: resp.claim_token,
             session_policy,
             budget_bindings: resp.budget_bindings,

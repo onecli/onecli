@@ -33,22 +33,30 @@ impl std::fmt::Display for OpError {
     }
 }
 
-/// Base URL of the internal Node API, resolved in order:
-/// 1. `INTERNAL_API_URL` — explicit override (cloud points this at the in-VPC
-///    api-server, e.g. `http://api-server:10256`).
-/// 2. `APP_URL` — the co-located OSS app's own address; in docker-compose this
-///    tracks `ONECLI_BIND_HOST`, so the gateway reaches the app at whatever host
-///    the deployment is bound to without a second env var.
-/// 3. A loopback default for a bare local run.
+/// Where the Node app answers when nothing overrides it. The gateway and the
+/// app share a container in every self-hosted layout, so loopback is the
+/// address, not a guess.
+const INTERNAL_API_URL_DEFAULT: &str = "http://localhost:10254";
+
+/// Base URL of the internal Node API: `INTERNAL_API_URL` when set (cloud points
+/// it at the in-VPC api-server, e.g. `http://api-server:10256`), else loopback.
+///
+/// Deliberately **not** `APP_URL`. That is the *public* URL users browse to —
+/// a different concept, and since it can now name a real external host, using
+/// it here would send in-container vault calls out over the internet. Split out
+/// for testability, as [`super::super::gateway::response::dashboard_url`] is.
+fn resolve_internal_api_url(explicit: Option<&str>) -> String {
+    explicit
+        .map(str::trim)
+        .filter(|url| !url.is_empty())
+        .unwrap_or(INTERNAL_API_URL_DEFAULT)
+        .trim_end_matches('/')
+        .to_string()
+}
+
 fn internal_api_url() -> &'static str {
     static URL: OnceLock<String> = OnceLock::new();
-    URL.get_or_init(|| {
-        std::env::var("INTERNAL_API_URL")
-            .or_else(|_| std::env::var("APP_URL"))
-            .unwrap_or_else(|_| "http://localhost:10254".to_string())
-            .trim_end_matches('/')
-            .to_string()
-    })
+    URL.get_or_init(|| resolve_internal_api_url(std::env::var("INTERNAL_API_URL").ok().as_deref()))
 }
 
 /// Shared secret presented to the internal API as `X-Gateway-Secret`.
@@ -174,3 +182,35 @@ async fn classify(resp: reqwest::Response) -> OpError {
 
 // `op://` reference shape is validated Node-side (`opRefSchema`) at secret
 // write time; the gateway trusts the refs it reads back from validated rows.
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn explicit_internal_url_wins_and_is_trimmed() {
+        assert_eq!(
+            resolve_internal_api_url(Some("http://api-server:10256/")),
+            "http://api-server:10256"
+        );
+    }
+
+    // The regression guard. This used to fall back to APP_URL — the *public*
+    // URL — which, now that APP_URL can name a real external host, would send
+    // in-container vault calls out over the internet. Loopback is the only
+    // correct answer when nothing explicit is set.
+    //
+    // Asserted through the parameter rather than by setting APP_URL in the
+    // environment: the resolver takes its only input as an argument, so there is
+    // nothing for an env var to reach, and mutating process-wide env here would
+    // race the sibling suites that read APP_URL through a cached `OnceLock`.
+    #[test]
+    fn falls_back_to_loopback_never_to_a_public_url() {
+        assert_eq!(resolve_internal_api_url(None), INTERNAL_API_URL_DEFAULT);
+        assert_eq!(resolve_internal_api_url(Some("")), INTERNAL_API_URL_DEFAULT);
+        assert_eq!(
+            resolve_internal_api_url(Some("   ")),
+            INTERNAL_API_URL_DEFAULT
+        );
+    }
+}

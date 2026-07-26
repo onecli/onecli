@@ -54,24 +54,15 @@ const ORG_APP_CONFIG_ALIASES = {
   "@/lib/actions/app-config": "@/ee/actions/app-config",
 };
 
-// All EE editions (cloud + both onprems) carry the v2 translator, so they run
-// the boot policy data passes (the instrumentation hook): the step-5 backfill
-// pre-cutover (editing off) and the app-permission ADOPTION pass post-cutover
-// (editing on) — swap both OSS no-op seams for the real ee/ implementations.
-// OSS keeps the no-ops and migrates/adopts at its own cutover (step 9.5).
+// The boot-policy seam, swapped per edition. OSS converts a pre-cutover
+// instance's legacy policy into v2 and then runs the read-only guard
+// (`services/policy-legacy-migration/` — TEMPORARY, see its README); every EE
+// edition swaps that away for the guard alone, since cloud has nothing to
+// convert and an onprem instance in that state should surface the report to an
+// operator rather than be rewritten unattended. This alias is what keeps the
+// conversion out of every EE build.
 const POLICY_MIGRATE_ALIASES = {
   "@/lib/policy-migrate": "@/ee/policy-migrate",
-  "@/lib/policy-adopt": "@/ee/policy-adopt",
-  "@/lib/policy-compact": "@/ee/policy-compact",
-};
-
-// All EE editions get the step-9.7b read-only reflection dialogs behind the
-// POLICY_EDITING_ENABLED flag (the flag can flip on onprem too, so a cloud-only
-// alias would render the null stub there). OSS renders its own real stubs
-// since step 9.5 (the per-app "managed as policy rules" card + the legacy
-// equipment editors, which stay live through the OSS bridge until step 10).
-const POLICY_REFLECT_ALIASES = {
-  "@/lib/components/policy-reflect": "@/ee/policy-reflect",
 };
 
 // The shared project policy editor (step 9.5) with its EE-differentiating
@@ -99,7 +90,6 @@ const POLICY_EDITOR_ALIASES = {
 const CLOUD_ALIASES = {
   ...ORG_APP_CONFIG_ALIASES,
   ...POLICY_MIGRATE_ALIASES,
-  ...POLICY_REFLECT_ALIASES,
   ...POLICY_EDITOR_ALIASES,
   "@/lib/auth/auth-provider": "@/ee/auth/cognito-provider",
   "@/lib/auth/auth-server": "@/ee/auth/cognito-server",
@@ -157,7 +147,6 @@ const ONPREM_FULL_ALIASES = {
   ...ONPREM_ENTITLEMENT_ALIASES,
   ...ORG_APP_CONFIG_ALIASES,
   ...POLICY_MIGRATE_ALIASES,
-  ...POLICY_REFLECT_ALIASES,
   ...POLICY_EDITOR_ALIASES,
   // org-UI + org-aware redirect → cloud implementations (reuse the cloud mappings above)
   "@/lib/nav-config": CLOUD_ALIASES["@/lib/nav-config"],
@@ -177,7 +166,6 @@ const ONPREM_SLIM_ALIASES = {
   ...ONPREM_ENTITLEMENT_ALIASES,
   ...ORG_APP_CONFIG_ALIASES,
   ...POLICY_MIGRATE_ALIASES,
-  ...POLICY_REFLECT_ALIASES,
   ...POLICY_EDITOR_ALIASES,
 };
 
@@ -210,6 +198,20 @@ const nextConfig = {
         : isOnpremSlim
           ? ONPREM_SLIM_ALIASES
           : {},
+  },
+  async redirects() {
+    // The legacy Rules page and the policyMode toggle retired at step 10; their
+    // routes are gone, so a bookmark would 404. Send them to the console that
+    // replaced them. FLAT editions only: cloud and onprem-full namespace the
+    // console under /p/:id, and their `beforeFiles` rewrite below already 404s
+    // every bare dashboard path — redirecting there would just bounce a bookmark
+    // to a different 404. Redirects are evaluated BEFORE those rewrites, so this
+    // has to be gated rather than relying on the rewrite to catch it.
+    if (isCloud || isOnpremFull) return [];
+    return [
+      { source: "/rules", destination: "/policy", permanent: true },
+      { source: "/settings/policy", destination: "/policy", permanent: true },
+    ];
   },
   async rewrites() {
     // Cloud and onprem-full ship the OSS bare dashboard routes too (they may only add

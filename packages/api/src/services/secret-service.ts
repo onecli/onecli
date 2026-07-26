@@ -3,7 +3,6 @@ import { getCrypto } from "../providers";
 import { ServiceError } from "./errors";
 import type { ResourceScope } from "./resource-scope";
 import { scopeWhere, scopeCreate, scopeOwnership } from "./resource-scope";
-import { notifyPolicyCoherence } from "./policy-coherence-notify";
 import {
   detectAnthropicAuthMode,
   detectOpenaiAuthMode,
@@ -285,20 +284,7 @@ export const deleteSecret = async (scope: ResourceScope, secretId: string) => {
 
   if (!secret) throw new ServiceError("NOT_FOUND", "Secret not found");
 
-  // Step 8: capture the projects whose agents are assigned this secret BEFORE the
-  // delete cascades their `agent_secrets` (and any equipment rule's secret target)
-  // — those scopes must re-materialize so no orphaned equipment rule lingers.
-  const affected = await db.agentSecret.findMany({
-    where: { secretId },
-    select: { agent: { select: { projectId: true } } },
-  });
-
   await db.secret.delete({ where: { id: secretId } });
-
-  const projectIds = [...new Set(affected.map((a) => a.agent.projectId))];
-  await Promise.all(
-    projectIds.map((projectId) => notifyPolicyCoherence({ projectId })),
-  );
 };
 
 export const updateSecret = async (

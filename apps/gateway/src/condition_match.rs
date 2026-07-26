@@ -1,10 +1,6 @@
 use crate::policy::PolicyRule;
 
-/// OSS stub: no condition matching, no body buffering.
-pub(crate) fn needs_body_buffer(_rules: &[PolicyRule]) -> bool {
-    false
-}
-
+/// OSS stub: conditions match vacuously (no body inspection).
 pub(crate) fn matches(_rule: &PolicyRule, _body: Option<&[u8]>) -> bool {
     true
 }

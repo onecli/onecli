@@ -60,7 +60,7 @@ export const ActivityDetailDialog = ({
   const matchedRuleName = log ? getMatchedRuleName(log) : null;
   const matchedRuleScope = log ? getMatchedRuleScope(log) : null;
   const connectionLabel = log ? getConnectionLabel(log) : null;
-  const rulesUrl = withProjectPrefix(pathname, "/rules");
+  const rulesUrl = withProjectPrefix(pathname, "/policy");
 
   return (
     <Dialog open={!!log} onOpenChange={() => onClose()}>

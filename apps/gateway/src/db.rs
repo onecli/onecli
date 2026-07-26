@@ -29,7 +29,6 @@ pub(crate) struct AgentRow {
     pub organization_id: String,
     pub secret_mode: String,
     pub subscription_status: String,
-    pub policy_mode: String,
 }
 
 /// A secret row from the `secrets` table.
@@ -55,21 +54,6 @@ pub(crate) struct SecretRow {
     pub path_pattern: Option<String>,
     pub injection_config: Option<serde_json::Value>,
     pub metadata: Option<serde_json::Value>,
-}
-
-/// A policy rule row from the `policy_rules` table.
-#[derive(Debug, FromRow)]
-pub(crate) struct PolicyRuleRow {
-    pub id: String,
-    pub name: String,
-    pub host_pattern: String,
-    pub path_pattern: Option<String>,
-    pub method: Option<String>,
-    pub agent_id: Option<String>,
-    pub action: String,
-    pub rate_limit: Option<i32>,
-    pub rate_limit_window: Option<String>,
-    pub conditions: Option<serde_json::Value>,
 }
 
 /// A user row from the `users` table.
@@ -304,7 +288,7 @@ pub(crate) async fn find_agent_by_token(
     access_token: &str,
 ) -> Result<Option<AgentRow>> {
     sqlx::query_as::<_, AgentRow>(
-        r#"SELECT a.id, a.name, a.identifier, a.project_id, p.organization_id, a.secret_mode, o.subscription_status, o.policy_mode
+        r#"SELECT a.id, a.name, a.identifier, a.project_id, p.organization_id, a.secret_mode, o.subscription_status
            FROM agents a
            JOIN projects p ON a.project_id = p.id
            JOIN organizations o ON p.organization_id = o.id
@@ -345,20 +329,6 @@ pub(crate) async fn find_secrets_by_project(
     .context("querying secrets by project_id")
 }
 
-/// Find secrets assigned to a specific agent (selective mode).
-pub(crate) async fn find_secrets_by_agent(pool: &PgPool, agent_id: &str) -> Result<Vec<SecretRow>> {
-    sqlx::query_as::<_, SecretRow>(
-        r#"SELECT s.id, s.scope, s.type, s.value_source, s.encrypted_value, s.op_ref, s.host_pattern, s.path_pattern, s.injection_config, s.metadata
-           FROM secrets s
-           INNER JOIN agent_secrets as_ ON s.id = as_.secret_id
-           WHERE as_.agent_id = $1"#,
-    )
-    .bind(agent_id)
-    .fetch_all(pool)
-    .await
-    .context("querying secrets by agent_id")
-}
-
 /// Find all organization-level secrets.
 pub(crate) async fn find_secrets_by_org(
     pool: &PgPool,
@@ -388,42 +358,6 @@ pub(crate) async fn update_secret_value(
         .await
         .context("updating secret encrypted value")?;
     Ok(())
-}
-
-/// Find all enabled policy rules for a given project.
-pub(crate) async fn find_policy_rules_by_project(
-    pool: &PgPool,
-    project_id: &str,
-) -> Result<Vec<PolicyRuleRow>> {
-    sqlx::query_as::<_, PolicyRuleRow>(
-        r#"SELECT id, name, host_pattern, path_pattern, method, agent_id,
-                  action, rate_limit, rate_limit_window, conditions
-           FROM policy_rules
-           WHERE project_id = $1 AND enabled = true
-             AND action IN ('block', 'rate_limit', 'manual_approval', 'allow')"#,
-    )
-    .bind(project_id)
-    .fetch_all(pool)
-    .await
-    .context("querying policy_rules by project_id")
-}
-
-/// Find all enabled organization-level policy rules.
-pub(crate) async fn find_policy_rules_by_org(
-    pool: &PgPool,
-    organization_id: &str,
-) -> Result<Vec<PolicyRuleRow>> {
-    sqlx::query_as::<_, PolicyRuleRow>(
-        r#"SELECT id, name, host_pattern, path_pattern, method, agent_id,
-                  action, rate_limit, rate_limit_window, conditions
-           FROM policy_rules
-           WHERE organization_id = $1 AND scope = 'organization' AND enabled = true
-             AND action IN ('block', 'rate_limit', 'manual_approval', 'allow')"#,
-    )
-    .bind(organization_id)
-    .fetch_all(pool)
-    .await
-    .context("querying policy_rules by organization_id")
 }
 
 // ── New-model policy queries (policy_rules_v2) ─────────────────────────────
@@ -533,7 +467,7 @@ pub(crate) struct PolicyV2Rules {
     /// The org+project custom secrets' host patterns (step 8), so a `secret` target
     /// can permit/deny its host DB-free per request. Empty unless a loaded rule has
     /// a secret target (lazy). Populated by both the OSS core and the EE engine
-    /// (`find_secret_hosts` is shared) whenever `POLICY_ENFORCE_V2` is on.
+    /// (`find_secret_hosts` is shared).
     #[serde(default)]
     pub secret_hosts: SecretHosts,
     /// The org+project app connections' providers, so a `connection` target can
@@ -851,23 +785,6 @@ pub(crate) async fn find_app_connections_by_project(
     .fetch_all(pool)
     .await
     .context("querying app_connections by project_id")
-}
-
-/// Find app connections assigned to a specific agent (selective mode).
-pub(crate) async fn find_app_connections_by_agent(
-    pool: &PgPool,
-    agent_id: &str,
-) -> Result<Vec<AppConnectionRow>> {
-    sqlx::query_as::<_, AppConnectionRow>(
-        r#"SELECT ac.id, ac.provider, ac.scope, ac.credentials, ac.label, ac.metadata, aac.session_policy
-           FROM app_connections ac
-           INNER JOIN agent_app_connections aac ON ac.id = aac.app_connection_id
-           WHERE aac.agent_id = $1 AND ac.status = 'connected'"#,
-    )
-    .bind(agent_id)
-    .fetch_all(pool)
-    .await
-    .context("querying app_connections by agent_id")
 }
 
 /// Find all organization-level app connections.

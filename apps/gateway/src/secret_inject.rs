@@ -236,17 +236,40 @@ pub(crate) async fn refresh_openai_oauth_if_expired(
     }
 }
 
+const OPENAI_TOKEN_URL: &str = "https://auth.openai.com/oauth/token";
+
+/// Public OAuth client id of the Codex CLI — the app that issued the vaulted
+/// ChatGPT session we are refreshing.
+///
+/// `auth.openai.com` rejects a `refresh_token` grant that omits it with
+/// 400 `Missing 'client_id'`, so without this the refresh can never succeed and
+/// the session hard-expires with the access token (~10 days).
+///
+/// A constant rather than configuration: it identifies OpenAI's own first-party
+/// CLI, is hardcoded in the open-source Codex client, and the vaulted
+/// `auth.json` has no `client_id` field to read it from. That is unlike the
+/// OAuth providers in `apps.rs`, which take a `client_id_env` because an
+/// operator supplies their own app there.
+const OPENAI_CODEX_CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
+
+/// Form body for the refresh_token grant. Split out from the request so the
+/// field set can be asserted — sending it needs the network.
+fn refresh_token_form(refresh_token: &str) -> [(&'static str, &str); 3] {
+    [
+        ("client_id", OPENAI_CODEX_CLIENT_ID),
+        ("grant_type", "refresh_token"),
+        ("refresh_token", refresh_token),
+    ]
+}
+
 /// Refresh an OpenAI OAuth access_token using the refresh_token.
 async fn refresh_openai_oauth_token(
     refresh_token: &str,
 ) -> anyhow::Result<(String, Option<String>)> {
     let resp = reqwest::Client::new()
-        .post("https://auth.openai.com/oauth/token")
+        .post(OPENAI_TOKEN_URL)
         .timeout(std::time::Duration::from_secs(10))
-        .form(&[
-            ("grant_type", "refresh_token"),
-            ("refresh_token", refresh_token),
-        ])
+        .form(&refresh_token_form(refresh_token))
         .send()
         .await
         .map_err(|e| anyhow::anyhow!("openai oauth token refresh request failed: {e}"))?;
@@ -281,6 +304,41 @@ async fn refresh_openai_oauth_token(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── openai oauth refresh ───────────────────────────────────────────
+
+    // The regression guard for a refresh that never once succeeded: without
+    // `client_id`, auth.openai.com answers 400 "Missing 'client_id'", the
+    // gateway falls through to the expired token, and every chatgpt.com request
+    // 401s until the user re-authenticates by hand.
+    #[test]
+    fn refresh_token_form_sends_client_id_and_the_grant() {
+        let form = refresh_token_form("rt-abc123");
+
+        assert_eq!(
+            form,
+            [
+                ("client_id", OPENAI_CODEX_CLIENT_ID),
+                ("grant_type", "refresh_token"),
+                ("refresh_token", "rt-abc123"),
+            ]
+        );
+    }
+
+    // Pinned as a literal: a typo here is not a compile error and not a test
+    // failure elsewhere — it surfaces as `invalid_client` from OpenAI, inside a
+    // warning, roughly ten days after anyone touched this.
+    #[test]
+    fn client_id_is_the_codex_cli_app() {
+        assert_eq!(OPENAI_CODEX_CLIENT_ID, "app_EMoamEEZ73f0CkXaXp7hrann");
+    }
+
+    // Same reasoning: the endpoint is only exercised against the network, so a
+    // wrong URL fails at runtime rather than here.
+    #[test]
+    fn token_url_is_the_openai_oauth_endpoint() {
+        assert_eq!(OPENAI_TOKEN_URL, "https://auth.openai.com/oauth/token");
+    }
 
     // ── build_injections: anthropic ────────────────────────────────────
 

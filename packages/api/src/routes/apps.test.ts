@@ -1,4 +1,4 @@
-import { beforeAll, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import type { Hono } from "hono";
 import type { ApiEnv } from "../types";
 
@@ -180,4 +180,62 @@ describe("app-permission catalog endpoints", () => {
     const res = await app.request("/v1/apps/permission-definitions");
     expect(res.status).toBe(401);
   });
+});
+
+// Where the OAuth callback sends the browser when the dance ends. An unknown
+// provider is the cheapest way in: it short-circuits to the "Invalid provider"
+// error redirect, which is built from the same `appOrigin` as every success and
+// failure path in the handler.
+describe("oauth callback redirect origin", () => {
+  let app: Hono<ApiEnv>;
+
+  beforeAll(() => {
+    app = createApiApp(nullSession);
+  });
+
+  const orig = {
+    APP_URL: process.env.APP_URL,
+    NEXT_PUBLIC_APP_URL: process.env.NEXT_PUBLIC_APP_URL,
+  };
+  afterEach(() => {
+    for (const key of ["APP_URL", "NEXT_PUBLIC_APP_URL"] as const) {
+      if (orig[key] === undefined) delete process.env[key];
+      else process.env[key] = orig[key];
+    }
+  });
+
+  const callback = (headers: Record<string, string>) =>
+    app.request("/v1/apps/nosuchprovider/callback", { headers });
+
+  const invalidProviderAt = (origin: string) =>
+    `${origin}/app-connect/nosuchprovider?status=error&message=Invalid%20provider`;
+
+  // The reported bug (OSS #420): APP_URL is unset, so the handler used to read
+  // lib/env.ts's `http://localhost:10254` default and strand the user there.
+  it("falls back to the request origin when APP_URL is unconfigured", async () => {
+    delete process.env.APP_URL;
+    delete process.env.NEXT_PUBLIC_APP_URL;
+
+    const res = await callback({ host: "my-gateway.example.com" });
+
+    expect(res.status).toBe(302);
+    expect(res.headers.get("location")).toBe(
+      invalidProviderAt("http://my-gateway.example.com"),
+    );
+  });
+
+  it("honors a configured APP_URL, stripping trailing slashes", async () => {
+    process.env.APP_URL = "https://configured.example.com/";
+    delete process.env.NEXT_PUBLIC_APP_URL;
+
+    const res = await callback({ host: "my-gateway.example.com" });
+
+    expect(res.status).toBe(302);
+    expect(res.headers.get("location")).toBe(
+      invalidProviderAt("https://configured.example.com"),
+    );
+  });
+
+  // The split-origin deployment shape is covered in
+  // apps-callback-origin.test.ts, which needs its own edition pin.
 });
