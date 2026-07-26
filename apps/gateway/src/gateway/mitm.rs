@@ -191,7 +191,6 @@ pub(crate) struct InterceptToken {
 #[derive(Debug)]
 pub(crate) struct ResolvedRules {
     pub injection_rules: Vec<InjectionRule>,
-    pub policy_rules: Vec<crate::policy::PolicyRule>,
     pub access_restricted: bool,
     /// Ready-to-use interception data when the resolved connection has a
     /// cached token that should be served instead of forwarding.
@@ -209,8 +208,6 @@ pub(crate) struct ResolvedRules {
     /// Provider-specific body transform resolved from the app connection.
     /// The handler decides per-request whether to act.
     pub body_transform: Option<crate::apps::BodyTransform>,
-    /// Organization policy mode: "allow" (default) or "deny" (block by default).
-    pub policy_mode: String,
     /// Cloud-only: pending claim token when the org is in claim mode. Inert in OSS.
     #[cfg_attr(not(edition_cloud), allow(dead_code))]
     pub claim_token: Option<String>,
@@ -261,8 +258,9 @@ enum ResolveResult {
 }
 
 /// Resolve injection + policy rules from cache, with per-request app connection
-/// disambiguation. Falls back to vault rules if no DB secrets or app connections
-/// are configured for this host.
+/// disambiguation. Secret and app-connection rules are both path-scoped and are
+/// merged per request (`inject::merge_injection_rules`); vault rules fill in
+/// only when neither source yields any.
 async fn resolve_rules(
     ctx: &ProxyContext,
     authority: &str,
@@ -293,7 +291,8 @@ async fn resolve_rules(
     )
     .await?;
 
-    let mut injection_rules = resp.injection_rules; // from secrets
+    let secret_rules = resp.injection_rules; // from secrets (path-scoped)
+    let mut app_rules: Vec<InjectionRule> = Vec::new();
     let mut token_expires_at: Option<i64> = None;
     let mut rewrite_host: Option<String> = None;
     let mut connection_label: Option<String> = None;
@@ -306,8 +305,16 @@ async fn resolve_rules(
             .map(str::to_string)
     });
 
-    // If no secret rules, try app connections (per-request disambiguation)
-    if injection_rules.is_empty() && !resp.app_connections.is_empty() {
+    // Resolve app connections whenever any exist and MERGE their rules with
+    // the secret rules. A shared host (e.g. www.googleapis.com) can carry
+    // both an API-key secret (/youtube/*) and OAuth app connections
+    // (/calendar/*, /drive/*); both rule sets are path-scoped and coexist —
+    // a secret must not preempt the apps (#428). When the secret rules
+    // already serve this request's path, app-side escalations (ambiguity,
+    // stale connection id, resolution errors) are best-effort no-ops rather
+    // than failures of a request the secret alone satisfies.
+    if !resp.app_connections.is_empty() {
+        let secrets_serve = crate::inject::rules_serve_path(&secret_rules, request_path);
         match engine
             .resolve_app_injection_for_request(
                 &resp.app_connections,
@@ -318,9 +325,9 @@ async fn resolve_rules(
                 project_id,
                 cache,
             )
-            .await?
+            .await
         {
-            AppConnectionResult::Rules {
+            Ok(AppConnectionResult::Rules {
                 rules,
                 token_expires_at: exp,
                 rewrite_host: rh,
@@ -329,8 +336,8 @@ async fn resolve_rules(
                 body_transform: bt,
                 session_policy: sp,
                 ..
-            } => {
-                injection_rules = rules;
+            }) => {
+                app_rules = rules;
                 token_expires_at = exp;
                 rewrite_host = rh;
                 connection_label = cl;
@@ -338,30 +345,44 @@ async fn resolve_rules(
                 body_transform = bt;
                 session_policy = sp;
             }
-            AppConnectionResult::Ambiguous { connections } => {
-                return Ok(ResolveResult::Ambiguous(connections));
+            Ok(AppConnectionResult::Ambiguous { connections }) => {
+                if !secrets_serve {
+                    return Ok(ResolveResult::Ambiguous(connections));
+                }
+                debug!(host = %hostname, "app connections ambiguous; secret rules serve this path");
             }
-            AppConnectionResult::MultipleProviders { connections } => {
-                return Ok(ResolveResult::MultipleProviders(connections));
+            Ok(AppConnectionResult::MultipleProviders { connections }) => {
+                if !secrets_serve {
+                    return Ok(ResolveResult::MultipleProviders(connections));
+                }
+                debug!(host = %hostname, "multiple providers match; secret rules serve this path");
             }
-            AppConnectionResult::NotFound { connections } => {
-                return Ok(ResolveResult::NotFound {
-                    connection_id: connection_id.unwrap_or("").to_string(),
-                    connections,
-                });
+            Ok(AppConnectionResult::NotFound { connections }) => {
+                if !secrets_serve {
+                    return Ok(ResolveResult::NotFound {
+                        connection_id: connection_id.unwrap_or("").to_string(),
+                        connections,
+                    });
+                }
+                debug!(host = %hostname, "requested connection not found; secret rules serve this path");
             }
-            AppConnectionResult::NoConnections => {}
+            Ok(AppConnectionResult::NoConnections) => {}
+            Err(e) => {
+                if !secrets_serve {
+                    return Err(e);
+                }
+                warn!(host = %hostname, error = ?e, "app resolution failed; proceeding with secret rules");
+            }
         }
     }
 
-    // Vault fallback
-    if injection_rules.is_empty() && !vault_rules.is_empty() {
-        injection_rules = vault_rules.to_vec();
-    }
-
-    // Build intercept token only for providers that have intercept rules
+    // Build the intercept token only for providers that have intercept rules.
+    // Scan the APP rules only: the intercept exists to answer token-refresh
+    // POSTs for app connections (vertex-ai on oauth2.googleapis.com), so a
+    // Bearer-shaped secret or vault credential on the same host must not
+    // donate the token.
     let intercept_token = if crate::apps::host_has_intercept_rules(hostname) {
-        injection_rules
+        app_rules
             .iter()
             .find_map(|rule| {
                 rule.injections.iter().find_map(|inj| match inj {
@@ -392,10 +413,16 @@ async fn resolve_rules(
         None
     };
 
+    let mut injection_rules = crate::inject::merge_injection_rules(app_rules, secret_rules);
+
+    // Vault fallback — only when neither secrets nor apps yielded any rules.
+    if injection_rules.is_empty() && !vault_rules.is_empty() {
+        injection_rules = vault_rules.to_vec();
+    }
+
     Ok(ResolveResult::Resolved {
         rules: Box::new(ResolvedRules {
             injection_rules,
-            policy_rules: resp.policy_rules,
             policy_rules_v2: resp.policy_rules_v2,
             available_apps: resp.available_apps,
             dynamic_provider,
@@ -406,11 +433,399 @@ async fn resolve_rules(
             connection_label,
             finalizer,
             body_transform,
-            policy_mode: resp.policy_mode,
             claim_token: resp.claim_token,
             session_policy,
             budget_bindings: resp.budget_bindings,
         }),
         app_connections: resp.app_connections,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use crate::connect::{seed_app_injection_cache, ConnectResponse};
+    use crate::inject::{apply_injections, Injection};
+
+    const HOST: &str = "www.googleapis.com";
+
+    fn ctx() -> ProxyContext {
+        ProxyContext {
+            project_id: Some("p1".to_string()),
+            organization_id: Some("o1".to_string()),
+            agent_id: None,
+            agent_name: None,
+            agent_identifier: None,
+            agent_token: Some("tok".to_string()),
+        }
+    }
+
+    fn app_conn(id: &str, provider: &str) -> db::AppConnectionRow {
+        db::AppConnectionRow {
+            id: id.to_string(),
+            provider: provider.to_string(),
+            scope: "project".to_string(),
+            credentials: None,
+            label: None,
+            metadata: None,
+            session_policy: None,
+        }
+    }
+
+    fn header_rule(pattern: &str, value: &str) -> InjectionRule {
+        InjectionRule {
+            path_pattern: pattern.to_string(),
+            injections: vec![Injection::SetHeader {
+                name: "authorization".to_string(),
+                value: value.to_string(),
+            }],
+        }
+    }
+
+    fn param_rule(pattern: &str, name: &str, value: &str) -> InjectionRule {
+        InjectionRule {
+            path_pattern: pattern.to_string(),
+            injections: vec![Injection::SetParam {
+                name: name.to_string(),
+                value: value.to_string(),
+            }],
+        }
+    }
+
+    async fn seed_connect(
+        store: &Arc<dyn CacheStore>,
+        hostname: &str,
+        secrets: Vec<InjectionRule>,
+        connections: Vec<db::AppConnectionRow>,
+    ) {
+        let resp = ConnectResponse {
+            injection_rules: secrets,
+            app_connections: connections,
+            project_id: Some("p1".to_string()),
+            organization_id: Some("o1".to_string()),
+            ..Default::default()
+        };
+        let key = format!("connect:o1:p1:tok:{hostname}");
+        store.set(&key, &resp, 60).await;
+    }
+
+    /// Seed the app-injection cache for a fixture connection (no
+    /// session_policy → no cache-key suffix), labeled "Conn".
+    async fn seed_app_injection(
+        store: &Arc<dyn CacheStore>,
+        conn_id: &str,
+        provider: &str,
+        hostname: &str,
+        rules: Vec<InjectionRule>,
+    ) {
+        seed_app_injection_cache(
+            store,
+            "o1",
+            "p1",
+            &app_conn(conn_id, provider),
+            hostname,
+            rules,
+            None,
+            Some("Conn"),
+        )
+        .await;
+    }
+
+    fn applied_auth(path: &str, rules: &[InjectionRule]) -> (Option<String>, String) {
+        let mut headers = hyper::HeaderMap::new();
+        let mut request_path = path.to_string();
+        apply_injections(&mut headers, &mut request_path, rules);
+        let auth = headers
+            .get("authorization")
+            .map(|v| v.to_str().unwrap().to_string());
+        (auth, request_path)
+    }
+
+    #[tokio::test]
+    async fn coexisting_secret_and_app_rules_merge() {
+        let engine = PolicyEngine::test_stub();
+        let store = crate::cache::create_store().await.unwrap();
+        seed_connect(
+            &store,
+            HOST,
+            vec![param_rule("/youtube/*", "key", "yt-key")],
+            vec![app_conn("c1", "google-calendar")],
+        )
+        .await;
+        seed_app_injection(
+            &store,
+            "c1",
+            "google-calendar",
+            HOST,
+            vec![header_rule("/calendar/*", "Bearer cal")],
+        )
+        .await;
+
+        // A calendar request gets the OAuth Bearer (the #428 fix)…
+        let res = resolve_rules(
+            &ctx(),
+            HOST,
+            &engine,
+            &*store,
+            &[],
+            None,
+            Some("/calendar/v3/users/me/calendarList"),
+        )
+        .await
+        .unwrap();
+        let ResolveResult::Resolved { rules, .. } = res else {
+            panic!("expected Resolved");
+        };
+        let (auth, path) =
+            applied_auth("/calendar/v3/users/me/calendarList", &rules.injection_rules);
+        assert_eq!(auth.as_deref(), Some("Bearer cal"));
+        assert!(!path.contains("key=yt-key"));
+        // …and the serving connection's label is attributed.
+        assert_eq!(rules.connection_label.as_deref(), Some("Conn"));
+
+        // A youtube request still gets the API key and no app metadata.
+        let res = resolve_rules(
+            &ctx(),
+            HOST,
+            &engine,
+            &*store,
+            &[],
+            None,
+            Some("/youtube/v3/search"),
+        )
+        .await
+        .unwrap();
+        let ResolveResult::Resolved { rules, .. } = res else {
+            panic!("expected Resolved");
+        };
+        let (auth, path) = applied_auth("/youtube/v3/search", &rules.injection_rules);
+        assert_eq!(auth, None);
+        assert!(path.contains("key=yt-key"));
+        assert!(rules.connection_label.is_none());
+        assert!(rules.session_policy.is_none());
+    }
+
+    #[tokio::test]
+    async fn ambiguity_swallowed_when_secrets_serve_the_path() {
+        let engine = PolicyEngine::test_stub();
+        let store = crate::cache::create_store().await.unwrap();
+        // Two same-provider connections make /gmail requests ambiguous.
+        seed_connect(
+            &store,
+            HOST,
+            vec![header_rule("/gmail/*", "ApiKey gmail-secret")],
+            vec![app_conn("c1", "gmail"), app_conn("c2", "gmail")],
+        )
+        .await;
+
+        // The secret serves /gmail — the ambiguity is a best-effort no-op.
+        let res = resolve_rules(
+            &ctx(),
+            HOST,
+            &engine,
+            &*store,
+            &[],
+            None,
+            Some("/gmail/v1/users/me"),
+        )
+        .await
+        .unwrap();
+        let ResolveResult::Resolved { rules, .. } = res else {
+            panic!("expected Resolved");
+        };
+        let (auth, _) = applied_auth("/gmail/v1/users/me", &rules.injection_rules);
+        assert_eq!(auth.as_deref(), Some("ApiKey gmail-secret"));
+
+        // With a secret that does NOT serve the path, ambiguity still escalates.
+        seed_connect(
+            &store,
+            HOST,
+            vec![param_rule("/youtube/*", "key", "yt-key")],
+            vec![app_conn("c1", "gmail"), app_conn("c2", "gmail")],
+        )
+        .await;
+        let res = resolve_rules(
+            &ctx(),
+            HOST,
+            &engine,
+            &*store,
+            &[],
+            None,
+            Some("/gmail/v1/users/me"),
+        )
+        .await
+        .unwrap();
+        assert!(matches!(res, ResolveResult::Ambiguous(_)));
+    }
+
+    #[tokio::test]
+    async fn stale_connection_id_swallowed_when_secrets_serve_the_path() {
+        let engine = PolicyEngine::test_stub();
+        let store = crate::cache::create_store().await.unwrap();
+        seed_connect(
+            &store,
+            HOST,
+            vec![param_rule("/youtube/*", "key", "yt-key")],
+            vec![app_conn("c1", "google-calendar")],
+        )
+        .await;
+
+        // Stale explicit id on a secret-served path → proceed with the secret.
+        let res = resolve_rules(
+            &ctx(),
+            HOST,
+            &engine,
+            &*store,
+            &[],
+            Some("gone"),
+            Some("/youtube/v3/search"),
+        )
+        .await
+        .unwrap();
+        let ResolveResult::Resolved { rules, .. } = res else {
+            panic!("expected Resolved");
+        };
+        let (_, path) = applied_auth("/youtube/v3/search", &rules.injection_rules);
+        assert!(path.contains("key=yt-key"));
+
+        // On a path the secret does not serve, NotFound still escalates.
+        let res = resolve_rules(
+            &ctx(),
+            HOST,
+            &engine,
+            &*store,
+            &[],
+            Some("gone"),
+            Some("/calendar/v3/events"),
+        )
+        .await
+        .unwrap();
+        assert!(matches!(res, ResolveResult::NotFound { .. }));
+    }
+
+    #[tokio::test]
+    async fn intercept_token_comes_from_app_rules_only() {
+        let engine = PolicyEngine::test_stub();
+        let store = crate::cache::create_store().await.unwrap();
+        let host = "oauth2.googleapis.com";
+        // A Bearer-shaped catch-all secret coexists with the vertex-ai app
+        // connection on the intercept host; the intercepted token must be the
+        // app's, not the secret's.
+        seed_connect(
+            &store,
+            host,
+            vec![header_rule("*", "Bearer secret-tok")],
+            vec![app_conn("c1", "vertex-ai")],
+        )
+        .await;
+        seed_app_injection(
+            &store,
+            "c1",
+            "vertex-ai",
+            host,
+            vec![header_rule("/token*", "Bearer app-tok")],
+        )
+        .await;
+
+        let res = resolve_rules(&ctx(), host, &engine, &*store, &[], None, Some("/token"))
+            .await
+            .unwrap();
+        let ResolveResult::Resolved { rules, .. } = res else {
+            panic!("expected Resolved");
+        };
+        let token = rules.intercept_token.expect("intercept token");
+        assert_eq!(token.access_token, "app-tok");
+    }
+
+    #[tokio::test]
+    async fn app_only_host_behavior_unchanged() {
+        let engine = PolicyEngine::test_stub();
+        let store = crate::cache::create_store().await.unwrap();
+        seed_connect(
+            &store,
+            HOST,
+            vec![],
+            vec![app_conn("c1", "google-calendar")],
+        )
+        .await;
+        seed_app_injection(
+            &store,
+            "c1",
+            "google-calendar",
+            HOST,
+            vec![header_rule("/calendar/*", "Bearer cal")],
+        )
+        .await;
+
+        let res = resolve_rules(
+            &ctx(),
+            HOST,
+            &engine,
+            &*store,
+            &[],
+            None,
+            Some("/calendar/v3/events"),
+        )
+        .await
+        .unwrap();
+        let ResolveResult::Resolved { rules, .. } = res else {
+            panic!("expected Resolved");
+        };
+        let (auth, _) = applied_auth("/calendar/v3/events", &rules.injection_rules);
+        assert_eq!(auth.as_deref(), Some("Bearer cal"));
+        assert_eq!(rules.connection_label.as_deref(), Some("Conn"));
+    }
+
+    #[tokio::test]
+    async fn secret_only_resolution_keeps_rule_order() {
+        // No app connections: resolution must not reorder the secrets — the
+        // last-listed catch-all keeps winning overlaps exactly as before.
+        let engine = PolicyEngine::test_stub();
+        let store = crate::cache::create_store().await.unwrap();
+        seed_connect(
+            &store,
+            HOST,
+            vec![
+                header_rule("/v1/*", "specific"),
+                header_rule("*", "catch-all"),
+            ],
+            vec![],
+        )
+        .await;
+
+        let res = resolve_rules(&ctx(), HOST, &engine, &*store, &[], None, Some("/v1/x"))
+            .await
+            .unwrap();
+        let ResolveResult::Resolved { rules, .. } = res else {
+            panic!("expected Resolved");
+        };
+        let (auth, _) = applied_auth("/v1/x", &rules.injection_rules);
+        assert_eq!(auth.as_deref(), Some("catch-all"));
+    }
+
+    #[tokio::test]
+    async fn vault_fallback_when_no_secret_or_app_rules() {
+        let engine = PolicyEngine::test_stub();
+        let store = crate::cache::create_store().await.unwrap();
+        seed_connect(&store, HOST, vec![], vec![]).await;
+        let vault_rules = vec![header_rule("*", "Basic vault-cred")];
+
+        let res = resolve_rules(
+            &ctx(),
+            HOST,
+            &engine,
+            &*store,
+            &vault_rules,
+            None,
+            Some("/anything"),
+        )
+        .await
+        .unwrap();
+        let ResolveResult::Resolved { rules, .. } = res else {
+            panic!("expected Resolved");
+        };
+        let (auth, _) = applied_auth("/anything", &rules.injection_rules);
+        assert_eq!(auth.as_deref(), Some("Basic vault-cred"));
+    }
 }

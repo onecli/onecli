@@ -9,17 +9,13 @@ import {
   updateConnectionLabel,
 } from "../services/connection-service";
 import {
-  listConnectionAgents,
-  setConnectionAgents,
-} from "../services/agent-service";
-import { setConnectionAgentsSchema } from "../validations/agent";
-import {
   withAudit,
   AUDIT_ACTIONS,
   AUDIT_SERVICES,
   AUDIT_SOURCE,
 } from "../services/audit-service";
 import { removeAllBlocklistRules } from "../services/app-blocklist-service";
+import { getApp } from "../apps/registry";
 import {
   invalidateGatewayCacheForAccount,
   invalidateGatewayCacheForOrg,
@@ -80,7 +76,11 @@ export const disconnectOwnedConnection = async (
 
   const remaining = await listConnectionsByProvider(scope, connection.provider);
   if (remaining.length === 0) {
-    await removeAllBlocklistRules(scope, connection.provider);
+    await removeAllBlocklistRules(
+      scope,
+      connection.provider,
+      getApp(connection.provider)?.blocklist ?? [],
+    );
     // withAudit's flush ran before the blocklist cleanup — flush once more
     // so removed deny-rules can't linger in the gateway cache.
     if (isOrg) invalidateGatewayCacheForOrg(auth.organizationId);
@@ -176,54 +176,6 @@ export const connectionRoutes = () => {
       return c.json({ error: "Connection not found" }, 404);
     }
     return c.body(null, 204);
-  });
-
-  // ── GET /connections/:connectionId/agents ── which project agents can ──
-  // use this connection (reverse of GET /agents/:id/connections).
-  app.get("/:connectionId/agents", async (c) => {
-    const auth = c.get("auth");
-    const connectionId = c.req.param("connectionId");
-    const agents = await listConnectionAgents(
-      requireProjectId(auth),
-      connectionId,
-    );
-    return c.json(agents);
-  });
-
-  // ── PUT /connections/:connectionId/agents ── set the selective agents ──
-  // granted this connection. All-mode agents already reach every connection
-  // and are neither granted nor revoked here.
-  app.put("/:connectionId/agents", async (c) => {
-    const auth = c.get("auth");
-    const connectionId = c.req.param("connectionId");
-
-    const body = await c.req.json().catch(() => null);
-    const parsed = setConnectionAgentsSchema.safeParse(body);
-    if (!parsed.success) {
-      return c.json(
-        { error: parsed.error.issues[0]?.message ?? "Invalid request body" },
-        400,
-      );
-    }
-
-    const projectId = requireProjectId(auth);
-    await withAudit(
-      () => setConnectionAgents(projectId, connectionId, parsed.data.agentIds),
-      (result) => ({
-        projectId,
-        userId: auth.userId,
-        userEmail: auth.userEmail,
-        action: AUDIT_ACTIONS.UPDATE,
-        service: AUDIT_SERVICES.AGENT,
-        source: AUDIT_SOURCE.API,
-        metadata: {
-          connectionId,
-          added: result.added,
-          removed: result.removed,
-        },
-      }),
-    );
-    return c.json({ success: true });
   });
 
   return app;

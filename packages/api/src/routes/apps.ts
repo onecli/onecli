@@ -27,9 +27,9 @@ import {
   verifyOAuthState,
   generateNonce,
 } from "../lib/oauth-state";
-import { APP_URL, NODE_ENV, CAPS } from "../lib/env";
+import { NODE_ENV, CAPS } from "../lib/env";
 import { dashboardUrl } from "../lib/dashboard-url";
-import { getRequestOrigin } from "../lib/request-origin";
+import { getRequestOrigin, getAppOrigin } from "../lib/request-origin";
 import { buildFragmentBridgeHtml } from "../lib/fragment-bridge";
 import {
   invalidateGatewayCache,
@@ -69,7 +69,6 @@ import {
   getBlocklistState,
   toggleBlocklistRule,
   activateBlocklistHost,
-  addCustomBlocklistRule,
   removeBlocklistRule,
 } from "../services/app-blocklist-service";
 import { logger } from "../lib/logger";
@@ -331,7 +330,14 @@ export const appRoutes = () => {
 
     const hint = isConfigured
       ? `Your MCP server needs local credential stub files to start. Create them in the format and location the MCP server expects, but use 'onecli-managed' as a placeholder for all secrets. See ${docsBaseURL}/${provider}.md for examples (fallback: ${docsBaseURL}/general-app.md ). The OneCLI gateway handles real OAuth token exchange at request time.`
-      : `This app is not configured yet. Go to ${dashboardUrl(`/connections?connect=${provider}`, { projectId })} to set up your credentials.`;
+      : // The caller's origin is the fallback so an unconfigured self-hosted
+        // instance hands out a link that actually resolves for them, rather
+        // than the localhost default nobody but a local dev can open.
+        `This app is not configured yet. Go to ${dashboardUrl(
+          `/connections?connect=${provider}`,
+          { projectId },
+          getRequestOrigin(c.req.raw),
+        )} to set up your credentials.`;
 
     return c.json({
       id: appDef.id,
@@ -411,10 +417,14 @@ export const appRoutes = () => {
       const rawAgentName = c.req.query("agent_name");
       const agentName = rawAgentName ? rawAgentName.slice(0, 128) : undefined;
 
+      // Decide where the browser goes *after* consent here, at the authenticated
+      // end, and sign it: the callback is unauthenticated, so re-deriving it
+      // there from request headers lets the caller influence the destination.
       const state = signOAuthState({
         projectId,
         provider,
         nonce: generateNonce(),
+        origin: getAppOrigin(c.req.raw),
         ...(connectionId ? { connectionId } : {}),
         ...(agentName ? { agentName } : {}),
       });
@@ -461,7 +471,30 @@ export const appRoutes = () => {
   app.get("/:provider/callback", async (c) => {
     const provider = c.req.param("provider")!;
     const apiOrigin = getRequestOrigin(c.req.raw);
-    const appOrigin = APP_URL || apiOrigin;
+
+    // Resolve the state before anything else can redirect or render. It arrives
+    // in the query, or in the `oauth_state` cookie `/authorize` set on this exact
+    // path (SameSite=Lax, so the provider's top-level GET still carries it) —
+    // which is why the fragment-bridge branch below can rely on it even though
+    // its provider returns everything else in the URL fragment. That branch
+    // renders the origin inside a <script>, so it is the last place that should
+    // be trusting request headers.
+    const stateParam = c.req.query("state") ?? getCookie(c, "oauth_state");
+    const state = stateParam ? verifyOAuthState(stateParam) : null;
+    // Only a state this request would actually accept gets to choose the
+    // destination — never one we are about to reject as belonging to another
+    // provider.
+    const signedOrigin =
+      state?.provider === provider ? state.origin : undefined;
+
+    // Two different questions, and conflating them is what broke this before.
+    // `apiOrigin` is who answered the callback — it must build the redirect_uri
+    // for the token exchange below. `appOrigin` is where the browser goes next,
+    // which is a dashboard page and may live on another host entirely, so it
+    // comes from the origin committed to at `/authorize` rather than from this
+    // unauthenticated request's headers. A state minted before that field
+    // existed leaves it undefined and resolves exactly as it did before.
+    const appOrigin = getAppOrigin(c.req.raw, signedOrigin);
 
     const appDef = getApp(provider);
     if (
@@ -496,12 +529,11 @@ export const appRoutes = () => {
         return errorRedirect("Invalid provider");
       }
 
-      const stateParam = c.req.query("state") ?? getCookie(c, "oauth_state");
+      // Both resolved at the top so `appOrigin` could be derived from the state;
+      // the checks stay here so the error responses are unchanged.
       if (!stateParam) {
         return errorRedirect("Missing state parameter");
       }
-
-      const state = verifyOAuthState(stateParam);
       if (!state || state.provider !== provider) {
         return errorRedirect("Invalid state parameter");
       }
@@ -953,7 +985,7 @@ export const appRoutes = () => {
     return c.json(states);
   });
 
-  // ── POST /apps/:provider/blocklist ── activate predefined or add custom ─
+  // ── POST /apps/:provider/blocklist ── activate one of the app's hosts ──
   app.post("/:provider/blocklist", authMiddleware, async (c) => {
     const auth = c.get("auth");
     const projectId = requireProjectId(auth);
@@ -964,27 +996,17 @@ export const appRoutes = () => {
     const body = await c.req.json().catch(() => null);
     if (!body) return c.json({ error: "Invalid request body" }, 400);
 
-    let result;
-    if (body.hostId) {
-      result = await activateBlocklistHost(
-        { projectId },
-        provider,
-        body.hostId,
-        appDef.blocklist ?? [],
-      );
-    } else if (body.name && body.hostPattern) {
-      result = await addCustomBlocklistRule(
-        { projectId },
-        provider,
-        body.name,
-        body.hostPattern,
-      );
-    } else {
-      return c.json(
-        { error: "Provide either { hostId } or { name, hostPattern }" },
-        400,
-      );
+    // Blocking an arbitrary host is a policy rule (POST /v1/policy/rules) now;
+    // this surface only toggles the hosts the app itself declares.
+    if (!body.hostId) {
+      return c.json({ error: "Provide { hostId }" }, 400);
     }
+    const result = await activateBlocklistHost(
+      { projectId },
+      provider,
+      body.hostId,
+      appDef.blocklist ?? [],
+    );
 
     invalidateGatewayCache(c.req.raw);
     return c.json(result, 201);

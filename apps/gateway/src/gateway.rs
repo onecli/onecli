@@ -29,7 +29,9 @@ pub(crate) mod hooks;
 #[path = "ee/hooks.rs"]
 pub(crate) mod hooks;
 mod mitm;
-mod response;
+// `pub(crate)` so `main` can report at startup whether dashboard links will be
+// built from a configured APP_URL or from the fallback.
+pub(crate) mod response;
 mod transforms;
 mod tunnel;
 mod websocket;
@@ -48,7 +50,7 @@ use hyper_util::rt::TokioIo;
 use tokio::net::{TcpListener, TcpStream};
 use tower::ServiceExt;
 use tower_http::cors::CorsLayer;
-use tracing::{info, info_span, warn, Instrument};
+use tracing::{debug, info, info_span, warn, Instrument};
 
 use crate::approval::{ApprovalDecision, ApprovalStore, APPROVAL_TIMEOUT_SECS};
 use crate::auth::AuthUser;
@@ -780,7 +782,11 @@ async fn handle_http_proxy(
         connect::ConnectResponse::default()
     };
 
-    // Per-request app connection disambiguation
+    // Per-request app connection disambiguation — app rules MERGE with the
+    // secret rules (see inject::merge_injection_rules; #428). When the secret
+    // rules already serve this request's path, app-side escalations are
+    // best-effort no-ops rather than failures of a request the secret alone
+    // satisfies.
     let mut resolved_finalizer: Option<crate::apps::RequestFinalizer> = None;
     let mut resolved_body_transform: Option<crate::apps::BodyTransform> = None;
     // Granular-access policy of the connection that wins injection (if any).
@@ -789,10 +795,13 @@ async fn handle_http_proxy(
         connect::dynamic_provider_for_request(&resolved.app_connections, &authority, path.as_str())
             .map(str::to_string)
     });
-    if resolved.injection_rules.is_empty() && !resolved.app_connections.is_empty() {
+    if !resolved.app_connections.is_empty() {
         let oid = resolved.organization_id.as_deref().unwrap_or("");
         let pid = resolved.project_id.as_deref().unwrap_or("");
         let request_path = req.uri().path_and_query().map(|pq| pq.as_str());
+        let secret_rules = std::mem::take(&mut resolved.injection_rules);
+        let secrets_serve = inject::rules_serve_path(&secret_rules, request_path);
+        let mut app_rules: Vec<inject::InjectionRule> = Vec::new();
         match state
             .policy_engine
             .resolve_app_injection_for_request(
@@ -813,27 +822,40 @@ async fn handle_http_proxy(
                 session_policy,
                 ..
             }) => {
-                resolved.injection_rules = rules;
+                app_rules = rules;
                 resolved_finalizer = finalizer;
                 resolved_body_transform = body_transform;
                 resolved_session_policy = session_policy;
             }
             Ok(AppConnectionResult::Ambiguous { connections }) => {
-                return Ok(response::multiple_connections_axum(&connections));
+                if !secrets_serve {
+                    return Ok(response::multiple_connections_axum(&connections));
+                }
+                debug!(host = %authority, "app connections ambiguous; secret rules serve this path");
             }
             Ok(AppConnectionResult::MultipleProviders { connections }) => {
-                return Ok(response::multiple_providers_axum(&connections));
+                if !secrets_serve {
+                    return Ok(response::multiple_providers_axum(&connections));
+                }
+                debug!(host = %authority, "multiple providers match; secret rules serve this path");
             }
             Ok(AppConnectionResult::NotFound { connections }) => {
-                let cid = connection_id.as_deref().unwrap_or("");
-                return Ok(response::connection_not_found_axum(cid, &connections));
+                if !secrets_serve {
+                    let cid = connection_id.as_deref().unwrap_or("");
+                    return Ok(response::connection_not_found_axum(cid, &connections));
+                }
+                debug!(host = %authority, "requested connection not found; secret rules serve this path");
             }
             Ok(AppConnectionResult::NoConnections) => {}
             Err(e) => {
-                warn!(peer = %peer_addr, host = %authority, error = ?e, "HTTP proxy: app connection resolution failed");
-                return Ok(response::bad_gateway());
+                if !secrets_serve {
+                    warn!(peer = %peer_addr, host = %authority, error = ?e, "HTTP proxy: app connection resolution failed");
+                    return Ok(response::bad_gateway());
+                }
+                warn!(peer = %peer_addr, host = %authority, error = ?e, "HTTP proxy: app resolution failed; proceeding with secret rules");
             }
         }
+        resolved.injection_rules = inject::merge_injection_rules(app_rules, secret_rules);
     }
 
     // Vault fallback
@@ -862,7 +884,6 @@ async fn handle_http_proxy(
         parent: &session_span,
         scheme = %scheme,
         injection_count = resolved.injection_rules.len(),
-        policy_count = resolved.policy_rules.len(),
         "HTTP_PROXY"
     );
 
@@ -877,7 +898,6 @@ async fn handle_http_proxy(
 
     let rules = mitm::ResolvedRules {
         injection_rules: resolved.injection_rules,
-        policy_rules: resolved.policy_rules,
         policy_rules_v2: resolved.policy_rules_v2,
         available_apps: resolved.available_apps,
         dynamic_provider,
@@ -888,7 +908,6 @@ async fn handle_http_proxy(
         connection_label: None,
         finalizer: resolved_finalizer,
         body_transform: resolved_body_transform,
-        policy_mode: resolved.policy_mode,
         claim_token: resolved.claim_token,
         session_policy: resolved_session_policy,
         budget_bindings: resolved.budget_bindings,

@@ -1,6 +1,10 @@
 import type { LucideIcon } from "lucide-react";
-import { ShieldBan, ShieldCheck } from "lucide-react";
-import type { PolicyRuleTarget, ProjectionIdentity } from "@/lib/api";
+import { KeyRound, ShieldBan, ShieldCheck } from "lucide-react";
+import type {
+  PolicyRuleSource,
+  PolicyRuleTarget,
+  ProjectionIdentity,
+} from "@/lib/api";
 
 // Pure render helpers shared by the read-only preview row/dialog AND the
 // editable policy console. The new model's action is allow|block with
@@ -15,6 +19,8 @@ import type { PolicyRuleTarget, ProjectionIdentity } from "@/lib/api";
  */
 export interface PolicyRuleView {
   name: string;
+  /** Absent on the read-only preview rows, which have no derived sources. */
+  source?: PolicyRuleSource;
   isDefault: boolean;
   priority: number;
   identities: ProjectionIdentity[];
@@ -37,15 +43,28 @@ export interface ActionMeta {
   className: string;
 }
 
-/** The primary verdict (allow/block); modifiers render as separate chips. */
-export const actionMeta = (rule: Pick<PolicyRuleView, "action">): ActionMeta =>
-  rule.action === "block"
-    ? { Icon: ShieldBan, label: "Block", className: "text-destructive" }
-    : {
-        Icon: ShieldCheck,
-        label: "Allow",
-        className: "text-emerald-700 dark:text-emerald-400",
-      };
+/** The primary verdict (allow/block); modifiers render as separate chips.
+ *
+ * An `equipment` rule is INJECTION-ONLY — the gateway's `assemble_v2` drops it
+ * before any decision is made, so it never permits anything. Rendering the
+ * shared green "Allow" would claim access this rule does not grant, so it gets
+ * its own honest verdict. */
+export const actionMeta = (
+  rule: Pick<PolicyRuleView, "action"> & { source?: PolicyRuleSource },
+): ActionMeta =>
+  rule.source === "equipment"
+    ? {
+        Icon: KeyRound,
+        label: "Attaches credential",
+        className: "text-muted-foreground",
+      }
+    : rule.action === "block"
+      ? { Icon: ShieldBan, label: "Block", className: "text-destructive" }
+      : {
+          Icon: ShieldCheck,
+          label: "Allow",
+          className: "text-emerald-700 dark:text-emerald-400",
+        };
 
 /** Short "100/min"-style label for a rate-limit modifier, or null. */
 export const rateLimitLabel = (

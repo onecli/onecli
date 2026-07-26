@@ -1,9 +1,15 @@
-// The staged-changes diff: draft vs published, over CUSTOM rules + the Default
-// Rule's action only. Bridge-derived rows (blocklist/equipment — plus
-// app_permission pre-adoption; the editing cutover re-tags those `custom` with
-// draft↔published logicalId parity, making them first-class here) are
-// system-managed — they re-materialize with fresh logicalIds and legitimately
-// differ between draft and published — so they never count as "your changes".
+// The staged-changes diff: draft vs published, over the rules a user can change
+// plus the Default Rule's action.
+//
+// `blocklist` rows stay out: the app page's blocklist panel writes them in
+// draft/published lockstep, so they can never be pending and the console offers
+// them no actions. `equipment` and legacy `app_permission` rows ARE in: since
+// step 10 neither has an editor of its own, so the console is the only place
+// they can be disabled or deleted, and a staged revoke has to count as a change
+// or "Apply Changes" stays greyed out and the revoke never reaches the gateway.
+// (The old exclusion assumed derived rows re-materialized with fresh logicalIds
+// every bridge run; the bridge is gone, so their identities are stable and
+// comparable.) Kept in step with `REVOCABLE_SOURCES` in the rules table.
 // Keyed by `logicalId`, the generation-stable identity (row `id` regenerates on
 // every publish). Pure + structural so the web editor can feed its DTOs
 // directly and the logic stays unit-testable here.
@@ -48,9 +54,11 @@ export interface PolicyDiff {
   rowState: Map<string, "new" | "changed">;
 }
 
-const customsOf = <T extends DiffableRule>(rules: T[]): T[] =>
+const USER_CHANGEABLE = new Set(["custom", "equipment", "app_permission"]);
+
+const changeableOf = <T extends DiffableRule>(rules: T[]): T[] =>
   rules
-    .filter((r) => r.source === "custom" && !r.isDefault)
+    .filter((r) => USER_CHANGEABLE.has(r.source) && !r.isDefault)
     .slice()
     .sort((a, b) => a.priority - b.priority);
 
@@ -110,8 +118,8 @@ export const diffPolicyChanges = (
   draftDefault: { action: "allow" | "block" } | undefined,
   publishedDefault: { action: "allow" | "block" } | undefined,
 ): PolicyDiff => {
-  const draft = customsOf(draftRules);
-  const published = customsOf(publishedRules);
+  const draft = changeableOf(draftRules);
+  const published = changeableOf(publishedRules);
   const draftById = new Map(draft.map((r) => [r.logicalId, r]));
   const publishedById = new Map(published.map((r) => [r.logicalId, r]));
 

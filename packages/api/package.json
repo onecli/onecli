@@ -7,6 +7,8 @@
     ".": "./src/index.ts",
     "./providers": "./src/providers/index.ts",
     "./services/*": "./src/services/*.ts",
+    "./services/policy-legacy-migration": "./src/services/policy-legacy-migration/index.ts",
+    "./routes/*": "./src/routes/*.ts",
     "./lib/*": "./src/lib/*.ts",
     "./validations/*": "./src/validations/*.ts",
     "./apps/*": "./src/apps/*.ts",

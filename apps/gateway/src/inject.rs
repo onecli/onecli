@@ -172,6 +172,64 @@ pub(crate) fn apply_injections(
     count
 }
 
+/// True for the two host-wide catch-all shapes (`*` and `/*`) that
+/// [`path_matches`] accepts for every request path.
+pub(crate) fn is_catch_all_pattern(pattern: &str) -> bool {
+    matches!(pattern, "*" | "/*")
+}
+
+/// True when any rule's `path_pattern` matches the request path. A missing
+/// request path is conservatively non-matching.
+pub(crate) fn rules_serve_path(rules: &[InjectionRule], request_path: Option<&str>) -> bool {
+    request_path.is_some_and(|path| {
+        rules
+            .iter()
+            .any(|rule| path_matches(path, &rule.path_pattern))
+    })
+}
+
+/// Merge app-connection and secret injection rules for one request.
+///
+/// Both sets are path-scoped, so they coexist on shared hosts — e.g.
+/// `www.googleapis.com`, where a `/youtube/*` API-key secret and a
+/// `/calendar/*` OAuth Bearer serve different APIs (#428).
+/// [`apply_injections`] applies every matching rule in order with
+/// last-insert-wins per header, so ordering encodes precedence:
+///
+/// - specific patterns out-rank catch-alls (`*` / `/*`) regardless of
+///   source, so a host-wide secret doesn't starve path-scoped apps;
+/// - on equal specificity, secrets keep their historical precedence over
+///   apps, so pre-existing overlapping configs keep injecting the secret;
+/// - disjoint patterns simply coexist. A path matched by rules of both
+///   sources with different injection kinds (e.g. a query-param key and a
+///   Bearer header) carries both — pre-existing apply semantics.
+pub(crate) fn merge_injection_rules(
+    app_rules: Vec<InjectionRule>,
+    secret_rules: Vec<InjectionRule>,
+) -> Vec<InjectionRule> {
+    // Single-source resolutions pass through untouched: the specificity law
+    // arbitrates real coexistence, never a lone source, whose list order is
+    // load-bearing pre-existing behavior.
+    if app_rules.is_empty() {
+        return secret_rules;
+    }
+    if secret_rules.is_empty() {
+        return app_rules;
+    }
+    let (app_catch_all, app_specific): (Vec<_>, Vec<_>) = app_rules
+        .into_iter()
+        .partition(|rule| is_catch_all_pattern(&rule.path_pattern));
+    let (secret_catch_all, secret_specific): (Vec<_>, Vec<_>) = secret_rules
+        .into_iter()
+        .partition(|rule| is_catch_all_pattern(&rule.path_pattern));
+
+    let mut merged = app_catch_all;
+    merged.extend(secret_catch_all);
+    merged.extend(app_specific);
+    merged.extend(secret_specific);
+    merged
+}
+
 /// Add or replace a URL query parameter in a path+query string.
 ///
 /// Only the injected parameter is encoded via `form_urlencoded`; existing
@@ -896,6 +954,114 @@ mod tests {
             name: name.to_string(),
             value: value.to_string(),
         }
+    }
+
+    // ── merge_injection_rules / secret+app coexistence (#428) ───────────
+
+    fn apply_to(path: &str, rules: &[InjectionRule]) -> (hyper::HeaderMap, String) {
+        let mut headers = hyper::HeaderMap::new();
+        let mut request_path = path.to_string();
+        apply_injections(&mut headers, &mut request_path, rules);
+        (headers, request_path)
+    }
+
+    #[test]
+    fn catch_all_pattern_is_star_or_slash_star() {
+        assert!(is_catch_all_pattern("*"));
+        assert!(is_catch_all_pattern("/*"));
+        assert!(!is_catch_all_pattern("/youtube/*"));
+        assert!(!is_catch_all_pattern("/v1*"));
+        assert!(!is_catch_all_pattern(""));
+    }
+
+    #[test]
+    fn rules_serve_path_matches_any_rule() {
+        let rules = vec![make_rule("/youtube/*", vec![])];
+        assert!(rules_serve_path(&rules, Some("/youtube/v3/search")));
+        assert!(!rules_serve_path(&rules, Some("/calendar/v3/events")));
+        assert!(!rules_serve_path(&rules, None));
+        assert!(!rules_serve_path(&[], Some("/youtube/v3/search")));
+    }
+
+    #[test]
+    fn merged_disjoint_secret_and_app_rules_coexist() {
+        // #428: a /youtube/* API-key secret and a /calendar/* OAuth app share
+        // www.googleapis.com; each request applies only its own rule.
+        let secrets = vec![make_rule(
+            "/youtube/*",
+            vec![Injection::SetParam {
+                name: "key".to_string(),
+                value: "yt-key".to_string(),
+            }],
+        )];
+        let apps = vec![make_rule(
+            "/calendar/*",
+            vec![set_header("authorization", "Bearer app-token")],
+        )];
+        let merged = merge_injection_rules(apps, secrets);
+
+        let (headers, path) = apply_to("/calendar/v3/users/me/calendarList", &merged);
+        assert_eq!(headers.get("authorization").unwrap(), "Bearer app-token");
+        assert!(!path.contains("key=yt-key"));
+
+        let (headers, path) = apply_to("/youtube/v3/search", &merged);
+        assert!(headers.get("authorization").is_none());
+        assert!(path.contains("key=yt-key"));
+    }
+
+    #[test]
+    fn specific_app_rule_beats_catch_all_secret_on_its_path() {
+        let secrets = vec![make_rule(
+            "*",
+            vec![set_header("authorization", "ApiKey secret-key")],
+        )];
+        let apps = vec![make_rule(
+            "/calendar/*",
+            vec![set_header("authorization", "Bearer app-token")],
+        )];
+        let merged = merge_injection_rules(apps, secrets);
+
+        let (headers, _) = apply_to("/calendar/v3/events", &merged);
+        assert_eq!(headers.get("authorization").unwrap(), "Bearer app-token");
+
+        // Off the app's paths the host-wide secret still applies.
+        let (headers, _) = apply_to("/other/v1/x", &merged);
+        assert_eq!(headers.get("authorization").unwrap(), "ApiKey secret-key");
+    }
+
+    #[test]
+    fn single_source_lists_pass_through_unchanged() {
+        // An app-less (or secret-less) resolution must keep its original
+        // order — the specificity law applies only to real coexistence.
+        let secrets = vec![
+            make_rule("/v1/*", vec![set_header("authorization", "specific")]),
+            make_rule("*", vec![set_header("authorization", "catch-all")]),
+        ];
+        assert_eq!(merge_injection_rules(vec![], secrets.clone()), secrets);
+
+        let apps = vec![
+            make_rule("/v1/*", vec![set_header("authorization", "specific")]),
+            make_rule("*", vec![set_header("authorization", "catch-all")]),
+        ];
+        assert_eq!(merge_injection_rules(apps.clone(), vec![]), apps);
+    }
+
+    #[test]
+    fn equal_specificity_keeps_secret_precedence() {
+        // A pre-existing catch-all secret keeps winning over a catch-all app
+        // rule — no silent credential flip for overlapping configs.
+        let secrets = vec![make_rule(
+            "*",
+            vec![set_header("authorization", "token secret-pat")],
+        )];
+        let apps = vec![make_rule(
+            "*",
+            vec![set_header("authorization", "Bearer app-token")],
+        )];
+        let merged = merge_injection_rules(apps, secrets);
+
+        let (headers, _) = apply_to("/repos/acme/x", &merged);
+        assert_eq!(headers.get("authorization").unwrap(), "token secret-pat");
     }
 
     fn remove_header(name: &str) -> Injection {
