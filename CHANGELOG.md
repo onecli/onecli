@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.43.3](https://github.com/onecli/onecli/compare/v1.43.2...v1.43.3) (2026-07-26)
+
+
+### Bug Fixes
+
+* **gateway:** merge secret and OAuth app injection on shared hosts ([#429](https://github.com/onecli/onecli/issues/429)) ([8a2da30](https://github.com/onecli/onecli/commit/8a2da302680785e34a3b92d1b859af3ff9c591e4))
+
 ## [1.43.2](https://github.com/onecli/onecli/compare/v1.43.1...v1.43.2) (2026-07-26)
 
 
