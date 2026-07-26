@@ -70,8 +70,9 @@ RUN --mount=type=cache,target=/app/apps/web/.next/cache \
 FROM node:22-alpine AS runner
 WORKDIR /app
 
-# tini as PID 1: entrypoint.sh execs node, and Node.js is not designed to run
-# as PID 1 (zombies are never reaped, signal handling differs). See
+# tini as PID 1: entrypoint.sh supervises two long-lived children, and neither a
+# shell nor Node is a real init (orphans are never reaped, signal handling
+# differs). See
 # https://github.com/nodejs/docker-node/blob/main/docs/BestPractices.md#handling-kernel-signals
 RUN apk add --no-cache tini
 ENTRYPOINT ["/sbin/tini", "--"]
