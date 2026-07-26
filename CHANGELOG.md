@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.43.2](https://github.com/onecli/onecli/compare/v1.43.1...v1.43.2) (2026-07-26)
+
+
+### Bug Fixes
+
+* **docker:** reap the gateway — tini as PID 1 plus a supervising entrypoint ([#431](https://github.com/onecli/onecli/issues/431)) ([206336e](https://github.com/onecli/onecli/commit/206336e4388d9d96d57df323c070f46772f422be))
+
 ## [1.43.1](https://github.com/onecli/onecli/compare/v1.43.0...v1.43.1) (2026-07-25)
 
 
