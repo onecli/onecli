@@ -5,7 +5,6 @@
 //! service. When a WebSocket upgrade is detected, the request is routed here
 //! instead of the normal reqwest-based forwarding path.
 
-use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
@@ -85,6 +84,10 @@ fn is_websocket_forwarded_header(name: &HeaderName) -> bool {
     !NON_WS_HOP_BY_HOP.contains(&s)
 }
 
+// 8/7: this leg needs the same request context `forward_request` does, plus the
+// upstream connector resolved at CONNECT. `expect` rather than `allow` so the
+// attribute is removed by CI the day a refactor drops the count back under.
+#[expect(clippy::too_many_arguments)]
 pub(super) async fn handle_websocket(
     mut req: Request<Incoming>,
     host: &str,
@@ -95,6 +98,9 @@ pub(super) async fn handle_websocket(
     cache: &dyn CacheStore,
     pool: &sqlx::PgPool,
     proxy_ctx: &ProxyContext,
+    // Resolved at CONNECT time against the operator's skip-verify configuration,
+    // so this leg trusts exactly what the HTTP leg trusts.
+    connector: &TlsConnector,
 ) -> Result<Response<Either<Full<Bytes>, http_body_util::StreamBody<hooks::BodyStream>>>> {
     let start = std::time::Instant::now();
     let path = req
@@ -219,7 +225,7 @@ pub(super) async fn handle_websocket(
         .and_then(|p| p.parse::<u16>().ok())
         .unwrap_or(443);
 
-    let upstream_io = connect_upstream_tls(hostname, port)
+    let upstream_io = connect_upstream_tls(hostname, port, connector)
         .await
         .context("WebSocket: connecting to upstream")?;
 
@@ -321,23 +327,21 @@ pub(super) async fn handle_websocket(
     Ok(client_resp)
 }
 
+/// Dial the upstream over TLS with the connection's resolved configuration.
+///
+/// The config is built once at startup and handed down, so this neither
+/// rebuilds a root store per upgrade nor decides for itself what to trust —
+/// deciding for itself is how this leg came to ignore the operator's
+/// skip-verify settings while the HTTP leg honored them.
 async fn connect_upstream_tls(
     hostname: &str,
     port: u16,
+    connector: &TlsConnector,
 ) -> Result<TokioIo<tokio_rustls::client::TlsStream<TcpStream>>> {
     let tcp = TcpStream::connect((hostname, port))
         .await
         .context("TCP connect to upstream")?;
 
-    let mut root_store = rustls::RootCertStore::empty();
-    root_store.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
-
-    let mut tls_config = rustls::ClientConfig::builder()
-        .with_root_certificates(root_store)
-        .with_no_client_auth();
-    tls_config.alpn_protocols = vec![b"http/1.1".to_vec()];
-
-    let connector = TlsConnector::from(Arc::new(tls_config));
     let server_name = rustls::pki_types::ServerName::try_from(hostname.to_string())
         .context("invalid server name")?;
 

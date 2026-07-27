@@ -224,7 +224,7 @@ export interface CreateSecretInput {
   injectionConfig?: unknown;
 }
 
-// ── Org directory (§3.5 contract: groups, agent groups, members, agents) ──
+// ── Org directory (groups, members) ──
 
 /** Cursor envelope shared by every directory-scale list. */
 export interface DirectoryPage<T> {
@@ -283,34 +283,6 @@ export interface RoleMappingImpact {
   affectedCount: number;
 }
 
-export interface AgentGroupRow {
-  id: string;
-  name: string;
-  memberCount: number;
-  createdAt: string;
-  updatedAt: string;
-}
-
-export interface AgentGroupMemberRow {
-  agentId: string;
-  name: string;
-  identifier: string;
-  projectId: string;
-  projectName: string | null;
-  addedAt: string;
-}
-
-export interface OrgAgentRow {
-  id: string;
-  name: string;
-  identifier: string;
-  projectId: string;
-  projectName: string | null;
-  /** The project's bound humans (first 3) — "whose project" disambiguation. */
-  projectPeople: { name: string | null; email: string }[];
-  projectPeopleTotal: number;
-}
-
 export interface OrgMemberListRow {
   userId: string;
   email: string;
@@ -323,12 +295,11 @@ export interface OrgMemberListRow {
 
 // ── Shared policy identity/condition shapes ──────────────────────────────────
 // Used by the editor's PolicyRuleV2. Project rules target a specific agent or
-// "any" (empty); org rules target directory identities (agent-group / user /
-// user-group). Conditions are body-contains.
+// "any" (empty); org rules target directory identities (user / user-group).
+// Conditions are body-contains.
 
 export type ProjectionIdentity =
   | { type: "agent"; id: string }
-  | { type: "agentGroup"; id: string }
   | { type: "user"; id: string }
   | { type: "group"; id: string };
 

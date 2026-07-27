@@ -101,7 +101,6 @@ const CLOUD_ALIASES = {
   "@/lib/auth/login-content": "@/ee/auth/login-content",
   "@/lib/user-plan": "@/ee/user-plan",
   "@/lib/components/request-app-slot": "@/ee/apps/request-app-slot",
-  "@/lib/components/agent-group-field": "@/ee/groups/agent-group-field",
   "@/lib/home-redirect": "@/ee/home-redirect",
   "@/lib/components/pro-app-dialog": "@/ee/apps/pro-app-dialog",
   "@/lib/components/condition-builder": "@/ee/components/condition-builder",

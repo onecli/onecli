@@ -6,9 +6,9 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 // connection or its provider pool; empty identities never grant), the
 // DECISIONS rollup rides the shared per-tool core, the fence mirrors
 // assertConnectionVisible (org-scoped rows visible, foreign orgs not), the
-// catalog-less axis is honestly absent, and the per-agent principal arm is
-// BATCHED (one grouped query however many agents). The db is mocked at the
-// boundary; wheres are recorded and asserted.
+// catalog-less axis is honestly absent, and the principal set resolves ONCE
+// per call however many agents (it is project-derived). The db is mocked at
+// the boundary; wheres are recorded and asserted.
 
 const state = vi.hoisted(() => ({
   calls: [] as { model: string; op: string; args: unknown }[],
@@ -48,7 +48,6 @@ vi.mock("@onecli/db", () => {
     db: {
       project: model("project"),
       agent: model("agent"),
-      agentGroupMember: model("agentGroupMember"),
       projectAccess: model("projectAccess"),
       group: model("group"),
       groupMember: model("groupMember"),
@@ -107,7 +106,6 @@ const identityRow = (
     id: "i1",
     ruleId: "r1",
     agentId: null,
-    agentGroupId: null,
     userId: null,
     groupId: null,
     ...over,
@@ -148,7 +146,6 @@ const armStubs = (opts: {
   agents?: { id: string; name: string; secretMode: string }[];
   orgRows?: SimRuleRow[];
   projectRows?: SimRuleRow[];
-  agentGroupRows?: { agentId: string; agentGroupId: string }[];
 }) => {
   state.results.set("project.findUnique", { organizationId: "org-1" });
   state.results.set(
@@ -176,7 +173,6 @@ const armStubs = (opts: {
         excluded === undefined || (r.source ?? "custom") !== excluded,
     );
   });
-  state.results.set("agentGroupMember.findMany", opts.agentGroupRows ?? []);
 };
 
 const totalGmailTools = () => {
@@ -499,7 +495,7 @@ describe("fencing", () => {
 });
 
 describe("batching", () => {
-  it("resolves principals with ONE grouped agent-group query and ONE ProjectAccess read, however many agents", async () => {
+  it("resolves the principal set with ONE ProjectAccess read, however many agents", async () => {
     armStubs({
       agents: [
         { id: "a-1", name: "A", secretMode: "all" },
@@ -510,14 +506,6 @@ describe("batching", () => {
 
     await effectiveAgents("conn-1", CTX);
 
-    const groupReads = state.calls.filter(
-      (c) => c.model === "agentGroupMember",
-    );
-    expect(groupReads).toHaveLength(1);
-    expect((groupReads[0]?.args as { where: unknown }).where).toEqual({
-      agentId: { in: ["a-1", "a-2", "a-3"] },
-      agentGroup: { organizationId: "org-1" },
-    });
     expect(state.calls.filter((c) => c.model === "projectAccess")).toHaveLength(
       1,
     );

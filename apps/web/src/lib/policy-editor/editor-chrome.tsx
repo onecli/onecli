@@ -5,7 +5,7 @@ import type { PageScope, PolicyRuleV2 } from "@/lib/api";
 
 /**
  * The OSS editor chrome (step 9.5) — deliberately empty. The staged publish
- * surface (Test a request, Apply Changes + review, last-applied), the org
+ * surface (Apply Changes + review, last-applied), the org
  * guardrails, and directory name resolution are OneCLI Cloud capabilities;
  * OSS's editor is immediate-apply and project-scoped, so this module renders
  * nothing. The EE editions alias this file to `@/ee/policy-editor/editor-chrome`

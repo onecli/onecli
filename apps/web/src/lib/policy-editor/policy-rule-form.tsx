@@ -306,7 +306,7 @@ export const PolicyRuleForm = ({
 }: PolicyRuleFormProps) => {
   const isEdit = rule !== null;
   // Agents are project-scoped; at org scope there's no project context to load
-  // them (and org guardrails apply to all agents — agent groups arrive step 6).
+  // them (and org guardrails apply to all agents).
   const isProject = scope === "project";
   const { data: agents = [] } = useAgents(isProject);
   const { data: connections = [] } = useConnections(scope);
@@ -656,8 +656,8 @@ export const PolicyRuleForm = ({
                 <IdentityLockHint />
               </>
             ) : (
-              // Org scope: target directory identities (agent-groups / users /
-              // user-groups), or none = all agents in the organization.
+              // Org scope: target directory identities (users / user-groups),
+              // or none = all agents in the organization.
               <OrgIdentityPicker
                 id="rule-agent"
                 value={identities}

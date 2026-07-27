@@ -29,8 +29,6 @@ const identityMatches = (rule: NewRule, request: PolicyRequest): boolean =>
     switch (i.type) {
       case "agent":
         return i.id === request.agentId;
-      case "agentGroup":
-        return (request.agentGroupIds ?? []).includes(i.id);
       case "user":
         return (request.userIds ?? []).includes(i.id);
       case "group":

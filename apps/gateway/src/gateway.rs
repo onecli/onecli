@@ -48,6 +48,7 @@ use hyper::service::service_fn;
 use hyper::{Method, Request, Response, StatusCode};
 use hyper_util::rt::TokioIo;
 use tokio::net::{TcpListener, TcpStream};
+use tokio_rustls::TlsConnector;
 use tower::ServiceExt;
 use tower_http::cors::CorsLayer;
 use tracing::{debug, info, info_span, warn, Instrument};
@@ -60,6 +61,10 @@ use crate::connect::{self, AppConnectionResult, ConnectError, PolicyEngine};
 use crate::db;
 use crate::inject;
 use crate::vault;
+
+/// Pause before retrying a failed `accept`, so a persistent error (a truly
+/// exhausted fd table) cannot spin the loop at full tilt.
+const ACCEPT_RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(100);
 
 // ── GatewayState ───────────────────────────────────────────────────────
 
@@ -88,6 +93,13 @@ pub(crate) struct GatewayState {
     /// Supports exact match (`internal.corp`) and wildcard prefix (`*.internal.corp`).
     /// Populated from `GATEWAY_SKIP_VERIFY_HOSTS` (comma-separated).
     pub skip_verify_hosts: Arc<Vec<String>>,
+    /// Standard upstream connector for the WebSocket leg, which reqwest does
+    /// not serve — validates TLS certificates.
+    pub ws_connector: TlsConnector,
+    /// No-verify WebSocket connector — skips TLS certificate validation.
+    /// Selected for hosts matched by `skip_verify_hosts`, exactly as
+    /// `http_client_no_verify` is.
+    pub ws_connector_no_verify: TlsConnector,
     pub policy_engine: Arc<PolicyEngine>,
     pub cache: Arc<dyn CacheStore>,
     /// Provider-agnostic vault service for credential fetching.
@@ -113,6 +125,110 @@ fn build_http_client(accept_invalid_certs: bool) -> reqwest::Client {
         .danger_accept_invalid_certs(accept_invalid_certs)
         .build()
         .expect("build HTTP client")
+}
+
+/// Accepts any server certificate, for the hosts an operator has explicitly
+/// exempted from verification.
+///
+/// This is deliberately the same posture `reqwest`'s `danger_accept_invalid_certs`
+/// gives the HTTP path: chain, hostname *and* handshake signature all go
+/// unchecked. Parity is the point — an operator who exempts an internal host
+/// expects it to work over both protocols, and the appliances that need the
+/// exemption at all are exactly the ones with certificates and signature
+/// algorithms nothing modern will accept.
+#[derive(Debug)]
+struct AcceptAnyServerCert;
+
+impl rustls::client::danger::ServerCertVerifier for AcceptAnyServerCert {
+    fn verify_server_cert(
+        &self,
+        _end_entity: &rustls::pki_types::CertificateDer<'_>,
+        _intermediates: &[rustls::pki_types::CertificateDer<'_>],
+        _server_name: &rustls::pki_types::ServerName<'_>,
+        _ocsp_response: &[u8],
+        _now: rustls::pki_types::UnixTime,
+    ) -> Result<rustls::client::danger::ServerCertVerified, rustls::Error> {
+        Ok(rustls::client::danger::ServerCertVerified::assertion())
+    }
+
+    // Both signature paths must be stubbed: rustls calls exactly one depending
+    // on the negotiated version, and TLS 1.2 is still reachable here.
+    fn verify_tls12_signature(
+        &self,
+        _message: &[u8],
+        _cert: &rustls::pki_types::CertificateDer<'_>,
+        _dss: &rustls::DigitallySignedStruct,
+    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        _message: &[u8],
+        _cert: &rustls::pki_types::CertificateDer<'_>,
+        _dss: &rustls::DigitallySignedStruct,
+    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
+    }
+
+    /// This list is load-bearing, not decoration: it becomes the ClientHello's
+    /// `signature_algorithms`. Return nothing and the server finds no acceptable
+    /// scheme and aborts *before sending a certificate* — the verifier above
+    /// never runs, and skipping verification manifests as an unexplained
+    /// handshake failure.
+    ///
+    /// Copied from reqwest so the two paths advertise the same thing. It
+    /// deliberately includes schemes our own provider cannot verify (SHA-1,
+    /// Ed448) — harmless, because nothing here verifies anything, and it is
+    /// what lets a legacy appliance find something it can sign with.
+    fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
+        use rustls::SignatureScheme;
+        vec![
+            SignatureScheme::RSA_PKCS1_SHA1,
+            SignatureScheme::ECDSA_SHA1_Legacy,
+            SignatureScheme::RSA_PKCS1_SHA256,
+            SignatureScheme::ECDSA_NISTP256_SHA256,
+            SignatureScheme::RSA_PKCS1_SHA384,
+            SignatureScheme::ECDSA_NISTP384_SHA384,
+            SignatureScheme::RSA_PKCS1_SHA512,
+            SignatureScheme::ECDSA_NISTP521_SHA512,
+            SignatureScheme::RSA_PSS_SHA256,
+            SignatureScheme::RSA_PSS_SHA384,
+            SignatureScheme::RSA_PSS_SHA512,
+            SignatureScheme::ED25519,
+            SignatureScheme::ED448,
+        ]
+    }
+}
+
+/// Build the TLS config used to dial upstream WebSocket servers.
+///
+/// The sibling of [`build_http_client`], and built the same way for the same
+/// reason: the WebSocket leg dials the same upstreams as the HTTP leg, so it
+/// has to honor the same verification exemptions. Built once at startup rather
+/// than per upgrade — a rustls config is expensive to assemble.
+///
+/// # Panics
+///
+/// Requires the process-default [`rustls::crypto::CryptoProvider`] that `main`
+/// installs at startup: with both `ring` and `aws_lc_rs` compiled in, rustls
+/// cannot choose one itself and `ClientConfig::builder()` panics.
+fn build_ws_tls_config(accept_invalid_certs: bool) -> Arc<rustls::ClientConfig> {
+    let mut config = if accept_invalid_certs {
+        rustls::ClientConfig::builder()
+            .dangerous()
+            .with_custom_certificate_verifier(Arc::new(AcceptAnyServerCert))
+            .with_no_client_auth()
+    } else {
+        let mut roots = rustls::RootCertStore::empty();
+        roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+        rustls::ClientConfig::builder()
+            .with_root_certificates(roots)
+            .with_no_client_auth()
+    };
+    // The upstream leg speaks HTTP/1.1 — an upgrade cannot ride h2 here.
+    config.alpn_protocols = vec![b"http/1.1".to_vec()];
+    Arc::new(config)
 }
 
 /// Parse `GATEWAY_SKIP_VERIFY_HOSTS` into a list of hostname patterns.
@@ -172,6 +288,8 @@ impl GatewayServer {
             http_client: build_http_client(global_skip),
             http_client_no_verify: build_http_client(true),
             skip_verify_hosts,
+            ws_connector: TlsConnector::from(build_ws_tls_config(global_skip)),
+            ws_connector_no_verify: TlsConnector::from(build_ws_tls_config(true)),
             policy_engine,
             cache,
             vault_service,
@@ -188,7 +306,12 @@ impl GatewayServer {
             .await
             .context("binding TCP listener")?;
 
-        info!(addr = %addr, "listening for connections");
+        // Report what we actually bound rather than what we asked for: with
+        // `--port 0` the OS assigns the port, and the requested address would
+        // report `:0` — leaving no way to discover where the gateway is listening.
+        let bound_addr = listener.local_addr().context("reading bound address")?;
+
+        info!(addr = %bound_addr, "listening for connections");
 
         // CORS configuration for browser → gateway requests.
         // credentials: true requires explicit headers/methods (not wildcard *).
@@ -302,17 +425,45 @@ impl GatewayServer {
             .fallback(fallback)
             .with_state(self.state.clone());
 
+        let mut shutdown_signal = crate::shutdown::subscribe();
+
         loop {
-            let (stream, peer_addr) = listener.accept().await?;
+            let (stream, peer_addr) = tokio::select! {
+                accepted = listener.accept() => match accepted {
+                    Ok(conn) => conn,
+                    Err(e) => {
+                        // Accept failures are almost always transient and
+                        // self-healing (EMFILE clears as connections close,
+                        // ECONNABORTED is a client that gave up mid-handshake).
+                        // Propagating one would tear down every healthy
+                        // connection this proxy is carrying.
+                        warn!(error = %e, "accept failed; retrying");
+                        tokio::time::sleep(ACCEPT_RETRY_DELAY).await;
+                        continue;
+                    }
+                },
+                _ = shutdown_signal.wait() => break,
+            };
+
             let state = self.state.clone();
             let router = axum_router.clone();
+            let guard = crate::shutdown::task_guard();
 
             tokio::spawn(async move {
+                let _guard = guard;
                 if let Err(e) = handle_connection(stream, peer_addr, state, router).await {
                     warn!(peer = %peer_addr, error = ?e, "connection error");
                 }
             });
         }
+
+        // Closing the port is what stops new work: anything that connects from
+        // here on is refused rather than accepted into a process on its way
+        // out. Dropped explicitly rather than at the end of the scope so the
+        // port is provably shut before the line below claims it is.
+        drop(listener);
+        info!("listener closed — draining connections");
+        Ok(())
     }
 }
 
@@ -419,10 +570,18 @@ async fn get_pending_approvals(
         let mut long_polled = false;
         if pending.is_empty() {
             long_polled = true;
-            let got_new = state
-                .approval_store
-                .wait_for_new(&org_id, &auth.project_id, std::time::Duration::from_secs(30))
-                .await;
+            let mut shutdown_signal = crate::shutdown::subscribe();
+            // A poller holding a connection open for 30 seconds would pin the
+            // drain for its whole window. Answer "nothing pending" at once and
+            // let the SDK re-poll against the replacement instance.
+            let got_new = tokio::select! {
+                got_new = state.approval_store.wait_for_new(
+                    &org_id,
+                    &auth.project_id,
+                    std::time::Duration::from_secs(30),
+                ) => got_new,
+                _ = shutdown_signal.wait() => false,
+            };
             if got_new {
                 let mut fresh = state.approval_store.list_pending(&org_id, &auth.project_id).await;
                 fresh.retain(|a| !exclude.contains(a.id.as_str()));
@@ -564,7 +723,7 @@ async fn handle_connection(
 ) -> Result<()> {
     let io = TokioIo::new(stream);
 
-    http1::Builder::new()
+    let conn = http1::Builder::new()
         .preserve_header_case(true)
         .title_case_headers(true)
         .serve_connection(
@@ -588,9 +747,23 @@ async fn handle_connection(
                 }
             }),
         )
-        .with_upgrades()
-        .await
-        .context("serving HTTP connection")
+        .with_upgrades();
+    tokio::pin!(conn);
+
+    let mut shutdown_signal = crate::shutdown::subscribe();
+
+    // One select, no loop: the signal is monotonic, so once it fires there is
+    // nothing left to race against. `graceful_shutdown` turns off keep-alive —
+    // an idle connection closes at once, an in-flight request still gets its
+    // response, and a CONNECT that has already upgraded is unaffected (its
+    // session runs in its own task, under its own guard).
+    tokio::select! {
+        result = conn.as_mut() => result.context("serving HTTP connection"),
+        _ = shutdown_signal.wait() => {
+            conn.as_mut().graceful_shutdown();
+            conn.await.context("draining HTTP connection")
+        }
+    }
 }
 
 // ── CONNECT handling ────────────────────────────────────────────────────
@@ -685,11 +858,18 @@ async fn handle_connect(
 
     let ca = Arc::clone(&state.ca);
     let skip_verify = host_matches_skip_verify(&hostname, &state.skip_verify_hosts);
-    let http_client = if skip_verify {
+    // Both legs picked in one branch, deliberately: HTTP and WebSocket dial the
+    // same upstreams, so a host they disagree about would mean traffic verified
+    // on one protocol and not the other. One branch makes that unrepresentable
+    // rather than merely true today.
+    let (http_client, ws_connector) = if skip_verify {
         info!(parent: &session_span, "TLS verification skipped (GATEWAY_SKIP_VERIFY_HOSTS)");
-        state.http_client_no_verify.clone()
+        (
+            state.http_client_no_verify.clone(),
+            state.ws_connector_no_verify.clone(),
+        )
     } else {
-        state.http_client.clone()
+        (state.http_client.clone(), state.ws_connector.clone())
     };
     let cache = Arc::clone(&state.cache);
     let approval_store = Arc::clone(&state.approval_store);
@@ -702,16 +882,25 @@ async fn handle_connect(
         agent_token: agent_token.clone(),
     });
 
+    // Taken here, before the spawn, so the session is tracked from the moment
+    // it is promised rather than from whenever the new task first runs — the
+    // accept task's own guard drops as soon as the upgrade is dispatched.
+    let session_guard = crate::shutdown::task_guard();
+
     tokio::spawn(
         async move {
             match hyper::upgrade::on(req).await {
                 Ok(upgraded) => {
                     let result = if intercept {
+                        // A MITM session is HTTP: the drain waits for it, and
+                        // its inner connection gets its own graceful shutdown.
+                        let _guard = session_guard;
                         mitm::mitm(
                             upgraded,
                             &host,
                             &ca,
                             http_client,
+                            ws_connector,
                             vault_injection_rules,
                             cache,
                             proxy_ctx,
@@ -720,6 +909,11 @@ async fn handle_connect(
                         )
                         .await
                     } else {
+                        // A raw tunnel is an indefinite byte pipe with no
+                        // request boundary to finish on. Waiting for one would
+                        // mean every shutdown takes the full deadline, so it is
+                        // deliberately untracked and cut when the process exits.
+                        drop(session_guard);
                         tunnel::tunnel(upgraded, &host).await
                     };
                     if let Err(e) = result {
@@ -964,6 +1158,53 @@ pub(crate) fn strip_port(host: &str) -> &str {
 mod tests {
     use super::*;
     use std::net::TcpListener;
+
+    /// `ClientConfig::builder()` panics when no process-default provider is
+    /// installed, and both `ring` and `aws_lc_rs` are compiled in, so rustls
+    /// cannot pick one on its own. `main` installs it at startup; tests must.
+    fn ensure_crypto_provider() {
+        static INIT_CRYPTO: std::sync::Once = std::sync::Once::new();
+        INIT_CRYPTO.call_once(|| {
+            let _ = rustls::crypto::ring::default_provider().install_default();
+        });
+    }
+
+    /// Named for what it actually checks. An earlier version looped over both
+    /// modes asserting only this, which a `build_ws_tls_config` that ignored
+    /// its argument would have passed — the claim in the name has to be one
+    /// the assertions can fail on. Which config a host *gets* is a behavioral
+    /// claim, pinned end to end by the gateway-e2e suite against a self-signed
+    /// upstream; rustls exposes no way to read a config's verifier back out.
+    #[test]
+    fn ws_tls_config_sets_http11_alpn() {
+        ensure_crypto_provider();
+
+        // ALPN is what makes the upstream answer HTTP/1.1 rather than
+        // negotiating h2, which cannot carry an upgrade.
+        let config = build_ws_tls_config(false);
+        assert_eq!(config.alpn_protocols, vec![b"http/1.1".to_vec()]);
+    }
+
+    /// The dangerous branch takes a different builder chain, so it can fail to
+    /// construct on its own — and it is the branch that almost never runs.
+    #[test]
+    fn ws_tls_config_builds_the_no_verify_branch() {
+        ensure_crypto_provider();
+
+        let config = build_ws_tls_config(true);
+        assert_eq!(config.alpn_protocols, vec![b"http/1.1".to_vec()]);
+    }
+
+    /// The scheme list is what the ClientHello advertises. An empty one makes
+    /// the server abort before it ever sends a certificate, so "skip
+    /// verification" would surface as an unexplained handshake failure.
+    #[test]
+    fn accept_any_server_cert_advertises_signature_schemes() {
+        use rustls::client::danger::ServerCertVerifier;
+
+        let schemes = AcceptAnyServerCert.supported_verify_schemes();
+        assert!(schemes.contains(&rustls::SignatureScheme::RSA_PKCS1_SHA256));
+    }
 
     #[tokio::test]
     async fn healthz_reports_status_and_version() {

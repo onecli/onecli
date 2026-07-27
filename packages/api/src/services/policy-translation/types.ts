@@ -23,12 +23,11 @@ export interface PolicyRequest {
   /** Which agent the request is from (identity + shadowing). */
   agentId: string;
   /**
-   * The agent's resolved principal set (step 6): the agent-groups it belongs to,
-   * and the human users + directory groups its project inherits via ProjectAccess.
+   * The agent's resolved principal set (step 6): the human users + directory
+   * groups its project inherits via ProjectAccess.
    * A directory-identity rule matches iff its principal is in the matching set.
    * Optional/empty for pure-agent traffic → only agent/"any" rules match.
    */
-  agentGroupIds?: string[];
   userIds?: string[];
   groupIds?: string[];
   /** A credential was injected for this host — the deny-default precondition. */
@@ -54,7 +53,7 @@ export interface Decision {
 
 /**
  * The ATTRIBUTED result of an evaluation — which rule (or default) decided.
- * `evaluateNew` collapses this to a `Decision`; the what-if simulator keeps it
+ * `evaluateNew` collapses this to a `Decision`; the reflections keep it
  * to name the deciding rule. Mirrors the gateway's `Outcome` (evaluate.rs).
  */
 export type PolicyOutcome =
@@ -73,15 +72,14 @@ export type PolicyOutcome =
 
 // Internal new-model shapes for the evaluator. The TRANSLATOR only ever produces
 // agent or all-agents identities and app/network targets (the old model is
-// agent-only; equipment is step 7). The directory kinds (agentGroup/user/group,
-// step 6) are matched against the request's resolved principal set — they arrive
+// agent-only; equipment is step 7). The directory kinds (user/group, step 6)
+// are matched against the request's resolved principal set — they arrive
 // on direct `PolicyRuleV2` rows, not from translation. Step 5's backfill maps
 // translated rules to real `PolicyRuleV2` rows using the API's stricter enums in
 // validations/policy; here the looser `method: string | null` carries an old
 // row's method verbatim so the matcher stays byte-faithful.
 export type NewIdentity =
   | { type: "agent"; id: string }
-  | { type: "agentGroup"; id: string }
   | { type: "user"; id: string }
   | { type: "group"; id: string };
 

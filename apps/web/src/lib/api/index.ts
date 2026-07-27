@@ -7,9 +7,7 @@ import * as projectAccess from "./project-access";
 import * as domains from "./domains";
 import * as orgMembers from "./org-members";
 import * as groups from "./groups";
-import * as agentGroups from "./agent-groups";
 import * as roleMappings from "./role-mappings";
-import * as orgAgents from "./org-agents";
 import * as ssoConnections from "./sso-connections";
 import * as ssoEnforcement from "./sso-enforcement";
 import * as scimTokens from "./scim-tokens";
@@ -31,9 +29,7 @@ export {
   domains,
   orgMembers,
   groups,
-  agentGroups,
   roleMappings,
-  orgAgents,
   ssoConnections,
   ssoEnforcement,
   scimTokens,
@@ -68,9 +64,6 @@ export type {
   CreateRoleMappingInput,
   UpdateRoleMappingInput,
   RoleMappingImpact,
-  AgentGroupRow,
-  AgentGroupMemberRow,
-  OrgAgentRow,
   OrgMemberListRow,
   OrgSsoConnection,
   SsoTestResult,

@@ -7,8 +7,8 @@ import type {
 import type { SimRuleRow } from "./load-rules";
 import type { SecretHostSet } from "./secret-hosts";
 
-// Row → evaluator-rule mapper for the simulator and the reflections. Mirrors
-// the gateway's row decode: identities decode all FOUR
+// Row → evaluator-rule mapper for the reflections. Mirrors
+// the gateway's row decode: identities decode all three
 // kinds (the verify path is agent-only by design and stays untouched), `secret`
 // targets resolve to their gated host patterns via the fenced `SecretHostSet`,
 // and `connection` targets resolve to their connection's provider via the
@@ -16,7 +16,7 @@ import type { SecretHostSet } from "./secret-hosts";
 // = the provider's whole app, host-only; named = the tool fan-out), exactly as
 // the gateway's `assemble.rs::decode_row` does at connect. The rule's identity
 // metadata (row id, generation-stable logicalId) rides beside the engine rule
-// so the simulator can NAME the deciding rule without widening the shared
+// so the reflections can NAME the deciding rule without widening the shared
 // `NewRule` shape.
 
 export interface SimRuleMeta {
@@ -27,6 +27,17 @@ export interface SimRuleMeta {
   source: string;
 }
 
+/** The deciding rule, trimmed for display — never the full targets/identities. */
+export interface ProvenanceRuleRef {
+  logicalId: string;
+  name: string;
+  source: string;
+  action: "allow" | "block";
+  requireApproval: boolean;
+  rateLimit: number | null;
+  rateLimitWindow: string | null;
+}
+
 export interface SimRule {
   meta: SimRuleMeta;
   rule: NewRule;
@@ -35,8 +46,6 @@ export interface SimRule {
 const decodeIdentities = (row: SimRuleRow): NewIdentity[] =>
   row.identities.map((i): NewIdentity => {
     if (i.agentId != null) return { type: "agent", id: i.agentId };
-    if (i.agentGroupId != null)
-      return { type: "agentGroup", id: i.agentGroupId };
     if (i.userId != null) return { type: "user", id: i.userId };
     if (i.groupId != null) return { type: "group", id: i.groupId };
     // No principal (impossible per the DB `one_principal` CHECK) — mirror the

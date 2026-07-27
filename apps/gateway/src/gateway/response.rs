@@ -373,6 +373,28 @@ pub(crate) fn manual_approval_denied<S>(
     ))
 }
 
+/// 503 Service Unavailable — the gateway is shutting down while this request
+/// was held for manual approval.
+///
+/// Deliberately not the 403 a denial produces: nobody decided anything here,
+/// and an agent that reads a restart as a policy denial will stop retrying
+/// something it was never refused. Retryable on purpose — the replacement
+/// instance can serve it.
+pub(crate) fn gateway_restarting<S>(approval_id: &str) -> Response<ForwardBody<S>> {
+    let mut resp = json_error(
+        StatusCode::SERVICE_UNAVAILABLE,
+        serde_json::json!({
+            "error": "gateway_restarting",
+            "message": "OneCLI gateway is restarting and released this request \
+                        before it was reviewed. Retry it.",
+            "approval_id": approval_id,
+        }),
+    );
+    resp.headers_mut()
+        .insert("retry-after", HeaderValue::from_static("1"));
+    resp
+}
+
 /// 403 Forbidden — request blocked by a policy rule.
 pub(crate) fn blocked_by_policy<S>(
     method: &str,

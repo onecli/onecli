@@ -12,7 +12,7 @@ use hyper::server::conn::http1;
 use hyper::service::service_fn;
 use hyper_util::rt::TokioIo;
 use std::fmt;
-use tokio_rustls::TlsAcceptor;
+use tokio_rustls::{TlsAcceptor, TlsConnector};
 use tracing::{debug, warn};
 
 use crate::approval::ApprovalStore;
@@ -25,6 +25,9 @@ use crate::inject::InjectionRule;
 use super::forward;
 use super::response;
 use super::ProxyContext;
+
+/// Cap on the client-side TLS handshake inside a tunnel.
+const TLS_HANDSHAKE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
 /// Typed error context for TLS handshake failures with the client.
 #[derive(Debug)]
@@ -46,6 +49,9 @@ pub(super) async fn mitm(
     host: &str,
     ca: &CertificateAuthority,
     http_client: reqwest::Client,
+    // Upstream TLS for the WebSocket leg, already resolved against the
+    // operator's skip-verify configuration at CONNECT time.
+    ws_connector: TlsConnector,
     vault_injection_rules: Vec<InjectionRule>,
     cache: Arc<dyn CacheStore>,
     proxy_ctx: Arc<ProxyContext>,
@@ -58,9 +64,12 @@ pub(super) async fn mitm(
     let acceptor = TlsAcceptor::from(server_config);
 
     let client_io = TokioIo::new(upgraded);
-    let tls_stream = acceptor
-        .accept(client_io)
+    // Bounded because a client that opens a tunnel and then never speaks would
+    // otherwise hold this task forever — and, once the drain is waiting on it,
+    // hold the whole shutdown to its deadline.
+    let tls_stream = tokio::time::timeout(TLS_HANDSHAKE_TIMEOUT, acceptor.accept(client_io))
         .await
+        .context("TLS handshake with client timed out")?
         .context(TlsHandshakeWithClient)?;
     debug!(host = %hostname, "TLS handshake with client succeeded");
 
@@ -68,7 +77,7 @@ pub(super) async fn mitm(
     let vault_injection_rules = Arc::new(vault_injection_rules);
     let io = TokioIo::new(tls_stream);
 
-    http1::Builder::new()
+    let conn = http1::Builder::new()
         .preserve_header_case(true)
         .title_case_headers(true)
         .serve_connection(
@@ -76,6 +85,7 @@ pub(super) async fn mitm(
             service_fn(move |req: hyper::Request<hyper::body::Incoming>| {
                 let host = host_owned.clone();
                 let client = http_client.clone();
+                let ws_tls = ws_connector.clone();
                 let cache = Arc::clone(&cache);
                 let ctx = Arc::clone(&proxy_ctx);
                 let approvals = Arc::clone(&approval_store);
@@ -114,6 +124,7 @@ pub(super) async fn mitm(
                                     &*cache,
                                     &engine.pool,
                                     &ctx,
+                                    &ws_tls,
                                 )
                                 .await
                                 {
@@ -176,9 +187,20 @@ pub(super) async fn mitm(
                 }
             }),
         )
-        .with_upgrades()
-        .await
-        .context("serving MITM connection")
+        .with_upgrades();
+    tokio::pin!(conn);
+
+    let mut shutdown_signal = crate::shutdown::subscribe();
+
+    // The tunnel carries real HTTP, so it drains like any other connection:
+    // the request in flight when the signal lands still gets its response.
+    tokio::select! {
+        result = conn.as_mut() => result.context("serving MITM connection"),
+        _ = shutdown_signal.wait() => {
+            conn.as_mut().graceful_shutdown();
+            conn.await.context("draining MITM connection")
+        }
+    }
 }
 
 /// Pre-computed data for token endpoint interception responses.

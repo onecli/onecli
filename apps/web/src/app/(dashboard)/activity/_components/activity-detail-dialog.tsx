@@ -156,7 +156,7 @@ export const ActivityDetailDialog = ({
               !blockedByRule &&
               !defaultDenied && (
                 // An org rule decided, but its details are org-admin-only —
-                // the server redacted the name (the simulator's contract).
+                // the server redacted the name (the reflections' contract).
                 <Row label="Decided by rule">
                   <span className="text-muted-foreground">
                     An organization rule

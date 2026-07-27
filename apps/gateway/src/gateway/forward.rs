@@ -524,9 +524,54 @@ pub(crate) async fn forward_request(
                 "holding request for approval"
             );
 
-            let outcome = decision_rx
-                .wait(Duration::from_secs(APPROVAL_TIMEOUT_SECS))
-                .await;
+            let mut shutdown_signal = crate::shutdown::subscribe();
+            let outcome = tokio::select! {
+                outcome = decision_rx.wait(Duration::from_secs(APPROVAL_TIMEOUT_SECS)) => {
+                    Some(outcome)
+                }
+                // Shutting down with nobody having decided. Left alone this
+                // request would be cut without an answer while its approval
+                // card lingered in the dashboard for another three minutes —
+                // reviewable, and approvable into a process that no longer
+                // exists. Release it explicitly instead.
+                _ = shutdown_signal.wait() => None,
+            };
+
+            let Some(outcome) = outcome else {
+                warn!(
+                    url = %url,
+                    approval_id = %approval_id,
+                    "shutting down — releasing held request for retry"
+                );
+                // Defuse first: the guard's Drop would spawn this same cleanup
+                // detached, racing the pool close that follows the drain.
+                guard.defuse();
+                approval_store
+                    .remove(org_id, project_id, &approval_id)
+                    .await;
+                let resolved_at = time::OffsetDateTime::now_utc()
+                    .format(&time::format_description::well_known::Iso8601::DEFAULT)
+                    .unwrap_or_default();
+                emit_approval_telemetry(
+                    proxy_ctx,
+                    host,
+                    &method,
+                    telemetry_path,
+                    503,
+                    start.elapsed().as_millis() as u32,
+                    crate::telemetry_core::RequestDecision::ApprovalDenied {
+                        approval_id: approval_id.clone(),
+                        reason: "gateway_restarting".to_string(),
+                        triggered_at,
+                        resolved_at,
+                        approved_by: None,
+                    },
+                    None,
+                    Some(log_id),
+                    matched_rule.clone(),
+                );
+                return Ok(response::gateway_restarting(&approval_id));
+            };
 
             // Decision received (or timed out) — defuse guard, handle explicitly.
             guard.defuse();

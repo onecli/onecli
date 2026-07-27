@@ -68,6 +68,7 @@ mod gateway;
 mod inject;
 mod policy;
 mod secret_inject;
+mod shutdown;
 mod summary;
 
 // Cloud-only request summarizers for manual-approval cards. OSS build uses the
@@ -161,6 +162,12 @@ struct Cli {
     data_dir: PathBuf,
 }
 
+/// Cap on the final telemetry flush, inside the overall shutdown budget.
+const TELEMETRY_FLUSH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
+
+/// Cap on closing the database pool — cosmetic cleanliness, never worth a hang.
+const POOL_CLOSE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
+
 fn default_data_dir() -> &'static str {
     if cfg!(target_os = "linux") && Path::new("/app/data").exists() {
         "/app/data"
@@ -195,6 +202,13 @@ async fn main() -> Result<()> {
     }
 
     let cli = Cli::parse();
+
+    // Before anything that can block: as PID 1 the kernel discards a SIGTERM
+    // whose handler is still the default, so until this runs the process
+    // cannot be stopped by anything short of SIGKILL. A signal arriving during
+    // the startup below simply sets the flag, and the accept loop exits on its
+    // first poll.
+    shutdown::install();
 
     // Expand ~ in data dir
     let data_dir = expand_tilde(&cli.data_dir);
@@ -242,6 +256,9 @@ async fn main() -> Result<()> {
     let pool = db::create_pool(&database_url).await?;
     info!("database pool created");
     let telemetry_pool = pool.clone();
+    // The pool itself moves into the PolicyEngine below, and that moves into
+    // the server — so the shutdown sequence needs its own handle to close it.
+    let shutdown_pool = pool.clone();
 
     // Load crypto service for secret decryption
     // OSS: AES-256-GCM with local key from SECRET_ENCRYPTION_KEY
@@ -288,9 +305,11 @@ async fn main() -> Result<()> {
     telemetry::init(telemetry_pool, Arc::clone(&cache));
     info!("telemetry initialized");
 
-    info!(port = cli.port, "gateway ready");
+    // No port here: it would report the *requested* value, which is `0` when the
+    // OS is asked to choose. The listening line logs the address actually bound.
+    info!("gateway ready");
 
-    // Start the gateway server (blocks forever)
+    // Serve until a shutdown signal stops the listener.
     let server = GatewayServer::new(
         ca,
         cli.port,
@@ -299,7 +318,25 @@ async fn main() -> Result<()> {
         cache,
         approval_store,
     );
-    server.run().await
+    let result = server.run().await;
+
+    // The drain, in the one order that does not lose data: connections first
+    // (they are still emitting telemetry as they finish), then the telemetry
+    // flush that persists what they emitted, then the database it wrote to.
+    // Every phase draws from one budget, so the total cannot outrun the
+    // orchestrator's patience however it is configured.
+    let budget = shutdown::Budget::start();
+    let drained = shutdown::drain_connections(budget.drain_share()).await;
+    if !drained {
+        warn!("drain deadline reached — remaining connections will be cut");
+    }
+    telemetry_core::shutdown(budget.allow(TELEMETRY_FLUSH_TIMEOUT)).await;
+    // Bounded: a detached approval-cleanup task can briefly hold a connection,
+    // and no amount of tidiness is worth missing the SIGKILL deadline.
+    let _ = tokio::time::timeout(budget.allow(POOL_CLOSE_TIMEOUT), shutdown_pool.close()).await;
+
+    info!(drained, "drain complete");
+    result
 }
 
 /// Expand `~` at the start of a path to the user's home directory.

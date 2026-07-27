@@ -9,7 +9,6 @@ import { ruleConditionSchema } from "./policy-rule";
 /** A rule names exactly one principal per identity — a uniform {type, id}. */
 export const policyIdentitySchema = z.discriminatedUnion("type", [
   z.object({ type: z.literal("agent"), id: z.string().min(1) }),
-  z.object({ type: z.literal("agentGroup"), id: z.string().min(1) }),
   z.object({ type: z.literal("user"), id: z.string().min(1) }),
   z.object({ type: z.literal("group"), id: z.string().min(1) }),
 ]);

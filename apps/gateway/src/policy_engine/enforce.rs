@@ -48,7 +48,6 @@ pub(crate) async fn load_connect_v2(
     pool: &PgPool,
     org_id: &str,
     project_id: &str,
-    _agent_id: &str,
 ) -> anyhow::Result<PolicyV2Rules> {
     let project = find_published_policy_rules_v2_by_project(pool, project_id)
         .await

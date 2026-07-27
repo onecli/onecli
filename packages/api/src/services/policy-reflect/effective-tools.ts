@@ -8,7 +8,7 @@ import { hostMatches, isLlmHost } from "../../lib/path-match";
 import { allRuleVariants } from "../policy-translation/translate/app-catalog";
 import { evaluatePolicyOutcome } from "../policy-translation/evaluator";
 import type { NewRule, PolicyRequest } from "../policy-translation/types";
-import type { SimulatedRuleRef } from "../policy-simulate/simulate";
+import type { ProvenanceRuleRef } from "../policy-simulate/sim-rule";
 import {
   loadInjectionRules,
   loadRulesForSimulation,
@@ -36,14 +36,14 @@ import { buildInjectionProbe } from "./injection";
 //   visible to a representative request (it would need pattern-intersection
 //   analysis) — the same inherent limit as any per-tool summary.
 // - Body conditions cannot be exercised (no body input) — conditioned rules
-//   that would match live cannot match here; the simulator carries the same
-//   limitation.
+//   that would match live cannot match here, an inherent limit of any static
+//   summary.
 // - `hasInjections` is DERIVED per tool host from the agent's credential pools
 //   (the injection-probe approximation, hoisted once per request); the response
 //   discloses whether a credential is attached so a "Not managed" wall on an
 //   unconnected app reads correctly.
 //
-// REDACTION CONTRACT: identical to the simulator's (simulate.ts) — org rule
+// REDACTION CONTRACT (this file is its canonical home): org rule
 // DETAILS are org-admin-only; a non-admin sees `redacted: true` provenance and
 // org rules are excluded from the `variesByIdentity` disclosure count.
 //
@@ -63,7 +63,7 @@ export type EffectiveToolVerdict =
 
 export type EffectiveProvenance =
   | { kind: "rule"; scope: "organization"; redacted: true }
-  | { kind: "rule"; scope: "organization" | "project"; rule: SimulatedRuleRef }
+  | { kind: "rule"; scope: "organization" | "project"; rule: ProvenanceRuleRef }
   /** A level's Default Rule blocked (the deny-default terminal). */
   | { kind: "default"; scope: "organization" | "project" };
 
@@ -355,7 +355,6 @@ export const computeEffectiveGroups = (input: {
 }): { groups: EffectiveToolGroupResult[]; credentialAttached: boolean } => {
   const baseRequest = {
     agentId: input.agentId,
-    agentGroupIds: input.principals.agentGroupIds,
     userIds: input.principals.userIds,
     groupIds: input.principals.groupIds,
   };
@@ -454,9 +453,13 @@ export const effectiveAppPermissions = async (
     projectBase
       ? loadInjectionRules(projectBase, "published")
       : Promise.resolve([]),
+    // The `agent &&` clause is load-bearing even though the set no longer
+    // depends on the agent: the agent-less BASELINE view must not inherit the
+    // project's users/groups, or identity-scoped verdicts would leak into it
+    // while `variesByIdentity` reports 0.
     agent && ctx.projectId
-      ? resolvePrincipalSet(agent.id, ctx.projectId, ctx.organizationId)
-      : Promise.resolve({ agentGroupIds: [], userIds: [], groupIds: [] }),
+      ? resolvePrincipalSet(ctx.projectId, ctx.organizationId)
+      : Promise.resolve({ userIds: [], groupIds: [] }),
     loadSecretHosts(ctx.organizationId, ctx.projectId ?? ""),
     loadConnectionProviders(ctx.organizationId, ctx.projectId ?? ""),
     loadInjectionPool(agent, ctx),

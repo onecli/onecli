@@ -11,8 +11,8 @@ import { providerHostMatches } from "../policy-translation/translate/app-catalog
 
 /**
  * `inject_select.rs::identity_matches`: injection requires an EXPLICIT identity
- * in the agent's principal set (own id, or an inherited agent-group / user /
- * group). Unlike the block/allow engine — where empty identities mean "any" — an
+ * in the agent's principal set (own id, or an inherited user / group). Unlike
+ * the block/allow engine — where empty identities mean "any" — an
  * EMPTY identity here NEVER matches (a credential must not inject to every
  * agent; also the orphan guard: a deleted agent's cascaded-empty rule must not
  * widen to "any").
@@ -25,8 +25,6 @@ export const injectionIdentityMatches = (
   identities.length > 0 &&
   identities.some((i) => {
     if (i.agentId != null) return i.agentId === agentId;
-    if (i.agentGroupId != null)
-      return principals.agentGroupIds.includes(i.agentGroupId);
     if (i.userId != null) return principals.userIds.includes(i.userId);
     if (i.groupId != null) return principals.groupIds.includes(i.groupId);
     // No principal (the DB one_principal CHECK makes this unreachable) — never

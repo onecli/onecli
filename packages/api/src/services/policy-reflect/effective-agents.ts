@@ -5,10 +5,7 @@ import {
   loadInjectionRules,
   loadRulesForSimulation,
 } from "../policy-simulate/load-rules";
-import {
-  resolveProjectPrincipals,
-  type PrincipalSet,
-} from "../policy-simulate/principal-set";
+import { resolvePrincipalSet } from "../policy-simulate/principal-set";
 import { loadConnectionProviders } from "../policy-simulate/connection-providers";
 import { loadSecretHosts } from "../policy-simulate/secret-hosts";
 import { toSimRule, type SimRule } from "../policy-simulate/sim-rule";
@@ -41,9 +38,8 @@ import type { CredentialProvenance } from "./effective-credentials";
 //
 // Fencing: the connection must be project-owned or org-scoped in the caller's
 // org; agents are the caller's project's. Perf: the rule set, pools, and the
-// project-level
-// principal arms load ONCE; only the per-agent agent-group arm is per-agent —
-// batched into a single grouped query.
+// principal set load ONCE — the principal set is project-derived, so every
+// agent in the project shares it.
 //
 // REDACTION: org rule provenance follows the simulate contract (names are
 // org-admin-only; multiple org refs collapse to one redacted marker).
@@ -164,7 +160,6 @@ export const effectiveAgents = async (
     select: { id: true, name: true, secretMode: true },
     orderBy: [{ isDefault: "desc" }, { createdAt: "desc" }],
   });
-  const agentIds = agents.map((a) => a.id);
   // Only a selective agent consults the injection set — skip those two reads
   // entirely when every agent in the project is all-mode.
   const anySelective = agents.some((a) => a.secretMode === "selective");
@@ -176,8 +171,7 @@ export const effectiveAgents = async (
     projectInjectRows,
     secretHosts,
     connectionProviders,
-    projectPrincipals,
-    agentGroupRows,
+    principals,
     poolSecrets,
     poolConnections,
   ] = await Promise.all([
@@ -205,17 +199,7 @@ export const effectiveAgents = async (
       : [],
     loadSecretHosts(ctx.organizationId, ctx.projectId),
     loadConnectionProviders(ctx.organizationId, ctx.projectId),
-    resolveProjectPrincipals(ctx.projectId, ctx.organizationId),
-    // The only per-agent principal arm, batched into one grouped query.
-    agentIds.length > 0
-      ? db.agentGroupMember.findMany({
-          where: {
-            agentId: { in: agentIds },
-            agentGroup: { organizationId: ctx.organizationId },
-          },
-          select: { agentId: true, agentGroupId: true },
-        })
-      : Promise.resolve([]),
+    resolvePrincipalSet(ctx.projectId, ctx.organizationId),
     // The non-selective (pool) injection probe inputs, loaded once.
     db.secret.findMany({
       where: {
@@ -248,12 +232,6 @@ export const effectiveAgents = async (
     ? def.groups.reduce((n, g) => n + g.tools.length, 0)
     : 0;
 
-  const agentGroupsByAgent = new Map<string, string[]>();
-  for (const row of agentGroupRows) {
-    const list = agentGroupsByAgent.get(row.agentId) ?? [];
-    list.push(row.agentGroupId);
-    agentGroupsByAgent.set(row.agentId, list);
-  }
   const poolProviders = [...new Set(poolConnections.map((c) => c.provider))];
 
   // The injection-relevant allow rules, prefiltered to THIS connection: a
@@ -275,12 +253,6 @@ export const effectiveAgents = async (
     .map(({ row }) => row);
 
   const entries: EffectiveAgentEntry[] = agents.map((agent) => {
-    const principals: PrincipalSet = {
-      agentGroupIds: agentGroupsByAgent.get(agent.id) ?? [],
-      userIds: projectPrincipals.userIds,
-      groupIds: projectPrincipals.groupIds,
-    };
-
     let credential: AgentCredentialStatus;
     if (agent.secretMode !== "selective") {
       credential = { status: "full" };

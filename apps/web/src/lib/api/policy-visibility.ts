@@ -1,32 +1,26 @@
 "use client";
 
-import { useMutation, useQuery } from "@tanstack/react-query";
-import { toast } from "sonner";
-import { apiGet, apiPost, queryKeys } from "@/lib/api";
+import { useQuery } from "@tanstack/react-query";
+import { apiGet, queryKeys } from "@/lib/api";
 import type { PageScope } from "@/lib/api";
 
-// The EE policy-visibility surface: the what-if simulator, the step-9
-// resolved-identity read, and the 9.7b read-only reflections. The backing
-// endpoints are EE-registered (policy-simulate / policy-reflect /
-// agent-resolved-identity), so the whole client family lives in the EE
-// overlay — the shared `lib/api` carries no trace of it. Query keys are built
-// by SPREADING the shared namespaces (`queryKeys.agents.all()` etc.), so the
-// arrays are byte-identical to nested entries and every broad shared
-// invalidation (`invalidateQueries({ queryKey: queryKeys.agents.all() })`)
+// The policy-visibility client: the 9.7b read-only reflections (the equipment
+// panels). The project/agent/connection reflect endpoints mount in the shared
+// app for every edition; only the org-scoped variant is EE-registered. Query
+// keys are built by SPREADING the shared namespaces (`queryKeys.agents.all()`
+// etc.), so the arrays are byte-identical to nested entries and every broad
+// shared invalidation (`invalidateQueries({ queryKey: queryKeys.agents.all() })`)
 // still covers these caches.
 
-// ── What-if simulator ────────────────────────────────────────────────────────
+export type EffectiveToolVerdict =
+  | "allow"
+  | "approval"
+  | "block"
+  | "mixed"
+  | "unmanaged";
 
-export interface SimulateInput {
-  agentId: string;
-  host: string;
-  path?: string;
-  method: string;
-  includeStaged?: boolean;
-  hasInjectionsOverride?: boolean;
-}
-
-export interface SimulatedRuleRef {
+/** The deciding rule, trimmed for display — never the full targets/identities. */
+export interface ProvenanceRuleRef {
   logicalId: string;
   name: string;
   source: string;
@@ -36,90 +30,9 @@ export interface SimulatedRuleRef {
   rateLimitWindow: string | null;
 }
 
-/** Who decided the simulated request. Org-rule decisions arrive REDACTED for
- * non-org-admin viewers (verdict only, no name/details). */
-export type SimulatedDecidedBy =
-  | { kind: "rule"; scope: "organization"; redacted: true }
-  | { kind: "rule"; scope: "organization" | "project"; rule: SimulatedRuleRef }
-  | { kind: "default"; scope: "organization" | "project"; action: "block" }
-  | { kind: "none"; managed: boolean };
-
-export interface SimulateResult {
-  decision: {
-    action: "allow" | "block";
-    requireApproval?: boolean;
-    rateLimit?: number;
-    rateLimitWindow?: string;
-    byDefault?: boolean;
-  };
-  decidedBy: SimulatedDecidedBy;
-  inputs: {
-    host: string;
-    path: string;
-    method: string;
-    isLlmHost: boolean;
-    hasInjections: boolean;
-    hasInjectionsBasis: "auto" | "override";
-    staged: boolean;
-  };
-  /** Rules with body conditions the simulator can't evaluate (no body input) —
-   * scoped to the viewer's visibility (org rules excluded for non-admins). */
-  bodyConditionsSkipped: number;
-}
-
-/**
- * The what-if simulator (project scope only — a simulation is agent+project
- * contextual): evaluate a hypothetical request against the current rules with
- * the real engine; nothing is sent. Org-rule decisions arrive redacted for
- * non-org-admins.
- */
-export const simulate = (input: SimulateInput) =>
-  apiPost<SimulateResult>("/v1/policy/simulate", input);
-
-/** The what-if simulator — a pure computation POST (no cache side effects). */
-export const useSimulatePolicy = () =>
-  useMutation({
-    mutationFn: (input: SimulateInput) => simulate(input),
-    onError: (err: Error) => toast.error(err.message),
-  });
-
-// ── Resolved identity (step 9 visibility) ───────────────────────────────────
-
-/** The principal set the policy engine matches an agent's requests against
- * (org-admin-only read). */
-export interface ResolvedIdentity {
-  agent: { id: string; name: string };
-  agentGroups: { id: string; name: string }[];
-  users: { id: string; name: string | null; email: string }[];
-  groups: { id: string; name: string }[];
-}
-
-/** Who the policy engine thinks this agent is (org-admin-only; 403 otherwise). */
-export const resolvedIdentity = (agentId: string) =>
-  apiGet<ResolvedIdentity>(`/v1/agents/${agentId}/resolved-identity`);
-
-/** The agent's engine-resolved principal set (step 9 visibility). Org-admin
- * only — the 403 for members is expected, so never retry it. */
-export const useResolvedIdentity = (agentId: string, enabled = true) =>
-  useQuery({
-    queryKey: [...queryKeys.agents.all(), agentId, "resolved-identity"],
-    queryFn: () => resolvedIdentity(agentId),
-    enabled: enabled && agentId.length > 0,
-    retry: false,
-  });
-
-// ── Step 9.7b read-only reflections (the equipment panels) ──────────
-
-export type EffectiveToolVerdict =
-  | "allow"
-  | "approval"
-  | "block"
-  | "mixed"
-  | "unmanaged";
-
 export type EffectiveProvenance =
   | { kind: "rule"; scope: "organization"; redacted: true }
-  | { kind: "rule"; scope: "organization" | "project"; rule: SimulatedRuleRef }
+  | { kind: "rule"; scope: "organization" | "project"; rule: ProvenanceRuleRef }
   | { kind: "default"; scope: "organization" | "project" };
 
 export interface EffectiveToolResult {

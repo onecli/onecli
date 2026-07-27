@@ -370,14 +370,13 @@ pub(crate) async fn update_secret_value(
 // the OSS build.
 
 /// One aggregated identity (from `json_agg`, camelCase keys). Exactly one of the
-/// four principal columns is set per row (the DB `one_principal` CHECK); the
+/// three principal columns is set per row (the DB `one_principal` CHECK); the
 /// engine decodes it to the matching `Identity` variant. The non-agent kinds
 /// are cloud/EE-only (OSS decodes them fail-closed).
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct PolicyIdentityRow {
     pub agent_id: Option<String>,
-    pub agent_group_id: Option<String>,
     pub user_id: Option<String>,
     pub group_id: Option<String>,
 }
@@ -440,8 +439,6 @@ pub(crate) struct PolicyRuleV2Row {
 /// builds serialize the same struct.
 #[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub(crate) struct PrincipalSet {
-    /// Agent-groups the agent belongs to (org-scoped).
-    pub agent_group_ids: Vec<String>,
     /// Human users the agent's project grants via ProjectAccess — directly, or as
     /// members of a granted group.
     pub user_ids: Vec<String>,
@@ -459,8 +456,8 @@ pub(crate) struct PrincipalSet {
 pub(crate) struct PolicyV2Rules {
     pub org: Vec<PolicyRuleV2Row>,
     pub project: Vec<PolicyRuleV2Row>,
-    /// The connection's resolved principal set (step 6). Empty unless some loaded
-    /// rule targets an agent-group/user/group identity (lazy). Only cloud ever
+    /// The connection's resolved principal set (step 6). Empty unless some
+    /// loaded rule targets a user/group identity (lazy). Only cloud ever
     /// populates it.
     #[serde(default)]
     pub principals: PrincipalSet,
@@ -553,7 +550,7 @@ pub(crate) const POLICY_V2_SELECT: &str = r#"
            r.rate_limit, r.rate_limit_window, r.require_approval, r.conditions,
            COALESCE((
              SELECT json_agg(json_build_object(
-               'agentId', i.agent_id, 'agentGroupId', i.agent_group_id,
+               'agentId', i.agent_id,
                'userId', i.user_id, 'groupId', i.group_id))
              FROM policy_rule_identities i WHERE i.rule_id = r.id
            ), '[]'::json) AS identities,

@@ -65,8 +65,8 @@ export const policyReflectRoutes = () => {
 
 /** Composes onto the shared /agents router: the injectable-credential
  * reflection for the "Credential access" dialog. Any PROJECT MEMBER
- * (it replaces a member-visible dialog — the member fence, not the
- * resolved-identity admin gate). */
+ * (it replaces a member-visible dialog — the member fence, not an
+ * admin gate). */
 export const agentReflectRoutes = () => {
   const app = new Hono<ApiEnv>();
 

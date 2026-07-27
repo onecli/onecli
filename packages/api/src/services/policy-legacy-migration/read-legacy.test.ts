@@ -51,9 +51,7 @@ describe("reconstructOssRule", () => {
       requireApproval: false,
       enabled: true,
       conditions: [{ target: "body", operator: "contains", value: "x" }],
-      identities: [
-        { agentId: "a1", agentGroupId: null, userId: null, groupId: null },
-      ],
+      identities: [{ agentId: "a1", userId: null, groupId: null }],
       targets: [
         {
           kind: "network",

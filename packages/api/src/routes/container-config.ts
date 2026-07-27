@@ -44,7 +44,7 @@ export const injectableSecretWhere = async (
   if (agent.secretMode !== "selective") return pool;
 
   const [principals, orgRules, projectRules] = await Promise.all([
-    resolvePrincipalSet(agent.id, projectId, organizationId),
+    resolvePrincipalSet(projectId, organizationId),
     loadInjectionRules({ scope: "organization", organizationId }, "published"),
     loadInjectionRules({ scope: "project", projectId }, "published"),
   ]);

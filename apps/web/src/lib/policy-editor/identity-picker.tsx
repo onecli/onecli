@@ -4,8 +4,8 @@ import type { ProjectionIdentity } from "@/lib/api";
 
 /**
  * The OSS identity-picker seam (step 9.5). OSS rules target a specific agent
- * or all agents (the plain Select in the rule form); directory identities —
- * agent-groups, users, user-groups — are a OneCLI Cloud capability. The org
+ * or all agents (the plain Select in the rule form); directory identities
+ * (users, user-groups) are a OneCLI Cloud capability. The org
  * picker can never render here (OSS mounts no org scope), and the hint under
  * the agent select says where the capability lives. The EE editions alias this
  * file to `@/ee/policy-editor/identity-picker`.

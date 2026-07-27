@@ -1,14 +1,14 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 // Focused unit tests for step-6 identity authz + plan-gate: the level restriction
-// (project → agent/any; org → agent-group/user/group/any), the org-scoped
+// (project → agent/any; org → user/group/any), the org-scoped
 // ownership check (the IDOR guard), and the directory-identity plan token. Both
-// helpers are DB-light, so we mock @onecli/db with the project lookup + the four
+// helpers are DB-light, so we mock @onecli/db with the project lookup + the
 // per-kind counts (each returns a fixed number the test sets to match/mismatch
 // the ids it passes).
 const state = vi.hoisted(() => ({
   projectOrg: "org-1" as string | null,
-  counts: { agent: 0, agentGroup: 0, user: 0, group: 0 },
+  counts: { agent: 0, user: 0, group: 0 },
 }));
 
 vi.mock("@onecli/db", () => ({
@@ -19,7 +19,6 @@ vi.mock("@onecli/db", () => ({
         state.projectOrg ? { organizationId: state.projectOrg } : null,
     },
     agent: { count: async () => state.counts.agent },
-    agentGroup: { count: async () => state.counts.agentGroup },
     organizationMember: { count: async () => state.counts.user },
     group: { count: async () => state.counts.group },
   },
@@ -58,7 +57,7 @@ describe("assertIdentitiesValid — level restriction", () => {
   beforeEach(() => {
     state.projectOrg = "org-1";
     // One owned row per kind so the ownership check passes for single-id cases.
-    state.counts = { agent: 1, agentGroup: 1, user: 1, group: 1 };
+    state.counts = { agent: 1, user: 1, group: 1 };
   });
 
   it("allows 'any' (empty identities) at either level", async () => {
@@ -105,7 +104,7 @@ describe("assertIdentitiesValid — level restriction", () => {
 describe("assertIdentitiesValid — ownership (IDOR guard)", () => {
   beforeEach(() => {
     state.projectOrg = "org-1";
-    state.counts = { agent: 0, agentGroup: 0, user: 0, group: 0 };
+    state.counts = { agent: 0, user: 0, group: 0 };
   });
 
   it("rejects an identity that does not resolve in the acting org", async () => {
@@ -150,9 +149,6 @@ describe("rowHasDirectoryIdentity (publish re-gate source)", () => {
   type IdRows = Parameters<typeof rowHasDirectoryIdentity>[0];
 
   it("is true when a stored rule row carries a directory principal", () => {
-    expect(rowHasDirectoryIdentity([{ agentGroupId: "ag1" }] as IdRows)).toBe(
-      true,
-    );
     expect(rowHasDirectoryIdentity([{ groupId: "g1" }] as IdRows)).toBe(true);
     expect(rowHasDirectoryIdentity([{ userId: "u1" }] as IdRows)).toBe(true);
   });

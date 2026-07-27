@@ -31,8 +31,8 @@ impl RateWindow {
 
 /// A rule identity. OSS rules target a specific agent or all agents (empty
 /// identity list = "any"). `Other` covers every non-agent identity row a
-/// permissive API client might have stored (agent-group/user/group are OneCLI
-/// Cloud capabilities) — it NEVER matches, so such a row narrows to nothing
+/// permissive API client might have stored (user/group are OneCLI Cloud
+/// capabilities) — it NEVER matches, so such a row narrows to nothing
 /// instead of silently widening to "any" (fail-closed).
 #[derive(Debug, Clone)]
 pub(super) enum Identity {

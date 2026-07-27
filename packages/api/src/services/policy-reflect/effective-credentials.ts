@@ -188,7 +188,6 @@ const secretAccessStatus = (
     path: "/",
     method: "GET",
     agentId: engine.agentId,
-    agentGroupIds: engine.principals.agentGroupIds,
     userIds: engine.principals.userIds,
     groupIds: engine.principals.groupIds,
     hasInjections: true, // the secret is the attached credential
@@ -256,7 +255,7 @@ export const effectiveCredentials = async (
     secretHosts,
     connectionProviders,
   ] = await Promise.all([
-    resolvePrincipalSet(agent.id, ctx.projectId, ctx.organizationId),
+    resolvePrincipalSet(ctx.projectId, ctx.organizationId),
     // DECISION rules — equipment dropped, as the gateway's assembler drops them.
     loadRulesForSimulation(orgBase, "published"),
     loadRulesForSimulation(projectBase, "published"),
@@ -283,7 +282,7 @@ export const effectiveCredentials = async (
     // footnote explains why they're all here). Fences to org+project only; the
     // gateway's all-mode merge also folds cloud-partner-scoped secrets
     // (`connect.rs`), so a partner-injected credential is under-reported here —
-    // the same partner blind-spot the injection probe / simulator carry, not a
+    // the same partner blind-spot every reflection carries, not a
     // cross-org leak.
     const [secrets, connections] = await Promise.all([
       db.secret.findMany({

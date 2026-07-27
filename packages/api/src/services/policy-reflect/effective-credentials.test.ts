@@ -37,7 +37,6 @@ vi.mock("@onecli/db", () => {
     Prisma: {},
     db: {
       agent: model("agent"),
-      agentGroupMember: model("agentGroupMember"),
       projectAccess: model("projectAccess"),
       group: model("group"),
       groupMember: model("groupMember"),
@@ -95,7 +94,6 @@ const identityRow = (
     id: "i1",
     ruleId: "r1",
     agentId: null,
-    agentGroupId: null,
     userId: null,
     groupId: null,
     ...over,

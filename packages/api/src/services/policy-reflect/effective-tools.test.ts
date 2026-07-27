@@ -41,7 +41,6 @@ vi.mock("@onecli/db", () => {
     Prisma: {},
     db: {
       agent: model("agent"),
-      agentGroupMember: model("agentGroupMember"),
       projectAccess: model("projectAccess"),
       group: model("group"),
       groupMember: model("groupMember"),
@@ -115,7 +114,6 @@ const identityRow = (
     id: "i1",
     ruleId: "r1",
     agentId: null,
-    agentGroupId: null,
     userId: null,
     groupId: null,
     ...over,
@@ -211,7 +209,6 @@ const expectedVerdicts = (
           path: subst(variant.pathPattern),
           method: variant.method ?? "GET",
           agentId: "agent-1",
-          agentGroupIds: [],
           userIds: [],
           groupIds: [],
           hasInjections: opts.hasInjections,
@@ -460,7 +457,7 @@ describe("buildInjectionProbe (the inject_select mirror)", () => {
     orgHosts: [] as string[],
   };
   const CONN_PROVIDERS = new Map([["c1", "gmail"]]);
-  const PRINCIPALS = { agentGroupIds: [], userIds: [], groupIds: [] };
+  const PRINCIPALS = { userIds: [], groupIds: [] };
 
   const probeFor = (
     agent: { id: string; secretMode: string } | null,
@@ -747,7 +744,7 @@ describe("baseline honesty", () => {
       logicalId: "org-grp",
       name: "Group-only block",
       action: "block",
-      identities: [identityRow({ agentGroupId: "ag1" })],
+      identities: [identityRow({ groupId: "g1" })],
       targets: [targetRow({ kind: "app", appProvider: "gmail" })],
     });
 
@@ -777,9 +774,14 @@ describe("baseline honesty", () => {
     expect(result.variesByIdentity).toBe(0);
   });
 
-  it("an agent IN the group gets the identity-scoped verdict", async () => {
+  it("an agent whose project inherits the group gets the identity-scoped verdict", async () => {
     armStubs({ orgRows: [identityScopedBlock()] });
-    state.results.set("agentGroupMember.findMany", [{ agentGroupId: "ag1" }]);
+    // The project grants group g1 via ProjectAccess → g1 lands in the
+    // resolved principal set (org-fenced by the group read).
+    state.results.set("projectAccess.findMany", [
+      { userId: null, groupId: "g1" },
+    ]);
+    state.results.set("group.findMany", [{ id: "g1" }]);
     const result = await effectiveAppPermissions(
       { provider: "gmail", agentId: "agent-1" },
       PROJECT_CTX,

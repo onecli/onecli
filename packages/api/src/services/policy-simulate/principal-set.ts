@@ -2,53 +2,24 @@ import { db } from "@onecli/db";
 
 // The TS mirror of the gateway's connect-time `find_principal_set` CTE
 // (apps/gateway/src/db.rs) — the set of principals the policy engine matches an
-// agent's requests against: the agent's agent-groups, the humans the agent
-// inherits from its project's ProjectAccess (direct users + members of granted
-// groups, ACTIVE org members only), and every directory group those humans
-// belong to. Role-agnostic (presence-only) and ORG-FENCED on every arm — a
-// granted group or a user's membership in ANOTHER org's groups can never leak
-// in. Off the hot path (backs the resolved-identity view + the simulator); the
-// gateway resolves its own set at connect. Keep in lockstep with the CTE.
+// agent's requests against: the humans the agent inherits from its project's
+// ProjectAccess (direct users + members of granted groups, ACTIVE org members
+// only), and every directory group those humans belong to. Role-agnostic
+// (presence-only) and ORG-FENCED on every arm — a granted group or a user's
+// membership in ANOTHER org's groups can never leak in. Agent-independent, so
+// one resolution covers every agent of the project. Off the hot path (backs
+// the read-only reflections); the gateway resolves its own
+// set at connect. Keep in lockstep with the CTE.
 
 export interface PrincipalSet {
-  agentGroupIds: string[];
-  userIds: string[];
-  groupIds: string[];
-}
-
-/** The PROJECT-level arms of the principal set (everything except the agent's
- * own agent-groups) — agent-INDEPENDENT, so a caller resolving many agents of
- * one project (the connection reflection) resolves these once and batches only
- * the per-agent agent-group arm. */
-export interface ProjectPrincipals {
   userIds: string[];
   groupIds: string[];
 }
 
 export const resolvePrincipalSet = async (
-  agentId: string,
   projectId: string,
   organizationId: string,
 ): Promise<PrincipalSet> => {
-  // agent_groups_matched: the agent's groups, org-fenced via the group row.
-  const agentGroupIds = (
-    await db.agentGroupMember.findMany({
-      where: { agentId, agentGroup: { organizationId } },
-      select: { agentGroupId: true },
-    })
-  ).map((m) => m.agentGroupId);
-
-  const { userIds, groupIds } = await resolveProjectPrincipals(
-    projectId,
-    organizationId,
-  );
-  return { agentGroupIds, userIds, groupIds };
-};
-
-export const resolveProjectPrincipals = async (
-  projectId: string,
-  organizationId: string,
-): Promise<ProjectPrincipals> => {
   // ProjectAccess rows: direct users + candidate granted groups.
   const accessRows = await db.projectAccess.findMany({
     where: { projectId },

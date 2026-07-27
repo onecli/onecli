@@ -258,7 +258,6 @@ impl PolicyEngine {
             &self.pool,
             &agent.organization_id,
             &agent.project_id,
-            &agent.id,
         )
         .await
         .map_err(db_err)?;

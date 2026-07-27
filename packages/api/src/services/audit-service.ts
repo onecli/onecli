@@ -52,8 +52,6 @@ export const AUDIT_SERVICES = {
   MEMBER: "member",
   // EE-only (directory): human groups (manual + SCIM-provisioned)
   GROUP: "group",
-  // EE-only (directory): OneCLI-native agent groups
-  AGENT_GROUP: "agent-group",
   // EE-only (directory): group→org-role mappings (the mapping config itself;
   // the member role changes it drives are audited under MEMBER).
   ROLE_MAPPING: "role-mapping",

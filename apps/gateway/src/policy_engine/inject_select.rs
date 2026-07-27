@@ -116,7 +116,7 @@ mod tests {
     }
 
     fn agent_identity(id: &str) -> serde_json::Value {
-        json!([{ "agentId": id, "agentGroupId": null, "userId": null, "groupId": null }])
+        json!([{ "agentId": id, "userId": null, "groupId": null }])
     }
 
     #[test]
@@ -166,7 +166,7 @@ mod tests {
     fn directory_identity_rows_never_inject_in_oss() {
         let rules = v2(vec![rule(
             "allow",
-            json!([{ "agentId": null, "agentGroupId": "g1", "userId": null, "groupId": null }]),
+            json!([{ "agentId": null, "userId": null, "groupId": "g1" }]),
             json!([{ "kind": "secret", "secretId": "s1" }]),
         )]);
         assert!(derive_inject_selection(&rules, "a1").secret_ids.is_empty());
