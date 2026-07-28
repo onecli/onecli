@@ -887,7 +887,25 @@ export const SecretDialog = ({
                       ) : (
                         <p className="text-muted-foreground text-xs">
                           {type === "anthropic" ? (
-                            "Paste your API key or OAuth token from the Anthropic Console."
+                            detectAnthropicAuthMode(value) === "oauth" ? (
+                              <>
+                                Claude Code&rsquo;s own token rotates every few
+                                hours. Run{" "}
+                                <code className="bg-muted rounded px-1 py-0.5 text-[11px]">
+                                  claude setup-token
+                                </code>{" "}
+                                for a long-lived one.
+                              </>
+                            ) : (
+                              <>
+                                Paste your API key from the Anthropic Console,
+                                or run{" "}
+                                <code className="bg-muted rounded px-1 py-0.5 text-[11px]">
+                                  claude setup-token
+                                </code>{" "}
+                                for an OAuth token.
+                              </>
+                            )
                           ) : type === "openai" ? (
                             <>
                               Paste your API key, or{" "}
