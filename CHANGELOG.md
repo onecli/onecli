@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.44.0](https://github.com/onecli/onecli/compare/v1.43.3...v1.44.0) (2026-07-29)
+
+
+### Features
+
+* agent grants — per-agent credential access replaces the project policy page ([#462](https://github.com/onecli/onecli/issues/462)) ([7e1c0e3](https://github.com/onecli/onecli/commit/7e1c0e3bdb9817e7cc7ba2378269242e0040e9a3))
+
 ## [1.43.3](https://github.com/onecli/onecli/compare/v1.43.2...v1.43.3) (2026-07-26)
 
 
