@@ -50,14 +50,9 @@ import {
 } from "@/hooks/use-connections";
 import type { PageScope } from "@/lib/api";
 import { extractLabel } from "@onecli/api/services/connection-service";
-import { ConnectionAgentAccessSummary } from "./connection-agent-access-summary";
-import { ConnectionAgentAccessDialog } from "./connection-agent-access-dialog";
-// The step-9.7b read-only reflection (null stub in OSS; real under the
-// POLICY_REFLECT alias) — rendered only when the flag is threaded in.
-import {
-  ConnectionAgentsReflection,
-  REFLECTIONS_AVAILABLE,
-} from "@/lib/components/policy-reflect";
+// The read-only agent-access reflection, which reads the v2 policy engine.
+// Shared since step 10 — every edition renders it.
+import { ConnectionAgentsReflection } from "@/lib/components/policy-reflect";
 
 interface ConnectionAccountCardProps {
   connection: {
@@ -71,9 +66,6 @@ interface ConnectionAccountCardProps {
   appName: string;
   onReconnect: (connectionId: string) => void;
   pageScope?: PageScope;
-  /** Step 9.7b: flag-ON, the agent-access editor renders as the read-only
-   * Policy reflection instead (threaded from the RSC page). */
-  policyEditingEnabled?: boolean;
 }
 
 export const ConnectionAccountCard = ({
@@ -81,7 +73,6 @@ export const ConnectionAccountCard = ({
   appName,
   onReconnect,
   pageScope = "project",
-  policyEditingEnabled = false,
 }: ConnectionAccountCardProps) => {
   const [confirmOpen, setConfirmOpen] = useState(false);
   const [renameOpen, setRenameOpen] = useState(false);
@@ -204,9 +195,7 @@ export const ConnectionAccountCard = ({
               {showAgentAccess && (
                 <DropdownMenuItem onClick={() => setAgentDialogOpen(true)}>
                   <Users className="size-4" />
-                  {policyEditingEnabled
-                    ? "Agent access"
-                    : "Manage agent access"}
+                  Agent access
                 </DropdownMenuItem>
               )}
               <DropdownMenuSeparator />
@@ -228,29 +217,23 @@ export const ConnectionAccountCard = ({
           </DropdownMenu>
         </div>
 
-        {showAgentAccess &&
-          (policyEditingEnabled && REFLECTIONS_AVAILABLE ? (
-            // Flag-ON: the old summary self-fetches equipment state, which is
-            // no longer the access truth — a neutral opener replaces it.
-            <button
-              type="button"
-              onClick={() => setAgentDialogOpen(true)}
-              aria-label="View agent access"
-              className="flex min-w-0 items-center gap-1.5 rounded-sm text-xs text-muted-foreground transition-colors hover:text-foreground focus-visible:ring-ring focus-visible:ring-2 focus-visible:outline-none"
-            >
-              <Users className="size-3.5 shrink-0" aria-hidden="true" />
-              <span className="truncate">Agent access</span>
-              <ChevronRight
-                className="size-3 shrink-0 opacity-60"
-                aria-hidden="true"
-              />
-            </button>
-          ) : (
-            <ConnectionAgentAccessSummary
-              connectionId={connection.id}
-              onManage={() => setAgentDialogOpen(true)}
+        {showAgentAccess && (
+          // A neutral opener: policy rules decide agent access, so a summary
+          // line can't state it without the reflection's own evaluation.
+          <button
+            type="button"
+            onClick={() => setAgentDialogOpen(true)}
+            aria-label="View agent access"
+            className="flex min-w-0 items-center gap-1.5 rounded-sm text-xs text-muted-foreground transition-colors hover:text-foreground focus-visible:ring-ring focus-visible:ring-2 focus-visible:outline-none"
+          >
+            <Users className="size-3.5 shrink-0" aria-hidden="true" />
+            <span className="truncate">Agent access</span>
+            <ChevronRight
+              className="size-3 shrink-0 opacity-60"
+              aria-hidden="true"
             />
-          ))}
+          </button>
+        )}
 
         {tags.length > 0 && (
           <div className="flex flex-wrap gap-1.5">
@@ -325,24 +308,15 @@ export const ConnectionAccountCard = ({
         </DialogContent>
       </Dialog>
 
-      {showAgentAccess &&
-        (policyEditingEnabled && REFLECTIONS_AVAILABLE ? (
-          <ConnectionAgentsReflection
-            connectionId={connection.id}
-            connectionLabel={displayName}
-            appName={appName}
-            open={agentDialogOpen}
-            onOpenChange={setAgentDialogOpen}
-          />
-        ) : (
-          <ConnectionAgentAccessDialog
-            connectionId={connection.id}
-            connectionLabel={displayName}
-            appName={appName}
-            open={agentDialogOpen}
-            onOpenChange={setAgentDialogOpen}
-          />
-        ))}
+      {showAgentAccess && (
+        <ConnectionAgentsReflection
+          connectionId={connection.id}
+          connectionLabel={displayName}
+          appName={appName}
+          open={agentDialogOpen}
+          onOpenChange={setAgentDialogOpen}
+        />
+      )}
     </>
   );
 };

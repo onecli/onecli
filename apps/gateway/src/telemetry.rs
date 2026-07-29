@@ -26,7 +26,7 @@ pub(crate) use crate::telemetry_core::{on_request, RequestEvent};
 pub(crate) fn init(pool: PgPool, _cache: Arc<dyn CacheStore>) {
     let (tx, rx) = mpsc::channel::<RequestEvent>(CHANNEL_CAPACITY);
     SENDER.set(tx).ok();
-    tokio::spawn(flush_loop(rx, pool));
+    crate::telemetry_core::spawn_flush_loop(flush_loop(rx, pool));
     info!("telemetry initialized (postgres)");
 }
 

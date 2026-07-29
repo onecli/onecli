@@ -54,7 +54,16 @@ export const usePolicyLastPublish = (scope: PageScope = "project") =>
 
 const useInvalidatePolicy = () => {
   const qc = useQueryClient();
-  return () => qc.invalidateQueries({ queryKey: queryKeys.policy.all() });
+  return () => {
+    qc.invalidateQueries({ queryKey: queryKeys.policy.all() });
+    // The reflections READ these rules but are keyed by the resource they
+    // describe, so a policy write has to reach them too — otherwise the
+    // credential-access and agent-access dialogs keep serving pre-write verdicts
+    // for the query's stale window. They are the only surface showing effective
+    // access now, so a stale verdict there reads as a security answer.
+    qc.invalidateQueries({ queryKey: queryKeys.agents.all() });
+    qc.invalidateQueries({ queryKey: queryKeys.connections.all() });
+  };
 };
 
 export const useCreatePolicyRule = (scope: PageScope = "project") => {

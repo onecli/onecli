@@ -33,6 +33,13 @@ import type { PageScope, PolicyRuleV2 } from "@/lib/api";
 import { DefaultRuleRow } from "./default-rule-row";
 import { EditableRuleRow } from "./editable-rule-row";
 
+/** Derived sources with no editor of their own that still take effect, so the
+ * console must at least be able to disable or delete them: `equipment` injects
+ * a credential, and a legacy `app_permission` row still decides. `blocklist` is
+ * excluded — the app page's blocklist panel owns those rows. Kept in step with
+ * `USER_CHANGEABLE` in lib/policy-diff.ts, or a revoke stages but can't Apply. */
+const REVOCABLE_SOURCES = new Set(["equipment", "app_permission"]);
+
 const HEAD =
   "text-muted-foreground h-9 text-[11px] font-medium tracking-wide uppercase";
 const COLS = 6;
@@ -228,6 +235,7 @@ export const PolicyRulesTable = ({
                       position={i + 1}
                       identityName={identityName}
                       editable={editable && rule.source === "custom"}
+                      revocable={editable && REVOCABLE_SOURCES.has(rule.source)}
                       sortColumn={sortColumn}
                       sortable={sortable}
                       sortLocked={reorderLocked}

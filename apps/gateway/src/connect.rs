@@ -14,7 +14,6 @@ use crate::cache::CacheStore;
 use crate::crypto::CryptoService;
 use crate::db;
 use crate::inject::{Injection, InjectionRule};
-use crate::policy::{PolicyAction, PolicyRule};
 use crate::secret_inject;
 use crate::vault::onepassword::OnePasswordVaultProvider;
 
@@ -28,6 +27,48 @@ pub(crate) const CONNECTIONS_HEADER: &str = "x-onecli-connections";
 /// Agent secret mode that restricts access to explicitly assigned credentials.
 pub(crate) const SECRET_MODE_SELECTIVE: &str = "selective";
 
+/// Which credential pool a connecting agent draws from. `secret_mode` is the
+/// all-vs-rules SWITCH; the v2 selection only says WHICH credentials a already
+/// -selective agent gets.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum InjectionPool {
+    /// All mode: the whole org+project(+partner) fenced pool. Policy rules gate
+    /// the REQUEST here — they never NARROW the pool, or an all-mode agent would
+    /// lose its partner / budget-metered / other host-matched credentials.
+    All,
+    /// Selective with a rule-driven selection: the fenced pool narrowed to what
+    /// the agent's v2 allow rules name.
+    RuleSelected,
+    /// Selective with no selection: nothing is injected. Since step 10 the old
+    /// per-agent grant tables are unread, so this must NEVER fall through to
+    /// `All` — that would hand a deliberately restricted agent every credential.
+    Empty,
+}
+
+/// The pool for the SECRET side: rule-selected when the agent is selective and
+/// its rules name secret ids and/or whole levels.
+pub(crate) fn secret_pool(secret_mode: &str, selection: &db::InjectSelection) -> InjectionPool {
+    if secret_mode != SECRET_MODE_SELECTIVE {
+        return InjectionPool::All;
+    }
+    if selection.secret_ids.is_empty() && selection.secret_scopes.is_empty() {
+        return InjectionPool::Empty;
+    }
+    InjectionPool::RuleSelected
+}
+
+/// The pool for the APP-CONNECTION side: the symmetric rule, over named
+/// connection ids and/or (provider, level) scopes.
+pub(crate) fn connection_pool(secret_mode: &str, selection: &db::InjectSelection) -> InjectionPool {
+    if secret_mode != SECRET_MODE_SELECTIVE {
+        return InjectionPool::All;
+    }
+    if selection.connections.is_empty() && selection.app_scopes.is_empty() {
+        return InjectionPool::Empty;
+    }
+    InjectionPool::RuleSelected
+}
+
 // ── Data types ──────────────────────────────────────────────────────────
 
 /// Result of policy resolution for a CONNECT request.
@@ -37,7 +78,6 @@ pub(crate) struct ConnectResponse {
     pub injection_rules: Vec<InjectionRule>,
     #[serde(default)]
     pub app_connections: Vec<db::AppConnectionRow>,
-    pub policy_rules: Vec<PolicyRule>,
     pub project_id: Option<String>,
     pub organization_id: Option<String>,
     pub agent_id: Option<String>,
@@ -52,9 +92,6 @@ pub(crate) struct ConnectResponse {
     /// "enterprise").
     #[serde(default)]
     pub plan: String,
-    /// Organization policy mode: "allow" (default) or "deny" (block by default).
-    #[serde(default)]
-    pub policy_mode: String,
     /// Cloud-only: pending claim token when this org is a partner-created org
     /// awaiting claim (claim mode). None otherwise. Inert in OSS.
     #[serde(default)]
@@ -211,16 +248,19 @@ impl PolicyEngine {
         // (cached with the rest of ConnectResponse, so the per-request path never
         // touches the DB). Step 8: the inject-selection derives from these rules
         // which specific credentials the agent's rules allow — the connect-time
-        // SELECTION that replaces the equipment join for a selective agent. Empty
-        // in OSS / when the engine is off → the selection is empty → the resolvers
-        // fall back to the legacy equipment path (the fail-safe).
+        // SELECTION that replaces the equipment join for a selective agent.
+        //
+        // A load failure REFUSES the CONNECT (like every other query here), so the
+        // agent retries. Resolving empty instead would be doubly wrong now that
+        // the legacy fallback is gone: every request would decide Allow AND a
+        // selective agent would get no credentials — both cached for ~60s.
         let policy_rules_v2 = crate::policy_engine::load_connect_v2(
             &self.pool,
             &agent.organization_id,
             &agent.project_id,
-            &agent.id,
         )
-        .await;
+        .await
+        .map_err(db_err)?;
         let inject_selection =
             crate::policy_engine::derive_inject_selection(&policy_rules_v2, &agent.id);
 
@@ -230,9 +270,14 @@ impl PolicyEngine {
         let app_connections = self
             .resolve_app_connections(agent, hostname, &inject_selection)
             .await?;
-        let policy_rules = self.resolve_policy_rules(agent, hostname).await?;
-        let has_rules =
-            !injection_rules.is_empty() || !app_connections.is_empty() || !policy_rules.is_empty();
+        // Intercept when this host has a credential to inject. Enforcement does
+        // NOT depend on this: `gateway.rs` forces MITM for every authenticated
+        // agent, so a block / rate-limit / approval rule on an uncredentialed host
+        // is intercepted and enforced regardless. Keeping a rule-derived term here
+        // would only suppress the vault fallback (`gateway.rs` runs it when
+        // `!intercept`) for hosts some rule happens to name — including rules
+        // scoped to a different agent.
+        let has_credentials = !injection_rules.is_empty() || !app_connections.is_empty();
 
         // Check if the project has credentials (secrets or app connections) for this
         // host that the agent can't access (selective mode).
@@ -264,10 +309,9 @@ impl PolicyEngine {
         .await;
 
         Ok(ConnectResponse {
-            intercept: has_rules || access_restricted,
+            intercept: has_credentials || access_restricted,
             injection_rules,
             app_connections,
-            policy_rules,
             project_id: Some(agent.project_id.clone()),
             organization_id: Some(agent.organization_id.clone()),
             agent_id: Some(agent.id.clone()),
@@ -275,7 +319,6 @@ impl PolicyEngine {
             agent_identifier: agent.identifier.clone(),
             access_restricted,
             plan,
-            policy_mode: agent.policy_mode.clone(),
             claim_token,
             budget_bindings,
             policy_rules_v2,
@@ -291,54 +334,55 @@ impl PolicyEngine {
         hostname: &str,
         selection: &db::InjectSelection,
     ) -> Result<(Vec<InjectionRule>, Vec<crate::budget::BudgetBinding>), ConnectError> {
-        let secrets = if agent.secret_mode == SECRET_MODE_SELECTIVE
-            && (!selection.secret_ids.is_empty() || !selection.secret_scopes.is_empty())
-        {
-            // Step 8 (rule-driven): a SELECTIVE agent's allow rules name specific
-            // secrets (`secret_ids`) and/or "all secrets at a level"
-            // (`secret_scopes`). Gated on `secret_mode` — `secret_mode` stays the
-            // all-vs-selective SWITCH, so an ALL-mode agent always takes the full
-            // merge below and a rule can never NARROW it (dropping its partner /
-            // budget-metered / other host-matched secrets); the v2 selection only
-            // picks WHICH secrets for an already-selective agent.
-            // Fetch the ORG/PROJECT-fenced candidate pool and NARROW to the named
-            // ids OR the named levels (a secret's own `scope` — "organization" /
-            // "project"). The org-fence is on the FETCH, so a rule naming another
-            // org's secret can't pull it (the id simply isn't in the pool). Partner
-            // is excluded (a rule can only name a project/org secret or level, per
-            // `assertTargetsValid`), matching legacy selective mode (also no partner).
-            let (org_result, project_result) = tokio::join!(
-                db::find_secrets_by_org(&self.pool, &agent.organization_id),
-                db::find_secrets_by_project(&self.pool, &agent.project_id),
-            );
-            let mut merged = org_result.map_err(db_err)?;
-            merged.extend(project_result.map_err(db_err)?);
-            merged.retain(|s| {
-                selection.secret_ids.contains(&s.id) || selection.secret_scopes.contains(&s.scope)
-            });
-            merged
-        } else if agent.secret_mode == SECRET_MODE_SELECTIVE {
-            // Fail-safe / legacy selective: no rule-driven selection (engine off,
-            // not yet materialized, or no granted secrets) → the agent_secrets join,
-            // exactly as before.
-            db::find_secrets_by_agent(&self.pool, &agent.id)
-                .await
-                .map_err(db_err)?
-        } else {
-            // All mode precedence (lowest → highest): partner, then org, then
-            // project. Later same-header injections override earlier ones, so
-            // partner is the lowest-priority fallback. All three tiers resolve
-            // concurrently (this only runs on a cache miss); `inherited_secret_rows`
-            // is a no-op in OSS (returns an empty Vec).
-            let (partner_rows, org_result, project_result) = tokio::join!(
-                crate::partner::inherited_secret_rows(&self.pool, &agent.organization_id),
-                db::find_secrets_by_org(&self.pool, &agent.organization_id),
-                db::find_secrets_by_project(&self.pool, &agent.project_id),
-            );
-            let mut merged = partner_rows;
-            merged.extend(org_result.map_err(db_err)?);
-            merged.extend(project_result.map_err(db_err)?);
-            merged
+        let secrets = match secret_pool(&agent.secret_mode, selection) {
+            InjectionPool::RuleSelected => {
+                // Step 8 (rule-driven): a SELECTIVE agent's allow rules name specific
+                // secrets (`secret_ids`) and/or "all secrets at a level"
+                // (`secret_scopes`). Gated on `secret_mode` — `secret_mode` stays the
+                // all-vs-selective SWITCH, so an ALL-mode agent always takes the full
+                // merge below and a rule can never NARROW it (dropping its partner /
+                // budget-metered / other host-matched secrets); the v2 selection only
+                // picks WHICH secrets for an already-selective agent.
+                // Fetch the ORG/PROJECT-fenced candidate pool and NARROW to the named
+                // ids OR the named levels (a secret's own `scope` — "organization" /
+                // "project"). The org-fence is on the FETCH, so a rule naming another
+                // org's secret can't pull it (the id simply isn't in the pool). Partner
+                // is excluded (a rule can only name a project/org secret or level, per
+                // `assertTargetsValid`), matching legacy selective mode (also no partner).
+                let (org_result, project_result) = tokio::join!(
+                    db::find_secrets_by_org(&self.pool, &agent.organization_id),
+                    db::find_secrets_by_project(&self.pool, &agent.project_id),
+                );
+                let mut merged = org_result.map_err(db_err)?;
+                merged.extend(project_result.map_err(db_err)?);
+                merged.retain(|s| {
+                    selection.secret_ids.contains(&s.id)
+                        || selection.secret_scopes.contains(&s.scope)
+                });
+                merged
+            }
+            // A SELECTIVE agent with no rule-driven selection has no granted
+            // secrets → inject nothing. WHICH secrets a selective agent gets now
+            // comes solely from its v2 allow rules (incl. the frozen equipment
+            // rules that mirror its old grants) — there is no `agent_secrets`
+            // fallback since step 10.
+            InjectionPool::Empty => Vec::new(),
+            InjectionPool::All => {
+                // All mode precedence (lowest → highest): partner, then org, then
+                // project. Later same-header injections override earlier ones, so
+                // partner is the lowest-priority fallback. All three tiers resolve
+                // concurrently (this only runs on a cache miss);
+                // `inherited_secret_rows` is a no-op in OSS (returns an empty Vec).
+                let (partner_rows, org_result, project_result) = tokio::join!(
+                    crate::partner::inherited_secret_rows(&self.pool, &agent.organization_id),
+                    db::find_secrets_by_org(&self.pool, &agent.organization_id),
+                    db::find_secrets_by_project(&self.pool, &agent.project_id),
+                );
+                let mut merged = partner_rows;
+                merged.extend(org_result.map_err(db_err)?);
+                merged.extend(project_result.map_err(db_err)?);
+                merged
+            }
         };
 
         let matching: Vec<_> = secrets
@@ -491,51 +535,51 @@ impl PolicyEngine {
         }
         debug!(host = %hostname, providers = ?providers, "app_connections: matched providers");
 
-        let connections = if agent.secret_mode == SECRET_MODE_SELECTIVE
-            && (!selection.connections.is_empty() || !selection.app_scopes.is_empty())
-        {
-            // Step 8 (rule-driven): a SELECTIVE agent's allow rules name SPECIFIC
-            // connections (`kind=connection`) and/or ALL connections of a provider
-            // at a level (`kind=app` + `connection_scope`). Gated on `secret_mode`
-            // — an ALL-mode agent always takes the full merge below, so a rule can
-            // never narrow it. Fetch the ORG/PROJECT-fenced pool and keep the
-            // connections a rule selects: a named id, or a (provider, scope) match.
-            // Attach the per-connection sessionPolicy only for the SPECIFIC ones
-            // (the "all-at-level" ones are unscoped, like all-mode). Org-fence on
-            // the FETCH → a foreign id/scope can't pull a foreign connection.
-            let (org_result, project_result) = tokio::join!(
-                db::find_app_connections_by_org(&self.pool, &agent.organization_id),
-                db::find_app_connections_by_project(&self.pool, &agent.project_id),
-            );
-            let mut merged = org_result.map_err(db_err)?;
-            merged.extend(project_result.map_err(db_err)?);
-            merged.retain(|c| {
-                selection.connections.contains_key(&c.id)
-                    || selection
-                        .app_scopes
-                        .iter()
-                        .any(|(provider, scope)| *provider == c.provider && *scope == c.scope)
-            });
-            for c in &mut merged {
-                if let Some(policy) = selection.connections.get(&c.id) {
-                    c.session_policy = policy.clone();
+        let connections = match connection_pool(&agent.secret_mode, selection) {
+            InjectionPool::RuleSelected => {
+                // Step 8 (rule-driven): a SELECTIVE agent's allow rules name SPECIFIC
+                // connections (`kind=connection`) and/or ALL connections of a provider
+                // at a level (`kind=app` + `connection_scope`). Gated on `secret_mode`
+                // — an ALL-mode agent always takes the full merge below, so a rule can
+                // never narrow it. Fetch the ORG/PROJECT-fenced pool and keep the
+                // connections a rule selects: a named id, or a (provider, scope) match.
+                // Attach the per-connection sessionPolicy only for the SPECIFIC ones
+                // (the "all-at-level" ones are unscoped, like all-mode). Org-fence on
+                // the FETCH → a foreign id/scope can't pull a foreign connection.
+                let (org_result, project_result) = tokio::join!(
+                    db::find_app_connections_by_org(&self.pool, &agent.organization_id),
+                    db::find_app_connections_by_project(&self.pool, &agent.project_id),
+                );
+                let mut merged = org_result.map_err(db_err)?;
+                merged.extend(project_result.map_err(db_err)?);
+                merged.retain(|c| {
+                    selection.connections.contains_key(&c.id)
+                        || selection
+                            .app_scopes
+                            .iter()
+                            .any(|(provider, scope)| *provider == c.provider && *scope == c.scope)
+                });
+                for c in &mut merged {
+                    if let Some(policy) = selection.connections.get(&c.id) {
+                        c.session_policy = policy.clone();
+                    }
                 }
+                merged
             }
-            merged
-        } else if agent.secret_mode == SECRET_MODE_SELECTIVE {
-            // Fail-safe / legacy selective: the agent_app_connections join (carries
-            // its own session_policy), exactly as before.
-            db::find_app_connections_by_agent(&self.pool, &agent.id)
-                .await
-                .map_err(db_err)?
-        } else {
-            let (org_result, project_result) = tokio::join!(
-                db::find_app_connections_by_org(&self.pool, &agent.organization_id),
-                db::find_app_connections_by_project(&self.pool, &agent.project_id),
-            );
-            let mut merged = org_result.map_err(db_err)?;
-            merged.extend(project_result.map_err(db_err)?);
-            merged
+            // A SELECTIVE agent with no rule-driven selection reaches no app
+            // connections → none injected. As with secrets, WHICH connections a
+            // selective agent gets comes solely from its v2 allow rules — there is
+            // no `agent_app_connections` fallback since step 10.
+            InjectionPool::Empty => Vec::new(),
+            InjectionPool::All => {
+                let (org_result, project_result) = tokio::join!(
+                    db::find_app_connections_by_org(&self.pool, &agent.organization_id),
+                    db::find_app_connections_by_project(&self.pool, &agent.project_id),
+                );
+                let mut merged = org_result.map_err(db_err)?;
+                merged.extend(project_result.map_err(db_err)?);
+                merged
+            }
         };
 
         let matching: Vec<db::AppConnectionRow> = connections
@@ -591,17 +635,35 @@ impl PolicyEngine {
         let candidates = narrow_connections_by_path(app_connections, hostname, request_path);
         let app_connections: &[db::AppConnectionRow] = &candidates;
 
-        // Single connection — use it directly
+        // Single connection — use it directly. Its rules always merge (they
+        // self-select by path at apply time), but the winner metadata is
+        // dropped when the provider does not serve this request's path — a
+        // lone Calendar connection on a `/youtube/` request must not donate
+        // its granular policy, finalizer, or host rewrite.
         if app_connections.len() == 1 {
-            return self
-                .resolve_connection_injections(
-                    &app_connections[0],
-                    hostname,
-                    organization_id,
-                    project_id,
-                    cache,
-                )
-                .await;
+            let conn = &app_connections[0];
+            let mut result = self
+                .resolve_connection_injections(conn, hostname, organization_id, project_id, cache)
+                .await?;
+            if let AppConnectionResult::Rules {
+                provider,
+                rewrite_host,
+                connection_label,
+                finalizer,
+                body_transform,
+                session_policy,
+                ..
+            } = &mut result
+            {
+                if !provider_serves_request(provider, hostname, request_path) {
+                    *rewrite_host = None;
+                    *connection_label = None;
+                    *finalizer = None;
+                    *body_transform = None;
+                    *session_policy = None;
+                }
+            }
+            return Ok(result);
         }
 
         // Multiple connections — check for ambiguity per provider
@@ -666,27 +728,25 @@ impl PolicyEngine {
                     .await?
                 {
                     rules.extend(r);
-                    if rewrite_host.is_some() {
-                        resolved_rewrite_host = rewrite_host;
-                    }
-                    if resolved_label.is_none() {
-                        resolved_label = connection_label;
-                    }
-                    if finalizer.is_some() {
-                        resolved_finalizer = finalizer;
-                    }
-                    if body_transform.is_some() {
-                        resolved_body_transform = body_transform;
-                    }
-                    // Tie the granular policy to the connection that actually
-                    // serves THIS host — not merely the first to yield rules. A
-                    // non-serving connection (e.g. a GitHub connection on a
-                    // Dropbox request) still returns `Rules` carrying its own
-                    // policy, so adopting the first would mis-apply it.
-                    let serves_host = request_path
-                        .map(|p| apps::provider_matches_host_and_path(&provider, hostname, p))
-                        .unwrap_or(false);
-                    if serves_host {
+                    // Tie ALL winner metadata to the connection that actually
+                    // serves THIS request — not merely the first to yield
+                    // rules. A non-serving connection (e.g. a GitHub
+                    // connection on a Dropbox request) still returns `Rules`
+                    // carrying its own policy/finalizer/rewrite, and adopting
+                    // those would mis-apply them to a request it doesn't own.
+                    if provider_serves_request(&provider, hostname, request_path) {
+                        if rewrite_host.is_some() {
+                            resolved_rewrite_host = rewrite_host;
+                        }
+                        if resolved_label.is_none() {
+                            resolved_label = connection_label;
+                        }
+                        if finalizer.is_some() {
+                            resolved_finalizer = finalizer;
+                        }
+                        if body_transform.is_some() {
+                            resolved_body_transform = body_transform;
+                        }
                         resolved_session_policy = session_policy;
                     }
                     if resolved_provider.is_none() {
@@ -987,26 +1047,6 @@ impl PolicyEngine {
                 false
             }
         }
-    }
-
-    /// Resolve policy rules (block / rate-limit) for this agent + host.
-    /// Merges org rules (enforced, all agents) with project rules
-    /// (agent-filtered, with agent overrides shadowing all-agents rules).
-    async fn resolve_policy_rules(
-        &self,
-        agent: &db::AgentRow,
-        hostname: &str,
-    ) -> Result<Vec<PolicyRule>, ConnectError> {
-        let (org_result, project_result) = tokio::join!(
-            db::find_policy_rules_by_org(&self.pool, &agent.organization_id),
-            db::find_policy_rules_by_project(&self.pool, &agent.project_id),
-        );
-        Ok(assemble_policy_rules(
-            org_result.map_err(db_err)?,
-            project_result.map_err(db_err)?,
-            &agent.id,
-            hostname,
-        ))
     }
 
     /// Extract access token from decrypted credentials JSON, refreshing if expired.
@@ -1386,6 +1426,73 @@ fn narrow_connections_by_path<'a>(
     }
 }
 
+/// True when `provider` serves this request's host+path. Winner metadata
+/// (granular policy, finalizer, body transform, host rewrite, label) is
+/// adopted only from a serving connection; injection rules need no such
+/// gate — they self-select via `path_pattern` at apply time. A missing
+/// request path is conservatively non-serving.
+fn provider_serves_request(provider: &str, hostname: &str, request_path: Option<&str>) -> bool {
+    request_path
+        .map(|p| apps::provider_matches_host_and_path(provider, hostname, p))
+        .unwrap_or(false)
+}
+
+#[cfg(test)]
+impl PolicyEngine {
+    /// Test-only engine whose pool is lazy and never dereferenced —
+    /// resolution tests that stay on cache-hit paths need no Postgres.
+    pub(crate) fn test_stub() -> Self {
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy("postgres://unused:unused@127.0.0.1:9/unused")
+            .expect("lazy pool");
+        let crypto = Arc::new(
+            CryptoService::from_base64_key("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=")
+                .expect("test key"),
+        );
+        let onepassword = Arc::new(OnePasswordVaultProvider::new(
+            pool.clone(),
+            Arc::clone(&crypto),
+        ));
+        PolicyEngine {
+            pool,
+            crypto,
+            onepassword,
+        }
+    }
+}
+
+/// Test-only: seed the `app_injection:` cache entry exactly the way
+/// `resolve_connection_injections` writes it (struct-typed, so shape drift
+/// breaks tests loudly instead of deserializing via defaults).
+#[cfg(test)]
+#[expect(clippy::too_many_arguments)]
+pub(crate) async fn seed_app_injection_cache(
+    cache: &Arc<dyn CacheStore>,
+    organization_id: &str,
+    project_id: &str,
+    conn: &db::AppConnectionRow,
+    hostname: &str,
+    rules: Vec<InjectionRule>,
+    rewrite_host: Option<&str>,
+    connection_label: Option<&str>,
+) {
+    let policy_suffix = conn
+        .session_policy
+        .as_ref()
+        .map(|sp| format!(":{sp}"))
+        .unwrap_or_default();
+    let key = format!(
+        "app_injection:{organization_id}:{project_id}:{}:{hostname}{policy_suffix}",
+        conn.id
+    );
+    let entry = CachedAppInjection {
+        rules,
+        rewrite_host: rewrite_host.map(str::to_string),
+        connection_label: connection_label.map(str::to_string),
+    };
+    cache.set(&key, &entry, 60).await;
+}
+
 // ── Host matching ───────────────────────────────────────────────────────
 
 /// Returns `true` when the credential's stored host does not match the
@@ -1447,110 +1554,6 @@ pub(crate) fn host_matches(request_host: &str, pattern: &str) -> bool {
     }
 }
 
-/// Endpoint signature used for agent-override shadowing: hosts are
-/// case-insensitive (DNS), methods are uppercased, and a NULL path is
-/// normalized to "*" to match the resolve-time mapping below.
-type EndpointSignature = (String, String, Option<String>);
-
-fn endpoint_signature(rule: &db::PolicyRuleRow) -> EndpointSignature {
-    (
-        rule.host_pattern.to_ascii_lowercase(),
-        rule.path_pattern.clone().unwrap_or_else(|| "*".to_string()),
-        rule.method.as_ref().map(|m| m.to_ascii_uppercase()),
-    )
-}
-
-/// Full-override shadowing within the project rule set: an agent-scoped rule
-/// replaces every all-agents rule sharing its endpoint signature, so a
-/// per-agent app-permission override can loosen as well as tighten the
-/// all-agents setting. Operates on rules that already survived
-/// `row_to_policy_rule`, so a malformed row (e.g. a rate rule with no config)
-/// that will never be evaluated can never shadow anything. Org rules must
-/// never be passed here — org enforcement cannot be overridden per agent.
-fn shadow_all_agents_rules(rules: Vec<(EndpointSignature, bool, PolicyRule)>) -> Vec<PolicyRule> {
-    let agent_signatures: std::collections::HashSet<EndpointSignature> = rules
-        .iter()
-        .filter(|(_, agent_scoped, _)| *agent_scoped)
-        .map(|(signature, _, _)| signature.clone())
-        .collect();
-    rules
-        .into_iter()
-        .filter(|(signature, agent_scoped, _)| {
-            *agent_scoped || !agent_signatures.contains(signature)
-        })
-        .map(|(_, _, rule)| rule)
-        .collect()
-}
-
-/// Map a policy rule row to a resolved rule, dropping rows with unknown
-/// actions or invalid rate-limit configs.
-fn row_to_policy_rule(r: db::PolicyRuleRow) -> Option<PolicyRule> {
-    let action = match r.action.as_str() {
-        "block" => PolicyAction::Block,
-        "rate_limit" => {
-            let max_requests = r.rate_limit.filter(|&v| v > 0)? as u64;
-            let window = r.rate_limit_window.as_deref()?;
-            let window_secs = match window {
-                "minute" => 60,
-                "hour" => 3600,
-                "day" => 86400,
-                _ => return None,
-            };
-            PolicyAction::RateLimit {
-                rule_id: r.id,
-                max_requests,
-                window_secs,
-            }
-        }
-        "manual_approval" => PolicyAction::ManualApproval { rule_id: r.id },
-        "allow" => PolicyAction::Allow,
-        _ => return None,
-    };
-    Some(PolicyRule {
-        name: r.name,
-        path_pattern: r.path_pattern.unwrap_or_else(|| "*".to_string()),
-        method: r.method,
-        action,
-        conditions_raw: r.conditions,
-    })
-}
-
-/// Filter org + project rows for this agent and host, map them to resolved
-/// rules, and shadow the project set — org rules first, preserving today's
-/// evaluation order.
-///
-/// `pub(crate)` so the EE editions' engine can reuse the exact assembly
-/// (host + agent filter, agent-override shadowing, org-first order). Behavior
-/// is unchanged.
-pub(crate) fn assemble_policy_rules(
-    org_rows: Vec<db::PolicyRuleRow>,
-    project_rows: Vec<db::PolicyRuleRow>,
-    agent_id: &str,
-    hostname: &str,
-) -> Vec<PolicyRule> {
-    let relevant = |r: &db::PolicyRuleRow| {
-        host_matches(hostname, &r.host_pattern)
-            && (r.agent_id.is_none() || r.agent_id.as_deref() == Some(agent_id))
-    };
-    let project_rules = shadow_all_agents_rules(
-        project_rows
-            .into_iter()
-            .filter(&relevant)
-            .filter_map(|r| {
-                let signature = endpoint_signature(&r);
-                let agent_scoped = r.agent_id.is_some();
-                row_to_policy_rule(r).map(|rule| (signature, agent_scoped, rule))
-            })
-            .collect(),
-    );
-    org_rows
-        .into_iter()
-        .filter(&relevant)
-        .filter_map(row_to_policy_rule)
-        .chain(project_rules)
-        .collect()
-}
-
 // ── Tests ───────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -1560,367 +1563,95 @@ mod tests {
         crate::cache::create_store().await.unwrap()
     }
 
-    // ── Agent-override shadowing ──────────────────────────────────────
+    // ── Injection pool (step 10) ────────────────────────────────────────
+    // Since the old per-agent grant tables became unread, `secret_mode` +
+    // the v2 selection are the WHOLE story. The load-bearing property is that
+    // a selective agent with nothing selected injects NOTHING — if that ever
+    // fell back to the all-mode merge, a deliberately restricted agent would
+    // silently receive every credential in the project and org.
 
-    fn rule_row(
-        host: &str,
-        path: Option<&str>,
-        method: Option<&str>,
-        agent: Option<&str>,
-        action: &str,
-    ) -> db::PolicyRuleRow {
-        db::PolicyRuleRow {
-            id: format!("rule-{action}-{}", agent.unwrap_or("all")),
-            name: format!("Test {action} rule"),
-            host_pattern: host.to_string(),
-            path_pattern: path.map(|p| p.to_string()),
-            method: method.map(|m| m.to_string()),
-            agent_id: agent.map(|a| a.to_string()),
-            action: action.to_string(),
-            rate_limit: None,
-            rate_limit_window: None,
-            conditions: None,
+    fn selection_with_secret(id: &str) -> db::InjectSelection {
+        db::InjectSelection {
+            secret_ids: std::collections::HashSet::from([id.to_string()]),
+            ..Default::default()
         }
     }
 
-    /// Evaluate `rules` for GET /v1/a with a fresh store — the fixed request
-    /// every shadowing test uses.
-    async fn decide(
-        rules: &[PolicyRule],
-        policy_mode: &str,
-        enforce_deny: bool,
-    ) -> crate::policy::PolicyDecision {
-        let store = new_store().await;
-        crate::policy::evaluate(
-            "org1",
-            "proj1",
-            "GET",
-            "/v1/a",
-            None,
-            rules,
-            "tok",
-            store.as_ref(),
-            policy_mode,
-            enforce_deny,
-        )
-        .await
+    fn selection_with_connection(id: &str) -> db::InjectSelection {
+        db::InjectSelection {
+            connections: std::collections::HashMap::from([(id.to_string(), None)]),
+            ..Default::default()
+        }
     }
 
     #[test]
-    fn shadow_removes_all_agents_rule_with_same_signature() {
-        let rules = assemble_policy_rules(
-            vec![],
-            vec![
-                rule_row("api.x.com", Some("/v1/a"), Some("GET"), None, "block"),
-                rule_row(
-                    "api.x.com",
-                    Some("/v1/a"),
-                    Some("GET"),
-                    Some("agent-1"),
-                    "allow",
-                ),
-            ],
-            "agent-1",
-            "api.x.com",
+    fn selective_agent_without_a_selection_injects_nothing() {
+        let empty = db::InjectSelection::default();
+        assert_eq!(
+            secret_pool(SECRET_MODE_SELECTIVE, &empty),
+            InjectionPool::Empty,
+            "a selective agent with no secret selection must never fall back to the all-mode pool"
         );
-        assert_eq!(rules.len(), 1);
-        assert!(matches!(rules[0].action, PolicyAction::Allow));
+        assert_eq!(
+            connection_pool(SECRET_MODE_SELECTIVE, &empty),
+            InjectionPool::Empty,
+            "a selective agent with no connection selection must never fall back to the all-mode pool"
+        );
     }
 
     #[test]
-    fn shadow_keeps_all_agents_rules_with_different_signatures() {
-        let rules = assemble_policy_rules(
-            vec![],
-            vec![
-                rule_row("api.x.com", Some("/v1/b"), Some("GET"), None, "block"),
-                rule_row("api.x.com", Some("/v1/a"), Some("POST"), None, "block"),
-                rule_row("api.x.com", Some("/v1/a"), Some("GET"), None, "allow"),
-                rule_row(
-                    "api.x.com",
-                    Some("/v1/a"),
-                    Some("GET"),
-                    Some("agent-1"),
-                    "allow",
-                ),
-            ],
-            "agent-1",
-            "api.x.com",
+    fn selective_agent_with_a_selection_draws_the_narrowed_pool() {
+        assert_eq!(
+            secret_pool(SECRET_MODE_SELECTIVE, &selection_with_secret("sec-1")),
+            InjectionPool::RuleSelected
         );
-        // Only the same-signature all-agents rule is shadowed.
-        assert_eq!(rules.len(), 3);
+        assert_eq!(
+            secret_pool(
+                SECRET_MODE_SELECTIVE,
+                &db::InjectSelection {
+                    secret_scopes: vec!["project".to_string()],
+                    ..Default::default()
+                }
+            ),
+            InjectionPool::RuleSelected,
+            "a whole-level secret target selects too, not just named ids"
+        );
+        assert_eq!(
+            connection_pool(SECRET_MODE_SELECTIVE, &selection_with_connection("conn-1")),
+            InjectionPool::RuleSelected
+        );
+        assert_eq!(
+            connection_pool(
+                SECRET_MODE_SELECTIVE,
+                &db::InjectSelection {
+                    app_scopes: vec![("github".to_string(), "project".to_string())],
+                    ..Default::default()
+                }
+            ),
+            InjectionPool::RuleSelected,
+            "a provider+level app target selects too"
+        );
     }
 
     #[test]
-    fn shadow_is_identity_without_agent_rules() {
-        let rules = assemble_policy_rules(
-            vec![],
-            vec![
-                rule_row("api.x.com", Some("/v1/a"), Some("GET"), None, "block"),
-                rule_row("api.x.com", None, None, None, "manual_approval"),
-            ],
-            "agent-1",
-            "api.x.com",
+    fn all_mode_is_never_narrowed_by_rules() {
+        // The inverse guard: rules gate the REQUEST for an all-mode agent, they
+        // must not shrink its pool (it would lose partner / budget-metered /
+        // other host-matched credentials the selection never names).
+        for selection in [
+            db::InjectSelection::default(),
+            selection_with_secret("sec-1"),
+            selection_with_connection("conn-1"),
+        ] {
+            assert_eq!(secret_pool("all", &selection), InjectionPool::All);
+            assert_eq!(connection_pool("all", &selection), InjectionPool::All);
+        }
+        // An unknown/legacy mode string is treated as all-mode, matching the
+        // column's default — never as "selective with nothing".
+        assert_eq!(
+            secret_pool("", &db::InjectSelection::default()),
+            InjectionPool::All
         );
-        assert_eq!(rules.len(), 2);
-    }
-
-    #[test]
-    fn shadow_keeps_multiple_agent_rules_with_same_signature() {
-        let rules = assemble_policy_rules(
-            vec![],
-            vec![
-                rule_row("api.x.com", Some("/v1/a"), Some("GET"), None, "allow"),
-                rule_row(
-                    "api.x.com",
-                    Some("/v1/a"),
-                    Some("GET"),
-                    Some("agent-1"),
-                    "block",
-                ),
-                rule_row(
-                    "api.x.com",
-                    Some("/v1/a"),
-                    Some("GET"),
-                    Some("agent-1"),
-                    "manual_approval",
-                ),
-            ],
-            "agent-1",
-            "api.x.com",
-        );
-        assert_eq!(rules.len(), 2);
-        assert!(!rules
-            .iter()
-            .any(|r| matches!(r.action, PolicyAction::Allow)));
-    }
-
-    #[test]
-    fn shadow_signature_is_case_insensitive_for_host_and_method() {
-        let rules = assemble_policy_rules(
-            vec![],
-            vec![
-                rule_row("API.X.com", Some("/v1/a"), Some("get"), None, "block"),
-                rule_row(
-                    "api.x.com",
-                    Some("/v1/a"),
-                    Some("GET"),
-                    Some("agent-1"),
-                    "allow",
-                ),
-            ],
-            "agent-1",
-            "api.x.com",
-        );
-        assert_eq!(rules.len(), 1);
-        assert!(matches!(rules[0].action, PolicyAction::Allow));
-    }
-
-    #[test]
-    fn shadow_null_path_equals_star_pattern() {
-        let rules = assemble_policy_rules(
-            vec![],
-            vec![
-                rule_row("api.x.com", None, Some("GET"), None, "block"),
-                rule_row(
-                    "api.x.com",
-                    Some("*"),
-                    Some("GET"),
-                    Some("agent-1"),
-                    "allow",
-                ),
-            ],
-            "agent-1",
-            "api.x.com",
-        );
-        assert_eq!(rules.len(), 1);
-        assert!(matches!(rules[0].action, PolicyAction::Allow));
-    }
-
-    #[test]
-    fn shadow_requires_a_rule_that_survives_mapping() {
-        // A malformed agent rate rule (no rate config) is dropped by
-        // row_to_policy_rule; it must not shadow the all-agents block —
-        // otherwise the agent would be left with no rule at all (fail-open).
-        let rules = assemble_policy_rules(
-            vec![],
-            vec![
-                rule_row("api.x.com", Some("/v1/a"), Some("GET"), None, "block"),
-                rule_row(
-                    "api.x.com",
-                    Some("/v1/a"),
-                    Some("GET"),
-                    Some("agent-1"),
-                    "rate_limit",
-                ),
-            ],
-            "agent-1",
-            "api.x.com",
-        );
-        assert_eq!(rules.len(), 1);
-        assert!(matches!(rules[0].action, PolicyAction::Block));
-    }
-
-    #[tokio::test]
-    async fn assemble_agent_allow_overrides_all_agents_block() {
-        let rules = assemble_policy_rules(
-            vec![],
-            vec![
-                rule_row("api.x.com", Some("/v1/a"), Some("GET"), None, "block"),
-                rule_row(
-                    "api.x.com",
-                    Some("/v1/a"),
-                    Some("GET"),
-                    Some("agent-1"),
-                    "allow",
-                ),
-            ],
-            "agent-1",
-            "api.x.com",
-        );
-        let decision = decide(&rules, "allow", false).await;
-        assert!(matches!(decision, crate::policy::PolicyDecision::Allow));
-    }
-
-    #[tokio::test]
-    async fn assemble_agent_approval_overrides_all_agents_block() {
-        let rules = assemble_policy_rules(
-            vec![],
-            vec![
-                rule_row("api.x.com", Some("/v1/a"), Some("GET"), None, "block"),
-                rule_row(
-                    "api.x.com",
-                    Some("/v1/a"),
-                    Some("GET"),
-                    Some("agent-1"),
-                    "manual_approval",
-                ),
-            ],
-            "agent-1",
-            "api.x.com",
-        );
-        let decision = decide(&rules, "allow", false).await;
-        assert!(matches!(
-            decision,
-            crate::policy::PolicyDecision::ManualApproval { .. }
-        ));
-    }
-
-    #[tokio::test]
-    async fn assemble_agent_rate_limit_overrides_all_agents_block() {
-        let mut rate_rule = rule_row(
-            "api.x.com",
-            Some("/v1/a"),
-            Some("GET"),
-            Some("agent-1"),
-            "rate_limit",
-        );
-        rate_rule.rate_limit = Some(100);
-        rate_rule.rate_limit_window = Some("hour".to_string());
-        let rules = assemble_policy_rules(
-            vec![],
-            vec![
-                rule_row("api.x.com", Some("/v1/a"), Some("GET"), None, "block"),
-                rate_rule,
-            ],
-            "agent-1",
-            "api.x.com",
-        );
-        // The block row is shadowed; under the limit the request goes through.
-        let decision = decide(&rules, "allow", false).await;
-        assert!(matches!(decision, crate::policy::PolicyDecision::Allow));
-    }
-
-    #[tokio::test]
-    async fn assemble_org_block_not_shadowed_by_agent_allow() {
-        let rules = assemble_policy_rules(
-            vec![rule_row(
-                "api.x.com",
-                Some("/v1/a"),
-                Some("GET"),
-                None,
-                "block",
-            )],
-            vec![rule_row(
-                "api.x.com",
-                Some("/v1/a"),
-                Some("GET"),
-                Some("agent-1"),
-                "allow",
-            )],
-            "agent-1",
-            "api.x.com",
-        );
-        let decision = decide(&rules, "allow", false).await;
-        assert!(matches!(
-            decision,
-            crate::policy::PolicyDecision::Blocked { .. }
-        ));
-    }
-
-    #[test]
-    fn assemble_drops_foreign_agent_rules_and_other_hosts() {
-        let rules = assemble_policy_rules(
-            vec![],
-            vec![
-                rule_row(
-                    "api.x.com",
-                    Some("/v1/a"),
-                    Some("GET"),
-                    Some("agent-2"),
-                    "block",
-                ),
-                rule_row("other.com", Some("/v1/a"), Some("GET"), None, "block"),
-                rule_row("api.x.com", Some("/v1/a"), Some("GET"), None, "block"),
-            ],
-            "agent-1",
-            "api.x.com",
-        );
-        assert_eq!(rules.len(), 1);
-        assert!(matches!(rules[0].action, PolicyAction::Block));
-    }
-
-    #[tokio::test]
-    async fn assemble_agent_allow_row_satisfies_deny_mode() {
-        let rules = assemble_policy_rules(
-            vec![],
-            vec![rule_row(
-                "api.x.com",
-                Some("/v1/a"),
-                Some("GET"),
-                Some("agent-1"),
-                "allow",
-            )],
-            "agent-1",
-            "api.x.com",
-        );
-        let decision = decide(&rules, "deny", true).await;
-        assert!(matches!(decision, crate::policy::PolicyDecision::Allow));
-    }
-
-    #[tokio::test]
-    async fn assemble_agent_block_overrides_all_agents_allow_in_deny_mode() {
-        let rules = assemble_policy_rules(
-            vec![],
-            vec![
-                rule_row("api.x.com", Some("/v1/a"), Some("GET"), None, "allow"),
-                rule_row(
-                    "api.x.com",
-                    Some("/v1/a"),
-                    Some("GET"),
-                    Some("agent-1"),
-                    "block",
-                ),
-            ],
-            "agent-1",
-            "api.x.com",
-        );
-        // The allow row is truly gone — not merely outvoted by pass order.
-        assert_eq!(rules.len(), 1);
-        let decision = decide(&rules, "deny", true).await;
-        assert!(matches!(
-            decision,
-            crate::policy::PolicyDecision::Blocked { .. }
-        ));
     }
 
     #[tokio::test]
@@ -1930,7 +1661,6 @@ mod tests {
             intercept: true,
             injection_rules: vec![],
             app_connections: vec![],
-            policy_rules: vec![],
             project_id: None,
             organization_id: None,
             agent_id: None,
@@ -1938,7 +1668,6 @@ mod tests {
             agent_identifier: None,
             access_restricted: false,
             plan: "pro".to_string(),
-            policy_mode: "allow".to_string(),
             claim_token: None,
             budget_bindings: vec![],
             policy_rules_v2: db::PolicyV2Rules::default(),
@@ -1978,7 +1707,6 @@ mod tests {
                 injections: vec![],
             }],
             app_connections: vec![],
-            policy_rules: vec![],
             project_id: Some("proj_1".to_string()),
             organization_id: Some("org_1".to_string()),
             agent_id: Some("agent_1".to_string()),
@@ -1986,7 +1714,6 @@ mod tests {
             agent_identifier: None,
             access_restricted: false,
             plan: "pro".to_string(),
-            policy_mode: "allow".to_string(),
             claim_token: None,
             budget_bindings: vec![],
             policy_rules_v2: db::PolicyV2Rules::default(),
@@ -2022,7 +1749,6 @@ mod tests {
             intercept: true,
             injection_rules: vec![],
             app_connections: vec![],
-            policy_rules: vec![],
             project_id: Some("proj_restricted".to_string()),
             organization_id: Some("org_restricted".to_string()),
             agent_id: Some("agent_selective".to_string()),
@@ -2030,7 +1756,6 @@ mod tests {
             agent_identifier: None,
             access_restricted: true,
             plan: "pro".to_string(),
-            policy_mode: "allow".to_string(),
             claim_token: None,
             budget_bindings: vec![],
             policy_rules_v2: db::PolicyV2Rules::default(),
@@ -2214,6 +1939,215 @@ mod tests {
 
     fn ids(conns: &[db::AppConnectionRow]) -> Vec<&str> {
         conns.iter().map(|c| c.id.as_str()).collect()
+    }
+
+    // ── serves-path metadata gating (#428) ──────────────────────────────
+
+    fn bearer_rule(pattern: &str, token: &str) -> InjectionRule {
+        InjectionRule {
+            path_pattern: pattern.to_string(),
+            injections: vec![Injection::SetHeader {
+                name: "authorization".to_string(),
+                value: format!("Bearer {token}"),
+            }],
+        }
+    }
+
+    async fn seed_app_injection(
+        cache: &Arc<dyn CacheStore>,
+        conn: &db::AppConnectionRow,
+        hostname: &str,
+        rules: Vec<InjectionRule>,
+        rewrite_host: Option<&str>,
+        connection_label: Option<&str>,
+    ) {
+        seed_app_injection_cache(
+            cache,
+            "o1",
+            "p1",
+            conn,
+            hostname,
+            rules,
+            rewrite_host,
+            connection_label,
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn single_connection_metadata_gated_to_serving_path() {
+        let engine = PolicyEngine::test_stub();
+        let store = new_store().await;
+        let mut c = conn("c1", "google-calendar");
+        c.session_policy = Some(serde_json::json!({"folders": ["x"]}));
+        seed_app_injection(
+            &store,
+            &c,
+            "www.googleapis.com",
+            vec![bearer_rule("/calendar/*", "cal")],
+            Some("rw.example.com"),
+            Some("Cal"),
+        )
+        .await;
+
+        // Non-serving path (/youtube): rules still returned, metadata dropped.
+        let res = engine
+            .resolve_app_injection_for_request(
+                std::slice::from_ref(&c),
+                "www.googleapis.com",
+                Some("/youtube/v3/search"),
+                None,
+                "o1",
+                "p1",
+                &*store,
+            )
+            .await
+            .unwrap();
+        match res {
+            AppConnectionResult::Rules {
+                rules,
+                rewrite_host,
+                connection_label,
+                finalizer,
+                body_transform,
+                session_policy,
+                ..
+            } => {
+                assert_eq!(rules.len(), 1);
+                assert!(rewrite_host.is_none());
+                assert!(connection_label.is_none());
+                assert!(finalizer.is_none());
+                assert!(body_transform.is_none());
+                assert!(session_policy.is_none());
+            }
+            _ => panic!("expected Rules"),
+        }
+
+        // Serving path (/calendar): metadata kept.
+        let res = engine
+            .resolve_app_injection_for_request(
+                std::slice::from_ref(&c),
+                "www.googleapis.com",
+                Some("/calendar/v3/events"),
+                None,
+                "o1",
+                "p1",
+                &*store,
+            )
+            .await
+            .unwrap();
+        match res {
+            AppConnectionResult::Rules {
+                rewrite_host,
+                connection_label,
+                session_policy,
+                ..
+            } => {
+                assert_eq!(rewrite_host.as_deref(), Some("rw.example.com"));
+                assert_eq!(connection_label.as_deref(), Some("Cal"));
+                assert!(session_policy.is_some());
+            }
+            _ => panic!("expected Rules"),
+        }
+    }
+
+    #[tokio::test]
+    async fn explicit_connection_id_keeps_metadata_off_path() {
+        let engine = PolicyEngine::test_stub();
+        let store = new_store().await;
+        let c = conn("c1", "google-calendar");
+        seed_app_injection(
+            &store,
+            &c,
+            "www.googleapis.com",
+            vec![bearer_rule("/calendar/*", "cal")],
+            Some("rw.example.com"),
+            Some("Cal"),
+        )
+        .await;
+
+        // An explicit x-onecli-connection-id is a deliberate override: the
+        // serves-path gate does not apply.
+        let res = engine
+            .resolve_app_injection_for_request(
+                std::slice::from_ref(&c),
+                "www.googleapis.com",
+                Some("/youtube/v3/search"),
+                Some("c1"),
+                "o1",
+                "p1",
+                &*store,
+            )
+            .await
+            .unwrap();
+        match res {
+            AppConnectionResult::Rules {
+                rewrite_host,
+                connection_label,
+                ..
+            } => {
+                assert_eq!(rewrite_host.as_deref(), Some("rw.example.com"));
+                assert_eq!(connection_label.as_deref(), Some("Cal"));
+            }
+            _ => panic!("expected Rules"),
+        }
+    }
+
+    #[tokio::test]
+    async fn merge_loop_drops_metadata_when_no_provider_serves() {
+        // Two providers, neither serving the request path (/youtube): the
+        // empty-narrow fallback keeps both, their rules merge (they
+        // self-select at apply time), and no one's metadata is adopted.
+        let engine = PolicyEngine::test_stub();
+        let store = new_store().await;
+        let cal = conn("c1", "google-calendar");
+        let gm = conn("c2", "gmail");
+        seed_app_injection(
+            &store,
+            &cal,
+            "www.googleapis.com",
+            vec![bearer_rule("/calendar/*", "cal")],
+            Some("cal.example.com"),
+            Some("Cal"),
+        )
+        .await;
+        seed_app_injection(
+            &store,
+            &gm,
+            "www.googleapis.com",
+            vec![bearer_rule("/gmail/*", "gm")],
+            Some("gm.example.com"),
+            Some("Gm"),
+        )
+        .await;
+
+        let res = engine
+            .resolve_app_injection_for_request(
+                &[cal, gm],
+                "www.googleapis.com",
+                Some("/youtube/v3/search"),
+                None,
+                "o1",
+                "p1",
+                &*store,
+            )
+            .await
+            .unwrap();
+        match res {
+            AppConnectionResult::Rules {
+                rules,
+                rewrite_host,
+                connection_label,
+                session_policy,
+                ..
+            } => {
+                assert_eq!(rules.len(), 2);
+                assert!(rewrite_host.is_none());
+                assert!(connection_label.is_none());
+                assert!(session_policy.is_none());
+            }
+            _ => panic!("expected Rules"),
+        }
     }
 
     #[test]

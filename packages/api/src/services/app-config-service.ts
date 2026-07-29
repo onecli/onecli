@@ -10,7 +10,6 @@ import {
   appConfigKey,
   isOrgScope,
 } from "./resource-scope";
-import { notifyPolicyCoherence } from "./policy-coherence-notify";
 
 const disconnectIfConnected = async (
   scope: ResourceScope,
@@ -34,29 +33,6 @@ const disconnectIfConnected = async (
       )?.id)
     : undefined;
 
-  // Step 8: capture the projects whose agents are assigned any connection about
-  // to be deleted BEFORE the delete cascades their agent_app_connections + the
-  // equipment rules' connection targets — those scopes must re-materialize so no
-  // orphaned (target-less) equipment rule lingers. Mirrors deleteConnection, but
-  // for the bulk (fan-out-across-projects) app-config disconnect path.
-  const doomed = await db.appConnection.findMany({
-    where: {
-      OR: [
-        { ...scopeWhere(scope), provider },
-        ...(orgConfigId
-          ? [{ appConfigId: orgConfigId, scope: "project" }]
-          : []),
-      ],
-    },
-    select: { id: true },
-  });
-  const affected = doomed.length
-    ? await db.agentAppConnection.findMany({
-        where: { appConnectionId: { in: doomed.map((c) => c.id) } },
-        select: { agent: { select: { projectId: true } } },
-      })
-    : [];
-
   await db.appConnection.deleteMany({
     where: { ...scopeWhere(scope), provider },
   });
@@ -65,11 +41,6 @@ const disconnectIfConnected = async (
       where: { appConfigId: orgConfigId, scope: "project" },
     });
   }
-
-  const projectIds = [...new Set(affected.map((a) => a.agent.projectId))];
-  await Promise.all(
-    projectIds.map((projectId) => notifyPolicyCoherence({ projectId })),
-  );
 };
 
 export const getAppConfig = async (scope: ResourceScope, provider: string) => {

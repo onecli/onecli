@@ -8,21 +8,10 @@ export const queryKeys = {
   agents: {
     all: () => ["agents", ...scope()] as const,
     list: () => [...queryKeys.agents.all(), "list"] as const,
-    secrets: (agentId: string) =>
-      [...queryKeys.agents.all(), agentId, "secrets"] as const,
-    connections: (agentId: string) =>
-      [...queryKeys.agents.all(), agentId, "connections"] as const,
-    granularAccess: () =>
-      [...queryKeys.agents.all(), "granular-access"] as const,
   },
   secrets: {
     all: () => ["secrets", ...scope()] as const,
     list: () => [...queryKeys.secrets.all(), "list"] as const,
-  },
-  rules: {
-    all: () => ["rules", ...scope()] as const,
-    list: (pageScope: PageScope = "project") =>
-      [...queryKeys.rules.all(), "list", pageScope] as const,
   },
   policy: {
     all: () => ["policy", ...scope()] as const,
@@ -43,14 +32,6 @@ export const queryKeys = {
     members: (groupId: string) =>
       [...queryKeys.groups.all(), groupId, "members"] as const,
   },
-  agentGroups: {
-    all: () => ["agent-groups", ...scope()] as const,
-    list: () => [...queryKeys.agentGroups.all(), "list"] as const,
-    members: (groupId: string) =>
-      [...queryKeys.agentGroups.all(), groupId, "members"] as const,
-    forAgent: (agentId: string) =>
-      [...queryKeys.agentGroups.all(), "agent", agentId] as const,
-  },
   roleMappings: {
     all: () => ["role-mappings", ...scope()] as const,
     list: () => [...queryKeys.roleMappings.all(), "list"] as const,
@@ -58,10 +39,6 @@ export const queryKeys = {
   orgMembers: {
     all: () => ["org-members", ...scope()] as const,
     list: () => [...queryKeys.orgMembers.all(), "list"] as const,
-  },
-  orgAgents: {
-    all: () => ["org-agents", ...scope()] as const,
-    list: () => [...queryKeys.orgAgents.all(), "list"] as const,
   },
   ssoConnections: {
     all: () => ["sso-connections", ...scope()] as const,
@@ -81,8 +58,6 @@ export const queryKeys = {
       [...queryKeys.connections.all(), "list", pageScope] as const,
     byProvider: (provider: string) =>
       [...queryKeys.connections.all(), "provider", provider] as const,
-    agents: (connectionId: string) =>
-      [...queryKeys.connections.all(), connectionId, "agents"] as const,
   },
   projectAccess: {
     all: () => ["project-access", ...scope()] as const,

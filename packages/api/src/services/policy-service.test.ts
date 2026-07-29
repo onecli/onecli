@@ -103,50 +103,6 @@ describe("backfillPublishScope", () => {
     expect(state.deleteManyCalls).toBe(0);
   });
 
-  it("replace: discards the published scope and re-writes fresh (the heal path)", async () => {
-    // A scope that ALREADY has a published generation — the default path would
-    // skip; replace must delete it and re-materialize instead (fixing a scope
-    // frozen from an earlier catalog-less run).
-    state.publishedCount = 5;
-    const result = await backfillPublishScope(
-      { organizationId: "org-1" },
-      [networkRule],
-      { replace: true },
-    );
-    expect(state.deleteManyCalls).toBe(1); // stale v2 discarded
-    // The delete is fenced to EXACTLY this scope (the `scope` discriminator keeps
-    // an org replace from ever matching a project/other-org row) — the single
-    // highest-risk property of the heal path.
-    expect(state.deleteManyWheres[0]).toEqual({
-      scope: "organization",
-      organizationId: "org-1",
-    });
-    expect(result).toEqual({ skipped: false, generation: 1, ruleCount: 1 });
-    expect(state.creates).toHaveLength(2); // fresh draft gen 0 + published gen 1
-  });
-
-  it("replace on a project scope fences the delete to that project", async () => {
-    state.publishedCount = 2;
-    await backfillPublishScope({ projectId: "proj-1" }, [networkRule], {
-      replace: true,
-    });
-    expect(state.deleteManyWheres[0]).toEqual({
-      scope: "project",
-      projectId: "proj-1",
-    });
-  });
-
-  it("replace with no rules still discards the stale scope (generation null)", async () => {
-    // A scope whose old model is now empty must be CLEARED, not left stale.
-    state.publishedCount = 4;
-    const result = await backfillPublishScope({ organizationId: "org-1" }, [], {
-      replace: true,
-    });
-    expect(state.deleteManyCalls).toBe(1);
-    expect(state.creates).toHaveLength(0);
-    expect(result).toEqual({ skipped: false, generation: null, ruleCount: 0 });
-  });
-
   it("writes each rule as draft gen 0 + published gen 1 (the gateway reads published)", async () => {
     const result = await backfillPublishScope({ organizationId: "org-1" }, [
       networkRule,

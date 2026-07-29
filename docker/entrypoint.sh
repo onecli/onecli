@@ -54,13 +54,63 @@ if [ -n "$GOOGLE_CLIENT_ID" ]; then
 fi
 printf '{"authMode":"%s","oauthConfigured":%s}\n' "$AUTH_MODE" "$OAUTH_CONFIGURED" > /app/data/runtime-config.json
 
-# Start gateway in background
+# Both services run as background children so this shell stays alive to
+# supervise them. It deliberately does NOT `exec` the web server: doing so
+# replaces the shell, which discards the trap below (graceful shutdown then
+# never runs) and leaves the gateway as an inherited child of Node — which reaps
+# only what it spawned itself, so the gateway becomes a permanent <defunct> when
+# it exits. tini is PID 1 above this (see docker/Dockerfile) and reaps anything
+# that is genuinely orphaned; this shell owns these two.
+
 echo "Starting gateway on port ${GATEWAY_PORT:-10255}..."
 onecli-gateway --port "${GATEWAY_PORT:-10255}" --data-dir /app/data &
 GATEWAY_PID=$!
 
-# Graceful shutdown: stop both processes on SIGTERM
-trap "kill $GATEWAY_PID 2>/dev/null; wait $GATEWAY_PID 2>/dev/null; exit 0" TERM INT
+echo "Starting web server on port ${PORT:-10254}..."
+node apps/web/server.js &
+WEB_PID=$!
 
-# Start Next.js (foreground)
-exec node apps/web/server.js
+# Graceful shutdown: stop both children, then reap them so neither is left
+# behind. Clearing the trap first keeps a second signal from re-entering while
+# the teardown is still running. A child that ignored SIGTERM would keep these
+# waits blocked, which is bounded by the runtime's own stop timeout (it SIGKILLs
+# the container), and tini reaps whatever is left when this shell goes.
+shutdown() {
+  trap '' TERM INT
+  echo "Shutting down..."
+  kill "$WEB_PID" "$GATEWAY_PID" 2>/dev/null || true
+  wait "$WEB_PID" 2>/dev/null || true
+  wait "$GATEWAY_PID" 2>/dev/null || true
+  exit 0
+}
+trap shutdown TERM INT
+
+# Wait for either child to exit by polling liveness rather than with `wait -n`.
+# `wait -n` looks like the right tool and is not: it only reports children that
+# exit *after* it is called, so a service that dies during startup — the common
+# case, on a bad config or an unreachable database — is missed entirely and the
+# container sits there half-running. Measured directly: with one child already
+# dead, `wait -n` blocked for 27s until the *other* child exited. Polling asks
+# the question that actually matters, "are both still alive?", and a `sleep` is
+# interruptible so the trap above still fires immediately.
+while kill -0 "$WEB_PID" 2>/dev/null && kill -0 "$GATEWAY_PID" 2>/dev/null; do
+  sleep 1
+done
+
+if kill -0 "$WEB_PID" 2>/dev/null; then
+  # The web server is still up, so the gateway is what exited. Take the whole
+  # container down rather than serve without a proxy.
+  echo "Gateway exited unexpectedly — stopping the container" >&2
+  RC=1
+else
+  # The web server exited: carry its status out as the container's, the way
+  # `exec node` used to. `wait` on an already-reaped child still reports the
+  # real code here.
+  RC=0
+  wait "$WEB_PID" 2>/dev/null || RC=$?
+  echo "Web server exited (code ${RC}) — stopping the container" >&2
+fi
+
+kill "$WEB_PID" "$GATEWAY_PID" 2>/dev/null || true
+wait 2>/dev/null || true
+exit "$RC"

@@ -17,7 +17,7 @@ export const useOrgMembersList = (enabled: boolean) =>
       fetchAllPages((cursor) => orgMembers.list({ limit: PAGE_LIMIT, cursor })),
     enabled,
     // Directory routes are admin-only; a non-admin gets a deterministic 403,
-    // which is expected, not retryable (mirrors useAgentGroups).
+    // which is expected, not retryable.
     retry: false,
   });
 

@@ -51,17 +51,63 @@ describe("diffPolicyChanges", () => {
     expect(diff.rowState.has("keep")).toBe(false);
   });
 
-  it("ignores derived rows entirely (fresh logicalIds each rematerialization)", () => {
-    const derivedA = rule({ logicalId: "d1", source: "blocklist" });
-    const derivedB = rule({ logicalId: "d2", source: "app_permission" });
-    const equipment = rule({ logicalId: "d3", source: "equipment" });
+  it("ignores blocklist rows — written by their own surface in lockstep", () => {
+    // The app page's blocklist panel writes draft and published together and the
+    // console gives those rows no actions, so they can never be pending.
+    const blocklist = rule({ logicalId: "d1", source: "blocklist" });
     const diff = diffPolicyChanges(
-      [derivedA, equipment],
-      [derivedB],
+      [blocklist],
+      [rule({ logicalId: "d2", source: "blocklist" })],
       { action: "allow" },
       { action: "allow" },
     );
     expect(diff.count).toBe(0);
+  });
+
+  it("COUNTS a staged revoke of a legacy app_permission rule", () => {
+    // The App Permissions editor is gone and the adoption pass that re-tagged
+    // these to `custom` retired with it, so on an un-adopted instance such a row
+    // still DECIDES and the policy console is the only place to switch it off.
+    // If the diff ignored it, "Apply Changes" would stay greyed out and the
+    // change could never reach the gateway.
+    const legacy = rule({ logicalId: "ap1", source: "app_permission" });
+    const diff = diffPolicyChanges(
+      [{ ...legacy, enabled: false }],
+      [legacy],
+      { action: "allow" },
+      { action: "allow" },
+    );
+    expect(diff.count).toBe(1);
+    expect(diff.rowState.get("ap1")).toBe("changed");
+  });
+
+  it("COUNTS a staged revoke of a credential grant", () => {
+    // Equipment rows are the credential grants, revocable from the console since
+    // step 10. If the diff ignored them, "Apply Changes" would stay greyed out
+    // and a revoke could never reach the gateway — it would look done and do
+    // nothing.
+    const granted = rule({ logicalId: "eq1", source: "equipment" });
+    const diff = diffPolicyChanges(
+      [{ ...granted, enabled: false }],
+      [granted],
+      { action: "allow" },
+      { action: "allow" },
+    );
+    expect(diff.count).toBe(1);
+    expect(diff.rowState.get("eq1")).toBe("changed");
+    expect(diff.changed[0]?.details).toContain("Disabled");
+  });
+
+  it("COUNTS a deleted credential grant", () => {
+    const granted = rule({ logicalId: "eq1", source: "equipment" });
+    const diff = diffPolicyChanges(
+      [],
+      [granted],
+      { action: "allow" },
+      { action: "allow" },
+    );
+    expect(diff.count).toBe(1);
+    expect(diff.removed[0]?.logicalId).toBe("eq1");
   });
 
   it("reports a pure reorder as one change", () => {

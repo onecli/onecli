@@ -185,7 +185,7 @@ mod tests {
     fn directory_identities_decode_to_other_never_agent() {
         let rows = vec![row(|r| {
             r.identities = Json(vec![serde_json::from_value(
-                json!({"agentId": null, "agentGroupId": "g1", "userId": null, "groupId": null}),
+                json!({"agentId": null, "userId": null, "groupId": "g1"}),
             )
             .expect("identity row")]);
         })];
