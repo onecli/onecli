@@ -4,6 +4,10 @@ import { useEffect, useRef } from "react";
 
 export interface AppConnectedEvent {
   provider?: string;
+  /** Set only when the popup CREATED a connection — absent on reconnects, so a
+   * listener can tell "there is a new account to set up" from "credentials
+   * were refreshed". */
+  connectionId?: string;
 }
 
 interface UseAppMessagesOptions {
@@ -38,6 +42,7 @@ export const useAppMessages = ({
       if (event.data?.type === "app-connected") {
         onConnectedRef.current({
           provider: event.data.provider as string | undefined,
+          connectionId: event.data.connectionId as string | undefined,
         });
       }
       if (event.data?.type === "app-configure" && event.data?.provider) {

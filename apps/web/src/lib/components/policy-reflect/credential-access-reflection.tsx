@@ -1,7 +1,5 @@
 "use client";
 
-import Link from "next/link";
-import { usePathname } from "next/navigation";
 import {
   Ban,
   CircleCheck,
@@ -27,14 +25,13 @@ import type {
   CredentialProvenance,
   EffectiveCredentialEntry,
 } from "@/lib/api/policy-visibility";
-import { withProjectPrefix } from "@/lib/navigation";
 import { useEffectiveCredentials } from "@/lib/api/policy-visibility";
 import type { CredentialAccessReflectionProps } from "@/lib/components/policy-reflect";
 
 // The "Credential access" dialog (step 9.7b), framed around EFFECTIVE
 // access (the user decision — lead with what the agent can DO under the rules,
-// not the injection/secretMode view). Each credential the agent can inject is
-// tagged Usable / Limited / Blocked; `secretMode` survives only as a footnote.
+// not the raw injection view). Each credential the agent can inject is tagged
+// Usable / Limited / Blocked.
 
 const STATUS_META = {
   usable: {
@@ -160,13 +157,11 @@ export const CredentialAccessReflection = ({
   open,
   onOpenChange,
 }: CredentialAccessReflectionProps) => {
-  const pathname = usePathname();
   const {
     data: result,
     isPending,
     isError,
   } = useEffectiveCredentials(agent.id, open);
-  const policyHref = withProjectPrefix(pathname, "/policy");
   const isEmpty =
     !!result && result.secrets.length === 0 && result.connections.length === 0;
 
@@ -234,19 +229,16 @@ export const CredentialAccessReflection = ({
 
         {result && !isEmpty && (
           <p className="px-6 pb-2 text-[11px] text-muted-foreground">
-            {result.mode === "all"
-              ? "This agent can be handed any credential in its pool; the rules above decide what each one can do."
-              : "This agent is limited to the credentials above; the rules decide what each one can do."}
+            This agent is limited to the credentials above; the rules decide
+            what each one can do.
           </p>
         )}
 
+        {/* No "Manage in Policy" escape hatch: the project policy page is gone
+            (step 6), and this dialog's own rows plus the agent page are where
+            credential access is changed now. */}
         <DialogFooter className="border-border/50 border-t px-6 py-4">
-          <Button variant="ghost" onClick={() => onOpenChange(false)}>
-            Close
-          </Button>
-          <Button asChild>
-            <Link href={policyHref}>Manage in Policy</Link>
-          </Button>
+          <Button onClick={() => onOpenChange(false)}>Close</Button>
         </DialogFooter>
       </DialogContent>
     </Dialog>

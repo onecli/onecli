@@ -1,10 +1,10 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 // In-memory `@onecli/db` mock covering only what `createAgent` touches. The
-// load-bearing case is the secret-mode inheritance: since step 10 the per-agent
-// grant tables are frozen, so a sub-agent can only inherit its parent's MODE —
-// inheriting "selective" must leave it with nothing until a policy rule grants
-// it (fail-closed), and must never silently widen to "all".
+// load-bearing case since attach-model step 5: EVERY new agent is created
+// `selective` with nothing attached — no default-to-all, and no parent-mode
+// inheritance (an unconverted "all" parent minting new all-mode children would
+// keep step 7's zero-"all" gate from ever converging).
 
 interface AgentRow {
   id: string;
@@ -78,43 +78,27 @@ beforeEach(() => {
   store.createThrows = null;
 });
 
-describe("createAgent — secret-mode inheritance", () => {
-  it("defaults to all-mode with no parent", async () => {
+describe("createAgent — always selective (attach-model step 5)", () => {
+  it("creates selective with no parent", async () => {
     await createAgent("p1", "Solo", "solo");
-    expect(lastCreated().secretMode).toBe("all");
-  });
-
-  it("inherits a selective parent's mode — the child starts fail-closed", async () => {
-    seedParent("parent", "selective");
-    await createAgent("p1", "Child", "child", "parent");
-    // Selective + no grants = injects nothing until a policy rule says otherwise.
-    // Widening this to "all" would hand the child its parent's whole pool.
     expect(lastCreated().secretMode).toBe("selective");
   });
 
-  it("inherits an all-mode parent's mode", async () => {
+  it("creates selective even when a selective parent exists — fail-closed with no grants", async () => {
+    seedParent("parent", "selective");
+    await createAgent("p1", "Child", "child");
+    expect(lastCreated().secretMode).toBe("selective");
+  });
+
+  it("does NOT inherit an all-mode parent's mode during the grace window", async () => {
+    // The step-5 law: inheritance is gone (the parameter itself was removed —
+    // the route still accepts `parentIdentifier` but no longer threads it).
+    // An unconverted "all" parent must never mint new all-mode agents — the
+    // gateway no longer reads the column (step 7), but the converter's
+    // workload and step 8's drop census both depend on no new "all" rows.
     seedParent("parent", "all");
-    await createAgent("p1", "Child", "child", "parent");
-    expect(lastCreated().secretMode).toBe("all");
-  });
-
-  it("a parent in ANOTHER project is not inherited from", async () => {
-    store.agents.push({
-      id: "foreign",
-      projectId: "p2",
-      identifier: "parent",
-      name: "parent",
-      secretMode: "selective",
-    });
-    await createAgent("p1", "Child", "child", "parent");
-    expect(lastCreated().secretMode).toBe("all");
-  });
-
-  it("an unresolvable parent identifier falls back to all-mode", async () => {
-    // Documented consequence of a typo'd parent: the child is NOT restricted.
-    // Pinned so a future change to fail-closed here is a deliberate one.
-    await createAgent("p1", "Child", "child", "no-such-parent");
-    expect(lastCreated().secretMode).toBe("all");
+    await createAgent("p1", "Child", "child");
+    expect(lastCreated().secretMode).toBe("selective");
   });
 });
 

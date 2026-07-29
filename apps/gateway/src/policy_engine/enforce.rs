@@ -135,6 +135,7 @@ pub(crate) async fn evaluate(
     body: Option<&[u8]>,
     has_injections: bool,
     is_llm_host: bool,
+    winning_connection_id: Option<&str>,
     cache: &dyn CacheStore,
     v2: &PolicyV2Rules,
 ) -> (PolicyDecision, Option<MatchedRule>) {
@@ -155,6 +156,7 @@ pub(crate) async fn evaluate(
         agent_id: agent_id.to_string(),
         has_injections,
         is_llm_host,
+        winning_connection_id: winning_connection_id.map(str::to_string),
     };
 
     let matched_of = |rule: &Rule| MatchedRule {

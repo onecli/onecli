@@ -62,6 +62,25 @@ fn target_matches(target: &Target, rule: &Rule, request: &Request, body: Option<
             body,
             &rule.conditions,
         ),
+        // A connection target matches only when it is the request's winning
+        // injected connection AND the provider/tools fan-out hits. No winner →
+        // never matches (fail-closed for allow AND block).
+        Target::Connection {
+            id,
+            provider,
+            tools,
+        } => {
+            request.winning_connection_id.as_deref() == Some(id.as_str())
+                && super::catalog::app_target_matches(
+                    provider,
+                    tools,
+                    &request.host,
+                    &request.method,
+                    &request.path,
+                    body,
+                    &rule.conditions,
+                )
+        }
         // A secret target gates its resolved host(s), host-only. Empty patterns
         // (unresolved/deleted secret) never match — fail-closed.
         Target::Secret { host_patterns } => host_patterns
@@ -160,6 +179,7 @@ mod tests {
             agent_id: "agent-1".to_string(),
             has_injections: false,
             is_llm_host: false,
+            winning_connection_id: None,
         }
     }
 
@@ -168,6 +188,58 @@ mod tests {
             has_injections: true,
             ..request()
         }
+    }
+
+    /// The per-account law, all four directions: a `Connection` target matches
+    /// iff (the request's winning injected connection == its id) AND the
+    /// provider catalog fan-out hits. Lockstep twin of the EE corpus arms
+    /// 6b/6c/11/12 and the TS `connection target binds to the winner` block.
+    #[test]
+    fn connection_target_binds_to_the_winning_connection() {
+        let conn_block = |id: &str| {
+            let mut r = rule("c-rule", 1, Action::Block);
+            r.targets = vec![Target::Connection {
+                id: id.to_string(),
+                provider: "gmail".to_string(),
+                tools: Vec::new(),
+            }];
+            r
+        };
+        let req_via = |winner: Option<&str>| Request {
+            host: "gmail.googleapis.com".to_string(),
+            path: "/gmail/v1/users/me/messages".to_string(),
+            method: "GET".to_string(),
+            agent_id: "agent-1".to_string(),
+            has_injections: true,
+            is_llm_host: false,
+            winning_connection_id: winner.map(str::to_string),
+        };
+        let rules = vec![conn_block("c1")];
+
+        // Matching winner on the provider's catalog host → the block binds.
+        assert!(matches!(
+            evaluate_outcome(&rules, &req_via(Some("c1")), None),
+            Outcome::Rule(r) if r.action == Action::Block
+        ));
+        // A same-provider sibling account → no match (the deliberate change
+        // from the provider-wide decode).
+        assert!(matches!(
+            evaluate_outcome(&rules, &req_via(Some("c2")), None),
+            Outcome::Allow
+        ));
+        // No winner (secret-served / uncredentialed) → no match (fail-closed).
+        assert!(matches!(
+            evaluate_outcome(&rules, &req_via(None), None),
+            Outcome::Allow
+        ));
+        // Winner equality alone is not enough: a host outside the provider's
+        // catalog fails the fan-out gate.
+        let mut off_host = req_via(Some("c1"));
+        off_host.host = "api.github.com".to_string();
+        assert!(matches!(
+            evaluate_outcome(&rules, &off_host, None),
+            Outcome::Allow
+        ));
     }
 
     #[test]

@@ -36,7 +36,10 @@ import {
 import { useAvailableApps } from "@/hooks/use-available-apps";
 import { getApps, getApp } from "@onecli/api/apps/registry";
 import { RequestAppSlot } from "@/lib/components/request-app-slot";
-import { useAppMessages } from "@/hooks/use-app-connected";
+import {
+  useAppMessages,
+  type AppConnectedEvent,
+} from "@/hooks/use-app-connected";
 import { getCurrentPlan } from "@/lib/user-plan";
 import { ProAppDialog } from "@/lib/components/pro-app-dialog";
 import { AppIcon } from "./app-icon";
@@ -148,7 +151,7 @@ export const AppsTab = ({
     planQuery.isPending;
 
   const handleConnected = useCallback(
-    ({ provider }: { provider?: string }) => {
+    ({ provider, connectionId }: AppConnectedEvent) => {
       queryClient.invalidateQueries({ queryKey: queryKeys.connections.all() });
       // A credentials-import connect can implicitly save an app config.
       queryClient.invalidateQueries({
@@ -156,8 +159,17 @@ export const AppsTab = ({
       });
       queryClient.invalidateQueries({ queryKey: queryKeys.counts.all() });
       if (provider && !connectOnly) {
+        const path = connectionsPath(
+          { pathname, basePath },
+          `/apps/${provider}`,
+        );
+        // Hand a brand-new account to the detail page so it can offer agent
+        // access on arrival — the popup's message is long gone by the time
+        // that page mounts. A reconnect carries no id and just navigates.
         router.push(
-          connectionsPath({ pathname, basePath }, `/apps/${provider}`),
+          connectionId
+            ? `${path}?connected=${encodeURIComponent(connectionId)}`
+            : path,
         );
       }
     },

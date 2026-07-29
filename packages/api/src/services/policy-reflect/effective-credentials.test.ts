@@ -135,7 +135,7 @@ type ConnRow = {
 };
 
 const armStubs = (opts: {
-  agent?: { id: string; secretMode: string } | null;
+  agent?: { id: string } | null;
   orgRows?: SimRuleRow[];
   projectRows?: SimRuleRow[];
   poolSecrets?: SecretRow[];
@@ -146,9 +146,7 @@ const armStubs = (opts: {
   scopeConnections?: ConnRow[];
 }) => {
   state.responders.set("agent.findFirst", () =>
-    opts.agent !== undefined
-      ? opts.agent
-      : { id: "agent-1", secretMode: "all" },
+    opts.agent !== undefined ? opts.agent : { id: "agent-1" },
   );
   // Honour the `source: { not: … }` filter so the DECISION load (equipment
   // dropped) and the INJECTION load (equipment kept) genuinely differ — without
@@ -177,7 +175,7 @@ const armStubs = (opts: {
     if (a.where.id) return opts.ruleSecrets ?? [];
     if (a.select.scope && !a.select.name) return []; // loadSecretHosts
     if (a.select.scope && a.select.name) return opts.scopeSecrets ?? []; // scope-expand
-    return opts.poolSecrets ?? []; // all-mode pool
+    return opts.poolSecrets ?? [];
   });
   state.responders.set("appConnection.findMany", (args) => {
     const a = args as {
@@ -187,7 +185,7 @@ const armStubs = (opts: {
     if (a.where.id) return opts.ruleConnections ?? [];
     if (a.where.provider) return opts.scopeConnections ?? [];
     if (!a.select.label) return []; // loadConnectionProviders (id/provider)
-    return opts.poolConnections ?? []; // all-mode pool
+    return opts.poolConnections ?? [];
   });
 };
 
@@ -200,9 +198,9 @@ const CTX = {
 // ─────────────────────────────────────────────────────────────────────────────
 
 describe("the effective-access framing (the user's case)", () => {
-  it("all-mode: a connection BLOCKED by a rule reads `blocked`, another reads `usable`", async () => {
-    // NanoClaw is all-mode (whole pool: gmail + github). A rule blocks it from
-    // gmail's whole app. gmail must read `blocked`, github `usable`.
+  it("a granted connection BLOCKED by a rule reads `blocked`, another reads `usable`", async () => {
+    // NanoClaw holds grants for gmail + github. A rule blocks it from gmail's
+    // whole app. gmail must read `blocked` (attached ≠ usable), github `usable`.
     const blockGmail = simRow({
       logicalId: "block-gmail",
       name: "Block NanoClaw from gmail",
@@ -217,9 +215,37 @@ describe("the effective-access framing (the user's case)", () => {
       ],
     });
     armStubs({
-      agent: { id: "agent-1", secretMode: "all" },
-      projectRows: [blockGmail],
-      poolConnections: [
+      agent: { id: "agent-1" },
+      projectRows: [
+        blockGmail,
+        simRow({
+          id: "r-g1",
+          logicalId: "grant-gmail",
+          name: "Grant gmail",
+          identities: [identityRow({ id: "i-g1", agentId: "agent-1" })],
+          targets: [
+            targetRow({
+              id: "t-g1",
+              kind: "connection",
+              appConnectionId: "c-gmail",
+            }),
+          ],
+        }),
+        simRow({
+          id: "r-g2",
+          logicalId: "grant-gh",
+          name: "Grant github",
+          identities: [identityRow({ id: "i-g2", agentId: "agent-1" })],
+          targets: [
+            targetRow({
+              id: "t-g2",
+              kind: "connection",
+              appConnectionId: "c-gh",
+            }),
+          ],
+        }),
+      ],
+      ruleConnections: [
         { id: "c-gmail", label: "Support Gmail", provider: "gmail" },
         { id: "c-gh", label: "Repo", provider: "github" },
       ],
@@ -227,12 +253,14 @@ describe("the effective-access framing (the user's case)", () => {
 
     const result = await effectiveCredentials("agent-1", CTX);
 
-    expect(result.mode).toBe("all");
+    expect(result.mode).toBe("selective");
     const byId = new Map(result.connections.map((c) => [c.id, c]));
     expect(byId.get("c-gmail")?.status).toBe("blocked");
     expect(byId.get("c-gh")?.status).toBe("usable");
-    // All-mode credentials carry no per-item provenance (the footnote explains).
-    expect(byId.get("c-gmail")?.provenance).toEqual([]);
+    // Granted credentials carry their granting rule as provenance.
+    expect(byId.get("c-gmail")?.provenance).toMatchObject([
+      { kind: "rule", rule: { logicalId: "grant-gmail" } },
+    ]);
   });
 
   it("a connection whose tools all need approval reads `limited` (same shared rollup as the agent dialog)", async () => {
@@ -245,9 +273,24 @@ describe("the effective-access framing (the user's case)", () => {
       targets: [targetRow({ kind: "app", appProvider: "gmail" })],
     });
     armStubs({
-      agent: { id: "agent-1", secretMode: "all" },
-      projectRows: [approveGmail],
-      poolConnections: [
+      agent: { id: "agent-1" },
+      projectRows: [
+        approveGmail,
+        simRow({
+          id: "r-g1",
+          logicalId: "grant-gmail",
+          name: "Grant gmail",
+          identities: [identityRow({ id: "i-g1", agentId: "agent-1" })],
+          targets: [
+            targetRow({
+              id: "t-g1",
+              kind: "connection",
+              appConnectionId: "c-gmail",
+            }),
+          ],
+        }),
+      ],
+      ruleConnections: [
         { id: "c-gmail", label: "Support Gmail", provider: "gmail" },
       ],
     });
@@ -271,9 +314,25 @@ describe("the effective-access framing (the user's case)", () => {
       ],
     });
     armStubs({
-      agent: { id: "agent-1", secretMode: "all" },
-      projectRows: [blockHost],
-      poolSecrets: [
+      agent: { id: "agent-1" },
+      projectRows: [
+        blockHost,
+        simRow({
+          id: "r-s1",
+          logicalId: "grant-s1",
+          name: "Grant API_KEY",
+          identities: [identityRow({ id: "i-s1", agentId: "agent-1" })],
+          targets: [targetRow({ id: "t-s1", kind: "secret", secretId: "s1" })],
+        }),
+        simRow({
+          id: "r-s2",
+          logicalId: "grant-s2",
+          name: "Grant OTHER",
+          identities: [identityRow({ id: "i-s2", agentId: "agent-1" })],
+          targets: [targetRow({ id: "t-s2", kind: "secret", secretId: "s2" })],
+        }),
+      ],
+      ruleSecrets: [
         { id: "s1", name: "API_KEY", hostPattern: "api.secretco.com" },
         { id: "s2", name: "OTHER", hostPattern: "api.other.com" },
       ],
@@ -293,7 +352,7 @@ describe("the injectable set (inject_select mirror)", () => {
     // this read the DECISION set (which drops equipment) the agent's credential
     // would vanish here while the gateway still injects it.
     armStubs({
-      agent: { id: "agent-1", secretMode: "selective" },
+      agent: { id: "agent-1" },
       projectRows: [
         simRow({
           logicalId: "equip-gmail",
@@ -338,7 +397,7 @@ describe("the injectable set (inject_select mirror)", () => {
 
   it("PLANTED BAIT: an empty-identity allow rule NEVER grants a credential", async () => {
     armStubs({
-      agent: { id: "agent-1", secretMode: "selective" },
+      agent: { id: "agent-1" },
       projectRows: [
         simRow({
           logicalId: "bait",
@@ -356,7 +415,7 @@ describe("the injectable set (inject_select mirror)", () => {
 
   it("a secretScope grant EXPANDS to each project secret, tagged with the rule", async () => {
     armStubs({
-      agent: { id: "agent-1", secretMode: "selective" },
+      agent: { id: "agent-1" },
       projectRows: [
         simRow({
           logicalId: "pool",
@@ -409,7 +468,7 @@ describe("fencing + redaction", () => {
 
   it("CROSS-ORG BAIT: a rule-named foreign secret resolves to nothing", async () => {
     armStubs({
-      agent: { id: "agent-1", secretMode: "selective" },
+      agent: { id: "agent-1" },
       projectRows: [
         simRow({
           logicalId: "evil",
@@ -454,7 +513,7 @@ describe("fencing + redaction", () => {
 
   it("a non-admin sees ONE redacted marker for multiple org grants (no name, no count)", async () => {
     armStubs({
-      agent: { id: "agent-1", secretMode: "selective" },
+      agent: { id: "agent-1" },
       // c1 is named by BOTH org rules — the fenced id-in resolve returns it once
       // and the two org grants must collapse to a single redacted marker.
       ruleConnections: [{ id: "c1", label: "Gmail", provider: "gmail" }],
@@ -475,7 +534,7 @@ describe("fencing + redaction", () => {
 
   it("an org-admin sees the named org grant (the bait is non-vacuous)", async () => {
     armStubs({
-      agent: { id: "agent-1", secretMode: "selective" },
+      agent: { id: "agent-1" },
       ruleConnections: [{ id: "c1", label: "Gmail", provider: "gmail" }],
       orgRows: [orgGrant("org-a", BAIT)],
     });

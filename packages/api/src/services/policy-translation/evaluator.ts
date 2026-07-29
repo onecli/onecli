@@ -67,12 +67,27 @@ const targetMatches = (
         target.tools,
         rule.conditions,
       );
-    case "connection":
-      // An UNRESOLVED connection target (the sim-rule mapper rewrites resolvable
-      // ones to app targets carrying their tools; the gateway decodes them the
-      // same way) — its connection is deleted/foreign, so it never matches
-      // (fail-closed, mirrors the gateway's `Unresolved`).
-      return false;
+    case "connection": {
+      // A RESOLVED connection target (provider present) binds to the account
+      // that won injection: it matches only when this request's winning
+      // injected connection is exactly this one AND the provider/tools fan-out
+      // hits (the same expansion as `app`; empty tools = the whole app). No
+      // winner, or an UNRESOLVED provider-less target (deleted/foreign
+      // connection) → never matches — fail-closed for allow AND block.
+      // Mirrors evaluate.rs `Target::Connection`.
+      const provider = target.provider;
+      if (
+        provider === undefined ||
+        request.winningConnectionId === undefined ||
+        request.winningConnectionId !== target.connectionId
+      ) {
+        return false;
+      }
+      if (target.tools.length === 0) {
+        return providerHostMatches(request.host, provider);
+      }
+      return appTargetMatches(request, provider, target.tools, rule.conditions);
+    }
     case "secret":
       // A secret gates its host (step 8): permit on allow / block on block, like an
       // `app` target. Matches when the request host matches ANY resolved host

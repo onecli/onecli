@@ -341,10 +341,10 @@ describe("toSimRule (decode_row mirror, full fidelity)", () => {
     expect(rule.targets.every((t) => t.kind === "connection")).toBe(true);
   });
 
-  it("resolves a connection target to its provider as a whole-app target", () => {
-    // Mirror of the gateway's assemble.rs connection arm: the fenced map turns
-    // the connection into a whole-app target (no tools → the provider's catalog
-    // hosts, host-only).
+  it("resolves a connection target keeping its id (per-connection decisions)", () => {
+    // Mirror of the gateway's assemble.rs connection arm: the fenced map
+    // resolves the provider and the id is KEPT — the target binds to the
+    // connection that wins injection (no tools → the whole app, host-only).
     const { rule } = toSimRule(
       simRow({
         targets: [targetRow({ kind: "connection", appConnectionId: "c1" })],
@@ -353,14 +353,14 @@ describe("toSimRule (decode_row mirror, full fidelity)", () => {
       new Map([["c1", "gmail"]]),
     );
     expect(rule.targets).toEqual([
-      { kind: "app", provider: "gmail", tools: [], connectionScope: null },
+      { kind: "connection", connectionId: "c1", provider: "gmail", tools: [] },
     ]);
   });
 
-  it("carries a tool-narrowed connection target's tools onto the resolved app target", () => {
-    // The "Specific connection(s)" tools-picker shape: a connection target with
-    // tools resolves to an app target that keeps them (→ the tool fan-out, not
-    // the whole app) — the gateway's assemble.rs connection arm mirror.
+  it("carries a tool-narrowed connection target's tools onto the resolved shape", () => {
+    // The "Specific connection(s)" tools-picker shape: the resolved connection
+    // target keeps its tools (→ the tool fan-out, not the whole app) AND its
+    // id — the gateway's assemble.rs connection arm mirror.
     const { rule } = toSimRule(
       simRow({
         targets: [
@@ -376,10 +376,10 @@ describe("toSimRule (decode_row mirror, full fidelity)", () => {
     );
     expect(rule.targets).toEqual([
       {
-        kind: "app",
+        kind: "connection",
+        connectionId: "c1",
         provider: "gmail",
         tools: ["read_message", "search_messages"],
-        connectionScope: null,
       },
     ]);
   });

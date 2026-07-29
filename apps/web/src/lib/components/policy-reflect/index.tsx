@@ -10,6 +10,10 @@ export interface AppPermissionsReflectionProps {
   provider: string;
   appName: string;
   pageScope?: "project" | "organization";
+  /** The provider's connections (project + inherited). With ≥2 at project
+   * scope the panel offers a per-account selector — decisions bind to the
+   * winning connection since step 1, so accounts can genuinely differ. */
+  connections?: { id: string; label: string | null }[];
 }
 
 export interface ConnectionAgentsReflectionProps {
@@ -18,6 +22,10 @@ export interface ConnectionAgentsReflectionProps {
   appName: string;
   open: boolean;
   onOpenChange: (open: boolean) => void;
+  /** Opened straight off a successful connect: the header reads as success and
+   * frames the rows as the setup step, rather than as an audit of an
+   * established connection. Same rows, same writes. */
+  justConnected?: boolean;
 }
 
 export interface CredentialAccessReflectionProps {

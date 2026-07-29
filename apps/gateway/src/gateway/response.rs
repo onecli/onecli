@@ -214,15 +214,21 @@ pub(crate) fn access_restricted<S>(
     display_name: &str,
     project_id: Option<&str>,
 ) -> Response<ForwardBody<S>> {
-    // Point at the policy console: since step 10 credential access is granted by
-    // policy rules, so the agent surface can only SHOW effective access, not
-    // change it — sending the user there would dead-end on a read-only dialog.
-    let manage_url = scoped_url(dashboard_url(), "/policy", project_id);
+    // Point at the app's connections page: since attach-model step 6 the
+    // project policy console is gone, and each account card there carries the
+    // "Agent access" dialog — the surface that actually attaches a credential
+    // to an agent. (Before step 6 this pointed at the policy console, which
+    // was then the only place a grant could be authored.)
+    let manage_url = scoped_url(
+        dashboard_url(),
+        &format!("/connections/apps/{provider}"),
+        project_id,
+    );
     with_no_retry(json_error(
         status,
         serde_json::json!({
             "error": "access_restricted",
-            "message": format!("{display_name} credentials exist in OneCLI but this agent does not have access. Ask the user to grant it with a policy rule: {manage_url}"),
+            "message": format!("{display_name} credentials exist in OneCLI but this agent does not have access. Ask the user to attach the account to this agent: {manage_url}"),
             "provider": provider,
             "manage_url": manage_url,
         }),
@@ -402,7 +408,11 @@ pub(crate) fn blocked_by_policy<S>(
     rule_name: &str,
     project_id: Option<&str>,
 ) -> Response<ForwardBody<S>> {
-    let policy_url = scoped_url(dashboard_url(), "/policy", project_id);
+    // The agents page: a project-scope block now comes from the agent's own
+    // grants (changeable there) or from an organization guardrail (which a
+    // project member cannot change at all) — so the link informs rather than
+    // promising an edit.
+    let agents_url = scoped_url(dashboard_url(), "/agents", project_id);
     with_no_retry(json_error(
         StatusCode::FORBIDDEN,
         serde_json::json!({
@@ -410,12 +420,12 @@ pub(crate) fn blocked_by_policy<S>(
             "message": format!(
                 "Blocked by OneCLI policy rule \"{rule_name}\". \
                  {method} {path} is not allowed. \
-                 To change this, edit or disable the rule in your OneCLI dashboard."
+                 Review this agent's access in your OneCLI dashboard."
             ),
             "rule_name": rule_name,
             "method": method,
             "path": path,
-            "dashboard_url": policy_url,
+            "dashboard_url": agents_url,
         }),
     ))
 }
@@ -427,7 +437,7 @@ pub(crate) fn blocked_by_default_policy<S>(
     host: &str,
     project_id: Option<&str>,
 ) -> Response<ForwardBody<S>> {
-    let base = scoped_url(dashboard_url(), "", project_id);
+    let agents_url = scoped_url(dashboard_url(), "/agents", project_id);
     let hostname = host.split(':').next().unwrap_or(host);
     with_no_retry(json_error(
         StatusCode::FORBIDDEN,
@@ -435,13 +445,14 @@ pub(crate) fn blocked_by_default_policy<S>(
             "error": "blocked_by_default_policy",
             "message": format!(
                 "A default-deny policy blocked this request. \
-                 {method} {hostname}{path} requires an explicit allow rule. \
-                 Create one in your OneCLI dashboard."
+                 {method} {hostname}{path} is not permitted for this agent. \
+                 Attach the credential it needs, or ask an organization \
+                 administrator to allow the destination."
             ),
             "method": method,
             "host": hostname,
             "path": path,
-            "dashboard_url": format!("{base}/policy"),
+            "dashboard_url": agents_url,
         }),
     ))
 }
@@ -723,7 +734,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn access_restricted_body_points_at_the_policy_console() {
+    async fn access_restricted_body_points_at_the_attach_surface() {
         let resp: Response<TestBody> =
             access_restricted(StatusCode::UNAUTHORIZED, "resend", "Resend", None);
         use http_body_util::BodyExt;
@@ -738,9 +749,13 @@ mod tests {
             .as_str()
             .unwrap()
             .contains("does not have access"));
-        // Credential access is granted by policy rules now, so the remediation
-        // link must reach the policy console, not the read-only agent dialog.
-        assert!(json["manage_url"].as_str().unwrap().ends_with("/policy"));
+        // Since attach-model step 6 the project policy console does not exist,
+        // so the remediation link must reach a surface that can actually grant
+        // the credential: the app's connections page, whose account cards carry
+        // the "Agent access" dialog. A link ending in "/policy" would 404.
+        let manage_url = json["manage_url"].as_str().unwrap();
+        assert!(manage_url.ends_with("/connections/apps/resend"));
+        assert!(!manage_url.contains("/policy"));
     }
 
     #[tokio::test]

@@ -67,6 +67,14 @@ export type EffectiveProvenance =
   /** A level's Default Rule blocked (the deny-default terminal). */
   | { kind: "default"; scope: "organization" | "project" };
 
+/** What the ORG level alone says about a tool — the ceiling the project may
+ * tighten under but never loosen past. Derived from an org-rules-only engine
+ * run, so it stays visible even when a stricter project rule wins the combined
+ * verdict. Carries no rule ref (members may learn THAT the org constrains,
+ * never which rule — the §2.9 redaction posture). `null` = the org is silent
+ * (no matching rule, allow posture, or the enforce-deny carve passed it). */
+export type OrgCeilingVerdict = "allow" | "approval" | "block";
+
 export interface EffectiveToolResult {
   toolId: string;
   verdict: EffectiveToolVerdict;
@@ -77,6 +85,7 @@ export interface EffectiveToolResult {
   /** Attribution; null when variants disagree, or when allowed purely by an
    * allow-posture default / unmanaged pass. */
   decidedBy: EffectiveProvenance | null;
+  orgCeiling: OrgCeilingVerdict | null;
 }
 
 export interface EffectiveToolGroupResult {
@@ -106,6 +115,11 @@ export interface EffectiveAppPermissionsResult {
 export interface EffectiveAppPermissionsInput {
   provider: string;
   agentId?: string;
+  /** Reflect for ONE specific connection: synthesized requests carry it as the
+   * winning injected connection, so per-account rules bind exactly as the
+   * gateway would. Absent = the provider-level view (per-account differences
+   * fold to `mixed`). Project scope only, like `agentId`. */
+  connectionId?: string;
 }
 
 export interface EffectiveAppPermissionsCtx {
@@ -143,21 +157,20 @@ export const synthesizePath = (pattern: string): string => {
 export const synthesizeHost = (pattern: string): string =>
   pattern.replaceAll("*", TOKEN);
 
-/** Load the agent's injection POOL (host patterns + connected-connection
- * providers) — a selective agent's assigned set, or the whole fenced pool for
- * all-mode / the agent-less baseline (a selective agent draws nothing here — its
- * rules are the whole story). The queries run ONCE per request; the predicate is
- * then built via the shared `buildInjectionProbe`, which folds in the rule
- * grants. Org scope probes the org-level pool only. */
+/** Load the injection POOL (host patterns + connected-connection providers) —
+ * the whole fenced pool for the agent-less BASELINE only. An agent draws
+ * nothing here (step 7: its rules are the whole story, folded in by the shared
+ * `buildInjectionProbe`). The queries run ONCE per request. Org scope probes
+ * the org-level pool only. */
 const loadInjectionPool = async (
-  agent: { id: string; secretMode: string } | null,
+  agent: { id: string } | null,
   ctx: EffectiveAppPermissionsCtx,
 ): Promise<{ secretHostPatterns: string[]; providers: string[] }> => {
-  // A SELECTIVE agent has no baseline pool since step 10: everything it can be
-  // handed comes from its rules, which `buildInjectionProbe` folds in from the
-  // injection rule set. (Reading the frozen per-agent grant tables here would
-  // both miss every rule-made grant and keep counting revoked ones.)
-  if (agent?.secretMode === "selective") {
+  // An agent has no baseline pool: everything it can be handed comes from its
+  // rules, which `buildInjectionProbe` folds in from the injection rule set.
+  // (Reading the frozen per-agent grant tables here would both miss every
+  // rule-made grant and keep counting revoked ones.)
+  if (agent !== null) {
     return { secretHostPatterns: [], providers: [] };
   }
   const poolWhere =
@@ -192,7 +205,48 @@ interface VariantEval {
   rateLimit: number | null;
   rateLimitWindow: string | null;
   decidedBy: EffectiveProvenance | null;
+  orgCeiling: OrgCeilingVerdict | null;
 }
+
+/** Strictest-wins fold for ceilings (block > approval > allow > silent):
+ * variants or per-account runs that disagree lock at the tightest answer —
+ * over-locking a path-split tool is safe, under-locking invites the
+ * "clicked one thing, got another" save. Mirrors the engine's
+ * strictest-combine direction. */
+const CEILING_RANK: Record<OrgCeilingVerdict, number> = {
+  allow: 1,
+  approval: 2,
+  block: 3,
+};
+
+const foldCeilings = (
+  ceilings: (OrgCeilingVerdict | null)[],
+): OrgCeilingVerdict | null =>
+  ceilings.reduce<OrgCeilingVerdict | null>(
+    (a, b) =>
+      b === null ? a : a === null || CEILING_RANK[b] > CEILING_RANK[a] ? b : a,
+    null,
+  );
+
+/** The org level evaluated ALONE — the same request, org rules only, so org
+ * per-connection targets and the enforce-deny carve bind exactly as live. The
+ * corpus-gated engine core is reused unchanged; only the input set narrows. */
+const orgCeilingOf = (
+  engineRules: NewRule[],
+  request: PolicyRequest,
+): OrgCeilingVerdict | null => {
+  const outcome = evaluatePolicyOutcome(
+    engineRules.filter((r) => r.scope === "organization"),
+    request,
+  );
+  if (outcome.kind === "rule") {
+    if (outcome.rule.action === "block") return "block";
+    return outcome.rule.requireApproval ? "approval" : "allow";
+  }
+  if (outcome.kind === "denyDefault") return "block";
+  // Managed allow-posture pass or the unmanaged carve: the org imposes nothing.
+  return null;
+};
 
 const provenanceKey = (p: EffectiveProvenance | null): string => {
   if (p === null) return "none";
@@ -208,6 +262,7 @@ const evaluateVariant = (
   viewerSeesOrgRules: boolean,
 ): VariantEval => {
   const outcome = evaluatePolicyOutcome(engineRules, request);
+  const orgCeiling = orgCeilingOf(engineRules, request);
   if (outcome.kind === "rule") {
     const sim = simRules.find((s) => s.rule === outcome.rule);
     if (!sim) throw new Error("effective-tools: matched rule lost metadata");
@@ -234,6 +289,7 @@ const evaluateVariant = (
         rateLimit: null,
         rateLimitWindow: null,
         decidedBy,
+        orgCeiling,
       };
     }
     // An approval rule short-circuits before the rate arms at the gateway
@@ -246,6 +302,7 @@ const evaluateVariant = (
         rateLimit: null,
         rateLimitWindow: null,
         decidedBy,
+        orgCeiling,
       };
     }
     const rateLimit = outcome.rule.rateLimit;
@@ -256,6 +313,7 @@ const evaluateVariant = (
       rateLimit,
       rateLimitWindow,
       decidedBy,
+      orgCeiling,
     };
   }
   if (outcome.kind === "denyDefault") {
@@ -269,6 +327,7 @@ const evaluateVariant = (
       rateLimit: null,
       rateLimitWindow: null,
       decidedBy,
+      orgCeiling,
     };
   }
   // No rule matched, no default blocked: managed → allowed by the level
@@ -280,6 +339,7 @@ const evaluateVariant = (
     rateLimit: null,
     rateLimitWindow: null,
     decidedBy: null,
+    orgCeiling,
   };
 };
 
@@ -300,8 +360,13 @@ const aggregateVariants = (
       rateLimit: null,
       rateLimitWindow: null,
       decidedBy: null,
+      orgCeiling: null,
     };
   }
+  // The ceiling folds independently of the combined-verdict key: a ceiling
+  // difference between path variants must not read as `mixed`, and a `mixed`
+  // combined verdict can still carry a definite (strictest) ceiling lock.
+  const orgCeiling = foldCeilings(evals.map((e) => e.orgCeiling));
   if (evals.every((e) => e.key === first.key)) {
     const sameSource = evals.every(
       (e) => provenanceKey(e.decidedBy) === provenanceKey(first.decidedBy),
@@ -312,6 +377,7 @@ const aggregateVariants = (
       rateLimit: first.rateLimit,
       rateLimitWindow: first.rateLimitWindow,
       decidedBy: sameSource ? first.decidedBy : null,
+      orgCeiling,
     };
   }
   return {
@@ -320,7 +386,50 @@ const aggregateVariants = (
     rateLimit: null,
     rateLimitWindow: null,
     decidedBy: null,
+    orgCeiling,
   };
+};
+
+/** Fold the per-account runs of a provider-level view into one: tools that
+ * agree across every connected account keep their verdict (and provenance when
+ * uniform); any disagreement is `mixed` — the truthful provider-level answer
+ * once decisions bind per-connection. */
+const foldGroupRuns = (
+  runs: EffectiveToolGroupResult[][],
+): EffectiveToolGroupResult[] => {
+  const first = runs[0];
+  if (!first || runs.length === 1) return first ?? [];
+  const toolKey = (t: EffectiveToolResult) =>
+    `${t.verdict}|${t.rateLimit ?? ""}|${t.rateLimitWindow ?? ""}`;
+  return first.map((group, gi) => {
+    const tools = group.tools.map((tool, ti) => {
+      const across = runs.map((r) => r[gi]?.tools[ti] ?? tool);
+      // Same independence as the variant fold: per-account ceiling
+      // disagreement locks at the strictest, never flips the verdict.
+      const orgCeiling = foldCeilings(across.map((t) => t.orgCeiling));
+      if (across.every((t) => toolKey(t) === toolKey(tool))) {
+        const sameSource = across.every(
+          (t) => provenanceKey(t.decidedBy) === provenanceKey(tool.decidedBy),
+        );
+        return sameSource
+          ? { ...tool, orgCeiling }
+          : { ...tool, decidedBy: null, orgCeiling };
+      }
+      return {
+        toolId: tool.toolId,
+        verdict: "mixed" as const,
+        rateLimit: null,
+        rateLimitWindow: null,
+        decidedBy: null,
+        orgCeiling,
+      };
+    });
+    const firstVerdict = tools[0]?.verdict ?? "unmanaged";
+    const verdict = tools.every((t) => t.verdict === firstVerdict)
+      ? firstVerdict
+      : ("mixed" as const);
+    return { category: group.category, verdict, tools };
+  });
 };
 
 /** Effective ACCESS to a resource, folded from its per-tool verdicts — the one
@@ -352,6 +461,9 @@ export const computeEffectiveGroups = (input: {
   principals: PrincipalSet;
   probe: (host: string) => boolean;
   viewerSeesOrgRules: boolean;
+  /** The winning injected connection the synthesized requests carry — absent =
+   * no winner, so resolved connection targets never match (the gateway law). */
+  winningConnectionId?: string;
 }): { groups: EffectiveToolGroupResult[]; credentialAttached: boolean } => {
   const baseRequest = {
     agentId: input.agentId,
@@ -378,6 +490,7 @@ export const computeEffectiveGroups = (input: {
             method: variant.method ?? "GET",
             hasInjections: input.probe(host),
             isLlmHost: isLlmHost(host),
+            winningConnectionId: input.winningConnectionId,
           },
           input.viewerSeesOrgRules,
         ),
@@ -410,7 +523,7 @@ export const effectiveAppPermissions = async (
 
   // The agent must belong to the caller's project — a foreign id is simply not
   // found (existence is never revealed across the fence). Baseline when omitted.
-  let agent: { id: string; secretMode: string } | null = null;
+  let agent: { id: string } | null = null;
   if (input.agentId !== undefined) {
     if (ctx.scope !== "project") {
       throw new ServiceError(
@@ -420,9 +533,36 @@ export const effectiveAppPermissions = async (
     }
     agent = await db.agent.findFirst({
       where: { id: input.agentId, projectId: ctx.projectId },
-      select: { id: true, secretMode: true },
+      select: { id: true },
     });
     if (!agent) throw new ServiceError("NOT_FOUND", "Agent not found.");
+  }
+
+  // Same fence for an explicit connection: it must be THIS provider's and
+  // visible to the caller's scope (project-owned or org-shared) — a foreign id
+  // is simply not found (existence is never revealed across the fence).
+  let connection: { id: string } | null = null;
+  if (input.connectionId !== undefined) {
+    if (ctx.scope !== "project") {
+      throw new ServiceError(
+        "BAD_REQUEST",
+        "Connection-scoped reflection is project-level.",
+      );
+    }
+    connection = await db.appConnection.findFirst({
+      where: {
+        id: input.connectionId,
+        provider: input.provider,
+        OR: [
+          { projectId: ctx.projectId },
+          { organizationId: ctx.organizationId, scope: "organization" },
+        ],
+      },
+      select: { id: true },
+    });
+    if (!connection) {
+      throw new ServiceError("NOT_FOUND", "Connection not found.");
+    }
   }
 
   const orgBase = {
@@ -486,18 +626,50 @@ export const effectiveAppPermissions = async (
     connectionProviders,
   });
 
-  const { groups, credentialAttached } = computeEffectiveGroups({
-    def,
-    simRules,
-    engineRules,
-    // The baseline's empty-string agent id can never match an explicit agent
-    // identity (ids are never empty) — only any-identity rules apply, exactly
-    // "an agent with no specific grants".
-    agentId: agent?.id ?? "",
-    principals,
-    probe,
-    viewerSeesOrgRules: ctx.viewerSeesOrgRules,
-  });
+  const runCompute = (winningConnectionId?: string) =>
+    computeEffectiveGroups({
+      def,
+      simRules,
+      engineRules,
+      // The baseline's empty-string agent id can never match an explicit agent
+      // identity (ids are never empty) — only any-identity rules apply, exactly
+      // "an agent with no specific grants".
+      agentId: agent?.id ?? "",
+      principals,
+      probe,
+      viewerSeesOrgRules: ctx.viewerSeesOrgRules,
+      winningConnectionId,
+    });
+
+  // Per-connection accuracy. An explicit connection reflects with it as the
+  // winner. The provider-level view may VARY by account once resolved
+  // connection targets name this provider — evaluate once per connected
+  // account and fold disagreements to `mixed`; with no connection rules the
+  // single no-winner pass is byte-identical to the pre-per-connection view.
+  const hasConnectionRules = engineRules.some((r) =>
+    r.targets.some(
+      (t) => t.kind === "connection" && t.provider === input.provider,
+    ),
+  );
+  const providerConnectionIds = [...connectionProviders.entries()]
+    .filter(([, p]) => p === input.provider)
+    .map(([id]) => id);
+  let folded: {
+    groups: EffectiveToolGroupResult[];
+    credentialAttached: boolean;
+  };
+  if (connection) {
+    folded = runCompute(connection.id);
+  } else if (hasConnectionRules && providerConnectionIds.length > 0) {
+    const runs = providerConnectionIds.map((id) => runCompute(id));
+    folded = {
+      groups: foldGroupRuns(runs.map((r) => r.groups)),
+      credentialAttached: runs.some((r) => r.credentialAttached),
+    };
+  } else {
+    folded = runCompute();
+  }
+  const { groups, credentialAttached } = folded;
 
   // Identity-scoped rules relevant to this provider — what the BASELINE view
   // cannot show. Relevance is decidable cheaply: app targets by provider
@@ -520,6 +692,9 @@ export const effectiveAppPermissions = async (
     if (s.rule.isDefault || s.rule.identities.length === 0) return false;
     return s.rule.targets.some((t) => {
       if (t.kind === "app") return t.provider === input.provider;
+      // A RESOLVED connection target carries its provider; unresolved
+      // (provider-less) ones never match anything, so they can't vary either.
+      if (t.kind === "connection") return t.provider === input.provider;
       if (t.kind === "network")
         return concreteHosts.some((h) => hostMatches(h, t.hostPattern));
       if (t.kind === "secret")

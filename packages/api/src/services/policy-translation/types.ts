@@ -34,6 +34,13 @@ export interface PolicyRequest {
   hasInjections: boolean;
   /** Host is a known LLM provider — bypasses deny-default. */
   isLlmHost: boolean;
+  /**
+   * The app connection that won injection for this request; absent when no
+   * connection serves it (uncredentialed, secret-served, vault, or the
+   * gateway's non-serving wipe). A resolved `connection` target matches only
+   * against this id. Mirrors `PolicyRequest.winning_connection_id` (types.rs).
+   */
+  winningConnectionId?: string;
 }
 
 /**
@@ -93,16 +100,20 @@ export type RuleSource =
   | "app_permission"
   | "blocklist"
   | "default"
-  | "equipment";
+  | "equipment"
+  // Attach-model grant stacks (step 2): compiled per-(agent, credential) by the
+  // grants service; they DECIDE and inject like custom rules.
+  | "grant";
 
-// A `connection` target names a credential to inject — AND gates its provider's
-// hosts: resolvable ones are rewritten to `app` targets carrying the target's
-// own tools (empty = whole app, named = the tool fan-out) via the gateway's
-// `assemble.rs` decode / the sim-rule mapper; one that reaches the evaluator
-// unrewritten is UNRESOLVED (deleted/foreign connection) and never matches
-// (fail-closed). A `secret` target (step 8) gates its resolved host(s) the same
-// way. Both arrive on v2-authored custom rules and the equipment backfill, never
-// from the old-policy translators (network/app).
+// A `connection` target names a credential to inject — AND binds decisions to
+// that specific account: a RESOLVED one (provider present, set by the gateway's
+// `assemble.rs` decode / the sim-rule mapper) matches only when it is the
+// request's winning injected connection AND its provider/tools fan-out hits
+// (empty tools = the whole app). One that reaches the evaluator provider-less
+// is UNRESOLVED (deleted/foreign connection) and never matches (fail-closed).
+// A `secret` target (step 8) gates its resolved host(s) by host. Both arrive on
+// v2-authored custom rules and the equipment backfill, never from the
+// old-policy translators (network/app).
 export type NewTarget =
   | {
       kind: "network";
@@ -116,15 +127,21 @@ export type NewTarget =
       // Named tools → the exact per-tool (host, path, method) fan-out. EMPTY →
       // the WHOLE app: host-only against all the provider's catalog tool hosts
       // (permit on allow / block on block — the secret mirror). Authored as the
-      // dialog's "All connections" shape, or decoded from a resolved
-      // `connection` target (which carries its own tools).
+      // dialog's "All connections" shape.
       tools: string[];
       // Step 8: "all connections at a level" injection scope; null = no
       // injection. Injection-only (the evaluator ignores it — the level picks
       // the injection pool, never the host set).
       connectionScope: "organization" | "project" | null;
     }
-  | { kind: "connection"; connectionId: string; tools: string[] }
+  | {
+      kind: "connection";
+      connectionId: string;
+      /** The connection's provider — present iff RESOLVED (fenced-map hit);
+       * absent = unresolved → never matches. */
+      provider?: string;
+      tools: string[];
+    }
   // Step 8: a secret target gates its host — resolved (at the gateway, at connect)
   // to the secret's host pattern(s): a specific secret → its one host; a level
   // scope → the union of the org/project secrets' hosts. Permits on allow / blocks

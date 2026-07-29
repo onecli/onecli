@@ -19,7 +19,7 @@ import { isSessionPolicy } from "../validations/policy";
 
 type PolicyStatus = "draft" | "published";
 
-const RULE_INCLUDE = {
+export const RULE_INCLUDE = {
   identities: true,
   targets: true,
 } satisfies Prisma.PolicyRuleV2Include;
@@ -978,11 +978,14 @@ export const reorderPolicyRules = async (
   return listPolicyRules(scope, "draft");
 };
 
-// The terminal Default Rule is a per-scope singleton (isDefault). §2.4: new orgs
-// deny, projects allow. `action` is derived from the scope base (not the
-// caller's ResourceScope) so it stays consistent if both keys were ever set.
-const defaultAction = (base: PolicyScopeBase): "allow" | "block" =>
-  base.scope === "organization" ? "block" : "allow";
+// The terminal Default Rule is a per-scope singleton (isDefault). Both scopes
+// now default to ALLOW (the attach-model posture — deny-by-default is the
+// admin's opt-in flip on the org Default Rule): this covers lazy creation
+// (ensureDefault on publish/PATCH) and the virtual default, so an org whose
+// birth seed failed can never resurrect a Block nobody chose. The parameter
+// stays so every call site keeps naming its scope base.
+const defaultAction: (base: PolicyScopeBase) => "allow" | "block" = () =>
+  "allow";
 
 const findDefault = async (
   client: Prisma.TransactionClient | typeof db,
@@ -1008,7 +1011,9 @@ const findDefault = async (
 };
 
 // Create the default if absent — callers hold the per-scope lock (writes only).
-const ensureDefault = async (
+// Exported for feature-owned rule compilers (grants) that publish atomically
+// inside their own locked transaction.
+export const ensureDefault = async (
   tx: Prisma.TransactionClient,
   base: PolicyScopeBase,
 ): Promise<RuleRow> => {
@@ -1093,7 +1098,9 @@ const PUBLISHED_GENERATION_RETENTION = 10;
 // Gate-less snapshot of the given draft rows into a fresh published generation
 // (active published set = max(generation)). Callers hold the scope lock and have
 // already read `draftRules`; the plan gate — if any — is the caller's job.
-const snapshotDraftRules = async (
+// Exported for feature-owned rule compilers (grants) that publish atomically
+// inside their own locked transaction.
+export const snapshotDraftRules = async (
   tx: Prisma.TransactionClient,
   base: PolicyScopeBase,
   draftRules: RuleRow[],

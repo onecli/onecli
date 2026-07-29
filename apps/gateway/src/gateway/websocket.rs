@@ -138,6 +138,7 @@ pub(super) async fn handle_websocket(
         None,
         has_injections,
         policy::is_llm_host(host),
+        rules.winning_connection_id.as_deref(),
         cache,
         &rules.policy_rules_v2,
     )

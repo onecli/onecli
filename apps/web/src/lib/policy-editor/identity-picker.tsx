@@ -3,12 +3,12 @@
 import type { ProjectionIdentity } from "@/lib/api";
 
 /**
- * The OSS identity-picker seam (step 9.5). OSS rules target a specific agent
- * or all agents (the plain Select in the rule form); directory identities
- * (users, user-groups) are a OneCLI Cloud capability. The org
- * picker can never render here (OSS mounts no org scope), and the hint under
- * the agent select says where the capability lives. The EE editions alias this
- * file to `@/ee/policy-editor/identity-picker`.
+ * The OSS identity-picker seam (step 9.5). Directory identities (users,
+ * user-groups) are a OneCLI Cloud capability, and since attach-model step 6
+ * the only policy console left is the ORG one — which OSS does not mount at
+ * all. So this stub can never render; it exists to keep the shared rule form
+ * compiling in an OSS build. The EE editions alias this file to
+ * `@/ee/policy-editor/identity-picker`.
  */
 
 export interface OrgIdentityPickerProps {
@@ -20,10 +20,3 @@ export interface OrgIdentityPickerProps {
 
 export const OrgIdentityPicker: (props: OrgIdentityPickerProps) => null = () =>
   null;
-
-/** The locked capability hint under the project agent select. */
-export const IdentityLockHint = () => (
-  <p className="text-muted-foreground text-xs">
-    Group and people identities are available on OneCLI Cloud.
-  </p>
-);

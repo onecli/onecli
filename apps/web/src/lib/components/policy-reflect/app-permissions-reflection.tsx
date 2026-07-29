@@ -19,13 +19,20 @@ import {
   AccordionItem,
   AccordionTrigger,
 } from "@onecli/ui/components/accordion";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@onecli/ui/components/select";
 import { cn } from "@onecli/ui/lib/utils";
 import type {
   EffectiveProvenance,
   EffectiveToolResult,
   EffectiveToolVerdict,
 } from "@/lib/api/policy-visibility";
-import { withOrgPrefix, withProjectPrefix } from "@/lib/navigation";
+import { withOrgPrefix } from "@/lib/navigation";
 import { useAgents } from "@/hooks/use-agents";
 import { useAppPermissionDefinitions } from "@/hooks/use-app-permissions";
 import { useEffectiveAppPermissions } from "@/lib/api/policy-visibility";
@@ -42,6 +49,8 @@ const GROUP_LABELS: Record<string, string> = {
   read: "Read-only",
   write: "Write / delete",
 };
+
+const ALL_ACCOUNTS = "_all";
 
 const VERDICT_META = {
   allow: {
@@ -108,10 +117,22 @@ export const AppPermissionsReflection = ({
   provider,
   appName,
   pageScope = "project",
+  connections,
 }: AppPermissionsReflectionProps) => {
   const pathname = usePathname();
   const agentScoping = pageScope === "project";
   const [agentId, setAgentId] = useState("");
+  // "" = fold across every account; a specific id reflects that account only
+  // (decisions bind to the winning connection since step 1).
+  const [connectionId, setConnectionId] = useState("");
+  const accountScoping =
+    pageScope === "project" && (connections?.length ?? 0) >= 2;
+  // A selection that no longer exists (account disconnected while the panel
+  // is mounted) falls back to the all-accounts fold instead of a 404.
+  const selectedConnection =
+    accountScoping && connectionId
+      ? (connections ?? []).find((c) => c.id === connectionId)
+      : undefined;
   const { data: agents = [] } = useAgents(agentScoping);
   const { data: definitions = [] } = useAppPermissionDefinitions();
   const definition = definitions.find((d) => d.provider === provider);
@@ -119,12 +140,19 @@ export const AppPermissionsReflection = ({
     data: effective,
     isPending,
     isError,
-  } = useEffectiveAppPermissions(provider, agentId || null, pageScope);
+  } = useEffectiveAppPermissions(
+    provider,
+    agentId || null,
+    pageScope,
+    true,
+    selectedConnection?.id ?? null,
+  );
 
+  // Step 6: only the ORG console survives, so only an org-scope panel offers
+  // the escape hatch. At project scope these verdicts are changed on the agent
+  // page, which every row already links to.
   const policyHref =
-    pageScope === "organization"
-      ? withOrgPrefix(pathname, "/policy")
-      : withProjectPrefix(pathname, "/policy");
+    pageScope === "organization" ? withOrgPrefix(pathname, "/policy") : null;
 
   const selectedAgent = agents.find((a) => a.id === agentId);
   const verdictByTool = new Map(
@@ -141,15 +169,40 @@ export const AppPermissionsReflection = ({
       <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-2">
         <div className="min-w-0">
           <h3 className="text-sm font-medium">Permissions</h3>
-          <p className="text-xs text-muted-foreground mt-0.5">
+          <p className="text-muted-foreground mt-0.5 text-xs">
             {selectedAgent
-              ? `Effective access for ${selectedAgent.name}, decided by Policy rules.`
-              : agentScoping
-                ? "Effective baseline for every agent, decided by Policy rules."
-                : "Effective organization guardrails, decided by Policy rules."}
+              ? `Effective access for ${selectedAgent.name}${selectedConnection ? ` on ${selectedConnection.label ?? "this account"}` : ""}, decided by Policy rules.`
+              : selectedConnection
+                ? `Effective access on ${selectedConnection.label ?? "this account"}, decided by Policy rules.`
+                : agentScoping
+                  ? "Effective baseline for every agent, decided by Policy rules."
+                  : "Effective organization guardrails, decided by Policy rules."}
           </p>
         </div>
         <div className="flex shrink-0 items-center gap-2">
+          {accountScoping && (
+            <Select
+              value={connectionId || ALL_ACCOUNTS}
+              onValueChange={(v) =>
+                setConnectionId(v === ALL_ACCOUNTS ? "" : v)
+              }
+            >
+              <SelectTrigger
+                className="bg-card h-7 w-auto gap-1.5 px-2.5 text-xs"
+                aria-label="Show effective permissions for account"
+              >
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value={ALL_ACCOUNTS}>All accounts</SelectItem>
+                {(connections ?? []).map((conn) => (
+                  <SelectItem key={conn.id} value={conn.id}>
+                    {conn.label ?? "Unnamed account"}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          )}
           {agentScoping && agents.length > 0 && (
             <AgentScopeSelect
               agents={agents.map((a) => ({ id: a.id, name: a.name }))}
@@ -159,13 +212,15 @@ export const AppPermissionsReflection = ({
               ariaLabel="Show effective permissions for agent"
             />
           )}
-          <Link
-            href={policyHref}
-            className="inline-flex items-center gap-1 text-xs font-medium text-foreground hover:underline"
-          >
-            Manage in Policy
-            <ChevronRight className="size-3 opacity-60" aria-hidden="true" />
-          </Link>
+          {policyHref && (
+            <Link
+              href={policyHref}
+              className="text-foreground inline-flex items-center gap-1 text-xs font-medium hover:underline"
+            >
+              Manage in Policy
+              <ChevronRight className="size-3 opacity-60" aria-hidden="true" />
+            </Link>
+          )}
         </div>
       </div>
 

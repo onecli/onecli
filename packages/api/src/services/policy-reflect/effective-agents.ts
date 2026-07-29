@@ -157,12 +157,9 @@ export const effectiveAgents = async (
 
   const agents = await db.agent.findMany({
     where: { projectId: ctx.projectId },
-    select: { id: true, name: true, secretMode: true },
+    select: { id: true, name: true },
     orderBy: [{ isDefault: "desc" }, { createdAt: "desc" }],
   });
-  // Only a selective agent consults the injection set — skip those two reads
-  // entirely when every agent in the project is all-mode.
-  const anySelective = agents.some((a) => a.secretMode === "selective");
 
   const [
     orgRows,
@@ -172,8 +169,6 @@ export const effectiveAgents = async (
     secretHosts,
     connectionProviders,
     principals,
-    poolSecrets,
-    poolConnections,
   ] = await Promise.all([
     loadRulesForSimulation(
       { scope: "organization", organizationId: ctx.organizationId },
@@ -184,42 +179,19 @@ export const effectiveAgents = async (
       "published",
     ),
     // Injection rules keep `equipment` (the decision rules above drop it) —
-    // they are what a selective agent's access is actually made of.
-    anySelective
-      ? loadInjectionRules(
-          { scope: "organization", organizationId: ctx.organizationId },
-          "published",
-        )
-      : [],
-    anySelective
-      ? loadInjectionRules(
-          { scope: "project", projectId: ctx.projectId },
-          "published",
-        )
-      : [],
+    // they are what an agent's access is actually made of (step 7: every
+    // agent is rule-selected; there is no all-mode pool arm left).
+    loadInjectionRules(
+      { scope: "organization", organizationId: ctx.organizationId },
+      "published",
+    ),
+    loadInjectionRules(
+      { scope: "project", projectId: ctx.projectId },
+      "published",
+    ),
     loadSecretHosts(ctx.organizationId, ctx.projectId),
     loadConnectionProviders(ctx.organizationId, ctx.projectId),
     resolvePrincipalSet(ctx.projectId, ctx.organizationId),
-    // The non-selective (pool) injection probe inputs, loaded once.
-    db.secret.findMany({
-      where: {
-        OR: [
-          { projectId: ctx.projectId },
-          { organizationId: ctx.organizationId, scope: "organization" },
-        ],
-      },
-      select: { hostPattern: true },
-    }),
-    db.appConnection.findMany({
-      where: {
-        OR: [
-          { projectId: ctx.projectId },
-          { organizationId: ctx.organizationId, scope: "organization" },
-        ],
-        status: "connected",
-      },
-      select: { provider: true },
-    }),
   ]);
 
   const allRows = [...orgRows, ...projectRows];
@@ -231,8 +203,6 @@ export const effectiveAgents = async (
   const totalTools = def
     ? def.groups.reduce((n, g) => n + g.tools.length, 0)
     : 0;
-
-  const poolProviders = [...new Set(poolConnections.map((c) => c.provider))];
 
   // The injection-relevant allow rules, prefiltered to THIS connection: a
   // connection target naming it, or an app+connectionScope pool grant covering
@@ -253,45 +223,38 @@ export const effectiveAgents = async (
     .map(({ row }) => row);
 
   const entries: EffectiveAgentEntry[] = agents.map((agent) => {
-    let credential: AgentCredentialStatus;
-    if (agent.secretMode !== "selective") {
-      credential = { status: "full" };
-    } else {
-      // Every selective attachment is a rule now — the old per-agent grants
-      // became `equipment` rules, which the injection load carries. There is no
-      // separate "assigned" source left to distinguish.
-      const refs: RuleRef[] = grantingRules
-        .filter((row) =>
-          injectionIdentityMatches(row.identities, agent.id, principals),
-        )
-        .map((row) => ({
-          scope: row.scope === "organization" ? "organization" : "project",
-          logicalId: row.logicalId,
-          name: row.name,
-        }));
-      credential =
-        refs.length > 0
-          ? {
-              status: "viaRule",
-              provenance: toProvenance(refs, ctx.viewerSeesOrgRules),
-            }
-          : { status: "none" };
-    }
+    // Every attachment is a rule (step 7: there is no all-mode "full pool"
+    // status left) — the old per-agent grants became `equipment` rules, which
+    // the injection load carries. There is no separate "assigned" source left
+    // to distinguish.
+    const refs: RuleRef[] = grantingRules
+      .filter((row) =>
+        injectionIdentityMatches(row.identities, agent.id, principals),
+      )
+      .map((row) => ({
+        scope: row.scope === "organization" ? "organization" : "project",
+        logicalId: row.logicalId,
+        name: row.name,
+      }));
+    const credential: AgentCredentialStatus =
+      refs.length > 0
+        ? {
+            status: "viaRule",
+            provenance: toProvenance(refs, ctx.viewerSeesOrgRules),
+          }
+        : { status: "none" };
 
     let decisions: EffectiveAgentEntry["decisions"] = null;
     let toolStatus: ToolRollupStatus = "unknown";
     if (def) {
-      // The deny-default carve's injectable predicate. A selective agent draws
-      // NOTHING from the pool — its rules are the whole story (the injection set
-      // below carries them) — matching this agent's credential axis so the
-      // decisions rollup can't contradict "Attached · via rule".
-      const selective = agent.secretMode === "selective";
+      // The deny-default carve's injectable predicate. An agent draws NOTHING
+      // from the pool — its rules are the whole story (the injection set below
+      // carries them) — matching the credential axis so the decisions rollup
+      // can't contradict "Attached · via rule".
       const probe = buildInjectionProbe({
         agent,
-        poolSecretHostPatterns: selective
-          ? []
-          : poolSecrets.map((s) => s.hostPattern),
-        poolProviders: selective ? [] : poolProviders,
+        poolSecretHostPatterns: [],
+        poolProviders: [],
         rules: injectRows,
         principals,
         secretHosts,
@@ -305,6 +268,10 @@ export const effectiveAgents = async (
         principals,
         probe,
         viewerSeesOrgRules: ctx.viewerSeesOrgRules,
+        // This endpoint is scoped to ONE connection — reflect it as the
+        // winner, so per-account rules bind exactly as the gateway would and
+        // the N-of-M decisions are per-connection-accurate.
+        winningConnectionId: connectionId,
       });
       const tools = groups.flatMap((g) => g.tools);
       // The rollup status matches the credential dialog EXACTLY (the shared

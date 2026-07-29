@@ -552,7 +552,7 @@ export const appRoutes = () => {
           { projectId: state.projectId },
           provider,
         );
-        const justCreated = existing.some(
+        const justCreated = existing.find(
           (conn) =>
             conn.status === "connected" && conn.connectedAt >= recentCutoff,
         );
@@ -561,6 +561,10 @@ export const appRoutes = () => {
           if (state.agentName) {
             successParams.set("agent_name", state.agentName as string);
           }
+          // Same attach-step params as the primary success path — this IS the
+          // success redirect for the connection the first callback created.
+          successParams.set("connected", justCreated.id);
+          successParams.set("projectId", state.projectId);
           return c.redirect(
             `${appOrigin}/app-connect/${provider}?${successParams}`,
           );
@@ -608,6 +612,11 @@ export const appRoutes = () => {
 
       await getConnectionHooks().beforeConnect(stateOrgId, appDef);
 
+      // The freshly-CREATED connection id rides the success redirect so the
+      // popup can offer the post-connect attach step. Reconnects deliberately
+      // don't — the existing connection keeps whatever grants it has.
+      let createdId: string | null = null;
+
       if (reconnectId) {
         await reconnectConnection(
           { projectId: state.projectId },
@@ -621,7 +630,7 @@ export const appRoutes = () => {
         );
       } else {
         await getConnectionHooks().beforeCreate(stateOrgId);
-        await createConnection(
+        const fresh = await createConnection(
           { projectId: state.projectId },
           provider,
           credentials,
@@ -631,6 +640,7 @@ export const appRoutes = () => {
             appConfigId: resolved.appConfigId,
           },
         );
+        createdId = fresh.id;
       }
 
       if (appDef.blocklist?.length) {
@@ -646,6 +656,13 @@ export const appRoutes = () => {
       const successParams = new URLSearchParams({ status: "success" });
       if (state.agentName) {
         successParams.set("agent_name", state.agentName as string);
+      }
+      // `connected` (NOT `connectionId` — that param means "re-authenticate
+      // this connection" on the popup page) + the project, so the popup can
+      // offer grants for the brand-new connection.
+      if (createdId) {
+        successParams.set("connected", createdId);
+        successParams.set("projectId", state.projectId);
       }
 
       deleteCookie(c, "oauth_state", {
@@ -723,6 +740,10 @@ export const appRoutes = () => {
     const projectConnectionOpts = { ...connectionOpts, appConfigId: undefined };
 
     let connection: { id: string };
+    // The freshly-CREATED connection (never a reconnect/duplicate): the popup's
+    // post-connect attach step only offers grants for brand-new connections —
+    // an existing one already has whatever grants it has.
+    let created: { id: string; label: string | null } | null = null;
 
     if (body?.connectionId) {
       connection = await reconnectConnection(
@@ -753,12 +774,14 @@ export const appRoutes = () => {
         );
       } else {
         await getConnectionHooks().beforeCreate(auth.organizationId);
-        connection = await createConnection(
+        const fresh = await createConnection(
           { projectId },
           provider,
           credentials,
           projectConnectionOpts,
         );
+        connection = fresh;
+        created = { id: fresh.id, label: fresh.label };
       }
     }
 
@@ -789,7 +812,11 @@ export const appRoutes = () => {
 
     invalidateGatewayCache(c.req.raw);
 
-    return c.json({ success: true });
+    // `connection` is present only for a brand-new connection — the popup's
+    // attach step keys on it (reconnects keep their existing grants).
+    return c.json(
+      created ? { success: true, connection: created } : { success: true },
+    );
   });
 
   // ── GET /apps/:provider/permission-definition ── tool catalog ──────────

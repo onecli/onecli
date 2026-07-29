@@ -34,7 +34,7 @@ export const DeleteRuleDialog = ({
   onConfirm,
   loading,
 }: DeleteRuleDialogProps) => {
-  const isGrant = rule?.source === "equipment";
+  const isGrant = rule?.source === "equipment" || rule?.source === "grant";
   return (
     <AlertDialog open={rule !== null} onOpenChange={onOpenChange}>
       <AlertDialogContent>
@@ -46,8 +46,8 @@ export const DeleteRuleDialog = ({
             {!rule
               ? ""
               : isGrant
-                ? `The agents named by “${rule.name}” will stop receiving this credential — requests that need it will fail. It takes effect when you publish.`
-                : `“${rule.name}” will be removed from the draft. It takes effect when you publish.`}
+                ? `The agents named by “${rule.name}” will stop receiving this credential — requests that need it will fail.`
+                : `“${rule.name}” will be removed.`}
           </AlertDialogDescription>
         </AlertDialogHeader>
         <AlertDialogFooter>

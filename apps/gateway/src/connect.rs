@@ -24,33 +24,32 @@ const CACHE_TTL_SECS: u64 = 60;
 pub(crate) const CONNECTION_ID_HEADER: &str = "x-onecli-connection-id";
 /// Header name for listing available connections (response).
 pub(crate) const CONNECTIONS_HEADER: &str = "x-onecli-connections";
-/// Agent secret mode that restricts access to explicitly assigned credentials.
-pub(crate) const SECRET_MODE_SELECTIVE: &str = "selective";
 
-/// Which credential pool a connecting agent draws from. `secret_mode` is the
-/// all-vs-rules SWITCH; the v2 selection only says WHICH credentials a already
-/// -selective agent gets.
+/// Which ORG/PROJECT credential pool a connecting agent draws from. Since
+/// attach-model step 7 the v2 selection IS the whole story for those tiers:
+/// every agent is rule-selected, and the retired `agents.secret_mode` column
+/// is never read (it drops in step 8). The PARTNER secret tier rides OUTSIDE
+/// this classification: partner secrets are org infrastructure a rule cannot
+/// even name (`assertTargetsValid` forbids it), so `resolve_secret_injections`
+/// injects them unconditionally — a grant-less agent must still keep
+/// partner-provided (budget-metered) keys.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum InjectionPool {
-    /// All mode: the whole org+project(+partner) fenced pool. Policy rules gate
-    /// the REQUEST here — they never NARROW the pool, or an all-mode agent would
-    /// lose its partner / budget-metered / other host-matched credentials.
-    All,
-    /// Selective with a rule-driven selection: the fenced pool narrowed to what
-    /// the agent's v2 allow rules name.
+    /// A rule-driven selection: the fenced pool narrowed to what the agent's
+    /// v2 allow rules name.
     RuleSelected,
-    /// Selective with no selection: nothing is injected. Since step 10 the old
-    /// per-agent grant tables are unread, so this must NEVER fall through to
-    /// `All` — that would hand a deliberately restricted agent every credential.
+    /// No selection: nothing from the org/project pool is injected (the
+    /// grant-independent partner tier still is). Since step 10 the old
+    /// per-agent grant tables are unread, and since step 7 there is no
+    /// all-mode fallback — an empty selection injects NOTHING from these
+    /// tiers, or a deliberately restricted agent would silently receive every
+    /// org/project credential.
     Empty,
 }
 
-/// The pool for the SECRET side: rule-selected when the agent is selective and
-/// its rules name secret ids and/or whole levels.
-pub(crate) fn secret_pool(secret_mode: &str, selection: &db::InjectSelection) -> InjectionPool {
-    if secret_mode != SECRET_MODE_SELECTIVE {
-        return InjectionPool::All;
-    }
+/// The pool for the SECRET side: rule-selected when the agent's rules name
+/// secret ids and/or whole levels.
+pub(crate) fn secret_pool(selection: &db::InjectSelection) -> InjectionPool {
     if selection.secret_ids.is_empty() && selection.secret_scopes.is_empty() {
         return InjectionPool::Empty;
     }
@@ -59,14 +58,23 @@ pub(crate) fn secret_pool(secret_mode: &str, selection: &db::InjectSelection) ->
 
 /// The pool for the APP-CONNECTION side: the symmetric rule, over named
 /// connection ids and/or (provider, level) scopes.
-pub(crate) fn connection_pool(secret_mode: &str, selection: &db::InjectSelection) -> InjectionPool {
-    if secret_mode != SECRET_MODE_SELECTIVE {
-        return InjectionPool::All;
-    }
+pub(crate) fn connection_pool(selection: &db::InjectSelection) -> InjectionPool {
     if selection.connections.is_empty() && selection.app_scopes.is_empty() {
         return InjectionPool::Empty;
     }
     InjectionPool::RuleSelected
+}
+
+/// Map an org's billing `subscription_status` to the plan label the gateway
+/// enforces integration-call quotas against. Only an explicitly free (or unset)
+/// status maps to `"free"`; every other named plan passes through unchanged, so
+/// a new paid tier (e.g. "scale") is never silently throttled as the free tier.
+/// The quota itself lives in the EE hooks; this only decides which label to pass.
+pub(crate) fn plan_for_subscription_status(status: &str) -> &str {
+    match status {
+        "" | "free" => "free",
+        other => other,
+    }
 }
 
 // ── Data types ──────────────────────────────────────────────────────────
@@ -136,6 +144,13 @@ pub(crate) enum AppConnectionResult {
         /// scan) so request-level enforcement applies the correct policy even
         /// when an agent has several same-provider connections.
         session_policy: Option<serde_json::Value>,
+        /// Id of the connection that won injection for this request; `None`
+        /// when no connection serves this path per the catalog (the
+        /// non-serving wipe). Follows `session_policy`'s attribution law
+        /// exactly — including its catch-all blind spot: rules that
+        /// self-select by path at apply time can inject a credential whose id
+        /// was wiped here. `Target::Connection` decisions bind to this id.
+        connection_id: Option<String>,
     },
     /// No app connections available for this provider.
     NoConnections,
@@ -279,19 +294,14 @@ impl PolicyEngine {
         // scoped to a different agent.
         let has_credentials = !injection_rules.is_empty() || !app_connections.is_empty();
 
-        // Check if the project has credentials (secrets or app connections) for this
-        // host that the agent can't access (selective mode).
-        let access_restricted = injection_rules.is_empty()
-            && agent.secret_mode == SECRET_MODE_SELECTIVE
-            && self.has_available_credentials(agent, hostname).await;
+        // Check if the project has credentials (secrets or app connections) for
+        // this host that the agent's grants don't attach — surfaced as an
+        // `access_restricted` error pointing at the attach surface instead of a
+        // generic credential-not-found.
+        let access_restricted =
+            injection_rules.is_empty() && self.has_available_credentials(agent, hostname).await;
 
-        let plan = match agent.subscription_status.as_str() {
-            "pro" => "pro",
-            "team" => "team",
-            "enterprise" => "enterprise",
-            _ => "free",
-        }
-        .to_string();
+        let plan = plan_for_subscription_status(&agent.subscription_status).to_string();
 
         // Cloud-only: resolve claim-mode state once here (cached with the rest
         // of ConnectResponse for 60s). No-op in OSS (returns None).
@@ -334,54 +344,45 @@ impl PolicyEngine {
         hostname: &str,
         selection: &db::InjectSelection,
     ) -> Result<(Vec<InjectionRule>, Vec<crate::budget::BudgetBinding>), ConnectError> {
-        let secrets = match secret_pool(&agent.secret_mode, selection) {
+        // The PARTNER tier is GRANT-INDEPENDENT (attach-model steps 5+7): a
+        // rule cannot name a partner secret (`assertTargetsValid`), so grants
+        // can never carry that tier — it is injected in every arm, at LOWEST
+        // precedence: later same-header injections override earlier ones, so
+        // org/project values always win. `inherited_secret_rows` is a no-op
+        // stub outside the cloud edition (returns an empty Vec).
+        let secrets = match secret_pool(selection) {
             InjectionPool::RuleSelected => {
-                // Step 8 (rule-driven): a SELECTIVE agent's allow rules name specific
-                // secrets (`secret_ids`) and/or "all secrets at a level"
-                // (`secret_scopes`). Gated on `secret_mode` — `secret_mode` stays the
-                // all-vs-selective SWITCH, so an ALL-mode agent always takes the full
-                // merge below and a rule can never NARROW it (dropping its partner /
-                // budget-metered / other host-matched secrets); the v2 selection only
-                // picks WHICH secrets for an already-selective agent.
-                // Fetch the ORG/PROJECT-fenced candidate pool and NARROW to the named
-                // ids OR the named levels (a secret's own `scope` — "organization" /
-                // "project"). The org-fence is on the FETCH, so a rule naming another
-                // org's secret can't pull it (the id simply isn't in the pool). Partner
-                // is excluded (a rule can only name a project/org secret or level, per
-                // `assertTargetsValid`), matching legacy selective mode (also no partner).
-                let (org_result, project_result) = tokio::join!(
-                    db::find_secrets_by_org(&self.pool, &agent.organization_id),
-                    db::find_secrets_by_project(&self.pool, &agent.project_id),
-                );
-                let mut merged = org_result.map_err(db_err)?;
-                merged.extend(project_result.map_err(db_err)?);
-                merged.retain(|s| {
-                    selection.secret_ids.contains(&s.id)
-                        || selection.secret_scopes.contains(&s.scope)
-                });
-                merged
-            }
-            // A SELECTIVE agent with no rule-driven selection has no granted
-            // secrets → inject nothing. WHICH secrets a selective agent gets now
-            // comes solely from its v2 allow rules (incl. the frozen equipment
-            // rules that mirror its old grants) — there is no `agent_secrets`
-            // fallback since step 10.
-            InjectionPool::Empty => Vec::new(),
-            InjectionPool::All => {
-                // All mode precedence (lowest → highest): partner, then org, then
-                // project. Later same-header injections override earlier ones, so
-                // partner is the lowest-priority fallback. All three tiers resolve
-                // concurrently (this only runs on a cache miss);
-                // `inherited_secret_rows` is a no-op in OSS (returns an empty Vec).
+                // Rule-driven: the agent's allow rules name specific secrets
+                // (`secret_ids`) and/or "all secrets at a level"
+                // (`secret_scopes`). Fetch the ORG/PROJECT-fenced candidate
+                // pool and NARROW to the named ids OR the named levels (a
+                // secret's own `scope` — "organization" / "project"). The
+                // org-fence is on the FETCH, so a rule naming another org's
+                // secret can't pull it (the id simply isn't in the pool). The
+                // selection never filters the partner tier (above).
                 let (partner_rows, org_result, project_result) = tokio::join!(
                     crate::partner::inherited_secret_rows(&self.pool, &agent.organization_id),
                     db::find_secrets_by_org(&self.pool, &agent.organization_id),
                     db::find_secrets_by_project(&self.pool, &agent.project_id),
                 );
+                let mut selected = org_result.map_err(db_err)?;
+                selected.extend(project_result.map_err(db_err)?);
+                selected.retain(|s| {
+                    selection.secret_ids.contains(&s.id)
+                        || selection.secret_scopes.contains(&s.scope)
+                });
                 let mut merged = partner_rows;
-                merged.extend(org_result.map_err(db_err)?);
-                merged.extend(project_result.map_err(db_err)?);
+                merged.extend(selected);
                 merged
+            }
+            // An agent with no rule-driven selection has no granted org/project
+            // secrets → only the grant-independent partner tier is injected.
+            // WHICH org/project secrets an agent gets comes solely from its v2
+            // allow rules (incl. the frozen equipment rules that mirror its old
+            // grants) — there is no `agent_secrets` fallback since step 10, and
+            // no all-mode fallback since step 7.
+            InjectionPool::Empty => {
+                crate::partner::inherited_secret_rows(&self.pool, &agent.organization_id).await
             }
         };
 
@@ -535,17 +536,16 @@ impl PolicyEngine {
         }
         debug!(host = %hostname, providers = ?providers, "app_connections: matched providers");
 
-        let connections = match connection_pool(&agent.secret_mode, selection) {
+        let connections = match connection_pool(selection) {
             InjectionPool::RuleSelected => {
-                // Step 8 (rule-driven): a SELECTIVE agent's allow rules name SPECIFIC
-                // connections (`kind=connection`) and/or ALL connections of a provider
-                // at a level (`kind=app` + `connection_scope`). Gated on `secret_mode`
-                // — an ALL-mode agent always takes the full merge below, so a rule can
-                // never narrow it. Fetch the ORG/PROJECT-fenced pool and keep the
-                // connections a rule selects: a named id, or a (provider, scope) match.
-                // Attach the per-connection sessionPolicy only for the SPECIFIC ones
-                // (the "all-at-level" ones are unscoped, like all-mode). Org-fence on
-                // the FETCH → a foreign id/scope can't pull a foreign connection.
+                // Rule-driven: the agent's allow rules name SPECIFIC connections
+                // (`kind=connection`) and/or ALL connections of a provider at a
+                // level (`kind=app` + `connection_scope`). Fetch the
+                // ORG/PROJECT-fenced pool and keep the connections a rule
+                // selects: a named id, or a (provider, scope) match. Attach the
+                // per-connection sessionPolicy only for the SPECIFIC ones (the
+                // "all-at-level" ones are unscoped). Org-fence on the FETCH → a
+                // foreign id/scope can't pull a foreign connection.
                 let (org_result, project_result) = tokio::join!(
                     db::find_app_connections_by_org(&self.pool, &agent.organization_id),
                     db::find_app_connections_by_project(&self.pool, &agent.project_id),
@@ -566,20 +566,12 @@ impl PolicyEngine {
                 }
                 merged
             }
-            // A SELECTIVE agent with no rule-driven selection reaches no app
-            // connections → none injected. As with secrets, WHICH connections a
-            // selective agent gets comes solely from its v2 allow rules — there is
-            // no `agent_app_connections` fallback since step 10.
+            // An agent with no rule-driven selection reaches no app connections
+            // → none injected. As with secrets, WHICH connections an agent gets
+            // comes solely from its v2 allow rules — there is no
+            // `agent_app_connections` fallback since step 10, and no all-mode
+            // fallback since step 7.
             InjectionPool::Empty => Vec::new(),
-            InjectionPool::All => {
-                let (org_result, project_result) = tokio::join!(
-                    db::find_app_connections_by_org(&self.pool, &agent.organization_id),
-                    db::find_app_connections_by_project(&self.pool, &agent.project_id),
-                );
-                let mut merged = org_result.map_err(db_err)?;
-                merged.extend(project_result.map_err(db_err)?);
-                merged
-            }
         };
 
         let matching: Vec<db::AppConnectionRow> = connections
@@ -652,6 +644,7 @@ impl PolicyEngine {
                 finalizer,
                 body_transform,
                 session_policy,
+                connection_id,
                 ..
             } = &mut result
             {
@@ -661,6 +654,7 @@ impl PolicyEngine {
                     *finalizer = None;
                     *body_transform = None;
                     *session_policy = None;
+                    *connection_id = None;
                 }
             }
             return Ok(result);
@@ -707,6 +701,7 @@ impl PolicyEngine {
             let mut resolved_body_transform: Option<apps::BodyTransform> = None;
             let mut resolved_provider: Option<String> = None;
             let mut resolved_session_policy: Option<serde_json::Value> = None;
+            let mut resolved_connection_id: Option<String> = None;
             for conn in app_connections {
                 if let AppConnectionResult::Rules {
                     rules: r,
@@ -717,6 +712,7 @@ impl PolicyEngine {
                     body_transform,
                     provider,
                     session_policy,
+                    connection_id,
                 } = self
                     .resolve_connection_injections(
                         conn,
@@ -748,6 +744,7 @@ impl PolicyEngine {
                             resolved_body_transform = body_transform;
                         }
                         resolved_session_policy = session_policy;
+                        resolved_connection_id = connection_id;
                     }
                     if resolved_provider.is_none() {
                         resolved_provider = Some(provider);
@@ -768,6 +765,7 @@ impl PolicyEngine {
                 body_transform: resolved_body_transform,
                 provider: resolved_provider.unwrap_or_default(),
                 session_policy: resolved_session_policy,
+                connection_id: resolved_connection_id,
             });
         }
 
@@ -813,6 +811,7 @@ impl PolicyEngine {
                 body_transform: apps::body_transform_for_provider(&conn.provider),
                 provider: conn.provider.clone(),
                 session_policy: conn.session_policy.clone(),
+                connection_id: Some(conn.id.clone()),
             });
         }
 
@@ -975,6 +974,7 @@ impl PolicyEngine {
             body_transform: apps::body_transform_for_provider(&conn.provider),
             provider: conn.provider.clone(),
             session_policy: conn.session_policy.clone(),
+            connection_id: Some(conn.id.clone()),
         })
     }
 
@@ -1563,12 +1563,15 @@ mod tests {
         crate::cache::create_store().await.unwrap()
     }
 
-    // ── Injection pool (step 10) ────────────────────────────────────────
-    // Since the old per-agent grant tables became unread, `secret_mode` +
-    // the v2 selection are the WHOLE story. The load-bearing property is that
-    // a selective agent with nothing selected injects NOTHING — if that ever
-    // fell back to the all-mode merge, a deliberately restricted agent would
-    // silently receive every credential in the project and org.
+    // ── Injection pool (attach-model step 7) ────────────────────────────
+    // The v2 selection is the WHOLE story for the ORG/PROJECT tiers: the old
+    // per-agent grant tables became unread in step 10 and the all-mode merge
+    // died in step 7, so there is nothing left to fall back to. The
+    // load-bearing property is that an agent with nothing selected draws
+    // NOTHING from those tiers — anything else would hand a deliberately
+    // restricted agent every credential in the project and org. (The partner
+    // secret tier is grant-independent and rides outside this classification —
+    // see `resolve_secret_injections`.)
 
     fn selection_with_secret(id: &str) -> db::InjectSelection {
         db::InjectSelection {
@@ -1585,72 +1588,61 @@ mod tests {
     }
 
     #[test]
-    fn selective_agent_without_a_selection_injects_nothing() {
+    fn agent_without_a_selection_injects_nothing() {
         let empty = db::InjectSelection::default();
         assert_eq!(
-            secret_pool(SECRET_MODE_SELECTIVE, &empty),
+            secret_pool(&empty),
             InjectionPool::Empty,
-            "a selective agent with no secret selection must never fall back to the all-mode pool"
+            "no secret selection injects nothing from the org/project tiers (only the partner tier rides outside)"
         );
         assert_eq!(
-            connection_pool(SECRET_MODE_SELECTIVE, &empty),
+            connection_pool(&empty),
             InjectionPool::Empty,
-            "a selective agent with no connection selection must never fall back to the all-mode pool"
+            "no connection selection injects no app connections"
         );
     }
 
+    // ── Plan resolution (subscription_status to quota plan label) ────────
+    // The free-tier integration-call quota keys off this label, so a real paid
+    // tier must never collapse to "free". Regression guard for the `scale` plan
+    // being throttled as free, and for any future tier.
     #[test]
-    fn selective_agent_with_a_selection_draws_the_narrowed_pool() {
+    fn plan_resolution_only_treats_free_as_free() {
+        assert_eq!(plan_for_subscription_status("free"), "free");
+        assert_eq!(plan_for_subscription_status(""), "free");
+        assert_eq!(plan_for_subscription_status("pro"), "pro");
+        assert_eq!(plan_for_subscription_status("team"), "team");
+        assert_eq!(plan_for_subscription_status("enterprise"), "enterprise");
+        assert_eq!(plan_for_subscription_status("scale"), "scale");
+        // A future paid tier must pass through, never fall back to "free".
+        assert_eq!(plan_for_subscription_status("ultra"), "ultra");
+    }
+
+    #[test]
+    fn agent_with_a_selection_draws_the_narrowed_pool() {
         assert_eq!(
-            secret_pool(SECRET_MODE_SELECTIVE, &selection_with_secret("sec-1")),
+            secret_pool(&selection_with_secret("sec-1")),
             InjectionPool::RuleSelected
         );
         assert_eq!(
-            secret_pool(
-                SECRET_MODE_SELECTIVE,
-                &db::InjectSelection {
-                    secret_scopes: vec!["project".to_string()],
-                    ..Default::default()
-                }
-            ),
+            secret_pool(&db::InjectSelection {
+                secret_scopes: vec!["project".to_string()],
+                ..Default::default()
+            }),
             InjectionPool::RuleSelected,
             "a whole-level secret target selects too, not just named ids"
         );
         assert_eq!(
-            connection_pool(SECRET_MODE_SELECTIVE, &selection_with_connection("conn-1")),
+            connection_pool(&selection_with_connection("conn-1")),
             InjectionPool::RuleSelected
         );
         assert_eq!(
-            connection_pool(
-                SECRET_MODE_SELECTIVE,
-                &db::InjectSelection {
-                    app_scopes: vec![("github".to_string(), "project".to_string())],
-                    ..Default::default()
-                }
-            ),
+            connection_pool(&db::InjectSelection {
+                app_scopes: vec![("github".to_string(), "project".to_string())],
+                ..Default::default()
+            }),
             InjectionPool::RuleSelected,
             "a provider+level app target selects too"
-        );
-    }
-
-    #[test]
-    fn all_mode_is_never_narrowed_by_rules() {
-        // The inverse guard: rules gate the REQUEST for an all-mode agent, they
-        // must not shrink its pool (it would lose partner / budget-metered /
-        // other host-matched credentials the selection never names).
-        for selection in [
-            db::InjectSelection::default(),
-            selection_with_secret("sec-1"),
-            selection_with_connection("conn-1"),
-        ] {
-            assert_eq!(secret_pool("all", &selection), InjectionPool::All);
-            assert_eq!(connection_pool("all", &selection), InjectionPool::All);
-        }
-        // An unknown/legacy mode string is treated as all-mode, matching the
-        // column's default — never as "selective with nothing".
-        assert_eq!(
-            secret_pool("", &db::InjectSelection::default()),
-            InjectionPool::All
         );
     }
 
@@ -2011,6 +2003,7 @@ mod tests {
                 finalizer,
                 body_transform,
                 session_policy,
+                connection_id,
                 ..
             } => {
                 assert_eq!(rules.len(), 1);
@@ -2019,6 +2012,7 @@ mod tests {
                 assert!(finalizer.is_none());
                 assert!(body_transform.is_none());
                 assert!(session_policy.is_none());
+                assert!(connection_id.is_none(), "winner id follows the wipe law");
             }
             _ => panic!("expected Rules"),
         }
@@ -2041,11 +2035,13 @@ mod tests {
                 rewrite_host,
                 connection_label,
                 session_policy,
+                connection_id,
                 ..
             } => {
                 assert_eq!(rewrite_host.as_deref(), Some("rw.example.com"));
                 assert_eq!(connection_label.as_deref(), Some("Cal"));
                 assert!(session_policy.is_some());
+                assert_eq!(connection_id.as_deref(), Some("c1"));
             }
             _ => panic!("expected Rules"),
         }
@@ -2084,10 +2080,16 @@ mod tests {
             AppConnectionResult::Rules {
                 rewrite_host,
                 connection_label,
+                connection_id,
                 ..
             } => {
                 assert_eq!(rewrite_host.as_deref(), Some("rw.example.com"));
                 assert_eq!(connection_label.as_deref(), Some("Cal"));
+                assert_eq!(
+                    connection_id.as_deref(),
+                    Some("c1"),
+                    "an explicit override names the winner even off-path"
+                );
             }
             _ => panic!("expected Rules"),
         }
@@ -2139,12 +2141,14 @@ mod tests {
                 rewrite_host,
                 connection_label,
                 session_policy,
+                connection_id,
                 ..
             } => {
                 assert_eq!(rules.len(), 2);
                 assert!(rewrite_host.is_none());
                 assert!(connection_label.is_none());
                 assert!(session_policy.is_none());
+                assert!(connection_id.is_none(), "no serving provider → no winner");
             }
             _ => panic!("expected Rules"),
         }

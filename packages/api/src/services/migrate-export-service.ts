@@ -75,7 +75,7 @@ export const exportToCloud = async (
         projectId,
         status: "draft",
         isDefault: false,
-        source: { notIn: ["blocklist", "equipment"] },
+        source: { notIn: ["blocklist", "equipment", "grant"] },
       },
     }),
   ]);

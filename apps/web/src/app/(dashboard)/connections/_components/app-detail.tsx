@@ -1,15 +1,18 @@
 "use client";
 
-import { useCallback, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
-import { usePathname } from "next/navigation";
+import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { useQueryClient } from "@tanstack/react-query";
 import { ArrowLeft, Loader2, Settings2 } from "lucide-react";
 import { Button } from "@onecli/ui/components/button";
 import { Skeleton } from "@onecli/ui/components/skeleton";
 import type { Connection, PageScope } from "@/lib/api";
 import { queryKeys } from "@/lib/api/keys";
-import { useAppMessages } from "@/hooks/use-app-connected";
+import {
+  useAppMessages,
+  type AppConnectedEvent,
+} from "@/hooks/use-app-connected";
 import { useConnections } from "@/hooks/use-connections";
 import { useAppConfigStatus } from "@/hooks/use-app-config";
 import {
@@ -24,8 +27,12 @@ import { AppConfigForm, type AppConfigFormHandle } from "./app-config-form";
 import { ConfigureCredentialsDialog } from "./configure-credentials-dialog";
 import { PermissionsList } from "./permissions-list";
 // The read-only app-permissions reflection, which reads the v2 policy engine.
-// Shared since step 10 — every edition renders it.
-import { AppPermissionsReflection } from "@/lib/components/policy-reflect";
+// Shared since step 10 — every edition renders it. The connection dialog next
+// to it is editable, and doubles as this page's post-connect setup step.
+import {
+  AppPermissionsReflection,
+  ConnectionAgentsReflection,
+} from "@/lib/components/policy-reflect";
 import { ConnectionAccountCard } from "./connection-account-card";
 import { InheritedConnectionCard } from "./inherited-connection-card";
 import { AppBlocklist } from "./app-blocklist";
@@ -72,6 +79,8 @@ export const AppDetail = ({
   backPath,
 }: AppDetailProps) => {
   const pathname = usePathname();
+  const router = useRouter();
+  const searchParams = useSearchParams();
   const queryClient = useQueryClient();
   const [configDialogOpen, setConfigDialogOpen] = useState(false);
   const configFormRef = useRef<AppConfigFormHandle>(null);
@@ -93,12 +102,60 @@ export const AppDetail = ({
     };
   }, [allConnections, app.id, pageScope]);
 
-  const handleConnected = useCallback(() => {
-    queryClient.invalidateQueries({ queryKey: queryKeys.connections.all() });
-    queryClient.invalidateQueries({ queryKey: queryKeys.counts.all() });
-  }, [queryClient]);
+  // A brand-new account is useless until an agent is attached to it, and this
+  // is the moment the user is thinking about it — so a successful connect opens
+  // the account's agent-access dialog right here, where there is room for it.
+  // The `open` flag outlives the id so closing keeps the exit animation.
+  const [justConnectedId, setJustConnectedId] = useState<string | null>(null);
+  const [justConnectedOpen, setJustConnectedOpen] = useState(false);
+  // Agents are project-scoped, so this only means anything on a project page.
+  const canAttachAgents = pageScope === "project";
+  const openJustConnected = useCallback((connectionId: string) => {
+    setJustConnectedId(connectionId);
+    setJustConnectedOpen(true);
+  }, []);
+
+  const handleConnected = useCallback(
+    ({ provider, connectionId }: AppConnectedEvent) => {
+      queryClient.invalidateQueries({ queryKey: queryKeys.connections.all() });
+      queryClient.invalidateQueries({ queryKey: queryKeys.counts.all() });
+      // Only a CREATED connection carries an id — a reconnect refreshed
+      // credentials an agent already had, and needs no setup step. The
+      // provider has to match too: a popup keeps posting to its opener across
+      // client-side navigation, so one opened from another app's page can land
+      // here and would otherwise title someone else's account "<this app>
+      // connected".
+      if (connectionId && provider === app.id && canAttachAgents)
+        openJustConnected(connectionId);
+    },
+    [queryClient, app.id, canAttachAgents, openJustConnected],
+  );
 
   useAppMessages({ onConnected: handleConnected });
+
+  // `?connected=<id>` — the same handoff for the other way in: connecting from
+  // the Apps grid navigates here on success, so this page mounts long after the
+  // popup's message was posted and can only learn of it from the URL. One-shot
+  // per mount, then stripped so a refresh doesn't reopen the dialog.
+  const connectedParam = searchParams.get("connected");
+  const consumedConnectedParam = useRef(false);
+  useEffect(() => {
+    if (consumedConnectedParam.current) return;
+    if (!connectedParam || !canAttachAgents) return;
+    consumedConnectedParam.current = true;
+    openJustConnected(connectedParam);
+    const params = new URLSearchParams(searchParams.toString());
+    params.delete("connected");
+    const qs = params.toString();
+    router.replace(qs ? `${pathname}?${qs}` : pathname, { scroll: false });
+  }, [
+    connectedParam,
+    canAttachAgents,
+    openJustConnected,
+    searchParams,
+    router,
+    pathname,
+  ]);
 
   // The RSC page seeds the very first render; the query converges after.
   const { data: configStatus } = useAppConfigStatus(
@@ -276,6 +333,9 @@ export const AppDetail = ({
               provider={app.id}
               appName={app.name}
               pageScope={pageScope}
+              connections={[...connections, ...inheritedConnections].map(
+                (c) => ({ id: c.id, label: c.label }),
+              )}
             />
           ) : showOAuthScopesList ? (
             <PermissionsList
@@ -329,6 +389,27 @@ export const AppDetail = ({
             setConfigDialogOpen(false);
             openConnectPopup(undefined, popupOpts);
           }}
+        />
+      )}
+
+      {/* Rendered here rather than from the account card: the card for a
+          just-created account doesn't exist until the connections query
+          refetches, and this dialog's own queries are keyed on the id, so it
+          works immediately. Re-keyed per connection so a second connect can't
+          inherit the first one's row state. */}
+      {justConnectedId && (
+        <ConnectionAgentsReflection
+          key={justConnectedId}
+          connectionId={justConnectedId}
+          // Only the neutral header renders this; the success header titles on
+          // the app, precisely so it doesn't wait on the refetch.
+          connectionLabel={
+            connections.find((c) => c.id === justConnectedId)?.label ?? ""
+          }
+          appName={app.name}
+          justConnected
+          open={justConnectedOpen}
+          onOpenChange={setJustConnectedOpen}
         />
       )}
     </div>

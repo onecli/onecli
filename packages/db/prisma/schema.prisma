@@ -293,10 +293,16 @@ model Agent {
   identifier  String // user-provided machine-readable ID, unique per project
   accessToken String   @unique @map("access_token") // "aoc_..." prefix, used for gateway auth
   isDefault   Boolean  @default(false) @map("is_default")
-  /// LIVE. The all-vs-rules injection switch, read by the gateway on every
-  /// request: "all" injects the whole fenced credential pool, "selective"
-  /// injects only what policy rules grant. Not deprecated — see the plan's
-  /// eliminate-all-mode follow-up, which retires it properly.
+  /// RETIRED (attach-model step 7): the gateway no longer reads this column —
+  /// injection is driven solely by grant rules, so a lingering "all" value
+  /// drives nothing. It exists only as the idempotency predicate of
+  /// `services/policy-grant-conversion/` (its README is the removal
+  /// checklist): the converter materializes an "all" agent's pool as grants
+  /// and flips it to "selective" on every web boot, and `migrate-import` — the
+  /// one writer of "all" left, preserving an older export's value — relies on
+  /// that predicate to convert right after its transaction commits. Every
+  /// creation site writes "selective" explicitly (the column default below is
+  /// dead weight). The column drops in step 8, deleting the converter with it.
   secretMode  String   @default("all") @map("secret_mode") // "all" or "selective"
   createdAt   DateTime @default(now()) @map("created_at")
   updatedAt   DateTime @updatedAt @map("updated_at")

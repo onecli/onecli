@@ -350,7 +350,10 @@ export type PolicyRuleSource =
   | "default"
   // Injection-only rules materialized from the equipment model (step 8); the
   // editor hides them (managed via the agent access UI).
-  | "equipment";
+  | "equipment"
+  // Attach-model grant stacks (step 2): compiled by the grants API; rendered
+  // as labeled, revocable derived rows until the project rules table retires.
+  | "grant";
 
 export interface PolicyRuleV2 {
   id: string;
@@ -388,4 +391,66 @@ export interface LastPublish {
   ruleCount: number;
   appliedAt: string;
   appliedBy: { name: string | null; email: string } | null;
+}
+
+// ── Attach-model grants (plans/project-attach-model.md, step 2) ─────────────
+// Hand-mirrored from packages/api/src/services/grants-service.ts and
+// grants-summary-service.ts.
+
+export interface AgentGrantConnection {
+  connectionId: string;
+  provider: string;
+  label: string | null;
+  scope: "project" | "organization";
+  access: "full" | "custom";
+  allow: string[];
+  ask: string[];
+}
+
+export interface AgentGrantSecret {
+  secretId: string;
+  name: string;
+  type: string;
+  scope: "project" | "organization";
+}
+
+export interface AgentGrants {
+  agentId: string;
+  /** "all" = the agent still injects the whole fenced pool (pre-flip). */
+  mode: "all" | "grants";
+  connections: AgentGrantConnection[];
+  secrets: AgentGrantSecret[];
+}
+
+export interface ConnectionGrants {
+  connectionId: string;
+  agents: {
+    agentId: string;
+    access: "full" | "custom";
+    allow: string[];
+    ask: string[];
+  }[];
+}
+
+export type ConnectionGrantInput =
+  | { access: "full" }
+  | { access: "custom"; allow: string[]; ask: string[] };
+
+export type GrantsSummaryEntry =
+  | {
+      kind: "app";
+      provider: string;
+      connectionId: string;
+      label: string | null;
+    }
+  | { kind: "secret" | "llm"; id: string; name: string };
+
+export interface AgentGrantsSummary {
+  mode: "all" | "grants";
+  entries: GrantsSummaryEntry[];
+  total: number;
+}
+
+export interface AgentWithGrantsSummary extends Agent {
+  grantsSummary: AgentGrantsSummary;
 }

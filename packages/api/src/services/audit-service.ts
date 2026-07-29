@@ -29,6 +29,9 @@ export const AUDIT_SERVICES = {
   // (The legacy `rule` service retired with the old model at step 10; historical
   // audit rows carrying it still render — the log table maps the raw string.)
   POLICY: "policy",
+  // The attach-model grants surface (plans/project-attach-model.md, step 2):
+  // agent⇄credential grants compiled into source:"grant" policy rules.
+  GRANT: "grant",
   API_KEY: "api-key",
   APP_CONNECTION: "app-connection",
   APP_CONFIG: "app-config",

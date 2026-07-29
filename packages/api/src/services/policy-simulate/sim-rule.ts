@@ -95,24 +95,23 @@ const decodeTarget = (
       };
     case "connection": {
       // Mirror of the gateway's `assemble.rs` connection arm: resolve the
-      // connection to its provider (fenced map) → an app target carrying the
-      // target's own tools (empty → the provider's whole app, host-only; named →
-      // the tool fan-out). A missing/deleted/foreign id stays an inert connection
-      // target (unresolved — fail-closed).
-      const provider = target.appConnectionId
-        ? connectionProviders.get(target.appConnectionId)
-        : undefined;
-      if (provider !== undefined) {
+      // connection via the fenced map and KEEP its id — decisions bind to the
+      // connection that wins injection (tools narrow the endpoints; empty =
+      // the provider's whole app). A missing/deleted/foreign id stays a
+      // provider-less connection target (unresolved — fail-closed).
+      const id = target.appConnectionId;
+      const provider = id ? connectionProviders.get(id) : undefined;
+      if (id && provider !== undefined) {
         return {
-          kind: "app",
+          kind: "connection",
+          connectionId: id,
           provider,
           tools: target.appTools,
-          connectionScope: null,
         };
       }
       return {
         kind: "connection",
-        connectionId: target.appConnectionId ?? "",
+        connectionId: id ?? "",
         tools: [],
       };
     }
@@ -176,7 +175,8 @@ export const toSimRule = (
       row.source === "app_permission" ||
       row.source === "blocklist" ||
       row.source === "default" ||
-      row.source === "equipment"
+      row.source === "equipment" ||
+      row.source === "grant"
         ? row.source
         : "custom",
     name: row.name,

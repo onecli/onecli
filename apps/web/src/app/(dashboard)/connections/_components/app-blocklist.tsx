@@ -2,8 +2,6 @@
 
 import { Globe, Loader2, ShieldBan, X } from "lucide-react";
 import { Badge } from "@onecli/ui/components/badge";
-import Link from "next/link";
-import { usePathname } from "next/navigation";
 import { toast } from "sonner";
 import {
   Accordion,
@@ -19,7 +17,6 @@ import {
   useToggleBlocklistRule,
   useActivateBlocklistHost,
 } from "@/hooks/use-app-blocklist";
-import { withProjectPrefix } from "@/lib/navigation";
 import type { BlocklistHostState } from "@/lib/api/app-blocklist";
 
 interface AppBlocklistProps {
@@ -112,7 +109,6 @@ export const AppBlocklist = ({
     pageScope,
     isConnected,
   );
-  const pathname = usePathname();
   const toggleMutation = useToggleBlocklistRule(provider, pageScope);
   const activateMutation = useActivateBlocklistHost(provider, pageScope);
 
@@ -189,15 +185,11 @@ export const AppBlocklist = ({
                     />
                   ))}
                 </div>
+                {/* Step 6: blocking an arbitrary host is no longer a project
+                    capability — it is an organization guardrail (and absent in
+                    OSS, which has no organization level). */}
                 <p className="text-muted-foreground text-xs">
-                  To block any other host, add a rule on the{" "}
-                  <Link
-                    href={withProjectPrefix(pathname, "/policy")}
-                    className="underline underline-offset-2 hover:text-foreground"
-                  >
-                    Policy
-                  </Link>{" "}
-                  page.
+                  Blocking any other host is an organization-level guardrail.
                 </p>
               </>
             )}

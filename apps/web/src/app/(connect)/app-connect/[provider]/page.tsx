@@ -9,6 +9,9 @@ interface Props {
     status?: string;
     message?: string;
     connectionId?: string;
+    /** The freshly-created connection (the callback's success redirect) —
+     * distinct from `connectionId`, which means "re-authenticate". */
+    connected?: string;
     agent_name?: string;
     projectId?: string;
     orgId?: string;
@@ -17,8 +20,15 @@ interface Props {
 
 export default async function ConnectPage({ params, searchParams }: Props) {
   const { provider } = await params;
-  const { status, message, connectionId, agent_name, projectId, orgId } =
-    await searchParams;
+  const {
+    status,
+    message,
+    connectionId,
+    connected,
+    agent_name,
+    projectId,
+    orgId,
+  } = await searchParams;
 
   const app = getApp(provider);
   if (!app || !app.available) notFound();
@@ -71,6 +81,7 @@ export default async function ConnectPage({ params, searchParams }: Props) {
       status={status === "success" || status === "error" ? status : undefined}
       errorMessage={message}
       connectionId={connectionId}
+      connectedId={connected}
       agentName={agent_name}
       projectId={projectId}
       orgId={orgId}
