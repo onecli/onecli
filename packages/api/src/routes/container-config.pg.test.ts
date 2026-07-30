@@ -7,15 +7,15 @@ import { proofDatabaseUrl } from "../testing/pg-proof.js";
  *
  * Two properties that only a database can settle, and neither had a guard:
  *
- *  1. The FENCE. A selective agent's grants name secret ids; the gateway resolves
- *     them by retaining from the org/project-fenced pool, so a rule naming a
+ *  1. The FENCE. An agent's grants name secret ids; the gateway resolves them
+ *     by retaining from the org/project-fenced pool, so a rule naming a
  *     foreign secret yields nothing. Fencing the rules does not fence their
  *     target ids — this asserts the query itself is fenced.
- *  2. PRECEDENCE. The gateway merges its all-mode pool partner → org → project
- *     with later injections overriding, so the project secret is the one actually
+ *  2. PRECEDENCE. The gateway merges partner → org → project with later
+ *     injections overriding, so the project secret is the one actually
  *     injected. An unordered `findFirst` over an OR returns whatever Postgres
- *     reaches first, which is how the container ends up with an org secret's auth
- *     mode while the gateway injects the project's.
+ *     reaches first, which is how the container ends up with an org secret's
+ *     auth mode while the gateway injects the project's.
  *
  * Env-gated like the other proof suites; see app-blocklist-service.pg.test.ts.
  */
@@ -78,11 +78,11 @@ const grant = async (logicalId: string, secretId: string) => {
   });
 };
 
-const resolve = async (secretMode: string) =>
-  route.injectableSecretWhere({ id: AGENT, secretMode }, PROJECT, ORG);
+const resolve = async () =>
+  route.injectableSecretWhere({ id: AGENT }, PROJECT, ORG);
 
-const matchedIds = async (secretMode: string): Promise<string[]> => {
-  const where = await resolve(secretMode);
+const matchedIds = async (): Promise<string[]> => {
+  const where = await resolve();
   const rows = await db.secret.findMany({ where, select: { id: true } });
   return rows.map((r) => r.id).sort();
 };
@@ -123,7 +123,7 @@ beforeAll(async () => {
       name: AGENT,
       identifier: AGENT,
       accessToken: `aoc_${P}`,
-      secretMode: "all",
+      secretMode: "selective",
     },
   });
 });
@@ -149,38 +149,17 @@ beforeEach(async () => {
 describe.skipIf(!PROOF_URL)(
   "injectableSecretWhere over real PostgreSQL",
   () => {
-    it("all-mode takes the org+project pool and nothing outside it", async () => {
-      await db.secret.createMany({
-        data: [
-          secret(`${P}mine`),
-          secret(`${P}org`, {
-            projectId: null,
-            organizationId: ORG,
-            scope: "organization",
-          }),
-          // Another org's secret, and another project's — neither is reachable.
-          secret(`${P}foreign-org`, {
-            projectId: null,
-            organizationId: OTHER_ORG,
-            scope: "organization",
-          }),
-          secret(`${P}foreign-proj`, { projectId: OTHER_PROJECT }),
-        ],
-      });
-      await expect(matchedIds("all")).resolves.toEqual([`${P}mine`, `${P}org`]);
-    });
-
-    it("a selective agent gets ONLY what its rules grant", async () => {
+    it("an agent gets ONLY what its rules grant", async () => {
       await db.secret.createMany({
         data: [secret(`${P}granted`), secret(`${P}ungranted`)],
       });
       await grant(`${P}g1`, `${P}granted`);
-      await expect(matchedIds("selective")).resolves.toEqual([`${P}granted`]);
+      await expect(matchedIds()).resolves.toEqual([`${P}granted`]);
     });
 
-    it("a selective agent with NO grant gets nothing — never the pool", async () => {
+    it("an agent with NO grant gets nothing — never the pool", async () => {
       await db.secret.create({ data: secret(`${P}mine`) });
-      await expect(matchedIds("selective")).resolves.toEqual([]);
+      await expect(matchedIds()).resolves.toEqual([]);
     });
 
     it("CROSS-ORG BAIT: a grant naming a foreign secret resolves to nothing", async () => {
@@ -199,7 +178,7 @@ describe.skipIf(!PROOF_URL)(
       });
       await grant(`${P}g-bait-1`, `${P}foreign-org`);
       await grant(`${P}g-bait-2`, `${P}foreign-proj`);
-      await expect(matchedIds("selective")).resolves.toEqual([]);
+      await expect(matchedIds()).resolves.toEqual([]);
     });
 
     it("a whole-level grant matches by the secret's own scope, still fenced", async () => {
@@ -234,14 +213,15 @@ describe.skipIf(!PROOF_URL)(
       });
       // The other project's secret is also scope="project" — only the fence keeps
       // it out.
-      await expect(matchedIds("selective")).resolves.toEqual([`${P}mine`]);
+      await expect(matchedIds()).resolves.toEqual([`${P}mine`]);
     });
 
     it("PRECEDENCE: the project secret wins over an org one of the same type", async () => {
       // Insert the org row FIRST so an unordered findFirst would return it. The
-      // gateway injects the project secret (its all-mode merge puts project last
-      // and later overrides earlier), so the container must read the project's
-      // auth mode or it is configured for the wrong credential.
+      // gateway's merge puts project last with later overriding earlier, so the
+      // container must read the project's auth mode or it is configured for the
+      // wrong credential. Both rows are granted — precedence is only visible
+      // when more than one secret is reachable at all.
       await db.secret.create({
         data: secret(`${P}org-oauth`, {
           projectId: null,
@@ -253,11 +233,13 @@ describe.skipIf(!PROOF_URL)(
       await db.secret.create({
         data: secret(`${P}proj-apikey`, { authMode: "api-key" }),
       });
+      await grant(`${P}g-org`, `${P}org-oauth`);
+      await grant(`${P}g-proj`, `${P}proj-apikey`);
 
       // Goes through the route's own resolver — asserting an ordering the test
       // supplies itself would pass with the ordering removed from the code.
       const picked = await route.findInjectableSecretOfType(
-        await resolve("all"),
+        await resolve(),
         "anthropic",
         { id: true, metadata: true },
       );

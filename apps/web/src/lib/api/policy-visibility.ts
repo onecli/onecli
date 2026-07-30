@@ -35,12 +35,17 @@ export type EffectiveProvenance =
   | { kind: "rule"; scope: "organization" | "project"; rule: ProvenanceRuleRef }
   | { kind: "default"; scope: "organization" | "project" };
 
+/** What the org level ALONE says about the tool — the ceiling the project can
+ * tighten under but never loosen past. Null = the org is silent. */
+export type OrgCeilingVerdict = "allow" | "approval" | "block";
+
 export interface EffectiveToolResult {
   toolId: string;
   verdict: EffectiveToolVerdict;
   rateLimit: number | null;
   rateLimitWindow: string | null;
   decidedBy: EffectiveProvenance | null;
+  orgCeiling: OrgCeilingVerdict | null;
 }
 
 export interface EffectiveToolGroupResult {
@@ -70,10 +75,13 @@ export interface EffectiveAppPermissionsResult {
  */
 export const effectiveAppPermissions = (
   provider: string,
-  opts: { agentId?: string; scope?: PageScope } = {},
+  opts: { agentId?: string; connectionId?: string; scope?: PageScope } = {},
 ) => {
   const params = new URLSearchParams({ provider });
   if (opts.agentId) params.set("agentId", opts.agentId);
+  // Project scope only: reflect one specific account as the winning injected
+  // connection (per-account rules bind exactly as the gateway would).
+  if (opts.connectionId) params.set("connectionId", opts.connectionId);
   const base =
     (opts.scope ?? "project") === "organization"
       ? "/v1/org/policy"
@@ -91,6 +99,8 @@ export const useEffectiveAppPermissions = (
   agentId: string | null,
   scope: PageScope = "project",
   enabled = true,
+  /** Reflect one specific account (project scope); null = the provider view. */
+  connectionId: string | null = null,
 ) =>
   useQuery({
     queryKey: [
@@ -99,10 +109,12 @@ export const useEffectiveAppPermissions = (
       scope,
       provider,
       agentId ?? "baseline",
+      connectionId ?? "provider-level",
     ],
     queryFn: () =>
       effectiveAppPermissions(provider, {
         agentId: agentId ?? undefined,
+        connectionId: connectionId ?? undefined,
         scope,
       }),
     enabled: enabled && provider.length > 0,

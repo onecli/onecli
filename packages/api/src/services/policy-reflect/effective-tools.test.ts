@@ -146,7 +146,7 @@ const emptyProviders = new Map<string, string>();
 
 // ── stub arming ──────────────────────────────────────────────────────────────
 
-const AGENT = { id: "agent-1", secretMode: "all", projectId: "p1" };
+const AGENT = { id: "agent-1", projectId: "p1" };
 
 /** Arm the concurrent reads: rules by scope; the two secret reads told apart by
  * their select shape (loadSecretHosts selects id/scope, the probe doesn't); the
@@ -154,7 +154,7 @@ const AGENT = { id: "agent-1", secretMode: "all", projectId: "p1" };
 const armStubs = (opts: {
   orgRows?: SimRuleRow[];
   projectRows?: SimRuleRow[];
-  agent?: { id: string; secretMode: string } | null;
+  agent?: { id: string } | null;
   probeConnections?: { provider: string }[];
   providerRows?: { id: string; provider: string }[];
 }) => {
@@ -163,11 +163,22 @@ const armStubs = (opts: {
     "agent.findFirst",
     opts.agent !== undefined ? opts.agent : AGENT,
   );
+  // Honour `source: { not: … }` so the DECISION load (equipment dropped) and
+  // the INJECTION load (equipment kept) genuinely differ — without this a test
+  // passes whichever of the two the code happens to read.
   state.responders.set("policyRuleV2.findMany", (args) => {
-    const where = (args as { where: { scope: string } }).where;
-    return where.scope === "organization"
-      ? (opts.orgRows ?? [])
-      : (opts.projectRows ?? []);
+    const where = (
+      args as { where: { scope: string; source?: { not?: string } } }
+    ).where;
+    const rows =
+      where.scope === "organization"
+        ? (opts.orgRows ?? [])
+        : (opts.projectRows ?? []);
+    const excluded = where.source?.not;
+    return rows.filter(
+      (r: { source?: string }) =>
+        excluded === undefined || (r.source ?? "custom") !== excluded,
+    );
   });
   state.responders.set("secret.findMany", (args) => {
     const select = (args as { select: Record<string, boolean> }).select;
@@ -278,9 +289,26 @@ describe("the agreement law (per-tool verdicts ≡ the evaluator)", () => {
         }),
       ],
     });
+    // Step 7: the injection basis comes from the agent's grants, never a pool.
+    const gmailGrant = simRow({
+      id: "r-grant",
+      logicalId: "grant-gmail",
+      name: "Grant gmail",
+      action: "allow",
+      priority: 1000,
+      identities: [identityRow({ id: "i-grant", agentId: "agent-1" })],
+      targets: [
+        targetRow({
+          id: "t-grant",
+          kind: "app",
+          appProvider: "gmail",
+          appConnectionScope: "project",
+        }),
+      ],
+    });
     armStubs({
       orgRows: [orgAllow],
-      projectRows: [projectBlock],
+      projectRows: [projectBlock, gmailGrant],
       probeConnections: [{ provider: "gmail" }],
     });
 
@@ -289,9 +317,13 @@ describe("the agreement law (per-tool verdicts ≡ the evaluator)", () => {
       PROJECT_CTX,
     );
 
-    const expected = expectedVerdicts("gmail", [orgAllow, projectBlock], {
-      hasInjections: true, // the connected-gmail probe attaches every gmail host
-    });
+    const expected = expectedVerdicts(
+      "gmail",
+      [orgAllow, projectBlock, gmailGrant],
+      {
+        hasInjections: true, // the grant attaches every gmail host
+      },
+    );
     const actual = new Map(
       result.groups.flatMap((g) => g.tools.map((t) => [t.toolId, t.verdict])),
     );
@@ -380,7 +412,29 @@ describe("derived injection basis", () => {
       priority: 10_000,
     });
     armStubs({
-      projectRows: [projectDefault],
+      projectRows: [
+        projectDefault,
+        // Step 7: attachment comes from a grant, not a pool. EQUIPMENT-source:
+        // it feeds the injection basis but is dropped from decisions — the
+        // injected-yet-undecided shape this carve exists for (an ordinary
+        // attach's allow would first-match past the default).
+        simRow({
+          id: "r-grant",
+          logicalId: "grant-gmail",
+          name: "Grant gmail",
+          action: "allow",
+          source: "equipment",
+          identities: [identityRow({ id: "i-grant", agentId: "agent-1" })],
+          targets: [
+            targetRow({
+              id: "t-grant",
+              kind: "app",
+              appProvider: "gmail",
+              appConnectionScope: "project",
+            }),
+          ],
+        }),
+      ],
       probeConnections: [{ provider: "gmail" }],
     });
 
@@ -429,7 +483,7 @@ describe("derived injection basis", () => {
       priority: 10_000,
     });
     armStubs({
-      agent: { id: "agent-1", secretMode: "selective" },
+      agent: { id: "agent-1" },
       projectRows: [grant, projectDefault],
       // c1 resolves to gmail via loadConnectionProviders; it is NOT in the
       // assigned pool (probeConnections empty) — only the RULE grants it.
@@ -460,7 +514,7 @@ describe("buildInjectionProbe (the inject_select mirror)", () => {
   const PRINCIPALS = { userIds: [], groupIds: [] };
 
   const probeFor = (
-    agent: { id: string; secretMode: string } | null,
+    agent: { id: string } | null,
     rules: SimRuleRow[],
     pool: { poolSecretHostPatterns?: string[]; poolProviders?: string[] } = {},
   ) =>
@@ -483,15 +537,13 @@ describe("buildInjectionProbe (the inject_select mirror)", () => {
     });
 
   it("folds a selective agent's rule-granted connection", () => {
-    const probe = probeFor({ id: "agent-1", secretMode: "selective" }, [
-      connGrant(),
-    ]);
+    const probe = probeFor({ id: "agent-1" }, [connGrant()]);
     expect(probe("gmail.googleapis.com")).toBe(true);
     expect(probe("api.unrelated.com")).toBe(false);
   });
 
   it("folds a secretScope pool grant to the level's hosts", () => {
-    const probe = probeFor({ id: "agent-1", secretMode: "selective" }, [
+    const probe = probeFor({ id: "agent-1" }, [
       connGrant({
         targets: [targetRow({ kind: "secret", secretScope: "project" })],
       }),
@@ -500,14 +552,12 @@ describe("buildInjectionProbe (the inject_select mirror)", () => {
   });
 
   it("PLANTED BAIT: an empty-identity rule is NEVER folded (injection is explicit-only)", () => {
-    const probe = probeFor({ id: "agent-1", secretMode: "selective" }, [
-      connGrant({ identities: [] }),
-    ]);
+    const probe = probeFor({ id: "agent-1" }, [connGrant({ identities: [] })]);
     expect(probe("gmail.googleapis.com")).toBe(false);
   });
 
   it("skips block rules and app targets WITHOUT connectionScope", () => {
-    const probe = probeFor({ id: "agent-1", secretMode: "selective" }, [
+    const probe = probeFor({ id: "agent-1" }, [
       connGrant({ action: "block" }),
       simRow({
         id: "r2",
@@ -516,13 +566,6 @@ describe("buildInjectionProbe (the inject_select mirror)", () => {
         targets: [targetRow({ id: "t2", kind: "app", appProvider: "gmail" })],
       }),
     ]);
-    expect(probe("gmail.googleapis.com")).toBe(false);
-  });
-
-  it("an all-mode agent ignores grants — the pool is authoritative", () => {
-    // The grant would fold gmail in for a selective agent; for all-mode the
-    // pool is the whole truth, so an empty pool stays empty.
-    const probe = probeFor({ id: "agent-1", secretMode: "all" }, [connGrant()]);
     expect(probe("gmail.googleapis.com")).toBe(false);
   });
 });
@@ -882,6 +925,272 @@ describe("the no-endpoint-leak constraint", () => {
       "oc-any",
     ]) {
       expect(serialized).not.toContain(leaked);
+    }
+  });
+});
+
+describe("per-connection reflection (decisions bind to the winner)", () => {
+  const connAllow = () =>
+    simRow({
+      id: "ca1",
+      logicalId: "lca1",
+      name: "allow work gmail",
+      action: "allow",
+      priority: 1,
+      identities: [identityRow({ agentId: "agent-1" })],
+      targets: [targetRow({ kind: "connection", appConnectionId: "c-work" })],
+    });
+  const denyDefault = () =>
+    simRow({
+      id: "dd1",
+      logicalId: "ldd1",
+      name: "Default Rule",
+      action: "block",
+      isDefault: true,
+      source: "default",
+      priority: 100,
+      targets: [],
+    });
+  const arm = () =>
+    armStubs({
+      projectRows: [connAllow(), denyDefault()],
+      providerRows: [
+        { id: "c-work", provider: "gmail" },
+        { id: "c-personal", provider: "gmail" },
+      ],
+      probeConnections: [{ provider: "gmail" }],
+    });
+
+  it("folds per-account disagreement to `mixed` at the provider level", async () => {
+    arm();
+    const result = await effectiveAppPermissions(
+      { provider: "gmail", agentId: "agent-1" },
+      PROJECT_CTX,
+    );
+    const tools = result.groups.flatMap((g) => g.tools);
+    expect(tools.length).toBeGreaterThan(0);
+    // Allow via c-work, deny-default via c-personal — the only truthful
+    // provider-level answer is `mixed`, never a silent one-account view.
+    expect(tools.every((t) => t.verdict === "mixed")).toBe(true);
+    // The resolved connection target is identity-scoped → the baseline-visible
+    // varies counter includes it (the new `connection` relevance arm).
+    expect(result.variesByIdentity).toBe(1);
+  });
+
+  it("reflects one account exactly: allow via the granted one, deny-default via the sibling", async () => {
+    arm();
+    state.results.set("appConnection.findFirst", { id: "c-work" });
+    const work = await effectiveAppPermissions(
+      { provider: "gmail", agentId: "agent-1", connectionId: "c-work" },
+      PROJECT_CTX,
+    );
+    expect(
+      work.groups.flatMap((g) => g.tools).every((t) => t.verdict === "allow"),
+    ).toBe(true);
+
+    arm();
+    state.results.set("appConnection.findFirst", { id: "c-personal" });
+    const personal = await effectiveAppPermissions(
+      { provider: "gmail", agentId: "agent-1", connectionId: "c-personal" },
+      PROJECT_CTX,
+    );
+    expect(
+      personal.groups
+        .flatMap((g) => g.tools)
+        .every((t) => t.verdict === "block"),
+    ).toBe(true);
+  });
+
+  it("fences a foreign/mismatched connection id as NOT FOUND", async () => {
+    arm();
+    state.results.set("appConnection.findFirst", null);
+    await expect(
+      effectiveAppPermissions(
+        { provider: "gmail", agentId: "agent-1", connectionId: "c-foreign" },
+        PROJECT_CTX,
+      ),
+    ).rejects.toThrow("Connection not found");
+  });
+});
+
+describe("orgCeiling (the org level evaluated alone)", () => {
+  const orgRow = (over: Partial<SimRuleRow>) =>
+    simRow({
+      scope: "organization",
+      organizationId: "org-1",
+      projectId: null,
+      ...over,
+    });
+  const gmailApp = () => [targetRow({ kind: "app", appProvider: "gmail" })];
+  const flat = (r: Awaited<ReturnType<typeof effectiveAppPermissions>>) => {
+    const tools = r.groups.flatMap((g) => g.tools);
+    // Guard against vacuous per-tool loops: gmail's catalog is never empty.
+    expect(tools.length).toBeGreaterThan(0);
+    return tools;
+  };
+
+  it("stays visible under a STRICTER project rule (the invisible-floor case)", async () => {
+    armStubs({
+      orgRows: [
+        orgRow({
+          id: "oa1",
+          logicalId: "loa1",
+          name: "org approval",
+          action: "allow",
+          requireApproval: true,
+          targets: gmailApp(),
+        }),
+      ],
+      projectRows: [
+        simRow({
+          id: "pb1",
+          logicalId: "lpb1",
+          name: "project block",
+          action: "block",
+          targets: [targetRow({ kind: "app", appProvider: "gmail" })],
+        }),
+      ],
+      probeConnections: [{ provider: "gmail" }],
+    });
+    const result = await effectiveAppPermissions(
+      { provider: "gmail", agentId: "agent-1" },
+      PROJECT_CTX,
+    );
+    for (const tool of flat(result)) {
+      // The combined verdict is the stricter project block…
+      expect(tool.verdict).toBe("block");
+      expect(
+        tool.decidedBy?.kind === "rule" && tool.decidedBy.scope === "project",
+      ).toBe(true);
+      // …and the org floor is STILL reported — the whole point of the field.
+      expect(tool.orgCeiling).toBe("approval");
+    }
+  });
+
+  it("reports an org rule block as the ceiling", async () => {
+    armStubs({
+      orgRows: [
+        orgRow({
+          id: "ob1",
+          logicalId: "lob1",
+          name: "org block",
+          action: "block",
+          targets: gmailApp(),
+        }),
+      ],
+      projectRows: [
+        simRow({
+          id: "pa1",
+          logicalId: "lpa1",
+          name: "project allow",
+          action: "allow",
+          targets: [targetRow({ kind: "app", appProvider: "gmail" })],
+        }),
+      ],
+      probeConnections: [{ provider: "gmail" }],
+    });
+    const result = await effectiveAppPermissions(
+      { provider: "gmail", agentId: "agent-1" },
+      PROJECT_CTX,
+    );
+    for (const tool of flat(result)) {
+      expect(tool.verdict).toBe("block");
+      expect(tool.orgCeiling).toBe("block");
+    }
+  });
+
+  it("is null when the org is silent", async () => {
+    armStubs({
+      projectRows: [
+        simRow({
+          id: "pa2",
+          logicalId: "lpa2",
+          name: "project allow",
+          action: "allow",
+          targets: [targetRow({ kind: "app", appProvider: "gmail" })],
+        }),
+      ],
+      probeConnections: [{ provider: "gmail" }],
+    });
+    const result = await effectiveAppPermissions(
+      { provider: "gmail", agentId: "agent-1" },
+      PROJECT_CTX,
+    );
+    for (const tool of flat(result)) {
+      expect(tool.verdict).toBe("allow");
+      expect(tool.orgCeiling).toBeNull();
+    }
+  });
+
+  it("honors the enforce-deny carve: an org default Block is NO ceiling for uncredentialed traffic", async () => {
+    armStubs({
+      orgRows: [
+        orgRow({
+          id: "od1",
+          logicalId: "lod1",
+          name: "Default Rule",
+          action: "block",
+          isDefault: true,
+          source: "default",
+          priority: 100,
+        }),
+      ],
+      // No probe connections and no secrets → hasInjections false.
+    });
+    const result = await effectiveAppPermissions(
+      { provider: "gmail", agentId: "agent-1" },
+      PROJECT_CTX,
+    );
+    for (const tool of flat(result)) {
+      expect(tool.verdict).toBe("unmanaged");
+      expect(tool.orgCeiling).toBeNull();
+    }
+  });
+
+  it("reports the org default Block as the ceiling for credentialed traffic", async () => {
+    armStubs({
+      orgRows: [
+        orgRow({
+          id: "od2",
+          logicalId: "lod2",
+          name: "Default Rule",
+          action: "block",
+          isDefault: true,
+          source: "default",
+          priority: 100,
+        }),
+      ],
+      probeConnections: [{ provider: "gmail" }],
+      projectRows: [
+        // Step 7: attachment comes from a grant, not a pool.
+        simRow({
+          id: "r-grant",
+          logicalId: "grant-gmail",
+          name: "Grant gmail",
+          action: "allow",
+          identities: [identityRow({ id: "i-grant", agentId: "agent-1" })],
+          targets: [
+            targetRow({
+              id: "t-grant",
+              kind: "app",
+              appProvider: "gmail",
+              appConnectionScope: "project",
+            }),
+          ],
+        }),
+      ],
+    });
+    const result = await effectiveAppPermissions(
+      { provider: "gmail", agentId: "agent-1" },
+      PROJECT_CTX,
+    );
+    for (const tool of flat(result)) {
+      expect(tool.verdict).toBe("block");
+      expect(tool.decidedBy).toEqual({
+        kind: "default",
+        scope: "organization",
+      });
+      expect(tool.orgCeiling).toBe("block");
     }
   });
 });

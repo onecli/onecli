@@ -57,7 +57,6 @@ export const createAgent = async (
   projectId: string,
   name: string,
   identifier: string,
-  parentIdentifier?: string,
 ) => {
   const trimmed = name.trim();
   if (!trimmed || trimmed.length > 255) {
@@ -86,30 +85,23 @@ export const createAgent = async (
     );
   }
 
-  // A sub-agent inherits its parent's injection MODE only. The old per-agent
-  // grant tables are frozen (step 10) — what a selective agent may inject now
-  // comes from policy rules, so a selective parent's child starts with nothing
-  // until a rule grants it (fail-closed) rather than silently inheriting the
-  // parent's pool through rows the gateway no longer reads.
-  let inheritedSecretMode: SecretMode = "all";
-
-  if (parentIdentifier) {
-    const parent = await db.agent.findFirst({
-      where: { projectId, identifier: parentIdentifier },
-      select: { secretMode: true },
-    });
-    if (parent) inheritedSecretMode = parent.secretMode as SecretMode;
-  }
-
   const accessToken = generateAccessToken();
 
   try {
+    // Every new agent starts SELECTIVE with nothing attached (attach-model
+    // step 5): credentials arrive through explicit grants — the agent page or
+    // the post-connect attach step — never through an implicit whole-pool
+    // mode. Deliberately NOT inherited from a parent agent: during the grace
+    // window an unconverted "all" parent would otherwise mint new all-mode
+    // agents and step 7's zero-"all" gate could never converge. The schema
+    // default stays "all" until the column retires in step 8, so this must be
+    // explicit (as at every other creation site).
     const agent = await db.agent.create({
       data: {
         name: trimmed,
         identifier: trimmedIdentifier,
         accessToken,
-        secretMode: inheritedSecretMode,
+        secretMode: "selective",
         projectId,
       },
       select: {
@@ -213,22 +205,4 @@ export const regenerateAgentToken = async (
   });
 
   return { accessToken: updated.accessToken };
-};
-
-export const updateAgentSecretMode = async (
-  projectId: string,
-  agentId: string,
-  mode: SecretMode,
-) => {
-  const agent = await db.agent.findFirst({
-    where: { id: agentId, projectId },
-    select: { id: true },
-  });
-
-  if (!agent) throw new ServiceError("NOT_FOUND", "Agent not found");
-
-  await db.agent.update({
-    where: { id: agentId },
-    data: { secretMode: mode },
-  });
 };

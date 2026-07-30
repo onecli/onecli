@@ -11,29 +11,36 @@ import {
   renameAgent,
   deleteAgent,
   regenerateAgentToken,
-  updateAgentSecretMode,
 } from "../services/agent-service";
-import {
-  withAudit,
-  AUDIT_ACTIONS,
-  AUDIT_SERVICES,
-  AUDIT_SOURCE,
-} from "../services/audit-service";
-import {
-  createAgentSchema,
-  renameAgentSchema,
-  secretModeSchema,
-} from "../validations/agent";
+import { createAgentSchema, renameAgentSchema } from "../validations/agent";
+import { agentsIncludeSchema } from "../validations/grants";
+import { listAgentsWithGrantsSummary } from "../services/grants-summary-service";
+import { ServiceError } from "../services/errors";
 import { getResourceHooks } from "../providers";
 
 export const agentRoutes = () => {
   const app = new Hono<ApiEnv>();
   app.use("*", authMiddleware);
 
-  // GET /agents
+  // GET /agents[?include=grants-summary] — the plain list, or (the first
+  // `?include=` projection) each agent with its attach-list chips summary.
   app.get("/", async (c) => {
     const auth = c.get("auth");
-    const agents = await listAgents(requireProjectId(auth));
+    const projectId = requireProjectId(auth);
+    const rawInclude = c.req.query("include");
+    const include = agentsIncludeSchema.safeParse(rawInclude);
+    if (!include.success) {
+      throw new ServiceError(
+        "UNPROCESSABLE",
+        `Unknown include: ${rawInclude ?? ""}`,
+      );
+    }
+    if (include.data === "grants-summary") {
+      return c.json(
+        await listAgentsWithGrantsSummary(projectId, auth.organizationId),
+      );
+    }
+    const agents = await listAgents(projectId);
     return c.json(agents);
   });
 
@@ -62,11 +69,14 @@ export const agentRoutes = () => {
       );
     }
 
+    // `parentIdentifier` stays ACCEPTED in the schema (the CLI sends it on
+    // sub-agent creation) but is no longer threaded anywhere: it only ever
+    // drove secret-mode inheritance, and since attach-model step 5 every new
+    // agent is selective.
     const agent = await createAgent(
       projectId,
       parsed.data.name,
       parsed.data.identifier,
-      parsed.data.parentIdentifier,
     );
     invalidateGatewayCache(c.req.raw);
     return c.json(agent, 201);
@@ -126,34 +136,9 @@ export const agentRoutes = () => {
     return c.json(result);
   });
 
-  // PATCH /agents/:agentId/secret-mode
-  app.patch("/:agentId/secret-mode", async (c) => {
-    const auth = c.get("auth");
-    const agentId = c.req.param("agentId");
-    const body = await c.req.json().catch(() => null);
-    const parsed = secretModeSchema.safeParse(body);
-    if (!parsed.success) {
-      return c.json(
-        { error: parsed.error.issues[0]?.message ?? "Invalid request body" },
-        400,
-      );
-    }
-
-    const projectId = requireProjectId(auth);
-    await withAudit(
-      () => updateAgentSecretMode(projectId, agentId, parsed.data.mode),
-      () => ({
-        projectId,
-        userId: auth.userId,
-        userEmail: auth.userEmail,
-        action: AUDIT_ACTIONS.UPDATE,
-        service: AUDIT_SERVICES.AGENT,
-        source: AUDIT_SOURCE.API,
-        metadata: { agentId, secretMode: parsed.data.mode },
-      }),
-    );
-    return c.json({ success: true });
-  });
+  // PATCH /:agentId/secret-mode was removed in attach-model step 5 — the
+  // sub-path 410 lives in `removedAgentEquipmentRoutes`, mounted after this
+  // router.
 
   return app;
 };

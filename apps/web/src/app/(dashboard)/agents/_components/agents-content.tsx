@@ -1,9 +1,11 @@
 "use client";
 
-import { useState } from "react";
-import { useSearchParams } from "next/navigation";
+import { useEffect, useRef, useState } from "react";
+import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { Plus, Bot } from "lucide-react";
 import { useAgents } from "@/hooks/use-agents";
+import { useGrantsSummary } from "@/hooks/use-grants";
+import { agentPath } from "@/lib/navigation";
 import { Button } from "@onecli/ui/components/button";
 import { Card } from "@onecli/ui/components/card";
 import { Skeleton } from "@onecli/ui/components/skeleton";
@@ -18,9 +20,26 @@ export const AgentsContent = ({
   renderCreateButton,
 }: AgentsContentProps = {}) => {
   const searchParams = useSearchParams();
+  const router = useRouter();
+  const pathname = usePathname();
   const manageAgentId = searchParams.get("manage");
   const { data: agents = [], isPending: loading } = useAgents();
+  const { data: summaries = [] } = useGrantsSummary();
   const [createOpen, setCreateOpen] = useState(false);
+
+  // `?manage=<id-prefix>` (attach-model step 3): the deep link lands on the
+  // agent detail page — the attach surfaces live there now. Prefix matching
+  // preserved from the old dialog-opening behavior; one-shot per mount.
+  const redirected = useRef(false);
+  useEffect(() => {
+    if (redirected.current || !manageAgentId || agents.length === 0) return;
+    const target = agents.find((a) => a.id.startsWith(manageAgentId));
+    if (!target) return;
+    redirected.current = true;
+    router.replace(agentPath(pathname, target.id));
+  }, [manageAgentId, agents, router, pathname]);
+
+  const summaryByAgent = new Map(summaries.map((s) => [s.id, s.grantsSummary]));
 
   if (loading) {
     return (
@@ -72,9 +91,7 @@ export const AgentsContent = ({
           <AgentCard
             key={agent.id}
             agent={agent}
-            autoOpenAccess={
-              !!manageAgentId && agent.id.startsWith(manageAgentId)
-            }
+            summary={summaryByAgent.get(agent.id)}
           />
         ))
       )}

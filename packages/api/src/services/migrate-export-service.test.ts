@@ -112,7 +112,7 @@ describe("policy that cannot be migrated is reported, never dropped silently", (
       projectId: "proj-1",
       status: "draft",
       isDefault: false,
-      source: { notIn: ["blocklist", "equipment"] },
+      source: { notIn: ["blocklist", "equipment", "grant"] },
     });
   });
 });

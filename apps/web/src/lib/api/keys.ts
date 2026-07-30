@@ -52,6 +52,13 @@ export const queryKeys = {
     all: () => ["scim-tokens", ...scope()] as const,
     list: () => [...queryKeys.scimTokens.all(), "list"] as const,
   },
+  grants: {
+    all: () => ["grants", ...scope()] as const,
+    agent: (agentId: string) =>
+      [...queryKeys.grants.all(), "agent", agentId] as const,
+    connection: (connectionId: string) =>
+      [...queryKeys.grants.all(), "connection", connectionId] as const,
+  },
   connections: {
     all: () => ["connections", ...scope()] as const,
     list: (pageScope: PageScope = "project") =>

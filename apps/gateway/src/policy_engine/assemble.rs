@@ -57,16 +57,18 @@ fn decode_targets(
                 },
                 None => Target::Unresolved,
             },
-            // A connection target decodes to its provider's app (the target's
-            // own tools narrow which endpoints match; empty = the whole app).
-            // A missing/deleted/foreign id is not in the fenced map →
+            // A connection target binds the decision to that specific
+            // connection — it matches only when it wins injection (the target's
+            // own tools narrow which endpoints; empty = the whole app). A
+            // missing/deleted/foreign id is not in the fenced map →
             // `Unresolved` (never matches — fail-closed).
             "connection" => match r
                 .app_connection_id
                 .as_ref()
-                .and_then(|id| connection_providers.by_id.get(id))
+                .and_then(|id| connection_providers.by_id.get(id).map(|p| (id, p)))
             {
-                Some(provider) => Target::App {
+                Some((id, provider)) => Target::Connection {
+                    id: id.clone(),
                     provider: provider.clone(),
                     tools: r.app_tools.clone(),
                 },
@@ -210,9 +212,10 @@ mod tests {
             ]);
         })];
         let rules = assemble(&rows, &SecretHosts::default(), &providers);
-        assert!(
-            matches!(&rules[0].targets[0], Target::App { provider, .. } if provider == "github")
-        );
+        assert!(matches!(
+            &rules[0].targets[0],
+            Target::Connection { id, provider, .. } if id == "c1" && provider == "github"
+        ));
         assert!(matches!(rules[0].targets[1], Target::Unresolved));
     }
 

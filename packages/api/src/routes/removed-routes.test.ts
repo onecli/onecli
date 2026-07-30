@@ -93,21 +93,49 @@ describe("removed old-model endpoints answer 410, not 404", () => {
     ["PUT", "/v1/agents/agent-1/secrets"],
     ["GET", "/v1/agents/agent-1/connections"],
     ["PUT", "/v1/agents/agent-1/connections"],
+    // Attach-model step 5: the mode switch is gone — agents are always
+    // selective. The CLI's `onecli agents set-secret-mode` lands here.
+    ["PATCH", "/v1/agents/agent-1/secret-mode"],
     ["GET", "/v1/connections/conn-1/agents"],
     ["PUT", "/v1/connections/conn-1/agents"],
+    // Attach-model step 6: project-scope policy CRUD retired. Enumerated, not
+    // wildcarded — the reflection on the same base path must stay live (see
+    // the "is not 410" table below).
+    ["GET", "/v1/policy/rules"],
+    ["POST", "/v1/policy/rules"],
+    ["PUT", "/v1/policy/rules/order"],
+    ["PATCH", "/v1/policy/rules/rule-1"],
+    ["DELETE", "/v1/policy/rules/rule-1"],
+    ["GET", "/v1/policy/default"],
+    ["PATCH", "/v1/policy/default"],
+    ["POST", "/v1/policy/publish"],
+    ["GET", "/v1/policy/last-publish"],
   ])("%s %s → 410", async (method, path) => {
     expect(await status(method, path)).toBe(410);
   });
 
   it("every 410 body names the replacement, so a client can act on it", async () => {
+    // Project-scope shims point at the GRANTS surface. Pointing them at
+    // /v1/policy (as they did before step 6) would send a project client to
+    // another 410 — that path is retired at project scope now.
     for (const path of [
       "/v1/rules",
       "/v1/agents/agent-1/secrets",
       "/v1/connections/conn-1/agents",
+      "/v1/policy/rules",
+      "/v1/policy/publish",
     ]) {
       const text = await (await app.request(path, authed)).text();
-      expect(text).toContain("/v1/policy");
+      expect(text).toContain("/grants/");
+      expect(text).not.toContain("Use /v1/policy");
     }
+    const text = await (
+      await app.request("/v1/agents/agent-1/secret-mode", {
+        method: "PATCH",
+        ...authed,
+      })
+    ).text();
+    expect(text).toContain("/grants/");
   });
 });
 
@@ -132,7 +160,12 @@ describe("the shims stay scoped to the paths they replace", () => {
     ["/v1/agents", "the agents list"],
     ["/v1/agents/agent-1/effective-credentials", "the credential reflection"],
     ["/v1/connections", "the connections list"],
-    ["/v1/policy/rules", "the v2 rule list"],
+    // The reflection shares the /v1/policy base with the step-6 shim; if that
+    // shim ever grows a wildcard this is the assertion that catches it.
+    [
+      "/v1/policy/effective-app-permissions?provider=github",
+      "the app-permissions reflection",
+    ],
   ])("%s (%s) is not 410", async (path) => {
     expect(await status("GET", path)).not.toBe(410);
   });

@@ -239,6 +239,11 @@ pub(crate) struct ResolvedRules {
     /// enforce granular access; `None` in the common, unrestricted case.
     #[cfg_attr(not(edition_cloud), allow(dead_code))]
     pub session_policy: Option<serde_json::Value>,
+    /// Id of the app connection that won injection for this request; `None`
+    /// when no connection serves it (secret/vault/uncredentialed traffic, the
+    /// non-serving wipe, or a swallowed escalation). Same attribution law as
+    /// `session_policy`. `Target::Connection` policy decisions bind to it.
+    pub winning_connection_id: Option<String>,
     /// Cloud-only: spend budgets governing the effective credential for this host
     /// (0/1 in practice).
     #[cfg_attr(not(edition_cloud), allow(dead_code))]
@@ -319,6 +324,9 @@ async fn resolve_rules(
     let mut body_transform: Option<crate::apps::BodyTransform> = None;
     // Granular-access policy of the connection that wins injection (if any).
     let mut session_policy: Option<serde_json::Value> = None;
+    // Id of the connection that wins injection (if any) — rides with
+    // `session_policy` under the same attribution law.
+    let mut winning_connection_id: Option<String> = None;
 
     // Resolve app connections whenever any exist and MERGE their rules with
     // the secret rules. A shared host (e.g. www.googleapis.com) can carry
@@ -350,6 +358,7 @@ async fn resolve_rules(
                 finalizer: f,
                 body_transform: bt,
                 session_policy: sp,
+                connection_id: cid,
                 ..
             }) => {
                 app_rules = rules;
@@ -359,6 +368,7 @@ async fn resolve_rules(
                 finalizer = f;
                 body_transform = bt;
                 session_policy = sp;
+                winning_connection_id = cid;
             }
             Ok(AppConnectionResult::Ambiguous { connections }) => {
                 if !secrets_serve {
@@ -449,6 +459,7 @@ async fn resolve_rules(
             body_transform,
             claim_token: resp.claim_token,
             session_policy,
+            winning_connection_id,
             budget_bindings: resp.budget_bindings,
         }),
         app_connections: resp.app_connections,

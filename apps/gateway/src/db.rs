@@ -27,7 +27,6 @@ pub(crate) struct AgentRow {
     pub identifier: Option<String>,
     pub project_id: String,
     pub organization_id: String,
-    pub secret_mode: String,
     pub subscription_status: String,
 }
 
@@ -288,7 +287,7 @@ pub(crate) async fn find_agent_by_token(
     access_token: &str,
 ) -> Result<Option<AgentRow>> {
     sqlx::query_as::<_, AgentRow>(
-        r#"SELECT a.id, a.name, a.identifier, a.project_id, p.organization_id, a.secret_mode, o.subscription_status
+        r#"SELECT a.id, a.name, a.identifier, a.project_id, p.organization_id, o.subscription_status
            FROM agents a
            JOIN projects p ON a.project_id = p.id
            JOIN organizations o ON p.organization_id = o.id
@@ -507,15 +506,13 @@ pub(crate) struct ConnectionProviders {
     pub by_id: std::collections::HashMap<String, String>,
 }
 
-/// The specific credentials (step 8) the connect's published v2 rules ALLOW the
-/// requesting agent to have injected — derived ONCE at connect-resolution from the
-/// already-loaded `PolicyV2Rules` (pure, DB-free). This is the connect-time
-/// SELECTION that replaces the `agent_secrets` / `agent_app_connections` join for
-/// a SELECTIVE agent; `secretMode` stays the all-vs-selective switch. Empty in OSS
-/// and when the engine is off, so the gateway keeps the legacy equipment
-/// resolution (the fail-safe). NOT cached on its own — it feeds the resolvers
-/// whose output (`injection_rules` / `app_connections`) is what rides
-/// `ConnectResponse`.
+/// The specific credentials the connect's published v2 rules ALLOW the
+/// requesting agent to have injected — derived ONCE at connect-resolution from
+/// the already-loaded `PolicyV2Rules` (pure, DB-free). Since attach-model step 7
+/// this selection is the WHOLE story for the org/project tiers — every agent is
+/// rule-selected, and the retired `agents.secret_mode` column is never read.
+/// NOT cached on its own — it feeds the resolvers whose output
+/// (`injection_rules` / `app_connections`) is what rides `ConnectResponse`.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct InjectSelection {
     /// Specific `Secret` ids named by the agent's matching `kind=secret` allow
@@ -525,13 +522,13 @@ pub(crate) struct InjectSelection {
     /// conditions — the granular guard) for `kind=connection` allow targets.
     pub connections: std::collections::HashMap<String, Option<serde_json::Value>>,
     /// (provider, level) pairs from `kind=app` allow targets carrying a
-    /// `connection_scope` (step 8): inject ALL the agent's connections of
-    /// `provider` at that org/project `level` (a provider+level selection, no
-    /// per-connection sessionPolicy — "all" is unscoped, like all-mode).
+    /// `connection_scope`: inject ALL the agent's connections of `provider` at
+    /// that org/project `level` (a provider+level selection, no per-connection
+    /// sessionPolicy — a whole-level grant is unscoped).
     pub app_scopes: Vec<(String, String)>,
     /// Levels ("organization" | "project") from `kind=secret` allow targets
-    /// carrying a `secret_scope` (step 8): inject ALL the agent's secrets at that
-    /// level (a level selection, no per-secret guard — "all", like all-mode).
+    /// carrying a `secret_scope`: inject ALL the agent's secrets at that level
+    /// (a level selection, no per-secret guard).
     pub secret_scopes: Vec<String>,
 }
 

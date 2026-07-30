@@ -2,6 +2,7 @@ import * as agents from "./agents";
 import * as secrets from "./secrets";
 import * as policy from "./policy";
 import * as connections from "./connections";
+import * as grants from "./grants";
 import * as projects from "./projects";
 import * as projectAccess from "./project-access";
 import * as domains from "./domains";
@@ -24,6 +25,7 @@ export {
   secrets,
   policy,
   connections,
+  grants,
   projects,
   projectAccess,
   domains,
@@ -80,6 +82,14 @@ export type {
   PolicyRuleTarget,
   PolicyRuleSource,
   PublishResult,
+  AgentGrants,
+  AgentGrantConnection,
+  AgentGrantSecret,
+  ConnectionGrants,
+  ConnectionGrantInput,
+  AgentGrantsSummary,
+  AgentWithGrantsSummary,
+  GrantsSummaryEntry,
 } from "./types";
 export type { CreatePolicyRuleInput, UpdatePolicyRuleInput } from "./policy";
 export { appsPath } from "./scope";

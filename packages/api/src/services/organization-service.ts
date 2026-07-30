@@ -66,6 +66,11 @@ export const defaultProjectSeed = (userId: string, userEmail: string) => ({
       identifier: DEFAULT_AGENT_IDENTIFIER,
       accessToken: generateAccessToken(),
       isDefault: true,
+      // Attach-model step 5: every new agent starts selective with nothing
+      // attached — credentials arrive through explicit grants. Explicit at
+      // every creation site because the schema default stays "all" until the
+      // column retires (step 8).
+      secretMode: "selective",
     },
   },
 });
@@ -116,7 +121,7 @@ export const bootstrapOrganization = async (
     select: { id: true, organizationId: true },
   });
 
-  // Seed the new org's initial published policy (cloud: a secure-by-default org
+  // Seed the new org's initial published policy (cloud: an allow-posture org
   // Default Rule). Best-effort — a hiccup must not fail onboarding; the org then
   // has no published generation and the engine allows until one is authored. OSS
   // default is a no-op.
@@ -291,6 +296,7 @@ export const ensureProjectSeeds = async (
         identifier: DEFAULT_AGENT_IDENTIFIER,
         accessToken: generateAccessToken(),
         isDefault: true,
+        secretMode: "selective",
         projectId,
       },
     });

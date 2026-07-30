@@ -38,15 +38,16 @@ import { errorHandler, notFoundHandler } from "./middleware/error-handler";
 import { healthRoutes } from "./routes/health";
 import { agentRoutes } from "./routes/agents";
 import { secretRoutes } from "./routes/secrets";
-import { policyRoutes } from "./routes/policy";
 import {
   policyReflectRoutes,
   agentReflectRoutes,
   connectionReflectRoutes,
 } from "./routes/policy-reflect";
+import { agentGrantsRoutes, connectionGrantsRoutes } from "./routes/grants";
 import {
   removedAgentEquipmentRoutes,
   removedConnectionAgentRoutes,
+  removedProjectPolicyRoutes,
   removedRuleRoutes,
 } from "./routes/removed-routes";
 import { userRoutes } from "./routes/user";
@@ -87,9 +88,9 @@ export interface CreateApiAppOptions {
   policyValidator?: PolicyValidator;
   ruleActionGate?: RuleActionGate;
   /**
-   * Seeds a new org's initial published policy on bootstrap (cloud: a
-   * secure-by-default org Default Rule). OSS never sets it — new orgs stay on
-   * the old model until step 9.
+   * Seeds a new org's initial published policy on bootstrap (cloud: an
+   * allow-posture org Default Rule — deny-by-default is the admin's opt-in
+   * flip). OSS never sets it — new orgs stay on the old model until step 9.
    */
   newOrgPolicySeeder?: NewOrgPolicySeeder;
   sessionHooks?: Partial<SessionHooks>;
@@ -137,7 +138,6 @@ export const createApiApp = (
   app.route("/auth/session", authSessionRoutes());
   app.route("/agents", agentRoutes());
   app.route("/secrets", secretRoutes());
-  app.route("/policy", policyRoutes());
   app.route("/user", userRoutes());
   app.route("/apps", appRoutes());
   app.route("/connections", connectionRoutes());
@@ -148,6 +148,10 @@ export const createApiApp = (
   app.route("/policy", policyReflectRoutes());
   app.route("/agents", agentReflectRoutes());
   app.route("/connections", connectionReflectRoutes());
+  // The attach-model grants surface (step 2): agent⇄credential grants compiled
+  // into source:"grant" policy rules, composed onto the same base paths.
+  app.route("/agents", agentGrantsRoutes());
+  app.route("/connections", connectionGrantsRoutes());
   app.route("/vaults", vaultRoutes());
   app.route("/gateway-url", gatewayUrlRoutes());
   app.route("/gateway", gatewayCaRoutes());
@@ -162,6 +166,11 @@ export const createApiApp = (
   app.route("/rules", removedRuleRoutes());
   app.route("/agents", removedAgentEquipmentRoutes());
   app.route("/connections", removedConnectionAgentRoutes());
+  // Project-scope policy CRUD retired in attach-model step 6. Mounted on the
+  // same base path as `policyReflectRoutes` above, which is why the shim
+  // enumerates exact sub-paths instead of a wildcard: the reflections
+  // (`/v1/policy/effective-app-permissions`) must keep answering.
+  app.route("/policy", removedProjectPolicyRoutes());
 
   if (options?.eeRoutes) {
     options.eeRoutes(app);

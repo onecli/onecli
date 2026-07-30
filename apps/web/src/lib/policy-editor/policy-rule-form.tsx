@@ -41,7 +41,6 @@ import type {
   UpdatePolicyRuleInput,
 } from "@/lib/api/policy";
 import { useCreatePolicyRule, useUpdatePolicyRule } from "@/hooks/use-policy";
-import { useAgents } from "@/hooks/use-agents";
 import { useConnections } from "@/hooks/use-connections";
 import { useScopedSecrets } from "@/hooks/use-secrets";
 // The condition builder + org identity picker are edition seams: EE aliases
@@ -51,11 +50,8 @@ import { useScopedSecrets } from "@/hooks/use-secrets";
 import { ConditionBuilder } from "@/lib/components/condition-builder";
 // Alias key on purpose (see editor-chrome's note): a relative import would
 // bypass the edition seam.
-import {
-  IdentityLockHint,
-  OrgIdentityPicker,
-} from "@/lib/policy-editor/identity-picker";
-import { RULE_SHEET_DESCRIPTION } from "@/lib/policy-editor/publish-mode";
+import { OrgIdentityPicker } from "@/lib/policy-editor/identity-picker";
+import { ruleSheetDescription } from "@/lib/policy-editor/publish-mode";
 import {
   AppTargetFields,
   type AppTargetState,
@@ -74,7 +70,6 @@ import {
 type Method = "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
 const METHODS: Method[] = ["GET", "POST", "PUT", "PATCH", "DELETE"];
 const ANY_METHOD = "_any";
-const ALL_AGENTS = "_all";
 
 // The target kinds this editor authors. "App" fronts both specific connection
 // targets and an "all connections at a level" app target (step 8); "Secret" names
@@ -307,8 +302,7 @@ export const PolicyRuleForm = ({
   const isEdit = rule !== null;
   // Agents are project-scoped; at org scope there's no project context to load
   // them (and org guardrails apply to all agents).
-  const isProject = scope === "project";
-  const { data: agents = [] } = useAgents(isProject);
+  // Org scope is the only scope this form serves since attach-model step 6.
   const { data: connections = [] } = useConnections(scope);
   // Scope-aware secrets for the Secret target picker: the org page reads
   // /v1/org/secrets (the project-scoped /v1/secrets 401s at org scope — no
@@ -318,7 +312,7 @@ export const PolicyRuleForm = ({
   // its project's, an ORG rule the org's (`assertTargetsValid` 422s a cross-level
   // pick). Org resources are governed at the org level, so a project's config
   // never even sees them. Filter both pickers to what's actually saveable.
-  const targetScope = isProject ? "project" : "organization";
+  const targetScope = "organization" as const;
   const scopedSecrets = secrets.filter((s) => s.scope === targetScope);
   const scopedConnections = connections.filter((c) => c.scope === targetScope);
   const createMutation = useCreatePolicyRule(scope);
@@ -370,7 +364,6 @@ export const PolicyRuleForm = ({
   );
   // Project rules carry at most one agent identity (or none = all agents); the
   // Select below reads/writes it. Org rules use the multi-kind picker directly.
-  const projectAgentId = identities.find((i) => i.type === "agent")?.id ?? "";
   // A granular App target: an ALLOW on exactly one specific connection whose
   // resource scope (session policy) is set — its `conditions` carry that policy,
   // not behavioral rules. Drives the payload routing. Gated on `allow` because a
@@ -601,7 +594,7 @@ export const PolicyRuleForm = ({
       >
         <SheetHeader className="border-b px-6 py-4">
           <SheetTitle>{isEdit ? "Edit Rule" : "New Rule"}</SheetTitle>
-          <SheetDescription>{RULE_SHEET_DESCRIPTION}</SheetDescription>
+          <SheetDescription>{ruleSheetDescription(scope)}</SheetDescription>
         </SheetHeader>
 
         <div className="flex-1 space-y-6 overflow-y-auto overscroll-contain px-6 py-5">
@@ -630,40 +623,13 @@ export const PolicyRuleForm = ({
           {/* Applies to */}
           <div className="space-y-1.5">
             <Label htmlFor="rule-agent">Applies to</Label>
-            {isProject ? (
-              <>
-                <Select
-                  value={projectAgentId || ALL_AGENTS}
-                  onValueChange={(v) =>
-                    setIdentities(
-                      v === ALL_AGENTS ? [] : [{ type: "agent", id: v }],
-                    )
-                  }
-                >
-                  <SelectTrigger id="rule-agent" className="w-full">
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value={ALL_AGENTS}>All agents</SelectItem>
-                    {agents.map((a) => (
-                      <SelectItem key={a.id} value={a.id}>
-                        {a.name}
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-                {/* Null in EE; the OSS locked-capability hint. */}
-                <IdentityLockHint />
-              </>
-            ) : (
-              // Org scope: target directory identities (users / user-groups),
-              // or none = all agents in the organization.
-              <OrgIdentityPicker
-                id="rule-agent"
-                value={identities}
-                onChange={setIdentities}
-              />
-            )}
+            {/* Org scope: target directory identities (users / user-groups),
+                or none = all agents in the organization. */}
+            <OrgIdentityPicker
+              id="rule-agent"
+              value={identities}
+              onChange={setIdentities}
+            />
           </div>
 
           {/* Target */}
@@ -724,7 +690,7 @@ export const PolicyRuleForm = ({
                       value={appTarget}
                       onChange={setAppTarget}
                       connections={scopedConnections}
-                      isOrgRule={!isProject}
+                      isOrgRule
                       action={action}
                       hasBehavioralConditions={conditions.length > 0}
                       cloudLocked={appCloudLocked}
@@ -738,7 +704,7 @@ export const PolicyRuleForm = ({
                       value={secretTarget}
                       onChange={setSecretTarget}
                       secrets={scopedSecrets}
-                      isOrgRule={!isProject}
+                      isOrgRule
                       showError={!!showTargetError}
                       error={targetError}
                     />

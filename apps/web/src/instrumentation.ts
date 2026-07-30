@@ -56,11 +56,12 @@ export async function register() {
     // Boot policy pass (after the entrypoint's `prisma migrate deploy`),
     // best-effort in the background — a failure logs loudly but never crashes
     // the web. The aliased seam (`@/lib/policy-migrate`, swapped per edition):
-    // OSS converts any pre-cutover project's legacy policy into v2 and then runs
-    // the read-only guard; every EE edition runs the guard alone (cloud has
-    // nothing to convert, onprem gets a report rather than an unattended
-    // rewrite). NOTE the enclosing `NODE_ENV === "production"` gate: this does
-    // not run under `pnpm dev`, only in the shipped image.
+    // OSS converts any pre-cutover project's legacy policy into v2, runs the
+    // read-only guard, then the step-5 grant conversion; every EE edition is a
+    // no-op (cloud is fully converted and imports convert inline; onprem gets
+    // a report rather than an unattended rewrite). NOTE the enclosing
+    // `NODE_ENV === "production"` gate: this does not run under `pnpm dev`,
+    // only in the shipped image.
     void import("@/lib/policy-migrate")
       .then(({ runPolicyMigration }) => runPolicyMigration())
       .catch((err) => console.error("[policy-migrate] failed:", err));

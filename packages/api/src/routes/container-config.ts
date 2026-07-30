@@ -18,13 +18,11 @@ import { getCrypto } from "../providers";
 import { logger } from "../lib/logger";
 
 /**
- * A `where` selecting exactly the secrets this agent can be handed.
- *
- * "all" mode takes the whole org+project fenced pool (rules never narrow it,
- * matching `connect.rs`). "selective" takes the same pool NARROWED to what its
- * published rules grant — specific secret ids plus any whole-level grants — and
- * a selective agent with no grants selects NOTHING, the same fail-closed answer
- * the gateway gives, rather than falling back to the pool.
+ * A `where` selecting exactly the secrets this agent can be handed: the
+ * org+project fenced pool NARROWED to what its published rules grant —
+ * specific secret ids plus any whole-level grants. An agent with no grants
+ * selects NOTHING, the same fail-closed answer the gateway gives (step 7:
+ * every agent is rule-selected; there is no all-mode whole-pool arm).
  *
  * The pool is ANDed in rather than trusted away: the gateway selects by fetching
  * the org/project-fenced pool and RETAINING the named ids (`connect.rs`), so a
@@ -34,15 +32,10 @@ import { logger } from "../lib/logger";
  * rather than through it.
  */
 export const injectableSecretWhere = async (
-  agent: { id: string; secretMode: string },
+  agent: { id: string },
   projectId: string,
   organizationId: string,
 ): Promise<Prisma.SecretWhereInput> => {
-  const pool: Prisma.SecretWhereInput = {
-    OR: [{ projectId }, { organizationId, scope: "organization" }],
-  };
-  if (agent.secretMode !== "selective") return pool;
-
   const [principals, orgRules, projectRules] = await Promise.all([
     resolvePrincipalSet(projectId, organizationId),
     loadInjectionRules({ scope: "organization", organizationId }, "published"),
@@ -54,6 +47,9 @@ export const injectableSecretWhere = async (
     principals,
   );
 
+  const pool: Prisma.SecretWhereInput = {
+    OR: [{ projectId }, { organizationId, scope: "organization" }],
+  };
   // Level grants match the secret's own `scope` column, which is what the
   // gateway compares (`selection.secret_scopes.contains(&s.scope)`).
   const arms: Prisma.SecretWhereInput[] = [];
@@ -66,8 +62,8 @@ export const injectableSecretWhere = async (
 };
 
 /**
- * Which secret wins when several of a type are reachable. The gateway merges its
- * all-mode pool partner → org → project with later injections overriding earlier
+ * Which secret wins when several of a type are reachable. The gateway merges
+ * partner → org → project with later injections overriding earlier
  * (`connect.rs`), so the PROJECT one is what actually gets injected. Descending
  * `scope` orders "project" > "partner" > "organization", reproducing that — an
  * unordered `findFirst` returns whichever row Postgres reaches first, which can
@@ -144,11 +140,11 @@ export const containerConfigRoutes = () => {
       let agent = agentIdentifier
         ? await db.agent.findFirst({
             where: { projectId, identifier: agentIdentifier },
-            select: { id: true, accessToken: true, secretMode: true },
+            select: { id: true, accessToken: true },
           })
         : await db.agent.findFirst({
             where: { projectId, isDefault: true },
-            select: { id: true, accessToken: true, secretMode: true },
+            select: { id: true, accessToken: true },
           });
 
       if (!agent && agentIdentifier) {
@@ -178,9 +174,13 @@ export const containerConfigRoutes = () => {
             identifier: DEFAULT_AGENT_IDENTIFIER,
             accessToken: generateAccessToken(),
             isDefault: true,
+            // Step 5: a self-healed container agent starts selective too — it
+            // has zero credentials until someone attaches them (the recorded
+            // product change; the attach surfaces are the flow).
+            secretMode: "selective",
             projectId,
           },
-          select: { id: true, accessToken: true, secretMode: true },
+          select: { id: true, accessToken: true },
         });
       }
 

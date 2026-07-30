@@ -1,8 +1,8 @@
 //! The OSS inject-selection subset: derive which credentials the published
 //! project rules ALLOW the requesting agent to have injected — pure and
-//! DB-free over the already-loaded rows. This replaces the equipment join for
-//! a SELECTIVE agent after the cutover migrates equipment into rules;
-//! `secretMode` stays the all-vs-selective switch.
+//! DB-free over the already-loaded rows. Since attach-model step 7 this
+//! selection is the whole story for the org/project tiers — every agent is
+//! rule-selected, and the retired `agents.secret_mode` column is never read.
 //!
 //! Two locked narrowings vs the EE selector: identities match the AGENT ONLY
 //! (no principal set — directory identities are a OneCLI Cloud capability),

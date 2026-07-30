@@ -985,6 +985,10 @@ async fn handle_http_proxy(
     let mut resolved_body_transform: Option<crate::apps::BodyTransform> = None;
     // Granular-access policy of the connection that wins injection (if any).
     let mut resolved_session_policy: Option<serde_json::Value> = None;
+    // Id of the connection that wins injection — same attribution law as
+    // `resolved_session_policy`; unlike `connection_label` below, it MUST be
+    // threaded (policy decisions bind to it).
+    let mut resolved_connection_id: Option<String> = None;
     if !resolved.app_connections.is_empty() {
         let oid = resolved.organization_id.as_deref().unwrap_or("");
         let pid = resolved.project_id.as_deref().unwrap_or("");
@@ -1010,12 +1014,14 @@ async fn handle_http_proxy(
                 finalizer,
                 body_transform,
                 session_policy,
+                connection_id: winning_connection_id,
                 ..
             }) => {
                 app_rules = rules;
                 resolved_finalizer = finalizer;
                 resolved_body_transform = body_transform;
                 resolved_session_policy = session_policy;
+                resolved_connection_id = winning_connection_id;
             }
             Ok(AppConnectionResult::Ambiguous { connections }) => {
                 if !secrets_serve {
@@ -1099,6 +1105,7 @@ async fn handle_http_proxy(
         body_transform: resolved_body_transform,
         claim_token: resolved.claim_token,
         session_policy: resolved_session_policy,
+        winning_connection_id: resolved_connection_id,
         budget_bindings: resolved.budget_bindings,
     };
 

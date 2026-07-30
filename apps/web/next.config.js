@@ -55,21 +55,25 @@ const ORG_APP_CONFIG_ALIASES = {
 };
 
 // The boot-policy seam, swapped per edition. OSS converts a pre-cutover
-// instance's legacy policy into v2 and then runs the read-only guard
-// (`services/policy-legacy-migration/` — TEMPORARY, see its README); every EE
-// edition swaps that away for the guard alone, since cloud has nothing to
-// convert and an onprem instance in that state should surface the report to an
-// operator rather than be rewritten unattended. This alias is what keeps the
-// conversion out of every EE build.
+// instance's LEGACY policy into v2, runs the read-only guard
+// (`services/policy-legacy-migration/` — TEMPORARY, see its README), then the
+// step-5 grant conversion (`services/policy-grant-conversion/` — also
+// TEMPORARY). Every EE edition swaps to a NO-OP: cloud has nothing legacy to
+// convert, its fleet is grant-converted (imports convert inline via
+// migrate-import), and an onprem instance in either state should surface a
+// report to an operator rather than be rewritten unattended.
 const POLICY_MIGRATE_ALIASES = {
   "@/lib/policy-migrate": "@/ee/policy-migrate",
 };
 
-// The shared project policy editor (step 9.5) with its EE-differentiating
-// chrome behind seams: the staged publish surface + org guardrails + directory
-// names, the org identity picker, and the granular resource-scope editor. OSS
-// uses the lib modules (immediate apply; locked "available in OneCLI Cloud"
-// hints); every EE edition swaps in the real implementations.
+// The shared policy editor with its EE-differentiating chrome behind seams: the
+// staged publish surface + directory names, the org identity picker, and the
+// granular resource-scope editor. Since attach-model step 6 the editor is
+// reached ONLY from the ORG policy page, so these aliases are load-bearing for
+// cloud and onprem-full and inert for the flat editions (oss, onprem-slim),
+// which mount no org scope and therefore never import the tree. The mapping is
+// kept for the flat editions anyway: it costs nothing, and dropping it would
+// silently downgrade the seams if a flat edition ever gained the org UI.
 const POLICY_EDITOR_ALIASES = {
   "@/lib/policy-editor/editor-chrome": "@/ee/policy-editor/editor-chrome",
   "@/lib/policy-editor/identity-picker": "@/ee/policy-editor/identity-picker",
@@ -198,20 +202,11 @@ const nextConfig = {
           ? ONPREM_SLIM_ALIASES
           : {},
   },
-  async redirects() {
-    // The legacy Rules page and the policyMode toggle retired at step 10; their
-    // routes are gone, so a bookmark would 404. Send them to the console that
-    // replaced them. FLAT editions only: cloud and onprem-full namespace the
-    // console under /p/:id, and their `beforeFiles` rewrite below already 404s
-    // every bare dashboard path — redirecting there would just bounce a bookmark
-    // to a different 404. Redirects are evaluated BEFORE those rewrites, so this
-    // has to be gated rather than relying on the rewrite to catch it.
-    if (isCloud || isOnpremFull) return [];
-    return [
-      { source: "/rules", destination: "/policy", permanent: true },
-      { source: "/settings/policy", destination: "/policy", permanent: true },
-    ];
-  },
+  // No `redirects()`: the legacy Rules page and the policyMode toggle retired
+  // at step 10 and used to bounce to the project policy console — which itself
+  // retired at attach-model step 6. There is nowhere left to send those
+  // bookmarks, so they 404 like any other removed route; project access is
+  // authored on the agent and connection pages now.
   async rewrites() {
     // Cloud and onprem-full ship the OSS bare dashboard routes too (they may only add
     // files), but only serve them namespaced under /p, /org, /account. Shadow each bare

@@ -67,21 +67,19 @@ export const grantedSecretSelection = (
  * Build the host-match predicate for whether a credential would INJECT for an
  * agent + host (the deny-default carve's `hasInjections` input). The injectable
  * set is the union of:
- *  - the agent's assigned/pool credentials (`poolSecretHostPatterns` /
- *    `poolProviders`, already loaded — the assigned set for a selective agent,
- *    the whole fenced pool for all-mode / the baseline);
- *  - for a SELECTIVE agent, its published v2 RULE GRANTS (allow rules whose
- *    explicit identity matches): a `secret` target → its host (by id, or the
- *    level pool's hosts), a `connection` target → its provider, an `app` target
- *    WITH `connectionScope` → its provider (an app target WITHOUT one is
+ *  - the pool credentials (`poolSecretHostPatterns` / `poolProviders`, already
+ *    loaded — the whole fenced pool for the agent-less BASELINE; empty for an
+ *    agent, whose grants are the whole story since step 7);
+ *  - for an AGENT, its published v2 RULE GRANTS (allow rules whose explicit
+ *    identity matches): a `secret` target → its host (by id, or the level
+ *    pool's hosts), a `connection` target → its provider, an `app` target WITH
+ *    `connectionScope` → its provider (an app target WITHOUT one is
  *    block/allow only, never injection). Resolved through the already-fenced
  *    `secretHosts` / `connectionProviders` maps, so a foreign/deleted id
  *    contributes nothing (fail-closed).
- * All-mode / baseline agents already draw the whole pool (a rule grant is always
- * a subset), so only the selective arm folds the grants in.
  */
 export const buildInjectionProbe = (params: {
-  agent: { id: string; secretMode: string } | null;
+  agent: { id: string } | null;
   poolSecretHostPatterns: string[];
   poolProviders: string[];
   rules: SimRuleRow[];
@@ -92,7 +90,7 @@ export const buildInjectionProbe = (params: {
   const secretPatterns = [...params.poolSecretHostPatterns];
   const providers = new Set(params.poolProviders);
 
-  if (params.agent && params.agent.secretMode === "selective") {
+  if (params.agent) {
     const agentId = params.agent.id;
     for (const row of params.rules) {
       if (row.isDefault || row.action !== "allow") continue;

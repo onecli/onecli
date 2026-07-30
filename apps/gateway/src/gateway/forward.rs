@@ -229,6 +229,7 @@ pub(crate) async fn forward_request(
         condition_buffer.as_deref(),
         has_injections,
         policy::is_llm_host(host),
+        rules.winning_connection_id.as_deref(),
         cache,
         &rules.policy_rules_v2,
     )

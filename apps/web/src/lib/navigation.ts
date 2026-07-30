@@ -47,6 +47,11 @@ export const withOrgPrefix = (
  * `sub` is the path under the connections root, e.g. "" (root),
  * `/apps/<provider>`, or `/vaults/<provider>`.
  */
+/** The agent detail page, scoped to the current edition (OSS `/agents/<id>`,
+ * cloud `/p/<projectId>/agents/<id>` — the bare path 404s there). */
+export const agentPath = (currentPathname: string, agentId: string): string =>
+  withProjectPrefix(currentPathname, `/agents/${agentId}`);
+
 export const connectionsPath = (
   { pathname, basePath }: { pathname: string; basePath?: string },
   sub = "",

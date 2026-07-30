@@ -58,7 +58,13 @@ export const DashboardHeader = () => {
   const subPath = navItem
     ? pathname.slice(navItem.url.length).replace(/^\//, "")
     : "";
-  const subSegments = subPath ? subPath.split("/") : [];
+  // Opaque resource ids (uuid detail segments, e.g. /agents/<id>) would
+  // title-case into gibberish — drop them; the page's own header names the
+  // resource. The digit requirement keeps long PROVIDER slugs (all letters,
+  // e.g. a 16-char app id) rendering as crumbs.
+  const subSegments = (subPath ? subPath.split("/") : []).filter(
+    (s) => !(/^[a-z0-9-]{16,}$/i.test(s) && /\d/.test(s)),
+  );
 
   const formatSegment = (s: string) =>
     s.charAt(0).toUpperCase() + s.slice(1).replace(/-/g, " ");

@@ -24,21 +24,25 @@ const resolveRole = (userId: string, organizationId: string) =>
 const effectiveAppPermissionsQuery = z.object({
   provider: z.string().trim().min(1).max(100),
   agentId: z.string().trim().min(1).optional(),
+  connectionId: z.string().trim().min(1).optional(),
 });
 
 /** Composes onto the shared /policy router (project scope). */
 export const policyReflectRoutes = () => {
   const app = new Hono<ApiEnv>();
 
-  // GET /v1/policy/effective-app-permissions?provider=X[&agentId=Y] — the
-  // per-tool effective-permissions reflection for the App Permissions
-  // panel. Any PROJECT MEMBER (it replaces a member-visible panel).
+  // GET /v1/policy/effective-app-permissions?provider=X[&agentId=Y]
+  // [&connectionId=Z] — the per-tool effective-permissions reflection for the
+  // App Permissions panel. `connectionId` reflects one specific account as the
+  // winning injected connection. Any PROJECT MEMBER (it replaces a
+  // member-visible panel).
   app.get("/effective-app-permissions", auth(), async (c) => {
     const authCtx = c.get("auth");
     const projectId = requireProjectId(authCtx);
     const parsed = effectiveAppPermissionsQuery.safeParse({
       provider: c.req.query("provider"),
       agentId: c.req.query("agentId"),
+      connectionId: c.req.query("connectionId"),
     });
     if (!parsed.success) {
       throw new ServiceError(

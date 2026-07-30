@@ -143,7 +143,7 @@ const GMAIL_CONNECTION = {
 
 const armStubs = (opts: {
   connection?: { id: string; provider: string; scope: string } | null;
-  agents?: { id: string; name: string; secretMode: string }[];
+  agents?: { id: string; name: string }[];
   orgRows?: SimRuleRow[];
   projectRows?: SimRuleRow[];
 }) => {
@@ -154,7 +154,7 @@ const armStubs = (opts: {
   );
   state.results.set(
     "agent.findMany",
-    opts.agents ?? [{ id: "agent-1", name: "Support bot", secretMode: "all" }],
+    opts.agents ?? [{ id: "agent-1", name: "Support bot" }],
   );
   // Honour `source: { not: … }` so the DECISION load (equipment dropped) and
   // the INJECTION load (equipment kept) genuinely differ — without this a test
@@ -181,15 +181,14 @@ const totalGmailTools = () => {
 };
 
 describe("the credential axis (the old dialog's meaning)", () => {
-  it("full for all-mode, viaRule for an EQUIPMENT grant, none otherwise", async () => {
+  it("viaRule for an EQUIPMENT grant, none otherwise", async () => {
     // The old per-agent assignment rows became `source="equipment"` rules at the
     // cutover. They are dropped from the decision set, so reading that set here
     // would report "none" for an agent the gateway still injects for.
     armStubs({
       agents: [
-        { id: "a-all", name: "All", secretMode: "all" },
-        { id: "a-equipped", name: "Equipped", secretMode: "selective" },
-        { id: "a-none", name: "None", secretMode: "selective" },
+        { id: "a-equipped", name: "Equipped" },
+        { id: "a-none", name: "None" },
       ],
       projectRows: [
         simRow({
@@ -207,7 +206,6 @@ describe("the credential axis (the old dialog's meaning)", () => {
     const result = await effectiveAgents("conn-1", CTX);
 
     expect(result.agents.map((a) => [a.agentId, a.credential])).toEqual([
-      ["a-all", { status: "full" }],
       [
         "a-equipped",
         {
@@ -228,8 +226,8 @@ describe("the credential axis (the old dialog's meaning)", () => {
   it("viaRule for a connection-target grant with an explicit identity; empty identities NEVER grant", async () => {
     armStubs({
       agents: [
-        { id: "a-granted", name: "Granted", secretMode: "selective" },
-        { id: "a-other", name: "Other", secretMode: "selective" },
+        { id: "a-granted", name: "Granted" },
+        { id: "a-other", name: "Other" },
       ],
       projectRows: [
         simRow({
@@ -275,7 +273,7 @@ describe("the credential axis (the old dialog's meaning)", () => {
 
   it("viaRule for an app+connectionScope pool grant matching provider AND level; mismatches don't grant", async () => {
     armStubs({
-      agents: [{ id: "a-1", name: "A", secretMode: "selective" }],
+      agents: [{ id: "a-1", name: "A" }],
       projectRows: [
         simRow({
           logicalId: "pool",
@@ -351,8 +349,8 @@ describe("the decisions rollup", () => {
     // (unmanaged — no credential probe hits), agent-2 loses them all.
     armStubs({
       agents: [
-        { id: "agent-1", name: "Free", secretMode: "all" },
-        { id: "agent-2", name: "Blocked", secretMode: "all" },
+        { id: "agent-1", name: "Free" },
+        { id: "agent-2", name: "Blocked" },
       ],
       projectRows: [
         simRow({
@@ -390,14 +388,24 @@ describe("the decisions rollup", () => {
         provider: "no-catalog-app",
         scope: "project",
       },
-      agents: [{ id: "a-1", name: "A", secretMode: "all" }],
+      agents: [{ id: "a-1", name: "A" }],
+      projectRows: [
+        simRow({
+          logicalId: "grant-x",
+          name: "Grant conn-x",
+          identities: [identityRow({ agentId: "a-1" })],
+          targets: [
+            targetRow({ kind: "connection", appConnectionId: "conn-x" }),
+          ],
+        }),
+      ],
     });
 
     const result = await effectiveAgents("conn-x", CTX);
 
     expect(result.catalog).toBe(false);
     expect(result.agents[0]?.decisions).toBeNull();
-    expect(result.agents[0]?.credential).toEqual({ status: "full" });
+    expect(result.agents[0]?.credential).toMatchObject({ status: "viaRule" });
   });
 });
 
@@ -405,28 +413,50 @@ describe("the effective-access headline (the user decision)", () => {
   it("derives access: blocked / usable / none / unknown", async () => {
     armStubs({
       agents: [
-        { id: "a-usable", name: "Free", secretMode: "all" },
-        { id: "a-blocked", name: "Blocked", secretMode: "all" },
-        { id: "a-none", name: "Unattached", secretMode: "selective" },
+        { id: "a-usable", name: "Free" },
+        { id: "a-blocked", name: "Blocked" },
+        { id: "a-none", name: "Unattached" },
       ],
       projectRows: [
         simRow({
+          logicalId: "grant-usable",
+          name: "Grant Free",
+          identities: [identityRow({ agentId: "a-usable" })],
+          targets: [
+            targetRow({ kind: "connection", appConnectionId: "conn-1" }),
+          ],
+        }),
+        simRow({
+          id: "r2",
+          logicalId: "grant-blocked",
+          name: "Grant Blocked",
+          identities: [identityRow({ id: "i2", agentId: "a-blocked" })],
+          targets: [
+            targetRow({
+              id: "t2",
+              kind: "connection",
+              appConnectionId: "conn-1",
+            }),
+          ],
+        }),
+        simRow({
+          id: "r3",
           logicalId: "block-b",
           name: "Block Blocked from gmail",
           action: "block",
-          identities: [identityRow({ agentId: "a-blocked" })],
-          targets: [targetRow({ kind: "app", appProvider: "gmail" })],
+          identities: [identityRow({ id: "i3", agentId: "a-blocked" })],
+          targets: [targetRow({ id: "t3", kind: "app", appProvider: "gmail" })],
         }),
       ],
     });
 
     const result = await effectiveAgents("conn-1", CTX);
     const byId = new Map(result.agents.map((a) => [a.agentId, a.access]));
-    // all-mode + every gmail tool reachable → usable
+    // granted + every gmail tool reachable → usable
     expect(byId.get("a-usable")).toBe("usable");
-    // all-mode + a whole-app gmail block → every tool blocked → blocked
+    // granted + a whole-app gmail block → every tool blocked → blocked
     expect(byId.get("a-blocked")).toBe("blocked");
-    // selective, not assigned, no rule grant → no credential → none
+    // no rule grant → no credential → none
     expect(byId.get("a-none")).toBe("none");
   });
 
@@ -437,7 +467,17 @@ describe("the effective-access headline (the user decision)", () => {
         provider: "no-catalog-app",
         scope: "project",
       },
-      agents: [{ id: "a-1", name: "A", secretMode: "all" }],
+      agents: [{ id: "a-1", name: "A" }],
+      projectRows: [
+        simRow({
+          logicalId: "grant-x",
+          name: "Grant conn-x",
+          identities: [identityRow({ agentId: "a-1" })],
+          targets: [
+            targetRow({ kind: "connection", appConnectionId: "conn-x" }),
+          ],
+        }),
+      ],
     });
     const result = await effectiveAgents("conn-x", CTX);
     expect(result.agents[0]?.access).toBe("unknown");
@@ -447,15 +487,24 @@ describe("the effective-access headline (the user decision)", () => {
     // Every gmail tool needs approval → allowedTools===total but it isn't
     // freely usable. The shared rollupToolStatus must say "limited".
     armStubs({
-      agents: [{ id: "a-1", name: "A", secretMode: "all" }],
+      agents: [{ id: "a-1", name: "A" }],
       projectRows: [
         simRow({
+          logicalId: "grant-1",
+          name: "Grant conn-1",
+          identities: [identityRow({ agentId: "a-1" })],
+          targets: [
+            targetRow({ kind: "connection", appConnectionId: "conn-1" }),
+          ],
+        }),
+        simRow({
+          id: "r2",
           logicalId: "approve-all",
           name: "Approve all gmail",
           action: "allow",
           requireApproval: true,
-          identities: [identityRow({ agentId: "a-1" })],
-          targets: [targetRow({ kind: "app", appProvider: "gmail" })],
+          identities: [identityRow({ id: "i2", agentId: "a-1" })],
+          targets: [targetRow({ id: "t2", kind: "app", appProvider: "gmail" })],
         }),
       ],
     });
@@ -498,9 +547,9 @@ describe("batching", () => {
   it("resolves the principal set with ONE ProjectAccess read, however many agents", async () => {
     armStubs({
       agents: [
-        { id: "a-1", name: "A", secretMode: "all" },
-        { id: "a-2", name: "B", secretMode: "all" },
-        { id: "a-3", name: "C", secretMode: "all" },
+        { id: "a-1", name: "A" },
+        { id: "a-2", name: "B" },
+        { id: "a-3", name: "C" },
       ],
     });
 
@@ -517,7 +566,7 @@ describe("redaction", () => {
 
   it("org-rule viaRule provenance collapses to one redacted marker for members", async () => {
     armStubs({
-      agents: [{ id: "a-1", name: "A", secretMode: "selective" }],
+      agents: [{ id: "a-1", name: "A" }],
       orgRows: [
         simRow({
           id: "o1",
@@ -567,7 +616,7 @@ describe("redaction", () => {
 
   it("an org-admin DOES see the org rule name (proves the member redaction is non-vacuous)", async () => {
     armStubs({
-      agents: [{ id: "a-1", name: "A", secretMode: "selective" }],
+      agents: [{ id: "a-1", name: "A" }],
       orgRows: [
         simRow({
           id: "o1",

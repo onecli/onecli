@@ -2,15 +2,7 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import {
-  Ban,
-  Bot,
-  CircleCheck,
-  CircleMinus,
-  Hand,
-  Loader2,
-  TriangleAlert,
-} from "lucide-react";
+import { Bot, Check, Loader2, TriangleAlert } from "lucide-react";
 import { Button } from "@onecli/ui/components/button";
 import {
   Dialog,
@@ -20,90 +12,22 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@onecli/ui/components/dialog";
-import { cn } from "@onecli/ui/lib/utils";
-import type {
-  AgentAccessStatus,
-  AgentCredentialStatus,
-  EffectiveAgentEntry,
-} from "@/lib/api/policy-visibility";
-import { withProjectPrefix } from "@/lib/navigation";
 import { useConnectionEffectiveAgents } from "@/lib/api/policy-visibility";
+import { useConnectionGrants } from "@/hooks/use-grants";
+import { withProjectPrefix } from "@/lib/navigation";
 import type { ConnectionAgentsReflectionProps } from "@/lib/components/policy-reflect";
+import { ConnectionAgentAccessRow } from "./connection-agent-access-row";
 
-// The connection "agent access" dialog (step 9.7b), framed around
-// EFFECTIVE access (the user decision — lead with what the agent can DO, not
-// whether a credential is attached). Each agent row headlines its access
-// (Can use / Limited / Blocked / No access) with the tool count + how the
-// credential attaches as secondary detail.
-
-const ACCESS_META = {
-  usable: {
-    label: "Can use",
-    icon: CircleCheck,
-    className:
-      "bg-emerald-50 text-emerald-700 dark:bg-emerald-950/50 dark:text-emerald-400",
-  },
-  limited: {
-    label: "Limited",
-    icon: CircleMinus,
-    className:
-      "bg-amber-50 text-amber-700 dark:bg-amber-950/50 dark:text-amber-400",
-  },
-  blocked: {
-    label: "Blocked",
-    icon: Ban,
-    className: "bg-red-50 text-red-700 dark:bg-red-950/50 dark:text-red-400",
-  },
-  none: {
-    label: "No access",
-    className: "bg-muted text-muted-foreground",
-  },
-  unknown: {
-    // Attached, but a custom app with no catalog — access is via network rules.
-    label: "Network only",
-    className: "bg-muted text-muted-foreground",
-  },
-} as const satisfies Record<
-  AgentAccessStatus,
-  { label: string; className: string; icon?: typeof CircleCheck }
->;
-
-const AccessPill = ({ access }: { access: AgentAccessStatus }) => {
-  const meta = ACCESS_META[access];
-  const Icon = "icon" in meta ? meta.icon : undefined;
-  return (
-    <span
-      className={cn(
-        "inline-flex shrink-0 items-center gap-1 rounded-md px-1.5 py-0.5 text-xs font-medium whitespace-nowrap",
-        meta.className,
-      )}
-    >
-      {Icon && <Icon className="size-3.5" aria-hidden="true" />}
-      {meta.label}
-    </span>
-  );
-};
-
-/** How the credential attaches — the secondary line under the agent name. */
-const attachDetail = (credential: AgentCredentialStatus): string | null => {
-  switch (credential.status) {
-    case "full":
-      return "All-credentials mode";
-    case "viaRule": {
-      const named = credential.provenance.flatMap((p) =>
-        p.kind === "rule" && "rule" in p ? [p.rule.name] : [],
-      );
-      if (named.length) return `Granted by ${named.join(", ")}`;
-      return credential.provenance.some(
-        (p) => p.kind === "rule" && "redacted" in p,
-      )
-        ? "Granted by an organization rule"
-        : null;
-    }
-    case "none":
-      return "No credential attached";
-  }
-};
+// The connection "agent access" dialog — EDITABLE since step 4 of the attach
+// model: each agent row carries the attach toggle + a Manage deep-link into
+// the agent page's permissions sheet, while the effective framing stays
+// (lead with what the agent can DO; credential detail is secondary). Writes
+// go through the step-2 grants API's connection orientation.
+//
+// Two ways in, same rows: from an account card, to audit or change an
+// established connection; and straight off a successful connect
+// (`justConnected`), where it IS the setup step that used to be crammed into
+// the 520px OAuth popup.
 
 export const ConnectionAgentsReflection = ({
   connectionId,
@@ -111,36 +35,73 @@ export const ConnectionAgentsReflection = ({
   appName,
   open,
   onOpenChange,
+  justConnected = false,
 }: ConnectionAgentsReflectionProps) => {
   const pathname = usePathname();
-  const {
-    data: result,
-    isPending,
-    isError,
-  } = useConnectionEffectiveAgents(connectionId, open);
-  const policyHref = withProjectPrefix(pathname, "/policy");
+  const effectiveQuery = useConnectionEffectiveAgents(connectionId, open);
+  const grantsQuery = useConnectionGrants(connectionId, open);
 
-  const toolCount = (agent: EffectiveAgentEntry): string | null =>
-    agent.decisions && agent.credential.status !== "none"
-      ? `${agent.decisions.allowedTools} of ${agent.decisions.totalTools} tools`
-      : null;
+  // Toggles must never render over unknown grant state — both the effective
+  // view AND the grants view have to resolve first (the project-access rule).
+  const isPending = effectiveQuery.isPending || grantsQuery.isPending;
+  const isError = effectiveQuery.isError || grantsQuery.isError;
+  const result = effectiveQuery.data;
+  const grantedAgentIds = new Set(
+    (grantsQuery.data?.agents ?? []).map((a) => a.agentId),
+  );
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="gap-0 p-0 sm:max-w-lg">
-        <DialogHeader className="p-6 pb-4">
-          <DialogTitle>Agent access for {connectionLabel}</DialogTitle>
-          <DialogDescription className="text-xs leading-relaxed">
-            What each agent can do with this {appName} connection, decided by
-            Policy rules.
-          </DialogDescription>
+      <DialogContent className="gap-0 p-0 sm:max-w-xl">
+        <DialogHeader className="min-w-0 p-6 pb-4">
+          {justConnected ? (
+            <>
+              {/* Follows DialogHeader's own `text-center sm:text-left`, so the
+                  title doesn't sit left of a centred description on a phone. */}
+              <div className="flex min-w-0 items-center justify-center gap-2.5 sm:justify-start">
+                {/* The same mark the connect popup just showed, so the dialog
+                    reads as that flow continuing rather than as a new one. */}
+                <span
+                  className="bg-brand motion-safe:animate-in motion-safe:zoom-in-50 flex size-6 shrink-0 items-center justify-center rounded-full duration-300"
+                  aria-hidden="true"
+                >
+                  <Check className="size-3.5 text-white" strokeWidth={3} />
+                </span>
+                <DialogTitle className="break-words">
+                  {appName} connected
+                </DialogTitle>
+              </div>
+              <DialogDescription className="text-xs leading-relaxed">
+                Turn on the agents that should be able to use this connection.
+                Changes apply immediately — you can adjust them any time.
+              </DialogDescription>
+            </>
+          ) : (
+            <>
+              {/* `break-words` is load-bearing, not cosmetic: an account label
+                  is an email with no spaces, so without it the title's
+                  min-content width sizes the dialog's grid column and drags the
+                  whole panel past the viewport on a phone. */}
+              <DialogTitle className="break-words">
+                Agent access for {connectionLabel}
+              </DialogTitle>
+              <DialogDescription className="text-xs leading-relaxed">
+                Which agents may use this {appName} connection, and what each
+                one can do. Changes apply immediately.
+              </DialogDescription>
+            </>
+          )}
         </DialogHeader>
 
-        <div className="px-6 pb-2">
+        {/* `min-w-0` on the DIRECT children of DialogContent: they are grid
+            items, whose automatic minimum size is their min-content width, so
+            without it the widest row (or a long account label) sizes the
+            column and the panel overflows the viewport on a phone. */}
+        <div className="min-w-0 px-6 pb-2">
           {isPending ? (
             <div className="flex items-center justify-center py-10">
               <Loader2
-                className="size-5 animate-spin text-muted-foreground"
+                className="text-muted-foreground size-5 animate-spin"
                 aria-hidden="true"
               />
               <span className="sr-only">Loading agent access…</span>
@@ -148,22 +109,22 @@ export const ConnectionAgentsReflection = ({
           ) : isError ? (
             <div
               role="alert"
-              className="flex items-center gap-2 rounded-md border border-destructive/30 bg-destructive/5 px-3 py-2 text-xs text-destructive"
+              className="border-destructive/30 bg-destructive/5 text-destructive flex items-center gap-2 rounded-md border px-3 py-2 text-xs"
             >
               <TriangleAlert className="size-3.5 shrink-0" aria-hidden="true" />
               Couldn&apos;t load agent access for this connection.
             </div>
           ) : !result || result.agents.length === 0 ? (
             <div className="flex flex-col items-center gap-3 py-8 text-center">
-              <div className="flex size-10 items-center justify-center rounded-full bg-muted">
+              <div className="bg-muted flex size-10 items-center justify-center rounded-full">
                 <Bot
-                  className="size-4 text-muted-foreground"
+                  className="text-muted-foreground size-4"
                   aria-hidden="true"
                 />
               </div>
               <div>
                 <p className="text-sm font-medium">No agents yet</p>
-                <p className="text-xs text-muted-foreground">
+                <p className="text-muted-foreground text-xs">
                   Create an agent to route traffic through the gateway.
                 </p>
               </div>
@@ -176,70 +137,33 @@ export const ConnectionAgentsReflection = ({
           ) : (
             <>
               {!result.catalog && (
-                <p className="mb-1 rounded-md border bg-muted/40 px-3 py-2 text-xs text-muted-foreground">
+                <p className="bg-muted/40 text-muted-foreground mb-1 rounded-md border px-3 py-2 text-xs">
                   This app has no permission catalog — access is governed by
                   network rules only.
                 </p>
               )}
               {/* Native max-height scroller (not a Radix ScrollArea, which clips
                   under a max-height) so a long agent list stays reachable. */}
-              <div className="max-h-[min(24rem,50vh)] divide-y overflow-y-auto overscroll-contain">
-                {result.agents.map((agent) => {
-                  const detail = attachDetail(agent.credential);
-                  const tools = toolCount(agent);
-                  return (
-                    <div
-                      key={agent.agentId}
-                      className="flex items-center justify-between gap-3 py-2.5"
-                    >
-                      <span className="flex min-w-0 items-center gap-2.5">
-                        <span className="flex size-6 shrink-0 items-center justify-center rounded-md bg-muted">
-                          <Bot
-                            className="size-3.5 text-muted-foreground"
-                            aria-hidden="true"
-                          />
-                        </span>
-                        <span className="min-w-0">
-                          <span className="block truncate text-sm">
-                            {agent.name}
-                          </span>
-                          {detail && (
-                            <span className="block truncate text-[11px] text-muted-foreground">
-                              {detail}
-                            </span>
-                          )}
-                        </span>
-                      </span>
-                      <span className="flex shrink-0 items-center gap-1.5">
-                        {tools && (
-                          <span className="inline-flex items-center gap-1 rounded-full border px-1.5 py-0.5 text-[11px] text-muted-foreground tabular-nums">
-                            {tools}
-                            {agent.decisions?.anyApproval && (
-                              <>
-                                <Hand className="size-3" aria-hidden="true" />
-                                <span className="sr-only">
-                                  , some need approval
-                                </span>
-                              </>
-                            )}
-                          </span>
-                        )}
-                        <AccessPill access={agent.access} />
-                      </span>
-                    </div>
-                  );
-                })}
+              <div className="max-h-[min(24rem,50vh)] min-w-0 divide-y overflow-y-auto overscroll-contain">
+                {result.agents.map((agent) => (
+                  <ConnectionAgentAccessRow
+                    key={agent.agentId}
+                    connectionId={connectionId}
+                    agent={agent}
+                    projectGranted={grantedAgentIds.has(agent.agentId)}
+                  />
+                ))}
               </div>
             </>
           )}
         </div>
 
+        {/* No "Manage in Policy" escape hatch: the rows self-serve, and the
+            project policy page is on its way out (step 6) — new UI must not
+            advertise a dying surface. */}
         <DialogFooter className="border-border/50 border-t px-6 py-4">
-          <Button variant="ghost" onClick={() => onOpenChange(false)}>
-            Close
-          </Button>
-          <Button asChild>
-            <Link href={policyHref}>Manage in Policy</Link>
+          <Button onClick={() => onOpenChange(false)}>
+            {justConnected ? "Done" : "Close"}
           </Button>
         </DialogFooter>
       </DialogContent>
