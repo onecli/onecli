@@ -364,7 +364,10 @@ export const AppConfigForm = ({
               </div>
             ))}
 
-            <RedirectUri provider={provider} />
+            <RedirectUri
+              provider={provider}
+              unified={pageScope === "project"}
+            />
 
             <div className="flex items-center gap-3">
               <Button

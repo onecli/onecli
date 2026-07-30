@@ -35,6 +35,10 @@ const store = vi.hoisted(() => ({
   calls: [] as string[],
   deleteManyWheres: [] as ConnWhere[],
   countWheres: [] as ConnWhere[],
+  upsertArgs: [] as {
+    create: { provider: string; settings: Record<string, string> };
+    update: { settings: Record<string, string> };
+  }[],
 }));
 
 const matches = (conn: Conn, where: ConnWhere) =>
@@ -57,6 +61,14 @@ vi.mock("@onecli/db", () => ({
       update: async () => {
         store.calls.push("configUpdate");
         return { id: store.appConfigRow?.id, enabled: false };
+      },
+      upsert: async (args: {
+        create: { provider: string; settings: Record<string, string> };
+        update: { settings: Record<string, string> };
+      }) => {
+        store.calls.push("configUpsert");
+        store.upsertArgs.push(args);
+        return { id: "cfg-new", provider: args.create.provider };
       },
     },
     appConnection: {
@@ -116,6 +128,7 @@ import {
   countAppConfigDependents,
   getAppConfigCredentials,
   hasAppConfig,
+  upsertAppConfig,
 } from "./app-config-service";
 
 const seedConfig = (id = "cfg-1") => {
@@ -133,6 +146,7 @@ beforeEach(() => {
   store.calls = [];
   store.deleteManyWheres = [];
   store.countWheres = [];
+  store.upsertArgs = [];
 });
 
 describe("disconnectIfConnected via deleteAppConfig — org scope", () => {
@@ -345,6 +359,78 @@ describe("hasAppConfig — configured means usable (enabled + credentials)", () 
       enabled: false,
     };
     expect(await hasAppConfig({ projectId: "p-1" }, "prov")).toBe(false);
+  });
+});
+
+describe("upsertAppConfig — redirect-style stamp (#301)", () => {
+  const FIELDS = [
+    { name: "clientId", label: "Client ID", placeholder: "" },
+    {
+      name: "clientSecret",
+      label: "Client Secret",
+      placeholder: "",
+      secret: true,
+    },
+  ];
+
+  it("stamps project rows unified on create and update alike", async () => {
+    await upsertAppConfig(
+      { projectId: "p-1" },
+      "gmail",
+      { clientId: "cid", clientSecret: "sec" },
+      FIELDS,
+    );
+
+    const args = store.upsertArgs[0]!;
+    expect(args.create.settings).toEqual({
+      clientId: "cid",
+      redirectStyle: "unified",
+    });
+    // An update replaces settings wholesale, so it re-stamps too — this is
+    // exactly how a pre-unified row migrates when its owner re-saves the form
+    // (which also disconnects the provider, so no live flow straddles the
+    // switch).
+    expect(args.update.settings).toEqual({
+      clientId: "cid",
+      redirectStyle: "unified",
+    });
+  });
+
+  it("disconnects the provider before the stamped row lands", async () => {
+    await upsertAppConfig(
+      { projectId: "p-1" },
+      "gmail",
+      { clientId: "cid", clientSecret: "sec" },
+      FIELDS,
+    );
+
+    expect(store.calls).toEqual(["deleteMany", "configUpsert"]);
+  });
+
+  it("ignores a client-supplied redirectStyle — the server owns the stamp", async () => {
+    // parseConfigBody already strips unknown keys at the route; this pins the
+    // service-level behavior regardless.
+    await upsertAppConfig(
+      { projectId: "p-1" },
+      "gmail",
+      { clientId: "cid", clientSecret: "sec", redirectStyle: "legacy" },
+      FIELDS,
+    );
+
+    expect(store.upsertArgs[0]!.create.settings.redirectStyle).toBe("unified");
+  });
+
+  it("leaves org rows unstamped — org flows keep the per-provider URI", async () => {
+    await upsertAppConfig(
+      { organizationId: "org-1" },
+      "gmail",
+      { clientId: "cid", clientSecret: "sec" },
+      FIELDS,
+    );
+
+    const args = store.upsertArgs[0]!;
+    expect(args.create.settings).toEqual({ clientId: "cid" });
+    expect(args.update.settings).toEqual({ clientId: "cid" });
   });
 });
 

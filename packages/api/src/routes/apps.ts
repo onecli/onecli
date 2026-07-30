@@ -1,4 +1,4 @@
-import { Hono } from "hono";
+import { Hono, type Context } from "hono";
 import { setCookie, getCookie, deleteCookie } from "hono/cookie";
 import { z } from "zod";
 import { db } from "@onecli/db";
@@ -67,6 +67,16 @@ import {
 import { logger } from "../lib/logger";
 
 const docsBaseURL = "https://onecli.sh/docs/guides/credential-stubs";
+
+/**
+ * The shared OAuth callback path (#301): one redirect URI to register on an
+ * OAuth app instead of one per provider — the biggest win for Google OAuth
+ * apps, which back a dozen providers and otherwise need a dozen URIs. Flows
+ * land here only when `/authorize` chose it, which it does only for AppConfig
+ * rows stamped `redirectStyle: "unified"` at save time; every other flow keeps
+ * `/v1/apps/:provider/callback`.
+ */
+const UNIFIED_CALLBACK_PATH = "/v1/apps/callback";
 
 const toggleSchema = z.object({ enabled: z.boolean() });
 
@@ -280,6 +290,28 @@ export const appRoutes = () => {
     },
   );
 
+  // ── GET /apps/callback ── unified OAuth callback (#301) ────────────────
+  // One redirect URI for every provider: the provider comes from the signed
+  // state (committed at the authenticated /authorize, HMAC-verified here)
+  // instead of from the path. Registered before GET /:provider so "callback"
+  // isn't read as a provider id.
+  app.get("/callback", async (c) => {
+    // Same two state sources as the per-provider route: the query param, or
+    // the oauth_state cookie /authorize scoped to this exact path — which is
+    // how fragment-callback providers, whose redirects carry no query params,
+    // still resolve here.
+    const stateParam = c.req.query("state") ?? getCookie(c, "oauth_state");
+    const state = stateParam ? verifyOAuthState(stateParam) : null;
+    const provider = state?.provider;
+    // No verified provider means there is no per-provider error page to send
+    // the browser to — and nothing here an attacker can steer, since a forged
+    // state already failed the HMAC. Fail flat instead of redirecting.
+    if (!provider || !getApp(provider)) {
+      return c.json({ error: "Invalid or missing state parameter" }, 400);
+    }
+    return handleOAuthCallback(c, provider, UNIFIED_CALLBACK_PATH);
+  });
+
   // ── GET /apps/:provider ── single app detail ───────────────────────────
   app.get("/:provider", authMiddleware, async (c) => {
     const auth = c.get("auth");
@@ -438,7 +470,15 @@ export const appRoutes = () => {
 
       const { values: creds } = resolved;
 
-      const redirectUri = `${getRequestOrigin(c.req.raw)}/v1/apps/${provider}/callback`;
+      // The callback this flow lands on must be a URI the user's OAuth app has
+      // registered. Rows stamped at save time committed to the shared path;
+      // env credentials and rows saved before it keep the per-provider path
+      // their OAuth app already knows (#301).
+      const callbackPath =
+        resolved.redirectStyle === "unified"
+          ? UNIFIED_CALLBACK_PATH
+          : `/v1/apps/${provider}/callback`;
+      const redirectUri = `${getRequestOrigin(c.req.raw)}${callbackPath}`;
       const scopes = appDef.connectionMethod.defaultScopes ?? [];
 
       const authUrl = appDef.connectionMethod.buildAuthUrl({
@@ -452,7 +492,7 @@ export const appRoutes = () => {
         httpOnly: true,
         secure: NODE_ENV === "production",
         sameSite: "Lax",
-        path: `/v1/apps/${provider}/callback`,
+        path: callbackPath,
         maxAge: 600,
       });
 
@@ -460,9 +500,17 @@ export const appRoutes = () => {
     },
   );
 
-  // ── GET /apps/:provider/callback ── OAuth callback ─────────────────────
-  app.get("/:provider/callback", async (c) => {
-    const provider = c.req.param("provider")!;
+  // ── OAuth callback ── shared between the per-provider route and the
+  // unified one (#301). `provider` comes from the path on the former and from
+  // the HMAC-verified state on the latter. `callbackPath` is whichever route
+  // actually answered: the token exchange's redirect_uri must repeat the exact
+  // URI the authorization request used, and the state cookie was scoped to
+  // that same path at /authorize.
+  const handleOAuthCallback = async (
+    c: Context<ApiEnv>,
+    provider: string,
+    callbackPath: string,
+  ) => {
     const apiOrigin = getRequestOrigin(c.req.raw);
 
     // Resolve the state before anything else can redirect or render. It arrives
@@ -580,7 +628,7 @@ export const appRoutes = () => {
         return errorRedirect(`${appDef.name} is not configured`);
       }
 
-      const redirectUri = `${apiOrigin}/v1/apps/${provider}/callback`;
+      const redirectUri = `${apiOrigin}${callbackPath}`;
 
       // Extract all query params as callback params
       const url = new URL(c.req.url);
@@ -666,7 +714,7 @@ export const appRoutes = () => {
       }
 
       deleteCookie(c, "oauth_state", {
-        path: `/v1/apps/${provider}/callback`,
+        path: callbackPath,
       });
 
       return c.redirect(
@@ -678,6 +726,12 @@ export const appRoutes = () => {
         err instanceof Error ? err.message : "An unexpected error occurred";
       return errorRedirect(message);
     }
+  };
+
+  // ── GET /apps/:provider/callback ── OAuth callback ─────────────────────
+  app.get("/:provider/callback", async (c) => {
+    const provider = c.req.param("provider")!;
+    return handleOAuthCallback(c, provider, `/v1/apps/${provider}/callback`);
   });
 
   // ── POST /apps/:provider/connect ── direct connect ─────────────────────
