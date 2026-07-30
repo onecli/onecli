@@ -808,6 +808,31 @@ static APP_PROVIDERS: &[AppProvider] = &[
         body_transform: None,
     },
     AppProvider {
+        provider: "mantishub",
+        display_name: "MantisHub",
+        // Per-customer hosts (`<name>.mantishub.io`), authenticated with an
+        // API token sent raw in the Authorization header — no scheme prefix
+        // (MantisBT convention). The bare suffix alone would inject the token
+        // into ANY `*.mantishub.io` host, so `credential_host_field` gates
+        // injection to the connection's exact stored host (cf. JFrog).
+        host_rules: &[HostRule {
+            pattern: HostPattern::Suffix(".mantishub.io"),
+            path_prefix: None,
+            strategy: AuthStrategy::Header {
+                name: "authorization",
+            },
+            intercept: false,
+            credential_host_field: Some("subdomain"),
+        }],
+        refresh: None,
+        metadata_headers: &[],
+        credential_headers: &[],
+        credential_params: &[],
+        host_rewrite: None,
+        finalizer: None,
+        body_transform: None,
+    },
+    AppProvider {
         provider: "resend",
         display_name: "Resend",
         host_rules: &[HostRule {
@@ -2474,6 +2499,40 @@ mod tests {
                 name: "x-api-key".to_string(),
                 value: "tny_test123".to_string(),
             }
+        );
+    }
+
+    // ── MantisHub ──────────────────────────────────────────────────────
+
+    #[test]
+    fn providers_for_mantishub_host() {
+        assert_eq!(providers_for_host("acme.mantishub.io"), vec!["mantishub"]);
+    }
+
+    #[test]
+    fn mantishub_suffix_no_false_positives() {
+        assert!(providers_for_host("mantishub.io").is_empty());
+        assert!(providers_for_host(".mantishub.io").is_empty());
+    }
+
+    #[test]
+    fn mantishub_uses_raw_authorization_header() {
+        let injections = build_app_injections("mantishub", "acme.mantishub.io", "mh_test123");
+        assert_eq!(injections.len(), 1);
+        assert_eq!(
+            injections[0],
+            Injection::SetHeader {
+                name: "authorization".to_string(),
+                value: "mh_test123".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn mantishub_has_credential_host_field() {
+        assert_eq!(
+            credential_host_field("mantishub", "acme.mantishub.io"),
+            Some("subdomain")
         );
     }
 

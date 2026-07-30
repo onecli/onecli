@@ -50,6 +50,7 @@ import { youtubePermissions } from "./youtube";
 import { linkedinPermissions } from "./linkedin";
 import { trelloPermissions } from "./trello";
 import { testinyPermissions } from "./testiny";
+import { mantishubPermissions } from "./mantishub";
 import { mondayPermissions } from "./monday";
 import { vercelPermissions } from "./vercel";
 
@@ -105,5 +106,6 @@ register(supabasePermissions);
 register(linkedinPermissions);
 register(trelloPermissions);
 register(testinyPermissions);
+register(mantishubPermissions);
 register(mondayPermissions);
 register(vercelPermissions);

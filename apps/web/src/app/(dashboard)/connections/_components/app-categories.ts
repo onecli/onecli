@@ -55,6 +55,7 @@ export const APP_CATEGORIES: Record<string, AppCategory> = {
   // Project Management
   jira: "project-management",
   confluence: "project-management",
+  mantishub: "project-management",
   notion: "project-management",
   todoist: "project-management",
   trello: "project-management",

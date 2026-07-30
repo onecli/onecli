@@ -36,6 +36,7 @@ import { aws } from "./aws";
 import { linkedin } from "./linkedin";
 import { trello } from "./trello";
 import { testiny } from "./testiny";
+import { mantishub } from "./mantishub";
 import { monday } from "./monday";
 import { vercel } from "./vercel";
 import { jfrogArtifactory } from "./jfrog-artifactory";
@@ -78,6 +79,7 @@ const staticApps: AppDefinition[] = [
   linkedin,
   trello,
   testiny,
+  mantishub,
   vercel,
   jfrogArtifactory,
 ];
