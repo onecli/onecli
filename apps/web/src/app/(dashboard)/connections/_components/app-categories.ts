@@ -48,6 +48,7 @@ export const APP_CATEGORIES: Record<string, AppCategory> = {
   vercel: "development",
   cloudflare: "development",
   flyio: "development",
+  stripe: "development",
   sentry: "development",
   linear: "development",
 
