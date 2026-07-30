@@ -45,6 +45,7 @@ export const APP_CATEGORIES: Record<string, AppCategory> = {
   github: "development",
   "github-app": "development",
   docker: "development",
+  testiny: "development",
   vercel: "development",
   cloudflare: "development",
   flyio: "development",
