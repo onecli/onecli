@@ -75,6 +75,7 @@ export const ConnectionAccountCard = ({
   pageScope = "project",
 }: ConnectionAccountCardProps) => {
   const [confirmOpen, setConfirmOpen] = useState(false);
+  const [reconnectConfirmOpen, setReconnectConfirmOpen] = useState(false);
   const [renameOpen, setRenameOpen] = useState(false);
   const [renameValue, setRenameValue] = useState("");
   const [agentDialogOpen, setAgentDialogOpen] = useState(false);
@@ -92,6 +93,7 @@ export const ConnectionAccountCard = ({
   const avatarUrl = connection.metadata?.avatarUrl as string | undefined;
   const accountType = connection.metadata?.accountType as string | undefined;
   const tags = (connection.metadata?.tags as string[] | undefined) ?? [];
+  const manageUrl = connection.metadata?.manageUrl as string | undefined;
 
   const handleRename = () => {
     const trimmed = renameValue.trim();
@@ -163,24 +165,28 @@ export const ConnectionAccountCard = ({
               </Button>
             </DropdownMenuTrigger>
             <DropdownMenuContent align="end">
-              {!!connection.metadata?.manageUrl && (
+              {!!manageUrl && (
                 <DropdownMenuItem asChild>
-                  <a
-                    href={connection.metadata.manageUrl as string}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                  >
+                  <a href={manageUrl} target="_blank" rel="noopener noreferrer">
                     <Settings className="size-4" />
                     Settings
                   </a>
                 </DropdownMenuItem>
               )}
-              {!connection.metadata?.manageUrl && (
-                <DropdownMenuItem onClick={() => onReconnect(connection.id)}>
-                  <RefreshCw className="size-4" />
-                  Reconnect
-                </DropdownMenuItem>
-              )}
+              <DropdownMenuItem
+                onClick={() =>
+                  // A GitHub App install already on the account short-circuits
+                  // the OAuth callback — GitHub lands the user back on this
+                  // manageUrl instead, silently. Confirm first so they know to
+                  // uninstall before a reconnect can complete.
+                  manageUrl
+                    ? setReconnectConfirmOpen(true)
+                    : onReconnect(connection.id)
+                }
+              >
+                <RefreshCw className="size-4" />
+                Reconnect
+              </DropdownMenuItem>
               <DropdownMenuItem
                 onClick={() => {
                   setRenameValue(
@@ -245,6 +251,43 @@ export const ConnectionAccountCard = ({
           </div>
         )}
       </Card>
+
+      <AlertDialog
+        open={reconnectConfirmOpen}
+        onOpenChange={setReconnectConfirmOpen}
+      >
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>App already installed</AlertDialogTitle>
+            <AlertDialogDescription>
+              This app is already installed on GitHub, so reconnecting
+              won&apos;t trigger a fresh authorization — GitHub will send you
+              back to the installation settings instead.{" "}
+              <a
+                href={manageUrl}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="underline decoration-current/40 underline-offset-2 hover:decoration-current"
+              >
+                Open installation settings
+              </a>{" "}
+              and uninstall it first, then reconnect to complete a fresh
+              install.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              onClick={() => {
+                setReconnectConfirmOpen(false);
+                onReconnect(connection.id);
+              }}
+            >
+              Reconnect anyway
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
 
       <AlertDialog open={confirmOpen} onOpenChange={setConfirmOpen}>
         <AlertDialogContent>
