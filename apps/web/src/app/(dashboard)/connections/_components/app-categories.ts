@@ -67,6 +67,7 @@ export const APP_CATEGORIES: Record<string, AppCategory> = {
   dropbox: "cloud-data",
   datadog: "cloud-data",
   "vertex-ai": "cloud-data",
+  nadir: "cloud-data",
 
   // Communication
   resend: "communication",
