@@ -52,6 +52,11 @@ interface ConnectFlowProps {
   status?: "success" | "error";
   errorMessage?: string;
   connectionId?: string;
+  /** The freshly-CREATED connection (the OAuth callback's `connected` param) —
+   * handed to the parent window on success so it can offer agent access.
+   * Distinct from `connectionId`, which means "re-authenticate this existing
+   * connection". */
+  connectedId?: string;
   agentName?: string;
   preContent?: ReactNode;
   hiddenFields?: Record<string, string>;
@@ -65,6 +70,7 @@ export const ConnectFlow = ({
   status,
   errorMessage,
   connectionId,
+  connectedId,
   agentName,
   preContent,
   hiddenFields,
@@ -78,6 +84,11 @@ export const ConnectFlow = ({
   const [countdown, setCountdown] = useState(3);
   const redirectedRef = useRef(false);
   const [mode, setMode] = useState<"oauth" | "apikey">("oauth");
+  // The credentials flow reports the connection it created client-side (the
+  // OAuth path delivers the same via the `connected` redirect param).
+  const [createdConnectionId, setCreatedConnectionId] = useState<
+    string | undefined
+  >(undefined);
   const hasApiKeyAlternate = !!app.apiKeyFields?.length;
 
   const doRedirect = useCallback(async () => {
@@ -135,6 +146,7 @@ export const ConnectFlow = ({
           appIcon={app.icon}
           provider={app.id}
           agentName={agentName}
+          connectedId={connectedId ?? createdConnectionId}
         />
       </ConnectLayout>
     );
@@ -154,7 +166,10 @@ export const ConnectFlow = ({
         projectId={explicitProjectId}
         orgId={orgId}
         onBack={() => setMode("oauth")}
-        onSuccess={() => setState("success")}
+        onSuccess={(connection) => {
+          setCreatedConnectionId(connection?.id);
+          setState("success");
+        }}
         onError={(msg) => {
           setError(msg);
           setState("error");
@@ -180,7 +195,10 @@ export const ConnectFlow = ({
         hiddenFields={hiddenFields}
         projectId={explicitProjectId}
         orgId={orgId}
-        onSuccess={() => setState("success")}
+        onSuccess={(connection) => {
+          setCreatedConnectionId(connection?.id);
+          setState("success");
+        }}
         onError={(msg) => {
           setError(msg);
           setState("error");

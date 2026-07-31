@@ -8,6 +8,12 @@ export const queryKeys = {
   agents: {
     all: () => ["agents", ...scope()] as const,
     list: () => [...queryKeys.agents.all(), "list"] as const,
+    detail: (agentId: string) =>
+      [...queryKeys.agents.all(), "detail", agentId] as const,
+    // Explicitly-targeted project (the org-level picker) — keyed by that
+    // project, deliberately outside the URL-derived scope() prefix.
+    forProject: (projectId: string) =>
+      ["agents", "for-project", projectId] as const,
   },
   secrets: {
     all: () => ["secrets", ...scope()] as const,
@@ -32,14 +38,6 @@ export const queryKeys = {
     members: (groupId: string) =>
       [...queryKeys.groups.all(), groupId, "members"] as const,
   },
-  agentGroups: {
-    all: () => ["agent-groups", ...scope()] as const,
-    list: () => [...queryKeys.agentGroups.all(), "list"] as const,
-    members: (groupId: string) =>
-      [...queryKeys.agentGroups.all(), groupId, "members"] as const,
-    forAgent: (agentId: string) =>
-      [...queryKeys.agentGroups.all(), "agent", agentId] as const,
-  },
   roleMappings: {
     all: () => ["role-mappings", ...scope()] as const,
     list: () => [...queryKeys.roleMappings.all(), "list"] as const,
@@ -47,10 +45,6 @@ export const queryKeys = {
   orgMembers: {
     all: () => ["org-members", ...scope()] as const,
     list: () => [...queryKeys.orgMembers.all(), "list"] as const,
-  },
-  orgAgents: {
-    all: () => ["org-agents", ...scope()] as const,
-    list: () => [...queryKeys.orgAgents.all(), "list"] as const,
   },
   ssoConnections: {
     all: () => ["sso-connections", ...scope()] as const,
@@ -64,6 +58,13 @@ export const queryKeys = {
     all: () => ["scim-tokens", ...scope()] as const,
     list: () => [...queryKeys.scimTokens.all(), "list"] as const,
   },
+  grants: {
+    all: () => ["grants", ...scope()] as const,
+    agent: (agentId: string) =>
+      [...queryKeys.grants.all(), "agent", agentId] as const,
+    connection: (connectionId: string) =>
+      [...queryKeys.grants.all(), "connection", connectionId] as const,
+  },
   connections: {
     all: () => ["connections", ...scope()] as const,
     list: (pageScope: PageScope = "project") =>
@@ -75,6 +76,12 @@ export const queryKeys = {
     all: () => ["project-access", ...scope()] as const,
     list: (projectId: string) =>
       [...queryKeys.projectAccess.all(), projectId] as const,
+  },
+  projects: {
+    all: () => ["projects", ...scope()] as const,
+    // organizationId only when explicitly overridden (account-route picker).
+    list: (organizationId?: string) =>
+      [...queryKeys.projects.all(), "list", organizationId ?? "url"] as const,
   },
   appPermissionDefinitions: {
     // Global static catalog (identical across orgs/projects) — deliberately
@@ -96,6 +103,9 @@ export const queryKeys = {
   },
   counts: {
     all: () => ["counts", ...scope()] as const,
+  },
+  installInfo: {
+    all: () => ["install-info", ...scope()] as const,
   },
   userPlan: {
     all: () => ["user-plan", ...scope()] as const,

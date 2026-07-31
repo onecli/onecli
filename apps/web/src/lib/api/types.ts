@@ -8,6 +8,9 @@ export interface Agent {
    * editable from the console since step 10 — policy rules decide access. */
   secretMode: string;
   createdAt: string;
+  /** Newest gateway request inside the list's bounded lookback window; null =
+   * none in-window (never used OR quiet — `agentLastSeen` tells them apart). */
+  lastSeenAt: string | null;
 }
 
 export interface CreatedAgent {
@@ -15,6 +18,17 @@ export interface CreatedAgent {
   name: string;
   identifier: string;
   createdAt: string;
+}
+
+export interface AgentDetail {
+  id: string;
+  name: string;
+  identifier: string;
+  isDefault: boolean;
+  createdAt: string;
+  /** Newest gateway request inside the server's bounded lookback window — the
+   * Install page's verify signal. Null when the agent has none in-window. */
+  recentRequestAt: string | null;
 }
 
 export interface DropboxFolder {
@@ -224,7 +238,7 @@ export interface CreateSecretInput {
   injectionConfig?: unknown;
 }
 
-// ── Org directory (§3.5 contract: groups, agent groups, members, agents) ──
+// ── Org directory (groups, members) ──
 
 /** Cursor envelope shared by every directory-scale list. */
 export interface DirectoryPage<T> {
@@ -283,34 +297,6 @@ export interface RoleMappingImpact {
   affectedCount: number;
 }
 
-export interface AgentGroupRow {
-  id: string;
-  name: string;
-  memberCount: number;
-  createdAt: string;
-  updatedAt: string;
-}
-
-export interface AgentGroupMemberRow {
-  agentId: string;
-  name: string;
-  identifier: string;
-  projectId: string;
-  projectName: string | null;
-  addedAt: string;
-}
-
-export interface OrgAgentRow {
-  id: string;
-  name: string;
-  identifier: string;
-  projectId: string;
-  projectName: string | null;
-  /** The project's bound humans (first 3) — "whose project" disambiguation. */
-  projectPeople: { name: string | null; email: string }[];
-  projectPeopleTotal: number;
-}
-
 export interface OrgMemberListRow {
   userId: string;
   email: string;
@@ -323,12 +309,11 @@ export interface OrgMemberListRow {
 
 // ── Shared policy identity/condition shapes ──────────────────────────────────
 // Used by the editor's PolicyRuleV2. Project rules target a specific agent or
-// "any" (empty); org rules target directory identities (agent-group / user /
-// user-group). Conditions are body-contains.
+// "any" (empty); org rules target directory identities (user / user-group).
+// Conditions are body-contains.
 
 export type ProjectionIdentity =
   | { type: "agent"; id: string }
-  | { type: "agentGroup"; id: string }
   | { type: "user"; id: string }
   | { type: "group"; id: string };
 
@@ -379,7 +364,10 @@ export type PolicyRuleSource =
   | "default"
   // Injection-only rules materialized from the equipment model (step 8); the
   // editor hides them (managed via the agent access UI).
-  | "equipment";
+  | "equipment"
+  // Attach-model grant stacks (step 2): compiled by the grants API; rendered
+  // as labeled, revocable derived rows until the project rules table retires.
+  | "grant";
 
 export interface PolicyRuleV2 {
   id: string;
@@ -417,4 +405,79 @@ export interface LastPublish {
   ruleCount: number;
   appliedAt: string;
   appliedBy: { name: string | null; email: string } | null;
+}
+
+// ── Attach-model grants (plans/project-attach-model.md, step 2) ─────────────
+// Hand-mirrored from packages/api/src/services/grants-service.ts and
+// grants-summary-service.ts.
+
+/** A grant's session policy ("Resources"): which repositories/folders the
+ * connection's injected credential may reach. One strict axis per provider. */
+export type GrantResources = { repositories: string[] } | { folders: string[] };
+
+export interface AgentGrantConnection {
+  connectionId: string;
+  provider: string;
+  label: string | null;
+  scope: "project" | "organization";
+  access: "full" | "custom";
+  allow: string[];
+  ask: string[];
+  /** Null = unrestricted. */
+  resources: GrantResources | null;
+}
+
+export interface AgentGrantSecret {
+  secretId: string;
+  name: string;
+  type: string;
+  scope: "project" | "organization";
+}
+
+export interface AgentGrants {
+  agentId: string;
+  /** "all" = the agent still injects the whole fenced pool (pre-flip). */
+  mode: "all" | "grants";
+  connections: AgentGrantConnection[];
+  secrets: AgentGrantSecret[];
+}
+
+export interface ConnectionGrants {
+  connectionId: string;
+  agents: {
+    agentId: string;
+    access: "full" | "custom";
+    allow: string[];
+    ask: string[];
+  }[];
+}
+
+/** `resources` is tri-state: ABSENT = preserve what the stack carries, NULL =
+ * clear, OBJECT = set (server-validated per provider + edition). */
+export type ConnectionGrantInput =
+  | { access: "full"; resources?: GrantResources | null }
+  | {
+      access: "custom";
+      allow: string[];
+      ask: string[];
+      resources?: GrantResources | null;
+    };
+
+export type GrantsSummaryEntry =
+  | {
+      kind: "app";
+      provider: string;
+      connectionId: string;
+      label: string | null;
+    }
+  | { kind: "secret" | "llm"; id: string; name: string };
+
+export interface AgentGrantsSummary {
+  mode: "all" | "grants";
+  entries: GrantsSummaryEntry[];
+  total: number;
+}
+
+export interface AgentWithGrantsSummary extends Agent {
+  grantsSummary: AgentGrantsSummary;
 }

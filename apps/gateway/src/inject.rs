@@ -1084,6 +1084,34 @@ mod tests {
         assert_eq!(headers.get("accept").unwrap(), "application/json");
     }
 
+    /// The vault key is authoritative: SetHeader must REPLACE a key the agent
+    /// sent itself, never defer to it. `onecli run` hands agents that require
+    /// a local provider key (e.g. OpenClaw) a placeholder ANTHROPIC_API_KEY,
+    /// and users' own shell keys pass through the child env — both ride
+    /// requests as x-api-key and must lose to the injected credential, or a
+    /// placeholder (or stale personal key) would reach the provider and
+    /// governance would silently depend on the agent's local config.
+    #[test]
+    fn inject_set_header_replaces_agent_supplied_key() {
+        let mut headers = hyper::HeaderMap::new();
+        headers.insert(
+            "x-api-key",
+            HeaderValue::from_static("sk-ant-onecli-gateway-placeholder"),
+        );
+
+        let rules = vec![make_rule(
+            "*",
+            vec![set_header("x-api-key", "sk-ant-vault")],
+        )];
+
+        let count = apply_injections(&mut headers, &mut "/v1/messages".to_string(), &rules);
+        assert_eq!(count, 1);
+        assert_eq!(headers.get("x-api-key").unwrap(), "sk-ant-vault");
+        // Exactly one value — insert semantics, not append (a duplicate header
+        // would leak the placeholder alongside the real key).
+        assert_eq!(headers.get_all("x-api-key").iter().count(), 1);
+    }
+
     #[test]
     fn inject_set_header_overwrites_existing() {
         let mut headers = hyper::HeaderMap::new();

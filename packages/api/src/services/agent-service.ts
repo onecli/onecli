@@ -1,6 +1,7 @@
 import { randomBytes } from "crypto";
 import { db, Prisma } from "@onecli/db";
 import { ServiceError } from "./errors";
+import { LAST_SEEN_WINDOW_MS } from "../lib/agent-activity";
 import { IDENTIFIER_REGEX } from "../validations/agent";
 
 export type SecretMode = "all" | "selective";
@@ -9,23 +10,42 @@ export const generateAccessToken = () =>
   `aoc_${randomBytes(32).toString("hex")}`;
 
 export const listAgents = async (projectId: string) => {
-  const agents = await db.agent.findMany({
-    where: { projectId },
-    select: {
-      id: true,
-      name: true,
-      identifier: true,
-      accessToken: true,
-      isDefault: true,
-      secretMode: true,
-      createdAt: true,
-    },
-    orderBy: [{ isDefault: "desc" }, { createdAt: "desc" }],
-  });
+  const [agents, lastSeenRows] = await Promise.all([
+    db.agent.findMany({
+      where: { projectId },
+      select: {
+        id: true,
+        name: true,
+        identifier: true,
+        accessToken: true,
+        isDefault: true,
+        secretMode: true,
+        createdAt: true,
+      },
+      orderBy: [{ isDefault: "desc" }, { createdAt: "desc" }],
+    }),
+    // Newest gateway request per agent, bounded to the last-seen window (a
+    // range scan on the (project_id, created_at) index — never a walk of the
+    // project's whole log history). Null = no request in-window; the client
+    // tells "never used" from "quiet" via agentLastSeen.
+    db.requestLog.groupBy({
+      by: ["agentId"],
+      where: {
+        projectId,
+        createdAt: { gte: new Date(Date.now() - LAST_SEEN_WINDOW_MS) },
+      },
+      _max: { createdAt: true },
+    }),
+  ]);
+
+  const lastSeenByAgent = new Map(
+    lastSeenRows.map((r) => [r.agentId, r._max.createdAt]),
+  );
 
   return agents.map((a) => ({
     ...a,
     secretMode: a.secretMode as SecretMode,
+    lastSeenAt: lastSeenByAgent.get(a.id) ?? null,
   }));
 };
 
@@ -40,6 +60,38 @@ export const getDefaultAgent = async (projectId: string) => {
       createdAt: true,
     },
   });
+};
+
+/** Lookback for `recentRequestAt`: bounded so the RequestLog probe rides the
+ * (project_id, created_at) index — unbounded, a zero-request agent would walk
+ * the project's whole log history, and the Install page polls this read while
+ * waiting for the agent's first request. */
+export const RECENT_REQUEST_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
+
+export const getAgentDetail = async (projectId: string, agentId: string) => {
+  const agent = await db.agent.findFirst({
+    where: { id: agentId, projectId },
+    select: {
+      id: true,
+      name: true,
+      identifier: true,
+      isDefault: true,
+      createdAt: true,
+    },
+  });
+  if (!agent) throw new ServiceError("NOT_FOUND", "Agent not found");
+
+  const recent = await db.requestLog.findFirst({
+    where: {
+      projectId,
+      agentId,
+      createdAt: { gte: new Date(Date.now() - RECENT_REQUEST_WINDOW_MS) },
+    },
+    orderBy: { createdAt: "desc" },
+    select: { createdAt: true },
+  });
+
+  return { ...agent, recentRequestAt: recent?.createdAt ?? null };
 };
 
 export const agentExistsByIdentifier = async (
@@ -57,7 +109,6 @@ export const createAgent = async (
   projectId: string,
   name: string,
   identifier: string,
-  parentIdentifier?: string,
 ) => {
   const trimmed = name.trim();
   if (!trimmed || trimmed.length > 255) {
@@ -86,30 +137,23 @@ export const createAgent = async (
     );
   }
 
-  // A sub-agent inherits its parent's injection MODE only. The old per-agent
-  // grant tables are frozen (step 10) — what a selective agent may inject now
-  // comes from policy rules, so a selective parent's child starts with nothing
-  // until a rule grants it (fail-closed) rather than silently inheriting the
-  // parent's pool through rows the gateway no longer reads.
-  let inheritedSecretMode: SecretMode = "all";
-
-  if (parentIdentifier) {
-    const parent = await db.agent.findFirst({
-      where: { projectId, identifier: parentIdentifier },
-      select: { secretMode: true },
-    });
-    if (parent) inheritedSecretMode = parent.secretMode as SecretMode;
-  }
-
   const accessToken = generateAccessToken();
 
   try {
+    // Every new agent starts SELECTIVE with nothing attached (attach-model
+    // step 5): credentials arrive through explicit grants — the agent page or
+    // the post-connect attach step — never through an implicit whole-pool
+    // mode. Deliberately NOT inherited from a parent agent: during the grace
+    // window an unconverted "all" parent would otherwise mint new all-mode
+    // agents and step 7's zero-"all" gate could never converge. The schema
+    // default stays "all" until the column retires in step 8, so this must be
+    // explicit (as at every other creation site).
     const agent = await db.agent.create({
       data: {
         name: trimmed,
         identifier: trimmedIdentifier,
         accessToken,
-        secretMode: inheritedSecretMode,
+        secretMode: "selective",
         projectId,
       },
       select: {
@@ -213,22 +257,4 @@ export const regenerateAgentToken = async (
   });
 
   return { accessToken: updated.accessToken };
-};
-
-export const updateAgentSecretMode = async (
-  projectId: string,
-  agentId: string,
-  mode: SecretMode,
-) => {
-  const agent = await db.agent.findFirst({
-    where: { id: agentId, projectId },
-    select: { id: true },
-  });
-
-  if (!agent) throw new ServiceError("NOT_FOUND", "Agent not found");
-
-  await db.agent.update({
-    where: { id: agentId },
-    data: { secretMode: mode },
-  });
 };

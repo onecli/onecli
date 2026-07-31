@@ -24,33 +24,32 @@ const CACHE_TTL_SECS: u64 = 60;
 pub(crate) const CONNECTION_ID_HEADER: &str = "x-onecli-connection-id";
 /// Header name for listing available connections (response).
 pub(crate) const CONNECTIONS_HEADER: &str = "x-onecli-connections";
-/// Agent secret mode that restricts access to explicitly assigned credentials.
-pub(crate) const SECRET_MODE_SELECTIVE: &str = "selective";
 
-/// Which credential pool a connecting agent draws from. `secret_mode` is the
-/// all-vs-rules SWITCH; the v2 selection only says WHICH credentials a already
-/// -selective agent gets.
+/// Which ORG/PROJECT credential pool a connecting agent draws from. Since
+/// attach-model step 7 the v2 selection IS the whole story for those tiers:
+/// every agent is rule-selected, and the retired `agents.secret_mode` column
+/// is never read (it drops in step 8). The PARTNER secret tier rides OUTSIDE
+/// this classification: partner secrets are org infrastructure a rule cannot
+/// even name (`assertTargetsValid` forbids it), so `resolve_secret_injections`
+/// injects them unconditionally — a grant-less agent must still keep
+/// partner-provided (budget-metered) keys.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum InjectionPool {
-    /// All mode: the whole org+project(+partner) fenced pool. Policy rules gate
-    /// the REQUEST here — they never NARROW the pool, or an all-mode agent would
-    /// lose its partner / budget-metered / other host-matched credentials.
-    All,
-    /// Selective with a rule-driven selection: the fenced pool narrowed to what
-    /// the agent's v2 allow rules name.
+    /// A rule-driven selection: the fenced pool narrowed to what the agent's
+    /// v2 allow rules name.
     RuleSelected,
-    /// Selective with no selection: nothing is injected. Since step 10 the old
-    /// per-agent grant tables are unread, so this must NEVER fall through to
-    /// `All` — that would hand a deliberately restricted agent every credential.
+    /// No selection: nothing from the org/project pool is injected (the
+    /// grant-independent partner tier still is). Since step 10 the old
+    /// per-agent grant tables are unread, and since step 7 there is no
+    /// all-mode fallback — an empty selection injects NOTHING from these
+    /// tiers, or a deliberately restricted agent would silently receive every
+    /// org/project credential.
     Empty,
 }
 
-/// The pool for the SECRET side: rule-selected when the agent is selective and
-/// its rules name secret ids and/or whole levels.
-pub(crate) fn secret_pool(secret_mode: &str, selection: &db::InjectSelection) -> InjectionPool {
-    if secret_mode != SECRET_MODE_SELECTIVE {
-        return InjectionPool::All;
-    }
+/// The pool for the SECRET side: rule-selected when the agent's rules name
+/// secret ids and/or whole levels.
+pub(crate) fn secret_pool(selection: &db::InjectSelection) -> InjectionPool {
     if selection.secret_ids.is_empty() && selection.secret_scopes.is_empty() {
         return InjectionPool::Empty;
     }
@@ -59,14 +58,23 @@ pub(crate) fn secret_pool(secret_mode: &str, selection: &db::InjectSelection) ->
 
 /// The pool for the APP-CONNECTION side: the symmetric rule, over named
 /// connection ids and/or (provider, level) scopes.
-pub(crate) fn connection_pool(secret_mode: &str, selection: &db::InjectSelection) -> InjectionPool {
-    if secret_mode != SECRET_MODE_SELECTIVE {
-        return InjectionPool::All;
-    }
+pub(crate) fn connection_pool(selection: &db::InjectSelection) -> InjectionPool {
     if selection.connections.is_empty() && selection.app_scopes.is_empty() {
         return InjectionPool::Empty;
     }
     InjectionPool::RuleSelected
+}
+
+/// Map an org's billing `subscription_status` to the plan label the gateway
+/// enforces integration-call quotas against. Only an explicitly free (or unset)
+/// status maps to `"free"`; every other named plan passes through unchanged, so
+/// a new paid tier (e.g. "scale") is never silently throttled as the free tier.
+/// The quota itself lives in the EE hooks; this only decides which label to pass.
+pub(crate) fn plan_for_subscription_status(status: &str) -> &str {
+    match status {
+        "" | "free" => "free",
+        other => other,
+    }
 }
 
 // ── Data types ──────────────────────────────────────────────────────────
@@ -136,6 +144,18 @@ pub(crate) enum AppConnectionResult {
         /// scan) so request-level enforcement applies the correct policy even
         /// when an agent has several same-provider connections.
         session_policy: Option<serde_json::Value>,
+        /// Id of the connection that won injection for this request; `None`
+        /// when no connection serves this path per the catalog (the
+        /// non-serving wipe). Follows `session_policy`'s attribution law
+        /// exactly — including its catch-all blind spot: rules that
+        /// self-select by path at apply time can inject a credential whose id
+        /// was wiped here. `Target::Connection` decisions bind to this id.
+        connection_id: Option<String>,
+        /// Connections whose credential is minted only once the request is
+        /// ALLOWED — see [`PendingInjection`]. Their rules are absent from
+        /// `rules` until then, so every "are there injections?" test must
+        /// consider this too.
+        pending: Vec<PendingInjection>,
     },
     /// No app connections available for this provider.
     NoConnections,
@@ -145,6 +165,58 @@ pub(crate) enum AppConnectionResult {
     MultipleProviders { connections: Vec<ConnectionChoice> },
     /// The requested connection ID was not found — return the valid options.
     NotFound { connections: Vec<ConnectionChoice> },
+}
+
+/// Whether a session policy asks for a resource-scoped credential — a non-empty
+/// object, the same predicate `resolve_access_token` uses to force a scoped
+/// mint. (An empty allowlist reaches nothing and is refused before injection,
+/// so it never needs a credential at all.)
+fn granular_scoping_requested(session_policy: Option<&serde_json::Value>) -> bool {
+    session_policy
+        .and_then(|sp| sp.as_object())
+        .is_some_and(|obj| !obj.is_empty())
+}
+
+/// Stamp what each connection may reach: its own selected scope narrowed to
+/// the organization's boundary.
+///
+/// Both halves matter. A grant that NAMES a connection carries its own scope
+/// (already composed with the boundary while folding); a PROVIDER-LEVEL grant
+/// carries none, and its connections are only known here — this is the first
+/// point at which those ids exist, so it is the only place their boundary can
+/// be applied. Re-applying a boundary already composed in the fold is a no-op:
+/// intersection with a superset returns the same set.
+fn stamp_resource_scopes(
+    connections: &mut [db::AppConnectionRow],
+    selection: &db::InjectSelection,
+) {
+    for c in connections {
+        c.session_policy = crate::ee_apps::compose_resource_scope(
+            selection.boundaries.get(&c.id),
+            selection.connections.get(&c.id).and_then(|p| p.as_ref()),
+        );
+    }
+}
+
+/// A connection whose injection rules are built only after the policy allows
+/// the request.
+///
+/// Resource-scoped credentials (a GitHub installation token limited to specific
+/// repositories) are minted live from the provider on every request and never
+/// persisted. Building them during resolution meant a request the policy was
+/// about to refuse still caused a real credential to be created upstream. The
+/// selection — which connection wins, its policy, whether it injects at all —
+/// needs none of that, so it happens up front and the mint waits.
+///
+/// Everything here is already-decrypted, request-scoped state; it never leaves
+/// the process and is dropped with the request.
+#[derive(Debug)]
+pub(crate) struct PendingInjection {
+    pub conn: db::AppConnectionRow,
+    pub decrypted_json: String,
+    pub hostname: String,
+    pub cache_key: String,
+    pub project_id: String,
 }
 
 /// Cached injection result including host rewrite, so cache hits preserve routing.
@@ -266,7 +338,6 @@ impl PolicyEngine {
             &self.pool,
             &agent.organization_id,
             &agent.project_id,
-            &agent.id,
         )
         .await
         .map_err(db_err)?;
@@ -288,19 +359,14 @@ impl PolicyEngine {
         // scoped to a different agent.
         let has_credentials = !injection_rules.is_empty() || !app_connections.is_empty();
 
-        // Check if the project has credentials (secrets or app connections) for this
-        // host that the agent can't access (selective mode).
-        let access_restricted = injection_rules.is_empty()
-            && agent.secret_mode == SECRET_MODE_SELECTIVE
-            && self.has_available_credentials(agent, authority).await;
+        // Check if the project has credentials (secrets or app connections) for
+        // this host that the agent's grants don't attach — surfaced as an
+        // `access_restricted` error pointing at the attach surface instead of a
+        // generic credential-not-found.
+        let access_restricted =
+            injection_rules.is_empty() && self.has_available_credentials(agent, hostname).await;
 
-        let plan = match agent.subscription_status.as_str() {
-            "pro" => "pro",
-            "team" => "team",
-            "enterprise" => "enterprise",
-            _ => "free",
-        }
-        .to_string();
+        let plan = plan_for_subscription_status(&agent.subscription_status).to_string();
 
         // Cloud-only: resolve claim-mode state once here (cached with the rest
         // of ConnectResponse for 60s). No-op in OSS (returns None).
@@ -343,54 +409,45 @@ impl PolicyEngine {
         hostname: &str,
         selection: &db::InjectSelection,
     ) -> Result<(Vec<InjectionRule>, Vec<crate::budget::BudgetBinding>), ConnectError> {
-        let secrets = match secret_pool(&agent.secret_mode, selection) {
+        // The PARTNER tier is GRANT-INDEPENDENT (attach-model steps 5+7): a
+        // rule cannot name a partner secret (`assertTargetsValid`), so grants
+        // can never carry that tier — it is injected in every arm, at LOWEST
+        // precedence: later same-header injections override earlier ones, so
+        // org/project values always win. `inherited_secret_rows` is a no-op
+        // stub outside the cloud edition (returns an empty Vec).
+        let secrets = match secret_pool(selection) {
             InjectionPool::RuleSelected => {
-                // Step 8 (rule-driven): a SELECTIVE agent's allow rules name specific
-                // secrets (`secret_ids`) and/or "all secrets at a level"
-                // (`secret_scopes`). Gated on `secret_mode` — `secret_mode` stays the
-                // all-vs-selective SWITCH, so an ALL-mode agent always takes the full
-                // merge below and a rule can never NARROW it (dropping its partner /
-                // budget-metered / other host-matched secrets); the v2 selection only
-                // picks WHICH secrets for an already-selective agent.
-                // Fetch the ORG/PROJECT-fenced candidate pool and NARROW to the named
-                // ids OR the named levels (a secret's own `scope` — "organization" /
-                // "project"). The org-fence is on the FETCH, so a rule naming another
-                // org's secret can't pull it (the id simply isn't in the pool). Partner
-                // is excluded (a rule can only name a project/org secret or level, per
-                // `assertTargetsValid`), matching legacy selective mode (also no partner).
-                let (org_result, project_result) = tokio::join!(
-                    db::find_secrets_by_org(&self.pool, &agent.organization_id),
-                    db::find_secrets_by_project(&self.pool, &agent.project_id),
-                );
-                let mut merged = org_result.map_err(db_err)?;
-                merged.extend(project_result.map_err(db_err)?);
-                merged.retain(|s| {
-                    selection.secret_ids.contains(&s.id)
-                        || selection.secret_scopes.contains(&s.scope)
-                });
-                merged
-            }
-            // A SELECTIVE agent with no rule-driven selection has no granted
-            // secrets → inject nothing. WHICH secrets a selective agent gets now
-            // comes solely from its v2 allow rules (incl. the frozen equipment
-            // rules that mirror its old grants) — there is no `agent_secrets`
-            // fallback since step 10.
-            InjectionPool::Empty => Vec::new(),
-            InjectionPool::All => {
-                // All mode precedence (lowest → highest): partner, then org, then
-                // project. Later same-header injections override earlier ones, so
-                // partner is the lowest-priority fallback. All three tiers resolve
-                // concurrently (this only runs on a cache miss);
-                // `inherited_secret_rows` is a no-op in OSS (returns an empty Vec).
+                // Rule-driven: the agent's allow rules name specific secrets
+                // (`secret_ids`) and/or "all secrets at a level"
+                // (`secret_scopes`). Fetch the ORG/PROJECT-fenced candidate
+                // pool and NARROW to the named ids OR the named levels (a
+                // secret's own `scope` — "organization" / "project"). The
+                // org-fence is on the FETCH, so a rule naming another org's
+                // secret can't pull it (the id simply isn't in the pool). The
+                // selection never filters the partner tier (above).
                 let (partner_rows, org_result, project_result) = tokio::join!(
                     crate::partner::inherited_secret_rows(&self.pool, &agent.organization_id),
                     db::find_secrets_by_org(&self.pool, &agent.organization_id),
                     db::find_secrets_by_project(&self.pool, &agent.project_id),
                 );
+                let mut selected = org_result.map_err(db_err)?;
+                selected.extend(project_result.map_err(db_err)?);
+                selected.retain(|s| {
+                    selection.secret_ids.contains(&s.id)
+                        || selection.secret_scopes.contains(&s.scope)
+                });
                 let mut merged = partner_rows;
-                merged.extend(org_result.map_err(db_err)?);
-                merged.extend(project_result.map_err(db_err)?);
+                merged.extend(selected);
                 merged
+            }
+            // An agent with no rule-driven selection has no granted org/project
+            // secrets → only the grant-independent partner tier is injected.
+            // WHICH org/project secrets an agent gets comes solely from its v2
+            // allow rules (incl. the frozen equipment rules that mirror its old
+            // grants) — there is no `agent_secrets` fallback since step 10, and
+            // no all-mode fallback since step 7.
+            InjectionPool::Empty => {
+                crate::partner::inherited_secret_rows(&self.pool, &agent.organization_id).await
             }
         };
 
@@ -541,17 +598,15 @@ impl PolicyEngine {
         let providers = apps::providers_for_host(hostname);
         debug!(host = %authority, providers = ?providers, "app_connections: matching static and dynamic providers");
 
-        let connections = match connection_pool(&agent.secret_mode, selection) {
+        let connections = match connection_pool(selection) {
             InjectionPool::RuleSelected => {
-                // Step 8 (rule-driven): a SELECTIVE agent's allow rules name SPECIFIC
-                // connections (`kind=connection`) and/or ALL connections of a provider
-                // at a level (`kind=app` + `connection_scope`). Gated on `secret_mode`
-                // — an ALL-mode agent always takes the full merge below, so a rule can
-                // never narrow it. Fetch the ORG/PROJECT-fenced pool and keep the
-                // connections a rule selects: a named id, or a (provider, scope) match.
-                // Attach the per-connection sessionPolicy only for the SPECIFIC ones
-                // (the "all-at-level" ones are unscoped, like all-mode). Org-fence on
-                // the FETCH → a foreign id/scope can't pull a foreign connection.
+                // Rule-driven: the agent's allow rules name SPECIFIC connections
+                // (`kind=connection`) and/or ALL connections of a provider at a
+                // level (`kind=app` + `connection_scope`). Fetch the
+                // ORG/PROJECT-fenced pool and keep the connections a rule
+                // selects: a named id, or a (provider, scope) match. Attach the
+                // scope each one may reach below. Org-fence on the FETCH → a
+                // foreign id/scope can't pull a foreign connection.
                 let (org_result, project_result) = tokio::join!(
                     db::find_app_connections_by_org(&self.pool, &agent.organization_id),
                     db::find_app_connections_by_project(&self.pool, &agent.project_id),
@@ -565,27 +620,15 @@ impl PolicyEngine {
                             .iter()
                             .any(|(provider, scope)| *provider == c.provider && *scope == c.scope)
                 });
-                for c in &mut merged {
-                    if let Some(policy) = selection.connections.get(&c.id) {
-                        c.session_policy = policy.clone();
-                    }
-                }
+                stamp_resource_scopes(&mut merged, selection);
                 merged
             }
-            // A SELECTIVE agent with no rule-driven selection reaches no app
-            // connections → none injected. As with secrets, WHICH connections a
-            // selective agent gets comes solely from its v2 allow rules — there is
-            // no `agent_app_connections` fallback since step 10.
+            // An agent with no rule-driven selection reaches no app connections
+            // → none injected. As with secrets, WHICH connections an agent gets
+            // comes solely from its v2 allow rules — there is no
+            // `agent_app_connections` fallback since step 10, and no all-mode
+            // fallback since step 7.
             InjectionPool::Empty => Vec::new(),
-            InjectionPool::All => {
-                let (org_result, project_result) = tokio::join!(
-                    db::find_app_connections_by_org(&self.pool, &agent.organization_id),
-                    db::find_app_connections_by_project(&self.pool, &agent.project_id),
-                );
-                let mut merged = org_result.map_err(db_err)?;
-                merged.extend(project_result.map_err(db_err)?);
-                merged
-            }
         };
 
         let matching: Vec<db::AppConnectionRow> = connections
@@ -662,6 +705,7 @@ impl PolicyEngine {
                 finalizer,
                 body_transform,
                 session_policy,
+                connection_id,
                 ..
             } = &mut result
             {
@@ -671,6 +715,7 @@ impl PolicyEngine {
                     *finalizer = None;
                     *body_transform = None;
                     *session_policy = None;
+                    *connection_id = None;
                 }
             }
             return Ok(result);
@@ -717,6 +762,8 @@ impl PolicyEngine {
             let mut resolved_body_transform: Option<apps::BodyTransform> = None;
             let mut resolved_provider: Option<String> = None;
             let mut resolved_session_policy: Option<serde_json::Value> = None;
+            let mut resolved_connection_id: Option<String> = None;
+            let mut all_pending: Vec<PendingInjection> = Vec::new();
             for conn in app_connections {
                 if let AppConnectionResult::Rules {
                     rules: r,
@@ -727,6 +774,8 @@ impl PolicyEngine {
                     body_transform,
                     provider,
                     session_policy,
+                    connection_id,
+                    pending,
                 } = self
                     .resolve_connection_injections(
                         conn,
@@ -738,6 +787,7 @@ impl PolicyEngine {
                     .await?
                 {
                     rules.extend(r);
+                    all_pending.extend(pending);
                     // Tie ALL winner metadata to the connection that actually
                     // serves THIS request — not merely the first to yield
                     // rules. A non-serving connection (e.g. a GitHub
@@ -758,6 +808,7 @@ impl PolicyEngine {
                             resolved_body_transform = body_transform;
                         }
                         resolved_session_policy = session_policy;
+                        resolved_connection_id = connection_id;
                     }
                     if resolved_provider.is_none() {
                         resolved_provider = Some(provider);
@@ -778,6 +829,8 @@ impl PolicyEngine {
                 body_transform: resolved_body_transform,
                 provider: resolved_provider.unwrap_or_default(),
                 session_policy: resolved_session_policy,
+                connection_id: resolved_connection_id,
+                pending: all_pending,
             });
         }
 
@@ -802,6 +855,7 @@ impl PolicyEngine {
         project_id: &str,
         cache: &dyn CacheStore,
     ) -> Result<AppConnectionResult, ConnectError> {
+        let hostname = crate::gateway::strip_port(authority);
         let policy_suffix = conn
             .session_policy
             .as_ref()
@@ -813,6 +867,9 @@ impl PolicyEngine {
         );
 
         if let Some(cached) = cache.get::<CachedAppInjection>(&cache_key).await {
+            // A warm entry already holds the built rules (credential included),
+            // so there is nothing left to defer — the provider call this
+            // request would have made already happened for an earlier one.
             debug!(connection_id = %conn.id, "app injection: cache hit");
             return Ok(AppConnectionResult::Rules {
                 rules: cached.rules,
@@ -823,6 +880,8 @@ impl PolicyEngine {
                 body_transform: apps::body_transform_for_provider(&conn.provider),
                 provider: conn.provider.clone(),
                 session_policy: conn.session_policy.clone(),
+                connection_id: Some(conn.id.clone()),
+                pending: Vec::new(),
             });
         }
 
@@ -872,21 +931,141 @@ impl PolicyEngine {
             return Ok(AppConnectionResult::NoConnections);
         }
 
+        // A scope that reaches nothing needs no credential at all — resolving
+        // one could only produce access it may not use. Return early WITH the
+        // scope, so the request is refused for it (`hooks::refuse_empty_scope`)
+        // rather than quietly proceeding uncredentialed, which would read as
+        // unmanaged traffic and escape the deny-defaults.
+        if crate::ee_apps::scope_reaches_nothing(conn.session_policy.as_ref()) {
+            return Ok(AppConnectionResult::Rules {
+                rules: Vec::new(),
+                token_expires_at: None,
+                rewrite_host: None,
+                connection_label: conn.label.clone(),
+                finalizer: None,
+                body_transform: None,
+                provider: conn.provider.clone(),
+                session_policy: conn.session_policy.clone(),
+                connection_id: Some(conn.id.clone()),
+                pending: Vec::new(),
+            });
+        }
+
+        // Defer the credential when the provider mints a RESOURCE-SCOPED one:
+        // that is a live provider call, per request, for a credential that is
+        // never persisted — so it must not happen for a request the policy is
+        // about to refuse. Selection is unaffected: everything the decision
+        // needs (which connection wins, its policy, whether it injects) is
+        // already known, and `ResolvedRules::injects` preserves `has_injections`.
+        //
+        // Only this shape defers. An ordinary expired-token refresh is
+        // persisted and would be needed by the next allowed request anyway, so
+        // deferring it would buy nothing. OSS has no scopers and never defers.
+        // The scoper is keyed by CREDENTIAL type (`github_app`), which lives in
+        // the credentials payload — not by provider name (`github-app`), which
+        // would silently match nothing and defer nothing.
+        let cred_type = creds
+            .as_ref()
+            .and_then(|c| c.get("type"))
+            .and_then(|v| v.as_str())
+            .unwrap_or_default();
+        let needs_token = apps::needs_access_token(&conn.provider);
+        if needs_token
+            && crate::ee_apps::has_token_scoper(cred_type)
+            && granular_scoping_requested(conn.session_policy.as_ref())
+            && !apps::host_has_intercept_rules(hostname)
+        {
+            return Ok(AppConnectionResult::Rules {
+                rules: Vec::new(),
+                token_expires_at: None,
+                rewrite_host: creds.and_then(|c| apps::rewrite_host(&conn.provider, &c, hostname)),
+                connection_label: conn.label.clone(),
+                finalizer: apps::finalizer_for_provider(&conn.provider),
+                body_transform: apps::body_transform_for_provider(&conn.provider),
+                provider: conn.provider.clone(),
+                session_policy: conn.session_policy.clone(),
+                connection_id: Some(conn.id.clone()),
+                pending: vec![PendingInjection {
+                    conn: conn.clone(),
+                    decrypted_json,
+                    hostname: hostname.to_string(),
+                    cache_key,
+                    project_id: project_id.to_string(),
+                }],
+            });
+        }
+
+        let Some((rules, rewrite_host, expires_at)) = self
+            .build_connection_rules(
+                conn,
+                &decrypted_json,
+                hostname,
+                project_id,
+                &cache_key,
+                cache,
+            )
+            .await
+        else {
+            return Ok(AppConnectionResult::NoConnections);
+        };
+
+        Ok(AppConnectionResult::Rules {
+            rules,
+            token_expires_at: expires_at,
+            rewrite_host,
+            connection_label: conn.label.clone(),
+            finalizer: apps::finalizer_for_provider(&conn.provider),
+            body_transform: apps::body_transform_for_provider(&conn.provider),
+            provider: conn.provider.clone(),
+            session_policy: conn.session_policy.clone(),
+            connection_id: Some(conn.id.clone()),
+            pending: Vec::new(),
+        })
+    }
+
+    /// Materialize a deferred connection's injection rules — the credential
+    /// mint the policy decision was allowed to precede. Called once the request
+    /// is allowed; `None` means the credential could not be resolved.
+    pub(crate) async fn materialize_pending(
+        &self,
+        pending: &PendingInjection,
+        cache: &dyn CacheStore,
+    ) -> Option<Vec<InjectionRule>> {
+        self.build_connection_rules(
+            &pending.conn,
+            &pending.decrypted_json,
+            &pending.hostname,
+            &pending.project_id,
+            &pending.cache_key,
+            cache,
+        )
+        .await
+        .map(|(rules, _, _)| rules)
+    }
+
+    /// Resolve the credential and build the connection's injection rules, then
+    /// cache them. The tail shared by immediate and deferred resolution, so the
+    /// two can never drift. `None` = no usable credential.
+    async fn build_connection_rules(
+        &self,
+        conn: &db::AppConnectionRow,
+        decrypted_json: &str,
+        hostname: &str,
+        project_id: &str,
+        cache_key: &str,
+        cache: &dyn CacheStore,
+    ) -> Option<(Vec<InjectionRule>, Option<String>, Option<i64>)> {
+        let creds: Option<serde_json::Value> = serde_json::from_str(decrypted_json).ok();
         let needs_token = apps::needs_access_token(&conn.provider);
         let (token, expires_at) = if needs_token {
-            let Some(resolved) = self
-                .resolve_access_token(
-                    &decrypted_json,
-                    &conn.provider,
-                    project_id,
-                    &conn.id,
-                    conn.session_policy.as_ref(),
-                )
-                .await
-            else {
-                return Ok(AppConnectionResult::NoConnections);
-            };
-            resolved
+            self.resolve_access_token(
+                decrypted_json,
+                &conn.provider,
+                project_id,
+                &conn.id,
+                conn.session_policy.as_ref(),
+            )
+            .await?
         } else {
             (String::new(), None)
         };
@@ -900,11 +1079,7 @@ impl PolicyEngine {
                 .unwrap_or_default();
             apps::airbyte_injection_rules(base_path, &token)
         } else {
-            apps::build_app_injection_rules(
-                &conn.provider,
-                crate::gateway::strip_port(authority),
-                &token,
-            )
+            apps::build_app_injection_rules(&conn.provider, hostname, &token)
         };
         let mut rules: Vec<InjectionRule> = app_rules
             .into_iter()
@@ -914,7 +1089,7 @@ impl PolicyEngine {
             })
             .collect();
         if conn.provider == "airbyte" && rules.is_empty() {
-            return Ok(AppConnectionResult::NoConnections);
+            return None;
         }
 
         // For credential-only providers (no auth rules), ensure at least one
@@ -972,9 +1147,7 @@ impl PolicyEngine {
             }
         }
 
-        let rewrite_host = creds.and_then(|c| {
-            apps::rewrite_host(&conn.provider, &c, crate::gateway::strip_port(authority))
-        });
+        let rewrite_host = creds.and_then(|c| apps::rewrite_host(&conn.provider, &c, hostname));
 
         // Cache with TTL = min(CACHE_TTL, token remaining lifetime).
         // Skip caching if token is already expired — the stale token would cause
@@ -991,7 +1164,7 @@ impl PolicyEngine {
         if ttl > 0 {
             cache
                 .set(
-                    &cache_key,
+                    cache_key,
                     &CachedAppInjection {
                         rules: rules.clone(),
                         rewrite_host: rewrite_host.clone(),
@@ -1002,16 +1175,7 @@ impl PolicyEngine {
                 .await;
         }
 
-        Ok(AppConnectionResult::Rules {
-            rules,
-            token_expires_at: expires_at,
-            rewrite_host,
-            connection_label: conn.label.clone(),
-            finalizer: apps::finalizer_for_provider(&conn.provider),
-            body_transform: apps::body_transform_for_provider(&conn.provider),
-            provider: conn.provider.clone(),
-            session_policy: conn.session_policy.clone(),
-        })
+        Some((rules, rewrite_host, expires_at))
     }
 
     /// Check if the project or org has any credentials (secrets or app connections) for this
@@ -1117,38 +1281,56 @@ impl PolicyEngine {
 
         // Any non-empty session policy means scoped access is required.
         // Provider-specific interpretation (e.g. GitHub repos) is handled by
-        // ee_apps::try_refresh_credentials, not here.
-        let needs_scoped_token = session_policy
-            .and_then(|sp| sp.as_object())
-            .is_some_and(|obj| !obj.is_empty());
+        // ee_apps::try_refresh_credentials, not here. Shares its definition with
+        // the deferral predicate so the two can never disagree about whether a
+        // request needs a freshly minted credential.
+        let needs_scoped_token = granular_scoping_requested(session_policy);
+        let mut scoped_token_minted = false;
+        // Hoisted: the fail-closed check at the end of this function needs it
+        // too, and both must read the same key.
+        let cred_type = creds
+            .get("type")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
 
-        // Check if token is expired and needs refresh
-        if let Some(expires_at) = effective_expires_at {
+        // Refresh when the stored token has expired, or whenever scoped access
+        // is required (a scoped credential is minted per request and never
+        // persisted). The scoped case must NOT depend on `expires_at` being
+        // present: a payload without it would otherwise skip the mint entirely
+        // and fall back to the broad stored token.
+        {
             let now = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .expect("system clock before UNIX epoch")
                 .as_secs() as i64;
 
-            if expires_at < now || needs_scoped_token {
-                let cred_type = credential_type;
-
-                // Try cloud-specific refresh first, then shared credential types
-                let refresh_result = if let Some(r) =
-                    crate::ee_apps::try_refresh_credentials(cred_type, &creds, session_policy).await
-                {
-                    Some(r)
-                } else {
-                    apps::try_refresh_credentials(cred_type, &creds, session_policy).await
+            if effective_expires_at.is_some_and(|exp| exp < now) || needs_scoped_token {
+                // Try cloud-specific refresh first, then shared credential types.
+                // WHICH one answered matters: only the cloud path consults the
+                // scoper, so only it can have produced a SCOPED credential. The
+                // shared fallback mints the ordinary broad one — treating that
+                // as scoped would let a policy the scoper declined (an axis it
+                // does not recognize, say) pass the fail-closed check below
+                // while nothing enforces it.
+                let scoped =
+                    crate::ee_apps::try_refresh_credentials(&cred_type, &creds, session_policy)
+                        .await;
+                let from_scoper = scoped.is_some();
+                let refresh_result = match scoped {
+                    Some(r) => Some(r),
+                    None => apps::try_refresh_credentials(&cred_type, &creds, session_policy).await,
                 };
 
                 if let Some(result) = refresh_result {
                     match result {
                         Ok((new_token, new_expires_at)) => {
-                            debug!(provider = %provider, cred_type, "refreshed credential");
+                            debug!(provider = %provider, %cred_type, "refreshed credential");
                             token = Some(new_token.clone());
                             effective_expires_at = Some(new_expires_at);
 
                             if needs_scoped_token {
+                                scoped_token_minted = from_scoper;
                                 debug!(provider = %provider, "scoped token generated, skipping persist");
                             } else {
                                 creds["access_token"] = serde_json::Value::String(new_token);
@@ -1158,7 +1340,7 @@ impl PolicyEngine {
                             }
                         }
                         Err(e) => {
-                            debug!(provider = %provider, cred_type, error = ?e, "credential refresh failed");
+                            debug!(provider = %provider, %cred_type, error = ?e, "credential refresh failed");
                         }
                     }
                 } else if let Some(refresh_token) =
@@ -1202,6 +1384,35 @@ impl PolicyEngine {
                     }
                 }
             }
+        }
+
+        // A restrictive session policy must NEVER be satisfied with the stored,
+        // unscoped credential — but only where the credential itself is how the
+        // scope is enforced. For a TOKEN-SCOPED provider every failure above
+        // merely logs and falls through (a refusal to mint, an errored refresh,
+        // credentials with no `expires_at` so no mint was attempted), and
+        // returning the broad token would hand the agent exactly the access the
+        // policy exists to withhold — so inject nothing instead.
+        //
+        // Providers enforced at REQUEST level (Dropbox's folder guard) are the
+        // opposite case: the plain stored token IS the correct credential and
+        // the guard restricts each call. Withholding it there would not tighten
+        // anything, it would break granular access altogether.
+        //
+        // So the question is not "is this provider token-scoped?" but "is there
+        // ANY path that will enforce this scope?" — a provider with neither a
+        // scoped mint nor a request guard can enforce nothing, and handing it
+        // the broad credential would leave the restriction silently dead.
+        if needs_scoped_token
+            && !scoped_token_minted
+            && !crate::ee_apps::has_request_guard(provider)
+        {
+            warn!(
+                provider = %provider,
+                connection_id = %connection_id,
+                "scoped credential required but not minted; withholding the credential"
+            );
+            return None;
         }
 
         token.map(|t| (t, effective_expires_at))
@@ -1711,12 +1922,15 @@ mod tests {
         crate::cache::create_store().await.unwrap()
     }
 
-    // ── Injection pool (step 10) ────────────────────────────────────────
-    // Since the old per-agent grant tables became unread, `secret_mode` +
-    // the v2 selection are the WHOLE story. The load-bearing property is that
-    // a selective agent with nothing selected injects NOTHING — if that ever
-    // fell back to the all-mode merge, a deliberately restricted agent would
-    // silently receive every credential in the project and org.
+    // ── Injection pool (attach-model step 7) ────────────────────────────
+    // The v2 selection is the WHOLE story for the ORG/PROJECT tiers: the old
+    // per-agent grant tables became unread in step 10 and the all-mode merge
+    // died in step 7, so there is nothing left to fall back to. The
+    // load-bearing property is that an agent with nothing selected draws
+    // NOTHING from those tiers — anything else would hand a deliberately
+    // restricted agent every credential in the project and org. (The partner
+    // secret tier is grant-independent and rides outside this classification —
+    // see `resolve_secret_injections`.)
 
     fn selection_with_secret(id: &str) -> db::InjectSelection {
         db::InjectSelection {
@@ -1733,72 +1947,61 @@ mod tests {
     }
 
     #[test]
-    fn selective_agent_without_a_selection_injects_nothing() {
+    fn agent_without_a_selection_injects_nothing() {
         let empty = db::InjectSelection::default();
         assert_eq!(
-            secret_pool(SECRET_MODE_SELECTIVE, &empty),
+            secret_pool(&empty),
             InjectionPool::Empty,
-            "a selective agent with no secret selection must never fall back to the all-mode pool"
+            "no secret selection injects nothing from the org/project tiers (only the partner tier rides outside)"
         );
         assert_eq!(
-            connection_pool(SECRET_MODE_SELECTIVE, &empty),
+            connection_pool(&empty),
             InjectionPool::Empty,
-            "a selective agent with no connection selection must never fall back to the all-mode pool"
+            "no connection selection injects no app connections"
         );
     }
 
+    // ── Plan resolution (subscription_status to quota plan label) ────────
+    // The free-tier integration-call quota keys off this label, so a real paid
+    // tier must never collapse to "free". Regression guard for the `scale` plan
+    // being throttled as free, and for any future tier.
     #[test]
-    fn selective_agent_with_a_selection_draws_the_narrowed_pool() {
+    fn plan_resolution_only_treats_free_as_free() {
+        assert_eq!(plan_for_subscription_status("free"), "free");
+        assert_eq!(plan_for_subscription_status(""), "free");
+        assert_eq!(plan_for_subscription_status("pro"), "pro");
+        assert_eq!(plan_for_subscription_status("team"), "team");
+        assert_eq!(plan_for_subscription_status("enterprise"), "enterprise");
+        assert_eq!(plan_for_subscription_status("scale"), "scale");
+        // A future paid tier must pass through, never fall back to "free".
+        assert_eq!(plan_for_subscription_status("ultra"), "ultra");
+    }
+
+    #[test]
+    fn agent_with_a_selection_draws_the_narrowed_pool() {
         assert_eq!(
-            secret_pool(SECRET_MODE_SELECTIVE, &selection_with_secret("sec-1")),
+            secret_pool(&selection_with_secret("sec-1")),
             InjectionPool::RuleSelected
         );
         assert_eq!(
-            secret_pool(
-                SECRET_MODE_SELECTIVE,
-                &db::InjectSelection {
-                    secret_scopes: vec!["project".to_string()],
-                    ..Default::default()
-                }
-            ),
+            secret_pool(&db::InjectSelection {
+                secret_scopes: vec!["project".to_string()],
+                ..Default::default()
+            }),
             InjectionPool::RuleSelected,
             "a whole-level secret target selects too, not just named ids"
         );
         assert_eq!(
-            connection_pool(SECRET_MODE_SELECTIVE, &selection_with_connection("conn-1")),
+            connection_pool(&selection_with_connection("conn-1")),
             InjectionPool::RuleSelected
         );
         assert_eq!(
-            connection_pool(
-                SECRET_MODE_SELECTIVE,
-                &db::InjectSelection {
-                    app_scopes: vec![("github".to_string(), "project".to_string())],
-                    ..Default::default()
-                }
-            ),
+            connection_pool(&db::InjectSelection {
+                app_scopes: vec![("github".to_string(), "project".to_string())],
+                ..Default::default()
+            }),
             InjectionPool::RuleSelected,
             "a provider+level app target selects too"
-        );
-    }
-
-    #[test]
-    fn all_mode_is_never_narrowed_by_rules() {
-        // The inverse guard: rules gate the REQUEST for an all-mode agent, they
-        // must not shrink its pool (it would lose partner / budget-metered /
-        // other host-matched credentials the selection never names).
-        for selection in [
-            db::InjectSelection::default(),
-            selection_with_secret("sec-1"),
-            selection_with_connection("conn-1"),
-        ] {
-            assert_eq!(secret_pool("all", &selection), InjectionPool::All);
-            assert_eq!(connection_pool("all", &selection), InjectionPool::All);
-        }
-        // An unknown/legacy mode string is treated as all-mode, matching the
-        // column's default — never as "selective with nothing".
-        assert_eq!(
-            secret_pool("", &db::InjectSelection::default()),
-            InjectionPool::All
         );
     }
 
@@ -2316,6 +2519,7 @@ mod tests {
                 finalizer,
                 body_transform,
                 session_policy,
+                connection_id,
                 ..
             } => {
                 assert_eq!(rules.len(), 1);
@@ -2324,6 +2528,7 @@ mod tests {
                 assert!(finalizer.is_none());
                 assert!(body_transform.is_none());
                 assert!(session_policy.is_none());
+                assert!(connection_id.is_none(), "winner id follows the wipe law");
             }
             _ => panic!("expected Rules"),
         }
@@ -2346,11 +2551,13 @@ mod tests {
                 rewrite_host,
                 connection_label,
                 session_policy,
+                connection_id,
                 ..
             } => {
                 assert_eq!(rewrite_host.as_deref(), Some("rw.example.com"));
                 assert_eq!(connection_label.as_deref(), Some("Cal"));
                 assert!(session_policy.is_some());
+                assert_eq!(connection_id.as_deref(), Some("c1"));
             }
             _ => panic!("expected Rules"),
         }
@@ -2389,10 +2596,16 @@ mod tests {
             AppConnectionResult::Rules {
                 rewrite_host,
                 connection_label,
+                connection_id,
                 ..
             } => {
                 assert_eq!(rewrite_host.as_deref(), Some("rw.example.com"));
                 assert_eq!(connection_label.as_deref(), Some("Cal"));
+                assert_eq!(
+                    connection_id.as_deref(),
+                    Some("c1"),
+                    "an explicit override names the winner even off-path"
+                );
             }
             _ => panic!("expected Rules"),
         }
@@ -2444,12 +2657,14 @@ mod tests {
                 rewrite_host,
                 connection_label,
                 session_policy,
+                connection_id,
                 ..
             } => {
                 assert_eq!(rules.len(), 2);
                 assert!(rewrite_host.is_none());
                 assert!(connection_label.is_none());
                 assert!(session_policy.is_none());
+                assert!(connection_id.is_none(), "no serving provider → no winner");
             }
             _ => panic!("expected Rules"),
         }
@@ -2539,5 +2754,436 @@ mod tests {
             narrow_connections_by_path(&conns, "www.googleapis.com", Some("/calendar/v3"));
         assert_eq!(ids(&narrowed), vec!["gmail1"]);
         assert!(matches!(narrowed, Cow::Borrowed(_)));
+    }
+}
+
+#[cfg(test)]
+mod stamp_resource_scopes_tests {
+    use super::*;
+
+    fn conn(id: &str) -> db::AppConnectionRow {
+        db::AppConnectionRow {
+            id: id.into(),
+            provider: "github-app".into(),
+            scope: "project".into(),
+            credentials: None,
+            label: None,
+            metadata: None,
+            // The SELECTs hardcode NULL here, so every row starts unscoped.
+            session_policy: None,
+        }
+    }
+
+    fn selection(
+        connections: &[(&str, Option<serde_json::Value>)],
+        boundaries: &[(&str, serde_json::Value)],
+    ) -> db::InjectSelection {
+        db::InjectSelection {
+            connections: connections
+                .iter()
+                .map(|(id, p)| ((*id).to_string(), p.clone()))
+                .collect(),
+            boundaries: boundaries
+                .iter()
+                .map(|(id, b)| ((*id).to_string(), b.clone()))
+                .collect(),
+            ..Default::default()
+        }
+    }
+
+    /// The whole truth table of what a connection may reach, by how it was
+    /// granted and whether the organization bounds it. EE only: composing a
+    /// boundary is what the EE seam does, and OSS never produces one.
+    #[cfg(not(edition_oss))]
+    #[test]
+    fn stamps_the_scope_each_connection_may_actually_reach() {
+        let mut rows = vec![conn("named"), conn("by-provider"), conn("unbounded")];
+        let sel = selection(
+            &[
+                // Named grant: its own selection (the fold already composed the
+                // boundary in, so re-applying must not change it).
+                (
+                    "named",
+                    Some(serde_json::json!({ "repositories": ["org/a"] })),
+                ),
+                ("unbounded", Some(serde_json::json!({ "folders": ["/x"] }))),
+            ],
+            &[
+                ("named", serde_json::json!({ "repositories": ["org/a"] })),
+                // Granted by provider scope: the fold never saw this id, so the
+                // boundary can only be applied here.
+                (
+                    "by-provider",
+                    serde_json::json!({ "repositories": ["org/b"] }),
+                ),
+            ],
+        );
+
+        stamp_resource_scopes(&mut rows, &sel);
+
+        assert_eq!(
+            rows[0].session_policy,
+            Some(serde_json::json!({ "repositories": ["org/a"] })),
+            "a named grant keeps its composed scope — re-application is a no-op"
+        );
+        assert_eq!(
+            rows[1].session_policy,
+            Some(serde_json::json!({ "repositories": ["org/b"] })),
+            "a provider-level grant inherits the boundary it never named"
+        );
+        assert_eq!(
+            rows[2].session_policy,
+            Some(serde_json::json!({ "folders": ["/x"] })),
+            "with no boundary the selection stands alone"
+        );
+    }
+
+    /// OSS enforces no resource boundaries — it has no guard that could — so
+    /// the seam leaves a selection untouched even if one were planted. Pinned
+    /// so the composition can never leak into an edition that cannot honour it.
+    #[cfg(edition_oss)]
+    #[test]
+    fn oss_leaves_the_selection_untouched() {
+        let mut rows = vec![conn("c1")];
+        let sel = selection(
+            &[("c1", Some(serde_json::json!({ "repositories": ["org/z"] })))],
+            &[("c1", serde_json::json!({ "repositories": ["org/a"] }))],
+        );
+        stamp_resource_scopes(&mut rows, &sel);
+        assert_eq!(
+            rows[0].session_policy,
+            Some(serde_json::json!({ "repositories": ["org/z"] }))
+        );
+    }
+
+    #[test]
+    fn a_connection_with_neither_reaches_everything_it_always_did() {
+        let mut rows = vec![conn("plain")];
+        stamp_resource_scopes(&mut rows, &selection(&[("plain", None)], &[]));
+        assert_eq!(rows[0].session_policy, None);
+    }
+
+    #[cfg(not(edition_oss))]
+    #[test]
+    fn a_boundary_disjoint_from_the_selection_reaches_nothing() {
+        let mut rows = vec![conn("c1")];
+        let sel = selection(
+            &[("c1", Some(serde_json::json!({ "repositories": ["org/z"] })))],
+            &[("c1", serde_json::json!({ "repositories": ["org/a"] }))],
+        );
+        stamp_resource_scopes(&mut rows, &sel);
+        assert_eq!(
+            rows[0].session_policy,
+            Some(serde_json::json!({ "repositories": [] })),
+            "an empty overlap is the deny-all sentinel, not an absent scope"
+        );
+    }
+}
+
+#[cfg(test)]
+mod deferred_injection_tests {
+    use super::*;
+    use crate::cache::CacheStore;
+
+    async fn store() -> Arc<dyn CacheStore> {
+        crate::cache::create_store().await.unwrap()
+    }
+
+    /// A GitHub App connection carrying real (test-key) encrypted credentials:
+    /// the deferral decision happens after decryption, because the decrypted
+    /// payload is what the deferred mint will consume.
+    async fn github_conn(
+        engine: &PolicyEngine,
+        session_policy: Option<serde_json::Value>,
+    ) -> db::AppConnectionRow {
+        let creds = engine
+            .crypto
+            .encrypt(
+                &serde_json::json!({
+                    "type": "github_app",
+                    "app_id": "1",
+                    "installation_id": "2",
+                    "private_key": "k",
+                    "expires_at": 0,
+                })
+                .to_string(),
+            )
+            .await
+            .expect("encrypt test credentials");
+        db::AppConnectionRow {
+            id: "c-gh".into(),
+            provider: "github-app".into(),
+            scope: "project".into(),
+            credentials: Some(creds),
+            label: Some("gh".into()),
+            metadata: None,
+            session_policy,
+        }
+    }
+
+    #[test]
+    fn granular_scoping_is_requested_only_by_a_non_empty_policy_object() {
+        assert!(granular_scoping_requested(Some(&serde_json::json!({
+            "repositories": ["org/a"]
+        }))));
+        // Absent, null, empty object, or behavioral conditions: no scoped mint.
+        assert!(!granular_scoping_requested(None));
+        assert!(!granular_scoping_requested(Some(&serde_json::json!(null))));
+        assert!(!granular_scoping_requested(Some(&serde_json::json!({}))));
+        assert!(!granular_scoping_requested(Some(&serde_json::json!([
+            { "type": "body_contains", "value": "x" }
+        ]))));
+    }
+
+    /// The point of the deferral: a resource-scoped connection yields no rules
+    /// during resolution — the credential is minted only once the request is
+    /// allowed — while still reporting that it WILL inject, so the request
+    /// stays managed and the deny-defaults keep applying. EE editions only:
+    /// the deferral exists exactly where a token scoper does.
+    #[cfg(not(edition_oss))]
+    #[tokio::test]
+    async fn a_resource_scoped_connection_defers_its_credential() {
+        let engine = PolicyEngine::test_stub();
+        let cache = store().await;
+        let conn = github_conn(
+            &engine,
+            Some(serde_json::json!({ "repositories": ["org/a"] })),
+        )
+        .await;
+
+        let result = engine
+            .resolve_app_injection_for_request(
+                std::slice::from_ref(&conn),
+                "api.github.com",
+                Some("/repos/org/a"),
+                None,
+                "org-1",
+                "proj-1",
+                &*cache,
+            )
+            .await
+            .expect("resolution");
+
+        match result {
+            AppConnectionResult::Rules { rules, pending, .. } => {
+                assert!(rules.is_empty(), "no credential built during resolution");
+                assert_eq!(pending.len(), 1, "the mint is pending, not skipped");
+                assert_eq!(pending[0].conn.id, "c-gh");
+            }
+            _ => panic!("expected Rules"),
+        }
+    }
+
+    /// OSS never defers — it has no token scoper, so a session policy on a
+    /// connection (only plantable by hand there) changes nothing about WHEN the
+    /// credential resolves. Pinned so the deferral can never leak into OSS.
+    #[cfg(edition_oss)]
+    #[tokio::test]
+    async fn oss_never_defers_a_credential() {
+        let engine = PolicyEngine::test_stub();
+        let cache = store().await;
+        let conn = github_conn(
+            &engine,
+            Some(serde_json::json!({ "repositories": ["org/a"] })),
+        )
+        .await;
+
+        let result = engine
+            .resolve_app_injection_for_request(
+                std::slice::from_ref(&conn),
+                "api.github.com",
+                Some("/repos/org/a"),
+                None,
+                "org-1",
+                "proj-1",
+                &*cache,
+            )
+            .await
+            .expect("resolution");
+
+        match result {
+            AppConnectionResult::Rules { pending, .. } => {
+                assert!(pending.is_empty(), "OSS must never defer");
+            }
+            // The fake credentials cannot complete a real refresh here, so the
+            // eager path may resolve to nothing at all — equally undeferred.
+            AppConnectionResult::NoConnections => {}
+            _ => panic!("expected Rules or NoConnections"),
+        }
+    }
+
+    /// A connection with no resource scope mints as it always did — deferral is
+    /// narrowly for the live, never-persisted scoped credential.
+    #[tokio::test]
+    async fn an_unscoped_connection_is_not_deferred() {
+        let engine = PolicyEngine::test_stub();
+        let cache = store().await;
+        let conn = github_conn(&engine, None).await;
+
+        let result = engine
+            .resolve_app_injection_for_request(
+                std::slice::from_ref(&conn),
+                "api.github.com",
+                Some("/repos/org/a"),
+                None,
+                "org-1",
+                "proj-1",
+                &*cache,
+            )
+            .await
+            .expect("resolution");
+
+        match result {
+            AppConnectionResult::Rules { pending, .. } => {
+                assert!(pending.is_empty(), "nothing to defer without a scope");
+            }
+            // No credentials on the row, so resolution yields nothing at all —
+            // also acceptable, and equally free of pending work.
+            AppConnectionResult::NoConnections => {}
+            _ => panic!("expected Rules or NoConnections"),
+        }
+    }
+
+    /// The fail-closed law: when a scoped credential is REQUIRED but cannot be
+    /// minted, nothing is injected. The stored credential is the unrestricted
+    /// one — handing it over would grant exactly the access the policy exists
+    /// to withhold, and it would do so silently.
+    #[cfg(not(edition_oss))]
+    #[tokio::test]
+    async fn a_scoped_credential_that_cannot_be_minted_injects_nothing() {
+        let engine = PolicyEngine::test_stub();
+        let cache = store().await;
+        // An empty allowlist reaches nothing; the GitHub scoper refuses to turn
+        // it into a mint request (which GitHub would read as "every repo").
+        let conn = github_conn(&engine, Some(serde_json::json!({ "repositories": [] }))).await;
+
+        let materialized = engine
+            .materialize_pending(
+                &PendingInjection {
+                    conn: conn.clone(),
+                    decrypted_json: engine
+                        .crypto
+                        .decrypt(conn.credentials.as_ref().expect("creds"))
+                        .await
+                        .expect("decrypt"),
+                    hostname: "api.github.com".to_string(),
+                    cache_key: "app_injection:test:deny-all".to_string(),
+                    project_id: "proj-1".to_string(),
+                },
+                &*cache,
+            )
+            .await;
+
+        assert!(
+            materialized.is_none(),
+            "no credential may be injected when the scoped mint is refused"
+        );
+    }
+
+    /// A REQUEST-LEVEL provider (Dropbox's folder guard) keeps its plain stored
+    /// credential: the guard is what restricts each call, so withholding the
+    /// token would not tighten anything — it would break granular access
+    /// altogether. Only token-scoped providers withhold when the mint fails.
+    #[cfg(not(edition_oss))]
+    #[tokio::test]
+    async fn a_request_guarded_provider_keeps_its_credential_under_a_scope() {
+        let engine = PolicyEngine::test_stub();
+        let cache = store().await;
+        let creds = engine
+            .crypto
+            .encrypt(&serde_json::json!({ "access_token": "dbx-token" }).to_string())
+            .await
+            .expect("encrypt");
+        let conn = db::AppConnectionRow {
+            id: "c-dbx".into(),
+            provider: "dropbox".into(),
+            scope: "project".into(),
+            credentials: Some(creds),
+            label: Some("dbx".into()),
+            metadata: None,
+            session_policy: Some(serde_json::json!({ "folders": ["/clients"] })),
+        };
+
+        let result = engine
+            .resolve_app_injection_for_request(
+                std::slice::from_ref(&conn),
+                "api.dropboxapi.com",
+                Some("/2/files/list_folder"),
+                None,
+                "org-1",
+                "proj-1",
+                &*cache,
+            )
+            .await
+            .expect("resolution");
+
+        match result {
+            AppConnectionResult::Rules {
+                rules,
+                pending,
+                session_policy,
+                ..
+            } => {
+                assert!(pending.is_empty(), "no token scoper, nothing to defer");
+                assert!(!rules.is_empty(), "the plain credential still injects");
+                assert_eq!(
+                    session_policy,
+                    Some(serde_json::json!({ "folders": ["/clients"] })),
+                    "the guard needs the policy to enforce against"
+                );
+            }
+            _ => panic!("expected Rules — withholding here would break Dropbox scoping"),
+        }
+    }
+
+    /// A warm cache already holds the built rules, so there is nothing left to
+    /// defer: the provider call happened for an earlier request.
+    #[tokio::test]
+    async fn a_cached_connection_never_defers() {
+        let engine = PolicyEngine::test_stub();
+        let cache = store().await;
+        let conn = github_conn(
+            &engine,
+            Some(serde_json::json!({ "repositories": ["org/a"] })),
+        )
+        .await;
+        seed_app_injection_cache(
+            &cache,
+            "org-1",
+            "proj-1",
+            &conn,
+            "api.github.com",
+            vec![InjectionRule {
+                path_pattern: "*".to_string(),
+                injections: vec![Injection::SetHeader {
+                    name: "authorization".to_string(),
+                    value: "Bearer cached".to_string(),
+                }],
+            }],
+            None,
+            None,
+        )
+        .await;
+
+        let result = engine
+            .resolve_app_injection_for_request(
+                std::slice::from_ref(&conn),
+                "api.github.com",
+                Some("/repos/org/a"),
+                None,
+                "org-1",
+                "proj-1",
+                &*cache,
+            )
+            .await
+            .expect("resolution");
+
+        match result {
+            AppConnectionResult::Rules { rules, pending, .. } => {
+                assert!(pending.is_empty(), "a cache hit has nothing to mint");
+                assert_eq!(rules.len(), 1);
+            }
+            _ => panic!("expected Rules"),
+        }
     }
 }

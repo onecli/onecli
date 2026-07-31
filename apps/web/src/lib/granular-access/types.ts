@@ -15,6 +15,10 @@ export interface PolicyDialogContentProps {
   onPolicyChange: (policy: Record<string, unknown> | null) => void;
   onSave: () => void;
   onCancel: () => void;
+  /** The organization's boundary for this connection, when it sets one: the
+   * picker may only select within it, so resources outside show disabled.
+   * Null = no boundary, everything the connection offers is selectable. */
+  orgBoundary?: Record<string, unknown> | null;
 }
 
 export interface GranularAccessConfig {

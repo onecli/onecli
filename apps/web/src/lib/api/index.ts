@@ -2,14 +2,13 @@ import * as agents from "./agents";
 import * as secrets from "./secrets";
 import * as policy from "./policy";
 import * as connections from "./connections";
+import * as grants from "./grants";
 import * as projects from "./projects";
 import * as projectAccess from "./project-access";
 import * as domains from "./domains";
 import * as orgMembers from "./org-members";
 import * as groups from "./groups";
-import * as agentGroups from "./agent-groups";
 import * as roleMappings from "./role-mappings";
-import * as orgAgents from "./org-agents";
 import * as ssoConnections from "./sso-connections";
 import * as ssoEnforcement from "./sso-enforcement";
 import * as scimTokens from "./scim-tokens";
@@ -26,14 +25,13 @@ export {
   secrets,
   policy,
   connections,
+  grants,
   projects,
   projectAccess,
   domains,
   orgMembers,
   groups,
-  agentGroups,
   roleMappings,
-  orgAgents,
   ssoConnections,
   ssoEnforcement,
   scimTokens,
@@ -68,9 +66,6 @@ export type {
   CreateRoleMappingInput,
   UpdateRoleMappingInput,
   RoleMappingImpact,
-  AgentGroupRow,
-  AgentGroupMemberRow,
-  OrgAgentRow,
   OrgMemberListRow,
   OrgSsoConnection,
   SsoTestResult,
@@ -87,6 +82,15 @@ export type {
   PolicyRuleTarget,
   PolicyRuleSource,
   PublishResult,
+  AgentGrants,
+  AgentGrantConnection,
+  AgentGrantSecret,
+  ConnectionGrants,
+  ConnectionGrantInput,
+  GrantResources,
+  AgentGrantsSummary,
+  AgentWithGrantsSummary,
+  GrantsSummaryEntry,
 } from "./types";
 export type { CreatePolicyRuleInput, UpdatePolicyRuleInput } from "./policy";
 export { appsPath } from "./scope";

@@ -20,7 +20,3 @@ export const createAgentSchema = z.object({
 export const renameAgentSchema = z.object({
   name: z.string().trim().min(1).max(255),
 });
-
-export const secretModeSchema = z.object({
-  mode: z.enum(["all", "selective"]),
-});

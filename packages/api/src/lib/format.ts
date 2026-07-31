@@ -1,5 +1,5 @@
-export const formatRelative = (dateStr: string) => {
-  const diff = Date.now() - new Date(dateStr).getTime();
+export const formatRelative = (dateStr: string, now = Date.now()) => {
+  const diff = now - new Date(dateStr).getTime();
   const seconds = Math.floor(diff / 1000);
   if (seconds < 60) return "Just now";
   const minutes = Math.floor(seconds / 60);

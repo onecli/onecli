@@ -4,9 +4,9 @@
 //! The swapped `telemetry` module re-exports [`RequestEvent`] and [`on_request`]
 //! so consumer code uses `crate::telemetry::*` without change.
 
-use std::sync::OnceLock;
+use std::sync::{Mutex, OnceLock};
 
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
 
 pub(crate) const FLUSH_INTERVAL_SECS: u64 = 5;
 pub(crate) const FLUSH_BATCH_SIZE: usize = 500;
@@ -101,32 +101,93 @@ pub(crate) fn on_request(mut event: RequestEvent) {
     }
 }
 
+/// Signals the flush loop to drain and exit. A watch rather than a flag: the
+/// loop parks inside `rx.recv()`, and only something that can *wake* it will
+/// do — a bare `AtomicBool` would go unnoticed until the poll interval expired.
+static FLUSH_DOWN: OnceLock<watch::Sender<bool>> = OnceLock::new();
+
+/// The flush task, so shutdown can wait for it to finish rather than guess.
+static FLUSH_TASK: Mutex<Option<tokio::task::JoinHandle<()>>> = Mutex::new(None);
+
+fn flush_down_tx() -> &'static watch::Sender<bool> {
+    FLUSH_DOWN.get_or_init(|| watch::channel(false).0)
+}
+
+/// Spawn the flush loop, keeping its handle for [`shutdown`].
+///
+/// Both editions' `init` call this instead of `tokio::spawn` — the only thing
+/// they need to change to become drainable.
+pub(crate) fn spawn_flush_loop<F>(flush_loop: F)
+where
+    F: std::future::Future<Output = ()> + Send + 'static,
+{
+    *FLUSH_TASK.lock().expect("telemetry flush task") = Some(tokio::spawn(flush_loop));
+}
+
+/// Fill the buffer with whatever is already queued, without waiting.
+fn fill(rx: &mut mpsc::Receiver<RequestEvent>, buffer: &mut Vec<RequestEvent>) {
+    while buffer.len() < FLUSH_BATCH_SIZE {
+        match rx.try_recv() {
+            Ok(ev) => buffer.push(ev),
+            Err(_) => break,
+        }
+    }
+}
+
 /// Drain available events from the channel into the buffer.
-/// Returns `false` when the channel is closed (sender dropped).
+/// Returns `false` when there is nothing more to flush and the loop should end.
+///
+/// The buffer is always empty on entry (both flush loops drain and clear it
+/// before looping), so during shutdown this returns `true` for the final
+/// non-empty batch and `false` on the call after it — which is what lets the
+/// loops exit through the `break` they already have.
 #[must_use]
 pub(crate) async fn collect_batch(
     rx: &mut mpsc::Receiver<RequestEvent>,
     buffer: &mut Vec<RequestEvent>,
 ) -> bool {
-    let maybe = tokio::time::timeout(
-        std::time::Duration::from_secs(FLUSH_INTERVAL_SECS),
-        rx.recv(),
-    )
-    .await;
+    let mut down = flush_down_tx().subscribe();
 
-    match maybe {
-        Ok(Some(event)) => {
-            buffer.push(event);
-            while buffer.len() < FLUSH_BATCH_SIZE {
-                match rx.try_recv() {
-                    Ok(ev) => buffer.push(ev),
-                    Err(_) => break,
-                }
+    if !*down.borrow() {
+        tokio::select! {
+            maybe = tokio::time::timeout(
+                std::time::Duration::from_secs(FLUSH_INTERVAL_SECS),
+                rx.recv(),
+            ) => {
+                return match maybe {
+                    Ok(Some(event)) => {
+                        buffer.push(event);
+                        fill(rx, buffer);
+                        true
+                    }
+                    Ok(None) => false,
+                    Err(_) => true,
+                };
             }
-            true
+            _ = down.wait_for(|&down| down) => {}
         }
-        Ok(None) => false,
-        Err(_) => true,
+    }
+
+    fill(rx, buffer);
+    !buffer.is_empty()
+}
+
+/// Flush everything still buffered, then wait for the loop to finish.
+///
+/// Called after the connection drain, never at signal time: connections emit
+/// their last events *while* they finish, and those are exactly the ones worth
+/// saving — including the responses shutdown itself generates.
+pub(crate) async fn shutdown(deadline: std::time::Duration) {
+    let _ = flush_down_tx().send(true);
+
+    let handle = FLUSH_TASK.lock().expect("telemetry flush task").take();
+    let Some(mut handle) = handle else {
+        return;
+    };
+
+    if tokio::time::timeout(deadline, &mut handle).await.is_err() {
+        tracing::warn!("telemetry flush did not finish before the deadline");
+        handle.abort();
     }
 }
 

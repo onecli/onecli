@@ -1,8 +1,8 @@
 //! The OSS inject-selection subset: derive which credentials the published
 //! project rules ALLOW the requesting agent to have injected — pure and
-//! DB-free over the already-loaded rows. This replaces the equipment join for
-//! a SELECTIVE agent after the cutover migrates equipment into rules;
-//! `secretMode` stays the all-vs-selective switch.
+//! DB-free over the already-loaded rows. Since attach-model step 7 this
+//! selection is the whole story for the org/project tiers — every agent is
+//! rule-selected, and the retired `agents.secret_mode` column is never read.
 //!
 //! Two locked narrowings vs the EE selector: identities match the AGENT ONLY
 //! (no principal set — directory identities are a OneCLI Cloud capability),
@@ -74,6 +74,9 @@ pub(crate) fn derive_inject_selection(rules: &PolicyV2Rules, agent_id: &str) -> 
     InjectSelection {
         secret_ids,
         connections,
+        // OSS enforces no resource boundaries (there is no guard to enforce
+        // one), so nothing ever bounds a connection here.
+        boundaries: HashMap::new(),
         app_scopes,
         secret_scopes,
     }
@@ -116,7 +119,7 @@ mod tests {
     }
 
     fn agent_identity(id: &str) -> serde_json::Value {
-        json!([{ "agentId": id, "agentGroupId": null, "userId": null, "groupId": null }])
+        json!([{ "agentId": id, "userId": null, "groupId": null }])
     }
 
     #[test]
@@ -166,7 +169,7 @@ mod tests {
     fn directory_identity_rows_never_inject_in_oss() {
         let rules = v2(vec![rule(
             "allow",
-            json!([{ "agentId": null, "agentGroupId": "g1", "userId": null, "groupId": null }]),
+            json!([{ "agentId": null, "userId": null, "groupId": "g1" }]),
             json!([{ "kind": "secret", "secretId": "s1" }]),
         )]);
         assert!(derive_inject_selection(&rules, "a1").secret_ids.is_empty());

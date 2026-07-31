@@ -41,6 +41,10 @@ const SOURCE_LABEL: Partial<Record<PolicyRuleSource, string>> = {
   // block/allow engine never sees it. Shown so the grant is at least visible
   // and revocable — the dialogs that used to manage these are gone.
   equipment: "Credential grant",
+  // Attach-model grant stacks (step 2): compiled by the grants API, which
+  // repairs any hand-edit drift on its next write. Revocable here so a live
+  // grant rule is never unreachable; authoring belongs to the attach surfaces.
+  grant: "Agent grant",
 };
 
 export interface EditableRuleRowProps {

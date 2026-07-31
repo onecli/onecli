@@ -1,5 +1,7 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 
+import { proofDatabaseUrl } from "../../testing/pg-proof.js";
+
 /**
  * The two rule loaders on REAL PostgreSQL.
  *
@@ -16,7 +18,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
  * Env-gated like the other proof suites; see app-blocklist-service.pg.test.ts.
  */
 
-const PROOF_URL = process.env.POLICY_PROOF_DATABASE_URL;
+const PROOF_URL = proofDatabaseUrl();
 
 type Db = typeof import("@onecli/db").db;
 type Loaders = typeof import("./load-rules");

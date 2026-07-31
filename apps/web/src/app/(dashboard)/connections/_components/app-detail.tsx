@@ -1,15 +1,18 @@
 "use client";
 
-import { useCallback, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
-import { usePathname } from "next/navigation";
+import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { useQueryClient } from "@tanstack/react-query";
 import { ArrowLeft, Loader2, Settings2 } from "lucide-react";
 import { Button } from "@onecli/ui/components/button";
 import { Skeleton } from "@onecli/ui/components/skeleton";
 import type { Connection, PageScope } from "@/lib/api";
 import { queryKeys } from "@/lib/api/keys";
-import { useAppMessages } from "@/hooks/use-app-connected";
+import {
+  useAppMessages,
+  type AppConnectedEvent,
+} from "@/hooks/use-app-connected";
 import { useConnections } from "@/hooks/use-connections";
 import { useAppConfigStatus } from "@/hooks/use-app-config";
 import {
@@ -17,15 +20,10 @@ import {
   ORG_PATH_RE,
   withProjectPrefix,
 } from "@/lib/navigation";
-import type { OAuthPermission } from "@onecli/api/apps/types";
-import { useAppPermissionDefinitions } from "@/hooks/use-app-permissions";
 import { AppIcon } from "./app-icon";
 import { AppConfigForm, type AppConfigFormHandle } from "./app-config-form";
 import { ConfigureCredentialsDialog } from "./configure-credentials-dialog";
-import { PermissionsList } from "./permissions-list";
-// The read-only app-permissions reflection, which reads the v2 policy engine.
-// Shared since step 10 — every edition renders it.
-import { AppPermissionsReflection } from "@/lib/components/policy-reflect";
+import { ConnectionAgentsReflection } from "@/lib/components/policy-reflect";
 import { ConnectionAccountCard } from "./connection-account-card";
 import { InheritedConnectionCard } from "./inherited-connection-card";
 import { AppBlocklist } from "./app-blocklist";
@@ -38,8 +36,6 @@ interface AppDetailProps {
     darkIcon?: string;
     description: string;
     connectionType: "oauth" | "api_key" | "credentials_import" | "cloud_only";
-    defaultScopes: string[];
-    permissions: OAuthPermission[];
     blocklist?: { id: string; name: string; hostPattern: string }[];
   };
   configurable?: {
@@ -72,6 +68,8 @@ export const AppDetail = ({
   backPath,
 }: AppDetailProps) => {
   const pathname = usePathname();
+  const router = useRouter();
+  const searchParams = useSearchParams();
   const queryClient = useQueryClient();
   const [configDialogOpen, setConfigDialogOpen] = useState(false);
   const configFormRef = useRef<AppConfigFormHandle>(null);
@@ -93,12 +91,60 @@ export const AppDetail = ({
     };
   }, [allConnections, app.id, pageScope]);
 
-  const handleConnected = useCallback(() => {
-    queryClient.invalidateQueries({ queryKey: queryKeys.connections.all() });
-    queryClient.invalidateQueries({ queryKey: queryKeys.counts.all() });
-  }, [queryClient]);
+  // A brand-new account is useless until an agent is attached to it, and this
+  // is the moment the user is thinking about it — so a successful connect opens
+  // the account's agent-access dialog right here, where there is room for it.
+  // The `open` flag outlives the id so closing keeps the exit animation.
+  const [justConnectedId, setJustConnectedId] = useState<string | null>(null);
+  const [justConnectedOpen, setJustConnectedOpen] = useState(false);
+  // Agents are project-scoped, so this only means anything on a project page.
+  const canAttachAgents = pageScope === "project";
+  const openJustConnected = useCallback((connectionId: string) => {
+    setJustConnectedId(connectionId);
+    setJustConnectedOpen(true);
+  }, []);
+
+  const handleConnected = useCallback(
+    ({ provider, connectionId }: AppConnectedEvent) => {
+      queryClient.invalidateQueries({ queryKey: queryKeys.connections.all() });
+      queryClient.invalidateQueries({ queryKey: queryKeys.counts.all() });
+      // Only a CREATED connection carries an id — a reconnect refreshed
+      // credentials an agent already had, and needs no setup step. The
+      // provider has to match too: a popup keeps posting to its opener across
+      // client-side navigation, so one opened from another app's page can land
+      // here and would otherwise title someone else's account "<this app>
+      // connected".
+      if (connectionId && provider === app.id && canAttachAgents)
+        openJustConnected(connectionId);
+    },
+    [queryClient, app.id, canAttachAgents, openJustConnected],
+  );
 
   useAppMessages({ onConnected: handleConnected });
+
+  // `?connected=<id>` — the same handoff for the other way in: connecting from
+  // the Apps grid navigates here on success, so this page mounts long after the
+  // popup's message was posted and can only learn of it from the URL. One-shot
+  // per mount, then stripped so a refresh doesn't reopen the dialog.
+  const connectedParam = searchParams.get("connected");
+  const consumedConnectedParam = useRef(false);
+  useEffect(() => {
+    if (consumedConnectedParam.current) return;
+    if (!connectedParam || !canAttachAgents) return;
+    consumedConnectedParam.current = true;
+    openJustConnected(connectedParam);
+    const params = new URLSearchParams(searchParams.toString());
+    params.delete("connected");
+    const qs = params.toString();
+    router.replace(qs ? `${pathname}?${qs}` : pathname, { scroll: false });
+  }, [
+    connectedParam,
+    canAttachAgents,
+    openJustConnected,
+    searchParams,
+    router,
+    pathname,
+  ]);
 
   // The RSC page seeds the very first render; the query converges after.
   const { data: configStatus } = useAppConfigStatus(
@@ -109,11 +155,6 @@ export const AppDetail = ({
   const appConfigured = configStatus?.enabled ?? hasAppConfig;
 
   const hasCredentials = hasEnvDefaults || appConfigured;
-  const { data: permissionDefinitions, isPending: permissionsPending } =
-    useAppPermissionDefinitions();
-  const permissionDefinition = permissionDefinitions?.find(
-    (def) => def.provider === app.id,
-  );
 
   const openConnectPopup = (
     connectionId?: string,
@@ -153,10 +194,6 @@ export const AppDetail = ({
 
   const connectionCount = connections.length + inheritedConnections.length;
   const isConnected = connectionCount > 0;
-  // Hold the OAuth-scopes fallback until the catalog resolves, so it doesn't
-  // flash before being replaced by the permissions editor.
-  const showOAuthScopesList =
-    !permissionsPending && isConnected && app.permissions.length > 0;
 
   return (
     <div className="space-y-6">
@@ -235,61 +272,40 @@ export const AppDetail = ({
           <Loader2 className="size-5 animate-spin text-muted-foreground" />
         </div>
       ) : (
-        <div className="space-y-6">
-          {isConnected && (
-            <div className="space-y-3">
-              <div className="flex items-start justify-between">
-                <h3 className="text-sm font-medium">Connected accounts</h3>
-                <Button
-                  variant="outline"
-                  size="sm"
-                  onClick={handleConnect}
-                  className="shrink-0"
-                >
-                  Connect
-                </Button>
-              </div>
-              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2">
-                {connections.map((conn) => (
-                  <ConnectionAccountCard
-                    key={conn.id}
-                    connection={conn}
-                    appName={app.name}
-                    onReconnect={(id) => openConnectPopup(id, popupOpts)}
-                    pageScope={pageScope}
-                  />
-                ))}
-                {inheritedConnections.map((conn) => (
-                  <InheritedConnectionCard
-                    key={conn.id}
-                    connection={conn}
-                    appName={app.name}
-                    pageScope={pageScope}
-                  />
-                ))}
-              </div>
+        isConnected && (
+          <div className="space-y-3">
+            <div className="flex items-start justify-between">
+              <h3 className="text-sm font-medium">Connected accounts</h3>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={handleConnect}
+                className="shrink-0"
+              >
+                Connect
+              </Button>
             </div>
-          )}
-
-          {permissionDefinition ? (
-            <AppPermissionsReflection
-              provider={app.id}
-              appName={app.name}
-              pageScope={pageScope}
-            />
-          ) : showOAuthScopesList ? (
-            <PermissionsList
-              permissions={app.permissions}
-              grantedScopes={[
-                ...new Set(
-                  [...connections, ...inheritedConnections].flatMap(
-                    (c) => c.scopes,
-                  ),
-                ),
-              ]}
-            />
-          ) : null}
-        </div>
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2">
+              {connections.map((conn) => (
+                <ConnectionAccountCard
+                  key={conn.id}
+                  connection={conn}
+                  appName={app.name}
+                  onReconnect={(id) => openConnectPopup(id, popupOpts)}
+                  pageScope={pageScope}
+                />
+              ))}
+              {inheritedConnections.map((conn) => (
+                <InheritedConnectionCard
+                  key={conn.id}
+                  connection={conn}
+                  appName={app.name}
+                  pageScope={pageScope}
+                />
+              ))}
+            </div>
+          </div>
+        )
       )}
 
       {configurable && (
@@ -329,6 +345,27 @@ export const AppDetail = ({
             setConfigDialogOpen(false);
             openConnectPopup(undefined, popupOpts);
           }}
+        />
+      )}
+
+      {/* Rendered here rather than from the account card: the card for a
+          just-created account doesn't exist until the connections query
+          refetches, and this dialog's own queries are keyed on the id, so it
+          works immediately. Re-keyed per connection so a second connect can't
+          inherit the first one's row state. */}
+      {justConnectedId && (
+        <ConnectionAgentsReflection
+          key={justConnectedId}
+          connectionId={justConnectedId}
+          // Only the neutral header renders this; the success header titles on
+          // the app, precisely so it doesn't wait on the refetch.
+          connectionLabel={
+            connections.find((c) => c.id === justConnectedId)?.label ?? ""
+          }
+          appName={app.name}
+          justConnected
+          open={justConnectedOpen}
+          onOpenChange={setJustConnectedOpen}
         />
       )}
     </div>

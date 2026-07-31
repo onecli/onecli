@@ -8,6 +8,7 @@
     "./providers": "./src/providers/index.ts",
     "./services/*": "./src/services/*.ts",
     "./services/policy-legacy-migration": "./src/services/policy-legacy-migration/index.ts",
+    "./services/policy-grant-conversion": "./src/services/policy-grant-conversion/index.ts",
     "./routes/*": "./src/routes/*.ts",
     "./lib/*": "./src/lib/*.ts",
     "./validations/*": "./src/validations/*.ts",

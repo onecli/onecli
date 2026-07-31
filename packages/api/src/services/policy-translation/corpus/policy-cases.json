@@ -74,7 +74,7 @@
     }
   },
   {
-    "name": "deny-default org rule + injected non-LLM \u2192 blocked by default",
+    "name": "deny-default org rule + injected non-LLM → blocked by default",
     "rules": [
       {
         "scope": "organization",
@@ -105,7 +105,7 @@
     }
   },
   {
-    "name": "deny-default org rule + no injections \u2192 allow (enforce_deny false)",
+    "name": "deny-default org rule + no injections → allow (enforce_deny false)",
     "rules": [
       {
         "scope": "organization",
@@ -135,7 +135,7 @@
     }
   },
   {
-    "name": "deny-default org rule + LLM host \u2192 allow (enforce_deny false)",
+    "name": "deny-default org rule + LLM host → allow (enforce_deny false)",
     "rules": [
       {
         "scope": "organization",
@@ -395,7 +395,7 @@
     }
   },
   {
-    "name": "strictest-wins across scopes: org allow + project block \u2192 block",
+    "name": "strictest-wins across scopes: org allow + project block → block",
     "rules": [
       {
         "scope": "organization",
@@ -660,7 +660,7 @@
     }
   },
   {
-    "name": "body-contains condition does not match \u2192 allow",
+    "name": "body-contains condition does not match → allow",
     "rules": [
       {
         "scope": "project",
@@ -946,7 +946,7 @@
     }
   },
   {
-    "name": "ORG FLOOR is carved: same rules, no injections \u2192 the project allow stands",
+    "name": "ORG FLOOR is carved: same rules, no injections → the project allow stands",
     "rules": [
       {
         "scope": "organization",
@@ -997,7 +997,7 @@
     }
   },
   {
-    "name": "ORG FLOOR is carved on an LLM host \u2192 the project allow stands",
+    "name": "ORG FLOOR is carved on an LLM host → the project allow stands",
     "rules": [
       {
         "scope": "organization",
@@ -1327,6 +1327,443 @@
       "agentId": "agent-1",
       "hasInjections": false,
       "isLlmHost": false
+    },
+    "expected": {
+      "action": "block"
+    }
+  },
+  {
+    "name": "connection allow binds to the winning account (allow only via winner)",
+    "rules": [
+      {
+        "scope": "project",
+        "priority": 0,
+        "isDefault": false,
+        "source": "custom",
+        "name": "allow work gmail",
+        "identities": [
+          {
+            "type": "agent",
+            "id": "agent-1"
+          }
+        ],
+        "targets": [
+          {
+            "kind": "connection",
+            "connectionId": "c-work",
+            "provider": "gmail",
+            "tools": []
+          }
+        ],
+        "action": "allow",
+        "requireApproval": false,
+        "rateLimit": null,
+        "rateLimitWindow": null,
+        "conditions": null
+      },
+      {
+        "scope": "project",
+        "priority": 100,
+        "isDefault": true,
+        "source": "default",
+        "name": "Default Rule",
+        "identities": [],
+        "targets": [],
+        "action": "block",
+        "requireApproval": false,
+        "rateLimit": null,
+        "rateLimitWindow": null,
+        "conditions": null
+      }
+    ],
+    "request": {
+      "host": "gmail.googleapis.com",
+      "path": "/gmail/v1/users/me/messages",
+      "method": "GET",
+      "agentId": "agent-1",
+      "hasInjections": true,
+      "isLlmHost": false,
+      "winningConnectionId": "c-work"
+    },
+    "expected": {
+      "action": "allow"
+    }
+  },
+  {
+    "name": "connection allow does not open a same-provider sibling account",
+    "rules": [
+      {
+        "scope": "project",
+        "priority": 0,
+        "isDefault": false,
+        "source": "custom",
+        "name": "allow work gmail",
+        "identities": [
+          {
+            "type": "agent",
+            "id": "agent-1"
+          }
+        ],
+        "targets": [
+          {
+            "kind": "connection",
+            "connectionId": "c-work",
+            "provider": "gmail",
+            "tools": []
+          }
+        ],
+        "action": "allow",
+        "requireApproval": false,
+        "rateLimit": null,
+        "rateLimitWindow": null,
+        "conditions": null
+      },
+      {
+        "scope": "project",
+        "priority": 100,
+        "isDefault": true,
+        "source": "default",
+        "name": "Default Rule",
+        "identities": [],
+        "targets": [],
+        "action": "block",
+        "requireApproval": false,
+        "rateLimit": null,
+        "rateLimitWindow": null,
+        "conditions": null
+      }
+    ],
+    "request": {
+      "host": "gmail.googleapis.com",
+      "path": "/gmail/v1/users/me/messages",
+      "method": "GET",
+      "agentId": "agent-1",
+      "hasInjections": true,
+      "isLlmHost": false,
+      "winningConnectionId": "c-personal"
+    },
+    "expected": {
+      "action": "block",
+      "byDefault": true
+    }
+  },
+  {
+    "name": "connection target never matches without a winning connection",
+    "rules": [
+      {
+        "scope": "project",
+        "priority": 0,
+        "isDefault": false,
+        "source": "custom",
+        "name": "allow work gmail",
+        "identities": [
+          {
+            "type": "agent",
+            "id": "agent-1"
+          }
+        ],
+        "targets": [
+          {
+            "kind": "connection",
+            "connectionId": "c-work",
+            "provider": "gmail",
+            "tools": []
+          }
+        ],
+        "action": "allow",
+        "requireApproval": false,
+        "rateLimit": null,
+        "rateLimitWindow": null,
+        "conditions": null
+      },
+      {
+        "scope": "project",
+        "priority": 100,
+        "isDefault": true,
+        "source": "default",
+        "name": "Default Rule",
+        "identities": [],
+        "targets": [],
+        "action": "block",
+        "requireApproval": false,
+        "rateLimit": null,
+        "rateLimitWindow": null,
+        "conditions": null
+      }
+    ],
+    "request": {
+      "host": "gmail.googleapis.com",
+      "path": "/gmail/v1/users/me/messages",
+      "method": "GET",
+      "agentId": "agent-1",
+      "hasInjections": true,
+      "isLlmHost": false
+    },
+    "expected": {
+      "action": "block",
+      "byDefault": true
+    }
+  },
+  {
+    "name": "tool-narrowed connection permits its tool endpoint via the winner",
+    "rules": [
+      {
+        "scope": "project",
+        "priority": 0,
+        "isDefault": false,
+        "source": "custom",
+        "name": "allow work gmail",
+        "identities": [
+          {
+            "type": "agent",
+            "id": "agent-1"
+          }
+        ],
+        "targets": [
+          {
+            "kind": "connection",
+            "connectionId": "c-work",
+            "provider": "gmail",
+            "tools": ["create_draft"]
+          }
+        ],
+        "action": "allow",
+        "requireApproval": false,
+        "rateLimit": null,
+        "rateLimitWindow": null,
+        "conditions": null
+      },
+      {
+        "scope": "project",
+        "priority": 100,
+        "isDefault": true,
+        "source": "default",
+        "name": "Default Rule",
+        "identities": [],
+        "targets": [],
+        "action": "block",
+        "requireApproval": false,
+        "rateLimit": null,
+        "rateLimitWindow": null,
+        "conditions": null
+      }
+    ],
+    "request": {
+      "host": "gmail.googleapis.com",
+      "path": "/gmail/v1/users/me/drafts",
+      "method": "POST",
+      "agentId": "agent-1",
+      "hasInjections": true,
+      "isLlmHost": false,
+      "winningConnectionId": "c-work"
+    },
+    "expected": {
+      "action": "allow"
+    }
+  },
+  {
+    "name": "tool-narrowed connection does not match other endpoints of its provider",
+    "rules": [
+      {
+        "scope": "project",
+        "priority": 0,
+        "isDefault": false,
+        "source": "custom",
+        "name": "allow work gmail",
+        "identities": [
+          {
+            "type": "agent",
+            "id": "agent-1"
+          }
+        ],
+        "targets": [
+          {
+            "kind": "connection",
+            "connectionId": "c-work",
+            "provider": "gmail",
+            "tools": ["create_draft"]
+          }
+        ],
+        "action": "allow",
+        "requireApproval": false,
+        "rateLimit": null,
+        "rateLimitWindow": null,
+        "conditions": null
+      },
+      {
+        "scope": "project",
+        "priority": 100,
+        "isDefault": true,
+        "source": "default",
+        "name": "Default Rule",
+        "identities": [],
+        "targets": [],
+        "action": "block",
+        "requireApproval": false,
+        "rateLimit": null,
+        "rateLimitWindow": null,
+        "conditions": null
+      }
+    ],
+    "request": {
+      "host": "gmail.googleapis.com",
+      "path": "/gmail/v1/users/me/messages",
+      "method": "GET",
+      "agentId": "agent-1",
+      "hasInjections": true,
+      "isLlmHost": false,
+      "winningConnectionId": "c-work"
+    },
+    "expected": {
+      "action": "block",
+      "byDefault": true
+    }
+  },
+  {
+    "name": "winner equality alone is not enough: off-catalog host fails the fan-out",
+    "rules": [
+      {
+        "scope": "project",
+        "priority": 0,
+        "isDefault": false,
+        "source": "custom",
+        "name": "allow work gmail",
+        "identities": [
+          {
+            "type": "agent",
+            "id": "agent-1"
+          }
+        ],
+        "targets": [
+          {
+            "kind": "connection",
+            "connectionId": "c-work",
+            "provider": "gmail",
+            "tools": []
+          }
+        ],
+        "action": "allow",
+        "requireApproval": false,
+        "rateLimit": null,
+        "rateLimitWindow": null,
+        "conditions": null
+      },
+      {
+        "scope": "project",
+        "priority": 100,
+        "isDefault": true,
+        "source": "default",
+        "name": "Default Rule",
+        "identities": [],
+        "targets": [],
+        "action": "block",
+        "requireApproval": false,
+        "rateLimit": null,
+        "rateLimitWindow": null,
+        "conditions": null
+      }
+    ],
+    "request": {
+      "host": "api.github.com",
+      "path": "/user",
+      "method": "GET",
+      "agentId": "agent-1",
+      "hasInjections": true,
+      "isLlmHost": false,
+      "winningConnectionId": "c-work"
+    },
+    "expected": {
+      "action": "block",
+      "byDefault": true
+    }
+  },
+  {
+    "name": "an org whole-app block floors a project connection allow",
+    "rules": [
+      {
+        "scope": "organization",
+        "priority": 0,
+        "isDefault": false,
+        "source": "custom",
+        "name": "org block gmail",
+        "identities": [],
+        "targets": [
+          {
+            "kind": "app",
+            "provider": "gmail",
+            "tools": [],
+            "connectionScope": null
+          }
+        ],
+        "action": "block",
+        "requireApproval": false,
+        "rateLimit": null,
+        "rateLimitWindow": null,
+        "conditions": null
+      },
+      {
+        "scope": "organization",
+        "priority": 100,
+        "isDefault": true,
+        "source": "default",
+        "name": "Default Rule",
+        "identities": [],
+        "targets": [],
+        "action": "allow",
+        "requireApproval": false,
+        "rateLimit": null,
+        "rateLimitWindow": null,
+        "conditions": null
+      },
+      {
+        "scope": "project",
+        "priority": 0,
+        "isDefault": false,
+        "source": "custom",
+        "name": "allow work gmail",
+        "identities": [
+          {
+            "type": "agent",
+            "id": "agent-1"
+          }
+        ],
+        "targets": [
+          {
+            "kind": "connection",
+            "connectionId": "c-work",
+            "provider": "gmail",
+            "tools": []
+          }
+        ],
+        "action": "allow",
+        "requireApproval": false,
+        "rateLimit": null,
+        "rateLimitWindow": null,
+        "conditions": null
+      },
+      {
+        "scope": "project",
+        "priority": 100,
+        "isDefault": true,
+        "source": "default",
+        "name": "Default Rule",
+        "identities": [],
+        "targets": [],
+        "action": "allow",
+        "requireApproval": false,
+        "rateLimit": null,
+        "rateLimitWindow": null,
+        "conditions": null
+      }
+    ],
+    "request": {
+      "host": "gmail.googleapis.com",
+      "path": "/gmail/v1/users/me/messages",
+      "method": "GET",
+      "agentId": "agent-1",
+      "hasInjections": true,
+      "isLlmHost": false,
+      "winningConnectionId": "c-work"
     },
     "expected": {
       "action": "block"

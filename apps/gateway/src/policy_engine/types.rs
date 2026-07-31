@@ -31,8 +31,8 @@ impl RateWindow {
 
 /// A rule identity. OSS rules target a specific agent or all agents (empty
 /// identity list = "any"). `Other` covers every non-agent identity row a
-/// permissive API client might have stored (agent-group/user/group are OneCLI
-/// Cloud capabilities) — it NEVER matches, so such a row narrows to nothing
+/// permissive API client might have stored (user/group are OneCLI Cloud
+/// capabilities) — it NEVER matches, so such a row narrows to nothing
 /// instead of silently widening to "any" (fail-closed).
 #[derive(Debug, Clone)]
 pub(super) enum Identity {
@@ -42,10 +42,12 @@ pub(super) enum Identity {
 
 /// A rule target. `Network` matches host/path/method verbatim; `App` names a
 /// provider and tool set the catalog expands to its endpoint fan-out (empty
-/// tools = the whole app, host-only); `Secret` gates its resolved host
-/// pattern(s); `Unresolved` is the fail-closed arm for anything that cannot be
-/// resolved (unknown kind, provider-less app row, a connection/secret id absent
-/// from the fenced connect-time maps) — it never matches.
+/// tools = the whole app, host-only); `Connection` binds one specific
+/// connection — winner-id equality plus the same catalog expansion; `Secret`
+/// gates its resolved host pattern(s); `Unresolved` is the fail-closed arm for
+/// anything that cannot be resolved (unknown kind, provider-less app row, a
+/// connection/secret id absent from the fenced connect-time maps) — it never
+/// matches.
 #[derive(Debug, Clone)]
 pub(super) enum Target {
     Network {
@@ -54,6 +56,14 @@ pub(super) enum Target {
         method: Option<String>,
     },
     App {
+        provider: String,
+        tools: Vec<String>,
+    },
+    /// Matches only when this is the request's winning injected connection AND
+    /// the provider/tools fan-out hits; no winner → never matches (fail-closed
+    /// for allow AND block).
+    Connection {
+        id: String,
         provider: String,
         tools: Vec<String>,
     },
@@ -98,6 +108,9 @@ pub(super) struct Request {
     pub has_injections: bool,
     /// Host is a known LLM provider — bypasses deny-default.
     pub is_llm_host: bool,
+    /// The app connection that won injection for this request; `None` when no
+    /// connection serves it. `Target::Connection` matches only against this id.
+    pub winning_connection_id: Option<String>,
 }
 
 impl Request {

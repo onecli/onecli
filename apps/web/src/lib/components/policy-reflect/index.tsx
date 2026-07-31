@@ -1,16 +1,10 @@
-// The step-9.7b read-only policy reflections. Since step 10 these are SHARED —
-// every edition (OSS included) renders the real reflections that read the v2
-// policy engine; the old edition alias/null-stub swap is retired.
+// Policy reflections over the v2 engine: the connection Agent-access dialog
+// (editable since attach-model step 4) and the read-only agent Credential
+// access view. SHARED — every edition (OSS included) renders the real
+// reflections; there is no edition swap here.
 
-export { AppPermissionsReflection } from "./app-permissions-reflection";
 export { ConnectionAgentsReflection } from "./connection-agents-reflection";
 export { CredentialAccessReflection } from "./credential-access-reflection";
-
-export interface AppPermissionsReflectionProps {
-  provider: string;
-  appName: string;
-  pageScope?: "project" | "organization";
-}
 
 export interface ConnectionAgentsReflectionProps {
   connectionId: string;
@@ -18,6 +12,10 @@ export interface ConnectionAgentsReflectionProps {
   appName: string;
   open: boolean;
   onOpenChange: (open: boolean) => void;
+  /** Opened straight off a successful connect: the header reads as success and
+   * frames the rows as the setup step, rather than as an audit of an
+   * established connection. Same rows, same writes. */
+  justConnected?: boolean;
 }
 
 export interface CredentialAccessReflectionProps {

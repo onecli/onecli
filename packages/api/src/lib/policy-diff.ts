@@ -54,7 +54,12 @@ export interface PolicyDiff {
   rowState: Map<string, "new" | "changed">;
 }
 
-const USER_CHANGEABLE = new Set(["custom", "equipment", "app_permission"]);
+const USER_CHANGEABLE = new Set([
+  "custom",
+  "equipment",
+  "app_permission",
+  "grant",
+]);
 
 const changeableOf = <T extends DiffableRule>(rules: T[]): T[] =>
   rules

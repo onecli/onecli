@@ -1,5 +1,7 @@
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 
+import { proofDatabaseUrl } from "../../testing/pg-proof.js";
+
 /**
  * The legacy → v2 conversion on REAL PostgreSQL — the committed end-to-end
  * proof of the boot pass: translate → one atomic published generation per
@@ -22,7 +24,7 @@ import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
  * every org — concurrent files would interleave.
  */
 
-const PROOF_URL = process.env.POLICY_PROOF_DATABASE_URL;
+const PROOF_URL = proofDatabaseUrl();
 
 // Dynamic imports throughout: @onecli/db builds its client from DATABASE_URL
 // at import time, so the env must be staged first.

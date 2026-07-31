@@ -1,6 +1,6 @@
 import { Hono } from "hono";
 import type { ApiEnv } from "../types";
-import { authMiddleware, requireProjectId } from "../middleware/auth";
+import { auth, requireProjectId } from "../middleware/auth";
 import { getUser, updateProfile } from "../services/user-service";
 import { ensureApiKey, regenerateApiKey } from "../services/api-key-service";
 import {
@@ -13,7 +13,12 @@ import { updateProfileSchema } from "../validations/user";
 
 export const userRoutes = () => {
   const app = new Hono<ApiEnv>();
-  app.use("*", authMiddleware);
+  // Identity routes work without a project: an ORG key carries no project of
+  // its own, and `onecli auth login` verifies keys via GET /user — with the
+  // default requireProject it read every org key as invalid. The api-key
+  // sub-routes stay project-scoped through their requireProjectId calls
+  // (400 with the header hint, instead of the blanket 401).
+  app.use("*", auth({ requireProject: false }));
 
   // GET /user
   app.get("/", async (c) => {

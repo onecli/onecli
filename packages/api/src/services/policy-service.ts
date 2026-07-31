@@ -19,7 +19,7 @@ import { isSessionPolicy } from "../validations/policy";
 
 type PolicyStatus = "draft" | "published";
 
-const RULE_INCLUDE = {
+export const RULE_INCLUDE = {
   identities: true,
   targets: true,
 } satisfies Prisma.PolicyRuleV2Include;
@@ -117,7 +117,6 @@ const toIdentityDto = (
   row: RuleRow["identities"][number],
 ): PolicyIdentityInput => {
   if (row.agentId) return { type: "agent", id: row.agentId };
-  if (row.agentGroupId) return { type: "agentGroup", id: row.agentGroupId };
   if (row.userId) return { type: "user", id: row.userId };
   if (row.groupId) return { type: "group", id: row.groupId };
   throw new Error("policy identity row names no principal");
@@ -192,8 +191,6 @@ const identityCreate = (
   switch (i.type) {
     case "agent":
       return { agent: { connect: { id: i.id } } };
-    case "agentGroup":
-      return { agentGroup: { connect: { id: i.id } } };
     case "user":
       return { user: { connect: { id: i.id } } };
     case "group":
@@ -241,8 +238,6 @@ const identityRowToCreate = (
   i: RuleRow["identities"][number],
 ): Prisma.PolicyRuleIdentityCreateWithoutRuleInput => {
   if (i.agentId) return { agent: { connect: { id: i.agentId } } };
-  if (i.agentGroupId)
-    return { agentGroup: { connect: { id: i.agentGroupId } } };
   if (i.userId) return { user: { connect: { id: i.userId } } };
   if (i.groupId) return { group: { connect: { id: i.groupId } } };
   throw new Error("policy identity row names no principal");
@@ -297,16 +292,14 @@ const dedupeTargets = (items: PolicyTargetInput[]): PolicyTargetInput[] => {
   });
 };
 
-// True if any identity targets the directory (agent-group / user / user-group) —
-// the enterprise-gated "groups" capability. A plain agent / "any" rule is not.
+// True if any identity targets the directory (user / user-group) — the
+// enterprise-gated "groups" capability. A plain agent / "any" rule is not.
 const hasDirectoryIdentity = (
   identities: PolicyIdentityInput[] | undefined,
 ): boolean => (identities ?? []).some((i) => i.type !== "agent");
 
 export const rowHasDirectoryIdentity = (rows: RuleRow["identities"]): boolean =>
-  rows.some(
-    (i) => i.agentGroupId != null || i.userId != null || i.groupId != null,
-  );
+  rows.some((i) => i.userId != null || i.groupId != null);
 
 // The paid-plan gate keys off the modifiers + directory identities, reusing the
 // existing RuleActionGate (requireApproval → "manual_approval" [team], rateLimit
@@ -350,8 +343,8 @@ const asReferenceError = (err: unknown): never => {
 };
 
 // Validate a rule's identities before write: (1) the LEVEL restriction — a
-// PROJECT rule targets a specific agent or "any"; an ORG rule targets an
-// agent-group / user / user-group or "any"; and (2) OWNERSHIP — every referenced
+// PROJECT rule targets a specific agent or "any"; an ORG rule targets a user /
+// user-group or "any"; and (2) OWNERSHIP — every referenced
 // principal must belong to the acting org (agents to the acting project). The
 // ownership check is a security invariant that closes the IDOR gap
 // `asReferenceError` alone leaves open (it only proves existence, in any org).
@@ -367,17 +360,13 @@ export const assertIdentitiesValid = async (
   const idsOf = (type: PolicyIdentityInput["type"]) =>
     deduped.filter((i) => i.type === type).map((i) => i.id);
   const agentIds = idsOf("agent");
-  const agentGroupIds = idsOf("agentGroup");
   const userIds = idsOf("user");
   const groupIds = idsOf("group");
 
   // Level restriction. The OSS edition phrases it as the capability lock it
   // is there (directory identities are a OneCLI Cloud capability); the EE
   // editions keep the scope-shaped message byte-identical.
-  if (
-    base.scope === "project" &&
-    (agentGroupIds.length || userIds.length || groupIds.length)
-  ) {
+  if (base.scope === "project" && (userIds.length || groupIds.length)) {
     throw new ServiceError(
       "UNPROCESSABLE",
       isOssEdition()
@@ -388,7 +377,7 @@ export const assertIdentitiesValid = async (
   if (base.scope === "organization" && agentIds.length) {
     throw new ServiceError(
       "UNPROCESSABLE",
-      "An organization rule targets agent-groups, users, or user-groups — not a specific agent.",
+      "An organization rule targets users or user-groups — not a specific agent.",
     );
   }
 
@@ -430,11 +419,6 @@ export const assertIdentitiesValid = async (
           id: { in: agentIds },
           ...(projectId ? { projectId } : { project: { organizationId } }),
         },
-      }),
-    ),
-    verify(agentGroupIds, () =>
-      db.agentGroup.count({
-        where: { id: { in: agentGroupIds }, organizationId },
       }),
     ),
     verify(userIds, () =>
@@ -994,11 +978,14 @@ export const reorderPolicyRules = async (
   return listPolicyRules(scope, "draft");
 };
 
-// The terminal Default Rule is a per-scope singleton (isDefault). §2.4: new orgs
-// deny, projects allow. `action` is derived from the scope base (not the
-// caller's ResourceScope) so it stays consistent if both keys were ever set.
-const defaultAction = (base: PolicyScopeBase): "allow" | "block" =>
-  base.scope === "organization" ? "block" : "allow";
+// The terminal Default Rule is a per-scope singleton (isDefault). Both scopes
+// now default to ALLOW (the attach-model posture — deny-by-default is the
+// admin's opt-in flip on the org Default Rule): this covers lazy creation
+// (ensureDefault on publish/PATCH) and the virtual default, so an org whose
+// birth seed failed can never resurrect a Block nobody chose. The parameter
+// stays so every call site keeps naming its scope base.
+const defaultAction: (base: PolicyScopeBase) => "allow" | "block" = () =>
+  "allow";
 
 const findDefault = async (
   client: Prisma.TransactionClient | typeof db,
@@ -1024,7 +1011,9 @@ const findDefault = async (
 };
 
 // Create the default if absent — callers hold the per-scope lock (writes only).
-const ensureDefault = async (
+// Exported for feature-owned rule compilers (grants) that publish atomically
+// inside their own locked transaction.
+export const ensureDefault = async (
   tx: Prisma.TransactionClient,
   base: PolicyScopeBase,
 ): Promise<RuleRow> => {
@@ -1109,7 +1098,9 @@ const PUBLISHED_GENERATION_RETENTION = 10;
 // Gate-less snapshot of the given draft rows into a fresh published generation
 // (active published set = max(generation)). Callers hold the scope lock and have
 // already read `draftRules`; the plan gate — if any — is the caller's job.
-const snapshotDraftRules = async (
+// Exported for feature-owned rule compilers (grants) that publish atomically
+// inside their own locked transaction.
+export const snapshotDraftRules = async (
   tx: Prisma.TransactionClient,
   base: PolicyScopeBase,
   draftRules: RuleRow[],

@@ -1,8 +1,21 @@
 "use client";
 
-import { useMutation } from "@tanstack/react-query";
+import { useMutation, useQuery } from "@tanstack/react-query";
 import { toast } from "sonner";
 import { projects } from "@/lib/api";
+import { queryKeys } from "@/lib/api/keys";
+
+/** The caller's visible projects. Org comes from the URL scope by default; the
+ * explicit organizationId override serves the account-route Get Started picker
+ * (org from the default-org cookie, validated server-side). */
+export const useProjectsList = (
+  options: { organizationId?: string; enabled?: boolean } = {},
+) =>
+  useQuery({
+    queryKey: queryKeys.projects.list(options.organizationId),
+    queryFn: () => projects.list({ organizationId: options.organizationId }),
+    enabled: options.enabled ?? true,
+  });
 
 // Project rename/delete go through the audited `/v1/projects/:id` routes. Delete
 // flushes the gateway cache for the removed keys server-side, so there is

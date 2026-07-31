@@ -1,5 +1,19 @@
 # Changelog
 
+## [1.45.0](https://github.com/onecli/onecli/compare/v1.44.0...v1.45.0) (2026-07-31)
+
+
+### Features
+
+* install page, per-connection resources, approvals bell ([#470](https://github.com/onecli/onecli/issues/470)) ([834af80](https://github.com/onecli/onecli/commit/834af801e35a09ab7b01669a65488de4a89687e9))
+
+## [1.44.0](https://github.com/onecli/onecli/compare/v1.43.3...v1.44.0) (2026-07-29)
+
+
+### Features
+
+* agent grants — per-agent credential access replaces the project policy page ([#462](https://github.com/onecli/onecli/issues/462)) ([7e1c0e3](https://github.com/onecli/onecli/commit/7e1c0e3bdb9817e7cc7ba2378269242e0040e9a3))
+
 ## [1.43.3](https://github.com/onecli/onecli/compare/v1.43.2...v1.43.3) (2026-07-26)
 
 

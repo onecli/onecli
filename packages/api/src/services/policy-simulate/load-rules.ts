@@ -1,7 +1,7 @@
 import { db, Prisma } from "@onecli/db";
 import type { PolicyScopeBase } from "../../services/policy-service";
 
-// The rule read behind the simulator and the reflections — mirrors the
+// The rule read behind the reflections — mirrors the
 // GATEWAY's load, not the editor's (`listPolicyRules` excludes Default Rules,
 // ignores `enabled`, and returns DTOs): enabled rules only, Default Rules
 // INCLUDED (they drive the deny-default terminal), published pinned to the

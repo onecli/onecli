@@ -16,6 +16,33 @@ import { invalidateGatewayCache } from "@/lib/api/cache";
 export const useAgents = (enabled = true) =>
   useQuery({ queryKey: queryKeys.agents.list(), queryFn: getAgents, enabled });
 
+/** Detail read incl. `recentRequestAt`. With `poll`, refetches every 5s until
+ * a request is seen — the Install page's "waiting for the first request"
+ * signal — then stops on its own. An errored read (e.g. the agent was deleted
+ * mid-wait) also stops the loop instead of hammering a 404 every 5s. */
+export const useAgentDetail = (
+  agentId: string,
+  options: { poll?: boolean } = {},
+) =>
+  useQuery({
+    queryKey: queryKeys.agents.detail(agentId),
+    queryFn: () => agents.get(agentId),
+    enabled: agentId.length > 0,
+    refetchInterval: options.poll
+      ? (query) =>
+          query.state.error || query.state.data?.recentRequestAt ? false : 5000
+      : undefined,
+  });
+
+/** Agents of an explicitly-chosen project (the org-level Get Started picker) —
+ * everywhere else use `useAgents()`, which follows the URL scope. */
+export const useAgentsForProject = (projectId: string) =>
+  useQuery({
+    queryKey: queryKeys.agents.forProject(projectId),
+    queryFn: () => agents.list({ projectId }),
+    enabled: projectId.length > 0,
+  });
+
 export const useCreateAgent = () => {
   const qc = useQueryClient();
   return useMutation({

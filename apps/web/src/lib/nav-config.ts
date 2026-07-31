@@ -1,7 +1,7 @@
 import {
   LayoutDashboard,
+  Download,
   Bot,
-  Shield,
   Settings,
   Plug,
   Activity,
@@ -25,8 +25,8 @@ export interface SettingsNavSection {
 
 export const navItems: NavItem[] = [
   { title: "Overview", url: "/overview", icon: LayoutDashboard },
+  { title: "Install", url: "/install", icon: Download },
   { title: "Agents", url: "/agents", icon: Bot },
-  { title: "Policy", url: "/policy", icon: Shield },
   { title: "Connections", url: "/connections", icon: Plug },
   { title: "Activity", url: "/activity", icon: Activity },
   { title: "Settings", url: "/settings", icon: Settings },

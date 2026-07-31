@@ -38,7 +38,7 @@ import { EditableRuleRow } from "./editable-rule-row";
  * a credential, and a legacy `app_permission` row still decides. `blocklist` is
  * excluded — the app page's blocklist panel owns those rows. Kept in step with
  * `USER_CHANGEABLE` in lib/policy-diff.ts, or a revoke stages but can't Apply. */
-const REVOCABLE_SOURCES = new Set(["equipment", "app_permission"]);
+const REVOCABLE_SOURCES = new Set(["equipment", "app_permission", "grant"]);
 
 const HEAD =
   "text-muted-foreground h-9 text-[11px] font-medium tracking-wide uppercase";

@@ -49,6 +49,10 @@ vi.mock("@onecli/db", () => ({
       findUnique: async () =>
         state.projectOrg == null ? null : { organizationId: state.projectOrg },
     },
+    // getPolicyDefault's read path: no persisted default → the virtual one.
+    policyRuleV2: {
+      findFirst: async () => null,
+    },
     appConnection: {
       findMany: async ({ where }: { where: unknown }) => {
         state.connectionWheres.push(where);
@@ -58,7 +62,7 @@ vi.mock("@onecli/db", () => ({
   },
 }));
 
-const { backfillPublishScope, assertSessionPolicyValid } =
+const { backfillPublishScope, assertSessionPolicyValid, getPolicyDefault } =
   await import("./policy-service");
 const { initPolicyValidator } = await import("../providers");
 
@@ -265,5 +269,24 @@ describe("assertSessionPolicyValid", () => {
         "allow",
       ),
     ).rejects.toThrow(/organization/i);
+  });
+});
+
+describe("the default-rule posture (both scopes allow)", () => {
+  // The attach-model law (plans/project-attach-model.md, step-3 decision): a
+  // scope with no persisted Default Rule reads back ALLOW — org included. This
+  // pins the co-change beside the new-org seeder flip: ensureDefault and the
+  // virtual default derive from the same `defaultAction`, so an org whose
+  // birth seed failed can never lazily resurrect a Block nobody chose.
+  it("virtual org default is allow", async () => {
+    const dto = await getPolicyDefault({ organizationId: "org-1" });
+    expect(dto.isDefault).toBe(true);
+    expect(dto.action).toBe("allow");
+  });
+
+  it("virtual project default is allow", async () => {
+    const dto = await getPolicyDefault({ projectId: "p-1" });
+    expect(dto.isDefault).toBe(true);
+    expect(dto.action).toBe("allow");
   });
 });

@@ -48,7 +48,6 @@ type StoredRuleRow = {
   conditions: unknown;
   identities: {
     agentId: string | null;
-    agentGroupId: string | null;
     userId: string | null;
     groupId: string | null;
   }[];
@@ -70,7 +69,6 @@ const reconstructIdentity = (
   i: StoredRuleRow["identities"][number],
 ): PolicyIdentityInput => {
   if (i.agentId) return { type: "agent", id: i.agentId };
-  if (i.agentGroupId) return { type: "agentGroup", id: i.agentGroupId };
   if (i.userId) return { type: "user", id: i.userId };
   return { type: "group", id: i.groupId ?? "" };
 };

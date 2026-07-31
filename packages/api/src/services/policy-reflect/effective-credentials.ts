@@ -28,29 +28,26 @@ import { injectionIdentityMatches } from "./injection";
 
 // The "Credential access" dialog's reflection (step 9.7b),
 // framed around EFFECTIVE ACCESS (the user decision — reflections lead with what
-// the rules ALLOW, never the injection/`secretMode` view): the credentials an
-// agent can inject, each tagged with what it can actually DO under the enforced
-// rules (Usable / Limited / Blocked). An all-mode agent gets the whole pool
-// attached, but a Block rule denies its requests — so an attached-but-blocked
-// credential reads "Blocked", not "available".
+// the rules ALLOW, never the raw injection view): the credentials an agent can
+// inject, each tagged with what it can actually DO under the enforced rules
+// (Usable / Limited / Blocked). An attached-but-blocked credential reads
+// "Blocked", not "available".
 //
-// The injectable SET mirrors `inject_select.rs` / `connect.rs`:
-//   - ALL-mode → the whole fenced org+project pool (rules can't narrow it).
-//   - SELECTIVE → the published v2 RULE GRANTS and nothing else — enabled allow
-//     rules whose identity EXPLICITLY names the agent (an EMPTY identity never
-//     injects; the four target arms: `secretId`, `secretScope` level pool,
-//     `connectionId`, `app` WITH `connectionScope`). The rule set is the
-//     INJECTION one, which keeps `source="equipment"` rows — the retired
-//     per-agent assignments live on as those, and `inject_select` walks them
-//     like any other grant. Pool grants EXPAND to their concrete credentials so
-//     each shows its own status. Rule-named ids resolve through the same
-//     org+project fence the gateway uses — a foreign/deleted id resolves to
-//     nothing (fail-closed).
+// The injectable SET mirrors `inject_select.rs` / `connect.rs` (step 7: every
+// agent is rule-selected): the published v2 RULE GRANTS and nothing else —
+// enabled allow rules whose identity EXPLICITLY names the agent (an EMPTY
+// identity never injects; the four target arms: `secretId`, `secretScope`
+// level pool, `connectionId`, `app` WITH `connectionScope`). The rule set is
+// the INJECTION one, which keeps `source="equipment"` rows — the retired
+// per-agent assignments live on as those, and `inject_select` walks them like
+// any other grant. Pool grants EXPAND to their concrete credentials so each
+// shows its own status. Rule-named ids resolve through the same org+project
+// fence the gateway uses — a foreign/deleted id resolves to nothing
+// (fail-closed).
 //
 // Each credential's STATUS is the same engine the App Permissions reflection
 // uses: a connection's = its provider's per-tool decision rollup; a secret's =
-// its host decision (with the secret assumed attached). `secretMode` survives
-// only as a demoted footnote in the UI, never the headline.
+// its host decision (with the secret assumed attached).
 //
 // REDACTION (the simulate contract): org rule NAMES are org-admin-only; multiple
 // granting org rules COLLAPSE to one redacted marker (their count isn't
@@ -89,6 +86,10 @@ export type EffectiveCredentialEntry =
       label: string | null;
       provider: string;
       status: CredentialAccessStatus;
+      /** The ORGANIZATION blocks every tool of this connection for this agent.
+       * Distinct from `status: "blocked"`, which doesn't say who blocked: a
+       * project can lift its own block, but not the organization's. */
+      orgBlocked: boolean;
       provenance: CredentialProvenance[];
     };
 
@@ -160,15 +161,38 @@ interface EngineCtx {
 }
 
 /** A connection's effective status = its provider's per-tool decision rollup
- * (the shared `rollupToolStatus`, so it matches the connection→agents dialog). */
+ * (the shared `rollupToolStatus`, so it matches the connection→agents dialog),
+ * plus whether the ORGANIZATION is what blocks it.
+ *
+ * The connection id is threaded as the winning connection so per-account rules
+ * bind exactly as the gateway would — without it, an org rule targeting THIS
+ * specific connection matches nothing here and the row reads "usable" while
+ * every request 403s.
+ *
+ * `orgBlocked` comes from the same engine run: `orgCeiling` is the org-alone
+ * verdict already computed per tool, so attributing the block costs nothing
+ * extra. It is what lets the UI say "Blocked by your organization" — and stop
+ * offering a toggle that could only grant more of nothing.
+ */
 const connectionAccessStatus = (
   provider: string,
+  connectionId: string,
   engine: EngineCtx,
-): CredentialAccessStatus => {
+): { status: CredentialAccessStatus; orgBlocked: boolean } => {
   const def = getAppPermissionDefinition(provider);
-  if (!def) return "unknown"; // custom app — no catalog to evaluate against
-  const { groups } = computeEffectiveGroups({ def, ...engine });
-  return rollupToolStatus(groups.flatMap((g) => g.tools.map((t) => t.verdict)));
+  // Custom app — no catalog to evaluate against.
+  if (!def) return { status: "unknown", orgBlocked: false };
+  const { groups } = computeEffectiveGroups({
+    def,
+    ...engine,
+    winningConnectionId: connectionId,
+  });
+  const tools = groups.flatMap((g) => g.tools);
+  return {
+    status: rollupToolStatus(tools.map((t) => t.verdict)),
+    orgBlocked:
+      tools.length > 0 && tools.every((t) => t.orgCeiling === "block"),
+  };
 };
 
 /** A secret's effective status = the decision on a REPRESENTATIVE request to its
@@ -188,7 +212,6 @@ const secretAccessStatus = (
     path: "/",
     method: "GET",
     agentId: engine.agentId,
-    agentGroupIds: engine.principals.agentGroupIds,
     userIds: engine.principals.userIds,
     groupIds: engine.principals.groupIds,
     hasInjections: true, // the secret is the attached credential
@@ -216,10 +239,9 @@ export const effectiveCredentials = async (
   // found (existence is never revealed across the fence).
   const agent = await db.agent.findFirst({
     where: { id: agentId, projectId: ctx.projectId },
-    select: { id: true, secretMode: true },
+    select: { id: true },
   });
   if (!agent) throw new ServiceError("NOT_FOUND", "Agent not found.");
-  const selective = agent.secretMode === "selective";
 
   const secretPoolWhere = (level: "organization" | "project") =>
     level === "project"
@@ -256,17 +278,17 @@ export const effectiveCredentials = async (
     secretHosts,
     connectionProviders,
   ] = await Promise.all([
-    resolvePrincipalSet(agent.id, ctx.projectId, ctx.organizationId),
+    resolvePrincipalSet(ctx.projectId, ctx.organizationId),
     // DECISION rules — equipment dropped, as the gateway's assembler drops them.
     loadRulesForSimulation(orgBase, "published"),
     loadRulesForSimulation(projectBase, "published"),
-    // INJECTION rules — equipment KEPT, as `inject_select` keeps them. These are
-    // what a selective agent's credentials actually come from since step 10; the
-    // frozen per-agent grant tables are no longer consulted, so a revoked grant
-    // stops being listed instead of lingering as "assigned". An all-mode agent
-    // takes the whole pool and never consults them, so don't pay for the reads.
-    selective ? loadInjectionRules(orgBase, "published") : [],
-    selective ? loadInjectionRules(projectBase, "published") : [],
+    // INJECTION rules — equipment KEPT, as `inject_select` keeps them. These
+    // are what an agent's credentials actually come from since step 10 (and
+    // the ONLY source since step 7 — there is no all-mode pool arm left); the
+    // frozen per-agent grant tables are no longer consulted, so a revoked
+    // grant stops being listed instead of lingering as "assigned".
+    loadInjectionRules(orgBase, "published"),
+    loadInjectionRules(projectBase, "published"),
     loadSecretHosts(ctx.organizationId, ctx.projectId),
     loadConnectionProviders(ctx.organizationId, ctx.projectId),
   ]);
@@ -277,28 +299,9 @@ export const effectiveCredentials = async (
   const secretById = new Map<string, SecretResolved>();
   const connectionById = new Map<string, ConnectionResolved>();
 
-  if (!selective) {
-    // ALL mode: the whole fenced pool (rules can't narrow it) — every credential
-    // listed with its own effective status; provenance is empty (the mode
-    // footnote explains why they're all here). Fences to org+project only; the
-    // gateway's all-mode merge also folds cloud-partner-scoped secrets
-    // (`connect.rs`), so a partner-injected credential is under-reported here —
-    // the same partner blind-spot the injection probe / simulator carry, not a
-    // cross-org leak.
-    const [secrets, connections] = await Promise.all([
-      db.secret.findMany({
-        where: anySecretPool,
-        select: { id: true, name: true, hostPattern: true },
-      }),
-      db.appConnection.findMany({
-        where: anyConnectionPool,
-        select: { id: true, label: true, provider: true },
-      }),
-    ]);
-    for (const s of secrets) secretById.set(s.id, s);
-    for (const c of connections) connectionById.set(c.id, c);
-  } else {
-    // SELECTIVE: exactly the rule grants. The old per-agent grant tables became
+  {
+    // Exactly the rule grants (step 7: every agent is rule-selected; the
+    // all-mode whole-pool arm is gone). The old per-agent grant tables became
     // `source="equipment"` rules at the cutover and are carried by the injection
     // load below, so nothing is lost by not reading them — and a grant the user
     // has since revoked correctly disappears instead of lingering as "assigned".
@@ -488,13 +491,15 @@ export const effectiveCredentials = async (
     id: c.id,
     label: c.label,
     provider: c.provider,
-    status: connectionAccessStatus(c.provider, engine),
+    ...connectionAccessStatus(c.provider, c.id, engine),
     provenance: provenance.for(`connection:${c.id}`, ctx.viewerSeesOrgRules),
   }));
 
   return {
     agentId: agent.id,
-    mode: selective ? "selective" : "all",
+    // Constant since step 7 — the union's "all" arm stays for wire compat and
+    // narrows away with the column in step 8.
+    mode: "selective",
     secrets,
     connections,
   };

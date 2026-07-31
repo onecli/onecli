@@ -98,7 +98,8 @@
     "ATLASSIAN_CLIENT_ID",
     "ATLASSIAN_CLIENT_SECRET",
     "EDITION",
-    "POLICY_PROOF_DATABASE_URL"
+    "POLICY_PROOF_DATABASE_URL",
+    "CI"
   ],
   "tasks": {
     "build": {

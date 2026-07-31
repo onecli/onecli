@@ -1,5 +1,7 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 
+import { proofDatabaseUrl } from "../testing/pg-proof.js";
+
 /**
  * The app blocklist on REAL PostgreSQL — the committed proof that a blocked host
  * actually reaches the set the gateway enforces.
@@ -23,7 +25,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
  *     pnpm --filter @onecli/api test -- --run src/services/app-blocklist-service.pg.test.ts
  */
 
-const PROOF_URL = process.env.POLICY_PROOF_DATABASE_URL;
+const PROOF_URL = proofDatabaseUrl();
 
 // Dynamic imports: @onecli/db builds its client from DATABASE_URL at import
 // time, so the env must be staged first.

@@ -1,32 +1,27 @@
 "use client";
 
-import { useMutation, useQuery } from "@tanstack/react-query";
-import { toast } from "sonner";
-import { apiGet, apiPost, queryKeys } from "@/lib/api";
-import type { PageScope } from "@/lib/api";
+import { useQuery } from "@tanstack/react-query";
+import { apiGet, queryKeys } from "@/lib/api";
+import type { GrantResources } from "@/lib/api";
 
-// The EE policy-visibility surface: the what-if simulator, the step-9
-// resolved-identity read, and the 9.7b read-only reflections. The backing
-// endpoints are EE-registered (policy-simulate / policy-reflect /
-// agent-resolved-identity), so the whole client family lives in the EE
-// overlay — the shared `lib/api` carries no trace of it. Query keys are built
-// by SPREADING the shared namespaces (`queryKeys.agents.all()` etc.), so the
-// arrays are byte-identical to nested entries and every broad shared
-// invalidation (`invalidateQueries({ queryKey: queryKeys.agents.all() })`)
-// still covers these caches.
+// The policy-visibility client: effective-access reflections read by the agent
+// page (Manage-permissions dialog, grant rows) and the connection/credential
+// dialogs. The reflect endpoints mount in the shared app for every edition.
+// Query keys are built by SPREADING the shared namespaces
+// (`queryKeys.agents.all()` etc.), so the arrays are byte-identical to nested
+// entries and every broad shared invalidation
+// (`invalidateQueries({ queryKey: queryKeys.agents.all() })`) still covers
+// these caches.
 
-// ── What-if simulator ────────────────────────────────────────────────────────
+export type EffectiveToolVerdict =
+  | "allow"
+  | "approval"
+  | "block"
+  | "mixed"
+  | "unmanaged";
 
-export interface SimulateInput {
-  agentId: string;
-  host: string;
-  path?: string;
-  method: string;
-  includeStaged?: boolean;
-  hasInjectionsOverride?: boolean;
-}
-
-export interface SimulatedRuleRef {
+/** The deciding rule, trimmed for display — never the full targets/identities. */
+export interface ProvenanceRuleRef {
   logicalId: string;
   name: string;
   source: string;
@@ -36,91 +31,14 @@ export interface SimulatedRuleRef {
   rateLimitWindow: string | null;
 }
 
-/** Who decided the simulated request. Org-rule decisions arrive REDACTED for
- * non-org-admin viewers (verdict only, no name/details). */
-export type SimulatedDecidedBy =
-  | { kind: "rule"; scope: "organization"; redacted: true }
-  | { kind: "rule"; scope: "organization" | "project"; rule: SimulatedRuleRef }
-  | { kind: "default"; scope: "organization" | "project"; action: "block" }
-  | { kind: "none"; managed: boolean };
-
-export interface SimulateResult {
-  decision: {
-    action: "allow" | "block";
-    requireApproval?: boolean;
-    rateLimit?: number;
-    rateLimitWindow?: string;
-    byDefault?: boolean;
-  };
-  decidedBy: SimulatedDecidedBy;
-  inputs: {
-    host: string;
-    path: string;
-    method: string;
-    isLlmHost: boolean;
-    hasInjections: boolean;
-    hasInjectionsBasis: "auto" | "override";
-    staged: boolean;
-  };
-  /** Rules with body conditions the simulator can't evaluate (no body input) —
-   * scoped to the viewer's visibility (org rules excluded for non-admins). */
-  bodyConditionsSkipped: number;
-}
-
-/**
- * The what-if simulator (project scope only — a simulation is agent+project
- * contextual): evaluate a hypothetical request against the current rules with
- * the real engine; nothing is sent. Org-rule decisions arrive redacted for
- * non-org-admins.
- */
-export const simulate = (input: SimulateInput) =>
-  apiPost<SimulateResult>("/v1/policy/simulate", input);
-
-/** The what-if simulator — a pure computation POST (no cache side effects). */
-export const useSimulatePolicy = () =>
-  useMutation({
-    mutationFn: (input: SimulateInput) => simulate(input),
-    onError: (err: Error) => toast.error(err.message),
-  });
-
-// ── Resolved identity (step 9 visibility) ───────────────────────────────────
-
-/** The principal set the policy engine matches an agent's requests against
- * (org-admin-only read). */
-export interface ResolvedIdentity {
-  agent: { id: string; name: string };
-  agentGroups: { id: string; name: string }[];
-  users: { id: string; name: string | null; email: string }[];
-  groups: { id: string; name: string }[];
-}
-
-/** Who the policy engine thinks this agent is (org-admin-only; 403 otherwise). */
-export const resolvedIdentity = (agentId: string) =>
-  apiGet<ResolvedIdentity>(`/v1/agents/${agentId}/resolved-identity`);
-
-/** The agent's engine-resolved principal set (step 9 visibility). Org-admin
- * only — the 403 for members is expected, so never retry it. */
-export const useResolvedIdentity = (agentId: string, enabled = true) =>
-  useQuery({
-    queryKey: [...queryKeys.agents.all(), agentId, "resolved-identity"],
-    queryFn: () => resolvedIdentity(agentId),
-    enabled: enabled && agentId.length > 0,
-    retry: false,
-  });
-
-// ── Step 9.7b read-only reflections (the equipment panels) ──────────
-
-export type EffectiveToolVerdict =
-  | "allow"
-  | "approval"
-  | "block"
-  | "mixed"
-  | "unmanaged";
-
 export type EffectiveProvenance =
   | { kind: "rule"; scope: "organization"; redacted: true }
-  | { kind: "rule"; scope: "organization" | "project"; rule: SimulatedRuleRef }
+  | { kind: "rule"; scope: "organization" | "project"; rule: ProvenanceRuleRef }
   | { kind: "default"; scope: "organization" | "project" };
+
+/** What the org level ALONE says about the tool — the ceiling the project can
+ * tighten under but never loosen past. Null = the org is silent. */
+export type OrgCeilingVerdict = "allow" | "approval" | "block";
 
 export interface EffectiveToolResult {
   toolId: string;
@@ -128,6 +46,7 @@ export interface EffectiveToolResult {
   rateLimit: number | null;
   rateLimitWindow: string | null;
   decidedBy: EffectiveProvenance | null;
+  orgCeiling: OrgCeilingVerdict | null;
 }
 
 export interface EffectiveToolGroupResult {
@@ -144,53 +63,65 @@ export interface EffectiveAppPermissionsResult {
     scope: "organization" | "project";
   };
   /** Identity-scoped provider-relevant rules the agent-less baseline can't
-   * show — viewer-scoped like bodyConditionsSkipped. */
+   * show (viewer-scoped). */
   variesByIdentity: number;
+  /** The ORG's resource boundary ("Resources") for the explicit
+   * (agent, connection) basis — how far the organization allows the credential
+   * to reach. Values only (never the rule); null = the org is silent or no
+   * explicit basis was given. */
+  orgResources: GrantResources | null;
+  /** What the credential actually reaches: the org boundary composed with the
+   * project's selection. An empty list = the two don't overlap, so it reaches
+   * nothing and every request is refused. */
+  effectiveResources: GrantResources | null;
   groups: EffectiveToolGroupResult[];
 }
 
 /**
- * The App Permissions panel's read-only reflection: per-tool effective
- * verdicts from the ENFORCED (published) rules. Project scope takes an optional
- * agent (omitted = the agent-less baseline); the org scope is agent-less by
- * construction. Org-rule provenance arrives redacted for non-org-admins.
+ * Per-tool effective verdicts from the ENFORCED (published) rules — read by
+ * the agent page's Manage-permissions dialog and grant rows (org ceiling, org
+ * resources, rate limits). Also the shape behind the public CLI/SDK
+ * effective-permissions surface. Takes an optional agent (omitted = the
+ * agent-less baseline). Org-rule provenance arrives redacted for
+ * non-org-admins. Project scope only — the org-scoped twin
+ * (`/v1/org/policy/effective-app-permissions`) serves the CLI/SDK and has no
+ * web caller.
  */
 export const effectiveAppPermissions = (
   provider: string,
-  opts: { agentId?: string; scope?: PageScope } = {},
+  opts: { agentId?: string; connectionId?: string } = {},
 ) => {
   const params = new URLSearchParams({ provider });
   if (opts.agentId) params.set("agentId", opts.agentId);
-  const base =
-    (opts.scope ?? "project") === "organization"
-      ? "/v1/org/policy"
-      : "/v1/policy";
+  // Reflect one specific account as the winning injected connection
+  // (per-account rules bind exactly as the gateway would).
+  if (opts.connectionId) params.set("connectionId", opts.connectionId);
   return apiGet<EffectiveAppPermissionsResult>(
-    `${base}/effective-app-permissions?${params}`,
+    `/v1/policy/effective-app-permissions?${params}`,
   );
 };
 
-/** The App Permissions panel's read-only reflection (step 9.7b):
- * per-tool effective verdicts from the ENFORCED rules. `agentId` null = the
+/** Per-tool effective verdicts from the ENFORCED rules. `agentId` null = the
  * agent-less baseline. */
 export const useEffectiveAppPermissions = (
   provider: string,
   agentId: string | null,
-  scope: PageScope = "project",
   enabled = true,
+  /** Reflect one specific account; null = the provider view. */
+  connectionId: string | null = null,
 ) =>
   useQuery({
     queryKey: [
       ...queryKeys.policy.all(),
       "effective-app-permissions",
-      scope,
       provider,
       agentId ?? "baseline",
+      connectionId ?? "provider-level",
     ],
     queryFn: () =>
       effectiveAppPermissions(provider, {
         agentId: agentId ?? undefined,
-        scope,
+        connectionId: connectionId ?? undefined,
       }),
     enabled: enabled && provider.length > 0,
   });
@@ -225,6 +156,9 @@ export type EffectiveCredentialEntry =
       label: string | null;
       provider: string;
       status: CredentialAccessStatus;
+      /** The organization blocks every tool of this connection for this agent
+       * — a project admin cannot lift it, only the org can. */
+      orgBlocked: boolean;
       provenance: CredentialProvenance[];
     };
 
