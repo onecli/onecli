@@ -108,6 +108,32 @@ describe("path injection config validation", () => {
   });
 });
 
+describe("createSecretSchema authMode (onecli/onecli#387)", () => {
+  const base = {
+    name: "Anthropic OAuth",
+    type: "anthropic" as const,
+    valueSource: "onepassword" as const,
+    opRef: "op://vault/item/field",
+    hostPattern: "api.anthropic.com",
+  };
+
+  it("accepts an explicit oauth authMode for a 1Password-sourced secret", () => {
+    const result = createSecretSchema.safeParse({ ...base, authMode: "oauth" });
+    expect(result.success).toBe(true);
+    if (result.success) expect(result.data.authMode).toBe("oauth");
+  });
+
+  it("allows omitting authMode", () => {
+    expect(createSecretSchema.safeParse(base).success).toBe(true);
+  });
+
+  it("rejects an authMode outside api-key/oauth", () => {
+    expect(
+      createSecretSchema.safeParse({ ...base, authMode: "bogus" }).success,
+    ).toBe(false);
+  });
+});
+
 describe("injection config type guards", () => {
   it("classifies path template and regex configs", () => {
     expect(isPathTemplateInjection({ pathTemplate: "/bot{value}" })).toBe(true);
