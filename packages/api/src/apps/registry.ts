@@ -38,8 +38,10 @@ import { trello } from "./trello";
 import { monday } from "./monday";
 import { vercel } from "./vercel";
 import { jfrogArtifactory } from "./jfrog-artifactory";
+import { airbyte } from "./airbyte";
 
 const staticApps: AppDefinition[] = [
+  airbyte,
   gmail,
   github,
   githubApp,

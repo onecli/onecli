@@ -98,10 +98,9 @@ pub(super) async fn mitm(
 
                     // Re-resolve rules from cache on each request so that
                     // secret/rule changes take effect without a reconnect.
-                    let hostname = super::strip_port(&host);
                     match resolve_rules(
                         &ctx,
-                        hostname,
+                        &host,
                         &engine,
                         &*cache,
                         &vault_rules,
@@ -261,6 +260,9 @@ pub(crate) struct ResolvedRules {
     /// the per-request availability pre-check. Unrestricted (all available) in
     /// OSS, when the org is "open", or when enforcement is off.
     pub available_apps: crate::db::AvailableApps,
+    /// Provider identified from per-connection endpoint metadata. Static
+    /// providers are still identified from the registry in the request path.
+    pub dynamic_provider: Option<String>,
 }
 
 impl ResolvedRules {
@@ -305,13 +307,14 @@ enum ResolveResult {
 /// only when neither source yields any.
 async fn resolve_rules(
     ctx: &ProxyContext,
-    hostname: &str,
+    authority: &str,
     engine: &PolicyEngine,
     cache: &dyn CacheStore,
     vault_rules: &[InjectionRule],
     connection_id: Option<&str>,
     request_path: Option<&str>,
 ) -> Result<ResolveResult, crate::connect::ConnectError> {
+    let hostname = super::strip_port(authority);
     let project_id = ctx.project_id.as_deref().ok_or_else(|| {
         crate::connect::ConnectError::Internal("MITM session missing project_id".to_string())
     })?;
@@ -326,7 +329,7 @@ async fn resolve_rules(
         organization_id,
         project_id,
         agent_token,
-        hostname,
+        authority,
         engine,
         cache,
     )
@@ -342,6 +345,10 @@ async fn resolve_rules(
     let mut body_transform: Option<crate::apps::BodyTransform> = None;
     // Granular-access policy of the connection that wins injection (if any).
     let mut session_policy: Option<serde_json::Value> = None;
+    let dynamic_provider = request_path.and_then(|path| {
+        connect::dynamic_provider_for_request(&resp.app_connections, authority, path)
+            .map(str::to_string)
+    });
     // Id of the connection that wins injection (if any) — rides with
     // `session_policy` under the same attribution law.
     let mut winning_connection_id: Option<String> = None;
@@ -359,7 +366,7 @@ async fn resolve_rules(
         match engine
             .resolve_app_injection_for_request(
                 &resp.app_connections,
-                hostname,
+                authority,
                 request_path,
                 connection_id,
                 organization_id,
@@ -474,6 +481,7 @@ async fn resolve_rules(
             pending_injections,
             policy_rules_v2: resp.policy_rules_v2,
             available_apps: resp.available_apps,
+            dynamic_provider,
             access_restricted: resp.access_restricted,
             intercept_token,
             plan: resp.plan,

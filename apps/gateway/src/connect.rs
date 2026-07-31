@@ -227,6 +227,13 @@ struct CachedAppInjection {
     connection_label: Option<String>,
 }
 
+fn requires_eager_client_credentials_refresh(credential_type: &str) -> bool {
+    // Airbyte application tokens can be revoked independently of their stored
+    // expiry. On a cold/cache-miss resolution, mint from the durable client
+    // credentials first; the resulting injection is then cached normally.
+    credential_type == "airbyte_client_credentials"
+}
+
 /// A single app connection option returned in disambiguation responses.
 #[derive(Debug, Clone, serde::Serialize)]
 pub(crate) struct ConnectionChoice {
@@ -314,8 +321,9 @@ impl PolicyEngine {
     async fn resolve_uncached(
         &self,
         agent: &db::AgentRow,
-        hostname: &str,
+        authority: &str,
     ) -> Result<ConnectResponse, ConnectError> {
+        let hostname = crate::gateway::strip_port(authority);
         // Load the published new-model policy for this connection's scopes FIRST
         // (cached with the rest of ConnectResponse, so the per-request path never
         // touches the DB). Step 8: the inject-selection derives from these rules
@@ -340,7 +348,7 @@ impl PolicyEngine {
             .resolve_secret_injections(agent, hostname, &inject_selection)
             .await?;
         let app_connections = self
-            .resolve_app_connections(agent, hostname, &inject_selection)
+            .resolve_app_connections(agent, authority, &inject_selection)
             .await?;
         // Intercept when this host has a credential to inject. Enforcement does
         // NOT depend on this: `gateway.rs` forces MITM for every authenticated
@@ -583,15 +591,12 @@ impl PolicyEngine {
     async fn resolve_app_connections(
         &self,
         agent: &db::AgentRow,
-        hostname: &str,
+        authority: &str,
         selection: &db::InjectSelection,
     ) -> Result<Vec<db::AppConnectionRow>, ConnectError> {
+        let hostname = crate::gateway::strip_port(authority);
         let providers = apps::providers_for_host(hostname);
-        if providers.is_empty() {
-            debug!(host = %hostname, "app_connections: no provider for host");
-            return Ok(vec![]);
-        }
-        debug!(host = %hostname, providers = ?providers, "app_connections: matched providers");
+        debug!(host = %authority, providers = ?providers, "app_connections: matching static and dynamic providers");
 
         let connections = match connection_pool(selection) {
             InjectionPool::RuleSelected => {
@@ -628,10 +633,13 @@ impl PolicyEngine {
 
         let matching: Vec<db::AppConnectionRow> = connections
             .into_iter()
-            .filter(|c| providers.contains(&c.provider.as_str()))
+            .filter(|connection| {
+                providers.contains(&connection.provider.as_str())
+                    || airbyte_connection_matches_host(connection, authority)
+            })
             .collect();
 
-        debug!(host = %hostname, count = matching.len(), "app_connections: deferred connections");
+        debug!(host = %authority, count = matching.len(), "app_connections: deferred connections");
         Ok(matching)
     }
 
@@ -643,7 +651,7 @@ impl PolicyEngine {
     pub(crate) async fn resolve_app_injection_for_request(
         &self,
         app_connections: &[db::AppConnectionRow],
-        hostname: &str,
+        authority: &str,
         request_path: Option<&str>,
         connection_id: Option<&str>,
         organization_id: &str,
@@ -653,6 +661,7 @@ impl PolicyEngine {
         if app_connections.is_empty() {
             return Ok(AppConnectionResult::NoConnections);
         }
+        let hostname = crate::gateway::strip_port(authority);
 
         // If a specific connection ID is requested, use that one
         if let Some(conn_id) = connection_id {
@@ -666,7 +675,7 @@ impl PolicyEngine {
                 });
             };
             return self
-                .resolve_connection_injections(conn, hostname, organization_id, project_id, cache)
+                .resolve_connection_injections(conn, authority, organization_id, project_id, cache)
                 .await;
         }
 
@@ -676,7 +685,7 @@ impl PolicyEngine {
         // same-provider connections (e.g. two Gmail accounts) don't make
         // Calendar/Drive requests, which are unambiguous by path, falsely
         // ambiguous. Dedicated hosts and no-path cases fall through unchanged.
-        let candidates = narrow_connections_by_path(app_connections, hostname, request_path);
+        let candidates = narrow_connections_by_path(app_connections, authority, request_path);
         let app_connections: &[db::AppConnectionRow] = &candidates;
 
         // Single connection — use it directly. Its rules always merge (they
@@ -687,7 +696,7 @@ impl PolicyEngine {
         if app_connections.len() == 1 {
             let conn = &app_connections[0];
             let mut result = self
-                .resolve_connection_injections(conn, hostname, organization_id, project_id, cache)
+                .resolve_connection_injections(conn, authority, organization_id, project_id, cache)
                 .await?;
             if let AppConnectionResult::Rules {
                 provider,
@@ -700,7 +709,7 @@ impl PolicyEngine {
                 ..
             } = &mut result
             {
-                if !provider_serves_request(provider, hostname, request_path) {
+                if !connection_serves_request(conn, provider, authority, request_path) {
                     *rewrite_host = None;
                     *connection_label = None;
                     *finalizer = None;
@@ -770,7 +779,7 @@ impl PolicyEngine {
                 } = self
                     .resolve_connection_injections(
                         conn,
-                        hostname,
+                        authority,
                         organization_id,
                         project_id,
                         cache,
@@ -785,7 +794,7 @@ impl PolicyEngine {
                     // connection on a Dropbox request) still returns `Rules`
                     // carrying its own policy/finalizer/rewrite, and adopting
                     // those would mis-apply them to a request it doesn't own.
-                    if provider_serves_request(&provider, hostname, request_path) {
+                    if connection_serves_request(conn, &provider, authority, request_path) {
                         if rewrite_host.is_some() {
                             resolved_rewrite_host = rewrite_host;
                         }
@@ -841,18 +850,19 @@ impl PolicyEngine {
     async fn resolve_connection_injections(
         &self,
         conn: &db::AppConnectionRow,
-        hostname: &str,
+        authority: &str,
         organization_id: &str,
         project_id: &str,
         cache: &dyn CacheStore,
     ) -> Result<AppConnectionResult, ConnectError> {
+        let hostname = crate::gateway::strip_port(authority);
         let policy_suffix = conn
             .session_policy
             .as_ref()
             .map(|sp| format!(":{sp}"))
             .unwrap_or_default();
         let cache_key = format!(
-            "app_injection:{organization_id}:{project_id}:{}:{hostname}{policy_suffix}",
+            "app_injection:{organization_id}:{project_id}:{}:{authority}{policy_suffix}",
             conn.id
         );
 
@@ -900,12 +910,19 @@ impl PolicyEngine {
             })
             .ok();
 
+        // Dynamic self-managed Airbyte hosts are stored per connection. Reject
+        // any mismatch before token resolution, rule building, or caching.
+        if conn.provider == "airbyte" && !airbyte_connection_matches_host(conn, authority) {
+            debug!(connection_id = %conn.id, "Airbyte host mismatch; no injection");
+            return Ok(AppConnectionResult::NoConnections);
+        }
+
         // For rules with `credential_host_field` (e.g. JFrog's wildcard
         // `*.jfrog.io`), inject ONLY when the request host equals the
         // connection's exact stored host. This runs BEFORE token resolution,
         // rule building, and caching, so a mismatch yields no injection and
         // writes no cache entry — the token can never leak to another tenant.
-        if credential_host_mismatch(&conn.provider, creds.as_ref(), hostname) {
+        if credential_host_mismatch(&conn.provider, creds.as_ref(), authority) {
             debug!(
                 connection_id = %conn.id,
                 provider = %conn.provider,
@@ -1053,14 +1070,27 @@ impl PolicyEngine {
             (String::new(), None)
         };
 
-        let mut rules: Vec<InjectionRule> =
+        let app_rules = if conn.provider == "airbyte" {
+            let base_path = conn
+                .metadata
+                .as_ref()
+                .and_then(|metadata| metadata.get("basePath"))
+                .and_then(|value| value.as_str())
+                .unwrap_or_default();
+            apps::airbyte_injection_rules(base_path, &token)
+        } else {
             apps::build_app_injection_rules(&conn.provider, hostname, &token)
-                .into_iter()
-                .map(|(path_pattern, injections)| InjectionRule {
-                    path_pattern,
-                    injections,
-                })
-                .collect();
+        };
+        let mut rules: Vec<InjectionRule> = app_rules
+            .into_iter()
+            .map(|(path_pattern, injections)| InjectionRule {
+                path_pattern,
+                injections,
+            })
+            .collect();
+        if conn.provider == "airbyte" && rules.is_empty() {
+            return None;
+        }
 
         // For credential-only providers (no auth rules), ensure at least one
         // catch-all rule exists so credential headers/params have somewhere to attach.
@@ -1151,7 +1181,8 @@ impl PolicyEngine {
     /// Check if the project or org has any credentials (secrets or app connections) for this
     /// host that the agent can't access. Used to distinguish "not connected" from
     /// "connected but agent lacks access" in selective mode.
-    async fn has_available_credentials(&self, agent: &db::AgentRow, hostname: &str) -> bool {
+    async fn has_available_credentials(&self, agent: &db::AgentRow, authority: &str) -> bool {
+        let hostname = crate::gateway::strip_port(authority);
         // Check 1: project or org has manual secrets matching this host
         match db::find_secrets_by_project(&self.pool, &agent.project_id).await {
             Ok(secrets) => {
@@ -1186,9 +1217,6 @@ impl PolicyEngine {
 
         // Check 2: project or org has app connections for this host
         let providers = apps::providers_for_host(hostname);
-        if providers.is_empty() {
-            return false;
-        }
 
         let has_project_conns = match db::find_app_connections_by_project(
             &self.pool,
@@ -1196,9 +1224,10 @@ impl PolicyEngine {
         )
         .await
         {
-            Ok(conns) => conns
-                .iter()
-                .any(|c| providers.contains(&c.provider.as_str())),
+            Ok(conns) => conns.iter().any(|connection| {
+                providers.contains(&connection.provider.as_str())
+                    || airbyte_connection_matches_host(connection, authority)
+            }),
             Err(e) => {
                 tracing::warn!(error = %e, "has_available_credentials: app connections query failed");
                 false
@@ -1209,9 +1238,10 @@ impl PolicyEngine {
         }
 
         match db::find_app_connections_by_org(&self.pool, &agent.organization_id).await {
-            Ok(conns) => conns
-                .iter()
-                .any(|c| providers.contains(&c.provider.as_str())),
+            Ok(conns) => conns.iter().any(|connection| {
+                providers.contains(&connection.provider.as_str())
+                    || airbyte_connection_matches_host(connection, authority)
+            }),
             Err(e) => {
                 tracing::warn!(error = %e, "has_available_credentials: org app connections query failed");
                 false
@@ -1244,6 +1274,10 @@ impl PolicyEngine {
             .map(String::from);
 
         let mut effective_expires_at = creds.get("expires_at").and_then(|v| v.as_i64());
+        let credential_type = creds.get("type").and_then(|v| v.as_str()).unwrap_or("");
+        if requires_eager_client_credentials_refresh(credential_type) {
+            effective_expires_at = Some(0);
+        }
 
         // Any non-empty session policy means scoped access is required.
         // Provider-specific interpretation (e.g. GitHub repos) is handled by
@@ -1602,6 +1636,65 @@ pub(crate) async fn resolve_from_cache(
 
 // ── Connection narrowing ─────────────────────────────────────────────────
 
+fn normalize_airbyte_authority(value: &str) -> Option<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let candidate = if trimmed.contains("://") {
+        trimmed.to_string()
+    } else {
+        format!("https://{trimmed}")
+    };
+    let url = reqwest::Url::parse(&candidate).ok()?;
+    if url.scheme() != "https"
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || (url.path() != "/" && !url.path().is_empty())
+        || url.query().is_some()
+        || url.fragment().is_some()
+    {
+        return None;
+    }
+    let host = url.host_str()?.trim_end_matches('.').to_ascii_lowercase();
+    let port = url.port_or_known_default()?;
+    Some(format!("{host}:{port}"))
+}
+
+fn airbyte_connection_matches_host(connection: &db::AppConnectionRow, authority: &str) -> bool {
+    if connection.provider != "airbyte" {
+        return false;
+    }
+    let stored_authority = connection
+        .metadata
+        .as_ref()
+        .and_then(|metadata| {
+            metadata
+                .get("baseAuthority")
+                .or_else(|| metadata.get("baseHost"))
+        })
+        .and_then(|value| value.as_str())
+        .and_then(normalize_airbyte_authority);
+    stored_authority.is_some() && stored_authority == normalize_airbyte_authority(authority)
+}
+
+fn airbyte_connection_matches_path(connection: &db::AppConnectionRow, request_path: &str) -> bool {
+    let base_path = connection
+        .metadata
+        .as_ref()
+        .and_then(|metadata| metadata.get("basePath"))
+        .and_then(|value| value.as_str())
+        .and_then(apps::normalize_airbyte_base_path);
+    let Some(base_path) = base_path else {
+        return false;
+    };
+    let request_path = request_path
+        .split(['?', '#'])
+        .next()
+        .unwrap_or(request_path);
+    request_path == base_path || request_path.starts_with(&format!("{base_path}/"))
+}
+
 /// Narrow app connections to those whose provider serves THIS request path,
 /// but only on shared, path-scoped hosts (e.g. `www.googleapis.com`, where
 /// Gmail, Calendar and Drive coexist by path prefix).
@@ -1617,7 +1710,7 @@ pub(crate) async fn resolve_from_cache(
 /// behavior in every case except the shared-host mismatch this fixes.
 fn narrow_connections_by_path<'a>(
     connections: &'a [db::AppConnectionRow],
-    hostname: &str,
+    authority: &str,
     request_path: Option<&str>,
 ) -> Cow<'a, [db::AppConnectionRow]> {
     // Narrowing can only change the outcome with at least two connections to
@@ -1628,12 +1721,23 @@ fn narrow_connections_by_path<'a>(
     let Some(path) = request_path else {
         return Cow::Borrowed(connections);
     };
-    if !apps::host_has_path_scoped_providers(hostname) {
+    let has_dynamic_airbyte = connections
+        .iter()
+        .any(|connection| connection.provider == "airbyte");
+    let hostname = crate::gateway::strip_port(authority);
+    if !has_dynamic_airbyte && !apps::host_has_path_scoped_providers(hostname) {
         return Cow::Borrowed(connections);
     }
     let narrowed: Vec<db::AppConnectionRow> = connections
         .iter()
-        .filter(|c| apps::provider_matches_host_and_path(&c.provider, hostname, path))
+        .filter(|connection| {
+            if connection.provider == "airbyte" {
+                airbyte_connection_matches_host(connection, authority)
+                    && airbyte_connection_matches_path(connection, path)
+            } else {
+                apps::provider_matches_host_and_path(&connection.provider, hostname, path)
+            }
+        })
         .cloned()
         .collect();
     if narrowed.is_empty() {
@@ -1641,6 +1745,23 @@ fn narrow_connections_by_path<'a>(
     } else {
         Cow::Owned(narrowed)
     }
+}
+
+/// Identify a metadata-backed provider for request-time policy enforcement.
+/// Static providers remain resolved by the app registry; this only covers apps
+/// whose destination authority is defined by each connection.
+pub(crate) fn dynamic_provider_for_request<'a>(
+    connections: &'a [db::AppConnectionRow],
+    authority: &str,
+    path: &str,
+) -> Option<&'a str> {
+    connections
+        .iter()
+        .find(|connection| {
+            airbyte_connection_matches_host(connection, authority)
+                && airbyte_connection_matches_path(connection, path)
+        })
+        .map(|connection| connection.provider.as_str())
 }
 
 /// True when `provider` serves this request's host+path. Winner metadata
@@ -1651,6 +1772,27 @@ fn narrow_connections_by_path<'a>(
 fn provider_serves_request(provider: &str, hostname: &str, request_path: Option<&str>) -> bool {
     request_path
         .map(|p| apps::provider_matches_host_and_path(provider, hostname, p))
+        .unwrap_or(false)
+}
+
+/// True when this exact connection serves the request. Static providers use
+/// the registry host/path rules; metadata-backed Airbyte connections also
+/// require their configured authority and Public API path to match.
+fn connection_serves_request(
+    connection: &db::AppConnectionRow,
+    provider: &str,
+    authority: &str,
+    request_path: Option<&str>,
+) -> bool {
+    request_path
+        .map(|path| {
+            if provider == "airbyte" {
+                airbyte_connection_matches_host(connection, authority)
+                    && airbyte_connection_matches_path(connection, path)
+            } else {
+                provider_serves_request(provider, crate::gateway::strip_port(authority), Some(path))
+            }
+        })
         .unwrap_or(false)
 }
 
@@ -2148,6 +2290,163 @@ mod tests {
 
     fn ids(conns: &[db::AppConnectionRow]) -> Vec<&str> {
         conns.iter().map(|c| c.id.as_str()).collect()
+    }
+
+    fn airbyte_conn(id: &str, authority: &str, path: &str) -> db::AppConnectionRow {
+        let mut connection = conn(id, "airbyte");
+        connection.metadata = Some(serde_json::json!({
+            "baseAuthority": authority,
+            "basePath": path,
+        }));
+        connection
+    }
+
+    #[test]
+    fn airbyte_host_match_is_exact_and_case_insensitive() {
+        let connection = airbyte_conn("airbyte", "AIRBYTE.example.com", "/api/public/v1");
+        assert!(airbyte_connection_matches_host(
+            &connection,
+            "airbyte.example.com:443"
+        ));
+        assert!(!airbyte_connection_matches_host(
+            &connection,
+            "evil.example.com"
+        ));
+        assert!(!airbyte_connection_matches_host(
+            &connection,
+            "clone.airbyte.example.com"
+        ));
+    }
+
+    #[test]
+    fn airbyte_host_match_isolates_nonstandard_ports() {
+        let connection = airbyte_conn("airbyte", "airbyte.example.com:8443", "/api/public/v1");
+        assert!(airbyte_connection_matches_host(
+            &connection,
+            "AIRBYTE.example.com:8443"
+        ));
+        assert!(!airbyte_connection_matches_host(
+            &connection,
+            "airbyte.example.com"
+        ));
+        assert!(!airbyte_connection_matches_host(
+            &connection,
+            "airbyte.example.com:443"
+        ));
+        assert!(!airbyte_connection_matches_host(
+            &connection,
+            "airbyte.example.com:9443"
+        ));
+    }
+
+    #[test]
+    fn airbyte_legacy_base_host_is_limited_to_https_default_port() {
+        let mut connection = conn("airbyte", "airbyte");
+        connection.metadata = Some(serde_json::json!({
+            "baseHost": "airbyte.example.com",
+            "basePath": "/api/public/v1",
+        }));
+        assert!(airbyte_connection_matches_host(
+            &connection,
+            "airbyte.example.com:443"
+        ));
+        assert!(!airbyte_connection_matches_host(
+            &connection,
+            "airbyte.example.com:8443"
+        ));
+    }
+
+    #[test]
+    fn airbyte_path_match_respects_segment_boundaries() {
+        let connection = airbyte_conn("airbyte", "airbyte.example.com", "/api/public/v1/");
+        assert!(airbyte_connection_matches_path(
+            &connection,
+            "/api/public/v1"
+        ));
+        assert!(airbyte_connection_matches_path(
+            &connection,
+            "/api/public/v1/workspaces"
+        ));
+        assert!(!airbyte_connection_matches_path(
+            &connection,
+            "/api/public/v10/workspaces"
+        ));
+    }
+
+    #[test]
+    fn airbyte_legacy_path_only_authorizes_public_api_path() {
+        let connection = airbyte_conn("airbyte", "airbyte.example.com", "/api/v1");
+        assert!(airbyte_connection_matches_path(
+            &connection,
+            "/api/public/v1/workspaces"
+        ));
+        assert!(!airbyte_connection_matches_path(
+            &connection,
+            "/api/v1/users"
+        ));
+    }
+
+    #[test]
+    fn airbyte_missing_metadata_never_matches() {
+        let connection = conn("airbyte", "airbyte");
+        assert!(!airbyte_connection_matches_host(
+            &connection,
+            "airbyte.example.com"
+        ));
+        assert!(!airbyte_connection_matches_path(
+            &connection,
+            "/api/public/v1"
+        ));
+    }
+
+    #[test]
+    fn dynamic_airbyte_provider_requires_exact_authority_and_path() {
+        let conns = vec![airbyte_conn(
+            "airbyte",
+            "airbyte.example.com:8443",
+            "/api/public/v1",
+        )];
+        assert_eq!(
+            dynamic_provider_for_request(
+                &conns,
+                "airbyte.example.com:8443",
+                "/api/public/v1/workspaces",
+            ),
+            Some("airbyte")
+        );
+        assert_eq!(
+            dynamic_provider_for_request(
+                &conns,
+                "airbyte.example.com:443",
+                "/api/public/v1/workspaces",
+            ),
+            None
+        );
+        assert_eq!(
+            dynamic_provider_for_request(
+                &conns,
+                "airbyte.example.com:8443",
+                "/api/public/v1?limit=10",
+            ),
+            Some("airbyte")
+        );
+        assert_eq!(
+            dynamic_provider_for_request(
+                &conns,
+                "airbyte.example.com:8443",
+                "/api/public/v10/workspaces",
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn airbyte_client_credentials_refresh_eagerly_on_cache_miss() {
+        assert!(requires_eager_client_credentials_refresh(
+            "airbyte_client_credentials"
+        ));
+        assert!(!requires_eager_client_credentials_refresh("oauth"));
+        assert!(!requires_eager_client_credentials_refresh(""));
     }
 
     // ── serves-path metadata gating (#428) ──────────────────────────────

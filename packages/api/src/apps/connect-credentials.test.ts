@@ -1,5 +1,8 @@
 import { describe, expect, it } from "vitest";
-import { resolveConnectCredentials } from "./connect-credentials";
+import {
+  resolveConnectCredentials,
+  shouldPersistImportedClientCredentials,
+} from "./connect-credentials";
 import type { AppDefinition } from "./types";
 
 // Minimal typed app fixtures — the helper only reads connectionMethod /
@@ -42,6 +45,32 @@ const oauthApp: AppDefinition = {
     },
   ],
 };
+
+describe("shouldPersistImportedClientCredentials", () => {
+  const importMethod = {
+    type: "credentials_import" as const,
+    fields: [],
+    exchangeCredentials: async () => ({ credentials: {}, scopes: [] }),
+  };
+
+  it("keeps the existing provider-wide persistence default", () => {
+    expect(
+      shouldPersistImportedClientCredentials(importMethod, {
+        clientId: "id",
+        clientSecret: "secret",
+      }),
+    ).toBe(true);
+  });
+
+  it("allows per-connection credentials to opt out", () => {
+    expect(
+      shouldPersistImportedClientCredentials(
+        { ...importMethod, persistClientCredentialsAsAppConfig: false },
+        { clientId: "id", clientSecret: "secret" },
+      ),
+    ).toBe(false);
+  });
+});
 
 describe("resolveConnectCredentials", () => {
   it("builds api_key credentials with the primary field as access_token", async () => {
