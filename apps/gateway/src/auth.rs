@@ -1,7 +1,9 @@
 //! Gateway authentication for browser requests.
 //!
 //! Supports two modes controlled by the `AUTH_MODE` env var:
-//! - `local`: bypasses JWT validation, looks up the "local-admin" user directly.
+//! - `local`: no session mechanism at all (single-user dev, no login) — the
+//!   only accepted credential is an `Authorization: Bearer oc_...` API key,
+//!   checked by `validate_api_key` before mode-specific logic even runs.
 //! - `oauth` (default): validates a NextAuth session cookie JWT (HS256).
 
 use std::sync::OnceLock;
@@ -142,26 +144,17 @@ async fn validate_api_key(pool: &PgPool, headers: &HeaderMap) -> Option<AuthUser
 /// The caller resolves the project ID from the user's membership.
 async fn validate_request(pool: &PgPool, headers: &HeaderMap) -> Result<String, AuthError> {
     match auth_mode() {
-        "local" => validate_local(pool).await,
+        // Local mode has no cookie/session mechanism to fall back to (no
+        // login flow exists). A request reaching here already failed the API
+        // key check above, so it is unauthenticated — reject it rather than
+        // auto-trusting it as local-admin. This is the only credential path
+        // in local mode, so it must hold even when the gateway is bound to
+        // loopback: anything else on the same host could otherwise reach it.
+        "local" => Err(AuthError(
+            "missing API key (Authorization: Bearer oc_...)".to_string(),
+        )),
         _ => validate_oauth(pool, headers).await,
     }
-}
-
-// ── Local mode ───────────────────────────────────────────────────────────
-
-async fn validate_local(pool: &PgPool) -> Result<String, AuthError> {
-    let user = db::find_user_by_external_auth_id(pool, "local-admin")
-        .await
-        .map_err(|e| {
-            warn!(error = %e, "local auth: db error");
-            AuthError("internal error".to_string())
-        })?
-        .ok_or_else(|| {
-            warn!("local auth: local-admin user not found");
-            AuthError("user not found".to_string())
-        })?;
-
-    Ok(user.id)
 }
 
 // ── OAuth mode ───────────────────────────────────────────────────────────
@@ -258,5 +251,22 @@ mod tests {
     #[test]
     fn parse_cookie_empty() {
         assert_eq!(parse_cookie("", "authjs.session-token"), None);
+    }
+
+    /// Regression test for the loopback auth bypass (local gateway API did
+    /// not enforce ONECLI_API_KEY when bound to TCP loopback): a bare
+    /// request with no `Authorization` header must be rejected in `local`
+    /// mode instead of silently authenticating as local-admin.
+    #[tokio::test]
+    async fn validate_request_local_mode_rejects_bare_request() {
+        std::env::set_var("AUTH_MODE", "local");
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy("postgres://localhost/nonexistent")
+            .expect("lazy pool never fails to construct");
+        let headers = HeaderMap::new();
+
+        let result = validate_request(&pool, &headers).await;
+
+        assert!(result.is_err());
     }
 }

@@ -5,11 +5,10 @@
 //
 // Like the approvals and 1Password value pickers, this hits the gateway
 // directly (different base URL + auth than the typed JSON API), so it uses
-// getGatewayApiUrl() + getGatewayFetchOptions() — the edition-aware seam that
-// authenticates as the ACTING USER: the Cognito ID token + X-Project-Id in
-// cloud, session-cookie credentials in OSS. The gateway scopes the flush to
-// that authenticated principal's project (its AuthUser extractor), so there is
-// no need to look up — or borrow — an API key from the database.
+// getGatewayApiUrl() + getGatewayFetchOptions() — the seam that authenticates
+// as the ACTING USER via their own API key (see gateway-auth.ts). The gateway
+// scopes the flush to that authenticated principal's project (its AuthUser
+// extractor).
 import { getGatewayApiUrl } from "@/hooks/use-vault-status";
 import { getGatewayFetchOptions } from "@/lib/gateway-auth";
 
