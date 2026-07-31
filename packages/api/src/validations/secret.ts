@@ -198,6 +198,13 @@ const opDisplaySchema = z
   .object({ vault: z.string(), item: z.string(), field: z.string() })
   .optional();
 
+// Moved above the schemas that reference it: a 1Password-sourced Anthropic
+// secret's value is never seen by the server, so the auth mode can't be
+// detected from it the way an inline value's can — the caller has to say
+// which it is.
+export const anthropicAuthModes = ["api-key", "oauth"] as const;
+export type AnthropicAuthMode = (typeof anthropicAuthModes)[number];
+
 export const createSecretSchema = z
   .object({
     name: z.string().trim().min(1).max(255),
@@ -206,6 +213,8 @@ export const createSecretSchema = z
     value: z.string().max(10000).optional(),
     opRef: opRefSchema.optional(),
     opDisplay: opDisplaySchema,
+    // Only meaningful for a 1Password-sourced anthropic secret; see comment above.
+    authMode: z.enum(anthropicAuthModes).optional(),
     hostPattern: hostPatternSchema,
     pathPattern: z.string().max(1000).optional(),
     injectionConfig: injectionConfigSchema,
@@ -237,6 +246,7 @@ export const updateSecretSchema = z
     value: z.string().max(10000).optional(),
     opRef: opRefSchema.optional(),
     opDisplay: opDisplaySchema,
+    authMode: z.enum(anthropicAuthModes).optional(),
     hostPattern: hostPatternSchema.optional(),
     pathPattern: z.string().max(1000).nullable().optional(),
     injectionConfig: injectionConfigSchema,
@@ -267,9 +277,6 @@ export const updateSecretSchema = z
 export type UpdateSecretInput = z.infer<typeof updateSecretSchema>;
 
 export const ANTHROPIC_KEY_MIN_LENGTH = 40;
-
-export const anthropicAuthModes = ["api-key", "oauth"] as const;
-export type AnthropicAuthMode = (typeof anthropicAuthModes)[number];
 
 export interface AnthropicSecretMetadata {
   authMode: AnthropicAuthMode;

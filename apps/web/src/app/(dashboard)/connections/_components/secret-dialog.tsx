@@ -223,6 +223,12 @@ export const SecretDialog = ({
 
   const [type, setType] = useState<SecretType>("anthropic");
   const [openaiMode, setOpenaiMode] = useState<"api-key" | "codex">("api-key");
+  // 1Password never hands the server the resolved value, so an anthropic
+  // secret sourced from it can't have its auth mode detected the way an
+  // inline value's can (see AnthropicKeyBadge) — the user has to say which.
+  const [opAnthropicAuthMode, setOpAnthropicAuthMode] = useState<
+    "api-key" | "oauth"
+  >("api-key");
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [name, setName] = useState("");
   const [nameTouched, setNameTouched] = useState(false);
@@ -277,6 +283,7 @@ export const SecretDialog = ({
       setNameTouched(false);
       setAdvancedOpen("");
       setOpenaiMode("api-key");
+      setOpAnthropicAuthMode("api-key");
       setOpSelection(null);
       setPickerOpen(false);
       // Path-injection fields reset here; only the edit branches below repopulate
@@ -296,6 +303,11 @@ export const SecretDialog = ({
             opRef: secret.opRef,
             opDisplay: readOpDisplay(secret.metadata, secret.opRef),
           });
+          if (
+            secret.type === "anthropic" &&
+            secret.metadata?.authMode === "oauth"
+          )
+            setOpAnthropicAuthMode("oauth");
         }
         setName(secret.name);
         setValue("");
@@ -449,6 +461,9 @@ export const SecretDialog = ({
                 valueSource: "onepassword" as const,
                 opRef: opSelection.opRef,
                 opDisplay: opSelection.opDisplay,
+                ...(type === "anthropic" && {
+                  authMode: opAnthropicAuthMode,
+                }),
               }
             : value.trim()
               ? { valueSource: "inline" as const, value: value.trim() }
@@ -467,6 +482,9 @@ export const SecretDialog = ({
                 valueSource: "onepassword",
                 opRef: opSelection.opRef,
                 opDisplay: opSelection.opDisplay,
+                ...(type === "anthropic" && {
+                  authMode: opAnthropicAuthMode,
+                }),
                 hostPattern,
                 pathPattern: pathPattern || undefined,
                 injectionConfig: buildInjectionConfig() ?? null,
@@ -777,11 +795,43 @@ export const SecretDialog = ({
                 />
 
                 {opSelection ? (
-                  <OnePasswordSelectedField
-                    display={opSelection.opDisplay}
-                    onChange={() => setPickerOpen(true)}
-                    onClear={() => setOpSelection(null)}
-                  />
+                  <>
+                    <OnePasswordSelectedField
+                      display={opSelection.opDisplay}
+                      onChange={() => setPickerOpen(true)}
+                      onClear={() => setOpSelection(null)}
+                    />
+                    {type === "anthropic" && (
+                      <div
+                        className="mt-2 flex w-full items-center gap-1 rounded-lg border p-1"
+                        role="radiogroup"
+                        aria-label="Anthropic auth method"
+                      >
+                        {(
+                          [
+                            ["api-key", "API Key"],
+                            ["oauth", "OAuth Token"],
+                          ] as const
+                        ).map(([mode, label]) => (
+                          <button
+                            key={mode}
+                            type="button"
+                            role="radio"
+                            aria-checked={opAnthropicAuthMode === mode}
+                            className={cn(
+                              "flex-1 rounded-md px-3 py-1 text-sm font-medium transition-colors",
+                              opAnthropicAuthMode === mode
+                                ? "bg-brand/10 text-brand"
+                                : "text-muted-foreground hover:bg-brand/5 hover:text-brand/80",
+                            )}
+                            onClick={() => setOpAnthropicAuthMode(mode)}
+                          >
+                            {label}
+                          </button>
+                        ))}
+                      </div>
+                    )}
+                  </>
                 ) : isOAuthMode ? (
                   <>
                     {value ? (

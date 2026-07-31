@@ -114,13 +114,18 @@ const buildMetadata = (
   return Prisma.JsonNull;
 };
 
-const buildOnePasswordMetadata = (
+export const buildOnePasswordMetadata = (
   type: string,
   opDisplay: CreateSecretInput["opDisplay"],
+  authMode: CreateSecretInput["authMode"],
 ): Prisma.InputJsonValue | typeof Prisma.JsonNull => {
   const meta: Record<string, unknown> = {};
-  // LLM keys resolved from 1Password are always API-key mode (no value to inspect, no OAuth).
-  if (type === "anthropic" || type === "openai") meta.authMode = "api-key";
+  // The server never sees a 1Password-resolved value, so unlike an inline
+  // value's auth mode can't be detected from it — the caller says which it
+  // is. OpenAI has no such choice: a 1Password value there is always a raw
+  // API key (OAuth is a JSON blob uploaded directly, never 1Password-sourced).
+  if (type === "anthropic") meta.authMode = authMode ?? "api-key";
+  else if (type === "openai") meta.authMode = "api-key";
   if (opDisplay) meta.opDisplay = opDisplay;
   return Object.keys(meta).length > 0
     ? (meta as Prisma.InputJsonValue)
@@ -223,7 +228,11 @@ export const createSecret = async (
         hostPattern,
         pathPattern,
         injectionConfig,
-        metadata: buildOnePasswordMetadata(input.type, input.opDisplay),
+        metadata: buildOnePasswordMetadata(
+          input.type,
+          input.opDisplay,
+          input.authMode,
+        ),
         ...scopeCreate(scope),
       },
       select: {
@@ -324,7 +333,11 @@ export const updateSecret = async (
     data.opRef = input.opRef;
     if (secret.type === "anthropic") data.hostPattern = "api.anthropic.com";
     if (secret.type === "openai") data.hostPattern = "api.openai.com";
-    data.metadata = buildOnePasswordMetadata(secret.type, input.opDisplay);
+    data.metadata = buildOnePasswordMetadata(
+      secret.type,
+      input.opDisplay,
+      input.authMode,
+    );
   } else if (input.value !== undefined) {
     let value = input.value.trim();
     if (!value)
