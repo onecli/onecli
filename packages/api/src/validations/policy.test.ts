@@ -72,12 +72,16 @@ describe("sessionPolicySchema — granular per-resource scoping", () => {
     });
   });
 
-  it("accepts an empty list (empty = all resources)", () => {
-    // Empty/absent means "the whole connection" — the enforcement layer treats
-    // no items as no restriction. The schema still accepts it as a valid shape.
-    expect(sessionPolicySchema.parse({ repositories: [] })).toEqual({
-      repositories: [],
-    });
+  it("rejects an empty list — an unauthorable scope that used to mean the opposite", () => {
+    // "Reach nothing" is expressed by clearing the policy (null), never by an
+    // empty list, and an empty list was historically mis-read as "no scoping
+    // requested" — which for GitHub mints a token for EVERY repository. The
+    // gateway now denies all access for a stored empty list; refusing it here
+    // stops new ones from ever being written.
+    expect(sessionPolicySchema.safeParse({ repositories: [] }).success).toBe(
+      false,
+    );
+    expect(sessionPolicySchema.safeParse({ folders: [] }).success).toBe(false);
   });
 
   it("rejects a mixed shape (repos AND folders on one object)", () => {

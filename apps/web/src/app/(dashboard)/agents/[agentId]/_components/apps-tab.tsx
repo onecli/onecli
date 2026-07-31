@@ -42,7 +42,11 @@ export const AppsTab = ({ agentId, onManage }: AppsTabProps) => {
   }
   // Never render toggle rows over a failed load — a blind toggle would write
   // against invisible state (the project-access-dialog rule).
-  if (connectionsQuery.isError || grantsQuery.isError) {
+  if (
+    connectionsQuery.isError ||
+    grantsQuery.isError ||
+    credentialsQuery.isError
+  ) {
     return (
       <div
         role="alert"
@@ -100,6 +104,9 @@ export const AppsTab = ({ agentId, onManage }: AppsTabProps) => {
             grant={grant}
             orgGranted={orgGranted}
             credentialStatus={credential?.status}
+            credentialOrgBlocked={
+              credential?.kind === "connection" && credential.orgBlocked
+            }
             hasCatalog={catalogProviders.has(connection.provider)}
             onManage={() => onManage(connection)}
           />

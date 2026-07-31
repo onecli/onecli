@@ -8,6 +8,9 @@ export interface Agent {
    * editable from the console since step 10 — policy rules decide access. */
   secretMode: string;
   createdAt: string;
+  /** Newest gateway request inside the list's bounded lookback window; null =
+   * none in-window (never used OR quiet — `agentLastSeen` tells them apart). */
+  lastSeenAt: string | null;
 }
 
 export interface CreatedAgent {
@@ -15,6 +18,17 @@ export interface CreatedAgent {
   name: string;
   identifier: string;
   createdAt: string;
+}
+
+export interface AgentDetail {
+  id: string;
+  name: string;
+  identifier: string;
+  isDefault: boolean;
+  createdAt: string;
+  /** Newest gateway request inside the server's bounded lookback window — the
+   * Install page's verify signal. Null when the agent has none in-window. */
+  recentRequestAt: string | null;
 }
 
 export interface DropboxFolder {
@@ -397,6 +411,10 @@ export interface LastPublish {
 // Hand-mirrored from packages/api/src/services/grants-service.ts and
 // grants-summary-service.ts.
 
+/** A grant's session policy ("Resources"): which repositories/folders the
+ * connection's injected credential may reach. One strict axis per provider. */
+export type GrantResources = { repositories: string[] } | { folders: string[] };
+
 export interface AgentGrantConnection {
   connectionId: string;
   provider: string;
@@ -405,6 +423,8 @@ export interface AgentGrantConnection {
   access: "full" | "custom";
   allow: string[];
   ask: string[];
+  /** Null = unrestricted. */
+  resources: GrantResources | null;
 }
 
 export interface AgentGrantSecret {
@@ -432,9 +452,16 @@ export interface ConnectionGrants {
   }[];
 }
 
+/** `resources` is tri-state: ABSENT = preserve what the stack carries, NULL =
+ * clear, OBJECT = set (server-validated per provider + edition). */
 export type ConnectionGrantInput =
-  | { access: "full" }
-  | { access: "custom"; allow: string[]; ask: string[] };
+  | { access: "full"; resources?: GrantResources | null }
+  | {
+      access: "custom";
+      allow: string[];
+      ask: string[];
+      resources?: GrantResources | null;
+    };
 
 export type GrantsSummaryEntry =
   | {

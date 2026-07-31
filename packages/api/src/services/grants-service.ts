@@ -1,8 +1,16 @@
 import { randomUUID } from "node:crypto";
 import { db, Prisma } from "@onecli/db";
 import { ServiceError } from "./errors";
-import { getRuleActionGate } from "../providers";
+import { getPolicyValidator, getRuleActionGate } from "../providers";
 import { assertToolIdsValid } from "../apps/app-permissions/validate";
+import {
+  isSessionPolicy,
+  type SessionPolicyInput,
+} from "../validations/policy";
+import { entriesOutside } from "../lib/resource-axis";
+import { loadInjectionRules } from "./policy-simulate/load-rules";
+import { resolvePrincipalSet } from "./policy-simulate/principal-set";
+import { orgResourceBoundary } from "./policy-reflect/org-resource-boundary";
 import {
   ensureDefault,
   gatedActions,
@@ -68,6 +76,10 @@ export interface AgentGrantConnection {
   access: "full" | "custom";
   allow: string[];
   ask: string[];
+  /** The grant's session policy ("Resources" — repositories/folders the
+   * injected credential may reach), read off the stack's allow rows; null =
+   * unrestricted. */
+  resources: SessionPolicyInput | null;
 }
 
 export interface AgentGrantSecret {
@@ -131,10 +143,92 @@ const requireAgent = async (scope: GrantScope, agentId: string) => {
 const requireConnection = async (scope: GrantScope, connectionId: string) => {
   const connection = await db.appConnection.findFirst({
     where: { id: connectionId, ...poolWhere(scope) },
-    select: { id: true, provider: true, label: true, scope: true },
+    select: {
+      id: true,
+      provider: true,
+      label: true,
+      scope: true,
+      // The policy validator deep-checks a resources set against the
+      // connection (e.g. repos exist on the GitHub installation).
+      metadata: true,
+    },
   });
   if (!connection) throw new ServiceError("NOT_FOUND", "Connection not found.");
   return connection;
+};
+
+/** The stack's session policy in the wire shape: object conditions only (grant
+ * rows never carry behavioral arrays by construction, but a hand-planted one
+ * must not leak into `AgentGrantConnection.resources`). */
+const grantResources = (rows: PolicyRuleRow[]): SessionPolicyInput | null => {
+  const conditions = stackConditions(rows);
+  return isSessionPolicy(conditions) ? conditions : null;
+};
+
+/**
+ * Refuse a resource selection that reaches outside the organization's boundary
+ * for this (agent, connection). The project narrows within what the org allows;
+ * picking beyond it would compose to a smaller scope than asked for — or to
+ * nothing — so say so at write time instead of letting it fail silently later.
+ *
+ * The runtime composition in the gateway remains the enforcement truth: an org
+ * rule can change after a grant is written, and the stack must keep working
+ * (narrowed) rather than needing a rewrite.
+ */
+const assertWithinOrgBoundary = async (
+  scope: GrantScope,
+  agentId: string,
+  connectionId: string,
+  resources: SessionPolicyInput,
+): Promise<void> => {
+  const orgBase = {
+    scope: "organization" as const,
+    organizationId: scope.organizationId,
+  };
+  const [orgRows, principals] = await Promise.all([
+    loadInjectionRules(orgBase, "published"),
+    resolvePrincipalSet(scope.projectId, scope.organizationId),
+  ]);
+  const boundary = orgResourceBoundary(
+    orgRows,
+    agentId,
+    principals,
+    connectionId,
+  );
+  if (!boundary) return;
+  const outside = entriesOutside(resources, boundary);
+  if (outside.length > 0) {
+    throw new ServiceError(
+      "UNPROCESSABLE",
+      `Outside the access your organization allows for this connection: ${outside.join(", ")}`,
+    );
+  }
+};
+
+/** Server-side mirror of the picker's empty≡all law, plus byte-stable storage.
+ *
+ * Not a contradiction of `sessionPolicySchema`, which now REJECTS an empty list
+ * (validations/policy.ts): the wire can no longer carry one, so this arm exists
+ * for direct service callers (the converter, tests) and turns their empty
+ * selection into "unrestricted" BEFORE it could ever be stored as the deny-all
+ * sentinel the gateway would enforce.
+ *
+ * an all-empty selection clears to null (a non-null empty list is ambiguous at
+ * the gateway), and list values sort — `conditionsEqual`/`stackEquals` sort
+ * keys but never array elements, so an unsorted same-set re-pick would defeat
+ * write idempotence. */
+const normalizeResources = (
+  resources: SessionPolicyInput | null,
+): SessionPolicyInput | null => {
+  if (resources === null) return null;
+  if ("repositories" in resources) {
+    return resources.repositories.length === 0
+      ? null
+      : { repositories: [...resources.repositories].sort() };
+  }
+  return resources.folders.length === 0
+    ? null
+    : { folders: [...resources.folders].sort() };
 };
 
 const requireSecret = async (scope: GrantScope, secretId: string) => {
@@ -295,13 +389,17 @@ export const getAgentGrants = async (
     // Constant since step 7 — the union's "all" arm stays for wire compat and
     // narrows away with the column in step 8.
     mode: "grants",
-    connections: connections.map((c) => ({
-      connectionId: c.id,
-      provider: c.provider,
-      label: c.label,
-      scope: c.scope === "organization" ? "organization" : "project",
-      ...stackToGrant(byConnection.get(c.id) ?? []),
-    })),
+    connections: connections.map((c) => {
+      const stack = byConnection.get(c.id) ?? [];
+      return {
+        connectionId: c.id,
+        provider: c.provider,
+        label: c.label,
+        scope: c.scope === "organization" ? "organization" : "project",
+        ...stackToGrant(stack),
+        resources: grantResources(stack),
+      };
+    }),
     secrets: secrets.map((s) => ({
       secretId: s.id,
       name: s.name,
@@ -360,15 +458,37 @@ export const setConnectionGrant = async (
 
   const nameBase = `Grant: ${agent.name} · ${connection.label ?? connection.provider}`;
   const existing = await readGrantRows(db, scope, { agentId, connectionId });
-  // A session policy on the existing stack (carried there by the step-5
-  // conversion — the dialog cannot author one) survives every re-save: the
-  // recompiled stack re-carries it instead of silently dropping the
-  // restriction.
+  // The resources tri-state (validations/grants.ts): ABSENT preserves whatever
+  // the existing stack carries — the step-5 conversion's carried policies and
+  // every tools-only dialog save — while NULL clears and an OBJECT sets. The
+  // preserve read sits deliberately outside the write transaction (the same
+  // window the step-5 carry always had): a tools-only save racing a concurrent
+  // resources save can lose the newer restriction — accepted.
+  let conditions: Prisma.JsonValue | null;
+  if (input.resources === undefined) {
+    conditions = stackConditions(existing);
+  } else {
+    const resources = normalizeResources(input.resources);
+    if (resources !== null) {
+      // An explicit SET runs the edition's validator: EE deep-checks the shape
+      // against the provider and team-gates the entitlement; OSS rejects every
+      // session policy with its 422 lock. Clearing and preserving are never
+      // gated — removing a restriction must not require an entitlement.
+      await getPolicyValidator().validate(
+        scope.organizationId,
+        connection.provider,
+        connection.metadata as Record<string, unknown> | null,
+        resources,
+      );
+      await assertWithinOrgBoundary(scope, agentId, connectionId, resources);
+    }
+    conditions = resources;
+  }
   const desired = compileConnectionStack(
     nameBase,
     connection.provider,
     input,
-    stackConditions(existing),
+    conditions,
   );
   if (stackEquals(existing, desired)) {
     return {

@@ -64,12 +64,19 @@ const rateLimitWindowSchema = z.enum(["minute", "hour", "day"]);
 // source-agnostically), distinct from the behavioral RuleCondition[] (body
 // contains X) the block/allow engine evaluates. Structural bounds only; the
 // per-provider deep checks (repos exist on the installation, absolute Dropbox
-// paths) + the entitlement gate run in the EE policy validator. Empty/absent = all.
+// paths) + the entitlement gate run in the EE policy validator. Absent = all.
+//
+// An EMPTY list is refused: it reads as "reach nothing", which is a scope no
+// UI can author (clearing a restriction sends `null`) and which the credential
+// paths historically mis-read as "no scoping requested" — for GitHub that
+// silently mints a token for EVERY repository. The gateway now treats a stored
+// empty list as deny-all; this stops new ones from being written at all.
+const resourceList = (max: number, itemMax: number) =>
+  z.array(z.string().min(1).max(itemMax)).min(1).max(max);
+
 export const sessionPolicySchema = z.union([
-  z
-    .object({ repositories: z.array(z.string().min(1).max(400)).max(1000) })
-    .strict(),
-  z.object({ folders: z.array(z.string().min(1).max(1024)).max(100) }).strict(),
+  z.object({ repositories: resourceList(1000, 400) }).strict(),
+  z.object({ folders: resourceList(100, 1024) }).strict(),
 ]);
 export type SessionPolicyInput = z.infer<typeof sessionPolicySchema>;
 

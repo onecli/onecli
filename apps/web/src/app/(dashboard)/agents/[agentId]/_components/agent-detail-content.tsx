@@ -138,14 +138,21 @@ export const AgentDetailContent = ({ agentId }: { agentId: string }) => {
   // Org-granted (no project grant, injected by an ORG rule) → read-only view.
   // A plain unattached connection stays editable: Manage-before-attach saves a
   // customized grant in one step.
+  const manageCredential = manageConnection
+    ? credentialsQuery.data?.connections.find(
+        (e) => e.id === manageConnection.id,
+      )
+    : undefined;
   const manageOrgGranted =
     manageConnection !== null &&
     manageGrant === undefined &&
-    (credentialsQuery.data?.connections
-      .find((e) => e.id === manageConnection.id)
-      ?.provenance.some((p) => p.scope === "organization") ??
+    (manageCredential?.provenance.some((p) => p.scope === "organization") ??
       false);
-  const manageReadOnly = manageOrgGranted;
+  // Under an org-wide block there is nothing a project admin can usefully
+  // change — every tool is already at the organization's floor.
+  const manageOrgBlocked =
+    manageCredential?.kind === "connection" && manageCredential.orgBlocked;
+  const manageReadOnly = manageOrgGranted || manageOrgBlocked;
 
   const countBadge = (count: number) =>
     count > 0 && (

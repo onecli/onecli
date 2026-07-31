@@ -106,6 +106,70 @@ const AUTH_CHECK_BODY_LIMIT: usize = 8192;
 /// OAuth refresh bodies are tiny; this only guards against pathological inputs.
 const MAX_DEFAULT_INTERCEPT_BODY: usize = 64 * 1024;
 
+/// Mint any deferred credentials and fold their rules into the request's
+/// injection set. Called once the request is allowed — see
+/// [`crate::connect::PendingInjection`].
+///
+/// The merge is re-run rather than appended to: `merge_injection_rules` encodes
+/// which rule wins when a secret and an app both cover a host, and appending
+/// would silently hand that contest to the app.
+///
+/// A credential that cannot be resolved BLOCKS. The decision was made on the
+/// premise that one would be injected, so forwarding the request bare would
+/// send it upstream with less authority than the policy assumed — and read to
+/// the agent as an inexplicable upstream 401.
+///
+/// KNOWN GAP: this runs before the manual-approval wait, and before the
+/// `pre_forward` refusals (claim, budget, quota, the Dropbox guard) — those
+/// need `injection_count`, so the ordering is forced. A request denied at any
+/// of those points has therefore already minted. Closing it would mean moving
+/// header injection past the approval hold, which changes what `pre_forward`
+/// inspects for every request — more risk than the case is worth. Requests
+/// blocked by POLICY, the ones that matter, never reach here.
+pub(super) async fn materialize_injections<'a>(
+    rules: &'a ResolvedRules,
+    engine: &crate::connect::PolicyEngine,
+    cache: &dyn CacheStore,
+    method: &str,
+    path: &str,
+) -> std::result::Result<Cow<'a, [inject::InjectionRule]>, Response<hooks::ForwardResponseBody>> {
+    // Nothing deferred (every request that isn't resource-scoped) borrows the
+    // rules as they are — this sits on the hot path, so it must not allocate.
+    if rules.pending_injections.is_empty() {
+        return Ok(Cow::Borrowed(&rules.injection_rules));
+    }
+    let mut app_rules = Vec::new();
+    for pending in &rules.pending_injections {
+        match engine.materialize_pending(pending, cache).await {
+            Some(minted) => app_rules.extend(minted),
+            None => {
+                warn!(
+                    connection_id = %pending.conn.id,
+                    provider = %pending.conn.provider,
+                    %method,
+                    %path,
+                    "could not resolve the connection's credential after the request was allowed"
+                );
+                return Err(response::json(
+                    StatusCode::BAD_GATEWAY,
+                    serde_json::json!({
+                        "error": "credential_unavailable",
+                        "message": format!(
+                            "OneCLI could not obtain a credential for the {} connection, \
+                             so the request was not forwarded.",
+                            pending.conn.provider
+                        ),
+                    }),
+                ));
+            }
+        }
+    }
+    Ok(Cow::Owned(inject::merge_injection_rules(
+        app_rules,
+        rules.injection_rules.clone(),
+    )))
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn forward_request(
     req: Request<Incoming>,
@@ -121,7 +185,7 @@ pub(crate) async fn forward_request(
     cache: &dyn CacheStore,
     proxy_ctx: &ProxyContext,
     approval_store: &Arc<dyn ApprovalStore>,
-    pool: &sqlx::PgPool,
+    engine: &crate::connect::PolicyEngine,
 ) -> Result<Response<hooks::ForwardResponseBody>> {
     let start = std::time::Instant::now();
     let method = req.method().clone();
@@ -131,6 +195,15 @@ pub(crate) async fn forward_request(
         .map(|pq| pq.as_str().to_string())
         .unwrap_or_else(|| "/".to_string());
     let url = format!("{scheme}://{host}{path}");
+
+    // An empty resource scope reaches nothing, so refuse before anything can
+    // hand out or mint a credential — ahead of the token interception below,
+    // which would otherwise serve the connection's access token straight to the
+    // client and bypass every later check.
+    if let Some(resp) = hooks::refuse_empty_scope(rules, proxy_ctx, host, method.as_str(), &path) {
+        warn!(method = %method, url = %url, "empty resource scope — request denied");
+        return Ok(resp);
+    }
 
     // Token endpoint interception: when a client SDK tries to refresh its
     // own OAuth token through the proxy, serve the cached access token from
@@ -197,7 +270,7 @@ pub(crate) async fn forward_request(
         }
     }
 
-    let has_injections = !rules.injection_rules.is_empty();
+    let has_injections = rules.injects();
 
     // Step-7 app-availability pre-check (DB-free — the set was resolved at
     // connect). Governs ONLY identifiable app providers, so raw/unknown hosts and
@@ -329,11 +402,20 @@ pub(crate) async fn forward_request(
 
     hooks::prepare_request(rules, host, &path, &mut headers);
 
+    // The request is allowed: mint any deferred credential now. Everything
+    // above could have refused it, and a refused request must never cause a
+    // live credential to be created upstream.
+    let injection_rules =
+        match materialize_injections(rules, engine, cache, method.as_str(), &path).await {
+            Ok(rules) => rules,
+            Err(resp) => return Ok(resp),
+        };
+
     // Apply injection rules — upstream_path may gain query-param secrets;
     // the original `path`/`url` stays clean for logging and approval metadata.
     let mut upstream_path = path.clone();
     let injection_count =
-        inject::apply_injections(&mut headers, &mut upstream_path, &rules.injection_rules);
+        inject::apply_injections(&mut headers, &mut upstream_path, &injection_rules);
     let upstream_url = format!("{scheme}://{host}{upstream_path}");
 
     if let Some(resp) = hooks::pre_forward(
@@ -341,7 +423,7 @@ pub(crate) async fn forward_request(
         proxy_ctx,
         host,
         cache,
-        pool,
+        &engine.pool,
         injection_count,
         method.as_str(),
         &path,
@@ -498,7 +580,7 @@ pub(crate) async fn forward_request(
                 .unwrap_or_default();
 
             let log_id = uuid::Uuid::new_v4().to_string();
-            guard.set_log_context(log_id.clone(), pool.clone());
+            guard.set_log_context(log_id.clone(), engine.pool.clone());
             emit_approval_telemetry(
                 proxy_ctx,
                 host,

@@ -122,7 +122,7 @@ pub(super) async fn mitm(
                                     hostname, // policy_host: pre-rewrite host the rules match
                                     &rules,
                                     &*cache,
-                                    &engine.pool,
+                                    &engine,
                                     &ctx,
                                     &ws_tls,
                                 )
@@ -151,7 +151,7 @@ pub(super) async fn mitm(
                                     &*cache,
                                     &ctx,
                                     &approvals,
-                                    &engine.pool,
+                                    &engine,
                                 )
                                 .await
                                 {
@@ -214,6 +214,11 @@ pub(crate) struct InterceptToken {
 #[derive(Debug)]
 pub(crate) struct ResolvedRules {
     pub injection_rules: Vec<InjectionRule>,
+    /// Connections whose credential is minted only after the request is
+    /// allowed (`connect::PendingInjection`). Their rules are NOT yet in
+    /// `injection_rules`, so use [`Self::injects`] — never
+    /// `injection_rules.is_empty()` — to ask whether a credential is in play.
+    pub pending_injections: Vec<crate::connect::PendingInjection>,
     pub access_restricted: bool,
     /// Ready-to-use interception data when the resolved connection has a
     /// cached token that should be served instead of forwarding.
@@ -256,6 +261,18 @@ pub(crate) struct ResolvedRules {
     /// the per-request availability pre-check. Unrestricted (all available) in
     /// OSS, when the org is "open", or when enforcement is off.
     pub available_apps: crate::db::AvailableApps,
+}
+
+impl ResolvedRules {
+    /// Whether a credential will be injected into this request — including one
+    /// still waiting to be minted.
+    ///
+    /// This is the enforce-deny carve's input: answering "no" makes the traffic
+    /// unmanaged and exempts it from deny-defaults, so a deferred credential
+    /// that read as "none" would quietly let blocked requests through.
+    pub fn injects(&self) -> bool {
+        !self.injection_rules.is_empty() || !self.pending_injections.is_empty()
+    }
 }
 
 /// Result of per-request rule resolution including app connection disambiguation.
@@ -317,6 +334,7 @@ async fn resolve_rules(
 
     let secret_rules = resp.injection_rules; // from secrets (path-scoped)
     let mut app_rules: Vec<InjectionRule> = Vec::new();
+    let mut pending_injections: Vec<crate::connect::PendingInjection> = Vec::new();
     let mut token_expires_at: Option<i64> = None;
     let mut rewrite_host: Option<String> = None;
     let mut connection_label: Option<String> = None;
@@ -352,6 +370,7 @@ async fn resolve_rules(
         {
             Ok(AppConnectionResult::Rules {
                 rules,
+                provider: _,
                 token_expires_at: exp,
                 rewrite_host: rh,
                 connection_label: cl,
@@ -359,9 +378,10 @@ async fn resolve_rules(
                 body_transform: bt,
                 session_policy: sp,
                 connection_id: cid,
-                ..
+                pending,
             }) => {
                 app_rules = rules;
+                pending_injections = pending;
                 token_expires_at = exp;
                 rewrite_host = rh;
                 connection_label = cl;
@@ -440,14 +460,18 @@ async fn resolve_rules(
 
     let mut injection_rules = crate::inject::merge_injection_rules(app_rules, secret_rules);
 
-    // Vault fallback — only when neither secrets nor apps yielded any rules.
-    if injection_rules.is_empty() && !vault_rules.is_empty() {
+    // Vault fallback — only when neither secrets nor apps yielded any rules. A
+    // connection awaiting its credential counts as "apps yielded rules": it
+    // will inject once allowed, and adopting a vault credential alongside it
+    // would apply two credentials to the same host.
+    if injection_rules.is_empty() && pending_injections.is_empty() && !vault_rules.is_empty() {
         injection_rules = vault_rules.to_vec();
     }
 
     Ok(ResolveResult::Resolved {
         rules: Box::new(ResolvedRules {
             injection_rules,
+            pending_injections,
             policy_rules_v2: resp.policy_rules_v2,
             available_apps: resp.available_apps,
             access_restricted: resp.access_restricted,

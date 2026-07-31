@@ -989,6 +989,8 @@ async fn handle_http_proxy(
     // `resolved_session_policy`; unlike `connection_label` below, it MUST be
     // threaded (policy decisions bind to it).
     let mut resolved_connection_id: Option<String> = None;
+    // Connections whose credential is minted only after the request is allowed.
+    let mut pending_injections: Vec<crate::connect::PendingInjection> = Vec::new();
     if !resolved.app_connections.is_empty() {
         let oid = resolved.organization_id.as_deref().unwrap_or("");
         let pid = resolved.project_id.as_deref().unwrap_or("");
@@ -1015,9 +1017,11 @@ async fn handle_http_proxy(
                 body_transform,
                 session_policy,
                 connection_id: winning_connection_id,
+                pending,
                 ..
             }) => {
                 app_rules = rules;
+                pending_injections = pending;
                 resolved_finalizer = finalizer;
                 resolved_body_transform = body_transform;
                 resolved_session_policy = session_policy;
@@ -1054,8 +1058,10 @@ async fn handle_http_proxy(
         resolved.injection_rules = inject::merge_injection_rules(app_rules, secret_rules);
     }
 
-    // Vault fallback
-    if resolved.injection_rules.is_empty() {
+    // Vault fallback — skipped when a connection is awaiting its credential:
+    // it will inject once allowed, and a vault credential adopted here would
+    // land on the same host alongside it.
+    if resolved.injection_rules.is_empty() && pending_injections.is_empty() {
         if let Some(ref aid) = resolved.project_id {
             if let Some(cred) = state.vault_service.request_credential(aid, &hostname).await {
                 let vault_rules = inject::vault_credential_to_rules(&hostname, &cred);
@@ -1094,6 +1100,7 @@ async fn handle_http_proxy(
 
     let rules = mitm::ResolvedRules {
         injection_rules: resolved.injection_rules,
+        pending_injections,
         policy_rules_v2: resolved.policy_rules_v2,
         available_apps: resolved.available_apps,
         access_restricted: resolved.access_restricted,
@@ -1127,7 +1134,7 @@ async fn handle_http_proxy(
             &*state.cache,
             &proxy_ctx,
             &state.approval_store,
-            &state.policy_engine.pool,
+            &state.policy_engine,
         )
         .await
     }

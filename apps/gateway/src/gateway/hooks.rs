@@ -64,6 +64,18 @@ pub(crate) fn needs_request_body(
     false
 }
 
+/// Refuse a request whose resource scope allows nothing, before any credential
+/// is materialized or served. OSS stores no resource scopes → always allowed.
+pub(crate) fn refuse_empty_scope(
+    _rules: &ResolvedRules,
+    _proxy_ctx: &ProxyContext,
+    _host: &str,
+    _method: &str,
+    _path: &str,
+) -> Option<Response<ForwardResponseBody>> {
+    None
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn pre_forward(
     _rules: &ResolvedRules,

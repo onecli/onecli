@@ -7,6 +7,7 @@ import {
   createAgent,
   agentExistsByIdentifier,
   getDefaultAgent,
+  getAgentDetail,
   setDefaultAgent,
   renameAgent,
   deleteAgent,
@@ -89,6 +90,18 @@ export const agentRoutes = () => {
     if (!agent) {
       return c.json({ error: "No default agent found" }, 404);
     }
+    return c.json(agent);
+  });
+
+  // GET /agents/:agentId — registered after /default so the literal path wins.
+  app.get("/:agentId", async (c, next) => {
+    const agentId = c.req.param("agentId");
+    // `/granular-access` is a step-10 tombstone: fall through to the 410 shim
+    // (`removedAgentEquipmentRoutes`, mounted after this router) instead of
+    // answering 404 for a path that must keep saying what replaced it.
+    if (agentId === "granular-access") return next();
+    const auth = c.get("auth");
+    const agent = await getAgentDetail(requireProjectId(auth), agentId);
     return c.json(agent);
   });
 

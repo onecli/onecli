@@ -86,6 +86,10 @@ export type EffectiveCredentialEntry =
       label: string | null;
       provider: string;
       status: CredentialAccessStatus;
+      /** The ORGANIZATION blocks every tool of this connection for this agent.
+       * Distinct from `status: "blocked"`, which doesn't say who blocked: a
+       * project can lift its own block, but not the organization's. */
+      orgBlocked: boolean;
       provenance: CredentialProvenance[];
     };
 
@@ -157,15 +161,38 @@ interface EngineCtx {
 }
 
 /** A connection's effective status = its provider's per-tool decision rollup
- * (the shared `rollupToolStatus`, so it matches the connection→agents dialog). */
+ * (the shared `rollupToolStatus`, so it matches the connection→agents dialog),
+ * plus whether the ORGANIZATION is what blocks it.
+ *
+ * The connection id is threaded as the winning connection so per-account rules
+ * bind exactly as the gateway would — without it, an org rule targeting THIS
+ * specific connection matches nothing here and the row reads "usable" while
+ * every request 403s.
+ *
+ * `orgBlocked` comes from the same engine run: `orgCeiling` is the org-alone
+ * verdict already computed per tool, so attributing the block costs nothing
+ * extra. It is what lets the UI say "Blocked by your organization" — and stop
+ * offering a toggle that could only grant more of nothing.
+ */
 const connectionAccessStatus = (
   provider: string,
+  connectionId: string,
   engine: EngineCtx,
-): CredentialAccessStatus => {
+): { status: CredentialAccessStatus; orgBlocked: boolean } => {
   const def = getAppPermissionDefinition(provider);
-  if (!def) return "unknown"; // custom app — no catalog to evaluate against
-  const { groups } = computeEffectiveGroups({ def, ...engine });
-  return rollupToolStatus(groups.flatMap((g) => g.tools.map((t) => t.verdict)));
+  // Custom app — no catalog to evaluate against.
+  if (!def) return { status: "unknown", orgBlocked: false };
+  const { groups } = computeEffectiveGroups({
+    def,
+    ...engine,
+    winningConnectionId: connectionId,
+  });
+  const tools = groups.flatMap((g) => g.tools);
+  return {
+    status: rollupToolStatus(tools.map((t) => t.verdict)),
+    orgBlocked:
+      tools.length > 0 && tools.every((t) => t.orgCeiling === "block"),
+  };
 };
 
 /** A secret's effective status = the decision on a REPRESENTATIVE request to its
@@ -464,7 +491,7 @@ export const effectiveCredentials = async (
     id: c.id,
     label: c.label,
     provider: c.provider,
-    status: connectionAccessStatus(c.provider, engine),
+    ...connectionAccessStatus(c.provider, c.id, engine),
     provenance: provenance.for(`connection:${c.id}`, ctx.viewerSeesOrgRules),
   }));
 

@@ -1,6 +1,7 @@
 import { randomBytes } from "crypto";
 import { db, Prisma } from "@onecli/db";
 import { ServiceError } from "./errors";
+import { LAST_SEEN_WINDOW_MS } from "../lib/agent-activity";
 import { IDENTIFIER_REGEX } from "../validations/agent";
 
 export type SecretMode = "all" | "selective";
@@ -9,23 +10,42 @@ export const generateAccessToken = () =>
   `aoc_${randomBytes(32).toString("hex")}`;
 
 export const listAgents = async (projectId: string) => {
-  const agents = await db.agent.findMany({
-    where: { projectId },
-    select: {
-      id: true,
-      name: true,
-      identifier: true,
-      accessToken: true,
-      isDefault: true,
-      secretMode: true,
-      createdAt: true,
-    },
-    orderBy: [{ isDefault: "desc" }, { createdAt: "desc" }],
-  });
+  const [agents, lastSeenRows] = await Promise.all([
+    db.agent.findMany({
+      where: { projectId },
+      select: {
+        id: true,
+        name: true,
+        identifier: true,
+        accessToken: true,
+        isDefault: true,
+        secretMode: true,
+        createdAt: true,
+      },
+      orderBy: [{ isDefault: "desc" }, { createdAt: "desc" }],
+    }),
+    // Newest gateway request per agent, bounded to the last-seen window (a
+    // range scan on the (project_id, created_at) index — never a walk of the
+    // project's whole log history). Null = no request in-window; the client
+    // tells "never used" from "quiet" via agentLastSeen.
+    db.requestLog.groupBy({
+      by: ["agentId"],
+      where: {
+        projectId,
+        createdAt: { gte: new Date(Date.now() - LAST_SEEN_WINDOW_MS) },
+      },
+      _max: { createdAt: true },
+    }),
+  ]);
+
+  const lastSeenByAgent = new Map(
+    lastSeenRows.map((r) => [r.agentId, r._max.createdAt]),
+  );
 
   return agents.map((a) => ({
     ...a,
     secretMode: a.secretMode as SecretMode,
+    lastSeenAt: lastSeenByAgent.get(a.id) ?? null,
   }));
 };
 
@@ -40,6 +60,38 @@ export const getDefaultAgent = async (projectId: string) => {
       createdAt: true,
     },
   });
+};
+
+/** Lookback for `recentRequestAt`: bounded so the RequestLog probe rides the
+ * (project_id, created_at) index — unbounded, a zero-request agent would walk
+ * the project's whole log history, and the Install page polls this read while
+ * waiting for the agent's first request. */
+export const RECENT_REQUEST_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
+
+export const getAgentDetail = async (projectId: string, agentId: string) => {
+  const agent = await db.agent.findFirst({
+    where: { id: agentId, projectId },
+    select: {
+      id: true,
+      name: true,
+      identifier: true,
+      isDefault: true,
+      createdAt: true,
+    },
+  });
+  if (!agent) throw new ServiceError("NOT_FOUND", "Agent not found");
+
+  const recent = await db.requestLog.findFirst({
+    where: {
+      projectId,
+      agentId,
+      createdAt: { gte: new Date(Date.now() - RECENT_REQUEST_WINDOW_MS) },
+    },
+    orderBy: { createdAt: "desc" },
+    select: { createdAt: true },
+  });
+
+  return { ...agent, recentRequestAt: recent?.createdAt ?? null };
 };
 
 export const agentExistsByIdentifier = async (

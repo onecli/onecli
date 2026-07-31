@@ -494,4 +494,244 @@ describe.skipIf(!PROOF_URL)("grant compiler over real PostgreSQL", () => {
     );
     expect(again.changed).toBe(false);
   });
+
+  it("resources tri-state: SET rides every allow row (draft + published), ABSENT preserves, NULL clears", async () => {
+    const SORTED = { repositories: ["owner/a", "owner/b"] };
+    // SET — deliberately unsorted input: the server normalizes to sorted.
+    await grants.setConnectionGrant(
+      SCOPE,
+      AGENT,
+      CONN_WORK,
+      {
+        access: "custom",
+        allow: ["create_draft"],
+        ask: ["get_message"],
+        resources: { repositories: ["owner/b", "owner/a"] },
+      },
+      null,
+    );
+    for (const status of ["draft", "published"] as const) {
+      const rows = await grantRows({ status });
+      const allowRows = rows.filter((r) => r.action === "allow");
+      expect(allowRows.length).toBeGreaterThan(1);
+      for (const row of allowRows) {
+        expect(JSON.parse(JSON.stringify(row.conditions))).toEqual(SORTED);
+      }
+    }
+
+    // The read path exposes it in the wire shape.
+    const read = await grants.getAgentGrants(SCOPE, AGENT);
+    expect(
+      read.connections.find((c) => c.connectionId === CONN_WORK)?.resources,
+    ).toEqual(SORTED);
+
+    // A same-set re-pick in a different order is the idempotent no-op.
+    const reordered = await grants.setConnectionGrant(
+      SCOPE,
+      AGENT,
+      CONN_WORK,
+      {
+        access: "custom",
+        allow: ["create_draft"],
+        ask: ["get_message"],
+        resources: { repositories: ["owner/b", "owner/a"] },
+      },
+      null,
+    );
+    expect(reordered.changed).toBe(false);
+
+    // ABSENT (a tools-only save) preserves the stored restriction.
+    await grants.setConnectionGrant(
+      SCOPE,
+      AGENT,
+      CONN_WORK,
+      { access: "custom", allow: ["create_draft"], ask: [] },
+      null,
+    );
+    const preserved = await grantRows({ status: "draft" });
+    for (const row of preserved.filter((r) => r.action === "allow")) {
+      expect(JSON.parse(JSON.stringify(row.conditions))).toEqual(SORTED);
+    }
+
+    // NULL clears — every row, and the read path agrees.
+    await grants.setConnectionGrant(
+      SCOPE,
+      AGENT,
+      CONN_WORK,
+      { access: "custom", allow: ["create_draft"], ask: [], resources: null },
+      null,
+    );
+    const cleared = await grantRows({ status: "draft" });
+    expect(cleared.every((r) => r.conditions === null)).toBe(true);
+    const readCleared = await grants.getAgentGrants(SCOPE, AGENT);
+    expect(
+      readCleared.connections.find((c) => c.connectionId === CONN_WORK)
+        ?.resources,
+    ).toBeNull();
+  });
+
+  it("the org boundary bounds what a project may select — and narrowing within it saves", async () => {
+    // A published ORG rule naming NO identity: the "applies to every agent"
+    // shape, which bounds every agent's reach for this connection.
+    const orgBase = { scope: "organization", organizationId: ORG };
+    const orgRule = async (repositories: string[]) => {
+      await db.policyRuleV2.deleteMany({ where: { organizationId: ORG } });
+      for (const status of ["draft", "published"] as const) {
+        await db.policyRuleV2.create({
+          data: {
+            ...orgBase,
+            status,
+            generation: status === "published" ? 1 : 0,
+            priority: 1,
+            isDefault: false,
+            enabled: true,
+            source: "custom",
+            logicalId: `${P}org-rule`,
+            name: "org boundary",
+            action: "allow",
+            requireApproval: false,
+            conditions: { repositories },
+            targets: {
+              create: [
+                {
+                  kind: "connection",
+                  appConnection: { connect: { id: CONN_WORK } },
+                },
+              ],
+            },
+          },
+        });
+      }
+    };
+    await orgRule(["org/allowed", "org/also-allowed"]);
+
+    // Outside the boundary → refused, naming the offending entry.
+    await expect(
+      grants.setConnectionGrant(
+        SCOPE,
+        AGENT,
+        CONN_WORK,
+        { access: "full", resources: { repositories: ["org/forbidden"] } },
+        null,
+      ),
+    ).rejects.toThrow(/org\/forbidden/);
+    expect(await grantRows({ status: "draft" })).toHaveLength(0);
+
+    // Within it → saved as written; the gateway composes the rest.
+    await grants.setConnectionGrant(
+      SCOPE,
+      AGENT,
+      CONN_WORK,
+      { access: "full", resources: { repositories: ["org/allowed"] } },
+      null,
+    );
+    const rows = await grantRows({ status: "draft" });
+    expect(JSON.parse(JSON.stringify(rows[0]?.conditions))).toEqual({
+      repositories: ["org/allowed"],
+    });
+
+    // An org edit that narrows below an existing grant leaves the stack alone —
+    // runtime composition, not a rewrite, is what enforces the new boundary.
+    await orgRule(["org/also-allowed"]);
+    const after = await grantRows({ status: "draft" });
+    expect(JSON.parse(JSON.stringify(after[0]?.conditions))).toEqual({
+      repositories: ["org/allowed"],
+    });
+    await db.policyRuleV2.deleteMany({ where: { organizationId: ORG } });
+  });
+
+  it("an empty resources selection normalizes to null (empty ≡ all)", async () => {
+    await grants.setConnectionGrant(
+      SCOPE,
+      AGENT,
+      CONN_WORK,
+      { access: "full", resources: { repositories: [] } },
+      null,
+    );
+    const rows = await grantRows({ status: "draft" });
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.conditions).toBeNull();
+  });
+
+  it("an explicit SET runs the edition validator; clear and preserve never do; a rejecting validator blocks the write", async () => {
+    const providers = await import("../providers");
+    const calls: {
+      organizationId: string;
+      provider: string;
+      policy: unknown;
+    }[] = [];
+    providers.initPolicyValidator({
+      validate: async (organizationId, provider, _metadata, policy) => {
+        calls.push({ organizationId, provider, policy });
+      },
+    });
+    try {
+      await grants.setConnectionGrant(
+        SCOPE,
+        AGENT,
+        CONN_WORK,
+        { access: "full", resources: { repositories: ["owner/a"] } },
+        null,
+      );
+      expect(calls).toHaveLength(1);
+      expect(calls[0]).toMatchObject({
+        organizationId: ORG,
+        provider: "gmail",
+        policy: { repositories: ["owner/a"] },
+      });
+      // A FULL grant's single allow row carries the set policy too — access
+      // stays "full" (conditions don't affect the shape detection).
+      const fullRows = await grantRows({ status: "draft" });
+      expect(fullRows).toHaveLength(1);
+      expect(JSON.parse(JSON.stringify(fullRows[0]?.conditions))).toEqual({
+        repositories: ["owner/a"],
+      });
+      const fullRead = await grants.getAgentGrants(SCOPE, AGENT);
+      expect(
+        fullRead.connections.find((c) => c.connectionId === CONN_WORK),
+      ).toMatchObject({
+        access: "full",
+        resources: { repositories: ["owner/a"] },
+      });
+
+      // Preserve (absent) and clear (null) are never gated.
+      await grants.setConnectionGrant(
+        SCOPE,
+        AGENT,
+        CONN_WORK,
+        { access: "full" },
+        null,
+      );
+      await grants.setConnectionGrant(
+        SCOPE,
+        AGENT,
+        CONN_WORK,
+        { access: "full", resources: null },
+        null,
+      );
+      expect(calls).toHaveLength(1);
+
+      // A rejecting validator (the OSS 422 lock / EE plan gate) blocks the
+      // write before anything lands.
+      providers.initPolicyValidator({
+        validate: async () => {
+          throw new Error("locked");
+        },
+      });
+      await expect(
+        grants.setConnectionGrant(
+          SCOPE,
+          AGENT,
+          CONN_WORK,
+          { access: "full", resources: { repositories: ["owner/a"] } },
+          null,
+        ),
+      ).rejects.toThrow("locked");
+      const rows = await grantRows({ status: "draft" });
+      expect(rows.every((r) => r.conditions === null)).toBe(true);
+    } finally {
+      // The permissive default — leave the registry as the suite found it.
+      providers.initPolicyValidator({ validate: async () => {} });
+    }
+  });
 });

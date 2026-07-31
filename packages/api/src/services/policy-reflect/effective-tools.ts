@@ -12,7 +12,14 @@ import type { ProvenanceRuleRef } from "../policy-simulate/sim-rule";
 import {
   loadInjectionRules,
   loadRulesForSimulation,
+  type SimRuleRow,
 } from "../policy-simulate/load-rules";
+import type { SessionPolicyInput } from "../../validations/policy";
+import { intersectPolicies } from "../../lib/resource-axis";
+import {
+  orgResourceBoundary,
+  projectResourceSelection,
+} from "./org-resource-boundary";
 import {
   resolvePrincipalSet,
   type PrincipalSet,
@@ -46,6 +53,10 @@ import { buildInjectionProbe } from "./injection";
 // REDACTION CONTRACT (this file is its canonical home): org rule
 // DETAILS are org-admin-only; a non-admin sees `redacted: true` provenance and
 // org rules are excluded from the `variesByIdentity` disclosure count.
+// `orgResources` deliberately discloses the org rule's repo/folder VALUES —
+// never the rule's name or identity — to project viewers: the same posture as
+// the rate-limit values above, and for GitHub the repo list is already visible
+// via the connection's own metadata.
 //
 // RESPONSE CONSTRAINT: tool endpoint mappings (hostPattern/pathPattern/method)
 // NEVER serialize — per-tool id + verdict + provenance only (the client-safe
@@ -109,6 +120,16 @@ export interface EffectiveAppPermissionsResult {
    * cannot show (they only match specific agents/groups) — scoped to the
    * viewer's visibility like `bodyConditionsSkipped`. */
   variesByIdentity: number;
+  /** The ORG's resource boundary ("Resources") for this (agent, connection) —
+   * how far the organization allows the credential to reach, which a project
+   * selection narrows within but can never exceed. Only computed for an
+   * explicit `agentId` + `connectionId`; null = the org does not restrict (or
+   * no explicit basis). Discloses values only — see the redaction contract. */
+  orgResources: SessionPolicyInput | null;
+  /** What the credential actually reaches: the org boundary composed with the
+   * project's selection. An empty list means the two do not overlap and the
+   * credential reaches nothing (the gateway refuses every request). */
+  effectiveResources: SessionPolicyInput | null;
   groups: EffectiveToolGroupResult[];
 }
 
@@ -713,6 +734,50 @@ export const effectiveAppPermissions = async (
       scope: ctx.scope,
     },
     variesByIdentity,
+    ...resourceScopes(
+      agent && connection
+        ? {
+            orgInjectRows,
+            projectInjectRows,
+            agentId: agent.id,
+            principals,
+            connectionId: connection.id,
+          }
+        : null,
+    ),
     groups,
+  };
+};
+
+/** The org boundary and the effective (composed) scope for the basis, or nulls
+ * when the reflection has no explicit (agent, connection) to reason about. */
+const resourceScopes = (
+  basis: {
+    orgInjectRows: SimRuleRow[];
+    projectInjectRows: SimRuleRow[];
+    agentId: string;
+    principals: PrincipalSet;
+    connectionId: string;
+  } | null,
+): {
+  orgResources: SessionPolicyInput | null;
+  effectiveResources: SessionPolicyInput | null;
+} => {
+  if (!basis) return { orgResources: null, effectiveResources: null };
+  const orgResources = orgResourceBoundary(
+    basis.orgInjectRows,
+    basis.agentId,
+    basis.principals,
+    basis.connectionId,
+  );
+  const projectResources = projectResourceSelection(
+    basis.projectInjectRows,
+    basis.agentId,
+    basis.principals,
+    basis.connectionId,
+  );
+  return {
+    orgResources,
+    effectiveResources: intersectPolicies(orgResources, projectResources),
   };
 };

@@ -7,6 +7,7 @@ import { KeyRound, Settings2 } from "lucide-react";
 import { Card } from "@onecli/ui/components/card";
 import { Badge } from "@onecli/ui/components/badge";
 import { Button } from "@onecli/ui/components/button";
+import { agentLastSeen } from "@onecli/api/lib/agent-activity";
 import type { AgentGrantsSummary } from "@/lib/api";
 import { agentPath } from "@/lib/navigation";
 // The read-only credential-access reflection, which reads the v2 policy
@@ -23,6 +24,7 @@ interface AgentCardProps {
     accessToken: string;
     isDefault: boolean;
     createdAt: Date;
+    lastSeenAt: Date | null;
   };
   /** The batched grants-summary entry for this agent (the access cluster);
    * undefined while the summary loads — the cluster simply isn't shown yet. */
@@ -32,6 +34,7 @@ interface AgentCardProps {
 export const AgentCard = ({ agent, summary }: AgentCardProps) => {
   const pathname = usePathname();
   const [secretsDialogOpen, setSecretsDialogOpen] = useState(false);
+  const lastSeen = agentLastSeen(agent.lastSeenAt, agent.createdAt);
 
   return (
     // The whole card is clickable through the STRETCHED name link (a real
@@ -60,6 +63,21 @@ export const AgentCard = ({ agent, summary }: AgentCardProps) => {
             <code className="bg-muted text-muted-foreground relative rounded px-1.5 py-0.5 font-mono">
               {agent.identifier}
             </code>
+            {/* One element, not a second status chip: the freshness dot lives
+                INSIDE the last-seen text and only for activity within the
+                hour — "seen" is always last-request-time, never presence. */}
+            <span
+              className="text-muted-foreground inline-flex items-center gap-1.5"
+              title={lastSeen.exactAt?.toLocaleString()}
+            >
+              {lastSeen.fresh && (
+                <span
+                  aria-hidden
+                  className="bg-brand size-1.5 shrink-0 rounded-full"
+                />
+              )}
+              {lastSeen.label}
+            </span>
             <span className="text-muted-foreground">
               Created {new Date(agent.createdAt).toLocaleDateString()}
             </span>

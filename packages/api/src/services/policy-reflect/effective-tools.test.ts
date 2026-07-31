@@ -1194,3 +1194,238 @@ describe("orgCeiling (the org level evaluated alone)", () => {
     }
   });
 });
+
+describe("orgResources (the org resource floor mirror)", () => {
+  const orgConnAllow = (id: string, conditions: unknown): SimRuleRow =>
+    simRow({
+      id,
+      scope: "organization",
+      projectId: null,
+      organizationId: "org-1",
+      logicalId: `l-${id}`,
+      name: `org ${id}`,
+      action: "allow",
+      conditions: conditions as SimRuleRow["conditions"],
+      identities: [identityRow({ id: `i-${id}`, agentId: "agent-1" })],
+      targets: [
+        targetRow({
+          id: `t-${id}`,
+          kind: "connection",
+          appConnectionId: "conn-1",
+        }),
+      ],
+    });
+
+  const reflect = (viewerSeesOrgRules = true) =>
+    effectiveAppPermissions(
+      { provider: "gmail", agentId: "agent-1", connectionId: "conn-1" },
+      { ...PROJECT_CTX, viewerSeesOrgRules },
+    );
+
+  it("exposes an identity-matched org session policy — values-only, viewer-independent", async () => {
+    armStubs({ orgRows: [orgConnAllow("o1", { repositories: ["org/a"] })] });
+    state.results.set("appConnection.findFirst", { id: "conn-1" });
+    expect((await reflect()).orgResources).toEqual({
+      repositories: ["org/a"],
+    });
+    // The documented disclosure: a non-admin sees the VALUES (never the rule).
+    expect((await reflect(false)).orgResources).toEqual({
+      repositories: ["org/a"],
+    });
+  });
+
+  it("a later condition-less allow row cannot clear the boundary", async () => {
+    // A plain org attach of the same connection restricts nothing, so it is not
+    // a boundary — letting it win by sorting later would make the effective
+    // scope depend on unrelated rule ordering. (Deliberately NOT the
+    // last-match-wins law a scope's own selection follows.)
+    armStubs({
+      orgRows: [
+        orgConnAllow("o1", { repositories: ["org/a"] }),
+        orgConnAllow("o2", null),
+      ],
+    });
+    state.results.set("appConnection.findFirst", { id: "conn-1" });
+    expect((await reflect()).orgResources).toEqual({
+      repositories: ["org/a"],
+    });
+  });
+
+  it("several org rules constraining one connection all apply", async () => {
+    armStubs({
+      orgRows: [
+        orgConnAllow("o1", { repositories: ["org/a", "org/b"] }),
+        orgConnAllow("o2", { repositories: ["org/b", "org/c"] }),
+      ],
+    });
+    state.results.set("appConnection.findFirst", { id: "conn-1" });
+    expect((await reflect()).orgResources).toEqual({
+      repositories: ["org/b"],
+    });
+  });
+
+  it("an explicit-identity org grant and an org-wide boundary compose (gateway parity)", async () => {
+    // The gateway folds the org GRANT's own policy and every matching boundary;
+    // this is the shape where a naive reflection would report more reach than
+    // the gateway actually allows.
+    const explicitGrant = orgConnAllow("o1", { repositories: ["org/x"] });
+    explicitGrant.identities = [identityRow({ id: "i-a", agentId: "agent-1" })];
+    armStubs({
+      orgRows: [
+        explicitGrant,
+        orgConnAllow("o2", { repositories: ["org/x", "org/y"] }),
+      ],
+    });
+    state.results.set("appConnection.findFirst", { id: "conn-1" });
+    const result = await reflect();
+    expect(result.orgResources).toEqual({ repositories: ["org/x"] });
+    expect(result.effectiveResources).toEqual({ repositories: ["org/x"] });
+  });
+
+  it("behavioral array conditions are not a policy (the is_object mirror)", async () => {
+    armStubs({
+      orgRows: [orgConnAllow("o1", [{ type: "body_contains", value: "x" }])],
+    });
+    state.results.set("appConnection.findFirst", { id: "conn-1" });
+    expect((await reflect()).orgResources).toBeNull();
+  });
+
+  it("another agent's org rule never floors this agent", async () => {
+    const foreign = orgConnAllow("o1", { repositories: ["org/a"] });
+    foreign.identities = [identityRow({ id: "i-x", agentId: "agent-2" })];
+    armStubs({ orgRows: [foreign] });
+    state.results.set("appConnection.findFirst", { id: "conn-1" });
+    expect((await reflect()).orgResources).toBeNull();
+  });
+
+  it("project rows never feed it, and it is null without an explicit connection", async () => {
+    const projectPolicy = simRow({
+      id: "p1r",
+      logicalId: "l-p1r",
+      name: "project grant",
+      action: "allow",
+      source: "grant",
+      conditions: { folders: ["/x"] } as SimRuleRow["conditions"],
+      identities: [identityRow({ id: "i-p", agentId: "agent-1" })],
+      targets: [
+        targetRow({
+          id: "t-p",
+          kind: "connection",
+          appConnectionId: "conn-1",
+        }),
+      ],
+    });
+    armStubs({ projectRows: [projectPolicy] });
+    state.results.set("appConnection.findFirst", { id: "conn-1" });
+    expect((await reflect()).orgResources).toBeNull();
+
+    armStubs({ orgRows: [orgConnAllow("o1", { repositories: ["org/a"] })] });
+    const noConnection = await effectiveAppPermissions(
+      { provider: "gmail", agentId: "agent-1" },
+      PROJECT_CTX,
+    );
+    expect(noConnection.orgResources).toBeNull();
+  });
+});
+
+describe("resource scopes (org boundary ∩ project selection)", () => {
+  const connTarget = (id: string) =>
+    targetRow({ id: `t-${id}`, kind: "connection", appConnectionId: "conn-1" });
+
+  const orgRule = (
+    id: string,
+    conditions: unknown,
+    identities: SimRuleRow["identities"] = [],
+  ): SimRuleRow =>
+    simRow({
+      id,
+      scope: "organization",
+      projectId: null,
+      organizationId: "org-1",
+      logicalId: `l-${id}`,
+      name: `org ${id}`,
+      action: "allow",
+      conditions: conditions as SimRuleRow["conditions"],
+      identities,
+      targets: [connTarget(id)],
+    });
+
+  const projectGrant = (conditions: unknown): SimRuleRow =>
+    simRow({
+      id: "p-grant",
+      logicalId: "l-p-grant",
+      name: "project grant",
+      source: "grant",
+      action: "allow",
+      conditions: conditions as SimRuleRow["conditions"],
+      identities: [identityRow({ id: "i-p", agentId: "agent-1" })],
+      targets: [connTarget("p")],
+    });
+
+  const reflect = async (opts: {
+    orgRows?: SimRuleRow[];
+    projectRows?: SimRuleRow[];
+  }) => {
+    armStubs(opts);
+    state.results.set("appConnection.findFirst", { id: "conn-1" });
+    return effectiveAppPermissions(
+      { provider: "gmail", agentId: "agent-1", connectionId: "conn-1" },
+      PROJECT_CTX,
+    );
+  };
+
+  it("an org rule naming NO identity bounds this agent — the reported case", () => {
+    // The authoring shape an admin reaches for ("applies to every agent").
+    // Under the injection law it bound nothing; as a BOUNDARY it must bind.
+    return reflect({
+      orgRows: [
+        orgRule("o1", { repositories: ["buckle/electron", "buckle/api"] }),
+      ],
+      projectRows: [projectGrant({ repositories: ["buckle/api"] })],
+    }).then((result) => {
+      expect(result.orgResources).toEqual({
+        repositories: ["buckle/electron", "buckle/api"],
+      });
+      expect(result.effectiveResources).toEqual({
+        repositories: ["buckle/api"],
+      });
+    });
+  });
+
+  it("a project pick outside the boundary composes to nothing", async () => {
+    const result = await reflect({
+      orgRows: [orgRule("o1", { repositories: ["org/a"] })],
+      projectRows: [projectGrant({ repositories: ["org/z"] })],
+    });
+    expect(result.effectiveResources).toEqual({ repositories: [] });
+  });
+
+  it("either scope alone stands on its own", async () => {
+    const orgOnly = await reflect({
+      orgRows: [orgRule("o1", { folders: ["/clients"] })],
+      projectRows: [projectGrant(null)],
+    });
+    expect(orgOnly.effectiveResources).toEqual({ folders: ["/clients"] });
+
+    const projectOnly = await reflect({
+      projectRows: [projectGrant({ folders: ["/clients/acme"] })],
+    });
+    expect(projectOnly.orgResources).toBeNull();
+    expect(projectOnly.effectiveResources).toEqual({
+      folders: ["/clients/acme"],
+    });
+  });
+
+  it("an org boundary for a group the agent is not in does not bind", async () => {
+    const result = await reflect({
+      orgRows: [
+        orgRule("o1", { repositories: ["org/a"] }, [
+          identityRow({ id: "i-g", groupId: "other-group" }),
+        ]),
+      ],
+      projectRows: [projectGrant({ repositories: ["proj/b"] })],
+    });
+    expect(result.orgResources).toBeNull();
+    expect(result.effectiveResources).toEqual({ repositories: ["proj/b"] });
+  });
+});

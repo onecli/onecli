@@ -523,9 +523,17 @@ pub(crate) struct InjectSelection {
     pub connections: std::collections::HashMap<String, Option<serde_json::Value>>,
     /// (provider, level) pairs from `kind=app` allow targets carrying a
     /// `connection_scope`: inject ALL the agent's connections of `provider` at
-    /// that org/project `level` (a provider+level selection, no per-connection
-    /// sessionPolicy — a whole-level grant is unscoped).
+    /// that org/project `level`. The grant itself carries no per-connection
+    /// sessionPolicy — but the connections it resolves to are still bounded by
+    /// `boundaries` below, applied where those ids are read from the database.
     pub app_scopes: Vec<(String, String)>,
+    /// Connection id → the ORG's resource boundary for it, when the
+    /// organization restricts how far that credential may reach. Kept separate
+    /// from `connections` because a boundary is not a grant: it applies to
+    /// whatever the agent ends up with, including a connection pulled in by an
+    /// `app_scopes` (provider-level) grant, which is resolved from the database
+    /// long after the rules are folded. Always empty in OSS.
+    pub boundaries: std::collections::HashMap<String, serde_json::Value>,
     /// Levels ("organization" | "project") from `kind=secret` allow targets
     /// carrying a `secret_scope`: inject ALL the agent's secrets at that level
     /// (a level selection, no per-secret guard).

@@ -96,7 +96,7 @@ pub(super) async fn handle_websocket(
     policy_host: &str,
     rules: &ResolvedRules,
     cache: &dyn CacheStore,
-    pool: &sqlx::PgPool,
+    engine: &crate::connect::PolicyEngine,
     proxy_ctx: &ProxyContext,
     // Resolved at CONNECT time against the operator's skip-verify configuration,
     // so this leg trusts exactly what the HTTP leg trusts.
@@ -109,7 +109,14 @@ pub(super) async fn handle_websocket(
         .map(|pq| pq.as_str().to_string())
         .unwrap_or_else(|| "/".to_string());
 
-    let has_injections = !rules.injection_rules.is_empty();
+    let has_injections = rules.injects();
+
+    // An empty resource scope reaches nothing — refuse the upgrade outright
+    // (the HTTP path does the same in forward.rs).
+    if let Some(resp) = hooks::refuse_empty_scope(rules, proxy_ctx, policy_host, "GET", &path) {
+        warn!(host = %policy_host, path = %path, "empty resource scope — WebSocket upgrade denied");
+        return Ok(resp);
+    }
 
     // Step-7 app-availability pre-check (DB-free — resolved at connect; see
     // forward.rs). Governs only identifiable app providers, so raw/LLM hosts are
@@ -193,7 +200,7 @@ pub(super) async fn handle_websocket(
         proxy_ctx,
         host,
         cache,
-        pool,
+        &engine.pool,
         0,
         req.method().as_str(),
         &path,
@@ -215,9 +222,21 @@ pub(super) async fn handle_websocket(
         }
     }
 
+    // The upgrade is allowed: mint any deferred credential now, exactly as the
+    // HTTP path does. Without this a deferred connection would upgrade with no
+    // credential at all and fail upstream — latent today (no token-scoped
+    // provider serves WebSocket), load-bearing the moment one does.
+    let injection_rules =
+        match crate::gateway::forward::materialize_injections(rules, engine, cache, "GET", &path)
+            .await
+        {
+            Ok(rules) => rules,
+            Err(resp) => return Ok(resp),
+        };
+
     let mut upstream_path = path.clone();
     let injection_count =
-        inject::apply_injections(&mut headers, &mut upstream_path, &rules.injection_rules);
+        inject::apply_injections(&mut headers, &mut upstream_path, &injection_rules);
 
     let hostname = super::strip_port(host);
     let port = host

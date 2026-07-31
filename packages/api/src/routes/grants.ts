@@ -9,7 +9,10 @@ import {
   AUDIT_SERVICES,
   AUDIT_SOURCE,
 } from "../services/audit-service";
-import { connectionGrantSchema } from "../validations/grants";
+import {
+  connectionGrantSchema,
+  type ConnectionGrantInput,
+} from "../validations/grants";
 import {
   getAgentGrants,
   getConnectionGrants,
@@ -53,6 +56,17 @@ const parseGrantBody = async (c: { req: { json: () => Promise<unknown> } }) => {
   return parsed.data;
 };
 
+/** Audit marker for the grant's resources tri-state — never the values
+ * themselves (repo/folder names stay out of the audit log). */
+const resourcesAudit = (
+  input: ConnectionGrantInput,
+): "preserved" | "cleared" | "set" =>
+  input.resources === undefined
+    ? "preserved"
+    : input.resources === null
+      ? "cleared"
+      : "set";
+
 export const agentGrantsRoutes = () => {
   const app = new Hono<ApiEnv>();
   app.use("*", authMiddleware);
@@ -87,6 +101,7 @@ export const agentGrantsRoutes = () => {
           agentId,
           connectionId,
           access: input.access,
+          resources: resourcesAudit(input),
           changed: r.changed,
           ruleIds: r.ruleIds,
         },
@@ -186,6 +201,7 @@ export const connectionGrantsRoutes = () => {
           agentId,
           connectionId,
           access: input.access,
+          resources: resourcesAudit(input),
           changed: r.changed,
           ruleIds: r.ruleIds,
         },

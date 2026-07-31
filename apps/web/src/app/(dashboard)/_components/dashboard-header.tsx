@@ -21,7 +21,6 @@ import {
   BreadcrumbSeparator,
 } from "@onecli/ui/components/breadcrumb";
 import { navItems } from "@/lib/nav-config";
-import { PROJECT_PATH_RE } from "@/lib/navigation";
 import { GetStartedButton } from "./get-started-button";
 import { ApprovalsBell } from "@/lib/components/approvals";
 
@@ -50,7 +49,6 @@ const DiscordIcon = ({ className }: { className?: string }) => (
 export const DashboardHeader = () => {
   const pathname = usePathname();
   const { resolvedTheme, setTheme } = useTheme();
-  const onProjectPage = PROJECT_PATH_RE.test(pathname);
 
   const navItem = navItems.find((item) => pathname.startsWith(item.url));
   const title = navItem?.title ?? "Dashboard";
@@ -172,15 +170,14 @@ export const DashboardHeader = () => {
           </TooltipTrigger>
           <TooltipContent>Discord</TooltipContent>
         </Tooltip>
-        {onProjectPage && (
-          <>
-            <Separator
-              orientation="vertical"
-              className="mx-1 hidden h-4! md:block"
-            />
-            <ApprovalsBell />
-          </>
-        )}
+        {/* This header ships only in flat single-project editions (the
+            org-scoped editions alias it away), where the bell is always
+            live — it self-guards for any other context. */}
+        <Separator
+          orientation="vertical"
+          className="mx-1 hidden h-4! md:block"
+        />
+        <ApprovalsBell />
         <Separator
           orientation="vertical"
           className="mx-1 hidden h-4! md:block"

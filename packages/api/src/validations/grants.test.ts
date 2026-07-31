@@ -49,6 +49,49 @@ describe("connectionGrantSchema", () => {
     );
     expect(connectionGrantSchema.safeParse(null).success).toBe(false);
   });
+
+  it("accepts the resources tri-state on both arms; absent stays absent", () => {
+    expect(
+      connectionGrantSchema.parse({
+        access: "full",
+        resources: { repositories: ["owner/a"] },
+      }),
+    ).toEqual({ access: "full", resources: { repositories: ["owner/a"] } });
+    expect(
+      connectionGrantSchema.parse({
+        access: "custom",
+        allow: ["read_message"],
+        ask: [],
+        resources: null,
+      }),
+    ).toMatchObject({ resources: null });
+    // Absent must survive as absent — it is the PRESERVE arm of the tri-state,
+    // distinct from an explicit null (clear).
+    expect("resources" in connectionGrantSchema.parse({ access: "full" })).toBe(
+      false,
+    );
+  });
+
+  it("rejects malformed resources — one strict axis per policy", () => {
+    expect(
+      connectionGrantSchema.safeParse({
+        access: "full",
+        resources: { repositories: ["a"], folders: ["/x"] },
+      }).success,
+    ).toBe(false);
+    expect(
+      connectionGrantSchema.safeParse({
+        access: "full",
+        resources: { repos: ["a"] },
+      }).success,
+    ).toBe(false);
+    expect(
+      connectionGrantSchema.safeParse({
+        access: "full",
+        resources: { repositories: [""] },
+      }).success,
+    ).toBe(false);
+  });
 });
 
 describe("agentsIncludeSchema", () => {

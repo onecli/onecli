@@ -2,15 +2,16 @@
 
 import { useQuery } from "@tanstack/react-query";
 import { apiGet, queryKeys } from "@/lib/api";
-import type { PageScope } from "@/lib/api";
+import type { GrantResources } from "@/lib/api";
 
-// The policy-visibility client: the 9.7b read-only reflections (the equipment
-// panels). The project/agent/connection reflect endpoints mount in the shared
-// app for every edition; only the org-scoped variant is EE-registered. Query
-// keys are built by SPREADING the shared namespaces (`queryKeys.agents.all()`
-// etc.), so the arrays are byte-identical to nested entries and every broad
-// shared invalidation (`invalidateQueries({ queryKey: queryKeys.agents.all() })`)
-// still covers these caches.
+// The policy-visibility client: effective-access reflections read by the agent
+// page (Manage-permissions dialog, grant rows) and the connection/credential
+// dialogs. The reflect endpoints mount in the shared app for every edition.
+// Query keys are built by SPREADING the shared namespaces
+// (`queryKeys.agents.all()` etc.), so the arrays are byte-identical to nested
+// entries and every broad shared invalidation
+// (`invalidateQueries({ queryKey: queryKeys.agents.all() })`) still covers
+// these caches.
 
 export type EffectiveToolVerdict =
   | "allow"
@@ -62,51 +63,57 @@ export interface EffectiveAppPermissionsResult {
     scope: "organization" | "project";
   };
   /** Identity-scoped provider-relevant rules the agent-less baseline can't
-   * show — viewer-scoped like bodyConditionsSkipped. */
+   * show (viewer-scoped). */
   variesByIdentity: number;
+  /** The ORG's resource boundary ("Resources") for the explicit
+   * (agent, connection) basis — how far the organization allows the credential
+   * to reach. Values only (never the rule); null = the org is silent or no
+   * explicit basis was given. */
+  orgResources: GrantResources | null;
+  /** What the credential actually reaches: the org boundary composed with the
+   * project's selection. An empty list = the two don't overlap, so it reaches
+   * nothing and every request is refused. */
+  effectiveResources: GrantResources | null;
   groups: EffectiveToolGroupResult[];
 }
 
 /**
- * The App Permissions panel's read-only reflection: per-tool effective
- * verdicts from the ENFORCED (published) rules. Project scope takes an optional
- * agent (omitted = the agent-less baseline); the org scope is agent-less by
- * construction. Org-rule provenance arrives redacted for non-org-admins.
+ * Per-tool effective verdicts from the ENFORCED (published) rules — read by
+ * the agent page's Manage-permissions dialog and grant rows (org ceiling, org
+ * resources, rate limits). Also the shape behind the public CLI/SDK
+ * effective-permissions surface. Takes an optional agent (omitted = the
+ * agent-less baseline). Org-rule provenance arrives redacted for
+ * non-org-admins. Project scope only — the org-scoped twin
+ * (`/v1/org/policy/effective-app-permissions`) serves the CLI/SDK and has no
+ * web caller.
  */
 export const effectiveAppPermissions = (
   provider: string,
-  opts: { agentId?: string; connectionId?: string; scope?: PageScope } = {},
+  opts: { agentId?: string; connectionId?: string } = {},
 ) => {
   const params = new URLSearchParams({ provider });
   if (opts.agentId) params.set("agentId", opts.agentId);
-  // Project scope only: reflect one specific account as the winning injected
-  // connection (per-account rules bind exactly as the gateway would).
+  // Reflect one specific account as the winning injected connection
+  // (per-account rules bind exactly as the gateway would).
   if (opts.connectionId) params.set("connectionId", opts.connectionId);
-  const base =
-    (opts.scope ?? "project") === "organization"
-      ? "/v1/org/policy"
-      : "/v1/policy";
   return apiGet<EffectiveAppPermissionsResult>(
-    `${base}/effective-app-permissions?${params}`,
+    `/v1/policy/effective-app-permissions?${params}`,
   );
 };
 
-/** The App Permissions panel's read-only reflection (step 9.7b):
- * per-tool effective verdicts from the ENFORCED rules. `agentId` null = the
+/** Per-tool effective verdicts from the ENFORCED rules. `agentId` null = the
  * agent-less baseline. */
 export const useEffectiveAppPermissions = (
   provider: string,
   agentId: string | null,
-  scope: PageScope = "project",
   enabled = true,
-  /** Reflect one specific account (project scope); null = the provider view. */
+  /** Reflect one specific account; null = the provider view. */
   connectionId: string | null = null,
 ) =>
   useQuery({
     queryKey: [
       ...queryKeys.policy.all(),
       "effective-app-permissions",
-      scope,
       provider,
       agentId ?? "baseline",
       connectionId ?? "provider-level",
@@ -115,7 +122,6 @@ export const useEffectiveAppPermissions = (
       effectiveAppPermissions(provider, {
         agentId: agentId ?? undefined,
         connectionId: connectionId ?? undefined,
-        scope,
       }),
     enabled: enabled && provider.length > 0,
   });
@@ -150,6 +156,9 @@ export type EffectiveCredentialEntry =
       label: string | null;
       provider: string;
       status: CredentialAccessStatus;
+      /** The organization blocks every tool of this connection for this agent
+       * — a project admin cannot lift it, only the org can. */
+      orgBlocked: boolean;
       provenance: CredentialProvenance[];
     };
 

@@ -74,6 +74,9 @@ pub(crate) fn derive_inject_selection(rules: &PolicyV2Rules, agent_id: &str) -> 
     InjectSelection {
         secret_ids,
         connections,
+        // OSS enforces no resource boundaries (there is no guard to enforce
+        // one), so nothing ever bounds a connection here.
+        boundaries: HashMap::new(),
         app_scopes,
         secret_scopes,
     }

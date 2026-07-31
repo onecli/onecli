@@ -20,19 +20,10 @@ import {
   ORG_PATH_RE,
   withProjectPrefix,
 } from "@/lib/navigation";
-import type { OAuthPermission } from "@onecli/api/apps/types";
-import { useAppPermissionDefinitions } from "@/hooks/use-app-permissions";
 import { AppIcon } from "./app-icon";
 import { AppConfigForm, type AppConfigFormHandle } from "./app-config-form";
 import { ConfigureCredentialsDialog } from "./configure-credentials-dialog";
-import { PermissionsList } from "./permissions-list";
-// The read-only app-permissions reflection, which reads the v2 policy engine.
-// Shared since step 10 — every edition renders it. The connection dialog next
-// to it is editable, and doubles as this page's post-connect setup step.
-import {
-  AppPermissionsReflection,
-  ConnectionAgentsReflection,
-} from "@/lib/components/policy-reflect";
+import { ConnectionAgentsReflection } from "@/lib/components/policy-reflect";
 import { ConnectionAccountCard } from "./connection-account-card";
 import { InheritedConnectionCard } from "./inherited-connection-card";
 import { AppBlocklist } from "./app-blocklist";
@@ -45,8 +36,6 @@ interface AppDetailProps {
     darkIcon?: string;
     description: string;
     connectionType: "oauth" | "api_key" | "credentials_import" | "cloud_only";
-    defaultScopes: string[];
-    permissions: OAuthPermission[];
     blocklist?: { id: string; name: string; hostPattern: string }[];
   };
   configurable?: {
@@ -166,11 +155,6 @@ export const AppDetail = ({
   const appConfigured = configStatus?.enabled ?? hasAppConfig;
 
   const hasCredentials = hasEnvDefaults || appConfigured;
-  const { data: permissionDefinitions, isPending: permissionsPending } =
-    useAppPermissionDefinitions();
-  const permissionDefinition = permissionDefinitions?.find(
-    (def) => def.provider === app.id,
-  );
 
   const openConnectPopup = (
     connectionId?: string,
@@ -210,10 +194,6 @@ export const AppDetail = ({
 
   const connectionCount = connections.length + inheritedConnections.length;
   const isConnected = connectionCount > 0;
-  // Hold the OAuth-scopes fallback until the catalog resolves, so it doesn't
-  // flash before being replaced by the permissions editor.
-  const showOAuthScopesList =
-    !permissionsPending && isConnected && app.permissions.length > 0;
 
   return (
     <div className="space-y-6">
@@ -292,64 +272,40 @@ export const AppDetail = ({
           <Loader2 className="size-5 animate-spin text-muted-foreground" />
         </div>
       ) : (
-        <div className="space-y-6">
-          {isConnected && (
-            <div className="space-y-3">
-              <div className="flex items-start justify-between">
-                <h3 className="text-sm font-medium">Connected accounts</h3>
-                <Button
-                  variant="outline"
-                  size="sm"
-                  onClick={handleConnect}
-                  className="shrink-0"
-                >
-                  Connect
-                </Button>
-              </div>
-              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2">
-                {connections.map((conn) => (
-                  <ConnectionAccountCard
-                    key={conn.id}
-                    connection={conn}
-                    appName={app.name}
-                    onReconnect={(id) => openConnectPopup(id, popupOpts)}
-                    pageScope={pageScope}
-                  />
-                ))}
-                {inheritedConnections.map((conn) => (
-                  <InheritedConnectionCard
-                    key={conn.id}
-                    connection={conn}
-                    appName={app.name}
-                    pageScope={pageScope}
-                  />
-                ))}
-              </div>
+        isConnected && (
+          <div className="space-y-3">
+            <div className="flex items-start justify-between">
+              <h3 className="text-sm font-medium">Connected accounts</h3>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={handleConnect}
+                className="shrink-0"
+              >
+                Connect
+              </Button>
             </div>
-          )}
-
-          {permissionDefinition ? (
-            <AppPermissionsReflection
-              provider={app.id}
-              appName={app.name}
-              pageScope={pageScope}
-              connections={[...connections, ...inheritedConnections].map(
-                (c) => ({ id: c.id, label: c.label }),
-              )}
-            />
-          ) : showOAuthScopesList ? (
-            <PermissionsList
-              permissions={app.permissions}
-              grantedScopes={[
-                ...new Set(
-                  [...connections, ...inheritedConnections].flatMap(
-                    (c) => c.scopes,
-                  ),
-                ),
-              ]}
-            />
-          ) : null}
-        </div>
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2">
+              {connections.map((conn) => (
+                <ConnectionAccountCard
+                  key={conn.id}
+                  connection={conn}
+                  appName={app.name}
+                  onReconnect={(id) => openConnectPopup(id, popupOpts)}
+                  pageScope={pageScope}
+                />
+              ))}
+              {inheritedConnections.map((conn) => (
+                <InheritedConnectionCard
+                  key={conn.id}
+                  connection={conn}
+                  appName={app.name}
+                  pageScope={pageScope}
+                />
+              ))}
+            </div>
+          </div>
+        )
       )}
 
       {configurable && (
