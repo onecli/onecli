@@ -265,6 +265,20 @@ fn host_matches_skip_verify(host: &str, patterns: &[String]) -> bool {
     })
 }
 
+/// The single origin allowed to make credentialed browser → gateway calls: the
+/// dashboard's own origin (`APP_URL`, else the loopback fallback).
+///
+/// Deliberately NOT the reflected request origin. The browser API is
+/// credentialed and, in local mode, authenticates as `local-admin` from no
+/// request state — so reflecting every origin let any website read and approve
+/// pending approvals, pair vaults, and invalidate the cache. `dashboard_url()`
+/// already normalizes `APP_URL` to a bare `scheme://host[:port]` origin (no
+/// path), which is what an `Origin` header is compared against.
+fn cors_allowed_origin() -> hyper::header::HeaderValue {
+    hyper::header::HeaderValue::from_str(response::dashboard_url())
+        .expect("dashboard_url() is a valid header value")
+}
+
 impl GatewayServer {
     pub fn new(
         ca: CertificateAuthority,
@@ -315,8 +329,17 @@ impl GatewayServer {
 
         // CORS configuration for browser → gateway requests.
         // credentials: true requires explicit headers/methods (not wildcard *).
+        //
+        // The allowed origin is the dashboard's own origin (`APP_URL`, else the
+        // loopback fallback) — NOT the reflected request origin. With
+        // credentials on, reflecting every origin let any website drive the
+        // authenticated browser API (read/approve pending approvals, vault
+        // pairing, cache invalidation), since local mode resolves `local-admin`
+        // from no request state. `response::dashboard_url()` already normalizes
+        // `APP_URL` to a bare `scheme://host[:port]` origin, which is exactly the
+        // shape `AllowOrigin::exact` expects.
         let cors_layer = CorsLayer::new()
-            .allow_origin(tower_http::cors::AllowOrigin::mirror_request())
+            .allow_origin(tower_http::cors::AllowOrigin::exact(cors_allowed_origin()))
             .allow_headers([
                 hyper::header::CONTENT_TYPE,
                 hyper::header::AUTHORIZATION,
@@ -1335,6 +1358,23 @@ mod tests {
     #[test]
     fn skip_verify_empty_patterns_never_matches() {
         assert!(!host_matches_skip_verify("anything.com", &[]));
+    }
+
+    // ── CORS allowed origin (the credentialed browser-API boundary) ──────
+
+    /// The regression guard for the reflected-origin bypass: the credentialed
+    /// browser API must be scoped to the dashboard's own origin, never the
+    /// request's. If this ever equals a foreign `Origin`, any website can drive
+    /// the authenticated API (read/approve approvals, pair vaults, invalidate
+    /// cache) — which is exactly what `AllowOrigin::mirror_request()` did.
+    #[test]
+    fn cors_allowed_origin_is_the_dashboard_not_the_caller() {
+        let allowed = cors_allowed_origin();
+        // It is exactly the dashboard origin the rest of the gateway uses…
+        assert_eq!(allowed.to_str().unwrap(), response::dashboard_url());
+        // …and never a wildcard or an attacker's origin.
+        assert_ne!(allowed.to_str().unwrap(), "*");
+        assert_ne!(allowed.to_str().unwrap(), "https://evil.example");
     }
 
     // ── parse_skip_verify_patterns ─────────────────────────────────────
