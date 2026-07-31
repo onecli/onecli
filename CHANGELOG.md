@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.45.0](https://github.com/onecli/onecli/compare/v1.44.0...v1.45.0) (2026-07-31)
+
+
+### Features
+
+* install page, per-connection resources, approvals bell ([#470](https://github.com/onecli/onecli/issues/470)) ([834af80](https://github.com/onecli/onecli/commit/834af801e35a09ab7b01669a65488de4a89687e9))
+
 ## [1.44.0](https://github.com/onecli/onecli/compare/v1.43.3...v1.44.0) (2026-07-29)
 
 
