@@ -35,6 +35,7 @@ import { supabase } from "./supabase";
 import { aws } from "./aws";
 import { linkedin } from "./linkedin";
 import { trello } from "./trello";
+import { testiny } from "./testiny";
 import { monday } from "./monday";
 import { vercel } from "./vercel";
 import { jfrogArtifactory } from "./jfrog-artifactory";
@@ -76,6 +77,7 @@ const staticApps: AppDefinition[] = [
   supabase,
   linkedin,
   trello,
+  testiny,
   vercel,
   jfrogArtifactory,
 ];

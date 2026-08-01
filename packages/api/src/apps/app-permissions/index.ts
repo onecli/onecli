@@ -49,6 +49,7 @@ import { vertexAiPermissions } from "./vertex-ai";
 import { youtubePermissions } from "./youtube";
 import { linkedinPermissions } from "./linkedin";
 import { trelloPermissions } from "./trello";
+import { testinyPermissions } from "./testiny";
 import { mondayPermissions } from "./monday";
 import { vercelPermissions } from "./vercel";
 
@@ -103,5 +104,6 @@ register(dropboxPermissions);
 register(supabasePermissions);
 register(linkedinPermissions);
 register(trelloPermissions);
+register(testinyPermissions);
 register(mondayPermissions);
 register(vercelPermissions);
