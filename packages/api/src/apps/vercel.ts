@@ -5,48 +5,38 @@ export const vercel: AppDefinition = {
   name: "Vercel",
   icon: "/icons/vercel.svg",
   darkIcon: "/icons/vercel-light.svg",
-  description: "Projects, deployments, domains, and environment variables.",
+  description: "Deployments, projects, environment variables, and build logs.",
   connectionMethod: {
     type: "api_key",
     fields: [
       {
-        name: "apiToken",
-        label: "Access Token",
+        name: "apiKey",
+        label: "API Token",
         description:
-          "Your Vercel token. Create one at vercel.com/account/tokens",
-        placeholder: "vcp_...",
+          "Create a Personal Access Token in your Vercel Account Settings.",
+        placeholder: "vbc_...",
+        secret: true,
       },
     ],
     resolveMetadata: async (fields) => {
-      try {
-        const res = await fetch("https://api.vercel.com/v2/user", {
-          headers: { Authorization: `Bearer ${fields.apiToken}` },
-        });
-        if (res.ok) {
-          const { user } = (await res.json()) as {
-            user?: {
-              email?: string;
-              username?: string;
-              name?: string;
-              avatar?: string;
-            };
-          };
-          if (user) {
-            return {
-              email: user.email,
-              username: user.email ?? user.username,
-              name: user.name ?? user.username,
-              avatarUrl: user.avatar
-                ? `https://api.vercel.com/www/avatar/${user.avatar}`
-                : undefined,
-            };
-          }
-        }
-      } catch {
-        // Non-fatal
+      const res = await fetch("https://api.vercel.com/v2/user", {
+        headers: {
+          Authorization: `Bearer ${fields.apiKey}`,
+        },
+      });
+
+      if (!res.ok) {
+        throw new Error("Invalid Vercel API Token");
       }
-      return null;
+
+      const data = await res.json();
+      return {
+        username: data.user?.username || data.user?.email,
+        email: data.user?.email,
+        accountName: data.user?.name || data.user?.username,
+      };
     },
   },
+  labelHint: 'e.g. "production", "personal-account"',
   available: true,
 };
