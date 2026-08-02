@@ -176,7 +176,7 @@ async fn validate_oauth(pool: &PgPool, headers: &HeaderMap) -> Result<String, Au
             AuthError("missing cookie".to_string())
         })?;
 
-    let token = parse_cookie(cookie_header, "authjs.session-token").ok_or_else(|| {
+    let token = session_token_from_cookies(cookie_header).ok_or_else(|| {
         warn!("oauth auth: session token cookie not found");
         AuthError("missing session token".to_string())
     })?;
@@ -221,6 +221,24 @@ async fn validate_oauth(pool: &PgPool, headers: &HeaderMap) -> Result<String, Au
 
 // ── Helpers ──────────────────────────────────────────────────────────────
 
+/// The NextAuth session cookie, under either spelling Auth.js may have used.
+///
+/// Auth.js prefixes the cookie with `__Secure-` whenever it considers the
+/// deployment secure, which it decides from the scheme of the resolved
+/// `AUTH_URL` / `NEXTAUTH_URL`. Every instance reached over https therefore
+/// sends `__Secure-authjs.session-token`, and a self-hosted one cannot opt out:
+/// the OAuth spec (and Google's redirect-URI validation) requires an https
+/// callback for anything but localhost, so the single variable that makes login
+/// work also renames this cookie. Matching only the bare name meant session auth
+/// could never succeed on a TLS deployment.
+///
+/// Bare name first: it is what an http/localhost install sends, and checking it
+/// first keeps that path a single comparison.
+fn session_token_from_cookies(cookie_header: &str) -> Option<&str> {
+    parse_cookie(cookie_header, "authjs.session-token")
+        .or_else(|| parse_cookie(cookie_header, "__Secure-authjs.session-token"))
+}
+
 /// Parse a specific cookie value from a Cookie header string.
 fn parse_cookie<'a>(cookie_header: &'a str, name: &str) -> Option<&'a str> {
     cookie_header.split(';').find_map(|pair| {
@@ -258,5 +276,39 @@ mod tests {
     #[test]
     fn parse_cookie_empty() {
         assert_eq!(parse_cookie("", "authjs.session-token"), None);
+    }
+
+    #[test]
+    fn session_token_accepts_bare_name() {
+        let header = "other=abc; authjs.session-token=eyJhbGciOiJIUzI1NiJ9.test";
+        assert_eq!(
+            session_token_from_cookies(header),
+            Some("eyJhbGciOiJIUzI1NiJ9.test")
+        );
+    }
+
+    /// What a browser sends to an https deployment: Auth.js switches the session
+    /// cookie to the `__Secure-` prefix and the CSRF cookie to `__Host-`.
+    #[test]
+    fn session_token_accepts_secure_prefixed_name() {
+        let header = "__Host-authjs.csrf-token=abc; \
+                      __Secure-authjs.session-token=eyJhbGciOiJIUzI1NiJ9.test";
+        assert_eq!(
+            session_token_from_cookies(header),
+            Some("eyJhbGciOiJIUzI1NiJ9.test")
+        );
+    }
+
+    /// The bare name wins when both are somehow present, so an http install's
+    /// behaviour is unchanged.
+    #[test]
+    fn session_token_prefers_bare_name() {
+        let header = "__Secure-authjs.session-token=prefixed; authjs.session-token=bare";
+        assert_eq!(session_token_from_cookies(header), Some("bare"));
+    }
+
+    #[test]
+    fn session_token_missing() {
+        assert_eq!(session_token_from_cookies("other=abc; foo=bar"), None);
     }
 }
