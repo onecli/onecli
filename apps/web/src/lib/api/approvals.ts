@@ -1,8 +1,8 @@
 // Pending-approval value picker — list and resolve held requests through the
 // gateway. Like the 1Password client, these hit the gateway directly (different
 // base URL + auth) rather than the typed JSON API, so they use
-// getGatewayApiUrl() + getGatewayFetchOptions() (edition-aware: Cognito Bearer +
-// X-Project-Id in cloud, cookie credentials in OSS).
+// getGatewayApiUrl() + getGatewayFetchOptions(), which authenticates as the
+// acting user via their own API key (see gateway-auth.ts).
 import { getGatewayApiUrl } from "@/hooks/use-vault-status";
 import { getGatewayFetchOptions } from "@/lib/gateway-auth";
 
