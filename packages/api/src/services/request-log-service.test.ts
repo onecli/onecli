@@ -2,7 +2,11 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { LLM_HOST_FRAGMENTS } from "../lib/llm-hosts";
 import { initRoleResolver } from "../providers";
-import { buildActivityWhere, getRequestLogs } from "./request-log-service";
+import {
+  buildActivityWhere,
+  getRequestLogById,
+  getRequestLogs,
+} from "./request-log-service";
 
 const dbState = vi.hoisted(() => ({
   logs: [] as unknown[],
@@ -11,7 +15,19 @@ const dbState = vi.hoisted(() => ({
 vi.mock("@onecli/db", () => ({
   Prisma: {},
   db: {
-    requestLog: { findMany: async () => dbState.logs },
+    requestLog: {
+      findMany: async () => dbState.logs,
+      // Honors BOTH halves of the where — the project scope is what makes a
+      // foreign id indistinguishable from a missing one.
+      findFirst: async ({
+        where,
+      }: {
+        where: { id: string; projectId: string };
+      }) =>
+        (dbState.logs as { id: string; projectId: string }[]).find(
+          (l) => l.id === where.id && l.projectId === where.projectId,
+        ) ?? null,
+    },
     agent: { findMany: async () => [] },
     user: { findMany: async () => [] },
   },
@@ -66,6 +82,75 @@ describe("buildActivityWhere", () => {
       { createdAt: { lt: new Date(cursor.createdAt) } },
       { createdAt: new Date(cursor.createdAt), id: { lt: cursor.id } },
     ]);
+  });
+});
+
+// ── ActivityQuery narrowing (the #411 automation filters) ────────────────
+
+describe("buildActivityWhere — ActivityQuery", () => {
+  it("adds nothing when the query is empty", () => {
+    expect(buildActivityWhere(PROJECT_ID, { query: {} })).toEqual({
+      projectId: PROJECT_ID,
+    });
+  });
+
+  it("matches agent exactly and host/provider case-insensitively", () => {
+    const where = buildActivityWhere(PROJECT_ID, {
+      query: { agentId: "agent-1", host: "GitHub.com", provider: "github" },
+    });
+
+    expect(where.AND).toEqual([
+      { agentId: "agent-1" },
+      { host: { contains: "GitHub.com", mode: "insensitive" } },
+      { provider: { contains: "github", mode: "insensitive" } },
+    ]);
+  });
+
+  it("upper-cases the method so ?method=get matches the stored verb", () => {
+    expect(
+      buildActivityWhere(PROJECT_ID, { query: { method: "get" } }).AND,
+    ).toEqual([{ method: "GET" }]);
+  });
+
+  it("bounds the window with gte/lt so `since` is inclusive and `until` is not", () => {
+    const since = new Date("2026-07-01T00:00:00.000Z");
+    const until = new Date("2026-07-02T00:00:00.000Z");
+
+    expect(
+      buildActivityWhere(PROJECT_ID, { query: { since, until } }).AND,
+    ).toEqual([{ createdAt: { gte: since } }, { createdAt: { lt: until } }]);
+  });
+
+  it("keeps status 0 and 200 distinct from `undefined` (no silent drop)", () => {
+    expect(
+      buildActivityWhere(PROJECT_ID, { query: { status: 200 } }).AND,
+    ).toEqual([{ status: 200 }]);
+    expect(buildActivityWhere(PROJECT_ID, { query: {} }).AND).toBeUndefined();
+  });
+
+  // The reason query conditions are ANDed rather than assigned onto the root:
+  // `filter: "blocked"` owns `status` and the cursor owns `OR`. A root
+  // assignment would drop one of them — here it would turn a contradictory
+  // "blocked AND status=200" into "every 200", the opposite of what was asked.
+  it("preserves the blocked filter's own status clause alongside a status query", () => {
+    const where = buildActivityWhere(PROJECT_ID, {
+      filter: "blocked",
+      query: { status: 200 },
+    });
+
+    expect(where.status).toEqual({ gte: 400 });
+    expect(where.AND).toEqual([{ status: 200 }]);
+  });
+
+  it("preserves the cursor's OR alongside query conditions", () => {
+    const cursor = { createdAt: "2026-06-26T12:00:00.000Z", id: "log_42" };
+    const where = buildActivityWhere(PROJECT_ID, {
+      cursor,
+      query: { agentId: "agent-1" },
+    });
+
+    expect(where.OR).toHaveLength(2);
+    expect(where.AND).toEqual([{ agentId: "agent-1" }]);
   });
 });
 
@@ -215,5 +300,68 @@ describe("getRequestLogs — org matched-rule redaction", () => {
       },
     );
     expect(JSON.stringify(nullRole)).not.toContain(ORG_BAIT);
+  });
+});
+
+// ── getRequestLogById (the #411 single-event read) ───────────────────────
+
+describe("getRequestLogById", () => {
+  beforeEach(() => {
+    dbState.logs = [orgDecidedRow(), projectDecidedRow()];
+  });
+
+  it("returns the event when it belongs to the project", async () => {
+    initRoleResolver({ getUserRole: async () => "admin" });
+
+    const entry = await getRequestLogById(PROJECT_ID, "log-2", {
+      userId: "u1",
+      organizationId: "org-1",
+    });
+
+    expect(entry?.id).toBe("log-2");
+    expect(entry?.host).toBe("gmail.googleapis.com");
+  });
+
+  it("returns null for another project's id — never leaks across the fence", async () => {
+    initRoleResolver({ getUserRole: async () => "admin" });
+
+    // The row exists; it just isn't this project's. Indistinguishable from
+    // "no such id", which is what stops id probing.
+    const entry = await getRequestLogById("someone-elses-project", "log-2", {
+      userId: "u1",
+      organizationId: "org-1",
+    });
+
+    expect(entry).toBeNull();
+  });
+
+  it("returns null for an unknown id", async () => {
+    expect(await getRequestLogById(PROJECT_ID, "nope")).toBeNull();
+  });
+
+  // The reason this goes through the shared redaction rather than returning
+  // the row: a single-row read must not become the way to see what the feed
+  // hides from a non-admin.
+  it("applies the SAME org-rule redaction as the feed", async () => {
+    initRoleResolver({ getUserRole: async () => "member" });
+
+    const entry = await getRequestLogById(PROJECT_ID, "log-1", {
+      userId: "u1",
+      organizationId: "org-1",
+    });
+
+    expect(JSON.stringify(entry)).not.toContain(ORG_BAIT);
+    expect(entry?.matchedRuleLogicalId).toBeNull();
+    expect(
+      (entry?.extraData as Record<string, unknown>).matched_rule_scope,
+    ).toBe("organization");
+  });
+
+  it("fails SAFE to redaction when there is no viewer", async () => {
+    initRoleResolver({ getUserRole: async () => "admin" });
+
+    const entry = await getRequestLogById(PROJECT_ID, "log-1");
+
+    expect(JSON.stringify(entry)).not.toContain(ORG_BAIT);
   });
 });
