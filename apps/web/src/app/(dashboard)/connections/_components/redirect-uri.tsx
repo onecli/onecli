@@ -15,8 +15,22 @@ const useBaseUrl = () => {
   return typeof window !== "undefined" ? window.location.origin : APP_URL;
 };
 
-export const RedirectUri = ({ provider }: { provider: string }) => {
-  const redirectUri = `${useBaseUrl()}/v1/apps/${provider}/callback`;
+export interface RedirectUriProps {
+  provider: string;
+  /**
+   * Whether the surface saving this config records the unified redirect style
+   * (project app configs stamp `redirectStyle: "unified"` on save, so their
+   * flows use the shared `/v1/apps/callback`). Org-scoped config forms keep
+   * showing the per-provider path until org flows adopt the stamp.
+   */
+  unified: boolean;
+}
+
+export const RedirectUri = ({ provider, unified }: RedirectUriProps) => {
+  const baseUrl = useBaseUrl();
+  const redirectUri = unified
+    ? `${baseUrl}/v1/apps/callback`
+    : `${baseUrl}/v1/apps/${provider}/callback`;
   const { copied, copy } = useCopyToClipboard();
 
   return (
@@ -68,6 +82,7 @@ export const RedirectUri = ({ provider }: { provider: string }) => {
         }
       >
         Add this to your OAuth app&apos;s allowed redirect URIs.
+        {unified && " The same URI works for every app on this instance."}
       </p>
     </div>
   );

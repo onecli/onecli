@@ -179,6 +179,17 @@ export const upsertAppConfig = async (
     }
   }
 
+  // A save through the project config form commits the user to the redirect
+  // URI that form displayed — the shared `/v1/apps/callback` (#301). Recording
+  // the style on the row, rather than switching flows globally, is what keeps
+  // configs saved before the unified path on the per-provider URI their OAuth
+  // app already has registered: `/authorize` only goes unified when the row
+  // says so. Save is the safe moment to flip — it disconnects the provider's
+  // connections (below), so every surviving flow starts fresh against the URI
+  // shown at save time. Org rows stay unstamped until the org config surfaces
+  // display the unified URI too.
+  if (!isOrgScope(scope)) plainFields.redirectStyle = "unified";
+
   let encryptedCredentials: string | undefined;
   if (Object.keys(secretFields).length > 0) {
     encryptedCredentials = await getCrypto().encrypt(

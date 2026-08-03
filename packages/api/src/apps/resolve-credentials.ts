@@ -11,6 +11,15 @@ export interface ResolvedAppCredentials {
    * it on the connection so refresh and config-removal know the provenance.
    */
   appConfigId?: string;
+  /**
+   * Redirect style recorded on the AppConfig row when it was saved. "unified"
+   * means the config form displayed the shared `/v1/apps/callback` URI, so
+   * that is what the user registered on their OAuth app and what the OAuth
+   * flow must send. Absent — a row saved before the unified path existed, or
+   * env/org credentials — keeps the per-provider callback those OAuth apps
+   * have registered.
+   */
+  redirectStyle?: "unified";
 }
 
 /**
@@ -36,7 +45,14 @@ export const resolveAppCredentials = async (
   if (config && requiredFields.every((f) => !!config.fields[f])) {
     const values: Record<string, string> = {};
     for (const f of requiredFields) values[f] = config.fields[f]!;
-    return { values, source: "app_config", appConfigId: config.appConfigId };
+    return {
+      values,
+      source: "app_config",
+      appConfigId: config.appConfigId,
+      ...(config.fields.redirectStyle === "unified" && {
+        redirectStyle: "unified" as const,
+      }),
+    };
   }
 
   const orgAppConfig = getOrgAppConfig();
