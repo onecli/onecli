@@ -185,10 +185,34 @@ export interface RequestLogPage {
 
 export type ActivityFilter = "all" | "hide-llm" | "blocked";
 
+/**
+ * Field-level narrowing on top of {@link ActivityFilter} — what an automation
+ * asks for when it wants "did MY call land?" rather than a browsable feed
+ * (#411): the agent, the upstream it went to, and when.
+ *
+ * ANDed with the filter and the project scope, never instead of them. `host`
+ * and `provider` are contains-matches (case-insensitive) so a caller can pass
+ * `api.github.com` or just `github`; the rest are exact/range.
+ */
+export interface ActivityQuery {
+  agentId?: string;
+  /** Case-insensitive substring of the upstream host. */
+  host?: string;
+  /** Case-insensitive substring of the resolved provider id. */
+  provider?: string;
+  method?: string;
+  status?: number;
+  /** Inclusive lower bound on `createdAt`. */
+  since?: Date;
+  /** Exclusive upper bound on `createdAt`. */
+  until?: Date;
+}
+
 export interface ActivityPageParams {
   cursor?: { createdAt: string; id: string };
   limit?: number;
   filter?: ActivityFilter;
+  query?: ActivityQuery;
 }
 
 const resolveAgentNames = async (
@@ -272,15 +296,48 @@ export const getRecentRequestLogs = async (
 };
 
 /**
+ * Field-level conditions for an {@link ActivityQuery}, as an AND array.
+ *
+ * Deliberately NOT assigned onto the `where` root: `filter: "blocked"` already
+ * owns `status` and the cursor owns `OR`, so a root assignment would silently
+ * drop one of them (a caller passing `filter=blocked&status=200` must get an
+ * empty page, not "every 200"). ANDing keeps every condition load-bearing.
+ */
+const activityQueryConditions = (
+  query: ActivityQuery,
+): Prisma.RequestLogWhereInput[] => {
+  const conditions: Prisma.RequestLogWhereInput[] = [];
+
+  if (query.agentId) conditions.push({ agentId: query.agentId });
+  if (query.host) {
+    conditions.push({ host: { contains: query.host, mode: "insensitive" } });
+  }
+  if (query.provider) {
+    conditions.push({
+      provider: { contains: query.provider, mode: "insensitive" },
+    });
+  }
+  if (query.method) {
+    conditions.push({ method: query.method.toUpperCase() });
+  }
+  if (query.status !== undefined) conditions.push({ status: query.status });
+  if (query.since) conditions.push({ createdAt: { gte: query.since } });
+  if (query.until) conditions.push({ createdAt: { lt: query.until } });
+
+  return conditions;
+};
+
+/**
  * Build the Prisma `where` for an activity query: project scope, the selected
- * {@link ActivityFilter}, and the keyset-pagination cursor. Pure and synchronous
- * so it can be unit-tested without a database.
+ * {@link ActivityFilter}, any {@link ActivityQuery} narrowing, and the keyset-
+ * pagination cursor. Pure and synchronous so it can be unit-tested without a
+ * database.
  */
 export const buildActivityWhere = (
   projectId: string,
-  params: Pick<ActivityPageParams, "cursor" | "filter"> = {},
+  params: Pick<ActivityPageParams, "cursor" | "filter" | "query"> = {},
 ): Prisma.RequestLogWhereInput => {
-  const { cursor, filter = "all" } = params;
+  const { cursor, filter = "all", query } = params;
   const where: Prisma.RequestLogWhereInput = { projectId };
 
   if (filter === "blocked") {
@@ -304,7 +361,37 @@ export const buildActivityWhere = (
     ];
   }
 
+  if (query) {
+    const conditions = activityQueryConditions(query);
+    if (conditions.length > 0) where.AND = conditions;
+  }
+
   return where;
+};
+
+/**
+ * One activity event by id, or null when it doesn't exist **or belongs to
+ * another project** — the project scope rides the `where`, so a caller can't
+ * probe foreign ids. Goes through the same agent/approver resolution and
+ * org-rule redaction as the list, so a single-row read can never surface
+ * details the feed would hide from this viewer.
+ */
+export const getRequestLogById = async (
+  projectId: string,
+  id: string,
+  viewer?: RequestLogViewer,
+): Promise<RequestLogEntry | null> => {
+  const log = await db.requestLog.findFirst({ where: { id, projectId } });
+  if (!log) return null;
+
+  const [agentMap, userMap, seesOrgRules] = await Promise.all([
+    resolveAgentNames(projectId, [log.agentId]),
+    resolveUserNames(collectApproverIds([log])),
+    viewerSeesOrgRules(viewer),
+  ]);
+
+  const entry = toEntry(log, agentMap, userMap);
+  return seesOrgRules ? entry : redactOrgMatchedRule(entry);
 };
 
 export const getRequestLogs = async (
