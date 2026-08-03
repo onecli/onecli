@@ -18,6 +18,9 @@ pub(crate) enum AuthStrategy {
     Bearer,
     /// `Authorization: Basic base64("x-access-token:{token}")`
     BasicXAccessToken,
+    /// `{name}: {token}` — the raw credential in a provider-named header
+    /// (e.g. Testiny's `X-Api-Key`), no auth scheme prefix.
+    Header { name: &'static str },
     /// No `Authorization` header — auth injected via `credential_headers` only.
     None,
 }
@@ -785,6 +788,51 @@ static APP_PROVIDERS: &[AppProvider] = &[
         body_transform: None,
     },
     AppProvider {
+        provider: "testiny",
+        display_name: "Testiny",
+        // REST API under app.testiny.io/api/v1, authenticated with an API key
+        // sent raw in the X-Api-Key header (no auth scheme prefix).
+        host_rules: &[HostRule {
+            pattern: HostPattern::Exact("app.testiny.io"),
+            path_prefix: None,
+            strategy: AuthStrategy::Header { name: "x-api-key" },
+            intercept: false,
+            credential_host_field: None,
+        }],
+        refresh: None,
+        metadata_headers: &[],
+        credential_headers: &[],
+        credential_params: &[],
+        host_rewrite: None,
+        finalizer: None,
+        body_transform: None,
+    },
+    AppProvider {
+        provider: "mantishub",
+        display_name: "MantisHub",
+        // Per-customer hosts (`<name>.mantishub.io`), authenticated with an
+        // API token sent raw in the Authorization header — no scheme prefix
+        // (MantisBT convention). The bare suffix alone would inject the token
+        // into ANY `*.mantishub.io` host, so `credential_host_field` gates
+        // injection to the connection's exact stored host (cf. JFrog).
+        host_rules: &[HostRule {
+            pattern: HostPattern::Suffix(".mantishub.io"),
+            path_prefix: None,
+            strategy: AuthStrategy::Header {
+                name: "authorization",
+            },
+            intercept: false,
+            credential_host_field: Some("subdomain"),
+        }],
+        refresh: None,
+        metadata_headers: &[],
+        credential_headers: &[],
+        credential_params: &[],
+        host_rewrite: None,
+        finalizer: None,
+        body_transform: None,
+    },
+    AppProvider {
         provider: "resend",
         display_name: "Resend",
         host_rules: &[HostRule {
@@ -1295,6 +1343,10 @@ pub(crate) fn build_app_injections(provider: &str, hostname: &str, token: &str) 
                 value: format!("Basic {encoded}"),
             }]
         }
+        AuthStrategy::Header { name } => vec![Injection::SetHeader {
+            name: name.to_string(),
+            value: token.to_string(),
+        }],
         AuthStrategy::None => vec![],
     }
 }
@@ -1332,6 +1384,10 @@ pub(crate) fn build_app_injection_rules(
                         value: format!("Basic {encoded}"),
                     }]
                 }
+                AuthStrategy::Header { name } => vec![Injection::SetHeader {
+                    name: name.to_string(),
+                    value: token.to_string(),
+                }],
                 AuthStrategy::None => vec![],
             };
             (pattern, injections)
@@ -2423,6 +2479,60 @@ mod tests {
                 name: "authorization".to_string(),
                 value: "Bearer vca_test123".to_string(),
             }
+        );
+    }
+
+    // ── Testiny ────────────────────────────────────────────────────────
+
+    #[test]
+    fn providers_for_testiny_host() {
+        assert_eq!(providers_for_host("app.testiny.io"), vec!["testiny"]);
+    }
+
+    #[test]
+    fn testiny_uses_raw_x_api_key_header() {
+        let injections = build_app_injections("testiny", "app.testiny.io", "tny_test123");
+        assert_eq!(injections.len(), 1);
+        assert_eq!(
+            injections[0],
+            Injection::SetHeader {
+                name: "x-api-key".to_string(),
+                value: "tny_test123".to_string(),
+            }
+        );
+    }
+
+    // ── MantisHub ──────────────────────────────────────────────────────
+
+    #[test]
+    fn providers_for_mantishub_host() {
+        assert_eq!(providers_for_host("acme.mantishub.io"), vec!["mantishub"]);
+    }
+
+    #[test]
+    fn mantishub_suffix_no_false_positives() {
+        assert!(providers_for_host("mantishub.io").is_empty());
+        assert!(providers_for_host(".mantishub.io").is_empty());
+    }
+
+    #[test]
+    fn mantishub_uses_raw_authorization_header() {
+        let injections = build_app_injections("mantishub", "acme.mantishub.io", "mh_test123");
+        assert_eq!(injections.len(), 1);
+        assert_eq!(
+            injections[0],
+            Injection::SetHeader {
+                name: "authorization".to_string(),
+                value: "mh_test123".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn mantishub_has_credential_host_field() {
+        assert_eq!(
+            credential_host_field("mantishub", "acme.mantishub.io"),
+            Some("subdomain")
         );
     }
 
