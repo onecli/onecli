@@ -803,6 +803,35 @@ static APP_PROVIDERS: &[AppProvider] = &[
         body_transform: None,
     },
     AppProvider {
+        provider: "stripe",
+        display_name: "Stripe",
+        // Secret/restricted key sent as a Bearer token. files.stripe.com is
+        // Stripe's file-upload host and authenticates the same way.
+        host_rules: &[
+            HostRule {
+                pattern: HostPattern::Exact("api.stripe.com"),
+                path_prefix: None,
+                strategy: AuthStrategy::Bearer,
+                intercept: false,
+                credential_host_field: None,
+            },
+            HostRule {
+                pattern: HostPattern::Exact("files.stripe.com"),
+                path_prefix: None,
+                strategy: AuthStrategy::Bearer,
+                intercept: false,
+                credential_host_field: None,
+            },
+        ],
+        refresh: None,
+        metadata_headers: &[],
+        credential_headers: &[],
+        credential_params: &[],
+        host_rewrite: None,
+        finalizer: None,
+        body_transform: None,
+    },
+    AppProvider {
         provider: "cloudflare",
         display_name: "Cloudflare",
         host_rules: &[HostRule {
@@ -2442,6 +2471,40 @@ mod tests {
             Injection::SetHeader {
                 name: "authorization".to_string(),
                 value: "Bearer re_test123".to_string(),
+            }
+        );
+    }
+
+    // ── Stripe ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn providers_for_stripe_hosts() {
+        assert_eq!(providers_for_host("api.stripe.com"), vec!["stripe"]);
+        assert_eq!(providers_for_host("files.stripe.com"), vec!["stripe"]);
+    }
+
+    #[test]
+    fn stripe_api_uses_bearer() {
+        let injections = build_app_injections("stripe", "api.stripe.com", "sk_test123");
+        assert_eq!(injections.len(), 1);
+        assert_eq!(
+            injections[0],
+            Injection::SetHeader {
+                name: "authorization".to_string(),
+                value: "Bearer sk_test123".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn stripe_files_host_uses_bearer() {
+        let injections = build_app_injections("stripe", "files.stripe.com", "sk_test123");
+        assert_eq!(injections.len(), 1);
+        assert_eq!(
+            injections[0],
+            Injection::SetHeader {
+                name: "authorization".to_string(),
+                value: "Bearer sk_test123".to_string(),
             }
         );
     }

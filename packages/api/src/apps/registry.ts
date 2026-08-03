@@ -38,6 +38,7 @@ import { trello } from "./trello";
 import { monday } from "./monday";
 import { vercel } from "./vercel";
 import { jfrogArtifactory } from "./jfrog-artifactory";
+import { stripe } from "./stripe";
 
 const staticApps: AppDefinition[] = [
   gmail,
@@ -78,6 +79,7 @@ const staticApps: AppDefinition[] = [
   trello,
   vercel,
   jfrogArtifactory,
+  stripe,
 ];
 
 export const getApps = (): AppDefinition[] => {
