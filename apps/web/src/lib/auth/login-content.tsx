@@ -10,8 +10,20 @@ import { CAPS } from "@/lib/env";
 
 export const LoginContent = () => {
   const router = useRouter();
-  const { isAuthenticated, isLoading, user, signIn, signOut } = useAuth();
+  const {
+    isAuthenticated,
+    isLoading,
+    user,
+    signIn,
+    signOut,
+    authProviderId,
+    authProviderName,
+  } = useAuth();
   const [signingIn, setSigningIn] = useState(false);
+
+  // Google keeps its branded button; any other provider (generic OIDC) gets a
+  // neutral button labelled with the configured provider name.
+  const isGoogle = authProviderId === "google";
 
   useEffect(() => {
     if (!isAuthenticated || !user) return;
@@ -84,15 +96,23 @@ export const LoginContent = () => {
             <Button
               size="lg"
               variant="outline"
-              className="w-full gap-2 text-base bg-white text-black hover:bg-gray-100 dark:bg-white dark:text-black dark:hover:bg-gray-100"
+              className={
+                isGoogle
+                  ? "w-full gap-2 text-base bg-white text-black hover:bg-gray-100 dark:bg-white dark:text-black dark:hover:bg-gray-100"
+                  : "w-full gap-2 text-base"
+              }
               loading={signingIn}
               onClick={() => {
                 setSigningIn(true);
                 signIn();
               }}
             >
-              <GoogleIcon />
-              {signingIn ? "Redirecting..." : "Continue with Google"}
+              {isGoogle && <GoogleIcon />}
+              {signingIn
+                ? "Redirecting..."
+                : isGoogle
+                  ? "Continue with Google"
+                  : `Continue with ${authProviderName}`}
             </Button>
             <p className="text-muted-foreground mt-4 text-center text-xs">
               By continuing, you acknowledge OneCLI&apos;s{" "}

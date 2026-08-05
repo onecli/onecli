@@ -11,9 +11,12 @@ const errors: Record<string, { title: string; description: React.ReactNode }> =
       title: "OAuth not configured",
       description: (
         <p>
-          <Code>NEXTAUTH_SECRET</Code> is set but <Code>GOOGLE_CLIENT_ID</Code>{" "}
-          and <Code>GOOGLE_CLIENT_SECRET</Code> are missing. Either provide all
-          three or remove <Code>NEXTAUTH_SECRET</Code> to use local mode.
+          <Code>NEXTAUTH_SECRET</Code> is set but no login provider is
+          configured. Set Google credentials (<Code>GOOGLE_CLIENT_ID</Code> and{" "}
+          <Code>GOOGLE_CLIENT_SECRET</Code>) or OIDC credentials (
+          <Code>OIDC_ISSUER</Code>, <Code>OIDC_CLIENT_ID</Code>, and{" "}
+          <Code>OIDC_CLIENT_SECRET</Code>), or remove{" "}
+          <Code>NEXTAUTH_SECRET</Code> to use local mode.
         </p>
       ),
     },

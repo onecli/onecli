@@ -26,6 +26,10 @@ export interface AuthContextValue {
   user: AuthUser | null;
   signIn: () => Promise<void>;
   signOut: () => Promise<void>;
+  // NextAuth id + label of the active login provider (e.g. "google"/"Google" or
+  // "oidc"/"Okta"); empty in local mode. Drives the login button.
+  authProviderId: string;
+  authProviderName: string;
   // Email OTP flow (cloud-only, undefined in OSS mode)
   signUpWithEmail?: (email: string) => Promise<EmailOtpStep>;
   signInWithEmail?: (email: string) => Promise<EmailOtpStep>;

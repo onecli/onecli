@@ -133,6 +133,10 @@ All environment variables are optional for local development:
 | `NEXTAUTH_SECRET`       | Enables Google OAuth (multi-user) | Single-user mode   |
 | `GOOGLE_CLIENT_ID`      | Google OAuth client ID            | —                  |
 | `GOOGLE_CLIENT_SECRET`  | Google OAuth client secret        | —                  |
+| `OIDC_ISSUER`           | Generic OIDC issuer URL           | —                  |
+| `OIDC_CLIENT_ID`        | Generic OIDC client ID            | —                  |
+| `OIDC_CLIENT_SECRET`    | Generic OIDC client secret        | —                  |
+| `OIDC_PROVIDER_NAME`    | OIDC login button label           | `SSO`              |
 | `SECRET_ENCRYPTION_KEY` | AES-256-GCM encryption key        | Auto-generated     |
 
 ## Contributing
