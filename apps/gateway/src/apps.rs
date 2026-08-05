@@ -372,6 +372,33 @@ static APP_PROVIDERS: &[AppProvider] = &[
         body_transform: None,
     },
     AppProvider {
+        provider: "google-fit",
+        display_name: "Google Fit",
+        host_rules: &[
+            HostRule {
+                pattern: HostPattern::Exact("www.googleapis.com"),
+                path_prefix: Some("/fitness/"),
+                strategy: AuthStrategy::Bearer,
+                intercept: false,
+                credential_host_field: None,
+            },
+            HostRule {
+                pattern: HostPattern::Exact("fitness.googleapis.com"),
+                path_prefix: Some("/fitness/"),
+                strategy: AuthStrategy::Bearer,
+                intercept: false,
+                credential_host_field: None,
+            },
+        ],
+        refresh: Some(&GOOGLE_REFRESH),
+        metadata_headers: &[],
+        credential_headers: &[],
+        credential_params: &[],
+        host_rewrite: None,
+        finalizer: None,
+        body_transform: None,
+    },
+    AppProvider {
         provider: "google-drive",
         display_name: "Google Drive",
         host_rules: &[

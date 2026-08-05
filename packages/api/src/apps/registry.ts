@@ -16,6 +16,7 @@ import { googleContacts } from "./google-contacts";
 import { googleDocs } from "./google-docs";
 import { googleDrive } from "./google-drive";
 import { googleForms } from "./google-forms";
+import { googleFit } from "./google-fit";
 import { googleMeet } from "./google-meet";
 import { googlePhotos } from "./google-photos";
 import { googleSearchConsole } from "./google-search-console";
@@ -54,6 +55,7 @@ const staticApps: AppDefinition[] = [
   googleClassroom,
   googleDocs,
   googleForms,
+  googleFit,
   googleMeet,
   googlePhotos,
   googleSearchConsole,

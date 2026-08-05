@@ -1959,6 +1959,53 @@
       ]
     }
   },
+  "google-fit": {
+    "aggregate_data": {
+      "hostPattern": "www.googleapis.com",
+      "paths": [
+        "/fitness/v1/users/me/dataset:aggregate"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "list_data_sources": {
+      "hostPattern": "www.googleapis.com",
+      "paths": [
+        "/fitness/v1/users/me/dataSources"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_dataset_points": {
+      "hostPattern": "www.googleapis.com",
+      "paths": [
+        "/fitness/v1/users/me/dataSources/*/datasets/*"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_sessions": {
+      "hostPattern": "www.googleapis.com",
+      "paths": [
+        "/fitness/v1/users/me/sessions"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "read_all": {
+      "hostPattern": "www.googleapis.com",
+      "paths": [
+        "/fitness/v1/*"
+      ],
+      "methods": [
+        "GET"
+      ]
+    }
+  },
   "google-forms": {
     "batch_update_form": {
       "hostPattern": "forms.googleapis.com",
