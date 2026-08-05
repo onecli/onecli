@@ -1,5 +1,65 @@
 # Changelog
 
+## [1.45.0](https://github.com/onecli/onecli/compare/v1.44.0...v1.45.0) (2026-07-31)
+
+
+### Features
+
+* install page, per-connection resources, approvals bell ([#470](https://github.com/onecli/onecli/issues/470)) ([834af80](https://github.com/onecli/onecli/commit/834af801e35a09ab7b01669a65488de4a89687e9))
+
+## [1.44.0](https://github.com/onecli/onecli/compare/v1.43.3...v1.44.0) (2026-07-29)
+
+
+### Features
+
+* agent grants — per-agent credential access replaces the project policy page ([#462](https://github.com/onecli/onecli/issues/462)) ([7e1c0e3](https://github.com/onecli/onecli/commit/7e1c0e3bdb9817e7cc7ba2378269242e0040e9a3))
+
+## [1.43.3](https://github.com/onecli/onecli/compare/v1.43.2...v1.43.3) (2026-07-26)
+
+
+### Bug Fixes
+
+* **gateway:** merge secret and OAuth app injection on shared hosts ([#429](https://github.com/onecli/onecli/issues/429)) ([8a2da30](https://github.com/onecli/onecli/commit/8a2da302680785e34a3b92d1b859af3ff9c591e4))
+
+## [1.43.2](https://github.com/onecli/onecli/compare/v1.43.1...v1.43.2) (2026-07-26)
+
+
+### Bug Fixes
+
+* **docker:** reap the gateway — tini as PID 1 plus a supervising entrypoint ([#431](https://github.com/onecli/onecli/issues/431)) ([206336e](https://github.com/onecli/onecli/commit/206336e4388d9d96d57df323c070f46772f422be))
+
+## [1.43.1](https://github.com/onecli/onecli/compare/v1.43.0...v1.43.1) (2026-07-25)
+
+
+### Bug Fixes
+
+* **gateway:** send client_id on OpenAI OAuth token refresh ([#434](https://github.com/onecli/onecli/issues/434)) ([f8179ac](https://github.com/onecli/onecli/commit/f8179ac80e003dacd16a0e4dfee2f0db330211bb))
+* resolve public URLs from what we configured, not from request headers ([#451](https://github.com/onecli/onecli/issues/451)) ([a9799ca](https://github.com/onecli/onecli/commit/a9799ca0b4a7fb91ed29f7f7241f29f418090496))
+
+## [1.43.0](https://github.com/onecli/onecli/compare/v1.42.0...v1.43.0) (2026-07-25)
+
+
+### Features
+
+* drop the legacy policy model, convert to v2 rules on boot ([#448](https://github.com/onecli/onecli/issues/448)) ([345ac58](https://github.com/onecli/onecli/commit/345ac585fdcd7dc4b05b36236022cbb4d4367b91))
+
+
+### Bug Fixes
+
+* **api:** resolve the OAuth callback's app origin from configured APP_URL ([#421](https://github.com/onecli/onecli/issues/421)) ([8d11172](https://github.com/onecli/onecli/commit/8d111722c0cab2a019c4727d6fd42fdb90946806))
+
+## [1.42.0](https://github.com/onecli/onecli/compare/v1.41.0...v1.42.0) (2026-07-23)
+
+
+### Features
+
+* unified first-match policy engine with automatic migration ([#436](https://github.com/onecli/onecli/issues/436)) ([21b015b](https://github.com/onecli/onecli/commit/21b015b6621346d8d43ea0b96c571bc2f24e8b10))
+
+
+### Bug Fixes
+
+* **policy:** close credential-injection host-enforcement bypass ([#438](https://github.com/onecli/onecli/issues/438)) ([1633c21](https://github.com/onecli/onecli/commit/1633c21e20874f7d9add80f2d566c7c5424070d4))
+
 ## [1.41.0](https://github.com/onecli/onecli/compare/v1.40.0...v1.41.0) (2026-07-07)
 
 

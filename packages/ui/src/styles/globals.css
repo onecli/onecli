@@ -41,8 +41,8 @@
   --sidebar-accent-foreground: oklch(0.205 0 0);
   --sidebar-border: oklch(0.922 0 0);
   --sidebar-ring: oklch(0.708 0 0);
-  /* OneCLI brand: green #19BA5D */
-  --brand: #19ba5d;
+  /* OneCLI brand: green #14994c */
+  --brand: #14994c;
   --brand-foreground: #ffffff;
 }
 
@@ -67,7 +67,7 @@
   --border: oklch(0.4 0 0);
   --input: oklch(0.4 0 0);
   --ring: oklch(0.4 0 0);
-  --chart-1: #19ba5d;
+  --chart-1: #14994c;
   --chart-2: oklch(0.75 0.15 200);
   --chart-3: #12944a;
   --chart-4: oklch(0.7 0.12 200);
@@ -75,14 +75,14 @@
   --sidebar: #1a1918;
   --sidebar-foreground: oklch(0.985 0 0);
   /* OneCLI brand green for sidebar active states */
-  --sidebar-primary: #19ba5d;
+  --sidebar-primary: #14994c;
   --sidebar-primary-foreground: #ffffff;
   --sidebar-accent: oklch(0.269 0 0);
   --sidebar-accent-foreground: oklch(0.985 0 0);
   --sidebar-border: oklch(0.3 0 0);
   --sidebar-ring: oklch(0.35 0 0);
-  /* OneCLI brand: green #19BA5D */
-  --brand: #19ba5d;
+  /* OneCLI brand: green #14994c */
+  --brand: #14994c;
   --brand-foreground: #ffffff;
 }
 

@@ -190,6 +190,8 @@ main() {
   echo "  Dashboard:  http://$ONECLI_BIND_HOST:${ONECLI_APP_PORT:-10254}"
   echo "  Gateway:    http://$ONECLI_BIND_HOST:${ONECLI_GATEWAY_PORT:-10255}"
   echo ""
+  echo "  Reaching OneCLI at another address (tunnel, proxy, domain)? Set APP_URL in $INSTALL_DIR/.env"
+  echo ""
   echo "  Compose file: $COMPOSE_FILE"
   echo ""
   echo "  To stop:   docker compose -p $PROJECT_NAME -f $COMPOSE_FILE down"

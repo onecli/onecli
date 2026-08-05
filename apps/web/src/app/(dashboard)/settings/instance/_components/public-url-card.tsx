@@ -10,7 +10,13 @@ import {
 } from "@onecli/ui/components/card";
 import { useCopyToClipboard } from "@/hooks/use-copy-to-clipboard";
 
-export const PublicUrlCard = ({ appUrl }: { appUrl: string }) => {
+export interface PublicUrlCardProps {
+  appUrl: string;
+  /** No APP_URL configured — `appUrl` came from the current request. */
+  autoDetected?: boolean;
+}
+
+export const PublicUrlCard = ({ appUrl, autoDetected }: PublicUrlCardProps) => {
   const { copied, copy } = useCopyToClipboard();
 
   return (
@@ -33,21 +39,34 @@ export const PublicUrlCard = ({ appUrl }: { appUrl: string }) => {
           <button
             type="button"
             onClick={() => copy(appUrl)}
+            aria-label={copied ? "Public URL copied" : "Copy public URL"}
             className="text-muted-foreground hover:text-foreground shrink-0 rounded-md border p-2 transition-colors"
           >
             {copied ? (
-              <Check className="text-brand size-4" />
+              <Check className="text-brand size-4" aria-hidden />
             ) : (
-              <Copy className="size-4" />
+              <Copy className="size-4" aria-hidden />
             )}
           </button>
         </div>
         <p className="text-muted-foreground text-xs">
-          Configure via the{" "}
-          <code className="bg-muted rounded px-1 py-0.5 text-[11px]">
-            APP_URL
-          </code>{" "}
-          environment variable.{" "}
+          {autoDetected ? (
+            <>
+              Auto-detected from the address you&apos;re on. Set the{" "}
+              <code className="bg-muted rounded px-1 py-0.5 text-[11px]">
+                APP_URL
+              </code>{" "}
+              environment variable to pin it.{" "}
+            </>
+          ) : (
+            <>
+              Configured via the{" "}
+              <code className="bg-muted rounded px-1 py-0.5 text-[11px]">
+                APP_URL
+              </code>{" "}
+              environment variable.{" "}
+            </>
+          )}
           <a
             href="https://onecli.sh/docs/quickstart"
             target="_blank"

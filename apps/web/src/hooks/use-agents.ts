@@ -16,25 +16,31 @@ import { invalidateGatewayCache } from "@/lib/api/cache";
 export const useAgents = (enabled = true) =>
   useQuery({ queryKey: queryKeys.agents.list(), queryFn: getAgents, enabled });
 
-export const useAgentGranularAccess = (enabled = true) =>
+/** Detail read incl. `recentRequestAt`. With `poll`, refetches every 5s until
+ * a request is seen — the Install page's "waiting for the first request"
+ * signal — then stops on its own. An errored read (e.g. the agent was deleted
+ * mid-wait) also stops the loop instead of hammering a 404 every 5s. */
+export const useAgentDetail = (
+  agentId: string,
+  options: { poll?: boolean } = {},
+) =>
   useQuery({
-    queryKey: queryKeys.agents.granularAccess(),
-    queryFn: agents.granularAccess,
-    enabled,
+    queryKey: queryKeys.agents.detail(agentId),
+    queryFn: () => agents.get(agentId),
+    enabled: agentId.length > 0,
+    refetchInterval: options.poll
+      ? (query) =>
+          query.state.error || query.state.data?.recentRequestAt ? false : 5000
+      : undefined,
   });
 
-export const useAgentSecrets = (agentId: string, enabled = true) =>
+/** Agents of an explicitly-chosen project (the org-level Get Started picker) —
+ * everywhere else use `useAgents()`, which follows the URL scope. */
+export const useAgentsForProject = (projectId: string) =>
   useQuery({
-    queryKey: queryKeys.agents.secrets(agentId),
-    queryFn: () => agents.secrets(agentId),
-    enabled: enabled && agentId.length > 0,
-  });
-
-export const useAgentConnections = (agentId: string, enabled = true) =>
-  useQuery({
-    queryKey: queryKeys.agents.connections(agentId),
-    queryFn: () => agents.connections(agentId),
-    enabled: enabled && agentId.length > 0,
+    queryKey: queryKeys.agents.forProject(projectId),
+    queryFn: () => agents.list({ projectId }),
+    enabled: projectId.length > 0,
   });
 
 export const useCreateAgent = () => {
@@ -113,69 +119,5 @@ export const useSetDefaultAgent = () => {
       toast.success("Default agent updated");
     },
     onError: () => toast.error("Failed to set default agent"),
-  });
-};
-
-// Credential-access mutations. These invalidate only the React Query cache;
-// the audited API routes invalidate the gateway cache server-side (withAudit),
-// and the caller (the manage-access dialog) shows a single consolidated toast,
-// so these are intentionally headless (no gateway call, no per-hook toast).
-// The mode + connection mutations also refresh the connection→agents reverse
-// view (app-page connection cards, keyed under connections.*), which mirrors
-// this access; secrets aren't shown there, so useUpdateAgentSecrets doesn't.
-
-export const useUpdateSecretMode = () => {
-  const qc = useQueryClient();
-  return useMutation({
-    mutationFn: ({
-      agentId,
-      mode,
-    }: {
-      agentId: string;
-      mode: "all" | "selective";
-    }) => agents.updateSecretMode(agentId, mode),
-    onSuccess: (_data, { agentId }) => {
-      qc.invalidateQueries({ queryKey: queryKeys.agents.secrets(agentId) });
-      qc.invalidateQueries({ queryKey: queryKeys.agents.all() });
-      qc.invalidateQueries({ queryKey: queryKeys.connections.all() });
-    },
-  });
-};
-
-export const useUpdateAgentSecrets = () => {
-  const qc = useQueryClient();
-  return useMutation({
-    mutationFn: ({
-      agentId,
-      secretIds,
-    }: {
-      agentId: string;
-      secretIds: string[];
-    }) => agents.updateSecrets(agentId, secretIds),
-    onSuccess: (_data, { agentId }) => {
-      qc.invalidateQueries({ queryKey: queryKeys.agents.secrets(agentId) });
-      qc.invalidateQueries({ queryKey: queryKeys.agents.all() });
-    },
-  });
-};
-
-export const useUpdateAgentConnections = () => {
-  const qc = useQueryClient();
-  return useMutation({
-    mutationFn: ({
-      agentId,
-      connections,
-    }: {
-      agentId: string;
-      connections: {
-        appConnectionId: string;
-        sessionPolicy?: Record<string, unknown> | null;
-      }[];
-    }) => agents.updateConnections(agentId, connections),
-    onSuccess: (_data, { agentId }) => {
-      qc.invalidateQueries({ queryKey: queryKeys.agents.connections(agentId) });
-      qc.invalidateQueries({ queryKey: queryKeys.agents.all() });
-      qc.invalidateQueries({ queryKey: queryKeys.connections.all() });
-    },
   });
 };

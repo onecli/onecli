@@ -47,7 +47,8 @@ export interface CredentialsFlowProps {
   connectionId?: string;
   preContent?: ReactNode;
   hiddenFields?: Record<string, string>;
-  onSuccess: () => void;
+  /** Carries the freshly-created connection (absent on reconnects). */
+  onSuccess: (connection?: { id: string; label: string | null }) => void;
   onError: (message: string) => void;
   projectId?: string;
   orgId?: string;
@@ -160,7 +161,12 @@ export const CredentialsFlow = ({
             : (data?.error?.message ?? "Failed to connect");
         throw new Error(message);
       }
-      onSuccess();
+      // The create branch returns the fresh connection — the success state's
+      // attach step keys on it (reconnects return no connection, on purpose).
+      const data = (await resp.json().catch(() => null)) as {
+        connection?: { id: string; label: string | null };
+      } | null;
+      onSuccess(data?.connection);
     } catch (err) {
       onError(err instanceof Error ? err.message : "Failed to connect");
     } finally {

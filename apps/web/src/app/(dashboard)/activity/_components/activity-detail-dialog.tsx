@@ -1,7 +1,5 @@
 "use client";
 
-import Link from "next/link";
-import { usePathname } from "next/navigation";
 import {
   Dialog,
   DialogContent,
@@ -16,7 +14,6 @@ import {
 import { StatusBadge } from "./status-badge";
 import { MethodBadge } from "./method-badge";
 import { ProviderIcon } from "./provider-icon";
-import { withProjectPrefix } from "@/lib/navigation";
 import { hasJsonData } from "@onecli/api/lib/format";
 import {
   isBlockedRequest,
@@ -25,6 +22,8 @@ import {
   isRateLimitedRequest,
   getBlockedByRule,
   getConnectionLabel,
+  getMatchedRuleName,
+  getMatchedRuleScope,
   type RequestLogEntry,
 } from "@onecli/api/services/request-log-service";
 
@@ -50,13 +49,17 @@ export const ActivityDetailDialog = ({
   log,
   onClose,
 }: ActivityDetailDialogProps) => {
-  const pathname = usePathname();
   const blocked = log ? isBlockedRequest(log) : false;
   const defaultDenied = log ? isDefaultDenied(log) : false;
   const rateLimited = log ? isRateLimitedRequest(log) : false;
   const blockedByRule = log ? getBlockedByRule(log) : null;
+  const matchedRuleName = log ? getMatchedRuleName(log) : null;
+  const matchedRuleScope = log ? getMatchedRuleScope(log) : null;
   const connectionLabel = log ? getConnectionLabel(log) : null;
-  const rulesUrl = withProjectPrefix(pathname, "/rules");
+  // Rule attributions below are PLAIN TEXT since step 6: they used to link to
+  // the project policy page, which no longer exists — and a project member
+  // cannot edit the rule anyway (org guardrails and compiled grants are the
+  // only rule sources left).
 
   return (
     <Dialog open={!!log} onOpenChange={() => onClose()}>
@@ -115,24 +118,35 @@ export const ActivityDetailDialog = ({
             </Row>
             {defaultDenied && (
               <Row label="Reason">
-                <Link
-                  href={rulesUrl}
-                  className="text-destructive hover:text-destructive/80 underline underline-offset-4 transition-colors"
-                >
-                  No matching allow rule
-                </Link>
+                <span className="text-destructive">No matching allow rule</span>
               </Row>
             )}
             {(blocked || rateLimited) && blockedByRule && (
               <Row label={rateLimited ? "Limited by" : "Blocked by"}>
-                <Link
-                  href={rulesUrl}
-                  className="text-destructive hover:text-destructive/80 underline underline-offset-4 transition-colors"
-                >
-                  {blockedByRule}
-                </Link>
+                <span className="text-destructive">{blockedByRule}</span>
               </Row>
             )}
+            {matchedRuleName && !blockedByRule && !defaultDenied && (
+              // The v2 engine's attribution (step 9) for decisions no other
+              // row already names — allowed and approval requests. Blocked/
+              // rate-limited rows show "Blocked/Limited by"; default-denied
+              // rows show the "Reason" row instead.
+              <Row label="Decided by rule">
+                <span>{matchedRuleName}</span>
+              </Row>
+            )}
+            {!matchedRuleName &&
+              matchedRuleScope === "organization" &&
+              !blockedByRule &&
+              !defaultDenied && (
+                // An org rule decided, but its details are org-admin-only —
+                // the server redacted the name (the reflections' contract).
+                <Row label="Decided by rule">
+                  <span className="text-muted-foreground">
+                    An organization rule
+                  </span>
+                </Row>
+              )}
             <Row label="Latency">
               <span className="font-mono text-xs tabular-nums">
                 {log.latencyMs}ms

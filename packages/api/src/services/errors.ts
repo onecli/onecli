@@ -1,8 +1,10 @@
 export type ServiceErrorCode =
   | "NOT_FOUND"
   | "BAD_REQUEST"
+  | "UNPROCESSABLE"
   | "CONFLICT"
-  | "FORBIDDEN";
+  | "FORBIDDEN"
+  | "GONE";
 
 export class ServiceError extends Error {
   readonly code: ServiceErrorCode;

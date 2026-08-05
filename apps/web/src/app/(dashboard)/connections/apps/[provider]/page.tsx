@@ -37,14 +37,6 @@ export default async function AppDetailPage({ params }: Props) {
         darkIcon: app.darkIcon,
         description: app.description,
         connectionType: app.connectionMethod.type,
-        defaultScopes:
-          app.connectionMethod.type === "oauth"
-            ? (app.connectionMethod.defaultScopes ?? [])
-            : [],
-        permissions:
-          app.connectionMethod.type === "oauth"
-            ? (app.connectionMethod.permissions ?? [])
-            : [],
       }}
       configurable={app.configurable}
       hasEnvDefaults={hasEnvDefaults}

@@ -1,1 +1,5 @@
 CHANGELOG.md
+
+# Generated app-permission catalogs the gateway embeds (derived from the TS catalog; drift-checked in ee/apps/catalog-json.test.ts)
+apps/gateway/src/policy_engine/catalog.generated.json
+apps/gateway/src/ee/policy_engine/catalog*.generated.json

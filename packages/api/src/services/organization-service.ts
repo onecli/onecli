@@ -3,6 +3,8 @@ import { generateApiKey, ensureBootstrapOrgApiKey } from "./api-key-service";
 import { generateAccessToken } from "./agent-service";
 import { DEFAULT_AGENT_NAME, DEFAULT_AGENT_IDENTIFIER } from "../lib/constants";
 import { generateProjectId, generateOrganizationId } from "../lib/ids";
+import { getNewOrgPolicySeeder } from "../providers";
+import { logger } from "../lib/logger";
 
 export const slugify = (raw: string) =>
   raw
@@ -64,6 +66,11 @@ export const defaultProjectSeed = (userId: string, userEmail: string) => ({
       identifier: DEFAULT_AGENT_IDENTIFIER,
       accessToken: generateAccessToken(),
       isDefault: true,
+      // Attach-model step 5: every new agent starts selective with nothing
+      // attached — credentials arrive through explicit grants. Explicit at
+      // every creation site because the schema default stays "all" until the
+      // column retires (step 8).
+      secretMode: "selective",
     },
   },
 });
@@ -113,6 +120,16 @@ export const bootstrapOrganization = async (
     },
     select: { id: true, organizationId: true },
   });
+
+  // Seed the new org's initial published policy (cloud: an allow-posture org
+  // Default Rule). Best-effort — a hiccup must not fail onboarding; the org then
+  // has no published generation and the engine allows until one is authored. OSS
+  // default is a no-op.
+  try {
+    await getNewOrgPolicySeeder().seed(org.id, project.id);
+  } catch (err) {
+    logger.warn({ err, organizationId: org.id }, "new-org policy seed failed");
+  }
 
   return { project, organization: org };
 };
@@ -174,6 +191,18 @@ export const ensureSharedOrgWithKey = async (
   // ONECLI_ORG_API_KEY / _FILE, else generated). Idempotent — no-ops once seeded.
   await ensureBootstrapOrgApiKey({ organizationId: org.id, userId, userEmail });
 
+  // Seed the shared org's initial published policy (step 9.5 — onprem rides
+  // the EE engine, so a fresh instance starts on v2 directly). Best-effort +
+  // idempotent, like the per-user-org bootstrap above.
+  try {
+    await getNewOrgPolicySeeder().seed(org.id);
+  } catch (err) {
+    logger.warn(
+      { err, organizationId: org.id },
+      "shared-org policy seed failed",
+    );
+  }
+
   return org;
 };
 
@@ -213,6 +242,17 @@ export const joinSharedOrganization = async (
       },
       select: { id: true, organizationId: true },
     });
+    // Seed the new project's initial published policy (step 9.5) — a no-op
+    // for the org-scope EE seeder (idempotent on the org's existing
+    // generation), load-bearing where the seeder is project-scoped.
+    try {
+      await getNewOrgPolicySeeder().seed(org.id, project.id);
+    } catch (err) {
+      logger.warn(
+        { err, organizationId: org.id, projectId: project.id },
+        "shared-org project policy seed failed",
+      );
+    }
   }
 
   return { project, organization: org };
@@ -256,6 +296,7 @@ export const ensureProjectSeeds = async (
         identifier: DEFAULT_AGENT_IDENTIFIER,
         accessToken: generateAccessToken(),
         isDefault: true,
+        secretMode: "selective",
         projectId,
       },
     });

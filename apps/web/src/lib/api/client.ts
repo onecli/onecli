@@ -8,8 +8,11 @@ const extractErrorMessage = (body: Record<string, unknown>, status: number) => {
   return `Request failed: ${status}`;
 };
 
-export const apiGet = async <T>(path: string): Promise<T> => {
-  const res = await apiFetch(path);
+export const apiGet = async <T>(
+  path: string,
+  init?: RequestInit,
+): Promise<T> => {
+  const res = await apiFetch(path, init);
   if (!res.ok) {
     const body = await res.json().catch(() => ({}));
     throw new Error(extractErrorMessage(body, res.status));

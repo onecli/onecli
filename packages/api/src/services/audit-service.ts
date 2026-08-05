@@ -13,6 +13,8 @@ export const AUDIT_ACTIONS = {
   DELETE: "delete",
   REGENERATE: "regenerate",
   DISCONNECT: "disconnect",
+  // Policy engine: snapshot the draft policy set into the published set.
+  PUBLISH: "publish",
   // EE-only (partner layer): a user claims a partner-created org as its owner.
   CLAIM: "claim",
   // EE-only (identity): a claimed resource passed its ownership proof
@@ -23,10 +25,19 @@ export const AUDIT_ACTIONS = {
 export const AUDIT_SERVICES = {
   AGENT: "agent",
   SECRET: "secret",
-  RULE: "rule",
+  // Unified policy engine (policy_rules_v2): the priority-ordered rule model.
+  // (The legacy `rule` service retired with the old model at step 10; historical
+  // audit rows carrying it still render — the log table maps the raw string.)
+  POLICY: "policy",
+  // The attach-model grants surface (plans/project-attach-model.md, step 2):
+  // agent⇄credential grants compiled into source:"grant" policy rules.
+  GRANT: "grant",
   API_KEY: "api-key",
   APP_CONNECTION: "app-connection",
   APP_CONFIG: "app-config",
+  // EE-only (policy-engine step 7): the org app-availability allowlist
+  // (toggle + per-principal grants).
+  APP_AVAILABILITY: "app-availability",
   PROJECT: "project",
   ORGANIZATION: "organization",
   // EE-only (partner layer)
@@ -44,8 +55,6 @@ export const AUDIT_SERVICES = {
   MEMBER: "member",
   // EE-only (directory): human groups (manual + SCIM-provisioned)
   GROUP: "group",
-  // EE-only (directory): OneCLI-native agent groups
-  AGENT_GROUP: "agent-group",
   // EE-only (directory): group→org-role mappings (the mapping config itself;
   // the member role changes it drives are audited under MEMBER).
   ROLE_MAPPING: "role-mapping",

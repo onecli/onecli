@@ -6,15 +6,19 @@ import { logger } from "../lib/logger";
 const STATUS_MAP = {
   NOT_FOUND: 404,
   BAD_REQUEST: 400,
+  UNPROCESSABLE: 422,
   CONFLICT: 409,
   FORBIDDEN: 403,
+  GONE: 410,
 } as const satisfies Record<ServiceErrorCode, ContentfulStatusCode>;
 
 const ERROR_TYPE_MAP: Record<ServiceErrorCode, string> = {
   NOT_FOUND: "not_found_error",
   BAD_REQUEST: "invalid_request_error",
+  UNPROCESSABLE: "validation_error",
   CONFLICT: "invalid_request_error",
   FORBIDDEN: "authentication_error",
+  GONE: "invalid_request_error",
 };
 
 const DOCS_URL = "https://onecli.sh/docs/api-reference";

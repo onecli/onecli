@@ -5,6 +5,7 @@ import Image from "next/image";
 import { toast } from "sonner";
 import {
   Building2,
+  ChevronRight,
   Loader2,
   MoreVertical,
   Pencil,
@@ -49,8 +50,9 @@ import {
 } from "@/hooks/use-connections";
 import type { PageScope } from "@/lib/api";
 import { extractLabel } from "@onecli/api/services/connection-service";
-import { ConnectionAgentAccessSummary } from "./connection-agent-access-summary";
-import { ConnectionAgentAccessDialog } from "./connection-agent-access-dialog";
+// The read-only agent-access reflection, which reads the v2 policy engine.
+// Shared since step 10 — every edition renders it.
+import { ConnectionAgentsReflection } from "@/lib/components/policy-reflect";
 
 interface ConnectionAccountCardProps {
   connection: {
@@ -193,7 +195,7 @@ export const ConnectionAccountCard = ({
               {showAgentAccess && (
                 <DropdownMenuItem onClick={() => setAgentDialogOpen(true)}>
                   <Users className="size-4" />
-                  Manage agent access
+                  Agent access
                 </DropdownMenuItem>
               )}
               <DropdownMenuSeparator />
@@ -216,10 +218,21 @@ export const ConnectionAccountCard = ({
         </div>
 
         {showAgentAccess && (
-          <ConnectionAgentAccessSummary
-            connectionId={connection.id}
-            onManage={() => setAgentDialogOpen(true)}
-          />
+          // A neutral opener: policy rules decide agent access, so a summary
+          // line can't state it without the reflection's own evaluation.
+          <button
+            type="button"
+            onClick={() => setAgentDialogOpen(true)}
+            aria-label="View agent access"
+            className="flex min-w-0 items-center gap-1.5 rounded-sm text-xs text-muted-foreground transition-colors hover:text-foreground focus-visible:ring-ring focus-visible:ring-2 focus-visible:outline-none"
+          >
+            <Users className="size-3.5 shrink-0" aria-hidden="true" />
+            <span className="truncate">Agent access</span>
+            <ChevronRight
+              className="size-3 shrink-0 opacity-60"
+              aria-hidden="true"
+            />
+          </button>
         )}
 
         {tags.length > 0 && (
@@ -296,7 +309,7 @@ export const ConnectionAccountCard = ({
       </Dialog>
 
       {showAgentAccess && (
-        <ConnectionAgentAccessDialog
+        <ConnectionAgentsReflection
           connectionId={connection.id}
           connectionLabel={displayName}
           appName={appName}

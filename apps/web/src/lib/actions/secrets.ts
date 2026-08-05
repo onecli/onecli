@@ -3,7 +3,7 @@
 import { db } from "@onecli/db";
 import { resolveProjectContext } from "@/lib/actions/resolve-user";
 import type { ResolveOptions } from "@/lib/actions/resolve-user";
-import { APP_URL, API_URL, GATEWAY_BASE_URL } from "@/lib/env";
+import { APP_URL, API_URL } from "@/lib/env";
 import {
   listSecrets,
   createSecret as createSecretService,
@@ -61,13 +61,7 @@ export const deleteSecret = async (secretId: string): Promise<void> => {
 export const getInstallInfo = async (options?: ResolveOptions) => {
   const { projectId, userId, userEmail } = await resolveProjectContext(options);
 
-  const [keyResult, agent] = await Promise.all([
-    ensureApiKey(userId, { projectId }),
-    db.agent.findFirst({
-      where: { projectId, isDefault: true },
-      select: { accessToken: true },
-    }),
-  ]);
+  const keyResult = await ensureApiKey(userId, { projectId });
 
   if (keyResult.created) {
     await recordAuditEvent({
@@ -82,8 +76,6 @@ export const getInstallInfo = async (options?: ResolveOptions) => {
 
   return {
     apiKey: keyResult.apiKey,
-    agentToken: agent?.accessToken ?? null,
-    gatewayUrl: GATEWAY_BASE_URL,
     appUrl: APP_URL,
     apiUrl: API_URL,
   };

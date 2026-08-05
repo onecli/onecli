@@ -22,6 +22,7 @@ use crate::cache::CacheStore;
 use crate::default_interceptions;
 use crate::inject;
 use crate::policy::{self, PolicyDecision};
+use crate::policy_engine;
 
 use super::hooks;
 use super::mitm::ResolvedRules;
@@ -105,17 +106,86 @@ const AUTH_CHECK_BODY_LIMIT: usize = 8192;
 /// OAuth refresh bodies are tiny; this only guards against pathological inputs.
 const MAX_DEFAULT_INTERCEPT_BODY: usize = 64 * 1024;
 
+/// Mint any deferred credentials and fold their rules into the request's
+/// injection set. Called once the request is allowed — see
+/// [`crate::connect::PendingInjection`].
+///
+/// The merge is re-run rather than appended to: `merge_injection_rules` encodes
+/// which rule wins when a secret and an app both cover a host, and appending
+/// would silently hand that contest to the app.
+///
+/// A credential that cannot be resolved BLOCKS. The decision was made on the
+/// premise that one would be injected, so forwarding the request bare would
+/// send it upstream with less authority than the policy assumed — and read to
+/// the agent as an inexplicable upstream 401.
+///
+/// KNOWN GAP: this runs before the manual-approval wait, and before the
+/// `pre_forward` refusals (claim, budget, quota, the Dropbox guard) — those
+/// need `injection_count`, so the ordering is forced. A request denied at any
+/// of those points has therefore already minted. Closing it would mean moving
+/// header injection past the approval hold, which changes what `pre_forward`
+/// inspects for every request — more risk than the case is worth. Requests
+/// blocked by POLICY, the ones that matter, never reach here.
+pub(super) async fn materialize_injections<'a>(
+    rules: &'a ResolvedRules,
+    engine: &crate::connect::PolicyEngine,
+    cache: &dyn CacheStore,
+    method: &str,
+    path: &str,
+) -> std::result::Result<Cow<'a, [inject::InjectionRule]>, Response<hooks::ForwardResponseBody>> {
+    // Nothing deferred (every request that isn't resource-scoped) borrows the
+    // rules as they are — this sits on the hot path, so it must not allocate.
+    if rules.pending_injections.is_empty() {
+        return Ok(Cow::Borrowed(&rules.injection_rules));
+    }
+    let mut app_rules = Vec::new();
+    for pending in &rules.pending_injections {
+        match engine.materialize_pending(pending, cache).await {
+            Some(minted) => app_rules.extend(minted),
+            None => {
+                warn!(
+                    connection_id = %pending.conn.id,
+                    provider = %pending.conn.provider,
+                    %method,
+                    %path,
+                    "could not resolve the connection's credential after the request was allowed"
+                );
+                return Err(response::json(
+                    StatusCode::BAD_GATEWAY,
+                    serde_json::json!({
+                        "error": "credential_unavailable",
+                        "message": format!(
+                            "OneCLI could not obtain a credential for the {} connection, \
+                             so the request was not forwarded.",
+                            pending.conn.provider
+                        ),
+                    }),
+                ));
+            }
+        }
+    }
+    Ok(Cow::Owned(inject::merge_injection_rules(
+        app_rules,
+        rules.injection_rules.clone(),
+    )))
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn forward_request(
     req: Request<Incoming>,
     host: &str,
+    // The original, pre-rewrite host the live policy rules were assembled from —
+    // the host policy must match against. Differs from `host` only when an app
+    // rewrites the upstream to a provider-specific site; `host` stays the actual
+    // forward target (URL, `is_llm_host`, interception).
+    policy_host: &str,
     scheme: &str,
     http_client: reqwest::Client,
     rules: &ResolvedRules,
     cache: &dyn CacheStore,
     proxy_ctx: &ProxyContext,
     approval_store: &Arc<dyn ApprovalStore>,
-    pool: &sqlx::PgPool,
+    engine: &crate::connect::PolicyEngine,
 ) -> Result<Response<hooks::ForwardResponseBody>> {
     let start = std::time::Instant::now();
     let method = req.method().clone();
@@ -125,7 +195,15 @@ pub(crate) async fn forward_request(
         .map(|pq| pq.as_str().to_string())
         .unwrap_or_else(|| "/".to_string());
     let url = format!("{scheme}://{host}{path}");
-    let agent_token = proxy_ctx.agent_token.as_deref().unwrap_or("");
+
+    // An empty resource scope reaches nothing, so refuse before anything can
+    // hand out or mint a credential — ahead of the token interception below,
+    // which would otherwise serve the connection's access token straight to the
+    // client and bypass every later check.
+    if let Some(resp) = hooks::refuse_empty_scope(rules, proxy_ctx, host, method.as_str(), &path) {
+        warn!(method = %method, url = %url, "empty resource scope — request denied");
+        return Ok(resp);
+    }
 
     // Token endpoint interception: when a client SDK tries to refresh its
     // own OAuth token through the proxy, serve the cached access token from
@@ -161,7 +239,7 @@ pub(crate) async fn forward_request(
     // to inspect it (e.g. Dropbox folder scoping reads the JSON body), or for a
     // matched default interception. In OSS, both predicates return false → zero
     // overhead unless a default interception matched.
-    let (condition_buffer, req) = if crate::condition_match::needs_body_buffer(&rules.policy_rules)
+    let (condition_buffer, req) = if crate::policy_engine::needs_body_buffer(&rules.policy_rules_v2)
         || hooks::needs_request_body(rules, host, method.as_str(), &path)
     {
         let (parts, incoming) = req.into_parts();
@@ -192,23 +270,41 @@ pub(crate) async fn forward_request(
         }
     }
 
-    let has_injections = !rules.injection_rules.is_empty();
-    let enforce_deny = has_injections && !policy::is_llm_host(host);
+    let has_injections = rules.injects();
 
-    let org_id = proxy_ctx.organization_id.as_deref().unwrap_or("");
-    let pid = proxy_ctx.project_id.as_deref().unwrap_or("");
+    // Step-7 app-availability pre-check (DB-free — the set was resolved at
+    // connect). Governs ONLY identifiable app providers, so raw/unknown hosts and
+    // the LLM host are structurally never blocked (the enforce-deny carve). "Open"
+    // orgs / OSS / enforcement-off resolve to unrestricted → a no-op here.
+    // Matches on `policy_host` (pre-rewrite + port-stripped — the host the
+    // provider registry knows), NOT the port-bearing / possibly-rewritten `host`,
+    // which would silently identify no provider and never block.
+    if let Some(provider) =
+        crate::apps::app_availability_block(policy_host, &path, &rules.available_apps)
+    {
+        info!(method = %method, host = %policy_host, provider = %provider, "app unavailable to project — refusing request");
+        return Ok(response::app_unavailable(
+            &provider,
+            method.as_str(),
+            &path,
+            policy_host,
+        ));
+    }
 
-    let decision = policy::evaluate(
-        org_id,
-        pid,
+    // The first-match engine over the published `policy_rules_v2` is authoritative.
+    // `policy_host` is the pre-rewrite rule-match host; `is_llm_host(host)` is the
+    // effective host for the deny-default carve.
+    let (decision, matched_rule) = policy_engine::evaluate(
+        proxy_ctx,
+        policy_host,
         method.as_str(),
         &path,
         condition_buffer.as_deref(),
-        &rules.policy_rules,
-        agent_token,
+        has_injections,
+        policy::is_llm_host(host),
+        rules.winning_connection_id.as_deref(),
         cache,
-        &rules.policy_mode,
-        enforce_deny,
+        &rules.policy_rules_v2,
     )
     .await;
 
@@ -224,6 +320,7 @@ pub(crate) async fn forward_request(
                 start,
                 StatusCode::FORBIDDEN,
                 crate::telemetry_core::RequestDecision::BlockedByDefaultPolicy,
+                matched_rule.clone(),
             );
             return Ok(response::blocked_by_default_policy(
                 method.as_str(),
@@ -244,6 +341,7 @@ pub(crate) async fn forward_request(
                 crate::telemetry_core::RequestDecision::Blocked {
                     rule_name: rule_name.clone(),
                 },
+                matched_rule.clone(),
             );
             return Ok(response::blocked_by_policy(
                 method.as_str(),
@@ -269,6 +367,7 @@ pub(crate) async fn forward_request(
                 crate::telemetry_core::RequestDecision::RateLimited {
                     rule_name: rule_name.clone(),
                 },
+                matched_rule.clone(),
             );
             return Ok(response::rate_limited(*limit, window, *retry_after_secs));
         }
@@ -303,11 +402,20 @@ pub(crate) async fn forward_request(
 
     hooks::prepare_request(rules, host, &path, &mut headers);
 
+    // The request is allowed: mint any deferred credential now. Everything
+    // above could have refused it, and a refused request must never cause a
+    // live credential to be created upstream.
+    let injection_rules =
+        match materialize_injections(rules, engine, cache, method.as_str(), &path).await {
+            Ok(rules) => rules,
+            Err(resp) => return Ok(resp),
+        };
+
     // Apply injection rules — upstream_path may gain query-param secrets;
     // the original `path`/`url` stays clean for logging and approval metadata.
     let mut upstream_path = path.clone();
     let injection_count =
-        inject::apply_injections(&mut headers, &mut upstream_path, &rules.injection_rules);
+        inject::apply_injections(&mut headers, &mut upstream_path, &injection_rules);
     let upstream_url = format!("{scheme}://{host}{upstream_path}");
 
     if let Some(resp) = hooks::pre_forward(
@@ -315,7 +423,7 @@ pub(crate) async fn forward_request(
         proxy_ctx,
         host,
         cache,
-        pool,
+        &engine.pool,
         injection_count,
         method.as_str(),
         &path,
@@ -472,7 +580,7 @@ pub(crate) async fn forward_request(
                 .unwrap_or_default();
 
             let log_id = uuid::Uuid::new_v4().to_string();
-            guard.set_log_context(log_id.clone(), pool.clone());
+            guard.set_log_context(log_id.clone(), engine.pool.clone());
             emit_approval_telemetry(
                 proxy_ctx,
                 host,
@@ -486,6 +594,9 @@ pub(crate) async fn forward_request(
                 },
                 Some(log_id.clone()),
                 None,
+                // The pending INSERT is what persists the column (approval
+                // resolution is an UPDATE that never writes it).
+                matched_rule.clone(),
             );
 
             info!(
@@ -496,9 +607,54 @@ pub(crate) async fn forward_request(
                 "holding request for approval"
             );
 
-            let outcome = decision_rx
-                .wait(Duration::from_secs(APPROVAL_TIMEOUT_SECS))
-                .await;
+            let mut shutdown_signal = crate::shutdown::subscribe();
+            let outcome = tokio::select! {
+                outcome = decision_rx.wait(Duration::from_secs(APPROVAL_TIMEOUT_SECS)) => {
+                    Some(outcome)
+                }
+                // Shutting down with nobody having decided. Left alone this
+                // request would be cut without an answer while its approval
+                // card lingered in the dashboard for another three minutes —
+                // reviewable, and approvable into a process that no longer
+                // exists. Release it explicitly instead.
+                _ = shutdown_signal.wait() => None,
+            };
+
+            let Some(outcome) = outcome else {
+                warn!(
+                    url = %url,
+                    approval_id = %approval_id,
+                    "shutting down — releasing held request for retry"
+                );
+                // Defuse first: the guard's Drop would spawn this same cleanup
+                // detached, racing the pool close that follows the drain.
+                guard.defuse();
+                approval_store
+                    .remove(org_id, project_id, &approval_id)
+                    .await;
+                let resolved_at = time::OffsetDateTime::now_utc()
+                    .format(&time::format_description::well_known::Iso8601::DEFAULT)
+                    .unwrap_or_default();
+                emit_approval_telemetry(
+                    proxy_ctx,
+                    host,
+                    &method,
+                    telemetry_path,
+                    503,
+                    start.elapsed().as_millis() as u32,
+                    crate::telemetry_core::RequestDecision::ApprovalDenied {
+                        approval_id: approval_id.clone(),
+                        reason: "gateway_restarting".to_string(),
+                        triggered_at,
+                        resolved_at,
+                        approved_by: None,
+                    },
+                    None,
+                    Some(log_id),
+                    matched_rule.clone(),
+                );
+                return Ok(response::gateway_restarting(&approval_id));
+            };
 
             // Decision received (or timed out) — defuse guard, handle explicitly.
             guard.defuse();
@@ -548,6 +704,7 @@ pub(crate) async fn forward_request(
                         },
                         None,
                         Some(log_id),
+                        matched_rule.clone(),
                     );
                     return Ok(response::manual_approval_denied(&approval_id, reason));
                 }
@@ -667,7 +824,6 @@ pub(crate) async fn forward_request(
                 status,
                 provider,
                 display_name,
-                proxy_ctx.agent_id.as_deref(),
                 proxy_ctx.project_id.as_deref(),
             ));
         }
@@ -728,7 +884,6 @@ pub(crate) async fn forward_request(
                     StatusCode::BAD_REQUEST,
                     provider,
                     display_name,
-                    proxy_ctx.agent_id.as_deref(),
                     proxy_ctx.project_id.as_deref(),
                 ));
             }
@@ -850,6 +1005,7 @@ pub(crate) async fn forward_request(
             connection_label: rules.connection_label.clone(),
             existing_log_id: approval_log_id,
             decision: approval_decision,
+            matched_rule,
         };
 
         hooks::track_and_wrap(meta, rules, &resp_headers, upstream_resp.bytes_stream())
@@ -870,6 +1026,7 @@ pub(crate) async fn forward_request(
     Ok(response)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn emit_policy_telemetry(
     proxy_ctx: &super::ProxyContext,
     host: &str,
@@ -878,6 +1035,7 @@ fn emit_policy_telemetry(
     start: std::time::Instant,
     status: StatusCode,
     decision: crate::telemetry_core::RequestDecision,
+    matched_rule: Option<crate::policy::MatchedRule>,
 ) {
     let (pid, aid) = match (
         proxy_ctx.project_id.as_deref(),
@@ -920,6 +1078,7 @@ fn emit_policy_telemetry(
         existing_log_id: None,
         log_id: None,
         budget_charge: None,
+        matched_rule,
     });
 }
 
@@ -934,6 +1093,7 @@ fn emit_approval_telemetry(
     decision: crate::telemetry_core::RequestDecision,
     log_id: Option<String>,
     existing_log_id: Option<String>,
+    matched_rule: Option<crate::policy::MatchedRule>,
 ) {
     let (pid, aid) = match (
         proxy_ctx.project_id.as_deref(),
@@ -975,6 +1135,7 @@ fn emit_approval_telemetry(
         existing_log_id,
         log_id,
         budget_charge: None,
+        matched_rule,
     });
 }
 

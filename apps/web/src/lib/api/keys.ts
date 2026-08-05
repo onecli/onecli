@@ -8,21 +8,25 @@ export const queryKeys = {
   agents: {
     all: () => ["agents", ...scope()] as const,
     list: () => [...queryKeys.agents.all(), "list"] as const,
-    secrets: (agentId: string) =>
-      [...queryKeys.agents.all(), agentId, "secrets"] as const,
-    connections: (agentId: string) =>
-      [...queryKeys.agents.all(), agentId, "connections"] as const,
-    granularAccess: () =>
-      [...queryKeys.agents.all(), "granular-access"] as const,
+    detail: (agentId: string) =>
+      [...queryKeys.agents.all(), "detail", agentId] as const,
+    // Explicitly-targeted project (the org-level picker) — keyed by that
+    // project, deliberately outside the URL-derived scope() prefix.
+    forProject: (projectId: string) =>
+      ["agents", "for-project", projectId] as const,
   },
   secrets: {
     all: () => ["secrets", ...scope()] as const,
     list: () => [...queryKeys.secrets.all(), "list"] as const,
   },
-  rules: {
-    all: () => ["rules", ...scope()] as const,
-    list: (pageScope: PageScope = "project") =>
-      [...queryKeys.rules.all(), "list", pageScope] as const,
+  policy: {
+    all: () => ["policy", ...scope()] as const,
+    rules: (pageScope: PageScope = "project") =>
+      [...queryKeys.policy.all(), "rules", pageScope] as const,
+    default: (pageScope: PageScope = "project") =>
+      [...queryKeys.policy.all(), "default", pageScope] as const,
+    lastPublish: (pageScope: PageScope = "project") =>
+      [...queryKeys.policy.all(), "last-publish", pageScope] as const,
   },
   domains: {
     all: () => ["domains", ...scope()] as const,
@@ -34,14 +38,6 @@ export const queryKeys = {
     members: (groupId: string) =>
       [...queryKeys.groups.all(), groupId, "members"] as const,
   },
-  agentGroups: {
-    all: () => ["agent-groups", ...scope()] as const,
-    list: () => [...queryKeys.agentGroups.all(), "list"] as const,
-    members: (groupId: string) =>
-      [...queryKeys.agentGroups.all(), groupId, "members"] as const,
-    forAgent: (agentId: string) =>
-      [...queryKeys.agentGroups.all(), "agent", agentId] as const,
-  },
   roleMappings: {
     all: () => ["role-mappings", ...scope()] as const,
     list: () => [...queryKeys.roleMappings.all(), "list"] as const,
@@ -49,10 +45,6 @@ export const queryKeys = {
   orgMembers: {
     all: () => ["org-members", ...scope()] as const,
     list: () => [...queryKeys.orgMembers.all(), "list"] as const,
-  },
-  orgAgents: {
-    all: () => ["org-agents", ...scope()] as const,
-    list: () => [...queryKeys.orgAgents.all(), "list"] as const,
   },
   ssoConnections: {
     all: () => ["sso-connections", ...scope()] as const,
@@ -66,19 +58,30 @@ export const queryKeys = {
     all: () => ["scim-tokens", ...scope()] as const,
     list: () => [...queryKeys.scimTokens.all(), "list"] as const,
   },
+  grants: {
+    all: () => ["grants", ...scope()] as const,
+    agent: (agentId: string) =>
+      [...queryKeys.grants.all(), "agent", agentId] as const,
+    connection: (connectionId: string) =>
+      [...queryKeys.grants.all(), "connection", connectionId] as const,
+  },
   connections: {
     all: () => ["connections", ...scope()] as const,
     list: (pageScope: PageScope = "project") =>
       [...queryKeys.connections.all(), "list", pageScope] as const,
     byProvider: (provider: string) =>
       [...queryKeys.connections.all(), "provider", provider] as const,
-    agents: (connectionId: string) =>
-      [...queryKeys.connections.all(), connectionId, "agents"] as const,
   },
   projectAccess: {
     all: () => ["project-access", ...scope()] as const,
     list: (projectId: string) =>
       [...queryKeys.projectAccess.all(), projectId] as const,
+  },
+  projects: {
+    all: () => ["projects", ...scope()] as const,
+    // organizationId only when explicitly overridden (account-route picker).
+    list: (organizationId?: string) =>
+      [...queryKeys.projects.all(), "list", organizationId ?? "url"] as const,
   },
   appPermissionDefinitions: {
     // Global static catalog (identical across orgs/projects) — deliberately
@@ -94,8 +97,15 @@ export const queryKeys = {
       [...queryKeys.appConfig.all(), "configured", pageScope] as const,
     envDefaults: () => [...queryKeys.appConfig.all(), "envDefaults"] as const,
   },
+  appAvailability: {
+    all: () => ["appAvailability", ...scope()] as const,
+    available: () => [...queryKeys.appAvailability.all(), "available"] as const,
+  },
   counts: {
     all: () => ["counts", ...scope()] as const,
+  },
+  installInfo: {
+    all: () => ["install-info", ...scope()] as const,
   },
   userPlan: {
     all: () => ["user-plan", ...scope()] as const,

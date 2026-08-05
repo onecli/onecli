@@ -159,6 +159,34 @@ pub(crate) fn build_injections(
     }
 }
 
+/// The host-match patterns a secret of `secret_type` injects its credential on,
+/// given its stored `host_pattern`. Single source of truth shared by the
+/// connect-time injection filter (`connect::resolve_secret_injections`) AND policy
+/// enforcement (`db::find_secret_hosts` → v2 `Target::Secret`), so injection
+/// coverage == enforcement coverage BY CONSTRUCTION — the secret analog of the
+/// provider-registry host fix. Every secret covers its own stored `host_pattern`;
+/// only `openai` adds the extra hosts one OpenAI credential is valid across
+/// (`api.openai.com`, ChatGPT, and their subdomains) regardless of which host it
+/// was stored under. Returned as `host_matches` patterns, so `*.openai.com` covers
+/// every `.openai.com` subdomain.
+#[must_use]
+pub(crate) fn secret_host_patterns(secret_type: &str, host_pattern: &str) -> Vec<String> {
+    let mut patterns = vec![host_pattern.to_string()];
+    if secret_type == "openai" {
+        for extra in [
+            "api.openai.com",
+            "chatgpt.com",
+            "*.chatgpt.com",
+            "*.openai.com",
+        ] {
+            if !patterns.iter().any(|p| p == extra) {
+                patterns.push(extra.to_string());
+            }
+        }
+    }
+    patterns
+}
+
 /// If the OpenAI OAuth access_token is expired, refresh it and persist the
 /// updated credentials. Returns `Some(updated_json)` on successful refresh,
 /// or `None` to fall through with the original (possibly expired) value.
@@ -208,17 +236,40 @@ pub(crate) async fn refresh_openai_oauth_if_expired(
     }
 }
 
+const OPENAI_TOKEN_URL: &str = "https://auth.openai.com/oauth/token";
+
+/// Public OAuth client id of the Codex CLI — the app that issued the vaulted
+/// ChatGPT session we are refreshing.
+///
+/// `auth.openai.com` rejects a `refresh_token` grant that omits it with
+/// 400 `Missing 'client_id'`, so without this the refresh can never succeed and
+/// the session hard-expires with the access token (~10 days).
+///
+/// A constant rather than configuration: it identifies OpenAI's own first-party
+/// CLI, is hardcoded in the open-source Codex client, and the vaulted
+/// `auth.json` has no `client_id` field to read it from. That is unlike the
+/// OAuth providers in `apps.rs`, which take a `client_id_env` because an
+/// operator supplies their own app there.
+const OPENAI_CODEX_CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
+
+/// Form body for the refresh_token grant. Split out from the request so the
+/// field set can be asserted — sending it needs the network.
+fn refresh_token_form(refresh_token: &str) -> [(&'static str, &str); 3] {
+    [
+        ("client_id", OPENAI_CODEX_CLIENT_ID),
+        ("grant_type", "refresh_token"),
+        ("refresh_token", refresh_token),
+    ]
+}
+
 /// Refresh an OpenAI OAuth access_token using the refresh_token.
 async fn refresh_openai_oauth_token(
     refresh_token: &str,
 ) -> anyhow::Result<(String, Option<String>)> {
     let resp = reqwest::Client::new()
-        .post("https://auth.openai.com/oauth/token")
+        .post(OPENAI_TOKEN_URL)
         .timeout(std::time::Duration::from_secs(10))
-        .form(&[
-            ("grant_type", "refresh_token"),
-            ("refresh_token", refresh_token),
-        ])
+        .form(&refresh_token_form(refresh_token))
         .send()
         .await
         .map_err(|e| anyhow::anyhow!("openai oauth token refresh request failed: {e}"))?;
@@ -253,6 +304,41 @@ async fn refresh_openai_oauth_token(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── openai oauth refresh ───────────────────────────────────────────
+
+    // The regression guard for a refresh that never once succeeded: without
+    // `client_id`, auth.openai.com answers 400 "Missing 'client_id'", the
+    // gateway falls through to the expired token, and every chatgpt.com request
+    // 401s until the user re-authenticates by hand.
+    #[test]
+    fn refresh_token_form_sends_client_id_and_the_grant() {
+        let form = refresh_token_form("rt-abc123");
+
+        assert_eq!(
+            form,
+            [
+                ("client_id", OPENAI_CODEX_CLIENT_ID),
+                ("grant_type", "refresh_token"),
+                ("refresh_token", "rt-abc123"),
+            ]
+        );
+    }
+
+    // Pinned as a literal: a typo here is not a compile error and not a test
+    // failure elsewhere — it surfaces as `invalid_client` from OpenAI, inside a
+    // warning, roughly ten days after anyone touched this.
+    #[test]
+    fn client_id_is_the_codex_cli_app() {
+        assert_eq!(OPENAI_CODEX_CLIENT_ID, "app_EMoamEEZ73f0CkXaXp7hrann");
+    }
+
+    // Same reasoning: the endpoint is only exercised against the network, so a
+    // wrong URL fails at runtime rather than here.
+    #[test]
+    fn token_url_is_the_openai_oauth_endpoint() {
+        assert_eq!(OPENAI_TOKEN_URL, "https://auth.openai.com/oauth/token");
+    }
 
     // ── build_injections: anthropic ────────────────────────────────────
 
@@ -472,5 +558,49 @@ mod tests {
     fn build_injections_unknown_type() {
         let injections = build_injections("unknown", "value", None, None);
         assert!(injections.is_empty());
+    }
+
+    // ── secret_host_patterns (injection == enforcement, the OpenAI bypass) ────
+
+    #[test]
+    fn secret_host_patterns_openai_covers_all_its_hosts() {
+        // One OpenAI credential is valid across api.openai.com, ChatGPT, and the
+        // subdomains — enforcement must resolve the same set injection does.
+        assert_eq!(
+            secret_host_patterns("openai", "api.openai.com"),
+            vec![
+                "api.openai.com".to_string(),
+                "chatgpt.com".to_string(),
+                "*.chatgpt.com".to_string(),
+                "*.openai.com".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn secret_host_patterns_openai_dedups_the_stored_host() {
+        // Stored under chatgpt.com (Codex/OAuth mode): same set, no duplicate.
+        assert_eq!(
+            secret_host_patterns("openai", "chatgpt.com"),
+            vec![
+                "chatgpt.com".to_string(),
+                "api.openai.com".to_string(),
+                "*.chatgpt.com".to_string(),
+                "*.openai.com".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn secret_host_patterns_other_types_are_just_their_host() {
+        // No expansion for symmetric types — enforcement already == injection.
+        assert_eq!(
+            secret_host_patterns("anthropic", "api.anthropic.com"),
+            vec!["api.anthropic.com".to_string()]
+        );
+        assert_eq!(
+            secret_host_patterns("generic", "internal.example.com"),
+            vec!["internal.example.com".to_string()]
+        );
     }
 }

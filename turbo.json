@@ -100,7 +100,10 @@
     "RUST_LOG",
     "PORT",
     "ATLASSIAN_CLIENT_ID",
-    "ATLASSIAN_CLIENT_SECRET"
+    "ATLASSIAN_CLIENT_SECRET",
+    "EDITION",
+    "POLICY_PROOF_DATABASE_URL",
+    "CI"
   ],
   "tasks": {
     "build": {

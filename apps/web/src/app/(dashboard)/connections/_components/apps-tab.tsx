@@ -33,9 +33,13 @@ import {
   useConfiguredProviders,
   useEnvDefaultProviders,
 } from "@/hooks/use-app-config";
+import { useAvailableApps } from "@/hooks/use-available-apps";
 import { getApps, getApp } from "@onecli/api/apps/registry";
 import { RequestAppSlot } from "@/lib/components/request-app-slot";
-import { useAppMessages } from "@/hooks/use-app-connected";
+import {
+  useAppMessages,
+  type AppConnectedEvent,
+} from "@/hooks/use-app-connected";
 import { getCurrentPlan } from "@/lib/user-plan";
 import { ProAppDialog } from "@/lib/components/pro-app-dialog";
 import { AppIcon } from "./app-icon";
@@ -116,6 +120,7 @@ export const AppsTab = ({
   const connectionsQuery = useConnections(pageScope);
   const configuredQuery = useConfiguredProviders(pageScope);
   const envDefaultsQuery = useEnvDefaultProviders();
+  const availableQuery = useAvailableApps(pageScope);
   const planQuery = useQuery({
     queryKey: queryKeys.userPlan.all(),
     queryFn: getCurrentPlan,
@@ -146,7 +151,7 @@ export const AppsTab = ({
     planQuery.isPending;
 
   const handleConnected = useCallback(
-    ({ provider }: { provider?: string }) => {
+    ({ provider, connectionId }: AppConnectedEvent) => {
       queryClient.invalidateQueries({ queryKey: queryKeys.connections.all() });
       // A credentials-import connect can implicitly save an app config.
       queryClient.invalidateQueries({
@@ -154,8 +159,17 @@ export const AppsTab = ({
       });
       queryClient.invalidateQueries({ queryKey: queryKeys.counts.all() });
       if (provider && !connectOnly) {
+        const path = connectionsPath(
+          { pathname, basePath },
+          `/apps/${provider}`,
+        );
+        // Hand a brand-new account to the detail page so it can offer agent
+        // access on arrival — the popup's message is long gone by the time
+        // that page mounts. A reconnect carries no id and just navigates.
         router.push(
-          connectionsPath({ pathname, basePath }, `/apps/${provider}`),
+          connectionId
+            ? `${path}?connected=${encodeURIComponent(connectionId)}`
+            : path,
         );
       }
     },
@@ -227,12 +241,21 @@ export const AppsTab = ({
     }, []),
   });
 
+  const availableApps = availableQuery.data;
   const filteredApps = useMemo(() => {
     let apps = [...getApps()].sort((a, b) => {
       const aConnected = (connectionCounts.get(a.id) ?? 0) > 0 ? 1 : 0;
       const bConnected = (connectionCounts.get(b.id) ?? 0) > 0 ? 1 : 0;
       return bConnected - aConnected;
     });
+
+    // Availability (policy-engine step 7): when the org restricts availability,
+    // hide the apps this project may not connect. `restricted:false` (an "open"
+    // org, or OSS) leaves the picker unfiltered — no behavior change.
+    if (availableApps?.restricted) {
+      const allowed = new Set(availableApps.providers);
+      apps = apps.filter((app) => allowed.has(app.id));
+    }
 
     if (activeCategory !== "all") {
       apps = apps.filter((app) => APP_CATEGORIES[app.id] === activeCategory);
@@ -244,7 +267,7 @@ export const AppsTab = ({
     }
 
     return apps;
-  }, [connectionCounts, activeCategory, localSearch]);
+  }, [connectionCounts, activeCategory, localSearch, availableApps]);
 
   const hasActiveFilter = localSearch.trim() !== "" || activeCategory !== "all";
 

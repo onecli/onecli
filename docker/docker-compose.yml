@@ -34,11 +34,34 @@ services:
     environment:
       DATABASE_URL: postgresql://${POSTGRES_USER:-onecli}:${POSTGRES_PASSWORD:-onecli}@postgres:5432/${POSTGRES_DB:-onecli}
       NEXTAUTH_SECRET: ${NEXTAUTH_SECRET:-}
-      APP_URL: http://${ONECLI_BIND_HOST:-127.0.0.1}:${ONECLI_APP_PORT:-10254}
+      # The public URL users reach OneCLI on. The gateway needs it to build the
+      # links it puts in agent-facing responses — it answers proxy calls, so it
+      # has no browser request to derive an address from.
+      #
+      # The default below assumes you reach OneCLI at the address Docker binds
+      # to, which holds for a local or single-host install. When it doesn't — a
+      # tunnel, a reverse proxy, a real domain — set APP_URL instead of relying
+      # on it: either export it, or put it in a `.env` beside this file.
+      APP_URL: ${APP_URL:-http://${ONECLI_BIND_HOST:-127.0.0.1}:${ONECLI_APP_PORT:-10254}}
       GATEWAY_API_URL: http://${ONECLI_BIND_HOST:-127.0.0.1}:${ONECLI_GATEWAY_PORT:-10255}
+      # Where the gateway reaches the Node API. Both run in this one container
+      # (see docker/entrypoint.sh), so it is a loopback call and never leaves it.
+      #
+      # Set explicitly because images before this file's release resolve it as
+      # `INTERNAL_API_URL, else APP_URL, else loopback` — and APP_URL is now
+      # settable to a real public address. Naming it here keeps those images from
+      # sending internal vault calls out over the internet, whatever version the
+      # `image:` above pins.
+      INTERNAL_API_URL: http://localhost:10254
     volumes:
       - app-data:/app/data
     env_file:
+      # Beside this file — where an installed layout puts it ($HOME/.onecli/.env,
+      # which is also the file Compose reads for the interpolation above).
+      - path: .env
+        required: false
+      # Repo root, for a checkout where this file lives under docker/. Last, so
+      # it keeps winning in that layout.
       - path: ../.env
         required: false
     networks:

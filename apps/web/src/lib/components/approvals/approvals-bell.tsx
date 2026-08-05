@@ -14,7 +14,7 @@ import {
   TooltipContent,
   TooltipTrigger,
 } from "@onecli/ui/components/tooltip";
-import { PROJECT_PATH_RE } from "@/lib/navigation";
+import { hasProjectContext } from "@/lib/navigation";
 import { usePendingApprovals } from "@/hooks/use-approvals";
 import type { PendingApproval } from "@/lib/api/approvals";
 import { ApprovalsPopover } from "./approvals-popover";
@@ -23,17 +23,17 @@ import { ApprovalDetailsDialog } from "./approval-details-dialog";
 /**
  * Header notification bell showing pending approvals for the active project,
  * with a live count and a popover to approve/reject/inspect each held request.
- * Renders nothing outside a project page. Self-contained — drop it into any
- * header with no props.
+ * Renders nothing outside a project context (in single-project editions every
+ * dashboard page has one). Self-contained — drop it into any header with no
+ * props.
  */
 export const ApprovalsBell = () => {
   const pathname = usePathname();
-  const onProjectPage = PROJECT_PATH_RE.test(pathname);
   const { data: approvals = [] } = usePendingApprovals();
   const [open, setOpen] = useState(false);
   const [details, setDetails] = useState<PendingApproval | null>(null);
 
-  if (!onProjectPage) return null;
+  if (!hasProjectContext(pathname)) return null;
 
   const count = approvals.length;
 

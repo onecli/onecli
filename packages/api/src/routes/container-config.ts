@@ -1,5 +1,5 @@
 import { Hono } from "hono";
-import { db } from "@onecli/db";
+import { db, type Prisma } from "@onecli/db";
 import type { ApiEnv } from "../types";
 import { authMiddleware, requireProjectId } from "../middleware/auth";
 import { GATEWAY_BASE_URL } from "../lib/env";
@@ -11,8 +11,80 @@ import {
 import { buildCodexOAuthStub } from "../lib/codex-stubs";
 import { DEFAULT_AGENT_NAME, DEFAULT_AGENT_IDENTIFIER } from "../lib/constants";
 import { generateAccessToken } from "../services/agent-service";
+import { grantedSecretSelection } from "../services/policy-reflect/injection";
+import { loadInjectionRules } from "../services/policy-simulate/load-rules";
+import { resolvePrincipalSet } from "../services/policy-simulate/principal-set";
 import { getCrypto } from "../providers";
 import { logger } from "../lib/logger";
+
+/**
+ * A `where` selecting exactly the secrets this agent can be handed: the
+ * org+project fenced pool NARROWED to what its published rules grant —
+ * specific secret ids plus any whole-level grants. An agent with no grants
+ * selects NOTHING, the same fail-closed answer the gateway gives (step 7:
+ * every agent is rule-selected; there is no all-mode whole-pool arm).
+ *
+ * The pool is ANDed in rather than trusted away: the gateway selects by fetching
+ * the org/project-fenced pool and RETAINING the named ids (`connect.rs`), so a
+ * rule naming a foreign secret contributes nothing. Fencing only the RULES would
+ * not fence their target ids — write-time validation is a write-path invariant,
+ * not a query fence, and these rows were materialized by the retired bridge
+ * rather than through it.
+ */
+export const injectableSecretWhere = async (
+  agent: { id: string },
+  projectId: string,
+  organizationId: string,
+): Promise<Prisma.SecretWhereInput> => {
+  const [principals, orgRules, projectRules] = await Promise.all([
+    resolvePrincipalSet(projectId, organizationId),
+    loadInjectionRules({ scope: "organization", organizationId }, "published"),
+    loadInjectionRules({ scope: "project", projectId }, "published"),
+  ]);
+  const granted = grantedSecretSelection(
+    [...orgRules, ...projectRules],
+    agent.id,
+    principals,
+  );
+
+  const pool: Prisma.SecretWhereInput = {
+    OR: [{ projectId }, { organizationId, scope: "organization" }],
+  };
+  // Level grants match the secret's own `scope` column, which is what the
+  // gateway compares (`selection.secret_scopes.contains(&s.scope)`).
+  const arms: Prisma.SecretWhereInput[] = [];
+  if (granted.ids.length > 0) arms.push({ id: { in: granted.ids } });
+  if (granted.levels.has("project")) arms.push({ scope: "project" });
+  if (granted.levels.has("organization")) arms.push({ scope: "organization" });
+  // No grants → match nothing, never the pool.
+  if (arms.length === 0) return { id: { in: [] } };
+  return { AND: [pool, { OR: arms }] };
+};
+
+/**
+ * Which secret wins when several of a type are reachable. The gateway merges
+ * partner → org → project with later injections overriding earlier
+ * (`connect.rs`), so the PROJECT one is what actually gets injected. Descending
+ * `scope` orders "project" > "partner" > "organization", reproducing that — an
+ * unordered `findFirst` returns whichever row Postgres reaches first, which can
+ * hand the container an org secret's auth mode while the gateway injects the
+ * project's.
+ */
+const SCOPE_PRECEDENCE = { scope: "desc" } as const;
+
+/** Pick the secret of `type` this agent would actually be handed: the injectable
+ * set, narrowed to the type, resolved in the gateway's precedence order. Both
+ * LLM lookups go through here so the ordering can't drift between them. */
+export const findInjectableSecretOfType = async <S extends Prisma.SecretSelect>(
+  where: Prisma.SecretWhereInput,
+  type: string,
+  select: S,
+) =>
+  db.secret.findFirst({
+    where: { AND: [where, { type }] },
+    select,
+    orderBy: SCOPE_PRECEDENCE,
+  });
 
 const CA_CONTAINER_PATH = "/tmp/onecli-gateway-ca.pem";
 const CODEX_HOME_CONTAINER_PATH = "/home/node/.codex";
@@ -68,11 +140,11 @@ export const containerConfigRoutes = () => {
       let agent = agentIdentifier
         ? await db.agent.findFirst({
             where: { projectId, identifier: agentIdentifier },
-            select: { id: true, accessToken: true, secretMode: true },
+            select: { id: true, accessToken: true },
           })
         : await db.agent.findFirst({
             where: { projectId, isDefault: true },
-            select: { id: true, accessToken: true, secretMode: true },
+            select: { id: true, accessToken: true },
           });
 
       if (!agent && agentIdentifier) {
@@ -102,9 +174,13 @@ export const containerConfigRoutes = () => {
             identifier: DEFAULT_AGENT_IDENTIFIER,
             accessToken: generateAccessToken(),
             isDefault: true,
+            // Step 5: a self-healed container agent starts selective too — it
+            // has zero credentials until someone attaches them (the recorded
+            // product change; the attach surfaces are the flow).
+            secretMode: "selective",
             projectId,
           },
-          select: { id: true, accessToken: true, secretMode: true },
+          select: { id: true, accessToken: true },
         });
       }
 
@@ -121,24 +197,28 @@ export const containerConfigRoutes = () => {
         );
       }
 
-      // Detect auth mode from the agent's Anthropic secret metadata.
-      // In selective mode, only check secrets assigned to this agent.
-      // OAuth tokens need CLAUDE_CODE_OAUTH_TOKEN so the SDK does the token
-      // exchange. API keys need ANTHROPIC_API_KEY. Defaults to api-key for
-      // legacy secrets without metadata.
-      const anthropicSecret =
-        agent.secretMode === "selective"
-          ? await db.secret.findFirst({
-              where: {
-                type: "anthropic",
-                agentSecrets: { some: { agentId: agent.id } },
-              },
-              select: { metadata: true, encryptedValue: true },
-            })
-          : await db.secret.findFirst({
-              where: { projectId, type: "anthropic" },
-              select: { metadata: true, encryptedValue: true },
-            });
+      // Which credentials this agent can actually be handed — the same answer
+      // the gateway reaches at connect. An "all"-mode agent draws the whole
+      // fenced pool; a "selective" one draws exactly what its published rules
+      // grant, which since step 10 is the ONLY source (the legacy per-agent
+      // grant tables are frozen and unread, so reading them here would miss
+      // every credential granted the normal way — and hand the container an API
+      // key for what is actually an OAuth token).
+      const injectableSecrets = await injectableSecretWhere(
+        agent,
+        projectId,
+        auth.organizationId,
+      );
+
+      // Detect auth mode from the agent's Anthropic secret metadata. OAuth
+      // tokens need CLAUDE_CODE_OAUTH_TOKEN so the SDK does the token exchange;
+      // API keys need ANTHROPIC_API_KEY. Defaults to api-key for legacy secrets
+      // without metadata.
+      const anthropicSecret = await findInjectableSecretOfType(
+        injectableSecrets,
+        "anthropic",
+        { metadata: true, encryptedValue: true },
+      );
 
       const meta = parseAnthropicMetadata(anthropicSecret?.metadata);
 
@@ -148,19 +228,11 @@ export const containerConfigRoutes = () => {
           : { ANTHROPIC_API_KEY: "placeholder" };
 
       // Detect OpenAI auth mode for Codex container support.
-      const openaiSecret =
-        agent.secretMode === "selective"
-          ? await db.secret.findFirst({
-              where: {
-                type: "openai",
-                agentSecrets: { some: { agentId: agent.id } },
-              },
-              select: { metadata: true },
-            })
-          : await db.secret.findFirst({
-              where: { projectId, type: "openai" },
-              select: { metadata: true },
-            });
+      const openaiSecret = await findInjectableSecretOfType(
+        injectableSecrets,
+        "openai",
+        { metadata: true },
+      );
 
       const openaiMeta = parseOpenaiMetadata(openaiSecret?.metadata);
 

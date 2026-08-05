@@ -5,7 +5,6 @@
 //! service. When a WebSocket upgrade is detected, the request is routed here
 //! instead of the normal reqwest-based forwarding path.
 
-use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
@@ -85,13 +84,23 @@ fn is_websocket_forwarded_header(name: &HeaderName) -> bool {
     !NON_WS_HOP_BY_HOP.contains(&s)
 }
 
+// 8/7: this leg needs the same request context `forward_request` does, plus the
+// upstream connector resolved at CONNECT. `expect` rather than `allow` so the
+// attribute is removed by CI the day a refactor drops the count back under.
+#[expect(clippy::too_many_arguments)]
 pub(super) async fn handle_websocket(
     mut req: Request<Incoming>,
     host: &str,
+    // The original, pre-rewrite host the policy rules match against (the effective
+    // `host` may be app-rewritten) — mirrors `forward_request`'s `policy_host`.
+    policy_host: &str,
     rules: &ResolvedRules,
     cache: &dyn CacheStore,
-    pool: &sqlx::PgPool,
+    engine: &crate::connect::PolicyEngine,
     proxy_ctx: &ProxyContext,
+    // Resolved at CONNECT time against the operator's skip-verify configuration,
+    // so this leg trusts exactly what the HTTP leg trusts.
+    connector: &TlsConnector,
 ) -> Result<Response<Either<Full<Bytes>, http_body_util::StreamBody<hooks::BodyStream>>>> {
     let start = std::time::Instant::now();
     let path = req
@@ -100,24 +109,45 @@ pub(super) async fn handle_websocket(
         .map(|pq| pq.as_str().to_string())
         .unwrap_or_else(|| "/".to_string());
 
-    let agent_token = proxy_ctx.agent_token.as_deref().unwrap_or("");
-    let has_injections = !rules.injection_rules.is_empty();
-    let enforce_deny = has_injections && !policy::is_llm_host(host);
+    let has_injections = rules.injects();
 
-    let org_id = proxy_ctx.organization_id.as_deref().unwrap_or("");
-    let pid = proxy_ctx.project_id.as_deref().unwrap_or("");
+    // An empty resource scope reaches nothing — refuse the upgrade outright
+    // (the HTTP path does the same in forward.rs).
+    if let Some(resp) = hooks::refuse_empty_scope(rules, proxy_ctx, policy_host, "GET", &path) {
+        warn!(host = %policy_host, path = %path, "empty resource scope — WebSocket upgrade denied");
+        return Ok(resp);
+    }
 
-    let decision = policy::evaluate(
-        org_id,
-        pid,
+    // Step-7 app-availability pre-check (DB-free — resolved at connect; see
+    // forward.rs). Governs only identifiable app providers, so raw/LLM hosts are
+    // never blocked. WebSocket upgrades are GET. Matches on `policy_host`
+    // (pre-rewrite + port-stripped), NOT the port-bearing/rewritten `host`.
+    if let Some(provider) =
+        crate::apps::app_availability_block(policy_host, &path, &rules.available_apps)
+    {
+        warn!(host = %policy_host, path = %path, provider = %provider, "WebSocket app unavailable to project — refusing request");
+        return Ok(response::app_unavailable(
+            &provider,
+            "GET",
+            &path,
+            policy_host,
+        ));
+    }
+
+    // The first-match engine over `policy_rules_v2` is authoritative. WebSocket
+    // blocks emit no telemetry today, so the matched rule is not attributed here
+    // (allow-attribution for ws is out of scope) — only the decision is consumed.
+    let (decision, _matched) = crate::policy_engine::evaluate(
+        proxy_ctx,
+        policy_host,
         "GET",
         &path,
         None,
-        &rules.policy_rules,
-        agent_token,
+        has_injections,
+        policy::is_llm_host(host),
+        rules.winning_connection_id.as_deref(),
         cache,
-        &rules.policy_mode,
-        enforce_deny,
+        &rules.policy_rules_v2,
     )
     .await;
 
@@ -170,7 +200,7 @@ pub(super) async fn handle_websocket(
         proxy_ctx,
         host,
         cache,
-        pool,
+        &engine.pool,
         0,
         req.method().as_str(),
         &path,
@@ -192,9 +222,21 @@ pub(super) async fn handle_websocket(
         }
     }
 
+    // The upgrade is allowed: mint any deferred credential now, exactly as the
+    // HTTP path does. Without this a deferred connection would upgrade with no
+    // credential at all and fail upstream — latent today (no token-scoped
+    // provider serves WebSocket), load-bearing the moment one does.
+    let injection_rules =
+        match crate::gateway::forward::materialize_injections(rules, engine, cache, "GET", &path)
+            .await
+        {
+            Ok(rules) => rules,
+            Err(resp) => return Ok(resp),
+        };
+
     let mut upstream_path = path.clone();
     let injection_count =
-        inject::apply_injections(&mut headers, &mut upstream_path, &rules.injection_rules);
+        inject::apply_injections(&mut headers, &mut upstream_path, &injection_rules);
 
     let hostname = super::strip_port(host);
     let port = host
@@ -203,7 +245,7 @@ pub(super) async fn handle_websocket(
         .and_then(|p| p.parse::<u16>().ok())
         .unwrap_or(443);
 
-    let upstream_io = connect_upstream_tls(hostname, port)
+    let upstream_io = connect_upstream_tls(hostname, port, connector)
         .await
         .context("WebSocket: connecting to upstream")?;
 
@@ -305,23 +347,21 @@ pub(super) async fn handle_websocket(
     Ok(client_resp)
 }
 
+/// Dial the upstream over TLS with the connection's resolved configuration.
+///
+/// The config is built once at startup and handed down, so this neither
+/// rebuilds a root store per upgrade nor decides for itself what to trust —
+/// deciding for itself is how this leg came to ignore the operator's
+/// skip-verify settings while the HTTP leg honored them.
 async fn connect_upstream_tls(
     hostname: &str,
     port: u16,
+    connector: &TlsConnector,
 ) -> Result<TokioIo<tokio_rustls::client::TlsStream<TcpStream>>> {
     let tcp = TcpStream::connect((hostname, port))
         .await
         .context("TCP connect to upstream")?;
 
-    let mut root_store = rustls::RootCertStore::empty();
-    root_store.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
-
-    let mut tls_config = rustls::ClientConfig::builder()
-        .with_root_certificates(root_store)
-        .with_no_client_auth();
-    tls_config.alpn_protocols = vec![b"http/1.1".to_vec()];
-
-    let connector = TlsConnector::from(Arc::new(tls_config));
     let server_name = rustls::pki_types::ServerName::try_from(hostname.to_string())
         .context("invalid server name")?;
 
@@ -428,6 +468,7 @@ fn emit_telemetry(
             existing_log_id: None,
             log_id: None,
             budget_charge: None,
+            matched_rule: None,
         });
     }
 }

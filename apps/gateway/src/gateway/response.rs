@@ -20,15 +20,40 @@ pub(super) fn proxy_auth_required() -> Response<axum::body::Body> {
 /// Response body type used by [`super::forward::forward_request`].
 pub(crate) type ForwardBody<S> = Either<Full<Bytes>, S>;
 
-/// Resolve the OneCLI dashboard base URL from `APP_URL`,
-/// falling back to `http://localhost:10254`. Cached after first call.
+/// Where dashboard links point when `APP_URL` says nothing. Right for a
+/// loopback install, wrong for anyone reaching OneCLI on another address —
+/// which is why `main` warns at startup rather than letting it pass silently.
+pub(crate) const DASHBOARD_URL_FALLBACK: &str = "http://localhost:10254";
+
+/// The configured public URL, or `None` when there isn't one.
+///
+/// Present-but-blank counts as absent: an `APP_URL=` line, or a compose
+/// passthrough that resolved to nothing, must not read as configuration. Mirrors
+/// `configuredAppUrl()` on the Node side so both halves agree on what "set"
+/// means. Split out from [`dashboard_url`] so it is testable — that one caches
+/// in a `OnceLock` and cannot be re-evaluated under a different environment.
+fn normalize_app_url(raw: Option<&str>) -> Option<String> {
+    let trimmed = raw?.trim().trim_end_matches('/');
+    (!trimmed.is_empty()).then(|| trimmed.to_string())
+}
+
+/// Whether the dashboard links are built from a configured `APP_URL` or from
+/// the fallback. Drives the startup warning in `main`.
+///
+/// Deliberately derived from [`dashboard_url`] rather than re-reading the
+/// environment: the warning then describes the value actually in use, and cannot
+/// drift from it if the env changes after the cache is populated.
+pub(crate) fn app_url_is_configured() -> bool {
+    dashboard_url() != DASHBOARD_URL_FALLBACK
+}
+
+/// Resolve the OneCLI dashboard base URL from `APP_URL`, falling back to
+/// [`DASHBOARD_URL_FALLBACK`]. Cached after first call.
 pub(crate) fn dashboard_url() -> &'static str {
     static URL: std::sync::OnceLock<String> = std::sync::OnceLock::new();
     URL.get_or_init(|| {
-        std::env::var("APP_URL")
-            .unwrap_or_else(|_| "http://localhost:10254".to_string())
-            .trim_end_matches('/')
-            .to_string()
+        normalize_app_url(std::env::var("APP_URL").ok().as_deref())
+            .unwrap_or_else(|| DASHBOARD_URL_FALLBACK.to_string())
     })
 }
 
@@ -187,19 +212,23 @@ pub(crate) fn access_restricted<S>(
     status: StatusCode,
     provider: &str,
     display_name: &str,
-    agent_id: Option<&str>,
     project_id: Option<&str>,
 ) -> Response<ForwardBody<S>> {
-    let base = scoped_url(dashboard_url(), "", project_id);
-    let manage_url = match agent_id {
-        Some(id) => format!("{base}/agents?manage={}", id.get(..8).unwrap_or(id)),
-        None => format!("{base}/agents"),
-    };
+    // Point at the app's connections page: since attach-model step 6 the
+    // project policy console is gone, and each account card there carries the
+    // "Agent access" dialog — the surface that actually attaches a credential
+    // to an agent. (Before step 6 this pointed at the policy console, which
+    // was then the only place a grant could be authored.)
+    let manage_url = scoped_url(
+        dashboard_url(),
+        &format!("/connections/apps/{provider}"),
+        project_id,
+    );
     with_no_retry(json_error(
         status,
         serde_json::json!({
             "error": "access_restricted",
-            "message": format!("{display_name} credentials exist in OneCLI but this agent does not have access. Ask the user to grant access: {manage_url}"),
+            "message": format!("{display_name} credentials exist in OneCLI but this agent does not have access. Ask the user to attach the account to this agent: {manage_url}"),
             "provider": provider,
             "manage_url": manage_url,
         }),
@@ -350,6 +379,28 @@ pub(crate) fn manual_approval_denied<S>(
     ))
 }
 
+/// 503 Service Unavailable — the gateway is shutting down while this request
+/// was held for manual approval.
+///
+/// Deliberately not the 403 a denial produces: nobody decided anything here,
+/// and an agent that reads a restart as a policy denial will stop retrying
+/// something it was never refused. Retryable on purpose — the replacement
+/// instance can serve it.
+pub(crate) fn gateway_restarting<S>(approval_id: &str) -> Response<ForwardBody<S>> {
+    let mut resp = json_error(
+        StatusCode::SERVICE_UNAVAILABLE,
+        serde_json::json!({
+            "error": "gateway_restarting",
+            "message": "OneCLI gateway is restarting and released this request \
+                        before it was reviewed. Retry it.",
+            "approval_id": approval_id,
+        }),
+    );
+    resp.headers_mut()
+        .insert("retry-after", HeaderValue::from_static("1"));
+    resp
+}
+
 /// 403 Forbidden — request blocked by a policy rule.
 pub(crate) fn blocked_by_policy<S>(
     method: &str,
@@ -357,7 +408,11 @@ pub(crate) fn blocked_by_policy<S>(
     rule_name: &str,
     project_id: Option<&str>,
 ) -> Response<ForwardBody<S>> {
-    let rules_url = scoped_url(dashboard_url(), "/rules", project_id);
+    // The agents page: a project-scope block now comes from the agent's own
+    // grants (changeable there) or from an organization guardrail (which a
+    // project member cannot change at all) — so the link informs rather than
+    // promising an edit.
+    let agents_url = scoped_url(dashboard_url(), "/agents", project_id);
     with_no_retry(json_error(
         StatusCode::FORBIDDEN,
         serde_json::json!({
@@ -365,12 +420,12 @@ pub(crate) fn blocked_by_policy<S>(
             "message": format!(
                 "Blocked by OneCLI policy rule \"{rule_name}\". \
                  {method} {path} is not allowed. \
-                 To change this, edit or disable the rule in your OneCLI dashboard."
+                 Review this agent's access in your OneCLI dashboard."
             ),
             "rule_name": rule_name,
             "method": method,
             "path": path,
-            "dashboard_url": rules_url,
+            "dashboard_url": agents_url,
         }),
     ))
 }
@@ -382,22 +437,50 @@ pub(crate) fn blocked_by_default_policy<S>(
     host: &str,
     project_id: Option<&str>,
 ) -> Response<ForwardBody<S>> {
-    let base = scoped_url(dashboard_url(), "", project_id);
+    let agents_url = scoped_url(dashboard_url(), "/agents", project_id);
     let hostname = host.split(':').next().unwrap_or(host);
-    let encoded_host = utf8_percent_encode(hostname, NON_ALPHANUMERIC);
     with_no_retry(json_error(
         StatusCode::FORBIDDEN,
         serde_json::json!({
             "error": "blocked_by_default_policy",
             "message": format!(
-                "Your organization's default-deny policy blocked this request. \
-                 {method} {hostname}{path} requires an explicit allow rule. \
-                 Create one in your OneCLI dashboard."
+                "A default-deny policy blocked this request. \
+                 {method} {hostname}{path} is not permitted for this agent. \
+                 Attach the credential it needs, or ask an organization \
+                 administrator to allow the destination."
             ),
             "method": method,
             "host": hostname,
             "path": path,
-            "dashboard_url": format!("{base}/rules?create=allow&host={encoded_host}"),
+            "dashboard_url": agents_url,
+        }),
+    ))
+}
+
+/// 403 Forbidden — the request targets an app that is not available to this
+/// project (the org's app-availability allowlist, step 7). Availability is an
+/// org-level, admin-managed posture, so — unlike the project-scoped policy
+/// blocks — there is no per-project dashboard deep link here.
+pub(crate) fn app_unavailable<S>(
+    provider: &str,
+    method: &str,
+    path: &str,
+    host: &str,
+) -> Response<ForwardBody<S>> {
+    let hostname = host.split(':').next().unwrap_or(host);
+    with_no_retry(json_error(
+        StatusCode::FORBIDDEN,
+        serde_json::json!({
+            "error": "app_unavailable",
+            "message": format!(
+                "The \"{provider}\" app is not available to this project. \
+                 {method} {hostname}{path} was blocked. An organization admin \
+                 can grant access on the App Availability page."
+            ),
+            "provider": provider,
+            "method": method,
+            "host": hostname,
+            "path": path,
         }),
     ))
 }
@@ -440,6 +523,50 @@ mod tests {
 
     type TestBody =
         ForwardBody<futures_util::stream::Empty<Result<hyper::body::Frame<Bytes>, reqwest::Error>>>;
+
+    // A blank value must read as "unconfigured", not as a configured empty
+    // string — otherwise every dashboard link becomes "/connections" with no
+    // host, and the startup warning that would have flagged it stays quiet.
+    #[test]
+    fn normalize_app_url_treats_blank_as_unset() {
+        assert_eq!(normalize_app_url(None), None);
+        assert_eq!(normalize_app_url(Some("")), None);
+        assert_eq!(normalize_app_url(Some("   ")), None);
+        assert_eq!(normalize_app_url(Some("\t\n")), None);
+        // A lone slash trims to nothing; it is not a URL.
+        assert_eq!(normalize_app_url(Some("/")), None);
+    }
+
+    #[test]
+    fn normalize_app_url_trims_whitespace_and_trailing_slashes() {
+        assert_eq!(
+            normalize_app_url(Some("  https://onecli.example.com//  ")),
+            Some("https://onecli.example.com".to_string())
+        );
+        assert_eq!(
+            normalize_app_url(Some("http://172.17.0.1:10254")),
+            Some("http://172.17.0.1:10254".to_string())
+        );
+    }
+
+    // `main` branches on this to decide whether to warn. Asserting the two agree
+    // is what keeps the warning honest: if `dashboard_url` ever resolved the
+    // fallback while this reported "configured", the operator would be told
+    // nothing while every link pointed at localhost.
+    //
+    // Env-free: `dashboard_url` caches in a `OnceLock`, so whichever value this
+    // process resolved first is the one under test either way — and mutating
+    // APP_URL here would race the rest of the suite.
+    #[test]
+    fn app_url_is_configured_agrees_with_the_url_actually_in_use() {
+        assert_eq!(
+            app_url_is_configured(),
+            dashboard_url() != DASHBOARD_URL_FALLBACK
+        );
+        if !app_url_is_configured() {
+            assert_eq!(dashboard_url(), DASHBOARD_URL_FALLBACK);
+        }
+    }
 
     #[test]
     fn proxy_auth_required_has_correct_status_and_header() {
@@ -596,13 +723,8 @@ mod tests {
 
     #[test]
     fn access_restricted_preserves_status() {
-        let resp: Response<TestBody> = access_restricted(
-            StatusCode::FORBIDDEN,
-            "resend",
-            "Resend",
-            Some("abc12345-def"),
-            None,
-        );
+        let resp: Response<TestBody> =
+            access_restricted(StatusCode::FORBIDDEN, "resend", "Resend", None);
         assert_eq!(resp.status(), StatusCode::FORBIDDEN);
         assert_eq!(
             resp.headers().get("content-type").unwrap(),
@@ -612,14 +734,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn access_restricted_body_with_agent_id() {
-        let resp: Response<TestBody> = access_restricted(
-            StatusCode::UNAUTHORIZED,
-            "resend",
-            "Resend",
-            Some("abc12345-long-id"),
-            None,
-        );
+    async fn access_restricted_body_points_at_the_attach_surface() {
+        let resp: Response<TestBody> =
+            access_restricted(StatusCode::UNAUTHORIZED, "resend", "Resend", None);
         use http_body_util::BodyExt;
         let body = match resp.into_body() {
             Either::Left(full) => full.collect().await.expect("collect full body").to_bytes(),
@@ -632,40 +749,13 @@ mod tests {
             .as_str()
             .unwrap()
             .contains("does not have access"));
-        assert!(json["manage_url"]
-            .as_str()
-            .unwrap()
-            .contains("/agents?manage=abc12345"));
-    }
-
-    #[tokio::test]
-    async fn access_restricted_body_without_agent_id() {
-        let resp: Response<TestBody> =
-            access_restricted(StatusCode::FORBIDDEN, "github", "GitHub", None, None);
-        use http_body_util::BodyExt;
-        let body = match resp.into_body() {
-            Either::Left(full) => full.collect().await.expect("collect full body").to_bytes(),
-            Either::Right(_) => panic!("expected Left"),
-        };
-        let json: serde_json::Value = serde_json::from_slice(&body).expect("valid JSON");
-        assert_eq!(json["error"], "access_restricted");
-        assert!(json["manage_url"].as_str().unwrap().ends_with("/agents"));
-    }
-
-    #[tokio::test]
-    async fn access_restricted_short_agent_id() {
-        let resp: Response<TestBody> =
-            access_restricted(StatusCode::FORBIDDEN, "resend", "Resend", Some("abc"), None);
-        use http_body_util::BodyExt;
-        let body = match resp.into_body() {
-            Either::Left(full) => full.collect().await.expect("collect full body").to_bytes(),
-            Either::Right(_) => panic!("expected Left"),
-        };
-        let json: serde_json::Value = serde_json::from_slice(&body).expect("valid JSON");
-        assert!(json["manage_url"]
-            .as_str()
-            .unwrap()
-            .contains("/agents?manage=abc"));
+        // Since attach-model step 6 the project policy console does not exist,
+        // so the remediation link must reach a surface that can actually grant
+        // the credential: the app's connections page, whose account cards carry
+        // the "Agent access" dialog. A link ending in "/policy" would 404.
+        let manage_url = json["manage_url"].as_str().unwrap();
+        assert!(manage_url.ends_with("/connections/apps/resend"));
+        assert!(!manage_url.contains("/policy"));
     }
 
     #[tokio::test]

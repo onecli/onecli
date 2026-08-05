@@ -54,12 +54,47 @@ const ORG_APP_CONFIG_ALIASES = {
   "@/lib/actions/app-config": "@/ee/actions/app-config",
 };
 
+// The boot-policy seam, swapped per edition. OSS converts a pre-cutover
+// instance's LEGACY policy into v2, runs the read-only guard
+// (`services/policy-legacy-migration/` — TEMPORARY, see its README), then the
+// step-5 grant conversion (`services/policy-grant-conversion/` — also
+// TEMPORARY). Every EE edition swaps to a NO-OP: cloud has nothing legacy to
+// convert, its fleet is grant-converted (imports convert inline via
+// migrate-import), and an onprem instance in either state should surface a
+// report to an operator rather than be rewritten unattended.
+const POLICY_MIGRATE_ALIASES = {
+  "@/lib/policy-migrate": "@/ee/policy-migrate",
+};
+
+// The shared policy editor with its EE-differentiating chrome behind seams: the
+// staged publish surface + directory names, the org identity picker, and the
+// granular resource-scope editor. Since attach-model step 6 the editor is
+// reached ONLY from the ORG policy page, so these aliases are load-bearing for
+// cloud and onprem-full and inert for the flat editions (oss, onprem-slim),
+// which mount no org scope and therefore never import the tree. The mapping is
+// kept for the flat editions anyway: it costs nothing, and dropping it would
+// silently downgrade the seams if a flat edition ever gained the org UI.
+const POLICY_EDITOR_ALIASES = {
+  "@/lib/policy-editor/editor-chrome": "@/ee/policy-editor/editor-chrome",
+  "@/lib/policy-editor/identity-picker": "@/ee/policy-editor/identity-picker",
+  "@/lib/policy-editor/resource-scope": "@/ee/policy-editor/resource-scope",
+  "@/lib/policy-editor/publish-mode": "@/ee/policy-editor/publish-mode",
+  // The behavioral-conditions builder rides with the editor seam: every EE
+  // edition is entitled (onprem now ENFORCES conditions via the EE
+  // condition_match arm, so it must author them too); the OSS module stays
+  // the locked upsell card. Cloud also carries this key in CLOUD_ALIASES;
+  // duplicating it here is how both onprem maps get it.
+  "@/lib/components/condition-builder": "@/ee/components/condition-builder",
+};
+
 // Cloud edition swaps these web import paths to cloud implementations (turbopack
 // resolveAlias, applied only when isCloud). This config runs in plain Node, so the
 // key→value map lives here directly. The onprem-full edition selects a curated
 // subset below (ONPREM_FULL_ALIASES).
 const CLOUD_ALIASES = {
   ...ORG_APP_CONFIG_ALIASES,
+  ...POLICY_MIGRATE_ALIASES,
+  ...POLICY_EDITOR_ALIASES,
   "@/lib/auth/auth-provider": "@/ee/auth/cognito-provider",
   "@/lib/auth/auth-server": "@/ee/auth/cognito-server",
   "@/lib/actions/resolve-user": "@/ee/auth/resolve-user",
@@ -70,7 +105,6 @@ const CLOUD_ALIASES = {
   "@/lib/auth/login-content": "@/ee/auth/login-content",
   "@/lib/user-plan": "@/ee/user-plan",
   "@/lib/components/request-app-slot": "@/ee/apps/request-app-slot",
-  "@/lib/components/agent-group-field": "@/ee/groups/agent-group-field",
   "@/lib/home-redirect": "@/ee/home-redirect",
   "@/lib/components/pro-app-dialog": "@/ee/apps/pro-app-dialog",
   "@/lib/components/condition-builder": "@/ee/components/condition-builder",
@@ -115,6 +149,8 @@ const ONPREM_FULL_ALIASES = {
   ...ONPREM_INIT_ALIASES,
   ...ONPREM_ENTITLEMENT_ALIASES,
   ...ORG_APP_CONFIG_ALIASES,
+  ...POLICY_MIGRATE_ALIASES,
+  ...POLICY_EDITOR_ALIASES,
   // org-UI + org-aware redirect → cloud implementations (reuse the cloud mappings above)
   "@/lib/nav-config": CLOUD_ALIASES["@/lib/nav-config"],
   "@dashboard/dashboard-sidebar": CLOUD_ALIASES["@dashboard/dashboard-sidebar"],
@@ -132,6 +168,8 @@ const ONPREM_SLIM_ALIASES = {
   ...ONPREM_INIT_ALIASES,
   ...ONPREM_ENTITLEMENT_ALIASES,
   ...ORG_APP_CONFIG_ALIASES,
+  ...POLICY_MIGRATE_ALIASES,
+  ...POLICY_EDITOR_ALIASES,
 };
 
 /** @type {import('next').NextConfig} */
@@ -164,6 +202,11 @@ const nextConfig = {
           ? ONPREM_SLIM_ALIASES
           : {},
   },
+  // No `redirects()`: the legacy Rules page and the policyMode toggle retired
+  // at step 10 and used to bounce to the project policy console — which itself
+  // retired at attach-model step 6. There is nowhere left to send those
+  // bookmarks, so they 404 like any other removed route; project access is
+  // authored on the agent and connection pages now.
   async rewrites() {
     // Cloud and onprem-full ship the OSS bare dashboard routes too (they may only add
     // files), but only serve them namespaced under /p, /org, /account. Shadow each bare

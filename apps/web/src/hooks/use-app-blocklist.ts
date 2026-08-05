@@ -51,27 +51,6 @@ export const useActivateBlocklistHost = (
   });
 };
 
-export const useAddBlocklistRule = (provider: string, scope: PageScope) => {
-  const qc = useQueryClient();
-  return useMutation({
-    mutationFn: ({
-      name,
-      hostPattern,
-    }: {
-      name: string;
-      hostPattern: string;
-    }) => appBlocklist.addCustom(provider, name, hostPattern, scope),
-    onSuccess: () => {
-      qc.invalidateQueries({
-        queryKey: queryKeys.appBlocklist.byProvider(provider),
-      });
-      invalidateGatewayCache();
-    },
-    onError: (err) =>
-      toast.error(err instanceof Error ? err.message : "Failed to add host"),
-  });
-};
-
 export const useRemoveBlocklistRule = (provider: string, scope: PageScope) => {
   const qc = useQueryClient();
   return useMutation({

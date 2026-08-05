@@ -1,41 +1,23 @@
-import { apiGet, apiPost, apiPut, apiPatch } from "./client";
+import { apiGet, apiPost } from "./client";
 import type {
   Agent,
+  AgentDetail,
   CreatedAgent,
   CreateAgentInput,
-  AgentGranularAccess,
-  AgentConnection,
 } from "./types";
 
-export const list = () => apiGet<Agent[]>("/v1/agents");
+// Explicit project targeting exists for the org-level Get Started picker,
+// which reads agents of a project the URL doesn't carry. The override wins
+// over the path-derived scope (apiFetch spreads options.headers last) and the
+// server re-fences it against the caller's memberships.
+const projectScope = (projectId?: string): RequestInit | undefined =>
+  projectId ? { headers: { "X-Project-Id": projectId } } : undefined;
+
+export const list = (options: { projectId?: string } = {}) =>
+  apiGet<Agent[]>("/v1/agents", projectScope(options.projectId));
+
+export const get = (agentId: string) =>
+  apiGet<AgentDetail>(`/v1/agents/${agentId}`);
 
 export const create = (input: CreateAgentInput) =>
   apiPost<CreatedAgent>("/v1/agents", input);
-
-export const granularAccess = () =>
-  apiGet<AgentGranularAccess[]>("/v1/agents/granular-access");
-
-// ── Credential access (secret mode, secrets, app connections) ──────────────
-
-export const secrets = (agentId: string) =>
-  apiGet<string[]>(`/v1/agents/${agentId}/secrets`);
-
-export const updateSecrets = (agentId: string, secretIds: string[]) =>
-  apiPut<{ success: boolean }>(`/v1/agents/${agentId}/secrets`, { secretIds });
-
-export const updateSecretMode = (agentId: string, mode: "all" | "selective") =>
-  apiPatch<{ success: boolean }>(`/v1/agents/${agentId}/secret-mode`, { mode });
-
-export const connections = (agentId: string) =>
-  apiGet<AgentConnection[]>(`/v1/agents/${agentId}/connections`);
-
-export const updateConnections = (
-  agentId: string,
-  connections: {
-    appConnectionId: string;
-    sessionPolicy?: Record<string, unknown> | null;
-  }[],
-) =>
-  apiPut<{ success: boolean }>(`/v1/agents/${agentId}/connections`, {
-    connections,
-  });
