@@ -81,7 +81,14 @@ pub(crate) struct InjectionRule {
 /// Returns `None` if the header is missing or malformed.
 pub(crate) fn extract_agent_token<T>(req: &Request<T>) -> Option<String> {
     let value = req.headers().get("proxy-authorization")?.to_str().ok()?;
-    let encoded = value.strip_prefix("Basic ")?.trim();
+    // RFC 7235 §2.1 defines auth-scheme as a case-insensitive token. Some clients
+    // send `basic` (PySocks, and therefore every httplib2 caller), so matching the
+    // scheme byte-for-byte would drop a valid agent token.
+    let (scheme, encoded) = value.split_once(' ')?;
+    if !scheme.eq_ignore_ascii_case("Basic") {
+        return None;
+    }
+    let encoded = encoded.trim();
     let decoded = base64::engine::general_purpose::STANDARD
         .decode(encoded)
         .ok()?;
@@ -616,8 +623,30 @@ mod tests {
     }
 
     #[test]
+    fn extract_token_lowercase_scheme() {
+        // RFC 7235 §2.1: auth-scheme is case-insensitive. PySocks sends `basic`,
+        // so every httplib2-based client depends on this.
+        let encoded = base64::engine::general_purpose::STANDARD.encode("x:aoc_lower");
+        let req = request_with_proxy_auth(Some(&format!("basic {encoded}")));
+        assert_eq!(extract_agent_token(&req).as_deref(), Some("aoc_lower"));
+    }
+
+    #[test]
+    fn extract_token_mixed_case_scheme() {
+        let encoded = base64::engine::general_purpose::STANDARD.encode("x:aoc_mixed");
+        let req = request_with_proxy_auth(Some(&format!("BaSiC {encoded}")));
+        assert_eq!(extract_agent_token(&req).as_deref(), Some("aoc_mixed"));
+    }
+
+    #[test]
     fn extract_token_wrong_scheme() {
         let req = request_with_proxy_auth(Some("Bearer some_token"));
+        assert_eq!(extract_agent_token(&req), None);
+    }
+
+    #[test]
+    fn extract_token_wrong_scheme_lowercase() {
+        let req = request_with_proxy_auth(Some("bearer some_token"));
         assert_eq!(extract_agent_token(&req), None);
     }
 
