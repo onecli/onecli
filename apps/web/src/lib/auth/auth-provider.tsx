@@ -1,13 +1,19 @@
 "use client";
 
-import { useCallback, useMemo, type ReactNode } from "react";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useState,
+  type ReactNode,
+} from "react";
 import {
   SessionProvider,
-  useSession,
   signIn as nextAuthSignIn,
   signOut as nextAuthSignOut,
 } from "next-auth/react";
 import { AuthContext } from "@/providers/auth-provider";
+import { apiFetch } from "@/lib/api-fetch";
 import type { AuthUser, AuthContextValue } from "@/lib/auth/types";
 import type { AuthMode } from "@/lib/auth/auth-mode";
 
@@ -33,16 +39,35 @@ const LocalAuthProvider = ({ children }: { children: ReactNode }) => {
 };
 
 const OAuthInner = ({ children }: { children: ReactNode }) => {
-  const { data: session, status } = useSession();
+  const [user, setUser] = useState<AuthUser | null>(null);
+  const [loading, setLoading] = useState(true);
 
-  const user = useMemo<AuthUser | null>(() => {
-    if (!session?.user?.id || !session.user.email) return null;
-    return {
-      id: session.user.id,
-      email: session.user.email,
-      name: session.user.name ?? undefined,
+  // Read the signed-in user from /v1/auth/session — the same endpoint the
+  // dashboard layout uses. It returns the OneCLI profile directly
+  // (flat { id, email, name }), not NextAuth's { user } wrapper, so the
+  // identity must be read off the response root.
+  useEffect(() => {
+    let active = true;
+    apiFetch("/v1/auth/session")
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data: { id?: string; email?: string; name?: string } | null) => {
+        if (!active) return;
+        setUser(
+          data?.id && data.email
+            ? { id: data.id, email: data.email, name: data.name ?? undefined }
+            : null,
+        );
+      })
+      .catch(() => {
+        if (active) setUser(null);
+      })
+      .finally(() => {
+        if (active) setLoading(false);
+      });
+    return () => {
+      active = false;
     };
-  }, [session]);
+  }, []);
 
   const signIn = useCallback(async () => {
     await nextAuthSignIn("google");
@@ -54,13 +79,13 @@ const OAuthInner = ({ children }: { children: ReactNode }) => {
 
   const value = useMemo<AuthContextValue>(
     () => ({
-      isAuthenticated: status === "authenticated",
-      isLoading: status === "loading",
+      isAuthenticated: user !== null,
+      isLoading: loading,
       user,
       signIn,
       signOut,
     }),
-    [status, user, signIn, signOut],
+    [user, loading, signIn, signOut],
   );
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;
