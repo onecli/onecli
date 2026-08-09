@@ -6,8 +6,12 @@
 #
 # Usage: curl -fsSL https://onecli.sh/install | sh
 #
-# Custom bind host:
-#   export ONECLI_BIND_HOST=192.168.1.50
+# Custom bind hosts (the gateway binds for agent containers; the admin API
+# and Postgres bind 127.0.0.1 by default so unrelated containers can't reach
+# them — expose them only if you actually need remote access):
+#   export ONECLI_BIND_HOST=192.168.1.50           # gateway
+#   export ONECLI_APP_BIND_HOST=192.168.1.50       # dashboard (admin API)
+#   export ONECLI_POSTGRES_BIND_HOST=192.168.1.50  # psql
 #   curl -fsSL https://onecli.sh/install | sh
 #
 # Custom PostgreSQL port (if 5432 is already in use):
@@ -185,10 +189,15 @@ main() {
 
   echo ""
   echo "  OneCLI is running!"
-  echo "  ONECLI_URL:  http://$ONECLI_BIND_HOST:${ONECLI_APP_PORT:-10254}"
+  echo "  ONECLI_URL:  http://${ONECLI_APP_BIND_HOST:-127.0.0.1}:${ONECLI_APP_PORT:-10254}"
   echo ""
-  echo "  Dashboard:  http://$ONECLI_BIND_HOST:${ONECLI_APP_PORT:-10254}"
+  echo "  Dashboard:  http://${ONECLI_APP_BIND_HOST:-127.0.0.1}:${ONECLI_APP_PORT:-10254}"
   echo "  Gateway:    http://$ONECLI_BIND_HOST:${ONECLI_GATEWAY_PORT:-10255}"
+  echo ""
+  echo "  Serving the dashboard remotely? The admin API and Postgres bind to"
+  echo "  127.0.0.1 by default so unrelated containers can't reach them. Set"
+  echo "  ONECLI_APP_BIND_HOST=<your-ip> (and APP_URL) in $INSTALL_DIR/.env to"
+  echo "  expose the dashboard, ONECLI_POSTGRES_BIND_HOST to expose psql."
   echo ""
   echo "  Reaching OneCLI at another address (tunnel, proxy, domain)? Set APP_URL in $INSTALL_DIR/.env"
   echo ""

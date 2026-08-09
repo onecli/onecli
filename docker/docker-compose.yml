@@ -10,8 +10,13 @@ services:
       POSTGRES_DB: ${POSTGRES_DB:-onecli}
     volumes:
       - pgdata:/var/lib/postgresql
+    # Postgres is internal to the install: the app talks to it over the
+    # compose network, so the published port exists only for the operator's
+    # psql. Keep it on loopback — publishing it on ONECLI_BIND_HOST puts the
+    # database on the docker bridge where unrelated containers can reach it
+    # (#268).
     ports:
-      - "${ONECLI_BIND_HOST:-127.0.0.1}:${POSTGRES_PORT:-5432}:5432"
+      - "${ONECLI_POSTGRES_BIND_HOST:-127.0.0.1}:${POSTGRES_PORT:-5432}:5432"
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-onecli}"]
       interval: 5s
@@ -28,8 +33,12 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+    # The gateway is the only service that must be reachable from agent
+    # containers, so it binds ONECLI_BIND_HOST (the docker bridge IP on bare-
+    # metal Linux). The admin API stays on loopback unless the operator
+    # opts into exposing it with ONECLI_APP_BIND_HOST (#268).
     ports:
-      - "${ONECLI_BIND_HOST:-127.0.0.1}:${ONECLI_APP_PORT:-10254}:10254"
+      - "${ONECLI_APP_BIND_HOST:-127.0.0.1}:${ONECLI_APP_PORT:-10254}:10254"
       - "${ONECLI_BIND_HOST:-127.0.0.1}:${ONECLI_GATEWAY_PORT:-10255}:10255"
     environment:
       DATABASE_URL: postgresql://${POSTGRES_USER:-onecli}:${POSTGRES_PASSWORD:-onecli}@postgres:5432/${POSTGRES_DB:-onecli}
@@ -42,7 +51,10 @@ services:
       # to, which holds for a local or single-host install. When it doesn't — a
       # tunnel, a reverse proxy, a real domain — set APP_URL instead of relying
       # on it: either export it, or put it in a `.env` beside this file.
-      APP_URL: ${APP_URL:-http://${ONECLI_BIND_HOST:-127.0.0.1}:${ONECLI_APP_PORT:-10254}}
+      # APP_URL follows the app bind: the admin API defaults to loopback, so
+      # the advertised URL does too. Remote dashboard access means setting
+      # ONECLI_APP_BIND_HOST (and APP_URL if it differs).
+      APP_URL: ${APP_URL:-http://${ONECLI_APP_BIND_HOST:-127.0.0.1}:${ONECLI_APP_PORT:-10254}}
       GATEWAY_API_URL: http://${ONECLI_BIND_HOST:-127.0.0.1}:${ONECLI_GATEWAY_PORT:-10255}
       # Where the gateway reaches the Node API. Both run in this one container
       # (see docker/entrypoint.sh), so it is a loopback call and never leaves it.
