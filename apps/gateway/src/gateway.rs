@@ -788,9 +788,11 @@ async fn handle_connect(
     // Resolve at CONNECT time for the intercept decision and agent identity.
     // DB injection/policy rules are NOT frozen here — they're re-resolved
     // per request inside the MITM tunnel from cache (see mitm.rs).
+    // NOTE: pass `host` (port-inclusive) not `hostname` (stripped) so that
+    // port-qualified hostPatterns can match. See issue #485.
     let (mut intercept, project_id, organization_id, agent_id, agent_name, agent_identifier) =
         if let Some(ref token) = agent_token {
-            match connect::resolve(token, &hostname, &state.policy_engine, &*state.cache).await {
+            match connect::resolve(token, &host, &state.policy_engine, &*state.cache).await {
                 Ok(resp) => (
                     resp.intercept,
                     resp.project_id,
@@ -960,8 +962,10 @@ async fn handle_http_proxy(
 
     let connection_id = connect::extract_connection_id(req.headers());
 
+    // NOTE: pass `authority` (port-inclusive) not `hostname` (stripped) so
+    // that port-qualified hostPatterns can match. See issue #485.
     let mut resolved = if let Some(ref token) = agent_token {
-        match connect::resolve(token, &hostname, &state.policy_engine, &*state.cache).await {
+        match connect::resolve(token, &authority, &state.policy_engine, &*state.cache).await {
             Ok(resp) => resp,
             Err(ConnectError::InvalidToken) => {
                 warn!(peer = %peer_addr, host = %authority, "HTTP proxy rejected: invalid agent token");

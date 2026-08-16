@@ -1755,19 +1755,50 @@ fn credential_host_mismatch(
 /// `pub(crate)` so the policy engine reuses the exact host matcher for its
 /// network targets. Behavior is unchanged.
 pub(crate) fn host_matches(request_host: &str, pattern: &str) -> bool {
-    match pattern.split_once('*') {
-        None => request_host.eq_ignore_ascii_case(pattern),
+    let (req_host, req_port) = split_host_port(request_host);
+    let (pat_host, pat_port) = split_host_port(pattern);
+
+    // A port-qualified pattern (e.g. `example.internal:3000`) must match
+    // the request's port exactly. A bare-hostname pattern matches any port.
+    // See issue #485.
+    if let Some(pp) = pat_port {
+        if req_port != Some(pp) {
+            return false;
+        }
+    }
+
+    match pat_host.split_once('*') {
+        None => req_host.eq_ignore_ascii_case(pat_host),
         Some((prefix, suffix)) => {
             // `get(..)` keeps the slices on char boundaries, so a non-ASCII
             // host can never panic — it just won't match an ASCII pattern.
-            request_host.len() >= prefix.len() + suffix.len()
-                && request_host
+            req_host.len() >= prefix.len() + suffix.len()
+                && req_host
                     .get(..prefix.len())
                     .is_some_and(|p| p.eq_ignore_ascii_case(prefix))
-                && request_host
-                    .get(request_host.len() - suffix.len()..)
+                && req_host
+                    .get(req_host.len() - suffix.len()..)
                     .is_some_and(|s| s.eq_ignore_ascii_case(suffix))
         }
+    }
+}
+
+/// Split a `host` or `host:port` string into (host, Some(port)) or
+/// (host, None). Only splits on a trailing numeric port so IPv6 literals
+/// and bare hostnames pass through untouched.
+///
+/// Known limitations (see #485 review discussion):
+/// - An implicit default port (e.g. `http://host/...` implying `:80`) is
+///   not normalized against an explicit `host:80` pattern — they are
+///   treated as distinct today.
+/// - Unbracketed IPv6 literals (e.g. `::1`) are not handled correctly,
+///   since the last `:`-segment will be misread as a port. Bracketed
+///   IPv6 (`[::1]:port`) is unaffected since `rsplit_once(':')` still
+///   finds the real port after the closing bracket.
+fn split_host_port(s: &str) -> (&str, Option<&str>) {
+    match s.rsplit_once(':') {
+        Some((h, p)) if !p.is_empty() && p.chars().all(|c| c.is_ascii_digit()) => (h, Some(p)),
+        _ => (s, None),
     }
 }
 
@@ -1988,13 +2019,28 @@ mod tests {
     }
 
     // ── host_matches ────────────────────────────────────────────────────
-
     #[test]
     fn host_exact_match() {
         assert!(host_matches("api.anthropic.com", "api.anthropic.com"));
         assert!(!host_matches("api.anthropic.com", "other.com"));
     }
-
+    #[test]
+    fn host_matches_port_qualified_pattern_requires_matching_port() {
+        assert!(host_matches(
+            "example.internal:3000",
+            "example.internal:3000"
+        ));
+        assert!(!host_matches(
+            "example.internal:3200",
+            "example.internal:3000"
+        ));
+    }
+    #[test]
+    fn host_matches_bare_pattern_matches_any_port() {
+        assert!(host_matches("example.internal:3000", "example.internal"));
+        assert!(host_matches("example.internal:3200", "example.internal"));
+        assert!(host_matches("example.internal", "example.internal"));
+    }
     #[test]
     fn host_wildcard_match() {
         assert!(host_matches("api.example.com", "*.example.com"));
