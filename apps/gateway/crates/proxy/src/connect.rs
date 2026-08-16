@@ -2179,8 +2179,14 @@ mod tests {
     }
     #[test]
     fn host_matches_port_qualified_pattern_requires_matching_port() {
-        assert!(host_matches("example.internal:3000", "example.internal:3000"));
-        assert!(!host_matches("example.internal:3200", "example.internal:3000"));
+        assert!(host_matches(
+            "example.internal:3000",
+            "example.internal:3000"
+        ));
+        assert!(!host_matches(
+            "example.internal:3200",
+            "example.internal:3000"
+        ));
     }
     #[test]
     fn host_matches_bare_pattern_matches_any_port() {
