@@ -364,6 +364,18 @@ pub(crate) fn resolution_failed<S>() -> Response<ForwardBody<S>> {
     )
 }
 
+/// 504 Gateway Timeout — upstream accepted the request path but did not return
+/// response headers before the configured gateway bound.
+pub(crate) fn upstream_timeout<S>() -> Response<ForwardBody<S>> {
+    with_no_retry(json_error(
+        StatusCode::GATEWAY_TIMEOUT,
+        serde_json::json!({
+            "error": "upstream_timeout",
+            "message": "Upstream did not return response headers before the gateway timeout.",
+        }),
+    ))
+}
+
 /// 403 Forbidden — manual approval denied or timed out.
 pub(crate) fn manual_approval_denied<S>(
     approval_id: &str,
