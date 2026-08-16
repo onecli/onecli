@@ -98,7 +98,9 @@ pub(super) async fn mitm(
 
                     // Re-resolve rules from cache on each request so that
                     // secret/rule changes take effect without a reconnect.
-                    let hostname = super::strip_port(&host);
+                    // Keep `host` port-inclusive so port-qualified
+                    // hostPatterns can match on re-resolution. See #485.
+                    let hostname = host.as_str();
                     match resolve_rules(
                         &ctx,
                         hostname,
