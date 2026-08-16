@@ -1954,6 +1954,15 @@ pub(crate) fn host_matches(request_host: &str, pattern: &str) -> bool {
 /// Split a `host` or `host:port` string into (host, Some(port)) or
 /// (host, None). Only splits on a trailing numeric port so IPv6 literals
 /// and bare hostnames pass through untouched.
+///
+/// Known limitations (see #485 review discussion):
+/// - An implicit default port (e.g. `http://host/...` implying `:80`) is
+///   not normalized against an explicit `host:80` pattern — they are
+///   treated as distinct today.
+/// - Unbracketed IPv6 literals (e.g. `::1`) are not handled correctly,
+///   since the last `:`-segment will be misread as a port. Bracketed
+///   IPv6 (`[::1]:port`) is unaffected since `rsplit_once(':')` still
+///   finds the real port after the closing bracket.
 fn split_host_port(s: &str) -> (&str, Option<&str>) {
     match s.rsplit_once(':') {
         Some((h, p)) if !p.is_empty() && p.chars().all(|c| c.is_ascii_digit()) => (h, Some(p)),
@@ -2169,10 +2178,11 @@ mod tests {
             .await;
         let cached = cached.expect("should be cached");
         assert!(cached.access_restricted);
-        assert_eq!(cached.project_id.as_deref(), Some("proj_restricted"));
+        assert_eq!(cached.workspace_id.as_deref(), Some("proj_restricted"));
     }
 
     // ── host_matches ────────────────────────────────────────────────────
+    #[test]
     fn host_exact_match() {
         assert!(host_matches("api.anthropic.com", "api.anthropic.com"));
         assert!(!host_matches("api.anthropic.com", "other.com"));
