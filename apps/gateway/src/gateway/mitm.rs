@@ -24,6 +24,7 @@ use crate::inject::InjectionRule;
 
 use super::forward;
 use super::response;
+use super::upstream::{UpstreamClients, UpstreamTlsPolicy};
 use super::ProxyContext;
 
 /// Cap on the client-side TLS handshake inside a tunnel.
@@ -48,7 +49,8 @@ pub(super) async fn mitm(
     upgraded: hyper::upgrade::Upgraded,
     host: &str,
     ca: &CertificateAuthority,
-    http_client: reqwest::Client,
+    upstream_clients: UpstreamClients,
+    upstream_tls_policy: UpstreamTlsPolicy,
     // Upstream TLS for the WebSocket leg, already resolved against the
     // operator's skip-verify configuration at CONNECT time.
     ws_connector: TlsConnector,
@@ -84,7 +86,7 @@ pub(super) async fn mitm(
             io,
             service_fn(move |req: hyper::Request<hyper::body::Incoming>| {
                 let host = host_owned.clone();
-                let client = http_client.clone();
+                let clients = upstream_clients.clone();
                 let ws_tls = ws_connector.clone();
                 let cache = Arc::clone(&cache);
                 let ctx = Arc::clone(&proxy_ctx);
@@ -141,6 +143,7 @@ pub(super) async fn mitm(
                                     }
                                 }
                             } else {
+                                let client = clients.lease(upstream_tls_policy);
                                 match forward::forward_request(
                                     req,
                                     effective_host, // forward target (may be host-rewritten)

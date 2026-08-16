@@ -317,7 +317,7 @@ async fn main() -> Result<()> {
         vault_service,
         cache,
         approval_store,
-    );
+    )?;
     let result = server.run().await;
 
     // The drain, in the one order that does not lose data: connections first

@@ -34,6 +34,7 @@ mod mitm;
 pub(crate) mod response;
 mod transforms;
 mod tunnel;
+mod upstream;
 mod websocket;
 
 use std::net::SocketAddr;
@@ -53,6 +54,7 @@ use tower::ServiceExt;
 use tower_http::cors::CorsLayer;
 use tracing::{debug, info, info_span, warn, Instrument};
 
+use self::upstream::{UpstreamClients, UpstreamTlsPolicy};
 use crate::approval::{ApprovalDecision, ApprovalStore, APPROVAL_TIMEOUT_SECS};
 use crate::auth::AuthUser;
 use crate::ca::CertificateAuthority;
@@ -84,11 +86,9 @@ pub(crate) struct ProxyContext {
 #[derive(Clone)]
 pub(crate) struct GatewayState {
     pub ca: Arc<CertificateAuthority>,
-    /// Standard upstream client — validates TLS certificates.
-    pub http_client: reqwest::Client,
-    /// No-verify upstream client — skips TLS certificate validation.
-    /// Selected for hosts matched by `skip_verify_hosts`.
-    pub http_client_no_verify: reqwest::Client,
+    /// Shared upstream HTTP clients. Standard and no-verify TLS policies live
+    /// in separate slots and can rotate independently after header timeouts.
+    pub upstream_clients: UpstreamClients,
     /// Hostname patterns for which TLS certificate validation is skipped.
     /// Supports exact match (`internal.corp`) and wildcard prefix (`*.internal.corp`).
     /// Populated from `GATEWAY_SKIP_VERIFY_HOSTS` (comma-separated).
@@ -97,8 +97,8 @@ pub(crate) struct GatewayState {
     /// not serve — validates TLS certificates.
     pub ws_connector: TlsConnector,
     /// No-verify WebSocket connector — skips TLS certificate validation.
-    /// Selected for hosts matched by `skip_verify_hosts`, exactly as
-    /// `http_client_no_verify` is.
+    /// Selected for hosts matched by `skip_verify_hosts`, exactly as the
+    /// no-verify HTTP client slot is.
     pub ws_connector_no_verify: TlsConnector,
     pub policy_engine: Arc<PolicyEngine>,
     pub cache: Arc<dyn CacheStore>,
@@ -113,18 +113,6 @@ pub(crate) struct GatewayState {
 pub struct GatewayServer {
     state: GatewayState,
     port: u16,
-}
-
-/// Build the HTTP client used for upstream requests.
-///
-/// - Redirects are disabled so 3xx responses are forwarded to the client as-is.
-/// - `accept_invalid_certs` skips TLS certificate validation for upstream connections.
-fn build_http_client(accept_invalid_certs: bool) -> reqwest::Client {
-    reqwest::Client::builder()
-        .redirect(reqwest::redirect::Policy::none())
-        .danger_accept_invalid_certs(accept_invalid_certs)
-        .build()
-        .expect("build HTTP client")
 }
 
 /// Accepts any server certificate, for the hosts an operator has explicitly
@@ -273,9 +261,10 @@ impl GatewayServer {
         vault_service: Arc<vault::VaultService>,
         cache: Arc<dyn CacheStore>,
         approval_store: Arc<dyn ApprovalStore>,
-    ) -> Self {
+    ) -> Result<Self> {
         let global_skip = std::env::var("GATEWAY_DANGER_ACCEPT_INVALID_CERTS").is_ok();
         let skip_verify_hosts = Arc::new(parse_skip_verify_hosts());
+        let upstream_config = upstream::UpstreamTransportConfig::from_env()?;
 
         if global_skip {
             warn!("GATEWAY_DANGER_ACCEPT_INVALID_CERTS is set: TLS verification disabled for ALL upstream hosts");
@@ -285,8 +274,7 @@ impl GatewayServer {
 
         let state = GatewayState {
             ca: Arc::new(ca),
-            http_client: build_http_client(global_skip),
-            http_client_no_verify: build_http_client(true),
+            upstream_clients: UpstreamClients::new(upstream_config, global_skip)?,
             skip_verify_hosts,
             ws_connector: TlsConnector::from(build_ws_tls_config(global_skip)),
             ws_connector_no_verify: TlsConnector::from(build_ws_tls_config(true)),
@@ -296,7 +284,7 @@ impl GatewayServer {
             approval_store,
         };
 
-        Self { state, port }
+        Ok(Self { state, port })
     }
 
     /// Start the gateway TCP listener. Runs forever.
@@ -862,15 +850,16 @@ async fn handle_connect(
     // same upstreams, so a host they disagree about would mean traffic verified
     // on one protocol and not the other. One branch makes that unrepresentable
     // rather than merely true today.
-    let (http_client, ws_connector) = if skip_verify {
+    let (upstream_tls_policy, ws_connector) = if skip_verify {
         info!(parent: &session_span, "TLS verification skipped (GATEWAY_SKIP_VERIFY_HOSTS)");
         (
-            state.http_client_no_verify.clone(),
+            UpstreamTlsPolicy::NoVerify,
             state.ws_connector_no_verify.clone(),
         )
     } else {
-        (state.http_client.clone(), state.ws_connector.clone())
+        (UpstreamTlsPolicy::Verify, state.ws_connector.clone())
     };
+    let upstream_clients = state.upstream_clients.clone();
     let cache = Arc::clone(&state.cache);
     let approval_store = Arc::clone(&state.approval_store);
     let proxy_ctx = Arc::new(ProxyContext {
@@ -899,7 +888,8 @@ async fn handle_connect(
                             upgraded,
                             &host,
                             &ca,
-                            http_client,
+                            upstream_clients,
+                            upstream_tls_policy,
                             ws_connector,
                             vault_injection_rules,
                             cache,
@@ -1116,12 +1106,13 @@ async fn handle_http_proxy(
         budget_bindings: resolved.budget_bindings,
     };
 
-    let http_client =
+    let upstream_tls_policy =
         if scheme == "https" && host_matches_skip_verify(&hostname, &state.skip_verify_hosts) {
-            state.http_client_no_verify.clone()
+            UpstreamTlsPolicy::NoVerify
         } else {
-            state.http_client.clone()
+            UpstreamTlsPolicy::Verify
         };
+    let upstream_client = state.upstream_clients.lease(upstream_tls_policy);
 
     let mut resp = async {
         forward::forward_request(
@@ -1129,7 +1120,7 @@ async fn handle_http_proxy(
             &authority, // forward target (the HTTP-proxy path never host-rewrites)
             &hostname,  // policy_host: host the rules were assembled from
             scheme,
-            http_client,
+            upstream_client,
             &rules,
             &*state.cache,
             &proxy_ctx,
@@ -1253,7 +1244,9 @@ mod tests {
         });
 
         // Act: use the same client the gateway uses in production.
-        let client = build_http_client(false);
+        let client =
+            upstream::build_http_client(false, upstream::UpstreamTransportConfig::default())
+                .expect("build HTTP client");
         let resp = client
             .get(format!("http://{addr}/test"))
             .send()

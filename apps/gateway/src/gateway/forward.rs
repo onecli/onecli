@@ -27,6 +27,7 @@ use crate::policy_engine;
 use super::hooks;
 use super::mitm::ResolvedRules;
 use super::response;
+use super::upstream::UpstreamClientLease;
 use super::ProxyContext;
 
 // ── Header filtering ────────────────────────────────────────────────────
@@ -106,6 +107,77 @@ const AUTH_CHECK_BODY_LIMIT: usize = 8192;
 /// OAuth refresh bodies are tiny; this only guards against pathological inputs.
 const MAX_DEFAULT_INTERCEPT_BODY: usize = 64 * 1024;
 
+enum UpstreamSendError {
+    ResponseHeaderTimeout,
+    Request(reqwest::Error),
+}
+
+enum ForwardUpstreamError {
+    TimeoutResponse(Box<Response<hooks::ForwardResponseBody>>),
+    Request(reqwest::Error),
+}
+
+fn observable_host(host: &str) -> &str {
+    let without_userinfo = host.rsplit('@').next().unwrap_or(host);
+    super::strip_port(without_userinfo)
+}
+
+/// Send an upstream request, bounding the wait for response headers.
+///
+/// The response body remains streamed after headers arrive, so long-lived SSE
+/// and large downloads are not capped by this timeout.
+async fn send_upstream_with_timeout(
+    request: reqwest::RequestBuilder,
+    timeout: Duration,
+) -> std::result::Result<reqwest::Response, UpstreamSendError> {
+    match tokio::time::timeout(timeout, request.send()).await {
+        Ok(Ok(response)) => Ok(response),
+        Ok(Err(err)) => Err(UpstreamSendError::Request(err)),
+        Err(_) => Err(UpstreamSendError::ResponseHeaderTimeout),
+    }
+}
+
+async fn send_upstream_or_timeout_response(
+    request: reqwest::RequestBuilder,
+    client: &UpstreamClientLease,
+    method: &hyper::Method,
+    host: &str,
+) -> std::result::Result<reqwest::Response, ForwardUpstreamError> {
+    match send_upstream_with_timeout(request, client.response_header_timeout()).await {
+        Ok(response) => Ok(response),
+        Err(UpstreamSendError::ResponseHeaderTimeout) => {
+            let log_host = observable_host(host);
+            let rotated = match client.rotate_after_timeout() {
+                Ok(rotated) => rotated,
+                Err(err) => {
+                    warn!(
+                        method = %method,
+                        host = %log_host,
+                        tls_policy = ?client.policy(),
+                        generation = client.generation(),
+                        error = ?err,
+                        "upstream response-header timeout; failed to rotate client generation"
+                    );
+                    false
+                }
+            };
+            warn!(
+                method = %method,
+                host = %log_host,
+                tls_policy = ?client.policy(),
+                generation = client.generation(),
+                timeout_secs = client.response_header_timeout().as_secs(),
+                rotated,
+                "upstream response-header timeout"
+            );
+            Err(ForwardUpstreamError::TimeoutResponse(Box::new(
+                response::upstream_timeout(),
+            )))
+        }
+        Err(UpstreamSendError::Request(err)) => Err(ForwardUpstreamError::Request(err)),
+    }
+}
+
 /// Mint any deferred credentials and fold their rules into the request's
 /// injection set. Called once the request is allowed — see
 /// [`crate::connect::PendingInjection`].
@@ -180,7 +252,7 @@ pub(crate) async fn forward_request(
     // forward target (URL, `is_llm_host`, interception).
     policy_host: &str,
     scheme: &str,
-    http_client: reqwest::Client,
+    http_client: UpstreamClientLease,
     rules: &ResolvedRules,
     cache: &dyn CacheStore,
     proxy_ctx: &ProxyContext,
@@ -775,16 +847,20 @@ pub(crate) async fn forward_request(
     };
 
     // ── Forward to upstream ──────────────────────────────────────────
-    let mut upstream = http_client.request(method.clone(), &upstream_url);
+    let mut upstream = http_client.client().request(method.clone(), &upstream_url);
     for (name, value) in headers.iter() {
         upstream = upstream.header(name.clone(), value.clone());
     }
     upstream = upstream.body(forward_body);
 
-    let upstream_resp = upstream
-        .send()
-        .await
-        .with_context(|| format!("forwarding to {url}"))?;
+    let upstream_resp =
+        match send_upstream_or_timeout_response(upstream, &http_client, &method, host).await {
+            Ok(response) => response,
+            Err(ForwardUpstreamError::TimeoutResponse(resp)) => return Ok(*resp),
+            Err(ForwardUpstreamError::Request(err)) => {
+                return Err(err).with_context(|| format!("forwarding to {url}"));
+            }
+        };
 
     let status = upstream_resp.status();
     let resp_headers = upstream_resp.headers().clone();
@@ -1166,6 +1242,295 @@ fn body_indicates_auth_error(body: &[u8]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::net::SocketAddr;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use http_body_util::BodyExt;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    use super::super::upstream::{UpstreamClients, UpstreamTlsPolicy, UpstreamTransportConfig};
+
+    fn upstream_clients(response_header_timeout: Duration) -> UpstreamClients {
+        UpstreamClients::new(
+            UpstreamTransportConfig {
+                connect_timeout: Duration::from_secs(10),
+                response_header_timeout,
+            },
+            false,
+        )
+        .expect("build upstream clients")
+    }
+
+    async fn read_request_headers(stream: &mut tokio::net::TcpStream) {
+        let mut buf = [0u8; 1024];
+        let mut seen = Vec::new();
+        loop {
+            match stream.read(&mut buf).await {
+                Ok(0) | Err(_) => return,
+                Ok(n) => {
+                    seen.extend_from_slice(&buf[..n]);
+                    if seen.windows(4).any(|w| w == b"\r\n\r\n") {
+                        return;
+                    }
+                }
+            }
+        }
+    }
+
+    async fn silent_upstream() -> (SocketAddr, Arc<AtomicUsize>, tokio::task::JoinHandle<()>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind silent upstream");
+        let addr = listener.local_addr().expect("silent upstream address");
+        let accepted = Arc::new(AtomicUsize::new(0));
+        let accepted_for_task = Arc::clone(&accepted);
+        let server = tokio::spawn(async move {
+            loop {
+                let Ok((mut stream, _)) = listener.accept().await else {
+                    return;
+                };
+                accepted_for_task.fetch_add(1, Ordering::SeqCst);
+                tokio::spawn(async move {
+                    read_request_headers(&mut stream).await;
+                    tokio::time::sleep(Duration::from_secs(10)).await;
+                });
+            }
+        });
+        (addr, accepted, server)
+    }
+
+    async fn wait_for_accepts(accepted: &AtomicUsize, expected: usize) {
+        let done = tokio::time::timeout(Duration::from_secs(1), async {
+            while accepted.load(Ordering::SeqCst) < expected {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await;
+        assert!(
+            done.is_ok(),
+            "upstream accepted {} requests, expected {expected}",
+            accepted.load(Ordering::SeqCst)
+        );
+    }
+
+    async fn one_response_upstream(
+        response: &'static [u8],
+        body_delay: Duration,
+    ) -> (SocketAddr, tokio::task::JoinHandle<()>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind response upstream");
+        let addr = listener.local_addr().expect("response upstream address");
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("accept request");
+            read_request_headers(&mut stream).await;
+            if let Some(split) = response.windows(4).position(|w| w == b"\r\n\r\n") {
+                let header_end = split + 4;
+                stream
+                    .write_all(&response[..header_end])
+                    .await
+                    .expect("write response headers");
+                tokio::time::sleep(body_delay).await;
+                stream
+                    .write_all(&response[header_end..])
+                    .await
+                    .expect("write response body");
+            } else {
+                stream
+                    .write_all(response)
+                    .await
+                    .expect("write whole response");
+            }
+        });
+        (addr, server)
+    }
+
+    async fn timeout_response_body(resp: Response<hooks::ForwardResponseBody>) -> String {
+        let bytes = resp
+            .into_body()
+            .collect()
+            .await
+            .expect("collect timeout response body")
+            .to_bytes();
+        String::from_utf8(bytes.to_vec()).expect("timeout response is utf8")
+    }
+
+    #[tokio::test]
+    async fn upstream_response_header_wait_is_bounded() {
+        let (addr, accepted, server) = silent_upstream().await;
+        let request = reqwest::Client::new().get(format!("http://{addr}/silent"));
+        let guarded = tokio::time::timeout(
+            Duration::from_millis(250),
+            send_upstream_with_timeout(request, Duration::from_millis(50)),
+        )
+        .await;
+
+        wait_for_accepts(&accepted, 1).await;
+        server.abort();
+        assert!(
+            matches!(guarded, Ok(Err(UpstreamSendError::ResponseHeaderTimeout))),
+            "the helper did not enforce its own response-header timeout"
+        );
+    }
+
+    #[tokio::test]
+    async fn upstream_timeout_maps_to_sanitized_504() {
+        let (addr, _accepted, server) = silent_upstream().await;
+        let clients = upstream_clients(Duration::from_millis(50));
+        let lease = clients.lease(UpstreamTlsPolicy::Verify);
+        let request = lease.client().get(format!(
+            "http://{addr}/silent?marker=fixture-redaction-marker"
+        ));
+
+        let err = match send_upstream_or_timeout_response(
+            request,
+            &lease,
+            &hyper::Method::GET,
+            "127.0.0.1",
+        )
+        .await
+        {
+            Ok(_) => panic!("silent upstream should return timeout response"),
+            Err(err) => err,
+        };
+
+        server.abort();
+        let ForwardUpstreamError::TimeoutResponse(resp) = err else {
+            panic!("expected timeout response");
+        };
+        assert_eq!(resp.status(), StatusCode::GATEWAY_TIMEOUT);
+        assert_eq!(
+            resp.headers()
+                .get("x-should-retry")
+                .and_then(|v| v.to_str().ok()),
+            Some("false")
+        );
+        let body = timeout_response_body(*resp).await;
+        assert!(body.contains(r#""error":"upstream_timeout""#));
+        assert!(!body.contains("fixture-redaction-marker"));
+    }
+
+    #[tokio::test]
+    async fn timeout_rotates_generation_and_next_lease_succeeds() {
+        let (silent_addr, _accepted, silent_server) = silent_upstream().await;
+        let clients = upstream_clients(Duration::from_millis(50));
+        let stale = clients.lease(UpstreamTlsPolicy::Verify);
+        let request = stale.client().get(format!("http://{silent_addr}/silent"));
+
+        let result =
+            send_upstream_or_timeout_response(request, &stale, &hyper::Method::GET, "127.0.0.1")
+                .await;
+        assert!(matches!(
+            result,
+            Err(ForwardUpstreamError::TimeoutResponse(_))
+        ));
+        assert_eq!(clients.generation(UpstreamTlsPolicy::Verify), 1);
+        silent_server.abort();
+
+        let (ok_addr, ok_server) = one_response_upstream(
+            b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok",
+            Duration::ZERO,
+        )
+        .await;
+        let fresh = clients.lease(UpstreamTlsPolicy::Verify);
+        assert_eq!(fresh.generation(), 1);
+        let request = fresh.client().get(format!("http://{ok_addr}/ok"));
+        let response_result =
+            send_upstream_or_timeout_response(request, &fresh, &hyper::Method::GET, "127.0.0.1")
+                .await;
+        let response = match response_result {
+            Ok(response) => response,
+            Err(_) => panic!("fresh generation should receive response headers"),
+        };
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.bytes().await.expect("read body"),
+            Bytes::from_static(b"ok")
+        );
+        ok_server.await.expect("response server finished");
+    }
+
+    #[tokio::test]
+    async fn concurrent_timeouts_rotate_one_generation_once() {
+        let (addr, _accepted, server) = silent_upstream().await;
+        let clients = upstream_clients(Duration::from_millis(50));
+        let leases = (0..5)
+            .map(|_| clients.lease(UpstreamTlsPolicy::Verify))
+            .collect::<Vec<_>>();
+
+        let results = futures_util::future::join_all(leases.into_iter().map(|lease| {
+            let request = lease.client().get(format!("http://{addr}/silent"));
+            async move {
+                send_upstream_or_timeout_response(request, &lease, &hyper::Method::GET, "127.0.0.1")
+                    .await
+            }
+        }))
+        .await;
+
+        server.abort();
+        assert!(results
+            .into_iter()
+            .all(|result| matches!(result, Err(ForwardUpstreamError::TimeoutResponse(_)))));
+        assert_eq!(clients.generation(UpstreamTlsPolicy::Verify), 1);
+    }
+
+    #[tokio::test]
+    async fn response_header_timeout_does_not_bound_streamed_body() {
+        let (addr, server) = one_response_upstream(
+            b"HTTP/1.1 200 OK\r\nContent-Length: 11\r\n\r\nhello world",
+            Duration::from_millis(150),
+        )
+        .await;
+        let clients = upstream_clients(Duration::from_millis(50));
+        let lease = clients.lease(UpstreamTlsPolicy::Verify);
+        let request = lease.client().get(format!("http://{addr}/stream"));
+
+        let response_result =
+            send_upstream_or_timeout_response(request, &lease, &hyper::Method::GET, "127.0.0.1")
+                .await;
+        let response = match response_result {
+            Ok(response) => response,
+            Err(_) => panic!("headers arrive before the response-header timeout"),
+        };
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = tokio::time::timeout(Duration::from_secs(1), response.bytes())
+            .await
+            .expect("body stream should not be capped by the header timeout")
+            .expect("read body");
+        assert_eq!(body, Bytes::from_static(b"hello world"));
+        server.await.expect("stream server finished");
+    }
+
+    #[tokio::test]
+    async fn response_header_timeout_does_not_replay_post() {
+        let (addr, accepted, server) = silent_upstream().await;
+        let clients = upstream_clients(Duration::from_millis(50));
+        let lease = clients.lease(UpstreamTlsPolicy::Verify);
+        let request = lease
+            .client()
+            .post(format!("http://{addr}/create"))
+            .body("payload");
+
+        let result =
+            send_upstream_or_timeout_response(request, &lease, &hyper::Method::POST, "127.0.0.1")
+                .await;
+
+        wait_for_accepts(&accepted, 1).await;
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        server.abort();
+        assert!(matches!(
+            result,
+            Err(ForwardUpstreamError::TimeoutResponse(_))
+        ));
+        assert_eq!(accepted.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn observable_host_strips_userinfo_and_port() {
+        assert_eq!(observable_host("userinfo@example.test:443"), "example.test");
+        assert_eq!(observable_host("example.test:443"), "example.test");
+    }
 
     // ── is_forwarded_request_header ──────────────────────────────────────
 
