@@ -1,5 +1,13 @@
 # Changelog
 
+## [2.0.1](https://github.com/onecli/onecli/compare/v2.0.0...v2.0.1) (2026-08-18)
+
+
+### Bug Fixes
+
+* chat-native approval cards, cross-surface sync, and channel seams ([#501](https://github.com/onecli/onecli/issues/501)) ([3513c69](https://github.com/onecli/onecli/commit/3513c69f0edfd4d35920499a154385c5e61e081b))
+* restore GitHub-detectable Apache-2.0 LICENSE ([#499](https://github.com/onecli/onecli/issues/499)) ([17e7db1](https://github.com/onecli/onecli/commit/17e7db175fad1c070829e2f12f78ac1205d522d6))
+
 ## [2.0.0](https://github.com/onecli/onecli/compare/v1.45.0...v2.0.0) (2026-08-18)
 
 
