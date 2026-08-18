@@ -10,6 +10,16 @@ export interface ReplyTarget {
   threadTs: string | null;
 }
 
+/** Where one channel post goes — the credential plus the thread address.
+ * The base shape both channel seams (`ApprovalCardUi`, `MirrorPosts`)
+ * extend, so a new target field lands in one place. */
+export interface ChannelPostTarget {
+  credential: string;
+  channel: string;
+  threadTs?: string;
+  iconUrl?: string;
+}
+
 /** `direct` links address the IM channel; `group` links pack
  * `<channel>:<threadRootTs>` into the external thread id. */
 export const replyTargetForLink = (

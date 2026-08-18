@@ -3877,6 +3877,49 @@ describe.skipIf(!PROOF_URL)("getAdapterWork", () => {
     // The wire watermark is the promotion stamp, so the CAS still advances.
     expect(item?.turn.createdAt.getTime()).toBeGreaterThan(Date.now() - 60_000);
   });
+
+  it("resolves attribution names PER AUTHOR — the asker and each follow-up's own speaker", async () => {
+    // On a group thread a follow-up's author can differ from the turn's
+    // asker, so each follow-up carries its OWN userName on the wire.
+    // MUTATION-TESTED: drop `userId` from the follow-up select (or reuse the
+    // turn's name in the mapping) and the ADMIN follow-up below surfaces as
+    // null / under Morgan's name — the exact misattribution this pins.
+    const { conversation, link } = await seedLinkedConversation("names");
+    // Backdate the link so the turns below are unambiguously AFTER it (the
+    // mirror floor is strict).
+    await db.$executeRaw`UPDATE channel_thread_links SET created_at = now() - interval '10 minutes' WHERE id = ${link.id}`;
+    const asked = await db.turn.create({
+      data: {
+        conversationId: conversation.id,
+        message: "who is on call?",
+        status: "done",
+        source: "web",
+        userId: MEMBER,
+        finishedAt: new Date(),
+      },
+      select: { id: true },
+    });
+    await db.turn.create({
+      data: {
+        conversationId: conversation.id,
+        message: "and check the pager",
+        status: "joined",
+        source: "web",
+        userId: ADMIN,
+        followUpOfTurnId: asked.id,
+      },
+    });
+
+    const work = await adapters.getAdapterWork();
+
+    const item = work.finished.find((w) => w.turn.id === asked.id);
+    expect(item?.turn.userName).toBe("Morgan Member");
+    // ADMIN has no display name → unnamed, NEVER the email local-part: the
+    // Slack audience is not fenced to workspace membership, so email-derived
+    // identity must not travel there.
+    expect(item?.followUps.map((f) => f.userName)).toEqual([null]);
+    expect(JSON.stringify(item)).not.toContain(`${ADMIN}@example.com`);
+  });
 });
 
 describe.skipIf(!PROOF_URL)("turn receipts (the reaction 'seen' mark)", () => {

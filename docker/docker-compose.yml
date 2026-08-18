@@ -321,6 +321,9 @@ services:
       CHANNEL_ADAPTER_TOKEN: ${CHANNEL_ADAPTER_TOKEN:-}
       CONTROL_PLANE_URL: http://api:10256
       GATEWAY_API_URL: http://gateway:10255
+      # The dashboard address the model-key buttons in Slack posts point at —
+      # same default as the api/web/gateway services above.
+      APP_URL: ${APP_URL:-http://${ONECLI_BIND_HOST:-127.0.0.1}:${ONECLI_APP_PORT:-10254}}
       CHANNEL_ADAPTER_NAME: ${CHANNEL_ADAPTER_NAME:-compose}
     env_file:
       # Only the install's own .env — same rule as the api service (a

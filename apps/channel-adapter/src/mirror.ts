@@ -1,8 +1,6 @@
-import { escapeSlackText, type AdapterWorkItem } from "@onecli/agent-protocol";
+import type { AdapterWorkItem } from "@onecli/agent-protocol";
 import type { ControlPlaneClient } from "./control-plane";
-import { replyTargetForLink } from "./targets";
-import { postMessage } from "./slack/client";
-import { markdownToMrkdwn } from "./slack/mrkdwn";
+import { replyTargetForLink, type ChannelPostTarget } from "./targets";
 
 /**
  * The COMPLETION PASS — the one and only answer path (the de-streaming
@@ -15,6 +13,11 @@ import { markdownToMrkdwn } from "./slack/mrkdwn";
  *   pass's winning claim.
  * - A WEB-originated turn is mirrored — question attributed, then the
  *   answer — so both doors of the same conversation stay visually in sync.
+ *
+ * Channel-general by design: this module decides WHAT to post and in what
+ * order; every rendering decision (attribution formatting, icons, markdown
+ * conversion, structured cards) lives behind the injected `MirrorPosts`
+ * seam — Slack's implementation is slack/mirror-posts.ts.
  *
  * The cursor makes it exactly-once: the work poll only surfaces finished
  * turns past `mirrorCursor`, and the cursor advances by COMPARE-AND-SET —
@@ -42,15 +45,52 @@ const answerFromTranscript = async (
   return answer;
 };
 
+/**
+ * What a channel must provide to carry the mirror's posts. Each operation is
+ * semantic — the implementation owns the channel-native rendering (Slack:
+ * slack/mirror-posts.ts); a second channel implements the same seam. The
+ * shared `ChannelPostTarget` base (targets.ts) carries the credential and
+ * thread address.
+ */
+export interface MirrorPosts {
+  /** A person's words from another surface, attributed. `userName` null →
+   * unnamed attribution. The message is a quote — never converted. */
+  webSourced(
+    input: ChannelPostTarget & { userName: string | null; message: string },
+  ): Promise<void>;
+  /** An automated run's report: the run's title as a caption, plus the body
+   * (model markdown) when one exists. */
+  automation(
+    input: ChannelPostTarget & {
+      source: "watch" | "cron";
+      title: string;
+      body: string | null;
+    },
+  ): Promise<void>;
+  /** The turn's answer — model-authored markdown (or a door failure's plain
+   * `turn.error`). */
+  answer(input: ChannelPostTarget & { markdown: string }): Promise<void>;
+  /** A no-model-key failure with the web's same call to action: the raw
+   * answer (the canonical sentence) plus where the fix lives. */
+  noModelKey(
+    input: ChannelPostTarget & { modelsUrl: string; answer: string },
+  ): Promise<void>;
+}
+
 export interface MirrorDeps {
   controlPlane: ControlPlaneClient;
-  botToken: string;
+  /** The channel credential for this presence (opaque here). */
+  credential: string;
   provider: string;
-  /** The agent's public avatar URL, posted as `icon_url` when set. */
+  posts: MirrorPosts;
+  /** The agent's public avatar URL, threaded to every post when set. */
   iconUrl?: string | null;
   /** The link's cursor as this adapter last knew it (the CAS expectation). */
   knownCursor: string | null;
   item: AdapterWorkItem;
+  /** Where a no-model-key answer's call to action points (the agent's
+   * Models page). Omitted → plain text, no button. */
+  modelsUrl?: string;
   onLog: (message: string, detail?: unknown) => void;
 }
 
@@ -63,8 +103,13 @@ export const mirrorFinishedTurn = async (
   deps: MirrorDeps,
 ): Promise<string | null> => {
   const { item } = deps;
-  const target = replyTargetForLink(item);
-  const iconUrl = deps.iconUrl ?? undefined;
+  const link = replyTargetForLink(item);
+  const target: ChannelPostTarget = {
+    credential: deps.credential,
+    channel: link.channel,
+    ...(link.threadTs && { threadTs: link.threadTs }),
+    ...(deps.iconUrl && { iconUrl: deps.iconUrl }),
+  };
 
   // Claim FIRST: the CAS is the exactly-once gate, so the post happens only
   // on the winning side. (Claim-then-post means a crash between the two can
@@ -85,16 +130,15 @@ export const mirrorFinishedTurn = async (
   // An automated run's report (crons step 7, watches step 10): the turn is a
   // platform-materialized delivery whose message is the automation header,
   // not a person's question — labelling it "(from the web)" would attribute
-  // automation to a human. One message: the header as a caption, then the
-  // report. The icon distinguishes the two, and watch volume is bounded by
-  // one-shot semantics (the decided answer to the posting-shape question).
-  // This list mirrors `AUTOMATION_SOURCES` in @onecli/api's conversation
-  // validations. This app cannot import that package, so the two are kept in
-  // sync by convention — a new automation source must be added in BOTH places
-  // or it will be bridged in the control plane yet mis-attributed here.
+  // automation to a human. One message: the report, or the header when the
+  // run produced none. The icon distinguishes the two, and watch volume is
+  // bounded by one-shot semantics (the decided answer to the posting-shape
+  // question). This list mirrors `AUTOMATION_SOURCES` in @onecli/api's
+  // conversation validations. This app cannot import that package, so the
+  // two are kept in sync by convention — a new automation source must be
+  // added in BOTH places or it will be bridged in the control plane yet
+  // mis-attributed here.
   const automated = item.turn.source === "cron" || item.turn.source === "watch";
-  const automationIcon =
-    item.turn.source === "watch" ? ":stopwatch:" : ":calendar:";
 
   try {
     const answer =
@@ -107,24 +151,22 @@ export const mirrorFinishedTurn = async (
       null;
 
     if (automated) {
-      await postMessage(deps.botToken, {
-        channel: target.channel,
-        // The header is quoted verbatim (escape only); the report body is
-        // model markdown — converted (markdownToMrkdwn escapes internally).
-        text: `${automationIcon} _${escapeSlackText(item.turn.message)}_${answer ? `\n${markdownToMrkdwn(answer)}` : ""}`,
-        ...(target.threadTs && { threadTs: target.threadTs }),
-        ...(iconUrl && { iconUrl }),
+      await deps.posts.automation({
+        ...target,
+        source: item.turn.source === "watch" ? "watch" : "cron",
+        title: item.turn.message,
+        body: answer,
       });
       return item.turn.createdAt;
     }
 
     if (!fromProvider) {
-      // The question came from elsewhere (the web): show it, attributed.
-      await postMessage(deps.botToken, {
-        channel: target.channel,
-        text: `_(from the web)_ ${escapeSlackText(item.turn.message)}`,
-        ...(target.threadTs && { threadTs: target.threadTs }),
-        ...(iconUrl && { iconUrl }),
+      // The question came from elsewhere (the web): show it, attributed —
+      // by name when the control plane resolved one.
+      await deps.posts.webSourced({
+        ...target,
+        userName: item.turn.userName ?? null,
+        message: item.turn.message,
       });
     }
 
@@ -134,25 +176,33 @@ export const mirrorFinishedTurn = async (
     // already in the channel — posting them again would echo the user.
     for (const followUp of item.followUps ?? []) {
       if (followUp.source === deps.provider) continue;
-      await postMessage(deps.botToken, {
-        channel: target.channel,
-        text: `_(from the web)_ ${escapeSlackText(followUp.message)}`,
-        ...(target.threadTs && { threadTs: target.threadTs }),
-        ...(iconUrl && { iconUrl }),
+      // Attributed by the follow-up's OWN author. An older control plane
+      // sends no per-follow-up name (field absent) — fall back to the turn's
+      // asker, the pre-field behavior, exact on direct threads. Null means
+      // the control plane resolved and found nothing (deleted user): unnamed.
+      await deps.posts.webSourced({
+        ...target,
+        userName:
+          followUp.userName === undefined
+            ? (item.turn.userName ?? null)
+            : followUp.userName,
+        message: followUp.message,
       });
     }
 
     if (answer) {
-      await postMessage(deps.botToken, {
-        channel: target.channel,
-        // The answer is model-authored markdown (or a door failure's
-        // turn.error — plain text the converter passes through): convert to
-        // mrkdwn so **bold**/headings/lists render instead of showing their
-        // markers (escaping happens inside the converter, first).
-        text: markdownToMrkdwn(answer),
-        ...(target.threadTs && { threadTs: target.threadTs }),
-        ...(iconUrl && { iconUrl }),
-      });
+      // A no-model-key failure gets the web's same call to action. Only when
+      // the CODE says so — never inferred from prose — and only with a URL
+      // to point at; without one it falls through to the plain answer.
+      if (item.turn.errorCode === "no_model_key" && deps.modelsUrl) {
+        await deps.posts.noModelKey({
+          ...target,
+          modelsUrl: deps.modelsUrl,
+          answer,
+        });
+      } else {
+        await deps.posts.answer({ ...target, markdown: answer });
+      }
     }
   } catch (err) {
     // The cursor already moved: log loudly rather than retry into a double

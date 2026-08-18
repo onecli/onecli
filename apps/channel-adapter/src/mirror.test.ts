@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { AdapterWorkItem, AdapterWorkTurn } from "@onecli/agent-protocol";
 import type { ControlPlaneClient } from "./control-plane";
 import { mirrorFinishedTurn } from "./mirror";
+import { slackMirrorPosts } from "./slack/mirror-posts";
 import {
   createFakeControlPlane,
   startFakeSlackServer,
@@ -71,15 +72,20 @@ const mirror = (input: {
   workItem?: AdapterWorkItem;
   knownCursor?: string | null;
   iconUrl?: string | null;
+  modelsUrl?: string;
   onLog?: (message: string, detail?: unknown) => void;
 }) =>
+  // The REAL Slack posts implementation rides the fake HTTP server — the
+  // mirror itself is channel-general and only sees the seam.
   mirrorFinishedTurn({
     controlPlane: input.controlPlane,
-    botToken: "xoxb-bot",
+    credential: "xoxb-bot",
     provider: "slack",
+    posts: slackMirrorPosts,
     iconUrl: input.iconUrl ?? null,
     knownCursor: input.knownCursor ?? "2026-08-05T00:00:00.000Z",
     item: input.workItem ?? item(),
+    ...(input.modelsUrl && { modelsUrl: input.modelsUrl }),
     onLog: input.onLog ?? (() => {}),
   });
 
@@ -212,6 +218,8 @@ describe("what gets posted", () => {
     });
 
     const posted = slack.callsTo("chat.postMessage");
+    // The title rides every automation post as a quiet caption — two
+    // automations reporting into one thread are indistinguishable without it.
     expect(posted.map((call) => call.form.text)).toEqual([
       ':calendar: _Scheduled run "daily-check"_\nInbox is clear &lt;ok&gt;',
     ]);
@@ -275,11 +283,10 @@ describe("what gets posted", () => {
     ]);
   });
 
-  it("converts the automated report body but quotes the header verbatim", async () => {
-    // The header is the automation's name — quoted words, escape only; the
-    // report below it is model markdown. MUTATION-PROOF both ways: escape
-    // the body and the heading/bullet/bold markers stay literal; convert
-    // the header and its literal **daily** collapses to *daily*.
+  it("converts the automated report body under the verbatim title caption", async () => {
+    // The report is model markdown — converted. The TITLE stays a quoted
+    // caption above it (escape only, never converted): reports do not
+    // self-identify, so the caption is what tells two automations apart.
     const controlPlane = createFakeControlPlane(
       transcriptWith("## Inbox\n- **unread:** 0"),
     );
@@ -298,6 +305,23 @@ describe("what gets posted", () => {
     ]);
   });
 
+  it("falls back to the escaped title when the automated run produced no body", async () => {
+    const controlPlane = createFakeControlPlane(transcriptWith(null));
+
+    await mirror({
+      controlPlane,
+      workItem: item({
+        source: "cron",
+        userId: null,
+        message: "Scheduled run **daily** <sweep>",
+      }),
+    });
+
+    expect(slack.callsTo("chat.postMessage").map((c) => c.form.text)).toEqual([
+      ":calendar: _Scheduled run **daily** &lt;sweep&gt;_",
+    ]);
+  });
+
   it("quotes web-sourced questions VERBATIM — markdown in a human's words is not converted", async () => {
     // The attributed mirror is a quote, not a rendering: a person who typed
     // literal asterisks said literal asterisks.
@@ -311,6 +335,51 @@ describe("what gets posted", () => {
     expect(slack.callsTo("chat.postMessage")[0]?.form.text).toBe(
       "_(from the web)_ is **this** bold?",
     );
+  });
+
+  it("attributes a web-sourced turn by NAME when the control plane resolved one — italic, escaped", async () => {
+    const controlPlane = createFakeControlPlane(transcriptWith("Done."));
+
+    await mirror({
+      controlPlane,
+      workItem: item({ userName: "Jonathan <j>" }),
+    });
+
+    // Italic: the attribution is metadata and must stay quieter than the
+    // quoted words themselves.
+    expect(slack.callsTo("chat.postMessage")[0]?.form.text).toBe(
+      "_(from the web · Jonathan &lt;j&gt;)_ Deploy it &lt;now&gt;",
+    );
+  });
+
+  it("attributes each follow-up by ITS OWN author — named, null → unnamed, absent → the asker (legacy)", async () => {
+    // On a group thread the follow-up author can differ from the turn's
+    // asker. Named rows use their own name; an explicit null (the control
+    // plane resolved and found nothing — deleted user) renders unnamed; an
+    // ABSENT field (an older control plane that predates per-follow-up
+    // names) falls back to the asker's name, the pre-field behavior.
+    // MUTATION-PROOF: reuse the turn's name for every follow-up and Bob's
+    // line below surfaces under Alice's name.
+    const controlPlane = createFakeControlPlane(transcriptWith("Covers all."));
+
+    await mirror({
+      controlPlane,
+      workItem: {
+        ...item({ source: "slack", userName: "Alice" }),
+        followUps: [
+          { message: "from Bob", source: "web", userName: "Bob" },
+          { message: "from a deleted user", source: "web", userName: null },
+          { message: "old control plane", source: "web" },
+        ],
+      },
+    });
+
+    expect(slack.callsTo("chat.postMessage").map((c) => c.form.text)).toEqual([
+      "_(from the web · Bob)_ from Bob",
+      "_(from the web)_ from a deleted user",
+      "_(from the web · Alice)_ old control plane",
+      "Covers all.",
+    ]);
   });
 
   it("posts the turn's WEB-sourced joined follow-ups before the answer — Slack-sourced ones never echo", async () => {
@@ -368,6 +437,83 @@ describe("what gets posted", () => {
     expect(slack.callsTo("chat.postMessage").map((c) => c.form.text)).toEqual([
       "The model provider refused &lt;retry&gt;",
     ]);
+  });
+
+  it("posts the no-model-key card — headline, context line, and a button to the Models page", async () => {
+    // The web's same call to action, structured: keyed on the CODE (never
+    // prose) and gated on having a URL to point at. The canonical sentence
+    // stays as the notification fallback text.
+    const controlPlane = createFakeControlPlane(transcriptWith(null));
+
+    await mirror({
+      controlPlane,
+      modelsUrl: "https://app.example.com/w/ws1/agents/ag1/models",
+      workItem: item({
+        source: "slack",
+        error: "No key <yet>.",
+        errorCode: "no_model_key",
+      }),
+    });
+
+    const posted = slack.callsTo("chat.postMessage");
+    expect(posted).toHaveLength(1);
+    expect(posted[0]?.form.text).toBe("No key &lt;yet&gt;.");
+    const blocks = JSON.parse(posted[0]!.form.blocks!) as {
+      type: string;
+      text?: { text: string };
+      elements?: {
+        type: string;
+        text?: { text: string };
+        url?: string;
+        action_id?: string;
+      }[];
+    }[];
+    expect(blocks[0]?.text?.text).toBe("*This agent has no model key yet*");
+    const button = blocks.find((b) => b.type === "actions")?.elements?.[0];
+    expect(button?.url).toBe("https://app.example.com/w/ws1/agents/ag1/models");
+    expect(button?.action_id).toBe("open_models_page");
+    expect(button?.text?.text).toBe("Connect a model key");
+  });
+
+  it("falls back to the plain answer when no models URL is configured — the failure still posts", async () => {
+    const controlPlane = createFakeControlPlane(transcriptWith(null));
+
+    await mirror({
+      controlPlane,
+      workItem: item({
+        source: "slack",
+        error: "No key <yet>.",
+        errorCode: "no_model_key",
+      }),
+    });
+
+    const posted = slack.callsTo("chat.postMessage");
+    expect(posted).toHaveLength(1);
+    expect(posted[0]?.form.text).toBe("No key &lt;yet&gt;.");
+    expect("blocks" in posted[0]!.form).toBe(false);
+  });
+
+  it("treats any OTHER error code as a plain answer — no card is invented for codes without a producer", async () => {
+    // `model_provider_error` once had a card arm here despite having no
+    // producer anywhere (finishTurn's allowlist makes it unreachable); this
+    // pins its removal — an unknown code takes the plain-answer path even
+    // with a models URL configured.
+    const controlPlane = createFakeControlPlane(transcriptWith(null));
+
+    await mirror({
+      controlPlane,
+      modelsUrl: "https://app.example.com/w/ws1/agents/ag1/models",
+      workItem: item({
+        source: "slack",
+        error: "Provider said no <retry>",
+        errorCode: "model_provider_error",
+      }),
+    });
+
+    const posted = slack.callsTo("chat.postMessage");
+    expect(posted).toHaveLength(1);
+    expect(posted[0]?.form.text).toBe("Provider said no &lt;retry&gt;");
+    expect("blocks" in posted[0]!.form).toBe(false);
   });
 
   it("posts nothing at all when there is neither answer nor error, but still advances", async () => {

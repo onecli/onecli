@@ -80,8 +80,8 @@ export const SEAMS: readonly Seam[] = [
   },
   {
     from: "apps/gateway/src/**",
-    why: "The gateway is one binary: its shared request path calls into the licensed feature modules (budgets, granular access, group principals + app availability, the Redis HA stores, the RBAC key rechecks, org routes) at defined points, and shared docs cross-reference the licensed homes. Counted per file/module so a new call site has to be declared. NOTE the detector is anchored on `crate::`/`super::` — main.rs is the crate root and could write a bare `ee::` path that evades counting; always write `crate::ee::…` there.",
-    count: 21,
+    why: "The gateway is one binary: its shared request path calls into the licensed feature modules (budgets, granular access, group principals + app availability, the Redis HA stores, the RBAC key rechecks, org routes) and the hosted-platform plumbing (Cognito session validation from auth.rs's selector, the KMS envelope backend from crypto.rs's dispatch) at defined points, and shared docs cross-reference the licensed homes. Counted per file/module so a new call site has to be declared. NOTE the detector is anchored on `crate::`/`super::` — main.rs is the crate root and could write a bare `ee::` path that evades counting; always write `crate::ee::…` there.",
+    count: 23,
     permanent: true,
   },
   {

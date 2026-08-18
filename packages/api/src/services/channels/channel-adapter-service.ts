@@ -308,6 +308,9 @@ export interface AdapterWorkItem {
     status: string;
     source: string;
     userId: string | null;
+    /** Display name of the person behind `userId`, for cross-surface
+     * attribution ("(from the web — Jonathan)"). Resolved server-side. */
+    userName: string | null;
     message: string;
     error: string | null;
     errorCode: string | null;
@@ -315,8 +318,10 @@ export interface AdapterWorkItem {
     finishedAt: Date | null;
   };
   /** Mid-run follow-ups this turn consumed, oldest first — the mirror posts
-   * the web-sourced ones so both surfaces show the same exchange. */
-  followUps: { message: string; source: string }[];
+   * the web-sourced ones so both surfaces show the same exchange. Each
+   * carries its OWN author's display name: on a group thread the follow-up
+   * author can differ from the turn's asker. */
+  followUps: { message: string; source: string; userName: string | null }[];
 }
 
 export interface AdapterWork {
@@ -414,9 +419,35 @@ export const getAdapterWork = async (): Promise<AdapterWork> => {
             followUpOfTurnId: true,
             message: true,
             source: true,
+            userId: true,
           },
           orderBy: { createdAt: "asc" },
         });
+
+  // Who spoke, by name — one batched lookup for the cross-surface
+  // attribution lines ("(from the web — Jonathan)"). Follow-up authors are
+  // resolved too: on a group thread they can differ from the turn's asker,
+  // and the mirror must not put one member's words under another's name.
+  const userIds = [
+    ...new Set(
+      [...finishedTurns, ...joinedFollowUps]
+        .map((t) => t.userId)
+        .filter((id): id is string => !!id),
+    ),
+  ];
+  const users =
+    userIds.length === 0
+      ? []
+      : await db.user.findMany({
+          where: { id: { in: userIds } },
+          select: { id: true, name: true },
+        });
+  // Display name or nothing — never an email-derived fallback: the mirror
+  // posts this into a Slack thread whose audience is Slack-defined (guests,
+  // external members), not fenced to workspace membership, so a member's
+  // email local-part must not travel there. A name-less member mirrors as
+  // the unnamed "(from the web)".
+  const userNameById = new Map(users.map((u) => [u.id, u.name ?? null]));
 
   // Attachment names, batched for turns AND follow-ups: the mirror's WIRE
   // COPY of a message gains a "📎 name" line so an attachment-only web
@@ -451,7 +482,7 @@ export const getAdapterWork = async (): Promise<AdapterWork> => {
 
   const followUpsByTarget = new Map<
     string,
-    { message: string; source: string }[]
+    { message: string; source: string; userName: string | null }[]
   >();
   for (const row of joinedFollowUps) {
     if (!row.followUpOfTurnId) continue;
@@ -459,6 +490,7 @@ export const getAdapterWork = async (): Promise<AdapterWork> => {
     list.push({
       message: withAttachmentLine(row.id, row.message),
       source: row.source,
+      userName: row.userId ? (userNameById.get(row.userId) ?? null) : null,
     });
     followUpsByTarget.set(row.followUpOfTurnId, list);
   }
@@ -481,6 +513,7 @@ export const getAdapterWork = async (): Promise<AdapterWork> => {
       // raw column.
       turn: {
         ...rest,
+        userName: rest.userId ? (userNameById.get(rest.userId) ?? null) : null,
         message: withAttachmentLine(turn.id, rest.message),
         createdAt: timelineOf(turn),
       },

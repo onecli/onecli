@@ -10,19 +10,19 @@
 //!   rechecks (org-key admin, workspace-key access binding) enforce on cloud and
 //!   on a licensed self-host — mirroring the Node API's role resolver, which
 //!   no-ops only for unlicensed non-RBAC deployments.
-//! - **Sessions**: when `COGNITO_USER_POOL_ID` is configured (cloud), a Cognito
-//!   JWT from the `Authorization` header is validated via RS256 + JWKS.
-//!   Otherwise the self-hosted session cookie is validated — a signed token
-//!   backed by a `sessions` row, so signing out or revoking takes effect here
-//!   immediately. There is no third arm: a request without a valid credential
-//!   is anonymous.
+//! - **Sessions**: only on the cloud edition with `COGNITO_USER_POOL_ID`
+//!   configured (`EDITION=cloud` AND a pool set), a Cognito JWT from the
+//!   `Authorization` header is validated via RS256 + JWKS — the mechanics live
+//!   in the licensed `crate::ee::cognito` (hosted-platform plumbing); the
+//!   selector stays here. Every other configuration validates the self-hosted
+//!   session cookie — a signed token backed by a `sessions` row, so signing out
+//!   or revoking takes effect here immediately. There is no third arm: a
+//!   request without a valid credential is anonymous.
 //! - **Workspace resolution**: the cloud edition is multi-workspace and requires a
 //!   validated `X-Workspace-Id` (the web sets it from the URL) — never a silent
 //!   default. The onprem edition falls back to the caller's default workspace.
 
-use std::collections::HashMap;
-use std::sync::{Arc, OnceLock};
-use std::time::{Duration, Instant};
+use std::sync::OnceLock;
 
 use axum::extract::FromRequestParts;
 use axum::http::request::Parts;
@@ -30,12 +30,9 @@ use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use base64::Engine as _;
 use hyper::HeaderMap;
-use jsonwebtoken::{decode, decode_header, Algorithm, DecodingKey, Validation};
 use ring::hmac;
-use serde::Deserialize;
 use sqlx::PgPool;
-use tokio::sync::RwLock;
-use tracing::{debug, warn};
+use tracing::warn;
 
 use crate::db;
 use crate::edition::{edition, Edition};
@@ -43,9 +40,11 @@ use crate::gateway::GatewayState;
 
 // ── AuthError ────────────────────────────────────────────────────────────
 
-/// Authentication error — always returns 401 Unauthorized.
+/// Authentication error — always returns 401 Unauthorized. The payload is
+/// `pub(crate)` so the licensed Cognito plumbing (`crate::ee::cognito`)
+/// constructs the same error shape as the shared arms.
 #[derive(Debug)]
-pub(crate) struct AuthError(String);
+pub(crate) struct AuthError(pub(crate) String);
 
 impl std::fmt::Display for AuthError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -554,13 +553,24 @@ struct SessionAuth {
     auth_method: &'static str,
 }
 
-/// Validate an incoming browser request: Cognito (Bearer JWT) when the pool is
-/// configured, otherwise the self-hosted session cookie. There is no
-/// unauthenticated arm — a request without a valid credential is anonymous.
+/// Whether browser sessions are validated as Cognito JWTs: only on the cloud
+/// edition with a pool configured. A self-hosted box whose env carries a pool
+/// id (e.g. a shared dev `.env`) must still validate the session cookie —
+/// auth mode must never switch on env residue. Takes `Edition` as a parameter
+/// so both arms are table-tested; `edition()` and the pool presence are read
+/// only at the call site.
+fn use_cognito_sessions(edition: Edition, pool_configured: bool) -> bool {
+    edition == Edition::Cloud && pool_configured
+}
+
+/// Validate an incoming browser request: Cognito (Bearer JWT) only on the
+/// cloud edition with the pool configured, otherwise the self-hosted session
+/// cookie. There is no unauthenticated arm — a request without a valid
+/// credential is anonymous.
 async fn validate_session(pool: &PgPool, headers: &HeaderMap) -> Result<SessionAuth, AuthError> {
-    if cognito_configured() {
+    if use_cognito_sessions(edition(), crate::ee::cognito::configured()) {
         return Ok(SessionAuth {
-            user_id: validate_cognito(pool, headers).await?,
+            user_id: crate::ee::cognito::validate(pool, headers).await?,
             auth_method: "cognito",
         });
     }
@@ -664,201 +674,13 @@ async fn validate_session_cookie(pool: &PgPool, headers: &HeaderMap) -> Result<S
     Ok(user.id)
 }
 
-// ── Cognito mode (Bearer JWT, RS256 via JWKS) ────────────────────────────
-
-/// Cognito ID token claims. The `sub` field is the Cognito user ID; it maps to
-/// `User.externalAuthId` in the database — the same value Cognito returns as
-/// `userId` from `getCurrentUser()`.
-#[derive(Debug, Deserialize)]
-struct CognitoClaims {
-    sub: String,
-}
-
-/// How long to cache JWKS keys before allowing a refresh.
-const JWKS_MIN_REFRESH_INTERVAL: Duration = Duration::from_secs(300);
-
-/// A single JWK (JSON Web Key) for RS256 verification.
-#[derive(Debug, Deserialize)]
-struct Jwk {
-    kid: String,
-    kty: String,
-    n: String,
-    e: String,
-    #[serde(rename = "use")]
-    use_: Option<String>,
-}
-
-/// JWKS response from Cognito.
-#[derive(Debug, Deserialize)]
-struct JwksResponse {
-    keys: Vec<Jwk>,
-}
-
-/// Cached JWKS keys, keyed by `kid`.
-struct JwksCache {
-    keys: HashMap<String, DecodingKey>,
-    last_fetched: Instant,
-    jwks_url: String,
-}
-
-impl JwksCache {
-    fn new(jwks_url: String) -> Self {
-        Self {
-            keys: HashMap::new(),
-            last_fetched: Instant::now() - JWKS_MIN_REFRESH_INTERVAL,
-            jwks_url,
-        }
-    }
-
-    /// Get the decoding key for a `kid`, fetching from Cognito if needed.
-    async fn get_key(&mut self, kid: &str) -> Result<&DecodingKey, AuthError> {
-        if !self.keys.contains_key(kid) {
-            // Rate-limit JWKS fetches to avoid hammering Cognito on invalid tokens
-            if self.last_fetched.elapsed() < JWKS_MIN_REFRESH_INTERVAL {
-                return Err(AuthError("unknown signing key".to_string()));
-            }
-            self.refresh().await?;
-        }
-
-        self.keys
-            .get(kid)
-            .ok_or_else(|| AuthError("unknown signing key".to_string()))
-    }
-
-    /// Fetch fresh keys from the Cognito JWKS endpoint.
-    async fn refresh(&mut self) -> Result<(), AuthError> {
-        let resp: JwksResponse = reqwest::get(&self.jwks_url)
-            .await
-            .map_err(|e| {
-                warn!(error = %e, "cognito auth: failed to fetch JWKS");
-                AuthError("failed to fetch signing keys".to_string())
-            })?
-            .json()
-            .await
-            .map_err(|e| {
-                warn!(error = %e, "cognito auth: failed to parse JWKS");
-                AuthError("failed to parse signing keys".to_string())
-            })?;
-
-        self.keys.clear();
-        for jwk in resp.keys {
-            // Only use RSA signing keys (skip encryption keys)
-            if jwk.kty != "RSA" || jwk.use_.as_deref() == Some("enc") {
-                continue;
-            }
-            match DecodingKey::from_rsa_components(&jwk.n, &jwk.e) {
-                Ok(key) => {
-                    self.keys.insert(jwk.kid, key);
-                }
-                Err(e) => {
-                    warn!(error = %e, "cognito auth: failed to parse JWK");
-                }
-            }
-        }
-
-        self.last_fetched = Instant::now();
-        Ok(())
-    }
-}
-
-/// Global JWKS cache, initialized once from environment.
-static JWKS: OnceLock<Option<Arc<RwLock<JwksCache>>>> = OnceLock::new();
-
-fn jwks_state() -> &'static Option<Arc<RwLock<JwksCache>>> {
-    JWKS.get_or_init(|| {
-        let region = std::env::var("AWS_REGION").unwrap_or_else(|_| "us-east-1".to_string());
-        let user_pool_id = match std::env::var("COGNITO_USER_POOL_ID") {
-            Ok(id) if !id.trim().is_empty() => id,
-            _ => return None,
-        };
-
-        let jwks_url = format!(
-            "https://cognito-idp.{region}.amazonaws.com/{user_pool_id}/.well-known/jwks.json"
-        );
-
-        Some(Arc::new(RwLock::new(JwksCache::new(jwks_url))))
-    })
-}
-
-/// Whether Cognito session auth is configured (`COGNITO_USER_POOL_ID` set).
-/// This is the session-validator selector: cloud deployments set the pool id,
-/// self-hosted ones never do.
-fn cognito_configured() -> bool {
-    jwks_state().is_some()
-}
-
-fn jwks_cache() -> Result<&'static Arc<RwLock<JwksCache>>, AuthError> {
-    jwks_state().as_ref().ok_or_else(|| {
-        // Generic body — the config detail stays in the log, not the response.
-        warn!("cognito auth: COGNITO_USER_POOL_ID env var not set");
-        AuthError("unauthorized".to_string())
-    })
-}
-
-/// Validate a Cognito JWT from the Authorization header and return the internal user ID.
-async fn validate_cognito(pool: &PgPool, headers: &HeaderMap) -> Result<String, AuthError> {
-    // 1. Extract bearer token from Authorization header
-    let token = extract_bearer_token(headers)?;
-
-    // 2. Decode JWT header to get the `kid` (key ID)
-    let header = decode_header(token).map_err(|e| {
-        // Tokens without dots aren't JWTs — normal fallthrough from non-JWT auth
-        if token.matches('.').count() < 2 {
-            debug!(error = %e, "cognito auth: non-JWT token, skipping");
-        } else {
-            warn!(error = %e, "cognito auth: failed to decode JWT header");
-        }
-        AuthError("invalid token".to_string())
-    })?;
-
-    let kid = header.kid.ok_or_else(|| {
-        warn!("cognito auth: JWT header missing kid");
-        AuthError("invalid token".to_string())
-    })?;
-
-    // 3. Get the decoding key from JWKS cache (fetches from Cognito if needed)
-    let cache = jwks_cache()?;
-    let key = {
-        let mut cache_write = cache.write().await;
-        // Clone the key to release the lock before decode
-        cache_write.get_key(&kid).await?.clone()
-    };
-
-    // 4. Validate and decode the JWT (RS256)
-    let mut validation = Validation::new(Algorithm::RS256);
-    validation.validate_exp = true;
-    // Cognito ID tokens don't always have an `aud` claim that matches
-    // the client ID when using hosted UI. Disable audience validation
-    // and rely on the issuer + signature instead.
-    validation.validate_aud = false;
-
-    let token_data = decode::<CognitoClaims>(token, &key, &validation).map_err(|e| {
-        warn!(error = %e, "cognito auth: JWT validation failed");
-        AuthError("invalid token".to_string())
-    })?;
-
-    let sub = &token_data.claims.sub;
-
-    // 5. Look up user by Cognito user ID (externalAuthId in DB)
-    let user = db::find_user_by_external_auth_id(pool, sub)
-        .await
-        .map_err(|e| {
-            warn!(error = %e, "cognito auth: db error");
-            AuthError("internal error".to_string())
-        })?
-        .ok_or_else(|| {
-            warn!(sub = %sub, "cognito auth: user not found");
-            AuthError("user not found".to_string())
-        })?;
-
-    Ok(user.id)
-}
-
 // ── Helpers ──────────────────────────────────────────────────────────────
 
 /// Extract the bearer token from the `Authorization` header.
 /// The `Bearer` scheme is case-insensitive per RFC 6750.
-fn extract_bearer_token(headers: &HeaderMap) -> Result<&str, AuthError> {
+/// `pub(crate)`: the licensed Cognito plumbing (`crate::ee::cognito`) reads
+/// the same header the shared arms do.
+pub(crate) fn extract_bearer_token(headers: &HeaderMap) -> Result<&str, AuthError> {
     let auth_header = headers
         .get(hyper::header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
@@ -1039,18 +861,6 @@ mod tests {
         assert!(extract_bearer_token(&headers).is_err());
     }
 
-    #[test]
-    fn jwks_url_construction() {
-        let region = "us-east-1";
-        let pool_id = "us-east-1_abc123";
-        let url =
-            format!("https://cognito-idp.{region}.amazonaws.com/{pool_id}/.well-known/jwks.json");
-        assert_eq!(
-            url,
-            "https://cognito-idp.us-east-1.amazonaws.com/us-east-1_abc123/.well-known/jwks.json"
-        );
-    }
-
     // The key rechecks are RBAC enforcement — cloud or a licensed self-host,
     // mirroring the Node API's role resolver (which no-ops only for the
     // unlicensed onprem edition).
@@ -1084,6 +894,17 @@ mod tests {
         assert!(enforce_key_rechecks(Edition::Cloud, true));
         assert!(enforce_key_rechecks(Edition::Onprem, true));
         assert!(!enforce_key_rechecks(Edition::Onprem, false));
+    }
+
+    // The session-validator selector is edition-gated, never config-presence:
+    // a self-hosted box whose env carries a pool id (a shared dev `.env`)
+    // must stay on the cookie arm. Only cloud with a pool routes to Cognito.
+    #[test]
+    fn cognito_sessions_only_on_cloud_with_pool() {
+        assert!(use_cognito_sessions(Edition::Cloud, true));
+        assert!(!use_cognito_sessions(Edition::Cloud, false));
+        assert!(!use_cognito_sessions(Edition::Onprem, true));
+        assert!(!use_cognito_sessions(Edition::Onprem, false));
     }
 
     // ── Strict key commit semantics (`classify_bearer`) ──────────────────

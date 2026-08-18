@@ -8,7 +8,10 @@ import type { AdapterConfig } from "./config";
 import type { ControlPlaneClient } from "./control-plane";
 import { createApprovalsManager } from "./approvals";
 import { mirrorFinishedTurn } from "./mirror";
+import { slackApprovalCardUi } from "./slack/approval-card";
 import { postMessage } from "./slack/client";
+import { botTokenOf } from "./slack/credentials";
+import { slackMirrorPosts } from "./slack/mirror-posts";
 import { openSocketMode, type SocketModeConnection } from "./slack/socket-mode";
 
 /**
@@ -63,6 +66,8 @@ export const createAdapter = ({ config, controlPlane, log }: AdapterDeps) => {
     controlPlane,
     gatewayUrl: config.gatewayUrl,
     approvalsPollSeconds: config.approvalsPollSeconds,
+    cardUi: slackApprovalCardUi,
+    credentialOf: botTokenOf,
     onLog: log,
   });
 
@@ -223,19 +228,28 @@ export const createAdapter = ({ config, controlPlane, log }: AdapterDeps) => {
     ) {
       return;
     }
-    const decision = await controlPlane.decide({
-      presenceId: runtime.presence.presenceId,
-      approvalId: action.value,
-      decision: action.action_id === "channel_approve" ? "approve" : "deny",
-      clickerExternalUserId: clicker,
-    });
-    const text =
-      decision.kind === "decided"
-        ? `${action.action_id === "channel_approve" ? "✅ Approved" : "⛔ Denied"} by ${escapeSlackText(decision.decidedByName)}`
-        : decision.kind === "already_settled"
-          ? "This request was already decided."
-          : escapeSlackText(decision.message);
-    await approvals.settleDecided(action.value, text);
+    // Fence the poll loop's absence arm for the round-trip: decide() removes
+    // the approval from the gateway's pending set before settleDecided runs,
+    // and an unfenced poll in that window would rewrite the card as
+    // "decided from the dashboard" — wrong provenance for a click made here.
+    approvals.beginDecision(action.value);
+    try {
+      const decision = await controlPlane.decide({
+        presenceId: runtime.presence.presenceId,
+        approvalId: action.value,
+        decision: action.action_id === "channel_approve" ? "approve" : "deny",
+        clickerExternalUserId: clicker,
+      });
+      const text =
+        decision.kind === "decided"
+          ? `${action.action_id === "channel_approve" ? "✅ Approved" : "⛔ Denied"} by ${escapeSlackText(decision.decidedByName)}`
+          : decision.kind === "already_settled"
+            ? "This request was already decided."
+            : escapeSlackText(decision.message);
+      await approvals.settleDecided(action.value, text);
+    } finally {
+      approvals.endDecision(action.value);
+    }
   };
 
   // ── Reconcile against the config feed ───────────────────────────────────
@@ -286,13 +300,19 @@ export const createAdapter = ({ config, controlPlane, log }: AdapterDeps) => {
   const handleFinished = async (item: AdapterWorkItem): Promise<void> => {
     const runtime = runtimes.get(item.presenceId);
     if (!runtime?.botToken) return;
+    const { agent } = runtime.presence;
     const next = await mirrorFinishedTurn({
       controlPlane,
-      botToken: runtime.botToken,
+      credential: runtime.botToken,
       provider: runtime.presence.provider,
+      posts: slackMirrorPosts,
       iconUrl: runtime.presence.agent.imageUrl ?? null,
       knownCursor: cursors.get(item.linkId) ?? null,
       item,
+      // The agent's Models page — where a key-problem answer's button points.
+      ...(config.appUrl && {
+        modelsUrl: `${config.appUrl}/w/${encodeURIComponent(agent.workspaceId)}/agents/${encodeURIComponent(agent.id)}/models`,
+      }),
       onLog: log,
     });
     if (next !== null) cursors.set(item.linkId, next);

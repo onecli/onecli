@@ -4,6 +4,11 @@ import { memo, type ReactNode } from "react";
 import ReactMarkdown, { type Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { isCardConnectLink } from "@/lib/chat/connect-links";
+import { remarkPlainDashes } from "@/lib/markdown/remark-plain-dashes";
+
+// Stable array identity — an inline literal would defeat the memo below by
+// changing on every parent render.
+const remarkPlugins = [remarkGfm, remarkPlainDashes];
 
 /**
  * The transcript's markdown renderer. What it renders is UNTRUSTED, DURABLE
@@ -135,7 +140,7 @@ export const ChatMarkdown = memo(
   }) => (
     <div className="min-w-0 text-sm break-words">
       <ReactMarkdown
-        remarkPlugins={[remarkGfm]}
+        remarkPlugins={remarkPlugins}
         components={
           suppressConnectLinks ? connectSuppressingComponents : components
         }

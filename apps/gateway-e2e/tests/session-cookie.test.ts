@@ -29,8 +29,8 @@ const ONPREM_SESSION = {
   expectedEdition: "Onprem",
   env: {
     EDITION: "onprem",
-    // Self-host runs without Cognito — that is what routes sessions to the
-    // cookie arm rather than the bearer-token one.
+    // The edition routes sessions to the cookie arm; the empty pool id only
+    // mirrors a real self-host env (the stray-pool-id scenario keeps it set).
     COGNITO_USER_POOL_ID: "",
     // Multi-instance operation is licensed; the unlicensed boot must run on
     // the in-memory stores.
@@ -101,6 +101,32 @@ describe("self-hosted session cookies at the gateway", () => {
     expect(res.status).toBe(200);
     expect(await res.text()).toBe(cx.ids.user);
   });
+
+  scenario(
+    "a stray Cognito pool id in a self-host env does not flip the auth arm",
+    async (cx) => {
+      await cx.seed({ withApiKey: true });
+
+      // EDITION=onprem with the harness default COGNITO_USER_POOL_ID kept: a
+      // shared self-host .env can carry a pool id it never uses, and the
+      // session cookie must still validate. The selector is the edition, not
+      // config presence; before the edition gate this request 401'd.
+      const gw = await cx.startGateway({
+        expectedEdition: "Onprem",
+        env: {
+          EDITION: "onprem",
+          REDIS_HOST: "",
+          BETTER_AUTH_SECRET: SECRET,
+        },
+      });
+
+      const cookie = await signInSeededUser(cx);
+      const res = await fetch(`${gw.origin}/me`, { headers: { cookie } });
+
+      expect(res.status).toBe(200);
+      expect(await res.text()).toBe(cx.ids.user);
+    },
+  );
 
   scenario("stops accepting it the moment the user signs out", async (cx) => {
     await cx.seed({ withApiKey: true });

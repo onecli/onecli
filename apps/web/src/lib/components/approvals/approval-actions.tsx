@@ -19,7 +19,7 @@ interface ApprovalActionsProps {
   className?: string;
 }
 
-/** Shared Approve / Reject control, wired to the decision mutation. */
+/** Shared Approve / Deny control, wired to the decision mutation. */
 export const ApprovalActions = ({
   approvalId,
   size = "sm",
@@ -53,10 +53,10 @@ export const ApprovalActions = ({
               className="text-destructive hover:text-destructive"
             >
               {!denyLoading && <X className="size-3.5" />}
-              <span className="sr-only">Reject</span>
+              <span className="sr-only">Deny</span>
             </Button>
           </TooltipTrigger>
-          <TooltipContent>Reject</TooltipContent>
+          <TooltipContent>Deny</TooltipContent>
         </Tooltip>
         <Tooltip>
           <TooltipTrigger asChild>
@@ -89,7 +89,7 @@ export const ApprovalActions = ({
         className="text-destructive hover:text-destructive"
       >
         {!denyLoading && <X className="size-3.5" />}
-        Reject
+        Deny
       </Button>
       <Button
         size={size}

@@ -1,13 +1,18 @@
 import { z } from "zod";
-import { escapeSlackText, type AdapterPresence } from "@onecli/agent-protocol";
+import type { AdapterPresence } from "@onecli/agent-protocol";
 import type { ControlPlaneClient } from "./control-plane";
-import { postBlocks, updateBlocks } from "./slack/client";
-import { replyTargetForLink } from "./targets";
+import { replyTargetForLink, type ChannelPostTarget } from "./targets";
 
 /**
  * The approvals surface: per presence, long-poll the GATEWAY's pending list
- * with the presence's service key, post one Block Kit card per approval, and
- * settle the card on decision or expiry.
+ * with the presence's service key, post one card per approval, and settle
+ * the card on decision or expiry.
+ *
+ * Channel-general by design: this module never renders. What a card looks
+ * like — and how it is delivered — is the injected `ApprovalCardUi`'s
+ * business (Slack's implementation lives in slack/approval-card.ts); a
+ * second channel implements the same seam. Settle copy here is plain,
+ * channel-neutral text.
  *
  * Restart-safe by the control plane's `ChannelApprovalPrompt` ledger: a card
  * is CLAIMED (unique by approval id) before it is posted, so a restarted or
@@ -15,10 +20,10 @@ import { replyTargetForLink } from "./targets";
  * can update the card later; unsettled prompts are re-armed at boot.
  *
  * The card carries ONLY the opaque approval id in its button values (the
- * 2000-char cap and the injection rule both point the same way); everything
- * else stays server-side. Decisions are forwarded to the control plane,
- * which authorizes the CLICKER as a workspace member before the gateway is
- * asked anything — the fence is never Slack-side.
+ * channel payload cap and the injection rule both point the same way);
+ * everything else stays server-side. Decisions are forwarded to the control
+ * plane, which authorizes the CLICKER as a workspace member before the
+ * gateway is asked anything — the fence is never channel-side.
  */
 
 const pendingResponse = z.object({
@@ -74,60 +79,32 @@ export const fetchPendingApprovals = async (input: {
   return pendingResponse.parse(await response.json()).requests;
 };
 
-/** Keep each gateway-supplied detail well inside the section block's 3,000-
- * char cap (8 details × ~200 + title leaves ample margin). */
-const clampDetail = (value: string): string =>
-  value.length <= 200 ? value : `${value.slice(0, 200)}…`;
-
-/** The card. Template text is OURS; every dynamic field is escaped. */
-export const approvalCardBlocks = (approval: PendingApproval): unknown[] => {
-  const title = approval.summary?.action
-    ? escapeSlackText(clampDetail(approval.summary.action))
-    : `${escapeSlackText(approval.method ?? "?")} ${escapeSlackText(approval.host ?? "")}${escapeSlackText(clampDetail(approval.path ?? ""))}`;
-  const details = (approval.summary?.details ?? [])
-    .slice(0, 8)
-    .map(
-      (d) =>
-        `*${escapeSlackText(clampDetail(d.label))}*: ${escapeSlackText(clampDetail(d.value))}`,
-    )
-    .join("\n");
-  const expires = approval.expiresAt
-    ? `Expires <!date^${Math.floor(new Date(approval.expiresAt).getTime() / 1000)}^{time_secs}|soon>. Undecided means denied.`
-    : "Undecided means denied.";
-
-  return [
-    {
-      type: "section",
-      text: {
-        type: "mrkdwn",
-        text: `:shield: *Approval needed${approval.agent?.name ? `: ${escapeSlackText(approval.agent.name)}` : ""}*\n${title}${details ? `\n${details}` : ""}`,
-      },
-    },
-    {
-      type: "context",
-      elements: [{ type: "mrkdwn", text: expires }],
-    },
-    {
-      type: "actions",
-      elements: [
-        {
-          type: "button",
-          style: "primary",
-          text: { type: "plain_text", text: "Approve" },
-          action_id: "channel_approve",
-          value: approval.id,
-        },
-        {
-          type: "button",
-          style: "danger",
-          text: { type: "plain_text", text: "Deny" },
-          action_id: "channel_deny",
-          value: approval.id,
-        },
-      ],
-    },
-  ];
-};
+/**
+ * What a channel must provide to carry approval cards. Rendering and
+ * transport live behind this seam (Slack: slack/approval-card.ts); the
+ * manager below owns everything channel-independent — the poll loop, the
+ * ledger protocol, expiry, and cross-surface settlement.
+ */
+export interface ApprovalCardUi {
+  /** Post the card for a pending approval; returns the channel-native
+   * message ref. Throws on failure (the caller owns retry semantics). */
+  post(
+    input: ChannelPostTarget & { approval: PendingApproval },
+  ): Promise<{ channel: string; ts: string }>;
+  /** Rewrite a posted card with plain settled text, prefixed by the
+   * approval's action title when one is known — a settled card must still
+   * say WHAT was asked, or a thread of settled cards is unreadable. Throws
+   * on failure, EXCEPT when the card is permanently gone (deleted message,
+   * archived channel): a card that no longer exists cannot mislead anyone,
+   * so implementations treat that as settled rather than retrying forever. */
+  settle(input: {
+    credential: string;
+    channel: string;
+    ts: string;
+    text: string;
+    title: string | null;
+  }): Promise<void>;
+}
 
 interface TrackedPrompt {
   approvalId: string;
@@ -135,12 +112,22 @@ interface TrackedPrompt {
   channel: string;
   ts: string | null;
   expiresAt: number | null;
+  /** The approval's action title, for outcome rewrites ("what was asked").
+   * Null for prompts recovered from the ledger (it records no title). */
+  title: string | null;
 }
 
 export interface ApprovalsManagerDeps {
   controlPlane: ControlPlaneClient;
   gatewayUrl: string;
   approvalsPollSeconds: number;
+  cardUi: ApprovalCardUi;
+  /** Extract the channel credential from a presence (the credential's shape
+   * is the channel's business — Slack: slack/credentials.ts). */
+  credentialOf: (presence: AdapterPresence) => string | null;
+  /** Poll pacing while cards are outstanding (the gateway answers instantly
+   * then). Injectable so tests don't sleep real seconds. */
+  pacingMs?: number;
   onLog: (message: string, detail?: unknown) => void;
 }
 
@@ -156,39 +143,77 @@ export const createApprovalsManager = (deps: ApprovalsManagerDeps) => {
   const presenceById = new Map<string, AdapterPresence>();
   let expiryTimer: ReturnType<typeof setInterval> | undefined;
 
+  const tokenFor = new Map<string, string>();
+
+  /** Approval ids whose decision is in flight on THIS channel (a click being
+   * forwarded to the control plane). The cross-surface absence arm skips
+   * them: the control plane's decide() removes the approval from the
+   * gateway's pending set BEFORE settleDecided rewrites the card, so an
+   * unfenced poll in that window would win the rewrite with the wrong
+   * provenance. The expiry sweep stays unfenced — the deadline is truth. */
+  const deciding = new Set<string>();
+
+  /**
+   * Card FIRST, ledger second, untrack last: once the ledger settles, no
+   * instance ever looks at this prompt again, so settling before the rewrite
+   * lands strands a live-looking card (missing credential during boot,
+   * instance death between the two calls). Any failure keeps the prompt
+   * tracked — the caller's cadence (the 5s sweep, or the poll loop's next
+   * absence) retries the whole pair; a missing credential (config feed
+   * pending) just leaves it tracked the same way.
+   */
+  const settleTracked = async (
+    prompt: TrackedPrompt,
+    state: "decided" | "expired",
+    text: string,
+  ): Promise<void> => {
+    if (prompt.ts) {
+      const credential = tokenFor.get(prompt.presenceId);
+      if (!credential) return;
+      await deps.cardUi.settle({
+        credential,
+        channel: prompt.channel,
+        ts: prompt.ts,
+        text,
+        title: prompt.title,
+      });
+    }
+    await deps.controlPlane.settlePrompt(prompt.approvalId, state);
+    prompts.delete(prompt.approvalId);
+  };
+
   const settleExpired = async (): Promise<void> => {
     const now = Date.now();
     for (const prompt of [...prompts.values()]) {
       if (prompt.expiresAt === null || prompt.expiresAt > now) continue;
-      prompts.delete(prompt.approvalId);
       try {
-        await deps.controlPlane.settlePrompt(prompt.approvalId, "expired");
-        if (prompt.ts) {
-          await updateBlocksSafe(
-            prompt,
-            "⏱️ Timed out. The request was denied.",
-          );
-        }
+        await settleTracked(
+          prompt,
+          "expired",
+          "Expired (no response) · denied",
+        );
       } catch (err) {
-        deps.onLog("expiry settle failed", { err: String(err) });
+        deps.onLog("expiry settle failed; will retry", { err: String(err) });
       }
     }
   };
 
-  const tokenFor = new Map<string, string>();
-
-  const updateBlocksSafe = async (
+  /** The swallow-wrapper for decision-path rewrites: the outcome is already
+   * settled elsewhere (the ledger via the control plane's decide), so a
+   * failed rewrite is cosmetic — log and move on. */
+  const settleCardSafe = async (
     prompt: TrackedPrompt,
     text: string,
   ): Promise<void> => {
-    const botToken = tokenFor.get(prompt.presenceId);
-    if (!botToken || !prompt.ts) return;
+    const credential = tokenFor.get(prompt.presenceId);
+    if (!credential || !prompt.ts) return;
     try {
-      await updateBlocks(botToken, {
+      await deps.cardUi.settle({
+        credential,
         channel: prompt.channel,
         ts: prompt.ts,
         text,
-        blocks: [{ type: "section", text: { type: "mrkdwn", text } }],
+        title: prompt.title,
       });
     } catch (err) {
       deps.onLog("card update failed", { err: String(err) });
@@ -203,7 +228,7 @@ export const createApprovalsManager = (deps: ApprovalsManagerDeps) => {
   ): Promise<void> => {
     const prompt = prompts.get(approvalId);
     prompts.delete(approvalId);
-    if (prompt) await updateBlocksSafe(prompt, text);
+    if (prompt) await settleCardSafe(prompt, text);
   };
 
   const postCard = async (
@@ -214,8 +239,8 @@ export const createApprovalsManager = (deps: ApprovalsManagerDeps) => {
     // a card that arrives before the agent's first DM must find its home once
     // the DM (and its link) shows up in a later config feed.
     const presence = presenceById.get(presenceId);
-    const botToken = presence ? tokenFor.get(presenceId) : undefined;
-    if (!presence || !botToken) return;
+    const credential = presence ? tokenFor.get(presenceId) : undefined;
+    if (!presence || !credential) return;
 
     // Where the card goes: the presence's direct thread when there is one,
     // else its first link. No home at all → leave it unclaimed; a later poll
@@ -233,12 +258,12 @@ export const createApprovalsManager = (deps: ApprovalsManagerDeps) => {
     });
     if (!claimed) return;
 
-    const posted = await postBlocks(botToken, {
+    const posted = await deps.cardUi.post({
+      credential,
       channel: target.channel,
-      text: "Approval needed",
-      blocks: approvalCardBlocks(approval),
       ...(target.threadTs && { threadTs: target.threadTs }),
       ...(presence.agent.imageUrl && { iconUrl: presence.agent.imageUrl }),
+      approval,
     });
     await deps.controlPlane.recordPromptMessage(
       approval.id,
@@ -252,6 +277,7 @@ export const createApprovalsManager = (deps: ApprovalsManagerDeps) => {
       expiresAt: approval.expiresAt
         ? new Date(approval.expiresAt).getTime()
         : null,
+      title: approval.summary?.action ?? null,
     });
   };
 
@@ -269,10 +295,15 @@ export const createApprovalsManager = (deps: ApprovalsManagerDeps) => {
           continue;
         }
         try {
+          // NO exclude list: the response is the full pending set, so a
+          // tracked card that is absent from it was decided somewhere else
+          // (the web, another surface) — that absence is the only signal the
+          // adapter gets. The gateway long-polls only when the set is empty,
+          // so while cards are up the sleep below provides the pacing.
           const pending = await fetchPendingApprovals({
             gatewayUrl: deps.gatewayUrl,
             serviceKey,
-            excludeIds: [...prompts.keys()],
+            excludeIds: [],
             timeoutMs: (deps.approvalsPollSeconds + 10) * 1000,
           });
           if (!healthy) {
@@ -281,9 +312,78 @@ export const createApprovalsManager = (deps: ApprovalsManagerDeps) => {
             await deps.controlPlane.reportApprovalHealth(presenceId, true);
             healthy = true;
           }
+          // Settle cards whose approval left the pending set: decided from
+          // another surface. The absence signal is ambiguous near the
+          // deadline — the gateway auto-denies and removes at ITS clock, a
+          // beat before ours reaches expiresAt — so an absence inside the
+          // final 15s window is treated as the expiry it almost certainly
+          // is. Both arms settle card-first via settleTracked: a failure
+          // keeps the prompt tracked, and the absence persisting into the
+          // next poll retries the pair.
+          const pendingIds = new Set(pending.map((a) => a.id));
+          for (const prompt of [...prompts.values()]) {
+            if (prompt.presenceId !== presenceId) continue;
+            if (pendingIds.has(prompt.approvalId)) continue;
+            // A click on THIS card is mid-flight: decide() already removed
+            // the approval from the pending set, and settleDecided is about
+            // to rewrite the card with the real outcome — an absence settle
+            // here would win the race with the wrong provenance.
+            if (deciding.has(prompt.approvalId)) continue;
+            if (
+              prompt.expiresAt !== null &&
+              prompt.expiresAt - 15_000 <= Date.now()
+            ) {
+              // At/near the deadline: expire NOW rather than waiting out the
+              // sweep against a local clock the gateway already beat.
+              try {
+                await settleTracked(
+                  prompt,
+                  "expired",
+                  "Expired (no response) · denied",
+                );
+              } catch (err) {
+                deps.onLog("expiry settle failed; will retry", {
+                  err: String(err),
+                });
+              }
+              continue;
+            }
+            try {
+              await settleTracked(
+                prompt,
+                "decided",
+                "Decided from the dashboard",
+              );
+            } catch (err) {
+              deps.onLog("cross-surface settle failed; will retry", {
+                err: String(err),
+              });
+            }
+          }
           for (const approval of pending) {
             if (prompts.has(approval.id)) continue;
+            // The gateway's pending list is WORKSPACE-scoped, but this loop
+            // is one presence — one agent's channel home. Another agent's
+            // approval must not land here (its own presence, if any, posts
+            // it). An approval without an agent id (older gateway) keeps the
+            // legacy post-everywhere behavior rather than vanishing.
+            const approvalAgentId = approval.agent?.id;
+            if (
+              approvalAgentId !== undefined &&
+              approvalAgentId !== presence.agent.id
+            )
+              continue;
             await postCard(presenceId, approval);
+          }
+          // Pace on what the fetch actually did: the gateway long-polls only
+          // when the pending set is EMPTY, so any non-empty answer came back
+          // instantly — including sets this presence tracks nothing from
+          // (another agent's fenced approval, a card with no home yet, a
+          // lost claim), which would otherwise hot-loop against the gateway
+          // for the approval's whole lifetime. Empty set → the fetch itself
+          // long-polled, no extra sleep.
+          if (pending.length > 0) {
+            await sleep(deps.pacingMs ?? 3_000, () => stopped);
           }
         } catch (err) {
           if (err instanceof ApprovalsAuthError) {
@@ -338,8 +438,8 @@ export const createApprovalsManager = (deps: ApprovalsManagerDeps) => {
       presenceById.clear();
       for (const [presenceId, presence] of wanted) {
         presenceById.set(presenceId, presence);
-        const botToken = botTokenOf(presence);
-        if (botToken) tokenFor.set(presenceId, botToken);
+        const credential = deps.credentialOf(presence);
+        if (credential) tokenFor.set(presenceId, credential);
       }
       for (const [presenceId, loop] of loops) {
         if (!wanted.has(presenceId)) {
@@ -379,8 +479,19 @@ export const createApprovalsManager = (deps: ApprovalsManagerDeps) => {
           expiresAt: prompt.expiresAt
             ? new Date(prompt.expiresAt).getTime()
             : Date.now() + 5_000,
+          title: null,
         });
       }
+    },
+
+    /** Fence one approval from the cross-surface absence arm while its
+     * channel-click decision round-trips (see `deciding`). Always pair with
+     * `endDecision` in a finally. */
+    beginDecision(approvalId: string): void {
+      deciding.add(approvalId);
+    },
+    endDecision(approvalId: string): void {
+      deciding.delete(approvalId);
     },
 
     settleDecided,
@@ -392,18 +503,6 @@ export const createApprovalsManager = (deps: ApprovalsManagerDeps) => {
       expiryTimer = undefined;
     },
   };
-};
-
-const botTokenOf = (presence: AdapterPresence): string | null => {
-  if (!presence.credentialsJson) return null;
-  try {
-    const parsed = JSON.parse(presence.credentialsJson) as {
-      botToken?: string;
-    };
-    return parsed.botToken ?? null;
-  } catch {
-    return null;
-  }
 };
 
 const sleep = (ms: number, cancelled: () => boolean): Promise<void> =>

@@ -12,6 +12,8 @@ import type { Turn } from "@/lib/api/types";
 import type { OutgoingMessage } from "@/hooks/use-conversations";
 import type { RenderedTurn } from "@/lib/chat/transcript";
 import { isFollowUpRow } from "@/lib/chat/turns";
+import { useApprovalCards, type ApprovalCard } from "./use-approval-cards";
+import { InlineApprovalItem } from "./inline-approval-item";
 import { TurnBlock } from "./turn-block";
 import { UserBubble } from "./user-bubble";
 
@@ -57,23 +59,60 @@ export const ChatThread = ({
     [...followUpsByTarget.values()].flat().map((turn) => turn.id),
   );
 
+  // Approval cards ride the timeline like messages: each is slotted after
+  // the last turn that PRECEDES its creation, so the card sits where it
+  // fired and stays there as the conversation moves on — exactly the Slack
+  // reading. Cards newer than every turn land at the end.
+  const approvalCards = useApprovalCards();
+  const rows = turns.filter((turn) => !grouped.has(turn.id));
+  const cardsAfterTurn = new Map<string, ApprovalCard[]>();
+  const cardsAtEnd: ApprovalCard[] = [];
+  for (const card of approvalCards) {
+    let homeId: string | undefined;
+    for (const turn of rows) {
+      if (new Date(turn.createdAt).getTime() <= card.at) homeId = turn.id;
+      else break;
+    }
+    if (homeId === rows[rows.length - 1]?.id || homeId === undefined) {
+      // Newest slot (or an empty thread) — keep it after the final turn so
+      // it never renders above the exchange that raised it.
+      cardsAtEnd.push(card);
+    } else {
+      const group = cardsAfterTurn.get(homeId) ?? [];
+      group.push(card);
+      cardsAfterTurn.set(homeId, group);
+    }
+  }
+
   return (
     <MessageScrollerProvider autoScroll defaultScrollPosition="end">
       <MessageScroller className="min-h-0 flex-1">
         <MessageScrollerViewport>
           <MessageScrollerContent className="mx-auto w-full max-w-3xl gap-6 px-4 py-6">
-            {turns
-              .filter((turn) => !grouped.has(turn.id))
-              .map((turn) => (
-                <MessageScrollerItem key={turn.id} messageId={turn.id}>
-                  <TurnBlock
-                    turn={turn}
-                    rendered={folded.get(turn.id)}
-                    followUps={followUpsByTarget.get(turn.id)}
-                    modelsHref={modelsHref}
+            {rows.map((turn) => (
+              <MessageScrollerItem
+                key={turn.id}
+                messageId={turn.id}
+                // The thread's gap-6 only separates ITEMS; inside one item
+                // the user bubble, its follow-ups, the agent block and any
+                // approval cards are siblings and would touch without this.
+                className="flex flex-col gap-3"
+              >
+                <TurnBlock
+                  turn={turn}
+                  rendered={folded.get(turn.id)}
+                  followUps={followUpsByTarget.get(turn.id)}
+                  modelsHref={modelsHref}
+                />
+                {cardsAfterTurn.get(turn.id)?.map(({ approval, settled }) => (
+                  <InlineApprovalItem
+                    key={approval.id}
+                    approval={approval}
+                    settled={settled}
                   />
-                </MessageScrollerItem>
-              ))}
+                ))}
+              </MessageScrollerItem>
+            ))}
             {pending !== undefined && (
               <MessageScrollerItem messageId="pending">
                 <UserBubble
@@ -81,6 +120,21 @@ export const ChatThread = ({
                   conversationId={conversationId}
                   attachments={pending.attachments}
                 />
+              </MessageScrollerItem>
+            )}
+            {/* Cards newer than every turn — including ones raised by a
+                background watch/cron with no turn running at all. */}
+            {cardsAtEnd.length > 0 && (
+              <MessageScrollerItem messageId="approvals">
+                <div className="flex flex-col gap-3">
+                  {cardsAtEnd.map(({ approval, settled }) => (
+                    <InlineApprovalItem
+                      key={approval.id}
+                      approval={approval}
+                      settled={settled}
+                    />
+                  ))}
+                </div>
               </MessageScrollerItem>
             )}
           </MessageScrollerContent>

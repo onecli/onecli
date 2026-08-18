@@ -73,6 +73,7 @@ const adapterConfig = (): AdapterConfig => ({
   configPollMs: 25,
   workPollMs: 25,
   approvalsPollSeconds: 1,
+  appUrl: "https://app.example.com",
 });
 
 const presence = (

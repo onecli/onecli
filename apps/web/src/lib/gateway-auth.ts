@@ -18,7 +18,16 @@ export type { GatewayFetchOptions };
 export const getGatewayFetchOptions =
   async (): Promise<GatewayFetchOptions> => {
     if (!IS_CLOUD) {
-      return { headers: {}, credentials: "include" };
+      // The session cookie authenticates the user, but without an explicit
+      // workspace the gateway falls back to the user's default (oldest)
+      // workspace — so approvals and vault state in any OTHER workspace would
+      // be invisible from its own pages. Send the active workspace from the
+      // `/w/<id>/` URL; the gateway validates membership on the header.
+      const workspaceId = getWorkspaceId();
+      return {
+        headers: workspaceId ? { "X-Workspace-Id": workspaceId } : {},
+        credentials: "include",
+      };
     }
 
     const headers: Record<string, string> = {};

@@ -20,14 +20,25 @@
 //! Org-scoped CREDENTIALS are not one of them: org secrets and connections
 //! inject on every tier.
 //!
+//! Hosted-platform PLUMBING also lives here (`cognito`, `kms_crypto`):
+//! Cognito session validation and the KMS envelope crypto backend — never
+//! entitlement-gated. Cognito is dead on self-host BY CODE (the selector
+//! requires `Edition::Cloud`); the KMS arm is dead there BY CONFIG (every
+//! supported self-host path provisions `SECRET_ENCRYPTION_KEY`, so local AES
+//! serves — a keyless deployment falls through to KMS regardless of edition).
+//! Same rule as the API package, where `ee/kms-crypto.ts` and the Cognito
+//! services are licensed.
+//!
 //! Free capabilities never live here, even when they were written for the
 //! hosted product: app providers, request summarizers, request finalizers and
 //! body-condition matching sit in their shared homes (`crate::apps`,
 //! `crate::summary`, `crate::gateway::finalizers`, `crate::condition_match`).
 
 pub(crate) mod budget;
+pub(crate) mod cognito;
 pub(crate) mod granular_access;
 pub(crate) mod ha;
+pub(crate) mod kms_crypto;
 pub(crate) mod org_routes;
 pub(crate) mod principals;
 pub(crate) mod rbac;

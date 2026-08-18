@@ -16,8 +16,8 @@ import { scenario } from "../src/scenario.js";
 const UNLICENSED = {
   env: {
     EDITION: "onprem",
-    // Self-host runs without Cognito; the scenarios authenticate with agent
-    // tokens and `oc_` API keys only.
+    // The scenarios authenticate with agent tokens and `oc_` API keys only;
+    // the edition keeps sessions on the cookie arm regardless of this var.
     COGNITO_USER_POOL_ID: "",
     // HA is licensed (#7): the unlicensed boot must run the in-memory stores.
     REDIS_HOST: "",

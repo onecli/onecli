@@ -41,6 +41,11 @@ export const useAgentPageAgent = (): AgentPageAgent => {
   return agent;
 };
 
+/** Same context, absence-tolerant: for components that can render both inside
+ * and outside the agent frame (chat turn internals under test, embeds). */
+export const useAgentPageAgentMaybe = (): AgentPageAgent | null =>
+  useContext(AgentPageContext);
+
 const FrameSkeleton = () => (
   <div className="flex min-h-0 min-w-0 flex-1 flex-col">
     <div className="flex h-14 shrink-0 items-center gap-3 border-b px-4 sm:px-6">

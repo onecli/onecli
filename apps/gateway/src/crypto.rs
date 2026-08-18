@@ -7,9 +7,10 @@
 //!   `SECRET_ENCRYPTION_KEY` env key (32 bytes, base64). Matches the Node.js
 //!   `CryptoService` (`lib/crypto.ts`).
 //! * **4 parts** `{encryptedDataKey}:{iv}:{authTag}:{ciphertext}` — KMS
-//!   envelope. Matches the TypeScript `KmsCryptoService`
-//!   (`packages/api/src/ee/kms-crypto.ts`): KMS Decrypt recovers the data key,
-//!   AES-256-GCM decrypts with it, then the plaintext data key is zeroed.
+//!   envelope. The mechanics live in the licensed
+//!   [`crate::ee::kms_crypto`] (hosted-platform plumbing), matching the
+//!   TypeScript `KmsCryptoService` (`packages/api/src/ee/kms-crypto.ts`);
+//!   this module owns backend selection and format dispatch.
 //!
 //! [`CryptoService::from_env`] configures exactly ONE backend — local AES when
 //! `SECRET_ENCRYPTION_KEY` is set, else KMS envelope (requires `KMS_KEY_ARN`
@@ -26,7 +27,6 @@
 //! Uses `ring::aead` (already a transitive dependency via rustls).
 
 use anyhow::{bail, Context, Result};
-use aws_sdk_kms::Client as KmsClient;
 use base64::Engine;
 use ring::aead;
 use ring::rand::{SecureRandom, SystemRandom};
@@ -35,17 +35,13 @@ const KEY_LEN: usize = 32;
 const IV_LEN: usize = 12;
 const TAG_LEN: usize = 16;
 
-/// Encryption context must match what the TypeScript side uses.
-const ENCRYPTION_CONTEXT_KEY: &str = "purpose";
-const ENCRYPTION_CONTEXT_VALUE: &str = "onecli-secret-encryption";
-
 /// Service for encrypting/decrypting secrets with whichever backend the
 /// deployment configures (see the module docs).
 pub(crate) struct CryptoService {
     /// Local AES-256-GCM key from `SECRET_ENCRYPTION_KEY`, when configured.
     aes: Option<aead::LessSafeKey>,
-    /// KMS client for envelope encryption, when the AES key is not configured.
-    kms: Option<KmsClient>,
+    /// KMS envelope backend, when the AES key is not configured.
+    kms: Option<crate::ee::kms_crypto::KmsEnvelopeCrypto>,
 }
 
 impl CryptoService {
@@ -59,10 +55,9 @@ impl CryptoService {
         if let Ok(key_b64) = std::env::var("SECRET_ENCRYPTION_KEY") {
             return Self::from_base64_key(&key_b64);
         }
-        let config = aws_config::load_defaults(aws_config::BehaviorVersion::latest()).await;
         Ok(Self {
             aes: None,
-            kms: Some(KmsClient::new(&config)),
+            kms: Some(crate::ee::kms_crypto::KmsEnvelopeCrypto::from_env().await),
         })
     }
 
@@ -97,7 +92,14 @@ impl CryptoService {
         let parts: Vec<&str> = encrypted.split(':').collect();
         match parts.len() {
             3 => self.decrypt_aes(&parts),
-            4 => self.decrypt_kms(&parts).await,
+            4 => match self.kms.as_ref() {
+                Some(kms) => kms.decrypt(&parts).await,
+                None => bail!(
+                    "secret uses the KMS envelope format \
+                     (encryptedDataKey:iv:authTag:ciphertext) but this deployment is \
+                     configured for local AES (SECRET_ENCRYPTION_KEY) without KMS"
+                ),
+            },
             _ => bail!(
                 "invalid encrypted format: expected iv:authTag:ciphertext or \
                  encryptedDataKey:iv:authTag:ciphertext"
@@ -127,52 +129,6 @@ impl CryptoService {
         open_with_key(key, &iv, &auth_tag, &ciphertext)
     }
 
-    /// Decrypt the 4-part KMS envelope format: KMS Decrypt recovers the data
-    /// key, AES-256-GCM decrypts with it, then the plaintext data key is zeroed.
-    async fn decrypt_kms(&self, parts: &[&str]) -> Result<String> {
-        let Some(kms) = self.kms.as_ref() else {
-            bail!(
-                "secret uses the KMS envelope format \
-                 (encryptedDataKey:iv:authTag:ciphertext) but this deployment is \
-                 configured for local AES (SECRET_ENCRYPTION_KEY) without KMS"
-            );
-        };
-
-        let b64 = &base64::engine::general_purpose::STANDARD;
-
-        let encrypted_data_key = b64
-            .decode(parts[0])
-            .context("invalid encrypted data key base64")?;
-        let iv = b64.decode(parts[1]).context("invalid IV base64")?;
-        let auth_tag = b64.decode(parts[2]).context("invalid auth tag base64")?;
-        let ciphertext = b64.decode(parts[3]).context("invalid ciphertext base64")?;
-
-        check_iv_and_tag(&iv, &auth_tag)?;
-
-        // Decrypt the data key via KMS
-        let resp = kms
-            .decrypt()
-            .ciphertext_blob(aws_sdk_kms::primitives::Blob::new(encrypted_data_key))
-            .encryption_context(ENCRYPTION_CONTEXT_KEY, ENCRYPTION_CONTEXT_VALUE)
-            .send()
-            .await
-            .context("KMS Decrypt failed")?;
-
-        let mut data_key = resp
-            .plaintext()
-            .context("KMS Decrypt returned no plaintext")?
-            .as_ref()
-            .to_vec();
-
-        // AES-256-GCM decrypt with the plaintext data key
-        let result = aes_gcm_decrypt(&data_key, &iv, &auth_tag, &ciphertext);
-
-        // Zero out the plaintext data key
-        data_key.fill(0);
-
-        result
-    }
-
     /// Encrypt a plaintext string with the configured backend: local AES
     /// (3-part format) when `SECRET_ENCRYPTION_KEY` is set, else KMS envelope
     /// (4-part format, requires `KMS_KEY_ARN`). Output is compatible with the
@@ -188,42 +144,16 @@ impl CryptoService {
             bail!("no encryption backend configured");
         };
 
-        let key_arn = std::env::var("KMS_KEY_ARN").context("KMS_KEY_ARN env var not set")?;
-
-        let resp = kms
-            .generate_data_key()
-            .key_id(&key_arn)
-            .key_spec(aws_sdk_kms::types::DataKeySpec::Aes256)
-            .encryption_context(ENCRYPTION_CONTEXT_KEY, ENCRYPTION_CONTEXT_VALUE)
-            .send()
-            .await
-            .context("KMS GenerateDataKey failed")?;
-
-        let mut data_key = resp
-            .plaintext()
-            .context("KMS GenerateDataKey returned no plaintext")?
-            .as_ref()
-            .to_vec();
-
-        let encrypted_data_key = resp
-            .ciphertext_blob()
-            .context("KMS GenerateDataKey returned no ciphertext blob")?
-            .as_ref()
-            .to_vec();
-
-        let result = kms_envelope_encrypt(&data_key, &encrypted_data_key, plaintext);
-
-        // Zero out the plaintext data key
-        data_key.fill(0);
-
-        result
+        kms.encrypt(plaintext).await
     }
 }
 
 // ── AES helpers (shared by both backends) ───────────────────────────────
 
 /// Validate IV and auth tag lengths before touching the cipher.
-fn check_iv_and_tag(iv: &[u8], auth_tag: &[u8]) -> Result<()> {
+/// `pub(crate)`: the licensed KMS backend (`crate::ee::kms_crypto`) validates
+/// the same envelope parts.
+pub(crate) fn check_iv_and_tag(iv: &[u8], auth_tag: &[u8]) -> Result<()> {
     if iv.len() != IV_LEN {
         bail!("invalid IV length: expected {IV_LEN}, got {}", iv.len());
     }
@@ -259,7 +189,8 @@ fn open_with_key(
 }
 
 /// AES-256-GCM decrypt with raw key bytes (the KMS data key).
-fn aes_gcm_decrypt(
+/// `pub(crate)`: the licensed KMS backend opens envelopes with it.
+pub(crate) fn aes_gcm_decrypt(
     key_bytes: &[u8],
     iv: &[u8],
     auth_tag: &[u8],
@@ -272,7 +203,11 @@ fn aes_gcm_decrypt(
 }
 
 /// AES-256-GCM seal: returns `(iv, auth_tag, ciphertext)` raw parts.
-fn seal_with_key(key: &aead::LessSafeKey, plaintext: &str) -> Result<([u8; IV_LEN], Vec<u8>)> {
+/// `pub(crate)`: the licensed KMS backend seals envelopes with it.
+pub(crate) fn seal_with_key(
+    key: &aead::LessSafeKey,
+    plaintext: &str,
+) -> Result<([u8; IV_LEN], Vec<u8>)> {
     let rng = SystemRandom::new();
     let mut iv = [0u8; IV_LEN];
     rng.fill(&mut iv)
@@ -298,31 +233,6 @@ fn encrypt_aes(key: &aead::LessSafeKey, plaintext: &str) -> Result<String> {
     let b64 = &base64::engine::general_purpose::STANDARD;
     Ok(format!(
         "{}:{}:{}",
-        b64.encode(iv),
-        b64.encode(auth_tag),
-        b64.encode(ciphertext),
-    ))
-}
-
-/// Encrypt to the 4-part KMS envelope format
-/// `{encryptedDataKey}:{iv}:{authTag}:{ciphertext}` with a plaintext data key.
-fn kms_envelope_encrypt(
-    data_key: &[u8],
-    encrypted_data_key: &[u8],
-    plaintext: &str,
-) -> Result<String> {
-    let unbound_key = aead::UnboundKey::new(&aead::AES_256_GCM, data_key)
-        .map_err(|_| anyhow::anyhow!("failed to create AES-256-GCM key from data key"))?;
-    let key = aead::LessSafeKey::new(unbound_key);
-
-    let (iv, in_out) = seal_with_key(&key, plaintext)?;
-    let ciphertext = &in_out[..plaintext.len()];
-    let auth_tag = &in_out[plaintext.len()..];
-
-    let b64 = &base64::engine::general_purpose::STANDARD;
-    Ok(format!(
-        "{}:{}:{}:{}",
-        b64.encode(encrypted_data_key),
         b64.encode(iv),
         b64.encode(auth_tag),
         b64.encode(ciphertext),

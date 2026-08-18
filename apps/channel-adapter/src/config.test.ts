@@ -44,6 +44,7 @@ describe("defaults", () => {
       configPollMs: 10_000,
       workPollMs: 2_000,
       approvalsPollSeconds: 25,
+      appUrl: "",
     });
   });
 });
@@ -59,6 +60,7 @@ describe("overrides", () => {
         CHANNEL_ADAPTER_CONFIG_POLL_MS: "500",
         CHANNEL_ADAPTER_WORK_POLL_MS: "250",
         CHANNEL_ADAPTER_APPROVALS_POLL_SECONDS: "10",
+        APP_URL: "https://app.example.com/",
       }),
     ).toEqual({
       token: "cha_secret",
@@ -68,6 +70,7 @@ describe("overrides", () => {
       configPollMs: 500,
       workPollMs: 250,
       approvalsPollSeconds: 10,
+      appUrl: "https://app.example.com",
     });
   });
 
@@ -81,6 +84,42 @@ describe("overrides", () => {
     });
     expect(config.controlPlaneUrl).toBe("https://api.example.com");
     expect(config.gatewayUrl).toBe("https://gw.example.com");
+  });
+});
+
+describe("appUrl resolution", () => {
+  // Pins the canonical configuredAppUrl() semantics (packages/api's
+  // app-origin.ts): a merely-present env var is not a configured URL.
+  it("falls through a present-but-empty APP_URL to NEXT_PUBLIC_APP_URL", () => {
+    expect(
+      loadConfig({
+        ...base,
+        APP_URL: "",
+        NEXT_PUBLIC_APP_URL: "https://x.example",
+      }).appUrl,
+    ).toBe("https://x.example");
+  });
+
+  it("falls through a whitespace-only APP_URL", () => {
+    expect(
+      loadConfig({
+        ...base,
+        APP_URL: "   ",
+        NEXT_PUBLIC_APP_URL: "https://x.example",
+      }).appUrl,
+    ).toBe("https://x.example");
+  });
+
+  it("strips every trailing slash, not just one", () => {
+    expect(
+      loadConfig({ ...base, APP_URL: "https://a.example///" }).appUrl,
+    ).toBe("https://a.example");
+  });
+
+  it("trims surrounding whitespace before stripping slashes", () => {
+    expect(
+      loadConfig({ ...base, APP_URL: "  https://a.example/  " }).appUrl,
+    ).toBe("https://a.example");
   });
 });
 

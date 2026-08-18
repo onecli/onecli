@@ -18,6 +18,11 @@ export interface AdapterConfig {
   workPollMs: number;
   /** Gateway approvals long-poll hold, seconds (the gateway holds ~30s). */
   approvalsPollSeconds: number;
+  /** The dashboard's public origin — where "fix it" buttons point. First
+   * non-empty of APP_URL then NEXT_PUBLIC_APP_URL (a present-but-empty
+   * APP_URL falls through, matching `configuredAppUrl()`); empty string when
+   * neither is set (buttons are simply omitted). */
+  appUrl: string;
 }
 
 export class ConfigError extends Error {}
@@ -25,6 +30,17 @@ export class ConfigError extends Error {}
 const positiveInt = (raw: string | undefined, fallback: number): number => {
   const parsed = Number(raw);
   return Number.isInteger(parsed) && parsed > 0 ? parsed : fallback;
+};
+
+/** First env var with a non-empty value after trimming — the local copy of
+ * `configuredAppUrl()`'s rule (the adapter cannot import `packages/api`). A
+ * present-but-empty var falls through to the next; `""` when none is set. */
+const firstConfigured = (...values: (string | undefined)[]): string => {
+  for (const value of values) {
+    const trimmed = value?.trim();
+    if (trimmed) return trimmed;
+  }
+  return "";
 };
 
 export const loadConfig = (env: NodeJS.ProcessEnv): AdapterConfig => {
@@ -49,6 +65,10 @@ export const loadConfig = (env: NodeJS.ProcessEnv): AdapterConfig => {
     approvalsPollSeconds: positiveInt(
       env.CHANNEL_ADAPTER_APPROVALS_POLL_SECONDS,
       25,
+    ),
+    appUrl: firstConfigured(env.APP_URL, env.NEXT_PUBLIC_APP_URL).replace(
+      /\/+$/,
+      "",
     ),
   };
 };

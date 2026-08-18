@@ -42,6 +42,7 @@
     "remark-gfm": "^4.0.1",
     "sonner": "^2.0.7",
     "stripe": "^20.4.0",
+    "unist-util-visit": "^5.1.0",
     "zod": "^4.3.6"
   },
   "devDependencies": {
@@ -52,6 +53,7 @@
     "@testing-library/jest-dom": "^7.0.0",
     "@testing-library/react": "^16.3.2",
     "@testing-library/user-event": "^14.6.3",
+    "@types/mdast": "^4.0.4",
     "@types/node": "^22.15.3",
     "@types/qrcode": "^1.5.6",
     "@types/react": "19.2.2",

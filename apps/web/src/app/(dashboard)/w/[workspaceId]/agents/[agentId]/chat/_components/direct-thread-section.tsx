@@ -24,7 +24,6 @@ import { useAgentPageAgent } from "../../_components/agent-page-frame";
 import { EmptyState } from "../../_components/empty-state";
 import { ChatThread } from "./chat-thread";
 import { Composer } from "./composer";
-import { InlineApprovals } from "./inline-approvals";
 import { OfflineBanner } from "./offline-banner";
 
 const ThreadSkeleton = () => (
@@ -226,10 +225,6 @@ export const DirectThreadSection = () => {
           Reconnecting…
         </p>
       )}
-
-      {/* Held requests for THIS agent, between the thread and the composer —
-          empty renders nothing, so the chat column keeps its height. */}
-      <InlineApprovals />
 
       <Composer
         onSend={(outgoing) => sendMessage.mutate(outgoing)}

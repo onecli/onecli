@@ -57,6 +57,37 @@ export const usePendingApprovals = () => {
 };
 
 /**
+ * Session memory of THIS browser's own decisions, keyed by approval id. The
+ * chat's settled record consults it to say "Approved"/"Denied" precisely for
+ * own clicks (a departure from the pending list alone cannot tell who
+ * decided). Written on mutate, erased on rollback, consumed on read — the
+ * map never outlives the one departure it explains.
+ */
+const localDecisions = new Map<string, "approved" | "denied">();
+
+/** Read-and-forget an own-click outcome for a departed approval. */
+export const takeLocalDecision = (
+  id: string,
+): "approved" | "denied" | undefined => {
+  const outcome = localDecisions.get(id);
+  localDecisions.delete(id);
+  return outcome;
+};
+
+/** What useDecideApproval's onMutate records (exported for tests). */
+export const recordLocalDecision = (
+  id: string,
+  outcome: "approved" | "denied",
+): void => {
+  localDecisions.set(id, outcome);
+};
+
+/** What useDecideApproval's onError does — a rollback must forget. */
+export const forgetLocalDecision = (id: string): void => {
+  localDecisions.delete(id);
+};
+
+/**
  * Approve or deny a held request. Optimistically removes the item from the
  * pending list, rolls back on error, and refreshes activity + counts on settle.
  * No gateway-cache invalidation — a decision releases a held request, it does
@@ -73,7 +104,8 @@ export const useDecideApproval = () => {
       id: string;
       decision: ApprovalDecisionInput;
     }) => decide(id, decision),
-    onMutate: async ({ id }) => {
+    onMutate: async ({ id, decision }) => {
+      recordLocalDecision(id, decision === "approve" ? "approved" : "denied");
       await qc.cancelQueries({ queryKey: queryKeys.approvals.all() });
       const previous = qc.getQueryData<PendingApproval[]>(
         queryKeys.approvals.list(),
@@ -83,7 +115,8 @@ export const useDecideApproval = () => {
       );
       return { previous };
     },
-    onError: (_err, _vars, ctx) => {
+    onError: (_err, vars, ctx) => {
+      forgetLocalDecision(vars.id);
       if (ctx?.previous) {
         qc.setQueryData(queryKeys.approvals.list(), ctx.previous);
       }
@@ -91,7 +124,7 @@ export const useDecideApproval = () => {
     },
     onSuccess: (_data, { decision }) => {
       toast.success(
-        decision === "approve" ? "Request approved" : "Request rejected",
+        decision === "approve" ? "Request approved" : "Request denied",
       );
     },
     onSettled: () => {

@@ -79,6 +79,9 @@ export const adapterWorkTurnSchema = z.object({
   status: z.string(),
   source: z.string(),
   userId: z.string().nullable(),
+  /** Display name behind `userId`, for cross-surface attribution. Optional:
+   * an older control plane never sends it. */
+  userName: z.string().nullable().optional(),
   message: z.string(),
   error: z.string().nullable(),
   errorCode: z.string().nullable(),
@@ -103,7 +106,17 @@ export const adapterWorkItemSchema = z.object({
    * sends it.
    */
   followUps: z
-    .array(z.object({ message: z.string(), source: z.string() }))
+    .array(
+      z.object({
+        message: z.string(),
+        source: z.string(),
+        /** Display name of THIS follow-up's author — on a group thread it
+         * can differ from the turn's asker. Optional: an older control plane
+         * never sends it (consumers fall back to the turn's name). Null: the
+         * control plane resolved and found nothing (deleted user). */
+        userName: z.string().nullable().optional(),
+      }),
+    )
     .optional(),
 });
 export type AdapterWorkItem = z.infer<typeof adapterWorkItemSchema>;

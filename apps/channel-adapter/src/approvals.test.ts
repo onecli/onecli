@@ -4,11 +4,12 @@ import type { AdapterPresence } from "@onecli/agent-protocol";
 import type { ControlPlaneClient } from "./control-plane";
 import {
   ApprovalsAuthError,
-  approvalCardBlocks,
   createApprovalsManager,
   fetchPendingApprovals,
   type PendingApproval,
 } from "./approvals";
+import { approvalCardBlocks, slackApprovalCardUi } from "./slack/approval-card";
+import { botTokenOf } from "./slack/credentials";
 import {
   createFakeControlPlane,
   settle,
@@ -98,11 +99,20 @@ const pendingBody = (id: string, expiresAt?: string): unknown => ({
   ],
 });
 
-const makeManager = (controlPlane: ControlPlaneClient) => {
+const makeManager = (
+  controlPlane: ControlPlaneClient,
+  overrides: { pacingMs?: number } = {},
+) => {
+  // The REAL Slack card implementation rides the fake HTTP server — the
+  // manager itself is channel-general and only sees the seam.
   const manager = createApprovalsManager({
     controlPlane,
     gatewayUrl: gateway.url,
     approvalsPollSeconds: 1,
+    cardUi: slackApprovalCardUi,
+    credentialOf: botTokenOf,
+    // Real pacing is 3s; tests pace in tens of ms like the other cadences.
+    pacingMs: overrides.pacingMs ?? 25,
     onLog: () => {},
   });
   managers.push(manager);
@@ -189,12 +199,33 @@ describe("the approval card", () => {
   };
 
   it("escapes every dynamic field — cards must not ping the workspace either", () => {
-    const rendered = JSON.stringify(approvalCardBlocks(approval));
-    expect(rendered).not.toContain("<!here>");
-    expect(rendered).toContain("&lt;!here&gt; Send email");
-    expect(rendered).toContain("Bot &lt;b&gt;");
-    expect(rendered).toContain("To&lt;");
-    expect(rendered).toContain("x&amp;y");
+    const blocks = approvalCardBlocks(approval);
+    // The action title rides the header block, which is plain_text — Slack
+    // renders it literally and never parses pings there. Every mrkdwn field
+    // (where <!here> WOULD ping) must carry only escaped text.
+    const mrkdwnTexts = JSON.stringify(
+      blocks.flatMap((b) => {
+        const block = b as {
+          type: string;
+          text?: { type: string; text: string };
+          elements?: { type: string; text: string }[];
+        };
+        return [
+          ...(block.text?.type === "mrkdwn" ? [block.text.text] : []),
+          ...(block.elements ?? [])
+            .filter((e) => e.type === "mrkdwn")
+            .map((e) => e.text),
+        ];
+      }),
+    );
+    expect(mrkdwnTexts).not.toContain("<!here>");
+    expect(mrkdwnTexts).toContain("Bot &lt;b&gt;");
+    expect(mrkdwnTexts).toContain("To&lt;");
+    expect(mrkdwnTexts).toContain("x&amp;y");
+    // And the header really is plain_text (the no-parse guarantee).
+    const header = blocks[0] as { type: string; text: { type: string } };
+    expect(header.type).toBe("header");
+    expect(header.text.type).toBe("plain_text");
   });
 
   it("falls back to method/host/path when the gateway sent no summary", () => {
@@ -209,12 +240,12 @@ describe("the approval card", () => {
     expect(rendered).toContain("Undecided means denied.");
   });
 
-  it("clamps an oversized detail value (and the title) at ~200 chars with a trailing ellipsis", () => {
+  it("clamps an oversized detail value (and the header action) with a trailing ellipsis", () => {
     // The gateway's summary fields are unbounded; a Slack section block caps
-    // at 3,000 chars. clampDetail keeps each dynamic field ≤200+ellipsis so
-    // 8 details plus the title always fit — delete the clamp and the raw
-    // 300-char value lands whole in the card (and a long enough one kills
-    // the entire post with invalid_blocks, silencing the approval).
+    // at 3,000 chars and a header block at 150. clampDetail keeps each
+    // dynamic field ≤200+ellipsis and clampHeader keeps the action ≤120 so
+    // the card always posts — delete either clamp and a long enough value
+    // kills the entire post with invalid_blocks, silencing the approval.
     const rendered = JSON.stringify(
       approvalCardBlocks({
         ...approval,
@@ -226,8 +257,31 @@ describe("the approval card", () => {
     );
     expect(rendered).toContain(`${"v".repeat(200)}…`);
     expect(rendered).not.toContain("v".repeat(201));
-    expect(rendered).toContain(`${"t".repeat(200)}…`);
-    expect(rendered).not.toContain("t".repeat(201));
+    expect(rendered).toContain(`${"t".repeat(120)}…`);
+    expect(rendered).not.toContain("t".repeat(121));
+  });
+
+  it("keeps the details section under Slack's cap even when escaping expands every char", () => {
+    // '<' escapes 4x, so clamping BEFORE escaping would land ~800 chars per
+    // field and a few bracket-heavy details would blow the 3,000-char
+    // section cap — invalid_blocks, and a claimed card that never posts.
+    // Clamp-after-escape plus the joined budget keep the post alive and say
+    // what was dropped instead of truncating silently.
+    const blocks = approvalCardBlocks({
+      ...approval,
+      summary: {
+        action: "Send an email",
+        details: Array.from({ length: 8 }, () => ({
+          label: "<".repeat(300),
+          value: "<".repeat(300),
+        })),
+      },
+    });
+    const section = (blocks[1] as { text: { text: string } }).text.text;
+    expect(section.length).toBeLessThanOrEqual(3_000);
+    // Whole lines past the budget are dropped, and the drop is said aloud.
+    expect(section).toMatch(/>_\+\d more_$/);
+    expect(section).not.toContain("<".repeat(2));
   });
 });
 
@@ -302,8 +356,9 @@ describe("posting a card", () => {
         `${String(card.response.channel)}:${String(card.response.ts)}`,
       ],
     ]);
-    // The tracked prompt is excluded from the next long-poll.
-    expect(gateway.calls[1]?.exclude).toEqual(["app-42"]);
+    // No exclude list — the full pending set is the cross-surface sync
+    // signal (an absent tracked id means "decided elsewhere").
+    expect(gateway.calls[1]?.exclude).toEqual([]);
   });
 
   it("carries the agent's avatar as icon_url on the card when the feed serves one", async () => {
@@ -353,6 +408,72 @@ describe("posting a card", () => {
     expect(claims).toHaveLength(1);
     expect(slack.callsTo("chat.postMessage")).toEqual([]);
     expect(records).toEqual([]);
+  });
+
+  it("posts NO card for another agent's approval — the pending set is workspace-wide, the DM is one agent's", async () => {
+    // The gateway scopes /v1/approvals/pending to the WORKSPACE, so Martin's
+    // poll also sees Donna's approval. Without the agent fence the first
+    // presence to claim posts it — Donna's card in Martin's DM.
+    const claims: unknown[] = [];
+    const controlPlane = createFakeControlPlane({
+      claimPrompt: async (input) => {
+        claims.push(input);
+        return true;
+      },
+      recordPromptMessage: async () => {},
+    });
+    gateway.script.push({
+      status: 200,
+      body: {
+        requests: [
+          {
+            id: "app-donna",
+            method: "POST",
+            host: "www.googleapis.com",
+            path: "/calendar/v3/events",
+            summary: { action: "Update calendar event", details: [] },
+            agent: { id: "ag-donna", name: "Donna" },
+          },
+        ],
+      },
+    });
+
+    // Martin's presence polls; the sole pending approval is Donna's.
+    makeManager(controlPlane).reconcile([
+      presence({
+        agent: { id: "ag-martin", name: "Martin", workspaceId: "proj1" },
+      }),
+    ]);
+    await waitReal(() => gateway.calls.length >= 2, "loop re-armed");
+
+    expect(claims).toEqual([]);
+    expect(slack.callsTo("chat.postMessage")).toEqual([]);
+  });
+
+  it("still posts an agent-less approval (older gateway) — the fence must not silence it", async () => {
+    const controlPlane = createFakeControlPlane({
+      claimPrompt: async () => true,
+      recordPromptMessage: async () => {},
+    });
+    gateway.script.push({
+      status: 200,
+      body: {
+        requests: [
+          {
+            id: "app-legacy",
+            method: "POST",
+            host: "api.example.com",
+            path: "/v1/emails",
+            summary: { action: "Send an email", details: [] },
+          },
+        ],
+      },
+    });
+
+    makeManager(controlPlane).reconcile([presence()]);
+    await waitReal(() => gateway.calls.length >= 2, "loop re-armed");
+
+    expect(slack.callsTo("chat.postMessage")).toHaveLength(1);
   });
 });
 
@@ -431,11 +552,77 @@ describe("expiry", () => {
     );
     const update = slack.callsTo("chat.update")[0]!;
     expect(update.form.ts).toBe(card.response.ts);
-    expect(update.form.text).toBe("⏱️ Timed out. The request was denied.");
+    // The record keeps WHAT was asked and states the outcome.
+    expect(update.form.text).toBe(
+      "Send an email · Expired (no response) · denied",
+    );
   });
 });
 
 describe("settleDecided", () => {
+  it("rewrites a card whose approval vanished from the pending set (decided on the web)", async () => {
+    const settles: [string, string][] = [];
+    const controlPlane = createFakeControlPlane({
+      settlePrompt: async (approvalId, state) => {
+        settles.push([approvalId, state]);
+      },
+    });
+    // Poll 1 posts the card; poll 2 serves an EMPTY set — the approval was
+    // decided elsewhere, and the card must follow without a Slack click.
+    gateway.script.push({ status: 200, body: pendingBody("app-42") });
+    gateway.script.push({ status: 200, body: { requests: [] } });
+    const manager = makeManager(controlPlane);
+    manager.reconcile([presence()]);
+    // The ledger settles AFTER the card rewrite lands (card-first order), so
+    // the ledger write is the "whole pair ran" signal to wait on.
+    await waitReal(() => settles.length >= 1, "card settled from the poll");
+
+    expect(settles).toContainEqual(["app-42", "decided"]);
+    const update = slack.callsTo("chat.update")[0]!;
+    expect(update.form.text).toBe("Send an email · Decided from the dashboard");
+  });
+
+  it("keeps the prompt tracked when the rewrite fails — ledger untouched, retried on the next poll", async () => {
+    // Card FIRST, ledger second, untrack last: once the ledger says
+    // "decided" no instance ever rewrites this card again, so a failed
+    // chat.update must leave the ledger alone and the prompt tracked — the
+    // absence persists into the next poll, which retries the pair.
+    // MUTATION-PROOF: restore the old order (delete + settle before the
+    // rewrite, or a swallowed update error) and the failed update below
+    // still records a settle — the ledger-untouched assertion fails.
+    const settles: [string, string][] = [];
+    const controlPlane = createFakeControlPlane({
+      settlePrompt: async (approvalId, state) => {
+        settles.push([approvalId, state]);
+      },
+    });
+    let failUpdates = true;
+    slack.respond("chat.update", (form) =>
+      failUpdates
+        ? { ok: false, error: "msg_too_long" }
+        : { ok: true, ts: form.ts ?? "0.0" },
+    );
+    gateway.script.push({ status: 200, body: pendingBody("app-42") });
+    gateway.script.push({ status: 200, body: { requests: [] } }); // rewrite fails
+
+    makeManager(controlPlane).reconcile([presence()]);
+    await waitReal(
+      () => slack.callsTo("chat.update").length >= 1,
+      "first rewrite attempted",
+    );
+    expect(settles).toEqual([]);
+
+    // Heal the update and answer the re-armed long-poll(s) with the same
+    // absence — the retry settles the whole pair.
+    failUpdates = false;
+    await waitReal(() => {
+      gateway.releaseHeld(200, { requests: [] });
+      return settles.length === 1;
+    }, "retry settled the pair");
+    expect(settles).toEqual([["app-42", "decided"]]);
+    expect(slack.callsTo("chat.update").length).toBeGreaterThanOrEqual(2);
+  });
+
   it("rewrites the tracked card with the decision text, once", async () => {
     const controlPlane = createFakeControlPlane();
     gateway.script.push({ status: 200, body: pendingBody("app-42") });
@@ -449,11 +636,112 @@ describe("settleDecided", () => {
     const updates = slack.callsTo("chat.update");
     expect(updates).toHaveLength(1);
     expect(updates[0]?.form.ts).toBe(card.response.ts);
-    expect(updates[0]?.form.text).toBe("✅ Approved by Ada");
+    expect(updates[0]?.form.text).toBe("Send an email · ✅ Approved by Ada");
 
     // The ledger entry is consumed — a second settle touches nothing.
     await manager.settleDecided("app-42", "again?");
     expect(slack.callsTo("chat.update")).toHaveLength(1);
+  });
+
+  it("skips the absence settle while a channel-click decision is in flight", async () => {
+    // The click path removes the approval from the gateway's pending set via
+    // decide() BEFORE settleDecided rewrites the card; an unfenced poll in
+    // that window would win the rewrite with the wrong provenance
+    // ("Decided from the dashboard" for a click made right here).
+    // MUTATION-PROOF: drop the `deciding` fence in the absence arm and the
+    // dashboard text lands below instead of the approved text.
+    const settles: [string, string][] = [];
+    const controlPlane = createFakeControlPlane({
+      settlePrompt: async (approvalId, state) => {
+        settles.push([approvalId, state]);
+      },
+    });
+    gateway.script.push({ status: 200, body: pendingBody("app-42") });
+    const manager = makeManager(controlPlane);
+    manager.reconcile([presence()]);
+    await waitReal(() => gateway.calls.length >= 2, "second poll held");
+
+    // The click lands: the decision round-trip begins, and the approval
+    // vanishes from the pending set the next poll serves.
+    manager.beginDecision("app-42");
+    gateway.releaseHeld(200, { requests: [] });
+    await settle();
+    expect(settles).toEqual([]);
+    expect(slack.callsTo("chat.update")).toEqual([]);
+
+    // The round-trip completes with the real outcome.
+    await manager.settleDecided("app-42", "✅ Approved by Ada");
+    manager.endDecision("app-42");
+    const updates = slack.callsTo("chat.update");
+    expect(updates).toHaveLength(1);
+    expect(updates[0]?.form.text).toBe("Send an email · ✅ Approved by Ada");
+  });
+
+  it("treats a permanently-gone card as settled — a deleted message must not retry forever", async () => {
+    // An admin deleted the bot's card message: chat.update answers
+    // message_not_found on every attempt, permanently. The card cannot
+    // mislead anyone if it no longer exists, so the settle proceeds (ledger
+    // written, prompt untracked) instead of wedging the 5s sweep and the
+    // poll's absence arm in an infinite retry.
+    const settles: [string, string][] = [];
+    const controlPlane = createFakeControlPlane({
+      settlePrompt: async (approvalId, state) => {
+        settles.push([approvalId, state]);
+      },
+    });
+    slack.respond("chat.update", () => ({
+      ok: false,
+      error: "message_not_found",
+    }));
+    gateway.script.push({ status: 200, body: pendingBody("app-42") });
+    gateway.script.push({ status: 200, body: { requests: [] } });
+
+    makeManager(controlPlane).reconcile([presence()]);
+    await waitReal(() => settles.length === 1, "settled past the gone card");
+    expect(settles).toEqual([["app-42", "decided"]]);
+  });
+});
+
+describe("poll pacing", () => {
+  it("paces on the fetched set — a foreign agent's approval must not hot-loop the poll", async () => {
+    // The gateway long-polls only when the pending set is EMPTY, so any
+    // non-empty answer returns instantly — including sets this presence
+    // tracks nothing from (the agent fence skips foreign rows without
+    // tracking them). MUTATION-PROOF: key the pacing back on tracked
+    // prompts (the old condition) and the loop refetches at network speed —
+    // the call count below explodes.
+    const controlPlane = createFakeControlPlane();
+    gateway.script.push(
+      ...Array.from({ length: 10 }, () => ({
+        status: 200,
+        body: {
+          requests: [
+            {
+              id: "app-donna",
+              summary: { action: "Update calendar event", details: [] },
+              agent: { id: "ag-donna", name: "Donna" },
+            },
+          ],
+        },
+      })),
+    );
+    const manager = createApprovalsManager({
+      controlPlane,
+      gatewayUrl: gateway.url,
+      approvalsPollSeconds: 1,
+      cardUi: slackApprovalCardUi,
+      credentialOf: botTokenOf,
+      // Long pacing: the loop must park after ONE answered poll.
+      pacingMs: 60_000,
+      onLog: () => {},
+    });
+    managers.push(manager);
+    manager.reconcile([presence()]);
+
+    await waitReal(() => gateway.calls.length >= 1, "first poll answered");
+    await settle();
+    expect(gateway.calls.length).toBe(1);
+    expect(slack.callsTo("chat.postMessage")).toEqual([]);
   });
 });
 
@@ -476,11 +764,15 @@ describe("boot recovery", () => {
     const manager = makeManager(controlPlane);
 
     await manager.recoverUnsettled();
+    // The recovered approval is still pending on the gateway — served, not
+    // excluded; its presence in the response is what keeps the card armed.
+    gateway.script.push({ status: 200, body: pendingBody("app-9") });
     manager.reconcile([presence()]);
     await waitReal(() => gateway.calls.length >= 1, "loop started");
 
-    // The recovered prompt is excluded from the very first long-poll…
-    expect(gateway.calls[0]?.exclude).toEqual(["app-9"]);
+    // No exclude — the poll serves the full set and the tracked id is simply
+    // not re-posted.
+    expect(gateway.calls[0]?.exclude).toEqual([]);
 
     // …and a decision routes the update to the RECORDED message ref.
     await manager.settleDecided("app-9", "⛔ Denied by Ada");

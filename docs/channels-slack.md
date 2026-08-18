@@ -28,6 +28,11 @@ docker compose up -d
 No ports, no database, no docker socket. Its traffic goes directly to Slack —
 deliberately not through the gateway (platform traffic, not agent traffic).
 
+The adapter uses `APP_URL` for the "Connect a model key" button in its Slack
+posts; the compose default points at the install's own address, so set
+`APP_URL` in the install `.env` when OneCLI is reached at another address (a
+tunnel, a reverse proxy, a real domain).
+
 ## 2. (Optional, recommended) Connect the workspace once
 
 An org admin, in **Organization → Settings → Channels**:
