@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.0.0](https://github.com/onecli/onecli/compare/v1.45.0...v2.0.0) (2026-08-18)
+
+
+### Features
+
+* OneCLI v2 - workspaces, split services, hosted agents ([#497](https://github.com/onecli/onecli/issues/497)) ([612ce80](https://github.com/onecli/onecli/commit/612ce802701c2b8532a77c56cbc5e020f42edd90))
+
 ## [1.45.0](https://github.com/onecli/onecli/compare/v1.44.0...v1.45.0) (2026-07-31)
 
 
