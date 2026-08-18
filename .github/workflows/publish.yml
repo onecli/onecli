@@ -22,6 +22,9 @@ env:
 
 jobs:
   build:
+    # Display name only — without it every run shows 14 rows of
+    # "build (<service>, <arch>)"; this renders "gateway (amd64)" instead.
+    name: ${{ matrix.service }} (${{ matrix.arch }})
     if: github.repository == 'onecli/onecli'
     strategy:
       matrix:
@@ -96,6 +99,7 @@ jobs:
           retention-days: 1
 
   merge:
+    name: ${{ matrix.service }} (manifest)
     if: github.repository == 'onecli/onecli'
     runs-on: ubuntu-latest
     needs: build
