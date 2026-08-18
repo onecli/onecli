@@ -278,20 +278,24 @@ describe("enterprise-license boundary", () => {
 
   // ── The paperwork says what the code says ──────────────────────────────
   //
-  // The path list is authored ONCE, in the root LICENSE under "THE LICENSED
-  // PATHS", and every other document points at it. That is what keeps a
-  // rename from needing seven edits — but it only works if the one remaining
-  // copy cannot drift from `LICENSED_ROOTS`/`LICENSED_FILES`, which is what
-  // the boundary is actually enforced against. Prose that disagrees with the
-  // enforced boundary is worse than no prose: it is a written claim we do not
-  // honour.
-  it("the LICENSE path list is exactly the boundary the code enforces", () => {
+  // The path list is authored ONCE, in LICENSE-ENTERPRISE under "THE LICENSED
+  // PATHS", and every other document points at it. It lives in the enterprise
+  // license rather than the root LICENSE so the grant document defines its
+  // own scope and the Apache file stays the pristine, tool-recognizable text
+  // (GitHub's licensee needs a near-verbatim match to name it Apache-2.0).
+  // That is what keeps a rename from needing seven edits — but it only works
+  // if the one remaining copy cannot drift from
+  // `LICENSED_ROOTS`/`LICENSED_FILES`, which is what the boundary is actually
+  // enforced against. Prose that disagrees with the enforced boundary is
+  // worse than no prose: it is a written claim we do not honour.
+  it("the LICENSE-ENTERPRISE path list is exactly the boundary the code enforces", () => {
     const section = /THE LICENSED PATHS\.[\s\S]*?\n\n([\s\S]*?)\n\n/.exec(
-      read("LICENSE"),
+      read("LICENSE-ENTERPRISE"),
     );
-    expect(section, "LICENSE must carry a THE LICENSED PATHS block").not.toBe(
-      null,
-    );
+    expect(
+      section,
+      "LICENSE-ENTERPRISE must carry a THE LICENSED PATHS block",
+    ).not.toBe(null);
 
     const listed = (section?.[1] ?? "")
       .split("\n")
@@ -342,15 +346,28 @@ describe("enterprise-license boundary", () => {
     );
   });
 
-  // The documents that defer to LICENSE must actually say so. Without this a
-  // well-meaning edit re-inlines the list somewhere and the duplication grows
-  // back, one file at a time.
-  it("the other documents defer to LICENSE rather than restating the paths", () => {
-    for (const doc of ["NOTICE", "README.md", "CONTRIBUTING.md", "CLA.md"]) {
+  // The documents that defer to LICENSE-ENTERPRISE must actually say so, and
+  // the root LICENSE must never restate the paths — a preamble there is both
+  // duplication and exactly what broke GitHub's Apache-2.0 detection. Without
+  // this a well-meaning edit re-inlines the list somewhere and the
+  // duplication grows back, one file at a time.
+  it("the other documents defer to LICENSE-ENTERPRISE rather than restating the paths", () => {
+    for (const doc of [
+      "LICENSE",
+      "NOTICE",
+      "README.md",
+      "CONTRIBUTING.md",
+      "CLA.md",
+    ]) {
       const text = read(doc);
-      expect(text, `${doc} must point at LICENSE for the paths`).toMatch(
-        /LICENSE/,
-      );
+      // The root LICENSE is the one document that must not point anywhere:
+      // it stays the verbatim Apache text and mentions no other file.
+      if (doc !== "LICENSE") {
+        expect(
+          text,
+          `${doc} must point at LICENSE-ENTERPRISE for the paths`,
+        ).toMatch(/LICENSE-ENTERPRISE/);
+      }
       for (const root of LICENSED_ROOTS) {
         expect(text, `${doc} restates the licensed path ${root}`).not.toContain(
           root,

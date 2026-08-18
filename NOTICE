@@ -13,9 +13,9 @@ the root of this repository.
 Certain paths are NOT licensed under the Apache License. They contain
 enterprise features governed by the OneCLI Enterprise License
 (LICENSE-ENTERPRISE). Those paths are enumerated under "THE LICENSED PATHS" in
-the LICENSE file at the root of this repository, which is the authoritative
-list; a notice pointing at the enterprise license is also placed in each of
-the licensed directories.
+the LICENSE-ENTERPRISE file itself, which is the authoritative list; a notice
+pointing at the enterprise license is also placed in each of the licensed
+directories.
 
 The OneCLI Enterprise License permits use for development, testing, evaluation
 and internal non-production purposes. Production use of those components

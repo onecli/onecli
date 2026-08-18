@@ -5,7 +5,7 @@ this repository. It contains enterprise features licensed under the OneCLI
 Enterprise License.
 
   Terms:      /LICENSE-ENTERPRISE at the root of this repository
-  Path list:  /LICENSE, under "THE LICENSED PATHS"
+  Path list:  /LICENSE-ENTERPRISE, under "THE LICENSED PATHS"
 
 That license permits development, testing, evaluation and internal
 non-production use. Production use requires a valid OneCLI Enterprise

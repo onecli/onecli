@@ -2,8 +2,8 @@
 name = "onecli-gateway"
 version = "0.1.0"
 edition = "2021"
-# The crate embeds the licensed src/ee/ modules in every build — see /LICENSE
-# ("THE LICENSED PATHS") and /LICENSE-ENTERPRISE at the repository root.
+# The crate embeds the licensed src/ee/ modules in every build — see
+# /LICENSE-ENTERPRISE ("THE LICENSED PATHS") at the repository root.
 license = "Apache-2.0 AND LicenseRef-OneCLI-Enterprise"
 publish = false
 

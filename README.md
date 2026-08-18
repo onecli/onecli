@@ -122,5 +122,5 @@ enterprise features under the [OneCLI Enterprise License](LICENSE-ENTERPRISE),
 each carrying a notice that points at it. That license is free for development,
 testing and evaluation, and requires a subscription for production use.
 Everything else is Apache-2.0 and can be self-hosted in production with no
-commercial license. [LICENSE](LICENSE) carries the authoritative list of
-licensed paths.
+commercial license. [LICENSE-ENTERPRISE](LICENSE-ENTERPRISE) carries the
+authoritative list of licensed paths.

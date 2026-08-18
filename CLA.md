@@ -9,10 +9,10 @@ project, collectively referred to as the "Parties."
 OneCLI is an open-source project. Most of this repository is licensed under
 the Apache License, Version 2.0, as set out in the [LICENSE](LICENSE) file;
 a set of enterprise features is licensed under the OneCLI Enterprise License,
-as set out in the [LICENSE-ENTERPRISE](LICENSE-ENTERPRISE) file. The LICENSE
-file carries the authoritative description of which parts of the repository
-each license covers. This CLA governs the rights in the contributions made by
-the Contributor to the OneCLI project.
+as set out in the [LICENSE-ENTERPRISE](LICENSE-ENTERPRISE) file. The
+LICENSE-ENTERPRISE file carries the authoritative description of which parts
+of the repository each license covers. This CLA governs the rights in the
+contributions made by the Contributor to the OneCLI project.
 
 ## Agreement
 
@@ -28,7 +28,7 @@ right and license to:
   including any intellectual property rights therein.
 - Incorporate the Contributions into other works or products.
 - License and re-license the Contributions, in whole or in part, under any
-  license at ChartDB's sole discretion — including the Apache License,
+  license at ChartDB's sole discretion, including the Apache License,
   Version 2.0 (as included in the LICENSE file), the OneCLI Enterprise
   License (as included in the LICENSE-ENTERPRISE file), or any other license,
   whether open source or proprietary, at any time in the future.
@@ -81,8 +81,8 @@ understandings, agreements, representations, and warranties.
 The Contributor accepts this CLA in either of two ways, each of which is
 individually sufficient:
 
-1. By signing it through the CLA Assistant flow on a pull request — replying
-   to the CLA Assistant comment with the sign phrase it asks for. The
+1. By signing it through the CLA Assistant flow on a pull request (replying
+   to the CLA Assistant comment with the sign phrase it asks for). The
    signature is recorded once against the Contributor's GitHub account and
    applies to all past and future Contributions.
 2. By submitting Contributions to the OneCLI project.

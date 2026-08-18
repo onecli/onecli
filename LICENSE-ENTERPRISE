@@ -3,12 +3,26 @@ OneCLI Enterprise License
 Copyright (c) 2025-present ChartDB, Inc.
 
 This license governs the enterprise components of OneCLI. It applies ONLY to
-the paths enumerated under "THE LICENSED PATHS" in the LICENSE file at the root
-of this repository. Each of those directories carries a notice pointing back
-at this file, so the license travels with the code it covers.
+the paths enumerated below.
+
+THE LICENSED PATHS. The list below is authoritative. This file is the only
+place the paths are enumerated. Every other document in this repository refers
+back to this list rather than restating it.
+
+    apps/web/src/ee/
+    packages/api/src/ee/
+    apps/gateway/src/ee/
+    apps/gateway/src/ee.rs
+
+Those paths are NOT covered by the Apache License. No rights under the Apache
+License, including the rights to use, reproduce, modify, distribute or
+sublicense, are granted with respect to those paths. Each of the licensed
+directories carries a notice pointing back at this file, so the license
+travels with the code it covers.
 
 All other files in this repository are licensed under the Apache License,
-Version 2.0. See the LICENSE and NOTICE files at the root of the repository.
+Version 2.0, and may be self-hosted in production with no commercial license.
+See the LICENSE and NOTICE files at the root of the repository.
 
 Those enterprise components and their associated documentation files (the
 "Software") are licensed under the following terms:

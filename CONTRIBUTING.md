@@ -55,8 +55,8 @@ Running these before you create the PR will help reduce back and forth during re
 
 This project is licensed under the [Apache License 2.0](LICENSE), with one
 exception: the `ee/` directories hold enterprise features under the [OneCLI
-Enterprise License](LICENSE-ENTERPRISE). See [LICENSE](LICENSE) for the exact
-paths. By contributing, you agree that your contributions will be licensed
+Enterprise License](LICENSE-ENTERPRISE), which enumerates the exact paths it
+covers. By contributing, you agree that your contributions will be licensed
 under the Apache License 2.0 as well.
 
 ---
