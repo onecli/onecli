@@ -68,6 +68,7 @@ export const APP_CATEGORIES: Record<string, AppCategory> = {
   datadog: "cloud-data",
   snowflake: "cloud-data",
   "vertex-ai": "cloud-data",
+  serply: "cloud-data",
 
   // Communication
   resend: "communication",
