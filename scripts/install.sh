@@ -164,7 +164,7 @@ legacy_volume_secret() {
 
 main() {
   echo ""
-  echo "  OneCLI: give your agents access, not your secrets."
+  echo "  OneCLI: The agent harness built for teams."
   echo ""
 
   # ── Prerequisites ──

@@ -83,11 +83,12 @@ export const FOLLOW_UP_EXPIRED_MESSAGE =
  * Machine-readable failure reasons, set beside the human `Turn.error` ONLY
  * when a reader has to do something more than print the sentence.
  *
- * `no_model_key` offers a fix that is a link away. The lifecycle codes
- * (`agent_restarted`, `agent_start_failed`, `at_capacity`,
- * `image_unavailable`) tell the web these are platform hiccups, not agent
- * output — rendered as a quiet notice, never the red failure box — and none
- * of that can be decided by pattern-matching on prose.
+ * `no_model_key` and `model_provider_error` offer a fix that is a link away
+ * (connect a key / check the key). The lifecycle codes (`agent_restarted`,
+ * `agent_start_failed`, `at_capacity`, `image_unavailable`) tell the web
+ * these are platform hiccups, not agent output — rendered as a quiet notice,
+ * never the red failure box — and none of that can be decided by
+ * pattern-matching on prose.
  */
 /** The lifecycle subset, exported on its own because the web derives its
  * "render as a quiet notice" set from it (turn-block.tsx imports this module
@@ -102,6 +103,7 @@ export const LIFECYCLE_TURN_ERROR_CODES = [
 
 export const TURN_ERROR_CODES = [
   "no_model_key",
+  "model_provider_error",
   ...LIFECYCLE_TURN_ERROR_CODES,
 ] as const;
 export type TurnErrorCode = (typeof TURN_ERROR_CODES)[number];
@@ -151,6 +153,15 @@ export const AT_CAPACITY_MESSAGE =
 export const IMAGE_UNAVAILABLE_MESSAGE =
   "The agent couldn't start because its software isn't installed where it runs yet. Ask whoever operates this install to finish the agent setup.";
 
+/** The model provider refused the request — a usage limit, exhausted
+ * credits, or a key that stopped working. The fix is the key, so the copy
+ * points there (the web attaches the models-page link off the code, like
+ * `no_model_key`). Raw provider responses never render on a chat surface:
+ * this canonical copy replaces them; the raw text stays operator material
+ * (the server log and the stored transcript events). */
+export const MODEL_PROVIDER_ERROR_MESSAGE =
+  "The agent's model provider rejected the request. This is usually a usage limit or an expired key. Check the connected model key, or connect a different one, then send your message again.";
+
 /**
  * The server-side allowlist: a WIRE failure code (supervisor/runner-supplied,
  * an open string there) → the canonical {code, message} pair written to the
@@ -171,6 +182,10 @@ export const TURN_FAILURE_COPY: Partial<
   agent_start_failed: {
     code: "agent_start_failed",
     message: AGENT_START_FAILED_MESSAGE,
+  },
+  model_provider_error: {
+    code: "model_provider_error",
+    message: MODEL_PROVIDER_ERROR_MESSAGE,
   },
 };
 

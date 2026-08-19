@@ -317,6 +317,17 @@ export type WorkItem = z.infer<typeof workItemSchema>;
  */
 export const MAX_UNHEALTHY_REASON_CHARS = 2000;
 
+/**
+ * Cap on a `turn.result` error string, applied at the SENDER (the schema
+ * stays open for old peers). Same law as MAX_UNHEALTHY_REASON_CHARS: the
+ * terminal frame must deliver, and an unbounded harness error could exceed
+ * the runner WS server's frame cap, which does not truncate — it drops the
+ * frame and kills the socket, losing the turn's close entirely. Matches the
+ * runner's own forward cap (`turn.finished` error, runner-wire.ts), so
+ * nothing downstream ever kept more anyway.
+ */
+export const MAX_TURN_RESULT_ERROR_CHARS = 2000;
+
 export const supervisorMessageSchema = z
   .discriminatedUnion("kind", [
     z.object({
@@ -345,11 +356,12 @@ export const supervisorMessageSchema = z
       error: z.string().optional(),
       /**
        * Machine-readable failure class (see `failure-codes.ts`), attached
-       * beside the raw `error` only when the harness itself died. An open
-       * bounded string, never an enum: this is the one frame that must
-       * deliver, and a novel future code must degrade (the control plane's
-       * allowlist ignores it), not invalidate the frame. Additive-optional —
-       * an old runner strips it and everything behaves as today.
+       * beside the raw `error` when the harness itself died — or when a live
+       * harness's model provider refused the request. An open bounded
+       * string, never an enum: this is the one frame that must deliver, and
+       * a novel future code must degrade (the control plane's allowlist
+       * ignores it), not invalidate the frame. Additive-optional — an old
+       * runner strips it and everything behaves as today.
        */
       errorCode: z.string().max(64).optional(),
       usage: turnUsageSchema.optional(),

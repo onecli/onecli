@@ -145,6 +145,33 @@ describe("TurnBlock", () => {
     expect(screen.queryByText("some folded error")).not.toBeInTheDocument();
   });
 
+  it("holds the waiting state while the poll still says active — no raw-error flash", () => {
+    // The transcript stream's raw `error` event lands a beat before the
+    // turns poll settles the status and delivers the canonical copy. While
+    // the poll says ACTIVE, the stream's raw text must not flash.
+    render(
+      <TurnBlock
+        turn={turn({ status: "running" })}
+        rendered={rendered({ ended: true, error: "raw provider blob" })}
+      />,
+    );
+    expect(screen.queryByText("raw provider blob")).not.toBeInTheDocument();
+    expect(screen.getByText("Thinking…")).toBeInTheDocument();
+  });
+
+  it("still shows the stream's error once the turn settles without a row error", () => {
+    // The fallback witness: an uncoded failure whose turn.result carried no
+    // error string leaves turn.error null — the folded stream error is the
+    // only record, and hiding it on a SETTLED turn would hide the failure.
+    render(
+      <TurnBlock
+        turn={turn({ status: "failed", error: null })}
+        rendered={rendered({ error: "the stream's own error" })}
+      />,
+    );
+    expect(screen.getByText("the stream's own error")).toBeInTheDocument();
+  });
+
   it("says it is waking before the agent runs, thinking once it does", () => {
     const { rerender } = render(
       <TurnBlock turn={turn({ status: "queued" })} rendered={undefined} />,
@@ -240,6 +267,47 @@ describe("a turn that could not run for a reason the reader can fix", () => {
     const action = screen.getByRole("link", { name: "Connect a model key" });
     expect(action).toHaveAttribute("href", "/w/p1/agents/a1/models");
     // Guidance, not a crash: none of the destructive treatment.
+    expect(document.querySelector(".text-destructive")).toBeNull();
+  });
+
+  it("offers the key check for a model-provider refusal — same door, its own label", () => {
+    // A key EXISTS but the provider refused it (limit, expiry): the fix
+    // lives on the same Models page, and the label says "check", not
+    // "connect". Keyed on the CODE, never the message text.
+    render(
+      <TurnBlock
+        turn={turn({
+          status: "failed",
+          error:
+            "The agent's model provider rejected the request. This is usually a usage limit or an expired key.",
+          errorCode: "model_provider_error",
+        })}
+        rendered={undefined}
+        modelsHref="/w/p1/agents/a1/models"
+      />,
+    );
+    const action = screen.getByRole("link", { name: "Check the model key" });
+    expect(action).toHaveAttribute("href", "/w/p1/agents/a1/models");
+    expect(document.querySelector(".text-destructive")).toBeNull();
+  });
+
+  it("a provider refusal without a models href keeps the notice, minus the door", () => {
+    // Outside the agent page there is no destination to offer — the
+    // guidance still renders as the quiet notice, just with no action.
+    render(
+      <TurnBlock
+        turn={turn({
+          status: "failed",
+          error: "The agent's model provider rejected the request.",
+          errorCode: "model_provider_error",
+        })}
+        rendered={undefined}
+      />,
+    );
+    expect(screen.getByRole("status")).toHaveTextContent(
+      "The agent's model provider rejected the request.",
+    );
+    expect(screen.queryByRole("link")).toBeNull();
     expect(document.querySelector(".text-destructive")).toBeNull();
   });
 

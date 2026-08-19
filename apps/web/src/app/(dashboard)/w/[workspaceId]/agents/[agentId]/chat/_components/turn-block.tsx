@@ -43,6 +43,16 @@ const ORIGIN_LABELS: Record<string, string> = { slack: "via Slack" };
  *  back to the red box. */
 const FRIENDLY_FAILURE_CODES = new Set<string>(LIFECYCLE_TURN_ERROR_CODES);
 
+/** Turn.errorCode values whose fix is a link away on the agent's Models
+ *  page, with the label saying WHICH fix: no key at all vs a key the
+ *  provider refused. Keyed on the CODE, never the message text — and a Map,
+ *  not a bare object, so a peer-supplied string can never resolve to a
+ *  prototype member. */
+const KEY_FIX_LABELS = new Map<string, string>([
+  ["no_model_key", "Connect a model key"],
+  ["model_provider_error", "Check the model key"],
+]);
+
 const originLabel = (source: string): string | undefined =>
   source === "web" ? undefined : (ORIGIN_LABELS[source] ?? `via ${source}`);
 
@@ -62,16 +72,20 @@ export const TurnBlock = ({
   modelsHref?: string;
 }) => {
   const active = isActiveTurn(turn);
-  const errorText = turn.error ?? rendered?.error;
+  // The transcript stream's raw `error` event lands a beat before the turns
+  // poll flips the status and delivers the canonical error + errorCode. While
+  // the poll still says ACTIVE, showing the stream's raw text would flash the
+  // red blob and then swap to the friendly notice — so an active turn keeps
+  // its waiting state and the error renders only from the settled poll view.
+  const errorText = turn.error ?? (active ? undefined : rendered?.error);
   const showWaiting = active && (rendered?.tools.length ?? 0) === 0;
-  // A turn that never ran because the agent has no model key. Rendered as
-  // guidance with the fix attached, rather than as a failure — read off the
-  // CODE, never the message text.
-  const missingKey = turn.errorCode === "no_model_key";
+  // A turn the reader can fix from the Models page — no key yet, or a key
+  // the provider refused. Rendered as guidance with the fix attached, rather
+  // than as a failure.
+  const keyFixLabel = KEY_FIX_LABELS.get(turn.errorCode ?? "");
   // A lifecycle hiccup (restart, start failure, capacity): guidance too,
   // just with no action to attach — the sentence itself says what to do.
-  const friendlyFailure =
-    !missingKey && FRIENDLY_FAILURE_CODES.has(turn.errorCode ?? "");
+  const friendlyFailure = FRIENDLY_FAILURE_CODES.has(turn.errorCode ?? "");
 
   return (
     <>
@@ -146,11 +160,11 @@ export const TurnBlock = ({
               <TurnNotice key={`${index}-${notice}`} message={notice} />
             ))}
             {errorText &&
-              (missingKey ? (
+              (keyFixLabel ? (
                 <TurnNotice
                   message={errorText}
                   {...(modelsHref && {
-                    action: { href: modelsHref, label: "Connect a model key" },
+                    action: { href: modelsHref, label: keyFixLabel },
                   })}
                 />
               ) : friendlyFailure ? (

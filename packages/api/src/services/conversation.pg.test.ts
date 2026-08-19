@@ -8,6 +8,7 @@ import {
   AGENT_START_FAILED_MESSAGE,
   AT_CAPACITY_MESSAGE,
   IMAGE_UNAVAILABLE_MESSAGE,
+  MODEL_PROVIDER_ERROR_MESSAGE,
 } from "../validations/conversation.js";
 
 /**
@@ -1217,6 +1218,43 @@ describe.skipIf(!PROOF_URL)("finishTurn and the cold-death revival", () => {
     expect(raw?.status).toBe("failed");
     expect(raw?.error).toBe("the model exploded");
     expect(raw?.errorCode).toBeNull();
+  });
+
+  it("closes a model-provider refusal with the canonical copy, never the raw blob", async () => {
+    // The supervisor classifies the refusal and sends the raw provider text
+    // beside the code; the row must carry ONLY the canonical sentence — the
+    // raw blob is operator material (the log and the transcript events).
+    const { conversationId, sandboxId } = await seedTalkable("fin-provider");
+    const turn = await turns.createTurn(
+      WORKSPACE,
+      conversationId,
+      "first",
+      WEB_A,
+    );
+    await dueWork.claimDueWork(RUNNER_A, 5);
+    await turns.applyTurnEvents(
+      reporter(RUNNER_A, sandboxId),
+      conversationId,
+      turn.id,
+      [{ type: "turn.started" }],
+    );
+
+    const rawBlob =
+      'API Error: 429 {"type":"error","error":{"type":"rate_limit_error","message":"rate limit reached"}}';
+    await turns.finishTurn({
+      reporter: reporter(RUNNER_A, sandboxId),
+      conversationId,
+      turnId: turn.id,
+      status: "failed",
+      error: rawBlob,
+      errorCode: "model_provider_error",
+    });
+
+    const row = await db.turn.findUnique({ where: { id: turn.id } });
+    expect(row?.status).toBe("failed");
+    expect(row?.error).toBe(MODEL_PROVIDER_ERROR_MESSAGE);
+    expect(row?.errorCode).toBe("model_provider_error");
+    expect(row?.error).not.toContain("rate_limit_error");
   });
 });
 

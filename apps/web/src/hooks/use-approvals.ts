@@ -122,7 +122,13 @@ export const useDecideApproval = () => {
       }
       toast.error("Failed to submit decision");
     },
-    onSuccess: (_data, { decision }) => {
+    onSuccess: (outcome, { decision }) => {
+      if (outcome === "already_settled") {
+        // The card was stale: expired, decided from another surface, or the
+        // gateway restarted. The click changed nothing — say that, quietly.
+        toast.info("This request was already settled");
+        return;
+      }
       toast.success(
         decision === "approve" ? "Request approved" : "Request denied",
       );

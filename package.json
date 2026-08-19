@@ -45,5 +45,10 @@
     "*.{ts,tsx,js,jsx,md,css,json}": [
       "prettier --write"
     ]
+  },
+  "pnpm": {
+    "overrides": {
+      "openid-client": "6.8.5"
+    }
   }
 }

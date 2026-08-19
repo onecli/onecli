@@ -661,9 +661,39 @@ impl PolicyEngine {
                         .collect(),
                 });
             };
-            return self
-                .resolve_connection_injections(conn, hostname, organization_id, workspace_id, cache)
-                .await;
+            // A pinned id only decides WHICH account to use — it cannot decide
+            // which PROVIDER serves the path. On a path-scoped shared host
+            // (www.googleapis.com: Gmail /gmail/*, Calendar /calendar/*,
+            // Drive /drive/*) an id naming a different provider than the
+            // request path builds rules that self-select to a path this
+            // request isn't on, so NOTHING injects and the upstream 401
+            // surfaces as a bogus `access_restricted` — a credential the
+            // agent HAS looks unattached. When another attached connection
+            // does serve this path, ignore the mismatched pin and fall through
+            // to path narrowing below.
+            let pin_serves = provider_serves_request(&conn.provider, hostname, request_path);
+            let another_serves = || {
+                app_connections.iter().any(|c| {
+                    c.id != conn.id && provider_serves_request(&c.provider, hostname, request_path)
+                })
+            };
+            if pin_serves || !another_serves() {
+                return self
+                    .resolve_connection_injections(
+                        conn,
+                        hostname,
+                        organization_id,
+                        workspace_id,
+                        cache,
+                    )
+                    .await;
+            }
+            debug!(
+                connection_id = %conn.id,
+                provider = %conn.provider,
+                host = %hostname,
+                "pinned connection does not serve this request path; falling back to path narrowing"
+            );
         }
 
         // On path-scoped shared hosts (e.g. www.googleapis.com, where Gmail,
@@ -2262,7 +2292,10 @@ mod tests {
         .await;
 
         // An explicit x-onecli-connection-id is a deliberate override: the
-        // serves-path gate does not apply.
+        // serves-path gate does not apply — unless another attached
+        // connection actually serves the path (see the fallback test below).
+        // Here the pinned connection is the only one, so the pin stands even
+        // off-path.
         let res = engine
             .resolve_app_injection_for_request(
                 std::slice::from_ref(&c),
@@ -2291,6 +2324,146 @@ mod tests {
                 );
             }
             _ => panic!("expected Rules"),
+        }
+    }
+
+    #[tokio::test]
+    async fn mismatched_pin_falls_back_to_the_connection_that_serves_the_path() {
+        // A Gmail connection id pinned on a CALENDAR request (the shared
+        // www.googleapis.com host). The pin names an account, not a provider:
+        // honoring it would build only /gmail/* rules, which self-select away
+        // from this path, so nothing injects and Google's 401 surfaces as a
+        // bogus `access_restricted`. The Calendar connection serves the path,
+        // so it wins instead.
+        let engine = PolicyEngine::test_stub();
+        let store = new_store().await;
+        let cal = conn("c1", "google-calendar");
+        let gm = conn("c2", "gmail");
+        seed_app_injection(
+            &store,
+            &cal,
+            "www.googleapis.com",
+            vec![bearer_rule("/calendar/*", "cal")],
+            None,
+            Some("Cal"),
+        )
+        .await;
+        seed_app_injection(
+            &store,
+            &gm,
+            "www.googleapis.com",
+            vec![bearer_rule("/gmail/*", "gm")],
+            None,
+            Some("Gm"),
+        )
+        .await;
+
+        let conns = vec![cal, gm.clone()];
+        let res = engine
+            .resolve_app_injection_for_request(
+                &conns,
+                "www.googleapis.com",
+                Some("/calendar/v3/calendars/primary/events"),
+                Some("c2"),
+                "o1",
+                "p1",
+                &*store,
+            )
+            .await
+            .unwrap();
+        match res {
+            AppConnectionResult::Rules {
+                connection_id,
+                rules,
+                ..
+            } => {
+                assert_eq!(
+                    connection_id.as_deref(),
+                    Some("c1"),
+                    "the calendar connection serves this path and must win"
+                );
+                assert!(rules.iter().any(|r| r.path_pattern == "/calendar/*"));
+            }
+            _ => panic!("expected Rules"),
+        }
+
+        // With no other connection serving the path, the pin still stands.
+        let only_gmail = vec![gm];
+        let res = engine
+            .resolve_app_injection_for_request(
+                &only_gmail,
+                "www.googleapis.com",
+                Some("/calendar/v3/calendars/primary/events"),
+                Some("c2"),
+                "o1",
+                "p1",
+                &*store,
+            )
+            .await
+            .unwrap();
+        assert!(matches!(res, AppConnectionResult::Rules { .. }));
+    }
+
+    #[tokio::test]
+    async fn mismatched_pin_with_two_serving_accounts_stays_ambiguous() {
+        // A Gmail pin on a CALENDAR path where TWO Calendar accounts are
+        // attached: ignoring the pin must never silently pick one of them —
+        // account choice is the agent's, so the fallback lands on the same
+        // Ambiguous 409 the no-pin path would give (the response names the
+        // choices and the pin header to send).
+        let engine = PolicyEngine::test_stub();
+        let store = new_store().await;
+        let cal_a = conn("c1", "google-calendar");
+        let cal_b = conn("c2", "google-calendar");
+        let gm = conn("c3", "gmail");
+        seed_app_injection(
+            &store,
+            &cal_a,
+            "www.googleapis.com",
+            vec![bearer_rule("/calendar/*", "cal-a")],
+            None,
+            Some("Cal A"),
+        )
+        .await;
+        seed_app_injection(
+            &store,
+            &cal_b,
+            "www.googleapis.com",
+            vec![bearer_rule("/calendar/*", "cal-b")],
+            None,
+            Some("Cal B"),
+        )
+        .await;
+        seed_app_injection(
+            &store,
+            &gm,
+            "www.googleapis.com",
+            vec![bearer_rule("/gmail/*", "gm")],
+            None,
+            Some("Gm"),
+        )
+        .await;
+
+        let conns = vec![cal_a, cal_b, gm];
+        let res = engine
+            .resolve_app_injection_for_request(
+                &conns,
+                "www.googleapis.com",
+                Some("/calendar/v3/calendars/primary/events"),
+                Some("c3"),
+                "o1",
+                "p1",
+                &*store,
+            )
+            .await
+            .unwrap();
+        match res {
+            AppConnectionResult::Ambiguous { connections } => {
+                let mut ids: Vec<&str> = connections.iter().map(|c| c.id.as_str()).collect();
+                ids.sort_unstable();
+                assert_eq!(ids, vec!["c1", "c2"], "both Calendar accounts offered");
+            }
+            _ => panic!("expected Ambiguous"),
         }
     }
 

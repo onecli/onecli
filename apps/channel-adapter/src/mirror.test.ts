@@ -493,11 +493,66 @@ describe("what gets posted", () => {
     expect("blocks" in posted[0]!.form).toBe(false);
   });
 
-  it("treats any OTHER error code as a plain answer — no card is invented for codes without a producer", async () => {
-    // `model_provider_error` once had a card arm here despite having no
-    // producer anywhere (finishTurn's allowlist makes it unreachable); this
-    // pins its removal — an unknown code takes the plain-answer path even
-    // with a models URL configured.
+  it("posts the provider-error card — headline, context line, and a button to the Models page", async () => {
+    // The supervisor now produces `model_provider_error` and finishTurn's
+    // allowlist carries it, so the code earns the web's same call to action
+    // here too: keyed on the CODE (never prose), gated on having a URL. The
+    // canonical sentence stays as the notification fallback text.
+    const controlPlane = createFakeControlPlane(transcriptWith(null));
+
+    await mirror({
+      controlPlane,
+      modelsUrl: "https://app.example.com/w/ws1/agents/ag1/models",
+      workItem: item({
+        source: "slack",
+        error: "The provider rejected <this>.",
+        errorCode: "model_provider_error",
+      }),
+    });
+
+    const posted = slack.callsTo("chat.postMessage");
+    expect(posted).toHaveLength(1);
+    expect(posted[0]?.form.text).toBe("The provider rejected &lt;this&gt;.");
+    const blocks = JSON.parse(posted[0]!.form.blocks!) as {
+      type: string;
+      text?: { text: string };
+      elements?: {
+        type: string;
+        text?: { text: string };
+        url?: string;
+        action_id?: string;
+      }[];
+    }[];
+    expect(blocks[0]?.text?.text).toBe(
+      "*The model provider rejected the request*",
+    );
+    const button = blocks.find((b) => b.type === "actions")?.elements?.[0];
+    expect(button?.url).toBe("https://app.example.com/w/ws1/agents/ag1/models");
+    expect(button?.action_id).toBe("open_models_page");
+    expect(button?.text?.text).toBe("Check the model key");
+  });
+
+  it("provider-error degrades to the plain answer when no models URL is configured", async () => {
+    const controlPlane = createFakeControlPlane(transcriptWith(null));
+
+    await mirror({
+      controlPlane,
+      workItem: item({
+        source: "slack",
+        error: "The provider rejected <this>.",
+        errorCode: "model_provider_error",
+      }),
+    });
+
+    const posted = slack.callsTo("chat.postMessage");
+    expect(posted).toHaveLength(1);
+    expect(posted[0]?.form.text).toBe("The provider rejected &lt;this&gt;.");
+    expect("blocks" in posted[0]!.form).toBe(false);
+  });
+
+  it("treats an UNKNOWN error code as a plain answer — no card is invented without a producer", async () => {
+    // Cards exist only for codes with a wired arm; anything else takes the
+    // plain-answer path even with a models URL configured.
     const controlPlane = createFakeControlPlane(transcriptWith(null));
 
     await mirror({
@@ -506,7 +561,7 @@ describe("what gets posted", () => {
       workItem: item({
         source: "slack",
         error: "Provider said no <retry>",
-        errorCode: "model_provider_error",
+        errorCode: "mystery_code",
       }),
     });
 

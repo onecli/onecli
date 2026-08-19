@@ -737,3 +737,136 @@ describe("a harness that dies takes the sandbox with it", () => {
     expect(t.of("unhealthy")).toHaveLength(0);
   });
 });
+
+describe("a model-provider refusal on a live harness", () => {
+  const REFUSAL =
+    'API Error: 429 {"type":"error","error":{"type":"rate_limit_error","message":"rate limit reached"}}';
+
+  it("earns the model_provider_error code, with the raw refusal beside it", async () => {
+    // The one live-harness failure a person can fix: the terminal error is
+    // the provider refusing (limit, credits, key). The CODE lets the control
+    // plane store canonical copy; the raw text rides beside it for the
+    // server log (and an old control plane's raw passthrough).
+    const t = createTestTransport();
+    const harness = createFakeHarness({
+      script: () => [{ type: "error", message: REFUSAL }],
+    });
+    const run = runSupervisor(
+      config(home("sup-refusal-")),
+      harness,
+      t.transport,
+    );
+
+    t.push(deliver("t1", "cv-a"));
+    await t.until(() => t.of("turn.result").length === 1, "the failed turn");
+    await t.finish(run);
+
+    const [failed] = t.of("turn.result");
+    expect(failed?.status).toBe("failed");
+    expect(failed?.errorCode).toBe("model_provider_error");
+    expect(failed?.error).toBe(REFUSAL);
+    // A refusal is one turn's problem, never a dead harness.
+    expect(t.of("unhealthy")).toHaveLength(0);
+  });
+
+  it("keeps a non-refusal terminal error uncoded — no error field either", async () => {
+    // The passthrough contract: anything the classifier does not positively
+    // recognize keeps today's shape (no code, no turn.result error; the
+    // transcript's own error event is the witness), so canonical copy can
+    // never paper over an unrecognized failure.
+    const t = createTestTransport();
+    const harness = createFakeHarness({
+      script: () => [
+        { type: "error", message: "something unrecognizable went wrong" },
+      ],
+    });
+    const run = runSupervisor(
+      config(home("sup-refusal-")),
+      harness,
+      t.transport,
+    );
+
+    t.push(deliver("t1", "cv-a"));
+    await t.until(() => t.of("turn.result").length === 1, "the failed turn");
+    await t.finish(run);
+
+    const [failed] = t.of("turn.result");
+    expect(failed?.status).toBe("failed");
+    expect(failed?.errorCode).toBeUndefined();
+    expect(failed?.error).toBeUndefined();
+  });
+
+  it("truncates the raw refusal at the source — the terminal frame must deliver", async () => {
+    // An unbounded harness error could exceed the runner WS server's frame
+    // cap, which does not truncate — it drops the frame and kills the
+    // socket, losing the turn's close entirely. Same law as the unhealthy
+    // reason: slice at the sender.
+    const t = createTestTransport();
+    const harness = createFakeHarness({
+      script: () => [
+        { type: "error", message: `${REFUSAL} ${"x".repeat(300_000)}` },
+      ],
+    });
+    const run = runSupervisor(
+      config(home("sup-refusal-")),
+      harness,
+      t.transport,
+    );
+
+    t.push(deliver("t1", "cv-a"));
+    await t.until(() => t.of("turn.result").length === 1, "the failed turn");
+    await t.finish(run);
+
+    const [failed] = t.of("turn.result");
+    expect(failed?.errorCode).toBe("model_provider_error");
+    expect(failed?.error?.length).toBe(2000);
+  });
+
+  it("classifies a refusal that arrives as a THROW, not a stream event", async () => {
+    // The catch arm consults the same classifier: a live-harness throw whose
+    // text is a provider refusal (an SDK-rejected call) earns the code, with
+    // the raw text riding beside it. The vehicle is a stale resume ref whose
+    // rejection message carries the refusal text.
+    const t = createTestTransport();
+    const run = runSupervisor(
+      config(home("sup-refusal-")),
+      createFakeHarness(),
+      t.transport,
+    );
+
+    t.push(
+      deliver("t1", "cv-a", { resumeSessionRef: "sess: rate limit reached" }),
+    );
+    await t.until(() => t.of("turn.result").length === 1, "the failed turn");
+    await t.finish(run);
+
+    const [failed] = t.of("turn.result");
+    expect(failed?.status).toBe("failed");
+    expect(failed?.errorCode).toBe("model_provider_error");
+    expect(failed?.error).toContain("unknown session");
+    // A refusal is one turn's problem, never a dead harness.
+    expect(t.of("unhealthy")).toHaveLength(0);
+  });
+
+  it("a DEATH whose last words look like a refusal still classifies as the death", async () => {
+    // Precedence: the death codes carry lifecycle semantics (revival,
+    // visibility) the provider code must never usurp — a dying harness that
+    // happens to mention a rate limit is still a dead harness.
+    const t = createTestTransport();
+    const harness = createFakeHarness({ script: longScript });
+    const run = runSupervisor(
+      config(home("sup-refusal-")),
+      harness,
+      t.transport,
+    );
+
+    t.push(deliver("t1", "cv-a"));
+    await t.until(() => deltasOf(t, "t1").length >= 3, "the turn to start");
+    harness.simulateFailure("connection closed: rate limit reached");
+    await run;
+
+    const failed = t.of("turn.result").find((r) => r.turnId === "t1");
+    expect(failed?.status).toBe("failed");
+    expect(failed?.errorCode).toBe("agent_restarted");
+  });
+});

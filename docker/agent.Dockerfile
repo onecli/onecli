@@ -134,8 +134,12 @@ WORKDIR /app
 # tini as PID 1: Node is not an init (signal handling differs, orphans are
 # never reaped). Common tools are the agent's hands — every outbound request
 # they make still exits through the gateway (§3.4).
+# e2fsprogs + util-linux serve the Kubernetes/Kata boot phase (the sandbox
+# manager's boot.sh formats and mounts the raw block home, then setpriv-drops
+# to `node` — plans/sandbox-platform.md step 2); inert under the Docker
+# backend, where the home arrives as a pre-mounted volume.
 RUN apt-get update \
-  && apt-get install -y --no-install-recommends tini git curl ripgrep ca-certificates openssl \
+  && apt-get install -y --no-install-recommends tini git curl ripgrep ca-certificates openssl e2fsprogs util-linux \
   && rm -rf /var/lib/apt/lists/*
 ENTRYPOINT ["/usr/bin/tini", "--"]
 

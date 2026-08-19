@@ -14,19 +14,27 @@
 
 /**
  * How a turn's failure relates to the harness's life. Attached by the
- * supervisor (and by the runner's synthetic no-channel failures) ONLY when the
- * harness actually died — an ordinary turn failure on a live harness carries
- * no code and keeps its raw error.
+ * supervisor (and by the runner's synthetic no-channel failures) when the
+ * harness actually died — or, the one live-harness exception, when the model
+ * provider refused the request. Every other ordinary turn failure on a live
+ * harness carries no code and keeps its raw error.
  *
  * - `agent_restarted`: the harness died AFTER the turn's stream opened —
  *   observable work may exist, so the failure must stay visible.
  * - `agent_start_failed`: the harness died BEFORE the stream opened — nothing
  *   observable happened, which is what makes the control plane's invisible
  *   one-shot revival safe.
+ * - `model_provider_error`: the harness lived but its model provider refused
+ *   the request (usage limit, exhausted credits, invalid key). Classified by
+ *   the supervisor from the harness's terminal error; canonical copy replaces
+ *   the raw provider response on every chat surface — the raw text stays
+ *   operator material (the control plane's server log and the stored
+ *   transcript events).
  */
 export const TURN_FAILURE_CODES = {
   agentRestarted: "agent_restarted",
   agentStartFailed: "agent_start_failed",
+  modelProviderError: "model_provider_error",
 } as const;
 export type TurnFailureCode =
   (typeof TURN_FAILURE_CODES)[keyof typeof TURN_FAILURE_CODES];

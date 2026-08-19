@@ -75,6 +75,11 @@ export interface MirrorPosts {
   noModelKey(
     input: ChannelPostTarget & { modelsUrl: string; answer: string },
   ): Promise<void>;
+  /** A model-provider refusal (usage limit, expired key) with the web's same
+   * call to action: the canonical sentence plus where the key lives. */
+  providerError(
+    input: ChannelPostTarget & { modelsUrl: string; answer: string },
+  ): Promise<void>;
 }
 
 export interface MirrorDeps {
@@ -88,8 +93,9 @@ export interface MirrorDeps {
   /** The link's cursor as this adapter last knew it (the CAS expectation). */
   knownCursor: string | null;
   item: AdapterWorkItem;
-  /** Where a no-model-key answer's call to action points (the agent's
-   * Models page). Omitted → plain text, no button. */
+  /** Where a key-problem answer's call to action points (the agent's
+   * Models page) — no_model_key and model_provider_error alike.
+   * Omitted → plain text, no button. */
   modelsUrl?: string;
   onLog: (message: string, detail?: unknown) => void;
 }
@@ -191,11 +197,20 @@ export const mirrorFinishedTurn = async (
     }
 
     if (answer) {
-      // A no-model-key failure gets the web's same call to action. Only when
+      // A key-problem failure gets the web's same call to action. Only when
       // the CODE says so — never inferred from prose — and only with a URL
       // to point at; without one it falls through to the plain answer.
       if (item.turn.errorCode === "no_model_key" && deps.modelsUrl) {
         await deps.posts.noModelKey({
+          ...target,
+          modelsUrl: deps.modelsUrl,
+          answer,
+        });
+      } else if (
+        item.turn.errorCode === "model_provider_error" &&
+        deps.modelsUrl
+      ) {
+        await deps.posts.providerError({
           ...target,
           modelsUrl: deps.modelsUrl,
           answer,

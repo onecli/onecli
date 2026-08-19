@@ -27,6 +27,45 @@ const targetForm = (
   ...(input.iconUrl && { iconUrl: input.iconUrl }),
 });
 
+/**
+ * The shared shape of a key-problem card. Structured, not prose: Slack has
+ * no width control, so a long sentence renders as one hard-to-scan line. A
+ * short headline, a muted context line, and the button AS the call to
+ * action reads in three clean rows. The canonical sentence stays as the
+ * notification fallback text; only the three strings differ per failure.
+ */
+const modelKeyCard = async (
+  input: ChannelPostTarget & { modelsUrl: string; answer: string },
+  copy: { headline: string; context: string; button: string },
+): Promise<void> => {
+  await postBlocks(input.credential, {
+    channel: input.channel,
+    text: markdownToMrkdwn(input.answer),
+    blocks: [
+      {
+        type: "section",
+        text: { type: "mrkdwn", text: copy.headline },
+      },
+      {
+        type: "context",
+        elements: [{ type: "mrkdwn", text: copy.context }],
+      },
+      {
+        type: "actions",
+        elements: [
+          {
+            type: "button",
+            text: { type: "plain_text", text: copy.button },
+            url: input.modelsUrl,
+            action_id: "open_models_page",
+          },
+        ],
+      },
+    ],
+    ...targetForm(input),
+  });
+};
+
 export const slackMirrorPosts: MirrorPosts = {
   async webSourced(input) {
     // The attributed mirror is a quote, not a rendering: a person who typed
@@ -64,43 +103,21 @@ export const slackMirrorPosts: MirrorPosts = {
     });
   },
   async noModelKey(input) {
-    // Structured, not prose: Slack has no width control, so a long sentence
-    // renders as one hard-to-scan line. A short headline, a muted context
-    // line, and the button AS the call to action reads in three clean rows.
-    // The canonical sentence stays as the notification fallback text.
-    await postBlocks(input.credential, {
-      channel: input.channel,
-      text: markdownToMrkdwn(input.answer),
-      blocks: [
-        {
-          type: "section",
-          text: {
-            type: "mrkdwn",
-            text: "*This agent has no model key yet*",
-          },
-        },
-        {
-          type: "context",
-          elements: [
-            {
-              type: "mrkdwn",
-              text: "Nothing to answer with until a key is connected. Connect one, then send your message again.",
-            },
-          ],
-        },
-        {
-          type: "actions",
-          elements: [
-            {
-              type: "button",
-              text: { type: "plain_text", text: "Connect a model key" },
-              url: input.modelsUrl,
-              action_id: "open_models_page",
-            },
-          ],
-        },
-      ],
-      ...targetForm(input),
+    await modelKeyCard(input, {
+      headline: "*This agent has no model key yet*",
+      context:
+        "Nothing to answer with until a key is connected. Connect one, then send your message again.",
+      button: "Connect a model key",
+    });
+  },
+  async providerError(input) {
+    // Same card shape as noModelKey — this failure differs only in WHY the
+    // key is the fix: one exists but the provider refused it.
+    await modelKeyCard(input, {
+      headline: "*The model provider rejected the request*",
+      context:
+        "Usually a usage limit or an expired key. Check the key or connect a different one, then send your message again.",
+      button: "Check the model key",
     });
   },
 };

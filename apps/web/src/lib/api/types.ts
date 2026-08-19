@@ -677,9 +677,11 @@ export interface Turn {
   error: string | null;
   /**
    * A machine-readable reason beside `error`, set only when the UI must do
-   * more than print the sentence. `"no_model_key"` is the one code today: the
-   * turn never ran because the agent has no model key, and the fix is a link
-   * away — which cannot be offered by matching on prose.
+   * more than print the sentence: `"no_model_key"` / `"model_provider_error"`
+   * attach the Models-page fix link, and the lifecycle codes render as a
+   * quiet notice instead of the red box — none of which can be decided by
+   * matching on prose. The full vocabulary is TURN_ERROR_CODES in
+   * @onecli/api's conversation validations.
    */
   errorCode: string | null;
   usage: TurnUsage | null;

@@ -2,6 +2,7 @@ import {
   isInlineableImage,
   isTerminalEvent,
   INLINE_IMAGES_TOTAL_MAX_BYTES,
+  MAX_TURN_RESULT_ERROR_CHARS,
   MAX_UNHEALTHY_REASON_CHARS,
   TURN_FAILURE_CODES,
   type AttachmentManifestEntry,
@@ -14,6 +15,7 @@ import {
 } from "@onecli/agent-protocol";
 import type { SupervisorConfig } from "./config";
 import { log } from "./log";
+import { isProviderRefusal } from "./provider-refusal";
 import { renderHome, type RenderInputs } from "./home/renderer";
 import { applyHomeSync } from "./home/materializer";
 import {
@@ -450,6 +452,21 @@ export const runSupervisor = async (
     const runtime = runtimeFor(item.conversationId);
     let sawCleanEnd = false;
     let usage: TurnUsage | undefined;
+    /** The harness's terminal `error` message, kept for failure classing. */
+    let terminalError: string | undefined;
+
+    /**
+     * The failure class for this turn. A DEATH code always outranks a
+     * refusal — the death codes carry lifecycle semantics (revival,
+     * visibility, the unhealthy recycle) the provider code must never usurp;
+     * a dying harness whose last words mention a rate limit is still a dead
+     * harness.
+     */
+    const classify = (raw: string | undefined): string | undefined =>
+      failureCode(runtime) ??
+      (raw && isProviderRefusal(raw)
+        ? TURN_FAILURE_CODES.modelProviderError
+        : undefined);
 
     /** Everything the agent said this turn, rebuilt from the deltas. */
     let answer = "";
@@ -602,6 +619,9 @@ export const runSupervisor = async (
           sawCleanEnd = true;
           usage = event.usage;
         }
+        if (event.type === "error") {
+          terminalError = event.message;
+        }
       }
 
       // A stream that ended without a terminal event still said something.
@@ -618,13 +638,24 @@ export const runSupervisor = async (
       if (status === "failed" && !harnessDead) {
         await new Promise((resolve) => setImmediate(resolve));
       }
-      const errorCode = status === "failed" ? failureCode(runtime) : undefined;
+      const errorCode =
+        status === "failed" ? classify(terminalError) : undefined;
       transport.send({
         kind: "turn.result",
         turnId: item.turnId,
         conversationId: item.conversationId,
         status,
         ...(errorCode && { errorCode }),
+        // The raw refusal rides beside the code — the control plane stores
+        // only the canonical copy and keeps this for its server log (and an
+        // old control plane's raw passthrough matches the catch arm below).
+        // Uncoded failures keep today's shape: no error field, the transcript
+        // stream's own error event is the witness. Sliced at the source per
+        // the transport's truncate-at-sender law: this frame must deliver.
+        ...(errorCode === TURN_FAILURE_CODES.modelProviderError &&
+          terminalError && {
+            error: terminalError.slice(0, MAX_TURN_RESULT_ERROR_CHARS),
+          }),
         ...(usage && { usage }),
         ...(runtime.session?.sessionRef && {
           sessionRef: runtime.session.sessionRef,
@@ -646,14 +677,16 @@ export const runSupervisor = async (
       if (!harnessDead) {
         await new Promise((resolve) => setImmediate(resolve));
       }
-      const errorCode = wasAborted() ? undefined : failureCode(runtime);
+      const errorCode = wasAborted() ? undefined : classify(String(error));
       const followUps = followUpOutcomes(runtime);
       transport.send({
         kind: "turn.result",
         turnId: item.turnId,
         conversationId: item.conversationId,
         status: wasAborted() ? "aborted" : "failed",
-        error: String(error),
+        // Sliced at the source, same law as above — a harness error can be
+        // arbitrarily large, and this terminal frame must deliver.
+        error: String(error).slice(0, MAX_TURN_RESULT_ERROR_CHARS),
         ...(errorCode && { errorCode }),
         ...(runtime.session?.sessionRef && {
           sessionRef: runtime.session.sessionRef,

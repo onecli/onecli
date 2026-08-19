@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 
 import { proofDatabaseUrl } from "../testing/pg-proof.js";
+import { MODEL_PROVIDER_ERROR_MESSAGE } from "../validations/conversation.js";
 
 /**
  * Scheduled tasks on REAL PostgreSQL (step 7). What only pg can prove:
@@ -547,6 +548,38 @@ describe.skipIf(!PROOF_URL)("settling and delivery", () => {
     expect(cron.lastOutcome).toBe("failed");
     expect(cron.consecutiveFailures).toBe(1);
     expect(cron.enabled).toBe(true);
+  });
+
+  it("a coded provider refusal delivers the CANONICAL copy, never the raw blob", async () => {
+    // The automation delivery is the third user-facing surface (after web
+    // and Slack): a known failure code must substitute the canonical
+    // sentence there too — the raw provider response is operator material.
+    const { sandboxId, run, originId } = await fireAndGetRun("fail-coded");
+
+    await turnService.finishTurn({
+      reporter: { sandboxId, runnerId: RUNNER_A },
+      conversationId: run.conversationId,
+      turnId: run.id,
+      status: "failed",
+      error:
+        'API Error: 429 {"type":"error","error":{"type":"rate_limit_error","message":"rate limit reached"}}',
+      errorCode: "model_provider_error",
+    });
+
+    const delivery = await db.turn.findFirstOrThrow({
+      where: { conversationId: originId, source: "cron" },
+      select: { id: true },
+    });
+    const text = await db.turnEvent.findFirstOrThrow({
+      where: { turnId: delivery.id, type: "text" },
+      select: { payload: true },
+    });
+    expect((text.payload as { text: string }).text).toContain(
+      MODEL_PROVIDER_ERROR_MESSAGE,
+    );
+    expect((text.payload as { text: string }).text).not.toContain(
+      "rate_limit_error",
+    );
   });
 
   it("an invisible cold-death revival never counts toward auto-disable", async () => {

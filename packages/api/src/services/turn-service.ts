@@ -879,6 +879,23 @@ export interface FinishTurnInput {
 }
 
 /**
+ * The canonical `{code, message}` for a failed report's wire code, when the
+ * allowlist knows it. A known class closes with the CANONICAL copy — the raw
+ * error string is operator material (finishTurn logs it), never shown to a
+ * person. A code the allowlist does not know (or an old supervisor that sent
+ * none) keeps today's raw passthrough. `hasOwn`, not a bare index: the code
+ * is a peer-supplied string, and "__proto__"/"constructor" would otherwise
+ * resolve to truthy prototype members and mis-take the branch.
+ */
+const knownFailureCopy = (
+  input: Pick<FinishTurnInput, "status" | "errorCode">,
+): (typeof TURN_FAILURE_COPY)[string] =>
+  input.status === "failed" &&
+  Object.hasOwn(TURN_FAILURE_COPY, input.errorCode ?? "")
+    ? TURN_FAILURE_COPY[input.errorCode ?? ""]
+    : undefined;
+
+/**
  * Close out a turn. Also persists the conversation's harness session ref —
  * the sandbox is the only place that knows it, and without it every turn
  * would start a fresh context instead of resuming.
@@ -900,17 +917,7 @@ export const finishTurn = async (input: FinishTurnInput): Promise<void> => {
     },
   } as const;
 
-  // A known wire failure class closes with the CANONICAL copy — the raw
-  // error string goes to the log below, never to a person. A code the
-  // allowlist does not know (or an old supervisor that sent none) keeps
-  // today's raw passthrough. `hasOwn`, not a bare index: the code is a
-  // peer-supplied string, and "__proto__"/"constructor" would otherwise
-  // resolve to truthy prototype members and mis-take this branch.
-  const known =
-    input.status === "failed" &&
-    Object.hasOwn(TURN_FAILURE_COPY, input.errorCode ?? "")
-      ? TURN_FAILURE_COPY[input.errorCode ?? ""]
-      : undefined;
+  const known = knownFailureCopy(input);
 
   // Only a DEATH-classified failure may revive. The supervisor/runner attach
   // these codes exactly when the harness or its channel died; an ordinary
@@ -1119,6 +1126,13 @@ const cleanAutomationName = (raw: string): string =>
 /** The run's report body — its last text event, or a status-shaped fallback.
  * Shared by both automation kinds so their delivery reads identically. */
 const runReport = async (input: FinishTurnInput): Promise<string> => {
+  // A coded failure reports its CANONICAL copy, same as the turn row — the
+  // raw wire error must not reach the automation's delivery surface either.
+  // Either detail also makes the transcript read below unnecessary.
+  if (input.status !== "done") {
+    const detail = knownFailureCopy(input)?.message ?? input.error;
+    if (detail) return `The run failed: ${detail}`;
+  }
   const textEvent = await db.turnEvent.findFirst({
     where: { turnId: input.turnId, type: "text" },
     orderBy: { seq: "desc" },
@@ -1129,7 +1143,7 @@ const runReport = async (input: FinishTurnInput): Promise<string> => {
   ).trim();
   return input.status === "done"
     ? answer || "The run finished without producing a report."
-    : `The run failed: ${input.error ?? answer ?? "no detail was reported."}`;
+    : `The run failed: ${answer || "no detail was reported."}`;
 };
 
 /** A finished non-human run settles its automation source. Dispatches on the
