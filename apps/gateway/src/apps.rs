@@ -1740,6 +1740,27 @@ static APP_PROVIDERS: &[AppProvider] = &[
         finalizer: None,
         body_transform: None,
     },
+    AppProvider {
+        provider: "serply",
+        display_name: "Serply",
+        host_rules: &[HostRule {
+            pattern: HostPattern::Exact("api.serply.io"),
+            path_prefix: None,
+            strategy: AuthStrategy::None,
+            intercept: false,
+            credential_host_field: None,
+        }],
+        refresh: None,
+        metadata_headers: &[],
+        credential_headers: &[CredentialHeader {
+            credential_field: "apiKey",
+            header_name: "X-Api-Key",
+        }],
+        credential_params: &[],
+        host_rewrite: None,
+        finalizer: None,
+        body_transform: None,
+    },
 ];
 
 // ── Public API ─────────────────────────────────────────────────────────
@@ -4662,5 +4683,36 @@ mod tests {
         assert!(providers_for_host("x.com").is_empty());
         assert!(providers_for_host("twitter.com").is_empty());
         assert!(providers_for_host("www.twitter.com").is_empty());
+    }
+
+    // ── Serply ────────────────────────────────────────────────────
+
+    #[test]
+    fn provider_for_host_serply() {
+        let result = provider_for_host("api.serply.io");
+        assert_eq!(result, Some(("serply", "Serply")));
+    }
+
+    #[test]
+    fn serply_no_auth_header_injected() {
+        let injections = build_app_injections("serply", "api.serply.io", "unused");
+        assert!(
+            injections.is_empty(),
+            "Serply should not inject Authorization header"
+        );
+    }
+
+    #[test]
+    fn serply_credential_headers_defined() {
+        let headers = credential_headers("serply");
+        assert_eq!(headers.len(), 1);
+        assert_eq!(headers[0].credential_field, "apiKey");
+        assert_eq!(headers[0].header_name, "X-Api-Key");
+    }
+
+    #[test]
+    fn serply_no_false_positives() {
+        assert!(providers_for_host("serply.io").is_empty());
+        assert!(providers_for_host("www.serply.io").is_empty());
     }
 }

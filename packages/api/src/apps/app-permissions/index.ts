@@ -69,6 +69,7 @@ import { fathomPermissions } from "./fathom";
 import { slackPermissions } from "./slack";
 import { firefliesPermissions } from "./fireflies";
 import { zohoCrmPermissions } from "./zoho-crm";
+import { serplyPermissions } from "./serply";
 
 const permissionRegistry = new Map<string, AppPermissionDefinition>();
 
@@ -141,3 +142,4 @@ register(fathomPermissions);
 register(slackPermissions);
 register(firefliesPermissions);
 register(zohoCrmPermissions);
+register(serplyPermissions);
