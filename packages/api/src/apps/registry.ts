@@ -78,6 +78,7 @@ import { twilio } from "./twilio";
 import { dripify } from "./dripify";
 import { webflow } from "./webflow";
 import { tavily } from "./tavily";
+import { serply } from "./serply";
 import { zendesk } from "./zendesk";
 
 const staticApps: AppDefinition[] = [
@@ -157,6 +158,7 @@ const staticApps: AppDefinition[] = [
   dripify,
   webflow,
   tavily,
+  serply,
   zendesk,
 ];
 

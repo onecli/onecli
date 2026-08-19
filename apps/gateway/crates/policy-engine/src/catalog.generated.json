@@ -10855,6 +10855,56 @@
       ]
     }
   },
+  "serply": {
+    "search_news": {
+      "hosts": [
+        "api.serply.io"
+      ],
+      "paths": [
+        "/v1/news/*",
+        "/v1/news"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "search_scholar": {
+      "hosts": [
+        "api.serply.io"
+      ],
+      "paths": [
+        "/v1/scholar/*",
+        "/v1/scholar"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "search_videos": {
+      "hosts": [
+        "api.serply.io"
+      ],
+      "paths": [
+        "/v1/video/*",
+        "/v1/video"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "search_web": {
+      "hosts": [
+        "api.serply.io"
+      ],
+      "paths": [
+        "/v1/search/*",
+        "/v1/search"
+      ],
+      "methods": [
+        "GET"
+      ]
+    }
+  },
   "snowflake": {
     "databases_get": {
       "hosts": [

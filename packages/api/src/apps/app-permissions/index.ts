@@ -90,6 +90,7 @@ import { twilioPermissions } from "./twilio";
 import { dripifyPermissions } from "./dripify";
 import { webflowPermissions } from "./webflow";
 import { tavilyPermissions } from "./tavily";
+import { serplyPermissions } from "./serply";
 import { zendeskPermissions } from "./zendesk";
 
 const permissionRegistry = new Map<string, AppPermissionDefinition>();
@@ -183,4 +184,5 @@ register(twilioPermissions);
 register(dripifyPermissions);
 register(webflowPermissions);
 register(tavilyPermissions);
+register(serplyPermissions);
 register(zendeskPermissions);
