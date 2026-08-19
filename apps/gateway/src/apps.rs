@@ -54,6 +54,7 @@ pub(crate) enum HostPattern {
 }
 
 /// A host pattern and its injection strategy for an app provider.
+#[derive(Clone, Copy)]
 pub(crate) struct HostRule {
     pub(crate) pattern: HostPattern,
     /// Optional path prefix to scope this rule (e.g., `"/calendar/"` for Google Calendar).
@@ -192,6 +193,14 @@ static GOOGLE_REFRESH: RefreshConfig = RefreshConfig {
     client_secret_env: "GOOGLE_CLIENT_SECRET",
     body_format: TokenBodyFormat::Form,
     client_auth: ClientCredentialMethod::Body,
+};
+
+const GOOGLE_TOKEN_RULE: HostRule = HostRule {
+    pattern: HostPattern::Exact("oauth2.googleapis.com"),
+    path_prefix: Some("/token"),
+    strategy: AuthStrategy::Bearer,
+    intercept: true,
+    credential_host_field: None,
 };
 
 /// Refresh config for Supabase Management API OAuth (uses Basic auth).
@@ -434,6 +443,7 @@ static APP_PROVIDERS: &[AppProvider] = &[
                 intercept: false,
                 credential_host_field: None,
             },
+            GOOGLE_TOKEN_RULE,
         ],
         refresh: Some(&GOOGLE_REFRESH),
         metadata_headers: &[],
@@ -461,6 +471,7 @@ static APP_PROVIDERS: &[AppProvider] = &[
                 intercept: false,
                 credential_host_field: None,
             },
+            GOOGLE_TOKEN_RULE,
         ],
         refresh: Some(&GOOGLE_REFRESH),
         metadata_headers: &[],
@@ -495,6 +506,7 @@ static APP_PROVIDERS: &[AppProvider] = &[
                 intercept: false,
                 credential_host_field: None,
             },
+            GOOGLE_TOKEN_RULE,
         ],
         refresh: Some(&GOOGLE_REFRESH),
         metadata_headers: &[],
@@ -507,13 +519,16 @@ static APP_PROVIDERS: &[AppProvider] = &[
     AppProvider {
         provider: "google-contacts",
         display_name: "Google Contacts",
-        host_rules: &[HostRule {
-            pattern: HostPattern::Exact("people.googleapis.com"),
-            path_prefix: None,
-            strategy: AuthStrategy::Bearer,
-            intercept: false,
-            credential_host_field: None,
-        }],
+        host_rules: &[
+            HostRule {
+                pattern: HostPattern::Exact("people.googleapis.com"),
+                path_prefix: None,
+                strategy: AuthStrategy::Bearer,
+                intercept: false,
+                credential_host_field: None,
+            },
+            GOOGLE_TOKEN_RULE,
+        ],
         refresh: Some(&GOOGLE_REFRESH),
         metadata_headers: &[],
         credential_headers: &[],
@@ -525,13 +540,16 @@ static APP_PROVIDERS: &[AppProvider] = &[
     AppProvider {
         provider: "google-docs",
         display_name: "Google Docs",
-        host_rules: &[HostRule {
-            pattern: HostPattern::Exact("docs.googleapis.com"),
-            path_prefix: None,
-            strategy: AuthStrategy::Bearer,
-            intercept: false,
-            credential_host_field: None,
-        }],
+        host_rules: &[
+            HostRule {
+                pattern: HostPattern::Exact("docs.googleapis.com"),
+                path_prefix: None,
+                strategy: AuthStrategy::Bearer,
+                intercept: false,
+                credential_host_field: None,
+            },
+            GOOGLE_TOKEN_RULE,
+        ],
         refresh: Some(&GOOGLE_REFRESH),
         metadata_headers: &[],
         credential_headers: &[],
@@ -543,13 +561,16 @@ static APP_PROVIDERS: &[AppProvider] = &[
     AppProvider {
         provider: "google-sheets",
         display_name: "Google Sheets",
-        host_rules: &[HostRule {
-            pattern: HostPattern::Exact("sheets.googleapis.com"),
-            path_prefix: None,
-            strategy: AuthStrategy::Bearer,
-            intercept: false,
-            credential_host_field: None,
-        }],
+        host_rules: &[
+            HostRule {
+                pattern: HostPattern::Exact("sheets.googleapis.com"),
+                path_prefix: None,
+                strategy: AuthStrategy::Bearer,
+                intercept: false,
+                credential_host_field: None,
+            },
+            GOOGLE_TOKEN_RULE,
+        ],
         refresh: Some(&GOOGLE_REFRESH),
         metadata_headers: &[],
         credential_headers: &[],
@@ -561,13 +582,16 @@ static APP_PROVIDERS: &[AppProvider] = &[
     AppProvider {
         provider: "google-slides",
         display_name: "Google Slides",
-        host_rules: &[HostRule {
-            pattern: HostPattern::Exact("slides.googleapis.com"),
-            path_prefix: None,
-            strategy: AuthStrategy::Bearer,
-            intercept: false,
-            credential_host_field: None,
-        }],
+        host_rules: &[
+            HostRule {
+                pattern: HostPattern::Exact("slides.googleapis.com"),
+                path_prefix: None,
+                strategy: AuthStrategy::Bearer,
+                intercept: false,
+                credential_host_field: None,
+            },
+            GOOGLE_TOKEN_RULE,
+        ],
         refresh: Some(&GOOGLE_REFRESH),
         metadata_headers: &[],
         credential_headers: &[],
@@ -579,13 +603,16 @@ static APP_PROVIDERS: &[AppProvider] = &[
     AppProvider {
         provider: "google-tasks",
         display_name: "Google Tasks",
-        host_rules: &[HostRule {
-            pattern: HostPattern::Exact("tasks.googleapis.com"),
-            path_prefix: None,
-            strategy: AuthStrategy::Bearer,
-            intercept: false,
-            credential_host_field: None,
-        }],
+        host_rules: &[
+            HostRule {
+                pattern: HostPattern::Exact("tasks.googleapis.com"),
+                path_prefix: None,
+                strategy: AuthStrategy::Bearer,
+                intercept: false,
+                credential_host_field: None,
+            },
+            GOOGLE_TOKEN_RULE,
+        ],
         refresh: Some(&GOOGLE_REFRESH),
         metadata_headers: &[],
         credential_headers: &[],
@@ -597,13 +624,16 @@ static APP_PROVIDERS: &[AppProvider] = &[
     AppProvider {
         provider: "google-chat",
         display_name: "Google Chat",
-        host_rules: &[HostRule {
-            pattern: HostPattern::Exact("chat.googleapis.com"),
-            path_prefix: None,
-            strategy: AuthStrategy::Bearer,
-            intercept: false,
-            credential_host_field: None,
-        }],
+        host_rules: &[
+            HostRule {
+                pattern: HostPattern::Exact("chat.googleapis.com"),
+                path_prefix: None,
+                strategy: AuthStrategy::Bearer,
+                intercept: false,
+                credential_host_field: None,
+            },
+            GOOGLE_TOKEN_RULE,
+        ],
         refresh: Some(&GOOGLE_REFRESH),
         metadata_headers: &[],
         credential_headers: &[],
@@ -615,13 +645,16 @@ static APP_PROVIDERS: &[AppProvider] = &[
     AppProvider {
         provider: "google-forms",
         display_name: "Google Forms",
-        host_rules: &[HostRule {
-            pattern: HostPattern::Exact("forms.googleapis.com"),
-            path_prefix: None,
-            strategy: AuthStrategy::Bearer,
-            intercept: false,
-            credential_host_field: None,
-        }],
+        host_rules: &[
+            HostRule {
+                pattern: HostPattern::Exact("forms.googleapis.com"),
+                path_prefix: None,
+                strategy: AuthStrategy::Bearer,
+                intercept: false,
+                credential_host_field: None,
+            },
+            GOOGLE_TOKEN_RULE,
+        ],
         refresh: Some(&GOOGLE_REFRESH),
         metadata_headers: &[],
         credential_headers: &[],
@@ -633,13 +666,16 @@ static APP_PROVIDERS: &[AppProvider] = &[
     AppProvider {
         provider: "google-classroom",
         display_name: "Google Classroom",
-        host_rules: &[HostRule {
-            pattern: HostPattern::Exact("classroom.googleapis.com"),
-            path_prefix: None,
-            strategy: AuthStrategy::Bearer,
-            intercept: false,
-            credential_host_field: None,
-        }],
+        host_rules: &[
+            HostRule {
+                pattern: HostPattern::Exact("classroom.googleapis.com"),
+                path_prefix: None,
+                strategy: AuthStrategy::Bearer,
+                intercept: false,
+                credential_host_field: None,
+            },
+            GOOGLE_TOKEN_RULE,
+        ],
         refresh: Some(&GOOGLE_REFRESH),
         metadata_headers: &[],
         credential_headers: &[],
@@ -651,13 +687,16 @@ static APP_PROVIDERS: &[AppProvider] = &[
     AppProvider {
         provider: "google-admin",
         display_name: "Google Admin",
-        host_rules: &[HostRule {
-            pattern: HostPattern::Exact("admin.googleapis.com"),
-            path_prefix: None,
-            strategy: AuthStrategy::Bearer,
-            intercept: false,
-            credential_host_field: None,
-        }],
+        host_rules: &[
+            HostRule {
+                pattern: HostPattern::Exact("admin.googleapis.com"),
+                path_prefix: None,
+                strategy: AuthStrategy::Bearer,
+                intercept: false,
+                credential_host_field: None,
+            },
+            GOOGLE_TOKEN_RULE,
+        ],
         refresh: Some(&GOOGLE_REFRESH),
         metadata_headers: &[],
         credential_headers: &[],
@@ -669,13 +708,16 @@ static APP_PROVIDERS: &[AppProvider] = &[
     AppProvider {
         provider: "google-analytics",
         display_name: "Google Analytics",
-        host_rules: &[HostRule {
-            pattern: HostPattern::Exact("analyticsdata.googleapis.com"),
-            path_prefix: None,
-            strategy: AuthStrategy::Bearer,
-            intercept: false,
-            credential_host_field: None,
-        }],
+        host_rules: &[
+            HostRule {
+                pattern: HostPattern::Exact("analyticsdata.googleapis.com"),
+                path_prefix: None,
+                strategy: AuthStrategy::Bearer,
+                intercept: false,
+                credential_host_field: None,
+            },
+            GOOGLE_TOKEN_RULE,
+        ],
         refresh: Some(&GOOGLE_REFRESH),
         metadata_headers: &[],
         credential_headers: &[],
@@ -702,6 +744,7 @@ static APP_PROVIDERS: &[AppProvider] = &[
                 intercept: false,
                 credential_host_field: None,
             },
+            GOOGLE_TOKEN_RULE,
         ],
         refresh: Some(&GOOGLE_REFRESH),
         metadata_headers: &[],
@@ -714,13 +757,16 @@ static APP_PROVIDERS: &[AppProvider] = &[
     AppProvider {
         provider: "google-meet",
         display_name: "Google Meet",
-        host_rules: &[HostRule {
-            pattern: HostPattern::Exact("meet.googleapis.com"),
-            path_prefix: None,
-            strategy: AuthStrategy::Bearer,
-            intercept: false,
-            credential_host_field: None,
-        }],
+        host_rules: &[
+            HostRule {
+                pattern: HostPattern::Exact("meet.googleapis.com"),
+                path_prefix: None,
+                strategy: AuthStrategy::Bearer,
+                intercept: false,
+                credential_host_field: None,
+            },
+            GOOGLE_TOKEN_RULE,
+        ],
         refresh: Some(&GOOGLE_REFRESH),
         metadata_headers: &[],
         credential_headers: &[],
@@ -732,13 +778,16 @@ static APP_PROVIDERS: &[AppProvider] = &[
     AppProvider {
         provider: "google-photos",
         display_name: "Google Photos",
-        host_rules: &[HostRule {
-            pattern: HostPattern::Exact("photoslibrary.googleapis.com"),
-            path_prefix: None,
-            strategy: AuthStrategy::Bearer,
-            intercept: false,
-            credential_host_field: None,
-        }],
+        host_rules: &[
+            HostRule {
+                pattern: HostPattern::Exact("photoslibrary.googleapis.com"),
+                path_prefix: None,
+                strategy: AuthStrategy::Bearer,
+                intercept: false,
+                credential_host_field: None,
+            },
+            GOOGLE_TOKEN_RULE,
+        ],
         refresh: Some(&GOOGLE_REFRESH),
         metadata_headers: &[],
         credential_headers: &[],
@@ -826,6 +875,7 @@ static APP_PROVIDERS: &[AppProvider] = &[
                 intercept: false,
                 credential_host_field: None,
             },
+            GOOGLE_TOKEN_RULE,
         ],
         refresh: Some(&GOOGLE_REFRESH),
         metadata_headers: &[],
@@ -846,13 +896,7 @@ static APP_PROVIDERS: &[AppProvider] = &[
                 intercept: false,
                 credential_host_field: None,
             },
-            HostRule {
-                pattern: HostPattern::Exact("oauth2.googleapis.com"),
-                path_prefix: Some("/token"),
-                strategy: AuthStrategy::Bearer,
-                intercept: true,
-                credential_host_field: None,
-            },
+            GOOGLE_TOKEN_RULE,
         ],
         refresh: Some(&GOOGLE_REFRESH),
         metadata_headers: &[MetadataHeader {
@@ -2696,6 +2740,14 @@ mod tests {
         assert!(patterns.contains(&"/batch/calendar/*"));
     }
 
+    #[test]
+    fn google_calendar_produces_token_intercept_rule() {
+        let rules =
+            build_app_injection_rules("google-calendar", "oauth2.googleapis.com", "ya29.cal_test");
+        assert_eq!(rules.len(), 1);
+        assert_eq!(rules[0].0, "/token*");
+    }
+
     // ── Google Drive ──────────────────────────────────────────────────
 
     #[test]
@@ -3509,11 +3561,10 @@ mod tests {
     }
 
     #[test]
-    fn oauth2_token_endpoint_maps_to_vertex_ai() {
-        assert_eq!(
-            providers_for_host("oauth2.googleapis.com"),
-            vec!["vertex-ai"]
-        );
+    fn oauth2_token_endpoint_maps_to_google_oauth_apps() {
+        let providers = providers_for_host("oauth2.googleapis.com");
+        assert!(providers.contains(&"google-calendar"));
+        assert!(providers.contains(&"vertex-ai"));
         assert!(is_intercept_target("oauth2.googleapis.com", "/token"));
         assert!(!is_intercept_target("oauth2.googleapis.com", "/authorize"));
     }
