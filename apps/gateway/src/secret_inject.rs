@@ -23,10 +23,15 @@ pub(crate) fn build_injections(
         "anthropic" => {
             let is_oauth = decrypted_value.starts_with("sk-ant-oat");
             if is_oauth {
-                vec![Injection::ReplaceHeader {
-                    name: "authorization".to_string(),
-                    value: format!("Bearer {decrypted_value}"),
-                }]
+                vec![
+                    Injection::SetHeader {
+                        name: "authorization".to_string(),
+                        value: format!("Bearer {decrypted_value}"),
+                    },
+                    Injection::RemoveHeader {
+                        name: "x-api-key".to_string(),
+                    },
+                ]
             } else {
                 vec![
                     Injection::SetHeader {
@@ -364,12 +369,18 @@ mod tests {
     #[test]
     fn build_injections_anthropic_oauth() {
         let injections = build_injections("anthropic", "sk-ant-oat-test-token", None, None);
-        assert_eq!(injections.len(), 1);
+        assert_eq!(injections.len(), 2);
         assert_eq!(
             injections[0],
-            Injection::ReplaceHeader {
+            Injection::SetHeader {
                 name: "authorization".to_string(),
                 value: "Bearer sk-ant-oat-test-token".to_string(),
+            }
+        );
+        assert_eq!(
+            injections[1],
+            Injection::RemoveHeader {
+                name: "x-api-key".to_string(),
             }
         );
     }
