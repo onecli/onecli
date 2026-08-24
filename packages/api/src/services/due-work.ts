@@ -5,12 +5,15 @@ import {
   SANDBOX_IDLE_STOP_SECONDS,
   SSH_SESSION_LEASE_SECONDS,
   TURN_CEILING_SECONDS,
+  TURN_CEILING_WARNING_SECONDS,
 } from "../lib/env";
 import {
   ACTIVE_TURN_STATUSES,
   AGENT_NEVER_STARTED_MESSAGE,
   AUTOMATION_SOURCES,
   FOLLOW_UP_EXPIRED_MESSAGE,
+  TURN_CEILING_WARNING_MESSAGE,
+  TURN_TIME_LIMIT_MESSAGE,
 } from "../validations/conversation";
 import { logger } from "../lib/logger";
 
@@ -125,7 +128,7 @@ const START_RETRY_SECONDS = 30;
  * one-edit law; a future automation source must inherit background rank by
  * that single edit), AGE-CAPPED: a background turn that has already waited
  * this long ranks as user-visible, so sustained user load delays automations
- * but can never starve them. (Unbounded, the only exit was the 30-minute
+ * but can never starve them. (Unbounded, the only exit was the
  * turn ceiling — whose raw UPDATE bypasses `settleAutomationRun`, leaving a
  * starved cron's `lastOutcome` stale; that pre-existing gap is tracked as
  * plans/sandbox-platform-issues.md's "cron outcome bookkeeping" item, not
@@ -641,6 +644,53 @@ export const claimDueWork = async (
       RETURNING s.id, s.agent_id, s.home_desired_generation
     `;
 
+    // THE APPROACHING-CEILING WARNING. A running turn inside the warning
+    // window gets one steer telling the agent to wrap up: report the status
+    // of anything it is supervising and end the turn cleanly — instead of
+    // reclaimStaleTurns killing it mid-wait with no handoff. It rides the
+    // existing `turn.message` wire with a SYNTHETIC id (the row's own id,
+    // prefixed): the supervisor injects it like any steer, and the outcome it
+    // reports for that id matches no follow-up row, so the settle pass
+    // no-ops — exactly the right amount of bookkeeping for a message that
+    // has no row. `ceiling_warned_at` is the once-fence, stamped in the same
+    // claim (a lost claim is not retried on purpose: the warning is best
+    // effort, the ceiling itself is the guarantee). Same capability gate as
+    // steers — an older runner would poison its poll batch on the kind, and
+    // its turns just meet the ceiling the way they always have. Measured
+    // from the same clock as the sweep, so the two arms agree on age.
+    const warnBefore = new Date(
+      Date.now() - (TURN_CEILING_SECONDS - TURN_CEILING_WARNING_SECONDS) * 1000,
+    );
+    const ceilingWarnings = await tx.$queryRaw<
+      { id: string; conversation_id: string; sandbox_id: string | null }[]
+    >`
+      WITH claimed AS (
+        SELECT t.id
+        FROM turns t
+        JOIN conversations c ON c.id = t.conversation_id
+        JOIN sandboxes s ON s.agent_id = c.agent_id
+        JOIN runners r ON r.id = s.runner_id
+        WHERE s.runner_id = ${runnerId}
+          AND s.status = 'running'
+          AND t.status = 'running'
+          AND t.ceiling_warned_at IS NULL
+          AND COALESCE(t.retried_at, t.promoted_at, t.created_at) < ${warnBefore}
+          AND (r.capabilities->>'steerMessages')::boolean IS TRUE
+        ORDER BY t.created_at ASC
+        LIMIT ${TURN_LIMIT}
+        FOR UPDATE OF t SKIP LOCKED
+      )
+      UPDATE turns t SET ceiling_warned_at = now()
+      FROM claimed cl
+      WHERE t.id = cl.id
+      RETURNING
+        t.id,
+        t.conversation_id,
+        (SELECT s.id FROM conversations c
+           JOIN sandboxes s ON s.agent_id = c.agent_id
+          WHERE c.id = t.conversation_id) AS sandbox_id
+    `;
+
     // Turns whose sandbox is actually up. A queued turn on a sleeping sandbox
     // waits here until the start arm has woken it and the supervisor reported
     // ready — which is why `createTurn` flips a stopped sandbox itself.
@@ -758,6 +808,23 @@ export const claimDueWork = async (
             ]
           : [],
       ),
+      // Ceiling warnings ride the same steer shape — the synthetic id is
+      // namespaced so a `turn.result` outcome for it can never collide with
+      // a real follow-up row's id (uuids have no colon).
+      ...ceilingWarnings.flatMap((row): DueTurnMessage[] =>
+        row.sandbox_id
+          ? [
+              {
+                kind: "turn.message",
+                turnId: `ceiling-warning:${row.id}`,
+                targetTurnId: row.id,
+                conversationId: row.conversation_id,
+                sandboxId: row.sandbox_id,
+                message: TURN_CEILING_WARNING_MESSAGE,
+              },
+            ]
+          : [],
+      ),
     ];
   });
 };
@@ -817,7 +884,7 @@ export const reclaimStaleTurns = async (): Promise<number> => {
   //
   // The copy tells two truths, not one: a turn whose `started_at` is NULL
   // never ran for a second — its sandbox never came up — and burying it
-  // under "ran longer than the limit" was a lie users acted on. It gets the
+  // under the time-limit copy was a lie users acted on. It gets the
   // never-started copy plus the code that renders it as a quiet notice.
   const ceiling = new Date(Date.now() - TURN_CEILING_SECONDS * 1000);
   const active = await db.$executeRaw`
@@ -825,10 +892,10 @@ export const reclaimStaleTurns = async (): Promise<number> => {
       status = 'failed',
       error = CASE WHEN started_at IS NULL
         THEN ${AGENT_NEVER_STARTED_MESSAGE}
-        ELSE 'This turn ran longer than the limit and was ended.' END,
+        ELSE ${TURN_TIME_LIMIT_MESSAGE} END,
       error_code = CASE WHEN started_at IS NULL
         THEN 'agent_start_failed'
-        ELSE NULL END,
+        ELSE 'turn_time_limit' END,
       finished_at = now(),
       updated_at = now()
     WHERE status IN ('queued', 'dispatched', 'running')

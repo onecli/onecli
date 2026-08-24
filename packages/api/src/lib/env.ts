@@ -249,7 +249,18 @@ export const SANDBOX_IDLE_STOP_SECONDS = positiveInt(
  */
 export const TURN_CEILING_SECONDS = positiveInt(
   process.env.TURN_CEILING_SECONDS,
-  1800,
+  3600,
+);
+
+/**
+ * How long before the ceiling the in-flight warning steers into the live
+ * run (see `warnApproachingCeiling`): enough runway for the agent to stop
+ * waiting, summarize supervised work, and close the turn cleanly — instead
+ * of dying mid-sleep with no handoff.
+ */
+export const TURN_CEILING_WARNING_SECONDS = positiveInt(
+  process.env.TURN_CEILING_WARNING_SECONDS,
+  300,
 );
 
 /**

@@ -741,6 +741,10 @@ model Turn {
   // purpose clock (house law: never `updatedAt`), and deliberately absent
   // from `turnSelect` — the retry is invisible to readers.
   retriedAt        DateTime? @map("retried_at")
+  // Stamped when the approaching-ceiling warning was steered into this
+  // turn's live run (at most once) — the fence that keeps the warning arm
+  // from re-delivering on every poll. Single-purpose clock (house law).
+  ceilingWarnedAt  DateTime? @map("ceiling_warned_at")
 
   startedAt  DateTime? @map("started_at")
   finishedAt DateTime? @map("finished_at")

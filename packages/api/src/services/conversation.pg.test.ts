@@ -1402,8 +1402,8 @@ describe.skipIf(!PROOF_URL)("stale-turn reclaim", () => {
 
     const row = await db.turn.findUnique({ where: { id: turn.id } });
     expect(row?.status).toBe("failed");
-    expect(row?.error).toContain("longer than the limit");
-    expect(row?.errorCode).toBeNull();
+    expect(row?.error).toContain("reached its time limit");
+    expect(row?.errorCode).toBe("turn_time_limit");
     const next = await turns.createTurn(
       WORKSPACE,
       conversationId,
