@@ -98,7 +98,6 @@ export const LIFECYCLE_TURN_ERROR_CODES = [
   "agent_start_failed",
   "at_capacity",
   "image_unavailable",
-  "turn_time_limit",
 ] as const;
 
 export const TURN_ERROR_CODES = [
@@ -142,21 +141,6 @@ export const AGENT_START_FAILED_MESSAGE =
  * FOLLOW_UP_EXPIRED_MESSAGE). */
 export const AGENT_NEVER_STARTED_MESSAGE =
   "The agent never got to this message. Send it again.";
-
-/** The ceiling's arm for a turn that DID run and used its whole budget.
- * Decided control-plane-side (like `no_model_key`, never on a wire). The
- * doctrine holds: temporary in tone, says what to DO next — nothing the
- * agent finished is lost, and background work it was supervising keeps
- * running, so the recovery is one message away. */
-export const TURN_TIME_LIMIT_MESSAGE =
-  "This turn reached its time limit and was wrapped up. Finished work is saved, and anything running in the background continues. Send a message to get a status update and keep going.";
-
-/** Steered into a live run when it approaches the ceiling (due-work's
- * warning arm) — agent-facing, so it says exactly what to do with the time
- * left: stop waiting, report supervised work's status, and hand off. The
- * wording assumes nothing about WHAT is being supervised on purpose. */
-export const TURN_CEILING_WARNING_MESSAGE =
-  "[system] This turn is approaching its time limit and will be ended soon. Stop starting new work and stop waiting on long-running things now. Reply with: what you completed, the current status of anything still running (background processes, CI, other agents — they keep running after this turn ends), what remains, and how to continue in the next message. Then end the turn.";
 
 /** The host has no room right now; honest about the wait, silent about the
  * infrastructure. */

@@ -784,7 +784,7 @@ describe.skipIf(!PROOF_URL)("the terminal settle", () => {
     await backdate(
       s.target.id,
       "created_at",
-      new Date(Date.now() - 70 * 60_000),
+      new Date(Date.now() - 40 * 60_000),
     );
     await dueWork.reclaimStaleTurns();
     const target = await db.turn.findUnique({ where: { id: s.target.id } });
@@ -1013,122 +1013,6 @@ describe.skipIf(!PROOF_URL)("Stop means silence", () => {
   });
 });
 
-describe.skipIf(!PROOF_URL)("the ceiling-warning arm", () => {
-  /** Push a running turn's ceiling clock into the warning window (older
-   * than ceiling − warning, younger than the ceiling itself). */
-  const ageIntoWarningWindow = async (turnId: string) => {
-    await db.$executeRaw`UPDATE turns SET created_at = now() - interval '58 minutes' WHERE id = ${turnId}`;
-  };
-
-  it("steers ONE wrap-up warning into a run approaching the ceiling", async () => {
-    const { conversationId, sandboxId } = await seedTalkable("warn-basic");
-    const target = await seedActiveTurn(conversationId);
-    await turns.applyTurnEvents(
-      reporter(RUNNER_A, sandboxId),
-      conversationId,
-      target.id,
-      [{ type: "turn.started" }],
-    );
-    await ageIntoWarningWindow(target.id);
-
-    const claimed = await dueWork.claimDueWork(RUNNER_A, 10);
-    const warning = claimed.find((c) => c.kind === "turn.message");
-    expect(warning).toMatchObject({
-      kind: "turn.message",
-      turnId: `ceiling-warning:${target.id}`,
-      targetTurnId: target.id,
-      conversationId,
-      sandboxId,
-      message: V.TURN_CEILING_WARNING_MESSAGE,
-    });
-    const row = await db.turn.findUnique({ where: { id: target.id } });
-    expect(row?.ceilingWarnedAt).not.toBeNull();
-
-    // AT MOST ONCE: the stamp fences a second poll out.
-    const second = await dueWork.claimDueWork(RUNNER_A, 10);
-    expect(second.some((c) => c.kind === "turn.message")).toBe(false);
-  });
-
-  it("leaves a run still comfortably inside its budget alone", async () => {
-    const { conversationId, sandboxId } = await seedTalkable("warn-young");
-    const target = await seedActiveTurn(conversationId);
-    await turns.applyTurnEvents(
-      reporter(RUNNER_A, sandboxId),
-      conversationId,
-      target.id,
-      [{ type: "turn.started" }],
-    );
-
-    const claimed = await dueWork.claimDueWork(RUNNER_A, 10);
-    expect(claimed.some((c) => c.kind === "turn.message")).toBe(false);
-    const row = await db.turn.findUnique({ where: { id: target.id } });
-    expect(row?.ceilingWarnedAt).toBeNull();
-  });
-
-  it("a turn.result outcome for the synthetic warning id settles NOTHING", async () => {
-    // The warning has no follow-up row, so a supervisor that reports a
-    // steer outcome for `ceiling-warning:<id>` must be a harmless no-op —
-    // the settle's where-clause simply matches nothing. MUTATION-PROOF for
-    // the comment in due-work's warning arm.
-    const { conversationId, sandboxId } = await seedTalkable("warn-settle");
-    const target = await seedActiveTurn(conversationId);
-    await turns.applyTurnEvents(
-      reporter(RUNNER_A, sandboxId),
-      conversationId,
-      target.id,
-      [{ type: "turn.started" }],
-    );
-    await ageIntoWarningWindow(target.id);
-    const claimed = await dueWork.claimDueWork(RUNNER_A, 10);
-    const warning = claimed.find((c) => c.kind === "turn.message");
-    expect(warning?.turnId).toBe(`ceiling-warning:${target.id}`);
-
-    // The close reports the warning "joined", the way a real supervisor
-    // reports every steered id it consumed.
-    await turns.finishTurn({
-      reporter: reporter(RUNNER_A, sandboxId),
-      conversationId,
-      turnId: target.id,
-      status: "done",
-      followUps: [
-        { turnId: `ceiling-warning:${target.id}`, outcome: "joined" },
-      ],
-    });
-
-    const closed = await db.turn.findUnique({ where: { id: target.id } });
-    expect(closed?.status).toBe("done");
-    // No stray row was created or mutated by the synthetic outcome.
-    const strays = await db.turn.findMany({
-      where: { conversationId, id: { not: target.id } },
-    });
-    expect(strays).toEqual([]);
-  });
-
-  it("never warns through a runner that cannot parse turn.message", async () => {
-    // The version-skew gate, same as the steer arm's: an old runner's poll
-    // parse is all-or-nothing, so the warning must simply not exist for it.
-    const { conversationId, sandboxId } = await seedTalkable(
-      "warn-oldrunner",
-      RUNNER_OLD,
-    );
-    const target = await seedActiveTurn(conversationId, RUNNER_OLD);
-    await turns.applyTurnEvents(
-      reporter(RUNNER_OLD, sandboxId),
-      conversationId,
-      target.id,
-      [{ type: "turn.started" }],
-    );
-    await ageIntoWarningWindow(target.id);
-
-    const claimed = await dueWork.claimDueWork(RUNNER_OLD, 10);
-    expect(claimed.some((c) => c.kind === "turn.message")).toBe(false);
-    // And the fence was NOT spent: the row stays warnable if the runner
-    // upgrades before the ceiling.
-    const row = await db.turn.findUnique({ where: { id: target.id } });
-    expect(row?.ceilingWarnedAt).toBeNull();
-  });
-});
-
 describe.skipIf(!PROOF_URL)("the sweeps", () => {
   it("a PROMOTED follow-up measures its ceiling from promotion, not birth", async () => {
     const { conversationId } = await seedTalkable("sweep-promoted");
@@ -1147,11 +1031,11 @@ describe.skipIf(!PROOF_URL)("the sweeps", () => {
       where: { id: sent.turn.id },
       data: { status: "queued", promotedAt: new Date() },
     });
-    // Born 70 minutes ago — past the 60-minute ceiling — but promoted NOW.
+    // Born 40 minutes ago — past the 30-minute ceiling — but promoted NOW.
     await backdate(
       sent.turn.id,
       "created_at",
-      new Date(Date.now() - 70 * 60_000),
+      new Date(Date.now() - 40 * 60_000),
     );
 
     await dueWork.reclaimStaleTurns();
@@ -1163,7 +1047,7 @@ describe.skipIf(!PROOF_URL)("the sweeps", () => {
     await backdate(
       sent.turn.id,
       "promoted_at",
-      new Date(Date.now() - 70 * 60_000),
+      new Date(Date.now() - 40 * 60_000),
     );
     await dueWork.reclaimStaleTurns();
     const swept = await db.turn.findUnique({ where: { id: sent.turn.id } });
@@ -1185,7 +1069,7 @@ describe.skipIf(!PROOF_URL)("the sweeps", () => {
     await backdate(
       sent.turn.id,
       "created_at",
-      new Date(Date.now() - 70 * 60_000),
+      new Date(Date.now() - 40 * 60_000),
     );
 
     await dueWork.expireWedgedFollowUps();
@@ -1210,9 +1094,9 @@ describe.skipIf(!PROOF_URL)("the sweeps", () => {
     await backdate(
       sent.turn.id,
       "created_at",
-      new Date(Date.now() - 70 * 60_000),
+      new Date(Date.now() - 40 * 60_000),
     );
-    await backdate(target.id, "created_at", new Date(Date.now() - 61 * 60_000));
+    await backdate(target.id, "created_at", new Date(Date.now() - 41 * 60_000));
 
     // The poll sequence, in its real order.
     await dueWork.reclaimStaleTurns(); // ceiling-fails the target
@@ -1242,7 +1126,7 @@ describe.skipIf(!PROOF_URL)("the sweeps", () => {
     await backdate(
       sent.turn.id,
       "created_at",
-      new Date(Date.now() - 70 * 60_000),
+      new Date(Date.now() - 40 * 60_000),
     );
 
     await dueWork.expireWedgedFollowUps();

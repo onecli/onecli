@@ -316,7 +316,6 @@ describe("a turn that could not run for a reason the reader can fix", () => {
     "agent_start_failed",
     "at_capacity",
     "image_unavailable",
-    "turn_time_limit",
   ])("renders a %s failure as a quiet notice, not the red box", (errorCode) => {
     // A platform hiccup whose copy already says what to do — red would say
     // the agent is broken. Read off the CODE, never the message text.

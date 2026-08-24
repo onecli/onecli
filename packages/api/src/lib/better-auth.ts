@@ -206,9 +206,6 @@ export const createOnpremAuth = (options: OnpremAuthOptions) => {
       },
     },
 
-    // Implicit account linking is configured below (see the posture note
-    // ahead of the `account` block near the end of these options).
-
     socialProviders: options.google
       ? {
           google: {

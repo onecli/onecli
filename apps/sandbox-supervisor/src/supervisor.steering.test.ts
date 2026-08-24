@@ -397,41 +397,4 @@ describe("steering into the live turn", () => {
 
     expect(followUpsOf(t, "t1")).toEqual([{ turnId: "f1", outcome: "missed" }]);
   });
-
-  it("the control plane's SYNTHETIC ceiling-warning id rides the same path", async () => {
-    // due-work's approaching-ceiling arm steers a wrap-up warning with a
-    // namespaced id (`ceiling-warning:<turnId>`, no row behind it). The
-    // supervisor must treat the id as the opaque token it is: inject the
-    // message and echo the id back on turn.result — where the control
-    // plane's settle provably no-ops (follow-ups.pg.test.ts).
-    const t = createTestTransport();
-    const run = runSupervisor(
-      config(home("sup-steer-ceiling-")),
-      createFakeHarness({ script: () => longScript() }),
-      t.transport,
-    );
-
-    t.push(deliver("t1", "cv-a"));
-    await t.until(
-      () => t.of("event").some((m) => m.event.type === "text.delta"),
-      "the turn to start streaming",
-    );
-    t.push(steer("ceiling-warning:t1", "t1", "cv-a", "[system] wrap up now"));
-
-    await t.until(() => t.of("turn.result").length === 1, "the turn to end");
-    await t.finish(run);
-
-    expect(followUpsOf(t, "t1")).toEqual([
-      { turnId: "ceiling-warning:t1", outcome: "joined" },
-    ]);
-    const injected = t
-      .of("event")
-      .some(
-        (m) =>
-          m.turnId === "t1" &&
-          m.event.type === "text.delta" &&
-          m.event.text.includes("[system] wrap up now"),
-      );
-    expect(injected).toBe(true);
-  });
 });
