@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.2.0](https://github.com/onecli/onecli/compare/v2.1.0...v2.2.0) (2026-08-24)
+
+
+### Features
+
+* **turns:** 1h ceiling, pre-ceiling wrap-up warning, honest time-limit copy ([#510](https://github.com/onecli/onecli/issues/510)) ([fd44ea0](https://github.com/onecli/onecli/commit/fd44ea0c54f0521f2a06ea8ef75691ee2c10b8fb))
+
 ## [2.1.0](https://github.com/onecli/onecli/compare/v2.0.1...v2.1.0) (2026-08-24)
 
 
