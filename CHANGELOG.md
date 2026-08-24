@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.2.1](https://github.com/onecli/onecli/compare/v2.2.0...v2.2.1) (2026-08-24)
+
+
+### Bug Fixes
+
+* user-chosen Slack transport, removable org workspaces in every state, agent-image upgrades on self-host ([#513](https://github.com/onecli/onecli/issues/513)) ([b2ff642](https://github.com/onecli/onecli/commit/b2ff64240124e09ae23bb5501b637764d4656e39))
+
 ## [2.2.0](https://github.com/onecli/onecli/compare/v2.1.0...v2.2.0) (2026-08-24)
 
 
