@@ -27,7 +27,8 @@ import { createJcodeBackgroundTasks } from "./jcode-background";
  * the config/env switches. Nothing above it may branch on "jcode"
  * (invariant 9).
  *
- * Every switch below was verified against jcode v0.71.x source
+ * Every switch below was verified against jcode v0.71.x source and
+ * re-verified against v0.78.1 at the pin bump, 2026-08-19
  * (see plans/hosted-agents-v2.md §3.2/§3.5):
  * - `inheritLogins: false` — never import host provider logins (zero-cred).
  * - `JCODE_NO_TELEMETRY=1` — telemetry is on by default upstream.
@@ -44,6 +45,17 @@ import { createJcodeBackgroundTasks } from "./jcode-background";
  *   API", so both actively steer work around the governed gateway (observed
  *   live: an email request burned a turn on `jcode login google`, Composio
  *   env hints, and catalog recommendations before one gateway curl answered).
+ *   `maintainer_feedback,jcode_docs` joined at the v0.78.1 bump — upstream
+ *   registers both unconditionally (v0.77/v0.74) and neither is a reflex
+ *   tool: `jcode_docs` serves compiled-in vendor documentation ("Use this
+ *   first for questions about Jcode features"), a standing leak of the
+ *   vendor identity PLATFORM_SYSTEM_PROMPT conceals; `maintainer_feedback`
+ *   ships model-authored feedback to the vendor over telemetry — a no-op
+ *   under JCODE_NO_TELEMETRY=1, but its name, description, and refusal
+ *   reply all speak as the vendor.
+ *   ⛔ Never add the literal name `mcp` to this list: since v0.75 it is a
+ *   meta-entry covering every dynamic `mcp__*` tool, so it would silently
+ *   kill the platform-tools bridge.
  *   Disabling is safe because a disabled tool is REMOVED from the
  *   model-visible tool list (upstream filters definitions; its own test
  *   proves it for gmail). The `bg` background tool is deliberately NOT
@@ -55,11 +67,20 @@ import { createJcodeBackgroundTasks } from "./jcode-background";
  *   proxy like everything else. `memory` joined the list with the memory
  *   write-back amendment (§3.8): `[features] memory=false` alone disables
  *   only the auto-recall/extraction machinery — the native tool registers
- *   unconditionally (verified in v0.71.1 source) and would write durable,
+ *   unconditionally (verified in v0.71.1, still true in v0.78.1) and would write durable,
  *   platform-invisible JSON graphs; the platform's memory/ files and
  *   memory_* tools are the ONLY memory. Its state is purged per boot too
  *   (cleanJcodeKnowledgeStores).
- * - `[features] memory=false, swarm=false` — same rule for the big systems.
+ * - `[features] memory=false` — same rule for the big systems. `swarm=true`
+ *   is the ONE deliberately-on subsystem: hosted agents always get bounded
+ *   sub-agent fan-out, fenced by the JCODE_SWARM_ENV launch pins (worker cap
+ *   + headless spawns; env beats the agent-writable config.toml on every
+ *   reload) and by the harness's own root-only spawn rule — recursion needs
+ *   the "swarm-deep" effort sentinel on the ROOT session, which the platform
+ *   never grants (JCODE_EFFORT maps only low|medium|high|max).
+ *   `check_updates=false` (a v0.76+ key, default TRUE) is the config half of
+ *   the update pin: it gates the startup update-check thread alongside
+ *   JCODE_NO_AUTO_UPDATE, so the pin no longer rests on the env var alone.
  * - `[sponsors] enabled=false` — the config half of the integration_tools
  *   kill: it stops the tool from ever REGISTERING and blocks all contact
  *   with the vendor's discovery endpoint (the env entry only filters the
@@ -71,6 +92,16 @@ import { createJcodeBackgroundTasks } from "./jcode-background";
  */
 
 const JCODE_HOME_DIRNAME = ".jcode-home";
+
+/**
+ * The agent's POSIX home under the workspace volume — byte-equal with the
+ * agent image's contract (docker/agent-entrypoint.sh's export,
+ * agent.Dockerfile `usermod -d`) and AGENT_POSIX_HOME in
+ * apps/sandbox-manager/src/constants.ts. Derived from homeDir, NEVER from
+ * process.env.HOME: in local dev that is the developer's real home, and the
+ * purge lists below DELETE from it.
+ */
+const POSIX_HOME_DIRNAME = ".home";
 
 /**
  * Resolve THE jcode binary — pinned, never guessed.
@@ -108,7 +139,7 @@ export const resolveJcodeBinary = (): string => {
  * `JCODE_NO_AUTO_UPDATE` stops checks, downloads, and the mid-run exec — but
  * it does NOT gate binary RESOLUTION: jcode's daemon prefers
  * `builds/shared-server` → `builds/stable` over the spawned file (verified in
- * v0.71.1 source: `dispatch.rs` spawn_server → `paths.rs`
+ * v0.71.1 and re-verified in v0.78.1: `dispatch.rs` spawn_server → `paths.rs`
  * shared_server_update_candidate, no env check). A volume that self-updated
  * before the pin would therefore keep booting its downloaded daemon under our
  * pinned client — a bridge/daemon version split upstream itself documents as
@@ -120,12 +151,23 @@ export const resolveJcodeBinary = (): string => {
  * (last check, install provenance) that would otherwise read as if updates
  * were live.
  *
+ * `provider-backends/` joined at the v0.78.1 bump: it is the volume's other
+ * EXECUTABLE stash — jcode prefers a managed CLI at
+ * `provider-backends/grok-build/grok` and execs it when that provider is
+ * selected — and the same law applies: nothing on the agent-writable volume
+ * may be something jcode will execute.
+ *
  * Symlink-safe by the same law as the home materializer: `rmSync`
  * unlinks a link rather than following it, so an agent planting
  * `builds -> /somewhere` costs the link, never the target.
  */
 export const cleanJcodeUpdaterState = (jcodeHome: string): void => {
-  for (const entry of ["builds", "bin", "update_metadata.json"]) {
+  for (const entry of [
+    "builds",
+    "bin",
+    "update_metadata.json",
+    "provider-backends",
+  ]) {
     rmSync(join(jcodeHome, entry), { recursive: true, force: true });
   }
 };
@@ -136,14 +178,24 @@ export const cleanJcodeUpdaterState = (jcodeHome: string): void => {
  * amendment made this airtight). Two families:
  *
  *  - native memory/notes JSON graphs: `[features] memory=false` disables the
- *    auto-recall machinery but NOT the `memory` tool (verified in v0.71.1
- *    source — the tool registers unconditionally), so the tool is disabled
- *    via JCODE_DISABLED_TOOLS below and any state it ever wrote is deleted;
+ *    auto-recall machinery but NOT the `memory` tool (verified in v0.71.1,
+ *    still true in v0.78.1 — the tool registers unconditionally), so the tool
+ *    is disabled via JCODE_DISABLED_TOOLS below and any state it ever wrote
+ *    is deleted;
  *  - unmanaged skill-stash dirs jcode loads on existence (home
  *    `.jcode/skills`, `.claude/skills`, `$JCODE_HOME/skills`,
  *    `external/.agents/skills`): a skill written there by file tools would
  *    load next session, invisible to the platform. The managed skills root
  *    (`.agents/skills`) is NOT touched — the sync channel owns it.
+ *    The `external/` trio joined at the v0.78.1 bump: with JCODE_HOME set,
+ *    jcode resolves user-home paths under `$JCODE_HOME/external/`, and its
+ *    first-run import copies `external/.claude/skills` +
+ *    `external/.codex/skills` into the live registry whenever
+ *    `$JCODE_HOME/skills` is absent — which THIS purge guarantees every
+ *    boot — while `external/.claude/plugins` is a global skill source
+ *    scanned on existence. All three live on the agent-writable volume, so
+ *    a planted stash would re-enter the registry at the next boot without
+ *    this purge (a pre-existing gap, closed at the bump).
  *
  * Same product-law posture as the prompt/MCP overrides: the agent can
  * rewrite mid-session; the next boot heals. `rmSync` unlinks a planted link
@@ -153,13 +205,28 @@ export const cleanJcodeKnowledgeStores = (
   homeDir: string,
   jcodeHome: string,
 ): void => {
+  // The durable POSIX home (~ = <homeDir>/.home) is the raw-$HOME twin of
+  // the external/ sandbox: $HOME used to be ephemeral rootfs (self-healing
+  // by relaunch), but it now persists on the volume, so every user-home
+  // stash path jcode's resolver knows must join the per-boot purge or a
+  // planted skill would re-enter the registry durably. The managed skills
+  // root stays <homeDir>/.agents/skills — a different path, untouched.
+  const posixHome = join(homeDir, POSIX_HOME_DIRNAME);
   for (const path of [
     join(jcodeHome, "memory"),
     join(jcodeHome, "notes"),
     join(jcodeHome, "skills"),
     join(jcodeHome, "external", ".agents", "skills"),
+    join(jcodeHome, "external", ".claude", "skills"),
+    join(jcodeHome, "external", ".claude", "plugins"),
+    join(jcodeHome, "external", ".codex", "skills"),
     join(homeDir, ".jcode", "skills"),
     join(homeDir, ".claude", "skills"),
+    join(posixHome, ".agents", "skills"),
+    join(posixHome, ".jcode", "skills"),
+    join(posixHome, ".claude", "skills"),
+    join(posixHome, ".claude", "plugins"),
+    join(posixHome, ".codex", "skills"),
   ]) {
     rmSync(path, { recursive: true, force: true });
   }
@@ -169,8 +236,9 @@ export const cleanJcodeKnowledgeStores = (
 // this adapter share one symlink-hardened write — the law lives there.
 
 /**
- * TRAP (verified in v0.71.1 source): the `[sponsors]` section must stay
- * exactly `enabled = false` with NO `endpoint` key. The harness "repairs" a
+ * TRAP (verified in v0.71.1, re-verified unchanged in v0.78.1): the
+ * `[sponsors]` section must stay exactly `enabled = false` with NO
+ * `endpoint` key. The harness "repairs" a
  * section holding enabled=false PLUS its default endpoint back to enabled —
  * it reads that shape as machine-written — while a bare hand-written
  * `enabled = false` is respected. The harness's own config save would
@@ -183,7 +251,8 @@ export const cleanJcodeKnowledgeStores = (
 export const managedConfigToml = `# Written by the OneCLI supervisor at every container boot — do not edit.
 [features]
 memory = false
-swarm = false
+swarm = true
+check_updates = false
 
 [provider]
 stream_idle_timeout_secs = 300
@@ -196,12 +265,65 @@ enabled = false
 `;
 
 /**
+ * Sub-agent fan-out is ALWAYS ON for hosted agents (a product decision:
+ * every agent may parallelize, no per-agent switch). `swarm = true` above
+ * turns the subsystem on; the SAFETY limits live in JCODE_SWARM_ENV below,
+ * not in this file — this file sits on the agent-writable volume and the
+ * harness hot-reloads it, so a value here is a statement, not a fence.
+ */
+export const SWARM_WORKER_CAP = 8;
+
+/**
+ * The launch-env half of the swarm posture — like JCODE_DISABLED_TOOLS,
+ * this constant IS the env the launch call passes, exported so the pin
+ * test asserts the exact strings the harness parses. Env overrides beat
+ * config.toml on EVERY config load (verified in v0.78.1
+ * `env_overrides.rs` / `config.rs`: both keys are in the reload
+ * fingerprint), so an agent editing its own config.toml cannot raise the
+ * cap — THIS is the hard stop, at the harness's spawn-admission gate.
+ * `swarm_spawn_mode` pins the worker default to headless (upstream
+ * defaults to `inline`, a TUI gallery mode nothing here renders); a
+ * per-spawn override degrades gracefully in a windowless container.
+ */
+export const JCODE_SWARM_ENV = {
+  JCODE_SWARM_MAX_CONCURRENT_AGENTS: String(SWARM_WORKER_CAP),
+  JCODE_SWARM_SPAWN_MODE: "headless",
+} as const;
+
+/**
+ * Appended to the platform system prompt so the model uses the fan-out
+ * well and stays inside the enforced envelope instead of slamming into
+ * the harness's refusals. Discipline, not enforcement: the cap is
+ * enforced by JCODE_SWARM_ENV above, recursion is refused by the harness
+ * itself (worker spawns are root-only), and the effort sentinels the
+ * prompt bans are never granted by the platform (see JCODE_EFFORT).
+ * Kept as one block so the pin test can assert it.
+ */
+export const SWARM_LIGHT_PROMPT = `
+
+## Sub-agents
+
+You may parallelize work by spawning helper agents (your swarm tool, light
+fan-out): give each helper ONE self-contained task and a fresh context, let
+it report back, and integrate the results yourself.
+Rules: at most ${SWARM_WORKER_CAP} helpers alive at once; helpers never
+spawn their own helpers; spawn headless only; prefer doing small tasks
+yourself — helpers are for genuinely parallel or context-heavy work.
+Never pass "swarm" or "swarm-deep" as an effort, and never use the task
+graph's deep mode — flat one-level fan-out is the only supported shape.
+If a spawn or swarm call is refused right after your computer starts,
+retry once before concluding the tooling is unavailable — membership can
+take a moment to settle.
+After collecting a helper's report, stop or clean up that helper — idle
+helpers hold memory for nothing.`;
+
+/**
  * The harness-native tools the platform turns off, exported so the pin test
  * asserts the exact string the launch env actually reads (a drifted copy
  * would pin nothing). Rationale per entry lives in the adapter header above.
  */
 export const JCODE_DISABLED_TOOLS_VALUE =
-  "schedule,skill_manage,gmail,integration_tools,memory";
+  "schedule,skill_manage,gmail,integration_tools,memory,maintainer_feedback,jcode_docs";
 
 /**
  * THE PLATFORM'S BASE SYSTEM PROMPT — it REPLACES the harness's built-in one.
@@ -308,17 +430,20 @@ export const preparePromptFiles = (
   const projectPromptDir = join(homeDir, ".jcode");
   mkdirSync(projectPromptDir, { recursive: true });
 
-  writeManagedFile(
-    join(jcodeHome, "system-prompt.md"),
-    PLATFORM_SYSTEM_PROMPT,
-    0o444,
-  );
+  // Fan-out is always on, so the swarm discipline block is part of the base
+  // prompt — both slots, same bytes, like everything else here.
+  const systemPrompt = PLATFORM_SYSTEM_PROMPT + SWARM_LIGHT_PROMPT;
+  writeManagedFile(join(jcodeHome, "system-prompt.md"), systemPrompt, 0o444);
   writeManagedFile(
     join(projectPromptDir, "system-prompt.md"),
-    PLATFORM_SYSTEM_PROMPT,
+    systemPrompt,
     0o444,
   );
 
+  // No POSIX-home ($HOME = <homeDir>/.home) entries here, deliberately: the
+  // prompt chain is project <workingDir>/.jcode → global $JCODE_HOME →
+  // built-in, and the home-global instruction slot is external/AGENTS.md
+  // (deleted above) — raw $HOME appears nowhere in it.
   for (const path of [
     join(projectPromptDir, "prompt-overlay.md"),
     join(jcodeHome, "prompt-overlay.md"),
@@ -393,12 +518,19 @@ export const prepareMcpConfig = (
     0o600,
   );
 
+  // The durable ~ (<homeDir>/.home) mirrors the same override surface —
+  // see cleanJcodeKnowledgeStores for why the POSIX home joined the purge.
+  const posixHome = join(homeDir, POSIX_HOME_DIRNAME);
   for (const path of [
     join(homeDir, ".jcode", "mcp.json"),
     join(homeDir, ".mcp.json"),
     join(homeDir, ".claude", "mcp.json"),
     join(jcodeHome, "external", ".claude.json"),
     join(jcodeHome, "external", ".claude", "mcp.json"),
+    join(posixHome, ".jcode", "mcp.json"),
+    join(posixHome, ".mcp.json"),
+    join(posixHome, ".claude", "mcp.json"),
+    join(posixHome, ".claude.json"),
   ]) {
     rmSync(path, { force: true });
   }
@@ -491,8 +623,15 @@ const toJcodeModel = (model: string): string =>
  * `none|minimal|low|medium|high|xhigh|max`, a superset of ours; the names we
  * share are a coincidence of vocabulary, not a contract, so the mapping is
  * written out rather than assumed.
+ *
+ * Exported for the pin test, which asserts something sharper than the
+ * vocabulary: jcode also accepts the SENTINEL efforts `swarm` and
+ * `swarm-deep`, and setting `swarm-deep` on the ROOT session is the one
+ * unlock for recursive worker spawning. This map is the only place the
+ * platform hands jcode an effort, so it staying sentinel-free IS the
+ * no-recursion guarantee.
  */
-const JCODE_EFFORT: Record<AgentEffort, string> = {
+export const JCODE_EFFORT: Record<AgentEffort, string> = {
   low: "low",
   medium: "medium",
   high: "high",
@@ -529,7 +668,8 @@ const isHarnessRefusal = (error: unknown): boolean =>
  *
  * jcode drains its soft-interrupt queue at a safe point, joins the grouped
  * texts with "\n\n", and appends them as ONE fresh user message (verified in
- * v0.71.1 `interrupts.rs`). So each steer's text always lands inside a
+ * v0.71.1 `interrupts.rs`; byte-identical in v0.78.1). So each steer's text
+ * always lands inside a
  * SINGLE history entry, and the match is per-entry substring, longest steer
  * first, consuming each matched span:
  *
@@ -619,7 +759,8 @@ class JcodeSession implements HarnessSession {
       // Inline vision: our TurnImage translates to jcode's [mediaType,
       // base64] tuple HERE and nowhere else (invariant 9 — the vendor shape
       // never crosses the adapter boundary). The daemon prepends the images
-      // as content blocks in the same user message (verified v0.71.1).
+      // as content blocks in the same user message (verified v0.71.1,
+      // unchanged in v0.78.1).
       const images = (input.images ?? []).map((image): [string, string] => [
         image.mediaType,
         image.dataBase64,
@@ -859,6 +1000,9 @@ export const createJcodeHarness = (): Harness => {
       // 0600 even though the value is a placeholder: this file is
       // credential-SHAPED, and the mode must already be right on the day
       // something real is ever considered for it.
+      // jcode canonicalizes account labels on load (renames them and
+      // re-saves the file), so nothing may ever assert the "onecli" label
+      // on disk — it exists only to be a valid non-empty string.
       writeManagedFile(
         join(jcodeHome, "auth.json"),
         `${JSON.stringify({
@@ -893,6 +1037,19 @@ export const createJcodeHarness = (): Harness => {
         // first turn. The image bakes it too; here covers local dev.
         JCODE_NO_AUTO_UPDATE: "1",
         JCODE_DISABLED_TOOLS: JCODE_DISABLED_TOOLS_VALUE,
+        // The swarm fence (cap + headless default). Env, not config.toml,
+        // on purpose: the harness re-applies env overrides on every config
+        // reload, so this survives an agent editing its own writable
+        // config — the managed TOML's swarm=true is the switch, these are
+        // the limits. See JCODE_SWARM_ENV's doc for the verified mechanics.
+        ...JCODE_SWARM_ENV,
+        // prepareMcpConfig deletes the Claude-compat MCP files per boot, but
+        // jcode re-reads MCP config at every session construction — a file
+        // planted mid-container-life would load before the next boot heals
+        // it. This presence-based env (v0.77+) closes that window for
+        // external/.claude.json + external/.claude/mcp.json; the deletes
+        // stay for the project-local overrides it does not cover.
+        JCODE_DISABLE_CLAUDE_MCP: "1",
         // NO JCODE_MODEL here, deliberately. It would be a second way to set
         // the model — process-wide, read straight off the environment, and
         // bypassing `StartSessionOptions` — so a caller passing a different

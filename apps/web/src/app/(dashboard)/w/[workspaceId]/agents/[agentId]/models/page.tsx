@@ -1,6 +1,5 @@
 import type { Metadata } from "next";
-import { ModelCard } from "../_components/model-card";
-import { SecretGrantsTab } from "../_components/secret-grants-tab";
+import { ModelsSection } from "../_components/models-section";
 
 export const metadata: Metadata = {
   title: "Models",
@@ -12,14 +11,11 @@ interface Props {
 
 /**
  * What the agent runs, and the keys that decide it — in that order, because
- * the key is the cause and the model is the consequence (§3.10).
+ * the key is the cause and the model is the consequence (§3.10). The section
+ * carries its own "Add LLM key" door (create-then-attach), so a dead key is
+ * fixable right here.
  */
 export default async function AgentModelsPage({ params }: Props) {
   const { agentId } = await params;
-  return (
-    <div className="flex flex-col gap-6">
-      <ModelCard agentId={agentId} />
-      <SecretGrantsTab agentId={agentId} kind="llm" />
-    </div>
-  );
+  return <ModelsSection agentId={agentId} />;
 }

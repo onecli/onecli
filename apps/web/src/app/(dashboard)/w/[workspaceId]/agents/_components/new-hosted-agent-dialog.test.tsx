@@ -30,6 +30,7 @@ vi.mock("@/hooks/use-agents", () => ({
 }));
 vi.mock("@/hooks/use-hosted-availability", () => ({
   useHostedAvailability: () => state.availability,
+  useHomeDurabilityMessage: () => null,
 }));
 // The key dialog is a whole flow of its own; only its presence matters here.
 vi.mock(

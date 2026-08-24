@@ -1,5 +1,5 @@
 import { db } from "@onecli/db";
-import { GATEWAY_INTERNAL_URL } from "./env";
+import { getGatewayInternalUrl } from "./env";
 
 export const invalidateGatewayCache = (request: Request) => {
   const authorization = request.headers.get("authorization");
@@ -16,7 +16,7 @@ export const invalidateGatewayCache = (request: Request) => {
   if (cookie) headers["cookie"] = cookie;
   if (workspaceId) headers["x-workspace-id"] = workspaceId;
 
-  fetch(`${GATEWAY_INTERNAL_URL}/v1/cache/invalidate`, {
+  fetch(`${getGatewayInternalUrl()}/v1/cache/invalidate`, {
     method: "POST",
     headers,
   }).catch(() => {});
@@ -29,7 +29,7 @@ export const invalidateGatewayCache = (request: Request) => {
  */
 export const invalidateGatewayCacheForKeys = (keys: string[]) => {
   for (const key of keys) {
-    fetch(`${GATEWAY_INTERNAL_URL}/v1/cache/invalidate`, {
+    fetch(`${getGatewayInternalUrl()}/v1/cache/invalidate`, {
       method: "POST",
       headers: { authorization: `Bearer ${key}` },
     }).catch(() => {});

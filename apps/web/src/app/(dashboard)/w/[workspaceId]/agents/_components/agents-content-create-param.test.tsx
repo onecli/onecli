@@ -22,6 +22,8 @@ const state = vi.hoisted(() => ({
   availability: "ready" as string,
   agents: [] as { id: string; kind: string; name: string }[],
   agentsPending: false,
+  org: { byoLegacy: false } as { byoLegacy: boolean } | undefined,
+  orgPending: false,
 }));
 
 const mocks = vi.hoisted(() => ({
@@ -51,6 +53,10 @@ vi.mock("@/hooks/use-grants", () => ({
 }));
 vi.mock("@/hooks/use-hosted-availability", () => ({
   useHostedAvailability: () => state.availability,
+  useHomeDurabilityMessage: () => null,
+}));
+vi.mock("@/hooks/use-org", () => ({
+  useOrg: () => ({ data: state.org, isPending: state.orgPending }),
 }));
 vi.mock("./create-agent-dialog", () => ({
   CreateAgentDialog: ({ open }: { open: boolean }) =>
@@ -80,6 +86,8 @@ beforeEach(() => {
   state.availability = "ready";
   state.agents = [];
   state.agentsPending = false;
+  state.org = { byoLegacy: false };
+  state.orgPending = false;
   mocks.replace.mockClear();
   mocks.closeHosted = undefined;
 });
@@ -94,20 +102,46 @@ describe("the ?new=1 create door", () => {
     });
   });
 
-  it("opens the BYO flow where there is no hosted surface", () => {
+  it("opens the BYO flow for a BYO-world org with no hosted surface", () => {
+    state.org = { byoLegacy: true };
     state.params = new URLSearchParams("new=1");
     state.availability = "absent";
     render(<AgentsContent />);
     expect(screen.getByText("byo dialog")).toBeInTheDocument();
   });
 
-  it("waits for availability rather than guessing the door", () => {
+  it("keeps a HOSTED-world org in the hosted flow even on a runner-less read", () => {
+    // The effect mirrors the page's primary (the door), never raw
+    // availability: a hosted-world org must not be dropped into BYO creation
+    // the server would refuse.
+    state.params = new URLSearchParams("new=1");
+    state.availability = "absent";
+    render(<AgentsContent />);
+    expect(screen.getByText("hosted dialog")).toBeInTheDocument();
+    expect(screen.queryByText("byo dialog")).not.toBeInTheDocument();
+  });
+
+  it("waits for availability where the door depends on it (BYO world)", () => {
+    // A BYO-world door is byo vs byo-with-hosted BY availability, so acting
+    // early would guess which dialog to open.
+    state.org = { byoLegacy: true };
     state.params = new URLSearchParams("new=1");
     state.availability = "loading";
     render(<AgentsContent />);
     expect(screen.queryByText("hosted dialog")).not.toBeInTheDocument();
     expect(screen.queryByText("byo dialog")).not.toBeInTheDocument();
+    expect(screen.queryByText("onboarding call")).not.toBeInTheDocument();
     expect(mocks.replace).not.toHaveBeenCalled();
+  });
+
+  it("does NOT stall a hosted-world org on the availability read", () => {
+    // A hosted-world door ignores availability entirely, and a failed
+    // instance read parks it on "loading" forever — the deep link must not
+    // dangle while the page paints a working hosted door.
+    state.params = new URLSearchParams("new=1");
+    state.availability = "loading";
+    render(<AgentsContent />);
+    expect(screen.getByText("hosted dialog")).toBeInTheDocument();
   });
 
   it("keeps other params when it strips its own", () => {
@@ -137,11 +171,12 @@ describe("the ?new=1 create door", () => {
     expect(screen.getByText("hosted dialog")).toBeInTheDocument();
   });
 
-  it("books the onboarding call for a legacy BYO user, never hosted creation", () => {
-    // A workspace with an existing BYO agent is a MIGRATION (§3.15 as
-    // amended): its hosted entry books a human. Arriving by `?new=1` must not
-    // be a way around that gate — this opened the hosted dialog directly
-    // before, quietly bypassing it for anyone following the link.
+  it("books the onboarding call for a BYO-world org, never hosted creation", () => {
+    // A BYO-world org's move to hosted is a MIGRATION (§3.10 as re-decided):
+    // its hosted entry books a human. Arriving by `?new=1` must not be a way
+    // around that gate — this opened the hosted dialog directly before,
+    // quietly bypassing it for anyone following the link.
+    state.org = { byoLegacy: true };
     state.agents = [{ id: "a1", kind: "byo", name: "legacy agent" }];
     state.params = new URLSearchParams("new=1");
     render(<AgentsContent />);
@@ -158,6 +193,19 @@ describe("the ?new=1 create door", () => {
     render(<AgentsContent />);
     expect(screen.queryByText("hosted dialog")).not.toBeInTheDocument();
     expect(screen.queryByText("onboarding call")).not.toBeInTheDocument();
+    expect(mocks.replace).not.toHaveBeenCalled();
+  });
+
+  it("waits for the org world before choosing a door", () => {
+    // The world decides between hosted creation and the onboarding call —
+    // firing before it resolves would route a BYO-world org's link into
+    // hosted creation.
+    state.orgPending = true;
+    state.params = new URLSearchParams("new=1");
+    render(<AgentsContent />);
+    expect(screen.queryByText("hosted dialog")).not.toBeInTheDocument();
+    expect(screen.queryByText("onboarding call")).not.toBeInTheDocument();
+    expect(screen.queryByText("byo dialog")).not.toBeInTheDocument();
     expect(mocks.replace).not.toHaveBeenCalled();
   });
 

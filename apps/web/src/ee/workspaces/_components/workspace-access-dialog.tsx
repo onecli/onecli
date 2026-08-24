@@ -282,7 +282,6 @@ export const WorkspaceAccessDialog = ({
             </div>
           ) : (
             <>
-              {/* People */}
               <div className="space-y-2">
                 <div className="flex items-center justify-between">
                   <p className="text-xs font-medium">People</p>
@@ -390,7 +389,6 @@ export const WorkspaceAccessDialog = ({
                 )}
               </div>
 
-              {/* Groups */}
               <div className="space-y-2">
                 <div className="flex items-center gap-1.5">
                   <p className="text-xs font-medium">Groups</p>

@@ -1,8 +1,13 @@
 import { IS_CLOUD } from "./lib/env";
 import { cryptoService as kmsCrypto } from "./ee/kms-crypto";
+import { getRedis, hasRedisConfigured } from "./ee/clients/redis-client";
+import { createRedisEventBus } from "./ee/event-bus/redis-event-bus";
+import { createInProcessEventBus } from "./services/event-bus";
+import { setDefaultEventBus } from "./providers/event-bus";
 import * as oauthOrg from "./apps/oauth-org";
 import { appAvailability as eeAppAvailability } from "./ee/apps/app-availability-provider";
 import { enforceSsoSession } from "./ee/sso/sso-enforcement";
+import { rateLimit, clientIpKey } from "./ee/middleware/rate-limit";
 import { orgAppConfig } from "./apps/org-app-config";
 import {
   eeWorkspaceAccessChecker,
@@ -19,9 +24,12 @@ import { pgAttachmentBlobStore } from "./services/attachments/pg-blob-store";
 import { setDefaultAttachmentStore } from "./providers/attachment-store";
 import { isEntitled } from "./lib/entitlements";
 import { setDefaultCrypto } from "./providers/crypto";
+import { kmsSshCa } from "./ee/ssh/kms-ssh-ca";
+import { setDefaultSshCa } from "./providers/ssh-ca";
 import { initOAuthOrg, setDefaultOAuthOrg } from "./providers/oauth-org";
 import { setDefaultAppAvailability } from "./providers/app-availability";
 import { setDefaultSessionEnforcer } from "./providers/session-enforcer";
+import { setDefaultSessionThrottle } from "./providers/session-throttle";
 import {
   initOrgAppConfig,
   setDefaultOrgAppConfig,
@@ -100,8 +108,26 @@ export const ensureEditionDefaults = (): void => {
 
   if (IS_CLOUD) {
     setDefaultCrypto(kmsCrypto);
+    // The SSH CA is nullable by design: null (no SSH_CA_KMS_KEY_ARN) keeps
+    // the front-door surface dark rather than failing the boot — the same
+    // config-presence posture as RUNNER_TOKEN.
+    setDefaultSshCa(kmsSshCa);
     setDefaultAppAvailability(eeAppAvailability);
     setDefaultSessionEnforcer(enforceSsoSession);
+    // /auth/session is unauthenticated and performs the user/org bootstrap
+    // writes — the one /v1 surface a signup script hammers. 120/min per IP
+    // is sized for the worst legitimate burst (an office NAT where dozens
+    // log in the same minute at ≤4 calls each) while still capping abuse at
+    // 2 req/s per IP. The limiter keeps its designed degraded modes: no
+    // REDIS_HOST → off, Redis outage → fail open.
+    setDefaultSessionThrottle(
+      rateLimit({
+        name: "auth-session",
+        limit: 120,
+        windowSeconds: 60,
+        key: clientIpKey,
+      }),
+    );
     setDefaultRoleResolver({ getUserRole });
     setDefaultWorkspaceAccessChecker(eeWorkspaceAccessChecker);
     setDefaultConnectionHooks(eeConnectionHooks);
@@ -110,6 +136,27 @@ export const ensureEditionDefaults = (): void => {
     setDefaultRuleActionGate(eeRuleActionGate);
     setDefaultPolicyValidator(eePolicyValidator);
     setDefaultNewOrgPolicySeeder(eeNewOrgPolicySeeder);
+
+    // Cross-pod live transcript fan-out: api runs multiple pods, so the
+    // in-process emitter delivers a publish to no one when the runner's event
+    // POST and a browser's SSE stream land on different pods. Redis pub/sub
+    // carries every publish between them. The subscriber MUST be its own
+    // connection: ioredis forbids commands on a connection in subscriber mode.
+    //
+    // The event-bus slot is fail-loud on cloud (like every provider slot), so
+    // — unlike rate-limit/quota, which degrade at their call site — the cloud
+    // arm MUST inject SOMETHING or the first getEventBus() throws. When Redis
+    // is absent (dev/staging/a misconfigured cloud), inject the in-process
+    // emitter explicitly: it keeps a single-pod cloud correct and multi-pod
+    // no worse than the pre-fix behavior, rather than 500ing every event.
+    setDefaultEventBus(
+      hasRedisConfigured()
+        ? createRedisEventBus({
+            publisher: getRedis(),
+            subscriber: getRedis().duplicate(),
+          })
+        : createInProcessEventBus(),
+    );
   } else {
     // The seeder is the one provider whose ONPREM arm is also too heavy for
     // the client graph (it rides policy-service → the DB client).

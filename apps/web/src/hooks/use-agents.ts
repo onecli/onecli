@@ -3,7 +3,11 @@
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import { agents } from "@/lib/api";
-import type { AgentDetail, AgentEffort } from "@/lib/api/types";
+import type {
+  AgentDetail,
+  AgentEffort,
+  MintSshCertificateSource,
+} from "@/lib/api/types";
 import { queryKeys } from "@/lib/api/keys";
 import { squareCrop } from "@/lib/agents/square-crop";
 import {
@@ -248,3 +252,23 @@ export const useRegenerateToken = () => {
     onError: () => toast.error("Failed to regenerate token"),
   });
 };
+
+/**
+ * Mint a short-lived SSH certificate for a hosted agent (sandbox-platform
+ * step 5). Headless (the use-crons convention): the SSH section owns the
+ * error copy, because refusals must render inline as states — 404 (no SSH
+ * front door here), 422 (not an ed25519 key), 429 (mint rate limit). No
+ * query invalidation: the cert is one-time material nothing caches. And no
+ * `invalidateGatewayCache()`: the gateway reads no SSH state, a flush would
+ * be pure noise.
+ */
+export const useMintSshCertificate = () =>
+  useMutation({
+    mutationFn: (vars: { agentId: string } & MintSshCertificateSource) =>
+      agents.mintSshCertificate(
+        vars.agentId,
+        "sshKeyId" in vars
+          ? { sshKeyId: vars.sshKeyId }
+          : { publicKey: vars.publicKey },
+      ),
+  });

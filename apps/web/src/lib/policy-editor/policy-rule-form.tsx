@@ -480,8 +480,7 @@ export const PolicyRuleForm = ({
       return;
     }
     const chosenMethod = METHODS.find((m) => m === method); // undefined = Any
-    // Build the target rows from the chosen kind (fixing the prior always-network
-    // build, which silently dropped a non-network target on save). App/Secret
+    // Build the target rows from the chosen kind. App/Secret
     // "specific" fans out to one connection/secret target per selected id; "all"
     // is a single target carrying the level as `connectionScope`/`secretScope`.
     const targets: PolicyTargetInput[] =
@@ -591,7 +590,6 @@ export const PolicyRuleForm = ({
         </SheetHeader>
 
         <div className="flex-1 space-y-6 overflow-y-auto overscroll-contain px-6 py-5">
-          {/* Name */}
           <div className="space-y-1.5">
             <Label htmlFor="rule-name">Name</Label>
             <Input
@@ -613,7 +611,6 @@ export const PolicyRuleForm = ({
             )}
           </div>
 
-          {/* Applies to */}
           <div className="space-y-1.5">
             <Label htmlFor="rule-agent">Applies to</Label>
             {/* Org scope: target directory identities (users / user-groups),
@@ -625,7 +622,6 @@ export const PolicyRuleForm = ({
             />
           </div>
 
-          {/* Target */}
           <fieldset className="space-y-3">
             <legend className="text-sm font-medium">Target</legend>
             <div className="space-y-3 rounded-lg border bg-muted/40 p-3">
@@ -767,7 +763,6 @@ export const PolicyRuleForm = ({
             </div>
           </fieldset>
 
-          {/* Action */}
           <fieldset className="space-y-3">
             <legend className="text-sm font-medium">Action</legend>
             <div className="grid grid-cols-2 gap-3">

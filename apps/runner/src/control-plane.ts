@@ -1,10 +1,12 @@
 import {
+  MAX_RUNNER_EVENTS_PER_POST,
   runnerRegisterResponseSchema,
   runnerSandboxCheckResponseSchema,
   runnerSandboxesResponseSchema,
   runnerWorkResponseSchema,
   type RunnerCapabilities,
   type RunnerEvent,
+  type RunnerSandboxesResponse,
   type RunnerWorkItem,
   runnerMemoryWriteResponseSchema,
   runnerToolCallResponseSchema,
@@ -28,7 +30,10 @@ export interface ControlPlaneClient {
   pollWork(wait: number, limit: number): Promise<RunnerWorkItem[]>;
   postEvents(events: RunnerEvent[]): Promise<void>;
   heartbeat(capabilities?: RunnerCapabilities): Promise<void>;
-  listSandboxIds(): Promise<string[]>;
+  /** The reconcile truth: the sandbox ids this runner should be hosting
+   * (the reap authority) plus — from a control plane new enough to send it —
+   * what it currently believes about each (the vanished-pod arm's input). */
+  listAssignedSandboxes(): Promise<RunnerSandboxesResponse>;
   /** The orphan sweep's authority: which of these sandbox ids exist NOWHERE
    * in the control plane. Throws on any failure — the sweep destroys nothing
    * without a positive answer. */
@@ -58,17 +63,58 @@ export class ControlPlaneError extends Error {
   }
 }
 
+/**
+ * Event-post retry law. Retried statuses are ONLY the ones where the server
+ * provably did not apply the batch — `turn.events` re-posts otherwise
+ * duplicate transcript rows, because `seq` is assigned server-side at
+ * arrival (routes/runner.ts says it out loud):
+ *
+ * - 429: a middlebox (a fronting proxy, a rate limiter) refused the request
+ *   before the origin — the api-server never answers it on this surface —
+ *   and a throttle can clear within the backoff budget.
+ * - 500: the events route answers 500 only when ZERO events applied
+ *   (per-event try/catch inside one transaction; partial success is a 204).
+ *   Residual: an intermediary-synthesized 500 is indistinguishable from the
+ *   route's own, but the route's contract makes the common case safe.
+ * - 503: no healthy target behind the load balancer — never processed, and a
+ *   deploy window clears in seconds.
+ *
+ * NEVER retried: timeouts, network errors, 502/504 — the request may have
+ * landed and the response been lost, exactly the duplicate-transcript case.
+ * 403 is deliberately NOT retried either, though it is provably unapplied:
+ * a WAF content rule matching the batch body is deterministic (identical
+ * bytes re-refused every time), and a WAF per-IP rate block outlasts this
+ * backoff budget while every retry feeds the counter that sustains it — so
+ * a 403 fails fast (one warn, batch dropped) instead of holding the head of
+ * the report chain for guaranteed-futile attempts.
+ * Retries happen per chunk, in place, so the report chains' arrival order
+ * (which decides `seq`) is preserved; the bounded budget keeps a sustained
+ * outage from wedging the head of the chain past what the drop queue absorbs.
+ */
+const RETRYABLE_EVENT_STATUSES = new Set([429, 500, 503]);
+const EVENT_POST_ATTEMPTS = 4;
+const EVENT_RETRY_BACKOFF_MS = [1_000, 4_000, 10_000];
+
 export interface ControlPlaneOptions {
   baseUrl: string;
   token: string;
   /** Injectable for tests; defaults to global fetch. */
   fetchImpl?: typeof fetch;
+  /** Injectable for tests (the retry backoff); defaults to a real timer. */
+  sleepImpl?: (ms: number) => Promise<void>;
 }
+
+const defaultSleep = (ms: number): Promise<void> =>
+  new Promise((resolve) => {
+    const timer = setTimeout(resolve, ms);
+    timer.unref?.();
+  });
 
 export const createControlPlaneClient = ({
   baseUrl,
   token,
   fetchImpl = fetch,
+  sleepImpl = defaultSleep,
 }: ControlPlaneOptions): ControlPlaneClient => {
   const call = async (
     path: string,
@@ -117,12 +163,37 @@ export const createControlPlaneClient = ({
     },
 
     async postEvents(events) {
-      if (events.length === 0) return;
-      await call("/v1/runner/events", {
-        method: "POST",
-        body: { events },
-        timeoutMs: 15_000,
-      });
+      // Chunked at the wire schema's ceiling, sequentially so arrival order
+      // is preserved (the report chain depends on it): a reconcile pass over
+      // a big fleet must degrade to more requests, never to one 400 that
+      // loses the whole report.
+      for (let i = 0; i < events.length; i += MAX_RUNNER_EVENTS_PER_POST) {
+        const body = {
+          events: events.slice(i, i + MAX_RUNNER_EVENTS_PER_POST),
+        };
+        // Bounded in-place retry for statuses the retry law (top of file)
+        // proves safe: the chunk provably never applied, so a re-post cannot
+        // duplicate transcript rows, and retrying HERE keeps chunk order.
+        for (let attempt = 1; ; attempt += 1) {
+          try {
+            await call("/v1/runner/events", {
+              method: "POST",
+              body,
+              timeoutMs: 15_000,
+            });
+            break;
+          } catch (error) {
+            if (
+              attempt >= EVENT_POST_ATTEMPTS ||
+              !(error instanceof ControlPlaneError) ||
+              !RETRYABLE_EVENT_STATUSES.has(error.status)
+            ) {
+              throw error;
+            }
+            await sleepImpl(EVENT_RETRY_BACKOFF_MS[attempt - 1] ?? 10_000);
+          }
+        }
+      }
     },
 
     async toolCall(request) {
@@ -177,19 +248,21 @@ export const createControlPlaneClient = ({
       return Buffer.from(await response.arrayBuffer());
     },
 
-    async listSandboxIds() {
+    async listAssignedSandboxes() {
       // Parsed, not cast: this list decides what reconcile destroys, so a
       // response that isn't the shape we expect must throw (reconcile logs and
       // skips) rather than read as an empty list and reap every sandbox.
+      // `statuses` is additive-optional — absent from an old control plane,
+      // which leaves the vanished-pod arm inert.
       const body = await call("/v1/runner/sandboxes", {
         method: "GET",
         timeoutMs: 15_000,
       });
-      return runnerSandboxesResponseSchema.parse(body).sandboxIds;
+      return runnerSandboxesResponseSchema.parse(body);
     },
 
     async checkSandboxIds(sandboxIds: string[]) {
-      // Same zod-parse-don't-cast law as listSandboxIds, and for the same
+      // Same zod-parse-don't-cast law as listAssignedSandboxes, and for the same
       // reason: this answer decides what the orphan sweep force-deletes.
       const body = await call("/v1/runner/sandboxes/check", {
         method: "POST",

@@ -20,8 +20,8 @@ export const useWorkspacesList = (
 // Workspace rename/delete go through the audited `/v1/workspaces/:id` routes. Delete
 // flushes the gateway cache for the removed keys server-side, so there is
 // nothing to flush client-side. The workspaces list is server-rendered, so
-// callers handle the on-success refresh/redirect themselves (as the old actions
-// did) rather than invalidating a query cache.
+// callers handle the on-success refresh/redirect themselves rather than
+// invalidating a query cache.
 
 export const useRenameWorkspace = () =>
   useMutation({

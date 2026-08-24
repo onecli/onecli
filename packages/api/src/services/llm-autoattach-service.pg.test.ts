@@ -1,6 +1,22 @@
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import {
+  afterAll,
+  beforeAll,
+  beforeEach,
+  describe,
+  expect,
+  it,
+  vi,
+} from "vitest";
 
 import { proofDatabaseUrl } from "../testing/pg-proof.js";
+
+// Pinned onprem: the end-to-end cases below run the real createAgent (default
+// kind byo) against an unstamped org, which the cloud creation-world gate
+// (§3.10 re-decided 2026-08-23) would refuse under the CI job's ambient cloud
+// edition. The gate's own matrix lives in agent-service{,.pg}.test.ts.
+vi.hoisted(() => {
+  process.env.NEXT_PUBLIC_EDITION = "onprem";
+});
 
 /**
  * The LLM auto-attach on REAL PostgreSQL — "a new agent can actually run".
@@ -298,11 +314,12 @@ describe.skipIf(!PROOF_URL)("LLM auto-attach over real PostgreSQL", () => {
 
   // ── End-to-end, through the real creation services ───────────────────────
   //
-  // The hooks live in the SERVICES, not the routes, because agents and secrets
-  // are created from two surfaces (the /v1 routes and the web server actions —
-  // onboarding's first Anthropic key comes through the latter). These two
-  // assert the user-visible outcome at that seam: after the ordinary create
-  // call, does the gateway resolve a credential?
+  // The hooks live in the SERVICES, not the routes, so the equip guarantee
+  // holds for every caller of the create services (secrets still arrive from
+  // two surfaces — the /v1 routes and the web server actions, onboarding's
+  // first Anthropic key among them). These two assert the user-visible
+  // outcome at that seam: after the ordinary create call, does the gateway
+  // resolve a credential?
 
   it("createAgent equips the agent it just made", async () => {
     await makeSecret(ANTHROPIC, "anthropic");

@@ -34,6 +34,16 @@ beforeEach(() => {
 });
 
 describe("GET /cli — param contract", () => {
+  // The snippet's api-host variable is ONECLI_API_HOST — the old ONECLI_URL
+  // name collided with the dashboard-URL meaning elsewhere and is banned for
+  // new surfaces (routes/migrate-nanoclaw.ts keeps it, frozen field format).
+  it("names the api host ONECLI_API_HOST, never ONECLI_URL", async () => {
+    const script = await fetchScript(`key=${KEY}`);
+    expect(script).toContain('ONECLI_API_HOST="https://api.test.example"');
+    expect(script).toContain('onecli config set api-host "$ONECLI_API_HOST"');
+    expect(script).not.toMatch(/\bONECLI_URL\b/);
+  });
+
   it("rejects a malformed key", async () => {
     const res = await app.request("/cli?key=oc_short");
     expect(res.status).toBe(400);

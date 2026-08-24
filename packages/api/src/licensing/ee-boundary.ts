@@ -57,7 +57,7 @@ export const SEAMS: readonly Seam[] = [
   {
     from: "packages/api/src/edition-defaults.ts",
     why: "The boot-time injector: the one place that wires cloud provider implementations into the shared seams. Called from server entry points only, never from a client-reachable module.",
-    count: 10,
+    count: 14,
     permanent: true,
   },
   {

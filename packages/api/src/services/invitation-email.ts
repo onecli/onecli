@@ -1,5 +1,5 @@
 import { sendEmail, isEmailConfigured } from "./email-service";
-import { APP_URL } from "../lib/env";
+import { appOrigin } from "../lib/public-origins";
 
 const escapeHtml = (s: string): string =>
   s
@@ -16,7 +16,7 @@ const escapeHtml = (s: string): string =>
  * craft a /join URL that displayed any organization name they liked.
  */
 export const buildInviteUrl = (token: string): string =>
-  `${APP_URL}/join?token=${encodeURIComponent(token)}`;
+  `${appOrigin()}/join?token=${encodeURIComponent(token)}`;
 
 const buildHtml = (raw: {
   orgName: string;

@@ -6,7 +6,12 @@ import {
   type WorkItem,
 } from "@onecli/agent-protocol";
 import { log } from "../log";
-import { ensureManagedDir, pruneManagedRoot, writeManagedFile } from "./fs";
+import {
+  ensureManagedDir,
+  isToleratedPruneError,
+  pruneManagedRoot,
+  writeManagedFile,
+} from "./fs";
 import { renderHome, type RenderInputs } from "./renderer";
 import {
   MAX_HARVEST_FILE_BYTES,
@@ -122,10 +127,21 @@ const pruneMemoryRoot = async (
   const rootAbs = ensureManagedDir(homeDir, MEMORY_ROOT);
   let harvestsThisPass = 0;
   let keptUnmanaged = 0;
-  for (const entry of readdirSync(rootAbs, { withFileTypes: true }).slice(
-    0,
-    MAX_HARVEST_SCAN_ENTRIES,
-  )) {
+  // Same tolerance the skills prune has: an agent's nested container can leave
+  // a subuid-owned memory/ that this uid cannot read. Skip-and-warn rather
+  // than throw (which would poison every future generation); a real IO fault
+  // still propagates.
+  let rootEntries;
+  try {
+    rootEntries = readdirSync(rootAbs, { withFileTypes: true });
+  } catch (err) {
+    if (!isToleratedPruneError(err)) throw err;
+    log("warn", "memory root unreadable; prune skipped this pass", {
+      code: (err as NodeJS.ErrnoException).code,
+    });
+    return;
+  }
+  for (const entry of rootEntries.slice(0, MAX_HARVEST_SCAN_ENTRIES)) {
     const rel = `${MEMORY_ROOT}/${entry.name}`;
     const abs = join(rootAbs, entry.name);
     if (entry.isSymbolicLink()) {
@@ -271,7 +287,14 @@ export const applyHomeSync = async (
             mapped !== null && mapped.startsWith(`${skillsDir}/`),
         ),
     );
-    pruneManagedRoot(homeDir, skillsDir, keepSkills);
+    const inaccessible = pruneManagedRoot(homeDir, skillsDir, keepSkills);
+    // One summary line per pass (the memory prune's posture): subuid-owned
+    // leftovers from a nested-container volume mount are skipped, not fatal.
+    if (inaccessible > 0) {
+      log("warn", "inaccessible entries under the skills root skipped", {
+        count: inaccessible,
+      });
+    }
   }
   const keepMemory = new Set(
     manifest.filter((path) => path.startsWith(`${MEMORY_ROOT}/`)),

@@ -103,27 +103,6 @@ mod tests {
         assert_eq!(legacy_workspace_header(&map), None);
     }
 
-    /// The composition contract at both auth.rs call sites: the canonical
-    /// header wins whenever present; the legacy header only fills absence.
-    #[test]
-    fn canonical_wins_over_legacy_in_the_or_else_composition() {
-        let map = headers(&[("x-workspace-id", "canonical"), ("x-project-id", "legacy")]);
-        let resolved = map
-            .get("x-workspace-id")
-            .and_then(|v| v.to_str().ok())
-            .filter(|s| !s.is_empty())
-            .or_else(|| legacy_workspace_header(&map));
-        assert_eq!(resolved, Some("canonical"));
-
-        let map = headers(&[("x-workspace-id", ""), ("x-project-id", "legacy")]);
-        let resolved = map
-            .get("x-workspace-id")
-            .and_then(|v| v.to_str().ok())
-            .filter(|s| !s.is_empty())
-            .or_else(|| legacy_workspace_header(&map));
-        assert_eq!(resolved, Some("legacy"));
-    }
-
     #[test]
     fn dual_emit_writes_the_workspace_id_as_project_id() {
         let mut row = serde_json::json!({ "workspaceId": "ws-1", "id": "a" });

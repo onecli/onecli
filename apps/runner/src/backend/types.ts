@@ -29,6 +29,22 @@ export class ImageUnavailableError extends Error {
   }
 }
 
+/**
+ * The substrate refused the create for CAPACITY — a per-tenant quota or an
+ * admission fence, not a broken image or a crashed boot. Typed at the seam
+ * (the ImageUnavailableError pattern) so the runner can classify it
+ * `reasonCode: "at_capacity"` — the control plane's honest "too many agents
+ * are running right now" copy — without knowing any substrate's error
+ * shapes. On the cloud backend this carries the manager's 422
+ * `workspace_quota_exceeded` (the per-workspace ResourceQuota, step 6).
+ */
+export class SandboxCapacityError extends Error {
+  constructor(detail: string) {
+    super(`sandbox refused for capacity: ${detail}`);
+    this.name = "SandboxCapacityError";
+  }
+}
+
 /** Where a home lives, as far as anything above the backend knows. */
 export type HomeRef = string;
 
@@ -50,6 +66,14 @@ export interface SandboxFileSpec {
 
 export interface SandboxSpec {
   sandboxId: string;
+  /**
+   * The workspace the sandbox's agent lives in — a DOMAIN id, not a runtime
+   * concept. Namespaced backends (the cloud manager) fence every sandbox
+   * inside its workspace; the Docker backend ignores it. Optional because an
+   * older control plane may not send it — a backend that requires it refuses
+   * loudly instead of guessing.
+   */
+  workspaceId?: string;
   image: string;
   env: Record<string, string>;
   /** Written INTO the sandbox before it starts (CA, credential stubs). */
@@ -70,6 +94,14 @@ export interface SandboxSnapshot {
   containerRef: ContainerRef;
   running: boolean;
   payloadHash: string | null;
+  /**
+   * The substrate's own lifecycle phase, when it has one (a Kubernetes pod
+   * phase). Absent/null on substrates without the concept — consumers must
+   * treat that as "running is the whole truth". The boot-crash classifier
+   * reads it to tell a genuinely TERMINAL container from one that is merely
+   * not running yet (Pending while its image pulls).
+   */
+  phase?: string | null;
 }
 
 /**
@@ -132,8 +164,14 @@ export interface SandboxBackend {
   // ── Sandboxes ─────────────────────────────────────────────────────────
   createSandbox(spec: SandboxSpec): Promise<ContainerRef>;
   startSandbox(ref: ContainerRef): Promise<void>;
-  stopSandbox(ref: ContainerRef): Promise<void>;
-  removeSandbox(ref: ContainerRef): Promise<void>;
+  /**
+   * `sandboxId` is an OPTIONAL efficiency hint (the workspaceId precedent):
+   * a namespaced backend can resolve the ref with a label-scoped lookup
+   * instead of a fleet-wide scan. Never required — the ref alone must stay
+   * sufficient — and the Docker backend ignores it.
+   */
+  stopSandbox(ref: ContainerRef, sandboxId?: string): Promise<void>;
+  removeSandbox(ref: ContainerRef, sandboxId?: string): Promise<void>;
   listSandboxes(): Promise<SandboxSnapshot[]>;
 
   // ── Orphan sweep (step 13) ────────────────────────────────────────────

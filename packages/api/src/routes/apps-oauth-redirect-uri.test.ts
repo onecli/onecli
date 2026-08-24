@@ -204,4 +204,69 @@ describe("oauth redirect_uri resolves to the API origin", () => {
       "http://arrived.example.com/v1/apps/oauthapp/callback",
     ]);
   });
+
+  // Route-level pins for the canonical var: the redirect_uri must follow the
+  // resolver's derivation — ports mode pins the api port on the external
+  // host; proxy mode pins the single https origin. These existed only at the
+  // facade level before; the route is what providers actually see.
+  it("ONECLI_EXTERNAL_URL (http) derives the redirect_uri on the api port", async () => {
+    for (const key of URL_VARS) delete process.env[key];
+    process.env.ONECLI_EXTERNAL_URL = "http://192.0.2.10:10254";
+    try {
+      const res = await authorize();
+      expect(res.status).toBe(302);
+      expect(captured.authUrl).toEqual([
+        "http://192.0.2.10:10256/v1/apps/oauthapp/callback",
+      ]);
+    } finally {
+      delete process.env.ONECLI_EXTERNAL_URL;
+    }
+  });
+
+  it("ONECLI_EXTERNAL_URL (https) pins the single proxy-mode origin", async () => {
+    for (const key of URL_VARS) delete process.env[key];
+    process.env.ONECLI_EXTERNAL_URL = "https://onecli.example.test";
+    try {
+      const res = await authorize();
+      expect(res.status).toBe(302);
+      expect(captured.authUrl).toEqual([
+        "https://onecli.example.test/v1/apps/oauthapp/callback",
+      ]);
+    } finally {
+      delete process.env.ONECLI_EXTERNAL_URL;
+    }
+  });
+
+  // The zero-config landing pin: the dashboard-initiated authorize (referer
+  // = the dashboard's localhost origin, trusted by default) must sign the
+  // DASHBOARD origin, so the post-connect browser lands on the dashboard,
+  // never on this api-server's JSON 404.
+  it("unconfigured: signs the dashboard's trusted referer as the landing origin", async () => {
+    for (const key of URL_VARS) delete process.env[key];
+
+    const res = await app.request("/v1/apps/oauthapp/authorize", {
+      headers: {
+        authorization: `Bearer ${WORKSPACE_KEY}`,
+        host: "localhost:10256",
+        referer: "http://localhost:10254/w/proj-1/connections",
+      },
+    });
+    expect(res.status).toBe(302);
+
+    // Round-trip through the callback with the state the route actually
+    // signed (the mocked provider drops it from its URL; the oauth_state
+    // cookie carries it verbatim): the browser must land on :10254.
+    const stateCookie = res.headers.get("set-cookie") ?? "";
+    const state = decodeURIComponent(
+      /oauth_state=([^;]+)/.exec(stateCookie)![1]!,
+    );
+    const cb = await app.request(
+      `/v1/apps/oauthapp/callback?code=abc123&state=${encodeURIComponent(state)}`,
+      { headers: { host: "localhost:10256" } },
+    );
+    expect(cb.status).toBe(302);
+    expect(cb.headers.get("location")).toContain(
+      "http://localhost:10254/app-connect/oauthapp?status=success",
+    );
+  });
 });

@@ -193,3 +193,83 @@ export const seedAnthropicGrant = async (
   });
   return { secretId };
 };
+
+/**
+ * An OpenAI OAuth (Codex) secret + grant, the production create-path shape:
+ * `hostPattern: "chatgpt.com"`, `metadata.authMode: "oauth"`, and a stored
+ * value that satisfies `parseOpenaiOAuthJson` (string access/refresh tokens)
+ * — the rows `secret-service` writes for a pasted Codex auth.json. This is
+ * the secret that makes `buildContainerConfig` emit the `/home/node/.codex`
+ * credential stub into the spawn payload, so seeding it exercises the docker
+ * backend's create-missing-directories path end to end.
+ */
+export const seedOpenaiOauthGrant = async (
+  prisma: PrismaClient,
+  ids: TestIds,
+  opts: { which?: "first" | "second" } = {},
+): Promise<{ secretId: string }> => {
+  const which = opts.which ?? "first";
+  const tenant = tenantOf(ids, which);
+  const agentId = which === "first" ? ids.agent : ids.secondAgent;
+  const secretId = `${tenant.workspace}-openai`;
+  const ruleId = `${tenant.workspace}-grant-openai`;
+
+  await prisma.secret.create({
+    data: {
+      id: secretId,
+      name: secretId,
+      type: "openai",
+      scope: "workspace",
+      workspaceId: tenant.workspace,
+      organizationId: tenant.org,
+      valueSource: "inline",
+      encryptedValue: await cryptoService.encrypt(
+        JSON.stringify({
+          auth_mode: "chatgpt",
+          OPENAI_API_KEY: null,
+          tokens: {
+            access_token: `oauth-e2e-${ids.nonce}`,
+            refresh_token: `refresh-e2e-${ids.nonce}`,
+            account_id: "onecli-e2e",
+          },
+          last_refresh: new Date().toISOString(),
+        }),
+      ),
+      metadata: { authMode: "oauth", accountId: "onecli-e2e" },
+      hostPattern: "chatgpt.com",
+      pathPattern: null,
+      injectionConfig: {},
+    },
+  });
+  await prisma.policyRuleV2.create({
+    data: {
+      id: ruleId,
+      scope: "workspace",
+      workspaceId: tenant.workspace,
+      status: "published",
+      generation: 1,
+      enabled: true,
+      isDefault: false,
+      source: "grant",
+      // Distinct from the anthropic grant's 1000 — equal-priority ordering
+      // between rules is undefined, and this suite seeds both.
+      priority: 1001,
+      name: `grant ${secretId}`,
+      action: "allow",
+      requireApproval: false,
+      targets: {
+        create: [
+          {
+            id: `${ruleId}-t0`,
+            kind: "secret",
+            secret: { connect: { id: secretId } },
+          },
+        ],
+      },
+      identities: {
+        create: [{ id: `${ruleId}-i0`, agent: { connect: { id: agentId } } }],
+      },
+    },
+  });
+  return { secretId };
+};

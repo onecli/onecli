@@ -6,7 +6,7 @@ import {
   splitImageRef,
   type EngineTransport,
 } from "./engine-client";
-import { buildTar } from "./tar";
+import { buildTar, type TarEntry } from "./tar";
 
 /** The wire details that are easy to get subtly wrong and hard to see fail. */
 
@@ -207,30 +207,51 @@ describe("filters encoding", () => {
 });
 
 describe("tar builder", () => {
-  const parse = (archive: Buffer) => {
-    const name = archive.subarray(0, 100).toString("utf8").replace(/\0+$/, "");
-    const mode = parseInt(
-      archive.subarray(100, 107).toString("ascii").replace(/\0+$/, ""),
-      8,
-    );
-    const size = parseInt(
-      archive.subarray(124, 135).toString("ascii").replace(/\0+$/, ""),
-      8,
-    );
-    const content = archive.subarray(512, 512 + size).toString("utf8");
+  const file = (
+    path: string,
+    content: string,
+    mode = 0o644,
+  ): Extract<TarEntry, { kind: "file" }> => ({
+    kind: "file",
+    path,
+    content,
+    mode,
+    uid: 1000,
+    gid: 1000,
+  });
+
+  const parse = (archive: Buffer, block = 0) => {
+    const at = block * 512;
+    const octal = (offset: number, length: number) =>
+      parseInt(
+        archive
+          .subarray(at + offset, at + offset + length)
+          .toString("ascii")
+          .replace(/\0+$/, ""),
+        8,
+      );
+    const name = archive
+      .subarray(at, at + 100)
+      .toString("utf8")
+      .replace(/\0+$/, "");
+    const size = octal(124, 11);
+    const content = archive
+      .subarray(at + 512, at + 512 + size)
+      .toString("utf8");
     return {
       name,
-      mode,
+      mode: octal(100, 7),
+      uid: octal(108, 7),
+      gid: octal(116, 7),
       size,
       content,
-      magic: archive.subarray(257, 262).toString("ascii"),
+      typeflag: archive.subarray(at + 156, at + 157).toString("ascii"),
+      magic: archive.subarray(at + 257, at + 262).toString("ascii"),
     };
   };
 
   it("writes a readable USTAR header and body", () => {
-    const archive = buildTar([
-      { path: "ca.pem", content: "CERT", mode: 0o644 },
-    ]);
+    const archive = buildTar([file("ca.pem", "CERT")]);
     const entry = parse(archive);
 
     expect(entry).toMatchObject({
@@ -238,19 +259,51 @@ describe("tar builder", () => {
       mode: 0o644,
       size: 4,
       content: "CERT",
+      typeflag: "0",
       magic: "ustar",
     });
   });
 
+  it("writes the entry's owner VERBATIM — the daemon extracts it as-is", () => {
+    const archive = buildTar([file("auth.json", "{}", 0o600)]);
+    expect(parse(archive)).toMatchObject({ uid: 1000, gid: 1000 });
+  });
+
   it("preserves a restrictive mode for credential-shaped files", () => {
-    const archive = buildTar([
-      { path: "auth.json", content: "{}", mode: 0o600 },
-    ]);
+    const archive = buildTar([file("auth.json", "{}", 0o600)]);
     expect(parse(archive).mode).toBe(0o600);
   });
 
+  it("writes a directory entry: typeflag 5, size 0, trailing slash", () => {
+    const archive = buildTar([
+      { kind: "directory", path: ".codex", mode: 0o755, uid: 1000, gid: 1000 },
+      file(".codex/auth.json", "{}", 0o600),
+    ]);
+    const dir = parse(archive);
+
+    expect(dir).toMatchObject({
+      name: ".codex/",
+      mode: 0o755,
+      uid: 1000,
+      gid: 1000,
+      size: 0,
+      typeflag: "5",
+      magic: "ustar",
+    });
+    // A directory entry has NO body: the file header follows immediately.
+    expect(parse(archive, 1).name).toBe(".codex/auth.json");
+  });
+
+  it("REFUSES a name over USTAR's 100-char field — never truncates", () => {
+    // A silently shortened path is a WRONG path, extracted somewhere nobody
+    // asked for.
+    expect(() => buildTar([file(`${"a/".repeat(60)}f`, "x")])).toThrow(
+      /exceeds USTAR/,
+    );
+  });
+
   it("has a valid checksum (docker rejects archives otherwise)", () => {
-    const archive = buildTar([{ path: "f", content: "x", mode: 0o644 }]);
+    const archive = buildTar([file("f", "x")]);
     const stored = parseInt(
       archive.subarray(148, 155).toString("ascii").replace(/\0+$/, ""),
       8,
@@ -265,18 +318,15 @@ describe("tar builder", () => {
   });
 
   it("pads every entry to a 512-byte boundary and terminates the archive", () => {
-    const archive = buildTar([
-      { path: "a", content: "1", mode: 0o644 },
-      { path: "b", content: "2", mode: 0o644 },
-    ]);
+    const archive = buildTar([file("a", "1"), file("b", "2")]);
     // 2 × (header + padded body) + 2 terminator blocks
     expect(archive.length).toBe(512 * 6);
     expect(archive.subarray(-1024).every((byte) => byte === 0)).toBe(true);
   });
 
   it("is byte-stable for the same input (so payload hashes are stable)", () => {
-    const once = buildTar([{ path: "f", content: "same", mode: 0o644 }]);
-    const twice = buildTar([{ path: "f", content: "same", mode: 0o644 }]);
+    const once = buildTar([file("f", "same")]);
+    const twice = buildTar([file("f", "same")]);
     expect(once.equals(twice)).toBe(true);
   });
 });

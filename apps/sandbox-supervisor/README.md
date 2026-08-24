@@ -1,9 +1,9 @@
 # @onecli/sandbox-supervisor
 
-The program that runs **inside** a hosted agent's sandbox (hosted-agents v2,
-step 2): it renders the home instruction files, drives the harness
-behind the vendor-neutral `@onecli/agent-protocol` interface, and speaks the
-supervisor transport — work items in, canonical events out.
+The program that runs **inside** a hosted agent's sandbox: it renders the home
+instruction files, drives the harness behind the vendor-neutral
+`@onecli/agent-protocol` interface, and speaks the supervisor transport — work
+items in, canonical events out.
 
 ## Shape
 
@@ -13,9 +13,9 @@ supervisor transport — work items in, canonical events out.
   makes the interface real.
 - **Home renderer** (`src/home/renderer.ts`): brief → preamble
   (boundary map) → capability fragments; rebuilt read-only at every boot.
-- **Transport** (`src/transport/`): step 2 ships the stdio driver (JSONL on
-  stdin/stdout; stdout is protocol-only, logs go to stderr). Step 3 adds the
-  WebSocket driver that dials the runner, behind the same seam.
+- **Transport** (`src/transport/`): the stdio driver (JSONL on stdin/stdout;
+  stdout is protocol-only, logs go to stderr) and the WebSocket driver that
+  dials the runner, behind the same seam.
 
 ## Tests
 
@@ -33,5 +33,5 @@ injecting at the wire.
 
 `dev/run-local.sh` is the whole thesis in one command: container-config in,
 placeholders-only container up, one turn piped, the model's real answer
-streaming back through the gateway. See the header for prereqs. It is the
-seed of the step-13 e2e suite.
+streaming back through the gateway. See the header for prereqs. The automated
+form of this proof is the `apps/hosted-e2e` black-box suite.

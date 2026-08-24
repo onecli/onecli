@@ -72,6 +72,12 @@ describe("supervisor loop end-to-end (fake harness, stdio transport)", () => {
     );
     expect(doc).toContain("read .agents/skills/onecli-gateway/SKILL.md");
     expect(doc).toContain("read .agents/skills/<name>/SKILL.md yourself");
+
+    // The machine fragment reaches the instruction doc end-to-end: the
+    // persistence contract (durable ~, stopped-not-destroyed containers)
+    // is registered unconditionally beside the other platform fragments.
+    expect(doc).toContain("/workspace/.home");
+    expect(doc).toContain("/etc/containers/README.onecli");
   });
 
   it("prepends delivery-only context to the harness prompt — and only when present", async () => {

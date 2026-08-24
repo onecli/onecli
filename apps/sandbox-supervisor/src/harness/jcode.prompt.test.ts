@@ -10,7 +10,15 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { PLATFORM_SYSTEM_PROMPT, preparePromptFiles } from "./jcode";
+import {
+  PLATFORM_SYSTEM_PROMPT,
+  preparePromptFiles,
+  SWARM_LIGHT_PROMPT,
+} from "./jcode";
+
+/** What both slots must hold: the base prompt plus the always-on swarm
+ * discipline block, one write, same bytes everywhere. */
+const WRITTEN_PROMPT = PLATFORM_SYSTEM_PROMPT + SWARM_LIGHT_PROMPT;
 
 /**
  * The platform owns the agent's identity — not the harness.
@@ -35,9 +43,11 @@ describe("the platform system prompt", () => {
   it("never names the harness vendor or frames the agent as a coding tool", () => {
     // MUTATION-PROOF: paste any of the harness's own identity lines back into
     // PLATFORM_SYSTEM_PROMPT and this fails — which is the whole point of
-    // replacing the prompt in the first place.
-    expect(PLATFORM_SYSTEM_PROMPT).not.toMatch(/jcode/i);
-    expect(PLATFORM_SYSTEM_PROMPT).not.toMatch(/coding agent/i);
+    // replacing the prompt in the first place. Checked on the FULL written
+    // text (base + swarm block): the discipline block ships to the model in
+    // the same file, so it is bound by the same identity law.
+    expect(WRITTEN_PROMPT).not.toMatch(/jcode/i);
+    expect(WRITTEN_PROMPT).not.toMatch(/coding agent/i);
     // …and it must actively defer identity to what we render.
     expect(PLATFORM_SYSTEM_PROMPT).toContain("hosted autonomous agent");
     const flat = PLATFORM_SYSTEM_PROMPT.replace(/\s+/g, " ");
@@ -84,7 +94,10 @@ describe("the platform system prompt", () => {
       join(home, "system-prompt.md"),
       join(dir, ".jcode", "system-prompt.md"),
     ]) {
-      expect(readFileSync(slot, "utf8")).toBe(PLATFORM_SYSTEM_PROMPT);
+      // The swarm block rides the SAME write — fan-out is always on, so a
+      // slot holding the bare base prompt means the discipline never
+      // reached the model.
+      expect(readFileSync(slot, "utf8")).toBe(WRITTEN_PROMPT);
       expect(statSync(slot).mode & 0o777).toBe(0o444);
     }
   });
@@ -128,7 +141,7 @@ describe("the platform system prompt", () => {
 
     preparePromptFiles(dir, home);
 
-    expect(readFileSync(slot, "utf8")).toBe(PLATFORM_SYSTEM_PROMPT);
+    expect(readFileSync(slot, "utf8")).toBe(WRITTEN_PROMPT);
     expect(statSync(slot).mode & 0o777).toBe(0o444);
   });
 });

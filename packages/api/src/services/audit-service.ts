@@ -32,6 +32,15 @@ export const AUDIT_ACTIONS = {
   // reading "invite" then "accept" is how the join is reconstructed.
   INVITE: "invite",
   ACCEPT: "accept",
+  // SSH front door (sandbox-platform step 5): a short-lived user certificate
+  // signed for a (user, agent) pair — an access GRANT, so first-class rather
+  // than CREATE. Metadata carries ids + the cert serial, never key material.
+  MINT: "mint",
+  // A live shell/scp/sftp session opening and closing. A human-driven shell
+  // is new policy surface — these two rows are the entire session record
+  // (content recording is deliberately out of scope, privacy posture).
+  SESSION_OPEN: "session_open",
+  SESSION_CLOSE: "session_close",
 } as const;
 
 export const AUDIT_SERVICES = {
@@ -90,6 +99,10 @@ export const AUDIT_SERVICES = {
   // EE-only (member provisioning): pre-minted placeholder accounts handed out
   // via claim links. CREATE = minted, ACCEPT = claimed.
   PROVISION: "provision",
+  // SSH front door (sandbox-platform step 5): certificate mints (MINT) and
+  // terminator-reported session open/close. Free shared code, dark without
+  // an SSH CA configured; sourceIp in metadata is terminator-reported.
+  SSH: "ssh",
 } as const;
 
 export const AUDIT_STATUS = {

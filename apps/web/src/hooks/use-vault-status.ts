@@ -2,16 +2,17 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { toast } from "sonner";
-import { GATEWAY_API_URL, IS_CLOUD } from "@/lib/env";
+import { IS_CLOUD } from "@/lib/env";
+import { gatewayHttpOrigin } from "@onecli/api/lib/public-origins";
 import { getGatewayFetchOptions } from "@/lib/gateway-auth";
 
 export const getGatewayApiUrl = (): string => {
-  if (IS_CLOUD) return GATEWAY_API_URL;
+  if (IS_CLOUD) return gatewayHttpOrigin();
   return (
     (typeof window !== "undefined" &&
       ((window as unknown as Record<string, unknown>)
         .__GATEWAY_API_URL__ as string)) ||
-    GATEWAY_API_URL
+    gatewayHttpOrigin()
   );
 };
 

@@ -18,6 +18,7 @@
     "zod": "^4.3.6"
   },
   "devDependencies": {
+    "@onecli/api": "workspace:*",
     "@onecli/eslint-config": "workspace:*",
     "@onecli/typescript-config": "workspace:*",
     "@types/node": "^22.15.3",

@@ -19,10 +19,13 @@ const services = vi.hoisted(() => ({
     email: "admin@example.com",
     name: "Admin",
   })),
+  sshKeyRows: [] as Array<{ id: string; userId: string }>,
 }));
 
 vi.mock("@onecli/db", () => ({
-  Prisma: {},
+  // A class so the ssh-key-service's `instanceof` duplicate check is callable
+  // (never taken here — the in-memory create below cannot throw P2002).
+  Prisma: { PrismaClientKnownRequestError: class extends Error {} },
   db: {
     apiKey: {
       findUnique: async ({ where }: { where: { key: string } }) =>
@@ -32,6 +35,39 @@ vi.mock("@onecli/db", () => ({
       findFirst: async () => null,
     },
     user: { findUnique: async () => ({ email: "admin@example.com" }) },
+    userSshKey: {
+      findMany: async () => services.sshKeyRows,
+      count: async () => services.sshKeyRows.length,
+      findFirst: async ({ where }: { where: { id: string; userId: string } }) =>
+        services.sshKeyRows.find(
+          (r) => r.id === where.id && r.userId === where.userId,
+        ) ?? null,
+      create: async ({ data }: { data: { userId: string; name: string } }) => {
+        const row = {
+          id: "key-1",
+          ...data,
+          fingerprint: "SHA256:x",
+          createdAt: new Date(),
+          lastUsedAt: null,
+        };
+        services.sshKeyRows.push(row as never);
+        return row;
+      },
+      deleteMany: async ({
+        where,
+      }: {
+        where: { id: string; userId: string };
+      }) => {
+        const before = services.sshKeyRows.length;
+        services.sshKeyRows = services.sshKeyRows.filter(
+          (r) => !(r.id === where.id && r.userId === where.userId),
+        );
+        return { count: before - services.sshKeyRows.length };
+      },
+    },
+    // The audit writes are best-effort by contract; give them a real sink so
+    // the handlers stay on the happy path.
+    auditLog: { create: async () => ({}) },
   },
 }));
 
@@ -69,5 +105,63 @@ describe("GET /v1/user auth posture", () => {
       headers: { Authorization: "Bearer oc_org_nope" },
     });
     expect(res.status).toBe(401);
+  });
+});
+
+describe("/v1/user/ssh-keys (account-level, no workspace fence)", () => {
+  const post = (body: unknown) =>
+    app.request("/v1/user/ssh-keys", {
+      method: "POST",
+      headers: { ...AUTH, "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+
+  it("lists without a workspace header", async () => {
+    const res = await app.request("/v1/user/ssh-keys", { headers: AUTH });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ sshKeys: [] });
+  });
+
+  it("registers a valid ed25519 key with 201", async () => {
+    const { generateKeyPairSync } = await import("node:crypto");
+    const { formatEd25519PublicKeyLine, spkiToEd25519Raw } =
+      await import("@onecli/ssh-cert");
+    const pair = generateKeyPairSync("ed25519");
+    const line = formatEd25519PublicKeyLine(
+      spkiToEd25519Raw(
+        Buffer.from(pair.publicKey.export({ format: "der", type: "spki" })),
+      ),
+      "route-test",
+    );
+    const res = await post({ name: "MacBook", publicKey: line });
+    expect(res.status).toBe(201);
+    const body = (await res.json()) as { sshKey: { id: string } };
+    expect(body.sshKey.id).toBe("key-1");
+
+    const del = await app.request(`/v1/user/ssh-keys/${body.sshKey.id}`, {
+      method: "DELETE",
+      headers: AUTH,
+    });
+    expect(del.status).toBe(204);
+  });
+
+  it("refuses a malformed body with the documented 422 shape", async () => {
+    const res = await post({ name: "", publicKey: "x" });
+    expect(res.status).toBe(422);
+    const body = (await res.json()) as { error: { message: string } };
+    expect(body.error.message).toBeTruthy();
+  });
+
+  it("refuses a non-ed25519 key with 422", async () => {
+    const res = await post({ name: "RSA", publicKey: "ssh-rsa AAAAB3Nza" });
+    expect(res.status).toBe(422);
+  });
+
+  it("404s a delete of an id the user does not own", async () => {
+    const res = await app.request("/v1/user/ssh-keys/not-mine", {
+      method: "DELETE",
+      headers: AUTH,
+    });
+    expect(res.status).toBe(404);
   });
 });

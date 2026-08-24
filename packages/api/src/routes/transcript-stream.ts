@@ -1,6 +1,7 @@
 import type { Context } from "hono";
 import { streamSSE } from "hono/streaming";
-import { subscribe, type PublishedEvent } from "../services/event-bus";
+import { type PublishedEvent } from "../services/event-bus";
+import { getEventBus } from "../providers/event-bus";
 import { logger } from "../lib/logger";
 
 const log = logger.child({ component: "transcript-stream" });
@@ -129,7 +130,7 @@ export const streamTranscript = (
       /** Set when the reader fell too far behind to keep buffering. */
       let overflowed = false;
 
-      const release = subscribe(conversationId, (events) => {
+      const subscription = getEventBus().subscribe(conversationId, (events) => {
         if (pending.length + events.length > MAX_PENDING_EVENTS) {
           overflowed = true;
           pending.length = 0;
@@ -139,6 +140,7 @@ export const streamTranscript = (
         pending.push(...events);
         wake?.();
       });
+      const release = subscription.release;
       // Released on every exit path: a closed tab must not leak a listener.
       // Waking too, so the loop notices and exits instead of sitting parked
       // on the heartbeat timer still holding its subscription.
@@ -214,36 +216,59 @@ export const streamTranscript = (
           };
         });
 
-      // Everything from here on is inside the try, so the subscription is
-      // released even if the history read fails.
-      try {
-        // Everything the client missed, in order, before any live event — so
-        // the tail can never arrive ahead of the history it belongs after.
-        //
-        // PAGED TO EXHAUSTION, not one page. `lastSeq` only ever advances,
-        // so stopping at the first page would move the cursor past the rest
-        // of the backlog and the live tail would never fill it in — the gap
-        // would survive until the client reconnected, which is precisely the
-        // loss this endpoint exists to prevent. A long turn with many tool
-        // calls clears 500 events easily.
-        let cursor = Number.isFinite(since) ? since : undefined;
+      /**
+       * Replay durable history after `fromCursor`, paged to exhaustion,
+       * advancing `lastSeq` past everything written. Two callers: the
+       * startup snapshot, and the live drain's gap repair.
+       *
+       * PAGED TO EXHAUSTION, not one page. `lastSeq` only ever advances,
+       * so stopping at the first page would move the cursor past the rest
+       * of the backlog and the live tail would never fill it in — the gap
+       * would survive until the client reconnected, which is precisely the
+       * loss this endpoint exists to prevent. A long turn with many tool
+       * calls clears 500 events easily.
+       */
+      const replayHistory = async (fromCursor: number | undefined) => {
+        let cursor = fromCursor;
         for (let page = 0; page < HISTORY_PAGE_LIMIT; page += 1) {
           const history = await readHistory({
             since: cursor,
             limit: HISTORY_PAGE_SIZE,
           });
           for (const event of history.events) {
-            await stream.writeSSE({
-              id: String(event.seq),
-              event: "transcript",
-              data: JSON.stringify(event),
-            });
+            await writeOrCut(() =>
+              stream.writeSSE({
+                id: String(event.seq),
+                event: "transcript",
+                data: JSON.stringify(event),
+              }),
+            );
+            if (stream.aborted || stream.closed) return;
           }
           lastSeq = Math.max(lastSeq, history.nextSince);
           cursor = history.nextSince;
           if (!history.hasMore) break;
           if (stream.aborted || stream.closed) break;
         }
+      };
+
+      // Everything from here on is inside the try, so the subscription is
+      // released even if the history read fails.
+      try {
+        // Wait for the subscription to be genuinely ACTIVE before the history
+        // snapshot: with an async bus (Redis), a publish between an un-acked
+        // SUBSCRIBE and the snapshot below would be in neither, and lost on a
+        // healthy connection until reload. Instant for the in-process bus.
+        // A subscribe that FAILS rejects here, which closes the stream — the
+        // client's EventSource retries on its backoff, which beats serving a
+        // heartbeat-alive stream that is silently deaf.
+        // Any live events that arrive during the history read are buffered in
+        // `pending` and the `seq <= lastSeq` dedupe drops the overlap.
+        await subscription.ready;
+
+        // Everything the client missed, in order, before any live event — so
+        // the tail can never arrive ahead of the history it belongs after.
+        await replayHistory(Number.isFinite(since) ? since : undefined);
 
         // One frame up front, so the client — and every proxy between it and
         // here — sees a live stream even when there is no history to replay.
@@ -265,6 +290,21 @@ export const streamTranscript = (
             // `<= lastSeq` is the dedupe: history and the live tail overlap
             // by design, and a reconnecting reader must not see doubles.
             if (!event || event.seq <= lastSeq) continue;
+            // GAP REPAIR. Seqs are contiguous per conversation and every
+            // event — deltas included — is published, so a hole in the live
+            // tail means a publish was dropped (a Redis blip) or arrived
+            // out of order across pods. Advancing `lastSeq` over the hole
+            // would make the dedupe hide its durable events for the life of
+            // the connection — so read them back first: this event's publish
+            // happened after its commit and commits are seq-ordered, so
+            // everything below it is already readable. A delta-only hole
+            // (deltas are published but never stored) reads back empty and
+            // costs one bounded page.
+            if (event.seq > lastSeq + 1) {
+              await replayHistory(lastSeq);
+              // The repair may have replayed this event itself.
+              if (event.seq <= lastSeq) continue;
+            }
             lastSeq = event.seq;
             await writeOrCut(() =>
               stream.writeSSE({

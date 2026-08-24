@@ -113,6 +113,7 @@ export type {
 } from "./transport";
 
 export {
+  MAX_RUNNER_EVENTS_PER_POST,
   MAX_SANDBOX_CHECK_IDS,
   runnerCapabilitiesSchema,
   runnerEventSchema,

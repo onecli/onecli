@@ -8,6 +8,7 @@ import * as workspaceAccess from "./workspace-access";
 import * as domains from "./domains";
 import * as invitations from "./invitations";
 import * as provisions from "./provisions";
+import * as org from "./org";
 import * as orgMembers from "./org-members";
 import * as groups from "./groups";
 import * as roleMappings from "./role-mappings";
@@ -28,6 +29,7 @@ import * as channels from "./channels";
 import * as crons from "./crons";
 import * as memories from "./memories";
 import * as skills from "./skills";
+import * as sshKeys from "./ssh-keys";
 
 export {
   agents,
@@ -40,6 +42,7 @@ export {
   domains,
   invitations,
   provisions,
+  org,
   orgMembers,
   groups,
   roleMappings,
@@ -60,6 +63,7 @@ export {
   crons,
   memories,
   skills,
+  sshKeys,
 };
 export type {
   Agent,
@@ -112,6 +116,10 @@ export type {
   AgentWithGrantsSummary,
   GrantsSummaryEntry,
   InstanceInfo,
+  OrgInfo,
+  SshKey,
+  MintSshCertificateSource,
+  MintedSshCertificate,
   AttachmentMeta,
   Conversation,
   ConversationSource,

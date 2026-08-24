@@ -14,15 +14,20 @@ export {
   type WorkspaceRef,
   type SessionDenial,
   type SessionEnforcer,
+  type SessionThrottle,
   type OAuthOrgHandlers,
   type OrgAppConfigProvider,
   type AppAvailabilityProvider,
   type CryptoService,
   type AppDefinition,
+  type SshCaSigner,
 } from "./types";
 
 export { initSession, getSessionProvider } from "./session";
 export { initCrypto, getCrypto } from "./crypto";
+export { initSshCa, getSshCa } from "./ssh-ca";
+export { type EventBus } from "../services/event-bus";
+export { initEventBus, getEventBus } from "./event-bus";
 export {
   type AttachmentBlobMeta,
   type AttachmentBlobRef,
@@ -41,6 +46,7 @@ export {
   getWorkspaceAccessChecker,
 } from "./access-checker";
 export { initSessionEnforcer, getSessionEnforcer } from "./session-enforcer";
+export { initSessionThrottle, getSessionThrottle } from "./session-throttle";
 export {
   type ResourceHooks,
   getResourceHooks,

@@ -16,31 +16,13 @@
 import { capabilitiesFor, parseEdition } from "@onecli/api/lib/edition";
 
 // ── App URLs ────────────────────────────────────────────────────────────
-
-/** Web app base URL (e.g., `https://app.onecli.sh` or `http://localhost:10254`). */
-export const APP_URL =
-  process.env.APP_URL ??
-  process.env.NEXT_PUBLIC_APP_URL ??
-  "http://localhost:10254";
-
-/** API server URL used by browser-side code for general API calls. */
-export const API_URL =
-  process.env.API_URL ??
-  process.env.NEXT_PUBLIC_API_URL ??
-  "http://localhost:10256";
-
-/** Gateway HTTP API URL for vault, cache, and approval calls. */
-export const GATEWAY_API_URL =
-  process.env.GATEWAY_API_URL ??
-  process.env.NEXT_PUBLIC_GATEWAY_API_URL ??
-  "http://localhost:10255";
-
-/**
- * Gateway CONNECT proxy address used by server-side code when the web app
- * calls the gateway from within a Docker network (e.g., `host.docker.internal:10255`).
- */
-export const GATEWAY_BASE_URL =
-  process.env.GATEWAY_BASE_URL ?? "host.docker.internal:10255";
+//
+// The URL exports moved to the shared resolver —
+// `@onecli/api/lib/public-origins` (`appOrigin()` / `apiOrigin()` /
+// `gatewayHttpOrigin()`). It is client-safe (a leaf module whose
+// `NEXT_PUBLIC_*` reads stay literal, so the build-time bakes keep working
+// as the browser fallback) and, unlike the constants that used to live here,
+// it can tell a configured URL from a defaulted one.
 
 // ── Version ─────────────────────────────────────────────────────────────
 
@@ -71,16 +53,12 @@ export const IS_CLOUD = EDITION_INFO.edition === "cloud";
 
 export const SECRET_ENCRYPTION_KEY = process.env.SECRET_ENCRYPTION_KEY ?? "";
 
-export const OAUTH_STATE_SECRET = process.env.OAUTH_STATE_SECRET ?? "";
-
 /**
  * Whether a Google sign-in button should be offered. Read server-side and
  * passed to the login screens as a prop — the value itself never reaches the
  * browser.
  */
 export const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID ?? "";
-
-export const GOOGLE_CLIENT_SECRET = process.env.GOOGLE_CLIENT_SECRET ?? "";
 
 // ── Cloud: Cognito ──────────────────────────────────────────────────────
 
@@ -97,45 +75,13 @@ export const COGNITO_USER_POOL_ID =
   process.env.NEXT_PUBLIC_COGNITO_USER_POOL_ID ??
   "";
 
-// ── Cloud: Stripe ───────────────────────────────────────────────────────
-
-export const STRIPE_SECRET_KEY = process.env.STRIPE_SECRET_KEY ?? "";
-
-export const STRIPE_PRO_PRICE_ID = process.env.STRIPE_PRO_PRICE_ID ?? "";
-
-// ── Cloud: Notifications ────────────────────────────────────────────────
-
-export const RESEND_API_KEY = process.env.RESEND_API_KEY ?? "";
-
-export const DISCORD_WEBHOOK_URL = process.env.DISCORD_WEBHOOK_URL ?? "";
-
-export const ENVIRONMENT = process.env.ENVIRONMENT ?? "dev";
-
-// ── Cloud: KMS ──────────────────────────────────────────────────────────
-
-export const KMS_KEY_ARN = process.env.KMS_KEY_ARN ?? "";
-
-// ── Cloud: Redis ────────────────────────────────────────────────────────
-
-export const REDIS_HOST = process.env.REDIS_HOST ?? "";
-
-export const REDIS_PORT = process.env.REDIS_PORT ?? "6379";
-
-export const REDIS_USERNAME = process.env.REDIS_USERNAME ?? "";
-
-export const REDIS_PASSWORD = process.env.REDIS_PASSWORD ?? "";
-
-// ── Gateway TLS ─────────────────────────────────────────────────────────
-
-export const GATEWAY_CA_CERT = process.env.GATEWAY_CA_CERT ?? "";
-
-export const GATEWAY_CA_PEM_FILE = process.env.GATEWAY_CA_PEM_FILE ?? "";
+// The server-only cloud vars (Stripe, Resend, Discord, KMS, Redis, gateway
+// TLS) are deliberately NOT re-exported here: nothing in the dashboard reads
+// them — the live reads are in `@onecli/api`, which the web server process
+// executes through the edition defaults and server actions.
 
 // ── Logging & Runtime ───────────────────────────────────────────────────
 
 export const LOG_LEVEL = process.env.LOG_LEVEL ?? "info";
 
 export const NODE_ENV = process.env.NODE_ENV ?? "development";
-
-/** User home directory (system). */
-export const HOME = process.env.HOME ?? "";

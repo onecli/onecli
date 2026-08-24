@@ -73,6 +73,7 @@ const mirror = (input: {
   knownCursor?: string | null;
   iconUrl?: string | null;
   modelsUrl?: string;
+  chatUrl?: string;
   onLog?: (message: string, detail?: unknown) => void;
 }) =>
   // The REAL Slack posts implementation rides the fake HTTP server — the
@@ -86,6 +87,7 @@ const mirror = (input: {
     knownCursor: input.knownCursor ?? "2026-08-05T00:00:00.000Z",
     item: input.workItem ?? item(),
     ...(input.modelsUrl && { modelsUrl: input.modelsUrl }),
+    ...(input.chatUrl && { chatUrl: input.chatUrl }),
     onLog: input.onLog ?? (() => {}),
   });
 
@@ -261,6 +263,378 @@ describe("what gets posted", () => {
     expect(slack.callsTo("chat.postMessage").map((c) => c.form.text)).toEqual([
       "The answer.",
     ]);
+  });
+
+  it("renders a gateway connect link as a card with a button, not a bare URL", async () => {
+    // The web chat renders these links as the ConnectorSuggestions card; the
+    // Slack mirror does the Block Kit equivalent — the raw URL leaves the
+    // prose, and the app row carries an Attach/Connect link button.
+    const controlPlane = createFakeControlPlane(
+      transcriptWith(
+        "You'll need to attach the account to me here: https://app.example.com/w/ws1/connections/apps/google-calendar\nLet me know once it's attached.",
+      ),
+    );
+
+    await mirror({
+      controlPlane,
+      workItem: item({ source: "slack" }),
+      chatUrl: "https://app.example.com/w/ws1/agents/ag1/chat",
+    });
+
+    const posted = slack.callsTo("chat.postMessage");
+    expect(posted).toHaveLength(1);
+    const blocks = JSON.parse(posted[0]!.form.blocks!) as {
+      type: string;
+      text?: { text: string };
+      elements?: {
+        type: string;
+        text?: { text: string } | string;
+        url?: string;
+        image_url?: string;
+      }[];
+    }[];
+    const rendered = JSON.stringify(blocks);
+    // The raw URL is not in the prose section…
+    expect(blocks[0]?.text?.text).not.toContain("connections/apps");
+    // …the card names the app, its state, and its icon…
+    expect(rendered).toContain("Google Calendar");
+    expect(rendered).toContain("Attach an account to this agent");
+    expect(rendered).toContain("faviconV2");
+    expect(rendered).toContain("calendar.google.com");
+    // …and the button deep-links to the agent's chat with the attach param
+    // (the web opens the attach dialog over the conversation).
+    const button = blocks
+      .filter((b) => b.type === "actions")
+      .flatMap((b) => b.elements ?? [])
+      .find((el) => el.type === "button");
+    expect((button?.text as { text: string } | undefined)?.text).toBe("Attach");
+    expect(button?.url).toBe(
+      "https://app.example.com/w/ws1/agents/ag1/chat?attach=google-calendar",
+    );
+  });
+
+  it("posts the plain answer when no chat URL is configured — a card button never carries a model-authored URL", async () => {
+    // MUTATION-PROOF: render the card on the degraded path anyway (button
+    // url = the matched link) and this fails — the answer is model prose, so
+    // that button would put whatever domain the model wrote behind a
+    // domain-hiding button. As a bare link in the prose the domain stays
+    // visible.
+    const controlPlane = createFakeControlPlane(
+      transcriptWith(
+        "Attach it here: https://evil.example.com/connections/apps/google-calendar",
+      ),
+    );
+
+    await mirror({ controlPlane, workItem: item({ source: "slack" }) });
+
+    const posted = slack.callsTo("chat.postMessage");
+    expect(posted).toHaveLength(1);
+    expect(posted[0]!.form.blocks).toBeUndefined();
+    expect(posted[0]!.form.text).toContain("evil.example.com");
+  });
+
+  it("caps the card rows so a link-stuffed answer cannot exceed Slack's block limit", async () => {
+    // Slack rejects a message over 50 blocks and each card row costs two —
+    // an answer stuffed with links must still post: capped rows, the rest
+    // left in the prose. MUTATION-PROOF: drop the cap in cardLinks and the
+    // actions count below reads 12. Real catalog ids: the card gate rejects
+    // invented providers, which is its own test below.
+    const providers = [
+      "gmail",
+      "github",
+      "gitlab",
+      "docker",
+      "dropbox",
+      "confluence",
+      "datadog",
+      "cloudflare",
+      "aws",
+      "flyio",
+      "attio",
+      "affinity",
+    ];
+    const links = providers.map(
+      (id) => `https://app.example.com/w/ws1/connections?connect=${id}`,
+    );
+    const controlPlane = createFakeControlPlane(
+      transcriptWith(`Connect these: ${links.join(" ")}`),
+    );
+
+    await mirror({
+      controlPlane,
+      workItem: item({ source: "slack" }),
+      chatUrl: "https://app.example.com/w/ws1/agents/ag1/chat",
+    });
+
+    const posted = slack.callsTo("chat.postMessage");
+    expect(posted).toHaveLength(1);
+    const blocks = JSON.parse(posted[0]!.form.blocks!) as { type: string }[];
+    expect(blocks.filter((b) => b.type === "actions")).toHaveLength(10);
+    // The links past the cap stay in the prose rather than vanishing.
+    const prose = JSON.stringify(blocks[0]);
+    expect(prose).toContain("connect=attio");
+    expect(prose).toContain("connect=affinity");
+  });
+
+  it("never cards a provider the app catalog does not know", async () => {
+    // MUTATION-PROOF: drop the getApp gate in cardLinks and this fails —
+    // a model-invented provider would otherwise strip the user's only real
+    // link from the prose and assert an official-looking attach row
+    // UI, favicon and all (the web's isCardConnectLink law).
+    const controlPlane = createFakeControlPlane(
+      transcriptWith(
+        "Attach it here: https://app.example.com/w/ws1/connections/apps/paypal-fake",
+      ),
+    );
+
+    await mirror({
+      controlPlane,
+      workItem: item({ source: "slack" }),
+      chatUrl: "https://app.example.com/w/ws1/agents/ag1/chat",
+    });
+
+    const posted = slack.callsTo("chat.postMessage");
+    expect(posted).toHaveLength(1);
+    expect(posted[0]!.form.blocks).toBeUndefined();
+    expect(posted[0]!.form.text).toContain("connections/apps/paypal-fake");
+  });
+
+  it("only recognizes the exact connect shapes — ?reconnect= and deeper /apps/ paths stay prose", async () => {
+    // MUTATION-PROOF: loosen CONNECT_LINK_RE back to substring matching and
+    // this fails — '?reconnect=gmail' would card Gmail and swallow the URL.
+    const controlPlane = createFakeControlPlane(
+      transcriptWith(
+        "See https://app.example.com/w/ws1/connections?reconnect=gmail and https://app.example.com/w/ws1/connections/apps/gmail/settings",
+      ),
+    );
+
+    await mirror({
+      controlPlane,
+      workItem: item({ source: "slack" }),
+      chatUrl: "https://app.example.com/w/ws1/agents/ag1/chat",
+    });
+
+    const posted = slack.callsTo("chat.postMessage");
+    expect(posted).toHaveLength(1);
+    expect(posted[0]!.form.blocks).toBeUndefined();
+    expect(posted[0]!.form.text).toContain("reconnect=gmail");
+  });
+
+  it("lifts a markdown-form connect link out whole — no '[label]()' remnant", async () => {
+    // MUTATION-PROOF: strip only the URL span and the prose keeps a broken
+    // '[attach it here]()' skeleton.
+    const controlPlane = createFakeControlPlane(
+      transcriptWith(
+        "You can [attach it here](https://app.example.com/w/ws1/connections/apps/google-calendar) once ready.",
+      ),
+    );
+
+    await mirror({
+      controlPlane,
+      workItem: item({ source: "slack" }),
+      chatUrl: "https://app.example.com/w/ws1/agents/ag1/chat",
+    });
+
+    const posted = slack.callsTo("chat.postMessage");
+    expect(posted).toHaveLength(1);
+    const blocks = JSON.parse(posted[0]!.form.blocks!) as {
+      type: string;
+      text?: { text: string };
+    }[];
+    expect(blocks[0]?.text?.text).not.toContain("attach it here");
+    expect(blocks[0]?.text?.text).not.toContain("()");
+    expect(JSON.stringify(blocks)).toContain("Google Calendar");
+  });
+
+  it("chunks long prose into 3,000-char-safe sections instead of losing the post", async () => {
+    // Slack caps a section's text at 3,000 chars and rejects the whole
+    // message past it — invalid_blocks AFTER the cursor advanced would
+    // silently drop the answer. MUTATION-PROOF: put the prose back into one
+    // section block and the length assertion fails.
+    const paragraph = `${"An answer long enough to overflow a single Slack section block. ".repeat(60)}\n`;
+    const controlPlane = createFakeControlPlane(
+      transcriptWith(
+        `${paragraph.repeat(2)}Attach it: https://app.example.com/w/ws1/connections/apps/google-calendar`,
+      ),
+    );
+
+    await mirror({
+      controlPlane,
+      workItem: item({ source: "slack" }),
+      chatUrl: "https://app.example.com/w/ws1/agents/ag1/chat",
+    });
+
+    const posted = slack.callsTo("chat.postMessage");
+    expect(posted).toHaveLength(1);
+    const blocks = JSON.parse(posted[0]!.form.blocks!) as {
+      type: string;
+      text?: { text: string };
+    }[];
+    const sections = blocks.filter((b) => b.type === "section");
+    expect(sections.length).toBeGreaterThan(1);
+    for (const section of sections) {
+      expect(section.text!.text.length).toBeLessThanOrEqual(3000);
+    }
+    expect(blocks.filter((b) => b.type === "actions")).toHaveLength(1);
+  });
+
+  it("posts a past-40k answer plain — the link scan stays inside mrkdwn's hostile-input fence", async () => {
+    // MUTATION-PROOF: drop the length gate and this cards the link (blocks
+    // defined) — and re-opens the quadratic-scan surface on unbounded input.
+    const controlPlane = createFakeControlPlane(
+      transcriptWith(
+        `${"x".repeat(40_001)} https://app.example.com/w/ws1/connections/apps/google-calendar`,
+      ),
+    );
+
+    await mirror({
+      controlPlane,
+      workItem: item({ source: "slack" }),
+      chatUrl: "https://app.example.com/w/ws1/agents/ag1/chat",
+    });
+
+    const posted = slack.callsTo("chat.postMessage");
+    expect(posted).toHaveLength(1);
+    expect(posted[0]!.form.blocks).toBeUndefined();
+  });
+
+  it("degrades to the plain answer when escape expansion would crest Slack's block ceiling", async () => {
+    // The mirror's 40k fence measures the INPUT, but the converter's
+    // escaping expands `&` 5× — a sub-40k answer can convert to ~200k of
+    // mrkdwn, whose section chunks plus card rows exceed 50 blocks and
+    // Slack rejects the WHOLE post (invalid_blocks) after the cursor
+    // advanced. MUTATION-PROOF: drop the block-budget fence in connectCards
+    // and this posts blocks (and the answer would be lost for real).
+    const controlPlane = createFakeControlPlane(
+      transcriptWith(
+        `${"&".repeat(39_000)} https://app.example.com/w/ws1/connections/apps/google-calendar`,
+      ),
+    );
+
+    await mirror({
+      controlPlane,
+      workItem: item({ source: "slack" }),
+      chatUrl: "https://app.example.com/w/ws1/agents/ag1/chat",
+    });
+
+    const posted = slack.callsTo("chat.postMessage");
+    expect(posted).toHaveLength(1);
+    expect(posted[0]!.form.blocks).toBeUndefined();
+    // Any input tripping the block budget converted past 40k too, so the
+    // plain fallback truncates (marked, under Slack's msg_too_long cap) — a
+    // delivered prefix beats losing the whole answer to the rejection.
+    // MUTATION-PROOF: drop the truncation and the length assertion fails
+    // (~195k), which live would be msg_too_long — nothing delivered.
+    expect(posted[0]!.form.text!.length).toBeLessThanOrEqual(39_050);
+    expect(posted[0]!.form.text!.endsWith("… (truncated)")).toBe(true);
+  });
+
+  it("keeps the card post's notification text to one section — never the whole converted answer", async () => {
+    // With blocks carrying the content, `text` is only the notification
+    // fallback — past 40k it rejects the whole post (msg_too_long).
+    // MUTATION-PROOF: put the full converted text back and the length
+    // assertion fails.
+    const paragraph = `${"A long answer that needs several section chunks to stay postable. ".repeat(90)}\n`;
+    const controlPlane = createFakeControlPlane(
+      transcriptWith(
+        `${paragraph}Attach it: https://app.example.com/w/ws1/connections/apps/google-calendar`,
+      ),
+    );
+
+    await mirror({
+      controlPlane,
+      workItem: item({ source: "slack" }),
+      chatUrl: "https://app.example.com/w/ws1/agents/ag1/chat",
+    });
+
+    const posted = slack.callsTo("chat.postMessage");
+    expect(posted).toHaveLength(1);
+    expect(posted[0]!.form.blocks).toBeDefined();
+    expect(posted[0]!.form.text!.length).toBeLessThanOrEqual(2900);
+  });
+
+  it("never cuts a section chunk inside a <url|label> token", async () => {
+    // A converted link straddling the 2,900 chunk boundary would render as
+    // literal angle-bracket soup in both halves. MUTATION-PROOF: drop the
+    // open-token check in sectionChunks and the first chunk ends mid-token.
+    const straddler = `${"x".repeat(2_880)} [click the long link](https://example.com/${"p".repeat(120)}) ${"y".repeat(3_000)}\nAttach: https://app.example.com/w/ws1/connections/apps/google-calendar`;
+    const controlPlane = createFakeControlPlane(transcriptWith(straddler));
+
+    await mirror({
+      controlPlane,
+      workItem: item({ source: "slack" }),
+      chatUrl: "https://app.example.com/w/ws1/agents/ag1/chat",
+    });
+
+    const posted = slack.callsTo("chat.postMessage");
+    expect(posted).toHaveLength(1);
+    const blocks = JSON.parse(posted[0]!.form.blocks!) as {
+      type: string;
+      text?: { text: string };
+    }[];
+    const sections = blocks.filter((b) => b.type === "section");
+    expect(sections.length).toBeGreaterThan(1);
+    for (const section of sections) {
+      const text = section.text!.text;
+      const lastOpen = text.lastIndexOf("<");
+      if (lastOpen !== -1) {
+        expect(text.indexOf(">", lastOpen)).toBeGreaterThan(lastOpen);
+      }
+    }
+  });
+
+  it("survives a connect link nested inside another connect link's markdown label", async () => {
+    // The wrapper rewind makes the outer link's span start before the inner
+    // link's end; the backwards slice must stay empty — no duplicated prose,
+    // both providers carded once.
+    const controlPlane = createFakeControlPlane(
+      transcriptWith(
+        "[see https://app.example.com/w/ws1/connections/apps/gmail](https://app.example.com/w/ws1/connections/apps/google-calendar)",
+      ),
+    );
+
+    await mirror({
+      controlPlane,
+      workItem: item({ source: "slack" }),
+      chatUrl: "https://app.example.com/w/ws1/agents/ag1/chat",
+    });
+
+    const posted = slack.callsTo("chat.postMessage");
+    expect(posted).toHaveLength(1);
+    const blocks = JSON.parse(posted[0]!.form.blocks!) as { type: string }[];
+    expect(blocks.filter((b) => b.type === "actions")).toHaveLength(2);
+    const rendered = JSON.stringify(blocks);
+    expect(rendered).toContain("Gmail");
+    expect(rendered).toContain("Google Calendar");
+    // No section repeats the answer's text — the spans never double-count.
+    expect(rendered.match(/connections\/apps/g)).toBeNull();
+  });
+
+  it("joins the attach param with & when the chat URL already carries a query", async () => {
+    const controlPlane = createFakeControlPlane(
+      transcriptWith(
+        "Attach: https://app.example.com/w/ws1/connections/apps/google-calendar",
+      ),
+    );
+
+    await mirror({
+      controlPlane,
+      workItem: item({ source: "slack" }),
+      chatUrl: "https://app.example.com/w/ws1/agents/ag1/chat?tab=chat",
+    });
+
+    const posted = slack.callsTo("chat.postMessage");
+    const blocks = JSON.parse(posted[0]!.form.blocks!) as {
+      type: string;
+      elements?: { type: string; url?: string }[];
+    }[];
+    const button = blocks
+      .filter((b) => b.type === "actions")
+      .flatMap((b) => b.elements ?? [])
+      .find((el) => el.type === "button");
+    expect(button?.url).toBe(
+      "https://app.example.com/w/ws1/agents/ag1/chat?tab=chat&attach=google-calendar",
+    );
   });
 
   it("renders the answer's markdown as mrkdwn — bold, bullets, links", async () => {

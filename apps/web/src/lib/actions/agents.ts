@@ -3,7 +3,6 @@
 import { resolveWorkspaceContext } from "@/lib/actions/resolve-user";
 import {
   listAgents,
-  createAgent as createAgentService,
   deleteAgent as deleteAgentService,
   updateAgent as updateAgentService,
   regenerateAgentToken as regenerateAgentTokenService,
@@ -17,21 +16,6 @@ import {
 export const getAgents = async () => {
   const { workspaceId } = await resolveWorkspaceContext();
   return listAgents(workspaceId);
-};
-
-export const createAgent = async (name: string, identifier: string) => {
-  const { userId, userEmail, workspaceId } = await resolveWorkspaceContext();
-  return withAudit(
-    () => createAgentService(workspaceId, { name, identifier }, userId),
-    (agent) => ({
-      workspaceId,
-      userId,
-      userEmail,
-      action: AUDIT_ACTIONS.CREATE,
-      service: AUDIT_SERVICES.AGENT,
-      metadata: { agentId: agent.id, name, identifier },
-    }),
-  );
 };
 
 export const deleteAgent = async (agentId: string): Promise<void> => {

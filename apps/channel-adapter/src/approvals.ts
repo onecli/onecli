@@ -458,11 +458,18 @@ export const createApprovalsManager = (deps: ApprovalsManagerDeps) => {
       }
     },
 
-    /** Boot sweep: re-arm cards the ledger says are still pending, against the
-     * REAL gateway deadline (not a guess). */
+    /** Recovery sweep — at boot and on every ownership acquisition: re-arm
+     * cards the ledger says are still pending, against the REAL gateway
+     * deadline (not a guess). */
     async recoverUnsettled(): Promise<void> {
       const unsettled = await deps.controlPlane.listUnsettledPrompts();
       for (const prompt of unsettled) {
+        // Never clobber a LIVE tracked prompt: acquisition sweeps run while
+        // this instance's own claims are mid-flight, and re-seeding from the
+        // ledger would reset a fresher `ts`/`title` (a card between claim and
+        // record-message would strand looking live). Recovery is for prompts
+        // we are NOT tracking — a dead peer's, or our own after a restart.
+        if (prompts.has(prompt.approvalId)) continue;
         const ref = prompt.externalMessageRef;
         const separator = ref?.indexOf(":") ?? -1;
         prompts.set(prompt.approvalId, {

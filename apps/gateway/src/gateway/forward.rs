@@ -64,6 +64,158 @@ fn is_forwarded_response_header(name: &HeaderName) -> bool {
     !HOP_BY_HOP_HEADERS.contains(&name.as_str())
 }
 
+/// Split `value` on every `sep` byte that lies OUTSIDE a double-quoted string.
+/// `WWW-Authenticate` uses commas both between challenges AND between the
+/// auth-params of one challenge, and realm/scope values are quoted and may
+/// themselves contain commas — so a naive split is wrong. Returns borrowed
+/// slices (no allocation).
+///
+/// `sep` is a `u8` and MUST be ASCII: the scan compares raw bytes, so both the
+/// separator and the `"` toggle only ever match single ASCII bytes. Because
+/// ASCII bytes never occur inside a multibyte UTF-8 sequence, every split index
+/// lands on a char boundary — the slices are always valid. (A non-ASCII `sep`
+/// would match a continuation byte and slice mid-codepoint; the debug assert
+/// pins the contract.)
+fn split_outside_quotes(value: &str, sep: u8) -> impl Iterator<Item = &str> {
+    debug_assert!(
+        sep.is_ascii() && sep != b'"',
+        "sep must be a non-quote ASCII byte"
+    );
+    let mut in_quotes = false;
+    let mut start = 0usize;
+    let mut done = false;
+    let bytes = value.as_bytes();
+    std::iter::from_fn(move || {
+        if done {
+            return None;
+        }
+        let mut i = start;
+        while i < bytes.len() {
+            let b = bytes[i];
+            if b == b'"' {
+                in_quotes = !in_quotes;
+            } else if b == sep && !in_quotes {
+                let seg = &value[start..i];
+                start = i + 1;
+                return Some(seg);
+            }
+            i += 1;
+        }
+        done = true;
+        Some(&value[start..])
+    })
+}
+
+/// True when `value` is an absolute `http(s)` URL with a non-empty host — the
+/// shape a container/OCI registry (or any OAuth2 token-exchange) uses for the
+/// `realm` that the client resolves anonymously to mint a token. A bare label
+/// realm (`realm="OpenAI API"`, `realm="Stripe"`) is deliberately NOT a URL.
+fn is_absolute_http_url(value: &str) -> bool {
+    let v = value.trim();
+    let bytes = v.as_bytes();
+    // Compare the scheme on bytes (ASCII, case-insensitive) so we never slice a
+    // str on a non-char-boundary; "http(s)://" is pure ASCII, so the resulting
+    // index is always a valid boundary.
+    let scheme_len = if bytes.len() >= 8 && bytes[..8].eq_ignore_ascii_case(b"https://") {
+        8
+    } else if bytes.len() >= 7 && bytes[..7].eq_ignore_ascii_case(b"http://") {
+        7
+    } else {
+        return false;
+    };
+    // Require a non-empty host before any path/query/fragment.
+    v[scheme_len..]
+        .split(['/', '?', '#'])
+        .next()
+        .is_some_and(|host| !host.is_empty())
+}
+
+/// True when one `WWW-Authenticate` header value carries a **`Bearer`**
+/// challenge whose own `realm` param is an absolute `http(s)` URL.
+///
+/// Parses the RFC 9110 `1#challenge` grammar: comma-separated (outside quotes),
+/// where each `challenge = auth-scheme [ 1*SP #auth-param ]`. A segment is a
+/// *continuation* auth-param when its leading token is followed (after optional
+/// BWS) by `=` — `auth-param = token BWS "=" BWS ( token / quoted-string )`;
+/// otherwise its leading token is a new auth-scheme. The realm is matched to
+/// the scheme of ITS OWN challenge — so a `Basic` challenge with a URL-shaped
+/// realm does NOT match, a `realm=` nested inside another param's quoted value
+/// does NOT match (only the param whose NAME is `realm`), and
+/// `Basic …, Bearer realm="https://…"` on one line DOES (including a
+/// `realm ="…"` continuation with BWS before the `=`).
+fn value_has_bearer_url_realm(value: &str) -> bool {
+    let mut current_is_bearer = false;
+    for segment in split_outside_quotes(value, b',') {
+        let seg = segment.trim();
+        if seg.is_empty() {
+            continue;
+        }
+        // Leading token = up to the first whitespace or `=`. The segment is a
+        // continuation param when, after that token, the next non-space char is
+        // `=` (`name = value`, BWS allowed); otherwise the token is a new
+        // auth-scheme and the remainder is its first auth-param.
+        let token_end = seg
+            .find(|c: char| c.is_ascii_whitespace() || c == '=')
+            .unwrap_or(seg.len());
+        let leading_token = &seg[..token_end];
+        let after_token = seg[token_end..].trim_start();
+        let param = if after_token.starts_with('=') {
+            // continuation param of the current challenge (the whole segment)
+            seg
+        } else {
+            // new challenge: leading_token is the auth-scheme, remainder is its
+            // first auth-param (may be empty for a bare scheme)
+            current_is_bearer = leading_token.eq_ignore_ascii_case("bearer");
+            after_token
+        };
+        if current_is_bearer && param_is_url_realm(param) {
+            return true;
+        }
+    }
+    false
+}
+
+/// True when a single auth-param is `realm=<absolute http(s) URL>` (name
+/// case-insensitive; value quoted-string or bare token). Only the param whose
+/// NAME is exactly `realm` is considered.
+fn param_is_url_realm(param: &str) -> bool {
+    let Some((name, raw)) = param.trim().split_once('=') else {
+        return false;
+    };
+    if !name.trim().eq_ignore_ascii_case("realm") {
+        return false;
+    }
+    let value = raw.trim();
+    // Strip surrounding quotes if present (quoted-string) — take up to the
+    // closing quote; else take the bare token up to the next whitespace.
+    let value = if let Some(inner) = value.strip_prefix('"') {
+        inner.split_once('"').map_or(inner, |(v, _)| v)
+    } else {
+        value.split_whitespace().next().unwrap_or(value)
+    };
+    is_absolute_http_url(value)
+}
+
+/// True when the upstream 401/403 carries a `Bearer` `WWW-Authenticate`
+/// challenge whose `realm` is an absolute `http(s)` URL — i.e. a container
+/// registry / OAuth2 token-exchange the client resolves ITSELF (the anonymous
+/// Docker Registry v2 token dance, or its own creds). In that case the gateway
+/// must forward the real 401 so the client can complete auth, NOT hijack it
+/// with the `credential_not_found` nudge (which would strip the challenge and
+/// break every `podman pull` / `docker pull` of a public image).
+///
+/// Deliberately narrow: `Basic`, a label-realm `Bearer` (`realm="OpenAI API"`),
+/// an `error=`-only / `authorization_uri=` challenge (Azure), and a header-less
+/// 401 all fail this and keep the nudge — for those there is no anonymous flow
+/// to break, so the nudge is the correct UX.
+fn upstream_offers_anonymous_token_challenge(headers: &hyper::HeaderMap) -> bool {
+    headers
+        .get_all(hyper::header::WWW_AUTHENTICATE)
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .any(value_has_bearer_url_realm)
+}
+
 /// Returns true if the request declares a `Content-Length` no larger than `max`.
 /// Absent or oversized `Content-Length` ⇒ false, so the request is left to
 /// forward normally rather than buffered for a default-interception check.
@@ -126,13 +278,17 @@ const MAX_DEFAULT_INTERCEPT_BODY: usize = 64 * 1024;
 /// header injection past the approval hold, which changes what `pre_forward`
 /// inspects for every request — more risk than the case is worth. Requests
 /// blocked by POLICY, the ones that matter, never reach here.
+// The Err is a full ready-to-send refusal Response (~152 bytes); boxed so the
+// hot Ok path moves a pointer-sized Result instead of one sized for the cold
+// refusal arm (clippy::result_large_err under -D warnings since Rust 1.98).
 pub(super) async fn materialize_injections<'a>(
     rules: &'a ResolvedRules,
     engine: &crate::connect::PolicyEngine,
     cache: &dyn CacheStore,
     method: &str,
     path: &str,
-) -> std::result::Result<Cow<'a, [inject::InjectionRule]>, Response<hooks::ForwardResponseBody>> {
+) -> std::result::Result<Cow<'a, [inject::InjectionRule]>, Box<Response<hooks::ForwardResponseBody>>>
+{
     // Nothing deferred (every request that isn't resource-scoped) borrows the
     // rules as they are — this sits on the hot path, so it must not allocate.
     if rules.pending_injections.is_empty() {
@@ -150,7 +306,7 @@ pub(super) async fn materialize_injections<'a>(
                     %path,
                     "could not resolve the connection's credential after the request was allowed"
                 );
-                return Err(response::json(
+                return Err(Box::new(response::json(
                     StatusCode::BAD_GATEWAY,
                     serde_json::json!({
                         "error": "credential_unavailable",
@@ -160,7 +316,7 @@ pub(super) async fn materialize_injections<'a>(
                             pending.conn.provider
                         ),
                     }),
-                ));
+                )));
             }
         }
     }
@@ -408,7 +564,7 @@ pub(crate) async fn forward_request(
     let injection_rules =
         match materialize_injections(rules, engine, cache, method.as_str(), &path).await {
             Ok(rules) => rules,
-            Err(resp) => return Ok(resp),
+            Err(resp) => return Ok(*resp),
         };
 
     // Apply injection rules — upstream_path may gain query-param secrets;
@@ -845,13 +1001,31 @@ pub(crate) async fn forward_request(
         }
 
         // 3. Unknown host — no credentials at all, guide user to create a secret.
-        info!(method = %method, url = %url, status = %status.as_u16(), "credential not found");
-        return Ok(response::credential_not_found(
-            status,
-            hostname,
-            &path,
-            proxy_ctx.workspace_id.as_deref(),
-        ));
+        //
+        // EXCEPT when the upstream advertises a Bearer challenge with a
+        // URL realm: that is a container registry / OAuth2 token-exchange the
+        // client resolves ITSELF (the anonymous Docker Registry v2 token
+        // dance). Hijacking it with the nudge strips the `WWW-Authenticate`
+        // challenge and breaks every `podman pull` / `docker run` of a public
+        // image from inside a sandbox. Forward the real 401 so the client can
+        // mint its token. (Basic, label-realm Bearer, and header-less 401s do
+        // not match — they keep the nudge, which is correct for them.)
+        if upstream_offers_anonymous_token_challenge(&resp_headers) {
+            info!(
+                method = %method,
+                url = %url,
+                status = %status.as_u16(),
+                "forwarding registry/token-exchange auth challenge (no nudge)"
+            );
+        } else {
+            info!(method = %method, url = %url, status = %status.as_u16(), "credential not found");
+            return Ok(response::credential_not_found(
+                status,
+                hostname,
+                &path,
+                proxy_ctx.workspace_id.as_deref(),
+            ));
+        }
     }
 
     // Some APIs (e.g. Google) return 400 instead of 401 for invalid/missing API keys.
@@ -1317,6 +1491,218 @@ mod tests {
     fn auth_error_rejects_unrelated_400() {
         let body = br#"{"error": "invalid_argument", "message": "Field 'email' is required"}"#;
         assert!(!body_indicates_auth_error(body));
+    }
+
+    // ── Registry / token-exchange challenge detection (arm #4 passthrough) ──
+    // Header values below are the real ones probed live 2026-08-22.
+
+    fn www_auth(value: &str) -> hyper::HeaderMap {
+        let mut h = hyper::HeaderMap::new();
+        h.append(
+            hyper::header::WWW_AUTHENTICATE,
+            hyper::header::HeaderValue::from_str(value).unwrap(),
+        );
+        h
+    }
+
+    #[test]
+    fn token_challenge_true_for_real_registries() {
+        // A URL realm is the shape every pullable registry uses — the client
+        // resolves it anonymously, so the gateway must NOT nudge.
+        let registries = [
+            // docker.io
+            r#"Bearer realm="https://auth.docker.io/token",service="registry.docker.io""#,
+            // docker.io on a real resource (scope present)
+            r#"Bearer realm="https://auth.docker.io/token",service="registry.docker.io",scope="repository:library/ubuntu:pull""#,
+            // Google Artifact Registry — NO service param
+            r#"Bearer realm="https://us-docker.pkg.dev/v2/token""#,
+            // gcr.io — service is UNQUOTED (bare token); realm still a URL
+            r#"Bearer realm="https://gcr.io/v2/token",service=gcr.io"#,
+            // public ECR
+            r#"Bearer realm="https://public.ecr.aws/token/",service="public.ecr.aws",scope="aws""#,
+            // self-hosted (Harbor-style) token server on an arbitrary host
+            r#"Bearer realm="https://harbor.example.com/service/token",service="harbor-registry""#,
+            // case-insensitive scheme
+            r#"bearer realm="https://ghcr.io/token",service="ghcr.io""#,
+        ];
+        for c in registries {
+            assert!(
+                upstream_offers_anonymous_token_challenge(&www_auth(c)),
+                "expected passthrough for: {c}"
+            );
+        }
+    }
+
+    #[test]
+    fn token_challenge_false_keeps_the_nudge() {
+        // These must KEEP the credential nudge — either there is no anonymous
+        // flow to break, or no challenge at all.
+        let nudge = [
+            // OpenAI — Bearer but realm is a LABEL, not a URL
+            r#"Bearer realm="OpenAI API""#,
+            // Stripe — Basic scheme (client supplies its own creds)
+            r#"Basic realm="Stripe""#,
+            // Azure — Bearer but authorization_uri, error=, and NO realm
+            r#"Bearer authorization_uri="https://login.windows.net/", error="invalid_token", error_description="missing header""#,
+            // Bearer with no realm at all
+            "Bearer",
+            // realm present but not http(s)
+            r#"Bearer realm="ftp://example.com/token""#,
+            // relative / non-absolute realm
+            r#"Bearer realm="/token""#,
+            // a param that merely ends in "realm" must not match
+            r#"Bearer myrealm="https://evil.example/token""#,
+            // Basic with a URL realm (unusual) must not match — Basic is not
+            // the anonymous token dance, AND the URL label even contains the
+            // substring "bearer" (regression: a naive substring match matched).
+            r#"Basic realm="https://bearer.example.com/login""#,
+            // The realm= is NESTED inside another param's quoted value — only a
+            // param whose NAME is realm counts (regression: nested match).
+            r#"Bearer error="see realm=https://x/token for details""#,
+        ];
+        for c in nudge {
+            assert!(
+                !upstream_offers_anonymous_token_challenge(&www_auth(c)),
+                "expected nudge (no passthrough) for: {c}"
+            );
+        }
+    }
+
+    #[test]
+    fn token_challenge_true_when_bearer_shares_a_line_with_basic() {
+        // Two challenges on ONE header line, Basic first: the Bearer's own URL
+        // realm must still be found (regression: the first realm, "Corp", is
+        // not a URL and would wrongly suppress passthrough → broken registry
+        // pull). Order-independent.
+        for c in [
+            r#"Basic realm="Corp", Bearer realm="https://auth.docker.io/token",service="registry.docker.io""#,
+            r#"Bearer realm="https://auth.docker.io/token",service="registry.docker.io", Basic realm="Corp""#,
+        ] {
+            assert!(
+                upstream_offers_anonymous_token_challenge(&www_auth(c)),
+                "expected passthrough for combined line: {c}"
+            );
+        }
+    }
+
+    #[test]
+    fn token_challenge_realm_value_with_comma_is_not_split() {
+        // A quoted realm containing a comma must not be truncated by the
+        // challenge/param splitter.
+        assert!(upstream_offers_anonymous_token_challenge(&www_auth(
+            r#"Bearer realm="https://auth.example.com/token,v2",service="reg""#
+        )));
+    }
+
+    #[test]
+    fn token_challenge_handles_bws_before_equals_on_a_continuation_param() {
+        // RFC 9110 auth-param allows BWS around '='. A continuation param whose
+        // '=' is preceded by a space must still be recognized as this Bearer
+        // challenge's realm (regression: classifying by first-whitespace-token
+        // treated `realm =…` as a new auth-scheme and dropped the passthrough).
+        assert!(upstream_offers_anonymous_token_challenge(&www_auth(
+            r#"Bearer service="x", realm ="https://auth.docker.io/token""#
+        )));
+        // BWS on the FIRST param too.
+        assert!(upstream_offers_anonymous_token_challenge(&www_auth(
+            r#"Bearer realm = "https://auth.docker.io/token""#
+        )));
+    }
+
+    #[test]
+    fn token_challenge_multibyte_header_value_is_safely_ignored() {
+        // A WWW-Authenticate field-value is ASCII (obs-text is rejected by
+        // HeaderValue::to_str), so any value carrying a multibyte char is
+        // conservatively dropped by the to_str filter — the function returns
+        // false (keeps the nudge) and NEVER panics. Real registry/OAuth
+        // challenges are ASCII; the splitter's own byte-boundary safety on
+        // multibyte input is proven directly in
+        // split_outside_quotes_respects_quotes_and_boundaries.
+        assert!(!upstream_offers_anonymous_token_challenge(&www_auth(
+            r#"Bearer realm="OpenAI™ API""#
+        )));
+        // Even a legitimate URL-realm Bearer is dropped if a multibyte char
+        // appears anywhere on the same (malformed) header line — safe, not a
+        // panic. A conformant ASCII line matches normally (covered elsewhere).
+        assert!(!upstream_offers_anonymous_token_challenge(&www_auth(
+            r#"Basic realm="Café", Bearer realm="https://auth.docker.io/token""#
+        )));
+    }
+
+    #[test]
+    fn split_outside_quotes_respects_quotes_and_boundaries() {
+        let parts: Vec<&str> = split_outside_quotes(r#"a="x,y", b="z", c"#, b',')
+            .map(str::trim)
+            .collect();
+        assert_eq!(parts, vec![r#"a="x,y""#, r#"b="z""#, "c"]);
+        // A multibyte char adjacent to the separator: split points stay on char
+        // boundaries (would panic if the byte scan mis-fired mid-codepoint).
+        let parts: Vec<&str> = split_outside_quotes("café,x", b',').collect();
+        assert_eq!(parts, vec!["café", "x"]);
+        // No separator → one segment (the whole string).
+        let parts: Vec<&str> = split_outside_quotes("solo", b',').collect();
+        assert_eq!(parts, vec!["solo"]);
+    }
+
+    #[test]
+    fn token_challenge_false_when_header_absent() {
+        assert!(!upstream_offers_anonymous_token_challenge(
+            &hyper::HeaderMap::new()
+        ));
+        // empty value
+        assert!(!upstream_offers_anonymous_token_challenge(&www_auth("")));
+    }
+
+    #[test]
+    fn token_challenge_true_across_multiple_header_lines() {
+        // Two separate WWW-Authenticate lines: a Basic label-realm one and a
+        // Bearer URL-realm one — the registry line wins.
+        let mut h = www_auth(r#"Basic realm="Corp""#);
+        h.append(
+            hyper::header::WWW_AUTHENTICATE,
+            hyper::header::HeaderValue::from_str(
+                r#"Bearer realm="https://auth.docker.io/token",service="registry.docker.io""#,
+            )
+            .unwrap(),
+        );
+        assert!(upstream_offers_anonymous_token_challenge(&h));
+    }
+
+    #[test]
+    fn param_is_url_realm_quoted_bare_and_case() {
+        assert!(param_is_url_realm(r#"realm="https://x/token""#));
+        // bare token value (gcr.io ships unquoted params)
+        assert!(param_is_url_realm("realm=https://x/token"));
+        // case-insensitive param name
+        assert!(param_is_url_realm(r#"REALM="https://x/token""#));
+        // not a realm param
+        assert!(!param_is_url_realm(r#"service="registry.docker.io""#));
+        // realm but not a URL
+        assert!(!param_is_url_realm(r#"realm="OpenAI API""#));
+        // a name that merely ends in "realm"
+        assert!(!param_is_url_realm(r#"myrealm="https://x""#));
+    }
+
+    #[test]
+    fn is_absolute_http_url_accepts_only_real_urls() {
+        for ok in [
+            "https://auth.docker.io/token",
+            "http://localhost:5000/token",
+            "HTTPS://Auth.Example.com/Token", // scheme case-insensitive
+            "https://host",                   // no path
+        ] {
+            assert!(is_absolute_http_url(ok), "should accept: {ok}");
+        }
+        for bad in [
+            "ftp://example.com",
+            "/token",        // relative
+            "OpenAI API",    // label
+            "https://",      // empty host
+            "https:///path", // empty host with path
+            "",
+        ] {
+            assert!(!is_absolute_http_url(bad), "should reject: {bad}");
+        }
     }
 
     #[test]

@@ -54,7 +54,10 @@ const connectedGmail: Connection = {
  * pool, the agent's grants, and its effective credentials. */
 const renderCard = (
   text: string,
-  { connections = [] as Connection[] } = {},
+  {
+    connections = [] as Connection[],
+    grantedConnectionIds = [] as string[],
+  } = {},
 ) => {
   const queryClient = new QueryClient({
     defaultOptions: { queries: { retry: false, staleTime: Infinity } },
@@ -66,9 +69,13 @@ const renderCard = (
   queryClient.setQueryData(queryKeys.grants.agent("agent-1"), {
     agentId: "agent-1",
     mode: "grants",
-    connections: [],
+    connections: grantedConnectionIds.map((connectionId) => ({
+      connectionId,
+    })),
     secrets: [],
   });
+  // The attach dialog's permission catalog (decides per-row Manage).
+  queryClient.setQueryData(queryKeys.appPermissionDefinitions.list(), []);
   queryClient.setQueryData(
     [...queryKeys.agents.all(), "agent-1", "effective-credentials"],
     { agentId: "agent-1", mode: "selective", secrets: [], connections: [] },
@@ -334,6 +341,134 @@ describe("ConnectorSuggestions card", () => {
     );
   });
 
+  describe("attach-kind rows (access_restricted)", () => {
+    const GMAIL_ATTACH_URL = "https://app.onecli.sh/w/a/connections/apps/gmail";
+
+    it("claims nothing about attachment until grants resolve — the door waits", () => {
+      // Grants unseeded and fetch hung: the row must not assert the negative
+      // ("not attached") it cannot know yet, and the door stays disabled.
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(() => new Promise(() => {})),
+      );
+      const queryClient = new QueryClient({
+        defaultOptions: { queries: { retry: false, staleTime: Infinity } },
+      });
+      queryClient.setQueryData(queryKeys.connections.list("workspace"), [
+        connectedGmail,
+      ]);
+      queryClient.setQueryData(
+        [...queryKeys.agents.all(), "agent-1", "effective-credentials"],
+        { agentId: "agent-1", mode: "selective", secrets: [], connections: [] },
+      );
+      render(
+        <QueryClientProvider client={queryClient}>
+          <ConnectorSuggestions text={GMAIL_ATTACH_URL} />
+        </QueryClientProvider>,
+      );
+      expect(
+        screen.queryByText("Connected, not attached to this agent"),
+      ).toBeNull();
+      expect(screen.getByText("Connected")).toBeInTheDocument();
+      expect(
+        screen.getByRole("button", { name: "Attach Gmail for this agent" }),
+      ).toBeDisabled();
+    });
+
+    it("names the missing grant and offers Attach — no Reconnect, no legacy Manage", () => {
+      renderCard(GMAIL_ATTACH_URL, { connections: [connectedGmail] });
+      expect(
+        screen.getByText("Connected, not attached to this agent"),
+      ).toBeInTheDocument();
+      expect(
+        screen.getByRole("button", { name: "Attach Gmail for this agent" }),
+      ).toBeInTheDocument();
+      expect(
+        screen.queryByRole("button", { name: "Reconnect Gmail" }),
+      ).toBeNull();
+      expect(
+        screen.queryByRole("button", { name: "Manage Gmail access" }),
+      ).toBeNull();
+    });
+
+    it("flips to the attached count + Manage once this agent holds a grant", () => {
+      renderCard(GMAIL_ATTACH_URL, {
+        connections: [connectedGmail],
+        grantedConnectionIds: ["conn-1"],
+      });
+      expect(screen.getByText("1 attached account")).toBeInTheDocument();
+      expect(
+        screen.getByRole("button", { name: "Manage Gmail for this agent" }),
+      ).toBeInTheDocument();
+      expect(
+        screen.queryByRole("button", { name: "Attach Gmail for this agent" }),
+      ).toBeNull();
+      expect(
+        screen.queryByRole("button", { name: "Reconnect Gmail" }),
+      ).toBeNull();
+    });
+
+    it("pluralizes the attached count", () => {
+      renderCard(GMAIL_ATTACH_URL, {
+        connections: [
+          connectedGmail,
+          { ...connectedGmail, id: "conn-2" } as Connection,
+        ],
+        grantedConnectionIds: ["conn-1", "conn-2"],
+      });
+      expect(screen.getByText("2 attached accounts")).toBeInTheDocument();
+    });
+
+    it("opens the attach dialog from the Attach button", async () => {
+      renderCard(GMAIL_ATTACH_URL, { connections: [connectedGmail] });
+      await userEvent.click(
+        screen.getByRole("button", { name: "Attach Gmail for this agent" }),
+      );
+      expect(
+        screen.getByRole("heading", { name: "Attach Gmail" }),
+      ).toBeInTheDocument();
+      // One row per connected account, toggle off (no grant yet).
+      expect(
+        screen.getByRole("switch", { name: "Attach Gmail" }),
+      ).toBeInTheDocument();
+    });
+
+    it("stakes the claim for the dialog's connect-new — the landing auto-grants", async () => {
+      renderCard(GMAIL_ATTACH_URL, { connections: [connectedGmail] });
+      await userEvent.click(
+        screen.getByRole("button", { name: "Attach Gmail for this agent" }),
+      );
+      await userEvent.click(
+        screen.getByRole("button", { name: "Connect another account" }),
+      );
+      expect(openSpy).toHaveBeenCalledTimes(1);
+      const [url, windowName] = openSpy.mock.calls[0] ?? [];
+      expect(url).toContain("/app-connect/gmail?");
+      expect(url).toContain("workspaceId=ws-1");
+      expect(windowName).toBe("connect-gmail-new");
+
+      act(() => {
+        window.dispatchEvent(
+          new MessageEvent("message", {
+            origin: window.location.origin,
+            data: {
+              type: "app-connected",
+              provider: "gmail",
+              connectionId: "conn-9",
+            },
+          }),
+        );
+      });
+      await waitFor(() =>
+        expect(grants.setConnectionGrant).toHaveBeenCalledWith(
+          "agent-1",
+          "conn-9",
+          { access: "full" },
+        ),
+      );
+    });
+  });
+
   it("keeps the picker's listener alive after it closes — an in-flight popup still grants", async () => {
     renderCard(GMAIL_CONNECT_URL);
     await userEvent.click(
@@ -365,5 +500,133 @@ describe("ConnectorSuggestions card", () => {
         { access: "full" },
       ),
     );
+  });
+});
+
+const GMAIL_ATTACH_URL = "https://app.onecli.sh/w/a/connections/apps/gmail";
+
+/** Seeded like renderCard, but with the grant/effective pools injectable —
+ * the attach branch's whole behavior turns on them. */
+const renderAttachCard = ({
+  connections = [connectedGmail] as Connection[],
+  grantedConnectionIds = [] as string[],
+  orgGrantedConnectionIds = [] as string[],
+} = {}) => {
+  const queryClient = new QueryClient({
+    defaultOptions: { queries: { retry: false, staleTime: Infinity } },
+  });
+  queryClient.setQueryData(
+    queryKeys.connections.list("workspace"),
+    connections,
+  );
+  queryClient.setQueryData(queryKeys.grants.agent("agent-1"), {
+    agentId: "agent-1",
+    mode: "grants",
+    connections: grantedConnectionIds.map((connectionId) => ({
+      connectionId,
+      provider: "gmail",
+      label: null,
+      scope: "workspace",
+      access: "full",
+      allow: [],
+      ask: [],
+      resources: null,
+    })),
+    secrets: [],
+  });
+  queryClient.setQueryData(
+    [...queryKeys.agents.all(), "agent-1", "effective-credentials"],
+    {
+      agentId: "agent-1",
+      mode: "selective",
+      secrets: [],
+      connections: orgGrantedConnectionIds.map((id) => ({
+        id,
+        kind: "connection",
+        provenance: [{ kind: "rule", scope: "organization", redacted: true }],
+        orgBlocked: false,
+      })),
+    },
+  );
+  queryClient.setQueryData(queryKeys.appAvailability.available(), {
+    restricted: false,
+    providers: [],
+  });
+  queryClient.setQueryData(queryKeys.agents.detail("agent-1"), {
+    id: "agent-1",
+    name: "Arik",
+  });
+  const wrapper = ({ children }: { children: ReactNode }) => (
+    <QueryClientProvider client={queryClient}>{children}</QueryClientProvider>
+  );
+  return render(<ConnectorSuggestions text={GMAIL_ATTACH_URL} />, { wrapper });
+};
+
+describe("ConnectorSuggestions attach rows", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+    routeParams = { agentId: "agent-1" };
+  });
+
+  it("names the missing grant and opens the attach dialog from the Attach button", async () => {
+    renderAttachCard();
+    expect(
+      screen.getByText("Connected, not attached to this agent"),
+    ).toBeInTheDocument();
+
+    await userEvent.click(
+      screen.getByRole("button", { name: "Attach Gmail for this agent" }),
+    );
+    const dialog = screen.getByRole("dialog");
+    expect(dialog).toHaveTextContent("Attach Gmail");
+    expect(
+      screen.getByRole("switch", { name: "Attach Gmail" }),
+    ).not.toBeChecked();
+  });
+
+  it("reads Manage with the attached count once a grant exists", () => {
+    renderAttachCard({ grantedConnectionIds: ["conn-1"] });
+    expect(screen.getByText("1 attached account")).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Manage Gmail for this agent" }),
+    ).toBeInTheDocument();
+  });
+
+  it("counts only status-connected accounts — a granted but broken connection is not 'attached'", () => {
+    // MUTATION-PROOF: drop the status filter from attachedCount and the card
+    // claims "1 attached account" for a connection the dialog's own pool
+    // (status-connected) would not even list.
+    renderAttachCard({
+      connections: [
+        connectedGmail,
+        { ...connectedGmail, id: "conn-2", status: "error" },
+      ],
+      grantedConnectionIds: ["conn-2"],
+    });
+    expect(
+      screen.getByText("Connected, not attached to this agent"),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/attached account/)).toBeNull();
+  });
+
+  it("counts an org-rule-granted connection as attached, and locks its dialog row ON", async () => {
+    // MUTATION-PROOF twice over: drop orgGrantedConnectionIds from the count
+    // and the card says "not attached" for access the org already granted;
+    // drop the dialog's org lock and the row renders an OFF toggle whose
+    // "detach" could never remove org access.
+    renderAttachCard({ orgGrantedConnectionIds: ["conn-1"] });
+    expect(screen.getByText("1 attached account")).toBeInTheDocument();
+
+    await userEvent.click(
+      screen.getByRole("button", { name: "Manage Gmail for this agent" }),
+    );
+    expect(screen.getByRole("dialog")).toHaveTextContent(
+      "Granted by your organization",
+    );
+    const lockedSwitch = screen.getByRole("switch", {
+      name: "Detach Gmail",
+    });
+    expect(lockedSwitch).toBeChecked();
+    expect(lockedSwitch).toBeDisabled();
   });
 });

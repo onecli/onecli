@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { GATEWAY_INTERNAL_URL } from "../../lib/env";
+import { getGatewayInternalUrl } from "../../lib/env";
 
 /**
  * The control plane's client for the GATEWAY's approvals API — used by the
@@ -31,7 +31,7 @@ export const decideApprovalAtGateway = async (input: {
   decision: "approve" | "deny";
 }): Promise<GatewayDecisionResult> => {
   const response = await fetch(
-    `${GATEWAY_INTERNAL_URL}/v1/approvals/${encodeURIComponent(input.approvalId)}/decision`,
+    `${getGatewayInternalUrl()}/v1/approvals/${encodeURIComponent(input.approvalId)}/decision`,
     {
       method: "POST",
       headers: {

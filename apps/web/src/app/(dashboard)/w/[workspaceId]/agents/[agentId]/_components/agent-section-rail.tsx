@@ -13,6 +13,7 @@ import {
 import { isSlackConnected, SLACK_ICON_SRC } from "@/lib/agents/slack-presence";
 import { AppIcon } from "@/lib/components/app-icon";
 import { useCounts } from "@/hooks/use-counts";
+import { useInstance } from "@/hooks/use-instance";
 import type { AgentPageAgent } from "./agent-page-frame";
 
 const RailLink = ({
@@ -100,8 +101,18 @@ export const AgentSectionRail = ({ agent }: { agent: AgentPageAgent }) => {
   const pathname = usePathname();
   const base = agentPath(pathname, agent.id);
   const { data: counts } = useCounts();
+  const instance = useInstance();
 
-  const sections = agentSectionsFor(agent.kind);
+  // Instance-gated entries (SSH) exist only where the deployment has the
+  // capability: hide once /v1/instance resolves WITHOUT it (auto-hide, never
+  // a teased dead door), show while still loading — loading must never render
+  // as unavailable (the availability.ts law).
+  const sections = agentSectionsFor(agent.kind).filter(
+    (s) =>
+      s.instanceGated !== "ssh" ||
+      instance === null ||
+      instance.ssh !== undefined,
+  );
 
   const countFor = (section: string) =>
     section === "connections"

@@ -98,6 +98,9 @@ const waitFor = async (url, budgetMs) => {
  * report.
  */
 export const healthWait = async ({ bind, apiPort, appPort, mode }) => {
+  // A wildcard bind publishes on every interface; probe it via loopback
+  // (the same mapping ensurePortsFree uses).
+  if (bind === "0.0.0.0") bind = "127.0.0.1";
   const s = spinner();
   s.start("Waiting for OneCLI to come up…");
   if (!(await waitFor(`http://${bind}:${apiPort}/v1/health`, 300_000))) {

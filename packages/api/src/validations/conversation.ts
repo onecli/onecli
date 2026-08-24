@@ -16,11 +16,10 @@ export const CONVERSATION_SOURCES = ["web", "slack", "cron", "watch"] as const;
 export type ConversationSource = (typeof CONVERSATION_SOURCES)[number];
 
 /** The non-human sources: a turn born from an automation, not a person
- * typing. The continuity bridge (turn-service) branches on this constant. The
- * channel mirror (`apps/channel-adapter/src/mirror.ts`) is a separate
- * deployable that cannot import `@onecli/api`, so it carries its OWN copy of
- * this same list — adding a future automation source is TWO edits (here and
- * the mirror), kept in sync by convention. Both lists must always match. */
+ * typing. The continuity bridge (turn-service) branches on this constant, and
+ * the channel mirror (`apps/channel-adapter/src/mirror.ts`) imports it for
+ * the same test — one definition, so a future automation source is ONE edit
+ * here and both surfaces follow. */
 export const AUTOMATION_SOURCES = [
   "cron",
   "watch",

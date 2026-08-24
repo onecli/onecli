@@ -4,7 +4,8 @@ import { matchJoinedSteers } from "./jcode";
 /**
  * The reconcile's pure core. jcode injects queued soft interrupts as fresh
  * user messages, grouping simultaneous ones joined by "\n\n" (verified in
- * v0.71.1 `interrupts.rs`), and the SDK bridge drops the injection event —
+ * v0.71.1 `interrupts.rs`; byte-identical in v0.78.1), and the SDK bridge
+ * drops the injection event —
  * so consumption is decided by matching pending steers against the user
  * entries that appeared AFTER the turn's own prompt. The matching rules each
  * exist to kill a specific failure:

@@ -13,11 +13,13 @@ import { WORKSPACE_PATH_RE, connectionsPath } from "@/lib/navigation";
 import { connectPopupHeight, openConnectPopup } from "@/lib/connect-popup";
 import { queryKeys } from "@/lib/api/keys";
 import { useConnections } from "@/hooks/use-connections";
-import { useSetConnectionGrant } from "@/hooks/use-grants";
+import { useAgentGrants, useSetConnectionGrant } from "@/hooks/use-grants";
 import { useManageConnectionState } from "@/hooks/use-manage-connection-state";
 import { useAppMessages } from "@/hooks/use-app-connected";
+import { useEffectiveCredentials } from "@/lib/api/policy-visibility";
 import type { Connection } from "@/lib/api";
 import { ManagePermissionsDialog } from "../../_components/manage-permissions-dialog";
+import { AttachConnectionDialog } from "./attach-connection-dialog";
 import { ConnectAppPickerDialog } from "../../_components/connect-app-picker-dialog";
 
 /**
@@ -70,10 +72,35 @@ const ConnectorSuggestionsCard = ({
   const params = useParams<{ agentId?: string }>();
   const agentId = params?.agentId ?? "";
   const { data: connections = [] } = useConnections("workspace");
+  // Which connections THIS agent already holds — decides whether the attach
+  // row's button says Attach (none of this app's accounts granted yet) or
+  // Manage (at least one is; the dialog then adjusts the set). Until the
+  // query RESOLVES the card must not claim either way — a cold cache saying
+  // "not attached" about an attached app would be a false negative.
+  const agentGrantsQuery = useAgentGrants(agentId);
+  const attachStateKnown = agentGrantsQuery.isSuccess;
+  const grantedConnectionIds = new Set(
+    (agentGrantsQuery.data?.connections ?? []).map((g) => g.connectionId),
+  );
+  // Org-rule-granted connections count as attached too — the same effective
+  // read the attach dialog's locked rows use (already fetched per-agent by
+  // useManageConnectionState, so this query is a cache hit).
+  const { data: effectiveCredentials } = useEffectiveCredentials(agentId);
+  const orgGrantedConnectionIds = new Set(
+    (effectiveCredentials?.connections ?? [])
+      .filter((c) => c.provenance.some((p) => p.scope === "organization"))
+      .map((c) => c.id),
+  );
   const setGrant = useSetConnectionGrant();
   const [manageConnection, setManageConnection] = useState<Connection | null>(
     null,
   );
+  /** Provider whose Attach dialog is open (all of that app's connections,
+   * each with an attach toggle for this agent). The provider survives the
+   * close (open flips false) so Radix can play the exit animation instead
+   * of snap-unmounting. */
+  const [attachProvider, setAttachProvider] = useState<string | null>(null);
+  const [attachOpen, setAttachOpen] = useState(false);
   const [pickerOpen, setPickerOpen] = useState(false);
   // Lazy-mount latch for the picker: a chat can carry many of these cards and
   // an unmounted dialog costs nothing, but once opened it must STAY mounted
@@ -171,6 +198,19 @@ const ConnectorSuggestionsCard = ({
         </div>
         {suggestions.map(({ app, agentName, kind }) => {
           const connection = connectionFor(app.id);
+          // Any of this app's accounts already granted to this agent → the
+          // attach state is partially satisfied; the button reads Manage and
+          // the status line counts what this agent holds. Same pool the
+          // dialog shows (status-connected), workspace grants plus
+          // org-rule-granted — a count the dialog's rows then agree with.
+          const attachedCount = connections.filter(
+            (c) =>
+              c.provider === app.id &&
+              c.status === "connected" &&
+              (grantedConnectionIds.has(c.id) ||
+                orgGrantedConnectionIds.has(c.id)),
+          ).length;
+          const anyAttached = attachedCount > 0;
           // An org-shared connection is usable here but not re-authable from
           // a workspace surface — the OAuth callback resolves connectionId in
           // workspace scope and would 404. Reconnect for those lives on the
@@ -195,12 +235,29 @@ const ConnectorSuggestionsCard = ({
                 <p className="truncate text-sm font-medium">{app.name}</p>
                 {connection ? (
                   kind === "attach" ? (
-                    // The gateway said access_restricted: an account exists
-                    // but THIS agent has no grant — name the actual problem,
-                    // and Manage beside it is the fix.
-                    <p className="text-muted-foreground text-xs">
-                      Connected, not attached to this agent
-                    </p>
+                    !attachStateKnown ? (
+                      // Grants unresolved (or failed): the only honest claim
+                      // is the connection's own state.
+                      <p className="text-brand text-xs font-medium">
+                        Connected
+                      </p>
+                    ) : anyAttached ? (
+                      // Attached since the card rendered (or the poll lagged
+                      // the grant): say what this agent holds now — attached
+                      // is the accurate word (the count is grants, and a
+                      // granted account can be expired).
+                      <p className="text-brand text-xs font-medium">
+                        {attachedCount} attached account
+                        {attachedCount === 1 ? "" : "s"}
+                      </p>
+                    ) : (
+                      // The gateway said access_restricted: an account exists
+                      // but THIS agent has no grant — name the actual
+                      // problem; Attach beside it is the fix.
+                      <p className="text-muted-foreground text-xs">
+                        Connected, not attached to this agent
+                      </p>
+                    )
                   ) : (
                     <p className="text-brand text-xs font-medium">Connected</p>
                   )
@@ -214,32 +271,66 @@ const ConnectorSuggestionsCard = ({
               </div>
               {connection ? (
                 <div className="flex shrink-0 items-center gap-1.5">
-                  {reconnectableHere && (
+                  {kind === "attach" ? (
+                    // The problem is the missing grant, so the fix is the
+                    // attach dialog: every connection of THIS app, each with
+                    // a toggle for this agent. Once at least one account is
+                    // attached the same door reads Manage — the job shifts
+                    // from "get access" to "adjust which accounts".
+                    <Button
+                      size="xs"
+                      variant={anyAttached ? "ghost" : "default"}
+                      aria-label={`${anyAttached ? "Manage" : "Attach"} ${app.name} for this agent`}
+                      // Also covers the router-less defensive branch: without
+                      // an agentId the grants query never resolves, so the
+                      // door (which needs one) stays shut.
+                      disabled={!attachStateKnown}
+                      onClick={() => {
+                        setAttachProvider(app.id);
+                        setAttachOpen(true);
+                      }}
+                    >
+                      {anyAttached ? (
+                        <>
+                          <Settings2 className="size-3.5" aria-hidden />
+                          Manage
+                        </>
+                      ) : (
+                        "Attach"
+                      )}
+                    </Button>
+                  ) : (
+                    reconnectableHere && (
+                      <Button
+                        variant="ghost"
+                        size="xs"
+                        aria-label={`Reconnect ${app.name}`}
+                        onClick={() =>
+                          openPopupOrExplain(app.id, {
+                            connectionId: connection.id,
+                            workspaceId,
+                            height: connectPopupHeight(app),
+                          })
+                        }
+                      >
+                        Reconnect
+                      </Button>
+                    )
+                  )}
+                  {/* Manage opens the same dialog Attach does — showing both
+                      on an attach row would be two names for one door. */}
+                  {kind !== "attach" && (
                     <Button
                       variant="ghost"
                       size="xs"
-                      aria-label={`Reconnect ${app.name}`}
-                      onClick={() =>
-                        openPopupOrExplain(app.id, {
-                          connectionId: connection.id,
-                          workspaceId,
-                          height: connectPopupHeight(app),
-                        })
-                      }
+                      aria-label={`Manage ${app.name} access`}
+                      disabled={!grantsReady}
+                      onClick={() => setManageConnection(connection)}
                     >
-                      Reconnect
+                      <Settings2 className="size-3.5" aria-hidden />
+                      Manage
                     </Button>
                   )}
-                  <Button
-                    variant="ghost"
-                    size="xs"
-                    aria-label={`Manage ${app.name} access`}
-                    disabled={!grantsReady}
-                    onClick={() => setManageConnection(connection)}
-                  >
-                    <Settings2 className="size-3.5" aria-hidden />
-                    Manage
-                  </Button>
                 </div>
               ) : (
                 <Button
@@ -304,6 +395,37 @@ const ConnectorSuggestionsCard = ({
           readOnly={manageReadOnly}
           readOnlyReason={manageReadOnlyReason}
           onClose={() => setManageConnection(null)}
+        />
+      )}
+
+      {agentId && attachProvider && (
+        <AttachConnectionDialog
+          key={attachProvider}
+          agentId={agentId}
+          agentName={
+            suggestions.find((s) => s.app.id === attachProvider)?.agentName
+          }
+          provider={attachProvider}
+          open={attachOpen}
+          onOpenChange={(open) => {
+            if (!open) setAttachOpen(false);
+          }}
+          onConnectNew={() => {
+            // Same claim + popup path as the card's Connect button — same
+            // options too (agentName rides to the landing page's copy) — so
+            // the landing auto-grants this agent and refreshes the pool.
+            const suggestion = suggestions.find(
+              (s) => s.app.id === attachProvider,
+            );
+            initiated.current.add(attachProvider);
+            openPopupOrExplain(attachProvider, {
+              agentName: suggestion?.agentName,
+              workspaceId,
+              ...(suggestion && {
+                height: connectPopupHeight(suggestion.app),
+              }),
+            });
+          }}
         />
       )}
     </>

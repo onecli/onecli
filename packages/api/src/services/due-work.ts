@@ -3,11 +3,13 @@ import { runnerCapabilitiesSchema } from "@onecli/agent-protocol";
 import {
   MAX_HELD_AWAKE_SANDBOXES,
   SANDBOX_IDLE_STOP_SECONDS,
+  SSH_SESSION_LEASE_SECONDS,
   TURN_CEILING_SECONDS,
 } from "../lib/env";
 import {
   ACTIVE_TURN_STATUSES,
   AGENT_NEVER_STARTED_MESSAGE,
+  AUTOMATION_SOURCES,
   FOLLOW_UP_EXPIRED_MESSAGE,
 } from "../validations/conversation";
 import { logger } from "../lib/logger";
@@ -33,9 +35,29 @@ const log = logger.child({ component: "due-work" });
 const STALE_CLAIM_SECONDS = 300;
 
 /**
+ * A LEASE-CURRENT SSH session (sandbox-platform step 5): the terminator
+ * heartbeats every ~30s, so a session whose `last_heartbeat_at` is inside
+ * the lease window is a human at a live prompt — and one whose terminator
+ * crashed goes silent and self-expires here without any cleanup write (the
+ * poll-time-truth rule; the stale-session sweep closes the row for audit's
+ * sake, but no consumer waits for it). `s` must be the enclosing query's
+ * sandboxes alias. A function for the same mocked-db reason as
+ * `keepAwakeExists`.
+ */
+const liveSshSessionExists = () => Prisma.sql`EXISTS (
+  SELECT 1 FROM ssh_session ss
+  WHERE ss.sandbox_id = s.id
+    AND ss.status = 'open'
+    AND ss.last_heartbeat_at > now() - make_interval(secs => ${SSH_SESSION_LEASE_SECONDS})
+)`;
+
+/**
  * §3.9 KEEP-AWAKE, as one SQL fragment with one definition — the stops arm
  * negates it, the ceiling counts it, the eviction arm requires it, and the
- * dashboard signal joins on it. Two live shapes hold a box up: a running
+ * dashboard signal joins on it (so a live SSH session lights the dashboard's
+ * "working in the background" badge too — accepted: one definition beats a
+ * split predicate, and a held-open box IS busy from a capacity standpoint).
+ * Three live shapes hold a box up: a lease-current SSH session, plus a running
  * process whose container_ref matches the sandbox's CURRENT one (a running
  * row from a DEAD container must never keep a fresh box awake — the lost
  * sweep terminalizes it), and a watch that is armed (detection lives in
@@ -46,7 +68,7 @@ const STALE_CLAIM_SECONDS = 300;
  * `@onecli/db` (whose `Prisma` carries no `sql`) can import this module
  * without ever touching the real tagged-template helper.
  */
-const keepAwakeExists = () => Prisma.sql`EXISTS (
+const keepAwakeExists = () => Prisma.sql`(EXISTS (
   SELECT 1 FROM sandbox_processes p
   WHERE p.sandbox_id = s.id
     AND (
@@ -57,7 +79,7 @@ const keepAwakeExists = () => Prisma.sql`EXISTS (
           AND w.status IN ('armed', 'triggered')
       )
     )
-)`;
+) OR ${liveSshSessionExists()})`;
 
 /**
  * The per-runner held-awake ceiling (step 13, the release-blocker bound):
@@ -95,6 +117,34 @@ const STALE_DISPATCH_SECONDS = 90;
  */
 const START_RETRY_SECONDS = 30;
 
+/**
+ * WAKE PRIORITY (step 4): under a wake storm — the 9:00 cron cohort — a
+ * person's message must not queue behind dozens of scheduled runs, so the
+ * start and turn arms rank user-visible work first. "User-visible" is a
+ * turn whose source is not an automation (`AUTOMATION_SOURCES` — the
+ * one-edit law; a future automation source must inherit background rank by
+ * that single edit), AGE-CAPPED: a background turn that has already waited
+ * this long ranks as user-visible, so sustained user load delays automations
+ * but can never starve them. (Unbounded, the only exit was the 30-minute
+ * turn ceiling — whose raw UPDATE bypasses `settleAutomationRun`, leaving a
+ * starved cron's `lastOutcome` stale; that pre-existing gap is tracked as
+ * plans/sandbox-platform-issues.md's "cron outcome bookkeeping" item, not
+ * fixed here.) Measured on the ceiling clock family (retried → promoted →
+ * created), the same one-way clocks `reclaimStaleTurns` uses.
+ */
+export const WAKE_PRIORITY_AGE_SECONDS = 600;
+
+/**
+ * A turn that outranks background work: user-visible by source, or a
+ * background turn past the age cap. `t` must be the enclosing query's turns
+ * alias. A function, not a const, for the same mocked-db reason as
+ * `keepAwakeExists`.
+ */
+const userVisibleTurn = (priorityAgeBefore: Date) => Prisma.sql`(
+  t.source NOT IN (${Prisma.join([...AUTOMATION_SOURCES])})
+  OR COALESCE(t.retried_at, t.promoted_at, t.created_at) < ${priorityAgeBefore}
+)`;
+
 export interface DueStart {
   kind: "start";
   sandboxId: string;
@@ -118,6 +168,14 @@ export interface DueTurn {
   agentId: string;
   message: string;
   resumeSessionRef: string | null;
+  /**
+   * When this turn's claim-latency clock started — the same
+   * COALESCE(retried_at, promoted_at, created_at) the turn-budget sweeps
+   * use. Server-side telemetry only (the claim-wait log line → the cloud's
+   * metric filter); never on the runner wire. Optional so test fakes that
+   * predate it stay valid.
+   */
+  waitedSince?: Date;
 }
 
 /** Someone asked an in-flight turn to stop. */
@@ -171,6 +229,7 @@ interface ClaimedTurnRow {
   agent_id: string | null;
   message: string;
   harness_session_ref: string | null;
+  waited_since: Date;
 }
 
 interface AbortRow {
@@ -202,6 +261,16 @@ interface SyncRow {
  */
 const TURN_LIMIT = 5;
 
+/**
+ * The claim-wait log line's contract with the cloud's CloudWatch metric
+ * filter (step 6): the filter pattern is built from EXACTLY these two
+ * strings and byte-pinned by an infra drift test that reads this file — a
+ * rename here without the infra edit would silently kill the TurnQueueSeconds
+ * metric and its alarm (NOT_BREACHING = nobody would ever know).
+ */
+export const WORK_CLAIMED_LOG_MSG = "work claimed";
+export const WORK_CLAIMED_WAIT_FIELD = "waitedSeconds";
+
 /** Home syncs' own budget (the TURN_LIMIT reasoning), and the pacing
  * window on a claimed-but-unacked sync: `home_sync_claimed_at` is this
  * arm's WHOLE recovery clock — a claim lost anywhere (runner death, dropped
@@ -232,6 +301,9 @@ export const claimDueWork = async (
   const retryBefore = new Date(Date.now() - START_RETRY_SECONDS * 1000);
   const idleBefore = new Date(Date.now() - SANDBOX_IDLE_STOP_SECONDS * 1000);
   const syncRetryBefore = new Date(Date.now() - HOME_SYNC_RETRY_SECONDS * 1000);
+  const priorityAgeBefore = new Date(
+    Date.now() - WAKE_PRIORITY_AGE_SECONDS * 1000,
+  );
 
   return db.$transaction(async (tx) => {
     // The claim is a CTE, deliberately — NOT `WHERE id IN (SELECT … LIMIT n
@@ -281,20 +353,44 @@ export const claimDueWork = async (
               -- HTTP round trips allow, for the whole turn ceiling. The claim
               -- stamps updated_at, so this term is what paces the retry.
               AND (s.status = 'stopped' OR s.updated_at < ${retryBefore})
-              AND EXISTS (
-                SELECT 1 FROM conversations c
-                JOIN turns t ON t.conversation_id = c.id
-                WHERE c.agent_id = s.agent_id
-                  -- Only what the turn arm can actually deliver once the
-                  -- sandbox is back. A running turn is unresumable, since
-                  -- every start recreates the container, and it is failed
-                  -- outright when the sandbox goes down (applyRunnerEvent) --
-                  -- so waking for one would start a container to do nothing.
-                  AND t.status IN ('queued', 'dispatched')
+              -- Work still owed is a deliverable turn OR a lease-current SSH
+              -- session (step 5's wake-on-connect, the same poll-time-truth
+              -- rule: session-open's flip is the latency optimization, this
+              -- arm is the wake that always happens). Deliberately INSIDE
+              -- the backoff frame above — a sibling OR would bypass the
+              -- failed-status pacing and reproduce the claim→refuse hot
+              -- loop on a sandbox that cannot compose (parkUnstartableClaim).
+              AND (
+                EXISTS (
+                  SELECT 1 FROM conversations c
+                  JOIN turns t ON t.conversation_id = c.id
+                  WHERE c.agent_id = s.agent_id
+                    -- Only what the turn arm can actually deliver once the
+                    -- sandbox is back. A running turn is unresumable, since
+                    -- every start recreates the container, and it is failed
+                    -- outright when the sandbox goes down (applyRunnerEvent) --
+                    -- so waking for one would start a container to do nothing.
+                    AND t.status IN ('queued', 'dispatched')
+                )
+                OR ${liveSshSessionExists()}
               )
             )
           )
-        ORDER BY s.updated_at ASC
+        -- WAKE PRIORITY: a sandbox someone is waiting on outranks one only
+        -- an automation woke (see WAKE_PRIORITY_AGE_SECONDS — the age cap
+        -- keeps starvation bounded). Under a claim LIMIT the ORDER BY is the
+        -- admission policy, exactly like the stop arm's LRU. A lease-current
+        -- SSH session is user-visible by definition — a human is sitting at
+        -- the prompt waiting for the boot.
+        ORDER BY
+          CASE WHEN EXISTS (
+            SELECT 1 FROM conversations c
+            JOIN turns t ON t.conversation_id = c.id
+            WHERE c.agent_id = s.agent_id
+              AND t.status IN ('queued', 'dispatched')
+              AND ${userVisibleTurn(priorityAgeBefore)}
+          ) OR ${liveSshSessionExists()} THEN 0 ELSE 1 END,
+          s.updated_at ASC
         LIMIT ${limit}
         FOR UPDATE OF s SKIP LOCKED
       )
@@ -560,7 +656,11 @@ export const claimDueWork = async (
             t.status = 'queued'
             OR (t.status = 'dispatched' AND t.updated_at < ${staleDispatch})
           )
-        ORDER BY t.created_at ASC
+        -- WAKE PRIORITY, same rank as the start arm: within one poll's turn
+        -- budget a person's message dispatches before a scheduled run's.
+        ORDER BY
+          CASE WHEN ${userVisibleTurn(priorityAgeBefore)} THEN 0 ELSE 1 END,
+          t.created_at ASC
         LIMIT ${TURN_LIMIT}
         FOR UPDATE OF t SKIP LOCKED
       )
@@ -577,7 +677,11 @@ export const claimDueWork = async (
           WHERE c.id = t.conversation_id) AS agent_id,
         t.message,
         (SELECT c.harness_session_ref FROM conversations c
-          WHERE c.id = t.conversation_id) AS harness_session_ref
+          WHERE c.id = t.conversation_id) AS harness_session_ref,
+        -- The claim-latency clock (step 6 telemetry): the same expression
+        -- the turn-budget sweeps measure from — a promoted follow-up or an
+        -- auto-retried turn deliberately restarts it.
+        COALESCE(t.retried_at, t.promoted_at, t.created_at) AS waited_since
     `;
 
     return [
@@ -632,6 +736,7 @@ export const claimDueWork = async (
                 agentId: row.agent_id,
                 message: row.message,
                 resumeSessionRef: row.harness_session_ref,
+                waitedSince: row.waited_since,
               },
             ]
           : [],

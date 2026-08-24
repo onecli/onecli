@@ -4,7 +4,7 @@ import { z } from "zod";
 import type { ApiEnv } from "../../types";
 import { auth } from "../../middleware/auth";
 import { provisionUser } from "../services/user-provision-service";
-import { APP_URL } from "../../lib/env";
+import { appOrigin } from "../../lib/public-origins";
 import {
   withAudit,
   AUDIT_ACTIONS,
@@ -45,7 +45,7 @@ export const teamRoutes = () => {
           skipOnboarding: parsed.data.skipOnboarding,
           provisionedById: authCtx.userId,
           provisionedByEmail: authCtx.userEmail,
-          appUrl: APP_URL,
+          appUrl: appOrigin(),
         }),
       (provision) => ({
         organizationId: authCtx.organizationId,

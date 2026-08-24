@@ -40,3 +40,12 @@ describe("queryKeys.agents.root()", () => {
     ).toBe(false);
   });
 });
+
+describe("queryKeys.sshKeys", () => {
+  it("is deliberately UNSCOPED — one cache across /account and /w pages", () => {
+    // A scoped key would silently split the account manager and the agent
+    // page's picker into two caches (see the rationale comment in keys.ts).
+    expect(queryKeys.sshKeys.all()).toEqual(["ssh-keys"]);
+    expect(queryKeys.sshKeys.list()).toEqual(["ssh-keys", "list"]);
+  });
+});

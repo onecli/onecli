@@ -99,6 +99,15 @@ export const sandboxStartPayloadSchema = z.object({
   env: z.record(z.string(), z.string()),
   files: z.array(sandboxFileSchema),
   /**
+   * The workspace the sandbox's agent lives in (step 3 of
+   * plans/sandbox-platform.md). Namespaced backends (the cloud manager) fence
+   * every sandbox inside its workspace's namespace and need this at create
+   * time; the Docker backend ignores it. Optional so an older control plane
+   * keeps working against a newer runner — a backend that REQUIRES it refuses
+   * loudly instead of guessing.
+   */
+  workspaceId: z.string().min(1).optional(),
+  /**
    * The PROVIDER's model id the agent runs (§3.10) — `claude-sonnet-4-6`, not
    * a harness alias. The adapter translates; nothing above it knows which
    * harness will run this.
@@ -375,8 +384,16 @@ export const runnerEventSchema = z.discriminatedUnion("kind", [
 ]);
 export type RunnerEvent = z.infer<typeof runnerEventSchema>;
 
+/**
+ * Ceiling on one events POST. The runner's client chunks larger batches into
+ * sequential posts at this bound — a reconcile pass over a big fleet (a dead
+ * node's worth of corrective events) must degrade to more requests, never to
+ * one 400 that loses the whole report.
+ */
+export const MAX_RUNNER_EVENTS_PER_POST = 100;
+
 export const runnerEventsRequestSchema = z.object({
-  events: z.array(runnerEventSchema).min(1).max(100),
+  events: z.array(runnerEventSchema).min(1).max(MAX_RUNNER_EVENTS_PER_POST),
 });
 export type RunnerEventsRequest = z.infer<typeof runnerEventsRequestSchema>;
 
@@ -388,6 +405,17 @@ export type RunnerEventsRequest = z.infer<typeof runnerEventsRequestSchema>;
  */
 export const runnerSandboxesResponseSchema = z.object({
   sandboxIds: z.array(z.string().min(1)),
+  /**
+   * What the control plane currently BELIEVES about each assigned sandbox,
+   * keyed by sandbox id — the vanished-pod arm's input: a sandbox believed
+   * `running` with no backend snapshot is a pod that died out-of-band, and
+   * the runner is the only party positioned to notice. `sandboxIds` stays
+   * the reap authority; this field is advisory. Values ride as open strings
+   * (never an enum — a future status must not break an old runner's parse),
+   * and the whole field is additive-optional so a new runner tolerates an
+   * old control plane by leaving the arm inert.
+   */
+  statuses: z.record(z.string().min(1), z.string().min(1)).optional(),
 });
 export type RunnerSandboxesResponse = z.infer<
   typeof runnerSandboxesResponseSchema

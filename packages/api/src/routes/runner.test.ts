@@ -31,7 +31,7 @@ const services = vi.hoisted(() => ({
   waitForWork: vi.fn(),
   buildSandboxStartPayload: vi.fn(),
   applyRunnerEvent: vi.fn(),
-  listRunnerSandboxIds: vi.fn(),
+  listRunnerSandboxes: vi.fn(),
   listMissingSandboxIds: vi.fn(),
   runnerUpdate: vi.fn(),
   buildTurnContext: vi.fn(),
@@ -113,7 +113,7 @@ vi.mock("../services/follow-up-service", () => ({
 vi.mock("../services/sandbox-service", () => ({
   buildSandboxStartPayload: services.buildSandboxStartPayload,
   applyRunnerEvent: services.applyRunnerEvent,
-  listRunnerSandboxIds: services.listRunnerSandboxIds,
+  listRunnerSandboxes: services.listRunnerSandboxes,
   listMissingSandboxIds: services.listMissingSandboxIds,
   requestSandboxRespawn: vi.fn(),
 }));
@@ -124,6 +124,14 @@ vi.mock("../services/turn-context-service", () => ({
 
 vi.mock("../services/cron-fire-service", () => ({
   fireDueCrons: services.fireDueCrons,
+}));
+
+// The poll's ssh-session sweep + the instance route's availability posture
+// (sandbox-platform step 5) — mocked so the route graph loads without the
+// ssh service; the sweep is non-fatal like every sweep.
+vi.mock("../services/ssh-service", () => ({
+  sweepSshSessions: vi.fn(async () => {}),
+  sshAvailable: () => false,
 }));
 
 vi.mock("../services/watch-fire-service", () => ({
@@ -173,7 +181,7 @@ beforeEach(() => {
   services.planTurnAttachments.mockResolvedValue({ manifest: [], note: null });
   services.sweepStalePendingAttachments.mockResolvedValue(0);
   services.waitForWork.mockResolvedValue(undefined);
-  services.listRunnerSandboxIds.mockResolvedValue([]);
+  services.listRunnerSandboxes.mockResolvedValue([]);
   services.getRunnerAvailability.mockResolvedValue({
     registered: false,
     online: false,
@@ -692,13 +700,19 @@ describe("heartbeat + sandboxes", () => {
     expect(services.heartbeatRunner).toHaveBeenCalledWith("r-1", CAPABILITIES);
   });
 
-  it("lists only the authenticated runner's sandboxes", async () => {
-    services.listRunnerSandboxIds.mockResolvedValue(["sb-1", "sb-2"]);
+  it("lists only the authenticated runner's sandboxes, with statuses", async () => {
+    services.listRunnerSandboxes.mockResolvedValue([
+      { id: "sb-1", status: "running" },
+      { id: "sb-2", status: "stopped" },
+    ]);
     const res = await app.request("/v1/runner/sandboxes", {
       headers: { authorization: `Bearer ${RUNNER_TOKEN}` },
     });
-    expect(await res.json()).toEqual({ sandboxIds: ["sb-1", "sb-2"] });
-    expect(services.listRunnerSandboxIds).toHaveBeenCalledWith("r-1");
+    expect(await res.json()).toEqual({
+      sandboxIds: ["sb-1", "sb-2"],
+      statuses: { "sb-1": "running", "sb-2": "stopped" },
+    });
+    expect(services.listRunnerSandboxes).toHaveBeenCalledWith("r-1");
   });
 });
 

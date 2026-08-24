@@ -27,6 +27,7 @@ import { startPlatformTools } from "./platform-tools";
 import { attachmentsFragment } from "./capabilities/attachments";
 import { connectionsFragment } from "./capabilities/connections";
 import { cronsFragment, cronsTools } from "./capabilities/crons";
+import { machineFragment } from "./capabilities/machine";
 import { memoryFragment, memoryTools } from "./capabilities/memory";
 import { skillsFragment } from "./capabilities/skills";
 import {
@@ -191,6 +192,10 @@ export const runSupervisor = async (
       cronsFragment,
       memoryFragment,
       processesFragment,
+      // Unconditional like connections: what survives sleep/relaunch is a
+      // substrate property. Registered AFTER processes — its last bullet
+      // says "see Background processes above".
+      machineFragment,
       // Unconditional like connections: receiving files is a platform
       // property (every harness can read a file), not an adapter capability.
       attachmentsFragment,
@@ -547,7 +552,8 @@ export const runSupervisor = async (
       // message on a path with no context (a runner without the attachments
       // capability, a failed context build) would otherwise hand the harness
       // an empty string, which jcode turns into an empty text block the
-      // model API rejects with a 400 (verified in v0.71.1 source).
+      // model API rejects with a 400 (verified in v0.71.1; v0.78.1 still
+      // passes the content through verbatim, no filtering).
       const composed = item.context
         ? `${item.context}\n\n${item.message}`
         : item.message;

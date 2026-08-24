@@ -30,6 +30,8 @@ export interface RunnerWsServerOptions {
   port: number;
   /** Called for every valid message a supervisor sends. */
   onMessage: (sandboxId: string, message: SupervisorMessage) => void;
+  /** Keepalive cadence override — tests only; see PING_INTERVAL_MS. */
+  pingIntervalMs?: number;
 }
 
 export interface RunnerWsServer {
@@ -48,13 +50,29 @@ export interface RunnerWsServer {
   close(): Promise<void>;
 }
 
+/**
+ * Keepalive cadence for every supervisor channel. The channel is long-lived
+ * and mostly SILENT (an idle agent sends nothing for hours), it cannot
+ * reconnect (the bootstrap token is single-use), and in the cloud it rides a
+ * network load balancer whose TCP idle timeout (~350s) silently discards
+ * quiet flows — after which the next write meets a dead connection and the
+ * agent is respawned for no reason. A server-side ping well inside that
+ * window keeps the flow alive everywhere; peers answer with pong
+ * automatically (`ws` clients and native WebSockets both), so the supervisor
+ * needs no change. Keepalive only — dead peers still surface through close
+ * events and reconcile, so no terminate-on-missed-pong.
+ */
+const PING_INTERVAL_MS = 60_000;
+
 export const createRunnerWsServer = ({
   port,
   onMessage,
+  pingIntervalMs = PING_INTERVAL_MS,
 }: RunnerWsServerOptions): RunnerWsServer => {
   /** token → sandboxId, consumed on connect. */
   const pending = new Map<string, string>();
   const connections = new Map<string, WebSocket>();
+  let pingTimer: NodeJS.Timeout | undefined;
 
   const http: Server = createServer((req, res) => {
     // The compose health check — the only plain HTTP this server answers.
@@ -166,6 +184,21 @@ export const createRunnerWsServer = ({
     },
 
     listen() {
+      // Started here rather than at construction so tests that never listen
+      // hold no timer, and unref'd so it can never keep the process open.
+      pingTimer = setInterval(() => {
+        for (const [sandboxId, ws] of connections) {
+          try {
+            ws.ping();
+          } catch (error) {
+            log("warn", "supervisor ping failed", {
+              sandboxId,
+              error: String(error),
+            });
+          }
+        }
+      }, pingIntervalMs);
+      pingTimer.unref?.();
       return new Promise((resolve, reject) => {
         http.once("error", reject);
         http.listen(port, () => {
@@ -184,6 +217,7 @@ export const createRunnerWsServer = ({
     },
 
     close() {
+      if (pingTimer) clearInterval(pingTimer);
       return new Promise((resolve) => {
         for (const ws of connections.values()) ws.close();
         connections.clear();

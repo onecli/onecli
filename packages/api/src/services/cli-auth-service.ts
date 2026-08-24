@@ -44,7 +44,6 @@ export const pollCliAuthSession = async (code: string) => {
     throw new ServiceError("NOT_FOUND", "Session not found");
   }
 
-  // Check expiry for pending sessions
   if (session.status === "pending" && session.expiresAt < new Date()) {
     await db.cliAuthSession.update({
       where: { code },

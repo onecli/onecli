@@ -145,7 +145,6 @@ impl ApprovalStore for RedisApprovalStore {
         let org_id = &approval.organization_id;
         let workspace_id = &approval.workspace_id;
 
-        // Store approval data with TTL
         if let Err(e) = redis::cmd("SETEX")
             .arg(format!("approval:{org_id}:{workspace_id}:{}", approval.id))
             .arg(REDIS_TTL_SECS)
@@ -156,7 +155,6 @@ impl ApprovalStore for RedisApprovalStore {
             return Err(anyhow::anyhow!("redis SETEX failed: {e}"));
         }
 
-        // Add to workspace index set
         let set_key = format!("approvals:{org_id}:{workspace_id}");
         let _ = redis::cmd("SADD")
             .arg(&set_key)
@@ -318,7 +316,6 @@ impl ApprovalStore for RedisApprovalStore {
     async fn remove(&self, org_id: &str, workspace_id: &str, id: &str) {
         let mut conn = self.conn.clone();
 
-        // Remove from workspace index set
         let _ = redis::cmd("SREM")
             .arg(format!("approvals:{org_id}:{workspace_id}"))
             .arg(id)
@@ -332,7 +329,6 @@ impl ApprovalStore for RedisApprovalStore {
             .query_async::<()>(&mut conn)
             .await;
 
-        // Delete the approval data
         let _ = redis::cmd("DEL")
             .arg(format!("approval:{org_id}:{workspace_id}:{id}"))
             .query_async::<()>(&mut conn)
@@ -437,7 +433,6 @@ impl ApprovalStore for RedisApprovalStore {
             .query_async::<()>(&mut conn)
             .await;
 
-        // Remove the pending approval
         self.remove(org_id, workspace_id, id).await;
         true
     }

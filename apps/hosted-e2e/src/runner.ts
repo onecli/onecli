@@ -71,6 +71,8 @@ export const startTestRunner = async (
     controlPlaneUrl: opts.controlPlaneUrl,
     name: `hosted-e2e-${opts.ids.nonce}`,
     backend: "docker",
+    // 1 = the self-host serialization posture; the e2e pins today's behavior.
+    lifecycleConcurrency: 1,
     agentImage: opts.config.agentImage,
     sandboxNetwork: opts.ids.network,
     networkInternal: false,
@@ -84,6 +86,12 @@ export const startTestRunner = async (
     sandboxExtraHosts: [`${opts.config.hostGatewayHost}:host-gateway`],
     orphanReap: opts.orphanReap ?? true,
     orphanGraceSeconds: opts.orphanGraceSeconds ?? 3600,
+    // Cloud-backend settings — inert here: hosted-e2e is the DOCKER path.
+    sandboxManagerUrl: null,
+    sandboxManagerToken: null,
+    cloudParkWaitSeconds: 120,
+    cloudWakeWaitSeconds: 900,
+    cloudImageWaitSeconds: 240,
   };
 
   const backend = createDockerBackend({

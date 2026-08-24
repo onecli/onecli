@@ -64,6 +64,19 @@ export interface WorkspaceRef {
 }
 
 /**
+ * The SSH certificate authority behind the front door (step 5): mints user
+ * certificates and session grants. Both operations are async because the
+ * cloud implementation signs inside KMS (the private key is non-extractable);
+ * the onprem twin wraps a local PEM. `getPublicKey` returns the raw 32-byte
+ * ed25519 key; `sign` returns the raw 64-byte signature over exactly the
+ * given bytes.
+ */
+export interface SshCaSigner {
+  getPublicKey(): Promise<Buffer>;
+  sign(data: Buffer): Promise<Buffer>;
+}
+
+/**
  * The licensed workspace-access + org-admin resolution behind the shared
  * predicates in `services/workspace-access-check.ts`. RBAC deployments (cloud,
  * licensed self-host) answer through the injected implementation — the
@@ -94,6 +107,14 @@ export type SessionEnforcer = (
   session: SessionUser,
   user: { id: string; email: string },
 ) => Promise<SessionDenial | null>;
+
+/**
+ * Edition throttle applied to /auth/session BEFORE the session read, so a
+ * refusal (429) precedes every DB write the bootstrap performs. Cloud injects
+ * the per-IP Redis limiter; never registered in OSS — self-host requests are
+ * never throttled here.
+ */
+export type SessionThrottle = import("hono").MiddlewareHandler;
 
 export interface OAuthOrgHandlers {
   tryHandleOrgAuthorize: (

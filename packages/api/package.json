@@ -35,6 +35,7 @@
     "@aws-sdk/client-secrets-manager": "^3.1014.0",
     "@onecli/agent-protocol": "workspace:*",
     "@onecli/db": "workspace:*",
+    "@onecli/ssh-cert": "workspace:*",
     "better-auth": "1.6.26",
     "croner": "^10.0.1",
     "hono": "^4.12.0",

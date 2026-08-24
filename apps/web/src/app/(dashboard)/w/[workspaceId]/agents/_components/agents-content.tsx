@@ -6,7 +6,7 @@ import { AgentIcon } from "@/lib/agents/agent-icon";
 import { useAgents } from "@/hooks/use-agents";
 import { useGrantsSummary } from "@/hooks/use-grants";
 import { useHostedAvailability } from "@/hooks/use-hosted-availability";
-import { showsHostedSurface } from "@/lib/agents/availability";
+import { useOrg } from "@/hooks/use-org";
 import { createDoor } from "@/lib/agents/create-door";
 import { IS_CLOUD } from "@/lib/env";
 import { agentSectionPath, AGENT_CREATE_PARAM } from "@/lib/navigation";
@@ -44,8 +44,18 @@ export const AgentsContent = ({
   // Read, not polled: the sidebar and the chat section own the availability
   // poll; the shared cache is fresh enough to decide which create door shows.
   const availability = useHostedAvailability();
-  // ONE door, chosen by what this user already has (§3.15 as amended).
-  const door = createDoor({ agents, availability });
+  // The org's creation world (cloud: byoLegacy picks the door; the hook is
+  // disabled on self-host, where a disabled query reports isPending forever —
+  // hence every read below guards with IS_CLOUD).
+  const { data: org, isPending: orgPending } = useOrg();
+  const orgLoading = IS_CLOUD && orgPending;
+  // ONE door — on cloud the org's world decides; self-host keeps the
+  // what-you-already-have rule (§3.10 as re-decided 2026-08-23).
+  const door = createDoor({
+    agents,
+    availability,
+    orgByoLegacy: IS_CLOUD ? (org?.byoLegacy ?? null) : null,
+  });
   // A legacy user's move to hosted is a migration, so their hosted entry books
   // the onboarding call; a new user goes straight into creation. Cloud only:
   // the call migrates them onto OUR runners. A self-host deployment's hosted
@@ -65,17 +75,32 @@ export const AgentsContent = ({
   // creation. Opening the hosted dialog directly here would have quietly
   // bypassed that migration gate for anyone arriving by link.
   //
-  // Waits for BOTH reads the door depends on: availability, and the agent
-  // list (`createDoor` treats `undefined` as "still loading" and falls back to
-  // BYO), so a first paint can't pick the wrong door.
+  // Waits for the reads the door actually depends on: the agent list
+  // (`createDoor` treats `undefined` as "still loading" and falls back to
+  // BYO), on cloud the org's world (an org-world miss would drop a BYO-world
+  // user into hosted creation instead of the onboarding call), and
+  // availability — EXCEPT for a hosted-world org, whose door ignores
+  // availability entirely: a failed instance read parks availability on
+  // "loading" forever, and this link must not stall while the page happily
+  // paints the hosted door.
   //
   // The guard is the PARAM's presence, never a latch: stripping it is what
   // makes this fire once, so pressing the button again on this same page
   // reopens the dialog. A one-shot ref silently broke that second press.
+  const doorAwaitsAvailability =
+    availability === "loading" && !(IS_CLOUD && org?.byoLegacy === false);
   useEffect(() => {
-    if (!createRequested || availability === "loading" || loading) return;
-    if (showsHostedSurface(availability)) onCreateHosted();
-    else setCreateOpen(true);
+    if (!createRequested || doorAwaitsAvailability || loading || orgLoading)
+      return;
+    // `?new=1` is a HOSTED-INTENT link (the Get Started landing): any door
+    // with a hosted arm routes through `onCreateHosted` — hosted-world orgs
+    // into creation, BYO-world orgs into the onboarding call (deliberately
+    // NOT the page's BYO primary) — and only the pure-BYO door opens BYO
+    // creation. Routed on the DOOR, never raw availability, which would
+    // disagree with it (e.g. a hosted-world org on a runner-less read must
+    // still land in the hosted flow, not BYO creation).
+    if (door === "byo") setCreateOpen(true);
+    else onCreateHosted();
     const params = new URLSearchParams(searchParams);
     params.delete(AGENT_CREATE_PARAM);
     const query = params.toString();
@@ -88,8 +113,9 @@ export const AgentsContent = ({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [
     createRequested,
-    availability,
+    doorAwaitsAvailability,
     loading,
+    orgLoading,
     door,
     searchParams,
     router,
@@ -114,11 +140,14 @@ export const AgentsContent = ({
 
   const summaryByAgent = new Map(summaries.map((s) => [s.id, s.grantsSummary]));
 
-  // Gate only on the agents read. Availability "loading" deliberately falls
-  // back to the BYO door (see createDoor) rather than holding the page:
-  // useInstance returns null for BOTH in-flight and failed reads, so waiting
-  // on it would turn an instance-read failure into a permanent skeleton.
-  if (loading) {
+  // Gate on the agents read, plus (cloud) the org's world while it is genuinely
+  // in flight — the world decides the PRIMARY button, and swapping a primary
+  // after paint breaks the user. `orgLoading` is react-query's isPending, never
+  // `org == null`: an errored org read renders with the workspace-derived
+  // fallback instead of a permanent skeleton. Availability "loading" likewise
+  // deliberately falls back (see createDoor) rather than holding the page:
+  // useInstance returns null for BOTH in-flight and failed reads.
+  if (loading || orgLoading) {
     return (
       <div className="space-y-4">
         {[1, 2].map((i) => (

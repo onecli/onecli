@@ -1,7 +1,7 @@
 import { Hono } from "hono";
 import { db } from "@onecli/db";
 import { getSelfUrl } from "../providers";
-import { APP_URL } from "../lib/env";
+import { appOrigin } from "../lib/public-origins";
 import { markOnboardingCompleteByApiKey } from "../services/onboarding-service";
 import { deviceAuthBlock } from "./shell-fragments";
 
@@ -38,7 +38,7 @@ export const migrateNanoclawRoutes = () => {
     }
 
     const onecliUrl = url ?? getSelfUrl();
-    const script = buildScript(key, onecliUrl, APP_URL, workspaceId);
+    const script = buildScript(key, onecliUrl, appOrigin(), workspaceId);
 
     return new Response(script, {
       headers: {
@@ -89,17 +89,13 @@ const buildScript = (
 
 const migrationSteps = (): string[] => [
   "",
-  "# ── Detect local secrets before switching ──",
+  "# ── Detect the current api-host before switching ──",
   'CONFIG_DIR="$HOME/.onecli"',
   'CONFIG_FILE="$CONFIG_DIR/config.json"',
-  'LOCAL_API_KEY=""',
   'CURRENT_HOST=""',
   "",
   'if [ -f "$CONFIG_FILE" ]; then',
   `  CURRENT_HOST=$(grep '"api-host"' "$CONFIG_FILE" | sed 's/.*: *"\\(.*\\)".*/\\1/')`,
-  "fi",
-  'if [ -f "$CONFIG_DIR/credentials/api-key" ]; then',
-  '  LOCAL_API_KEY=$(cat "$CONFIG_DIR/credentials/api-key")',
   "fi",
   "",
   'if [ -n "$CURRENT_HOST" ] && [ "$CURRENT_HOST" != "$ONECLI_URL" ]; then',
@@ -129,27 +125,6 @@ const migrationSteps = (): string[] => [
   'echo "  Updating OneCLI CLI..."',
   'CLI_ERR=$(curl -fsSL https://onecli.sh/cli/install 2>/dev/null | sh 2>&1) || echo "  Warning: CLI update failed: $CLI_ERR"',
   'export PATH="$HOME/.local/bin:$PATH"',
-  "",
-  'if command -v onecli >/dev/null 2>&1 && [ -n "$CURRENT_HOST" ] && [ -n "$LOCAL_API_KEY" ]; then',
-  "  # Ensure CLI is pointed at the local instance for export",
-  '  onecli config set api-host "$CURRENT_HOST" >/dev/null 2>&1 || true',
-  '  echo "$LOCAL_API_KEY" | onecli auth login >/dev/null 2>&1 || true',
-  '  echo ""',
-  '  echo "  Migrating data to cloud..."',
-  '  CLOUD_URL_FLAG=""',
-  '  if [ "$ONECLI_URL" != "https://api.onecli.sh" ]; then',
-  '    CLOUD_URL_FLAG="--cloud-url $ONECLI_URL"',
-  "  fi",
-  '  MIGRATE_ERR=$(onecli migrate --cloud-key "$ONECLI_API_KEY" $CLOUD_URL_FLAG 2>&1) && MIGRATE_OK=1 || MIGRATE_OK=0',
-  '  if [ "$MIGRATE_OK" = "1" ]; then',
-  '    echo "  Data migrated successfully"',
-  "  else",
-  '    echo "  Data migration skipped (you can add secrets manually in the dashboard)"',
-  '    if [ -n "$MIGRATE_ERR" ]; then',
-  '      echo "  Error: $MIGRATE_ERR"',
-  "    fi",
-  "  fi",
-  "fi",
   "",
   "# ── Update CLI config ──",
   "",

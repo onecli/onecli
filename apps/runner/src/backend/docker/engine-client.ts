@@ -38,7 +38,7 @@ export class DockerEngineError extends Error {
 
 export interface EngineTransport {
   request(options: {
-    method: "GET" | "POST" | "PUT" | "DELETE";
+    method: "GET" | "HEAD" | "POST" | "PUT" | "DELETE";
     path: string;
     headers?: Record<string, string>;
     body?: string | Buffer;
@@ -169,7 +169,7 @@ export class DockerEngine {
   }
 
   private async send(
-    method: "GET" | "POST" | "PUT" | "DELETE",
+    method: "GET" | "HEAD" | "POST" | "PUT" | "DELETE",
     path: string,
     options: {
       json?: unknown;
@@ -288,6 +288,17 @@ export class DockerEngine {
         `docker pull ${image} failed: ${lastError.slice(0, 300)}`,
       );
     }
+  }
+
+  /**
+   * Existence probe — returns the status code instead of parsing a body
+   * (HEAD bodies are empty by definition). Note undici deliberately closes
+   * the connection after every HEAD (misbehaving-server interop default),
+   * so each probe costs one extra unix-socket dial — harmless here.
+   */
+  async head(path: string, options: { tolerate?: number[] } = {}) {
+    const { statusCode } = await this.send("HEAD", path, options);
+    return statusCode;
   }
 
   async put(path: string, body: Buffer, contentType: string) {

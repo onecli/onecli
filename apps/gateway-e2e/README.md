@@ -88,12 +88,12 @@ every file underneath it moved.
 Two properties are worth calling out because nothing else in the repo guards them, and both
 fail **open** — a regression in either is silent, and every other test stays green:
 
-- **`has_injections`** (`forward.rs:200`) feeds the deny-by-default carve. If it goes false,
-  every Default-Rule Block stops enforcing. Pinned by the pair in `policy.test.ts` — same org
-  default rule, granted credential present vs absent.
+- **`has_injections`** (`src/gateway/forward.rs`) feeds the deny-by-default carve. If it goes
+  false, every Default-Rule Block stops enforcing. Pinned by the pair in `policy.test.ts` — same
+  org default rule, granted credential present vs absent.
 - **Grant-driven injection** (attach-model step 7): nothing from the org/workspace tiers injects
-  without a published allow rule naming the agent, and the dead `agents.secret_mode` column
-  drives nothing. Pinned by `grants.test.ts`. The silent-vacuity trap inverted with step 7:
+  without a published allow rule naming the agent (the legacy `agents.secret_mode` column is
+  dropped outright). Pinned by `grants.test.ts`. The silent-vacuity trap inverted with step 7:
   a world that seeds credentials but forgets `grantAll` (or granting rules) makes every
   injection assertion pass against a gateway that injects nothing at all — say `grantAll`.
 - **`needs_body_buffer`** (`policy_engine/enforce.rs`) feeds body buffering. If the body

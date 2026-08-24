@@ -1,4 +1,13 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+
+// Pinned onprem: the suite's laws below are edition-blind, but createAgent's
+// cloud arm now runs the creation-world gate (§3.10 re-decided 2026-08-23),
+// which the ambient-cloud CI lane would otherwise drag through every case.
+// The gate reads the edition at CALL time, so its own describe block flips
+// the env per test instead of forking a second file.
+vi.hoisted(() => {
+  process.env.NEXT_PUBLIC_EDITION = "onprem";
+});
 
 // In-memory `@onecli/db` mock covering what `createAgent`/`updateAgent` touch.
 // Two load-bearing laws live here: EVERY new agent is created `selective` with
@@ -31,6 +40,8 @@ const store = vi.hoisted(() => ({
   createThrows: null as Error | null,
   // Step 3: what the placement seam sees. Default: one runner with capacity.
   runners: [] as Array<Record<string, unknown>>,
+  // The org's creation world behind the workspace join (cloud gate only).
+  orgByoLegacy: false,
 }));
 
 // Step 9: render-input edits (name / instructions) reach a live sandbox as a
@@ -94,6 +105,20 @@ vi.mock("@onecli/db", () => {
       runner: {
         findMany: async () => store.runners,
       },
+      // The creation-world gate's workspace→org join (cloud only). Honors the
+      // exact nested select createAgent passes; the query SHAPE itself is
+      // proven against real Postgres in agent-service.pg.test.ts.
+      workspace: {
+        findUnique: async ({
+          select,
+        }: {
+          where: { id: string };
+          select: { organization: { select: { byoLegacy: boolean } } };
+        }) =>
+          select.organization.select.byoLegacy
+            ? { organization: { byoLegacy: store.orgByoLegacy } }
+            : null,
+      },
     },
   };
 });
@@ -119,7 +144,74 @@ beforeEach(() => {
   store.updated = [];
   store.runners = [ONLINE_RUNNER];
   store.createThrows = null;
+  store.orgByoLegacy = false;
   homeSync.bumpHomeForAgent.mockClear();
+});
+
+describe("createAgent — the creation-world gates (cloud, §3.10 re-decided)", () => {
+  // The gate reads the edition per call (policy-flags), so each case pins
+  // cloud itself and the hook below restores the file's onprem pin.
+  beforeEach(() => {
+    process.env.NEXT_PUBLIC_EDITION = "cloud";
+  });
+  afterEach(() => {
+    process.env.NEXT_PUBLIC_EDITION = "onprem";
+  });
+
+  it("refuses BYO creation for a hosted-world org — including an omitted kind", async () => {
+    // kind defaults to byo AFTER validation; the gate must see the defaulted
+    // value, or a body that simply omits `kind` slips past it.
+    for (const input of [
+      { name: "N", identifier: "n1", kind: "byo" as const },
+      { name: "N", identifier: "n2" },
+    ]) {
+      await expect(createAgent("p1", input)).rejects.toMatchObject({
+        code: "FORBIDDEN",
+      });
+    }
+    expect(store.created).toHaveLength(0);
+  });
+
+  it("lets a hosted-world org create hosted agents", async () => {
+    await createAgent("p1", { name: "H", identifier: "h", kind: "hosted" });
+    expect(lastCreated().kind).toBe("hosted");
+  });
+
+  it("refuses HOSTED creation for a BYO-world org", async () => {
+    store.orgByoLegacy = true;
+    await expect(
+      createAgent("p1", { name: "H", identifier: "h", kind: "hosted" }),
+    ).rejects.toMatchObject({ code: "FORBIDDEN" });
+    expect(store.created).toHaveLength(0);
+  });
+
+  it("lets a BYO-world org create BYO agents", async () => {
+    store.orgByoLegacy = true;
+    await createAgent("p1", { name: "B", identifier: "b" });
+    expect(lastCreated().kind).toBe("byo");
+  });
+
+  it("answers 409, not 403, for an existing identifier — ensureAgent stays idempotent", async () => {
+    seedAgent("taken");
+    await expect(
+      createAgent("p1", { name: "T", identifier: "taken" }),
+    ).rejects.toMatchObject({ code: "CONFLICT" });
+  });
+
+  it("stays ungated on self-host — both kinds, both worlds", async () => {
+    process.env.NEXT_PUBLIC_EDITION = "onprem";
+    for (const orgByoLegacy of [false, true]) {
+      store.orgByoLegacy = orgByoLegacy;
+      await createAgent("p1", { name: "B", identifier: `b-${orgByoLegacy}` });
+      expect(lastCreated().kind).toBe("byo");
+      await createAgent("p1", {
+        name: "H",
+        identifier: `h-${orgByoLegacy}`,
+        kind: "hosted",
+      });
+      expect(lastCreated().kind).toBe("hosted");
+    }
+  });
 });
 
 describe("createAgent — no parent-mode inheritance (attach-model step 5)", () => {

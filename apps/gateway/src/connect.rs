@@ -1571,7 +1571,6 @@ pub(crate) async fn resolve(
         agent.organization_id, agent.workspace_id
     );
 
-    // Check cache
     if let Some(response) = cache.get::<ConnectResponse>(&cache_key).await {
         debug!(host = %hostname, intercept = response.intercept, "resolve: cache hit");
         return Ok(response);
@@ -1582,7 +1581,6 @@ pub(crate) async fn resolve(
     // Query the database (agent already resolved, avoids re-querying)
     let response = policy_engine.resolve_uncached(&agent, hostname).await?;
 
-    // Cache the response
     cache.set(&cache_key, &response, CACHE_TTL_SECS).await;
 
     Ok(response)

@@ -16,6 +16,7 @@ import {
 import { presenceSettingsUrlFor } from "./channels/registry";
 import { autoAttachLlmKeys } from "./llm-autoattach-service";
 import { llmProvider } from "../llm/registry";
+import { isOnpremEdition } from "../lib/policy-flags";
 import {
   IDENTIFIER_REGEX,
   INSTRUCTIONS_MAX_LENGTH,
@@ -189,8 +190,9 @@ export const createAgent = async (
     );
   }
 
-  // Re-validated here (not only in zod) because the web server actions call
-  // the service directly, bypassing the routes.
+  // Re-validated here (not only in zod) so the service holds its own
+  // invariants — the /v1 route is the only production caller today, but
+  // nothing forces the next caller through zod.
   const kind: AgentKind = input.kind ?? "byo";
   const hosted = kind === "hosted";
   if (!hosted && (input.harness || input.instructions)) {
@@ -218,6 +220,34 @@ export const createAgent = async (
       "CONFLICT",
       "An agent with this identifier already exists",
     );
+  }
+
+  // Cloud creation worlds (sandbox-platform §3.10 as re-decided 2026-08-23):
+  // the org's byoLegacy column picks exactly one creation door — false means
+  // hosted-only, true means BYO-only (hosted starts with an onboarding call).
+  // Self-host is ungated. Placed after the identifier check so a re-created
+  // identifier still answers 409 (SDK ensureAgent stays idempotent), and read
+  // at call time so tests can pin either edition per case.
+  if (!isOnpremEdition()) {
+    const ws = await db.workspace.findUnique({
+      where: { id: workspaceId },
+      select: { organization: { select: { byoLegacy: true } } },
+    });
+    if (!ws) {
+      throw new ServiceError("NOT_FOUND", "Workspace not found");
+    }
+    if (kind === "byo" && !ws.organization.byoLegacy) {
+      throw new ServiceError(
+        "FORBIDDEN",
+        "BYO agent creation isn't enabled for this organization. Create a hosted agent instead.",
+      );
+    }
+    if (kind === "hosted" && ws.organization.byoLegacy) {
+      throw new ServiceError(
+        "FORBIDDEN",
+        "Hosted agents for this organization start with an onboarding call. Book one at https://cal.com/onecli/15min.",
+      );
+    }
   }
 
   const accessToken = generateAccessToken();
@@ -271,9 +301,8 @@ export const createAgent = async (
     if (hosted) signalWork();
 
     // Equip it before anyone can use it. This lives in the SERVICE, not the
-    // route, because agents are created from two surfaces (the /v1 route and
-    // the web server action) and an agent that can never run is not a
-    // property of one of them. Best-effort by contract — see
+    // route, so "an agent that can never run" stays impossible for any caller
+    // of createAgent, not just the /v1 route. Best-effort by contract — see
     // `llm-autoattach-service`.
     const { secretIds } = await autoAttachLlmKeys(
       workspaceId,

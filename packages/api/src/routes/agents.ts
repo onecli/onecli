@@ -18,7 +18,12 @@ import {
   deleteAgent,
   regenerateAgentToken,
 } from "../services/agent-service";
-import { createAgentSchema, updateAgentSchema } from "../validations/agent";
+import {
+  createAgentSchema,
+  mintSshCertificateSchema,
+  updateAgentSchema,
+} from "../validations/agent";
+import { mintSshCertificate } from "../services/ssh-service";
 import {
   setAgentImage,
   clearAgentImage,
@@ -269,6 +274,33 @@ export const agentRoutes = () => {
       agentId,
     );
     invalidateGatewayCache(c.req.raw);
+    return c.json(result);
+  });
+
+  // POST /agents/:agentId/ssh-certificate (sandbox-platform step 5): mint a
+  // short-lived OpenSSH user certificate for this agent. Same authz stack as
+  // every agent sub-resource (workspace-fenced lookup inside the service);
+  // the hosted-kind gate is the service's — the regenerate-token pattern
+  // does NOT provide it. Dark (404) when no SSH CA is configured. No gateway
+  // cache flush: the gateway reads no SSH state.
+  app.post("/:agentId/ssh-certificate", async (c) => {
+    const auth = c.get("auth");
+    const agentId = c.req.param("agentId");
+    const body = await c.req.json().catch(() => null);
+    const parsed = mintSshCertificateSchema.safeParse(body);
+    if (!parsed.success) {
+      return c.json(
+        { error: parsed.error.issues[0]?.message ?? "Invalid request body" },
+        400,
+      );
+    }
+    const result = await mintSshCertificate(
+      requireWorkspaceId(auth),
+      auth.userId,
+      auth.userEmail,
+      agentId,
+      parsed.data,
+    );
     return c.json(result);
   });
 

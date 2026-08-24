@@ -2335,6 +2335,15 @@
         "DELETE"
       ]
     },
+    "get_calendar": {
+      "hostPattern": "www.googleapis.com",
+      "paths": [
+        "/calendar/v3/calendars/*"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
     "get_event": {
       "hostPattern": "www.googleapis.com",
       "paths": [

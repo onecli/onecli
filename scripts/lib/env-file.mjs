@@ -287,6 +287,29 @@ export class EnvFile {
   }
 
   /**
+   * Append a commented `# KEY=value` stub (with `comment` lines above it) so
+   * the file documents an optional knob without pinning a value. A later
+   * `upsert` un-comments the stub in place. No-op when the key already
+   * exists as an assignment or as a stub.
+   */
+  hintStub(key, value, { comment } = {}) {
+    if (this.#last(key)) return false;
+    const stubRe = new RegExp(`^(\\s*)#\\s*(export\\s+)?${key}\\s*=`);
+    for (const e of this.entries)
+      if (e.kind === "comment" && stubRe.test(e.raw)) return false;
+    if (
+      this.entries.length &&
+      this.entries[this.entries.length - 1].kind !== "blank"
+    )
+      this.entries.push(rawLine("blank", ""));
+    for (const line of comment ? comment.split("\n") : [])
+      this.entries.push(rawLine("comment", `# ${line}`));
+    this.entries.push(rawLine("comment", `# ${key}=${value}`));
+    this.dirty = true;
+    return true;
+  }
+
+  /**
    * Atomic write: tmp file in the same directory, then rename — and the
    * result is always 0600, because every file this engine manages holds
    * secrets. No-op when nothing changed.

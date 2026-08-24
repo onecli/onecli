@@ -4,7 +4,8 @@ import { Source_Serif_4 } from "next/font/google";
 import "@onecli/ui/globals.css";
 import "./globals.css";
 import { AuthProvider } from "@/providers/auth-provider";
-import { API_URL, GATEWAY_API_URL, IS_CLOUD } from "@/lib/env";
+import { IS_CLOUD } from "@/lib/env";
+import { apiOrigin, gatewayHttpOrigin } from "@onecli/api/lib/public-origins";
 import { QueryProvider } from "@/providers/query-provider";
 import { ThemeProvider } from "@/providers/theme-provider";
 import { Toaster } from "@onecli/ui/components/sonner";
@@ -43,7 +44,7 @@ export const dynamic = "force-dynamic";
 const browserOriginScript = () =>
   process.env.NODE_ENV === "development"
     ? `window.__GATEWAY_API_URL__=location.origin+"/gw";window.__API_URL__=location.origin`
-    : `window.__GATEWAY_API_URL__=${JSON.stringify(GATEWAY_API_URL)};window.__API_URL__=${JSON.stringify(API_URL)}`;
+    : `window.__GATEWAY_API_URL__=${JSON.stringify(gatewayHttpOrigin())};window.__API_URL__=${JSON.stringify(apiOrigin())}`;
 
 export const viewport: Viewport = {
   width: "device-width",

@@ -108,6 +108,18 @@ beforeEach(() => {
     connectionId: "c1",
     agents: [],
   });
+  services.setSecretGrant.mockResolvedValue({
+    grants: GRANTS,
+    changed: true,
+    ruleIds: ["r2"],
+    generation: 3,
+  });
+  services.removeSecretGrant.mockResolvedValue({
+    grants: GRANTS,
+    changed: true,
+    ruleIds: [],
+    generation: 3,
+  });
   services.listAgentsWithGrantsSummary.mockResolvedValue([]);
   services.listAgents.mockResolvedValue([]);
 });
@@ -164,6 +176,51 @@ describe("agent grants routes", () => {
       SCOPE,
       "a1",
       "c1",
+      "user-1",
+    );
+  });
+});
+
+describe("secret grant routes", () => {
+  // The twin routes the web's attach-on-create drives (lib/api/grants.ts
+  // PUTs `{}` — the route reads no body, only the params and the auth scope).
+
+  it("PUT requires auth", async () => {
+    const res = await app.request("/v1/agents/a1/grants/secrets/s1", {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({}),
+    });
+    expect(res.status).toBe(401);
+    expect(services.setSecretGrant).not.toHaveBeenCalled();
+  });
+
+  it("PUT attaches with the workspace-fenced scope and returns the updated grants", async () => {
+    const res = await app.request("/v1/agents/a1/grants/secrets/s1", {
+      method: "PUT",
+      headers: { ...AUTH, "content-type": "application/json" },
+      body: JSON.stringify({}),
+    });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual(GRANTS);
+    expect(services.setSecretGrant).toHaveBeenCalledWith(
+      SCOPE,
+      "a1",
+      "s1",
+      "user-1",
+    );
+  });
+
+  it("DELETE detaches with 204 through the same workspace-fenced scope", async () => {
+    const res = await app.request("/v1/agents/a1/grants/secrets/s1", {
+      method: "DELETE",
+      headers: AUTH,
+    });
+    expect(res.status).toBe(204);
+    expect(services.removeSecretGrant).toHaveBeenCalledWith(
+      SCOPE,
+      "a1",
+      "s1",
       "user-1",
     );
   });

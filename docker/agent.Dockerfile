@@ -14,7 +14,7 @@
 #   (ONECLI_JCODE_BINARY), JCODE_NO_AUTO_UPDATE baked below, and the
 #   supervisor deleting the updater's builds/ dirs from persistent volumes
 #   at boot (harness/jcode.ts). @1jehuang/jcode-sdk stays as the CLIENT
-#   library only (its wire protocol major is 1 on both 0.67.x and 0.71.x);
+#   library only (its wire protocol major is 1 across 0.67.x–0.78.x);
 #   its bundled npm binary is deleted from the final image so a
 #   misconfiguration fails loudly instead of silently running 0.67.1.
 # - pnpm install must NEVER use --omit=optional: other packages' optional
@@ -58,15 +58,15 @@ RUN pnpm install --frozen-lockfile
 # own updater verified only opportunistically, and it is disabled anyway).
 FROM base AS jcode-runtime
 ARG TARGETARCH
-ARG JCODE_VERSION=v0.71.1
+ARG JCODE_VERSION=v0.78.1
 RUN apt-get update \
   && apt-get install -y --no-install-recommends curl ca-certificates \
   && rm -rf /var/lib/apt/lists/*
 RUN case "$TARGETARCH" in \
     arm64) ASSET="jcode-linux-aarch64"; \
-      SHA="bbd3bcd62cf67f89b7923960cda0fd8cc2129f6347d5e9904b7506e46c884d86";; \
+      SHA="91ec4fe88f04aab8f6b294ee319e66701e273a9077003d24fcbf17d14562fd56";; \
     amd64) ASSET="jcode-linux-x86_64"; \
-      SHA="fb2af63f1df5aecc6e9185d1f88be5ec634578d30081af7db68486bc8283f76b";; \
+      SHA="4a0c45bf8485785faaeb56384f4741e074e403951a2f179c88ff8c32a7ac3b53";; \
     *) echo "unsupported TARGETARCH: $TARGETARCH" >&2; exit 1;; \
   esac \
   && curl -fsSL -o /tmp/jcode.tar.gz \
@@ -138,10 +138,182 @@ WORKDIR /app
 # manager's boot.sh formats and mounts the raw block home, then setpriv-drops
 # to `node` — plans/sandbox-platform.md step 2); inert under the Docker
 # backend, where the home arrives as a pre-mounted volume.
+# openssh-sftp-server + openssh-client serve the SSH front door (step 5):
+# the terminator's relay execs /usr/lib/openssh/sftp-server for sftp and
+# modern scp (≥9.0 rides sftp), and openssh-client provides the in-guest scp
+# binary legacy `scp -O` targets — no daemon, no listener, the no-inbound
+# posture is untouched (and agents get a useful ssh client of their own).
+# podman + friends give the agent `docker run`-class work as ROOTLESS
+# containers (the `docker` CLI itself arrives via podman-docker). Explicitly
+# listed because they are only Recommends of podman: uidmap (setuid
+# newuidmap/newgidmap — the user-namespace helpers), passt (pasta, the
+# default rootless network) + slirp4netns (fallback), fuse-overlayfs
+# (storage fallback; native overlay is the expected driver), aardvark-dns +
+# iptables (netavark named networks / compose), catatonit (pod infra /
+# --init). This is a capability of the hosted microVM substrate, where each
+# sandbox owns a whole kernel; under the self-host Docker backend the same
+# binaries are deliberately inert — the runner pins `no-new-privileges` +
+# `CapDrop: ALL` on every sandbox (apps/runner/src/backend/docker/
+# docker-backend.ts, pinned by its test), which neuters the setuid helpers.
+# Never weaken those guards to chase this feature on a shared kernel; see
+# /etc/containers/README.onecli (baked below) for the agent-visible note.
+# python3 + python3-pip + python3-venv: the agent's second toolchain (node is
+# the runtime; python is the lingua franca of one-off scripting). Debian
+# marks the interpreter externally-managed (PEP 668), so pip refuses every
+# install out of the box — PIP_BREAK_SYSTEM_PACKAGES (env, below) opens it,
+# and as uid 1000 the system site-packages is unwritable anyway, so installs
+# land in the user scheme under the DURABLE home (~/.local — bin dir shared
+# with npm's global prefix). python3-venv also ships the offline pip wheel
+# the durable-home gate below installs from.
+# nano + less: the SSH front door needs an editor and a pager (neither ships
+# in slim, and --no-install-recommends keeps git from pulling less in);
+# EDITOR/PAGER/LESS pin them below.
 RUN apt-get update \
-  && apt-get install -y --no-install-recommends tini git curl ripgrep ca-certificates openssl e2fsprogs util-linux \
+  && apt-get install -y --no-install-recommends tini git curl ripgrep ca-certificates openssl e2fsprogs util-linux openssh-sftp-server openssh-client podman podman-docker uidmap passt slirp4netns fuse-overlayfs aardvark-dns catatonit iptables python3 python3-pip python3-venv nano less \
   && rm -rf /var/lib/apt/lists/*
 ENTRYPOINT ["/usr/bin/tini", "--"]
+
+# Rootless-podman wiring. Four pieces, each load-bearing:
+# - /etc/subuid + /etc/subgid: OVERWRITTEN, not appended — the base image
+#   already allocates node:100000:65536, and a duplicate row makes newuidmap
+#   fail with EINVAL (rootless dead). The range is a DURABLE-DATA FORMAT
+#   CONTRACT: it is baked into the ownership of every file podman writes on
+#   the persistent home volume, so changing it in a later image strands every
+#   existing agent's container storage. Never "tidy" it; the gate below pins
+#   the exact value.
+# - containers.conf (root-owned): the no-systemd in-sandbox posture —
+#   cgroupfs manager with cgroups disabled (limits come from the sandbox
+#   itself; there is no journald for events/logs either), and
+#   image_copy_tmp_dir="storage" so pull staging lands on the agent's own
+#   home volume instead of /var/tmp on the ephemeral rootfs (which sits on
+#   shared node storage under Kata). base_hosts_file="" pins "copy the
+#   sandbox's /etc/hosts into containers" — the only way a nested container
+#   can resolve the gateway proxy host (sandboxes have no DNS egress).
+# - registries.conf (root-owned): docker.io for unqualified names, so
+#   `podman pull postgres` resolves.
+# - storage.conf (node-owned, USER-level — rootless podman ignores the
+#   graphroot in /etc/containers/storage.conf): graphroot on /workspace, the
+#   durable home, so images/containers/volumes survive relaunch and
+#   park/wake. The file stays at its /home/node path ON PURPOSE, even now
+#   that ~ lives at /workspace/.home: this copy is image-baked and
+#   self-heals every boot (an agent-editable durable copy would not), and
+#   the storage path inside it is a DURABLE-DATA FORMAT CONTRACT — moving
+#   either strands every existing agent's container store.
+#   CONTAINERS_STORAGE_CONF (env, below) pins the same file regardless of
+#   where $HOME points.
+RUN printf 'node:100000:65536\n' > /etc/subuid \
+  && printf 'node:100000:65536\n' > /etc/subgid \
+  # Debian installs these setuid already; assert-by-construction, not trust.
+  && chmod u+s /usr/bin/newuidmap /usr/bin/newgidmap \
+  && printf '%s\n' \
+    '# OneCLI agent sandbox defaults — see README.onecli beside this file.' \
+    '[containers]' \
+    'log_driver = "k8s-file"' \
+    'cgroups = "disabled"' \
+    'base_hosts_file = ""' \
+    '' \
+    '[engine]' \
+    'cgroup_manager = "cgroupfs"' \
+    'events_logger = "file"' \
+    'runtime = "crun"' \
+    'image_copy_tmp_dir = "storage"' \
+    > /etc/containers/containers.conf \
+  && printf '%s\n' \
+    '# OneCLI agent sandbox defaults — see README.onecli beside this file.' \
+    'unqualified-search-registries = ["docker.io"]' \
+    > /etc/containers/registries.conf \
+  && install -d -o node -g node /home/node/.config /home/node/.config/containers \
+  && printf '%s\n' \
+    '# OneCLI agent sandbox defaults — see /etc/containers/README.onecli.' \
+    '# Storage lives on /workspace (the durable home). This path is a' \
+    '# durable-data format contract — never move it, even though ~ is now' \
+    '# durable too (/workspace/.home): existing agents own storage HERE.' \
+    '# rootless_storage_path is the load-bearing key — rootless podman IGNORES' \
+    '# [storage] graphroot from the user config (that is the ROOTFUL path).' \
+    '# graphroot is deliberately NOT set: pointing it at the durable home would' \
+    '# aim a rootful invocation (e.g. a root kubectl exec, which inherits the' \
+    '# global CONTAINERS_STORAGE_CONF) INTO the tenant rootless store, writing' \
+    '# root-owned db/lock files that brick it. A rootful podman falls back to' \
+    '# ephemeral /var/lib/containers, which is harmless. The store tree itself' \
+    '# is pre-created node-owned by agent-entrypoint.sh (podman does not create' \
+    '# <graphroot>/tmp before the first pull needs it).' \
+    '[storage]' \
+    'driver = "overlay"' \
+    'rootless_storage_path = "/workspace/.local/share/containers/storage"' \
+    > /home/node/.config/containers/storage.conf \
+  && chown node:node /home/node/.config/containers/storage.conf \
+  && printf '%s\n' \
+    'OneCLI agent sandbox — nested containers (podman, plus the `docker` CLI shim).' \
+    '' \
+    'Rootless podman works on the hosted microVM substrate, where each sandbox' \
+    'owns a whole kernel. Under the self-host Docker backend it is intentionally' \
+    'disabled: the sandbox hardening (no-new-privileges, CapDrop ALL, and the' \
+    'container runtime default seccomp profile) prevents the user-namespace' \
+    'setup rootless containers need on a shared kernel. Do not weaken any of' \
+    'those to work around it — the shared kernel is the tenant boundary there.' \
+    '' \
+    'Container storage lives under /workspace/.local/share/containers (the' \
+    'durable home), so images, containers, and volumes survive sandbox restarts.' \
+    'Running containers stop when the sandbox sleeps; `podman start` them again.' \
+    'Outbound traffic from pulls follows the sandbox proxy; a nested container' \
+    'inherits the proxy env (both HTTPS_PROXY/HTTP_PROXY and the lowercase' \
+    'https_proxy/http_proxy), which carries a credential, so committing a' \
+    'container bakes all four into the image config. Scrub ALL of them before' \
+    'pushing anywhere, then confirm none survived:' \
+    '  podman commit \' \
+    '    --change "ENV HTTPS_PROXY=" --change "ENV HTTP_PROXY=" \' \
+    '    --change "ENV https_proxy=" --change "ENV http_proxy=" <ctr> <image>' \
+    '  podman inspect <image> | grep -i proxy   # must print nothing' \
+    > /etc/containers/README.onecli
+# The gate (same law as the jcode gate below): prove the runtime surface at
+# build time, not at first agent boot. `podman info` is deliberately absent —
+# it initializes storage/userns, which a build step must not.
+RUN podman --version \
+  && docker --version \
+  # crun is pinned as the OCI runtime in containers.conf, but Debian satisfies
+  # podman's dependency with `crun | runc` — prove the pinned one is actually
+  # present, or every `podman run` dies at first use with the build still green.
+  && crun --version \
+  # The rootless network + storage helpers are Recommends-only (installed
+  # explicitly above under --no-install-recommends); prove they landed.
+  && command -v pasta \
+  && command -v newuidmap \
+  && command -v newgidmap \
+  && test -u /usr/bin/newuidmap \
+  && test -u /usr/bin/newgidmap \
+  && test -f /etc/containers/policy.json \
+  && [ "$(grep -c '^node:' /etc/subuid)" -eq 1 ] \
+  && [ "$(grep -c '^node:' /etc/subgid)" -eq 1 ] \
+  && grep -qx 'node:100000:65536' /etc/subuid \
+  && grep -qx 'node:100000:65536' /etc/subgid
+
+# The durable POSIX home: ~ = /workspace/.home, ON the home volume. Three
+# pieces:
+# - usermod: passwd is where the Docker substrate derives HOME from (runc
+#   fills HOME from the passwd entry when the env lacks it — spawn AND
+#   exec); the hosted boot script and agent-entrypoint.sh export the same
+#   literal (byte-equal contract with apps/sandbox-manager/src/constants.ts
+#   AGENT_POSIX_HOME).
+# - the profile.d drop-in: SSH login shells — Debian's /etc/profile RESETS
+#   PATH, so the entrypoint's export cannot survive `bash -l`/`sh -lc`.
+#   APPENDED, never prepended: a tenant-writable dir ahead of the system
+#   dirs would let a planted binary shadow git/node/curl for every session.
+#   POSIX-only syntax — `sh -lc` sessions run dash, which sources
+#   /etc/profile.d too.
+# - the directory itself is created at CONTAINER runtime by
+#   agent-entrypoint.sh as uid 1000 — deliberately NOT here: root must never
+#   create tenant-mount dirs, and content baked under /workspace forks the
+#   substrates (Docker seeds named volumes from image content; the hosted
+#   block mount shadows it).
+RUN usermod -d /workspace/.home node \
+  && printf '%s\n' \
+    '# OneCLI agent sandbox: the durable tool bin (npm -g, pip --user).' \
+    '# Appended, never prepended - image binaries must win name lookups.' \
+    'case ":$PATH:" in' \
+    '  *":/workspace/.home/.local/bin:"*) ;;' \
+    '  *) PATH="$PATH:/workspace/.home/.local/bin" ;;' \
+    'esac' \
+    > /etc/profile.d/onecli-path.sh
 
 ENV NODE_ENV=production
 ENV NO_COLOR=1
@@ -158,6 +330,39 @@ ENV APP_VERSION=${APP_VERSION}
 
 # Bundles ship sourcemaps; make Node actually use them in stack traces.
 ENV NODE_OPTIONS=--enable-source-maps
+
+# Rootless podman's runtime state (locks, conmon sockets, the optional API
+# socket) — EPHEMERAL by design: its disappearance across a relaunch is how
+# podman detects a "reboot" and resets stale container state. The dir is baked
+# into the image so it exists on every fresh rootfs regardless of what spawns
+# the process (supervisor, docker exec, an SSH session); on the microVM
+# substrate the boot phase additionally mounts a tmpfs over it. Nothing else
+# in the image reads XDG_RUNTIME_DIR (no systemd/logind here).
+ENV XDG_RUNTIME_DIR=/tmp/onecli-xdg-run
+RUN install -d -m 0700 -o node -g node /tmp/onecli-xdg-run
+# Belt-and-braces for HOME-less invocations: pin the rootless storage config
+# by env too — losing it would land storage on the ephemeral rootfs silently.
+ENV CONTAINERS_STORAGE_CONF=/home/node/.config/containers/storage.conf
+
+# `npm -g` and `pip --user` share ONE durable root: both bin dirs unify at
+# /workspace/.home/.local/bin — the single PATH entry the entrypoint and
+# /etc/profile.d/onecli-path.sh append. ENV (not entrypoint-only) so
+# docker-exec / pods-exec sessions inherit it too. Deliberately NO `ENV
+# HOME` here: it would poison later build-stage RUNs and fork the
+# substrates (Docker seeds named volumes from image content); HOME comes
+# from passwd (usermod above), the hosted boot script, and the entrypoint.
+ENV NPM_CONFIG_PREFIX=/workspace/.home/.local
+# PEP 668 pin — without it every `pip install` on this base refuses. Safe
+# here: no system component uses python, and as uid 1000 the system
+# site-packages is unwritable, so pip lands in the user scheme under the
+# durable ~ (proven by the gate below).
+ENV PIP_BREAK_SYSTEM_PACKAGES=1
+ENV EDITOR=nano
+ENV PAGER=less
+# -F quit-if-one-screen, -R pass colors through, -X no termcap init:
+# behaves for SSH humans and non-interactive reads alike (no hung pager in
+# a harness shell).
+ENV LESS=FRX
 
 # Root-owned on purpose, same law as /opt/jcode below: the container runs as
 # `node`, and a runtime-user-writable supervisor (bundle, deps, entrypoint)
@@ -186,6 +391,44 @@ RUN chmod +x ./agent-entrypoint.sh
 
 # The durable home (§3.9): the container is disposable, this is not.
 RUN mkdir -p /workspace && chown node:node /workspace
+# The durable-home gate (same law as the jcode/podman gates): prove the
+# surface at build time, not at first agent boot. setpriv, never `su -l` —
+# su strips the ENV these pins live in, so it would test a different
+# environment than production runs. The probe home is removed in this same
+# layer and BEFORE the VOLUME line: baked /workspace content would seed
+# Docker named volumes while the hosted block mount shadows it — a
+# substrate fork.
+RUN python3 --version \
+  && pip3 --version \
+  && nano --version \
+  && less --version \
+  && test "$EDITOR" = "nano" \
+  && test "$PAGER" = "less" \
+  # usermod took: passwd's home field is the durable literal (the Docker
+  # substrate derives HOME from it — spawn and exec).
+  && getent passwd node | grep -F ':/workspace/.home:' \
+  # The entrypoint seeds from skel on first boot; prove the source exists.
+  && test -f /etc/skel/.bashrc \
+  && test -f /etc/skel/.profile \
+  && test -f /etc/profile.d/onecli-path.sh \
+  # Login shells: /etc/profile resets PATH; the drop-in must append the
+  # workspace bin — and the system dirs must still win name lookups.
+  && setpriv --reuid node --regid node --init-groups \
+       env HOME=/workspace/.home bash -lc 'case ":$PATH:" in (*":/workspace/.home/.local/bin:"*) exit 0;; (*) exit 1;; esac' \
+  && [ "$(setpriv --reuid node --regid node --init-groups env HOME=/workspace/.home bash -lc 'command -v node')" = "/usr/local/bin/node" ] \
+  # npm's global prefix rides the baked env everywhere (spawn and exec).
+  && [ "$(setpriv --reuid node --regid node --init-groups env HOME=/workspace/.home npm config get prefix)" = "/workspace/.home/.local" ] \
+  # pip --user REALLY installs on this base: PEP 668 pin honored, user
+  # scheme lands in the shared bin dir. Offline — python3-venv ships pip's
+  # own wheel; a missing wheel fails the glob loudly. venv is proven
+  # end-to-end in the same breath.
+  && setpriv --reuid node --regid node --init-groups sh -c ' \
+       set -e; export HOME=/workspace/.home; mkdir -p "$HOME"; \
+       pip3 install --user --quiet --no-index --no-deps /usr/share/python-wheels/pip-*.whl; \
+       test -x "$HOME/.local/bin/pip"; \
+       python3 -m venv "$HOME/gate-venv"; \
+       "$HOME/gate-venv/bin/pip" --version' \
+  && rm -rf /workspace/.home
 VOLUME ["/workspace"]
 
 USER node

@@ -101,11 +101,20 @@ export const channelAdapterRoutes = () => {
       );
     }
 
-    const result = await registerAdapter({ token, name: body.data.name });
+    const result = await registerAdapter({
+      token,
+      name: body.data.name,
+      perInstance: body.data.perInstance,
+    });
     if (!result.ok) return c.json({ error: "Unauthorized" }, 401);
 
+    // The minted per-instance bearer travels once, here, over the channel the
+    // anchor just authenticated — and never into the log line.
     log.info({ adapterId: result.adapterId }, "channel adapter registered");
-    return c.json({ adapterId: result.adapterId });
+    return c.json({
+      adapterId: result.adapterId,
+      ...(result.mintedToken && { token: result.mintedToken }),
+    });
   });
 
   app.use("*", channelAdapterAuth);
@@ -115,10 +124,14 @@ export const channelAdapterRoutes = () => {
     return c.json({ ok: true });
   });
 
-  // GET /channel-adapter/config — everything to hold open. `If-None-Match`
+  // GET /channel-adapter/config — everything THIS instance holds open (its
+  // ownership slice, claimed at the top of the call). `If-None-Match`
   // against the content etag turns the steady state into a 304.
   app.get("/config", async (c) => {
-    const config = await getAdapterConfig(c.req.header("if-none-match"));
+    const config = await getAdapterConfig(
+      c.get("channelAdapter"),
+      c.req.header("if-none-match"),
+    );
     if (config.notModified) {
       c.header("ETag", config.etag);
       return c.body(null, 304);
@@ -142,9 +155,10 @@ export const channelAdapterRoutes = () => {
   });
 
   // GET /channel-adapter/work — the batched pending-work poll (~2s): finished
-  // turns past each mirror cursor, awaiting their one completion post.
+  // turns past each mirror cursor, awaiting their one completion post —
+  // scoped to the caller's ownership slice.
   app.get("/work", async (c) => {
-    const work = await getAdapterWork();
+    const work = await getAdapterWork(c.get("channelAdapter").adapterId);
     const serialize = (items: typeof work.finished) =>
       items.map((item) => ({
         ...item,
@@ -154,6 +168,7 @@ export const channelAdapterRoutes = () => {
           createdAt: item.turn.createdAt.toISOString(),
           finishedAt: iso(item.turn.finishedAt),
         },
+        linkMirrorCursor: iso(item.linkMirrorCursor),
       }));
     const response: AdapterWorkResponse = {
       finished: serialize(work.finished),
@@ -288,7 +303,9 @@ export const channelAdapterRoutes = () => {
   });
 
   app.get("/prompts/unsettled", async (c) => {
-    const prompts = await listUnsettledPrompts();
+    const prompts = await listUnsettledPrompts(
+      c.get("channelAdapter").adapterId,
+    );
     return c.json({
       prompts: prompts.map((p) => ({
         ...p,

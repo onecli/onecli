@@ -56,12 +56,33 @@ const nextConfig = {
     // swapping: code branches on the CAPS/IS_CLOUD capability layer instead.
     NEXT_PUBLIC_EDITION: process.env.NEXT_PUBLIC_EDITION || "onprem",
     NEXT_PUBLIC_APP_VERSION: appVersion,
-    NEXT_PUBLIC_API_URL: process.env.API_DOMAIN
-      ? `${isCloud && process.env.NODE_ENV !== "development" ? "https" : "http"}://${process.env.API_DOMAIN}`
-      : "http://localhost:10256",
-    NEXT_PUBLIC_GATEWAY_API_URL: process.env.GATEWAY_API_DOMAIN
-      ? `${isCloud && process.env.NODE_ENV !== "development" ? "https" : "http"}://${process.env.GATEWAY_API_DOMAIN}`
-      : "http://localhost:10255",
+    // Baked ONLY when a value was actually provided — full URLs first (what
+    // cloud CI passes), the bare-domain vars as a DEPRECATED fallback for
+    // older build invocations. LEGACY(next-major): delete the fallback here
+    // and the API_DOMAIN/GATEWAY_API_DOMAIN rows in turbo.json together
+    // (ledger: packages/api/src/lib/public-origins.ts).
+    //
+    // No localhost fallback here, deliberately: an env{} key is INLINED into
+    // the SERVER bundle too, where a baked localhost would read as a
+    // configured override and beat the resolver's runtime derivation (the
+    // prebuilt self-host image would advertise localhost regardless of
+    // ONECLI_EXTERNAL_URL). Left un-baked, the server reads runtime env and
+    // the browser bottoms out at the resolver's identical code default.
+    ...(process.env.NEXT_PUBLIC_API_URL || process.env.API_DOMAIN
+      ? {
+          NEXT_PUBLIC_API_URL:
+            process.env.NEXT_PUBLIC_API_URL ||
+            `${isCloud && process.env.NODE_ENV !== "development" ? "https" : "http"}://${process.env.API_DOMAIN}`,
+        }
+      : {}),
+    ...(process.env.NEXT_PUBLIC_GATEWAY_API_URL ||
+    process.env.GATEWAY_API_DOMAIN
+      ? {
+          NEXT_PUBLIC_GATEWAY_API_URL:
+            process.env.NEXT_PUBLIC_GATEWAY_API_URL ||
+            `${isCloud && process.env.NODE_ENV !== "development" ? "https" : "http"}://${process.env.GATEWAY_API_DOMAIN}`,
+        }
+      : {}),
   },
   // `redirects()` carries MOVED routes only — never retired ones. The legacy
   // Rules page and the policyMode toggle still 404 like any other removed
@@ -108,19 +129,22 @@ const nextConfig = {
   // or these would shadow the dashboard's own `/auth/login`, `/auth/signup`,
   // `/auth/cli` pages and the `/v1/health` deploy probe. `/gw` is a stripped
   // prefix of our own invention — the gateway's browser routes live under
-  // `/v1/*` too, so they'd collide with the api-server's without one. Cloud is
-  // excluded — CloudFront fronts the services and Cognito authenticates with a
-  // bearer token, so it has neither the problem nor the hop to spare.
-  rewrites:
-    isCloud || !isDev
-      ? undefined
-      : async () => ({
-          afterFiles: [
-            { source: "/v1/:path*", destination: `${devApiUrl}/v1/:path*` },
-            { source: "/auth/:path*", destination: `${devApiUrl}/auth/:path*` },
-            { source: "/gw/:path*", destination: `${devGatewayUrl}/:path*` },
-          ],
-        }),
+  // `/v1/*` too, so they'd collide with the api-server's without one. Dev-only
+  // but edition-agnostic: cloud PRODUCTION has CloudFront and a bearer token,
+  // but cloud DEV behind one tunnel needs the same single origin. For that
+  // cloud-dev tunnel, set BOTH baked vars at dev-server start —
+  // NEXT_PUBLIC_API_URL=<tunnel-origin> and
+  // NEXT_PUBLIC_GATEWAY_API_URL=<tunnel-origin>/gw — since cloud skips the
+  // runtime origin injection onprem gets; these rewrites then carry both legs.
+  rewrites: !isDev
+    ? undefined
+    : async () => ({
+        afterFiles: [
+          { source: "/v1/:path*", destination: `${devApiUrl}/v1/:path*` },
+          { source: "/auth/:path*", destination: `${devApiUrl}/auth/:path*` },
+          { source: "/gw/:path*", destination: `${devGatewayUrl}/:path*` },
+        ],
+      }),
   // The proxy above holds long-lived responses open — the approvals long-poll
   // sits silent for ~30s and the conversation stream is an indefinite SSE.
   // Next's proxy defaults to a 30s timeout, which would clip both; this is an

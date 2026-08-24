@@ -74,6 +74,7 @@ const adapterConfig = (): AdapterConfig => ({
   workPollMs: 25,
   approvalsPollSeconds: 1,
   appUrl: "https://app.example.com",
+  appUrlFromLegacyBind: false,
 });
 
 const presence = (
@@ -187,6 +188,63 @@ describe("the config feed owns connections", () => {
     pushFeed([], "e2"); // the presence was detached
 
     await vi.waitFor(() => expect(sockets[0]!.closedByClient).toBe(true));
+  });
+});
+
+describe("ownership acquisition drives unsettled-prompt recovery", () => {
+  it("recovers on the boot feed and again on a NEW presence — never on a no-addition round", async () => {
+    // Recovery rides applyConfig's `acquired` flag, not start(): the first
+    // feed is all-adds (boot), and a later feed ADDING a presence is a dead
+    // peer's slice failing over to us — both must re-arm the ledger's
+    // unsettled cards, or a dead claimer's cards strand until some instance
+    // restarts. A round that adds nothing (the same presences again, or a
+    // removal) must NOT re-sweep. MUTATION-PROOF: delete the `acquired` flag
+    // and its recovery block in applyConfig and no sweep ever fires — the
+    // boot and failover waits below both time out.
+    let recoveries = 0;
+    let served = 0;
+    const feeds: AdapterConfigResponse[] = [
+      { presences: [presence()], etag: "e1" },
+    ];
+    const controlPlane = createFakeControlPlane({
+      getConfig: async () => {
+        const next = feeds.shift() ?? null;
+        if (next) served += 1;
+        return next;
+      },
+      listUnsettledPrompts: async () => {
+        recoveries += 1;
+        return [];
+      },
+    });
+    await startAdapter(controlPlane);
+
+    // (i) Boot: the first feed is all-adds — one recovery sweep.
+    await vi.waitFor(() => expect(served).toBe(1));
+    await vi.waitFor(() => expect(recoveries).toBe(1));
+
+    // The same presence again: nothing acquired, no sweep.
+    feeds.push({ presences: [presence()], etag: "e2" });
+    await vi.waitFor(() => expect(served).toBe(2));
+    await settle();
+    expect(recoveries).toBe(1);
+
+    // (ii) A NEW presence joins the feed (a failover slice) — sweep again.
+    feeds.push({
+      presences: [
+        presence(),
+        presence({ presenceId: "p2", transport: "events", links: [] }),
+      ],
+      etag: "e3",
+    });
+    await vi.waitFor(() => expect(served).toBe(3));
+    await vi.waitFor(() => expect(recoveries).toBe(2));
+
+    // (iii) Removal-only round: p2 detaches — still no sweep.
+    feeds.push({ presences: [presence()], etag: "e4" });
+    await vi.waitFor(() => expect(served).toBe(4));
+    await settle();
+    expect(recoveries).toBe(2);
   });
 });
 
@@ -521,6 +579,86 @@ describe("the completion pass posts once", () => {
     expect(advances).toEqual([
       { expect: "SEED_A", next: "T1_TIME" },
       { expect: null, next: "T2_TIME" },
+    ]);
+  });
+
+  it("re-seeds a lost link's NEXT claim from the item's server-supplied cursor floor", async () => {
+    // An instance-identity etag no longer folds cursors, so after a CAS loss
+    // drops the local entry the config feed cannot re-seed it — the work
+    // item's `linkMirrorCursor` (ISO on the wire; opaque markers here) is the
+    // fallback floor. Claiming with null against the DB's non-null cursor
+    // would CAS-fail forever. The local cache still wins while it exists: the
+    // FIRST claim below expects the seed, not the floor riding the same item.
+    // MUTATION-PROOF: delete the `?? item.linkMirrorCursor` fallback in
+    // handleFinished and the second claim's expectation collapses to null.
+    const advances: { expect: string | null; next: string }[] = [];
+    let phase: "t1" | "t2" | "done" = "t1";
+    const seededLink = { ...presence().links[0]!, mirrorCursor: "SEED_A" };
+    const { controlPlane } = feedControlPlane(
+      [presence({ links: [seededLink] })],
+      {
+        getWork: async () =>
+          phase === "t1"
+            ? {
+                finished: [
+                  {
+                    ...workItem({
+                      id: "t1",
+                      status: "done",
+                      createdAt: "T1_TIME",
+                    }),
+                    linkMirrorCursor: "FLOOR_B",
+                  },
+                ],
+              }
+            : phase === "t2"
+              ? {
+                  finished: [
+                    {
+                      ...workItem({
+                        id: "t2",
+                        status: "done",
+                        createdAt: "T2_TIME",
+                      }),
+                      linkMirrorCursor: "FLOOR_B",
+                    },
+                  ],
+                }
+              : { finished: [] },
+        readTranscript: async () => ({
+          events: [
+            {
+              seq: 1,
+              turnId: "t2",
+              type: "text",
+              payload: { text: "t2 answer" },
+            },
+          ],
+          nextSince: 1,
+          hasMore: false,
+        }),
+        advanceCursor: async (_linkId, expect_, next) => {
+          advances.push({ expect: expect_, next });
+          if (next === "T1_TIME") {
+            phase = "t2";
+            return false; // t1 LOSES — the local cursor entry is dropped
+          }
+          phase = "done";
+          return true;
+        },
+      },
+    );
+    await startAdapter(controlPlane);
+
+    await vi.waitFor(() => expect(advances).toHaveLength(2), {
+      timeout: 5_000,
+    });
+
+    // Local cache first while it exists; the server-supplied floor — never
+    // null — once the loss dropped it.
+    expect(advances).toEqual([
+      { expect: "SEED_A", next: "T1_TIME" },
+      { expect: "FLOOR_B", next: "T2_TIME" },
     ]);
   });
 });

@@ -96,6 +96,10 @@ export interface Secret {
   metadata: Record<string, unknown> | null;
   scope: string | null;
   createdAt: string;
+  /** Latest injected upstream call failed with a status that indicts the key
+   * itself (401/403 auth, 402 billing, 429 limits). Cleared once a newer call
+   * lands with any other status. LLM keys only. */
+  lastError: { status: number; at: string } | null;
 }
 
 export interface CreatedSecret {
@@ -558,6 +562,18 @@ export interface AgentWithGrantsSummary extends Agent {
   grantsSummary: AgentGrantsSummary;
 }
 
+/** The current organization (`GET /v1/org`). `byoLegacy` is the org's
+ * creation world on cloud (sandbox-platform §3.10, re-decided 2026-08-23):
+ * false = hosted-only creation, true = BYO-only creation (hosted starts with
+ * an onboarding call). Operated manually per org; inert on self-host, where
+ * the web never fetches it. */
+export interface OrgInfo {
+  id: string;
+  name: string;
+  slug: string;
+  byoLegacy: boolean;
+}
+
 /** Runtime instance metadata (`GET /v1/instance`) — the browser's only
  * source of truth for edition + enterprise entitlement (runtime env the baked
  * client bundle cannot see). */
@@ -574,7 +590,67 @@ export interface InstanceInfo {
    * Optional because an older API answers without it, and "absent" must read
    * as "no hosted agents here", never as a crash.
    */
-  runners?: { registered: boolean; online: boolean };
+  runners?: {
+    registered: boolean;
+    online: boolean;
+    /**
+     * How the online runner keeps agent files (§3.9): `snapshot` archives
+     * them to durable storage on sleep, `resident` keeps them on local disk.
+     * Absent on an older API or while nothing is online. Posture, not data.
+     */
+    homeDurability?: "resident" | "snapshot";
+  };
+  /**
+   * The SSH front door (sandbox-platform step 5): present only when this
+   * deployment can mint certificates and terminate SSH. Same optional-field
+   * contract as `runners`: absent (an older API, or a deployment without the
+   * front door) means "no SSH here" — the rail auto-hides the agent's SSH
+   * section off it — never a crash and never a teased dead door.
+   */
+  ssh?: { host: string };
+}
+
+/**
+ * A registered SSH public key (`/v1/user/ssh-keys`) — account-level, not
+ * workspace-scoped: the same key authenticates its owner to every agent they
+ * can reach. Public material only; a row grants nothing by itself.
+ */
+export interface SshKey {
+  id: string;
+  name: string;
+  /** OpenSSH SHA256 fingerprint ("SHA256:..."), computed server-side. */
+  fingerprint: string;
+  createdAt: string;
+  /** ISO timestamp of the last certificate minted from this key, or null. */
+  lastUsedAt: string | null;
+}
+
+/**
+ * Exactly one certificate source: a registered key's id (the one-click
+ * path), or a pasted public key line (the API contract the future CLI
+ * rides). The server refuses a body carrying both.
+ */
+export type MintSshCertificateSource =
+  | { sshKeyId: string }
+  | { publicKey: string };
+
+/**
+ * A freshly minted OpenSSH user certificate
+ * (`POST /v1/agents/:agentId/ssh-certificate`). One-time material: nothing
+ * caches it, and the matching private key never leaves the user's machine.
+ */
+export interface MintedSshCertificate {
+  /** The full certificate line, ready to be written beside the private key
+   *  as `<key>-cert.pub`. */
+  certificate: string;
+  /** The public SSH endpoint to connect to. */
+  host: string;
+  /** The SSH username — the immutable agent id, the cert's principal. */
+  user: string;
+  serial: string;
+  /** ISO timestamp. Gates NEW authentications only: an open session is not
+   *  cut off when the certificate expires. */
+  expiresAt: string;
 }
 
 // ── Conversations (plans/hosted-agents-v2.md step 4) ────────────────────────

@@ -43,6 +43,12 @@ const baseConfig: RunnerConfig = {
   sandboxExtraHosts: [],
   orphanReap: true,
   orphanGraceSeconds: 3600,
+  sandboxManagerUrl: null,
+  sandboxManagerToken: null,
+  cloudParkWaitSeconds: 120,
+  cloudWakeWaitSeconds: 900,
+  cloudImageWaitSeconds: 240,
+  lifecycleConcurrency: 1,
 };
 
 const MY_RUNNER_ID = "r-1";
@@ -83,7 +89,7 @@ beforeEach(() => {
     pollWork: async () => [],
     postEvents: async () => {},
     heartbeat: async () => {},
-    listSandboxIds: async () => [],
+    listAssignedSandboxes: async () => ({ sandboxIds: [] }),
     checkSandboxIds: async (sandboxIds) => {
       if (checkError) throw checkError;
       checkCalls.push(sandboxIds);

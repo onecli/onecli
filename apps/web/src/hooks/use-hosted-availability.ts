@@ -2,6 +2,7 @@
 
 import { useInstance } from "@/hooks/use-instance";
 import {
+  homeDurabilityMessage,
   hostedAvailability,
   type HostedAvailability,
 } from "@/lib/agents/availability";
@@ -14,3 +15,11 @@ import {
 export const useHostedAvailability = (
   options: { poll?: boolean } = {},
 ): HostedAvailability => hostedAvailability(useInstance(options));
+
+/**
+ * The one sentence about where agent files live (§3.9), off the same shared
+ * cache entry — null when the platform makes no claim. Lives beside
+ * availability so both runner→agent translations stay in one place.
+ */
+export const useHomeDurabilityMessage = (): string | null =>
+  homeDurabilityMessage(useInstance());

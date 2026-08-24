@@ -14,15 +14,23 @@ vi.hoisted(() => {
   delete process.env.ENTERPRISE_ENABLED;
 });
 
-const store = vi.hoisted(() => ({ total: 0, online: 0 }));
+const store = vi.hoisted(() => ({
+  total: 0,
+  online: 0,
+  // Capabilities of the online runner findFirst returns. `{}` fails the
+  // schema parse → homeDurability omitted (the pre-step-3 two-boolean shape).
+  onlineCaps: {} as unknown,
+}));
 
 vi.mock("@onecli/db", () => ({
   db: {
     runner: {
-      // Two calls per availability read: bare count (registered), then the
-      // lastSeenAt-windowed count (online).
-      count: async (args?: { where?: unknown }) =>
-        args?.where ? store.online : store.total,
+      // registered = any runner exists.
+      count: async () => store.total,
+      // online = the oldest runner within the liveness window, or null; its
+      // capabilities carry the declared home-durability class (step 3).
+      findFirst: async () =>
+        store.online > 0 ? { capabilities: store.onlineCaps } : null,
     },
   },
 }));
@@ -37,6 +45,7 @@ const app = createApiApp({ getSession: async () => null });
 beforeEach(() => {
   store.total = 0;
   store.online = 0;
+  store.onlineCaps = {};
   // The 5s availability cache would otherwise leak one case into the next.
   resetRunnerAvailabilityCache();
 });
@@ -85,12 +94,39 @@ describe("GET /v1/instance (the auto-hide fact)", () => {
     initEntitlementForTests(null);
   });
 
-  it("carries exactly the posture surface: edition, entitlement, version, two runner booleans", async () => {
+  it("surfaces the online runner's home-durability class when it advertises one (§3.9)", async () => {
+    store.total = 1;
+    store.online = 1;
+    store.onlineCaps = {
+      maxSandboxes: 4,
+      backend: "cloud",
+      homeDurability: "snapshot",
+    };
+    const res = await app.request("/v1/instance");
+    const body = (await res.json()) as { runners: Record<string, unknown> };
+    expect(body.runners).toEqual({
+      registered: true,
+      online: true,
+      homeDurability: "snapshot",
+    });
+  });
+
+  it("omits home-durability when the online runner's capabilities don't declare one", async () => {
+    store.total = 1;
+    store.online = 1;
+    store.onlineCaps = {}; // unparseable → absence, never a fabricated default
+    const res = await app.request("/v1/instance");
+    const body = (await res.json()) as { runners: Record<string, unknown> };
+    expect(body.runners).toEqual({ registered: true, online: true });
+  });
+
+  it("carries exactly the posture surface: edition, entitlement, version, origins, runner booleans", async () => {
     const res = await app.request("/v1/instance");
     const body = (await res.json()) as Record<string, unknown>;
     expect(Object.keys(body).sort()).toEqual([
       "edition",
       "entitled",
+      "origins",
       "runners",
       "version",
     ]);
@@ -101,5 +137,19 @@ describe("GET /v1/instance (the auto-hide fact)", () => {
     ]);
     expect(body.edition).toBe("onprem");
     expect(typeof body.entitled).toBe("boolean");
+  });
+
+  it("exposes the resolved public origins — advertised addresses only", async () => {
+    // Hermetic setup deletes every URL var before this file loads, so the
+    // resolver answers its localhost defaults here — the same values the
+    // layout injects into every page, never an internal address.
+    const res = await app.request("/v1/instance");
+    const body = (await res.json()) as { origins: Record<string, unknown> };
+    expect(body.origins).toEqual({
+      external: "http://localhost:10254",
+      api: "http://localhost:10256",
+      gateway: "http://localhost:10255",
+      mode: "ports",
+    });
   });
 });

@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import type { PublishedEvent } from "../services/event-bus";
 
 // End-to-end proof of the entitlement choke points, on the REAL seams (not the
 // slot factory, which has its own unit tests): one call site —
@@ -53,6 +54,9 @@ describe("edition resolution at the real seams", () => {
     expect(() => providers.getRuleActionGate()).toThrow(
       /ruleActionGate.*ensureEditionDefaults/s,
     );
+    expect(() => providers.getEventBus()).toThrow(
+      /event-bus.*ensureEditionDefaults/s,
+    );
   });
 
   it("cloud: after ensureEditionDefaults(), call sites get the real plan-gated implementations", async () => {
@@ -74,6 +78,32 @@ describe("edition resolution at the real seams", () => {
     expect(providers.getWorkspaceAccessChecker()).toBe(
       authz.eeWorkspaceAccessChecker,
     );
+  });
+
+  // The event-bus boot wiring, pinned the same way: the Redis bus's own suite
+  // covers the implementation and event-bus.test.ts covers the onprem seam,
+  // but nothing else asserts the cloud arm actually ARMS the slot — deleting
+  // the `setDefaultEventBus` call in edition-defaults.ts would pass every
+  // suite and 500 the first live transcript (the slot is fail-loud on cloud).
+  it("cloud: the event bus is wired at boot — a publish reaches a live subscriber", async () => {
+    const { providers, defaults } = await loadAs("cloud");
+    defaults.ensureEditionDefaults();
+    const bus = providers.getEventBus();
+    // One instance across gets, or subscribe and publish split brains.
+    expect(providers.getEventBus()).toBe(bus);
+
+    const published: PublishedEvent = {
+      seq: 1,
+      turnId: "t-1",
+      type: "text.delta",
+      event: { type: "text.delta", text: "chunk-1" },
+    };
+    const seen: PublishedEvent[][] = [];
+    const subscription = bus.subscribe("cv-1", (events) => seen.push(events));
+    await subscription.ready;
+    bus.publish("cv-1", [published]);
+    expect(seen).toEqual([[published]]);
+    subscription.release();
   });
 
   it("entitled self-host: the same licensed checker rides the override arm", async () => {

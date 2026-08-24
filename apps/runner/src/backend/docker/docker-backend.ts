@@ -48,6 +48,67 @@ const VOLUME_PREFIX = "onecli-home-";
 const CONTAINER_PREFIX = "onecli-sandbox-";
 const HOME_MOUNT = "/workspace";
 
+/**
+ * The agent image's unprivileged user, by NUMBER. The create body pins
+ * `User: "node"` by name, but tar headers carry numeric ids and the daemon
+ * extracts them verbatim — so injected files are owned by whatever is written
+ * here. 1000 is the node base image's uid/gid for that user, the same value
+ * the cloud boot phase compares against when it installs these same payload
+ * files node-owned on the Kata substrate (apps/sandbox-manager/src/boot/
+ * boot-script.ts, NODE_UID).
+ */
+const NODE_UID = 1000;
+const NODE_GID = 1000;
+
+/**
+ * Injection may not touch the durable home (a PRIOR spawn could pre-plant a
+ * symlink on the volume for the daemon's root-driven extraction to follow —
+ * it resolves in-container symlinks) or the system directories the image's
+ * own tooling lives in (a control-plane bug must not be able to overwrite
+ * /usr/local/bin/node in every sandbox). `/onecli-init/` from the cloud list
+ * is omitted: that mount does not exist on this substrate.
+ */
+const FORBIDDEN_PATH_PREFIXES = [
+  `${HOME_MOUNT}/`,
+  "/usr/",
+  "/bin/",
+  "/sbin/",
+  "/proc/",
+  "/sys/",
+  "/dev/",
+];
+
+/**
+ * Refuse a payload file path the injection must never touch — the same
+ * conservative allowlist the cloud manager enforces on the identical payload
+ * (apps/sandbox-manager/src/validations.ts `containerPathSchema`; not
+ * importable, that package is cloud-only): one substrate trust model. The
+ * wire schema only enforces a non-empty string, and beyond the shared rules
+ * one shape is dangerous specifically HERE: a relative path would spin the
+ * ancestor walk forever (`posix.dirname(".") === "."`).
+ */
+const assertInjectablePath = (containerPath: string): void => {
+  if (
+    containerPath.length > 300 ||
+    !/^\/[A-Za-z0-9._/-]+$/.test(containerPath)
+  ) {
+    throw new Error(
+      `payload file path is not an absolute, conservative path: ${containerPath}`,
+    );
+  }
+  if (containerPath.split("/").includes("..")) {
+    throw new Error(`payload file path contains "..": ${containerPath}`);
+  }
+  if (
+    containerPath === HOME_MOUNT ||
+    FORBIDDEN_PATH_PREFIXES.some((prefix) => containerPath.startsWith(prefix))
+  ) {
+    throw new Error(
+      `payload file path targets the durable home or a system directory: ${containerPath}`,
+    );
+  }
+};
+
 export interface DockerBackendOptions {
   /** Initial owner label; replaced by `identify()` once registration
    * returns the stable control-plane id. */
@@ -123,28 +184,87 @@ export const createDockerBackend = (
   const containerName = (sandboxId: string) =>
     `${CONTAINER_PREFIX}${sandboxId}`;
 
+  /**
+   * Deepest EXISTING ancestor of `directory`, plus the missing chain from it
+   * down to `directory` (root→leaf). `HEAD /archive` is the probe: 200 means
+   * the path exists — file OR directory, the endpoint stats either; a file
+   * ancestor makes the later PUT fail with the daemon's own 400, which is
+   * the right loud outcome for a platform-composed payload — and 404 means
+   * missing. The walk breaks unconditionally at "/": a vanished container
+   * 404s EVERY path including "/", and `posix.dirname("/") === "/"` would
+   * spin forever — falling through lets the PUT surface the real error.
+   */
+  const resolveExtractionRoot = async (
+    ref: ContainerRef,
+    directory: string,
+  ): Promise<{ root: string; missing: string[] }> => {
+    const missing: string[] = [];
+    let current = directory;
+    while (current !== "/") {
+      const status = await engine.head(
+        `/containers/${encodeURIComponent(ref)}/archive?path=${encodeURIComponent(current)}`,
+        { tolerate: [404] },
+      );
+      if (status !== 404) break;
+      missing.unshift(posix.basename(current));
+      current = posix.dirname(current);
+    }
+    return { root: current, missing };
+  };
+
   const putFiles = async (
     ref: ContainerRef,
     files: SandboxSpec["files"],
   ): Promise<void> => {
+    for (const file of files) assertInjectablePath(file.containerPath);
+
     // Group by directory: docker extracts one archive per target path.
-    const byDirectory = new Map<string, TarEntry[]>();
+    const byDirectory = new Map<string, SandboxSpec["files"]>();
     for (const file of files) {
       const directory = posix.dirname(file.containerPath);
-      const entry: TarEntry = {
-        path: posix.basename(file.containerPath),
-        content: file.content,
-        mode: file.mode ?? 0o644,
-      };
-      byDirectory.set(directory, [
-        ...(byDirectory.get(directory) ?? []),
-        entry,
-      ]);
+      byDirectory.set(directory, [...(byDirectory.get(directory) ?? []), file]);
     }
 
-    for (const [directory, entries] of byDirectory) {
+    // Sequential ON PURPOSE: a later group's existence probe must see the
+    // directories an earlier group's PUT just created.
+    for (const [directory, groupFiles] of byDirectory) {
+      const { root, missing } = await resolveExtractionRoot(ref, directory);
+
+      // Directory entries ONLY for the missing chain, never for a directory
+      // that already exists: the daemon applies a dir entry's owner/mode to
+      // an existing directory too (verified against a real daemon), so a
+      // blanket ancestor entry would silently chown system paths. The chain
+      // is created node-owned — the workload must be able to write its own
+      // config dirs (the cloud boot script does the same with `install -d
+      // -o node -g node`, /home/node/.codex being the motivating case).
+      const chain = missing.map(
+        (_, index): TarEntry => ({
+          kind: "directory",
+          path: missing.slice(0, index + 1).join("/"),
+          mode: 0o755,
+          uid: NODE_UID,
+          gid: NODE_GID,
+        }),
+      );
+      const prefix = missing.length > 0 ? `${missing.join("/")}/` : "";
+      const entries: TarEntry[] = [
+        ...chain,
+        ...groupFiles.map(
+          (file): TarEntry => ({
+            kind: "file",
+            path: `${prefix}${posix.basename(file.containerPath)}`,
+            content: file.content,
+            // & 0o777: permission bits only — setuid/setgid/sticky never ride
+            // a payload in (the cloud validator caps mode at 0o777 too).
+            mode: (file.mode ?? 0o644) & 0o777,
+            uid: NODE_UID,
+            gid: NODE_GID,
+          }),
+        ),
+      ];
+
       await engine.put(
-        `/containers/${encodeURIComponent(ref)}/archive?path=${encodeURIComponent(directory)}&noOverwriteDirNonDir=false`,
+        `/containers/${encodeURIComponent(ref)}/archive?path=${encodeURIComponent(root)}&noOverwriteDirNonDir=false`,
         buildTar(entries),
         "application/x-tar",
       );
@@ -243,6 +363,18 @@ export const createDockerBackend = (
               // no capabilities at all — the harness needs none, and the default
               // set includes NET_RAW, which on a shared sandbox network would
               // let one sandbox spoof its way to another's proxy credentials.
+              //
+              // These three guards are ALSO the tenant boundary for the podman
+              // baked into the agent image: on this SHARED kernel the daemon's
+              // default seccomp profile blocks the `unshare`/`clone` namespace
+              // syscalls unless CAP_SYS_ADMIN is held, CapDrop:ALL removes that
+              // capability, and no-new-privileges neuters the setuid uidmap
+              // helpers — so rootless containers cannot set up their user
+              // namespace here (they are a hosted-microVM-only capability; see
+              // apps/runner/README.md). NEVER add a `seccomp=…` SecurityOpt
+              // that weakens the default profile: seccomp is the actual syscall
+              // gate, and `seccomp=unconfined` would re-open single-uid rootless
+              // podman on the shared kernel. Pinned by the test.
               SecurityOpt: ["no-new-privileges"],
               CapDrop: ["ALL"],
               RestartPolicy: { Name: "no" },

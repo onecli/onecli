@@ -3,7 +3,8 @@ import { cors } from "hono/cors";
 import { createApiApp } from "@onecli/api";
 import { createScimApp } from "@onecli/api/ee/scim";
 import { eeSessionHooks } from "@onecli/api/ee/auth/session-hooks";
-import { API_URL, IS_CLOUD } from "@onecli/api/lib/env";
+import { IS_CLOUD } from "@onecli/api/lib/env";
+import { apiOrigin, appOrigin } from "@onecli/api/lib/public-origins";
 import { LEGACY_PROJECT_HEADER } from "@onecli/api/lib/legacy-project-compat";
 import {
   BETTER_AUTH_BASE_PATH,
@@ -14,7 +15,7 @@ import { onpremSessionHooks } from "@onecli/api/lib/onprem-session-hooks";
 import { cognitoSessionProvider } from "./cognito-session-provider";
 import { requestLogger } from "./middleware/request-logger";
 
-const appUrl = process.env.APP_URL ?? "http://localhost:10254";
+const appUrl = appOrigin();
 
 // The api-server is the only API server in every edition. Every provider —
 // crypto, org OAuth, quotas, SSO enforcement, the EE routes — resolves from
@@ -25,7 +26,7 @@ const appUrl = process.env.APP_URL ?? "http://localhost:10254";
 const apiApp = createApiApp(
   IS_CLOUD ? cognitoSessionProvider : onpremSessionProvider,
   {
-    selfUrl: API_URL,
+    selfUrl: apiOrigin(),
     sessionHooks: IS_CLOUD ? eeSessionHooks : onpremSessionHooks,
     version: process.env.APP_VERSION || undefined,
   },

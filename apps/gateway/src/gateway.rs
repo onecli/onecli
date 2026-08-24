@@ -1180,7 +1180,6 @@ async fn handle_http_proxy(
 
     connect::inject_connections_header(&mut resp, &resolved.app_connections);
 
-    // Convert the response body type to match the axum::body::Body return type
     Ok(resp.map(axum::body::Body::new))
 }
 
@@ -1387,28 +1386,6 @@ mod tests {
     #[test]
     fn skip_verify_empty_patterns_never_matches() {
         assert!(!host_matches_skip_verify("anything.com", &[]));
-    }
-
-    // ── parse_skip_verify_patterns ─────────────────────────────────────
-
-    /// Helper: parse a raw comma-separated string the same way `parse_skip_verify_hosts` does.
-    fn parse_patterns(input: &str) -> Vec<String> {
-        input
-            .split(',')
-            .map(|s| s.trim().to_lowercase())
-            .filter(|s| !s.is_empty())
-            .collect()
-    }
-
-    #[test]
-    fn parse_skip_verify_splits_and_trims() {
-        let hosts = parse_patterns(" foo.com , *.bar.com , baz.io ");
-        assert_eq!(hosts, vec!["foo.com", "*.bar.com", "baz.io"]);
-    }
-
-    #[test]
-    fn parse_skip_verify_empty_input() {
-        assert!(parse_patterns("").is_empty());
     }
 
     // ── is_http_proxy_request ──────────────────────────────────────────

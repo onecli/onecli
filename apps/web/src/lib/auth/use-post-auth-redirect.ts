@@ -110,6 +110,14 @@ export const usePostAuthRedirect = (options?: {
           await signOut();
           return;
         }
+        if (res.status === 429) {
+          // Rate limited: retryable and not a setup failure — don't imply the
+          // account is broken.
+          setError(
+            "Too many requests right now. Please wait a moment and reload.",
+          );
+          return;
+        }
         // Signed in, but the account could not be set up — on a self-hosted
         // upgrade this is the deliberately loud failure of handing the old
         // install over, and it is retryable.

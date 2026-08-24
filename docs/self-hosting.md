@@ -2,7 +2,7 @@
 
 The [README Quick Start](../README.md#quick-start) covers the interactive
 setup. This page holds everything else you need to run OneCLI yourself: the
-install script, raw compose, version pinning, first-account rules, and
+install script, raw compose, version pinning, registration rules, and
 upgrade notes.
 
 ## Install script
@@ -56,16 +56,21 @@ images. Sizing a host for hosted
 agents (memory per sandbox, the held-awake ceiling) is covered in
 [`apps/runner/README.md`](../apps/runner/README.md).
 
-## The first account
+## Accounts and registration
 
-The first visit asks you to **create an account** — email and password. That
-account owns the instance; after it exists, joining needs an invitation.
+The first visit asks you to **create an account** — email and password.
+Registration stays open by design: every new account gets its own
+organization, fenced from everyone else's, so a stranger signing up takes
+nothing from existing users. Joining somebody **else's** organization
+goes through an invitation; registering without one starts a fresh org.
+A deployment that must not accept strangers keeps its dashboard behind the
+network boundary — there is deliberately no registration switch. (The one
+narrow refusal: sign-ups are blocked during a pre-2.0 upgrade window until the
+legacy account is adopted.)
+
 Setting `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` adds a "Continue with
 Google" button beside the password form (redirect URI:
 `<API_URL>/auth/callback/google`).
-
-**Create it right away.** Until you do, the instance has no owner, and on a
-reachable host whoever gets there first becomes one.
 
 **A hosted agent needs a granted model key.** The order matters: store the
 key, **grant it to the agent**, then chat. A sandbox will not start without
@@ -77,11 +82,12 @@ also signs out every other session.
 ## Upgrading from a release without login
 
 Your existing organization, workspaces, agents and API keys move to the
-account you create — nothing to migrate by hand, and the same "register
-immediately" advice applies (that release let in anyone who could reach it;
-creating your account is what ends that). If your `.env` still sets
-`NEXTAUTH_SECRET`, rename it to `BETTER_AUTH_SECRET`; everyone signs in
-again once.
+account you create — nothing to migrate by hand. **Register immediately
+after upgrading**: the old install's data is handed to the first account
+that registers, so on a reachable host don't let a stranger get there first
+(that release let in anyone who could reach it; creating your account is
+what ends that). If your `.env` still sets `NEXTAUTH_SECRET`, rename it to
+`BETTER_AUTH_SECRET`; everyone signs in again once.
 
 ## Configuration
 
@@ -98,3 +104,93 @@ Every required value is generated for you — by `pnpm dev` into `.env` for
 development, by `pnpm run setup` into `docker/.env` for a self-host stack,
 and by the install script into `~/.onecli/.env`. `.env.example` documents
 the optional settings.
+
+## Networking: one URL, two modes
+
+`ONECLI_EXTERNAL_URL` is the one networking variable most installs set: the
+URL people open OneCLI at. Every other address derives from it by one rule:
+
+- **`http://…` means ports mode.** The api and gateway are advertised on the
+  same host, on their own ports (`10256` / `10255` by default).
+- **`https://…` means proxy mode.** One origin; your reverse proxy terminates
+  TLS and routes `/v1` + `/auth` to the api (`:10256`) and `/gw/*`
+  (prefix-stripped) to the gateway (`:10255`); everything else goes to the
+  dashboard (`:10254`).
+
+The cookie `Secure` flag, OAuth redirect URIs, the CLI's api-host, install
+snippets, emails, Slack buttons, and the links the gateway hands agents all
+follow from it. Unset means `http://localhost:10254` — correct for a laptop
+and for tunnel access.
+
+`ONECLI_BIND_HOST` is the separate, listen-only knob: which interface the
+published ports bind on. The installers detect and persist it; it never
+shapes a URL.
+
+### Scenarios
+
+| Scenario                                              | What to set                                                                                                                   |
+| ----------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------- |
+| Laptop / trying it out                                | Nothing                                                                                                                       |
+| Isolated VM reached via a tunnel (`ssh -L`, SSM, IAP) | Nothing — localhost is the correct advertised address; forward ports 10254, 10255 and 10256                                   |
+| Permanent machine on a LAN                            | `ONECLI_EXTERNAL_URL=http://192.168.1.20:10254` and `ONECLI_BIND_HOST=0.0.0.0` (or run the wizard, which asks both questions) |
+| Public domain behind a TLS proxy                      | `ONECLI_EXTERNAL_URL=https://onecli.example.com` — bind stays local, the proxy connects from the same host                    |
+| Split hosts (app + api domains)                       | `ONECLI_EXTERNAL_URL=https://app.example.com` plus the `API_URL=https://api.example.com` override                             |
+| Reachable at two addresses (IP + DNS name)            | Add the second one to `ONECLI_TRUSTED_ORIGINS` (comma-separated)                                                              |
+
+Legacy names keep working forever: `APP_URL` is a read-alias of the canonical
+URL (it never derives the api/gateway origins — set those explicitly with
+it), `API_URL`/`GATEWAY_API_URL` remain per-origin overrides, and
+`GATEWAY_BASE_URL` still feeds the agent proxy address under its new name,
+`ONECLI_AGENT_PROXY_ADDRESS`.
+
+### Tunnel access (no ingress)
+
+Services bind to localhost (or the docker bridge) by default, so a VM with no
+open ports is a first-class deployment: forward the three ports and browse
+`http://localhost:10254`.
+
+```sh
+ssh -N -L 10254:127.0.0.1:10254 -L 10255:127.0.0.1:10255 -L 10256:127.0.0.1:10256 user@vm
+```
+
+On a bare-metal Linux VM the ports bind to the docker bridge address instead
+of loopback (so containers on the host can reach the gateway proxy) — the
+install's success output and `~/.onecli/.env` record the exact address to
+target in `-L`.
+
+### Reverse proxy (proxy mode)
+
+Caddy:
+
+```caddy
+onecli.example.com {
+    handle /v1/* {
+        reverse_proxy 127.0.0.1:10256
+    }
+    handle /auth/* {
+        reverse_proxy 127.0.0.1:10256
+    }
+    handle_path /gw/* {
+        reverse_proxy 127.0.0.1:10255
+    }
+    handle {
+        reverse_proxy 127.0.0.1:10254
+    }
+}
+```
+
+nginx (the `/gw/` trailing slash performs the prefix strip; disable buffering
+so token streams and the approvals long-poll flow):
+
+```nginx
+location /v1/ { proxy_pass http://127.0.0.1:10256; proxy_buffering off; }
+location /auth/ { proxy_pass http://127.0.0.1:10256; }
+location /gw/ { proxy_pass http://127.0.0.1:10255/; proxy_buffering off; }
+location / { proxy_pass http://127.0.0.1:10254; }
+```
+
+The gateway's CONNECT proxy (agent traffic) is raw TCP on `:10255` and cannot
+sit behind a path-routing HTTP proxy: agents on other machines need that port
+reachable directly (a VPN is the recommended transport), with
+`ONECLI_AGENT_PROXY_ADDRESS=onecli.example.com:10255` when the control plane
+hands out remote containers.

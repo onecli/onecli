@@ -386,6 +386,25 @@ describe("assertCanCreateAgent + per-org maxAgentsOverride", () => {
     );
   });
 
+  it("ENTERPRISE is uncapped by design — the org cap is VACUOUS there (sandbox step 6's recorded posture: a finite maxAgentsOverride is the required onboarding step for sales-managed orgs)", async () => {
+    // Pinned deliberately: hosted agents ride this same cap (the
+    // beforeCreateAgent hook), so an enterprise org — or a stolen
+    // enterprise API token — has NO per-tenant bound without the override.
+    // The step-6 runbook makes setting one part of enterprise onboarding.
+    state.subscriptionStatus = "enterprise";
+    state.agentCount = 1_000_000;
+    await expect(assertCanCreateAgent("org-1")).resolves.toBeUndefined();
+  });
+
+  it("…and the override IS that onboarding mechanism: it caps an enterprise org", async () => {
+    state.subscriptionStatus = "enterprise";
+    state.maxAgentsOverride = 200;
+    state.agentCount = 200;
+    await expect(assertCanCreateAgent("org-1")).rejects.toBeInstanceOf(
+      QuotaExceededError,
+    );
+  });
+
   it("reports the overridden limit in the usage overview, other limits untouched", async () => {
     state.subscriptionStatus = "scale";
     state.maxAgentsOverride = 600;

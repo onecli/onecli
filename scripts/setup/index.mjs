@@ -15,7 +15,9 @@ Interactive by default. Flags for scripted runs:
   --mode=<m>          compose (published images) | source (build from this checkout)
   --no-runner         leave hosted agents off (no COMPOSE_PROFILES=runner)
   --channel-adapter   also enable the Slack channel adapter profile
-  --bind=<host>       bind address for published ports (default: detected, never 0.0.0.0)
+  --external-url=<u>  the URL people open OneCLI at; every other address
+                      derives from it (http means ports; https means a proxy)
+  --bind=<host>       bind address for published ports (default: detected, never 0.0.0.0 by default)
   -h, --help          this text
 
 The wizard maintains docker/.env: secrets are generated once and reused, and a
@@ -34,6 +36,7 @@ try {
       mode: { type: "string" },
       "no-runner": { type: "boolean", default: false },
       "channel-adapter": { type: "boolean", default: false },
+      "external-url": { type: "string" },
       bind: { type: "string" },
       help: { type: "boolean", short: "h", default: false },
     },
@@ -80,6 +83,7 @@ try {
     mode: values.mode,
     noRunner: values["no-runner"],
     channelAdapter: values["channel-adapter"],
+    externalUrl: values["external-url"],
     bind: values.bind,
   });
 } catch (err) {

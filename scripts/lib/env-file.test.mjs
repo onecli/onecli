@@ -285,3 +285,27 @@ test("resolveEnv: a shell variable beats the file even inside expansions", () =>
   assert.equal(resolved.EDITION, "");
   assert.equal(resolved.TWIN, "");
 });
+
+// ── hintStub ────────────────────────────────────────────────────────────────
+
+test("hintStub appends a commented stub that a later upsert un-comments", () => {
+  const env = load("EXISTING=1\n");
+  assert.equal(
+    env.hintStub("ONECLI_EXTERNAL_URL", "http://localhost:10254", {
+      comment: "The URL people open OneCLI at.",
+    }),
+    true,
+  );
+  assert.equal(env.get("ONECLI_EXTERNAL_URL"), undefined);
+  // The upsert must adopt the stub in place, not append a duplicate.
+  env.upsert("ONECLI_EXTERNAL_URL", "http://192.168.1.20:10254");
+  assert.equal(env.get("ONECLI_EXTERNAL_URL"), "http://192.168.1.20:10254");
+});
+
+test("hintStub is a no-op when the key exists as an assignment or a stub", () => {
+  const assigned = load("ONECLI_EXTERNAL_URL=http://x.example\n");
+  assert.equal(assigned.hintStub("ONECLI_EXTERNAL_URL", "y"), false);
+
+  const stubbed = load("# ONECLI_EXTERNAL_URL=http://x.example\n");
+  assert.equal(stubbed.hintStub("ONECLI_EXTERNAL_URL", "y"), false);
+});

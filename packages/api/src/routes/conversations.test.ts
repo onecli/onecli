@@ -85,7 +85,17 @@ vi.mock("../services/attachment-service", () => ({
 
 const { createApiApp } = await import("../app");
 const { ServiceError } = await import("../services/errors");
-const { publish, subscriberCount } = await import("../services/event-bus");
+// Drive events through the SAME bus the stream route resolves (the onprem
+// in-process default here) — publish/subscribe moved onto the EventBus
+// instance behind the edition provider seam.
+const { getEventBus } = await import("../providers/event-bus");
+type PublishedEvent = Parameters<
+  ReturnType<typeof getEventBus>["publish"]
+>[1][number];
+const publish = (conversationId: string, events: PublishedEvent[]) =>
+  getEventBus().publish(conversationId, events);
+const subscriberCount = (conversationId: string) =>
+  getEventBus().subscriberCount(conversationId);
 
 const app = createApiApp({ getSession: async () => null });
 
@@ -893,6 +903,71 @@ describe("the live stream", () => {
 
     expect(text).not.toContain("STALE");
     expect(text).toContain("FRESH");
+    // Contiguous tail (4 replayed, 5 next): no gap, so no repair read — the
+    // ordinary delta stream must never pay extra history queries.
+    expect(services.readTranscript).toHaveBeenCalledTimes(1);
+  });
+
+  it("REPAIRS a hole in the live tail from history — a dropped publish must not hide durable events", async () => {
+    // The Redis bus may drop or reorder a publish (a blip, cross-pod
+    // interleaving). Without the repair, `lastSeq` jumps the hole and the
+    // dedupe hides the missing durable events for the life of the
+    // connection — the client never reconnects because keep-alives flow.
+    services.readTranscript
+      // The startup snapshot: durable history ends at seq 4.
+      .mockResolvedValueOnce({
+        events: [{ seq: 4, turnId: "t-1", type: "turn.started", payload: {} }],
+        nextSince: 4,
+        hasMore: false,
+      })
+      // The repair read: seq 6 was durable and its publish was dropped
+      // (5, 7, 8 were deltas — published but never stored, so a partial
+      // read-back is the normal shape).
+      .mockResolvedValueOnce({
+        events: [
+          {
+            seq: 6,
+            turnId: "t-1",
+            type: "tool.finished",
+            payload: { name: "bash", output: "RECOVERED" },
+          },
+        ],
+        nextSince: 6,
+        hasMore: false,
+      })
+      .mockResolvedValue({ events: [], nextSince: 9, hasMore: false });
+
+    const res = await app.request("/v1/conversations/cv-1/stream", {
+      headers: AUTH,
+    });
+    const text = await readStream(
+      res,
+      (t) => t.includes("id: 9"),
+      () => {
+        // Seq 9 arrives with 5–8 missing from this connection's tail.
+        publish("cv-1", [
+          {
+            seq: 9,
+            turnId: "t-1",
+            type: "error",
+            event: { type: "error", message: "AFTER-GAP" },
+          },
+        ]);
+      },
+    );
+
+    // The lost durable event came back from history, before the live event.
+    expect(text).toContain("RECOVERED");
+    expect(text.indexOf("id: 6")).toBeLessThan(text.indexOf("id: 9"));
+    expect(text).toContain("AFTER-GAP");
+    // The repair asked for exactly what this connection was missing.
+    expect(services.readTranscript).toHaveBeenNthCalledWith(
+      2,
+      "p1",
+      "cv-1",
+      "user-1",
+      { since: 4, limit: 500 },
+    );
   });
 
   it("replays a backlog LARGER than one page, to exhaustion", async () => {

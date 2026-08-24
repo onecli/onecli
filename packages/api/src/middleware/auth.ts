@@ -86,7 +86,7 @@ export const auth = (options?: AuthOptions) => {
       }
     }
 
-    // 1. API key (workspace or org)
+    // API key (workspace or org)
     const apiKeyAuth = await authenticateApiKey(request, requireWorkspace);
     let authResult: AuthContext | null =
       typeof apiKeyAuth === "string" ? null : apiKeyAuth;
@@ -106,8 +106,8 @@ export const auth = (options?: AuthOptions) => {
       }
     }
 
-    // 2. Session — cloud reads the JWT from Authorization; self-host reads the
-    //    session cookie
+    // Session — cloud reads the JWT from Authorization; self-host reads the
+    // session cookie
     if (!authResult) {
       const sessionAuth = await authenticateSession(request, requireWorkspace);
       if (sessionAuth && "denied" in sessionAuth) {
@@ -131,7 +131,7 @@ export const auth = (options?: AuthOptions) => {
       return c.json(UNAUTHORIZED, 401);
     }
 
-    // 4. Role check (only when role option is specified). Non-RBAC
+    // Role check (only when role option is specified). Non-RBAC
     // deployments (unlicensed self-host) enforce no roles — every active
     // member passes, the same flat-team choke point `requireRole`,
     // `userIsOrgAdmin`, and the invitations router already apply.

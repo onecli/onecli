@@ -32,3 +32,7 @@ export const askSelect = async (opts) =>
 /** @param {{message:string, initialValue:boolean}} opts */
 export const askConfirm = async (opts) =>
   assumeYes ? opts.initialValue : guard(await p.confirm(opts));
+
+/** @param {{message:string, initialValue?:string, placeholder?:string, validate?:(v:string)=>string|undefined}} opts */
+export const askText = async (opts) =>
+  assumeYes ? (opts.initialValue ?? "") : guard(await p.text(opts));

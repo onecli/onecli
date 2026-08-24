@@ -120,6 +120,10 @@ export const buildSandboxStartPayload = async (
     ok: true,
     agentId: agent.id,
     payload: {
+      // The workspace fence for namespaced backends (sandbox-platform step 3):
+      // the cloud manager creates every sandbox inside its workspace's
+      // namespace. Composed at dispatch from the same row as everything else.
+      workspaceId: agent.workspaceId,
       env: config.env,
       files: [
         {
@@ -257,6 +261,15 @@ export const applyRunnerEvent = async (
         status: { in: ["running", "stopping"] },
       }),
       ...(event.status === "starting" && { status: { not: "running" } }),
+      // `failed` — reports are fire-and-forget with retries, so a DELAYED
+      // duplicate (the runner's reconcile re-observing a corpse) can land
+      // after a successful re-start reached `running`. Unguarded it would
+      // knock the live sandbox back to `failed`, strand its turns through
+      // the arm below, and park the queue. Every legitimate failed reporter
+      // (start catch, capacity refusal, stop failure, boot-crash
+      // classification) reports while the row is starting/stopping — the
+      // guard costs none of them. (step 4)
+      ...(event.status === "failed" && { status: { not: "running" } }),
     },
     data: {
       status: event.status,
@@ -454,15 +467,20 @@ const applyStartFailureReason = async (
   );
 };
 
-/** The sandbox ids this runner should be hosting — the reconcile truth. */
-export const listRunnerSandboxIds = async (
+/**
+ * The sandboxes this runner should be hosting — the reconcile truth — with
+ * what the control plane currently believes about each. The ids are the reap
+ * authority (anything labeled ours and absent is destroyed); the statuses
+ * feed the vanished-pod arm (a sandbox believed `running` with no backend
+ * snapshot died out-of-band and must be reported `stopped`).
+ */
+export const listRunnerSandboxes = async (
   runnerId: string,
-): Promise<string[]> => {
-  const rows = await db.sandbox.findMany({
+): Promise<Array<{ id: string; status: string }>> => {
+  return db.sandbox.findMany({
     where: { runnerId },
-    select: { id: true },
+    select: { id: true, status: true },
   });
-  return rows.map((row) => row.id);
 };
 
 /**

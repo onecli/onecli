@@ -6,7 +6,12 @@
 #
 # Usage: curl -fsSL https://onecli.sh/install | sh
 #
-# Custom bind host:
+# The URL people open OneCLI at (the ONE networking var most installs set —
+# every other address derives from it; http means ports, https means a proxy):
+#   export ONECLI_EXTERNAL_URL=http://192.168.1.50:10254
+#   curl -fsSL https://onecli.sh/install | sh
+#
+# Custom bind host (which interface the ports publish on; listen-only):
 #   export ONECLI_BIND_HOST=192.168.1.50
 #   curl -fsSL https://onecli.sh/install | sh
 #
@@ -65,19 +70,29 @@ detect_bind_host() {
     return
   fi
 
-  # 2. macOS — Docker Desktop, loopback works
+  # 2. A previously persisted decision — the install's own .env is the record
+  # (parity with the setup wizard, which persists its detection too).
+  if [ -f "$ENV_FILE" ]; then
+    _persisted=$(grep "^ONECLI_BIND_HOST=" "$ENV_FILE" | tail -1 | cut -d= -f2-)
+    if [ -n "$_persisted" ]; then
+      echo "$_persisted"
+      return
+    fi
+  fi
+
+  # 3. macOS — Docker Desktop, loopback works
   if [ "$(uname -s)" = "Darwin" ]; then
     echo "127.0.0.1"
     return
   fi
 
-  # 3. WSL — same VM routing as macOS (check /proc, not env vars)
+  # 4. WSL — same VM routing as macOS (check /proc, not env vars)
   if [ -f /proc/sys/fs/binfmt_misc/WSLInterop ]; then
     echo "127.0.0.1"
     return
   fi
 
-  # 4. Bare-metal Linux — bind to docker0 bridge IP
+  # 5. Bare-metal Linux — bind to docker0 bridge IP
   if command -v ip >/dev/null 2>&1; then
     DOCKER0_IP=$(ip -4 addr show docker0 2>/dev/null | awk '/inet / {split($2, a, "/"); print a[1]; exit}')
     if [ -n "$DOCKER0_IP" ]; then
@@ -86,7 +101,7 @@ detect_bind_host() {
     fi
   fi
 
-  # 5. Cannot determine safely
+  # 6. Cannot determine safely
   echo ""
 }
 
@@ -160,6 +175,144 @@ legacy_volume_secret() {
   fi
   docker run --rm -v "${PROJECT_NAME}_app-data:/data:ro" alpine:3.21 \
     cat /data/secret-encryption-key 2>/dev/null | tr -d '\r\n'
+}
+
+strip_trailing_slashes() {
+  printf '%s' "$1" | sed 's:/*$::'
+}
+
+# LEGACY(next-major): whether a bind host may seed the canonical URL —
+# non-blank, non-loopback, non-wildcard, the SAME rule as the resolver, the
+# wizard, and the gateway mirror (ledger: packages/api/src/lib/public-origins.ts). A loopback bind means the localhost defaults are already right; a
+# wildcard is a listen address that must never become an advertised one (the
+# resolver rejects it at boot, so freezing it would crash-loop the stack).
+bind_seeds_url() {
+  case "$1" in
+    "" | 127.0.0.1 | ::1 | "[::1]" | localhost | 0.0.0.0 | :: | "[::]") return 1 ;;
+  esac
+  return 0
+}
+
+# A variable's effective value the way compose interpolation sees it: the
+# shell export wins, then the install's own .env line.
+env_or_file() {
+  eval _v="\${$1:-}"
+  if [ -n "$_v" ]; then
+    printf '%s' "$_v"
+    return
+  fi
+  if [ -f "$ENV_FILE" ]; then
+    grep "^$1=" "$ENV_FILE" | tail -1 | cut -d= -f2-
+  fi
+}
+
+# Strict validation for the canonical var only (legacy APP_URL stays lenient):
+# scheme required, no path or query, never a wildcard bind address. Every
+# refusal names the fix.
+validate_external_url() {
+  case "$1" in
+    http://* | https://*) ;;
+    *)
+      echo "Error: ONECLI_EXTERNAL_URL=\"$1\" has no scheme." >&2
+      echo "Write http:// or https:// explicitly (http means ports; https means a proxy)." >&2
+      return 1
+      ;;
+  esac
+  _hostpart="${1#*://}"
+  case "$_hostpart" in
+    */* | *\?*)
+      echo "Error: ONECLI_EXTERNAL_URL=\"$1\" carries a path or query." >&2
+      echo "Use scheme://host[:port] only; subpath serving is unsupported." >&2
+      return 1
+      ;;
+  esac
+  case "$_hostpart" in
+    0.0.0.0 | 0.0.0.0:* | \[::\] | \[::\]:*)
+      echo "Error: ONECLI_EXTERNAL_URL=\"$1\" names a bind address." >&2
+      echo "Set ONECLI_BIND_HOST for where ports publish, and ONECLI_EXTERNAL_URL to the address people browse to." >&2
+      return 1
+      ;;
+  esac
+}
+
+# The canonical-URL record in the install's .env: honor an exported value
+# (validated), keep any existing configuration, freeze the detected address
+# when the bind is non-loopback (the pre-refactor compose behavior, now
+# written down), and leave a self-documenting hint otherwise. A later run
+# whose exported value differs never overwrites the file (keep-existing law);
+# compose still prefers the export for that run.
+provision_external_url() {
+  if [ -n "${ONECLI_EXTERNAL_URL:-}" ]; then
+    _url=$(strip_trailing_slashes "$ONECLI_EXTERNAL_URL")
+    validate_external_url "$_url" || return 1
+    ensure_env_value ONECLI_EXTERNAL_URL "$_url"
+    return 0
+  fi
+  if [ -f "$ENV_FILE" ] && grep -q "^ONECLI_EXTERNAL_URL=\|^APP_URL=" "$ENV_FILE"; then
+    return 0
+  fi
+  if [ -n "${APP_URL:-}" ]; then
+    return 0
+  fi
+  if bind_seeds_url "$ONECLI_BIND_HOST"; then
+    _url="http://$ONECLI_BIND_HOST:${ONECLI_APP_PORT:-10254}"
+    # Defense in depth: an exotic bind value that would not survive the
+    # resolver's boot validation gets the hint instead of a frozen line the
+    # stack then refuses to start with.
+    if validate_external_url "$_url" 2>/dev/null; then
+      printf '# Frozen at install from the detected bind address; edit to the address people browse to.\n' >> "$ENV_FILE"
+      printf 'ONECLI_EXTERNAL_URL=%s\n' "$_url" >> "$ENV_FILE"
+      chmod 600 "$ENV_FILE"
+      return 0
+    fi
+  fi
+  if ! grep -q "ONECLI_EXTERNAL_URL" "$ENV_FILE" 2>/dev/null; then
+    printf '# The URL people open OneCLI at; every other address derives from it.\n' >> "$ENV_FILE"
+    printf '# http means ports; https means a proxy in front. Uncomment to change:\n' >> "$ENV_FILE"
+    printf '# ONECLI_EXTERNAL_URL=http://localhost:%s\n' "${ONECLI_APP_PORT:-10254}" >> "$ENV_FILE"
+    chmod 600 "$ENV_FILE"
+  fi
+}
+
+# The addresses the stack will actually advertise — the POSIX re-statement of
+# the resolver's chain head, for the success block and the --print-resolved
+# verification hook. Sets RESOLVED_EXTERNAL / RESOLVED_API / RESOLVED_GATEWAY.
+resolve_display_urls() {
+  RESOLVED_EXTERNAL=$(env_or_file ONECLI_EXTERNAL_URL)
+  _class="canonical"
+  if [ -z "$RESOLVED_EXTERNAL" ]; then
+    RESOLVED_EXTERNAL=$(env_or_file APP_URL)
+    _class="alias"
+  fi
+  if [ -z "$RESOLVED_EXTERNAL" ]; then
+    if bind_seeds_url "$ONECLI_BIND_HOST"; then
+      RESOLVED_EXTERNAL="http://$ONECLI_BIND_HOST:${ONECLI_APP_PORT:-10254}"
+    else
+      RESOLVED_EXTERNAL="http://localhost:${ONECLI_APP_PORT:-10254}"
+    fi
+    _class="derived"
+  fi
+  RESOLVED_EXTERNAL=$(strip_trailing_slashes "$RESOLVED_EXTERNAL")
+  # A bare legacy APP_URL never derives the other origins (frozen contract);
+  # canonical and detected addresses do: https means one proxied origin with
+  # the gateway under /gw, http means same host on the service ports.
+  if [ "$_class" = "alias" ]; then
+    RESOLVED_API="http://localhost:${ONECLI_API_PORT:-10256}"
+    RESOLVED_GATEWAY="http://localhost:${ONECLI_GATEWAY_PORT:-10255}"
+    return
+  fi
+  case "$RESOLVED_EXTERNAL" in
+    https://*)
+      RESOLVED_API="$RESOLVED_EXTERNAL"
+      RESOLVED_GATEWAY="$RESOLVED_EXTERNAL/gw"
+      ;;
+    *)
+      _host="${RESOLVED_EXTERNAL#*://}"
+      _host="${_host%%:*}"
+      RESOLVED_API="http://$_host:${ONECLI_API_PORT:-10256}"
+      RESOLVED_GATEWAY="http://$_host:${ONECLI_GATEWAY_PORT:-10255}"
+      ;;
+  esac
 }
 
 main() {
@@ -238,6 +391,21 @@ main() {
     exit 1
   fi
 
+  # ── Persist the publish-plane decisions ──
+  # The install's .env is the record: a later bare `docker compose up` must
+  # reproduce exactly this install (an exported-only bind used to silently
+  # revert to loopback). Exported custom ports are recorded for the same
+  # reason; defaults stay implicit.
+
+  ensure_env_value ONECLI_BIND_HOST "$ONECLI_BIND_HOST"
+  for pair in "ONECLI_APP_PORT:${ONECLI_APP_PORT:-}" "ONECLI_GATEWAY_PORT:${ONECLI_GATEWAY_PORT:-}" "ONECLI_API_PORT:${ONECLI_API_PORT:-}" "POSTGRES_PORT:${POSTGRES_PORT:-}"; do
+    _var="${pair%%:*}"
+    _val="${pair#*:}"
+    if [ -n "$_val" ]; then
+      ensure_env_value "$_var" "$_val"
+    fi
+  done
+
   # ── Required secrets (split stack) ──
   # Must exist before ANY compose command touches the file — it refuses to
   # interpolate without them. Existing values are never overwritten.
@@ -265,6 +433,8 @@ main() {
     # `${COMPOSE_PROFILES-runner}`: an exported empty value opts out; an
     # existing line in the env file is the operator's choice and stays.
     ensure_env_value COMPOSE_PROFILES "${COMPOSE_PROFILES-runner}"
+    # The canonical public URL (validated, persisted, frozen, or hinted).
+    provision_external_url || exit 1
   fi
 
   # ── Stop existing services ──
@@ -281,8 +451,12 @@ main() {
   fi
 
   # ── Check for port conflicts ──
+  # Effective values, not just exports: compose interpolation reads the
+  # install's .env too, so a port persisted by a previous run must be the one
+  # probed here.
 
-  PG_PORT="${POSTGRES_PORT:-5432}"
+  PG_PORT=$(env_or_file POSTGRES_PORT)
+  PG_PORT="${PG_PORT:-5432}"
   if port_in_use "$PG_PORT"; then
     echo "Error: Port $PG_PORT is already in use (probably a local PostgreSQL)." >&2
     echo "" >&2
@@ -293,9 +467,11 @@ main() {
   fi
 
   if [ "$STACK" = "split" ]; then
-    for pair in "ONECLI_APP_PORT:${ONECLI_APP_PORT:-10254}" "ONECLI_GATEWAY_PORT:${ONECLI_GATEWAY_PORT:-10255}" "ONECLI_API_PORT:${ONECLI_API_PORT:-10256}"; do
+    for pair in "ONECLI_APP_PORT:$(env_or_file ONECLI_APP_PORT):10254" "ONECLI_GATEWAY_PORT:$(env_or_file ONECLI_GATEWAY_PORT):10255" "ONECLI_API_PORT:$(env_or_file ONECLI_API_PORT):10256"; do
       var="${pair%%:*}"
-      port="${pair#*:}"
+      _rest="${pair#*:}"
+      port="${_rest%%:*}"
+      port="${port:-${_rest#*:}}"
       if port_in_use "$port"; then
         echo "Error: Port $port is already in use." >&2
         echo "" >&2
@@ -331,21 +507,25 @@ main() {
 
   echo ""
   echo "  OneCLI is running!"
-  echo "  ONECLI_URL:  http://$ONECLI_BIND_HOST:${ONECLI_APP_PORT:-10254}"
   echo ""
-  echo "  Dashboard:  http://$ONECLI_BIND_HOST:${ONECLI_APP_PORT:-10254}"
-  echo "  Gateway:    http://$ONECLI_BIND_HOST:${ONECLI_GATEWAY_PORT:-10255}"
   if [ "$STACK" = "split" ]; then
-    echo "  API:        http://$ONECLI_BIND_HOST:${ONECLI_API_PORT:-10256}"
+    resolve_display_urls
+    echo "  Dashboard:  $RESOLVED_EXTERNAL"
+    echo "  Gateway:    $RESOLVED_GATEWAY"
+    echo "  API:        $RESOLVED_API"
     if grep "^COMPOSE_PROFILES=" "$ENV_FILE" | tail -1 | grep -q runner; then
       echo "  Agents:     hosted agents are ON (the runner mounts the Docker socket to start sandboxes;"
       echo "              disable with COMPOSE_PROFILES= in $ENV_FILE)"
     else
       echo "  Agents:     off (set COMPOSE_PROFILES=runner in $ENV_FILE to enable hosted agents)"
     fi
+  else
+    echo "  Dashboard:  http://$ONECLI_BIND_HOST:${ONECLI_APP_PORT:-10254}"
+    echo "  Gateway:    http://$ONECLI_BIND_HOST:${ONECLI_GATEWAY_PORT:-10255}"
   fi
   echo ""
-  echo "  Reaching OneCLI at another address (tunnel, proxy, domain)? Set APP_URL and API_URL in $INSTALL_DIR/.env"
+  echo "  Reaching OneCLI at another address (tunnel, proxy, domain)? Set ONECLI_EXTERNAL_URL in $INSTALL_DIR/.env"
+  echo "  to the URL you browse to (http means ports; https means a proxy in front)."
   echo "  Sibling subdomains (app + api.<domain>) share the login automatically; BETTER_AUTH_COOKIE_DOMAIN pins or disables it."
   echo ""
   echo "  Compose file: $COMPOSE_FILE"
@@ -358,6 +538,31 @@ main() {
 # Hidden verification hook: print which compose file a version resolves to.
 if [ "$1" = "--print-compose-url" ]; then
   compose_url_for_version "${ONECLI_VERSION:-latest}"
+  exit 0
+fi
+
+# Hidden verification hook: run only the bind-persist + external-URL
+# provisioning against $HOME/.onecli/.env (no Docker needed), so tests can
+# assert the persist/freeze/hint behavior file-wise.
+if [ "$1" = "--provision-url-env" ]; then
+  ONECLI_BIND_HOST=$(detect_bind_host)
+  if [ -z "$ONECLI_BIND_HOST" ]; then
+    echo "Error: Could not safely determine a bind address for OneCLI." >&2
+    exit 1
+  fi
+  mkdir -p "$INSTALL_DIR"
+  ensure_env_value ONECLI_BIND_HOST "$ONECLI_BIND_HOST"
+  provision_external_url || exit 1
+  exit 0
+fi
+
+# Hidden verification hook: print the addresses the stack would advertise.
+if [ "$1" = "--print-resolved" ]; then
+  ONECLI_BIND_HOST=$(detect_bind_host)
+  resolve_display_urls
+  echo "external=$RESOLVED_EXTERNAL"
+  echo "api=$RESOLVED_API"
+  echo "gateway=$RESOLVED_GATEWAY"
   exit 0
 fi
 

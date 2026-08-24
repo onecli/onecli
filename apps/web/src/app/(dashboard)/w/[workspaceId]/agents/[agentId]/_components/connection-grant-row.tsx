@@ -137,7 +137,9 @@ export const ConnectionGrantRow = ({
           // ON direction is frozen; detaching stays available so an attached
           // row can still be cleaned up (see `manageable`).
           disabled={busy || orgGranted || (orgBlocked && !attached)}
-          aria-label={`${attached || orgGranted ? "Detach" : "Attach"} ${connection.label ?? connection.provider}`}
+          // Same fallback chain as the visible name above — the accessible
+          // name must match what sighted users read (label-in-name).
+          aria-label={`${attached || orgGranted ? "Detach" : "Attach"} ${connection.label ?? app?.name ?? connection.provider}`}
           onCheckedChange={(next) => {
             if (next) {
               attach.mutate({

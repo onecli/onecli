@@ -39,7 +39,7 @@ type Conversations = typeof import("./conversation-service");
 type Turns = typeof import("./turn-service");
 type DueWork = typeof import("./due-work");
 type Sandboxes = typeof import("./sandbox-service");
-type EventBus = typeof import("./event-bus");
+type EventBusProvider = typeof import("../providers/event-bus");
 type Errors = typeof import("./errors");
 
 let db: Db;
@@ -47,7 +47,7 @@ let conversations: Conversations;
 let turns: Turns;
 let dueWork: DueWork;
 let sandboxes: Sandboxes;
-let eventBus: EventBus;
+let eventBus: EventBusProvider;
 let ServiceError: Errors["ServiceError"];
 
 const P = "cvp-";
@@ -239,7 +239,7 @@ beforeAll(async () => {
   turns = await import("./turn-service");
   dueWork = await import("./due-work");
   sandboxes = await import("./sandbox-service");
-  eventBus = await import("./event-bus");
+  eventBus = await import("../providers/event-bus");
   ({ ServiceError } = await import("./errors"));
 
   await reset();
@@ -681,6 +681,8 @@ describe.skipIf(!PROOF_URL)("the turn arms of the dispatch seam", () => {
         agentId,
         message: "do it",
         resumeSessionRef: null,
+        // The claim-latency clock (step 6): a fresh turn's is its creation.
+        waitedSince: expect.any(Date),
       },
     ]);
     const row = await db.turn.findUnique({ where: { id: turn.id } });
@@ -1812,9 +1814,9 @@ describe.skipIf(!PROOF_URL)("the runner fence on turn reporting", () => {
       WEB_A,
     );
     const seen: unknown[] = [];
-    const release = eventBus.subscribe(conversationId, (events) =>
-      seen.push(...events),
-    );
+    const { release } = eventBus
+      .getEventBus()
+      .subscribe(conversationId, (events) => seen.push(...events));
 
     await turns.applyTurnEvents(
       reporter(RUNNER_B, sandboxId),
@@ -2966,6 +2968,10 @@ describe.skipIf(!PROOF_URL)(
       // The RESOLVED model, from the granted key's provider — nobody chose it.
       expect(decision.payload.model).toBe(anthropic.defaultModel);
       expect(decision.payload.env.ANTHROPIC_API_KEY).toBe("placeholder");
+      // The workspace fence for namespaced backends (sandbox-platform step 3):
+      // the cloud manager refuses a create without it, so dropping this field
+      // must fail HERE, not as a live 400 on dev.
+      expect(decision.payload.workspaceId).toBe(WORKSPACE);
     });
 
     it("refuses to compose one when the agent has no key", async () => {

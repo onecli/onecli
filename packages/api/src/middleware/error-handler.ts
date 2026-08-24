@@ -11,6 +11,7 @@ const STATUS_MAP = {
   CONFLICT: 409,
   FORBIDDEN: 403,
   GONE: 410,
+  RATE_LIMITED: 429,
 } as const satisfies Record<ServiceErrorCode, ContentfulStatusCode>;
 
 const ERROR_TYPE_MAP: Record<ServiceErrorCode, string> = {
@@ -20,6 +21,7 @@ const ERROR_TYPE_MAP: Record<ServiceErrorCode, string> = {
   CONFLICT: "invalid_request_error",
   FORBIDDEN: "authentication_error",
   GONE: "invalid_request_error",
+  RATE_LIMITED: "rate_limit_error",
 };
 
 const DOCS_URL = "https://onecli.sh/docs/api-reference";

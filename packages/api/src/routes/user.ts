@@ -9,7 +9,14 @@ import {
   AUDIT_SERVICES,
   AUDIT_SOURCE,
 } from "../services/audit-service";
+import {
+  createSshKey,
+  deleteSshKey,
+  listSshKeys,
+} from "../services/ssh-key-service";
+import { ServiceError } from "../services/errors";
 import { updateProfileSchema } from "../validations/user";
+import { createSshKeySchema } from "../validations/ssh-keys";
 
 export const userRoutes = () => {
   const app = new Hono<ApiEnv>();
@@ -71,6 +78,54 @@ export const userRoutes = () => {
       workspaceId: requireWorkspaceId(auth),
     });
     return c.json(result);
+  });
+
+  // The user's registered SSH public keys — account-level like GET / above
+  // (a key authenticates the person to every agent they can reach, so no
+  // workspace fence belongs here; authorization stays per-agent at mint).
+  // New handlers use the ServiceError-throw style, not this file's legacy
+  // bare-string 400s.
+
+  // GET /user/ssh-keys
+  app.get("/ssh-keys", async (c) => {
+    const auth = c.get("auth");
+    return c.json({ sshKeys: await listSshKeys(auth.userId) });
+  });
+
+  // POST /user/ssh-keys
+  app.post("/ssh-keys", async (c) => {
+    const auth = c.get("auth");
+    const body = await c.req.json().catch(() => null);
+    const parsed = createSshKeySchema.safeParse(body);
+    if (!parsed.success) {
+      throw new ServiceError(
+        "UNPROCESSABLE",
+        parsed.error.issues[0]?.message ?? "Invalid request body",
+      );
+    }
+    const sshKey = await createSshKey(
+      {
+        userId: auth.userId,
+        userEmail: auth.userEmail,
+        organizationId: auth.organizationId,
+      },
+      parsed.data,
+    );
+    return c.json({ sshKey }, 201);
+  });
+
+  // DELETE /user/ssh-keys/:keyId
+  app.delete("/ssh-keys/:keyId", async (c) => {
+    const auth = c.get("auth");
+    await deleteSshKey(
+      {
+        userId: auth.userId,
+        userEmail: auth.userEmail,
+        organizationId: auth.organizationId,
+      },
+      c.req.param("keyId"),
+    );
+    return c.body(null, 204);
   });
 
   return app;

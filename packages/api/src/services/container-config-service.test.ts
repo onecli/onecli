@@ -121,6 +121,30 @@ describe("the zero-credential line", () => {
     expect(JSON.stringify(rest)).not.toContain("aoc_agent_token");
   });
 
+  it("targets ONECLI_AGENT_PROXY_ADDRESS, with GATEWAY_BASE_URL as the alias", async () => {
+    // The proxy host comes from the resolver's agent-proxy chain: new name,
+    // then the legacy alias, then host.docker.internal. Hermetic setup
+    // deletes both vars before this file, so the default backs the other
+    // cases in this suite.
+    vi.stubEnv("ONECLI_AGENT_PROXY_ADDRESS", "203.0.113.9:24814");
+    try {
+      const result = await build();
+      if (!result.ok) throw new Error("expected a config");
+      expect(result.config.env.HTTPS_PROXY).toContain("@203.0.113.9:24814");
+    } finally {
+      vi.unstubAllEnvs();
+    }
+
+    vi.stubEnv("GATEWAY_BASE_URL", "198.51.100.7:24814");
+    try {
+      const result = await build();
+      if (!result.ok) throw new Error("expected a config");
+      expect(result.config.env.HTTPS_PROXY).toContain("@198.51.100.7:24814");
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
   it("points every TLS client at the CA path", async () => {
     const result = await build();
     if (!result.ok) throw new Error("expected a config");

@@ -231,7 +231,7 @@ pub(super) async fn handle_websocket(
             .await
         {
             Ok(rules) => rules,
-            Err(resp) => return Ok(resp),
+            Err(resp) => return Ok(*resp),
         };
 
     let mut upstream_path = path.clone();

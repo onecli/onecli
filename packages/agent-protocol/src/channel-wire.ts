@@ -17,6 +17,11 @@ import { z } from "zod";
 
 export const adapterRegisterRequestSchema = z.object({
   name: z.string().min(1).max(200),
+  /** New binaries send true: "mint me a per-instance credential" (the anchor
+   * then only proves membership, it is never this instance's identity). An
+   * old control plane's zod strips the unknown key and runs the legacy path —
+   * both directions of version skew stay correct. */
+  perInstance: z.boolean().optional(),
 });
 export type AdapterRegisterRequest = z.infer<
   typeof adapterRegisterRequestSchema
@@ -24,6 +29,10 @@ export type AdapterRegisterRequest = z.infer<
 
 export const adapterRegisterResponseSchema = z.object({
   adapterId: z.string().min(1),
+  /** Per-instance minted bearer ("cha_" + 64 hex), present only on the
+   * mint path. An old control plane never sends it — the client then keeps
+   * using the anchor as its bearer (the legacy shared-identity behavior). */
+  token: z.string().optional(),
 });
 
 // ── The config feed ─────────────────────────────────────────────────────────
@@ -118,6 +127,13 @@ export const adapterWorkItemSchema = z.object({
       }),
     )
     .optional(),
+  /** The link's stored mirror cursor (ISO or null) at the time this item was
+   * served — the CAS-seed floor for an instance that acquired the link
+   * mid-history with no local cursor. Instance-identity callers' config etag
+   * no longer folds cursors (so a mirrored turn stops busting it), and this
+   * field is what replaces that seed path. Optional: an older control plane
+   * never sends it (those callers still get cursor-busting etags). */
+  linkMirrorCursor: z.string().nullable().optional(),
 });
 export type AdapterWorkItem = z.infer<typeof adapterWorkItemSchema>;
 

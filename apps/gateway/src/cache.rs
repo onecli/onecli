@@ -170,7 +170,6 @@ impl CacheStore for InMemoryCacheStore {
             expires_at: now + ttl,
         });
 
-        // Reset if expired
         if entry.expires_at <= now {
             entry.data = "0".to_string();
             entry.expires_at = now + ttl;

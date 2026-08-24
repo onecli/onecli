@@ -3,12 +3,13 @@
 import { Check, Copy } from "lucide-react";
 import { useCopyToClipboard } from "@/hooks/use-copy-to-clipboard";
 import { API_ORIGIN } from "@/lib/api-fetch";
-import { APP_URL, IS_CLOUD } from "@/lib/env";
+import { IS_CLOUD } from "@/lib/env";
 
 // The OAuth callback is served by the api-server in every edition, so the
 // displayed redirect URI must be its origin (the server computes its own
-// redirect_uri from the same API URL).
-const useBaseUrl = () => API_ORIGIN || APP_URL;
+// redirect_uri from the same API URL). API_ORIGIN is never falsy (it bottoms
+// out at the resolver default), so it needs no fallback.
+const useBaseUrl = () => API_ORIGIN;
 
 // One typography decision: on cloud the URI is quiet, secondary metadata (the
 // platform's own OAuth apps usually apply); self-hosted it's a primary setup

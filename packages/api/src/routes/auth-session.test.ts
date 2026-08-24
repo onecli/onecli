@@ -65,7 +65,11 @@ vi.mock("../services/organization-service", () => ({
   ensureWorkspaceSeeds: async () => {},
 }));
 
-import { initSession, initSessionEnforcer } from "../providers";
+import {
+  initSession,
+  initSessionEnforcer,
+  initSessionThrottle,
+} from "../providers";
 import { authSessionRoutes, initSessionHooks } from "./auth-session";
 import type { SessionHooks } from "./auth-session";
 
@@ -89,6 +93,7 @@ afterEach(() => {
   // same worker never inherit a rejecting hook.
   initSessionHooks({});
   initSessionEnforcer(null);
+  initSessionThrottle(null);
 });
 
 describe("GET /auth/session identity-conflict seam", () => {
@@ -426,5 +431,42 @@ describe("GET /auth/session sessionEnforcer seam", () => {
     const res = await app.request("/");
     expect(res.status).toBe(200);
     expect(seen).toEqual(["user-1"]);
+  });
+});
+
+describe("GET /auth/session sessionThrottle seam", () => {
+  it("a throttling middleware answers 429 before the session read and every write", async () => {
+    initSessionThrottle(async (c) =>
+      c.json(
+        {
+          error: {
+            message: "Too many requests. Try again shortly.",
+            type: "rate_limit_error",
+          },
+        },
+        429,
+      ),
+    );
+    // A session that WOULD bootstrap: reaching the handler produces a 200 and
+    // an upsert (the passing test below) — so an empty write log here proves
+    // the refusal happened ahead of the handler, not inside it.
+    state.session = { id: "sub-1", email: "guy@acme.com" };
+
+    const res = await app.request("/");
+    expect(res.status).toBe(429);
+    const body = (await res.json()) as { error: { type: string } };
+    expect(body.error.type).toBe("rate_limit_error");
+    // MUTATION-TESTED (placement): move the throttle after the handler's
+    // session read and these go non-empty.
+    expect(state.order).toEqual([]);
+    expect(state.upserts).toHaveLength(0);
+  });
+
+  it("the default (onprem) throttle is null and requests pass untouched", async () => {
+    state.session = { id: "sub-1", email: "guy@acme.com" };
+
+    const res = await app.request("/");
+    expect(res.status).toBe(200);
+    expect(state.upserts).toHaveLength(1);
   });
 });

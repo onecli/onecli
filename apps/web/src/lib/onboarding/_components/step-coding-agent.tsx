@@ -80,7 +80,6 @@ export const StepCodingAgent = ({
           </button>
         ))}
 
-        {/* Other */}
         <button
           type="button"
           aria-pressed={selected === "other"}

@@ -237,6 +237,47 @@ mod tests {
     }
 
     #[test]
+    fn google_calendar_get_calendar_covers_the_agent_probe_url() {
+        // The URL most calendar agents open with (calendars.get on the primary
+        // calendar). get_calendar = GET www.googleapis.com /calendar/v3/calendars/*.
+        let probe = "/calendar/v3/calendars/primary";
+        assert!(matches(
+            "google-calendar",
+            &["get_calendar"],
+            "www.googleapis.com",
+            "GET",
+            probe
+        ));
+        // The pre-existing GRANULAR read tools do NOT cover the probe — the gap
+        // that stalled tool-scoped agents on their first calendar call before
+        // get_calendar existed (the read_all wildcard always covered it).
+        assert!(!matches(
+            "google-calendar",
+            &["list_events", "get_event", "list_calendars"],
+            "www.googleapis.com",
+            "GET",
+            probe
+        ));
+        // Path fencing: get_calendar is scoped to the calendars/ subtree — it
+        // must never widen to the whole /calendar/v3/* read surface (read_all).
+        assert!(!matches(
+            "google-calendar",
+            &["get_calendar"],
+            "www.googleapis.com",
+            "GET",
+            "/calendar/v3/users/me/calendarList"
+        ));
+        // Method fencing: the tool is read-only.
+        assert!(!matches(
+            "google-calendar",
+            &["get_calendar"],
+            "www.googleapis.com",
+            "POST",
+            probe
+        ));
+    }
+
+    #[test]
     fn empty_tool_set_matches_the_whole_app_host_only() {
         // An EMPTY tool set is the WHOLE app (the dialog's "All connections" and
         // an empty-tools `connection` target): host-only against every catalog

@@ -1,5 +1,5 @@
 import { Hono } from "hono";
-import { GATEWAY_API_URL } from "../lib/env";
+import { gatewayHttpOrigin } from "../lib/public-origins";
 import { loadCaCertificate } from "../lib/gateway-ca";
 
 // Public discovery endpoint — no auth, mirroring the `/gateway/ca` sibling
@@ -11,7 +11,9 @@ import { loadCaCertificate } from "../lib/gateway-ca";
 export const gatewayUrlRoutes = () => {
   const app = new Hono();
 
-  app.get("/", (c) => c.json({ url: GATEWAY_API_URL }));
+  // Proxy-mode deployments serve `https://<host>/gw` here — a path-suffixed
+  // base every client must compose paths onto, never string-replace.
+  app.get("/", (c) => c.json({ url: gatewayHttpOrigin() }));
 
   return app;
 };

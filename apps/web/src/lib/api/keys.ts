@@ -79,6 +79,16 @@ export const queryKeys = {
     all: () => ["invitations", ...scope()] as const,
     list: () => [...queryKeys.invitations.all(), "list"] as const,
   },
+  org: {
+    // The current-org read (GET /v1/org), keyed per URL scope like every
+    // other namespace. On /w/ pages the org slot is "default" (the org-id
+    // regex only matches /org/ paths) and the WORKSPACE id is the real
+    // discriminator — globally unique, so entries never bleed across orgs; a
+    // workspace switch re-fetches, accepted for a one-row read. A consumer on
+    // a route matching NEITHER regex would key to ["org","default","default"]
+    // and must not trust that entry across org switches.
+    all: () => ["org", ...scope()] as const,
+  },
   orgMembers: {
     all: () => ["org-members", ...scope()] as const,
     list: () => [...queryKeys.orgMembers.all(), "list"] as const,
@@ -144,6 +154,14 @@ export const queryKeys = {
   // Instance metadata is deployment-global — no org/workspace scope key.
   instance: {
     all: () => ["instance"] as const,
+  },
+  // Registered SSH keys are PER-USER, not per-org/workspace — deliberately
+  // unscoped (the instance precedent) so /account/ssh-keys and the agent SSH
+  // page resolve to the SAME cache entry; a scoped key would silently split
+  // the two surfaces.
+  sshKeys: {
+    all: () => ["ssh-keys"] as const,
+    list: () => [...queryKeys.sshKeys.all(), "list"] as const,
   },
   installInfo: {
     all: () => ["install-info", ...scope()] as const,

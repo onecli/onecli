@@ -6,3 +6,7 @@ apps/gateway/src/policy_engine/catalog.generated.json
 # Nested worktree checkouts (Claude Code sessions) — each is its own repo view;
 # the repo-wide glob must never format-check another checkout's files.
 .claude/worktrees/
+
+# Conductor workspace scratch space (gitignored agent collaboration files) —
+# not repo content; the format gate must not fail on it.
+.context/

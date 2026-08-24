@@ -587,7 +587,6 @@ export const appRoutes = () => {
 
       const redirectUri = `${apiOrigin}/v1/apps/${provider}/callback`;
 
-      // Extract all query params as callback params
       const url = new URL(c.req.url);
       const callbackParams = Object.fromEntries(url.searchParams.entries());
 

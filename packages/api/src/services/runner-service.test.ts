@@ -14,6 +14,7 @@ const mocks = vi.hoisted(() => ({
   create: vi.fn(),
   update: vi.fn(),
   count: vi.fn(),
+  findFirst: vi.fn(),
   findMany: vi.fn(),
 }));
 
@@ -33,6 +34,7 @@ vi.mock("@onecli/db", () => ({
       create: mocks.create,
       update: mocks.update,
       count: mocks.count,
+      findFirst: mocks.findFirst,
       findMany: mocks.findMany,
     },
     $queryRaw: async () => [],
@@ -61,6 +63,7 @@ beforeEach(() => {
   mocks.create.mockResolvedValue({ id: "r-new" });
   mocks.update.mockResolvedValue({});
   mocks.count.mockResolvedValue(0);
+  mocks.findFirst.mockResolvedValue(null);
   mocks.findMany.mockResolvedValue([]);
   resetRunnerAvailabilityCache();
 });
@@ -132,11 +135,41 @@ describe("availability", () => {
   });
 
   it("reports registered-but-offline when a runner exists with a stale heartbeat", async () => {
-    mocks.count.mockResolvedValueOnce(1).mockResolvedValueOnce(0);
+    mocks.count.mockResolvedValueOnce(1);
+    mocks.findFirst.mockResolvedValueOnce(null);
 
     expect(await getRunnerAvailability()).toEqual({
       registered: true,
       online: false,
+    });
+  });
+
+  it("states the online runner's home durability — the honest loss window (step 3)", async () => {
+    mocks.count.mockResolvedValueOnce(1);
+    mocks.findFirst.mockResolvedValueOnce({
+      capabilities: {
+        ...CAPABILITIES,
+        backend: "cloud",
+        homeDurability: "snapshot",
+      },
+    });
+
+    expect(await getRunnerAvailability()).toEqual({
+      registered: true,
+      online: true,
+      homeDurability: "snapshot",
+    });
+  });
+
+  it("omits durability when the capabilities blob predates the field — absence, never a default", async () => {
+    mocks.count.mockResolvedValueOnce(1);
+    mocks.findFirst.mockResolvedValueOnce({
+      capabilities: { maxSandboxes: 4, backend: "docker" },
+    });
+
+    expect(await getRunnerAvailability()).toEqual({
+      registered: true,
+      online: true,
     });
   });
 
@@ -145,8 +178,9 @@ describe("availability", () => {
     await getRunnerAvailability();
     await getRunnerAvailability();
 
-    // Two counts for the first call, none for the rest.
-    expect(mocks.count).toHaveBeenCalledTimes(2);
+    // One count (+ one findFirst) for the first call, none for the rest.
+    expect(mocks.count).toHaveBeenCalledTimes(1);
+    expect(mocks.findFirst).toHaveBeenCalledTimes(1);
   });
 
   it("re-reads after the cache is cleared", async () => {
@@ -154,7 +188,7 @@ describe("availability", () => {
     resetRunnerAvailabilityCache();
     await getRunnerAvailability();
 
-    expect(mocks.count).toHaveBeenCalledTimes(4);
+    expect(mocks.count).toHaveBeenCalledTimes(2);
   });
 });
 
@@ -193,6 +227,9 @@ describe("listRunners", () => {
     expect(runners[0]?.heldAwakeCount).toBe(0);
     expect(runners[0]?.heldAwakeCeiling).toBe(3);
     expect(runners[2]?.heldAwakeCeiling).toBe(1);
+    // The typed §3.9 read: declared class, null for an unparseable blob.
+    expect(runners[0]?.homeDurability).toBe("resident");
+    expect(runners[2]?.homeDurability).toBeNull();
     expect(JSON.stringify(runners)).not.toContain("rnr_");
     // The select must not even fetch the token column.
     const select = mocks.findMany.mock.calls[0]?.[0]?.select as

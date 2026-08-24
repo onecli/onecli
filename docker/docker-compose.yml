@@ -95,30 +95,43 @@ services:
       SECRET_ENCRYPTION_KEY: ${SECRET_ENCRYPTION_KEY:?put SECRET_ENCRYPTION_KEY in the .env beside this file (head -c 32 /dev/urandom | base64), or install via https://onecli.sh/install}
       # Authenticates gateway↔api internal calls (e.g. vault reads).
       GATEWAY_INTERNAL_SECRET: ${GATEWAY_INTERNAL_SECRET:?put GATEWAY_INTERNAL_SECRET in the .env beside this file (head -c 32 /dev/urandom | base64), or install via https://onecli.sh/install}
-      # The public URL users reach the dashboard on. The defaults below assume
-      # you reach OneCLI at the address Docker binds to, which holds for a
-      # local or single-host install. When it doesn't — a tunnel, a reverse
-      # proxy, a real domain — set APP_URL / API_URL / GATEWAY_API_URL
-      # instead of relying on them: either export them, or put them in the
-      # `.env` beside this file.
-      APP_URL: ${APP_URL:-http://${ONECLI_BIND_HOST:-127.0.0.1}:${ONECLI_APP_PORT:-10254}}
-      # This service's own public origin: install snippets, the CLI's api
-      # host, and OAuth redirect URIs are built from it.
-      API_URL: ${API_URL:-http://${ONECLI_BIND_HOST:-127.0.0.1}:${ONECLI_API_PORT:-10256}}
+      # THE canonical public URL — the address people open OneCLI at. Every
+      # other origin derives from it (http means ports mode: api/gateway on
+      # the same host's ports; https means proxy mode: one origin, a reverse
+      # proxy routes /v1, /auth and /gw). install.sh and the setup wizard
+      # write it into the `.env` beside this file; unset means localhost.
+      ONECLI_EXTERNAL_URL: ${ONECLI_EXTERNAL_URL:-}
+      # Legacy alias and per-origin overrides (split-host installs). Kept
+      # working forever; pass-throughs only — the services derive their own
+      # defaults, compose no longer seeds URLs from the bind address.
+      APP_URL: ${APP_URL:-}
+      API_URL: ${API_URL:-}
+      GATEWAY_API_URL: ${GATEWAY_API_URL:-}
+      # Extra browser origins the auth layer should trust (comma-separated),
+      # for installs reachable at more than one address (IP + DNS name).
+      ONECLI_TRUSTED_ORIGINS: ${ONECLI_TRUSTED_ORIGINS:-}
+      # Publish-plane facts the in-container derivation needs: the (warned,
+      # one-release) legacy bind seed and the ports-mode port numbers.
+      # LEGACY(next-major): the ONECLI_BIND_HOST rows here and on the web,
+      # gateway and channel-adapter services exist only to feed that seed
+      # (ledger: packages/api/src/lib/public-origins.ts).
+      ONECLI_BIND_HOST: ${ONECLI_BIND_HOST:-}
+      ONECLI_APP_PORT: ${ONECLI_APP_PORT:-10254}
+      ONECLI_API_PORT: ${ONECLI_API_PORT:-10256}
+      ONECLI_GATEWAY_PORT: ${ONECLI_GATEWAY_PORT:-10255}
       # Session-cookie scope for split-host installs (dashboard and API on
-      # sibling subdomains). Auto-derived from APP_URL/API_URL when they share
-      # a parent domain; set to pin a scope, or `none` to force host-only.
+      # sibling subdomains). Auto-derived from the app/api origins when they
+      # share a parent domain; set to pin a scope, or `none` to force host-only.
       BETTER_AUTH_COOKIE_DOMAIN: ${BETTER_AUTH_COOKIE_DOMAIN:-}
-      # Public gateway origin, served to CLI clients asking where the gateway is.
-      GATEWAY_API_URL: ${GATEWAY_API_URL:-http://${ONECLI_BIND_HOST:-127.0.0.1}:${ONECLI_GATEWAY_PORT:-10255}}
       # In-network address of the gateway for server-side cache flushes (the
-      # public origin above isn't routable from inside this container).
+      # public origin isn't routable from inside this container).
       GATEWAY_INTERNAL_URL: http://gateway:10255
       # The proxy address handed to CONTAINERS (agent sandboxes and any
       # containerized BYO agent on this stack). It must resolve from inside a
-      # container on this stack's networks, which the default
-      # `host.docker.internal` does not on Linux.
-      GATEWAY_BASE_URL: ${GATEWAY_BASE_URL:-gateway:10255}
+      # container on this stack's networks, which the code default
+      # `host.docker.internal` does not on Linux. The old GATEWAY_BASE_URL
+      # name keeps working as a permanent read-alias (nested default).
+      ONECLI_AGENT_PROXY_ADDRESS: ${ONECLI_AGENT_PROXY_ADDRESS:-${GATEWAY_BASE_URL:-gateway:10255}}
       # Hosted agents: the registration anchor for the runner plane. Unset =
       # no runner can register, and the hosted surface stays dark.
       RUNNER_TOKEN: ${RUNNER_TOKEN:-}
@@ -167,15 +180,21 @@ services:
       ENTERPRISE_ENABLED: ${ENTERPRISE_ENABLED:-}
       BETTER_AUTH_SECRET: ${BETTER_AUTH_SECRET:?put BETTER_AUTH_SECRET in the .env beside this file (openssl rand -base64 32), or install via https://onecli.sh/install}
       SECRET_ENCRYPTION_KEY: ${SECRET_ENCRYPTION_KEY:?put SECRET_ENCRYPTION_KEY in the .env beside this file (head -c 32 /dev/urandom | base64), or install via https://onecli.sh/install}
-      APP_URL: ${APP_URL:-http://${ONECLI_BIND_HOST:-127.0.0.1}:${ONECLI_APP_PORT:-10254}}
-      # Public API origin — the dashboard hands it to the browser at runtime
+      # Same resolver inputs as the api service: the dashboard derives the
+      # api/gateway origins and hands them to the browser at runtime
       # (prebuilt images cannot bake a deployment's URL).
-      API_URL: ${API_URL:-http://${ONECLI_BIND_HOST:-127.0.0.1}:${ONECLI_API_PORT:-10256}}
+      ONECLI_EXTERNAL_URL: ${ONECLI_EXTERNAL_URL:-}
+      APP_URL: ${APP_URL:-}
+      API_URL: ${API_URL:-}
+      GATEWAY_API_URL: ${GATEWAY_API_URL:-}
+      ONECLI_TRUSTED_ORIGINS: ${ONECLI_TRUSTED_ORIGINS:-}
+      ONECLI_BIND_HOST: ${ONECLI_BIND_HOST:-}
+      ONECLI_APP_PORT: ${ONECLI_APP_PORT:-10254}
+      ONECLI_API_PORT: ${ONECLI_API_PORT:-10256}
+      ONECLI_GATEWAY_PORT: ${ONECLI_GATEWAY_PORT:-10255}
       # Same value as the api service's: the web server builds the identical
       # auth factory for its server-rendered session reads.
       BETTER_AUTH_COOKIE_DOMAIN: ${BETTER_AUTH_COOKIE_DOMAIN:-}
-      # Public gateway origin, handed to the browser the same way.
-      GATEWAY_API_URL: ${GATEWAY_API_URL:-http://${ONECLI_BIND_HOST:-127.0.0.1}:${ONECLI_GATEWAY_PORT:-10255}}
       # In-network address of the gateway for server-side cache flushes.
       GATEWAY_INTERNAL_URL: http://gateway:10255
     env_file:
@@ -209,8 +228,13 @@ services:
       GATEWAY_INTERNAL_SECRET: ${GATEWAY_INTERNAL_SECRET:?put GATEWAY_INTERNAL_SECRET in the .env beside this file (head -c 32 /dev/urandom | base64), or install via https://onecli.sh/install}
       # The public URL users reach OneCLI on. The gateway needs it to build the
       # links it puts in agent-facing responses — it answers proxy calls, so it
-      # has no browser request to derive an address from.
-      APP_URL: ${APP_URL:-http://${ONECLI_BIND_HOST:-127.0.0.1}:${ONECLI_APP_PORT:-10254}}
+      # has no browser request to derive an address from. Its Rust chain head
+      # mirrors the resolver: ONECLI_EXTERNAL_URL, the APP_URL alias, then the
+      # warned legacy bind seed.
+      ONECLI_EXTERNAL_URL: ${ONECLI_EXTERNAL_URL:-}
+      APP_URL: ${APP_URL:-}
+      ONECLI_BIND_HOST: ${ONECLI_BIND_HOST:-}
+      ONECLI_APP_PORT: ${ONECLI_APP_PORT:-10254}
       # Where the gateway reaches the api service (internal vault calls — never
       # the public API_URL, which can name a real external host).
       INTERNAL_API_URL: http://api:10256
@@ -322,8 +346,12 @@ services:
       CONTROL_PLANE_URL: http://api:10256
       GATEWAY_API_URL: http://gateway:10255
       # The dashboard address the model-key buttons in Slack posts point at —
-      # same default as the api/web/gateway services above.
-      APP_URL: ${APP_URL:-http://${ONECLI_BIND_HOST:-127.0.0.1}:${ONECLI_APP_PORT:-10254}}
+      # the adapter mirrors the resolver's chain head (canonical, alias, then
+      # the warned legacy bind seed; nothing set means the buttons are omitted).
+      ONECLI_EXTERNAL_URL: ${ONECLI_EXTERNAL_URL:-}
+      APP_URL: ${APP_URL:-}
+      ONECLI_BIND_HOST: ${ONECLI_BIND_HOST:-}
+      ONECLI_APP_PORT: ${ONECLI_APP_PORT:-10254}
       CHANNEL_ADAPTER_NAME: ${CHANNEL_ADAPTER_NAME:-compose}
     env_file:
       # Only the install's own .env — same rule as the api service (a

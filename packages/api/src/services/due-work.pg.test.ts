@@ -377,14 +377,14 @@ describe.skipIf(!PROOF_URL)("the runner fence on event application", () => {
     expect(row?.status).toBe("running");
   });
 
-  it("lists only the owning runner's sandbox ids", async () => {
+  it("lists only the owning runner's sandboxes, with their statuses", async () => {
     const mine = await seedAgent("list-mine");
     const theirs = await seedAgent("list-theirs");
     await seedSandbox("sb-lm", mine, RUNNER_A, { status: "running" });
     await seedSandbox("sb-lt", theirs, RUNNER_B, { status: "running" });
 
-    expect(await sandboxes.listRunnerSandboxIds(RUNNER_A)).toEqual([
-      `${P}sb-lm`,
+    expect(await sandboxes.listRunnerSandboxes(RUNNER_A)).toEqual([
+      { id: `${P}sb-lm`, status: "running" },
     ]);
   });
 
@@ -596,5 +596,188 @@ describe.skipIf(!PROOF_URL)("placement over real PostgreSQL", () => {
     expect(
       await placement.pickRunnerForSandbox({ candidateIds: [] }),
     ).toBeNull();
+  });
+});
+
+describe.skipIf(!PROOF_URL)("wake priority (step 4)", () => {
+  /** A stopped sandbox with one waiting turn — the start arm's wake shape. */
+  const seedWakeCandidate = async (input: {
+    suffix: string;
+    updatedAt: Date;
+    turnSource: string;
+    turnCreatedAt?: Date;
+  }) => {
+    const agentId = await seedAgent(input.suffix);
+    await seedSandbox(`sb-${input.suffix}`, agentId, RUNNER_A, {
+      status: "stopped",
+      updatedAt: input.updatedAt,
+    });
+    await db.conversation.create({
+      data: { id: `${P}cv-${input.suffix}`, agentId, source: "web" },
+    });
+    await db.turn.create({
+      data: {
+        id: `${P}t-${input.suffix}`,
+        conversationId: `${P}cv-${input.suffix}`,
+        message: "wake me",
+        status: "queued",
+        source: input.turnSource,
+        ...(input.turnCreatedAt && { createdAt: input.turnCreatedAt }),
+      },
+    });
+    return agentId;
+  };
+
+  it("a person's wake outranks an older cron wake in the start arm", async () => {
+    await seedWakeCandidate({
+      suffix: "prio-cron",
+      updatedAt: new Date(Date.now() - 10 * 60 * 1000),
+      turnSource: "cron",
+    });
+    await seedWakeCandidate({
+      suffix: "prio-web",
+      updatedAt: new Date(Date.now() - 5 * 60 * 1000),
+      turnSource: "web",
+    });
+
+    // Limit 1 makes the ORDER BY the admission policy — without the rank the
+    // older-updated cron sandbox would claim first.
+    const claimed = await dueWork.claimDueWork(RUNNER_A, 1);
+    expect(claimed.map((c) => c.sandboxId)).toEqual([`${P}sb-prio-web`]);
+  });
+
+  it("positive control: with both wakes cron-born, the older sandbox claims first", async () => {
+    // Same seeding as above with the web source flipped to cron — proving
+    // the previous assertion holds BECAUSE of the source rank, not by luck
+    // of updated_at ordering.
+    await seedWakeCandidate({
+      suffix: "ctl-old",
+      updatedAt: new Date(Date.now() - 10 * 60 * 1000),
+      turnSource: "cron",
+    });
+    await seedWakeCandidate({
+      suffix: "ctl-new",
+      updatedAt: new Date(Date.now() - 5 * 60 * 1000),
+      turnSource: "cron",
+    });
+
+    const claimed = await dueWork.claimDueWork(RUNNER_A, 1);
+    expect(claimed.map((c) => c.sandboxId)).toEqual([`${P}sb-ctl-old`]);
+  });
+
+  it("a background wake past the age cap ranks as user-visible (starvation bound)", async () => {
+    // Aged cron on the YOUNGER-updated sandbox vs fresh cron on the older —
+    // without the age cap the older sandbox would win; with it, the aged
+    // turn's sandbox does.
+    await seedWakeCandidate({
+      suffix: "age-old",
+      updatedAt: new Date(Date.now() - 10 * 60 * 1000),
+      turnSource: "cron",
+    });
+    await seedWakeCandidate({
+      suffix: "age-aged",
+      updatedAt: new Date(Date.now() - 2 * 60 * 1000),
+      turnSource: "cron",
+      turnCreatedAt: new Date(
+        Date.now() - (dueWork.WAKE_PRIORITY_AGE_SECONDS + 60) * 1000,
+      ),
+    });
+
+    const claimed = await dueWork.claimDueWork(RUNNER_A, 1);
+    expect(claimed.map((c) => c.sandboxId)).toEqual([`${P}sb-age-aged`]);
+  });
+
+  it("the turn arm dispatches a person's message ahead of older cron runs", async () => {
+    // One RUNNING sandbox, six queued turns across six conversations: five
+    // cron-born (oldest first) and one web-born YOUNGEST. The 5-turn budget
+    // must include the web turn and exclude the newest cron turn.
+    const agentId = await seedAgent("tprio");
+    await seedSandbox("sb-tprio", agentId, RUNNER_A, {
+      status: "running",
+      lastActiveAt: new Date(),
+    });
+    for (let i = 0; i < 5; i++) {
+      await db.conversation.create({
+        data: { id: `${P}cv-tp-${i}`, agentId, source: "web" },
+      });
+      await db.turn.create({
+        data: {
+          id: `${P}t-tp-cron-${i}`,
+          conversationId: `${P}cv-tp-${i}`,
+          message: `cron ${i}`,
+          status: "queued",
+          source: "cron",
+          // All UNDER the age cap — a cron turn past WAKE_PRIORITY_AGE_SECONDS
+          // deliberately ranks user-visible and would defeat this proof.
+          createdAt: new Date(Date.now() - (300 - i * 30) * 1000),
+        },
+      });
+    }
+    await db.conversation.create({
+      data: { id: `${P}cv-tp-web`, agentId, source: "web" },
+    });
+    await db.turn.create({
+      data: {
+        id: `${P}t-tp-web`,
+        conversationId: `${P}cv-tp-web`,
+        message: "a person",
+        status: "queued",
+        source: "web",
+        createdAt: new Date(Date.now() - 60 * 1000),
+      },
+    });
+
+    const claimed = await dueWork.claimDueWork(RUNNER_A, 5);
+    const turnIds = claimed.flatMap((c) =>
+      c.kind === "turn" ? [c.turnId] : [],
+    );
+    expect(turnIds).toContain(`${P}t-tp-web`);
+    // The newest cron turn is the one the budget squeezed out — the rank is
+    // what made room, not a bigger limit.
+    expect(turnIds).not.toContain(`${P}t-tp-cron-4`);
+    expect(turnIds).toHaveLength(5);
+  });
+});
+
+describe.skipIf(!PROOF_URL)("the failed-status guard (step 4)", () => {
+  it("a delayed duplicate `failed` never knocks a RUNNING sandbox back", async () => {
+    // Reports are fire-and-forget with retries: a reconcile's stale corpse
+    // report can land after a successful re-start reached running. Unguarded
+    // it would strand the live turns and park the queue.
+    const agentId = await seedAgent("failguard");
+    await seedSandbox("sb-failguard", agentId, RUNNER_A, {
+      status: "running",
+      lastActiveAt: new Date(),
+      containerRef: "cont-live",
+    });
+
+    await sandboxes.applyRunnerEvent(RUNNER_A, {
+      kind: "sandbox.status",
+      sandboxId: `${P}sb-failguard`,
+      status: "failed",
+      error: "stale corpse report",
+    });
+
+    const row = await db.sandbox.findUnique({
+      where: { id: `${P}sb-failguard` },
+    });
+    expect(row?.status).toBe("running");
+  });
+
+  it("positive control: `failed` still applies over `starting`", async () => {
+    const agentId = await seedAgent("failctl");
+    await seedSandbox("sb-failctl", agentId, RUNNER_A, { status: "starting" });
+
+    await sandboxes.applyRunnerEvent(RUNNER_A, {
+      kind: "sandbox.status",
+      sandboxId: `${P}sb-failctl`,
+      status: "failed",
+      error: "boot crash",
+    });
+
+    expect(
+      (await db.sandbox.findUnique({ where: { id: `${P}sb-failctl` } }))
+        ?.status,
+    ).toBe("failed");
   });
 });

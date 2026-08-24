@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { Hono } from "hono";
 import { gatewayUrlRoutes } from "./gateway";
-import { GATEWAY_API_URL } from "../lib/env";
+import { gatewayHttpOrigin } from "../lib/public-origins";
 
 // Regression lock for the org-key discovery 401: an org key with no workspace
 // hit the workspace-requiring auth middleware and got a 401. GET /v1/gateway-url
@@ -15,7 +15,7 @@ describe("gateway-url route", () => {
     const res = await mount().request("/gateway-url");
 
     expect(res.status).toBe(200);
-    expect(await res.json()).toEqual({ url: GATEWAY_API_URL });
+    expect(await res.json()).toEqual({ url: gatewayHttpOrigin() });
   });
 
   it("does not 401 for an org key with no workspace (the reported scenario)", async () => {
@@ -24,6 +24,6 @@ describe("gateway-url route", () => {
     });
 
     expect(res.status).toBe(200);
-    expect(await res.json()).toEqual({ url: GATEWAY_API_URL });
+    expect(await res.json()).toEqual({ url: gatewayHttpOrigin() });
   });
 });

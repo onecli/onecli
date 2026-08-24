@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import type { BetterAuthOptions } from "better-auth";
 import { createOnpremAuth, trustedOrigins } from "./better-auth";
 import {
   SESSION_COOKIE_NAMES,
@@ -116,16 +117,27 @@ describe("trustedOrigins", () => {
     vi.unstubAllEnvs();
   });
 
-  // trustedOrigins() reads four env vars, and a developer's shell can export
-  // any of them into vitest through turbo's passthrough — NODE_ENV especially
-  // (a shell with NODE_ENV=production would otherwise silently flip the belt).
-  // So pin ALL FOUR every case; NODE_ENV defaults to "development" here so the
-  // dev-flag cases exercise the flag rather than the production belt.
+  // trustedOrigins() reads the resolver's env surface, and a developer's
+  // shell can export any of it into vitest through turbo's passthrough —
+  // NODE_ENV especially (a shell with NODE_ENV=production would otherwise
+  // silently flip the belt). So pin EVERY input each case; NODE_ENV defaults
+  // to "development" here so the dev-flag cases exercise the flag rather
+  // than the production belt.
   const pin = (env: Record<string, string>) => {
     vi.stubEnv("NODE_ENV", env.NODE_ENV ?? "development");
     for (const key of [
+      "ONECLI_EXTERNAL_URL",
       "APP_URL",
       "NEXT_PUBLIC_APP_URL",
+      "API_URL",
+      "NEXT_PUBLIC_API_URL",
+      "GATEWAY_API_URL",
+      "NEXT_PUBLIC_GATEWAY_API_URL",
+      "ONECLI_BIND_HOST",
+      "ONECLI_APP_PORT",
+      "ONECLI_API_PORT",
+      "ONECLI_GATEWAY_PORT",
+      "ONECLI_TRUSTED_ORIGINS",
       "DEV_TRUST_ANY_AUTH_ORIGIN",
     ]) {
       vi.stubEnv(key, env[key] ?? "");
@@ -150,13 +162,93 @@ describe("trustedOrigins", () => {
     expect(trustedOrigins()).toEqual(["https://onecli.example.com"]);
   });
 
-  it("returns the configured dashboard origin", () => {
+  it("returns the configured dashboard origin (no twin for a real host)", () => {
     pin({ APP_URL: "https://onecli.example.com" });
     expect(trustedOrigins()).toEqual(["https://onecli.example.com"]);
   });
 
-  it("returns undefined (and warns) when nothing is configured", () => {
+  it("prefers ONECLI_EXTERNAL_URL over the APP_URL alias", () => {
+    pin({
+      ONECLI_EXTERNAL_URL: "https://canonical.example.com",
+      APP_URL: "https://alias.example.com",
+    });
+    expect(trustedOrigins()).toEqual(["https://canonical.example.com"]);
+  });
+
+  // The zero-config contract: a prebuilt image cannot know its address, so
+  // the defaults (and their loopback twins — an operator typing 127.0.0.1
+  // where the config says localhost) must let the stock install sign in.
+  // The pre-refactor `undefined` here meant better-auth trusted only its own
+  // baseURL origin, and the compose file papered over it by always seeding
+  // APP_URL from the bind host; that seed is gone.
+  it("trusts the localhost defaults (and warns) when nothing is configured", () => {
     pin({});
-    expect(trustedOrigins()).toBeUndefined();
+    expect(trustedOrigins()).toEqual([
+      "http://localhost:10254",
+      "http://127.0.0.1:10254",
+    ]);
+  });
+
+  it("merges ONECLI_TRUSTED_ORIGINS extras", () => {
+    pin({
+      ONECLI_EXTERNAL_URL: "http://192.0.2.10:10254",
+      ONECLI_TRUSTED_ORIGINS: "http://onecli.corp:10254",
+    });
+    expect(trustedOrigins()).toEqual([
+      "http://192.0.2.10:10254",
+      "http://onecli.corp:10254",
+    ]);
+  });
+
+  it("adds the api origin on split hosts", () => {
+    pin({
+      ONECLI_EXTERNAL_URL: "https://app.acme.com",
+      API_URL: "https://api.acme.com",
+    });
+    expect(trustedOrigins()).toEqual([
+      "https://app.acme.com",
+      "https://api.acme.com",
+    ]);
+  });
+});
+
+describe("Google account linking posture", () => {
+  it("states implicit linking and allows different session emails", () => {
+    const auth = createOnpremAuth({
+      secret,
+      baseURL: "http://localhost:10256",
+    });
+    const linking = auth.options.account?.accountLinking;
+    expect(linking?.enabled).toBe(true);
+    expect(linking?.allowDifferentEmails).toBe(true);
+  });
+
+  // Mutation-style pins for the two linking fences (better-auth 1.6.26,
+  // oauth2/link-account.mjs). Both keys must stay ABSENT — each has exactly
+  // one effect, and it is the dangerous one:
+  //
+  // - trustedProviders waives the PROVIDER-side email_verified check. Real
+  //   Google sign-ins carry email_verified: true and link without it; the
+  //   waiver only admits identities Google refused to vouch for — an
+  //   account-takeover path against verified local accounts.
+  // - requireLocalEmailVerified (default true) refuses linking into an
+  //   unverified LOCAL account. Registration is open on self-host, so an
+  //   attacker can pre-register a victim's email with a password; this
+  //   default is what keeps that squatter account from absorbing the
+  //   victim's Google identity. (Deprecated upstream in favor of becoming
+  //   unconditional — when a version bump deletes the key from the type,
+  //   delete this pin; the fence got stronger, not weaker.)
+  it("never loosens either linking fence below the library default", () => {
+    const auth = createOnpremAuth({
+      secret,
+      baseURL: "http://localhost:10256",
+    });
+    // Widened to the library's own option type: the configured literal does
+    // not carry these keys at all (which is the point), so the property
+    // reads need the full shape to type-check.
+    const linking: NonNullable<BetterAuthOptions["account"]>["accountLinking"] =
+      auth.options.account?.accountLinking;
+    expect(linking?.trustedProviders).toBeUndefined();
+    expect(linking?.requireLocalEmailVerified).toBeUndefined();
   });
 });

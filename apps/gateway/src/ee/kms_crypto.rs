@@ -56,7 +56,6 @@ impl KmsEnvelopeCrypto {
 
         check_iv_and_tag(&iv, &auth_tag)?;
 
-        // Decrypt the data key via KMS
         let resp = self
             .client
             .decrypt()
@@ -72,7 +71,6 @@ impl KmsEnvelopeCrypto {
             .as_ref()
             .to_vec();
 
-        // AES-256-GCM decrypt with the plaintext data key
         let result = aes_gcm_decrypt(&data_key, &iv, &auth_tag, &ciphertext);
 
         // Zero out the plaintext data key

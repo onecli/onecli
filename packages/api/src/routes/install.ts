@@ -116,7 +116,10 @@ const buildScript = (
     'echo "  ╚════════════════════════════════════╝"',
     'echo ""',
     "",
-    `ONECLI_URL="${onecliUrl}"`,
+    // ONECLI_API_HOST, not ONECLI_URL: the old name collided with the
+    // dashboard-URL meaning elsewhere; this one says what it is — the api
+    // host the CLI talks to. Regenerated per fetch, so the rename is safe.
+    `ONECLI_API_HOST="${onecliUrl}"`,
   ];
 
   if (apiKey) {
@@ -137,7 +140,7 @@ const buildScript = (
     'export PATH="$HOME/.local/bin:$PATH"',
     "",
     "# ── Configure and authenticate CLI ──",
-    'onecli config set api-host "$ONECLI_URL" >/dev/null 2>&1 || true',
+    'onecli config set api-host "$ONECLI_API_HOST" >/dev/null 2>&1 || true',
     'onecli auth login --api-key "$ONECLI_API_KEY" >/dev/null 2>&1 || true',
   );
 
@@ -203,7 +206,7 @@ const buildScript = (
   parts.push(
     "",
     "# ── Notify OneCLI Cloud ──",
-    'curl -fsSL -X POST "$ONECLI_URL/v1/onboarding/install-complete" \\',
+    'curl -fsSL -X POST "$ONECLI_API_HOST/v1/onboarding/install-complete" \\',
     '  -H "X-API-Key: $ONECLI_API_KEY" \\',
     '  -H "Content-Type: application/json" \\',
     '  -d \'{"type":"cli-install"}\' >/dev/null 2>&1 || true',

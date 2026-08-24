@@ -44,3 +44,27 @@ describe("catalog tools never author an explicit empty methods array", () => {
     }
   });
 });
+
+// `buildCatalogJson` flattens each provider's groups into ONE id-keyed record
+// (`tools[tool.id] = …`), so a duplicate id anywhere in a provider — including a
+// tool reusing a wildcard's id, or the same id in the read and write groups —
+// silently drops one endpoint fan-out from the gateway JSON (last write wins).
+// The byte drift-test can't see that: it compares the regenerated file against
+// itself. Pin uniqueness at the authored source instead.
+describe("catalog tool ids are unique within each provider", () => {
+  it("every registered provider", () => {
+    for (const def of getAppPermissionDefinitions()) {
+      const ids = def.groups.flatMap((group) =>
+        allGroupTools(group).map((tool) => tool.id),
+      );
+      const seen = new Set<string>();
+      for (const id of ids) {
+        expect(
+          seen.has(id),
+          `${def.provider}/${id}: duplicate tool id — buildCatalogJson would silently drop one of its endpoint fan-outs`,
+        ).toBe(false);
+        seen.add(id);
+      }
+    }
+  });
+});

@@ -6,6 +6,7 @@ import {
   Plug,
   ScrollText,
   Sparkles,
+  Terminal,
   type LucideIcon,
   CalendarClock,
 } from "lucide-react";
@@ -19,6 +20,12 @@ import {
  * instructions are hosted-only" would drift the first time a section is
  * added, and the drift is invisible: the rail would stop offering a section
  * the switcher still navigates into.
+ *
+ * The rail alone additionally hides `instanceGated` entries when the
+ * deployment lacks the capability (`GET /v1/instance`) — a capability gate,
+ * not a kind gate, so it stays out of the three kind-keyed consumers: the
+ * frame's guard and the switcher remain kind-only, and a hand-typed URL into
+ * a gated section is answered by that section's own quiet empty state.
  */
 export interface AgentSection {
   /** Path segment under `/w/<id>/agents/<agentId>`. The index (`""`) is NOT a
@@ -34,6 +41,16 @@ export interface AgentSection {
   group: "chat" | "access" | "behavior";
   /** Hosted only: a BYO agent has no computer to talk to and no brief. */
   hostedOnly?: boolean;
+  /**
+   * Exists only where the deployment has the named capability: the RAIL hides
+   * the entry when `GET /v1/instance` resolves without it (the PR-#869
+   * auto-hide posture — a surface that cannot exist on this deployment is
+   * absent, not teased). While the instance is still loading the entry SHOWS:
+   * loading must never render as unavailable (the availability.ts law). The
+   * frame's guard stays kind-only, so a hand-typed URL still reaches the
+   * section, which renders its own quiet empty state.
+   */
+  instanceGated?: "ssh";
   /** Owns the page's full height — no scrolling section shell. */
   fullHeight?: boolean;
   /** The rail's ONE primary action — weight and colour on the ordinary row
@@ -84,6 +101,17 @@ export const AGENT_SECTIONS: readonly AgentSection[] = [
   // The model sits under Access too: it is the other thing the agent is
   // GIVEN, beside the connections it can reach.
   { section: "models", title: "Models", icon: Cpu, group: "access" },
+  {
+    // A shell on the agent's computer (sandbox-platform step 5) is the other
+    // way IN — an Access entry. Hosted-only (a BYO agent has no computer) and
+    // instance-gated: only deployments with the SSH front door show it.
+    section: "ssh",
+    title: "SSH",
+    icon: Terminal,
+    group: "access",
+    hostedOnly: true,
+    instanceGated: "ssh",
+  },
   {
     section: "instructions",
     title: "Instructions",

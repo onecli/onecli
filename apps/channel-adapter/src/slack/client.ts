@@ -117,9 +117,11 @@ export const postMessage = async (
 };
 
 /**
- * Block Kit message post — the approval card. `blocks` is built by the
- * caller from TRUSTED template text plus escaped dynamic fields; nothing
- * model-authored enters a card.
+ * Block Kit message post — the approval card and the connect-cards answer.
+ * The TRUST rule: button URLs and action ids are built ONLY from server-side
+ * config and template text, never model prose; section/context TEXT may
+ * carry model-authored answers, but only after `markdownToMrkdwn` /
+ * `escapeSlackText` neutralized Slack's control syntax.
  */
 export const postBlocks = async (
   botToken: string,

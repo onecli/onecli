@@ -9,7 +9,8 @@ import {
   confirmCliAuthSession,
 } from "../services/cli-auth-service";
 import { markOnboardingCompleteForUser } from "../services/onboarding-service";
-import { APP_URL } from "../lib/env";
+import { appOrigin, normalizeOrigin } from "../lib/public-origins";
+import { trustedOrigins } from "../lib/better-auth";
 import { ServiceError } from "../services/errors";
 import { withLegacyProjectLists } from "../lib/legacy-project-compat";
 import { logger } from "../lib/logger";
@@ -21,7 +22,7 @@ export const cliAuthRoutes = () => {
   // POST /session
   app.post("/session", async (c) => {
     try {
-      const result = await createCliAuthSession(APP_URL);
+      const result = await createCliAuthSession(appOrigin());
       return c.json(result);
     } catch (err) {
       logger.error({ err }, "cli auth session creation failed");
@@ -70,9 +71,21 @@ export const cliAuthRoutes = () => {
   // POST /confirm — bind the terminal to the chosen workspace (X-Workspace-Id).
   app.post("/confirm", auth(), async (c) => {
     try {
+      // Browser-only endpoint: a present Origin must be one the auth layer
+      // trusts (the resolved set — app origin, loopback twins, operator
+      // extras, split-host api origin). The old check compared against a
+      // localhost-DEFAULTED constant, 403ing every LAN install whose operator
+      // never set APP_URL. Absent Origin still passes (the CLI itself).
       const origin = c.req.header("origin");
-      if (origin && !APP_URL.startsWith(origin)) {
-        return c.json({ error: "Forbidden" }, 403);
+      if (origin) {
+        const allowed = trustedOrigins();
+        const normalized = normalizeOrigin(origin);
+        if (
+          !allowed.includes("*") &&
+          (!normalized || !allowed.includes(normalized))
+        ) {
+          return c.json({ error: "Forbidden" }, 403);
+        }
       }
 
       const authCtx = c.get("auth");

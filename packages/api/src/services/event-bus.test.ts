@@ -1,13 +1,9 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import type { PublishedEvent } from "./event-bus";
-import {
-  publish,
-  subscribe,
-  subscriberCount,
-  trackedConversationCount,
-} from "./event-bus";
+import type { EventBus, PublishedEvent } from "./event-bus";
+import { createInProcessEventBus } from "./event-bus";
 
-// The live fan-out seam. Its laws matter more than they look: a leaked
+// The in-process fan-out emitter — the onprem default AND the local half the
+// cloud Redis bus reuses. Its laws matter more than they look: a leaked
 // listener outlives the browser tab that made it, and a throwing subscriber
 // sits on the runner's critical path.
 
@@ -18,9 +14,18 @@ const event = (seq: number): PublishedEvent => ({
   event: { type: "text.delta", text: `chunk-${seq}` },
 });
 
+// A fresh bus per test — the emitter is now an instance, not module state.
+let bus: EventBus;
+const publish = (cv: string, events: PublishedEvent[]) =>
+  bus.publish(cv, events);
+const subscribe = (cv: string, listener: (e: PublishedEvent[]) => void) =>
+  bus.subscribe(cv, listener).release;
+const subscriberCount = (cv: string) => bus.subscriberCount(cv);
+const trackedConversationCount = () => bus.trackedConversationCount();
+
 beforeEach(() => {
-  // Every test releases its own subscriptions; this asserts they actually did,
-  // so a leak fails here rather than silently affecting the next test.
+  bus = createInProcessEventBus();
+  // A fresh bus has no listeners; this asserts the instance starts clean.
   expect(subscriberCount("cv-1")).toBe(0);
 });
 

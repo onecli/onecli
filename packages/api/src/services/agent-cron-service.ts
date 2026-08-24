@@ -93,24 +93,53 @@ const cronOf = (schedule: string, timezone: string): Cron => {
 };
 
 /**
+ * Ceiling on the per-occurrence wake-storm jitter. Late-only 0..300s is the
+ * deliberate reading of the plan's "±5 min" (plans/sandbox-platform.md step
+ * 4): a schedule may fire late, never early — "daily at 9:00" firing at 8:57
+ * would surprise the person who wrote it.
+ */
+export const CRON_JITTER_MAX_SECONDS = 300;
+
+/**
  * The next occurrence strictly after `from`, in the schedule's own zone.
  * Computed from NOW at fire time, deliberately — downtime coalesces into one
  * late fire instead of a backlog (misfire policy, decided in the plan).
+ *
+ * A late-only JITTER rides every computed occurrence (step 4's wake-storm
+ * spreading): identical schedules across the fleet — the "daily 9:00 report"
+ * cohort — must not wake their sandboxes in one thundering herd. The offset
+ * is capped at half the gap to the FOLLOWING occurrence, never a flat 300s:
+ * an every-minute schedule jittered past its next slot would silently skip
+ * occurrences on the healthy path, which only downtime is allowed to do.
+ * Everything downstream (`advanceClaimedCron`'s CAS, the dashboard's
+ * nextFireAt, `list_tasks`) sees the jittered time — displayed fire times
+ * are the real fire times.
  */
 export const computeNextFire = (
   schedule: string,
   timezone: string,
   from: Date,
+  random: () => number = Math.random,
 ): Date => {
   assertValidTimezone(timezone);
-  const next = cronOf(schedule, timezone).nextRun(from);
+  const cron = cronOf(schedule, timezone);
+  const next = cron.nextRun(from);
   if (!next) {
     throw new ServiceError(
       "UNPROCESSABLE",
       "This schedule never fires. Check the expression",
     );
   }
-  return next;
+  // The following occurrence bounds the jitter; a schedule with no further
+  // occurrence (a one-shot) takes the full ceiling.
+  const following = cron.nextRun(next);
+  const gapMs = following ? following.getTime() - next.getTime() : Infinity;
+  const ceilingMs = Math.min(
+    CRON_JITTER_MAX_SECONDS * 1000,
+    Math.floor(gapMs / 2),
+  );
+  const jitterMs = ceilingMs > 0 ? Math.floor(random() * ceilingMs) : 0;
+  return new Date(next.getTime() + jitterMs);
 };
 
 /** The agent fence both doors share — workspace-scoped, hosted-only. */

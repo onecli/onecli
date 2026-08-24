@@ -1,8 +1,9 @@
 import { randomUUID } from "node:crypto";
 import type { RunnerEvent, WorkItem } from "@onecli/agent-protocol";
-import { ConfigError, loadConfig } from "./config";
+import { ConfigError, loadConfig, type RunnerConfig } from "./config";
 import { installationFingerprint } from "./installation";
 import { ControlPlaneError, createControlPlaneClient } from "./control-plane";
+import { createCloudBackend } from "./backend/cloud/cloud-backend";
 import { createDockerBackend } from "./backend/docker/docker-backend";
 import { createFakeBackend } from "./backend/fake";
 import type { SandboxBackend } from "./backend/types";
@@ -18,29 +19,43 @@ import { log } from "./log";
  * new module plus one line here (§3.14 rule 2).
  */
 const selectBackend = (
-  backendId: string,
+  config: RunnerConfig,
   options: {
     runnerId: string;
     installationId: string;
-    network: string;
-    internal: boolean;
-    socket: string;
-    extraHosts: string[];
   },
 ): SandboxBackend => {
-  if (backendId === "fake") return createFakeBackend();
-  if (backendId !== "docker") {
+  if (config.backend === "fake") return createFakeBackend();
+  if (config.backend === "cloud") {
+    // loadConfig already refused to boot without these two; the non-null
+    // assertion-free narrowing here keeps that single source of truth.
+    if (!config.sandboxManagerUrl || !config.sandboxManagerToken) {
+      throw new ConfigError(
+        "cloud backend selected without sandbox-manager settings.",
+      );
+    }
+    return createCloudBackend({
+      runnerId: options.runnerId,
+      installationId: options.installationId,
+      managerUrl: config.sandboxManagerUrl,
+      managerToken: config.sandboxManagerToken,
+      parkWaitSeconds: config.cloudParkWaitSeconds,
+      wakeWaitSeconds: config.cloudWakeWaitSeconds,
+      imageWaitSeconds: config.cloudImageWaitSeconds,
+    });
+  }
+  if (config.backend !== "docker") {
     throw new ConfigError(
-      `Unknown RUNNER_BACKEND "${backendId}" — expected "docker" or "fake".`,
+      `Unknown RUNNER_BACKEND "${config.backend}" — expected "docker", "cloud" or "fake".`,
     );
   }
   return createDockerBackend({
     runnerId: options.runnerId,
     installationId: options.installationId,
-    network: options.network,
-    networkInternal: options.internal,
-    socketPath: options.socket,
-    extraHosts: options.extraHosts,
+    network: config.sandboxNetwork,
+    networkInternal: config.networkInternal,
+    socketPath: config.dockerSocket,
+    extraHosts: config.sandboxExtraHosts,
   });
 };
 
@@ -58,13 +73,9 @@ const main = async (): Promise<void> => {
   // after registration), so a restart still recognizes what it created.
   const localId = randomUUID();
 
-  const backend = selectBackend(config.backend, {
+  const backend = selectBackend(config, {
     runnerId: localId,
     installationId: installationFingerprint(config.token),
-    network: config.sandboxNetwork,
-    internal: config.networkInternal,
-    socket: config.dockerSocket,
-    extraHosts: config.sandboxExtraHosts,
   });
 
   const controlPlane = createControlPlaneClient({
@@ -91,8 +102,9 @@ const main = async (): Promise<void> => {
   let queuedReports = 0;
 
   const report = (event: RunnerEvent): void => {
-    // BOUNDED. Each post is capped at 15s, so a slow control plane drains the
-    // chain at worst one post per 15s while a sandbox — untrusted, running
+    // BOUNDED. Each post is capped at 15s per attempt — with the client's
+    // bounded retry (retryable statuses only), a post can hold the chain
+    // head ~75s worst case — while a sandbox — untrusted, running
     // model-driven code — can enqueue as fast as it emits. Unbounded, the
     // queue grows closures holding up to 256 KB each, in the one process that
     // holds the docker socket and hosts every tenant on the box.
@@ -213,9 +225,10 @@ const main = async (): Promise<void> => {
       });
       collector.flushAll();
       // Bounded: a control plane that is itself down must not hold the
-      // process open past its termination grace period.
+      // process open past its termination grace period. The runner's own
+      // settle covers in-flight lifecycle work and ITS report chain (step 4).
       await Promise.race([
-        reportChain,
+        Promise.all([runner.settle(), reportChain]),
         new Promise((resolve) => setTimeout(resolve, SHUTDOWN_DRAIN_MS)),
       ]);
     };

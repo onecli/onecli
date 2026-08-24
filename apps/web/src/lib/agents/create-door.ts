@@ -6,8 +6,19 @@ import { showsHostedSurface } from "./availability";
  * picker" — which shipped as literally two primary buttons competing for the
  * same corner).
  *
- * The door is chosen by what the user already has, because that is the only
- * honest read of what they came here to do:
+ * On CLOUD the door is chosen by the org's creation world — the manually
+ * operated `Organization.byoLegacy` column (sandbox-platform §3.10 as
+ * re-decided 2026-08-23), served by GET /v1/org:
+ *
+ * - `false` (every org by default): hosted-only. One button, straight into
+ *   hosted creation, whatever agents the workspace already holds — the server
+ *   refuses BYO creation for these orgs anyway.
+ * - `true` (set by an operator): the BYO world — exactly the legacy
+ *   experience below, whatever agents the workspace holds.
+ *
+ * On SELF-HOST (and while the org read is unresolved) the door falls back to
+ * what the user already has, because that is the only honest read of what
+ * they came here to do:
  *
  * - Someone who has never made an agent is a NEW user. Hosted is the product;
  *   they get one button and never learn the word "BYO".
@@ -16,8 +27,10 @@ import { showsHostedSurface } from "./availability";
  *   primary action out from under them is how you break a workflow. Hosted
  *   lives one click away, in the chevron.
  *
- * Hosted is not offered at all where the surface doesn't exist (`absent`, or
- * still `loading` — never flash the wrong door).
+ * In those fallback arms, hosted is not offered where the surface doesn't
+ * exist (`absent`, or still `loading` — never flash the wrong door); a
+ * hosted-world org keeps its hosted door regardless, since the world already
+ * decided and availability only changes what the dialog says.
  */
 export type CreateDoor =
   /** Hosted only: one button, straight into hosted creation. */
@@ -33,13 +46,26 @@ export interface CreateDoorInput {
    *  an unrecognized kind simply isn't legacy, which is the safe read. */
   agents: { kind: string }[] | undefined;
   availability: HostedAvailability;
+  /** The org's creation world on cloud — `Organization.byoLegacy` from
+   *  GET /v1/org. `null` = self-host, or the read failed: fall back to the
+   *  workspace-derived rule. Callers should hold the page on the read's
+   *  `isPending` instead of passing a transient null (the world decides the
+   *  PRIMARY button, and swapping a primary after paint breaks the user). */
+  orgByoLegacy: boolean | null;
 }
 
 export const createDoor = ({
   agents,
   availability,
+  orgByoLegacy,
 }: CreateDoorInput): CreateDoor => {
   const hostedPossible = showsHostedSurface(availability);
+  // The org's world is authoritative on cloud — the workspace's agents don't
+  // get a vote (a BYO-world org's fresh workspace still gets the BYO door;
+  // a hosted-world org keeps the hosted door even beside old BYO agents,
+  // which stay fully functional — only creation is world-gated).
+  if (orgByoLegacy === true) return hostedPossible ? "byo-with-hosted" : "byo";
+  if (orgByoLegacy === false) return "hosted";
   // Still loading: fall back to the flow that always works. A BYO button that
   // later gains a chevron is a quiet upgrade; a hosted button that later
   // disappears is a broken product.

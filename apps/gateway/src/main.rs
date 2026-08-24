@@ -120,7 +120,6 @@ async fn main() -> Result<()> {
     // first poll.
     shutdown::install();
 
-    // Expand ~ in data dir
     let data_dir = expand_tilde(&cli.data_dir);
 
     // The e2e suite asserts the boot line's `edition` field (Debug shape, e.g.
@@ -154,22 +153,47 @@ async fn main() -> Result<()> {
     // The gateway puts absolute links into the responses agents relay to humans
     // ("open this URL to connect the app"). It answers proxy traffic, so unlike
     // the web app it has no incoming browser request to derive its own address
-    // from — APP_URL is the only thing that can tell it. Say so once, loudly,
-    // rather than emitting links that look real and go nowhere.
-    if !gateway::response::app_url_is_configured() {
-        warn!(
-            fallback = gateway::response::DASHBOARD_URL_FALLBACK,
-            "APP_URL is not set — links in agent-facing responses will point at \
-             the fallback and will not open for anyone reaching OneCLI on a \
-             different address. Set APP_URL to the URL users browse to."
-        );
+    // from — the configured external URL is the only thing that can tell it.
+    // Say so once, loudly, rather than emitting links that look real and go
+    // nowhere. All three warnings derive from the cached resolution, so they
+    // describe the value actually in use.
+    {
+        use gateway::response::DashboardUrlSource;
+        let resolved = gateway::response::resolved_dashboard();
+        match resolved.source {
+            DashboardUrlSource::Fallback => warn!(
+                fallback = gateway::response::DASHBOARD_URL_FALLBACK,
+                "ONECLI_EXTERNAL_URL is not set — links in agent-facing \
+                 responses will point at the fallback and will not open for \
+                 anyone reaching OneCLI on a different address. Set \
+                 ONECLI_EXTERNAL_URL (the legacy APP_URL alias also works) to \
+                 the URL users browse to."
+            ),
+            DashboardUrlSource::LegacyBind => warn!(
+                url = resolved.url.as_str(),
+                "ONECLI_BIND_HOST is seeding the dashboard URL (deprecated, \
+                 removed next major). Pin it: add ONECLI_EXTERNAL_URL={} to \
+                 the .env beside docker-compose.yml.",
+                resolved.url
+            ),
+            DashboardUrlSource::Canonical => {
+                if let Some(alias) = resolved.alias_conflict.as_deref() {
+                    warn!(
+                        canonical = resolved.url.as_str(),
+                        alias,
+                        "ONECLI_EXTERNAL_URL and APP_URL disagree; \
+                         ONECLI_EXTERNAL_URL wins. Remove the APP_URL line \
+                         unless the difference is intentional."
+                    );
+                }
+            }
+            DashboardUrlSource::Alias => {}
+        }
     }
 
-    // Load or generate CA
     let ca = CertificateAuthority::load_or_generate(&data_dir).await?;
     info!("CA certificate loaded");
 
-    // Connect to PostgreSQL
     // Support both DATABASE_URL (OSS) and individual DB_* vars (cloud ECS from Secrets Manager)
     let database_url = match std::env::var("DATABASE_URL") {
         Ok(url) => url,
@@ -210,7 +234,6 @@ async fn main() -> Result<()> {
         onepassword: Arc::clone(&onepassword),
     });
 
-    // Initialize vault service with Bitwarden + 1Password providers.
     let proxy_url = std::env::var("BITWARDEN_PROXY_URL")
         .unwrap_or_else(|_| "wss://ap.lesspassword.dev".to_string());
     let bitwarden = BitwardenVaultProvider::new(
@@ -222,12 +245,10 @@ async fn main() -> Result<()> {
     let vault_service = Arc::new(VaultService::new(providers, policy_engine.pool.clone()));
     info!("vault service initialized");
 
-    // Initialize cache store
     // Redis (ElastiCache with TLS + AUTH) when REDIS_HOST is set, else in-memory.
     let cache = cache::create_store().await?;
     info!("cache store created");
 
-    // Initialize approval store for manual approval policy action
     // Redis + BLPOP when REDIS_HOST is set, else in-memory DashMap + channels.
     let approval_store = approval::create_store().await?;
     info!("approval store created");

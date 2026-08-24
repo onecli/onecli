@@ -91,7 +91,6 @@ impl CertificateAuthority {
     /// Get a rustls `ServerConfig` for a TLS handshake with a client connecting
     /// to `hostname`. Returns a cached config or generates a new leaf cert.
     pub fn server_config_for_host(&self, hostname: &str) -> Result<Arc<ServerConfig>> {
-        // Check cache — return if valid
         if let Some(entry) = self.leaf_cache.get(hostname) {
             let refresh_at = entry
                 .expires_at
@@ -102,7 +101,6 @@ impl CertificateAuthority {
             }
         }
 
-        // Generate new leaf cert
         let config = self.generate_leaf(hostname)?;
         let config = Arc::new(config);
 
@@ -179,7 +177,6 @@ impl CertificateAuthority {
 
         let ca_cert_der = ca_cert.der().clone();
 
-        // Persist key
         let key_pem = ca_key.serialize_pem();
         fs::write(key_path, key_pem.as_bytes())
             .await
@@ -190,7 +187,6 @@ impl CertificateAuthority {
             std::fs::set_permissions(key_path, std::fs::Permissions::from_mode(0o600)).ok();
         }
 
-        // Persist cert
         let cert_pem = der_to_pem(ca_cert_der.as_ref());
         fs::write(cert_path, cert_pem.as_bytes())
             .await
@@ -220,7 +216,6 @@ impl CertificateAuthority {
     /// The original CA cert DER (from disk) is used in leaf cert chains and for
     /// the public PEM download.
     async fn load_from_disk(key_path: &Path, cert_path: &Path) -> Result<Self> {
-        // Load private key
         let key_pem = fs::read_to_string(key_path)
             .await
             .context("reading CA private key")?;
@@ -281,7 +276,6 @@ impl CertificateAuthority {
         // Build cert chain: leaf + original CA cert from disk
         let cert_chain = vec![leaf_cert.der().clone(), self.ca_cert_der.clone()];
 
-        // Convert leaf private key to rustls format
         let key_der = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(leaf_key.serialize_der()));
 
         let mut config = ServerConfig::builder()

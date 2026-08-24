@@ -20,13 +20,16 @@ describe("agentSectionsFor", () => {
     expect(agentSectionsFor("hosted")).toHaveLength(AGENT_SECTIONS.length);
   });
 
-  it("hides chat, instructions, channels, schedules and memory from a BYO agent — it has none", () => {
+  it("hides chat, instructions, channels, ssh, schedules and memory from a BYO agent — it has none", () => {
     const byo = agentSectionsFor("byo").map((s) => s.section);
     expect(byo).not.toContain("chat");
     expect(byo).not.toContain("instructions");
     // Channels put a HOSTED agent in Slack — a BYO agent has no presence to
     // manage.
     expect(byo).not.toContain("channels");
+    // SSH lands in a HOSTED agent's sandbox — a BYO agent has no computer to
+    // shell into.
+    expect(byo).not.toContain("ssh");
     // Schedules wake a HOSTED agent's sandbox — a BYO agent has no computer
     // the platform can wake.
     expect(byo).not.toContain("schedules");
@@ -42,6 +45,7 @@ describe("agentSectionBlocked", () => {
     expect(agentSectionBlocked("chat", "byo")).toBe(true);
     expect(agentSectionBlocked("instructions", "byo")).toBe(true);
     expect(agentSectionBlocked("channels", "byo")).toBe(true);
+    expect(agentSectionBlocked("ssh", "byo")).toBe(true);
     expect(agentSectionBlocked("schedules", "byo")).toBe(true);
     expect(agentSectionBlocked("memory", "byo")).toBe(true);
   });
@@ -81,6 +85,7 @@ describe("the rail's shape (§3.18 as amended)", () => {
       "channels",
       "connections",
       "models",
+      "ssh",
       "instructions",
       "skills",
       "schedules",
@@ -95,9 +100,13 @@ describe("the rail's shape (§3.18 as amended)", () => {
     expect(sections).not.toContain("secrets");
   });
 
-  it("keeps Access to exactly what the agent is GIVEN: connections and models", () => {
+  it("keeps Access to exactly what the agent is GIVEN, plus the ways in: connections, models and ssh", () => {
     const access = AGENT_SECTIONS.filter((s) => s.group === "access");
-    expect(access.map((s) => s.section)).toEqual(["connections", "models"]);
+    expect(access.map((s) => s.section)).toEqual([
+      "connections",
+      "models",
+      "ssh",
+    ]);
   });
 
   it("puts everything else under Behavior", () => {
@@ -184,5 +193,25 @@ describe("Slack sits beside Chat (§3.16)", () => {
     expect(agentSectionsFor("byo").map((s) => s.section)).not.toContain(
       "channels",
     );
+  });
+});
+
+describe("SSH is instance-gated (sandbox-platform step 5)", () => {
+  it("is the ONE instance-gated entry, keyed to the instance's ssh capability", () => {
+    // The rail hides an `instanceGated` entry when /v1/instance resolves
+    // without the capability (auto-hide, never a teased dead door). Exactly
+    // one entry carries the gate, and it is SSH — a second one must extend
+    // the rail's filter deliberately, not ride this law by accident.
+    const gated = AGENT_SECTIONS.filter((s) => s.instanceGated !== undefined);
+    expect(gated.map((s) => s.section)).toEqual(["ssh"]);
+    expect(gated[0]?.instanceGated).toBe("ssh");
+  });
+
+  it("is an Access entry and hosted-only — a BYO agent has no computer to shell into", () => {
+    const ssh = AGENT_SECTIONS.find((s) => s.section === "ssh");
+    expect(ssh?.group).toBe("access");
+    expect(ssh?.hostedOnly).toBe(true);
+    expect(agentSectionBlocked("ssh", "byo")).toBe(true);
+    expect(agentSectionBlocked("ssh", "hosted")).toBe(false);
   });
 });

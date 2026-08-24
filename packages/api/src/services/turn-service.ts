@@ -6,7 +6,8 @@ import {
 } from "@onecli/agent-protocol";
 import { ServiceError } from "./errors";
 import { signalWork } from "./due-work";
-import { publish, type PublishedEvent } from "./event-bus";
+import { type PublishedEvent } from "./event-bus";
+import { getEventBus } from "../providers/event-bus";
 import {
   requireConversation,
   requireSystemConversation,
@@ -614,9 +615,11 @@ export const buildContinuityBridge = async (
 /**
  * A parked sandbox must come back before its turn can run. Only `stopped` and
  * `failed` are woken — never `running`/`starting`, which would tear down a
- * container that is already on its way.
+ * container that is already on its way. Exported for the SSH front door
+ * (step 5): session-open and cert-mint ride the same flip; the corresponding
+ * poll-time dueness arms in due-work.ts keep both honest if the flip races.
  */
-const wakeSandboxFor = async (agentId: string): Promise<void> => {
+export const wakeSandboxFor = async (agentId: string): Promise<void> => {
   await db.sandbox.updateMany({
     where: { agentId, status: { in: ["stopped", "failed"] } },
     data: { status: "unprovisioned" },
@@ -859,7 +862,7 @@ export const applyTurnEvents = async (
 
   // Publish AFTER commit: a subscriber must never see an event that a
   // rollback un-happened, and never one the fence rejected.
-  if (published) publish(conversationId, published);
+  if (published) getEventBus().publish(conversationId, published);
 };
 
 export interface FinishTurnInput {
@@ -1308,7 +1311,7 @@ export const materializeAutomationDelivery = async (
     ] satisfies PublishedEvent[];
   });
 
-  if (published) publish(originConversationId, published);
+  if (published) getEventBus().publish(originConversationId, published);
 };
 
 /**

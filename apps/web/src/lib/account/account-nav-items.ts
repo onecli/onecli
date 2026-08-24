@@ -1,4 +1,4 @@
-import { User, ScrollText } from "lucide-react";
+import { User, KeyRound, ScrollText } from "lucide-react";
 import type { NavItem } from "@dashboard/nav-main";
 
 export interface AccountNavItem {
@@ -15,7 +15,10 @@ export interface AccountNavSection {
 export const accountNavSections: AccountNavSection[] = [
   {
     label: "Account Settings",
-    items: [{ title: "Preferences", url: "/account/preferences", icon: User }],
+    items: [
+      { title: "Preferences", url: "/account/preferences", icon: User },
+      { title: "SSH Keys", url: "/account/ssh-keys", icon: KeyRound },
+    ],
   },
   {
     label: "Logs",

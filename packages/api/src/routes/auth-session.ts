@@ -1,6 +1,10 @@
 import { Hono } from "hono";
 import { db } from "@onecli/db";
-import { getSessionProvider, getSessionEnforcer } from "../providers";
+import {
+  getSessionProvider,
+  getSessionEnforcer,
+  getSessionThrottle,
+} from "../providers";
 import type { SessionUser } from "../providers/types";
 import { withLegacyProjectId } from "../lib/legacy-project-compat";
 import { logger } from "../lib/logger";
@@ -123,133 +127,144 @@ export const initSessionHooks = (hooks: Partial<SessionHooks>) => {
 export const authSessionRoutes = () => {
   const app = new Hono();
 
-  app.get("/", async (c) => {
-    try {
-      const session = getSessionProvider();
-      const user = await session.getSession(c.req.raw);
-      if (!user || !user.email) {
-        return c.json({ error: "Not authenticated" }, 401);
-      }
-
-      // Before anything reads a user row: an edition may still be deciding
-      // which row this identity owns (see the hook's contract).
-      await _hooks.beforeIdentitySync(user);
-
-      const extra = _hooks.getSessionAttributes(c.req.raw);
-
-      const existingUser = await db.user.findUnique({
-        where: { email: user.email },
-        select: { id: true, email: true, externalAuthId: true },
-      });
-
-      if (existingUser && existingUser.externalAuthId !== user.id) {
-        const decision = await _hooks.resolveIdentityConflict(
-          existingUser,
-          user,
-        );
-        if (decision === "reject") {
-          return c.json({ error: IDENTITY_CONFLICT_ERROR }, 409);
+  // Edition throttle (cloud: per-IP Redis limiter) ahead of the handler, so
+  // a 429 precedes the session read and every bootstrap DB write. Resolved
+  // at call time like every provider slot; the onprem default is null.
+  app.get(
+    "/",
+    async (c, next) => {
+      const throttle = getSessionThrottle();
+      if (throttle) return throttle(c, next);
+      await next();
+    },
+    async (c) => {
+      try {
+        const session = getSessionProvider();
+        const user = await session.getSession(c.req.raw);
+        if (!user || !user.email) {
+          return c.json({ error: "Not authenticated" }, 401);
         }
-      }
 
-      const dbUser = await db.user.upsert({
-        where: { email: user.email },
-        create: {
-          externalAuthId: user.id,
-          email: user.email,
-          name: user.name,
-          lastLoginAt: new Date(),
-          ...extra,
-        },
-        update: {
-          externalAuthId: user.id,
-          name: user.name,
-          lastLoginAt: new Date(),
-          ...extra,
-        },
-        select: { id: true, email: true, name: true },
-      });
+        // Before anything reads a user row: an edition may still be deciding
+        // which row this identity owns (see the hook's contract).
+        await _hooks.beforeIdentitySync(user);
 
-      // Edition membership (e.g. SSO JIT join) runs before the default
-      // workspace resolution so a just-created membership's workspace is what
-      // the session lands on — and the bootstrap branch below self-skips.
-      await _hooks.ensureSessionMembership(user, dbUser);
+        const extra = _hooks.getSessionAttributes(c.req.raw);
 
-      // Edition session policy (e.g. enterprise "require SSO") — after JIT
-      // so a first SSO login joins and then trivially passes. Denials MUST
-      // return inline: a throw would land in the catch below as a 500.
-      const enforcer = getSessionEnforcer();
-      if (enforcer) {
-        const denial = await enforcer(user, dbUser);
-        if (denial) {
-          return c.json({ error: denial.error, code: denial.code }, 401);
+        const existingUser = await db.user.findUnique({
+          where: { email: user.email },
+          select: { id: true, email: true, externalAuthId: true },
+        });
+
+        if (existingUser && existingUser.externalAuthId !== user.id) {
+          const decision = await _hooks.resolveIdentityConflict(
+            existingUser,
+            user,
+          );
+          if (decision === "reject") {
+            return c.json({ error: IDENTITY_CONFLICT_ERROR }, 409);
+          }
         }
-      }
 
-      let defaultWorkspace = await findUserDefaultWorkspace(dbUser.id);
+        const dbUser = await db.user.upsert({
+          where: { email: user.email },
+          create: {
+            externalAuthId: user.id,
+            email: user.email,
+            name: user.name,
+            lastLoginAt: new Date(),
+            ...extra,
+          },
+          update: {
+            externalAuthId: user.id,
+            name: user.name,
+            lastLoginAt: new Date(),
+            ...extra,
+          },
+          select: { id: true, email: true, name: true },
+        });
 
-      // `created` (not "the gate passed") feeds `onUserCreated`: a sync that
-      // converged on a concurrent winner's org, or repaired a half-provisioned
-      // one, must not re-announce the signup.
-      let bootstrappedOrg = false;
-      if (
-        !defaultWorkspace &&
-        _hooks.shouldBootstrapOrg(c.req.raw, { isNewUser: !existingUser })
-      ) {
-        const result = await ensureUserOrganization(
-          dbUser.id,
-          dbUser.email,
-          dbUser.name ?? undefined,
+        // Edition membership (e.g. SSO JIT join) runs before the default
+        // workspace resolution so a just-created membership's workspace is what
+        // the session lands on — and the bootstrap branch below self-skips.
+        await _hooks.ensureSessionMembership(user, dbUser);
+
+        // Edition session policy (e.g. enterprise "require SSO") — after JIT
+        // so a first SSO login joins and then trivially passes. Denials MUST
+        // return inline: a throw would land in the catch below as a 500.
+        const enforcer = getSessionEnforcer();
+        if (enforcer) {
+          const denial = await enforcer(user, dbUser);
+          if (denial) {
+            return c.json({ error: denial.error, code: denial.code }, 401);
+          }
+        }
+
+        let defaultWorkspace = await findUserDefaultWorkspace(dbUser.id);
+
+        // `created` (not "the gate passed") feeds `onUserCreated`: a sync that
+        // converged on a concurrent winner's org, or repaired a half-provisioned
+        // one, must not re-announce the signup.
+        let bootstrappedOrg = false;
+        if (
+          !defaultWorkspace &&
+          _hooks.shouldBootstrapOrg(c.req.raw, { isNewUser: !existingUser })
+        ) {
+          const result = await ensureUserOrganization(
+            dbUser.id,
+            dbUser.email,
+            dbUser.name ?? undefined,
+          );
+          defaultWorkspace = result.workspace;
+          bootstrappedOrg = result.created;
+        }
+
+        // No user row existed for this email before the upsert → it was created
+        // by this request. Fires outside the bootstrap branch so non-bootstrap
+        // signups (invitation/claim flows) reach the hook too.
+        if (!existingUser) {
+          _hooks.onUserCreated(
+            { email: dbUser.email, name: dbUser.name },
+            extra,
+            { request: c.req.raw, bootstrappedOrg },
+          );
+        }
+
+        if (defaultWorkspace) {
+          const workspaceId = defaultWorkspace.id;
+
+          await ensureWorkspaceSeeds(workspaceId, dbUser.id, dbUser.email);
+
+          // `withLegacyProjectId` dual-emits `projectId` (rename compat, temporary).
+          return c.json(
+            withLegacyProjectId({
+              id: dbUser.id,
+              email: dbUser.email,
+              name: dbUser.name,
+              workspaceId,
+              organizationId: defaultWorkspace.organizationId,
+            }),
+          );
+        }
+
+        const responseExtra = await _hooks.augmentSessionResponse(dbUser.id);
+
+        const sessionPayload = {
+          id: dbUser.id,
+          email: dbUser.email,
+          name: dbUser.name,
+          ...responseExtra,
+        };
+        return c.json(withLegacyProjectId(sessionPayload));
+      } catch (err) {
+        logger.error(
+          { err, route: "GET /v1/auth/session" },
+          "session sync failed",
         );
-        defaultWorkspace = result.workspace;
-        bootstrappedOrg = result.created;
+        return c.json({ error: "Internal server error" }, 500);
       }
-
-      // No user row existed for this email before the upsert → it was created
-      // by this request. Fires outside the bootstrap branch so non-bootstrap
-      // signups (invitation/claim flows) reach the hook too.
-      if (!existingUser) {
-        _hooks.onUserCreated(
-          { email: dbUser.email, name: dbUser.name },
-          extra,
-          { request: c.req.raw, bootstrappedOrg },
-        );
-      }
-
-      if (defaultWorkspace) {
-        const workspaceId = defaultWorkspace.id;
-
-        await ensureWorkspaceSeeds(workspaceId, dbUser.id, dbUser.email);
-
-        // `withLegacyProjectId` dual-emits `projectId` (rename compat, temporary).
-        return c.json(
-          withLegacyProjectId({
-            id: dbUser.id,
-            email: dbUser.email,
-            name: dbUser.name,
-            workspaceId,
-            organizationId: defaultWorkspace.organizationId,
-          }),
-        );
-      }
-
-      const responseExtra = await _hooks.augmentSessionResponse(dbUser.id);
-
-      const sessionPayload = {
-        id: dbUser.id,
-        email: dbUser.email,
-        name: dbUser.name,
-        ...responseExtra,
-      };
-      return c.json(withLegacyProjectId(sessionPayload));
-    } catch (err) {
-      logger.error(
-        { err, route: "GET /v1/auth/session" },
-        "session sync failed",
-      );
-      return c.json({ error: "Internal server error" }, 500);
-    }
-  });
+    },
+  );
 
   return app;
 };

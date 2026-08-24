@@ -1,12 +1,14 @@
 "use client";
 
-import { KeyRound } from "lucide-react";
+import { KeyRound, Pencil } from "lucide-react";
 import { Badge } from "@onecli/ui/components/badge";
+import { Button } from "@onecli/ui/components/button";
 import { Switch } from "@onecli/ui/components/switch";
 import type { Secret } from "@/lib/api";
 import type { CredentialAccessStatus } from "@/lib/api/policy-visibility";
 import { useAttachSecret, useDetachSecret } from "@/hooks/use-grants";
 import { EffectivePill } from "./effective-pill";
+import { KeyHealthBadge } from "./key-health-badge";
 
 interface SecretGrantRowProps {
   agentId: string;
@@ -16,6 +18,9 @@ interface SecretGrantRowProps {
   /** Injected via an ORG rule (locked on — not detachable at workspace level). */
   orgGranted: boolean;
   credentialStatus: CredentialAccessStatus | undefined;
+  /** Open the edit dialog for this secret. Omitted where editing has no home
+   *  (the Connections section's generic tab keeps its own management page). */
+  onEdit?: (secret: Secret) => void;
 }
 
 export const SecretGrantRow = ({
@@ -24,6 +29,7 @@ export const SecretGrantRow = ({
   granted,
   orgGranted,
   credentialStatus,
+  onEdit,
 }: SecretGrantRowProps) => {
   const attach = useAttachSecret();
   const detach = useDetachSecret();
@@ -47,12 +53,15 @@ export const SecretGrantRow = ({
               </Badge>
             )}
           </div>
-          <div className="text-muted-foreground mt-0.5 flex items-center gap-2 text-xs">
+          <div className="text-muted-foreground mt-0.5 flex flex-wrap items-center gap-x-2 gap-y-0.5 text-xs">
             <span className="truncate font-mono">{secret.hostPattern}</span>
             {orgGranted && (
               <span className="text-muted-foreground/80 shrink-0">
                 Granted by your organization
               </span>
+            )}
+            {secret.lastError && (
+              <KeyHealthBadge type={secret.type} lastError={secret.lastError} />
             )}
           </div>
         </div>
@@ -64,6 +73,16 @@ export const SecretGrantRow = ({
             the switch cannot — Limited, Blocked, Network only. */}
         {credentialStatus !== undefined && credentialStatus !== "usable" && (
           <EffectivePill status={credentialStatus} />
+        )}
+        {onEdit && (
+          <Button
+            variant="ghost"
+            size="icon-xs"
+            aria-label={`Edit ${secret.name}`}
+            onClick={() => onEdit(secret)}
+          >
+            <Pencil className="size-4" aria-hidden />
+          </Button>
         )}
         <Switch
           size="sm"

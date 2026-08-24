@@ -125,7 +125,9 @@ vi.mock("@onecli/db", () => {
     channelAdapter: {
       ...empty,
       findUnique: async ({ where }: { where: { token?: string } }) =>
-        where.token === CHA_TOKEN ? { id: "ad-1", name: "adapter" } : null,
+        where.token === CHA_TOKEN
+          ? { id: "ad-1", name: "adapter", kind: "instance" }
+          : null,
     },
     agentChannel: {
       ...empty,
@@ -301,10 +303,11 @@ beforeEach(() => {
   // getAdapterConfig now returns a DISCRIMINATED UNION and does the etag
   // compare itself: a matching If-None-Match yields { notModified: true }
   // (and never decrypts). The route branches on `.notModified`.
-  services.getAdapterConfig.mockImplementation(async (ifNoneMatch?: string) =>
-    ifNoneMatch === "etag-1"
-      ? { notModified: true, etag: "etag-1" }
-      : { notModified: false, presences: [], etag: "etag-1" },
+  services.getAdapterConfig.mockImplementation(
+    async (_caller: unknown, ifNoneMatch?: string) =>
+      ifNoneMatch === "etag-1"
+        ? { notModified: true, etag: "etag-1" }
+        : { notModified: false, presences: [], etag: "etag-1" },
   );
   services.getAdapterWork.mockResolvedValue({ finished: [] });
   services.advanceMirrorCursor.mockResolvedValue(true);
@@ -610,6 +613,29 @@ describe("POST /v1/channel-adapter/register", () => {
     });
   });
 
+  it("passes perInstance through and surfaces the minted token", async () => {
+    services.registerAdapter.mockResolvedValue({
+      ok: true,
+      adapterId: "ad-2",
+      mintedToken: "cha_minted-instance-credential",
+    });
+    const res = await appRbacOff.request("/v1/channel-adapter/register", {
+      method: "POST",
+      headers: { ...CHA_AUTH, "content-type": "application/json" },
+      body: JSON.stringify({ name: "adapter-2", perInstance: true }),
+    });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({
+      adapterId: "ad-2",
+      token: "cha_minted-instance-credential",
+    });
+    expect(services.registerAdapter).toHaveBeenCalledWith({
+      token: CHA_TOKEN,
+      name: "adapter-2",
+      perInstance: true,
+    });
+  });
+
   it("rejects a body without a name", async () => {
     const res = await appRbacOff.request("/v1/channel-adapter/register", {
       method: "POST",
@@ -638,7 +664,10 @@ describe("the adapter wire (authenticated by a registered cha_ token)", () => {
     });
     expect(cached.status).toBe(304);
     expect(cached.headers.get("etag")).toBe("etag-1");
-    expect(services.getAdapterConfig).toHaveBeenLastCalledWith("etag-1");
+    expect(services.getAdapterConfig).toHaveBeenLastCalledWith(
+      { adapterId: "ad-1", name: "adapter", kind: "instance" },
+      "etag-1",
+    );
   });
 
   it("serves the work poll", async () => {
@@ -647,6 +676,7 @@ describe("the adapter wire (authenticated by a registered cha_ token)", () => {
     });
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual({ finished: [] });
+    expect(services.getAdapterWork).toHaveBeenCalledWith("ad-1");
   });
 
   it("ingest resolves the presence identity and relays the door outcome", async () => {

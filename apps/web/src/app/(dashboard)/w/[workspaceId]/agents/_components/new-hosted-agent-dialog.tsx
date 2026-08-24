@@ -23,7 +23,10 @@ import { ApiError } from "@/lib/api/client";
 import { agentChatPath } from "@/lib/navigation";
 import { nameToIdentifier } from "@/lib/agents/agent-identifier";
 import { useCreateHostedAgent } from "@/hooks/use-agents";
-import { useHostedAvailability } from "@/hooks/use-hosted-availability";
+import {
+  useHomeDurabilityMessage,
+  useHostedAvailability,
+} from "@/hooks/use-hosted-availability";
 import { OFFLINE_CREATE_MESSAGE } from "@/lib/agents/availability";
 import { SecretDialog } from "@/app/(dashboard)/w/[workspaceId]/connections/_components/secret-dialog";
 
@@ -68,6 +71,9 @@ export const NewHostedAgentDialog = ({
   const { workspaceId } = useParams<{ workspaceId: string }>();
   const router = useRouter();
   const availability = useHostedAvailability();
+  // Same shared cache entry as the availability hook — no extra request. The
+  // one place agent-file durability is stated (§3.9), in agent words only.
+  const durabilityNote = useHomeDurabilityMessage();
   const createAgent = useCreateHostedAgent();
 
   const [name, setName] = useState("");
@@ -256,6 +262,9 @@ export const NewHostedAgentDialog = ({
               <p className="text-muted-foreground bg-muted rounded-md px-3 py-2 text-xs">
                 {OFFLINE_CREATE_MESSAGE}
               </p>
+            )}
+            {!offline && durabilityNote && (
+              <p className="text-muted-foreground text-xs">{durabilityNote}</p>
             )}
             {createAgent.error && (
               <p className="bg-destructive/10 text-destructive rounded-md px-3 py-2 text-xs">

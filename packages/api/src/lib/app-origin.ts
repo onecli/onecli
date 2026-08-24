@@ -3,16 +3,27 @@
  * origin-dependent call site composes.
  *
  * The rule, applied everywhere: an **explicitly configured** URL wins —
- * `APP_URL` for anything a browser will visit, `API_URL` for anything the
- * api-server answers (OAuth redirect URIs); failing that, the origin of the
- * request in hand; failing that, the caller's own last resort.
+ * the canonical `ONECLI_EXTERNAL_URL` (or its `APP_URL` alias) for anything a
+ * browser will visit, `API_URL` (or the external URL's derivation) for
+ * anything the api-server answers (OAuth redirect URIs); failing that, the
+ * origin of the request in hand; failing that, the caller's own last resort.
  *
- * The distinction that matters is *configured* vs *defaulted*: `lib/env.ts`
- * gives `APP_URL` and `API_URL` localhost fallbacks, so those constants can
- * never be falsy and can never tell the two apart. Reading one as a
- * configured-or-not signal silently strands self-hosters on localhost — see
- * `configuredAppUrl` below.
+ * The derivation itself lives in `public-origins.ts` (the one resolver); this
+ * module re-exports the configured-vs-defaulted facades beside the
+ * request-plane helper so existing importers keep one import site. The
+ * distinction that matters is *configured* vs *defaulted*: a defaulted
+ * localhost value read as a configured-or-not signal silently strands
+ * self-hosters on localhost — which is why the facades return `undefined`
+ * when nothing was configured.
  */
+
+import { HOST_PATTERN } from "./public-origins";
+
+export {
+  configuredApiUrl,
+  configuredAppUrl,
+  normalizeOrigin,
+} from "./public-origins";
 
 /**
  * Structural shape of a header bag. Deliberately not `Headers`: this package
@@ -23,91 +34,6 @@
 interface HeaderLookup {
   get(name: string): string | null | undefined;
 }
-
-/**
- * A syntactically valid `host` or `host:port` — a registered name or an IP
- * literal, optionally bracketed for IPv6.
- *
- * Header values are attacker-influenceable and the origins built from them end
- * up in `Location` headers and, on the OAuth fragment-bridge path, inside a
- * `<script>` block. `JSON.stringify` does not escape `</script>`, so an
- * unvalidated host could close the script element. Constraining the character
- * set at the source removes that sink for every consumer, and drops malformed
- * origins rather than emitting a redirect that goes nowhere.
- */
-const HOST_PATTERN = /^(?:[A-Za-z0-9._~-]+|\[[0-9A-Fa-f:.]+\])(?::\d{1,5})?$/;
-
-/** First env var with a non-empty value, ignoring surrounding whitespace. */
-const firstConfigured = (...values: (string | undefined)[]) => {
-  for (const value of values) {
-    const trimmed = value?.trim();
-    if (trimmed) return trimmed;
-  }
-  return undefined;
-};
-
-/**
- * The public app URL the operator explicitly configured, or `undefined` when
- * they configured none.
- *
- * `undefined` is the whole point: it is what lets a call site say "…and if
- * nothing was configured, use the request origin instead". Never use the
- * `APP_URL` constant from `lib/env.ts` for that decision — it is defaulted, so
- * `APP_URL || fallback` is dead code and the fallback never runs.
- *
- * Empty and whitespace-only values count as unconfigured, so an env var that is
- * merely *present* (an `APP_URL=` line, a compose passthrough) does not
- * masquerade as a configured URL. Trailing slashes are stripped so the result
- * concatenates cleanly with a leading-slash path.
- */
-export const configuredAppUrl = (): string | undefined =>
-  firstConfigured(
-    process.env.APP_URL,
-    process.env.NEXT_PUBLIC_APP_URL,
-  )?.replace(/\/+$/, "");
-
-/**
- * The public **api-server** URL the operator explicitly configured, or
- * `undefined` when they configured none.
- *
- * The sibling of `configuredAppUrl` for the other host: OAuth `redirect_uri`s
- * are `/v1` URLs the provider calls back, so they must resolve from the API
- * origin — never from `APP_URL`, which names the dashboard and serves no `/v1`
- * when the two are split. Pinning `API_URL` keeps the redirect URI stable
- * against exact-match provider registration; unset, callers fall back to the
- * origin the request arrived on. Same configured-vs-defaulted semantics as
- * `configuredAppUrl` (blank counts as unconfigured; trailing slashes stripped).
- */
-export const configuredApiUrl = (): string | undefined =>
-  firstConfigured(
-    process.env.API_URL,
-    process.env.NEXT_PUBLIC_API_URL,
-  )?.replace(/\/+$/, "");
-
-/**
- * Validate an origin that reached us as data rather than as request headers —
- * today, the one signed into the OAuth state at `/authorize`.
- *
- * Returns the normalized `scheme://host[:port]`, or `undefined` for anything
- * that is not a well-formed http(s) origin (including non-strings). Same host
- * rules as `originFromHeaders`, so the two agree on what an origin may look
- * like, and `javascript:`/`data:` can never survive into a redirect.
- *
- * Fail-*soft* on purpose: a bad value falls through to the caller's next
- * fallback rather than stranding the user mid-connect. Tampering is not the
- * threat model here — a modified state fails its HMAC long before this runs, so
- * a malformed value means we signed something malformed, which is our bug.
- */
-export const normalizeOrigin = (value: unknown): string | undefined => {
-  if (typeof value !== "string") return undefined;
-  const match = /^(https?):\/\/(.+)$/i.exec(value.trim().replace(/\/+$/, ""));
-  const [, scheme, host] = match ?? [];
-  // `HOST_PATTERN` allows no `/`, `@` or `?`, so a path, query, or `user:pass@`
-  // prefix lands in `host` and is rejected here rather than surviving into a
-  // redirect — the greedy `.+` above exists to make that happen.
-  if (!scheme || !host || !HOST_PATTERN.test(host)) return undefined;
-  return `${scheme.toLowerCase()}://${host}`;
-};
 
 /**
  * Origin (scheme + host) the client used to reach us, or `undefined` when the

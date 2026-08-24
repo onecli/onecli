@@ -26,6 +26,16 @@ export async function register() {
     // owner, bouncing the browser to /org on a fresh install's first open.
     const { ensureEditionDefaults } = await import("@onecli/api");
     ensureEditionDefaults();
+
+    // One boot-time report of the advertised addresses this process will
+    // inject into every page, each tagged with where it came from. A
+    // misconfigured ONECLI_EXTERNAL_URL throws here — at startup, with the
+    // fix in the message — instead of 500ing every render.
+    const { formatOriginsBanner, resolveOriginsFromEnv } =
+      await import("@onecli/api/lib/public-origins");
+    const origins = resolveOriginsFromEnv();
+    for (const line of formatOriginsBanner(origins)) console.info(line);
+    for (const warning of origins.warnings) console.warn(warning);
   }
 
   if (process.env.NEXT_RUNTIME === "nodejs" && NODE_ENV === "production") {

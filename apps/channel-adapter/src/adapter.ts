@@ -265,10 +265,12 @@ export const createAdapter = ({ config, controlPlane, log }: AdapterDeps) => {
       }
     }
 
+    let acquired = false;
     for (const [presenceId, presence] of wanted) {
       const existing = runtimes.get(presenceId);
       const { botToken } = credentialsOf(presence);
       if (!existing) {
+        acquired = true;
         const runtime: PresenceRuntime = { presence, botToken, socket: null };
         runtimes.set(presenceId, runtime);
         if (presence.transport === "socket") openSocket(runtime);
@@ -293,6 +295,18 @@ export const createAdapter = ({ config, controlPlane, log }: AdapterDeps) => {
     }
 
     approvals.reconcile(presences);
+
+    // A presence APPEARING in the feed is ownership acquired — a boot's first
+    // feed (all-adds) or a dead peer's slice failing over to us. Re-arm its
+    // unsettled approval cards against the real gateway deadlines: the
+    // endpoint is owner-scoped, so this is exactly our slice, and re-arming a
+    // prompt we already track just overwrites the same entry. Without this a
+    // dead claimer's cards strand until some instance RESTARTS.
+    if (acquired) {
+      void approvals.recoverUnsettled().catch((err: unknown) => {
+        log("unsettled-prompt recovery failed", { err: String(err) });
+      });
+    }
   };
 
   // ── Work handling ───────────────────────────────────────────────────────
@@ -307,11 +321,18 @@ export const createAdapter = ({ config, controlPlane, log }: AdapterDeps) => {
       provider: runtime.presence.provider,
       posts: slackMirrorPosts,
       iconUrl: runtime.presence.agent.imageUrl ?? null,
-      knownCursor: cursors.get(item.linkId) ?? null,
+      // Local cache first; a link acquired mid-history falls back to the
+      // item's server-supplied floor (an instance-identity etag no longer
+      // folds cursors, so the config feed can't be the only seed source — a
+      // null seed against a non-null DB cursor would CAS-fail forever).
+      knownCursor: cursors.get(item.linkId) ?? item.linkMirrorCursor ?? null,
       item,
       // The agent's Models page — where a key-problem answer's button points.
       ...(config.appUrl && {
         modelsUrl: `${config.appUrl}/w/${encodeURIComponent(agent.workspaceId)}/agents/${encodeURIComponent(agent.id)}/models`,
+        // The agent's chat — connect-card buttons land the user back in the
+        // conversation with the attach dialog open.
+        chatUrl: `${config.appUrl}/w/${encodeURIComponent(agent.workspaceId)}/agents/${encodeURIComponent(agent.id)}/chat`,
       }),
       onLog: log,
     });
@@ -383,9 +404,10 @@ export const createAdapter = ({ config, controlPlane, log }: AdapterDeps) => {
 
   return {
     async start(): Promise<void> {
-      await approvals.recoverUnsettled().catch((err: unknown) => {
-        log("unsettled-prompt recovery failed", { err: String(err) });
-      });
+      // Unsettled-prompt recovery rides ownership acquisition inside
+      // applyConfig (the first feed is all-adds, so boot is covered) — the
+      // endpoint is owner-scoped, and before the first claim it would answer
+      // an empty slice here anyway.
       void configLoop();
       void workLoop();
       void rotationLoop();

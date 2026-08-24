@@ -76,3 +76,18 @@ export const updateAgentSchema = z
       message: "At least one field to update is required",
     },
   );
+
+/**
+ * POST /agents/:agentId/ssh-certificate (sandbox-platform step 5). Exactly
+ * one source: a pasted public key (ed25519 only — the interop-proven cert
+ * path; the service re-parses and refuses anything else with an actionable
+ * message) OR a registered key's id. Strict objects make the arms mutually
+ * exclusive — a body carrying both fails both and is refused, never
+ * silently resolved in favor of one.
+ */
+export const mintSshCertificateSchema = z.union([
+  z.object({ publicKey: z.string().trim().min(1).max(1024) }).strict(),
+  z.object({ sshKeyId: z.string().trim().min(1).max(128) }).strict(),
+]);
+
+export type MintSshCertificateInput = z.infer<typeof mintSshCertificateSchema>;

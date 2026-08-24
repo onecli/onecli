@@ -50,9 +50,8 @@ import { containerConfigRoutes } from "./routes/container-config";
 import { countsRoutes } from "./routes/counts";
 import { skillRoutes } from "./routes/skill";
 import { credentialStubRoutes } from "./routes/credential-stubs";
-import { migrateRoutes } from "./routes/migrate";
-import { migrateImportRoutes } from "./routes/migrate-import";
 import { migrateNanoclawRoutes } from "./routes/migrate-nanoclaw";
+import { orgRoutes } from "./routes/org";
 import { internalRoutes } from "./routes/internal";
 import { runnerRoutes } from "./routes/runner";
 import { conversationRoutes, turnRoutes } from "./routes/conversations";
@@ -63,6 +62,7 @@ import { agentMemoryRoutes } from "./routes/agent-memories";
 import { userSkillRoutes } from "./routes/skills";
 import { orgSkillRoutes } from "./routes/org-skills";
 import { channelAdapterRoutes } from "./routes/channel-adapter";
+import { sshTerminatorRoutes } from "./routes/ssh-terminator";
 import { channelInboundSlackRoutes } from "./routes/channel-inbound-slack";
 import { runnersRoutes } from "./routes/runners";
 import {
@@ -185,10 +185,6 @@ export const createApiApp = (
   // User-authored skills (step 9) — /skills, distinct from the gateway
   // skill's untouched /skill mount above.
   app.route("/skills", userSkillRoutes());
-  // `migrateRoutes` (the export half) stays FIRST among the /migrate mounts —
-  // the two script-serving routers below compose onto the same base path.
-  app.route("/migrate", migrateRoutes());
-  app.route("/migrate", migrateImportRoutes());
   app.route("/migrate", migrateNanoclawRoutes());
   app.route("/install", installRoutes());
   app.route("/onboarding", onboardingRoutes());
@@ -196,6 +192,9 @@ export const createApiApp = (
   // Workspace CRUD; the org-scoped access surface (`workspaceAccessRoutes`)
   // composes onto this same base path from the EE block below.
   app.route("/workspaces", workspaceRoutes());
+  // The current-org read (bare /v1/org). Its middleware is per-handler, never
+  // `use("*")`, so it cannot shadow the /org/<segment> routers around it.
+  app.route("/org", orgRoutes());
   // Org policy CRUD. Shares the base path with `orgPolicyReflectRoutes`
   // (mounted with the other reflections above) — the two define disjoint
   // sub-paths, and both apply the same org-admin auth.
@@ -229,6 +228,10 @@ export const createApiApp = (
   // The channel adapter's own surface (step 6): `cha_` family only, the
   // runner-daemon pattern.
   app.route("/channel-adapter", channelAdapterRoutes());
+  // The SSH terminator's own surface (sandbox-platform step 5): static
+  // terminator secret only — the narrow terminator↔control-plane channel.
+  // Dark (blanket 401) until SSH_TERMINATOR_SECRET is configured.
+  app.route("/ssh-terminator", sshTerminatorRoutes());
   // The agent's channel presences, composed onto /agents ahead of the 410
   // shims (every path here is 2+ segments, so the agents router's
   // single-segment `/:agentId` routes never shadow it).

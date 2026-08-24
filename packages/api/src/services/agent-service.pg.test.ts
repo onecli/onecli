@@ -1,7 +1,24 @@
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import {
+  afterAll,
+  afterEach,
+  beforeAll,
+  describe,
+  expect,
+  it,
+  vi,
+} from "vitest";
 
 import { proofDatabaseUrl } from "../testing/pg-proof.js";
 import { LAST_SEEN_WINDOW_MS } from "../lib/agent-activity.js";
+
+// Pinned onprem: the foundation suites below create BOTH kinds against one
+// unstamped org, which the cloud creation-world gate (§3.10 re-decided
+// 2026-08-23) would refuse under the CI job's ambient cloud edition. The gate
+// reads the edition per call, so its own describe pins cloud per test against
+// dedicated world orgs.
+vi.hoisted(() => {
+  process.env.NEXT_PUBLIC_EDITION = "onprem";
+});
 
 /**
  * `getAgentDetail` on REAL PostgreSQL — the Install page's verify signal.
@@ -26,6 +43,11 @@ const P = "agd-";
 const ORG = `${P}org`;
 const WORKSPACE = `${P}proj`;
 const OTHER_WORKSPACE = `${P}other-proj`;
+// The creation-world orgs (cloud gate suite): one per world.
+const HOSTED_WORLD_ORG = `${P}org-hosted-world`;
+const HOSTED_WORLD_WS = `${P}proj-hosted-world`;
+const BYO_WORLD_ORG = `${P}org-byo-world`;
+const BYO_WORLD_WS = `${P}proj-byo-world`;
 const AGENT_ACTIVE = `${P}agent-active`;
 const AGENT_IDLE = `${P}agent-idle`;
 const AGENT_DORMANT = `${P}agent-dormant`;
@@ -73,6 +95,38 @@ beforeAll(async () => {
   });
   await db.workspace.create({
     data: { id: OTHER_WORKSPACE, name: OTHER_WORKSPACE, organizationId: ORG },
+  });
+  // The two creation worlds (§3.10 re-decided): byoLegacy false = hosted-only,
+  // true = BYO-only. Dedicated orgs so the gate suite can't disturb the
+  // foundation fixtures above.
+  await db.organization.create({
+    data: {
+      id: HOSTED_WORLD_ORG,
+      name: HOSTED_WORLD_ORG,
+      slug: HOSTED_WORLD_ORG,
+    },
+  });
+  await db.workspace.create({
+    data: {
+      id: HOSTED_WORLD_WS,
+      name: HOSTED_WORLD_WS,
+      organizationId: HOSTED_WORLD_ORG,
+    },
+  });
+  await db.organization.create({
+    data: {
+      id: BYO_WORLD_ORG,
+      name: BYO_WORLD_ORG,
+      slug: BYO_WORLD_ORG,
+      byoLegacy: true,
+    },
+  });
+  await db.workspace.create({
+    data: {
+      id: BYO_WORLD_WS,
+      name: BYO_WORLD_WS,
+      organizationId: BYO_WORLD_ORG,
+    },
   });
 
   const agent = (id: string, workspaceId: string) =>
@@ -294,6 +348,114 @@ describe.skipIf(!PROOF_URL)(
       expect(
         await db.runner.findUnique({ where: { id: runner.id } }),
       ).not.toBeNull();
+    });
+  },
+);
+
+describe.skipIf(!PROOF_URL)(
+  "the creation-world gates over real PostgreSQL (cloud, §3.10 re-decided)",
+  () => {
+    // The gate reads the edition per call, so each case pins cloud here and
+    // the hook restores the file's onprem pin — this is also the suite that
+    // proves the gate's real workspace→organization join shape (the unit
+    // suite's db double only mimics it).
+    afterEach(() => {
+      process.env.NEXT_PUBLIC_EDITION = "onprem";
+    });
+
+    it("refuses BYO creation in a hosted-world org, leaving nothing behind", async () => {
+      process.env.NEXT_PUBLIC_EDITION = "cloud";
+      await expect(
+        agents.createAgent(HOSTED_WORLD_WS, {
+          name: "Refused BYO",
+          identifier: `${P}refused-byo`,
+        }),
+      ).rejects.toMatchObject({ code: "FORBIDDEN" });
+      expect(
+        await db.agent.findFirst({
+          where: { identifier: `${P}refused-byo` },
+        }),
+      ).toBeNull();
+    });
+
+    it("refuses HOSTED creation in a BYO-world org", async () => {
+      process.env.NEXT_PUBLIC_EDITION = "cloud";
+      await expect(
+        agents.createAgent(BYO_WORLD_WS, {
+          name: "Refused Hosted",
+          identifier: `${P}refused-hosted`,
+          kind: "hosted",
+        }),
+      ).rejects.toMatchObject({ code: "FORBIDDEN" });
+      expect(
+        await db.agent.findFirst({
+          where: { identifier: `${P}refused-hosted` },
+        }),
+      ).toBeNull();
+    });
+
+    it("lets a BYO-world org create BYO agents", async () => {
+      process.env.NEXT_PUBLIC_EDITION = "cloud";
+      const created = await agents.createAgent(BYO_WORLD_WS, {
+        name: "World BYO",
+        identifier: `${P}world-byo`,
+      });
+      expect(created.kind).toBe("byo");
+      await db.agent.delete({ where: { id: created.id } });
+    });
+
+    it("lets a hosted-world org create hosted agents", async () => {
+      process.env.NEXT_PUBLIC_EDITION = "cloud";
+      await db.runner.create({
+        data: {
+          id: `${P}world-runner`,
+          name: "world runner",
+          token: `rnr_${P}world`,
+          capabilities: {
+            maxSandboxes: 4,
+            backend: "docker",
+            homeDurability: "resident",
+          },
+          lastSeenAt: new Date(),
+        },
+      });
+      const created = await agents.createAgent(HOSTED_WORLD_WS, {
+        name: "World Hosted",
+        identifier: `${P}world-hosted`,
+        kind: "hosted",
+      });
+      expect(created.kind).toBe("hosted");
+      await db.agent.delete({ where: { id: created.id } });
+      await db.runner.delete({ where: { id: `${P}world-runner` } });
+    });
+
+    it("answers 409, not 403, for an existing identifier — ensureAgent stays idempotent", async () => {
+      await db.agent.create({
+        data: {
+          id: `${P}world-taken`,
+          workspaceId: HOSTED_WORLD_WS,
+          name: "taken",
+          identifier: `${P}world-taken`,
+          accessToken: `aoc_${P}world-taken`,
+        },
+      });
+      process.env.NEXT_PUBLIC_EDITION = "cloud";
+      await expect(
+        agents.createAgent(HOSTED_WORLD_WS, {
+          name: "taken again",
+          identifier: `${P}world-taken`,
+        }),
+      ).rejects.toMatchObject({ code: "CONFLICT" });
+      await db.agent.delete({ where: { id: `${P}world-taken` } });
+    });
+
+    it("stays ungated on self-host — BYO creates fine in a hosted-world org", async () => {
+      const created = await agents.createAgent(HOSTED_WORLD_WS, {
+        name: "Onprem BYO",
+        identifier: `${P}onprem-byo`,
+      });
+      expect(created.kind).toBe("byo");
+      await db.agent.delete({ where: { id: created.id } });
     });
   },
 );

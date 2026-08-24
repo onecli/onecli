@@ -41,7 +41,6 @@ export async function resolveStripeCustomer(
     }
   }
 
-  // Create a new Stripe customer
   const customer = await stripe.customers.create({
     email,
     metadata: { organizationId: organization.id },

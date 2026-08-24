@@ -18,7 +18,8 @@ import { v1Client, type V1Client } from "./v1.js";
  * child, in-process runner with real Docker sandboxes.
  *
  * Ordering is load-bearing twice: the GATEWAY starts before the api-server
- * (module-load `GATEWAY_BASE_URL`), and teardown runs runner → sandbox reap
+ * (its port rides `ONECLI_AGENT_PROXY_ADDRESS` in the child env), and
+ * teardown runs runner → sandbox reap
  * → children → network → DB drop, with the drop unconditional (the one
  * resource another test can collide with).
  */

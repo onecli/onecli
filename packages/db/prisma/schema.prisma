@@ -42,10 +42,11 @@ model Organization {
   // Cloud-only (inert in OSS): first SSO login on a verified domain
   // auto-joins the org as a member.
   jitEnabled          Boolean  @default(true) @map("jit_enabled")
-  // The BYO-sunset legacy stamp (plans/hosted-agents-v2.md §3.15): true =
-  // this org keeps its existing byo agents after the flip. False everywhere
-  // until the flip task stamps it (paying ∧ has byo agents, evaluated then).
-  // Never set by application code before that.
+  // The org's creation world on the hosted cloud platform: false = hosted-only
+  // creation (the default for every org), true = BYO-only creation (hosted
+  // starts with an onboarding call). Set MANUALLY by the cloud operator —
+  // never written by application code. Inert on self-host, where creation is
+  // ungated in both directions.
   byoLegacy           Boolean  @default(false) @map("byo_legacy")
   createdAt           DateTime @default(now()) @map("created_at")
   updatedAt           DateTime @updatedAt @map("updated_at")
@@ -271,6 +272,7 @@ model User {
   watchesCreated                ProcessWatch[]                @relation("WatchCreator")
   sessions                      Session[]
   accounts                      Account[]
+  sshKeys                       UserSshKey[]
   provisionedAs                 UserProvision?                @relation("ProvisionedUser")
   createdProvisions             UserProvision[]               @relation("ProvisionCreator")
 
@@ -319,9 +321,10 @@ model Agent {
   // pre-v2 rows so /v1/container-config can resolve an unpinned machine to the
   // workspace's legacy default agent. New agents get NULL.
   isDefault     Boolean?  @map("is_default")
-  // "byo" (bring-your-own: laptops, CI — today's agents) | "hosted" (a
-  // platform-run sandbox). Hosted arrives with the v2 program; the sunset
-  // (plans/hosted-agents-v2.md §3.15) later retires byo creation entirely.
+  // "byo" (bring-your-own: laptops, CI) | "hosted" (a platform-run sandbox).
+  // On the hosted cloud platform, which kind an org may CREATE is picked by
+  // Organization.byoLegacy (the creation worlds); existing agents of either
+  // kind keep working everywhere. Self-host creation is ungated.
   kind          String    @default("byo") // "byo" | "hosted"
   // Hosted only — which harness adapter runs inside the sandbox. One value
   // today ("jcode"); the column is the seam that keeps a second adapter cheap.
@@ -415,11 +418,12 @@ model Sandbox {
   homeAppliedGeneration Int       @default(0) @map("home_applied_generation")
   homeSyncClaimedAt     DateTime? @map("home_sync_claimed_at")
 
-  createdAt DateTime         @default(now()) @map("created_at")
-  updatedAt DateTime         @updatedAt @map("updated_at")
-  agent     Agent            @relation(fields: [agentId], references: [id], onDelete: Cascade)
-  runner    Runner           @relation(fields: [runnerId], references: [id])
-  processes SandboxProcess[]
+  createdAt   DateTime         @default(now()) @map("created_at")
+  updatedAt   DateTime         @updatedAt @map("updated_at")
+  agent       Agent            @relation(fields: [agentId], references: [id], onDelete: Cascade)
+  runner      Runner           @relation(fields: [runnerId], references: [id])
+  processes   SandboxProcess[]
+  sshSessions SshSession[]
 
   @@index([runnerId])
   @@map("sandboxes")
@@ -518,6 +522,103 @@ model ProcessWatch {
   // The fire claim scan + the expiry sweep.
   @@index([status, expiresAt])
   @@map("process_watches")
+}
+
+// ── SSH front door (plans/sandbox-platform.md step 5, §3.8) ──
+// One customer SSH session into a hosted agent's sandbox, reported by the
+// SSH terminator over its own authenticated surface. LIVENESS truth is the
+// lease (`lastHeartbeatAt` within the lease window) — never the status
+// column alone: a crashed terminator reports nothing, so every consumer
+// (keep-awake, the start-dueness arm, the per-agent cap) reads the lease and
+// the stale-session sweep closes lease-expired rows (`lease_expired`). The
+// terminator writes `closed` on every clean exit path; `closeReason` says
+// why ("client_disconnect" | "revoked" | "max_duration" | "idle_timeout" |
+// "agent_deleted" | "wake_timeout" | "relay_error" | "lease_expired" | ...).
+model SshSession {
+  id          String @id @default(uuid())
+  sandboxId   String @map("sandbox_id")
+  agentId     String @map("agent_id")
+  workspaceId String @map("workspace_id")
+  userId      String @map("user_id")
+  userEmail   String @map("user_email")
+  // Terminator-reported (the control plane never sees the TCP peer) — audit
+  // metadata, not tamper-proof truth.
+  sourceIp    String @map("source_ip")
+  certSerial  String @map("cert_serial")
+  // "open" | "closed"
+  status      String @default("open")
+
+  openedAt        DateTime  @default(now()) @map("opened_at")
+  attachedAt      DateTime? @map("attached_at")
+  lastHeartbeatAt DateTime  @default(now()) @map("last_heartbeat_at")
+  closedAt        DateTime? @map("closed_at")
+  closeReason     String?   @map("close_reason")
+
+  sandbox Sandbox @relation(fields: [sandboxId], references: [id], onDelete: Cascade)
+
+  // The keep-awake arm's per-sandbox lease probe (due-work.ts).
+  @@index([sandboxId, status])
+  // The per-agent session cap count.
+  @@index([agentId, status])
+  // The stale-session sweep: `status='open' AND last_heartbeat_at < …` runs
+  // on EVERY runner poll across ALL sandboxes (not sandbox-scoped), so it
+  // needs a status-leading index — the sandbox_id-leading ones above cannot
+  // serve it, and the sweep would otherwise sequential-scan a table that only
+  // ever grows (closed rows are audit history, pruned only by cascade).
+  // The reclaimStaleTurns precedent rides Turn's `@@index([status, updatedAt])`.
+  @@index([status, lastHeartbeatAt])
+  @@map("ssh_session")
+}
+
+// A user's registered SSH public key — the identity half of the SSH front
+// door's mint flow. Rows are owned by the person, not a workspace: the same
+// key authenticates them to every agent they can reach, so the registry
+// lives beside their identity and dies with it (cascade). Only PUBLIC key
+// material is ever stored, and a row grants nothing by itself — every mint
+// and session-open still re-runs the full access law.
+model UserSshKey {
+  id          String @id @default(uuid())
+  userId      String @map("user_id")
+  // User-supplied label ("MacBook Pro"). Not unique: two laptops may share
+  // a name; the fingerprint below is the identity.
+  name        String
+  // Canonical "ssh-ed25519 <base64>" line rebuilt from the PARSED key —
+  // never the raw paste, whose free-text comment would make the same key
+  // read as two different strings.
+  publicKey   String @map("public_key")
+  // OpenSSH SHA256 fingerprint ("SHA256:<base64, no padding>"), computed
+  // server-side from the key blob — the display and dedupe identity. Never
+  // accepted from the client, or the unique constraint below is bypassable.
+  fingerprint String
+
+  createdAt  DateTime  @default(now()) @map("created_at")
+  // Stamped when a certificate is minted from this key.
+  lastUsedAt DateTime? @map("last_used_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  // The settings list and the duplicate check on registration; the leading
+  // user_id column also serves every per-user lookup, so no separate index.
+  @@unique([userId, fingerprint])
+  @@map("user_ssh_keys")
+}
+
+// One SSH certificate mint — the rate-limit counter for
+// POST /v1/agents/:id/ssh-certificate. Deliberately its own table rather
+// than counting audit rows: audit writes are best-effort/never-throw, and a
+// limiter must not under-count when they fail. Rows are pruned by the
+// stale-session sweep after 24h.
+model SshCertMint {
+  id        String   @id @default(uuid())
+  userId    String   @map("user_id")
+  agentId   String   @map("agent_id")
+  createdAt DateTime @default(now()) @map("created_at")
+
+  // The windowed per-(user, agent) count.
+  @@index([userId, agentId, createdAt])
+  // The prune sweep.
+  @@index([createdAt])
+  @@map("ssh_cert_mint")
 }
 
 // One continuous exchange with a hosted agent (plans/hosted-agents-v2.md
@@ -987,6 +1088,14 @@ model ChannelIntegration {
   name                 String?
   credentials          String? // encrypted provider JSON; null on paste-floor integrations
   credentialsRotatedAt DateTime? @map("credentials_rotated_at")
+  // The proactive sweep's claim lease (the claim-CTE pattern): stamped when a
+  // sweep pass claims this row so N adapter instances' hourly sweeps rotate
+  // DISJOINT sets — Slack's config-token refresh half is single-use, so two
+  // concurrent rotations of one row would consume it twice and brick the
+  // credential. Single-purpose clock: NEVER `credentialsRotatedAt` (that is
+  // the staleness truth; leasing on it would push a crashed claimer's retry
+  // to the 12h token expiry with zero margin).
+  rotateClaimedAt      DateTime? @map("rotate_claimed_at")
   createdByUserId      String?   @map("created_by_user_id")
   createdAt            DateTime  @default(now()) @map("created_at")
   updatedAt            DateTime  @updatedAt @map("updated_at")
@@ -1005,40 +1114,51 @@ model ChannelIntegration {
 // One presence per provider per agent; a second provider later is another row,
 // never a second meaning for this one.
 model AgentChannel {
-  id              String   @id @default(uuid())
-  agentId         String   @map("agent_id")
-  integrationId   String   @map("integration_id")
-  provider        String // "slack"
-  externalId      String   @map("external_id") // provider app id (Slack: app id)
-  identityRef     String?  @map("identity_ref") // the presence's own identity (Slack: bot user id)
+  id                  String    @id @default(uuid())
+  agentId             String    @map("agent_id")
+  integrationId       String    @map("integration_id")
+  provider            String // "slack"
+  externalId          String    @map("external_id") // provider app id (Slack: app id)
+  identityRef         String?   @map("identity_ref") // the presence's own identity (Slack: bot user id)
   /// The app's own display handle on the provider (Slack: the bot's `user`
   /// from `auth.test`, e.g. "donna"). Captured at completion from a call we
   /// already make. Nullable: the events arm completes via OAuth, and older
   /// presences predate this — surfaces fall back to the external id.
-  identityName    String?  @map("identity_name")
+  identityName        String?   @map("identity_name")
   // "events" = the provider calls our public HTTPS inbound routes (the
   // one-click posture) | "socket" = the adapter holds an outbound connection
   // (the no-ingress floor). Stamped at create from the deployment posture —
   // the provider manifest baked one or the other, so the presence must
   // remember which it is. Switching = detach/re-attach in v2.
-  transport       String
+  transport           String
   // Encrypted provider JSON. Slack: {clientId, clientSecret, signingSecret,
   // botToken?, appToken?} — client creds + signing secret arrive from
   // apps.manifest.create and are needed for the events arm's OAuth exchange
   // and inbound signature verification before any bot token exists.
-  credentials     String?
+  credentials         String?
   // "needs_attention" = the approvals service key is being refused (its owner
   // lost workspace access); everything else about the presence keeps working.
-  status          String   @default("pending_setup") // "pending_setup" | "active" | "disabled" | "needs_attention"
-  createdByUserId String?  @map("created_by_user_id")
+  status              String    @default("pending_setup") // "pending_setup" | "active" | "disabled" | "needs_attention"
+  createdByUserId     String?   @map("created_by_user_id")
   // The service API key (ApiKey.kind "service") the adapter uses to list and
   // decide gateway approvals for this presence. Revoked at detach.
-  apiKeyId        String?  @map("api_key_id")
-  createdAt       DateTime @default(now()) @map("created_at")
-  updatedAt       DateTime @updatedAt @map("updated_at")
+  apiKeyId            String?   @map("api_key_id")
+  // The presence-ownership claim (§3.17): which adapter instance serves this
+  // presence, under a lease renewed by its config poll. ⚠️ These two columns
+  // are written by RAW SQL ONLY (channel-adapter-service.ts) — a Prisma
+  // update would bump `updatedAt`, which is a config-feed etag input, and a
+  // lease renewal that busts the etag every poll recreates the KMS decrypt
+  // storm the ownership design exists to kill. `SetNull` on the owner FK
+  // makes adapter-row reaping safe: the presence becomes unowned and is
+  // claimed on a peer's next poll.
+  ownerAdapterId      String?   @map("owner_adapter_id")
+  ownerLeaseExpiresAt DateTime? @map("owner_lease_expires_at")
+  createdAt           DateTime  @default(now()) @map("created_at")
+  updatedAt           DateTime  @updatedAt @map("updated_at")
 
   agent           Agent                   @relation(fields: [agentId], references: [id], onDelete: Cascade)
   integration     ChannelIntegration      @relation(fields: [integrationId], references: [id], onDelete: Cascade)
+  ownerAdapter    ChannelAdapter?         @relation("PresenceOwner", fields: [ownerAdapterId], references: [id], onDelete: SetNull)
   createdBy       User?                   @relation("AgentChannelCreator", fields: [createdByUserId], references: [id], onDelete: SetNull)
   apiKey          ApiKey?                 @relation(fields: [apiKeyId], references: [id], onDelete: SetNull)
   threadLinks     ChannelThreadLink[]
@@ -1055,6 +1175,7 @@ model AgentChannel {
   // collision a CONFLICT at attach instead.
   @@unique([provider, externalId])
   @@index([integrationId])
+  @@index([ownerAdapterId])
   @@map("agent_channels")
 }
 
@@ -1170,10 +1291,19 @@ model ChannelTurnReceipt {
 model ChannelAdapter {
   id         String    @id @default(uuid())
   name       String
-  token      String    @unique // "cha_..." prefix
+  token      String    @unique // "cha_..." prefix — the anchor (legacy) or a per-instance mint
+  // "anchor" = the legacy shared-anchor identity (old binaries present the
+  // anchor itself; at most one such row per configured anchor). "instance" =
+  // a per-instance credential minted at registration. Drives the steal/reap
+  // rules and the config-feed etag recipe — anchor callers keep mirror
+  // cursors folded into the etag (their only CAS-seed source), instance
+  // callers get the floor per work item instead.
+  kind       String    @default("anchor") // "anchor" | "instance"
   lastSeenAt DateTime? @map("last_seen_at")
   createdAt  DateTime  @default(now()) @map("created_at")
   updatedAt  DateTime  @updatedAt @map("updated_at")
+
+  ownedChannels AgentChannel[] @relation("PresenceOwner")
 
   @@map("channel_adapters")
 }

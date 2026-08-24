@@ -36,6 +36,10 @@ export interface FakeBackend extends SandboxBackend {
     operation: "create" | "start" | "stop" | "list",
     error?: Error,
   ): void;
+  /** Make the NEXT call of an operation block until the returned release is
+   * called — the deterministic "slow backend" for executor queueing tests
+   * (never a sleep; the settled-escape law). */
+  holdNext(operation: "create" | "start" | "stop" | "list"): () => void;
   /** Plant a FOREIGN-labeled object (another runner id's leftover) — the
    * orphan sweep's input. Removed by removeSandbox/destroyHome like any
    * other object, so tests assert reaping by its absence. */
@@ -59,6 +63,15 @@ export const createFakeBackend = (): FakeBackend => {
     throw planted ?? new Error(`fake backend: ${operation} failed`);
   };
 
+  /** operation → gate the next call awaits (armed by holdNext). */
+  const holds = new Map<string, Promise<void>>();
+  const gateIfHeld = async (operation: string): Promise<void> => {
+    const gate = holds.get(operation);
+    if (!gate) return;
+    holds.delete(operation);
+    await gate;
+  };
+
   const byRef = (ref: ContainerRef) =>
     [...sandboxes.values()].find((record) => record.containerRef === ref);
 
@@ -74,6 +87,16 @@ export const createFakeBackend = (): FakeBackend => {
     },
     failNext(operation, error) {
       failures.set(operation, error);
+    },
+    holdNext(operation) {
+      let release: () => void = () => {};
+      holds.set(
+        operation,
+        new Promise<void>((resolve) => {
+          release = resolve;
+        }),
+      );
+      return release;
     },
 
     async prepare() {
@@ -103,6 +126,7 @@ export const createFakeBackend = (): FakeBackend => {
     },
 
     async createSandbox(spec) {
+      await gateIfHeld("create");
       throwIfArmed("create");
       counter += 1;
       const containerRef = `fake-container-${counter}`;
@@ -111,12 +135,14 @@ export const createFakeBackend = (): FakeBackend => {
     },
 
     async startSandbox(ref) {
+      await gateIfHeld("start");
       throwIfArmed("start");
       const record = byRef(ref);
       if (record) record.running = true;
     },
 
     async stopSandbox(ref) {
+      await gateIfHeld("stop");
       throwIfArmed("stop");
       const record = byRef(ref);
       if (record) record.running = false;

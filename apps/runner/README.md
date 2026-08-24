@@ -64,8 +64,7 @@ would end the conversation. Restart it by hand when you change it.
 
 The full-stack version of this (build → up → create a hosted agent → watch it
 start) lives in `apps/hosted-e2e` — the black-box suite that spawns a real
-gateway, api-server, this runner, and real sandbox containers per test, plus a
-cold-`docker compose up` smoke lane. The hand-run `dev/*.sh` proof scripts
+gateway, api-server, this runner, and real sandbox containers per test. The hand-run `dev/*.sh` proof scripts
 that used to live here were removed: nothing ran them, so four of the six had
 silently rotted — the automated suite is the only form of this worth keeping.
 
@@ -128,6 +127,24 @@ default, overridable with `MAX_HELD_AWAKE_SANDBOXES` on the api — evicting the
 longest-idle held box over the ceiling (its watches report "the process was
 lost" honestly), so background work can never wedge the whole host. Operators
 can read the per-runner count beside the ceiling on `GET /v1/runners`.
+
+## Nested containers (podman) in the sandbox
+
+The sandbox image ships rootless podman and a `docker` CLI shim
+(`podman-docker`) so agents can run `docker run`-class work — a capability of
+the **hosted microVM substrate**, where every sandbox owns a whole kernel.
+Under this runner's Docker backend the same binaries are intentionally inert:
+every sandbox is pinned with `no-new-privileges`, `CapDrop: ALL`, and the
+Docker daemon's **default seccomp profile**, which together deny the
+user-namespace setup rootless containers need on a **shared** kernel
+(`CapDrop: ALL` removes `CAP_SYS_ADMIN`, so the default seccomp profile keeps
+blocking `unshare`/`clone` with the namespace flags, and `no-new-privileges`
+neuters the setuid `newuidmap`/`newgidmap` helpers). That combination is the
+tenant boundary here — **do not weaken any of it** (in particular, never add
+`seccomp=unconfined`) to chase nested containers; an agent that tries will see
+userns/permission errors, and `/etc/containers/README.onecli` inside the image
+says why. On the microVM substrate, container storage lives under `/workspace`
+(the durable home), so images and volumes survive sandbox restarts there.
 
 ## Orphan reaping
 

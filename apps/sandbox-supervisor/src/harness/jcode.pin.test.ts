@@ -104,6 +104,11 @@ describe("cleanJcodeUpdaterState", () => {
       join(home, "bin/jcode"),
     );
     writeFileSync(join(home, "update_metadata.json"), "{}");
+    // The other on-volume executable stash (upstream since v0.76, purged
+    // since our v0.78.1 pin): a managed provider CLI jcode execs when that
+    // provider is selected.
+    mkdirSync(join(home, "provider-backends/grok-build"), { recursive: true });
+    writeFileSync(join(home, "provider-backends/grok-build/grok"), "elf");
     // What must SURVIVE: the agent's sessions and our managed files.
     mkdirSync(join(home, "sessions"));
     writeFileSync(join(home, "sessions/s1.jsonl"), "{}");
@@ -115,6 +120,7 @@ describe("cleanJcodeUpdaterState", () => {
     expect(existsSync(join(home, "builds"))).toBe(false);
     expect(existsSync(join(home, "bin"))).toBe(false);
     expect(existsSync(join(home, "update_metadata.json"))).toBe(false);
+    expect(existsSync(join(home, "provider-backends"))).toBe(false);
     expect(readFileSync(join(home, "sessions/s1.jsonl"), "utf8")).toBe("{}");
     expect(existsSync(join(home, "auth.json"))).toBe(true);
     expect(existsSync(join(home, "config.toml"))).toBe(true);
@@ -149,15 +155,31 @@ describe("cleanJcodeKnowledgeStores", () => {
     // MUTATION-PROOF for the no-alternatives law: drop any path from the
     // purge list and its case here fails — that path is durable,
     // platform-invisible knowledge ([features] memory=false does NOT remove
-    // the native memory tool; verified in v0.71.1 source).
+    // the native memory tool; verified in v0.71.1, still true in v0.78.1).
+    // The external/ trio matters doubly: jcode's first-run import copies
+    // external/.claude/skills + external/.codex/skills into the live
+    // registry whenever $JCODE_HOME/skills is absent — which this very
+    // purge guarantees each boot — and external/.claude/plugins is a global
+    // skill source scanned on existence.
     const agentHome = mkdtempSync(join(tmpdir(), "jcode-agent-home-"));
     for (const dir of [
       join(home, "memory"),
       join(home, "notes"),
       join(home, "skills", "stash"),
       join(home, "external", ".agents", "skills", "stash"),
+      join(home, "external", ".claude", "skills", "stash"),
+      join(home, "external", ".claude", "plugins", "stash"),
+      join(home, "external", ".codex", "skills", "stash"),
       join(agentHome, ".jcode", "skills", "stash"),
       join(agentHome, ".claude", "skills", "stash"),
+      // The durable POSIX home (~ = <homeDir>/.home): every user-home stash
+      // path jcode's resolver knows, now persistent across relaunch — a
+      // planted skill there would re-enter the registry durably.
+      join(agentHome, ".home", ".agents", "skills", "stash"),
+      join(agentHome, ".home", ".jcode", "skills", "stash"),
+      join(agentHome, ".home", ".claude", "skills", "stash"),
+      join(agentHome, ".home", ".claude", "plugins", "stash"),
+      join(agentHome, ".home", ".codex", "skills", "stash"),
     ]) {
       mkdirSync(dir, { recursive: true });
       writeFileSync(join(dir, "data.json"), "{}");
@@ -180,8 +202,28 @@ describe("cleanJcodeKnowledgeStores", () => {
     expect(existsSync(join(home, "notes"))).toBe(false);
     expect(existsSync(join(home, "skills"))).toBe(false);
     expect(existsSync(join(home, "external", ".agents", "skills"))).toBe(false);
+    expect(existsSync(join(home, "external", ".claude", "skills"))).toBe(false);
+    expect(existsSync(join(home, "external", ".claude", "plugins"))).toBe(
+      false,
+    );
+    expect(existsSync(join(home, "external", ".codex", "skills"))).toBe(false);
     expect(existsSync(join(agentHome, ".jcode", "skills"))).toBe(false);
     expect(existsSync(join(agentHome, ".claude", "skills"))).toBe(false);
+    expect(existsSync(join(agentHome, ".home", ".agents", "skills"))).toBe(
+      false,
+    );
+    expect(existsSync(join(agentHome, ".home", ".jcode", "skills"))).toBe(
+      false,
+    );
+    expect(existsSync(join(agentHome, ".home", ".claude", "skills"))).toBe(
+      false,
+    );
+    expect(existsSync(join(agentHome, ".home", ".claude", "plugins"))).toBe(
+      false,
+    );
+    expect(existsSync(join(agentHome, ".home", ".codex", "skills"))).toBe(
+      false,
+    );
     expect(existsSync(join(home, "sessions", "s1.json"))).toBe(true);
     expect(
       existsSync(join(agentHome, ".agents", "skills", "managed", "SKILL.md")),
@@ -203,8 +245,8 @@ describe("cleanJcodeKnowledgeStores", () => {
 describe("the disabled native tools", () => {
   it("memory is in the exact constant the launch env reads", () => {
     // The write-back amendment's lockdown: [features] memory=false alone
-    // leaves the native tool callable (v0.71.1 source) — only this list
-    // removes it from the model's definitions.
+    // leaves the native tool callable (v0.71.1, still true in v0.78.1) —
+    // only this list removes it from the model's definitions.
     expect(JCODE_DISABLED_TOOLS_VALUE.split(",")).toContain("memory");
   });
 });

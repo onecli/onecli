@@ -59,10 +59,12 @@ const dockerOut = (args) => {
 };
 
 /**
- * The bind host for published ports — never 0.0.0.0 (that would expose the
- * stack to the network). Same ladder as install.sh: explicit env, macOS and
- * WSL loopback, the docker0 bridge IP on bare-metal Linux, else "" (the
- * caller must ask).
+ * The bind host for published ports — the publish plane ONLY: it never
+ * seeds a URL (ONECLI_EXTERNAL_URL owns the advertise plane). Never
+ * 0.0.0.0 by default (that would expose the stack to the network; the
+ * wizard's reachability question makes it an explicit choice). Same ladder
+ * as install.sh: explicit env, macOS and WSL loopback, the docker0 bridge
+ * IP on bare-metal Linux, else "" (the caller must ask).
  */
 export const detectBindHost = (env = process.env) => {
   if (env.ONECLI_BIND_HOST) return env.ONECLI_BIND_HOST;

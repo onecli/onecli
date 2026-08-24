@@ -18,6 +18,9 @@ const log = logger.child({ component: "channel-adapter-auth" });
 export interface ChannelAdapterAuthContext {
   adapterId: string;
   name: string;
+  /** "anchor" (legacy shared identity) | "instance" (per-instance mint) —
+   * drives the config feed's etag recipe. */
+  kind: string;
 }
 
 export type ChannelAdapterEnv = {
@@ -36,11 +39,15 @@ export const channelAdapterAuth = createMiddleware<ChannelAdapterEnv>(
 
     const adapter = await db.channelAdapter.findUnique({
       where: { token },
-      select: { id: true, name: true },
+      select: { id: true, name: true, kind: true },
     });
     if (!adapter) return c.json(unauthorized, 401);
 
-    c.set("channelAdapter", { adapterId: adapter.id, name: adapter.name });
+    c.set("channelAdapter", {
+      adapterId: adapter.id,
+      name: adapter.name,
+      kind: adapter.kind,
+    });
 
     db.channelAdapter
       .update({ where: { id: adapter.id }, data: { lastSeenAt: new Date() } })

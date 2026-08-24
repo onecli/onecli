@@ -14,6 +14,15 @@ import {
  */
 
 describe("authErrorMessage", () => {
+  // The one wording pin: this copy is the operator's ONLY clue when a
+  // tunneled or LAN dashboard hits the origin check, and it must teach the
+  // canonical var, not the legacy alias.
+  it("names ONECLI_EXTERNAL_URL as the INVALID_ORIGIN fix", () => {
+    expect(authErrorMessage({ code: "INVALID_ORIGIN" })).toContain(
+      "ONECLI_EXTERNAL_URL",
+    );
+  });
+
   it("explains the refusals a person can do something about", () => {
     expect(authErrorMessage({ code: SIGNUP_BLOCKED_BY_UPGRADE })).toMatch(
       /finishing an upgrade/i,
@@ -46,6 +55,16 @@ describe("redirectErrorMessage", () => {
     expect(redirectErrorMessage(SIGNUP_BLOCKED_BY_UPGRADE)).toMatch(
       /finishing an upgrade/i,
     );
+  });
+
+  // The refused-social-link case: Google met an existing password account it
+  // could not safely absorb. The copy must point at the password door — the
+  // one that still works. Lowercase is the only spelling that exists: the
+  // refusal reaches the browser solely as the `?error=` redirect token.
+  it("tells a refused Google link to use the password instead", () => {
+    const copy = redirectErrorMessage("account_not_linked");
+    expect(copy).toMatch(/password/i);
+    expect(copy).toMatch(/sign in/i);
   });
 
   it("returns a string for ANY key, including inherited ones", () => {

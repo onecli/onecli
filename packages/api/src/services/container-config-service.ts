@@ -1,5 +1,5 @@
 import { db } from "@onecli/db";
-import { GATEWAY_BASE_URL } from "../lib/env";
+import { agentProxyAddress } from "../lib/public-origins";
 import { loadCaCertificate } from "../lib/gateway-ca";
 import {
   parseAnthropicMetadata,
@@ -79,6 +79,11 @@ export const resolveContainerConfigAgent = async (
  */
 
 export const CA_CONTAINER_PATH = "/tmp/onecli-gateway-ca.pem";
+// Stays on the EPHEMERAL rootfs on purpose, even though ~ is now durable
+// (/workspace/.home): spawn files may never target the durable home (the
+// manager's validations refuse /workspace/** — a prior spawn could pre-plant
+// a symlink for root's `install` to follow), and the stub is a per-spawn
+// placeholder the gateway splices over anyway. CODEX_HOME (env) pins it.
 const CODEX_HOME_CONTAINER_PATH = "/home/node/.codex";
 
 export interface ContainerConfig {
@@ -122,7 +127,7 @@ export const buildContainerConfig = async ({
   organizationId,
   origin,
 }: BuildContainerConfigInput): Promise<ContainerConfigResult> => {
-  const gatewayUrl = `http://x:${agent.accessToken}@${GATEWAY_BASE_URL}`;
+  const gatewayUrl = `http://x:${agent.accessToken}@${agentProxyAddress()}`;
 
   const caCertificate = loadCaCertificate();
   if (!caCertificate) return { ok: false, reason: "ca_unavailable" };

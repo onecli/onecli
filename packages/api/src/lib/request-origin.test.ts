@@ -182,3 +182,76 @@ describe("getAppOrigin", () => {
     expect(normalizeOrigin(configured)).toBe(configured);
   });
 });
+
+describe("getAppOrigin — trusted referer (the unconfigured OAuth landing)", () => {
+  const restore = snapshotUrlVars();
+  afterEach(() => {
+    restore();
+    delete process.env.ONECLI_EXTERNAL_URL;
+    delete process.env.ONECLI_TRUSTED_ORIGINS;
+  });
+
+  // The zero-config regression pin: /authorize is a top-level navigation
+  // FROM the dashboard, arriving ON the api origin. Without the referer step
+  // the signed origin becomes the API origin and the post-connect browser
+  // lands on this server's JSON 404 instead of the dashboard.
+  it("prefers a trusted referer over the request's own (api) origin", () => {
+    unconfigured();
+    expect(
+      getAppOrigin(
+        req({
+          host: "localhost:10256",
+          referer: "http://localhost:10254/w/w1/connections",
+        }),
+      ),
+    ).toBe("http://localhost:10254");
+    // The loopback twin is trusted too.
+    expect(
+      getAppOrigin(
+        req({ host: "127.0.0.1:10256", referer: "http://127.0.0.1:10254/" }),
+      ),
+    ).toBe("http://127.0.0.1:10254");
+  });
+
+  // A referer is cross-site-influenceable (SameSite=Lax sends the session
+  // cookie on top-level GETs), so an UNLISTED origin must never steer the
+  // post-consent landing — it falls through to the request origin exactly
+  // as before this step existed.
+  it("ignores an untrusted referer", () => {
+    unconfigured();
+    expect(
+      getAppOrigin(
+        req({ host: "arrived.example", referer: "https://evil.example/lure" }),
+      ),
+    ).toBe("http://arrived.example");
+  });
+
+  it("honors ONECLI_TRUSTED_ORIGINS extras", () => {
+    unconfigured();
+    process.env.ONECLI_TRUSTED_ORIGINS = "http://onecli.corp:10254";
+    expect(
+      getAppOrigin(
+        req({
+          host: "arrived.example",
+          referer: "http://onecli.corp:10254/w/w1",
+        }),
+      ),
+    ).toBe("http://onecli.corp:10254");
+  });
+
+  it("loses to a configured URL and to a signed origin", () => {
+    unconfigured();
+    process.env.ONECLI_EXTERNAL_URL = "http://configured.example:10254";
+    expect(
+      getAppOrigin(req({ host: "x", referer: "http://localhost:10254/" })),
+    ).toBe("http://configured.example:10254");
+    delete process.env.ONECLI_EXTERNAL_URL;
+    unconfigured();
+    expect(
+      getAppOrigin(
+        req({ host: "x", referer: "http://localhost:10254/" }),
+        "https://signed.example",
+      ),
+    ).toBe("https://signed.example");
+  });
+});

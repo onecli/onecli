@@ -41,10 +41,15 @@ export const apiGet = async <T>(
   return res.json();
 };
 
-export const apiPost = async <T>(path: string, body: unknown): Promise<T> => {
+export const apiPost = async <T>(
+  path: string,
+  body: unknown,
+  init?: RequestInit,
+): Promise<T> => {
   const res = await apiFetch(path, {
     method: "POST",
     body: JSON.stringify(body),
+    ...init,
   });
   if (!res.ok) throw await refusal(res);
   return res.json();
@@ -71,12 +76,14 @@ export const apiPut = async <T>(path: string, body: unknown): Promise<T> => {
 export const apiDelete = async (
   path: string,
   body?: unknown,
+  init?: RequestInit,
 ): Promise<void> => {
   const res = await apiFetch(path, {
     method: "DELETE",
     // Some deletes carry options (channel detach: `{ deleteRemote }`); a plain
     // delete sends no body at all, exactly as before.
     ...(body !== undefined && { body: JSON.stringify(body) }),
+    ...init,
   });
   if (!res.ok) throw await refusal(res);
 };

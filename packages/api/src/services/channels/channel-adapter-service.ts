@@ -1,7 +1,7 @@
-import { createHash, timingSafeEqual } from "node:crypto";
+import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import { db, Prisma } from "@onecli/db";
-import { getCrypto } from "../../providers";
 import { ServiceError } from "../errors";
+import { decryptCached } from "./channel-decrypt-cache";
 import {
   CHANNEL_ADAPTER_TOKEN,
   RUNNER_ONLINE_THRESHOLD_SECONDS,
@@ -12,13 +12,22 @@ import { agentImageUrlOrNull } from "../agent-image-service";
 
 /**
  * The channel adapter's control-plane service: registration and liveness
- * (the `RUNNER_TOKEN` anchor pattern, verbatim semantics), the config feed
- * that tells the adapter what to hold open, and the batched work poll that
- * drives the completion pass (answers and mirrors, posted once per turn).
+ * (the `RUNNER_TOKEN` anchor pattern, plus per-instance minting), the config
+ * feed that tells the adapter what to hold open, and the batched work poll
+ * that drives the completion pass (answers and mirrors, posted once per turn).
  *
- * v2 runs ONE adapter per install (the §3.17 seam: sharding by agent across
- * an adapter fleet swaps in inside this module — a presence-ownership claim,
- * the `due-work.ts` pattern — without touching the adapter's wire contract).
+ * The §3.17 sharding seam lives HERE, exactly as this module always promised:
+ * a presence-ownership claim (the `due-work.ts` pattern) partitions the fleet
+ * across adapter instances without touching the adapter's wire contract —
+ * each instance's config/work/prompt feeds serve only the presences it holds
+ * a live lease on. One instance therefore claims everything (the self-host
+ * singleton, unchanged behavior); N instances divide the fleet and a dead
+ * instance's slice fails over when its leases lapse.
+ *
+ * ⚠️ Every ownership write is RAW SQL on purpose: a Prisma update would bump
+ * `updated_at`, which is a config-etag input, and a lease renewal that busts
+ * the etag every poll would recreate the KMS decrypt storm the ownership
+ * split exists to kill (the etag-stability test pins this).
  */
 
 const safeEqual = (a: string, b: string): boolean => {
@@ -28,29 +37,63 @@ const safeEqual = (a: string, b: string): boolean => {
 };
 
 export type RegisterAdapterResult =
-  | { ok: true; adapterId: string }
+  | { ok: true; adapterId: string; mintedToken?: string }
   | { ok: false };
 
+/** Instance rows this stale are reaped opportunistically at register — far
+ * beyond every lease/online window (45s/90s), so only a truly dead twin ever
+ * matches. Anchor rows are never reaped: an idle self-host that comes back
+ * after a month must not have lost its identity. */
+const ADAPTER_REAP_AGE_MS = 24 * 60 * 60 * 1000;
+
 /**
- * Register (or re-register) an adapter. Same law as `registerRunner`: a known
- * token updates its row (the restart path); an unknown one may create a row
- * only when it equals the instance anchor; anything else is a hint-free
+ * Register (or re-register) an adapter.
+ *
+ * Legacy arm (no `perInstance` — old binaries): the runner law verbatim. A
+ * known token updates its row (the restart path); an unknown one may create a
+ * row only when it equals the instance anchor; anything else is a hint-free
  * refusal. `CHANNEL_ADAPTER_TOKEN` unset = nothing can ever register.
+ *
+ * Mint arm (`perInstance: true` — new binaries): the anchor is a membership
+ * PROOF, never the instance's identity. A fresh per-instance `cha_` credential
+ * is minted and the row is keyed by the instance's stable NAME: a restart
+ * re-registers under the same name and takes over its old row, so the
+ * `adapterId` — and every presence-ownership lease hanging off it — survives
+ * and a compose restart resumes with zero handoff dead time. Two LIVE
+ * same-named instances displace each other's token instead; the displaced
+ * side's next call answers 401 and the client re-registers once under a
+ * self-suffixed name (the documented disambiguation rule).
  */
 export const registerAdapter = async (input: {
   token: string;
   name: string;
+  perInstance?: boolean;
 }): Promise<RegisterAdapterResult> => {
-  const existing = await db.channelAdapter.findUnique({
-    where: { token: input.token },
-    select: { id: true },
-  });
-  if (existing) {
-    await db.channelAdapter.update({
-      where: { id: existing.id },
-      data: { name: input.name, lastSeenAt: new Date() },
+  if (!input.perInstance) {
+    const existing = await db.channelAdapter.findUnique({
+      where: { token: input.token },
+      select: { id: true },
     });
-    return { ok: true, adapterId: existing.id };
+    if (existing) {
+      await db.channelAdapter.update({
+        where: { id: existing.id },
+        data: { name: input.name, lastSeenAt: new Date() },
+      });
+      return { ok: true, adapterId: existing.id };
+    }
+
+    if (
+      !CHANNEL_ADAPTER_TOKEN ||
+      !safeEqual(input.token, CHANNEL_ADAPTER_TOKEN)
+    ) {
+      return { ok: false };
+    }
+
+    const created = await db.channelAdapter.create({
+      data: { token: input.token, name: input.name, lastSeenAt: new Date() },
+      select: { id: true },
+    });
+    return { ok: true, adapterId: created.id };
   }
 
   if (
@@ -60,11 +103,49 @@ export const registerAdapter = async (input: {
     return { ok: false };
   }
 
-  const created = await db.channelAdapter.create({
-    data: { token: input.token, name: input.name, lastSeenAt: new Date() },
-    select: { id: true },
+  const mintedToken = `cha_${randomBytes(32).toString("hex")}`;
+  const adapterId = await db.$transaction(async (tx) => {
+    // Serialize same-name mints (the policy-service lock idiom): two
+    // instances booting under one name must resolve to one steal ordering,
+    // never two rows.
+    await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`channel-adapter-register:${input.name}`}))`;
+    const existing = await tx.channelAdapter.findFirst({
+      where: { name: input.name, kind: "instance" },
+      orderBy: { lastSeenAt: "desc" },
+      select: { id: true },
+    });
+    if (existing) {
+      await tx.channelAdapter.update({
+        where: { id: existing.id },
+        data: { token: mintedToken, lastSeenAt: new Date() },
+      });
+      return existing.id;
+    }
+    const created = await tx.channelAdapter.create({
+      data: {
+        token: mintedToken,
+        name: input.name,
+        kind: "instance",
+        lastSeenAt: new Date(),
+      },
+      select: { id: true },
+    });
+    return created.id;
   });
-  return { ok: true, adapterId: created.id };
+
+  // Opportunistic reap of long-dead instance rows — their presence leases
+  // free via the owner FK's SetNull and a peer claims them on its next poll.
+  // Detached: register is the boot path and must not fail on housekeeping.
+  void db.channelAdapter
+    .deleteMany({
+      where: {
+        kind: "instance",
+        lastSeenAt: { lt: new Date(Date.now() - ADAPTER_REAP_AGE_MS) },
+      },
+    })
+    .catch(() => {});
+
+  return { ok: true, adapterId, mintedToken };
 };
 
 export const heartbeatAdapter = async (adapterId: string): Promise<void> => {
@@ -140,18 +221,119 @@ export type AdapterConfigResult =
   | { notModified: true; etag: string }
   | ({ notModified: false } & AdapterConfigFeed);
 
+/** How long a presence-ownership lease lives. Renewed by the owner's ~10s
+ * config poll, so it survives three consecutive missed/failed polls plus
+ * jitter before a peer may steal; worst-case failover on ungraceful death is
+ * ~lease + one peer poll (≈55s), safely inside the 90s online window. The 2s
+ * work poll deliberately does NOT renew — one renewal write per poll round,
+ * not five. */
+export const PRESENCE_LEASE_SECONDS = 45;
+
+/**
+ * The ownership pass — renew, then claim up to fair share, then shed the
+ * excess — run at the top of every config poll. Claims follow the due-work
+ * law: a CTE + `FOR UPDATE … SKIP LOCKED` (never a subquery `LIMIT`, which
+ * Postgres silently ignores), so concurrent claimers split the unowned set
+ * instead of blocking or double-claiming. Rebalance is fair-share with
+ * VOLUNTARY shed — never steal-from-live, which would turn every renewal
+ * into a CAS and yank live sockets; a joiner is fed within one poll round
+ * whenever an incumbent sits ABOVE fair. (Ceil-based fair means incumbents
+ * can all sit exactly AT fair with nothing to give — e.g. 3 adapters over 4
+ * presences settle 2/2/0 — so an extra scale-out instance can idle until
+ * presence counts change. Every presence stays served; load-balancing the
+ * remainder is the tracked §3.17 follow-up, not a correctness gap.) Claim
+ * prefers oldest-first and shed newest-first: disjoint ends, so the two arms
+ * cannot ping-pong one presence.
+ */
+const runOwnershipPass = async (adapterId: string): Promise<void> => {
+  await db.$transaction(async (tx) => {
+    // RENEW what I own. Fenced on owner = me: a row a peer stole (my lease
+    // lapsed) no longer matches, so a comeback never resurrects lost claims.
+    await tx.$executeRaw`
+      UPDATE agent_channels
+      SET owner_lease_expires_at = now() + make_interval(secs => ${PRESENCE_LEASE_SECONDS})
+      WHERE owner_adapter_id = ${adapterId}
+        AND status IN ('active', 'needs_attention')`;
+
+    // Fair share over LIVE adapters (self counted even if the liveness touch
+    // is still in flight). The membership window is the LEASE window, not the
+    // UI's 90s online window: a dead peer must leave the denominator at the
+    // same moment its leases become stealable, or a survivor already sitting
+    // at fair share would claim nothing until the corpse aged out of the
+    // longer window — doubling failover to ~90-100s and stranding half the
+    // fleet on every rolling deploy (each new task is a new name, so stopped
+    // tasks' rows are never stolen, only aged out). Old anchor-identity
+    // binaries share one row and therefore act as one claimant — their
+    // internal twin-ness stays CAS-tolerated exactly as before.
+    const [{ live }] = await tx.$queryRaw<[{ live: number }]>`
+      SELECT count(*)::int AS live FROM channel_adapters
+      WHERE last_seen_at > now() - make_interval(secs => ${PRESENCE_LEASE_SECONDS})
+         OR id = ${adapterId}`;
+    const [{ eligible }] = await tx.$queryRaw<[{ eligible: number }]>`
+      SELECT count(*)::int AS eligible FROM agent_channels
+      WHERE status IN ('active', 'needs_attention')`;
+    const [{ owned }] = await tx.$queryRaw<[{ owned: number }]>`
+      SELECT count(*)::int AS owned FROM agent_channels
+      WHERE owner_adapter_id = ${adapterId}
+        AND status IN ('active', 'needs_attention')`;
+    const fair = Math.ceil(eligible / Math.max(1, live));
+
+    if (owned < fair) {
+      await tx.$executeRaw`
+        WITH claimed AS (
+          SELECT ac.id FROM agent_channels ac
+          WHERE ac.status IN ('active', 'needs_attention')
+            AND (ac.owner_adapter_id IS NULL OR ac.owner_lease_expires_at < now())
+          ORDER BY ac.created_at ASC
+          LIMIT ${fair - owned}
+          FOR UPDATE OF ac SKIP LOCKED
+        )
+        UPDATE agent_channels ac
+        SET owner_adapter_id = ${adapterId},
+            owner_lease_expires_at = now() + make_interval(secs => ${PRESENCE_LEASE_SECONDS})
+        FROM claimed c
+        WHERE ac.id = c.id`;
+    } else if (owned > fair) {
+      await tx.$executeRaw`
+        WITH shed AS (
+          SELECT ac.id FROM agent_channels ac
+          WHERE ac.owner_adapter_id = ${adapterId}
+            AND ac.status IN ('active', 'needs_attention')
+          ORDER BY ac.created_at DESC
+          LIMIT ${owned - fair}
+          FOR UPDATE OF ac SKIP LOCKED
+        )
+        UPDATE agent_channels ac
+        SET owner_adapter_id = NULL,
+            owner_lease_expires_at = NULL
+        FROM shed s
+        WHERE ac.id = s.id`;
+    }
+  });
+};
+
 /**
  * `ifNoneMatch` lets the caller skip the WORK, not just the bytes: the etag is
  * computed from the plain rows (identity + shape, never secrets), and when it
  * matches we return 304 BEFORE decrypting anything. Cloud crypto is a KMS call
  * per credential, and the adapter polls every ~10s — decrypting the whole fleet
  * each idle poll would be thousands of needless KMS calls a day.
+ *
+ * The feed serves the CALLER'S SLICE: presences it holds a live ownership
+ * lease on (claimed at the top of this very call). Slice changes — claim,
+ * shed, failover — bust the etag naturally because the row set changes.
  */
 export const getAdapterConfig = async (
+  caller: { adapterId: string; kind: string },
   ifNoneMatch?: string,
 ): Promise<AdapterConfigResult> => {
+  await runOwnershipPass(caller.adapterId);
+
   const rows = await db.agentChannel.findMany({
-    where: { status: { in: ["active", "needs_attention"] } },
+    where: {
+      status: { in: ["active", "needs_attention"] },
+      ownerAdapterId: caller.adapterId,
+    },
     select: {
       id: true,
       provider: true,
@@ -199,7 +381,19 @@ export const getAdapterConfig = async (
           // The avatar rides the config feed — a changed key must bust the
           // etag or the adapter serves the old icon until an unrelated change.
           r.agent.imageKey ?? "",
-          r.threadLinks.map((l) => [l.id, l.mirrorCursor?.toISOString() ?? ""]),
+          // The cursor split: an ANCHOR-identity caller (old binary) seeds
+          // its mirror-CAS expectations ONLY from this feed, so cursors must
+          // keep busting its etag or a mid-history acquisition 304-freezes
+          // into a CAS livelock. An INSTANCE caller has the client code that
+          // reads `linkMirrorCursor` off each work item instead, so its etag
+          // folds only link membership — a mirrored turn stops busting the
+          // whole feed.
+          caller.kind === "instance"
+            ? r.threadLinks.map((l) => l.id)
+            : r.threadLinks.map((l) => [
+                l.id,
+                l.mirrorCursor?.toISOString() ?? "",
+              ]),
         ]),
       ]),
     )
@@ -209,7 +403,6 @@ export const getAdapterConfig = async (
     return { notModified: true, etag };
   }
 
-  const crypto = getCrypto();
   // The icon URL is for the PROVIDER to fetch (Slack's `icon_url`), unlike
   // the browser-facing list/detail projections — a localhost/plain-http
   // origin is unreachable from Slack and shouldn't leak into its payloads,
@@ -237,7 +430,7 @@ export const getAdapterConfig = async (
         name: row.integration.name,
       },
       credentialsJson: row.credentials
-        ? await crypto.decrypt(row.credentials)
+        ? await decryptCached(row.credentials)
         : null,
       approvalsKey: row.apiKey?.key ?? null,
       links: row.threadLinks,
@@ -322,6 +515,10 @@ export interface AdapterWorkItem {
    * carries its OWN author's display name: on a group thread the follow-up
    * author can differ from the turn's asker. */
   followUps: { message: string; source: string; userName: string | null }[];
+  /** The link's stored mirror cursor when this item was served — the CAS-seed
+   * floor for an instance that acquired the link mid-history (its etag no
+   * longer folds cursors, so the config feed can't be its seed source). */
+  linkMirrorCursor: Date | null;
 }
 
 export interface AdapterWork {
@@ -345,11 +542,16 @@ const workTurnSelect = {
 /**
  * The batched pending-work poll (one call, one indexed query) that replaces
  * per-link polling: every finished turn awaiting its completion post, across
- * every linked conversation. The adapter calls this every ~2s; the shape is
- * the seam — pace, sharding, and push all evolve inside here.
+ * the CALLER'S linked conversations — the ownership claim (taken by the
+ * config poll) shards this feed too, so each instance's per-link OR spans
+ * only its slice. The adapter calls this every ~2s; the shape is the seam —
+ * pace and push still evolve inside here.
  */
-export const getAdapterWork = async (): Promise<AdapterWork> => {
+export const getAdapterWork = async (
+  adapterId: string,
+): Promise<AdapterWork> => {
   const links = await db.channelThreadLink.findMany({
+    where: { agentChannel: { ownerAdapterId: adapterId } },
     select: {
       id: true,
       conversationId: true,
@@ -518,6 +720,7 @@ export const getAdapterWork = async (): Promise<AdapterWork> => {
         createdAt: timelineOf(turn),
       },
       followUps: followUpsByTarget.get(turn.id) ?? [],
+      linkMirrorCursor: link.mirrorCursor,
     };
   };
 
@@ -614,11 +817,13 @@ export const settleApprovalPrompt = async (
   };
 };
 
-/** Pending prompts, for a restarted adapter to re-arm expiry against the real
- * gateway deadline (`expiresAt`) rather than a guess. */
-export const listUnsettledPrompts = async () =>
+/** Pending prompts of the CALLER'S slice, for re-arming expiry against the
+ * real gateway deadline (`expiresAt`) rather than a guess — at boot, and on
+ * every ownership acquisition (the feed is owner-scoped, so a failed-over
+ * presence's stranded cards are re-armed by whoever inherits it). */
+export const listUnsettledPrompts = async (adapterId: string) =>
   db.channelApprovalPrompt.findMany({
-    where: { state: "pending" },
+    where: { state: "pending", agentChannel: { ownerAdapterId: adapterId } },
     select: {
       approvalId: true,
       agentChannelId: true,

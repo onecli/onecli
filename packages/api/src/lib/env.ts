@@ -8,23 +8,16 @@
 
 import { capabilitiesFor, parseEdition } from "./edition";
 import { isEntitled } from "./entitlements";
+import { firstConfigured, gatewayHttpOrigin } from "./public-origins";
 
 // ── App URLs ────────────────────────────────────────────────────────────
-
-export const APP_URL =
-  process.env.APP_URL ??
-  process.env.NEXT_PUBLIC_APP_URL ??
-  "http://localhost:10254";
-
-export const API_URL =
-  process.env.API_URL ??
-  process.env.NEXT_PUBLIC_API_URL ??
-  "http://localhost:10256";
-
-export const GATEWAY_API_URL =
-  process.env.GATEWAY_API_URL ??
-  process.env.NEXT_PUBLIC_GATEWAY_API_URL ??
-  "http://localhost:10255";
+//
+// The public URLs live in `public-origins.ts` (the one resolver): use
+// `appOrigin()` / `apiOrigin()` / `gatewayHttpOrigin()` / `agentProxyAddress()`
+// for advertise-plane values, and `configuredAppUrl()` / `configuredApiUrl()`
+// (via `lib/app-origin.ts`) when "was anything configured?" matters. The old
+// module-load constants were deleted deliberately: they defaulted to
+// localhost, so no caller could tell configured from defaulted.
 
 /**
  * Server-side address of the gateway (cache flushes): an explicit internal
@@ -32,11 +25,8 @@ export const GATEWAY_API_URL =
  * (the self-host compose points it at the gateway service), else the public
  * URL — which is exactly right on cloud and in single-host layouts.
  */
-export const GATEWAY_INTERNAL_URL =
-  process.env.GATEWAY_INTERNAL_URL ?? GATEWAY_API_URL;
-
-export const GATEWAY_BASE_URL =
-  process.env.GATEWAY_BASE_URL ?? "host.docker.internal:10255";
+export const getGatewayInternalUrl = (): string =>
+  firstConfigured(process.env.GATEWAY_INTERNAL_URL) ?? gatewayHttpOrigin();
 
 // ── Edition ─────────────────────────────────────────────────────────────
 
@@ -90,8 +80,8 @@ export const COGNITO_CLIENT_ID =
   process.env.NEXT_PUBLIC_COGNITO_CLIENT_ID ??
   "";
 
-export const COGNITO_DOMAIN =
-  process.env.COGNITO_DOMAIN ?? process.env.NEXT_PUBLIC_COGNITO_DOMAIN ?? "";
+// COGNITO_DOMAIN is deliberately not exported here: nothing in this package
+// reads it (the web app has its own live copy in apps/web/src/lib/env.ts).
 
 export const COGNITO_USER_POOL_ID =
   process.env.COGNITO_USER_POOL_ID ??
@@ -160,10 +150,85 @@ export const RUNNER_TOKEN = process.env.RUNNER_TOKEN ?? "";
  */
 export const CHANNEL_ADAPTER_TOKEN = process.env.CHANNEL_ADAPTER_TOKEN ?? "";
 
+// ── SSH front door (plans/sandbox-platform.md step 5) ─────────────────────
+
+/**
+ * The terminator's service secret — the narrow terminator↔control-plane
+ * channel (§3.8's pre-authorized fallback). Presenting exactly this value
+ * authorizes `/v1/ssh-terminator/*` and NOTHING else; empty means the
+ * surface refuses everything (the RUNNER_TOKEN dark posture). Never the
+ * runner↔manager secret, never a DB token family — one credential per plane.
+ */
+export const SSH_TERMINATOR_SECRET = process.env.SSH_TERMINATOR_SECRET ?? "";
+
+/**
+ * KMS asymmetric CA key (cloud): when set, `ensureEditionDefaults()` injects
+ * the KMS-backed signer. Onprem signs in-process with SSH_CA_PRIVATE_KEY
+ * instead. Neither set = the whole SSH surface is dark.
+ */
+export const SSH_CA_KMS_KEY_ARN = process.env.SSH_CA_KMS_KEY_ARN ?? "";
+
+/** Onprem CA: an ed25519 PKCS#8 PEM private key. Unset = surface dark. */
+export const SSH_CA_PRIVATE_KEY = process.env.SSH_CA_PRIVATE_KEY ?? "";
+
+/** Public SSH endpoint host (e.g. `ssh-dev.onecli.sh`). Unset = surface dark. */
+export const SSH_HOST = process.env.SSH_HOST ?? "";
+
 const positiveInt = (raw: string | undefined, fallback: number): number => {
   const parsed = Number(raw);
   return Number.isInteger(parsed) && parsed > 0 ? parsed : fallback;
 };
+
+/** Minted certificate lifetime — gates NEW auth only, never live sessions. */
+export const SSH_CERT_TTL_SECONDS = positiveInt(
+  process.env.SSH_CERT_TTL_SECONDS,
+  600,
+);
+
+/** Per-(user, agent) mint budget per hour (anti-abuse, fail-closed on DB error). */
+export const SSH_CERT_MINTS_PER_HOUR = positiveInt(
+  process.env.SSH_CERT_MINTS_PER_HOUR,
+  30,
+);
+
+/**
+ * Concurrent lease-current sessions per agent.
+ *
+ * Sized from real client behaviour, not a round number: one editor session
+ * (VS Code Remote opens the server bootstrap plus a probe connection, and
+ * without ControlMaster each window adds one), one or two hand terminals, and
+ * a transient `scp`/`sftp` already reaches five. The earlier ceiling of 3
+ * refused a single developer mid-workflow on the dev live gate. Each session
+ * costs one ServiceAccount/Role/RoleBinding plus one exec stream, so the real
+ * protections are the terminator's global and per-IP caps — this one only
+ * stops one agent from being used as an unbounded fan-out.
+ */
+export const SSH_MAX_SESSIONS_PER_AGENT = positiveInt(
+  process.env.SSH_MAX_SESSIONS_PER_AGENT,
+  8,
+);
+
+/** Hard ceiling on one session; also bounds the broker grant's lifetime. */
+export const SSH_MAX_SESSION_SECONDS = positiveInt(
+  process.env.SSH_MAX_SESSION_SECONDS,
+  43200,
+);
+
+/** Terminator-enforced idle timeout, returned in the session policy. */
+export const SSH_IDLE_TIMEOUT_SECONDS = positiveInt(
+  process.env.SSH_IDLE_TIMEOUT_SECONDS,
+  1800,
+);
+
+/**
+ * The session lease: a session whose last heartbeat is older than this is
+ * treated as dead by every consumer (keep-awake, start dueness, the cap) and
+ * closed by the stale-session sweep. 3× the terminator's 30s heartbeat.
+ */
+export const SSH_SESSION_LEASE_SECONDS = positiveInt(
+  process.env.SSH_SESSION_LEASE_SECONDS,
+  90,
+);
 
 /** A runner whose last heartbeat is older than this is offline (§3.13). */
 export const RUNNER_ONLINE_THRESHOLD_SECONDS = positiveInt(

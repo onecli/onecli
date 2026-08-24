@@ -19,6 +19,7 @@ import {
   parkUnstartableClaim,
   waitForWork,
 } from "../services/due-work";
+import { createLogClaimWait } from "../services/claim-wait-log";
 import { fireDueCrons } from "../services/cron-fire-service";
 import { fireDueWatches } from "../services/watch-fire-service";
 import { promoteParkedFollowUps } from "../services/follow-up-service";
@@ -33,11 +34,12 @@ import {
   planTurnAttachments,
   sweepStalePendingAttachments,
 } from "../services/attachment-service";
+import { sweepSshSessions } from "../services/ssh-service";
 import {
   applyRunnerEvent,
   buildSandboxStartPayload,
   listMissingSandboxIds,
-  listRunnerSandboxIds,
+  listRunnerSandboxes,
 } from "../services/sandbox-service";
 import { applyTurnEvents, finishTurn } from "../services/turn-service";
 import { buildTurnContext } from "../services/turn-context-service";
@@ -50,6 +52,9 @@ import {
 import { logger } from "../lib/logger";
 
 const log = logger.child({ component: "runner-routes" });
+
+/** The turn-queue telemetry line — see services/claim-wait-log.ts. */
+const logClaimWait = createLogClaimWait(logger);
 
 /**
  * The runner daemon's API (plans/hosted-agents-v2.md §3.3): outbound-only, so
@@ -165,6 +170,13 @@ export const runnerRoutes = () => {
     await sweepStalePendingAttachments().catch((err: unknown) =>
       log.warn({ err }, "stale attachment sweep failed"),
     );
+    // SSH sessions a crashed terminator abandoned (sandbox-platform step 5):
+    // lease-expired rows are closed here so the per-agent cap and the audit
+    // record stay honest — keep-awake already ignores them (the lease is the
+    // truth). Same non-fatal posture.
+    await sweepSshSessions().catch((err: unknown) =>
+      log.warn({ err }, "ssh session sweep failed"),
+    );
 
     const limit = parsed.data.limit ?? DEFAULT_LIMIT;
     const deadline =
@@ -179,6 +191,7 @@ export const runnerRoutes = () => {
         const items: RunnerWorkItem[] = [];
         for (const due of claimed) {
           if (due.kind === "turn") {
+            logClaimWait(due.waitedSince, due.turnId);
             // The memory context (step 8) is composed here, at dispatch time,
             // from current truth — and a failing builder ships the turn
             // WITHOUT context rather than blocking it: memory flavors a turn,
@@ -485,11 +498,17 @@ export const runnerRoutes = () => {
    * GET /runner/sandboxes — what this runner should be hosting. The runner
    * reconciles its local containers against this: anything labeled as ours
    * and absent here is an orphan to destroy (which is how agent deletion
-   * reaches the compute plane).
+   * reaches the compute plane). `statuses` rides along (additive-optional on
+   * the wire) so reconcile can also run the reverse diff — a sandbox believed
+   * `running` with no backend snapshot is a pod that vanished out-of-band.
    */
   app.get("/sandboxes", async (c) => {
     const { runnerId } = c.get("runner");
-    return c.json({ sandboxIds: await listRunnerSandboxIds(runnerId) });
+    const rows = await listRunnerSandboxes(runnerId);
+    return c.json({
+      sandboxIds: rows.map((row) => row.id),
+      statuses: Object.fromEntries(rows.map((row) => [row.id, row.status])),
+    });
   });
 
   /**

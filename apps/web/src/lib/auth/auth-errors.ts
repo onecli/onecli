@@ -48,7 +48,16 @@ const MESSAGES = new Map<string, string>([
   // trusted origins, so say what to fix rather than blaming the credentials.
   [
     "INVALID_ORIGIN",
-    "This dashboard's address is not trusted by the API. Set APP_URL to the URL you browse to, then restart.",
+    "This dashboard's address is not trusted by the API. Set ONECLI_EXTERNAL_URL to the URL you browse to, then restart.",
+  ],
+  // Google sign-in met an existing password account it could not safely
+  // absorb (linking requires the existing account's email to be verified;
+  // stock self-hosts send no verification mail). The password still works.
+  // Only ever reaches us lowercase, via the social-refusal `?error=`
+  // redirect — better-auth 1.6.26 has no uppercase API-body twin.
+  [
+    "account_not_linked",
+    "This email already has a password account. Sign in with your password instead.",
   ],
 ]);
 

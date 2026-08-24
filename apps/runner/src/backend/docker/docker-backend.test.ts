@@ -215,6 +215,27 @@ describe("createSandbox", () => {
     ).toEqual(["ALL"]);
   });
 
+  it("never weakens the daemon's default seccomp profile (the shared-kernel userns gate)", async () => {
+    // The agent image ships podman; on this SHARED kernel the default seccomp
+    // profile is what actually blocks the `unshare`/`clone` namespace syscalls
+    // rootless containers need (CapDrop:ALL + no-new-privileges disarm the
+    // capability and setuid paths, but seccomp is the syscall gate). A
+    // `seccomp=unconfined` SecurityOpt here would silently re-open rootless
+    // podman on the shared kernel — assert no SecurityOpt touches seccomp.
+    const { backend, calls } = makeBackend({ "/networks?": [] });
+    await backend.prepare();
+    await backend.createSandbox(spec);
+
+    const create = calls.find((call) =>
+      call.path.includes("/containers/create"),
+    );
+    const securityOpt = (
+      create?.body as { HostConfig: { SecurityOpt: string[] } }
+    ).HostConfig.SecurityOpt;
+    expect(securityOpt).toEqual(["no-new-privileges"]);
+    expect(securityOpt.some((opt) => opt.includes("seccomp"))).toBe(false);
+  });
+
   it("labels the container for reconcile, including the payload hash", async () => {
     const { backend, calls } = makeBackend({ "/networks?": [] });
     await backend.prepare();
@@ -240,8 +261,9 @@ describe("createSandbox", () => {
     const ref = await backend.createSandbox(spec);
     await backend.startSandbox(ref);
 
-    const archiveIndex = calls.findIndex((call) =>
-      call.path.includes("/archive"),
+    // The PUT specifically — the existence probe is also an /archive call.
+    const archiveIndex = calls.findIndex(
+      (call) => call.method === "PUT" && call.path.includes("/archive"),
     );
     const startIndex = calls.findIndex((call) => call.path.includes("/start"));
     expect(archiveIndex).toBeGreaterThan(-1);
@@ -261,6 +283,281 @@ describe("createSandbox", () => {
       "HTTPS_PROXY=http://x:aoc_t@gateway:10255",
       "ANTHROPIC_API_KEY=placeholder",
     ]);
+  });
+});
+
+describe("putFiles (payload file injection)", () => {
+  /**
+   * A transport with a tiny stateful filesystem: HEAD /archive answers from
+   * the set of existing paths, PUT /archive registers what its tar declares,
+   * and every call is recorded in order — so the ancestor walk BITES here. A
+   * 200-for-everything default (the generic recording transport) would let a
+   * wrong PUT target or a duplicate directory entry pass vacuously.
+   */
+  const createArchiveTransport = (existingPaths: string[]) => {
+    const calls: Array<{ method: string; path: string; raw?: Buffer }> = [];
+    const existing = new Set(existingPaths);
+
+    const queryPath = (path: string): string =>
+      new URLSearchParams(path.split("?")[1] ?? "").get("path") ?? "";
+
+    const transport: EngineTransport = {
+      async request({ method, path, body }) {
+        calls.push({
+          method,
+          path,
+          ...(Buffer.isBuffer(body) && { raw: body }),
+        });
+
+        if (path.endsWith("/version")) {
+          return {
+            statusCode: 200,
+            body: jsonBody({ ApiVersion: "1.47", MinAPIVersion: "1.24" }),
+          };
+        }
+        if (path.includes("/archive")) {
+          const target = queryPath(path);
+          if (method === "HEAD") {
+            return {
+              statusCode: existing.has(target) ? 200 : 404,
+              body: jsonBody(""),
+            };
+          }
+          // PUT: register the extraction results so a later group's probe
+          // sees them, exactly as a real daemon would.
+          if (Buffer.isBuffer(body)) {
+            for (const entry of parseTarEntries(body)) {
+              existing.add(
+                `${target}/${entry.name}`
+                  .replace(/\/+/g, "/")
+                  .replace(/\/$/, ""),
+              );
+            }
+          }
+          return { statusCode: 200, body: jsonBody({}) };
+        }
+        return { statusCode: 200, body: jsonBody({ Id: "cont-created" }) };
+      },
+      close: async () => {},
+    };
+
+    return { transport, calls };
+  };
+
+  /** Decode the headers of every entry in a USTAR archive. */
+  const parseTarEntries = (archive: Buffer) => {
+    const entries: Array<{
+      name: string;
+      typeflag: string;
+      mode: number;
+      uid: number;
+      gid: number;
+      size: number;
+    }> = [];
+    let offset = 0;
+    while (offset + 512 <= archive.length) {
+      const name = archive
+        .subarray(offset, offset + 100)
+        .toString("utf8")
+        .replace(/\0+$/, "");
+      if (!name) break;
+      const octal = (at: number, length: number) =>
+        parseInt(
+          archive
+            .subarray(offset + at, offset + at + length)
+            .toString("ascii")
+            .replace(/\0+$/, ""),
+          8,
+        );
+      const size = octal(124, 11);
+      entries.push({
+        name,
+        typeflag: archive
+          .subarray(offset + 156, offset + 157)
+          .toString("ascii"),
+        mode: octal(100, 7),
+        uid: octal(108, 7),
+        gid: octal(116, 7),
+        size,
+      });
+      offset += 512 + Math.ceil(size / 512) * 512;
+    }
+    return entries;
+  };
+
+  const makeArchiveBackend = (existingPaths: string[]) => {
+    const { transport, calls } = createArchiveTransport(existingPaths);
+    const backend = createDockerBackend({
+      runnerId: "r-1",
+      installationId: "inst-abc",
+      network: "onecli-sandboxes",
+      networkInternal: true,
+      socketPath: "/var/run/docker.sock",
+      transport,
+    });
+    return { backend, calls };
+  };
+
+  const archiveCalls = (calls: Array<{ method: string; path: string }>) =>
+    calls
+      .filter((call) => call.path.includes("/archive"))
+      .map((call) => ({
+        method: call.method,
+        target: new URLSearchParams(call.path.split("?")[1] ?? "").get("path"),
+      }));
+
+  const codexSpec = {
+    ...spec,
+    files: [
+      { containerPath: "/tmp/onecli-gateway-ca.pem", content: "PEM" },
+      {
+        containerPath: "/home/node/.codex/auth.json",
+        content: "{}",
+        mode: 0o600,
+      },
+    ],
+  };
+
+  it("existing target dir: ONE probe, direct PUT, zero directory entries", async () => {
+    const { backend, calls } = makeArchiveBackend(["/tmp"]);
+    await backend.createSandbox({ ...spec });
+
+    expect(archiveCalls(calls)).toEqual([
+      { method: "HEAD", target: "/tmp" },
+      { method: "PUT", target: "/tmp" },
+    ]);
+    const put = calls.find((call) => call.method === "PUT" && call.raw);
+    const entries = parseTarEntries(put!.raw!);
+    expect(entries).toHaveLength(1);
+    expect(entries[0]).toMatchObject({
+      name: "onecli-gateway-ca.pem",
+      typeflag: "0",
+      mode: 0o644,
+      uid: 1000,
+      gid: 1000,
+    });
+  });
+
+  it("missing dir: walks to the deepest EXISTING ancestor and creates the chain node-owned", async () => {
+    // The codex shape: /home/node exists in the image, .codex does not.
+    const { backend, calls } = makeArchiveBackend(["/tmp", "/home/node"]);
+    await backend.createSandbox(codexSpec);
+
+    expect(archiveCalls(calls)).toEqual([
+      { method: "HEAD", target: "/tmp" },
+      { method: "PUT", target: "/tmp" },
+      { method: "HEAD", target: "/home/node/.codex" },
+      { method: "HEAD", target: "/home/node" },
+      // The PUT lands on the ancestor that EXISTS — the target dir rides
+      // inside the archive.
+      { method: "PUT", target: "/home/node" },
+    ]);
+
+    const puts = calls.filter((call) => call.method === "PUT" && call.raw);
+    const stubEntries = parseTarEntries(puts[1]!.raw!);
+    expect(stubEntries).toEqual([
+      // Chain first, node-owned and writable by the workload — never
+      // root-owned dirs the agent cannot use (the cloud boot script's
+      // `install -d -o node -g node` contract).
+      {
+        name: ".codex/",
+        typeflag: "5",
+        mode: 0o755,
+        uid: 1000,
+        gid: 1000,
+        size: 0,
+      },
+      {
+        name: ".codex/auth.json",
+        typeflag: "0",
+        mode: 0o600,
+        uid: 1000,
+        gid: 1000,
+        size: 2,
+      },
+    ]);
+  });
+
+  it("never re-declares a directory an earlier group created (existing dirs get MUTATED by dir entries)", async () => {
+    const { backend, calls } = makeArchiveBackend(["/tmp"]);
+    await backend.createSandbox({
+      ...spec,
+      files: [
+        { containerPath: "/opt/newdir/a.txt", content: "A" },
+        { containerPath: "/opt/newdir/sub/b.txt", content: "B" },
+      ],
+    });
+
+    const puts = calls.filter((call) => call.method === "PUT" && call.raw);
+    expect(puts).toHaveLength(2);
+    // Group 2's probe found /opt/newdir (created by group 1's PUT): its
+    // archive declares ONLY the still-missing `sub/`, never `newdir/` again.
+    const second = parseTarEntries(puts[1]!.raw!);
+    expect(second.map((entry) => [entry.name, entry.typeflag])).toEqual([
+      ["sub/", "5"],
+      ["sub/b.txt", "0"],
+    ]);
+  });
+
+  it("a vanished container (every probe 404s) stops at / and lets the PUT surface the error", async () => {
+    const { backend, calls } = makeArchiveBackend([]);
+    // Every HEAD 404s; the PUT to "/" then fails on the real daemon — here it
+    // records, which is all the walk-termination pin needs.
+    await backend.createSandbox({
+      ...spec,
+      files: [{ containerPath: "/foo/bar.txt", content: "X" }],
+    });
+    expect(archiveCalls(calls)).toEqual([
+      { method: "HEAD", target: "/foo" },
+      { method: "PUT", target: "/" },
+    ]);
+  });
+
+  it("REFUSES a relative payload path before touching the engine", async () => {
+    const { backend, calls } = makeArchiveBackend(["/tmp"]);
+    await expect(
+      backend.createSandbox({
+        ...spec,
+        files: [{ containerPath: "etc/passwd", content: "X" }],
+      }),
+    ).rejects.toThrow(/not an absolute/);
+    expect(calls.some((call) => call.path.includes("/archive"))).toBe(false);
+  });
+
+  it("REFUSES traversal, durable-home, and system-directory targets", async () => {
+    const { backend } = makeArchiveBackend(["/tmp"]);
+    await expect(
+      backend.createSandbox({
+        ...spec,
+        files: [{ containerPath: "/tmp/../etc/shadow", content: "X" }],
+      }),
+    ).rejects.toThrow(/".."/);
+    await expect(
+      backend.createSandbox({
+        ...spec,
+        files: [{ containerPath: "/workspace/.home/.bashrc", content: "X" }],
+      }),
+    ).rejects.toThrow(/durable home/);
+    // A control-plane bug must never overwrite the image's own tooling.
+    await expect(
+      backend.createSandbox({
+        ...spec,
+        files: [{ containerPath: "/usr/local/bin/node", content: "X" }],
+      }),
+    ).rejects.toThrow(/system directory/);
+  });
+
+  it("strips setuid/setgid/sticky from payload modes — permission bits only", async () => {
+    const { backend, calls } = makeArchiveBackend(["/tmp"]);
+    await backend.createSandbox({
+      ...spec,
+      files: [{ containerPath: "/tmp/tool", content: "X", mode: 0o4755 }],
+    });
+    const put = calls.find((call) => call.method === "PUT" && call.raw);
+    expect(parseTarEntries(put!.raw!)[0]).toMatchObject({
+      name: "tool",
+      mode: 0o755,
+    });
   });
 });
 

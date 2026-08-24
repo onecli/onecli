@@ -65,6 +65,12 @@ export default function DashboardLayout({
           sessionData = await res.json();
           break;
         }
+        if (res.status === 429) {
+          // Rate limited: retrying inside the window only feeds the limiter.
+          // Fall through with no session data — the dashboard renders anyway
+          // (the same graceful arm as a deploy-time outage).
+          break;
+        }
       } catch {
         // network error — fall through to retry
       }

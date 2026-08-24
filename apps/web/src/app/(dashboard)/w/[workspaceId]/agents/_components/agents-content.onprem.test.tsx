@@ -36,6 +36,7 @@ vi.mock("@/hooks/use-grants", () => ({
 
 vi.mock("@/hooks/use-hosted-availability", () => ({
   useHostedAvailability: () => "ready",
+  useHomeDurabilityMessage: () => null,
 }));
 
 vi.mock("./agent-card", () => ({

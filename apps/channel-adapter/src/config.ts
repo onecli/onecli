@@ -1,3 +1,9 @@
+import { hostname } from "node:os";
+import {
+  OriginConfigError,
+  resolvePublicOrigins,
+} from "@onecli/api/lib/public-origins";
+
 /**
  * Adapter configuration — every address is config with a local default
  * (§3.14 rule 3), read once at boot. Mirrors `apps/runner/src/config.ts`:
@@ -5,8 +11,14 @@
  */
 
 export interface AdapterConfig {
-  /** The `cha_` registration/bearer token (the instance anchor). */
+  /** The `cha_` registration anchor. The instance's own bearer is minted at
+   * registration (per-instance identity); the anchor only proves membership —
+   * and remains the bearer against an old control plane that mints nothing. */
   token: string;
+  /** The instance's stable name — the key its registration row survives
+   * restarts under. Unset, it derives from the hostname: unique per ECS task
+   * and per container with zero configuration (compose and `pnpm dev` both
+   * set an explicit name). */
   name: string;
   /** The control plane's /v1 origin. */
   controlPlaneUrl: string;
@@ -18,11 +30,16 @@ export interface AdapterConfig {
   workPollMs: number;
   /** Gateway approvals long-poll hold, seconds (the gateway holds ~30s). */
   approvalsPollSeconds: number;
-  /** The dashboard's public origin — where "fix it" buttons point. First
-   * non-empty of APP_URL then NEXT_PUBLIC_APP_URL (a present-but-empty
-   * APP_URL falls through, matching `configuredAppUrl()`); empty string when
-   * neither is set (buttons are simply omitted). */
+  /** The dashboard's public origin — where "fix it" buttons point. Resolved
+   * by the shared resolver (`@onecli/api/lib/public-origins`): the canonical
+   * ONECLI_EXTERNAL_URL, the APP_URL alias, then the warned legacy bind
+   * seed; empty string when nothing is configured (buttons are simply
+   * omitted — the localhost default would point Slack users at their own
+   * machines). */
   appUrl: string;
+  /** True when `appUrl` came from the deprecated ONECLI_BIND_HOST seed —
+   * the adapter logs one deprecation line at boot. */
+  appUrlFromLegacyBind: boolean;
 }
 
 export class ConfigError extends Error {}
@@ -32,17 +49,6 @@ const positiveInt = (raw: string | undefined, fallback: number): number => {
   return Number.isInteger(parsed) && parsed > 0 ? parsed : fallback;
 };
 
-/** First env var with a non-empty value after trimming — the local copy of
- * `configuredAppUrl()`'s rule (the adapter cannot import `packages/api`). A
- * present-but-empty var falls through to the next; `""` when none is set. */
-const firstConfigured = (...values: (string | undefined)[]): string => {
-  for (const value of values) {
-    const trimmed = value?.trim();
-    if (trimmed) return trimmed;
-  }
-  return "";
-};
-
 export const loadConfig = (env: NodeJS.ProcessEnv): AdapterConfig => {
   const token = env.CHANNEL_ADAPTER_TOKEN ?? "";
   if (!token.startsWith("cha_")) {
@@ -50,9 +56,27 @@ export const loadConfig = (env: NodeJS.ProcessEnv): AdapterConfig => {
       'CHANNEL_ADAPTER_TOKEN must be set and start with "cha_". install.sh provisions it; scripts/dev-check.mjs mints one for dev.',
     );
   }
+  // The dashboard-origin chain (canonical, alias, legacy bind seed) comes
+  // from the ONE resolver — public-origins is a zero-import leaf, safe to
+  // bundle here, and it takes a caller-supplied env bag exactly like this
+  // function does. A malformed ONECLI_EXTERNAL_URL becomes the adapter's
+  // usual exit-2 ConfigError (the same boot-throw posture as the api-server).
+  let resolved: ReturnType<typeof resolvePublicOrigins>;
+  try {
+    resolved = resolvePublicOrigins({
+      externalUrl: env.ONECLI_EXTERNAL_URL,
+      appUrl: env.APP_URL,
+      nextPublicAppUrl: env.NEXT_PUBLIC_APP_URL,
+      bindHost: env.ONECLI_BIND_HOST,
+      appPort: env.ONECLI_APP_PORT,
+    });
+  } catch (err) {
+    if (err instanceof OriginConfigError) throw new ConfigError(err.message);
+    throw err;
+  }
   return {
     token,
-    name: env.CHANNEL_ADAPTER_NAME ?? "channel-adapter",
+    name: env.CHANNEL_ADAPTER_NAME?.trim() || `channel-adapter-${hostname()}`,
     controlPlaneUrl: (
       env.CONTROL_PLANE_URL ?? "http://localhost:10256"
     ).replace(/\/$/, ""),
@@ -66,9 +90,7 @@ export const loadConfig = (env: NodeJS.ProcessEnv): AdapterConfig => {
       env.CHANNEL_ADAPTER_APPROVALS_POLL_SECONDS,
       25,
     ),
-    appUrl: firstConfigured(env.APP_URL, env.NEXT_PUBLIC_APP_URL).replace(
-      /\/+$/,
-      "",
-    ),
+    appUrl: resolved.externalConfigured ? resolved.app : "",
+    appUrlFromLegacyBind: resolved.sources.external.source === "legacy-bind",
   };
 };

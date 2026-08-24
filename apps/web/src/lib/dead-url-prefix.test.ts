@@ -52,9 +52,4 @@ describe("the retired dashboard URL prefix", () => {
     // MUTATION-PROOF: reintroduce one dead link and this fails.
     expect(deadPrefixHits()).toEqual([]);
   });
-
-  it("the matcher actually detects the pattern it guards", () => {
-    // Guards the guard: a broken matcher makes the assertion above vacuous.
-    expect(`\`${DEAD_PREFIX}\${id}/overview\``).toContain(DEAD_PREFIX);
-  });
 });

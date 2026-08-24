@@ -9,8 +9,6 @@ import {
   readExternalAuthId,
 } from "./better-auth-contract";
 import {
-  API_URL,
-  APP_URL,
   BETTER_AUTH_SECRET,
   GOOGLE_CLIENT_ID,
   GOOGLE_CLIENT_SECRET,
@@ -18,6 +16,12 @@ import {
 } from "./env";
 import { logger } from "./logger";
 import { configuredApiUrl, configuredAppUrl } from "./app-origin";
+import {
+  apiOrigin,
+  appOrigin,
+  buildTrustedOrigins,
+  resolveOriginsFromEnv,
+} from "./public-origins";
 import { resolveCookieDomain } from "./cookie-domain";
 import { assertUpgradeWindowClear } from "./registration";
 import { sendPasswordResetEmail } from "../services/password-reset-email";
@@ -279,13 +283,48 @@ export const createOnpremAuth = (options: OnpremAuthOptions) => {
       },
     },
 
+    // Implicit linking (a Google sign-in whose email matches an existing
+    // account links instead of refusing) is better-auth's DEFAULT — `enabled`
+    // is pinned true here only so the posture is stated, not inherited. The
+    // one real knob is `allowDifferentEmails`, which covers the OTHER flow: a
+    // LOGGED-IN user clicking "Continue with Google" is attaching that Google
+    // identity to their own session's account, where requiring the addresses
+    // to match would refuse exactly the case linking exists for.
+    //
+    // TWO FENCES STAY AT THE LIBRARY DEFAULT, DELIBERATELY (better-auth
+    // 1.6.26, oauth2/link-account.mjs):
+    //
+    // - No `trustedProviders`. Naming a provider there does exactly one
+    //   thing: it waives the check that the PROVIDER-side email is verified
+    //   (`userInfo.emailVerified`). Real Google sign-ins carry
+    //   email_verified: true and link fine without it; the only identities
+    //   the waiver admits are ones whose inbox ownership Google explicitly
+    //   did NOT vouch for — which is an account-takeover path against any
+    //   verified local account. Adding a provider to that list must fail the
+    //   posture test first.
+    //
+    // - `requireLocalEmailVerified` stays true, so implicit linking still
+    //   refuses when the EXISTING account's email is unverified — the common
+    //   state on a stock self-host, where no email service runs.
+    //   Registration is open on self-host, so an attacker can pre-register a
+    //   victim's address with a password and wait; refusing unverified-local
+    //   links is what keeps that squatter account from absorbing the
+    //   victim's Google identity. The refused case gets actionable copy
+    //   instead (auth-errors.ts): sign in with the password.
+    account: {
+      accountLinking: {
+        enabled: true,
+        allowDifferentEmails: true,
+      },
+    },
+
     onAPIError: {
       // Where a failed OAuth callback sends the browser. The default is
       // `${baseURL}/error` — this API's own origin, which serves JSON and has
       // no such route, so a refused social sign-up would end on a 404 instead
       // of a page that explains itself. The dashboard's login screen reads the
       // `?error=` it arrives with.
-      errorURL: `${APP_URL}/auth/login`,
+      errorURL: `${appOrigin()}/auth/login`,
     },
   });
 };
@@ -331,7 +370,7 @@ export const getOnpremAuth = (): OnpremAuth => {
 
     cached = createOnpremAuth({
       secret: BETTER_AUTH_SECRET,
-      baseURL: API_URL,
+      baseURL: apiOrigin(),
       trustedOrigins: trustedOrigins(),
       cookieDomain: cookie.kind === "shared" ? cookie.domain : undefined,
       google:
@@ -362,10 +401,15 @@ export const getOnpremAuth = (): OnpremAuth => {
  * every cookie-bearing POST and redirect target. The API's own origin is
  * trusted implicitly from `baseURL`.
  *
- * `APP_URL` is already how the rest of the product addresses the dashboard;
- * a prebuilt image cannot know it, so an unset value is a misconfiguration
- * worth saying out loud — the symptom is a 403 INVALID_ORIGIN on sign-in
- * with no obvious cause (proven live against this exact configuration).
+ * The set comes from the resolver: the app origin plus its loopback twin
+ * (an operator typing 127.0.0.1 where the config says localhost must not
+ * face an unexplainable 403), any `ONECLI_TRUSTED_ORIGINS` extras, and the
+ * api origin when the two live on different hosts. Unconfigured deployments
+ * trust the localhost defaults — a prebuilt image cannot know its address,
+ * so the zero-config install must still let its own dashboard sign in — and
+ * the warning says out loud that any other address will be refused
+ * (the symptom is a 403 INVALID_ORIGIN on sign-in with no obvious cause,
+ * proven live against this exact configuration).
  *
  * DEV_TRUST_ANY_AUTH_ORIGIN=1 trusts every origin instead. It exists for
  * `pnpm dev`, where the browser may sit on any origin — localhost, or an
@@ -378,7 +422,7 @@ export const getOnpremAuth = (): OnpremAuth => {
  * so tests can prove it) ignores it in any production-configured process;
  * and the loud log line makes an escape visible. Exported for those tests.
  */
-export const trustedOrigins = (): string[] | undefined => {
+export const trustedOrigins = (): string[] => {
   if (
     process.env.DEV_TRUST_ANY_AUTH_ORIGIN === "1" &&
     process.env.NODE_ENV !== "production"
@@ -390,16 +434,21 @@ export const trustedOrigins = (): string[] | undefined => {
     );
     return ["*"];
   }
-  const appUrl = configuredAppUrl();
-  if (!appUrl) {
+  const resolved = resolveOriginsFromEnv();
+  const { origins, warnings } = buildTrustedOrigins(
+    resolved,
+    process.env.ONECLI_TRUSTED_ORIGINS,
+  );
+  for (const warning of warnings) logger.warn(warning);
+  if (!resolved.externalConfigured) {
     logger.warn(
-      "APP_URL is not set — sign-in and sign-out requests from the dashboard " +
-        "will be refused as untrusted origins. Set APP_URL to the URL users " +
-        "browse to.",
+      "ONECLI_EXTERNAL_URL is not set — only the localhost defaults are " +
+        "trusted, so sign-in from any other address will be refused as an " +
+        "untrusted origin. Set ONECLI_EXTERNAL_URL (or legacy APP_URL) to " +
+        "the URL users browse to.",
     );
-    return undefined;
   }
-  return [appUrl];
+  return origins;
 };
 
 /*

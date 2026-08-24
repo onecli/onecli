@@ -105,19 +105,37 @@ export const connectIntegration = async (
         "This token belongs to a different Slack workspace than the agents already attached here. Detach them first, or paste a token for the connected workspace.",
       );
     }
-    await db.channelIntegration.update({
-      where: { id: existing.id },
-      data: {
-        externalId: validated.tenant.externalId,
-        name: validated.tenant.name,
-        credentials: encrypted,
-        credentialsRotatedAt: new Date(),
-        createdByUserId: actorUserId,
-      },
-    });
+    // Under the rotate lock: a paste replacing a pair mid-rotation must
+    // serialize with that rotation, or the rotation's fenced write lands on
+    // a row the paste just moved (the count-0 tripwire, not the design).
+    await withIntegrationRotateLock(existing.id, (tx) =>
+      tx.channelIntegration.update({
+        where: { id: existing.id },
+        data: {
+          externalId: validated.tenant.externalId,
+          name: validated.tenant.name,
+          credentials: encrypted,
+          credentialsRotatedAt: new Date(),
+          createdByUserId: actorUserId,
+        },
+      }),
+    );
     return { provider, tenant: validated.tenant };
   }
 
+  if (existing) {
+    // Same-workspace re-paste: same lock, same reason.
+    await withIntegrationRotateLock(existing.id, (tx) =>
+      tx.channelIntegration.update({
+        where: { id: existing.id },
+        data: { credentials: encrypted, credentialsRotatedAt: new Date() },
+      }),
+    );
+    return { provider, tenant: validated.tenant };
+  }
+
+  // First connect: no row, so no rotation can be in flight for it. A racing
+  // first connect resolves on the (organizationId, provider) unique.
   await db.channelIntegration.upsert({
     where: { organizationId_provider: { organizationId, provider } },
     create: {
@@ -156,28 +174,203 @@ export const disconnectIntegration = async (
   });
   if (!existing) throw new ServiceError("NOT_FOUND", "Integration not found");
 
+  // Under the rotate lock: a disconnect is a deliberate revocation, and an
+  // in-flight rotation's count-0 reconcile would otherwise read the unlocked
+  // clear as "a stale refusal wiped my pair" and write the freshly rotated,
+  // fully LIVE credential back — silently undoing the revocation.
   if (existing._count.agentChannels === 0 && existing._count.userLinks === 0) {
-    await db.channelIntegration.delete({ where: { id: existing.id } });
+    await withIntegrationRotateLock(existing.id, (tx) =>
+      tx.channelIntegration.delete({ where: { id: existing.id } }),
+    );
     return;
   }
-  await db.channelIntegration.update({
-    where: { id: existing.id },
-    // The timestamp goes WITH the credential: `needsCredentials` derives "the
-    // token died" from `credentials == null && credentialsRotatedAt != null`,
-    // so leaving it would make a deliberate disconnect read as a failure.
-    data: { credentials: null, credentialsRotatedAt: null },
+  await withIntegrationRotateLock(existing.id, (tx) =>
+    tx.channelIntegration.update({
+      where: { id: existing.id },
+      // The timestamp goes WITH the credential: `needsCredentials` derives
+      // "the token died" from `credentials == null && credentialsRotatedAt !=
+      // null`, so leaving it would make a deliberate disconnect read as a
+      // failure — and its absence is ALSO what tells the rotation reconcile
+      // "this null is a revocation, never recover over it".
+      data: { credentials: null, credentialsRotatedAt: null },
+    }),
+  );
+};
+
+/**
+ * Per-integration mutual exclusion for every path that consumes or replaces
+ * the stored credential pair. Slack's refresh half is SINGLE-USE: two
+ * concurrent rotations of one row consume it twice, the loser's fenced clear
+ * can land before the winner's slow (KMS) write, and the org's live
+ * credential ends up nulled — a user-visible re-paste for no reason. The
+ * advisory xact lock (the policy-service idiom; parameterized, never
+ * concatenated) serializes rotate-vs-rotate, sweep-vs-on-use, and
+ * paste-vs-rotate; every locked section RE-READS the row via `tx` and
+ * re-decides before touching Slack. The transaction deliberately spans the
+ * provider's rotate call (bounded by its 15s client timeout) — rotations are
+ * rare (6h staleness) and the lock must cover read→rotate→persist or the
+ * single-use half leaks out of the fence.
+ */
+const withIntegrationRotateLock = <T>(
+  integrationId: string,
+  fn: (tx: Prisma.TransactionClient) => Promise<T>,
+): Promise<T> =>
+  db.$transaction(
+    async (tx) => {
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`channel-integration-rotate:${integrationId}`}))`;
+      return fn(tx);
+    },
+    // The 60s budget must outlive the WHOLE worst legitimate path — a prior
+    // holder's full rotation (Slack's 15s client timeout + KMS retries) as
+    // lock wait, then our own — because a tx that expires AFTER Slack
+    // consumed the single-use refresh half rolls back the persist and bricks
+    // the pair. maxWait (pool-connection acquisition) stays short: a
+    // saturated pool should fail fast, not stack waiters.
+    { timeout: 60_000, maxWait: 5_000 },
+  );
+
+type RotateRowOutcome =
+  | { outcome: "rotated"; credentialsJson: string }
+  | { outcome: "fresh"; credentialsJson: string }
+  | { outcome: "cleared"; reason: "refused" | "foreign_tenant" }
+  | { outcome: "gone" };
+
+/**
+ * The one locked rotate: re-read, re-decide, rotate, persist — shared by the
+ * on-use path and the proactive sweep. `force` is the sweep's arm (rotate
+ * regardless of expiry, but only when still STALE on the in-lock re-read: a
+ * claim that lost to a concurrent on-use rotation must not burn the fresh
+ * pair's single-use half for nothing).
+ */
+const rotateIntegrationRow = async (
+  tx: Prisma.TransactionClient,
+  integrationId: string,
+  opts: { force: boolean; staleCutoff?: Date },
+): Promise<RotateRowOutcome> => {
+  const row = await tx.channelIntegration.findUnique({
+    where: { id: integrationId },
+    select: {
+      id: true,
+      provider: true,
+      credentials: true,
+      credentialsRotatedAt: true,
+      externalId: true,
+    },
   });
+  if (!row?.credentials) return { outcome: "gone" };
+  if (
+    opts.force &&
+    opts.staleCutoff &&
+    row.credentialsRotatedAt &&
+    row.credentialsRotatedAt >= opts.staleCutoff
+  ) {
+    // A concurrent on-use rotation refreshed it after our claim — no longer
+    // stale, nothing to do.
+    return { outcome: "fresh", credentialsJson: "" };
+  }
+
+  const crypto = getCrypto();
+  const storedCiphertext = row.credentials;
+  const credentialsJson = await crypto.decrypt(storedCiphertext);
+  const impl = channelProvider(row.provider as ChannelProviderId);
+
+  let rotated: ValidatedIntegrationCredential | null;
+  try {
+    rotated = await impl.rotateIntegrationCredential(
+      credentialsJson,
+      opts.force ? { force: true } : undefined,
+    );
+  } catch (err) {
+    log.warn(
+      { err, integrationId, provider: row.provider },
+      "integration credential rotation refused; clearing for re-paste",
+    );
+    // Fenced on the ciphertext we read (a belt — under the lock nothing
+    // should have moved it): a pair we didn't rotate from is never wiped.
+    await tx.channelIntegration.updateMany({
+      where: { id: row.id, credentials: storedCiphertext },
+      data: { credentials: null },
+    });
+    return { outcome: "cleared", reason: "refused" };
+  }
+
+  if (rotated === null) return { outcome: "fresh", credentialsJson };
+
+  if (rotated.tenant.externalId !== row.externalId) {
+    // The rotation succeeded but named a workspace other than the one this
+    // org is bound to. Persisting the pair would hand the org's automation
+    // credential to a foreign tenant — and the stored pair is dead anyway
+    // (the rotate consumed its refresh half) — so refuse exactly like a
+    // dead credential: fenced clear, re-paste surfaced. The tenant binding
+    // (`externalId`) is never rebound outside `connectIntegration`.
+    log.warn(
+      {
+        integrationId,
+        provider: row.provider,
+        expected: row.externalId,
+        actual: rotated.tenant.externalId,
+      },
+      "rotated integration credential names a different workspace; clearing",
+    );
+    await tx.channelIntegration.updateMany({
+      where: { id: row.id, credentials: storedCiphertext },
+      data: { credentials: null },
+    });
+    return { outcome: "cleared", reason: "foreign_tenant" };
+  }
+
+  const encrypted = await crypto.encrypt(rotated.credentialsJson);
+  const { count } = await tx.channelIntegration.updateMany({
+    where: { id: row.id, credentials: storedCiphertext },
+    data: { credentials: encrypted, credentialsRotatedAt: new Date() },
+  });
+  if (count === 0) {
+    // Should be impossible now that every writer takes the lock — this is
+    // the mutation-tested tripwire for a writer that doesn't. Reconcile so
+    // the freshly minted pair is never lost NOR clobbers a newer paste: a
+    // null row means a stale refusal cleared it and ours is the only live
+    // pair (recover it, still fenced on null); a different non-null value is
+    // a newer paste, freshly validated by its own rotate — it wins.
+    log.error(
+      { integrationId },
+      "integration credential moved under the rotate lock; reconciling",
+    );
+    const current = await tx.channelIntegration.findUnique({
+      where: { id: row.id },
+      select: { credentials: true, credentialsRotatedAt: true },
+    });
+    if (
+      current?.credentials === null &&
+      current.credentialsRotatedAt !== null
+    ) {
+      // A stale refusal's clear (nulls the credential, KEEPS the timestamp).
+      // A deliberate disconnect nulls BOTH — that null is a revocation and is
+      // never recovered over. Fenced on null so a paste landing this instant
+      // still wins.
+      await tx.channelIntegration.updateMany({
+        where: {
+          id: row.id,
+          credentials: null,
+          credentialsRotatedAt: { not: null },
+        },
+        data: { credentials: encrypted, credentialsRotatedAt: new Date() },
+      });
+    }
+  }
+  return { outcome: "rotated", credentialsJson: rotated.credentialsJson };
 };
 
 /**
  * Rotate-on-use: run `fn` with a fresh provider access token. The replacement
  * pair is persisted in ONE update before `fn` runs — the refresh half is
  * single-use, so a torn write (new pair in memory, old pair on disk) would
- * strand the org; encrypt-then-single-UPDATE cannot tear.
+ * strand the org; encrypt-then-single-UPDATE cannot tear. The whole
+ * read→rotate→persist runs under the per-integration lock; `fn` runs AFTER
+ * it commits (it makes its own provider calls and must not extend the lock).
  *
  * A refused rotation clears the stored credential (the pair is dead — Slack
  * refresh tokens are consumed by the attempt) so the org page surfaces the
- * re-paste state, then rethrows for the caller's error envelope.
+ * re-paste state, then throws the caller's error envelope.
  */
 export const withFreshIntegrationCredentials = async <T>(
   organizationId: string,
@@ -186,7 +379,7 @@ export const withFreshIntegrationCredentials = async <T>(
 ): Promise<T> => {
   const row = await db.channelIntegration.findUnique({
     where: { organizationId_provider: { organizationId, provider } },
-    select: { id: true, credentials: true, externalId: true },
+    select: { id: true, credentials: true },
   });
   if (!row?.credentials) {
     throw new ServiceError(
@@ -195,70 +388,30 @@ export const withFreshIntegrationCredentials = async <T>(
     );
   }
 
-  const crypto = getCrypto();
-  const storedCiphertext = row.credentials;
-  let credentialsJson = await crypto.decrypt(storedCiphertext);
+  const result = await withIntegrationRotateLock(row.id, (tx) =>
+    rotateIntegrationRow(tx, row.id, { force: false }),
+  );
 
-  const impl = channelProvider(provider);
-  let rotated: ValidatedIntegrationCredential | null;
-  try {
-    rotated = await impl.rotateIntegrationCredential(credentialsJson);
-  } catch (err) {
-    log.warn(
-      { err, organizationId, provider },
-      "integration credential rotation refused; clearing for re-paste",
+  if (result.outcome === "gone") {
+    throw new ServiceError(
+      "UNPROCESSABLE",
+      "The organization has no Slack automation token. Connect one in the org's Channels settings, or use the manifest flow instead.",
     );
-    // Fence the clear on the ciphertext we read: a concurrent call that
-    // already rotated to a fresh pair must NOT have its valid credential
-    // wiped by our stale refusal (Slack refresh tokens are single-use, so the
-    // loser's rotate always fails — without the fence it would destroy the
-    // winner's still-good pair).
-    await db.channelIntegration.updateMany({
-      where: { id: row.id, credentials: storedCiphertext },
-      data: { credentials: null },
-    });
+  }
+  if (result.outcome === "cleared") {
+    if (result.reason === "foreign_tenant") {
+      throw new ServiceError(
+        "CONFLICT",
+        "The stored Slack automation token belongs to a different workspace than the one connected to this organization. Paste a token for the connected workspace in the org's Channels settings.",
+      );
+    }
     throw new ServiceError(
       "UNPROCESSABLE",
       "The stored Slack automation token has expired and could not be refreshed. Paste a fresh one in the org's Channels settings.",
     );
   }
 
-  if (rotated !== null) {
-    if (rotated.tenant.externalId !== row.externalId) {
-      // The rotation succeeded but named a workspace other than the one this
-      // org is bound to. Persisting the pair would hand the org's automation
-      // credential to a foreign tenant — and the stored pair is dead anyway
-      // (the rotate consumed its refresh half) — so refuse exactly like a
-      // dead credential: fenced clear, re-paste surfaced. The tenant binding
-      // (`externalId`) is never rebound outside `connectIntegration`.
-      log.warn(
-        {
-          organizationId,
-          provider,
-          expected: row.externalId,
-          actual: rotated.tenant.externalId,
-        },
-        "rotated integration credential names a different workspace; clearing",
-      );
-      await db.channelIntegration.updateMany({
-        where: { id: row.id, credentials: storedCiphertext },
-        data: { credentials: null },
-      });
-      throw new ServiceError(
-        "CONFLICT",
-        "The stored Slack automation token belongs to a different workspace than the one connected to this organization. Paste a token for the connected workspace in the org's Channels settings.",
-      );
-    }
-    const encrypted = await crypto.encrypt(rotated.credentialsJson);
-    // Same fence on the write: only replace the pair we actually rotated from.
-    await db.channelIntegration.updateMany({
-      where: { id: row.id, credentials: storedCiphertext },
-      data: { credentials: encrypted, credentialsRotatedAt: new Date() },
-    });
-    credentialsJson = rotated.credentialsJson;
-  }
-
-  const { accessToken } = JSON.parse(credentialsJson) as {
+  const { accessToken } = JSON.parse(result.credentialsJson) as {
     accessToken: string;
   };
   return fn(accessToken, row.id);
@@ -268,82 +421,70 @@ export const withFreshIntegrationCredentials = async <T>(
  * access-token lifetime, so even a whole failed sweep leaves a full margin. */
 const PROACTIVE_ROTATE_AGE_MS = 6 * 60 * 60 * 1000;
 
+/** How long a sweep claim holds before a peer may re-claim the row: a
+ * rotation is two bounded HTTP calls (≤ ~15s each), so 10 minutes covers
+ * pathological latency while leaving nearly the whole 6h staleness margin
+ * for a crashed claimer's retry. */
+const ROTATE_CLAIM_LEASE_MS = 10 * 60 * 1000;
+
+/** Bounded work per sweep pass; the next hourly pass continues. */
+const ROTATE_SWEEP_LIMIT = 25;
+
 /**
  * The proactive rotation sweep, called by the channel adapter (~hourly): keep
  * every stored integration credential fresh even when nothing USES it.
  * Exists because whether an unused refresh token outlives its access token is
  * undocumented (verified 2026-08-07) — lazy rotate-on-use alone would gamble
- * an idle org's credential on that silence. Serialized per integration on
- * purpose: each rotation invalidates the previous refresh token, and the
- * fenced writes (same discipline as `withFreshIntegrationCredentials`) make a
- * concurrent user-triggered rotation safe.
+ * an idle org's credential on that silence.
+ *
+ * N adapter instances all sweep — so the pass first CLAIMS disjoint stale
+ * rows (`rotate_claimed_at` lease + `FOR UPDATE SKIP LOCKED`, the claim-CTE
+ * law), then rotates each under the per-integration lock, which re-checks
+ * staleness in-lock. Each rotation invalidates the previous refresh token
+ * (single-use), so "at most one rotation attempt per row anywhere" is the
+ * invariant both layers exist for.
  */
 export const rotateStaleIntegrations = async (): Promise<{
   rotated: number;
   failed: number;
 }> => {
   const cutoff = new Date(Date.now() - PROACTIVE_ROTATE_AGE_MS);
-  const stale = await db.channelIntegration.findMany({
-    where: {
-      credentials: { not: null },
-      OR: [
-        { credentialsRotatedAt: null },
-        { credentialsRotatedAt: { lt: cutoff } },
-      ],
-    },
-    select: { id: true, provider: true, credentials: true, externalId: true },
-  });
+  const claimCutoff = new Date(Date.now() - ROTATE_CLAIM_LEASE_MS);
+  const claimed = await db.$queryRaw<{ id: string }[]>`
+    WITH claimed AS (
+      SELECT ci.id FROM channel_integrations ci
+      WHERE ci.credentials IS NOT NULL
+        AND (ci.credentials_rotated_at IS NULL OR ci.credentials_rotated_at < ${cutoff})
+        AND (ci.rotate_claimed_at IS NULL OR ci.rotate_claimed_at < ${claimCutoff})
+      ORDER BY ci.credentials_rotated_at ASC NULLS FIRST
+      LIMIT ${ROTATE_SWEEP_LIMIT}
+      FOR UPDATE OF ci SKIP LOCKED
+    )
+    UPDATE channel_integrations ci
+    SET rotate_claimed_at = now()
+    FROM claimed c
+    WHERE ci.id = c.id
+    RETURNING ci.id`;
 
-  const crypto = getCrypto();
   let rotated = 0;
   let failed = 0;
-  for (const row of stale) {
-    if (!row.credentials) continue;
+  for (const { id } of claimed) {
     try {
-      const json = await crypto.decrypt(row.credentials);
-      const next = await channelProvider(
-        row.provider as ChannelProviderId,
-      ).rotateIntegrationCredential(json, { force: true });
-      if (next === null) continue;
-      if (next.tenant.externalId !== row.externalId) {
-        // Same refusal as the rotate-on-use path: a pair naming a foreign
-        // workspace is never persisted — fenced clear, re-paste surfaced.
-        log.warn(
-          {
-            integrationId: row.id,
-            expected: row.externalId,
-            actual: next.tenant.externalId,
-          },
-          "proactive rotation named a different workspace; clearing",
-        );
-        await db.channelIntegration
-          .updateMany({
-            where: { id: row.id, credentials: row.credentials },
-            data: { credentials: null },
-          })
-          .catch(() => {});
-        failed += 1;
-        continue;
-      }
-      const encrypted = await crypto.encrypt(next.credentialsJson);
-      await db.channelIntegration.updateMany({
-        where: { id: row.id, credentials: row.credentials },
-        data: { credentials: encrypted, credentialsRotatedAt: new Date() },
-      });
-      rotated += 1;
-    } catch (err) {
-      // A refused rotation means the pair is dead (rotation consumes the
-      // refresh token) — clear it, fenced, so the org page shows re-paste.
-      log.warn(
-        { err, integrationId: row.id },
-        "proactive rotation refused; clearing for re-paste",
+      const result = await withIntegrationRotateLock(id, (tx) =>
+        rotateIntegrationRow(tx, id, { force: true, staleCutoff: cutoff }),
       );
-      await db.channelIntegration
-        .updateMany({
-          where: { id: row.id, credentials: row.credentials },
-          data: { credentials: null },
-        })
-        .catch(() => {});
+      if (result.outcome === "rotated") rotated += 1;
+      else if (result.outcome === "cleared") failed += 1;
+      // "fresh" (a concurrent on-use rotation beat the claim) and "gone"
+      // count as neither: nothing was owed.
+    } catch (err) {
+      // Transport/transaction failure. Usually the pair was not consumed (a
+      // Slack refusal is handled inside as "cleared") and the claim lease
+      // expiring lets a later sweep retry; the one bad tail — the tx expiring
+      // AFTER Slack consumed the refresh half — loses the pair and surfaces
+      // as a refused retry → re-paste, which the 60s budget exists to make
+      // vanishingly rare.
+      log.warn({ err, integrationId: id }, "proactive rotation pass failed");
       failed += 1;
     }
   }

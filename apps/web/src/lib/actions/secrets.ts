@@ -3,7 +3,7 @@
 import { db } from "@onecli/db";
 import { resolveWorkspaceContext } from "@/lib/actions/resolve-user";
 import type { ResolveOptions } from "@/lib/actions/resolve-user";
-import { APP_URL, API_URL } from "@/lib/env";
+import { apiOrigin, appOrigin } from "@onecli/api/lib/public-origins";
 import {
   listSecrets,
   createSecret as createSecretService,
@@ -78,8 +78,8 @@ export const getInstallInfo = async (options?: ResolveOptions) => {
 
   return {
     apiKey: keyResult.apiKey,
-    appUrl: APP_URL,
-    apiUrl: API_URL,
+    appUrl: appOrigin(),
+    apiUrl: apiOrigin(),
   };
 };
 

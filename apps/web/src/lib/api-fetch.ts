@@ -1,4 +1,5 @@
-import { API_URL, IS_CLOUD } from "@/lib/env";
+import { IS_CLOUD } from "@/lib/env";
+import { apiOrigin } from "@onecli/api/lib/public-origins";
 import { WORKSPACE_PATH_RE, ORG_PATH_RE } from "@/lib/navigation";
 
 /**
@@ -10,10 +11,10 @@ import { WORKSPACE_PATH_RE, ORG_PATH_RE } from "@/lib/navigation";
  * cannot bake a deployment's URL.
  */
 export const API_ORIGIN = IS_CLOUD
-  ? API_URL
+  ? apiOrigin()
   : (typeof window !== "undefined" &&
       ((window as unknown as Record<string, unknown>).__API_URL__ as string)) ||
-    API_URL;
+    apiOrigin();
 
 export const getAuthToken = async (): Promise<string | undefined> => {
   // Cookie auth outside cloud — no bearer token. The dynamic import keeps the

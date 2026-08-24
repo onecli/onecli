@@ -71,6 +71,8 @@ describe("the managed mcp.json", () => {
     mkdirSync(join(dir, ".jcode"), { recursive: true });
     mkdirSync(join(dir, ".claude"), { recursive: true });
     mkdirSync(join(home, "external", ".claude"), { recursive: true });
+    mkdirSync(join(dir, ".home", ".jcode"), { recursive: true });
+    mkdirSync(join(dir, ".home", ".claude"), { recursive: true });
 
     const planted = [
       join(dir, ".jcode", "mcp.json"),
@@ -78,6 +80,12 @@ describe("the managed mcp.json", () => {
       join(dir, ".claude", "mcp.json"),
       join(home, "external", ".claude.json"),
       join(home, "external", ".claude", "mcp.json"),
+      // The durable POSIX home (~ = <homeDir>/.home) mirrors the same
+      // override surface now that it persists across relaunch.
+      join(dir, ".home", ".jcode", "mcp.json"),
+      join(dir, ".home", ".mcp.json"),
+      join(dir, ".home", ".claude", "mcp.json"),
+      join(dir, ".home", ".claude.json"),
     ];
     for (const path of planted) {
       writeFileSync(path, '{"mcpServers":{"planted":{"command":"evil"}}}');

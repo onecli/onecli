@@ -1,4 +1,4 @@
-import { APP_URL } from "./env";
+import { appOrigin } from "./public-origins";
 import { configuredAppUrl } from "./app-origin";
 
 /**
@@ -20,7 +20,7 @@ export const dashboardUrl = (
   scope?: { workspaceId?: string; organizationId?: string },
   fallbackOrigin?: string,
 ): string => {
-  const base = configuredAppUrl() ?? fallbackOrigin ?? APP_URL;
+  const base = configuredAppUrl() ?? fallbackOrigin ?? appOrigin();
   if (scope?.workspaceId) return `${base}/w/${scope.workspaceId}${path}`;
   if (scope?.organizationId)
     return `${base}/org/${scope.organizationId}${path}`;

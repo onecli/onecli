@@ -94,7 +94,6 @@ export const exchangeGoogleCode = async ({
   // Google returns scopes space-separated (not comma like GitHub)
   const scopes = tokenData.scope?.split(" ").filter(Boolean) ?? [];
 
-  // Fetch user info for metadata
   let metadata: Record<string, unknown> | undefined;
   const userRes = await fetch("https://www.googleapis.com/oauth2/v2/userinfo", {
     headers: { Authorization: `Bearer ${tokenData.access_token}` },

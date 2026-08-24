@@ -9,6 +9,7 @@ import { useSecrets } from "@/hooks/use-secrets";
 import { useAgentGrants } from "@/hooks/use-grants";
 import { useEffectiveCredentials } from "@/lib/api/policy-visibility";
 import { connectionsPath } from "@/lib/navigation";
+import type { Secret } from "@/lib/api";
 import { SecretGrantRow } from "./secret-grant-row";
 
 interface SecretGrantsTabProps {
@@ -20,6 +21,8 @@ interface SecretGrantsTabProps {
    * dialog with attach-on-create); without it the empty state falls back to
    * linking the workspace page. */
   onAdd?: () => void;
+  /** Opens the section's edit dialog for one secret. */
+  onEdit?: (secret: Secret) => void;
 }
 
 const COPY = {
@@ -49,6 +52,7 @@ export const SecretGrantsTab = ({
   agentId,
   kind,
   onAdd,
+  onEdit,
 }: SecretGrantsTabProps) => {
   const pathname = usePathname();
   const secretsQuery = useSecrets();
@@ -71,7 +75,10 @@ export const SecretGrantsTab = ({
       </div>
     );
   }
-  if (secretsQuery.isError || grantsQuery.isError) {
+  // Credentials feed the org-lock derivation — a failed load must not render
+  // toggles over unknown org-grant state (the same blind-toggle rule AppsTab
+  // and the attach dialog enforce).
+  if (secretsQuery.isError || grantsQuery.isError || credentialsQuery.isError) {
     return (
       <div
         role="alert"
@@ -148,6 +155,9 @@ export const SecretGrantsTab = ({
             granted={granted}
             orgGranted={orgGranted}
             credentialStatus={credential?.status}
+            // An org-scoped key is not editable from a workspace surface —
+            // the workspace-fenced update can never own it.
+            onEdit={secret.scope === "organization" ? undefined : onEdit}
           />
         );
       })}

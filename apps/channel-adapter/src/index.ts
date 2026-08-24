@@ -22,6 +22,13 @@ const REGISTER_RETRY_MAX_MS = 10_000;
 
 const main = async (): Promise<void> => {
   const config = loadConfig(process.env);
+  if (config.appUrlFromLegacyBind) {
+    log(
+      "ONECLI_BIND_HOST is seeding the dashboard URL (deprecated, removed " +
+        `next major). Pin it: add ONECLI_EXTERNAL_URL=${config.appUrl} to ` +
+        "the .env beside docker-compose.yml.",
+    );
+  }
   const controlPlane = createControlPlane({
     baseUrl: config.controlPlaneUrl,
     token: config.token,

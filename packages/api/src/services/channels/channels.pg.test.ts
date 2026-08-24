@@ -43,6 +43,7 @@ type ApiKeys = typeof import("../api-key-service");
 type Providers = typeof import("../../providers");
 type Receipts = typeof import("./turn-receipt-service");
 type Validations = typeof import("../../validations/conversation");
+type DecryptCache = typeof import("./channel-decrypt-cache");
 
 let db: Db;
 let integrations: Integrations;
@@ -54,6 +55,7 @@ let dispatch: Dispatch;
 let apiKeys: ApiKeys;
 let receipts: Receipts;
 let validations: Validations;
+let decryptCache: DecryptCache;
 let getCrypto: Providers["getCrypto"];
 let initSelfUrl: Providers["initSelfUrl"];
 let initAttachmentStore: Providers["initAttachmentStore"];
@@ -201,7 +203,12 @@ const reset = async () => {
   // Prefix-fenced: the proof database is shared with the other pg suites.
   await db.auditLog.deleteMany({ where: { userId: { startsWith: P } } });
   await db.channelAdapter.deleteMany({
-    where: { token: { startsWith: `cha_${P}` } },
+    // Token-prefix catches the seeded callers; NAME-prefix catches mint-path
+    // rows, whose tokens are random `cha_<hex>` (the tests always register
+    // them under P-prefixed names).
+    where: {
+      OR: [{ token: { startsWith: `cha_${P}` } }, { name: { startsWith: P } }],
+    },
   });
   // Presences, thread links, ingested events and approval prompts cascade
   // from the agents; user links cascade from the integrations.
@@ -228,6 +235,34 @@ const dropAll = async () => {
   await db.workspace.deleteMany({ where: { id: { startsWith: P } } });
   await db.organization.deleteMany({ where: { id: { startsWith: P } } });
   await db.user.deleteMany({ where: { id: { startsWith: P } } });
+};
+
+/** An adapter caller for the owner-scoped feeds. One live adapter ⇒ fair
+ * share = the whole fleet, so its first `getAdapterConfig` claims every
+ * eligible presence — the self-host singleton shape these suites were
+ * written against. Prefix-fenced token so `reset` reaps the row. */
+let adapterCallerSeq = 0;
+const seedAdapterCaller = async (kind: "anchor" | "instance" = "anchor") => {
+  adapterCallerSeq += 1;
+  const row = await db.channelAdapter.create({
+    data: {
+      token: `cha_${P}caller-${adapterCallerSeq}`,
+      name: `${P}caller-${adapterCallerSeq}`,
+      kind,
+      lastSeenAt: new Date(),
+    },
+    select: { id: true, kind: true },
+  });
+  return { adapterId: row.id, kind: row.kind };
+};
+
+/** A caller that already CLAIMED the fleet — the work/prompt feeds are
+ * owner-scoped and never claim; the config poll does. Seed presences BEFORE
+ * calling this, or they stay unowned until another config poll. */
+const seedClaimedCaller = async () => {
+  const caller = await seedAdapterCaller();
+  await adapters.getAdapterConfig(caller);
+  return caller;
 };
 
 /** Copied law from conversation.pg.test.ts: a hosted agent needs an
@@ -445,6 +480,7 @@ beforeAll(async () => {
   apiKeys = await import("../api-key-service");
   receipts = await import("./turn-receipt-service");
   validations = await import("../../validations/conversation");
+  decryptCache = await import("./channel-decrypt-cache");
   ({ getCrypto, initSelfUrl, initAttachmentStore } =
     await import("../../providers"));
   // This suite imports services directly (never createApiApp), so
@@ -531,6 +567,9 @@ beforeAll(async () => {
 beforeEach(async () => {
   if (!PROOF_URL) return;
   await reset();
+  // Ciphertexts repeat across tests (deterministic fake crypto), so a stale
+  // cache entry would make decrypt-count assertions vacuous.
+  decryptCache.resetDecryptCacheForTests();
   slackCalls = [];
   slackHandlers = {};
   gatewayCalls = [];
@@ -1063,6 +1102,316 @@ describe.skipIf(!PROOF_URL)(
       });
       expect(row.credentials).toBe(winnerCiphertext);
       expect(row.credentials).not.toBeNull();
+    });
+  },
+);
+
+describe.skipIf(!PROOF_URL)(
+  "rotation single-flight (the rotate lock + sweep claims)",
+  () => {
+    it("a rotate BLOCKED behind the lock re-reads the winner's pair and never calls Slack", async () => {
+      // The verified N-instance breakage this design kills: without the lock
+      // (and the in-lock re-read) the loser's rotate consumes a single-use
+      // refresh token, gets refused, and its fenced clear can null the
+      // winner's still-good pair. MUTATION-TESTED: delete the in-lock re-read
+      // (always rotate from the pre-lock snapshot) and the loser here calls
+      // the unscripted rotate → SlackApiError; delete the lock and the loser
+      // races ahead of the winner's commit with the same result.
+      const integration = await seedIntegration({
+        credentials: await integrationCredentials(60), // inside the rotate window
+        rotatedAt: new Date(),
+      });
+      const winnerCiphertext = await getCrypto().encrypt(
+        JSON.stringify({
+          accessToken: "xoxe.access-winner",
+          refreshToken: "xoxe-refresh-winner",
+          expiresAt: nowSec() + 12 * 3600,
+        }),
+      );
+      // No rotate handler on purpose: ANY tooling.tokens.rotate call in this
+      // test answers test_unscripted and fails the run loudly.
+
+      let release!: () => void;
+      const gate = new Promise<void>((resolve) => (release = resolve));
+      let lockTaken!: () => void;
+      const taken = new Promise<void>((resolve) => (lockTaken = resolve));
+      const winner = db.$transaction(
+        async (tx) => {
+          await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`channel-integration-rotate:${integration.id}`}))`;
+          await tx.channelIntegration.update({
+            where: { id: integration.id },
+            data: {
+              credentials: winnerCiphertext,
+              credentialsRotatedAt: new Date(),
+            },
+          });
+          lockTaken();
+          await gate;
+        },
+        { timeout: 15_000 },
+      );
+      await taken;
+
+      const loser = integrations.withFreshIntegrationCredentials(
+        ORG,
+        "slack",
+        async (accessToken) => accessToken,
+      );
+      // The loser is parked on the advisory lock; nothing has hit Slack.
+      await new Promise((resolve) => setTimeout(resolve, 150));
+      expect(slackCallsFor("tooling.tokens.rotate")).toHaveLength(0);
+
+      release();
+      await winner;
+
+      // Unblocked, it re-reads the winner's FRESH pair, skips the rotate
+      // entirely, and hands fn the winner's access token.
+      expect(await loser).toBe("xoxe.access-winner");
+      expect(slackCallsFor("tooling.tokens.rotate")).toHaveLength(0);
+      const row = await db.channelIntegration.findUniqueOrThrow({
+        where: { id: integration.id },
+      });
+      expect(row.credentials).toBe(winnerCiphertext);
+    });
+
+    it("the sweep's claim lease makes concurrent sweeps rotate each row AT MOST once", async () => {
+      const integration = await seedIntegration({
+        credentials: await integrationCredentials(12 * 3600),
+        rotatedAt: new Date(Date.now() - 7 * 60 * 60 * 1000), // stale (>6h)
+      });
+      slackHandlers["tooling.tokens.rotate"] = () => ({
+        ok: true,
+        token: "xoxe.access-swept",
+        refresh_token: "xoxe-refresh-swept",
+        team_id: "T111",
+        exp: nowSec() + 12 * 3600,
+      });
+
+      const [first, second] = await Promise.all([
+        integrations.rotateStaleIntegrations(),
+        integrations.rotateStaleIntegrations(),
+      ]);
+
+      // One rotation total — Slack's refresh half is single-use, so a second
+      // attempt anywhere would have consumed a dead token and bricked the row.
+      expect(slackCallsFor("tooling.tokens.rotate")).toHaveLength(1);
+      expect(first.rotated + second.rotated).toBe(1);
+      expect(first.failed + second.failed).toBe(0);
+      const row = await db.channelIntegration.findUniqueOrThrow({
+        where: { id: integration.id },
+      });
+      expect(row.credentials).not.toBeNull();
+    });
+
+    it("a FRESH claim lease parks the row; an expired one is re-claimable", async () => {
+      // MUTATION-TESTED (the rotate_claimed_at arm of the claim CTE): drop it
+      // and the freshly-claimed row below is swept again immediately — the
+      // crashed-claimer retry window collapses to zero.
+      const integration = await seedIntegration({
+        credentials: await integrationCredentials(12 * 3600),
+        rotatedAt: new Date(Date.now() - 7 * 60 * 60 * 1000),
+      });
+      slackHandlers["tooling.tokens.rotate"] = () => ({
+        ok: true,
+        token: "xoxe.access-reclaim",
+        refresh_token: "xoxe-refresh-reclaim",
+        team_id: "T111",
+        exp: nowSec() + 12 * 3600,
+      });
+
+      // A peer claimed it moments ago (and hasn't finished): hands off.
+      await db.channelIntegration.update({
+        where: { id: integration.id },
+        data: { rotateClaimedAt: new Date() },
+      });
+      expect(await integrations.rotateStaleIntegrations()).toEqual({
+        rotated: 0,
+        failed: 0,
+      });
+      expect(slackCallsFor("tooling.tokens.rotate")).toHaveLength(0);
+
+      // The claimer crashed: its lease ages out and the row is swept.
+      await db.channelIntegration.update({
+        where: { id: integration.id },
+        data: { rotateClaimedAt: new Date(Date.now() - 11 * 60 * 1000) },
+      });
+      expect(await integrations.rotateStaleIntegrations()).toEqual({
+        rotated: 1,
+        failed: 0,
+      });
+      expect(slackCallsFor("tooling.tokens.rotate")).toHaveLength(1);
+    });
+
+    it("count-0 reconcile: an unlocked writer's PASTE wins; its stale CLEAR is recovered from", async () => {
+      // The tripwire for a writer that bypasses the lock. MUTATION-TESTED:
+      // delete the `count === 0` reconcile branch and the recover arm below
+      // leaves the row NULL — the freshly minted pair is lost and the org is
+      // told to re-paste for nothing.
+      const rotateSuccess = {
+        ok: true,
+        token: "xoxe.access-rotated",
+        refresh_token: "xoxe-refresh-rotated",
+        team_id: "T111",
+        exp: nowSec() + 12 * 3600,
+      };
+
+      // Arm 1 — a newer paste lands mid-rotation: it wins, never clobbered.
+      const pasted = await seedIntegration({
+        credentials: await integrationCredentials(60),
+        rotatedAt: new Date(),
+      });
+      const pasteCiphertext = await getCrypto().encrypt(
+        JSON.stringify({
+          accessToken: "xoxe.access-pasted",
+          refreshToken: "xoxe-refresh-pasted",
+          expiresAt: nowSec() + 12 * 3600,
+        }),
+      );
+      slackHandlers["tooling.tokens.rotate"] = async () => {
+        await db.channelIntegration.update({
+          where: { id: pasted.id },
+          data: {
+            credentials: pasteCiphertext,
+            credentialsRotatedAt: new Date(),
+          },
+        });
+        return rotateSuccess;
+      };
+      await integrations.withFreshIntegrationCredentials(
+        ORG,
+        "slack",
+        async () => 1,
+      );
+      expect(
+        (
+          await db.channelIntegration.findUniqueOrThrow({
+            where: { id: pasted.id },
+          })
+        ).credentials,
+      ).toBe(pasteCiphertext);
+      await db.channelIntegration.delete({ where: { id: pasted.id } });
+
+      // Arm 2 — a stale unlocked CLEAR nulls the row mid-rotation: the fresh
+      // pair is recovered (fenced on null, so a simultaneous paste still wins).
+      const cleared = await seedIntegration({
+        credentials: await integrationCredentials(60),
+        rotatedAt: new Date(),
+      });
+      slackHandlers["tooling.tokens.rotate"] = async () => {
+        await db.channelIntegration.update({
+          where: { id: cleared.id },
+          data: { credentials: null },
+        });
+        return rotateSuccess;
+      };
+      const accessToken = await integrations.withFreshIntegrationCredentials(
+        ORG,
+        "slack",
+        async (token) => token,
+      );
+      expect(accessToken).toBe("xoxe.access-rotated");
+      const recovered = await db.channelIntegration.findUniqueOrThrow({
+        where: { id: cleared.id },
+      });
+      expect(recovered.credentials).not.toBeNull();
+      expect(await getCrypto().decrypt(recovered.credentials!)).toContain(
+        "xoxe.access-rotated",
+      );
+    });
+
+    it("a DISCONNECT-shaped clear (both columns nulled) is a revocation — never recovered over", async () => {
+      // MUTATION-TESTED (the reconcile's credentialsRotatedAt discriminator):
+      // drop `credentialsRotatedAt: { not: null }` from the recover arm and
+      // the rotation below writes its freshly rotated LIVE pair back over the
+      // admin's revocation — the org page silently shows connected again.
+      const integration = await seedIntegration({
+        credentials: await integrationCredentials(60),
+        rotatedAt: new Date(),
+      });
+      slackHandlers["tooling.tokens.rotate"] = async () => {
+        // An unlocked writer lands a disconnect: BOTH columns nulled.
+        await db.channelIntegration.update({
+          where: { id: integration.id },
+          data: { credentials: null, credentialsRotatedAt: null },
+        });
+        return {
+          ok: true,
+          token: "xoxe.access-zombie",
+          refresh_token: "xoxe-refresh-zombie",
+          team_id: "T111",
+          exp: nowSec() + 12 * 3600,
+        };
+      };
+
+      await integrations.withFreshIntegrationCredentials(
+        ORG,
+        "slack",
+        async () => 1,
+      );
+      const row = await db.channelIntegration.findUniqueOrThrow({
+        where: { id: integration.id },
+      });
+      expect(row.credentials).toBeNull();
+      expect(row.credentialsRotatedAt).toBeNull();
+    });
+
+    it("disconnectIntegration SERIALIZES behind an in-flight rotation — the revocation lands last and stands", async () => {
+      // MUTATION-TESTED (the rotate lock on the disconnect path): drop
+      // `withIntegrationRotateLock` from disconnectIntegration and the
+      // disconnect below settles while the rotation still holds the lock.
+      const integration = await seedIntegration({
+        credentials: await integrationCredentials(60),
+        rotatedAt: new Date(),
+      });
+      // An attached presence keeps the row alive on disconnect (the CLEAR
+      // branch — the resurrect-prone one), not the delete branch.
+      await seedPresence(await seedAgent("disc-lock"), integration.id, {
+        externalId: "A-disc-lock",
+      });
+
+      let release!: () => void;
+      const gate = new Promise<void>((resolve) => (release = resolve));
+      let rotating!: () => void;
+      const started = new Promise<void>((resolve) => (rotating = resolve));
+      slackHandlers["tooling.tokens.rotate"] = async () => {
+        rotating();
+        await gate; // hold the rotation (and its lock) open
+        return {
+          ok: true,
+          token: "xoxe.access-slow",
+          refresh_token: "xoxe-refresh-slow",
+          team_id: "T111",
+          exp: nowSec() + 12 * 3600,
+        };
+      };
+
+      const rotation = integrations.withFreshIntegrationCredentials(
+        ORG,
+        "slack",
+        async () => 1,
+      );
+      await started;
+
+      let disconnected = false;
+      const disconnect = integrations
+        .disconnectIntegration(ORG, "slack")
+        .then(() => {
+          disconnected = true;
+        });
+      // Parked on the lock while the rotation is mid-Slack-call.
+      await new Promise((resolve) => setTimeout(resolve, 150));
+      expect(disconnected).toBe(false);
+
+      release();
+      await rotation;
+      await disconnect;
+
+      // The revocation was the LAST write and it stands.
+      const row = await db.channelIntegration.findUniqueOrThrow({
+        where: { id: integration.id },
+      });
+      expect(row.credentials).toBeNull();
+      expect(row.credentialsRotatedAt).toBeNull();
     });
   },
 );
@@ -3493,6 +3842,455 @@ describe.skipIf(!PROOF_URL)("registerAdapter (the anchor law)", () => {
   });
 });
 
+describe.skipIf(!PROOF_URL)("registerAdapter (the per-instance mint)", () => {
+  it("mints a per-instance credential — the anchor proves membership, never becomes the row", async () => {
+    const result = await adapters.registerAdapter({
+      token: ADAPTER_ANCHOR,
+      name: `${P}mint-1`,
+      perInstance: true,
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error("unreachable");
+    expect(result.mintedToken).toMatch(/^cha_[0-9a-f]{64}$/);
+    expect(result.mintedToken).not.toBe(ADAPTER_ANCHOR);
+
+    const row = await db.channelAdapter.findUniqueOrThrow({
+      where: { id: result.adapterId },
+    });
+    expect(row.kind).toBe("instance");
+    expect(row.token).toBe(result.mintedToken);
+    // The anchor itself was never stored: no anchor-token row exists.
+    expect(
+      await db.channelAdapter.count({ where: { token: ADAPTER_ANCHOR } }),
+    ).toBe(0);
+  });
+
+  it("REFUSES a mint request whose token is not the anchor", async () => {
+    expect(
+      await adapters.registerAdapter({
+        token: `cha_${P}not-the-anchor`,
+        name: `${P}mint-evil`,
+        perInstance: true,
+      }),
+    ).toEqual({ ok: false });
+  });
+
+  it("a same-name re-register STEALS the row: same adapterId, fresh token, old token dead", async () => {
+    const first = await adapters.registerAdapter({
+      token: ADAPTER_ANCHOR,
+      name: `${P}mint-steal`,
+      perInstance: true,
+    });
+    if (!first.ok) throw new Error("unreachable");
+    const again = await adapters.registerAdapter({
+      token: ADAPTER_ANCHOR,
+      name: `${P}mint-steal`,
+      perInstance: true,
+    });
+    if (!again.ok) throw new Error("unreachable");
+
+    // The identity (and every ownership lease keyed on it) survives the
+    // restart; the displaced credential does not.
+    expect(again.adapterId).toBe(first.adapterId);
+    expect(again.mintedToken).not.toBe(first.mintedToken);
+    expect(
+      await db.channelAdapter.count({ where: { token: first.mintedToken } }),
+    ).toBe(0);
+    expect(
+      await db.channelAdapter.count({ where: { name: `${P}mint-steal` } }),
+    ).toBe(1);
+  });
+
+  it("never cannibalizes an ANCHOR row that happens to share the name", async () => {
+    // MUTATION-TESTED: drop the `kind: "instance"` filter from the steal
+    // lookup and the mint below rotates the legacy shared row's token —
+    // every old binary presenting the anchor 401s from that moment on.
+    const legacy = await adapters.registerAdapter({
+      token: ADAPTER_ANCHOR,
+      name: `${P}mint-shared`,
+    });
+    if (!legacy.ok) throw new Error("unreachable");
+
+    const minted = await adapters.registerAdapter({
+      token: ADAPTER_ANCHOR,
+      name: `${P}mint-shared`,
+      perInstance: true,
+    });
+    if (!minted.ok) throw new Error("unreachable");
+
+    expect(minted.adapterId).not.toBe(legacy.adapterId);
+    const legacyRow = await db.channelAdapter.findUniqueOrThrow({
+      where: { id: legacy.adapterId },
+    });
+    expect(legacyRow.token).toBe(ADAPTER_ANCHOR);
+    expect(legacyRow.kind).toBe("anchor");
+  });
+
+  it("reaps long-dead INSTANCE rows at register; anchor rows are never reaped", async () => {
+    const staleInstance = await db.channelAdapter.create({
+      data: {
+        token: `cha_${P}stale-instance`,
+        name: `${P}stale-instance`,
+        kind: "instance",
+        lastSeenAt: new Date(Date.now() - 25 * 60 * 60 * 1000),
+      },
+      select: { id: true },
+    });
+    const staleAnchor = await db.channelAdapter.create({
+      data: {
+        token: `cha_${P}stale-anchor`,
+        name: `${P}stale-anchor`,
+        kind: "anchor",
+        lastSeenAt: new Date(Date.now() - 25 * 60 * 60 * 1000),
+      },
+      select: { id: true },
+    });
+
+    await adapters.registerAdapter({
+      token: ADAPTER_ANCHOR,
+      name: `${P}mint-reaper`,
+      perInstance: true,
+    });
+    // The reap is fire-and-forget off the register — observe, don't sleep.
+    await vi.waitFor(async () => {
+      expect(
+        await db.channelAdapter.count({ where: { id: staleInstance.id } }),
+      ).toBe(0);
+    });
+    // An idle self-host coming back after a month keeps its identity.
+    expect(
+      await db.channelAdapter.count({ where: { id: staleAnchor.id } }),
+    ).toBe(1);
+  });
+});
+
+describe.skipIf(!PROOF_URL)("presence ownership (§3.17)", () => {
+  /** Raw owner/lease readback — the columns Prisma writes never touch. */
+  const ownersOf = async () => {
+    const rows = await db.agentChannel.findMany({
+      where: { agent: { identifier: { startsWith: P } } },
+      select: { id: true, ownerAdapterId: true, ownerLeaseExpiresAt: true },
+      orderBy: { createdAt: "asc" },
+    });
+    return new Map(rows.map((r) => [r.id, r]));
+  };
+
+  it("a single live adapter claims the WHOLE fleet — the self-host singleton, unchanged", async () => {
+    const a = await seedChannelAgent("own-all-a");
+    const b = await seedChannelAgent("own-all-b");
+    const caller = await seedAdapterCaller();
+
+    const cfg = await adapters.getAdapterConfig(caller);
+    if (cfg.notModified) throw new Error("unreachable");
+
+    expect(cfg.presences.map((p) => p.presenceId).sort()).toEqual(
+      [a.presenceId, b.presenceId].sort(),
+    );
+    const owners = await ownersOf();
+    expect(owners.get(a.presenceId)?.ownerAdapterId).toBe(caller.adapterId);
+    expect(owners.get(b.presenceId)?.ownerAdapterId).toBe(caller.adapterId);
+  });
+
+  it("claims SKIP locked rows without blocking (the due-work law under real concurrency)", async () => {
+    // MUTATION-TESTED two ways: remove `SKIP LOCKED` from the claim CTE and
+    // this call blocks on the held row past the race guard; remove the
+    // `(owner IS NULL OR lease < now())` arm and live leases get stolen
+    // (asserted in the handover test below).
+    const p1 = await seedChannelAgent("own-skip-1");
+    const p2 = await seedChannelAgent("own-skip-2");
+    const caller = await seedAdapterCaller();
+
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    let lockTaken!: () => void;
+    const taken = new Promise<void>((resolve) => (lockTaken = resolve));
+    const holder = db.$transaction(
+      async (tx) => {
+        await tx.$queryRaw`SELECT id FROM agent_channels WHERE id = ${p1.presenceId} FOR UPDATE`;
+        lockTaken();
+        await gate;
+      },
+      { timeout: 15_000 },
+    );
+    // Observe the lock, never guess at it: the claimer starts strictly after
+    // the holder's FOR UPDATE resolved.
+    await taken;
+
+    const cfg = await Promise.race([
+      adapters.getAdapterConfig(caller),
+      new Promise<never>((_, reject) =>
+        setTimeout(
+          () => reject(new Error("claim blocked on a locked row")),
+          5_000,
+        ),
+      ),
+    ]);
+    release();
+    await holder;
+
+    if (cfg.notModified) throw new Error("unreachable");
+    // The locked row was skipped, not waited for; the free row was claimed.
+    expect(cfg.presences.map((p) => p.presenceId)).toEqual([p2.presenceId]);
+    const owners = await ownersOf();
+    expect(owners.get(p1.presenceId)?.ownerAdapterId).toBeNull();
+    expect(owners.get(p2.presenceId)?.ownerAdapterId).toBe(caller.adapterId);
+  });
+
+  it("fair-share rebalance: a joiner is fed by voluntary shed within one poll round, then stable", async () => {
+    const seeded = [
+      await seedChannelAgent("own-fair-1"),
+      await seedChannelAgent("own-fair-2"),
+      await seedChannelAgent("own-fair-3"),
+      await seedChannelAgent("own-fair-4"),
+    ];
+    const a = await seedAdapterCaller();
+    const first = await adapters.getAdapterConfig(a);
+    if (first.notModified) throw new Error("unreachable");
+    expect(first.presences).toHaveLength(4);
+
+    const b = await seedAdapterCaller();
+    // A's next poll sheds down to its fair share (ceil(4/2) = 2)...
+    const shedPass = await adapters.getAdapterConfig(a);
+    if (shedPass.notModified) throw new Error("unreachable");
+    expect(shedPass.presences).toHaveLength(2);
+    // ...and B's poll claims exactly the shed rows.
+    const claimPass = await adapters.getAdapterConfig(b);
+    if (claimPass.notModified) throw new Error("unreachable");
+    expect(claimPass.presences).toHaveLength(2);
+
+    const aIds = shedPass.presences.map((p) => p.presenceId);
+    const bIds = claimPass.presences.map((p) => p.presenceId);
+    expect(aIds.filter((id) => bIds.includes(id))).toEqual([]);
+    expect([...aIds, ...bIds].sort()).toEqual(
+      seeded.map((s) => s.presenceId).sort(),
+    );
+
+    // Stability: another round moves nothing — proven the strong way, as a
+    // 304 against each instance's previous etag (a moved slice busts it).
+    const aAgain = await adapters.getAdapterConfig(a, shedPass.etag);
+    const bAgain = await adapters.getAdapterConfig(b, claimPass.etag);
+    expect(aAgain.notModified).toBe(true);
+    expect(bAgain.notModified).toBe(true);
+  });
+
+  it("a dead peer's slice fails over on the LEASE window, not the 90s online window", async () => {
+    // The deploy/death gap this pins: a survivor already AT fair share must
+    // still claim a dead peer's expired-lease rows the moment they expire.
+    // MUTATION-TESTED: put RUNNER_ONLINE_THRESHOLD_SECONDS back into the
+    // `live` count and the corpse (last seen 60s ago — inside 90s, outside
+    // the 45s lease window) halves B's fair share, so B claims only 2 of 4
+    // here and the fleet strands for another ~40s.
+    const seeded = [
+      await seedChannelAgent("own-dead-1"),
+      await seedChannelAgent("own-dead-2"),
+      await seedChannelAgent("own-dead-3"),
+      await seedChannelAgent("own-dead-4"),
+    ];
+    const a = await seedAdapterCaller();
+    await adapters.getAdapterConfig(a); // A owns all 4
+
+    await db.$executeRaw`UPDATE agent_channels SET owner_lease_expires_at = now() - interval '1 second' WHERE owner_adapter_id = ${a.adapterId}`;
+    await db.$executeRaw`UPDATE channel_adapters SET last_seen_at = now() - interval '60 seconds' WHERE id = ${a.adapterId}`;
+
+    const b = await seedAdapterCaller();
+    const cfgB = await adapters.getAdapterConfig(b);
+    if (cfgB.notModified) throw new Error("unreachable");
+    expect(cfgB.presences.map((p) => p.presenceId).sort()).toEqual(
+      seeded.map((s) => s.presenceId).sort(),
+    );
+  });
+
+  it("EXPIRED leases fail over; live leases are never stolen and renewal never resurrects", async () => {
+    const p1 = await seedChannelAgent("own-lease-1");
+    const p2 = await seedChannelAgent("own-lease-2");
+    const a = await seedAdapterCaller();
+    await adapters.getAdapterConfig(a); // A owns both
+
+    // p1's lease lapses (a dead instance); p2 stays live. A itself goes
+    // liveness-stale so B's fair share is the whole fleet.
+    await db.$executeRaw`UPDATE agent_channels SET owner_lease_expires_at = now() - interval '1 second' WHERE id = ${p1.presenceId}`;
+    await db.$executeRaw`UPDATE channel_adapters SET last_seen_at = now() - interval '10 minutes' WHERE id = ${a.adapterId}`;
+
+    const b = await seedAdapterCaller();
+    const cfgB = await adapters.getAdapterConfig(b);
+    if (cfgB.notModified) throw new Error("unreachable");
+    // MUTATION-TESTED: drop the `(owner IS NULL OR lease < now())` claim arm
+    // and p2's LIVE lease is stolen here too.
+    expect(cfgB.presences.map((p) => p.presenceId)).toEqual([p1.presenceId]);
+    expect((await ownersOf()).get(p2.presenceId)?.ownerAdapterId).toBe(
+      a.adapterId,
+    );
+
+    // A comes back: its renewal is fenced on owner = me, so the stolen p1
+    // stays B's — and B's lease clock is untouched by A's pass.
+    const before = (await ownersOf()).get(p1.presenceId);
+    const cfgA = await adapters.getAdapterConfig(a);
+    if (!cfgA.notModified) {
+      expect(
+        cfgA.presences.map((p) => p.presenceId).includes(p1.presenceId),
+      ).toBe(false);
+    }
+    const after = (await ownersOf()).get(p1.presenceId);
+    expect(after?.ownerAdapterId).toBe(b.adapterId);
+    expect(after?.ownerLeaseExpiresAt?.getTime()).toBe(
+      before?.ownerLeaseExpiresAt?.getTime(),
+    );
+  });
+
+  it("the work and prompt feeds serve ONLY the caller's slice", async () => {
+    // MUTATION-TESTED: drop the `ownerAdapterId` WHERE from getAdapterWork or
+    // listUnsettledPrompts and the foreign row leaks into this feed.
+    const one = await seedChannelAgent("own-feed-1");
+    const two = await seedChannelAgent("own-feed-2");
+    const a = await seedAdapterCaller();
+    const b = await seedAdapterCaller();
+    await db.$executeRaw`UPDATE agent_channels SET owner_adapter_id = ${a.adapterId}, owner_lease_expires_at = now() + interval '45 seconds' WHERE id = ${one.presenceId}`;
+    await db.$executeRaw`UPDATE agent_channels SET owner_adapter_id = ${b.adapterId}, owner_lease_expires_at = now() + interval '45 seconds' WHERE id = ${two.presenceId}`;
+
+    const linkFor = async (
+      agentId: string,
+      presenceId: string,
+      ref: string,
+    ) => {
+      const conversation = await db.conversation.create({
+        data: { agentId, source: "slack", externalRef: ref },
+        select: { id: true },
+      });
+      const link = await db.channelThreadLink.create({
+        data: {
+          agentChannelId: presenceId,
+          conversationId: conversation.id,
+          externalThreadId: ref,
+          kind: "group",
+        },
+        select: { id: true },
+      });
+      await db.$executeRaw`UPDATE channel_thread_links SET created_at = now() - interval '10 minutes' WHERE id = ${link.id}`;
+      const turn = await db.turn.create({
+        data: {
+          conversationId: conversation.id,
+          message: `answer for ${ref}`,
+          status: "done",
+          source: "slack",
+          userId: MEMBER,
+          finishedAt: new Date(),
+        },
+        select: { id: true },
+      });
+      return turn.id;
+    };
+    const turnOne = await linkFor(one.agentId, one.presenceId, "C-own-1:1");
+    await linkFor(two.agentId, two.presenceId, "C-own-2:1");
+
+    const workA = await adapters.getAdapterWork(a.adapterId);
+    expect(workA.finished.map((w) => w.turn.id)).toEqual([turnOne]);
+
+    await adapters.claimApprovalPrompt({
+      approvalId: `${P}own-ap-1`,
+      agentChannelId: one.presenceId,
+      externalThreadId: "D1",
+      expiresAt: null,
+    });
+    await adapters.claimApprovalPrompt({
+      approvalId: `${P}own-ap-2`,
+      agentChannelId: two.presenceId,
+      externalThreadId: "D2",
+      expiresAt: null,
+    });
+    expect(
+      (await adapters.listUnsettledPrompts(a.adapterId)).map(
+        (prompt) => prompt.approvalId,
+      ),
+    ).toEqual([`${P}own-ap-1`]);
+  });
+
+  it("lease renewal never busts the etag; a cursor advance busts ANCHOR callers only", async () => {
+    // MUTATION-TESTED twice over: (a) rewrite an ownership write as a Prisma
+    // update and `updatedAt` — an etag input — bumps on every renewal, so the
+    // second call stops answering 304; (b) fold cursors back into the
+    // instance-kind hash and the instance 304 below breaks.
+    const { agentId, presenceId } = await seedChannelAgent("own-etag");
+    const conversation = await db.conversation.create({
+      data: { agentId, source: "slack", externalRef: "C-etag:1" },
+      select: { id: true },
+    });
+    const link = await db.channelThreadLink.create({
+      data: {
+        agentChannelId: presenceId,
+        conversationId: conversation.id,
+        externalThreadId: "C-etag:1",
+        kind: "group",
+      },
+      select: { id: true },
+    });
+
+    const instance = await seedAdapterCaller("instance");
+    const first = await adapters.getAdapterConfig(instance);
+    if (first.notModified) throw new Error("unreachable");
+
+    // Renewal round: same slice, same etag — a 304.
+    const renewed = await adapters.getAdapterConfig(instance, first.etag);
+    expect(renewed.notModified).toBe(true);
+
+    // A mirrored turn advances the cursor: the INSTANCE caller keeps its 304
+    // (the floor rides work items instead)...
+    const floor = new Date();
+    expect(await adapters.advanceMirrorCursor(link.id, null, floor)).toBe(true);
+    const afterCursor = await adapters.getAdapterConfig(instance, first.etag);
+    expect(afterCursor.notModified).toBe(true);
+
+    // ...and the work feed carries that floor for a mid-history acquirer.
+    const turn = await db.turn.create({
+      data: {
+        conversationId: conversation.id,
+        message: "late answer",
+        status: "done",
+        source: "slack",
+        userId: MEMBER,
+        finishedAt: new Date(Date.now() + 1_000),
+      },
+      select: { id: true },
+    });
+    await db.$executeRaw`UPDATE turns SET created_at = now() + interval '2 seconds' WHERE id = ${turn.id}`;
+    const work = await adapters.getAdapterWork(instance.adapterId);
+    const item = work.finished.find((w) => w.linkId === link.id);
+    // Pinned to the EXACT stored cursor: this field seeds the client's CAS
+    // expectation, so any other value (link.createdAt, now()) would CAS-fail
+    // forever — a permanent non-delivery invisible to a type-only assertion.
+    expect(item?.linkMirrorCursor?.getTime()).toBe(floor.getTime());
+  });
+
+  it("the decrypt cache absorbs an etag bust — no second KMS-shaped decrypt of an unchanged credential", async () => {
+    // MUTATION-TESTED: bypass the cache (call getCrypto().decrypt directly in
+    // the feed) and the second full payload below decrypts again.
+    const caller = await seedAdapterCaller();
+    await seedChannelAgent("own-cache-a", {
+      presenceCredentials: await getCrypto().encrypt(
+        JSON.stringify({ botToken: "xoxb-cache" }),
+      ),
+    });
+    const first = await adapters.getAdapterConfig(caller);
+    if (first.notModified) throw new Error("unreachable");
+
+    // A new (credential-less) presence busts the etag; the cached ciphertext
+    // must not be decrypted again.
+    await seedChannelAgent("own-cache-b");
+    const decryptSpy = vi.spyOn(getCrypto(), "decrypt");
+    try {
+      const second = await adapters.getAdapterConfig(caller, first.etag);
+      expect(second.notModified).toBe(false);
+      if (second.notModified) throw new Error("unreachable");
+      expect(
+        second.presences.find((p) => p.credentialsJson !== null)
+          ?.credentialsJson,
+      ).toBe(JSON.stringify({ botToken: "xoxb-cache" }));
+      expect(decryptSpy).not.toHaveBeenCalled();
+    } finally {
+      decryptSpy.mockRestore();
+    }
+  });
+});
+
 describe.skipIf(!PROOF_URL)("getAdapterConfig", () => {
   it("serves active AND needs_attention presences with decrypted credentials; the etag tracks link cursors", async () => {
     const { agentId, integrationId, presenceId } = await seedChannelAgent(
@@ -3551,7 +4349,8 @@ describe.skipIf(!PROOF_URL)("getAdapterConfig", () => {
       select: { id: true },
     });
 
-    const config = await adapters.getAdapterConfig();
+    const caller = await seedAdapterCaller();
+    const config = await adapters.getAdapterConfig(caller);
     if (config.notModified) throw new Error("unreachable");
 
     expect(config.presences.map((p) => p.presenceId)).toEqual([
@@ -3572,7 +4371,7 @@ describe.skipIf(!PROOF_URL)("getAdapterConfig", () => {
     expect(await adapters.advanceMirrorCursor(link.id, null, new Date())).toBe(
       true,
     );
-    const after = await adapters.getAdapterConfig();
+    const after = await adapters.getAdapterConfig(caller);
     if (after.notModified) throw new Error("unreachable");
     expect(after.etag).not.toBe(etagBefore);
   });
@@ -3588,7 +4387,8 @@ describe.skipIf(!PROOF_URL)("getAdapterConfig", () => {
 
     // Socket posture (the beforeEach default, localhost origin): Slack could
     // never fetch the icon, so the feed must not carry it at all.
-    const socketCfg = await adapters.getAdapterConfig();
+    const caller = await seedAdapterCaller();
+    const socketCfg = await adapters.getAdapterConfig(caller);
     if (socketCfg.notModified) throw new Error("unreachable");
     expect(socketCfg.presences[0]?.agent.imageUrl).toBeNull();
 
@@ -3596,7 +4396,7 @@ describe.skipIf(!PROOF_URL)("getAdapterConfig", () => {
     // posture flip itself busts the etag (it is a feed input; a long-running
     // adapter must not keep getting 304s across an API_URL change).
     initSelfUrl(EVENTS_SELF_URL);
-    const cfg = await adapters.getAdapterConfig();
+    const cfg = await adapters.getAdapterConfig(caller);
     if (cfg.notModified) throw new Error("unreachable");
     expect(cfg.etag).not.toBe(socketCfg.etag);
     expect(cfg.presences[0]?.agent.imageUrl).toBe(
@@ -3611,7 +4411,7 @@ describe.skipIf(!PROOF_URL)("getAdapterConfig", () => {
       where: { id: agentId },
       data: { imageKey: keyB },
     });
-    const rotated = await adapters.getAdapterConfig();
+    const rotated = await adapters.getAdapterConfig(caller);
     if (rotated.notModified) throw new Error("unreachable");
     expect(rotated.etag).not.toBe(etagBefore);
     expect(rotated.presences[0]?.agent.imageUrl).toContain(keyB);
@@ -3620,7 +4420,7 @@ describe.skipIf(!PROOF_URL)("getAdapterConfig", () => {
       where: { id: agentId },
       data: { imageKey: null },
     });
-    const cleared = await adapters.getAdapterConfig();
+    const cleared = await adapters.getAdapterConfig(caller);
     if (cleared.notModified) throw new Error("unreachable");
     expect(cleared.etag).not.toBe(rotated.etag);
     expect(cleared.presences[0]?.agent.imageUrl).toBeNull();
@@ -3637,12 +4437,16 @@ describe.skipIf(!PROOF_URL)("getAdapterConfig", () => {
         JSON.stringify({ botToken: "xoxb-304" }),
       ),
     });
-    const seed = await adapters.getAdapterConfig();
+    const caller = await seedAdapterCaller();
+    const seed = await adapters.getAdapterConfig(caller);
     if (seed.notModified) throw new Error("unreachable");
+    // The decrypt CACHE would also absorb the mutated-away early return —
+    // clear it so the spy below stays a real signal.
+    decryptCache.resetDecryptCacheForTests();
 
     const decryptSpy = vi.spyOn(getCrypto(), "decrypt");
     try {
-      const cached = await adapters.getAdapterConfig(seed.etag);
+      const cached = await adapters.getAdapterConfig(caller, seed.etag);
       expect(cached.notModified).toBe(true);
       expect(cached).not.toHaveProperty("presences");
       expect(decryptSpy).not.toHaveBeenCalled();
@@ -3773,7 +4577,8 @@ describe.skipIf(!PROOF_URL)("getAdapterWork", () => {
 
     // Running: NOT work — there is no live rendering; the completion pass
     // waits for the turn to land.
-    let work = await adapters.getAdapterWork();
+    const caller = await seedClaimedCaller();
+    let work = await adapters.getAdapterWork(caller.adapterId);
     expect(work.finished).toEqual([]);
 
     // Finished: exactly one work item, addressed through its link.
@@ -3781,7 +4586,7 @@ describe.skipIf(!PROOF_URL)("getAdapterWork", () => {
       where: { id: turn.id },
       data: { status: "done", finishedAt: new Date() },
     });
-    work = await adapters.getAdapterWork();
+    work = await adapters.getAdapterWork(caller.adapterId);
     expect(work.finished.map((w) => w.turn.id)).toEqual([turn.id]);
     expect(work.finished[0]).toMatchObject({
       linkId: link.id,
@@ -3797,7 +4602,7 @@ describe.skipIf(!PROOF_URL)("getAdapterWork", () => {
     expect(
       await adapters.advanceMirrorCursor(link.id, null, row.createdAt),
     ).toBe(true);
-    work = await adapters.getAdapterWork();
+    work = await adapters.getAdapterWork(caller.adapterId);
     expect(work.finished).toEqual([]);
   });
 
@@ -3822,7 +4627,8 @@ describe.skipIf(!PROOF_URL)("getAdapterWork", () => {
     // The turn PREDATES the link.
     await db.$executeRaw`UPDATE turns SET created_at = now() - interval '1 hour' WHERE id = ${old.id}`;
 
-    const work = await adapters.getAdapterWork();
+    const caller = await seedClaimedCaller();
+    const work = await adapters.getAdapterWork(caller.adapterId);
     expect(work.finished).toEqual([]);
 
     // A turn born AFTER the link mirrors normally.
@@ -3838,7 +4644,7 @@ describe.skipIf(!PROOF_URL)("getAdapterWork", () => {
       select: { id: true },
     });
     await db.$executeRaw`UPDATE channel_thread_links SET created_at = now() - interval '10 minutes' WHERE id = ${link.id}`;
-    const later = await adapters.getAdapterWork();
+    const later = await adapters.getAdapterWork(caller.adapterId);
     expect(later.finished.map((w) => w.turn.id)).toEqual([fresh.id]);
   });
 
@@ -3870,7 +4676,8 @@ describe.skipIf(!PROOF_URL)("getAdapterWork", () => {
     });
     await db.$executeRaw`UPDATE turns SET created_at = now() - interval '30 minutes' WHERE id = ${followUp.id}`;
 
-    const work = await adapters.getAdapterWork();
+    const caller = await seedClaimedCaller();
+    const work = await adapters.getAdapterWork(caller.adapterId);
 
     const item = work.finished.find((w) => w.turn.id === followUp.id);
     expect(item).toBeDefined();
@@ -3910,7 +4717,8 @@ describe.skipIf(!PROOF_URL)("getAdapterWork", () => {
       },
     });
 
-    const work = await adapters.getAdapterWork();
+    const caller = await seedClaimedCaller();
+    const work = await adapters.getAdapterWork(caller.adapterId);
 
     const item = work.finished.find((w) => w.turn.id === asked.id);
     expect(item?.turn.userName).toBe("Morgan Member");
@@ -4406,7 +5214,8 @@ describe.skipIf(!PROOF_URL)("approval prompts (restart-safe dedupe)", () => {
     });
     expect(stored.expiresAt).toEqual(expiresAt);
 
-    const unsettled = await adapters.listUnsettledPrompts();
+    const caller = await seedClaimedCaller();
+    const unsettled = await adapters.listUnsettledPrompts(caller.adapterId);
     expect(unsettled).toHaveLength(1);
     expect(unsettled[0]).toMatchObject({
       approvalId: "ap-exp",
@@ -4436,7 +5245,8 @@ describe.skipIf(!PROOF_URL)("approval prompts (restart-safe dedupe)", () => {
         })
       ).state,
     ).toBe("expired");
-    expect(await adapters.listUnsettledPrompts()).toEqual([]);
+    const caller = await seedClaimedCaller();
+    expect(await adapters.listUnsettledPrompts(caller.adapterId)).toEqual([]);
 
     expect(
       await adapters.settleApprovalPrompt("ap-nope", "decided"),

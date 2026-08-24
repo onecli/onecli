@@ -210,18 +210,3 @@ pub(crate) async fn validate(pool: &PgPool, headers: &HeaderMap) -> Result<Strin
 
     Ok(user.id)
 }
-
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn jwks_url_construction() {
-        let region = "us-east-1";
-        let pool_id = "us-east-1_abc123";
-        let url =
-            format!("https://cognito-idp.{region}.amazonaws.com/{pool_id}/.well-known/jwks.json");
-        assert_eq!(
-            url,
-            "https://cognito-idp.us-east-1.amazonaws.com/us-east-1_abc123/.well-known/jwks.json"
-        );
-    }
-}

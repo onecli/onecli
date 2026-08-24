@@ -10,9 +10,14 @@ import { log } from "../log";
 
 /**
  * jcode's background-task registry, read the way jcode itself writes it
- * (verified against v0.71.1 source, the exact vendored commit). Everything
- * vendor-format-specific lives HERE — the generic observer never sees a file
- * (invariant 9).
+ * (verified against v0.71.1 source, the exact vendored commit; re-verified
+ * against v0.78.1 at the pin bump — format unchanged, plus one additive
+ * field: `stall_wake_seconds` arms a jcode-internal stall watchdog whose
+ * wake is independent of the task's own `wake` flag. "stalled" is only a
+ * WAIT reason, never a status, so the enum below stays exact and the
+ * passthrough absorbs the new field; the platform prompt already steers
+ * agents off runtime-level wake channels). Everything vendor-format-specific
+ * lives HERE — the generic observer never sees a file (invariant 9).
  *
  * The registry: `$TMPDIR/jcode-bg-tasks/<id>.status.json` (rich task state,
  * rewritten whole on every change) + `<id>.output` (append-only interleaved

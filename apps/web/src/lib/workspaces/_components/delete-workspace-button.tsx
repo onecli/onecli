@@ -54,7 +54,7 @@ export const DeleteWorkspaceButton = ({
       // the workspace-card twin).
       setOpen(false);
       // Deleting the workspace leaves the active-workspace cookie dangling; pin the
-      // org and send the user to its workspace list (mirrors the old redirect).
+      // org and send the user to its workspace list.
       await setDefaultOrgCookie(organizationId);
       router.push(`/org/${organizationId}/workspaces`);
       router.refresh();

@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { render, screen } from "@testing-library/react";
+import type { InstanceInfo } from "@/lib/api/types";
 import type { AgentPageAgent } from "./agent-page-frame";
 
 /**
@@ -17,6 +18,24 @@ vi.mock("next/navigation", () => ({
 
 vi.mock("@/hooks/use-counts", () => ({
   useCounts: () => ({ data: undefined }),
+}));
+
+// The rail reads the instance for the SSH auto-hide gate (sandbox-platform
+// step 5). Mutable so the gate tests below can flip it; the default is an
+// instance WITH ssh, so the gated entry renders like any other row.
+const instanceState: { value: InstanceInfo | null } = { value: null };
+const instanceWithSsh = (): InstanceInfo => ({
+  edition: "cloud",
+  entitled: true,
+  version: "0.0.0-test",
+  ssh: { host: "ssh.onecli.test" },
+});
+beforeEach(() => {
+  instanceState.value = instanceWithSsh();
+});
+
+vi.mock("@/hooks/use-instance", () => ({
+  useInstance: () => instanceState.value,
 }));
 
 // Structural chrome (AppIcon renders through next/image).
@@ -75,5 +94,32 @@ describe("the rail's Slack connected mark", () => {
   it("shows no mark when no Slack presence exists", () => {
     render(<AgentSectionRail agent={agentWith([])} />);
     expect(screen.queryByText("(connected to Slack)")).not.toBeInTheDocument();
+  });
+});
+
+/**
+ * The SSH auto-hide gate (sandbox-platform step 5): an instance-gated entry
+ * exists only where the deployment has the capability. Loading shows the
+ * entry — loading must never render as unavailable (the availability.ts law).
+ */
+describe("the rail's SSH instance gate", () => {
+  it("shows the SSH entry when the instance has ssh", () => {
+    render(<AgentSectionRail agent={agentWith([])} />);
+    // Desktop aside + mobile strip.
+    expect(screen.getAllByText("SSH")).toHaveLength(2);
+  });
+
+  it("shows the SSH entry while the instance is still loading", () => {
+    instanceState.value = null;
+    render(<AgentSectionRail agent={agentWith([])} />);
+    expect(screen.getAllByText("SSH")).toHaveLength(2);
+  });
+
+  it("hides the SSH entry once the instance resolves without ssh", () => {
+    instanceState.value = { ...instanceWithSsh(), ssh: undefined };
+    render(<AgentSectionRail agent={agentWith([])} />);
+    expect(screen.queryByText("SSH")).not.toBeInTheDocument();
+    // Only the gated entry disappears — the rest of Access stays.
+    expect(screen.getAllByText("Models").length).toBeGreaterThan(0);
   });
 });

@@ -21,8 +21,20 @@ import {
 } from "./compose.mjs";
 import { dockerUp, projectContainers } from "./detect.mjs";
 import { SetupError } from "./errors.mjs";
-import { provisionEnv } from "./steps.mjs";
-import { askConfirm, askSelect, log, note, outro, spinner } from "./ui.mjs";
+import {
+  externalUrlProblem,
+  provisionEnv,
+  resolveDisplayUrls,
+} from "./steps.mjs";
+import {
+  askConfirm,
+  askSelect,
+  askText,
+  log,
+  note,
+  outro,
+  spinner,
+} from "./ui.mjs";
 
 const ROOT = fileURLToPath(new URL("../..", import.meta.url));
 const ENV_PATH = join(ROOT, "docker", ".env");
@@ -173,8 +185,57 @@ export const runWizard = async (opts) => {
       "No Docker at all? https://docs.docker.com/get-docker/",
     ]);
 
+  // ── networking (the two questions) ──
+  // Q1 decides the canonical URL; Q2 the publish plane. Asked only when the
+  // file answers neither (a kept config is the operator's choice) and no
+  // flag pre-answered them; --yes takes the defaults silently.
+  let externalUrl = opts.externalUrl;
+  let bindChoice = opts.bind;
+  const askNetworking = !env.existed || reviewing;
+  if (
+    askNetworking &&
+    !externalUrl &&
+    !env.get("ONECLI_EXTERNAL_URL") &&
+    !env.get("APP_URL")
+  ) {
+    const defaultUrl = `http://localhost:${env.get("ONECLI_APP_PORT") ?? "10254"}`;
+    const answer = await askText({
+      message:
+        "Where will people open OneCLI? (every link and origin derives from this URL)",
+      initialValue: defaultUrl,
+      validate: (value) => (value ? externalUrlProblem(value) : undefined),
+    });
+    // The localhost default stays a hint stub rather than a pinned value, so
+    // the file self-documents without freezing an address nobody chose.
+    if (answer && answer.trim().replace(/\/+$/, "") !== defaultUrl)
+      externalUrl = answer;
+  }
+  if (askNetworking && !bindChoice && !env.get("ONECLI_BIND_HOST")) {
+    const reach = await askSelect({
+      message: "Who should reach this machine's ports directly?",
+      options: [
+        {
+          value: "local",
+          label: "Only this machine",
+          hint: "bind to the detected local address (tunnels and proxies still work)",
+        },
+        {
+          value: "network",
+          label: "Other machines too",
+          hint: "bind to 0.0.0.0 (put a firewall or proxy in front)",
+        },
+      ],
+      initialValue: "local",
+    });
+    if (reach === "network") bindChoice = "0.0.0.0";
+  }
+
   // ── provision docker/.env ──
-  const { profiles } = await provisionEnv(env, opts);
+  const { profiles } = await provisionEnv(env, {
+    ...opts,
+    externalUrl,
+    bind: bindChoice,
+  });
   env.upsert("ONECLI_SETUP_MODE", mode, {
     comment:
       "How this install runs (compose = published images, source = built here).",
@@ -223,12 +284,23 @@ export const runWizard = async (opts) => {
   const { bind, appPort, gatewayPort, apiPort } = resolvedPorts(env);
   await healthWait({ bind, apiPort, appPort, mode });
 
-  const url = `http://${bind}:${appPort}`;
+  // Display the ADVERTISED addresses (what the resolver serves the browser),
+  // not the publish plane — the two are decoupled now. The browser open
+  // stays on the locally reachable address: the wizard runs on this machine,
+  // where the external URL may be a domain that only resolves elsewhere.
+  const advertised = resolveDisplayUrls(env);
+  // Open the browser on the ADVERTISED host when the bind is local-only:
+  // first-run sign-in then happens on the same origin every injected URL and
+  // cookie names (localhost), instead of its 127.0.0.1 twin.
+  const localUrl =
+    bind === "0.0.0.0" || bind === "127.0.0.1"
+      ? `http://localhost:${appPort}`
+      : `http://${bind}:${appPort}`;
   note(
     [
-      `Dashboard  ${url}`,
-      `Gateway    http://${bind}:${gatewayPort}`,
-      `API        http://${bind}:${apiPort}`,
+      `Dashboard  ${advertised.external}`,
+      `Gateway    ${advertised.gateway}`,
+      `API        ${advertised.api}`,
       "",
       "Create your account right away. The first account owns the instance.",
       "",
@@ -238,5 +310,5 @@ export const runWizard = async (opts) => {
     "OneCLI is running",
   );
   outro("Setup complete.");
-  openBrowser(url);
+  openBrowser(localUrl);
 };

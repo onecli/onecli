@@ -123,9 +123,9 @@ describe("injection config type guards", () => {
   });
 });
 
-// migrate-import.ts validates incoming secrets with this exact union, so this
-// proves param- and path-injected secrets survive an org->workspace migration.
-describe("injectionConfigSchema (shared union, used by migrate import)", () => {
+// The secret create/update schemas embed this exact union, so this proves
+// param- and path-injected secret configs are accepted end to end.
+describe("injectionConfigSchema (the shared injection-config union)", () => {
   it.each([
     ["header", { headerName: "Authorization", valueFormat: "Bearer {value}" }],
     ["param", { paramName: "api_key", paramFormat: "{value}" }],

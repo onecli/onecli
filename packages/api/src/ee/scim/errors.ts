@@ -68,6 +68,9 @@ const SERVICE_ERROR_MAP: Record<
   // Not thrown on the SCIM path (GONE is the legacy policy-rules deprecation);
   // mapped for exhaustiveness — SCIM has no 410, so express it as a 400.
   GONE: { status: 400, scimType: "invalidValue" },
+  // Not thrown on the SCIM path (RATE_LIMITED is the SSH cert-mint budget);
+  // mapped for exhaustiveness — SCIM's error status set has no 429.
+  RATE_LIMITED: { status: 400, scimType: "invalidValue" },
 };
 
 /** Domain ServiceError → the SCIM wire error; anything else stays as-is. */

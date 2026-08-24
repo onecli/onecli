@@ -55,3 +55,23 @@ export const OFFLINE_MESSAGE =
 /** The same state at the create door — a new agent has nowhere to start. */
 export const OFFLINE_CREATE_MESSAGE =
   "Your agents are offline. A new agent can't start until they're back.";
+
+/**
+ * The one honest sentence about where agent files live (§3.9), keyed off the
+ * platform's declared durability class — stated, never assumed. Agent
+ * vocabulary only (files, sleeping), exactly like everything else here: what
+ * implements the durability is never a word a user reads. Null (an older API,
+ * nothing online) renders nothing rather than a guess.
+ */
+export const homeDurabilityMessage = (
+  instance: InstanceInfo | null,
+): string | null => {
+  switch (instance?.runners?.homeDurability) {
+    case "snapshot":
+      return "Your agent's files are archived to durable storage whenever it sleeps.";
+    case "resident":
+      return "Your agent's files live on this deployment's own disk.";
+    default:
+      return null;
+  }
+};

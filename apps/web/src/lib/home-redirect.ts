@@ -26,6 +26,10 @@ export const resolveHomeRedirect = async (): Promise<string> => {
   // SSO): the login page owns the error UX — its own session sync hits the
   // same status, shows the reason, and signs out.
   if (res.status === 409 || res.status === 401) return "/auth/login";
+  // Rate limited: the login page owns the error UX here too — its own sync
+  // hits the same 429 and shows the retry message. Falling through would
+  // misroute an existing user to org creation.
+  if (res.status === 429) return "/auth/login";
   if (!res.ok) return "/create-org";
   const data = (await res.json()) as { workspaceId?: string };
 

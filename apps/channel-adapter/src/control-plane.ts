@@ -85,24 +85,97 @@ export const createControlPlane = (options: {
   baseUrl: string;
   token: string;
 }): ControlPlaneClient => {
+  // The bearer starts as the anchor and becomes the minted per-instance
+  // credential once registration answers one (an OLD control plane mints
+  // nothing — the anchor then stays the bearer, the legacy shared identity).
+  let bearer = options.token;
+  // The name the last successful registration used — the base for the
+  // displaced-twin recovery below. Null until first registration: a 401
+  // before that is a real refusal (bad anchor), never a displacement.
+  let registeredName: string | null = null;
+  let recovery: Promise<boolean> | null = null;
+
+  const register = async (name: string): Promise<string> => {
+    // Registration ALWAYS presents the anchor — it is the membership proof;
+    // the minted bearer is this instance's identity, never its passport.
+    const response = await fetch(
+      `${options.baseUrl}/v1/channel-adapter/register`,
+      {
+        method: "POST",
+        headers: {
+          authorization: `Bearer ${options.token}`,
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({ name, perInstance: true }),
+        signal: AbortSignal.timeout(DEFAULT_TIMEOUT_MS),
+      },
+    );
+    if (!response.ok) {
+      throw new ControlPlaneError(
+        response.status,
+        `control plane answered ${response.status} for /register`,
+      );
+    }
+    const parsed = adapterRegisterResponseSchema.parse(await response.json());
+    bearer = parsed.token ?? options.token;
+    registeredName = name;
+    return parsed.adapterId;
+  };
+
+  /**
+   * A 401 AFTER a successful mint means the minted credential was displaced —
+   * a same-named twin re-registered and took the row. Re-register ONCE under
+   * a self-suffixed name (fresh row, fresh mint) so two same-named live
+   * instances converge to distinct identities after one displacement each —
+   * never a flip-flop storm. Single-flighted: every 401-ing loop funnels into
+   * one re-register.
+   */
+  const recoverFromDisplacement = async (): Promise<boolean> => {
+    const baseName = registeredName;
+    if (!baseName) return false;
+    recovery ??= (async () => {
+      try {
+        const suffix = Math.floor(Math.random() * 0xffff)
+          .toString(16)
+          .padStart(4, "0");
+        await register(`${baseName}-${suffix}`);
+        return true;
+      } catch {
+        return false;
+      } finally {
+        // Allow a FUTURE displacement to recover again; concurrent callers of
+        // THIS one all shared the settled promise.
+        queueMicrotask(() => {
+          recovery = null;
+        });
+      }
+    })();
+    return recovery;
+  };
+
   const call = async <T extends z.ZodType>(
     method: "GET" | "POST",
     path: string,
     schema: T,
     init?: { body?: unknown; headers?: Record<string, string> },
   ): Promise<z.infer<T>> => {
-    const response = await fetch(`${options.baseUrl}/v1${path}`, {
-      method,
-      headers: {
-        authorization: `Bearer ${options.token}`,
-        ...(init?.body !== undefined && {
-          "content-type": "application/json",
-        }),
-        ...init?.headers,
-      },
-      ...(init?.body !== undefined && { body: JSON.stringify(init.body) }),
-      signal: AbortSignal.timeout(DEFAULT_TIMEOUT_MS),
-    });
+    const doFetch = () =>
+      fetch(`${options.baseUrl}/v1${path}`, {
+        method,
+        headers: {
+          authorization: `Bearer ${bearer}`,
+          ...(init?.body !== undefined && {
+            "content-type": "application/json",
+          }),
+          ...init?.headers,
+        },
+        ...(init?.body !== undefined && { body: JSON.stringify(init.body) }),
+        signal: AbortSignal.timeout(DEFAULT_TIMEOUT_MS),
+      });
+    let response = await doFetch();
+    if (response.status === 401 && (await recoverFromDisplacement())) {
+      response = await doFetch();
+    }
     if (!response.ok) {
       throw new ControlPlaneError(
         response.status,
@@ -113,27 +186,21 @@ export const createControlPlane = (options: {
   };
 
   return {
-    async register(name) {
-      const parsed = await call(
-        "POST",
-        "/channel-adapter/register",
-        adapterRegisterResponseSchema,
-        { body: { name } },
-      );
-      return parsed.adapterId;
-    },
+    register,
 
     async getConfig(etag) {
-      const response = await fetch(
-        `${options.baseUrl}/v1/channel-adapter/config`,
-        {
+      const doFetch = () =>
+        fetch(`${options.baseUrl}/v1/channel-adapter/config`, {
           headers: {
-            authorization: `Bearer ${options.token}`,
+            authorization: `Bearer ${bearer}`,
             ...(etag && { "if-none-match": etag }),
           },
           signal: AbortSignal.timeout(DEFAULT_TIMEOUT_MS),
-        },
-      );
+        });
+      let response = await doFetch();
+      if (response.status === 401 && (await recoverFromDisplacement())) {
+        response = await doFetch();
+      }
       if (response.status === 304) return null;
       if (!response.ok) {
         throw new ControlPlaneError(

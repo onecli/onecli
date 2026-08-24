@@ -1,6 +1,10 @@
 import { describe, expect, it } from "vitest";
 import type { InstanceInfo } from "@/lib/api/types";
-import { hostedAvailability, showsHostedSurface } from "./availability";
+import {
+  homeDurabilityMessage,
+  hostedAvailability,
+  showsHostedSurface,
+} from "./availability";
 
 const instance = (runners?: InstanceInfo["runners"]): InstanceInfo => ({
   edition: "cloud",
@@ -54,5 +58,28 @@ describe("what each state permits", () => {
   it("SHOWS the surface when offline — the agents are real, just idle", () => {
     expect(showsHostedSurface("offline")).toBe(true);
     expect(showsHostedSurface("ready")).toBe(true);
+  });
+});
+
+describe("homeDurabilityMessage", () => {
+  it("states each declared class in agent words only — never a runner word", () => {
+    const snapshot = homeDurabilityMessage(
+      instance({ registered: true, online: true, homeDurability: "snapshot" }),
+    );
+    const resident = homeDurabilityMessage(
+      instance({ registered: true, online: true, homeDurability: "resident" }),
+    );
+    expect(snapshot).toMatch(/archived to durable storage/);
+    expect(resident).toMatch(/deployment's own disk/);
+    for (const copy of [snapshot, resident]) {
+      expect(copy).not.toMatch(/runner|sandbox|pvc|s3/i);
+    }
+  });
+
+  it("renders NOTHING when the platform makes no claim — an older API or nobody online", () => {
+    expect(homeDurabilityMessage(null)).toBeNull();
+    expect(
+      homeDurabilityMessage(instance({ registered: true, online: false })),
+    ).toBeNull();
   });
 });

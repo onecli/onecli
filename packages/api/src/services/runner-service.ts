@@ -16,9 +16,10 @@ import { onlineSince } from "./placement";
  * presenting it may create its row, and afterwards presents the same token as
  * its credential. This keeps the self-host story zero-touch — install.sh
  * generates one secret into the `.env` both services read — while making an
- * unknown token unable to conjure a runner. With `RUNNER_TOKEN` unset (cloud's
- * posture) only already-registered runners authenticate and NOTHING can
- * register, so the surface stays dark.
+ * unknown token unable to conjure a runner. With `RUNNER_TOKEN` unset only
+ * already-registered runners authenticate and NOTHING can register, so the
+ * surface stays dark — a deployment opts in per environment by setting it;
+ * do NOT read an unset value as "hosted deployments never register runners".
  */
 
 const safeEqual = (a: string, b: string): boolean => {
@@ -98,6 +99,21 @@ export const heartbeatRunner = async (
   });
 };
 
+// Derived from the wire schema, never hand-rolled beside it: a third
+// durability class must not be able to drift between the schema, this
+// service, and the web's api types.
+export type HomeDurability = RunnerCapabilities["homeDurability"];
+
+/**
+ * The backend's declared home durability class (§3.9), read off the
+ * capabilities blob the runner registered with. Null when the blob predates
+ * the field or fails the schema — absence of a claim, never a default.
+ */
+const homeDurabilityOf = (capabilities: unknown): HomeDurability | null => {
+  const parsed = runnerCapabilitiesSchema.safeParse(capabilities);
+  return parsed.success ? parsed.data.homeDurability : null;
+};
+
 export interface RunnerSummary {
   id: string;
   name: string;
@@ -105,6 +121,8 @@ export interface RunnerSummary {
   lastSeenAt: Date | null;
   sandboxCount: number;
   capabilities: unknown;
+  /** Declared durability of this runner's agent homes (§3.9). */
+  homeDurability: HomeDurability | null;
   /** Sandboxes live background work is holding out of idle-stop (step 13). */
   heldAwakeCount: number;
   /** The ceiling that count is enforced against (env or derived). */
@@ -134,6 +152,7 @@ export const listRunners = async (): Promise<RunnerSummary[]> => {
     lastSeenAt: runner.lastSeenAt,
     sandboxCount: runner._count.sandboxes,
     capabilities: runner.capabilities,
+    homeDurability: homeDurabilityOf(runner.capabilities),
     heldAwakeCount: heldAwake.get(runner.id) ?? 0,
     heldAwakeCeiling: heldAwakeCeilingFor(runner.capabilities),
   }));
@@ -142,6 +161,14 @@ export const listRunners = async (): Promise<RunnerSummary[]> => {
 export interface RunnerAvailability {
   registered: boolean;
   online: boolean;
+  /**
+   * Durability class of the online runner's homes (§3.9) — what lets the
+   * product state the loss window honestly instead of assuming it away.
+   * Posture, not data (the instance route's rule): absent when nothing is
+   * online or the runner predates the field. With multiple runners the
+   * OLDEST online one speaks — one deployment runs one substrate.
+   */
+  homeDurability?: HomeDurability;
 }
 
 /**
@@ -166,11 +193,22 @@ export const getRunnerAvailability = async (): Promise<RunnerAvailability> => {
     return cached.value;
   }
 
-  const [total, online] = await Promise.all([
+  const [total, onlineRunner] = await Promise.all([
     db.runner.count(),
-    db.runner.count({ where: { lastSeenAt: { gte: onlineSince() } } }),
+    db.runner.findFirst({
+      where: { lastSeenAt: { gte: onlineSince() } },
+      orderBy: { createdAt: "asc" },
+      select: { capabilities: true },
+    }),
   ]);
-  const value = { registered: total > 0, online: online > 0 };
+  const homeDurability = onlineRunner
+    ? homeDurabilityOf(onlineRunner.capabilities)
+    : null;
+  const value: RunnerAvailability = {
+    registered: total > 0,
+    online: onlineRunner !== null,
+    ...(homeDurability && { homeDurability }),
+  };
   cached = { value, at: Date.now() };
   return value;
 };

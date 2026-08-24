@@ -1,7 +1,9 @@
 import { Hono } from "hono";
-import { EDITION_INFO } from "../lib/env";
+import { EDITION_INFO, SSH_HOST } from "../lib/env";
 import { isEntitled } from "../lib/entitlements";
+import { resolveOriginsFromEnv } from "../lib/public-origins";
 import { getRunnerAvailability } from "../services/runner-service";
+import { sshAvailable } from "../services/ssh-service";
 
 /**
  * Instance metadata — the browser's only source of runtime truth the client
@@ -13,20 +15,39 @@ import { getRunnerAvailability } from "../services/runner-service";
  * `runners` is the hosted-agents availability fact (§3.13): `registered`
  * gates the entrance — a deployment that never had a runner shows nothing —
  * and `online` is what lets the hosted surfaces say "offline" instead of
- * hiding agents that already exist. Same posture-not-data rule: two booleans,
- * no runner identity.
+ * hiding agents that already exist. Same posture-not-data rule: two booleans
+ * plus the declared home-durability CLASS (§3.9 — how agent files survive
+ * sleep, stated rather than assumed), never runner identity.
  */
 export const instanceRoutes = (version?: string) => {
   const app = new Hono();
 
-  app.get("/", async (c) =>
-    c.json({
+  app.get("/", async (c) => {
+    // Same posture-not-data rule as the rest of the body: these are the
+    // addresses the deployment already advertises to every browser (the
+    // layout injects two of them into each page), never internal ones.
+    const origins = resolveOriginsFromEnv();
+    return c.json({
       edition: EDITION_INFO.edition,
       entitled: isEntitled(),
       version: version ?? "unknown",
       runners: await getRunnerAvailability(),
-    }),
-  );
+      // `external` IS the app origin (no duplicate `app` twin on the wire).
+      // `mode` names the DERIVATION rule only — the explicit fields are
+      // authoritative (cloud, for one, is https with split-host overrides:
+      // mode says "proxy" while gateway is its own host, not external+/gw).
+      origins: {
+        external: origins.external,
+        api: origins.api,
+        gateway: origins.gateway,
+        mode: origins.mode,
+      },
+      // The SSH front door (sandbox-platform step 5): absent means "not on
+      // this deployment" — the optional-field contract `runners` set. Only
+      // the public DNS host, never CA or session facts.
+      ...(sshAvailable() ? { ssh: { host: SSH_HOST } } : {}),
+    });
+  });
 
   return app;
 };

@@ -370,7 +370,7 @@ const checkPlatform = () => {
   if (platform() !== "linux") return;
   warn(
     "On Linux `host.docker.internal` does not resolve from a container.",
-    "Set RUNNER_ADVERTISED_HOST and GATEWAY_BASE_URL to the docker bridge (usually 172.17.0.1) in .env.",
+    "Set RUNNER_ADVERTISED_HOST and ONECLI_AGENT_PROXY_ADDRESS to the docker bridge (usually 172.17.0.1) in .env.",
   );
 };
 

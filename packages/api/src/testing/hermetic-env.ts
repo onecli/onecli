@@ -103,6 +103,7 @@ export const AMBIENT_HAZARD_VARS: readonly string[] = [
   "DB_PORT",
   "DB_NAME",
   // URLs / gateway
+  "ONECLI_EXTERNAL_URL",
   "APP_URL",
   "NEXT_PUBLIC_APP_URL",
   "API_URL",
@@ -111,6 +112,14 @@ export const AMBIENT_HAZARD_VARS: readonly string[] = [
   "NEXT_PUBLIC_GATEWAY_API_URL",
   "GATEWAY_INTERNAL_URL",
   "GATEWAY_BASE_URL",
+  "ONECLI_AGENT_PROXY_ADDRESS",
+  "ONECLI_TRUSTED_ORIGINS",
+  // Publish plane, read only by the resolver's legacy bind seed and the
+  // ports-mode derivation (public-origins.ts).
+  "ONECLI_BIND_HOST",
+  "ONECLI_APP_PORT",
+  "ONECLI_API_PORT",
+  "ONECLI_GATEWAY_PORT",
   "GATEWAY_CA_CERT",
   // Flags & service tokens
   "DEV_TRUST_ANY_AUTH_ORIGIN",
@@ -122,6 +131,17 @@ export const AMBIENT_HAZARD_VARS: readonly string[] = [
   "SANDBOX_IDLE_STOP_SECONDS",
   "TURN_CEILING_SECONDS",
   "MAX_HELD_AWAKE_SANDBOXES",
+  // SSH front door (sandbox-platform step 5)
+  "SSH_TERMINATOR_SECRET",
+  "SSH_CA_KMS_KEY_ARN",
+  "SSH_CA_PRIVATE_KEY",
+  "SSH_HOST",
+  "SSH_CERT_TTL_SECONDS",
+  "SSH_CERT_MINTS_PER_HOUR",
+  "SSH_MAX_SESSIONS_PER_AGENT",
+  "SSH_MAX_SESSION_SECONDS",
+  "SSH_IDLE_TIMEOUT_SECONDS",
+  "SSH_SESSION_LEASE_SECONDS",
   // Provider base URLs (test doubles point these at fakes per suite)
   "SLACK_API_BASE_URL",
   "ANTHROPIC_API_BASE_URL",

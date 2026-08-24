@@ -4,7 +4,8 @@ import { db } from "@onecli/db";
 import type { ApiEnv } from "../../types";
 import { auth } from "../../middleware/auth";
 import { getStripe, resolveStripeCustomer } from "../billing/stripe";
-import { APP_URL, CAPS } from "../../lib/env";
+import { CAPS } from "../../lib/env";
+import { appOrigin } from "../../lib/public-origins";
 import { dashboardUrl } from "../../lib/dashboard-url";
 import {
   PLAN_PRICE_IDS,
@@ -153,7 +154,7 @@ export const billingRoutes = () => {
           organization,
           authCtx.userEmail,
         );
-        const baseUrl = APP_URL;
+        const baseUrl = appOrigin();
 
         const activeSub = await findActivePlanSubscription(
           stripe,

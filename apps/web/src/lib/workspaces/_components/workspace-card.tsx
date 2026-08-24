@@ -109,7 +109,7 @@ export const WorkspaceCard = ({
       // cookie write + redirect below can't fire a duplicate delete.
       setDeleteOpen(false);
       // Deleting the active workspace leaves its cookie dangling; pin the org and
-      // go to its workspace list (mirrors the old redirect).
+      // go to its workspace list.
       await setDefaultOrgCookie(organizationId);
       router.push(`/org/${organizationId}/workspaces`);
       router.refresh();

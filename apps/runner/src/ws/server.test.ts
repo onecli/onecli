@@ -123,3 +123,37 @@ describe("message attribution", () => {
     expect(response.status).toBe(404);
   });
 });
+
+describe("keepalive", () => {
+  it("pings every live connection on the configured cadence — what keeps an idle channel alive across an NLB's TCP idle timeout", async () => {
+    // A dedicated server on its own port so the cadence override never
+    // touches the shared beforeEach instance.
+    const pinger = createRunnerWsServer({
+      port: PORT + 1,
+      onMessage: () => undefined,
+      pingIntervalMs: 20,
+    });
+    await pinger.listen();
+    try {
+      const token = pinger.issueToken("sb-ping");
+      const ws = await new Promise<WebSocket>((resolve, reject) => {
+        const socket = new WebSocket(
+          `ws://127.0.0.1:${PORT + 1}/?token=${token}`,
+        );
+        socket.once("open", () => resolve(socket));
+        socket.once("error", reject);
+      });
+      const pinged = await new Promise<boolean>((resolve) => {
+        const timeout = setTimeout(() => resolve(false), 1_000);
+        ws.once("ping", () => {
+          clearTimeout(timeout);
+          resolve(true);
+        });
+      });
+      expect(pinged).toBe(true);
+      ws.close();
+    } finally {
+      await pinger.close();
+    }
+  });
+});

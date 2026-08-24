@@ -116,6 +116,12 @@ export const LoginContent = () => {
               "This email is already associated with a different sign-in identity.",
           );
           await signOut();
+        } else if (res.status === 429) {
+          // Rate limited: retryable, so keep the session — signing out would
+          // turn a brief throttle into a full re-login.
+          setError(
+            "Too many requests right now. Please wait a moment and try again.",
+          );
         }
       } catch {
         // Transient error (deploy, network) — don't sign out
@@ -288,7 +294,6 @@ export const LoginContent = () => {
       <div className="w-full max-w-sm rounded-2xl border border-border/50 bg-card p-8">
         {step === "providers" ? (
           <>
-            {/* Google */}
             <Button
               size="lg"
               variant="outline"

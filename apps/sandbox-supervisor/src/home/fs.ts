@@ -68,33 +68,88 @@ export const ensureManagedDir = (homeRoot: string, relDir: string): string => {
 };
 
 /**
+ * A filesystem error the managed-root walks tolerate: a subuid-owned entry an
+ * agent's nested container left behind that this (uid-1000) process cannot
+ * read or delete. `ENOTEMPTY` covers the empty-fold `rmdir` racing such an
+ * entry. Anything else (EIO, ENOSPC, …) is a real fault and must propagate —
+ * swallowing it would ack a sync generation that silently failed to prune.
+ */
+const TOLERATED_PRUNE_CODES = new Set([
+  "EPERM",
+  "EACCES",
+  "ENOENT",
+  "ENOTEMPTY",
+]);
+
+export const isToleratedPruneError = (err: unknown): boolean =>
+  err instanceof Error &&
+  "code" in err &&
+  typeof err.code === "string" &&
+  TOLERATED_PRUNE_CODES.has(err.code);
+
+/**
  * Prune a managed root to exactly `keep` (paths relative to homeRoot):
  * symlinks are unlinked AS LINKS (never followed, never recursed into),
  * files outside the manifest are removed, empty directories fold up
  * bottom-up. The walk only descends real directories under the root, so it
  * can never escape it. The root itself always survives.
+ *
+ * INACCESSIBLE entries are skipped, never fatal (returned as a count for the
+ * caller to warn on): with rootless containers in the sandbox, one
+ * volume-mount into a managed root can leave subuid-owned mode-700
+ * directories the supervisor's uid cannot read or delete — a throwing walk
+ * would poison every subsequent sync generation of the whole root over one
+ * stray entry (same posture as the memory prune's kept-unmanaged arm). Only
+ * permission/absence errors are tolerated; a genuine IO fault still throws so
+ * the generation is not falsely acked.
  */
 export const pruneManagedRoot = (
   homeRoot: string,
   relRoot: string,
   keep: ReadonlySet<string>,
-): void => {
+): number => {
   const rootAbs = ensureManagedDir(homeRoot, relRoot);
+  let inaccessible = 0;
 
-  const walk = (dirAbs: string, dirRel: string): void => {
-    for (const entry of readdirSync(dirAbs, { withFileTypes: true })) {
+  // Count a tolerated failure once and swallow it; rethrow anything else.
+  const tolerate = (err: unknown): void => {
+    if (!isToleratedPruneError(err)) throw err;
+    inaccessible += 1;
+  };
+
+  // Returns whether `dirAbs` was fully readable. An unreadable directory is
+  // counted exactly once (here), and its parent then skips the empty-fold —
+  // so one locked subtree contributes 1 to `inaccessible`, never 2.
+  const walk = (dirAbs: string, dirRel: string): boolean => {
+    let entries;
+    try {
+      entries = readdirSync(dirAbs, { withFileTypes: true });
+    } catch (err) {
+      tolerate(err);
+      return false;
+    }
+    for (const entry of entries) {
       const entryAbs = join(dirAbs, entry.name);
       const entryRel = `${dirRel}/${entry.name}`;
-      if (entry.isSymbolicLink()) {
-        rmSync(entryAbs, { force: true });
-      } else if (entry.isDirectory()) {
-        walk(entryAbs, entryRel);
-        if (readdirSync(entryAbs).length === 0) rmdirSync(entryAbs);
-      } else if (!keep.has(entryRel)) {
-        rmSync(entryAbs, { force: true });
+      try {
+        if (entry.isSymbolicLink()) {
+          rmSync(entryAbs, { force: true });
+        } else if (entry.isDirectory()) {
+          // Only fold up a child we could fully read and empty; a locked
+          // child was already counted by its own `walk` — don't touch it.
+          if (walk(entryAbs, entryRel) && readdirSync(entryAbs).length === 0) {
+            rmdirSync(entryAbs);
+          }
+        } else if (!keep.has(entryRel)) {
+          rmSync(entryAbs, { force: true });
+        }
+      } catch (err) {
+        tolerate(err);
       }
     }
+    return true;
   };
 
   walk(rootAbs, relRoot);
+  return inaccessible;
 };

@@ -1,5 +1,5 @@
 import { sendEmail, isEmailConfigured } from "./email-service";
-import { APP_URL } from "../lib/env";
+import { appOrigin } from "../lib/public-origins";
 
 /**
  * The "forgot your password" email.
@@ -18,7 +18,7 @@ export const sendPasswordResetEmail = async (params: {
 }): Promise<void> => {
   if (!isEmailConfigured()) return;
 
-  const resetUrl = `${APP_URL}/auth/reset-password?token=${encodeURIComponent(
+  const resetUrl = `${appOrigin()}/auth/reset-password?token=${encodeURIComponent(
     params.token,
   )}`;
 
