@@ -1,5 +1,17 @@
 # Changelog
 
+## [2.1.0](https://github.com/onecli/onecli/compare/v2.0.1...v2.1.0) (2026-08-24)
+
+
+### Features
+
+* SSH front door, registered keys, durable sandbox homes, hosted-agent fan-out ([#508](https://github.com/onecli/onecli/issues/508)) ([f383b31](https://github.com/onecli/onecli/commit/f383b3185e3a52907da531510d5d659b79e7460a))
+
+
+### Bug Fixes
+
+* coded model-provider refusals, stale approval cards, and pinned-connection path fallback ([#504](https://github.com/onecli/onecli/issues/504)) ([ff7a192](https://github.com/onecli/onecli/commit/ff7a1921a95943d19066567b274c1d3c9c157c14))
+
 ## [2.0.1](https://github.com/onecli/onecli/compare/v2.0.0...v2.0.1) (2026-08-18)
 
 
