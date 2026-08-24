@@ -5,21 +5,27 @@
 // generate-or-reuse, so a second run keeps a working install working.
 
 import { renameSync } from "node:fs";
-import { join } from "node:path";
+import { homedir } from "node:os";
+import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { EnvFile, resolveEnv } from "../lib/env-file.mjs";
 import { portBusy, portOwner } from "../lib/ports.mjs";
+import { reapSandboxes } from "../lib/sandbox-reap.mjs";
+import { composeProjectOwner } from "../lib/upgrade.mjs";
 import { showBanner } from "./banner.mjs";
 import {
+  agentImageRef,
   buildImages,
   composeArgs,
   healthWait,
+  isPullableRef,
   openBrowser,
+  pullAgentImage,
   pullImages,
   upStack,
 } from "./compose.mjs";
-import { dockerUp, projectContainers } from "./detect.mjs";
+import { dockerUp, projectConfigFiles, projectContainers } from "./detect.mjs";
 import { SetupError } from "./errors.mjs";
 import {
   externalUrlProblem,
@@ -108,49 +114,96 @@ export const runWizard = async (opts) => {
     const running = (docker ? await projectContainers() : []).filter(
       (c) => c.state === "running",
     );
-    return { docker, running };
+    const configFiles = running.length ? await projectConfigFiles() : [];
+    return { docker, running, configFiles };
   })();
   await showBanner({ animate: !opts.yes });
 
   const s = spinner();
   s.start("Looking at what you already have…");
-  const { docker, running } = await detecting;
+  const { docker, running, configFiles } = await detecting;
   let env = new EnvFile(ENV_PATH, { label: "pnpm run setup" });
   s.stop(
     `Detected: docker ${docker ? "✓" : "✗"} · ${env.existed ? "existing install config" : "no existing install"}${running.length ? ` · ${running.length} service(s) running` : ""}`,
   );
 
-  // ── existing config: keep / review / reset ──
+  // ── existing config: keep / upgrade / review / reset ──
   let reviewing = false;
+  let upgrading = Boolean(opts.upgrade);
   if (env.existed) {
-    const action = await askSelect({
-      message: "Found an existing docker/.env. What should we do?",
-      options: [
-        {
-          value: "keep",
-          label: "Keep it",
-          hint: "reuse every value and just (re)start the stack",
-        },
-        {
-          value: "review",
-          label: "Review and update",
-          hint: "walk setup again; current values are kept",
-        },
-        {
-          value: "reset",
-          label: "Reset",
-          hint: "archive docker/.env and start fresh",
-        },
-      ],
-      initialValue: "keep",
-    });
+    // --upgrade is not just a shortcut: off-TTY runs are rejected outright and
+    // --yes makes askSelect return its initialValue silently, so a flag is the
+    // only way a scripted run can reach the upgrade path at all.
+    const action = upgrading
+      ? "upgrade"
+      : await askSelect({
+          message: "Found an existing docker/.env. What should we do?",
+          options: [
+            {
+              value: "keep",
+              label: "Keep it",
+              hint: "reuse every value and just (re)start the stack",
+            },
+            {
+              value: "upgrade",
+              label: "Upgrade",
+              hint: "pull the newest images and restart running agents onto them",
+            },
+            {
+              value: "review",
+              label: "Review and update",
+              hint: "walk setup again; current values are kept",
+            },
+            {
+              value: "reset",
+              label: "Reset",
+              hint: "archive docker/.env and start fresh",
+            },
+          ],
+          initialValue: "keep",
+        });
     if (action === "reset") {
       const backup = `${ENV_PATH}.bak-${new Date().toISOString().replace(/[:.]/g, "-")}`;
       renameSync(ENV_PATH, backup);
       log.step(`Archived the old config to ${backup}`);
       env = new EnvFile(ENV_PATH, { label: "pnpm run setup" });
     }
-    reviewing = action !== "keep";
+    // Upgrading is deliberately NOT reviewing: it must not reopen the URL and
+    // bind questions, which is all "review" means here.
+    reviewing = action === "review" || action === "reset";
+    upgrading = action === "upgrade";
+  }
+
+  // The running project may belong to a DIFFERENT install. Every front door
+  // drives the compose project `onecli`, but from different files with
+  // different SECRET_ENCRYPTION_KEYs, so recreating someone else's project
+  // from here would leave every stored credential undecryptable. Refuse, and
+  // name a remedy that is actually safe for whoever owns it.
+  if (upgrading) {
+    const owner = composeProjectOwner(configFiles, {
+      composeDir: join(ROOT, "docker"),
+      homeDir: homedir(),
+    });
+    if (owner.kind === "probe-failed")
+      throw new SetupError(
+        "Could not determine which install owns the running OneCLI stack.",
+        [
+          "The docker probe for the com.docker.compose.project.config_files label failed",
+          "Upgrading without that answer could recreate another install's stack with this checkout's docker/.env, and every credential it stored would stop decrypting",
+          "Check that `docker ps` works, then re-run",
+        ],
+      );
+    if (!owner.ours && owner.kind !== "nothing-running")
+      throw new SetupError(
+        "The OneCLI stack running on this machine was not started from this checkout.",
+        [
+          `It runs from: ${owner.owner}`,
+          "That install's own env file holds the SECRET_ENCRYPTION_KEY its data is encrypted with; upgrading from here would recreate the stack with this checkout's key instead, and every stored credential would stop decrypting",
+          owner.kind === "installer"
+            ? "Upgrade it with the installer that owns it: curl -fsSL https://onecli.sh/install | sh"
+            : `Upgrade it from the checkout that owns it: cd ${dirname(dirname(owner.owner))} && pnpm run setup --upgrade`,
+        ],
+      );
   }
 
   // ── run mode ──
@@ -264,6 +317,26 @@ export const runWizard = async (opts) => {
       ]);
     mode = "source";
   }
+  // The agent sandbox image is not a compose service, so the pull above could
+  // not have fetched it. This runs on EVERY compose-mode setup, not only an
+  // upgrade: `pullImages` already moves the six services forward, and leaving
+  // the agent image behind is exactly the drift being fixed here. Source mode
+  // skips it, because buildImages below rebuilds it from this checkout.
+  if (mode === "compose" && profiles.includes("runner")) {
+    const ref = agentImageRef(env, process.env);
+    if (!isPullableRef(ref)) {
+      // Not necessarily "built locally": a two-segment ref like myorg/agent:1
+      // is a real Docker Hub reference we refuse on purpose, since pulling it
+      // could replace a locally built image from a namespace we do not own.
+      log.step(
+        `Agent sandbox image ${ref} names no registry host, so it is not pulled`,
+      );
+    } else if (!pullAgentImage(ref)) {
+      log.warn(
+        `Could not pull ${ref}. OneCLI will still start, but hosted agents keep using the agent image already on this host.`,
+      );
+    }
+  }
   if (mode === "source") {
     // However source mode was reached — chosen up front or as the
     // pull-failure fallback — the runner must use the locally built agent
@@ -283,6 +356,29 @@ export const runWizard = async (opts) => {
   upStack(mode);
   const { bind, appPort, gatewayPort, apiPort } = resolvedPorts(env);
   await healthWait({ bind, apiPort, appPort, mode });
+
+  // Move running agents onto the image we just pulled. Sandboxes are runner
+  // created containers with no compose labels, so `up` never replaces them:
+  // without this they keep running the old agent image indefinitely. Only on
+  // an explicit upgrade, because it interrupts whatever an agent is doing.
+  let reaped = { stopped: 0, kept: false };
+  if (upgrading && profiles.includes("runner")) {
+    const resolved = resolveEnv(env, process.env);
+    reaped = reapSandboxes({
+      token: resolved.RUNNER_TOKEN,
+      // Shell value or docker/.env line, same as install.sh reads it, so the
+      // documented escape hatch behaves identically at both doors.
+      keep: Boolean(resolved.ONECLI_KEEP_SANDBOXES),
+    });
+    if (reaped.kept)
+      log.step(
+        "Left running agent sandboxes alone (ONECLI_KEEP_SANDBOXES is set)",
+      );
+    else if (reaped.stopped)
+      log.step(
+        `Restarted ${reaped.stopped} agent sandbox(es) onto the new image`,
+      );
+  }
 
   // Display the ADVERTISED addresses (what the resolver serves the browser),
   // not the publish plane — the two are decoupled now. The browser open
@@ -305,7 +401,7 @@ export const runWizard = async (opts) => {
       "Create your account right away. The first account owns the instance.",
       "",
       `Stop:    docker ${composeArgs(mode).join(" ")} down`,
-      "Update:  re-run pnpm run setup",
+      "Update:  git pull && pnpm install && pnpm run setup --upgrade",
     ].join("\n"),
     "OneCLI is running",
   );

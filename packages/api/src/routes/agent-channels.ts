@@ -12,6 +12,8 @@ import {
 import { isChannelProviderId } from "../services/channels/registry";
 import type { ChannelProviderId } from "../services/channels/types";
 import {
+  attachPresenceSchema,
+  channelTransportSchema,
   completePresenceSchema,
   detachPresenceSchema,
 } from "../validations/channels";
@@ -57,12 +59,29 @@ export const agentChannelRoutes = () => {
   });
 
   // GET /agents/:agentId/channels/:provider/manifest — the paste floor's
-  // step 0 (Slack: the app manifest for the current posture).
+  // step 0 (Slack: the app manifest for the chosen transport, else the
+  // current posture).
   app.get("/:agentId/channels/:provider/manifest", async (c) => {
     const workspaceId = requireWorkspaceId(c.get("auth"));
     const provider = parseProvider(c.req.param("provider"));
+    const transport = channelTransportSchema
+      .optional()
+      .safeParse(c.req.query("transport"));
+    if (!transport.success) {
+      // Zod's own message names the accepted values ('events' | 'socket') —
+      // the same vocabulary the body parsers surface.
+      throw new ServiceError(
+        "UNPROCESSABLE",
+        transport.error.issues[0]?.message ?? "Unknown transport",
+      );
+    }
     return c.json(
-      await getSetupMaterial(workspaceId, c.req.param("agentId"), provider),
+      await getSetupMaterial(
+        workspaceId,
+        c.req.param("agentId"),
+        provider,
+        transport.data,
+      ),
     );
   });
 
@@ -73,11 +92,21 @@ export const agentChannelRoutes = () => {
     const a = c.get("auth");
     const workspaceId = requireWorkspaceId(a);
     const provider = parseProvider(c.req.param("provider"));
+    const body = attachPresenceSchema.safeParse(
+      (await parseBody(c.req.raw)) ?? {},
+    );
+    if (!body.success) {
+      throw new ServiceError(
+        "UNPROCESSABLE",
+        body.error.issues[0]?.message ?? "Invalid body",
+      );
+    }
     const result = await createPresence(
       workspaceId,
       c.req.param("agentId"),
       provider,
       a.userId,
+      body.data.transport,
     );
     await recordAuditEvent({
       workspaceId,
@@ -127,6 +156,7 @@ export const agentChannelRoutes = () => {
         provider,
         agentId: c.req.param("agentId"),
         presenceId: presence.id,
+        transport: presence.transport,
         completed: true,
       },
     });

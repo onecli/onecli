@@ -13,6 +13,11 @@ import { fileURLToPath } from "node:url";
 import { SetupError } from "./errors.mjs";
 import { log, spinner } from "./ui.mjs";
 
+// Re-exported so callers have one import site for the image decisions; the
+// logic itself lives in scripts/lib/ so it stays testable without this
+// module's @clack/prompts dependency (via ui.mjs).
+export { agentImageRef, isPullableRef } from "../lib/upgrade.mjs";
+
 const ROOT = fileURLToPath(new URL("../..", import.meta.url));
 
 export const composeArgs = (mode) => [
@@ -28,6 +33,16 @@ const run = (args) =>
 export const pullImages = (mode) => {
   log.step("Pulling images (docker compose pull)");
   return run([...composeArgs(mode), "pull"]).status === 0;
+};
+
+/**
+ * Pull the agent sandbox image. Non-throwing like `pullImages`: the caller
+ * warns and carries on, because this is the largest image by far and a flaky
+ * network must not fail an upgrade whose services are already pulled.
+ */
+export const pullAgentImage = (ref) => {
+  log.step(`Pulling the agent sandbox image (${ref})`);
+  return run(["pull", ref]).status === 0;
 };
 
 export const buildImages = (mode, { includeAgent = true } = {}) => {

@@ -16,6 +16,9 @@ import { InstallStep } from "@/app/(dashboard)/w/[workspaceId]/settings/install/
 interface SlackManifestFloorProps {
   agentId: string;
   transport: ChannelTransport;
+  /** The picker's choice, sent on the wire only when the server offers one
+   * (undefined on older servers, whose strict schemas reject unknown keys). */
+  requestedTransport?: ChannelTransport;
 }
 
 /**
@@ -27,8 +30,14 @@ interface SlackManifestFloorProps {
 export const SlackManifestFloor = ({
   agentId,
   transport,
+  requestedTransport,
 }: SlackManifestFloorProps) => {
-  const manifestQuery = useChannelManifest(agentId, "slack", true);
+  const manifestQuery = useChannelManifest(
+    agentId,
+    "slack",
+    true,
+    requestedTransport,
+  );
   const complete = useCompleteChannel(agentId, "slack");
   const { copied, copy } = useCopyToClipboard();
 
@@ -55,6 +64,7 @@ export const SlackManifestFloor = ({
         ...(socket
           ? { appToken: appToken.trim() }
           : { signingSecret: signingSecret.trim() }),
+        ...(requestedTransport && { transport: requestedTransport }),
       },
       {
         onSuccess: () => toast.success("Slack connected"),

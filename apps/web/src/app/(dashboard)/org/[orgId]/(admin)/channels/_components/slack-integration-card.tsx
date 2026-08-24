@@ -39,7 +39,10 @@ import {
  * is automatic server-side; when it fails, `needsCredentials` surfaces the
  * amber re-paste state. A workspace connected only through hand-made apps
  * (the paste floor) appears here too, with the paste form as its upgrade
- * path.
+ * path. Removal exists in every state: Disconnect (live credential) or
+ * Remove (dead/absent credential) — the server deletes the row only when no
+ * agent apps or member links reference it, so the dialog says which outcome
+ * the click buys.
  */
 export const SlackIntegrationCard = () => {
   const { data, isPending } = useOrgChannels();
@@ -51,6 +54,52 @@ export const SlackIntegrationCard = () => {
   const slack = data?.integrations.find((i) => i.provider === "slack");
   const showAdapterOffline =
     data !== undefined && data.integrations.length > 0 && !data.adapter.online;
+
+  // What keeps the workspace row alive: the server deletes it only when no
+  // agent apps and no member links reference it — otherwise a disconnect
+  // clears the credential and the row stays listed.
+  const slackLinkCount =
+    data?.userLinks.filter((l) => l.integration.provider === "slack").length ??
+    0;
+  const referenced = (slack?.presenceCount ?? 0) > 0 || slackLinkCount > 0;
+  const willDelete = !referenced;
+  const usage = [
+    slack && slack.presenceCount > 0
+      ? `${slack.presenceCount} agent app${slack.presenceCount === 1 ? "" : "s"}`
+      : null,
+    slackLinkCount > 0
+      ? `${slackLinkCount} member link${slackLinkCount === 1 ? "" : "s"}`
+      : null,
+  ]
+    .filter(Boolean)
+    .join(" and ");
+  // The one state where the DELETE would change nothing: no credential to
+  // clear, no dead-token notice to resolve, and the row survives regardless.
+  const removeIsNoop =
+    slack !== undefined &&
+    !slack.hasCredentials &&
+    !slack.needsCredentials &&
+    referenced;
+
+  const hasCredentials = slack?.hasCredentials ?? false;
+  const dialogDescription = [
+    hasCredentials
+      ? "One-click agent setup stops working. Agents already attached keep their own tokens and stay in Slack."
+      : null,
+    !hasCredentials && slack?.needsCredentials && !willDelete
+      ? "This clears the expired credential."
+      : null,
+    willDelete
+      ? "This removes the workspace connection from your organization."
+      : `The workspace stays listed while it's still in use: ${usage}. Detach those to remove it completely.`,
+  ]
+    .filter(Boolean)
+    .join(" ");
+  const successToast = willDelete
+    ? "Slack workspace removed"
+    : hasCredentials
+      ? "Slack disconnected"
+      : "Expired credential cleared";
 
   const submitToken = (e: React.FormEvent) => {
     e.preventDefault();
@@ -178,8 +227,26 @@ export const SlackIntegrationCard = () => {
                 </Button>
               ) : (
                 // Connected via hand-made apps only, or the credential died —
-                // either way the paste form is the way (back) to one-click.
-                pasteForm
+                // either way the paste form is the way (back) to one-click,
+                // and removal must not depend on holding a live credential.
+                <>
+                  {pasteForm}
+                  {removeIsNoop ? (
+                    <p className="text-muted-foreground text-sm">
+                      This workspace stays listed while it&apos;s still in use:{" "}
+                      {usage}. Detach those to remove it.
+                    </p>
+                  ) : (
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      className="text-destructive hover:text-destructive"
+                      onClick={() => setConfirmOpen(true)}
+                    >
+                      Remove
+                    </Button>
+                  )}
+                </>
               )}
             </>
           )}
@@ -195,11 +262,10 @@ export const SlackIntegrationCard = () => {
       <AlertDialog open={confirmOpen} onOpenChange={setConfirmOpen}>
         <AlertDialogContent>
           <AlertDialogHeader>
-            <AlertDialogTitle>Disconnect Slack?</AlertDialogTitle>
-            <AlertDialogDescription>
-              One-click agent setup stops working. Agents already attached keep
-              their own tokens and stay in Slack.
-            </AlertDialogDescription>
+            <AlertDialogTitle>
+              {hasCredentials ? "Disconnect Slack?" : "Remove Slack workspace?"}
+            </AlertDialogTitle>
+            <AlertDialogDescription>{dialogDescription}</AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
             <AlertDialogCancel disabled={disconnect.isPending}>
@@ -213,7 +279,7 @@ export const SlackIntegrationCard = () => {
                 e.preventDefault();
                 disconnect.mutate("slack", {
                   onSuccess: () => {
-                    toast.success("Slack disconnected");
+                    toast.success(successToast);
                     setConfirmOpen(false);
                   },
                   onError: (err) => toast.error(err.message),
@@ -223,7 +289,13 @@ export const SlackIntegrationCard = () => {
               {disconnect.isPending && (
                 <Loader2 className="animate-spin" aria-hidden />
               )}
-              {disconnect.isPending ? "Disconnecting…" : "Disconnect"}
+              {disconnect.isPending
+                ? hasCredentials
+                  ? "Disconnecting…"
+                  : "Removing…"
+                : hasCredentials
+                  ? "Disconnect"
+                  : "Remove"}
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>

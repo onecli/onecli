@@ -205,3 +205,289 @@ test("--print-resolved never displays a wildcard bind as the address", () => {
   assert.match(r.stdout, /^external=http:\/\/localhost:10254$/m);
   rmSync(r.home, { recursive: true, force: true });
 });
+
+// ─────────────────────────────────────────────────────────────────────────
+// The upgrade path: pulling the agent sandbox image, and restarting this
+// installation's sandboxes onto it.
+//
+// A stand-in for the docker CLI, in the style of scripts/migrate-sh.test.mjs:
+// it appends every invocation to STUB_LOG and answers `ps` from STUB_IDS, so
+// the tests can assert exactly which calls the script makes and, critically,
+// which it never makes.
+// ─────────────────────────────────────────────────────────────────────────
+
+const DOCKER_STUB = `
+import { appendFileSync } from "node:fs";
+const args = process.argv.slice(2);
+appendFileSync(process.env.STUB_LOG, args.join(" ") + "\\n");
+if (args[0] === "ps") process.stdout.write(process.env.STUB_IDS ?? "");
+process.exit(0);
+`;
+
+/** Run a hook with a stubbed docker; returns the result plus its call log. */
+const runStubbed = (args, { env = {}, envFile = "", ids = "" } = {}) => {
+  const home = mkdtempSync(join(tmpdir(), "onecli-install-test-"));
+  mkdirSync(join(home, ".onecli"), { recursive: true });
+  if (envFile) writeFileSync(join(home, ".onecli", ".env"), envFile);
+  const stub = join(home, "stub-docker.mjs");
+  const log = join(home, "docker-calls.log");
+  writeFileSync(stub, DOCKER_STUB);
+  writeFileSync(log, "");
+  const result = { home };
+  try {
+    result.stdout = execFileSync("sh", [SCRIPT, ...args], {
+      env: {
+        PATH: process.env.PATH,
+        HOME: home,
+        ONECLI_DOCKER_CMD: `node ${stub}`,
+        STUB_LOG: log,
+        STUB_IDS: ids,
+        ...env,
+      },
+      encoding: "utf8",
+    });
+    result.status = 0;
+  } catch (err) {
+    result.status = err.status;
+    result.stdout = err.stdout ?? "";
+    result.stderr = err.stderr ?? "";
+  }
+  result.calls = readFileSync(log, "utf8").trim().split("\n").filter(Boolean);
+  return result;
+};
+
+const RUNNER_ENV = "COMPOSE_PROFILES=runner\nRUNNER_TOKEN=rnr_testtoken\n";
+
+test("--print-agent-image returns the compose default when nothing is set", () => {
+  const r = runStubbed(["--print-agent-image"]);
+  assert.equal(r.status, 0);
+  assert.equal(r.stdout.trim(), "ghcr.io/onecli/onecli-agent:latest");
+  rmSync(r.home, { recursive: true, force: true });
+});
+
+test("--print-agent-image honors RUNNER_AGENT_IMAGE from the env file and the shell", () => {
+  const fromFile = runStubbed(["--print-agent-image"], {
+    envFile: "RUNNER_AGENT_IMAGE=ghcr.io/acme/agent:9.9.9\n",
+  });
+  assert.equal(fromFile.stdout.trim(), "ghcr.io/acme/agent:9.9.9");
+  rmSync(fromFile.home, { recursive: true, force: true });
+
+  // The shell export is what compose interpolation would use, so it wins.
+  const fromShell = runStubbed(["--print-agent-image"], {
+    envFile: "RUNNER_AGENT_IMAGE=ghcr.io/acme/agent:9.9.9\n",
+    env: { RUNNER_AGENT_IMAGE: "ghcr.io/acme/agent:1.0.0" },
+  });
+  assert.equal(fromShell.stdout.trim(), "ghcr.io/acme/agent:1.0.0");
+  rmSync(fromShell.home, { recursive: true, force: true });
+});
+
+test("--print-agent-image tracks a pinned ONECLI_VERSION", () => {
+  const r = runStubbed(["--print-agent-image"], {
+    env: { ONECLI_VERSION: "2.1.0" },
+  });
+  assert.equal(r.stdout.trim(), "ghcr.io/onecli/onecli-agent:2.1.0");
+  rmSync(r.home, { recursive: true, force: true });
+});
+
+test("the installation fingerprint is sha256(token) and uses printf, not echo", async () => {
+  const { createHash } = await import("node:crypto");
+  const token = "rnr_testtoken";
+  const r = runStubbed(["--print-installation-id"], { envFile: RUNNER_ENV });
+  assert.equal(r.status, 0);
+
+  const expected = createHash("sha256")
+    .update(token)
+    .digest("hex")
+    .slice(0, 32);
+  assert.equal(r.stdout.trim(), expected);
+
+  // The mutation test for `printf` vs `echo`: echo appends a newline, which
+  // hashes to something else entirely. The sweep would then match no
+  // containers while still reporting success, which is the worst possible
+  // failure mode here. This assertion is what makes that regression loud.
+  const withNewline = createHash("sha256")
+    .update(`${token}\n`)
+    .digest("hex")
+    .slice(0, 32);
+  assert.notEqual(r.stdout.trim(), withNewline);
+  rmSync(r.home, { recursive: true, force: true });
+});
+
+test("--print-installation-id fails when no runner token exists", () => {
+  const r = runStubbed(["--print-installation-id"]);
+  assert.notEqual(r.status, 0);
+  rmSync(r.home, { recursive: true, force: true });
+});
+
+test("the reap stops this installation's sandboxes, fenced on BOTH labels", async () => {
+  const { createHash } = await import("node:crypto");
+  const fp = createHash("sha256")
+    .update("rnr_testtoken")
+    .digest("hex")
+    .slice(0, 32);
+  const r = runStubbed(["--reap-sandboxes"], {
+    envFile: RUNNER_ENV,
+    ids: "abc123\ndef456\n",
+  });
+  assert.equal(r.status, 0);
+  assert.match(r.stdout, /^reaped=2$/m);
+
+  const ps = r.calls.find((c) => c.startsWith("ps "));
+  assert.ok(ps, "expected a docker ps call");
+  assert.ok(
+    ps.includes("label=sh.onecli.managed=1"),
+    `managed label missing: ${ps}`,
+  );
+  assert.ok(
+    ps.includes(`label=sh.onecli.installation=${fp}`),
+    `installation fence missing: ${ps}`,
+  );
+
+  assert.deepEqual(
+    r.calls.filter((c) => c.startsWith("stop ")),
+    ["stop -t 30 abc123", "stop -t 30 def456"],
+  );
+  rmSync(r.home, { recursive: true, force: true });
+});
+
+test("the reap NEVER touches volumes, removes, or prunes", () => {
+  // The durable agent homes (onecli-home-*) carry the IDENTICAL label pair as
+  // the containers, so this exact filter aimed at `docker volume rm` would
+  // erase every agent's /workspace. This is the guard against that.
+  const r = runStubbed(["--reap-sandboxes"], {
+    envFile: RUNNER_ENV,
+    ids: "abc123\n",
+  });
+  for (const forbidden of ["volume", "rm", "prune", "-v", "down"]) {
+    assert.deepEqual(
+      r.calls.filter((c) => c.split(" ").includes(forbidden)),
+      [],
+      `docker was called with "${forbidden}": ${r.calls.join(" | ")}`,
+    );
+  }
+  rmSync(r.home, { recursive: true, force: true });
+});
+
+test("ONECLI_KEEP_SANDBOXES leaves every sandbox alone", () => {
+  const r = runStubbed(["--reap-sandboxes"], {
+    envFile: RUNNER_ENV,
+    ids: "abc123\n",
+    env: { ONECLI_KEEP_SANDBOXES: "1" },
+  });
+  assert.match(r.stdout, /^reaped=0$/m);
+  assert.match(r.stdout, /^kept=yes$/m);
+  assert.deepEqual(r.calls, [], "docker must not be called at all");
+  rmSync(r.home, { recursive: true, force: true });
+});
+
+test("no runner token means no sweep: the fence is never widened", () => {
+  // An unknown installation must NOT fall back to a managed-only filter --
+  // that would reap a co-located install's live agents.
+  const r = runStubbed(["--reap-sandboxes"], {
+    envFile: "COMPOSE_PROFILES=runner\n",
+    ids: "abc123\n",
+  });
+  assert.match(r.stdout, /^reaped=0$/m);
+  assert.deepEqual(r.calls, [], "docker must not be called without a fence");
+  rmSync(r.home, { recursive: true, force: true });
+});
+
+test("an install without hosted agents skips the sweep entirely", () => {
+  const r = runStubbed(["--reap-sandboxes"], {
+    envFile: "COMPOSE_PROFILES=\nRUNNER_TOKEN=rnr_testtoken\n",
+    ids: "abc123\n",
+  });
+  assert.match(r.stdout, /^reaped=0$/m);
+  assert.deepEqual(r.calls, []);
+  rmSync(r.home, { recursive: true, force: true });
+});
+
+test("a quoted RUNNER_TOKEN hashes to the same fingerprint as a bare one", async () => {
+  const { createHash } = await import("node:crypto");
+  const expected = createHash("sha256")
+    .update("rnr_testtoken")
+    .digest("hex")
+    .slice(0, 32);
+  const r = runStubbed(["--print-installation-id"], {
+    envFile: 'RUNNER_TOKEN="rnr_testtoken"\n',
+  });
+  assert.equal(r.stdout.trim(), expected);
+  rmSync(r.home, { recursive: true, force: true });
+});
+
+test("--print-compose-url routes pre-2.0 to legacy and everything else to split", () => {
+  const legacy = ["1", "1.45", "1.45.0", "v1.44.2"];
+  const split = ["2", "2.1.0", "v2.1.0", "latest", ""];
+  for (const v of legacy) {
+    const r = run(["--print-compose-url"], { ONECLI_VERSION: v });
+    assert.match(r.stdout, /docker-compose\.legacy\.yml/, `version ${v}`);
+    rmSync(r.home, { recursive: true, force: true });
+  }
+  for (const v of split) {
+    const r = run(["--print-compose-url"], { ONECLI_VERSION: v });
+    assert.doesNotMatch(r.stdout, /legacy/, `version ${v}`);
+    rmSync(r.home, { recursive: true, force: true });
+  }
+});
+
+test("the supply-chain guard only pulls references that name a registry", () => {
+  // A reference whose first segment has no "." or ":" is not a registry: Docker
+  // would resolve `onecli-agent:dev` to docker.io/library/onecli-agent and pull
+  // whatever a squatter published there, over the top of a locally built image.
+  // Being conservative costs a skipped pull and a printed line; being wrong
+  // runs a stranger's code as the agent sandbox.
+  const cases = [
+    ["ghcr.io/onecli/onecli-agent:2.1.0", "pullable"],
+    ["ghcr.io/o/a@sha256:abc", "pullable"],
+    ["localhost:5000/foo:1", "pullable"],
+    ["myreg:5000/team/img:1", "pullable"],
+    ["docker.io/library/onecli-agent:dev", "pullable"],
+    // The source-mode tag the wizard builds, and the shapes that would
+    // silently become docker.io/library/*.
+    ["onecli-agent:dev", "local"],
+    ["onecli-agent", "local"],
+    ["onecli/onecli-agent:dev", "local"],
+    ["localhost/foo:1", "local"],
+    ["/foo:1", "local"],
+    ["", "local"],
+  ];
+  for (const [ref, expected] of cases) {
+    const r = runStubbed(["--print-ref-pullable", ref]);
+    assert.equal(r.stdout.trim(), expected, `ref ${JSON.stringify(ref)}`);
+    rmSync(r.home, { recursive: true, force: true });
+  }
+});
+
+test("a CRLF .env still produces the fingerprint the runner labelled", async () => {
+  // WSL is a first-class target and writes CRLF. Compose strips the carriage
+  // return; `cut -d= -f2-` does not. Without the trailing-whitespace strip the
+  // token hashes as "rnr_x\r", the label filter matches zero containers, and
+  // the sweep reports success having done nothing at all. That silent no-op is
+  // exactly the failure mode this code's own comment calls the worst one.
+  const { createHash } = await import("node:crypto");
+  const expected = createHash("sha256")
+    .update("rnr_testtoken")
+    .digest("hex")
+    .slice(0, 32);
+  for (const envFile of [
+    "RUNNER_TOKEN=rnr_testtoken\r\n",
+    'RUNNER_TOKEN="rnr_testtoken"\r\n',
+    "RUNNER_TOKEN=rnr_testtoken   \n",
+  ]) {
+    const r = runStubbed(["--print-installation-id"], { envFile });
+    assert.equal(r.stdout.trim(), expected, JSON.stringify(envFile));
+    rmSync(r.home, { recursive: true, force: true });
+  }
+});
+
+test("ONECLI_KEEP_SANDBOXES works from the env file, not just an export", () => {
+  // In the documented `curl … | sh` form a variable written in front of curl
+  // binds to curl, never to the script, so the .env route has to work.
+  const r = runStubbed(["--reap-sandboxes"], {
+    envFile: `${RUNNER_ENV}ONECLI_KEEP_SANDBOXES=1\n`,
+    ids: "abc123\n",
+  });
+  assert.match(r.stdout, /^kept=yes$/m);
+  assert.deepEqual(r.calls, [], "docker must not be called at all");
+  rmSync(r.home, { recursive: true, force: true });
+});

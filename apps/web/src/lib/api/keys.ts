@@ -217,8 +217,16 @@ export const queryKeys = {
     all: () => ["channels", ...scope()] as const,
     agent: (agentId: string) =>
       [...queryKeys.channels.all(), "agent", agentId] as const,
-    manifest: (agentId: string, provider: string) =>
-      [...queryKeys.channels.all(), "manifest", agentId, provider] as const,
+    manifest: (agentId: string, provider: string, transport?: string) =>
+      [
+        ...queryKeys.channels.all(),
+        "manifest",
+        agentId,
+        provider,
+        // Part of the key: flipping the mode picker must refetch, never serve
+        // the other transport's cached manifest.
+        transport ?? "default",
+      ] as const,
     org: () => [...queryKeys.channels.all(), "org"] as const,
   },
   appBlocklist: {

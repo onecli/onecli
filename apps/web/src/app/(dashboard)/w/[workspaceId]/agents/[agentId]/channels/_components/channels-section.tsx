@@ -134,9 +134,10 @@ export const ChannelsSection = () => {
       ) : (
         <SlackAttachCard
           agentId={agent.id}
+          posture={data.posture}
           // A pending presence resumes on ITS transport (the provider-side app
-          // baked one in); a fresh attach uses the deployment's posture.
-          transport={slack?.transport ?? data.posture.transport}
+          // baked one in); a fresh attach starts from the deployment's posture.
+          pendingTransport={slack?.transport}
           hasOrgCredentials={hasOrgCredentials}
           resuming={slack?.status === "pending_setup"}
         />

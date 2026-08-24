@@ -153,7 +153,7 @@ describe("the disconnect confirm", () => {
 });
 
 describe("needs credentials", () => {
-  it("says the token died and offers the re-paste", () => {
+  it("says the token died, offers the re-paste — and still offers removal", () => {
     state.view = view({
       integrations: [
         integration({ hasCredentials: false, needsCredentials: true }),
@@ -167,9 +167,87 @@ describe("needs credentials", () => {
     expect(
       screen.getByLabelText("App Configuration refresh token"),
     ).toBeInTheDocument();
+    // The dead-token state must not strand the row: Remove clears the expired
+    // credential (and deletes the row once nothing references it).
     expect(
       screen.queryByRole("button", { name: "Disconnect" }),
     ).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Remove" })).toBeInTheDocument();
+  });
+});
+
+describe("removal in every state", () => {
+  it("removes an unreferenced credential-less workspace row from the dialog", async () => {
+    const user = userEvent.setup();
+    mocks.disconnect.mockImplementation(
+      (_provider: string, opts: { onSuccess: () => void }) => opts.onSuccess(),
+    );
+    state.view = view({
+      integrations: [
+        integration({
+          hasCredentials: false,
+          needsCredentials: false,
+          presenceCount: 0,
+        }),
+      ],
+    });
+    render(<SlackIntegrationCard />);
+
+    await user.click(screen.getByRole("button", { name: "Remove" }));
+    const dialog = screen.getByRole("alertdialog");
+    expect(
+      within(dialog).getByText(/removes the workspace connection/),
+    ).toBeInTheDocument();
+    await user.click(within(dialog).getByRole("button", { name: "Remove" }));
+
+    expect(mocks.disconnect).toHaveBeenCalledWith("slack", expect.anything());
+    expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument();
+  });
+
+  it("shows an explainer instead of a dead button when removal would change nothing", () => {
+    // No credential to clear, no dead-token notice, and the row survives while
+    // referenced — a Remove here would be a silent no-op.
+    state.view = view({
+      integrations: [
+        integration({
+          hasCredentials: false,
+          needsCredentials: false,
+          presenceCount: 2,
+        }),
+      ],
+    });
+    render(<SlackIntegrationCard />);
+
+    expect(
+      screen.queryByRole("button", { name: "Remove" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.getByText(/stays listed while it's still in use: 2 agent apps/),
+    ).toBeInTheDocument();
+  });
+
+  it("tells a referenced disconnect what keeps the row listed, member links included", async () => {
+    const user = userEvent.setup();
+    state.view = view({
+      integrations: [integration({ presenceCount: 1 })],
+      userLinks: [
+        {
+          id: "l1",
+          externalUserId: "U1",
+          linkedVia: "manual",
+          createdAt: new Date().toISOString(),
+          user: { id: "u1", email: "a@b.c", name: null },
+          integration: { provider: "slack" },
+        },
+      ],
+    });
+    render(<SlackIntegrationCard />);
+
+    await user.click(screen.getByRole("button", { name: "Disconnect" }));
+    const dialog = screen.getByRole("alertdialog");
+    expect(
+      within(dialog).getByText(/1 agent app and 1 member link/),
+    ).toBeInTheDocument();
   });
 });
 

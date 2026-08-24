@@ -15,12 +15,15 @@ import type { ChannelTransport } from "@/lib/api";
 import { useAttachChannel, useDetachChannel } from "@/hooks/use-channels";
 import { SlackGuidedSocketSteps } from "./slack-guided-socket-steps";
 import { SlackManifestFloor } from "./slack-manifest-floor";
+import { SlackTransportPicker } from "./slack-transport-picker";
 
 interface SlackAttachCardProps {
   agentId: string;
-  /** The transport an attach would use — the pending presence's own when
-   * resuming, else the deployment posture. */
-  transport: ChannelTransport;
+  /** The deployment's transport posture: the default and (on servers that
+   * offer a choice) the alternatives. */
+  posture: { transport: ChannelTransport; available?: ChannelTransport[] };
+  /** A pending presence resumes on ITS stamped transport. */
+  pendingTransport?: ChannelTransport;
   hasOrgCredentials: boolean;
   /** A `pending_setup` presence exists: re-running create returns fresh URLs. */
   resuming: boolean;
@@ -51,16 +54,22 @@ const openInstallPopup = (): Window | null => {
  * The unattached (and resume) face of the Slack card. Three arms, decided by
  * what the org holds and how events can reach us: one-click install (events +
  * org credential), guided create + token paste (socket + org credential), or
- * the manifest paste floor (no org credential at all).
+ * the manifest paste floor (no org credential at all). When the deployment
+ * can serve both transports, a mode picker sits above the arms — the mode is
+ * baked into the Slack app at create time, so it is chosen up front.
  */
 export const SlackAttachCard = ({
   agentId,
-  transport,
+  posture,
+  pendingTransport,
   hasOrgCredentials,
   resuming,
 }: SlackAttachCardProps) => {
   const attach = useAttachChannel(agentId, "slack");
   const detach = useDetachChannel(agentId, "slack");
+  const [picked, setPicked] = useState<ChannelTransport>(
+    pendingTransport ?? posture.transport,
+  );
   // Set only when the events-arm popup was blocked despite opening inside the
   // click: the install URL is then offered as a plain link, whose click is a
   // fresh user gesture the blocker won't eat.
@@ -68,11 +77,37 @@ export const SlackAttachCard = ({
     null,
   );
 
+  // The picker renders only when the server offers a real choice (older
+  // servers send no `available`) and nothing is pinned by a pending row.
+  const showPicker = (posture.available?.length ?? 1) > 1 && !resuming;
+  // A resume is pinned to the row's stamp; a fresh attach follows the picker.
+  const transport = resuming && pendingTransport ? pendingTransport : picked;
+  // The wire carries the EFFECTIVE transport whenever the server understands
+  // it (`available` present) — including a resume, so the floor's manifest is
+  // fetched for the row's stamp, not the drifted deployment default. Older
+  // servers get nothing: the old attach route reads no body (the choice would
+  // be silently ignored) and the old strict complete schema rejects the key.
+  const requestedTransport = posture.available ? transport : undefined;
+
+  const pickTransport = (next: ChannelTransport) => {
+    setPicked(next);
+    // A create result belongs to the mode it was made for — a stale one must
+    // not drop the user into the other mode's steps.
+    attach.reset();
+    setBlockedInstallUrl(null);
+  };
+
   const startOver = () => {
     detach.mutate(
       { deleteRemote: true },
       {
-        onSuccess: () => toast.success("Setup cleared."),
+        onSuccess: () => {
+          // The dead app's URLs must not survive into the next attempt —
+          // neither the create result nor the blocked-popup fallback link.
+          attach.reset();
+          setBlockedInstallUrl(null);
+          toast.success("Setup cleared.");
+        },
         onError: (err) => toast.error(err.message),
       },
     );
@@ -87,28 +122,31 @@ export const SlackAttachCard = ({
     // The socket "Create app" has no install URL and opens nothing.
     const popup = transport === "events" ? openInstallPopup() : null;
 
-    attach.mutate(undefined, {
-      onSuccess: (result) => {
-        if (!result.installUrl) {
+    attach.mutate(
+      requestedTransport ? { transport: requestedTransport } : undefined,
+      {
+        onSuccess: (result) => {
+          if (!result.installUrl) {
+            popup?.close();
+            return;
+          }
+          if (popup) {
+            popup.location.href = result.installUrl;
+          } else if (transport === "events") {
+            // Blocked despite the in-gesture open — fall back to a link.
+            setBlockedInstallUrl(result.installUrl);
+            toast.error(
+              "Your browser blocked the Slack popup. Use the link below to continue.",
+            );
+          }
+        },
+        // The 422 ("no automation token") and friends carry a server sentence.
+        onError: (err) => {
           popup?.close();
-          return;
-        }
-        if (popup) {
-          popup.location.href = result.installUrl;
-        } else if (transport === "events") {
-          // Blocked despite the in-gesture open — fall back to a link.
-          setBlockedInstallUrl(result.installUrl);
-          toast.error(
-            "Your browser blocked the Slack popup. Use the link below to continue.",
-          );
-        }
+          toast.error(err.message);
+        },
       },
-      // The 422 ("no automation token") and friends carry a server sentence.
-      onError: (err) => {
-        popup?.close();
-        toast.error(err.message);
-      },
-    });
+    );
   };
 
   return (
@@ -140,9 +178,17 @@ export const SlackAttachCard = ({
           </div>
         )}
 
+        {showPicker && (
+          <SlackTransportPicker value={picked} onValueChange={pickTransport} />
+        )}
+
         {!hasOrgCredentials ? (
-          <SlackManifestFloor agentId={agentId} transport={transport} />
-        ) : transport === "socket" && attach.data ? (
+          <SlackManifestFloor
+            agentId={agentId}
+            transport={transport}
+            requestedTransport={requestedTransport}
+          />
+        ) : attach.data?.transport === "socket" ? (
           <SlackGuidedSocketSteps
             agentId={agentId}
             settingsUrl={attach.data.settingsUrl}

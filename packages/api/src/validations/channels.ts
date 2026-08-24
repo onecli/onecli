@@ -1,5 +1,8 @@
 import { z } from "zod";
-import { CHANNEL_PROVIDER_IDS } from "../services/channels/types";
+import {
+  CHANNEL_PROVIDER_IDS,
+  CHANNEL_TRANSPORTS,
+} from "../services/channels/types";
 
 /**
  * Zod surfaces for the channel routes (step 6). One definition per union —
@@ -8,6 +11,18 @@ import { CHANNEL_PROVIDER_IDS } from "../services/channels/types";
  */
 
 export const channelProviderSchema = z.enum(CHANNEL_PROVIDER_IDS);
+
+/** The connection-mode vocabulary — the manifest GET validates its
+ * `?transport=` with this directly (query params are bare strings). */
+export const channelTransportSchema = z.enum(CHANNEL_TRANSPORTS);
+
+/** POST /v1/agents/:agentId/channels/:provider: the caller's connection-mode
+ * choice — optional, the deployment posture decides when omitted. */
+export const attachPresenceSchema = z
+  .object({
+    transport: channelTransportSchema.optional(),
+  })
+  .strict();
 
 /** PUT /v1/org/channels/:provider/credentials */
 export const connectIntegrationSchema = z
@@ -31,6 +46,7 @@ export const completePresenceSchema = z
     appToken: z.string().trim().min(1).max(500).optional(),
     signingSecret: z.string().trim().min(1).max(500).optional(),
     appId: z.string().trim().min(1).max(100).optional(),
+    transport: channelTransportSchema.optional(),
   })
   .strict();
 

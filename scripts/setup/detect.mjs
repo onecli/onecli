@@ -47,6 +47,44 @@ export const projectContainers = async () => {
   });
 };
 
+/**
+ * The compose file(s) the RUNNING `onecli` project was started from.
+ *
+ * Both front doors drive the same project name from different files:
+ * scripts/install.sh from ~/.onecli/docker-compose.yml with ~/.onecli/.env,
+ * this wizard from the checkout with docker/.env. Those .env files hold
+ * DIFFERENT SECRET_ENCRYPTION_KEYs, so recreating an install.sh project from
+ * the checkout would leave every stored credential undecryptable. This label
+ * is how the wizard tells whose install it is looking at before touching it.
+ *
+ * Returns `null` when the probe itself could not run, and `[]` when it ran and
+ * found nothing. The distinction is load-bearing: a caller that collapses them
+ * treats a docker hiccup as permission to proceed, which is exactly the case
+ * this probe exists to block.
+ */
+export const projectConfigFiles = async () => {
+  try {
+    const { stdout } = await execFile("docker", [
+      "ps",
+      "--filter",
+      "label=com.docker.compose.project=onecli",
+      // `.Label "key"`, not `index .Labels "key"`: in `docker ps --format`,
+      // .Labels is a comma-joined STRING, so indexing it errors out and the
+      // probe would silently report "cannot tell" for every install.
+      "--format",
+      '{{.Label "com.docker.compose.project.config_files"}}',
+    ]);
+    return stdout
+      .trim()
+      .split("\n")
+      .flatMap((line) => line.split(","))
+      .map((p) => p.trim())
+      .filter(Boolean);
+  } catch {
+    return null;
+  }
+};
+
 const dockerOut = (args) => {
   try {
     return execFileSync("docker", args, {

@@ -68,7 +68,7 @@ const view = (
   overrides: Partial<AgentChannelsView> = {},
 ): AgentChannelsView => ({
   presences: [],
-  posture: { transport: "events" },
+  posture: { transport: "events", available: ["events"] },
   orgIntegrations: [
     { provider: "slack", connected: true, hasCredentials: true },
   ],
@@ -114,10 +114,30 @@ describe("the guided events arm", () => {
   });
 });
 
+describe("the mode picker", () => {
+  it("appears when the deployment offers both transports", () => {
+    state.view = view({
+      posture: { transport: "events", available: ["events", "socket"] },
+    });
+    renderSection();
+
+    expect(
+      screen.getByRole("radiogroup", { name: "Connection mode" }),
+    ).toBeInTheDocument();
+  });
+
+  it("stays hidden when only one transport is available", () => {
+    renderSection();
+    expect(screen.queryByRole("radiogroup")).not.toBeInTheDocument();
+  });
+});
+
 describe("the guided socket arm", () => {
   it("walks the two-step token list once the app exists, and completes with both tokens", async () => {
     const user = userEvent.setup();
-    state.view = view({ posture: { transport: "socket" } });
+    state.view = view({
+      posture: { transport: "socket", available: ["socket"] },
+    });
     state.attachData = {
       presenceId: "pr1",
       transport: "socket",
@@ -166,7 +186,7 @@ describe("the paste floor (no org credential)", () => {
   it("swaps the signing secret for the app-level token on the SOCKET floor", () => {
     state.view = view({
       orgIntegrations: [],
-      posture: { transport: "socket" },
+      posture: { transport: "socket", available: ["socket"] },
     });
     renderSection();
 
@@ -187,7 +207,14 @@ describe("the paste floor (no org credential)", () => {
     await user.click(screen.getByRole("button", { name: "Finish setup" }));
 
     expect(mocks.complete).toHaveBeenCalledWith(
-      { botToken: "xoxb-bot", appId: "A999", signingSecret: "sig" },
+      {
+        botToken: "xoxb-bot",
+        appId: "A999",
+        signingSecret: "sig",
+        // The server advertised `available`, so the wire names the effective
+        // transport explicitly (here the deployment default).
+        transport: "events",
+      },
       expect.anything(),
     );
   });

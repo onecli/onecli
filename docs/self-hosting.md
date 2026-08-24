@@ -35,24 +35,83 @@ Open **http://localhost:10254**, create your account, then create an agent,
 store a model key, grant it to the agent, and start talking. (Keep
 `SECRET_ENCRYPTION_KEY` safe — it encrypts your stored secrets.)
 
+## Upgrading
+
+Re-run the front door you installed with. Both refresh every image and then
+restart your running agent sandboxes so they come back on the new one:
+
+```bash
+# Installed with the one-liner:
+curl -fsSL https://onecli.sh/install | sh
+
+# Installed from a checkout (the wizard runs what your working tree contains,
+# so update it first):
+git pull && pnpm install && pnpm run setup --upgrade
+```
+
+**Do not upgrade with a bare `docker compose pull && docker compose up -d`.**
+It will leave you on a stale agent sandbox image, silently. That image is not
+a compose service — it is one environment value on the `runner` service
+(`RUNNER_AGENT_IMAGE`) — so `docker compose pull` cannot see it, and the runner
+only fetches it when it is missing from the host entirely. The result is a
+stack whose dashboard, API and gateway have moved forward while every hosted
+agent still boots the old sandbox image, with nothing reporting the mismatch.
+The two commands above pull it explicitly; nothing else does.
+
+Restarting a sandbox interrupts whatever that agent was doing: the in-flight
+turn reports that the agent restarted, and you send it again. Nothing else is
+lost — each agent's `/workspace` lives on its own durable volume, which is
+never touched. To upgrade the images but leave running agents alone, set
+`ONECLI_KEEP_SANDBOXES=1`; they keep the old image until they next restart.
+Put it in your `.env`, or export it — note that in the piped form a variable
+written in front of `curl` binds to `curl`, not to the script:
+
+```bash
+export ONECLI_KEEP_SANDBOXES=1
+curl -fsSL https://onecli.sh/install | sh
+
+ONECLI_KEEP_SANDBOXES=1 pnpm run setup --upgrade   # prefix is fine here
+```
+
 ## Pinning versions
 
-Every service image defaults to `:latest`. For anything you intend to keep
-running, pin one release in the same `.env` — `ONECLI_VERSION=v2.0.0` pins
-all services at once, and the agent sandbox image follows it
+Every service image defaults to `:latest`, and re-running either front door
+moves an unpinned install to the newest published images. For anything you
+intend to keep running, pin one release in the same `.env` —
+`ONECLI_VERSION=2.0.0` pins all services at once (bare semver, no `v` prefix:
+that is how the images are tagged), and the agent sandbox image ref follows it
 (`ghcr.io/onecli/onecli-agent:$ONECLI_VERSION`) unless you point
-`RUNNER_AGENT_IMAGE` somewhere else. Upgrades are then a deliberate edit +
-`docker compose up -d`, never a surprise pull. On every `up`, a one-shot
+`RUNNER_AGENT_IMAGE` somewhere else. Neither front door ever writes or changes
+`ONECLI_VERSION` for you.
+
+Where the two doors differ, and it matters: `pnpm run setup` reads the pin from
+`docker/.env` and honors it. The install script instead exports
+`ONECLI_VERSION=latest` for its own run, and an exported value beats the `.env`
+file in Compose interpolation — so an `.env`-only pin does **not** survive
+`curl … | sh`, and re-running it would move a pinned install (including the
+`migrations` image, which rolls the schema forward irreversibly). A pinned
+install has two safe upgrade routes:
+
+```bash
+# Move the pin deliberately, through the installer:
+export ONECLI_VERSION=2.1.0
+curl -fsSL https://onecli.sh/install | sh
+
+# Or stay on the pin and just restart, editing ~/.onecli/.env by hand:
+docker compose -p onecli -f ~/.onecli/docker-compose.yml up -d
+docker pull ghcr.io/onecli/onecli-agent:2.0.0   # the agent image, by hand
+```
+
+On every `up`, a one-shot
 `migrations` service (its own small image, `onecli-migrations`, pinned by the
 same `ONECLI_VERSION` so schema and code always move together) applies any
 pending database migrations before the api starts (view its output with
 `docker compose logs migrations`; re-run it with
 `docker compose up -d` or explicitly `docker compose run --rm migrations`). If
 a migration fails, the stack refuses to start rather than serving against a
-half-migrated schema — fix the cause, then `up -d` again. When upgrading an
-install created by `install.sh`, re-run the installer rather than a bare
-`docker compose pull`, so the compose file itself stays current alongside the
-images. Sizing a host for hosted
+half-migrated schema — fix the cause, then `up -d` again. Re-running the
+installer also refreshes the compose file itself, so the stack topology stays
+current alongside the images. Sizing a host for hosted
 agents (memory per sandbox, the held-awake ceiling) is covered in
 [`apps/runner/README.md`](../apps/runner/README.md).
 
@@ -79,7 +138,7 @@ one — the agent answers in the thread telling you so.
 You can change your password any time from **Account → Preferences**, which
 also signs out every other session.
 
-## Upgrading from a release without login
+## Upgrading from a pre-login release
 
 Your existing organization, workspaces, agents and API keys move to the
 account you create — nothing to migrate by hand. **Register immediately

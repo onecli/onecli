@@ -12,6 +12,9 @@ const HELP = `pnpm run setup: install and start OneCLI on this machine
 
 Interactive by default. Flags for scripted runs:
   --yes               accept every default, ask nothing (required off-TTY)
+  --upgrade           pull the newest images (agent sandbox image included) and
+                      restart running agents onto them; keep them with
+                      ONECLI_KEEP_SANDBOXES=1
   --mode=<m>          compose (published images) | source (build from this checkout)
   --no-runner         leave hosted agents off (no COMPOSE_PROFILES=runner)
   --channel-adapter   also enable the Slack channel adapter profile
@@ -33,6 +36,7 @@ try {
   parsed = parseArgs({
     options: {
       yes: { type: "boolean", default: false },
+      upgrade: { type: "boolean", default: false },
       mode: { type: "string" },
       "no-runner": { type: "boolean", default: false },
       "channel-adapter": { type: "boolean", default: false },
@@ -80,6 +84,7 @@ try {
   setAssumeYes(values.yes);
   await runWizard({
     yes: values.yes,
+    upgrade: values.upgrade,
     mode: values.mode,
     noRunner: values["no-runner"],
     channelAdapter: values["channel-adapter"],

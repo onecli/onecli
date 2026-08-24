@@ -40,7 +40,7 @@ describe("channel mutations sweep the agents ROOT (not the scoped all())", () =>
     const { result } = renderHook(() => useAttachChannel("ag-1", "slack"), {
       wrapper,
     });
-    await result.current.mutateAsync();
+    await result.current.mutateAsync(undefined);
     expect(sweptKeys()).toContainEqual(queryKeys.agents.root());
     expect(sweptKeys()).toContainEqual(queryKeys.channels.all());
   });

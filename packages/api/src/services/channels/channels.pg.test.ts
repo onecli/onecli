@@ -1672,6 +1672,116 @@ describe.skipIf(!PROOF_URL)("createPresence (the guided arm)", () => {
     ).rejects.toMatchObject({ code: "CONFLICT" });
     expect(slackCalls).toHaveLength(0);
   });
+
+  it("an explicit socket request on events posture stamps socket", async () => {
+    initSelfUrl(EVENTS_SELF_URL);
+    await seedIntegration({
+      credentials: await integrationCredentials(12 * 3600),
+    });
+    const agentId = await seedAgent("guided-choice-socket");
+    scriptManifestCreate();
+
+    const result = await agentChannels.createPresence(
+      WORKSPACE,
+      agentId,
+      "slack",
+      ADMIN,
+      "socket",
+    );
+
+    expect(result.transport).toBe("socket");
+    expect(result.installUrl).toBeNull();
+    const manifest = JSON.parse(
+      slackCallsFor("apps.manifest.create")[0]!.form.get("manifest")!,
+    ) as { settings: { socket_mode_enabled: boolean } };
+    expect(manifest.settings.socket_mode_enabled).toBe(true);
+    const row = await db.agentChannel.findUniqueOrThrow({
+      where: { agentId_provider: { agentId, provider: "slack" } },
+    });
+    expect(row.transport).toBe("socket");
+  });
+
+  it("refuses an events request without a public https origin", async () => {
+    // Default posture: socket self-url — events physically can't reach us.
+    await seedIntegration({
+      credentials: await integrationCredentials(12 * 3600),
+    });
+    const agentId = await seedAgent("guided-choice-events-refused");
+    await expect(
+      agentChannels.createPresence(
+        WORKSPACE,
+        agentId,
+        "slack",
+        ADMIN,
+        "events",
+      ),
+    ).rejects.toMatchObject({ code: "UNPROCESSABLE" });
+    expect(slackCalls).toHaveLength(0);
+  });
+
+  it("refuses a socket request on the cloud edition — the product clamp, not the URL scheme", async () => {
+    initSelfUrl(EVENTS_SELF_URL);
+    await seedIntegration({
+      credentials: await integrationCredentials(12 * 3600),
+    });
+    const agentId = await seedAgent("guided-choice-cloud-clamp");
+    // `isOnpremEdition()` reads env call-time, so this flip is visible without
+    // a re-import — and MUST be restored (the suite's semantics are onprem;
+    // see the beforeAll pin's worker-leak warning).
+    process.env.EDITION = "cloud";
+    process.env.NEXT_PUBLIC_EDITION = "cloud";
+    try {
+      await expect(
+        agentChannels.createPresence(
+          WORKSPACE,
+          agentId,
+          "slack",
+          ADMIN,
+          "socket",
+        ),
+      ).rejects.toMatchObject({ code: "UNPROCESSABLE" });
+    } finally {
+      process.env.EDITION = "onprem";
+      process.env.NEXT_PUBLIC_EDITION = "onprem";
+    }
+    expect(slackCalls).toHaveLength(0);
+  });
+
+  it("a resume keeps the row's stamp through posture drift, and refuses a conflicting request", async () => {
+    // Stamp events, then flip the deployment posture to socket-only.
+    initSelfUrl(EVENTS_SELF_URL);
+    await seedIntegration({
+      credentials: await integrationCredentials(12 * 3600),
+    });
+    const agentId = await seedAgent("guided-resume-stamp");
+    scriptManifestCreate();
+    await agentChannels.createPresence(WORKSPACE, agentId, "slack", ADMIN);
+
+    initSelfUrl(SOCKET_SELF_URL);
+    const resumed = await agentChannels.createPresence(
+      WORKSPACE,
+      agentId,
+      "slack",
+      ADMIN,
+    );
+    // The row's stamp wins — and the events resume still carries a usable
+    // install URL: the OAuth state is minted for the ROW's transport, not the
+    // drifted default (mint it off the default and this URL loses its state).
+    expect(resumed.transport).toBe("events");
+    expect(resumed.installUrl).toContain("&state=");
+
+    await expect(
+      agentChannels.createPresence(
+        WORKSPACE,
+        agentId,
+        "slack",
+        ADMIN,
+        "socket",
+      ),
+    ).rejects.toMatchObject({ code: "CONFLICT" });
+    // Neither the resume nor the refusal minted a second Slack app.
+    expect(slackCallsFor("apps.manifest.create")).toHaveLength(1);
+  });
 });
 
 describe.skipIf(!PROOF_URL)("completePresence (the paste floor)", () => {
@@ -1722,6 +1832,49 @@ describe.skipIf(!PROOF_URL)("completePresence (the paste floor)", () => {
       botToken: "xoxb-floor-token",
       appToken: "xapp-floor-token",
     });
+  });
+
+  it("stamps the floor's explicit socket choice on an events-posture deployment", async () => {
+    initSelfUrl(EVENTS_SELF_URL);
+    const agentId = await seedAgent("floor-choice-socket");
+    scriptAuthTest();
+
+    const presence = await agentChannels.completePresence(
+      WORKSPACE,
+      agentId,
+      "slack",
+      {
+        botToken: "xoxb-floor-token",
+        appToken: "xapp-floor-token",
+        appId: "A210",
+        transport: "socket",
+      },
+      ADMIN,
+    );
+
+    expect(presence.transport).toBe("socket");
+  });
+
+  it("refuses a transport that contradicts a pending row's stamp", async () => {
+    initSelfUrl(EVENTS_SELF_URL);
+    await seedIntegration({
+      credentials: await integrationCredentials(12 * 3600),
+    });
+    const agentId = await seedAgent("floor-choice-conflict");
+    scriptManifestCreate();
+    // The guided create stamps events; a socket-flavored paste must not
+    // silently complete onto it.
+    await agentChannels.createPresence(WORKSPACE, agentId, "slack", ADMIN);
+
+    await expect(
+      agentChannels.completePresence(
+        WORKSPACE,
+        agentId,
+        "slack",
+        { botToken: "xoxb-x", appToken: "xapp-x", transport: "socket" },
+        ADMIN,
+      ),
+    ).rejects.toMatchObject({ code: "CONFLICT" });
   });
 
   it("requires the App ID when no guided create ran", async () => {

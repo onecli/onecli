@@ -5,7 +5,12 @@ import { signOAuthState, verifyOAuthState } from "../../lib/oauth-state";
 import { ServiceError } from "../errors";
 import { createServiceApiKey, revokeServiceApiKey } from "../api-key-service";
 import { channelProvider } from "./registry";
-import { defaultTransport, publicApiUrl } from "./posture";
+import {
+  availableTransports,
+  defaultTransport,
+  publicApiUrl,
+  resolveTransport,
+} from "./posture";
 import { withFreshIntegrationCredentials } from "./channel-integration-service";
 import type {
   ChannelProviderId,
@@ -85,8 +90,8 @@ export interface AgentChannelStatus {
 
 export interface AgentChannelsView {
   presences: AgentChannelStatus[];
-  /** What an attach would use right now. */
-  posture: { transport: ChannelTransport };
+  /** What an attach would use right now, and what it could choose instead. */
+  posture: { transport: ChannelTransport; available: ChannelTransport[] };
   /** Per provider: does the org hold an automation credential? */
   orgIntegrations: {
     provider: ChannelProviderId;
@@ -180,7 +185,10 @@ export const getAgentChannels = async (
       },
       groupThreads: p.threadLinks,
     })),
-    posture: { transport: defaultTransport() },
+    posture: {
+      transport: defaultTransport(),
+      available: availableTransports(),
+    },
     orgIntegrations: integrations.map((i) => ({
       provider: i.provider as ChannelProviderId,
       connected: true,
@@ -202,9 +210,10 @@ export const getSetupMaterial = async (
   workspaceId: string,
   agentId: string,
   provider: ChannelProviderId,
+  requestedTransport?: ChannelTransport,
 ) => {
   const agent = await requireHostedAgent(workspaceId, agentId);
-  const transport = defaultTransport();
+  const transport = resolveTransport(requestedTransport);
   return {
     transport,
     material: channelProvider(provider).buildSetupMaterial({
@@ -235,13 +244,20 @@ export const createPresence = async (
   agentId: string,
   provider: ChannelProviderId,
   actorUserId: string,
+  requestedTransport?: ChannelTransport,
 ): Promise<CreatePresenceResult> => {
   const agent = await requireHostedAgent(workspaceId, agentId);
   const organizationId = agent.workspace.organizationId;
 
   const existing = await db.agentChannel.findUnique({
     where: { agentId_provider: { agentId: agent.id, provider } },
-    select: { id: true, status: true, externalId: true, credentials: true },
+    select: {
+      id: true,
+      status: true,
+      externalId: true,
+      transport: true,
+      credentials: true,
+    },
   });
   if (existing && existing.status !== "pending_setup") {
     throw new ServiceError(
@@ -249,8 +265,25 @@ export const createPresence = async (
       "This agent already has a Slack app. Detach it first.",
     );
   }
+  if (
+    existing &&
+    requestedTransport &&
+    requestedTransport !== existing.transport
+  ) {
+    throw new ServiceError(
+      "CONFLICT",
+      "Setup already started with a different connection mode. Start over to switch.",
+    );
+  }
 
-  const transport = defaultTransport();
+  // A resumed attach stays on the row's stamp (the provider-side app config
+  // baked it in); only a fresh create consults the request and the posture.
+  // The OAuth state is minted per that transport — mint it off the current
+  // default and a socket resume would carry a useless state while an events
+  // resume under a changed posture would lose its install URL.
+  const transport = existing
+    ? (existing.transport as ChannelTransport)
+    : resolveTransport(requestedTransport);
   const oauthState =
     transport === "events"
       ? signOAuthState({
@@ -459,6 +492,7 @@ export const completePresence = async (
     appToken?: string;
     signingSecret?: string;
     appId?: string;
+    transport?: ChannelTransport;
   },
   actorUserId: string,
 ) => {
@@ -480,10 +514,18 @@ export const completePresence = async (
       "This agent already has a Slack app. Detach it first.",
     );
   }
+  if (existing && input.transport && input.transport !== existing.transport) {
+    throw new ServiceError(
+      "CONFLICT",
+      "Setup already started with a different connection mode. Start over to switch.",
+    );
+  }
 
+  // A pending row keeps its stamp (the provider-side app config baked it in);
+  // only the floor's no-row paste consults the request and the posture.
   const transport = existing
     ? (existing.transport as ChannelTransport)
-    : defaultTransport();
+    : resolveTransport(input.transport);
 
   const externalId = existing?.externalId ?? input.appId?.trim();
   if (!externalId) {

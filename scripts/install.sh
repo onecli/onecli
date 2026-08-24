@@ -34,6 +34,14 @@
 #   curl -fsSL https://onecli.sh/install | sh
 # (or edit the COMPOSE_PROFILES line in ~/.onecli/.env later — empty disables.)
 #
+# Re-running this script IS the update path: it refreshes every image — the
+# agent sandbox image included, which `docker compose pull` cannot reach — and
+# then restarts this installation's agent sandboxes so they come back on the
+# new image. Keep them running instead (they stay on the old agent image until
+# they next restart on their own):
+#   export ONECLI_KEEP_SANDBOXES=1
+#   curl -fsSL https://onecli.sh/install | sh
+#
 # This script checks for Docker, downloads the docker-compose.yml matching the
 # requested version, and starts OneCLI (dashboard + API + gateway + PostgreSQL
 # + the hosted-agents runner) on ports 10254/10255/10256 by default.
@@ -47,6 +55,12 @@ ENV_FILE="$INSTALL_DIR/.env"
 COMPOSE_URL_NEW="https://raw.githubusercontent.com/onecli/onecli/main/docker/docker-compose.yml"
 COMPOSE_URL_LEGACY="https://raw.githubusercontent.com/onecli/onecli/main/docker/docker-compose.legacy.yml"
 PROJECT_NAME="onecli"
+# Docker command indirection, so the tests can substitute a stub and assert
+# exactly which calls the upgrade steps make — and, critically, which they
+# never make (see reap_sandboxes). docker/migrate.sh carries PRISMA_CMD for
+# the same reason. Only the upgrade helpers below read it; the prerequisite
+# checks deliberately probe the real binary.
+DOCKER="${ONECLI_DOCKER_CMD:-docker}"
 
 # Which compose file serves this version: a numeric major below 2 gets the
 # legacy all-in-one stack; everything else (2+, "latest", unset, non-numeric)
@@ -202,8 +216,139 @@ env_or_file() {
     return
   fi
   if [ -f "$ENV_FILE" ]; then
-    grep "^$1=" "$ENV_FILE" | tail -1 | cut -d= -f2-
+    # Trailing whitespace and a CRLF carriage return are stripped, exactly as
+    # compose does when it reads the same file. Without this a .env saved on
+    # Windows/WSL hands back "rnr_x\r", which hashes to a fingerprint matching
+    # no container: the sandbox sweep then finds nothing and reports success.
+    # The EXPORT branch above is deliberately left verbatim, since that is the
+    # value compose itself interpolates.
+    grep "^$1=" "$ENV_FILE" | tail -1 | cut -d= -f2- | sed 's/[[:space:]]*$//'
   fi
+}
+
+# One layer of surrounding quotes off an .env value. `env_or_file` hands back
+# the raw right-hand side, and compose accepts either style, so a quoted
+# RUNNER_TOKEN would otherwise hash to the wrong fingerprint.
+unquote() {
+  _u="$1"
+  case "$_u" in
+    '"'*'"')
+      _u="${_u#\"}"
+      _u="${_u%\"}"
+      ;;
+    "'"*"'")
+      _u="${_u#\'}"
+      _u="${_u%\'}"
+      ;;
+  esac
+  printf '%s' "$_u"
+}
+
+# Whether hosted agents are enabled for this install. The runner profile is
+# what creates sandboxes and what makes the agent image worth pulling, so both
+# upgrade steps below hang off it.
+runner_profile_on() {
+  case "$(env_or_file COMPOSE_PROFILES)" in
+    *runner*) return 0 ;;
+  esac
+  return 1
+}
+
+# The agent sandbox image this install starts agents from. It is deliberately
+# NOT a compose service — it is one env value on the runner service — so
+# `docker compose pull` cannot see it and this script has to pull it by name.
+agent_image_ref() {
+  _ref=$(unquote "$(env_or_file RUNNER_AGENT_IMAGE)")
+  if [ -n "$_ref" ]; then
+    printf '%s' "$_ref"
+    return
+  fi
+  printf 'ghcr.io/onecli/onecli-agent:%s' "${ONECLI_VERSION:-latest}"
+}
+
+# Whether a reference names a registry we may pull from. Docker treats the
+# first path segment as a registry only when it contains a "." or a ":", so a
+# locally built tag like `onecli-agent:dev` (what the wizard's source mode
+# builds) would silently resolve to docker.io/library/onecli-agent and pull a
+# stranger's image. Refusing is a supply-chain guard, not tidiness.
+ref_is_pullable() {
+  case "$1" in
+    */*) ;;
+    *) return 1 ;;
+  esac
+  case "${1%%/*}" in
+    *.* | *:*) return 0 ;;
+  esac
+  return 1
+}
+
+# A stable, non-secret fingerprint of THIS installation: sha256 of the runner
+# token, first 32 hex. Byte-equal with apps/runner/src/installation.ts, which
+# stamps the same value onto every sandbox container as sh.onecli.installation
+# — that label is what fences the restart below to our own containers.
+#
+# `printf`, never `echo`: echo appends a newline, which hashes to an entirely
+# different value, and the label filter would then match nothing while still
+# reporting success. A silent no-op that looks like it ran is the worst
+# possible failure here, so a test pins the exact digest.
+installation_fingerprint() {
+  _token=$(unquote "$(env_or_file RUNNER_TOKEN)")
+  [ -n "$_token" ] || return 1
+  if command -v sha256sum >/dev/null 2>&1; then
+    printf '%s' "$_token" | sha256sum | cut -c1-32
+  elif command -v shasum >/dev/null 2>&1; then
+    printf '%s' "$_token" | shasum -a 256 | cut -c1-32
+  else
+    return 1
+  fi
+}
+
+# Restart this installation's agent sandboxes so they come back on the image we
+# just pulled. Sandbox containers are created by the runner through the Docker
+# API rather than by compose, so they carry no compose labels and `compose
+# down` never touches them: without this they keep running the OLD agent image
+# indefinitely, which is the whole bug this step exists to close.
+#
+# BOTH labels are required. `managed=1` alone would also match a co-located
+# install's containers — precisely the failure apps/runner/src/installation.ts
+# was written to prevent. No fingerprint means no sweep: never widen the fence.
+#
+# CONTAINERS ONLY. The durable home volumes carry the IDENTICAL label pair, so
+# this filter must never reach `docker volume`, `docker rm -v`, or a prune:
+# that would erase every agent's /workspace. A test asserts those calls are
+# never made.
+#
+# Sets REAPED to the number of sandboxes actually stopped, and REAP_KEPT when
+# the operator opted out. The success block does the reporting, so every
+# "Agents:" line the run prints stays together.
+reap_sandboxes() {
+  REAPED=0
+  REAP_KEPT=""
+  [ "$STACK" = "split" ] || return 0
+  runner_profile_on || return 0
+  # Through env_or_file, like every other knob, so it works as a shell export
+  # AND as a line in the install's .env. A bare `$ONECLI_KEEP_SANDBOXES` would
+  # only ever see the export, and in the documented `curl | sh` form a variable
+  # prefix binds to curl, not to the script.
+  if [ -n "$(env_or_file ONECLI_KEEP_SANDBOXES)" ]; then
+    REAP_KEPT="yes"
+    return 0
+  fi
+  _fp=$(installation_fingerprint) || return 0
+  [ -n "$_fp" ] || return 0
+  _ids=$($DOCKER ps -q \
+    --filter "label=sh.onecli.managed=1" \
+    --filter "label=sh.onecli.installation=$_fp" 2>/dev/null)
+  [ -n "$_ids" ] || return 0
+  # -t 30 matches the runner's own graceful stop. The runner recreates the
+  # container from the current image on the agent's next message, so stopping
+  # is enough; removing it would only make the control plane wait longer.
+  for _id in $_ids; do
+    if $DOCKER stop -t 30 "$_id" >/dev/null 2>&1; then
+      REAPED=$((REAPED + 1))
+    fi
+  done
+  return 0
 }
 
 # Strict validation for the canonical var only (legacy APP_URL stays lenient):
@@ -491,6 +636,34 @@ main() {
     exit 1
   fi
 
+  # The agent sandbox image is not a compose service, so the pull above did not
+  # fetch it. Skipping this is how an upgraded install ends up serving 2.x
+  # services from a stale agent image: the runner only pulls that image when it
+  # is missing entirely, which never happens once a moving tag is cached.
+  #
+  # Non-fatal on purpose. It is the largest image by far, and a flaky network
+  # must not abort an upgrade whose services are already pulled; the warning
+  # names the exact consequence instead.
+  AGENT_PULL_FAILED=""
+  if [ "$STACK" = "split" ] && runner_profile_on; then
+    AGENT_IMAGE=$(agent_image_ref)
+    if ref_is_pullable "$AGENT_IMAGE"; then
+      echo "  Pulling the agent sandbox image ($AGENT_IMAGE)..."
+      if ! $DOCKER pull "$AGENT_IMAGE"; then
+        AGENT_PULL_FAILED="yes"
+        echo "Warning: Failed to pull $AGENT_IMAGE." >&2
+        echo "  OneCLI will still start, but hosted agents keep using the agent image already on this host." >&2
+      fi
+    else
+      # Not "built locally": a two-segment ref like myorg/agent:1 is a real
+      # Docker Hub reference we refuse on purpose, because pulling it could
+      # replace a locally built image from a namespace we do not control.
+      # Name the reason and the way out instead of guessing at intent.
+      echo "  Agent image $AGENT_IMAGE names no registry host, so it is not pulled."
+      echo "  Prefix it with ghcr.io/ or docker.io/ in $ENV_FILE to have it pulled."
+    fi
+  fi
+
   echo "  Starting OneCLI..."
   if ! docker compose -p "$PROJECT_NAME" -f "$COMPOSE_FILE" up -d --wait; then
     echo "" >&2
@@ -503,6 +676,12 @@ main() {
     exit 1
   fi
 
+  # ── Move running agents onto the new image ──
+  # After `up`, so the runner is already reconciling and reports the stopped
+  # sandbox on its first pass rather than waiting out an interval.
+
+  reap_sandboxes
+
   # ── Success ──
 
   echo ""
@@ -513,9 +692,22 @@ main() {
     echo "  Dashboard:  $RESOLVED_EXTERNAL"
     echo "  Gateway:    $RESOLVED_GATEWAY"
     echo "  API:        $RESOLVED_API"
-    if grep "^COMPOSE_PROFILES=" "$ENV_FILE" | tail -1 | grep -q runner; then
+    if runner_profile_on; then
       echo "  Agents:     hosted agents are ON (the runner mounts the Docker socket to start sandboxes;"
       echo "              disable with COMPOSE_PROFILES= in $ENV_FILE)"
+      if [ -n "$REAP_KEPT" ]; then
+        echo "              running sandboxes left alone (ONECLI_KEEP_SANDBOXES is set); they keep the"
+        echo "              old agent image until they next restart"
+      elif [ "$REAPED" -gt 0 ]; then
+        # "current", not "new": the pull above is non-fatal, so this may well
+        # be the same image they were already on. Claiming otherwise would
+        # send an operator hunting for a version bump that never happened.
+        echo "              restarted $REAPED running sandbox(es) onto the current agent image; any turn"
+        echo "              in flight reports that the agent restarted, and every /workspace is intact"
+        if [ -n "$AGENT_PULL_FAILED" ]; then
+          echo "              (the agent image pull failed above, so that is the image already on this host)"
+        fi
+      fi
     else
       echo "  Agents:     off (set COMPOSE_PROFILES=runner in $ENV_FILE to enable hosted agents)"
     fi
@@ -563,6 +755,44 @@ if [ "$1" = "--print-resolved" ]; then
   echo "external=$RESOLVED_EXTERNAL"
   echo "api=$RESOLVED_API"
   echo "gateway=$RESOLVED_GATEWAY"
+  exit 0
+fi
+
+# Hidden verification hook: print the agent sandbox image this install pulls,
+# resolved exactly as the pull step resolves it.
+if [ "$1" = "--print-agent-image" ]; then
+  ONECLI_VERSION="${ONECLI_VERSION:-latest}"
+  printf '%s\n' "$(agent_image_ref)"
+  exit 0
+fi
+
+# Hidden verification hook: whether a reference would be pulled from a
+# registry or treated as locally built. This is the supply-chain guard, so its
+# edge cases are pinned by tests rather than trusted.
+if [ "$1" = "--print-ref-pullable" ]; then
+  if ref_is_pullable "$2"; then
+    echo "pullable"
+  else
+    echo "local"
+  fi
+  exit 0
+fi
+
+# Hidden verification hook: print this installation's sandbox-label
+# fingerprint, so a test can pin it against apps/runner/src/installation.ts.
+if [ "$1" = "--print-installation-id" ]; then
+  installation_fingerprint || exit 1
+  exit 0
+fi
+
+# Hidden verification hook: run ONLY the sandbox restart, through
+# $ONECLI_DOCKER_CMD, so tests can assert every docker call it makes and every
+# destructive one it must never make.
+if [ "$1" = "--reap-sandboxes" ]; then
+  STACK="split"
+  reap_sandboxes
+  echo "reaped=$REAPED"
+  echo "kept=$REAP_KEPT"
   exit 0
 fi
 

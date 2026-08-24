@@ -2,7 +2,11 @@
 
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { channels } from "@/lib/api";
-import type { ChannelProvider, CompletePresenceInput } from "@/lib/api";
+import type {
+  ChannelProvider,
+  ChannelTransport,
+  CompletePresenceInput,
+} from "@/lib/api";
 import { queryKeys } from "@/lib/api/keys";
 
 // Channel mutations are headless (the use-app-config convention): the callers
@@ -19,15 +23,17 @@ export const useAgentChannels = (agentId: string) =>
     queryFn: () => channels.agentView(agentId),
   });
 
-/** The paste floor's step 0 — fetched only while the floor is on screen. */
+/** The paste floor's step 0 — fetched only while the floor is on screen.
+ * Keyed by the chosen transport: the manifest bakes it in. */
 export const useChannelManifest = (
   agentId: string,
   provider: ChannelProvider,
   enabled: boolean,
+  transport?: ChannelTransport,
 ) =>
   useQuery({
-    queryKey: queryKeys.channels.manifest(agentId, provider),
-    queryFn: () => channels.manifest(agentId, provider),
+    queryKey: queryKeys.channels.manifest(agentId, provider, transport),
+    queryFn: () => channels.manifest(agentId, provider, transport),
     enabled,
   });
 
@@ -39,7 +45,8 @@ export const useAttachChannel = (
 ) => {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: () => channels.attach(agentId, provider),
+    mutationFn: (input: { transport?: ChannelTransport } | undefined) =>
+      channels.attach(agentId, provider, input),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: queryKeys.channels.all() });
       // The agent lists carry the attached channels (the connected marks,

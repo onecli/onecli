@@ -35,8 +35,9 @@ export interface AgentChannelPresence {
 
 export interface AgentChannelsView {
   presences: AgentChannelPresence[];
-  /** What an attach would use right now. */
-  posture: { transport: ChannelTransport };
+  /** What an attach would use right now — and, on servers that offer a
+   * choice, what it could use instead (absent on older servers). */
+  posture: { transport: ChannelTransport; available?: ChannelTransport[] };
   orgIntegrations: {
     provider: ChannelProvider;
     connected: boolean;
@@ -66,6 +67,9 @@ export interface CompletePresenceInput {
   appToken?: string;
   signingSecret?: string;
   appId?: string;
+  /** The floor's chosen mode — sent only when the server offers a choice
+   * (`posture.available` present); older strict servers reject unknown keys. */
+  transport?: ChannelTransport;
 }
 
 /** The completion door's echo of the activated presence row. */
@@ -115,12 +119,30 @@ const agentBase = (agentId: string, sub = "") =>
 export const agentView = (agentId: string) =>
   apiGet<AgentChannelsView>(agentBase(agentId));
 
-export const manifest = (agentId: string, provider: ChannelProvider) =>
-  apiGet<ChannelSetupMaterial>(agentBase(agentId, `/${provider}/manifest`));
+export const manifest = (
+  agentId: string,
+  provider: ChannelProvider,
+  transport?: ChannelTransport,
+) =>
+  apiGet<ChannelSetupMaterial>(
+    agentBase(
+      agentId,
+      `/${provider}/manifest${transport ? `?transport=${transport}` : ""}`,
+    ),
+  );
 
-/** The guided arm: create the provider app from the org credential. */
-export const attach = (agentId: string, provider: ChannelProvider) =>
-  apiPost<CreatePresenceResult>(agentBase(agentId, `/${provider}`), {});
+/** The guided arm: create the provider app from the org credential. The
+ * transport rides along only when the server offers a choice (older servers
+ * read no body and would silently stamp their own default). */
+export const attach = (
+  agentId: string,
+  provider: ChannelProvider,
+  input?: { transport?: ChannelTransport },
+) =>
+  apiPost<CreatePresenceResult>(
+    agentBase(agentId, `/${provider}`),
+    input ?? {},
+  );
 
 /** The pasted-tokens completion door (socket arm + the whole paste floor). */
 export const complete = (

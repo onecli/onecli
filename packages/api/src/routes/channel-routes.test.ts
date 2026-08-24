@@ -289,7 +289,7 @@ beforeEach(() => {
   services.addUserLink.mockResolvedValue({ id: "lnk-1" });
   services.getAgentChannels.mockResolvedValue({
     presences: [],
-    posture: { transport: "socket" },
+    posture: { transport: "socket", available: ["socket"] },
     orgIntegrations: [],
     adapter: { online: false, lastSeenAt: null },
   });
@@ -1030,8 +1030,120 @@ describe("/v1/agents/:agentId/channels", () => {
       "ag-1",
       "slack",
       "user-1",
+      undefined,
     );
     expect(dbSpies.auditCreate).toHaveBeenCalled();
+  });
+
+  it("passes an explicit transport choice through to the create", async () => {
+    const res = await appRbacOff.request("/v1/agents/ag-1/channels/slack", {
+      method: "POST",
+      headers: { ...WORKSPACE_HEADERS, "content-type": "application/json" },
+      body: JSON.stringify({ transport: "socket" }),
+    });
+    expect(res.status).toBe(201);
+    expect(services.createPresence).toHaveBeenCalledWith(
+      "p1",
+      "ag-1",
+      "slack",
+      "user-1",
+      "socket",
+    );
+  });
+
+  it("rejects an unknown transport at the schema shell with 422", async () => {
+    const res = await appRbacOff.request("/v1/agents/ag-1/channels/slack", {
+      method: "POST",
+      headers: { ...WORKSPACE_HEADERS, "content-type": "application/json" },
+      body: JSON.stringify({ transport: "carrier-pigeon" }),
+    });
+    expect(res.status).toBe(422);
+    expect(services.createPresence).not.toHaveBeenCalled();
+  });
+
+  it("surfaces the service's transport refusals over HTTP: unavailable → 422, mismatch → 409", async () => {
+    // The pg suite proves the ServiceError codes; this crosses the HTTP
+    // boundary so the errorHandler's STATUS_MAP is exercised for both.
+    services.createPresence.mockRejectedValueOnce(
+      new ServiceError("UNPROCESSABLE", "Socket Mode isn't available"),
+    );
+    const unavailable = await appRbacOff.request(
+      "/v1/agents/ag-1/channels/slack",
+      {
+        method: "POST",
+        headers: { ...WORKSPACE_HEADERS, "content-type": "application/json" },
+        body: JSON.stringify({ transport: "socket" }),
+      },
+    );
+    expect(unavailable.status).toBe(422);
+
+    services.createPresence.mockRejectedValueOnce(
+      new ServiceError("CONFLICT", "Setup already started"),
+    );
+    const mismatch = await appRbacOff.request(
+      "/v1/agents/ag-1/channels/slack",
+      {
+        method: "POST",
+        headers: { ...WORKSPACE_HEADERS, "content-type": "application/json" },
+        body: JSON.stringify({ transport: "events" }),
+      },
+    );
+    expect(mismatch.status).toBe(409);
+  });
+
+  it("serves the manifest for a requested transport, and 422s an unknown one", async () => {
+    services.getSetupMaterial.mockResolvedValue({
+      transport: "socket",
+      material: {},
+    });
+    const res = await appRbacOff.request(
+      "/v1/agents/ag-1/channels/slack/manifest?transport=socket",
+      { headers: WORKSPACE_HEADERS },
+    );
+    expect(res.status).toBe(200);
+    expect(services.getSetupMaterial).toHaveBeenCalledWith(
+      "p1",
+      "ag-1",
+      "slack",
+      "socket",
+    );
+
+    const bad = await appRbacOff.request(
+      "/v1/agents/ag-1/channels/slack/manifest?transport=carrier-pigeon",
+      { headers: WORKSPACE_HEADERS },
+    );
+    expect(bad.status).toBe(422);
+  });
+
+  it("passes the floor's transport choice through to complete", async () => {
+    services.completePresence.mockResolvedValue({
+      id: "pr-1",
+      provider: "slack",
+      externalId: "A100",
+      status: "active",
+      transport: "socket",
+    });
+    const res = await appRbacOff.request(
+      "/v1/agents/ag-1/channels/slack/complete",
+      {
+        method: "POST",
+        headers: { ...WORKSPACE_HEADERS, "content-type": "application/json" },
+        body: JSON.stringify({
+          botToken: "xoxb-1",
+          appToken: "xapp-1",
+          appId: "A100",
+          transport: "socket",
+        }),
+      },
+    );
+    expect(res.status).toBe(200);
+    expect(services.completePresence).toHaveBeenCalledWith(
+      "p1",
+      "ag-1",
+      "slack",
+      expect.objectContaining({ transport: "socket" }),
+      "user-1",
+    );
   });
 
   it("rejects an unknown provider with 404", async () => {
