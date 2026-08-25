@@ -70,10 +70,13 @@ enum RequestBodyFraming {
 
 impl RequestBodyFraming {
     fn from_headers(headers: &hyper::HeaderMap, version: hyper::Version) -> Self {
-        if let Some(length) = headers.get(CONTENT_LENGTH) {
-            Self::ContentLength(length.clone())
-        } else if headers.contains_key(TRANSFER_ENCODING) {
+        // Transfer-Encoding defines the body framing when both headers are
+        // present. Hyper decodes that stream but retains Content-Length, so
+        // checking Content-Length first could truncate the forwarded body.
+        if headers.contains_key(TRANSFER_ENCODING) {
             Self::Chunked
+        } else if let Some(length) = headers.get(CONTENT_LENGTH) {
+            Self::ContentLength(length.clone())
         } else if matches!(
             version,
             hyper::Version::HTTP_09 | hyper::Version::HTTP_10 | hyper::Version::HTTP_11
@@ -1710,6 +1713,24 @@ mod tests {
             );
             assert!(request.ends_with("\r\n4\r\ntest\r\n0\r\n\r\n"), "{request}");
         }
+    }
+
+    #[tokio::test]
+    async fn unsigned_chunked_request_ignores_conflicting_content_length() {
+        let request = capture_forwarded_request(
+            "POST /upload HTTP/1.1\r\nHost: upload.example\r\nContent-Length: 0\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n4\r\ntest\r\n0\r\n\r\n",
+            passthrough_rules(),
+            false,
+        )
+        .await
+        .to_ascii_lowercase();
+
+        assert!(!request.contains("\r\ncontent-length:"), "{request}");
+        assert!(
+            request.contains("\r\ntransfer-encoding: chunked\r\n"),
+            "{request}"
+        );
+        assert!(request.ends_with("\r\n4\r\ntest\r\n0\r\n\r\n"), "{request}");
     }
 
     #[tokio::test]
