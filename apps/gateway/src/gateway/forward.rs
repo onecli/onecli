@@ -10,8 +10,8 @@ use anyhow::{Context, Result};
 use futures_util::{StreamExt, TryStreamExt};
 use http_body_util::{BodyExt, Either, Full};
 use hyper::body::{Bytes, Frame, Incoming};
-use hyper::header::HeaderName;
-use hyper::{Request, Response, StatusCode};
+use hyper::header::{HeaderName, HeaderValue, CONTENT_LENGTH, TRANSFER_ENCODING};
+use hyper::{Method, Request, Response, StatusCode};
 use tracing::{info, warn};
 
 use crate::approval::{
@@ -47,13 +47,107 @@ const HOP_BY_HOP_HEADERS: &[&str] = &[
 /// Returns true if a request header should be forwarded to the upstream server.
 ///
 /// Strips hop-by-hop headers plus `host` (set by the upstream URL) and
-/// `content-length` (recalculated by reqwest from the body).
+/// `content-length` (restored from [`RequestBodyFraming`] after any unsigned
+/// body transformations have run).
 fn is_forwarded_request_header(name: &HeaderName) -> bool {
     let s = name.as_str();
     if s == "host" || s == "content-length" || s == crate::connect::CONNECTION_ID_HEADER {
         return false;
     }
     !HOP_BY_HOP_HEADERS.contains(&s)
+}
+
+/// Request-body framing captured before Hyper's `Incoming` body is converted
+/// to a reqwest stream. That conversion loses a known Content-Length, including
+/// the zero length required by some mutation APIs.
+#[derive(Debug)]
+enum RequestBodyFraming {
+    ContentLength(HeaderValue),
+    Chunked,
+    KnownEmpty,
+    UnknownLength,
+}
+
+impl RequestBodyFraming {
+    fn from_headers(headers: &hyper::HeaderMap, version: hyper::Version) -> Self {
+        if let Some(length) = headers.get(CONTENT_LENGTH) {
+            Self::ContentLength(length.clone())
+        } else if headers.contains_key(TRANSFER_ENCODING) {
+            Self::Chunked
+        } else if matches!(
+            version,
+            hyper::Version::HTTP_09 | hyper::Version::HTTP_10 | hyper::Version::HTTP_11
+        ) {
+            // HTTP/1.x requests without Transfer-Encoding or Content-Length
+            // have no message body (RFC 9112 section 6.3).
+            Self::KnownEmpty
+        } else {
+            // HTTP/2 and later can carry DATA frames without Content-Length.
+            Self::UnknownLength
+        }
+    }
+
+    fn outgoing_content_length(
+        &self,
+        method: &Method,
+        final_exact_length: Option<u64>,
+    ) -> Option<HeaderValue> {
+        if let Some(length) = final_exact_length {
+            if length > 0
+                || matches!(self, Self::ContentLength(_))
+                || method_needs_explicit_empty_length(method)
+            {
+                return Some(
+                    HeaderValue::from_str(&length.to_string())
+                        .expect("a decimal u64 is a valid Content-Length"),
+                );
+            }
+            return None;
+        }
+
+        match self {
+            Self::ContentLength(length) => Some(length.clone()),
+            Self::Chunked => None,
+            Self::KnownEmpty if method_needs_explicit_empty_length(method) => {
+                Some(HeaderValue::from_static("0"))
+            }
+            Self::KnownEmpty | Self::UnknownLength => None,
+        }
+    }
+}
+
+fn method_needs_explicit_empty_length(method: &Method) -> bool {
+    matches!(
+        *method,
+        Method::POST | Method::PUT | Method::PATCH | Method::DELETE
+    )
+}
+
+fn canonicalize_non_finalized_framing(
+    has_request_finalizer: bool,
+    request_body_framing: &RequestBodyFraming,
+    method: &Method,
+    headers: &mut hyper::HeaderMap,
+    body: &reqwest::Body,
+) {
+    // Finalizers own their existing header/body handoff and may transform or
+    // buffer the body internally. Framing repair is deliberately unsigned-only.
+    if has_request_finalizer {
+        return;
+    }
+
+    let final_exact_length = body.as_bytes().map(|bytes| bytes.len() as u64);
+    let outgoing_content_length =
+        request_body_framing.outgoing_content_length(method, final_exact_length);
+
+    // Framing injected after the incoming headers were filtered is not
+    // authoritative. Reqwest supplies chunked framing for an unknown stream
+    // when neither header remains.
+    headers.remove(CONTENT_LENGTH);
+    headers.remove(TRANSFER_ENCODING);
+    if let Some(content_length) = outgoing_content_length {
+        headers.insert(CONTENT_LENGTH, content_length);
+    }
 }
 
 /// Returns true if a response header should be forwarded back to the client.
@@ -345,6 +439,7 @@ pub(crate) async fn forward_request(
 ) -> Result<Response<hooks::ForwardResponseBody>> {
     let start = std::time::Instant::now();
     let method = req.method().clone();
+    let request_body_framing = RequestBodyFraming::from_headers(req.headers(), req.version());
     let path = req
         .uri()
         .path_and_query()
@@ -896,11 +991,20 @@ pub(crate) async fn forward_request(
         None => forward_body,
     };
 
-    // ── Provider-specific request signing ─────────────────────────
-    let forward_body = match rules
+    let request_finalizer = rules
         .finalizer
-        .or_else(|| crate::apps::finalizer_for_host(host.split(':').next().unwrap_or(host)))
-    {
+        .or_else(|| crate::apps::finalizer_for_host(host.split(':').next().unwrap_or(host)));
+
+    canonicalize_non_finalized_framing(
+        request_finalizer.is_some(),
+        &request_body_framing,
+        &method,
+        &mut headers,
+        &forward_body,
+    );
+
+    // ── Provider-specific request signing ─────────────────────────
+    let forward_body = match request_finalizer {
         Some(crate::apps::RequestFinalizer::AwsSigV4) => {
             super::finalizers::aws_sigv4::finalize_request(
                 host,
@@ -1341,6 +1445,335 @@ fn body_indicates_auth_error(body: &[u8]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    use hyper::server::conn::http1;
+    use hyper::service::service_fn;
+    use hyper_util::rt::TokioIo;
+
+    fn passthrough_rules() -> ResolvedRules {
+        ResolvedRules {
+            injection_rules: vec![],
+            pending_injections: vec![],
+            access_restricted: false,
+            intercept_token: None,
+            plan: "free".to_string(),
+            rewrite_host: None,
+            connection_label: None,
+            finalizer: None,
+            body_transform: None,
+            session_policy: None,
+            winning_connection_id: None,
+            budget_bindings: vec![],
+            policy_rules_v2: Default::default(),
+            available_apps: Default::default(),
+        }
+    }
+
+    fn rules_injecting_stale_framing() -> ResolvedRules {
+        let mut rules = passthrough_rules();
+        rules.injection_rules.push(crate::inject::InjectionRule {
+            path_pattern: "*".to_string(),
+            injections: vec![
+                crate::inject::Injection::SetHeader {
+                    name: "content-length".to_string(),
+                    value: "999".to_string(),
+                },
+                crate::inject::Injection::SetHeader {
+                    name: "transfer-encoding".to_string(),
+                    value: "chunked".to_string(),
+                },
+            ],
+        });
+        rules
+    }
+
+    fn request_is_complete(request: &[u8]) -> bool {
+        let text = String::from_utf8_lossy(request);
+        let Some((head, body)) = text.split_once("\r\n\r\n") else {
+            return false;
+        };
+        let lower_head = head.to_ascii_lowercase();
+        if lower_head.contains("\r\ntransfer-encoding: chunked") {
+            return body.ends_with("\r\n0\r\n\r\n");
+        }
+        match lower_head.lines().find_map(|line| {
+            line.strip_prefix("content-length:")
+                .and_then(|value| value.trim().parse::<usize>().ok())
+        }) {
+            Some(length) => body.len() >= length,
+            None => true,
+        }
+    }
+
+    /// Send raw HTTP/1.1 through the real `forward_request` path and return the
+    /// exact bytes a raw upstream observes. The upstream read is bounded so a
+    /// broken stale Content-Length fails the assertion instead of deadlocking.
+    async fn capture_forwarded_request(
+        raw_request: &str,
+        rules: ResolvedRules,
+        with_agent_identity: bool,
+    ) -> String {
+        let upstream_hostname = raw_request
+            .lines()
+            .find_map(|line| {
+                let (name, value) = line.split_once(':')?;
+                name.eq_ignore_ascii_case("host")
+                    .then(|| value.trim().to_string())
+            })
+            .expect("raw request has a Host header");
+        let upstream = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind upstream");
+        let upstream_addr = upstream.local_addr().expect("upstream address");
+        let upstream_task = tokio::spawn(async move {
+            let (mut stream, _) = upstream.accept().await.expect("accept upstream request");
+            let mut request = Vec::new();
+            let mut buf = [0_u8; 1024];
+
+            while !request_is_complete(&request) {
+                let read = match tokio::time::timeout(Duration::from_secs(1), stream.read(&mut buf))
+                    .await
+                {
+                    Ok(Ok(read)) => read,
+                    Ok(Err(error)) => panic!("read upstream request: {error}"),
+                    Err(_) => break,
+                };
+                if read == 0 {
+                    break;
+                }
+                request.extend_from_slice(&buf[..read]);
+            }
+
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                .await
+                .expect("write upstream response");
+            String::from_utf8(request).expect("upstream request is HTTP text")
+        });
+
+        let proxy = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind forwarding harness");
+        let proxy_addr = proxy.local_addr().expect("proxy address");
+        let cache = crate::cache::create_store().await.expect("create cache");
+        let approval_store = crate::approval::create_store()
+            .await
+            .expect("create approval store");
+        let engine = Arc::new(crate::connect::PolicyEngine::test_stub());
+        let rules = Arc::new(rules);
+        let (workspace_id, agent_name) = if with_agent_identity {
+            (Some("workspace-1".to_string()), Some("Glowfer".to_string()))
+        } else {
+            (None, None)
+        };
+        let proxy_ctx = Arc::new(ProxyContext {
+            workspace_id,
+            organization_id: None,
+            agent_id: None,
+            agent_name,
+            agent_identifier: None,
+            agent_token: "forwarding-test-token".to_string(),
+        });
+        let forward_host = format!("{upstream_hostname}:{}", upstream_addr.port());
+        let http_client = reqwest::Client::builder()
+            .no_proxy()
+            .resolve(&upstream_hostname, upstream_addr)
+            .build()
+            .expect("build forwarding client");
+
+        let proxy_task = tokio::spawn(async move {
+            let (stream, _) = proxy.accept().await.expect("accept forwarding request");
+            http1::Builder::new()
+                .serve_connection(
+                    TokioIo::new(stream),
+                    service_fn(move |req| {
+                        let cache = Arc::clone(&cache);
+                        let approval_store = Arc::clone(&approval_store);
+                        let engine = Arc::clone(&engine);
+                        let rules = Arc::clone(&rules);
+                        let proxy_ctx = Arc::clone(&proxy_ctx);
+                        let forward_host = forward_host.clone();
+                        let upstream_hostname = upstream_hostname.clone();
+                        let http_client = http_client.clone();
+                        async move {
+                            forward_request(
+                                req,
+                                &forward_host,
+                                &upstream_hostname,
+                                "http",
+                                http_client,
+                                &rules,
+                                &*cache,
+                                &proxy_ctx,
+                                &approval_store,
+                                &engine,
+                            )
+                            .await
+                        }
+                    }),
+                )
+                .await
+                .expect("serve forwarding request");
+        });
+
+        let mut client = tokio::net::TcpStream::connect(proxy_addr)
+            .await
+            .expect("connect forwarding harness");
+        client
+            .write_all(raw_request.as_bytes())
+            .await
+            .expect("write forwarding request");
+        let mut response = Vec::new();
+        client
+            .read_to_end(&mut response)
+            .await
+            .expect("read forwarding response");
+        let response = String::from_utf8_lossy(&response);
+        assert!(
+            response
+                .lines()
+                .next()
+                .is_some_and(|status| status.starts_with("HTTP/1.") && status.contains(" 200 ")),
+            "forwarding harness should return the upstream response: {response}"
+        );
+
+        proxy_task.await.expect("forwarding task");
+        upstream_task.await.expect("upstream task")
+    }
+
+    #[tokio::test]
+    async fn unsigned_empty_http1_mutations_send_exact_zero_length() {
+        for version in ["HTTP/1.0", "HTTP/1.1"] {
+            for method in ["POST", "PUT", "PATCH", "DELETE"] {
+                let request = capture_forwarded_request(
+                    &format!(
+                        "{method} /compute/v1/projects/p/regions/r/routers/x/nats {version}\r\nHost: compute.googleapis.com\r\nConnection: close\r\n\r\n"
+                    ),
+                    passthrough_rules(),
+                    false,
+                )
+                .await
+                .to_ascii_lowercase();
+
+                assert_eq!(
+                    request.matches("\r\ncontent-length:").count(),
+                    1,
+                    "{method} {version}: {request}"
+                );
+                assert!(
+                    request.contains("\r\ncontent-length: 0\r\n"),
+                    "{method} {version}: {request}"
+                );
+                assert!(
+                    !request.contains("\r\ntransfer-encoding:"),
+                    "{method} {version}: {request}"
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn unsigned_empty_mutation_replaces_injected_framing() {
+        let request = capture_forwarded_request(
+            "POST /compute/v1/projects/p/regions/r/routers/x/nats HTTP/1.1\r\nHost: compute.googleapis.com\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+            rules_injecting_stale_framing(),
+            false,
+        )
+        .await
+        .to_ascii_lowercase();
+
+        assert_eq!(
+            request.matches("\r\ncontent-length:").count(),
+            1,
+            "{request}"
+        );
+        assert!(request.contains("\r\ncontent-length: 0\r\n"), "{request}");
+        assert!(!request.contains("\r\ntransfer-encoding:"), "{request}");
+    }
+
+    #[tokio::test]
+    async fn unsigned_chunked_requests_remain_streamed() {
+        for rules in [passthrough_rules(), rules_injecting_stale_framing()] {
+            let request = capture_forwarded_request(
+                "POST /upload HTTP/1.1\r\nHost: upload.example\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n4\r\ntest\r\n0\r\n\r\n",
+                rules,
+                false,
+            )
+            .await
+            .to_ascii_lowercase();
+
+            assert!(!request.contains("\r\ncontent-length:"), "{request}");
+            assert!(
+                request.contains("\r\ntransfer-encoding: chunked\r\n"),
+                "{request}"
+            );
+            assert!(request.ends_with("\r\n4\r\ntest\r\n0\r\n\r\n"), "{request}");
+        }
+    }
+
+    #[tokio::test]
+    async fn unsigned_nonempty_transform_sets_exact_final_length() {
+        let original_body = r#"{"message":"ship"}"#;
+        let raw_request = format!(
+            "POST /repos/owner/repo/git/commits HTTP/1.1\r\nHost: api.github.com\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{original_body}",
+            original_body.len()
+        );
+        let mut rules = rules_injecting_stale_framing();
+        rules.body_transform = Some(crate::apps::BodyTransform::GitHubCommitTrailer);
+
+        let request = capture_forwarded_request(&raw_request, rules, true).await;
+        let (head, forwarded_body) = request
+            .split_once("\r\n\r\n")
+            .expect("captured request has a header terminator");
+        let content_lengths: Vec<usize> = head
+            .lines()
+            .filter_map(|line| {
+                let (name, value) = line.split_once(':')?;
+                name.eq_ignore_ascii_case("content-length")
+                    .then(|| value.trim().parse().expect("forwarded Content-Length"))
+            })
+            .collect();
+
+        assert_eq!(content_lengths, vec![forwarded_body.len()]);
+        assert!(!head.to_ascii_lowercase().contains("transfer-encoding:"));
+        let transformed: serde_json::Value =
+            serde_json::from_str(forwarded_body).expect("transformed GitHub JSON");
+        let message = transformed["message"]
+            .as_str()
+            .expect("transformed commit message");
+        assert!(message.starts_with("[Glowfer] ship"), "{message}");
+        assert!(message.contains("On-Behalf-Of: Glowfer[onecli] (workspace-1)"));
+    }
+
+    #[test]
+    fn finalized_request_keeps_original_framing_for_handoff() {
+        let request_body_framing = RequestBodyFraming::ContentLength(HeaderValue::from_static("0"));
+        let mut headers = hyper::HeaderMap::new();
+        headers.insert(CONTENT_LENGTH, HeaderValue::from_static("999"));
+        headers.insert(TRANSFER_ENCODING, HeaderValue::from_static("chunked"));
+        let body = reqwest::Body::from(Vec::new());
+
+        canonicalize_non_finalized_framing(
+            true,
+            &request_body_framing,
+            &Method::POST,
+            &mut headers,
+            &body,
+        );
+
+        assert_eq!(headers.get(CONTENT_LENGTH).unwrap(), "999");
+        assert_eq!(headers.get(TRANSFER_ENCODING).unwrap(), "chunked");
+    }
+
+    #[test]
+    fn http2_unframed_mutation_is_not_assumed_empty() {
+        let headers = hyper::HeaderMap::new();
+        let framing = RequestBodyFraming::from_headers(&headers, hyper::Version::HTTP_2);
+
+        assert!(matches!(framing, RequestBodyFraming::UnknownLength));
+        assert_eq!(framing.outgoing_content_length(&Method::POST, None), None);
+    }
 
     // ── is_forwarded_request_header ──────────────────────────────────────
 
