@@ -48,7 +48,11 @@ you through watches.
 - process_stop stops a process_start task; tasks started other ways are
   stopped the way they were started.
 - If the machine restarts, background tasks die and their watches fire with
-  "lost" so you can restart the work.`,
+  "lost" so you can restart the work.
+- Nothing runs between your turns. A promise to "report back" is only real
+  after you arm the watch (or schedule) that will wake you. To follow
+  something outside this machine (a CI run, a deploy), process_start a
+  poller for it and watch that.`,
 };
 
 const startSchema = z

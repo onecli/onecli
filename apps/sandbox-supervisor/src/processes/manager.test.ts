@@ -7,6 +7,7 @@ import {
   createProcessManager,
   MAX_PROCESSES_PER_SANDBOX,
   MAX_WATCHES_PER_PROCESS,
+  TURN_END_SAFETY_NET_PROMPT,
   type ProcessManager,
 } from "./manager";
 
@@ -490,5 +491,113 @@ describe("observed entries (the native-task mirror)", () => {
     expect(latest(sent, "obs-1").watches[0]?.status).toBe("canceled");
     expect(manager.cancelWatch("obs-1", watchId)).toBe(false); // inert now
     expect(manager.cancelWatch("obs-1", "nope")).toBe(false);
+  });
+});
+
+describe("the turn-end safety net", () => {
+  it("arms a default exit watch on running processes with no watch", async () => {
+    const { manager, sent } = rig();
+    const id = startId(manager.start({ command: "sleep 5" }, null));
+
+    const armed = manager.armTurnEndSafetyNet({
+      conversationId: "cv-end",
+      turnId: "t-end",
+    });
+
+    expect(armed).toBe(1);
+    const p = latest(sent, id);
+    expect(p.watches).toHaveLength(1);
+    expect(p.watches[0]?.status).toBe("armed");
+    expect(p.watches[0]?.kind).toBe("exit");
+    expect(p.watches[0]?.prompt).toBe(TURN_END_SAFETY_NET_PROMPT);
+    // Context-less process → the ending turn's context is the fallback
+    // (the frame flattens watch context into conversationId/turnId).
+    expect(p.watches[0]?.conversationId).toBe("cv-end");
+    expect(p.watches[0]?.turnId).toBe("t-end");
+    manager.stop({ processId: id });
+  });
+
+  it("prefers the process's own arm-time context over the fallback", async () => {
+    // The honest origin: the chat where the task was STARTED — a net re-arm
+    // from a watch- or cron-sourced turn must not point the report at a
+    // hidden automation conversation.
+    const { manager, sent } = rig();
+    const id = startId(
+      manager.start(
+        { command: "sleep 5" },
+        { conversationId: "cv-origin", turnId: "t-origin" },
+      ),
+    );
+
+    manager.armTurnEndSafetyNet({
+      conversationId: "cv-automation",
+      turnId: "t-automation",
+    });
+
+    const p = latest(sent, id);
+    expect(p.watches[0]?.conversationId).toBe("cv-origin");
+    expect(p.watches[0]?.turnId).toBe("t-origin");
+    manager.stop({ processId: id });
+  });
+
+  it("skips processes that already have an armed watch — no double report", async () => {
+    const { manager } = rig();
+    const id = startId(manager.start({ command: "sleep 5" }, null));
+    manager.watch({ processId: id, kind: "exit", prompt: "mine" }, null);
+
+    const armed = manager.armTurnEndSafetyNet({
+      conversationId: "cv",
+      turnId: "t",
+    });
+
+    expect(armed).toBe(0);
+    manager.stop({ processId: id });
+  });
+
+  it("skips terminal processes — their completion was visible to the turn", async () => {
+    const { manager, sent } = rig();
+    const id = startId(manager.start({ command: "true" }, null));
+    await waitFor(sent, id, (x) => x.status !== "running");
+
+    const armed = manager.armTurnEndSafetyNet({
+      conversationId: "cv",
+      turnId: "t",
+    });
+
+    expect(armed).toBe(0);
+    expect(latest(sent, id).watches).toHaveLength(0);
+  });
+
+  it("covers OBSERVED harness-native tasks the same way", async () => {
+    const { manager, sent } = rig();
+    manager.observeUpsert(
+      {
+        ref: "native-1",
+        command: "native build",
+        status: "running",
+        startedAt: new Date().toISOString(),
+        wantsWake: false,
+      },
+      null,
+    );
+
+    const armed = manager.armTurnEndSafetyNet({
+      conversationId: "cv",
+      turnId: "t",
+    });
+
+    expect(armed).toBe(1);
+    const p = latest(sent, "native-1");
+    expect(p.watches[0]?.status).toBe("armed");
+    expect(p.watches[0]?.prompt).toBe(TURN_END_SAFETY_NET_PROMPT);
+  });
+
+  it("is inert after close", () => {
+    const { manager } = rig();
+    manager.start({ command: "sleep 5" }, null);
+    manager.close();
+    expect(
+      manager.armTurnEndSafetyNet({ conversationId: "cv", turnId: "t" }),
+    ).toBe(0);
   });
 });

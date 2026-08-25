@@ -30,11 +30,20 @@
  *   the raw provider response on every chat surface — the raw text stays
  *   operator material (the control plane's server log and the stored
  *   transcript events).
+ * - `harness_busy`: the harness refused to take the turn's message because
+ *   its session was still executing an earlier, platform-abandoned run — and
+ *   the adapter's self-heal (cancel the orphan, resend with backoff) could
+ *   not free it. Minted by the ADAPTER on its terminal error event (the
+ *   vendor's refusal wording never crosses the adapter boundary) and carried
+ *   to `turn.result.errorCode` by the supervisor. The raw refusal rides
+ *   beside it as `error` so an old control plane that ignores the code still
+ *   stores visible text instead of a silent NULL.
  */
 export const TURN_FAILURE_CODES = {
   agentRestarted: "agent_restarted",
   agentStartFailed: "agent_start_failed",
   modelProviderError: "model_provider_error",
+  harnessBusy: "harness_busy",
 } as const;
 export type TurnFailureCode =
   (typeof TURN_FAILURE_CODES)[keyof typeof TURN_FAILURE_CODES];

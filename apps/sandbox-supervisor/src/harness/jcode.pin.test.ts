@@ -28,6 +28,7 @@ const sdk = vi.hoisted(() => ({
 vi.mock("@1jehuang/jcode-sdk", () => ({
   bundledJcodeBinary: () => sdk.bundled,
   JcodeClient: class {},
+  launchInstance: () => Promise.reject(new Error("not launched in this suite")),
 }));
 
 const {

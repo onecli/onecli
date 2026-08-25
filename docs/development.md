@@ -55,6 +55,7 @@ apps/
   gateway/            # Rust gateway (credential injection, port 10255)
   runner/             # Hosted-agents daemon: starts/parks/reaps sandboxes
   sandbox-supervisor/ # Runs inside each agent sandbox
+  ssh-terminator/     # SSH front door: terminates ssh, bridges into sandboxes
   channel-adapter/    # Slack channels daemon
   gateway-e2e/        # Gateway end-to-end suite
   hosted-e2e/         # Hosted-agent end-to-end suite

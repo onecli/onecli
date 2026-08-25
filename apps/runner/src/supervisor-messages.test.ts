@@ -135,6 +135,28 @@ describe("supervisor message handler", () => {
     });
   });
 
+  it("forwards harness_busy verbatim too — a NEW code needs no runner change", async () => {
+    // The open-string law end to end: the adapter minted this code after the
+    // busy self-heal exhausted; the runner is a pipe.
+    const { reported } = drive([
+      {
+        kind: "turn.result",
+        turnId: "t1",
+        conversationId: "cv-1",
+        status: "failed",
+        error: "Already processing a message",
+        errorCode: "harness_busy",
+      },
+    ]);
+
+    expect(reported[0]).toMatchObject({
+      kind: "turn.finished",
+      status: "failed",
+      error: "Already processing a message",
+      errorCode: "harness_busy",
+    });
+  });
+
   it("flushes buffered text before the terminal report", () => {
     // Otherwise the transcript can record the turn finishing before the words
     // it said — `seq` is assigned control-plane-side, on arrival.

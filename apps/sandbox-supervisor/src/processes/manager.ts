@@ -69,6 +69,15 @@ export interface TurnContext {
   turnId: string;
 }
 
+/**
+ * What the turn-end safety net's watch instructs the fired turn to do. The
+ * net exists for work the agent left running with NOTHING armed to report
+ * it — a completion nobody would ever hear about otherwise (the running row
+ * already holds the machine awake; it is the RESULT that evaporates).
+ */
+export const TURN_END_SAFETY_NET_PROMPT =
+  "A background task was still running when your turn ended without any watch on it. Check its outcome (process_status shows its output) and report the result concisely — the report is delivered to the chat where the task was started. If nothing needs reporting, say so briefly.";
+
 export type ToolOutcome = {
   ok: boolean;
   result?: unknown;
@@ -119,6 +128,15 @@ export interface ProcessManager {
   /** Cancel one ARMED watch (armed→canceled + frame) — the wake-revoke
    * surface. Inert for unknown refs or non-armed watches. */
   cancelWatch(processRef: string, watchRef: string): boolean;
+  /**
+   * The turn-end safety net: arm a default exit-watch on every RUNNING
+   * process that has no armed watch, so work the agent left behind reports
+   * its outcome instead of completing invisibly. Each watch carries the
+   * process's own arm-time context (the chat where it was started);
+   * `fallbackContext` — the ending turn's — covers context-less entries.
+   * Returns how many were armed; inert when closed.
+   */
+  armTurnEndSafetyNet(fallbackContext: TurnContext): number;
   /** Orderly teardown: SIGTERM every group (no wait), destroy pipes, stop
    * the sweeper. Sends nothing — after container stop the control plane's
    * lost sweep owns the truth. */
@@ -330,6 +348,77 @@ export const createProcessManager = (
   const sweeper = setInterval(sweep, sweepIntervalMs);
   sweeper.unref();
 
+  /**
+   * The shared arm path — the `watch` tool and the turn-end safety net both
+   * go through it, so one place owns the caps, the arm-on-a-corpse immediate
+   * trigger, and the frame.
+   */
+  const armWatch = (
+    entry: ProcessEntry,
+    args: {
+      kind: "exit" | "pattern" | "silence";
+      pattern?: string;
+      silenceSeconds?: number;
+      prompt: string;
+      expiresInSeconds?: number;
+    },
+    context: TurnContext | null,
+  ): ToolOutcome => {
+    const armed = entry.watches.filter(
+      (watch) => watch.status === "armed",
+    ).length;
+    if (armed >= MAX_WATCHES_PER_PROCESS) {
+      return {
+        ok: false,
+        error: `This process already has ${MAX_WATCHES_PER_PROCESS} armed watches.`,
+      };
+    }
+    if (entry.watches.length >= MAX_WATCHES_PER_PROCESS_WIRE) {
+      return {
+        ok: false,
+        error: "Too many watches on this process — start a fresh one.",
+      };
+    }
+    const expiresInSeconds = Math.min(
+      Math.max(
+        args.expiresInSeconds ?? WATCH_EXPIRES_DEFAULT_SECONDS,
+        WATCH_EXPIRES_MIN_SECONDS,
+      ),
+      WATCH_EXPIRES_MAX_SECONDS,
+    );
+    const watch: WatchEntry = {
+      ref: randomUUID(),
+      kind: args.kind,
+      ...(args.kind === "pattern" && { pattern: args.pattern }),
+      ...(args.kind === "silence" && {
+        silenceSeconds: args.silenceSeconds,
+      }),
+      prompt: args.prompt,
+      status: "armed",
+      expiresAt: now() + expiresInSeconds * 1000,
+      context,
+    };
+    entry.watches.push(watch);
+    // Arming on an already-ended process triggers IMMEDIATELY — the
+    // status-check-then-arm TOCTOU cannot produce a watch that waits on a
+    // corpse.
+    if (entry.status !== "running") {
+      triggerWatch(entry, watch, "exited");
+    }
+    sendFrame(entry);
+    return {
+      ok: true,
+      result: {
+        watchId: watch.ref,
+        expiresAt: new Date(watch.expiresAt).toISOString(),
+        note:
+          watch.status === "triggered"
+            ? "The process had already ended, so this watch fired immediately."
+            : "Armed. It fires once, then is done; it also fires if the process ends first, whatever its kind.",
+      },
+    };
+  };
+
   // The process_start cap counts only OWNED entries: harness-native tasks
   // the observer mirrors must never brick the agent's own tool.
   const ownedRunningCount = (): number =>
@@ -527,59 +616,36 @@ export const createProcessManager = (
       if (!entry) {
         return { ok: false, error: `No process "${args.processId}".` };
       }
-      const armed = entry.watches.filter(
-        (watch) => watch.status === "armed",
-      ).length;
-      if (armed >= MAX_WATCHES_PER_PROCESS) {
-        return {
-          ok: false,
-          error: `This process already has ${MAX_WATCHES_PER_PROCESS} armed watches.`,
-        };
+      return armWatch(entry, args, context);
+    },
+
+    armTurnEndSafetyNet(fallbackContext) {
+      if (closed) return 0;
+      let armed = 0;
+      for (const entry of processes.values()) {
+        if (entry.status !== "running") continue;
+        // Any armed watch already guarantees a wake on exit (finalize fires
+        // them ALL) — the net exists only for work nothing will report.
+        if (entry.watches.some((watch) => watch.status === "armed")) continue;
+        const outcome = armWatch(
+          entry,
+          {
+            kind: "exit",
+            prompt: TURN_END_SAFETY_NET_PROMPT,
+            // The MAX, not the default: a day-long build's report must
+            // still land (the observer's implicit-wake choice).
+            expiresInSeconds: WATCH_EXPIRES_MAX_SECONDS,
+          },
+          // The process's own first-sight context is the honest origin —
+          // "the chat where the task was started" — and it also keeps a
+          // net re-arm from a watch- or cron-sourced turn from pointing
+          // the report at a hidden automation conversation. The ending
+          // turn's context only covers context-less observed tasks.
+          entry.context ?? fallbackContext,
+        );
+        if (outcome.ok) armed += 1;
       }
-      if (entry.watches.length >= MAX_WATCHES_PER_PROCESS_WIRE) {
-        return {
-          ok: false,
-          error: "Too many watches on this process — start a fresh one.",
-        };
-      }
-      const expiresInSeconds = Math.min(
-        Math.max(
-          args.expiresInSeconds ?? WATCH_EXPIRES_DEFAULT_SECONDS,
-          WATCH_EXPIRES_MIN_SECONDS,
-        ),
-        WATCH_EXPIRES_MAX_SECONDS,
-      );
-      const watch: WatchEntry = {
-        ref: randomUUID(),
-        kind: args.kind,
-        ...(args.kind === "pattern" && { pattern: args.pattern }),
-        ...(args.kind === "silence" && {
-          silenceSeconds: args.silenceSeconds,
-        }),
-        prompt: args.prompt,
-        status: "armed",
-        expiresAt: now() + expiresInSeconds * 1000,
-        context,
-      };
-      entry.watches.push(watch);
-      // Arming on an already-ended process triggers IMMEDIATELY — the
-      // status-check-then-arm TOCTOU cannot produce a watch that waits on a
-      // corpse.
-      if (entry.status !== "running") {
-        triggerWatch(entry, watch, "exited");
-      }
-      sendFrame(entry);
-      return {
-        ok: true,
-        result: {
-          watchId: watch.ref,
-          expiresAt: new Date(watch.expiresAt).toISOString(),
-          note:
-            watch.status === "triggered"
-              ? "The process had already ended, so this watch fired immediately."
-              : "Armed. It fires once, then is done; it also fires if the process ends first, whatever its kind.",
-        },
-      };
+      return armed;
     },
 
     observeUpsert(snapshot, context) {

@@ -10,6 +10,7 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
+import { processesFragment } from "../capabilities/processes";
 import {
   PLATFORM_SYSTEM_PROMPT,
   preparePromptFiles,
@@ -143,5 +144,40 @@ describe("the platform system prompt", () => {
 
     expect(readFileSync(slot, "utf8")).toBe(WRITTEN_PROMPT);
     expect(statSync(slot).mode & 0o777).toBe(0o444);
+  });
+});
+
+describe("the turn-ending contract", () => {
+  // The report-back incident's lesson: every line about watches was
+  // conditioned on "a background task", and nothing told the agent that a
+  // promise without an armed watch cannot be kept. These pins keep the
+  // contract in the prompt — remove any leg and a live agent goes back to
+  // "I'll check the result and report back" followed by silence.
+  it("states that nothing runs between turns", () => {
+    expect(PLATFORM_SYSTEM_PROMPT).toContain("Nothing runs between your turns");
+  });
+
+  it("forbids report-back promises without an armed wake", () => {
+    const flat = PLATFORM_SYSTEM_PROMPT.replace(/\s+/g, " ");
+    expect(flat).toContain(
+      "Never end a turn promising to check on something or report back",
+    );
+    expect(flat).toContain("FIRST armed what will wake you");
+  });
+
+  it("bridges external systems to a watched poller", () => {
+    const flat = PLATFORM_SYSTEM_PROMPT.replace(/\s+/g, " ");
+    expect(flat).toContain("follow something outside this machine");
+    expect(flat).toContain(
+      "start a background poller with process_start and arm a process_watch",
+    );
+  });
+
+  it("the processes fragment carries the same law", () => {
+    const flat = processesFragment.body.replace(/\s+/g, " ");
+    expect(flat).toContain("Nothing runs between your turns");
+    expect(flat).toContain(
+      'A promise to "report back" is only real after you arm the watch',
+    );
   });
 });

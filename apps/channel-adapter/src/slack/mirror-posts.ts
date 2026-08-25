@@ -264,4 +264,17 @@ export const slackMirrorPosts: MirrorPosts = {
       button: "Check the model key",
     });
   },
+  async failureNotice(input) {
+    // Platform chrome, not the agent's voice: one plain italic line (the
+    // automation caption's treatment), with a warning icon for failures and
+    // nothing for the quiet "Stopped." A single postMessage keeps the
+    // rejection modes minimal — this is the mirror's last word for the turn,
+    // posted after the cursor already advanced.
+    const line = `_${escapeSlackText(input.message)}_`;
+    await postMessage(input.credential, {
+      channel: input.channel,
+      text: input.warn ? `:warning: ${line}` : line,
+      ...targetForm(input),
+    });
+  },
 };

@@ -12,6 +12,7 @@
         "PATH",
         "HOME",
         "E2E_ADMIN_DATABASE_URL",
+        "E2E_ANTHROPIC_OAUTH_TOKEN",
         "E2E_TEMPLATE_DB",
         "E2E_GATEWAY_BIN",
         "E2E_AGENT_IMAGE",

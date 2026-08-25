@@ -32,7 +32,7 @@ afterEach(async () => {
 
 const turn = (overrides: Partial<AdapterWorkTurn> = {}): AdapterWorkTurn => ({
   id: "t1",
-  status: "completed",
+  status: "done",
   source: "web",
   userId: "u1",
   message: "Deploy it <now>",
@@ -945,7 +945,9 @@ describe("what gets posted", () => {
     expect("blocks" in posted[0]!.form).toBe(false);
   });
 
-  it("posts nothing at all when there is neither answer nor error, but still advances", async () => {
+  it("posts nothing for a DONE turn with neither answer nor error, but still advances", async () => {
+    // Silence is only legal for a clean turn that genuinely said nothing —
+    // a terminal failure always posts (the suite below).
     const controlPlane = createFakeControlPlane(transcriptWith(null));
 
     const next = await mirror({
@@ -955,6 +957,117 @@ describe("what gets posted", () => {
 
     expect(slack.calls).toEqual([]);
     expect(next).toBe("2026-08-06T10:00:00.000Z");
+  });
+});
+
+describe("failure surfacing — never silent on a terminal outcome", () => {
+  /** A transcript holding arbitrary events for t1. */
+  const transcriptOf = (
+    events: { type: string; payload: unknown }[],
+  ): Pick<ControlPlaneClient, "readTranscript"> => ({
+    readTranscript: async () => ({
+      events: events.map((event, index) => ({
+        seq: index + 1,
+        turnId: "t1",
+        ...event,
+      })),
+      nextSince: events.length + 1,
+      hasMore: false,
+    }),
+  });
+
+  it("a FAILED turn with nothing anywhere posts the canonical failure line", async () => {
+    // The incident's exact shape: uncoded failure, error NULL, no text —
+    // six messages died with the seen-reaction stripped and total silence.
+    const controlPlane = createFakeControlPlane(transcriptWith(null));
+
+    const next = await mirror({
+      controlPlane,
+      workItem: item({ source: "slack", status: "failed" }),
+    });
+
+    expect(next).toBe("2026-08-06T10:00:00.000Z");
+    const posted = slack.callsTo("chat.postMessage");
+    expect(posted).toHaveLength(1);
+    expect(posted[0]?.form.text).toContain(":warning:");
+    expect(posted[0]?.form.text).toContain(
+      "Something went wrong and this message didn",
+    );
+  });
+
+  it("a FAILED turn with only a transcript error event posts that message", async () => {
+    // Uncoded harness failures leave their text ONLY in the durable error
+    // event (the supervisor sends no turn.result error for them) — the
+    // mirror must read it, like the web's transcript fold does.
+    const controlPlane = createFakeControlPlane(
+      transcriptOf([
+        { type: "error", payload: { message: "the harness said why" } },
+      ]),
+    );
+
+    await mirror({
+      controlPlane,
+      workItem: item({ source: "slack", status: "failed" }),
+    });
+
+    const posted = slack.callsTo("chat.postMessage");
+    expect(posted).toHaveLength(1);
+    expect(posted[0]?.form.text).toContain("the harness said why");
+    // The message IS the failure — no extra line after it.
+    expect(posted[0]?.form.text).not.toContain(":warning:");
+  });
+
+  it("turn.error outranks the transcript error event — canonical copy wins", async () => {
+    const controlPlane = createFakeControlPlane(
+      transcriptOf([
+        { type: "error", payload: { message: "raw vendor wording" } },
+      ]),
+    );
+
+    await mirror({
+      controlPlane,
+      workItem: item({
+        source: "slack",
+        status: "failed",
+        error: "The canonical sentence.",
+      }),
+    });
+
+    const posted = slack.callsTo("chat.postMessage");
+    expect(posted).toHaveLength(1);
+    expect(posted[0]?.form.text).toContain("The canonical sentence.");
+    expect(posted[0]?.form.text).not.toContain("raw vendor wording");
+  });
+
+  it("a FAILED turn with partial answer text posts the text AND the failure line", async () => {
+    // A partial answer must never masquerade as a normal reply.
+    const controlPlane = createFakeControlPlane(
+      transcriptWith("Half an answer before it fell over"),
+    );
+
+    await mirror({
+      controlPlane,
+      workItem: item({ source: "slack", status: "failed" }),
+    });
+
+    const posted = slack.callsTo("chat.postMessage");
+    expect(posted).toHaveLength(2);
+    expect(posted[0]?.form.text).toContain("Half an answer");
+    expect(posted[1]?.form.text).toContain(":warning:");
+    expect(posted[1]?.form.text).toContain("stopped partway");
+  });
+
+  it("an ABORTED turn with nothing posts the web's quiet closure word", async () => {
+    const controlPlane = createFakeControlPlane(transcriptWith(null));
+
+    await mirror({
+      controlPlane,
+      workItem: item({ source: "slack", status: "aborted" }),
+    });
+
+    const posted = slack.callsTo("chat.postMessage");
+    expect(posted).toHaveLength(1);
+    expect(posted[0]?.form.text).toBe("_Stopped._");
   });
 });
 

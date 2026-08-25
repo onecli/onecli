@@ -4,17 +4,19 @@ import { fileURLToPath } from "node:url";
 import {
   bundledJcodeBinary,
   JcodeClient,
+  launchInstance,
   type ApiEvent,
 } from "@1jehuang/jcode-sdk";
-import type {
-  AgentEffort,
-  AgentEvent,
-  Harness,
-  HarnessSession,
-  StartSessionOptions,
-  SteerInput,
-  TurnInput,
-  TurnUsage,
+import {
+  TURN_FAILURE_CODES,
+  type AgentEffort,
+  type AgentEvent,
+  type Harness,
+  type HarnessSession,
+  type StartSessionOptions,
+  type SteerInput,
+  type TurnInput,
+  type TurnUsage,
 } from "@onecli/agent-protocol";
 import { log } from "../log";
 import { platformToolsSocketPath } from "../platform-tools";
@@ -244,8 +246,8 @@ export const cleanJcodeKnowledgeStores = (
  * `enabled = false` is respected. The harness's own config save would
  * round-trip the file into the repaired shape — its saves serialize both
  * keys unconditionally — which is why this file is rewritten at every
- * container boot (the first session of each supervisor process; ensureClient
- * caches the client after that) and why the env-level tool disable exists
+ * container boot (once, before the daemon instance launches; ensureInstance
+ * memoizes after that) and why the env-level tool disable exists
  * as a second, independent lever that reapplies on every config load.
  */
 export const managedConfigToml = `# Written by the OneCLI supervisor at every container boot — do not edit.
@@ -384,6 +386,14 @@ watch wake-ups to the chat. To be woken when a background task completes,
 arm process_watch — do not use any runtime-level wake or self-notify option;
 wake-ups raised outside the platform run invisibly and their results reach
 no one.
+Nothing runs between your turns: once a turn ends, nothing wakes you except
+a person's message, a schedule, or a watch. Never end a turn promising to
+check on something or report back unless you have FIRST armed what will
+wake you — a process_watch on a background task, or a scheduled task. To
+follow something outside this machine (a CI run, a deploy, a webhook),
+start a background poller with process_start and arm a process_watch on
+it; checking it once in the foreground and ending your turn means you will
+never see the result.
 
 ## External services
 
@@ -567,11 +577,24 @@ const applyPreferences = async (
     try {
       await jcode.setModel(sessionId, target);
     } catch (error) {
-      if (!isHarnessRefusal(error)) throw error;
-      log("warn", "harness rejected the configured model", { model: target });
-      notices.push(
-        `The model ${options.model} isn't available here, so this agent is running its default instead. Pick another in the agent's Models section.`,
-      );
+      // A timeout is not an answer: the daemon defers control ops behind a
+      // busy agent lock and replies only when the turn ends. Keep the default
+      // silently — a slow control op must neither fail the turn nor tell the
+      // user their model "isn't available" (both happened live).
+      if (errorCode(error) === "timeout") {
+        log("warn", "model preference timed out; keeping the default", {
+          model: target,
+        });
+      } else if (isHarnessRefusal(error)) {
+        log("warn", "harness rejected the configured model", {
+          model: target,
+        });
+        notices.push(
+          `The model ${options.model} isn't available here, so this agent is running its default instead. Pick another in the agent's Models section.`,
+        );
+      } else {
+        throw error;
+      }
     }
   }
 
@@ -579,13 +602,20 @@ const applyPreferences = async (
     try {
       await jcode.setReasoningEffort(sessionId, JCODE_EFFORT[options.effort]);
     } catch (error) {
-      if (!isHarnessRefusal(error)) throw error;
-      log("warn", "harness rejected the configured effort", {
-        effort: options.effort,
-      });
-      notices.push(
-        `This model doesn't support the "${options.effort}" thinking level, so it's running at its default.`,
-      );
+      if (errorCode(error) === "timeout") {
+        log("warn", "effort preference timed out; keeping the default", {
+          effort: options.effort,
+        });
+      } else if (isHarnessRefusal(error)) {
+        log("warn", "harness rejected the configured effort", {
+          effort: options.effort,
+        });
+        notices.push(
+          `This model doesn't support the "${options.effort}" thinking level, so it's running at its default.`,
+        );
+      } else {
+        throw error;
+      }
     }
   }
 
@@ -639,11 +669,43 @@ export const JCODE_EFFORT: Record<AgentEffort, string> = {
 };
 
 /**
+ * Codes the SDK mints LOCALLY for channel and launch faults — never the daemon
+ * answering. `timeout` is the load-bearing entry: a control op against a busy
+ * session is deferred daemon-side on the agent lock and only answered when the
+ * turn ends, so the SDK's 30s timeout fires with `code: "timeout"` — treating
+ * that as "the harness refused this model" produced a false "isn't available
+ * here" notice in production (the stuck-sandbox incident, reproduced live).
+ * The rest are listed for completeness; only `timeout` and `disconnected` are
+ * reachable from a request path.
+ */
+const SDK_LOCAL_CODES = new Set([
+  "timeout",
+  "disconnected",
+  "connect_failed",
+  "handshake_failed",
+  "startup_failed",
+  "startup_timeout",
+  "jcode_not_found",
+  "unsupported_transport",
+  "invalid_option",
+  "unexpected_reply",
+  "event_buffer_overflow",
+  "concurrent_next",
+]);
+
+/** The error's `code`, when it carries a string one. */
+const errorCode = (error: unknown): string | undefined => {
+  if (typeof error !== "object" || error === null) return undefined;
+  const code = (error as { code?: unknown }).code;
+  return typeof code === "string" ? code : undefined;
+};
+
+/**
  * Did the harness ANSWER, refusing this preference — as opposed to the channel
- * dying under us?
+ * dying under us or the request simply going unanswered?
  *
- * Inverted deliberately. Keying on a single code (`invalid_request`) was too
- * narrow: the SDK's code union is
+ * Broad on the daemon side deliberately. Keying on a single code
+ * (`invalid_request`) was too narrow: the daemon's reply union is
  * `unsupported_version | unknown_request | unknown_session | invalid_request |
  * internal`, and it documents `invalid_request` only for `setModel`. A build
  * without `set_reasoning_effort` answers `unknown_request`, and a provider
@@ -652,15 +714,14 @@ export const JCODE_EFFORT: Record<AgentEffort, string> = {
  * uncached session, so every turn in every conversation of that container fails
  * identically, forever, while it reports healthy.
  *
- * A reply of ANY code means the harness is alive and simply would not take the
- * value, which is a preference problem. Only a non-reply — a dead socket, a
- * closed client — is worth failing for, and that arrives as something without a
- * code.
+ * But an SDK-LOCAL code is not an answer: `timeout` means the daemon never
+ * replied (deferred, not refused), and the transport codes mean the channel
+ * died. Those must never mint a "this model isn't available" notice.
  */
-const isHarnessRefusal = (error: unknown): boolean =>
-  typeof error === "object" &&
-  error !== null &&
-  typeof (error as { code?: unknown }).code === "string";
+const isHarnessRefusal = (error: unknown): boolean => {
+  const code = errorCode(error);
+  return code !== undefined && !SDK_LOCAL_CODES.has(code);
+};
 
 /**
  * Which pending steers actually made it into the run — the reconcile's pure
@@ -706,6 +767,43 @@ export const matchJoinedSteers = (
   return joined;
 };
 
+/**
+ * Vendor wording of the daemon's send refusal while a run is in flight — the
+ * self-heal trigger below. On a per-conversation connection the only run that
+ * can hold the session is this conversation's own earlier, platform-abandoned
+ * one, which is what makes cancelling it safe. Stays inside the adapter
+ * (invariant 9 — the vendor's vocabulary never crosses this boundary).
+ */
+const BUSY_REFUSAL_SHAPE = /already processing a message/i;
+
+/**
+ * The daemon's cancel-path error wording. During the settle phase, after this
+ * turn has cancelled an orphan, an error of this shape is the ORPHAN's residue
+ * — never this turn's terminal. Only consulted there; in the live phase a
+ * cancel-shaped error is a real terminal (a user abort ends exactly this way).
+ */
+const ORPHAN_CANCEL_SHAPE = /cancelled by user/i;
+
+/**
+ * How long after each send frames are held before being trusted as this
+ * turn's own. A busy refusal lands in ~150ms (measured live); the first
+ * genuine model delta takes longer than this window in practice, so in the
+ * common no-orphan case the hold delays nothing observable.
+ */
+export const BUSY_DETECT_WINDOW_MS = 1_000;
+
+/**
+ * Backoff between self-heal resends, exported for the adapter tests. Bounded
+ * on purpose: a session that stays busy through every cancel+resend is
+ * wedged, and the turn must fail coded (`harness_busy`), canonical, and
+ * visible — rather than loop forever. The supervisor's heartbeat runs the
+ * whole time, so the turn stays alive and abortable while this waits.
+ */
+export const BUSY_RESEND_DELAYS_MS = [2_000, 5_000, 10_000, 30_000, 60_000];
+
+/** How long a heal round drains orphan residue before resending. */
+const ORPHAN_DRAIN_MIN_MS = 250;
+
 class JcodeSession implements HarnessSession {
   readonly sessionRef: string;
   /**
@@ -716,6 +814,11 @@ class JcodeSession implements HarnessSession {
   private pendingNotices: string[];
   /** The in-flight gate: `steer` refuses between turns (see the contract). */
   private turnActive = false;
+  /**
+   * Set by `abort()` and read by the self-heal loop: a stopped turn must
+   * never be resent — the user's cancel outranks the recovery.
+   */
+  private abortRequested = false;
   /** Steers delivered to the LIVE turn, reconciled at its terminal. */
   private pendingSteers: SteerInput[] = [];
   /**
@@ -740,10 +843,66 @@ class JcodeSession implements HarnessSession {
   async *runTurn(input: TurnInput): AsyncIterable<AgentEvent> {
     // Subscribe BEFORE sending, or a short turn's first deltas race the
     // subscription (verified SDK behavior — run() does the same).
-    const stream = this.client.events(this.sessionRef);
+    const stream = this.client.events(
+      this.sessionRef,
+    ) as AsyncIterableIterator<ApiEvent>;
     let usage: TurnUsage | undefined;
     let terminal: Extract<AgentEvent, { type: "turn.done" | "error" }> | null =
       null;
+
+    // ONE background reader owns `stream.next()` for the turn's whole life.
+    // The SDK iterator holds a single waker slot, so racing `next()` against
+    // timers directly would orphan a waker and silently drop the frame that
+    // resolves it — every timed read below goes through this queue instead.
+    const queue: ApiEvent[] = [];
+    let streamEnded = false;
+    let wakeReader: (() => void) | undefined;
+    const pump = (async () => {
+      try {
+        for await (const frame of stream) {
+          queue.push(frame);
+          wakeReader?.();
+          wakeReader = undefined;
+        }
+      } catch {
+        // A stream rejection reads as an unexpected end; the loop below
+        // synthesizes the terminal.
+      } finally {
+        streamEnded = true;
+        wakeReader?.();
+        wakeReader = undefined;
+      }
+    })();
+    /** Next frame, or "ended", or — when a deadline is given — "timeout". */
+    const nextFrame = async (
+      deadline?: number,
+    ): Promise<ApiEvent | "ended" | "timeout"> => {
+      for (;;) {
+        const frame = queue.shift();
+        if (frame !== undefined) return frame;
+        if (streamEnded) return "ended";
+        const waitMs =
+          deadline === undefined ? undefined : deadline - Date.now();
+        if (waitMs !== undefined && waitMs <= 0) return "timeout";
+        await new Promise<void>((resolve) => {
+          wakeReader = resolve;
+          if (waitMs !== undefined) {
+            const timer = setTimeout(() => {
+              if (wakeReader === resolve) wakeReader = undefined;
+              resolve();
+            }, waitMs);
+            timer.unref();
+          }
+        });
+      }
+    };
+    /** An orphaned reply to one of our own timed-out requests — the daemon
+     * answered after the SDK gave up, and the SDK re-emits unmatched replies
+     * as events. A request reply is never a turn terminal (observed live: a
+     * deferred set_reasoning_effort reply killing an unrelated stream). */
+    const isStaleReply = (frame: ApiEvent): boolean =>
+      frame.ev === "error" &&
+      (frame as { reply_to?: number }).reply_to !== undefined;
 
     try {
       // Drop interrupts leaked from a previous turn's very end: jcode holds
@@ -754,6 +913,7 @@ class JcodeSession implements HarnessSession {
       // refusal here must not cost the turn.
       await this.client.cancelSoftInterrupts(this.sessionRef).catch(() => {});
       this.pendingSteers = [];
+      this.abortRequested = false;
       this.turnActive = true;
 
       // Inline vision: our TurnImage translates to jcode's [mediaType,
@@ -765,33 +925,139 @@ class JcodeSession implements HarnessSession {
         image.mediaType,
         image.dataBase64,
       ]);
-      await this.client.sendMessage(
-        this.sessionRef,
-        input.message,
-        images.length > 0 ? images : undefined,
-      );
-      // The reconcile window's floor, captured by INDEX while nothing can
-      // have injected yet (injection points exist only inside the turn
-      // loop, after the first model stream). Best-effort: a failed read
-      // falls back to the content anchor at reconcile time.
-      this.turnHistoryBaseline = await this.client
-        .getHistory(this.sessionRef)
-        .then((history) => history.length)
-        .catch(() => null);
+      const imagesArg = images.length > 0 ? images : undefined;
+
+      // The reconcile window's floor, captured by INDEX right after each
+      // send, while nothing can have injected yet (injection points exist
+      // only inside the turn loop, after the first model stream) — re-read
+      // after every self-heal resend below, since the resend is the message
+      // the daemon actually took. Best-effort: a failed read falls back to
+      // the content anchor at reconcile time.
+      const captureBaseline = async () => {
+        this.turnHistoryBaseline = await this.client
+          .getHistory(this.sessionRef)
+          .then((history) => history.length)
+          .catch(() => null);
+      };
+
+      await this.client.sendMessage(this.sessionRef, input.message, imagesArg);
+      await captureBaseline();
       yield { type: "turn.started" };
 
       for (const text of this.pendingNotices.splice(0))
         yield { type: "notice", level: "warn", text };
 
-      for await (const event of stream as AsyncIterable<ApiEvent>) {
+      // THE SETTLE PHASE — the busy self-heal. The daemon acks sends before
+      // deciding whether to take them, so acceptance is only learnable from
+      // the stream: a refusal ("Already processing a message") lands as a
+      // broadcast error frame ~150ms after the send. On this per-conversation
+      // connection the only run that can be holding the session is this
+      // conversation's own earlier, platform-abandoned one — an ORPHAN — so
+      // the recovery is to cancel it and resend, bounded. Frames arriving
+      // before the send settles are HELD, not yielded: an actively-streaming
+      // orphan's output must never leak into this turn's answer. Deliberately
+      // NOT cancelling soft interrupts here — user messages queued during the
+      // busy window must survive into the resent run.
+      const held: ApiEvent[] = [];
+      let healRound = 0;
+      settle: for (;;) {
+        if (this.abortRequested) {
+          // The user's stop outranks the recovery: end cleanly (the fake's
+          // abort precedent); the supervisor's own abort bookkeeping reports
+          // the turn aborted.
+          terminal = { type: "turn.done" };
+          break settle;
+        }
+        const windowEnd = Date.now() + BUSY_DETECT_WINDOW_MS;
+        for (;;) {
+          const frame = await nextFrame(windowEnd);
+          // Window elapsed or stream gone: the held frames are ours; the
+          // live loop below owns the rest (including synthesizing the
+          // unexpected-end terminal).
+          if (frame === "timeout" || frame === "ended") break settle;
+          if (isStaleReply(frame)) continue;
+          if (
+            frame.ev === "error" &&
+            healRound > 0 &&
+            !this.abortRequested &&
+            ORPHAN_CANCEL_SHAPE.test(frame.message ?? "")
+          ) {
+            // The cancelled orphan's own death rattle, not our terminal.
+            continue;
+          }
+          if (
+            frame.ev === "error" &&
+            BUSY_REFUSAL_SHAPE.test(frame.message ?? "")
+          ) {
+            // Our send was refused — everything held so far was the orphan's.
+            held.length = 0;
+            if (healRound >= BUSY_RESEND_DELAYS_MS.length) {
+              terminal = {
+                type: "error",
+                message: frame.message,
+                code: TURN_FAILURE_CODES.harnessBusy,
+              };
+              break settle;
+            }
+            await this.client.cancel(this.sessionRef).catch(() => {});
+            // Drain the dying orphan's residue through the backoff, then
+            // resend into the freed session.
+            const drainEnd =
+              Date.now() +
+              Math.max(
+                BUSY_RESEND_DELAYS_MS[healRound] ?? 0,
+                ORPHAN_DRAIN_MIN_MS,
+              );
+            for (;;) {
+              const drained = await nextFrame(drainEnd);
+              if (drained === "timeout" || drained === "ended") break;
+              if (this.abortRequested) break;
+            }
+            healRound += 1;
+            if (this.abortRequested) {
+              terminal = { type: "turn.done" };
+              break settle;
+            }
+            await this.client.sendMessage(
+              this.sessionRef,
+              input.message,
+              imagesArg,
+            );
+            await captureBaseline();
+            continue settle;
+          }
+          held.push(frame);
+          // A non-busy terminal inside the window is ours: a busy refusal
+          // always precedes any orphan frame that could follow our send.
+          // (Known residual: an orphan that finishes NATURALLY in the few-ms
+          // gap between our subscribe and the daemon processing our send can
+          // land its terminal here and read as an instant empty end — it
+          // needs an abandoned run plus ms-precision timing, and the next
+          // message recovers.)
+          if (frame.ev === "turn_done" || frame.ev === "error") break settle;
+        }
+      }
+
+      // Whether this run visibly progressed — a busy refusal can only be OUR
+      // send's (the daemon mints it nowhere else), so one that slips past the
+      // settle window still deserves its honest code, but only while nothing
+      // has streamed (post-progress it cannot be a send refusal).
+      let progressed = false;
+      while (!terminal) {
+        const frame = held.shift() ?? (await nextFrame());
+        if (frame === "ended" || frame === "timeout") break;
+        const event = frame;
         switch (event.ev) {
           case "text_delta":
+            progressed = true;
             yield { type: "text.delta", text: event.text };
             break;
           case "reasoning_delta":
+            progressed = true;
             yield { type: "thinking.delta", text: event.text };
             break;
           case "tool_start":
+            progressed = true;
             yield {
               type: "tool.started",
               callId: event.call_id,
@@ -823,20 +1089,31 @@ class JcodeSession implements HarnessSession {
           case "turn_done":
             terminal = { type: "turn.done", ...(usage ? { usage } : {}) };
             break;
-          case "error":
+          case "error": {
             // A failed turn emits `error` INSTEAD of `turn_done` (verified) —
             // terminating here is what keeps the loop from hanging forever.
+            // Orphaned request replies are the one exception (see above).
+            if (isStaleReply(event)) break;
+            // A busy refusal that outran the settle window (a loaded daemon
+            // can answer late) still gets its honest code — no retry at this
+            // point, but never the silent uncoded shape again.
+            const lateBusy =
+              !progressed && BUSY_REFUSAL_SHAPE.test(event.message ?? "");
             terminal = {
               type: "error",
               message: event.message,
-              ...(event.code ? { code: event.code } : {}),
+              ...(lateBusy
+                ? { code: TURN_FAILURE_CODES.harnessBusy }
+                : event.code
+                  ? { code: event.code }
+                  : {}),
             };
             break;
+          }
           default:
             // Forward-compat: unknown vendor events are dropped, never leaked.
             break;
         }
-        if (terminal) break;
       }
 
       if (!terminal) {
@@ -855,7 +1132,8 @@ class JcodeSession implements HarnessSession {
       yield terminal;
     } finally {
       this.turnActive = false;
-      await (stream as AsyncIterableIterator<ApiEvent>).return?.(undefined);
+      await stream.return?.(undefined);
+      await pump.catch(() => {});
     }
   }
 
@@ -865,11 +1143,12 @@ class JcodeSession implements HarnessSession {
    * the turn streams — and injected as a user message between tool batches
    * or as the model finishes (which EXTENDS the turn instead of ending it).
    *
-   * Any coded refusal propagates as a throw and means NOTHING was injected —
-   * including `unknown_session`, the bridge's one-attached-session law (only
-   * the connection's currently-attached session accepts `soft_interrupt` /
-   * `get_history` / `cancel_soft_interrupts`; a second concurrently-active
-   * conversation in the same container degrades to the promotion path).
+   * Any coded refusal propagates as a throw and means NOTHING was injected.
+   * The bridge accepts `soft_interrupt` / `get_history` /
+   * `cancel_soft_interrupts` only for the connection's attached session —
+   * which is exactly this session, because every conversation owns its own
+   * connection (concurrent conversations steer first-class now; the old
+   * shared-connection degrade to promotion is gone).
    */
   async steer(input: SteerInput): Promise<void> {
     if (!this.turnActive) {
@@ -939,6 +1218,9 @@ class JcodeSession implements HarnessSession {
   }
 
   async abort(): Promise<void> {
+    // FIRST, before any await: the self-heal loop checks this between its
+    // waits — a stopped turn must never be resent.
+    this.abortRequested = true;
     // Stop means silence, daemon-side too: queued-but-undelivered interrupts
     // die with the turn instead of leaking into the next one.
     await this.client.cancelSoftInterrupts(this.sessionRef).catch(() => {});
@@ -949,7 +1231,28 @@ class JcodeSession implements HarnessSession {
 }
 
 export const createJcodeHarness = (): Harness => {
-  let client: JcodeClient | undefined;
+  /**
+   * The launched daemon instance — ONE per container, memoized as a PROMISE:
+   * `launchInstance` is destructive on re-entry (it unlinks the live socket
+   * and spawns a second daemon onto the same state dir), so a second launch
+   * must be structurally impossible, not merely unlikely. A rejected memo
+   * stays memoized on purpose — a container whose runtime will not launch is
+   * dead, and every later turn should fail identically instead of retrying
+   * the destructive launch.
+   */
+  let instance: Promise<Awaited<ReturnType<typeof launchInstance>>> | undefined;
+  /**
+   * Per-conversation connections (§3.6): the bridge binds ONE session per
+   * connection, so sharing a connection is what made a second conversation
+   * attach to the first's busy session (the stuck-sandbox incident). Every
+   * `startSession` dials its own connection; the maps below exist for
+   * dispose and the duplicate-resume-ref guard.
+   */
+  const clients = new Set<JcodeClient>();
+  const sessionClients = new Map<string, JcodeClient>();
+  /** Connections WE closed — their `close` event is teardown, not death. */
+  const deliberateCloses = new WeakSet<JcodeClient>();
+  let connectionCounter = 0;
   let onFailure: ((reason: string) => void) | undefined;
   /** Terminal failure is reported once, and never for our own teardown. */
   let failed = false;
@@ -962,9 +1265,26 @@ export const createJcodeHarness = (): Harness => {
     onFailure?.(reason);
   };
 
-  const ensureClient = async (homeDir: string): Promise<JcodeClient> => {
-    if (client) return client;
+  const closeClient = async (client: JcodeClient): Promise<void> => {
+    deliberateCloses.add(client);
+    clients.delete(client);
+    for (const [ref, holder] of sessionClients) {
+      if (holder === client) sessionClients.delete(ref);
+    }
+    await client.close().catch(() => {});
+  };
 
+  const ensureInstance = (
+    homeDir: string,
+  ): Promise<Awaited<ReturnType<typeof launchInstance>>> => {
+    if (instance) return instance;
+    instance = launchDaemon(homeDir);
+    return instance;
+  };
+
+  const launchDaemon = async (
+    homeDir: string,
+  ): Promise<Awaited<ReturnType<typeof launchInstance>>> => {
     // §3.6: the harness's own session state lives ON the home volume,
     // which is exactly what makes resume survive a container stop/start.
     const jcodeHome = join(homeDir, JCODE_HOME_DIRNAME);
@@ -1021,14 +1341,13 @@ export const createJcodeHarness = (): Harness => {
       );
     }
 
-    const launched = await JcodeClient.launch({
+    const launched = await launchInstance({
       workingDir: homeDir,
       jcodeHome,
       // Pinned, never the SDK's guess (which ends at bare "jcode" on PATH).
       binary: resolveJcodeBinary(),
       inheritLogins: false,
       startupTimeoutMs: 60_000,
-      clientName: "onecli-supervisor/0",
       env: {
         JCODE_NO_TELEMETRY: "1",
         // Presence-based upstream (any value disables, even "0"): without it
@@ -1059,12 +1378,38 @@ export const createJcodeHarness = (): Harness => {
       },
     });
 
+    // ONE of the two death signals this adapter owes the supervisor: the
+    // bridge process exiting means no connection can ever be served again.
+    // The per-connection `close` handler below is the other (and usually
+    // faster) signal — first one wins, `fail` is one-shot.
+    launched.process.once("exit", () => {
+      fail("jcode instance exited");
+    });
+
+    return launched;
+  };
+
+  /**
+   * Dial a fresh connection for one conversation. The bridge binds exactly
+   * one session per connection, so this is what gives every conversation its
+   * own session, its own busy state, and its own event scope — the incident's
+   * root fix. Mirrors the SDK's own `globalEvents` child-connection pattern.
+   */
+  const connectClient = async (homeDir: string): Promise<JcodeClient> => {
+    const inst = await ensureInstance(homeDir);
+    connectionCounter += 1;
+    const connected = await JcodeClient.connect({
+      socketPath: inst.socketPath,
+      clientName: `onecli-supervisor/0/conv-${connectionCounter}`,
+    });
+
     // Node treats an unlistened "error" as fatal; the SDK reserves it for
-    // transport faults and remaps protocol errors to "harness_error".
-    launched.on("error", (err) => {
+    // transport faults and remaps protocol errors to "harness_error". Both
+    // are per-EventEmitter, so every connection needs its own listeners.
+    connected.on("error", (err) => {
       log("error", "jcode transport error", { error: String(err) });
     });
-    launched.on(
+    connected.on(
       "harness_error",
       (frame: { code?: string; message?: string }) => {
         // Code + message only: a whole vendor frame can carry request/response
@@ -1077,18 +1422,21 @@ export const createJcodeHarness = (): Harness => {
       },
     );
 
-    // THE signal this adapter owes the supervisor. The SDK raises `close` when
-    // its socket to the jcode process goes away, which is exactly what a dead
-    // harness looks like from in here — and from that moment every request
-    // rejects with "harness connection closed", including the ones that open a
-    // new session for a new conversation. Observed live: one crash and the
-    // sandbox served nothing again for the rest of its life.
-    launched.on("close", (error?: Error) => {
+    // THE other death signal. These are unix-socket connections to a local
+    // daemon: an unexpected close means the daemon died, and from that moment
+    // every request on every connection rejects with "harness connection
+    // closed" — including the ones that open sessions for new conversations.
+    // Observed live: one crash and the sandbox served nothing again for the
+    // rest of its life. A close WE initiated (dispose, a failed session
+    // setup) is teardown, not death.
+    connected.on("close", (error?: Error) => {
+      clients.delete(connected);
+      if (deliberateCloses.has(connected)) return;
       fail(error ? String(error) : "harness connection closed");
     });
 
-    client = launched;
-    return launched;
+    clients.add(connected);
+    return connected;
   };
 
   return {
@@ -1114,44 +1462,74 @@ export const createJcodeHarness = (): Harness => {
     async startSession(options: StartSessionOptions) {
       let jcode: JcodeClient;
       try {
-        jcode = await ensureClient(options.homeDir);
+        jcode = await connectClient(options.homeDir);
       } catch (error) {
-        // Launching the runtime is this adapter's whole reason to exist. If it
-        // will not come up, the container can never serve a turn — and failing
-        // only the turn would hide that behind an error the user is invited to
-        // retry forever. Session-level failures on a LIVE client (a stale
-        // resume ref, say) deliberately do not come through here.
+        // Launching the runtime is this adapter's whole reason to exist, and
+        // a connect refused by a LOCAL daemon means that daemon is gone. If
+        // it will not come up, the container can never serve a turn — and
+        // failing only the turn would hide that behind an error the user is
+        // invited to retry forever. Session-level failures on a live
+        // connection (a stale resume ref, say) deliberately do not come
+        // through here.
         fail(`harness launch failed: ${String(error)}`);
         throw error;
       }
 
-      const session = options.resumeSessionRef
-        ? await jcode.attachSession(options.resumeSessionRef)
-        : await jcode.createSession(options.homeDir);
-
       try {
+        const resumeRef = options.resumeSessionRef;
+        // ONE ref, one conversation. A resume ref held by a LIVE client in
+        // this process is corrupted duplicate data — two conversations
+        // persisted the same ref, which is exactly what the pre-fix
+        // shared-session bug wrote to real installs. Never steal the live
+        // session out from under its conversation (that would brick it for
+        // the container's life): mint a FRESH session for the resumer
+        // instead. Its new ref rides the next `turn.result` and heals the
+        // duplication forward.
+        const holder = resumeRef ? sessionClients.get(resumeRef) : undefined;
+        if (resumeRef && holder) {
+          log(
+            "warn",
+            "resume ref is held by a live conversation; minting fresh",
+            {
+              resumeSessionRef: resumeRef,
+            },
+          );
+        }
+        const session =
+          resumeRef && !holder
+            ? await jcode.attachSession(resumeRef)
+            : await jcode.createSession(options.homeDir);
+
         const notices = await applyPreferences(
           jcode,
           session.session_id,
           options,
         );
+        sessionClients.set(session.session_id, jcode);
         return new JcodeSession(jcode, session.session_id, notices);
       } catch (error) {
-        // The session exists but is unusable. Detaching matters: without it,
-        // every retry creates another live session on the durable volume that
+        // The connection exists but its session is unusable. Closing the
+        // connection IS the detach (one attachment per connection) — without
+        // it, every retry would leak a socket and a live attachment that
         // nothing will ever reach again.
-        await jcode.detachSession(session.session_id).catch(() => {});
+        await closeClient(jcode);
         throw error;
       }
     },
     async dispose() {
-      // Set BEFORE the close, because closing the client raises the very
-      // `close` event that means "the harness died" — and a deliberate
-      // teardown reported as a failure would have the sandbox recycled on
-      // every ordinary shutdown.
+      // Set BEFORE any close, because both teardown steps raise the very
+      // signals that mean "the harness died" — every connection's `close`,
+      // then the instance process's `exit` — and a deliberate teardown
+      // reported as a failure would have the sandbox recycled on every
+      // ordinary shutdown.
       disposing = true;
-      await client?.close();
-      client = undefined;
+      await Promise.allSettled([...clients].map((c) => closeClient(c)));
+      sessionClients.clear();
+      if (instance) {
+        const inst = await instance.catch(() => undefined);
+        await inst?.shutdown();
+        instance = undefined;
+      }
     },
   };
 };

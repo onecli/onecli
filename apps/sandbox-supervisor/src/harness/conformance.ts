@@ -286,24 +286,38 @@ export const runHarnessConformance = (target: ConformanceTarget): void => {
       "resume reopens a session when the capability is declared",
       { timeout },
       async () => {
+        // The TRUE resume shape: a resume ref is only ever handed to a fresh
+        // container (the platform caches the live session in-process), so
+        // the first harness is DISPOSED before the second resumes on the
+        // same home. Resuming while the original session is still live is
+        // corrupted duplicate data, and an adapter may refuse to steal it —
+        // that shape is deliberately not part of this contract.
         const homeDir = mkdtempSync(join(tmpdir(), "conformance-"));
-        const harness = await target.makeHarness({ homeDir });
+        const first = await target.makeHarness({ homeDir });
+        let sessionRef: string | null | undefined;
         try {
-          if (!harness.capabilities.resume) return;
-          const first = await harness.startSession({ homeDir });
-          await collect(first.runTurn({ message: prompt }));
-          expect(first.sessionRef).toBeTruthy();
+          if (!first.capabilities.resume) return;
+          const session = await first.startSession({ homeDir });
+          await collect(session.runTurn({ message: prompt }));
+          sessionRef = session.sessionRef;
+          expect(sessionRef).toBeTruthy();
+        } finally {
+          await first.dispose();
+        }
+        if (!sessionRef) return;
 
-          const resumed = await harness.startSession({
+        const second = await target.makeHarness({ homeDir });
+        try {
+          const resumed = await second.startSession({
             homeDir,
-            resumeSessionRef: first.sessionRef ?? undefined,
+            resumeSessionRef: sessionRef,
           });
-          expect(resumed.sessionRef).toBe(first.sessionRef);
+          expect(resumed.sessionRef).toBe(sessionRef);
           const events = await collect(resumed.runTurn({ message: prompt }));
           const terminal = events.at(-1);
           expect(terminal && isTerminalEvent(terminal)).toBe(true);
         } finally {
-          await harness.dispose();
+          await second.dispose();
         }
       },
     );

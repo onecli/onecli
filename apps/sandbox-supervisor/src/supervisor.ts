@@ -468,19 +468,35 @@ export const runSupervisor = async (
     let usage: TurnUsage | undefined;
     /** The harness's terminal `error` message, kept for failure classing. */
     let terminalError: string | undefined;
+    /** The terminal `error` event's protocol code, when the adapter minted
+     * one — today only `harness_busy` (the adapter's self-heal exhausting). */
+    let terminalErrorCode: string | undefined;
+    /** Set on the failure arms: a turn that ended `failed` without a clean
+     * terminal may have left the harness still executing its run — the
+     * `finally` cancels it so an orphan can never burn for half an hour
+     * under a row nobody is reading (proven live in the incident). */
+    let uncleanFailure = false;
+    /** How this turn ended, for the `finally`'s safety net: done/failed
+     * turns get their leftover background work watched; aborted turns do
+     * not (stop means silence). */
+    let endedStatus: "done" | "failed" | "aborted" | undefined;
 
     /**
-     * The failure class for this turn. A DEATH code always outranks a
-     * refusal — the death codes carry lifecycle semantics (revival,
-     * visibility, the unhealthy recycle) the provider code must never usurp;
-     * a dying harness whose last words mention a rate limit is still a dead
-     * harness.
+     * The failure class for this turn. A DEATH code always outranks
+     * everything — the death codes carry lifecycle semantics (revival,
+     * visibility, the unhealthy recycle) no other code may usurp; a dying
+     * harness whose last words mention a rate limit is still a dead harness.
+     * `harness_busy` comes only from the terminal error EVENT's code (the
+     * adapter mints it; the catch arm's raw throw never does), and outranks
+     * the provider-refusal prose match.
      */
     const classify = (raw: string | undefined): string | undefined =>
       failureCode(runtime) ??
-      (raw && isProviderRefusal(raw)
-        ? TURN_FAILURE_CODES.modelProviderError
-        : undefined);
+      (terminalErrorCode === TURN_FAILURE_CODES.harnessBusy
+        ? TURN_FAILURE_CODES.harnessBusy
+        : raw && isProviderRefusal(raw)
+          ? TURN_FAILURE_CODES.modelProviderError
+          : undefined);
 
     /** Everything the agent said this turn, rebuilt from the deltas. */
     let answer = "";
@@ -564,6 +580,7 @@ export const runSupervisor = async (
           conversationId: item.conversationId,
           turnId: item.turnId,
         });
+        endedStatus = "aborted";
         transport.send({
           kind: "turn.result",
           turnId: item.turnId,
@@ -656,6 +673,7 @@ export const runSupervisor = async (
         }
         if (event.type === "error") {
           terminalError = event.message;
+          terminalErrorCode = event.code;
         }
       }
 
@@ -675,6 +693,8 @@ export const runSupervisor = async (
       }
       const errorCode =
         status === "failed" ? classify(terminalError) : undefined;
+      uncleanFailure = status === "failed" && !harnessDead;
+      endedStatus = status;
       transport.send({
         kind: "turn.result",
         turnId: item.turnId,
@@ -684,10 +704,14 @@ export const runSupervisor = async (
         // The raw refusal rides beside the code — the control plane stores
         // only the canonical copy and keeps this for its server log (and an
         // old control plane's raw passthrough matches the catch arm below).
-        // Uncoded failures keep today's shape: no error field, the transcript
-        // stream's own error event is the witness. Sliced at the source per
-        // the transport's truncate-at-sender law: this frame must deliver.
-        ...(errorCode === TURN_FAILURE_CODES.modelProviderError &&
+        // `harness_busy` attaches it too, as the version-skew guard: an old
+        // control plane that ignores the code then stores visible text
+        // instead of regressing to the silent NULL shape. Uncoded failures
+        // keep today's shape: no error field, the transcript stream's own
+        // error event is the witness. Sliced at the source per the
+        // transport's truncate-at-sender law: this frame must deliver.
+        ...((errorCode === TURN_FAILURE_CODES.modelProviderError ||
+          errorCode === TURN_FAILURE_CODES.harnessBusy) &&
           terminalError && {
             error: terminalError.slice(0, MAX_TURN_RESULT_ERROR_CHARS),
           }),
@@ -713,6 +737,8 @@ export const runSupervisor = async (
         await new Promise((resolve) => setImmediate(resolve));
       }
       const errorCode = wasAborted() ? undefined : classify(String(error));
+      uncleanFailure = !wasAborted() && !harnessDead;
+      endedStatus = wasAborted() ? "aborted" : "failed";
       const followUps = followUpOutcomes(runtime);
       transport.send({
         kind: "turn.result",
@@ -742,6 +768,57 @@ export const runSupervisor = async (
         (entry) => entry.targetTurnId !== item.turnId,
       );
       runtime.steered = new Map();
+      // THE DEFENSIVE ABORT. A turn that ended `failed` without a clean
+      // terminal may have walked away from a run the harness is still
+      // executing — which then burns invisibly under a row nobody reads
+      // (23 minutes, live) and blocks the session for the next message.
+      // Cancel it. AWAITED, not fire-and-forget: the conversation queue
+      // advances when this `finally` resolves, and an unawaited cancel could
+      // be written to the socket AFTER the next turn's send — killing the
+      // fresh run instead of the orphan. The terminal `turn.result` is
+      // already out (sent in the arms above), so nothing user-facing waits
+      // on this; worst case on a wedged harness is one request timeout
+      // delaying only this conversation's next turn, which is blocked on
+      // the wedged session anyway. Deliberately NOT via `abort()`/
+      // `abortedTurnId` — this is cleanup, and a failure must never be
+      // re-reported as a user cancel.
+      if (uncleanFailure && runtime.streamStarted && runtime.session) {
+        await runtime.session
+          .abort()
+          .catch((error: unknown) =>
+            log("warn", "defensive abort failed", { error: String(error) }),
+          );
+      }
+      // THE TURN-END SAFETY NET. Background work left running with nothing
+      // armed to report it completes invisibly: the running row keeps the
+      // machine awake, but no wake source exists, so the RESULT reaches no
+      // one (observed live — "I'll report back", then silence). Arm a
+      // default exit-watch on every such process. Aborted turns are
+      // excluded (stop means silence), and a dead harness is going down
+      // with its processes — N "lost" wake turns on top of the restart
+      // notice would be noise.
+      if (
+        (endedStatus === "done" || endedStatus === "failed") &&
+        !harnessDead
+      ) {
+        // Caught like the defensive abort above: a throw inside a `finally`
+        // would mask the turn's real completion — the net is best-effort.
+        try {
+          const armed = processes.armTurnEndSafetyNet({
+            conversationId: item.conversationId,
+            turnId: item.turnId,
+          });
+          if (armed > 0) {
+            log("info", "turn-end safety net armed exit watches", {
+              conversationId: item.conversationId,
+              turnId: item.turnId,
+              armed,
+            });
+          }
+        } catch (error) {
+          log("warn", "turn-end safety net failed", { error: String(error) });
+        }
+      }
     }
   };
 

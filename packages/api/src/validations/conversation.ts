@@ -97,6 +97,7 @@ export const LIFECYCLE_TURN_ERROR_CODES = [
   "agent_restarted",
   "agent_start_failed",
   "at_capacity",
+  "harness_busy",
   "image_unavailable",
   "turn_stalled",
   "turn_time_limit",
@@ -186,6 +187,30 @@ export const IMAGE_UNAVAILABLE_MESSAGE =
 export const MODEL_PROVIDER_ERROR_MESSAGE =
   "The agent's model provider rejected the request. This is usually a usage limit or an expired key. Check the connected model key, or connect a different one, then send your message again.";
 
+/** The harness refused the message because its session was still executing
+ * earlier, platform-abandoned work and the adapter's self-heal (cancel +
+ * resend with backoff) could not free it. Genuinely temporary: the blocked
+ * run either finishes or dies, so a resend is the honest recovery. */
+export const HARNESS_BUSY_MESSAGE =
+  "The agent was still busy with earlier work and couldn't take this message. Send it again in a moment.";
+
+/** The Slack mirror's last-resort line for a FAILED turn that produced no
+ * answer text and no error anywhere — silence would read as the agent
+ * ignoring the person (the seen-reaction is already stripped by the time the
+ * mirror decides). Same doctrine as the family above. */
+export const TURN_FAILED_SILENT_MESSAGE =
+  "Something went wrong and this message didn't get an answer. Send it again.";
+
+/** The Slack mirror's marker under a FAILED turn's partial answer — the text
+ * above it is real but incomplete, and must not read as a normal reply. */
+export const TURN_FAILED_PARTIAL_MESSAGE =
+  "The agent stopped partway through this answer. Send it again.";
+
+/** The Slack mirror's closure line for an aborted turn with nothing to show —
+ * the web's word for the same moment (turn-block's aborted arm), kept
+ * byte-identical by convention. */
+export const TURN_STOPPED_MESSAGE = "Stopped.";
+
 /**
  * The server-side allowlist: a WIRE failure code (supervisor/runner-supplied,
  * an open string there) → the canonical {code, message} pair written to the
@@ -210,6 +235,10 @@ export const TURN_FAILURE_COPY: Partial<
   model_provider_error: {
     code: "model_provider_error",
     message: MODEL_PROVIDER_ERROR_MESSAGE,
+  },
+  harness_busy: {
+    code: "harness_busy",
+    message: HARNESS_BUSY_MESSAGE,
   },
 };
 

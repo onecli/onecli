@@ -19,6 +19,7 @@ const stubManager = (): ProcessManager => ({
   watch: vi.fn(() => ({ ok: true })),
   observeUpsert: vi.fn(() => ({ created: false, hasArmedWatch: false })),
   cancelWatch: vi.fn(() => false),
+  armTurnEndSafetyNet: vi.fn(() => 0),
   close: vi.fn(),
   killAllSync: vi.fn(),
 });

@@ -7,6 +7,7 @@ import {
   AGENT_RESTARTED_MESSAGE,
   AGENT_START_FAILED_MESSAGE,
   AT_CAPACITY_MESSAGE,
+  HARNESS_BUSY_MESSAGE,
   IMAGE_UNAVAILABLE_MESSAGE,
   MODEL_PROVIDER_ERROR_MESSAGE,
   TURN_STALLED_MESSAGE,
@@ -1300,6 +1301,42 @@ describe.skipIf(!PROOF_URL)("finishTurn and the cold-death revival", () => {
     expect(row?.error).toBe(MODEL_PROVIDER_ERROR_MESSAGE);
     expect(row?.errorCode).toBe("model_provider_error");
     expect(row?.error).not.toContain("rate_limit_error");
+  });
+
+  it("closes a harness_busy failure with the canonical copy, never the vendor wording", async () => {
+    // The adapter's busy self-heal exhausted: the wire carries the code plus
+    // the raw refusal (the version-skew guard for OLD control planes) — this
+    // control plane knows the code, so the row gets the canonical sentence
+    // and the raw text stays operator material.
+    const { conversationId, sandboxId } = await seedTalkable("fin-busy");
+    const turn = await turns.createTurn(
+      WORKSPACE,
+      conversationId,
+      "first",
+      WEB_A,
+    );
+    await dueWork.claimDueWork(RUNNER_A, 5);
+    await turns.applyTurnEvents(
+      reporter(RUNNER_A, sandboxId),
+      conversationId,
+      turn.id,
+      [{ type: "turn.started" }],
+    );
+
+    await turns.finishTurn({
+      reporter: reporter(RUNNER_A, sandboxId),
+      conversationId,
+      turnId: turn.id,
+      status: "failed",
+      error: "Already processing a message",
+      errorCode: "harness_busy",
+    });
+
+    const row = await db.turn.findUnique({ where: { id: turn.id } });
+    expect(row?.status).toBe("failed");
+    expect(row?.error).toBe(HARNESS_BUSY_MESSAGE);
+    expect(row?.errorCode).toBe("harness_busy");
+    expect(row?.error).not.toContain("Already processing");
   });
 });
 

@@ -93,6 +93,7 @@ Agents run on your own infrastructure. The runner is outbound-only and holds no 
 - **[Rust Gateway](apps/gateway)**: intercepts outbound requests (HTTPS included, via MITM) and injects credentials. Agents authenticate with access tokens via `Proxy-Authorization` headers.
 - **[Runner](apps/runner)**: starts, parks and reaps agent sandboxes. Outbound-only, and never touches the database.
 - **[Sandbox Supervisor](apps/sandbox-supervisor)**: runs inside each sandbox, speaking a vendor-neutral harness interface so the agent runtime is swappable.
+- **[SSH Terminator](apps/ssh-terminator)**: the SSH front door — terminates `ssh` connections with short-lived certificates and bridges them into agent sandboxes through a pluggable substrate backend.
 - **[Channel Adapter](apps/channel-adapter)**: the Slack daemon, one app per agent.
 - **Secret Store**: AES-256-GCM at rest, decrypted only at request time, matched by host and path pattern, injected as headers or query parameters.
 

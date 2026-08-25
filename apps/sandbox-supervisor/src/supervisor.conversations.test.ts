@@ -14,6 +14,7 @@ import {
   createFakeSessionStore,
   type FakeSessionStore,
 } from "./harness/fake";
+import type { ProcessManager } from "./processes/manager";
 import { runSupervisor } from "./supervisor";
 
 /**
@@ -902,5 +903,275 @@ describe("a model-provider refusal on a live harness", () => {
     const failed = t.of("turn.result").find((r) => r.turnId === "t1");
     expect(failed?.status).toBe("failed");
     expect(failed?.errorCode).toBe("agent_restarted");
+  });
+});
+
+/** Wrap a harness so its sessions count `abort()` calls — the defensive
+ * abort has no other observable on the fake (its `aborted` flag resets per
+ * turn). Delegation, not spread: session methods live on the prototype. */
+const withAbortCounter = (base: Harness) => {
+  const counter = { aborts: 0 };
+  const startSession = base.startSession.bind(base);
+  const harness: Harness = {
+    ...base,
+    startSession: async (options) => {
+      const session = await startSession(options);
+      return {
+        sessionRef: session.sessionRef,
+        runTurn: (input) => session.runTurn(input),
+        ...(session.steer && {
+          steer: session.steer.bind(session),
+        }),
+        abort: async () => {
+          counter.aborts += 1;
+          await session.abort();
+        },
+      };
+    },
+  };
+  return { harness, counter };
+};
+
+describe("a busy harness on a live session", () => {
+  const BUSY = "Already processing a message";
+
+  it("a harness_busy terminal earns the code, with the raw refusal beside it", async () => {
+    // The adapter mints the code when its self-heal exhausts; the supervisor
+    // must carry it — and attach the raw text as the version-skew guard (an
+    // old control plane ignores the code, and a NULL error there is the
+    // silent-failure shape this whole fix exists to kill).
+    const t = createTestTransport();
+    const harness = createFakeHarness({
+      script: () => [{ type: "error", message: BUSY, code: "harness_busy" }],
+    });
+    const run = runSupervisor(config(home("sup-busy-")), harness, t.transport);
+
+    t.push(deliver("t1", "cv-a"));
+    await t.until(() => t.of("turn.result").length === 1, "the failed turn");
+    await t.finish(run);
+
+    const [failed] = t.of("turn.result");
+    expect(failed?.status).toBe("failed");
+    expect(failed?.errorCode).toBe("harness_busy");
+    expect(failed?.error).toBe(BUSY);
+    // Busy is one turn's problem, never a dead harness.
+    expect(t.of("unhealthy")).toHaveLength(0);
+  });
+
+  it("the busy VOCABULARY alone never mints the code — only the adapter's event code does", async () => {
+    // Invariant 9: the vendor's wording is the adapter's to interpret. A
+    // terminal that merely quotes it (uncoded) stays the raw passthrough.
+    const t = createTestTransport();
+    const harness = createFakeHarness({
+      script: () => [{ type: "error", message: BUSY }],
+    });
+    const run = runSupervisor(config(home("sup-busy-")), harness, t.transport);
+
+    t.push(deliver("t1", "cv-a"));
+    await t.until(() => t.of("turn.result").length === 1, "the failed turn");
+    await t.finish(run);
+
+    const [failed] = t.of("turn.result");
+    expect(failed?.status).toBe("failed");
+    expect(failed?.errorCode).toBeUndefined();
+  });
+});
+
+describe("the defensive abort", () => {
+  it("cancels the harness run when a turn fails without a clean end", async () => {
+    // The orphan-burn fix: a turn reported failed while the harness may
+    // still be executing its run must not leave that run alive (23 minutes,
+    // live). The session's abort is the cancel.
+    const t = createTestTransport();
+    const { harness, counter } = withAbortCounter(
+      createFakeHarness({
+        script: () => [{ type: "error", message: "stream fell over" }],
+      }),
+    );
+    const run = runSupervisor(
+      config(home("sup-dabort-")),
+      harness,
+      t.transport,
+    );
+
+    t.push(deliver("t1", "cv-a"));
+    await t.until(() => t.of("turn.result").length === 1, "the failed turn");
+    await t.finish(run);
+
+    expect(counter.aborts).toBe(1);
+    // Cleanup, never a reclassification: the failure stays a failure.
+    const [failed] = t.of("turn.result");
+    expect(failed?.status).toBe("failed");
+  });
+
+  it("never fires for a clean turn", async () => {
+    const t = createTestTransport();
+    const { harness, counter } = withAbortCounter(createFakeHarness());
+    const run = runSupervisor(
+      config(home("sup-dabort-")),
+      harness,
+      t.transport,
+    );
+
+    t.push(deliver("t1", "cv-a"));
+    await t.until(() => t.of("turn.result").length === 1, "the clean turn");
+    await t.finish(run);
+
+    expect(counter.aborts).toBe(0);
+  });
+
+  it("never doubles a user abort", async () => {
+    const t = createTestTransport();
+    const { harness, counter } = withAbortCounter(
+      createFakeHarness({ script: longScript }),
+    );
+    const run = runSupervisor(
+      config(home("sup-dabort-")),
+      harness,
+      t.transport,
+    );
+
+    t.push(deliver("t1", "cv-a"));
+    await t.until(
+      () => deltasOf(t, "t1").length >= 3,
+      "the turn to be mid-stream",
+    );
+    t.push({ kind: "turn.abort", turnId: "t1", conversationId: "cv-a" });
+    await t.until(() => t.of("turn.result").length === 1, "the aborted turn");
+    await t.finish(run);
+
+    const [result] = t.of("turn.result");
+    expect(result?.status).toBe("aborted");
+    // Exactly the user's abort — the defensive arm must not fire again.
+    expect(counter.aborts).toBe(1);
+  });
+
+  it("never fires against a dead harness", async () => {
+    const t = createTestTransport();
+    const { harness, counter } = withAbortCounter(
+      createFakeHarness({ script: longScript }),
+    );
+    const fake = harness as Harness & { simulateFailure: (r?: string) => void };
+    const run = runSupervisor(
+      config(home("sup-dabort-")),
+      harness,
+      t.transport,
+    );
+
+    t.push(deliver("t1", "cv-a"));
+    await t.until(
+      () => deltasOf(t, "t1").length >= 3,
+      "the turn to be mid-stream",
+    );
+    fake.simulateFailure("harness connection closed");
+    await run;
+
+    const [failed] = t.of("turn.result");
+    expect(failed?.status).toBe("failed");
+    expect(failed?.errorCode).toBe("agent_restarted");
+    // Nothing to cancel on a dead harness.
+    expect(counter.aborts).toBe(0);
+  });
+});
+
+/** A ProcessManager stub that records safety-net calls — the net's timing
+ * and gating live in the supervisor; the arming itself is manager-tested. */
+const netStub = () => {
+  const netCalls: { conversationId: string; turnId: string }[] = [];
+  const manager: ProcessManager = {
+    start: () => ({ ok: true }),
+    status: () => ({ ok: true }),
+    stop: () => ({ ok: true }),
+    watch: () => ({ ok: true }),
+    observeUpsert: () => ({ created: false, hasArmedWatch: false }),
+    cancelWatch: () => false,
+    armTurnEndSafetyNet: (context) => {
+      netCalls.push(context);
+      return 1;
+    },
+    close: () => undefined,
+    killAllSync: () => undefined,
+  };
+  return { manager, netCalls };
+};
+
+describe("the turn-end safety net (supervisor gating)", () => {
+  it("arms after a DONE turn, with the ending turn's context as fallback", async () => {
+    const t = createTestTransport();
+    const { manager, netCalls } = netStub();
+    const run = runSupervisor(
+      config(home("sup-net-")),
+      createFakeHarness(),
+      t.transport,
+      { processManager: manager },
+    );
+
+    t.push(deliver("t1", "cv-a"));
+    await t.until(() => t.of("turn.result").length === 1, "the turn");
+    await t.finish(run);
+
+    expect(netCalls).toEqual([{ conversationId: "cv-a", turnId: "t1" }]);
+  });
+
+  it("arms after a FAILED turn — leftover work still deserves its report", async () => {
+    const t = createTestTransport();
+    const { manager, netCalls } = netStub();
+    const run = runSupervisor(
+      config(home("sup-net-")),
+      createFakeHarness({
+        script: () => [{ type: "error", message: "stream fell over" }],
+      }),
+      t.transport,
+      { processManager: manager },
+    );
+
+    t.push(deliver("t1", "cv-a"));
+    await t.until(() => t.of("turn.result").length === 1, "the failed turn");
+    await t.finish(run);
+
+    expect(netCalls).toHaveLength(1);
+  });
+
+  it("never arms after a user abort — stop means silence", async () => {
+    const t = createTestTransport();
+    const { manager, netCalls } = netStub();
+    const run = runSupervisor(
+      config(home("sup-net-")),
+      createFakeHarness({ script: longScript }),
+      t.transport,
+      { processManager: manager },
+    );
+
+    t.push(deliver("t1", "cv-a"));
+    await t.until(
+      () => deltasOf(t, "t1").length >= 3,
+      "the turn to be mid-stream",
+    );
+    t.push({ kind: "turn.abort", turnId: "t1", conversationId: "cv-a" });
+    await t.until(() => t.of("turn.result").length === 1, "the aborted turn");
+    await t.finish(run);
+
+    expect(t.of("turn.result")[0]?.status).toBe("aborted");
+    expect(netCalls).toHaveLength(0);
+  });
+
+  it("never arms against a dead harness — the container is going down", async () => {
+    const t = createTestTransport();
+    const { manager, netCalls } = netStub();
+    const harness = createFakeHarness({ script: longScript });
+    const run = runSupervisor(config(home("sup-net-")), harness, t.transport, {
+      processManager: manager,
+    });
+
+    t.push(deliver("t1", "cv-a"));
+    await t.until(
+      () => deltasOf(t, "t1").length >= 3,
+      "the turn to be mid-stream",
+    );
+    harness.simulateFailure("harness connection closed");
+    await run;
+
+    expect(t.of("turn.result")[0]?.status).toBe("failed");
+    expect(netCalls).toHaveLength(0);
   });
 });

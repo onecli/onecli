@@ -4,7 +4,12 @@ import type { AdapterWorkItem } from "@onecli/agent-protocol";
 import { getApp } from "@onecli/api/apps/registry";
 // The one definition of "automated turn" — shared with the control plane's
 // continuity bridge, so a new automation source lands in both in one edit.
-import { AUTOMATION_SOURCES } from "@onecli/api/validations/conversation";
+import {
+  AUTOMATION_SOURCES,
+  TURN_FAILED_PARTIAL_MESSAGE,
+  TURN_FAILED_SILENT_MESSAGE,
+  TURN_STOPPED_MESSAGE,
+} from "@onecli/api/validations/conversation";
 import type { ControlPlaneClient } from "./control-plane";
 import { replyTargetForLink, type ChannelPostTarget } from "./targets";
 
@@ -199,24 +204,33 @@ export const providerIconUrl = (provider: string): string => {
  * posts nothing.
  */
 
-const answerFromTranscript = async (
+const transcriptOutcome = async (
   controlPlane: ControlPlaneClient,
   conversationId: string,
   turnId: string,
-): Promise<string | null> => {
+): Promise<{ text: string | null; error: string | null }> => {
   let since: number | undefined;
-  let answer: string | null = null;
+  let text: string | null = null;
+  // The turn's durable `error` event — the harness's terminal message, which
+  // for uncoded failures is the ONLY record (the supervisor deliberately
+  // sends no `turn.result.error` then, so `turn.error` is NULL). Last one
+  // wins, matching the `text` semantics and the web's transcript fold.
+  let error: string | null = null;
   for (let page = 0; page < 100; page += 1) {
     const history = await controlPlane.readTranscript(conversationId, since);
     for (const event of history.events) {
       if (event.turnId !== turnId) continue;
-      const payload = (event.payload ?? {}) as { text?: string };
-      if (event.type === "text" && payload.text) answer = payload.text;
+      const payload = (event.payload ?? {}) as {
+        text?: string;
+        message?: string;
+      };
+      if (event.type === "text" && payload.text) text = payload.text;
+      if (event.type === "error" && payload.message) error = payload.message;
     }
     since = history.nextSince;
     if (!history.hasMore) break;
   }
-  return answer;
+  return { text, error };
 };
 
 /**
@@ -265,6 +279,13 @@ export interface MirrorPosts {
    * call to action: the canonical sentence plus where the key lives. */
   providerError(
     input: ChannelPostTarget & { modelsUrl: string; answer: string },
+  ): Promise<void>;
+  /** Platform chrome for a turn that ended without a normal answer — a
+   * failure line, or the quiet "Stopped." after an abort. Rendered so it
+   * cannot be mistaken for the agent's own voice. `warn` picks the failure
+   * treatment over the muted one. */
+  failureNotice(
+    input: ChannelPostTarget & { message: string; warn: boolean },
   ): Promise<void>;
 }
 
@@ -339,14 +360,22 @@ export const mirrorFinishedTurn = async (
   );
 
   try {
-    const answer =
-      (await answerFromTranscript(
-        deps.controlPlane,
-        item.conversationId,
-        item.turn.id,
-      )) ??
-      item.turn.error ??
-      null;
+    const outcome = await transcriptOutcome(
+      deps.controlPlane,
+      item.conversationId,
+      item.turn.id,
+    );
+    // Precedence mirrors the web (turn-block prefers `turn.error`): the
+    // agent's own text first; then the canonical/raw `turn.error`; then the
+    // transcript's durable error event — the only record an UNCODED harness
+    // failure leaves, which used to fall through to total silence here.
+    const answer = outcome.text ?? item.turn.error ?? outcome.error ?? null;
+    // A failed turn whose post is its PARTIAL answer text must not read as a
+    // normal reply — the failure line rides after it. When the answer came
+    // from `turn.error` or the error event, that text IS the failure message
+    // and posts alone.
+    const failedWithPartialText =
+      item.turn.status === "failed" && outcome.text !== null;
 
     if (automated) {
       await deps.posts.automation({
@@ -440,7 +469,30 @@ export const mirrorFinishedTurn = async (
         } else {
           await deps.posts.answer({ ...target, markdown: answer });
         }
+        if (failedWithPartialText) {
+          await deps.posts.failureNotice({
+            ...target,
+            message: TURN_FAILED_PARTIAL_MESSAGE,
+            warn: true,
+          });
+        }
       }
+    } else if (item.turn.status === "failed") {
+      // NEVER silent on a failure: the cursor has advanced and the "seen"
+      // reaction is already stripped, so posting nothing reads as the agent
+      // ignoring the person (six messages died exactly this way, live).
+      await deps.posts.failureNotice({
+        ...target,
+        message: TURN_FAILED_SILENT_MESSAGE,
+        warn: true,
+      });
+    } else if (item.turn.status === "aborted") {
+      // The web's word for the same moment — closure, not alarm.
+      await deps.posts.failureNotice({
+        ...target,
+        message: TURN_STOPPED_MESSAGE,
+        warn: false,
+      });
     }
   } catch (err) {
     // The cursor already moved: log loudly rather than retry into a double
