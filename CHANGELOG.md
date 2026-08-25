@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.2.2](https://github.com/onecli/onecli/compare/v2.2.1...v2.2.2) (2026-08-25)
+
+
+### Bug Fixes
+
+* heartbeat turn liveness + 6h ceiling, onboarding v2, in-place model-key recovery, plan catalog, self-host version line ([#515](https://github.com/onecli/onecli/issues/515)) ([909da33](https://github.com/onecli/onecli/commit/909da33a7edc71719ff11b6e40aeca6ef0f26537))
+
 ## [2.2.1](https://github.com/onecli/onecli/compare/v2.2.0...v2.2.1) (2026-08-24)
 
 
