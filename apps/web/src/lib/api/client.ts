@@ -32,6 +32,15 @@ export const refusal = async (res: Response): Promise<ApiError> => {
   return new ApiError(extractErrorMessage(body, res.status), res.status);
 };
 
+/** Explicit workspace targeting for callers whose URL carries no scope (the
+ * org-level Get Started picker, onboarding). The override wins over the
+ * path-derived scope (apiFetch spreads options.headers last) and the server
+ * re-fences it against the caller's memberships. */
+export const workspaceScope = (
+  workspaceId?: string,
+): RequestInit | undefined =>
+  workspaceId ? { headers: { "X-Workspace-Id": workspaceId } } : undefined;
+
 export const apiGet = async <T>(
   path: string,
   init?: RequestInit,

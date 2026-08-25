@@ -18,38 +18,36 @@ interface WelcomeDiscoverySectionProps {
   onToggle: (id: string) => void;
 }
 
+/** Just the option grid — the step page owns the question headline, so the
+ * three steps share one heading rhythm. */
 export const WelcomeDiscoverySection = ({
   selected,
   onToggle,
 }: WelcomeDiscoverySectionProps) => {
   return (
-    <div className="w-full">
-      <h2 className="text-lg font-semibold">How did you find us?</h2>
+    <div className="grid w-full grid-cols-2 gap-3 sm:grid-cols-3">
+      {DISCOVERY_OPTIONS.map((option, i) => {
+        const Icon = option.icon;
+        const isSelected = selected.has(option.id);
 
-      <div className="mt-4 grid grid-cols-3 gap-3">
-        {DISCOVERY_OPTIONS.map((option, i) => {
-          const Icon = option.icon;
-          const isSelected = selected.has(option.id);
-
-          return (
-            <button
-              key={option.id}
-              type="button"
-              aria-pressed={isSelected}
-              onClick={() => onToggle(option.id)}
-              style={{ animationDelay: `${i * 60}ms` }}
-              className={cn(
-                "flex items-center justify-center gap-2 whitespace-nowrap rounded-xl px-4 py-3.5 text-sm font-medium",
-                "animate-in fade-in slide-in-from-bottom-2 fill-mode-both",
-                selectableCard(isSelected),
-              )}
-            >
-              <Icon className="size-4 shrink-0" />
-              {option.label}
-            </button>
-          );
-        })}
-      </div>
+        return (
+          <button
+            key={option.id}
+            type="button"
+            aria-pressed={isSelected}
+            onClick={() => onToggle(option.id)}
+            style={{ animationDelay: `${i * 60}ms` }}
+            className={cn(
+              "flex items-center justify-center gap-2 rounded-xl px-4 py-3.5 text-sm font-medium",
+              "motion-safe:animate-in motion-safe:fade-in motion-safe:slide-in-from-bottom-2 fill-mode-both",
+              selectableCard(isSelected),
+            )}
+          >
+            <Icon className="size-4 shrink-0" />
+            {option.label}
+          </button>
+        );
+      })}
     </div>
   );
 };

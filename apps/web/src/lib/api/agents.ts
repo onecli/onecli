@@ -1,4 +1,11 @@
-import { apiGet, apiPatch, apiPost, apiDelete, refusal } from "./client";
+import {
+  apiGet,
+  apiPatch,
+  apiPost,
+  apiDelete,
+  refusal,
+  workspaceScope,
+} from "./client";
 import { apiUpload } from "@/lib/api-fetch";
 import type {
   Agent,
@@ -11,13 +18,6 @@ import type {
   MintSshCertificateSource,
 } from "./types";
 
-// Explicit workspace targeting exists for the org-level Get Started picker,
-// which reads agents of a workspace the URL doesn't carry. The override wins
-// over the path-derived scope (apiFetch spreads options.headers last) and the
-// server re-fences it against the caller's memberships.
-const workspaceScope = (workspaceId?: string): RequestInit | undefined =>
-  workspaceId ? { headers: { "X-Workspace-Id": workspaceId } } : undefined;
-
 export const list = (options: { workspaceId?: string } = {}) =>
   apiGet<Agent[]>("/v1/agents", workspaceScope(options.workspaceId));
 
@@ -27,8 +27,15 @@ export const list = (options: { workspaceId?: string } = {}) =>
 export const get = (agentId: string) =>
   apiGet<AgentDetail>(`/v1/agents/${encodeURIComponent(agentId)}`);
 
-export const create = (input: CreateAgentInput) =>
-  apiPost<CreatedAgent>("/v1/agents", input);
+export const create = (
+  input: CreateAgentInput,
+  options: { workspaceId?: string } = {},
+) =>
+  apiPost<CreatedAgent>(
+    "/v1/agents",
+    input,
+    workspaceScope(options.workspaceId),
+  );
 
 /**
  * What this agent can run, and what it runs now (§3.10). Always 200 for an

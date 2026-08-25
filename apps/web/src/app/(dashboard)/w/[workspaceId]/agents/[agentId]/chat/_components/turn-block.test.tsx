@@ -270,6 +270,52 @@ describe("a turn that could not run for a reason the reader can fix", () => {
     expect(document.querySelector(".text-destructive")).toBeNull();
   });
 
+  it("opens the in-place door instead of navigating when one is wired", async () => {
+    // With onConnectModelKey provided, the fix happens OVER the chat — a
+    // button, not a link, so nothing leaves the conversation.
+    const user = userEvent.setup();
+    const onConnectModelKey = vi.fn();
+    render(
+      <TurnBlock
+        turn={turn({
+          status: "failed",
+          error: "This agent doesn't have a model key yet.",
+          errorCode: "no_model_key",
+        })}
+        rendered={undefined}
+        modelsHref="/w/p1/agents/a1/models"
+        onConnectModelKey={onConnectModelKey}
+      />,
+    );
+    expect(screen.queryByRole("link")).toBeNull();
+    await user.click(
+      screen.getByRole("button", { name: "Connect a model key" }),
+    );
+    expect(onConnectModelKey).toHaveBeenCalledTimes(1);
+  });
+
+  it("a provider refusal still NAVIGATES even when the in-place door exists", () => {
+    // Deliberate asymmetry: checking an existing key means editing it, and
+    // the chat has no edit door — the Models page does.
+    render(
+      <TurnBlock
+        turn={turn({
+          status: "failed",
+          error: "The agent's model provider rejected the request.",
+          errorCode: "model_provider_error",
+        })}
+        rendered={undefined}
+        modelsHref="/w/p1/agents/a1/models"
+        onConnectModelKey={vi.fn()}
+      />,
+    );
+    const action = screen.getByRole("link", { name: "Check the model key" });
+    expect(action).toHaveAttribute("href", "/w/p1/agents/a1/models");
+    expect(
+      screen.queryByRole("button", { name: "Check the model key" }),
+    ).toBeNull();
+  });
+
   it("offers the key check for a model-provider refusal — same door, its own label", () => {
     // A key EXISTS but the provider refused it (limit, expiry): the fix
     // lives on the same Models page, and the label says "check", not
@@ -316,6 +362,8 @@ describe("a turn that could not run for a reason the reader can fix", () => {
     "agent_start_failed",
     "at_capacity",
     "image_unavailable",
+    "turn_stalled",
+    "turn_time_limit",
   ])("renders a %s failure as a quiet notice, not the red box", (errorCode) => {
     // A platform hiccup whose copy already says what to do — red would say
     // the agent is broken. Read off the CODE, never the message text.

@@ -44,13 +44,14 @@ describe("resolveSubscriptionPlan", () => {
 
   it("resolves a retired-but-mapped legacy price to its plan", () => {
     // Grandfathered subs keep billing on retired prices; those ids stay in
-    // PRICE_TO_PLAN (the legacy slot) precisely so this resolves to "team"
-    // instead of falling through to the "pro" fallback below.
+    // PRICE_TO_PLAN (the legacy slots) precisely so this resolves to
+    // "team-legacy" (the grandfathered limits) instead of falling through to
+    // the "pro" fallback below.
     const { plan, baseItem } = resolveSubscriptionPlan(
       sub(["price_team_legacy"]),
-      { ...PRICE_TO_PLAN, price_team_legacy: "team" },
+      { ...PRICE_TO_PLAN, price_team_legacy: "team-legacy" },
     );
-    expect(plan).toBe("team");
+    expect(plan).toBe("team-legacy");
     expect(baseItem?.id).toBe("si_0");
   });
 

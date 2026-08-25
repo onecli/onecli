@@ -290,7 +290,7 @@ export const applyRunnerEvent = async (
    * so the harness session behind a `dispatched` or `running` turn is gone
    * the moment the sandbox stops — the turn can never be resumed, only
    * re-sent. Left alone it stays non-terminal, and the active-turn index then
-   * blocks its conversation until the turn ceiling half an hour later.
+   * blocks its conversation until the turn ceiling an hour later.
    *
    * Two arms, one transaction. A dispatched turn the harness never STARTED
    * (zero observable work) is revived in place and re-sent by the platform
@@ -358,7 +358,7 @@ export const applyRunnerEvent = async (
  * platform stops pretending. ~5 paced attempts (`START_RETRY_SECONDS` = 30):
  * long enough that a capacity blip or a daemon restart heals invisibly,
  * short enough that nobody watches "Waking the agent…" for the whole
- * 30-minute ceiling. Measured on the same clock family as the ceiling
+ * turn ceiling. Measured on the same clock family as the ceiling
  * (retried → promoted → created), so a just-revived turn's patience restarts
  * with it.
  */

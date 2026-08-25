@@ -95,7 +95,7 @@ beforeAll(async () => {
     data: { id: USER, email: `${USER}@example.com`, externalAuthId: USER },
   });
 
-  // Scale = 25 seats, 50 agents by plan.
+  // Scale = 10 seats, 20 agents by plan.
   await db.organization.create({
     data: {
       id: ORG_DEFAULT,
@@ -146,12 +146,12 @@ describe.skipIf(!PROOF_URL)(
     it("null override leaves the plan default untouched", async () => {
       const overview = await quotas.getUsageOverview(ORG_DEFAULT);
       const members = overview.resources.find((r) => r.name === "Members");
-      expect(members?.limit).toBe(25); // scale's plan seat cap
+      expect(members?.limit).toBe(10); // scale's plan seat cap
       expect(overview.plan).toBe("scale");
     });
 
     it("an override raises the real invite gate past the plan limit", async () => {
-      // 26 real member rows — over scale's 25, under the 50 override.
+      // 26 real member rows — over scale's 10, under the 50 override.
       await seedMembers(ORG_RAISED, 26);
       await expect(
         quotas.assertCanInviteMember(ORG_RAISED),
@@ -207,14 +207,14 @@ describe.skipIf(!PROOF_URL)(
         const quota = err as InstanceType<typeof quotas.QuotaExceededError>;
         expect(quota.resource).toBe("members");
         expect(quota.current).toBe(2);
-        expect(quota.limit).toBe(2); // the override, below scale's 25
+        expect(quota.limit).toBe(2); // the override, below scale's 10
         expect(quota.plan).toBe("scale"); // the plan itself is unchanged
       }
     });
 
     it("does not widen the agent cap (negative control)", async () => {
       // ORG_RAISED has 50 seats but no agent override: agents stay on the
-      // plan's 50, and the seat override must not leak across.
+      // plan's 20, and the seat override must not leak across.
       await db.workspace.create({
         data: { id: `${P}proj`, name: `${P}proj`, organizationId: ORG_RAISED },
       });
@@ -222,7 +222,7 @@ describe.skipIf(!PROOF_URL)(
       const byName = Object.fromEntries(
         overview.resources.map((r) => [r.name, r.limit]),
       );
-      expect(byName["Agents"]).toBe(50); // scale's plan default
+      expect(byName["Agents"]).toBe(20); // scale's plan default
       expect(byName["Workspaces"]).toBe(Infinity);
     });
   },

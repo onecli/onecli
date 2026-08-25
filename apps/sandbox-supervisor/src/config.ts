@@ -28,6 +28,12 @@ export interface SupervisorConfig {
   runnerWsUrl: string | undefined;
   /** Single-use bootstrap token for that channel (§5.1). */
   bootstrapToken: string | undefined;
+  /**
+   * Cadence of the turn-liveness heartbeat (`progress` frames) while a turn
+   * is in flight. Test-only override, like the observer's `intervalMs` —
+   * production always runs the default.
+   */
+  progressIntervalMs?: number;
 }
 
 /** Anything not on our scale is dropped, not forwarded — the env is only as

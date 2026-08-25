@@ -136,4 +136,11 @@ describe("pure auto-hide: no runner, no feature", () => {
     await screen.findByText("Channels");
     expect(screen.getByText("Skills")).toBeDefined();
   });
+
+  it("the footer shows the installed version on self-host", async () => {
+    state.runners = { registered: false, online: false };
+    renderSidebar();
+    // The wire mock reports version "test"; the real SidebarVersion renders it.
+    await screen.findByText("vtest");
+  });
 });

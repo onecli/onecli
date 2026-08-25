@@ -1,9 +1,9 @@
 import { cn } from "@onecli/ui/lib/utils";
 
 /**
- * Shared interaction styles for the onboarding selection surfaces (discovery,
- * interests, agent cards, etc.). Centralized so focus, hover, active and the
- * selected state stay identical across every choice the user makes.
+ * Shared interaction styles for selection surfaces (the onboarding discovery
+ * grid, the Slack transport picker). Centralized so focus, hover, active and
+ * the selected state stay identical across every choice the user makes.
  *
  * The hover border is applied only when unselected — otherwise the `:hover`
  * pseudo-class outranks the static `border-brand` and a selected card would

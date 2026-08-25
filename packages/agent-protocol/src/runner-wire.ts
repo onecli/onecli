@@ -351,6 +351,20 @@ export const runnerEventSchema = z.discriminatedUnion("kind", [
       ),
   }),
   /**
+   * The supervisor's turn-liveness heartbeat, relayed as its own single-event
+   * post (never batched with transcript events — an old control plane
+   * rejecting the unknown kind must lose only heartbeats). It carries no
+   * payload beyond identity: arriving at all is the signal, and the control
+   * plane stamps `turns.last_progress_at` from its own clock.
+   */
+  z.object({
+    kind: z.literal("turn.progress"),
+    /** As above: the authenticated speaker, not a claim in the payload. */
+    sandboxId: z.string().min(1),
+    conversationId: z.string().min(1),
+    turnId: z.string().min(1),
+  }),
+  /**
    * A turn reached a terminal state. `sessionRef` rides along because the
    * conversation's harness session is only knowable inside the sandbox.
    */

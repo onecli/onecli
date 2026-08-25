@@ -5,12 +5,17 @@ import {
   SANDBOX_IDLE_STOP_SECONDS,
   SSH_SESSION_LEASE_SECONDS,
   TURN_CEILING_SECONDS,
+  TURN_CEILING_WARNING_SECONDS,
+  TURN_STALL_SECONDS,
 } from "../lib/env";
 import {
   ACTIVE_TURN_STATUSES,
   AGENT_NEVER_STARTED_MESSAGE,
   AUTOMATION_SOURCES,
   FOLLOW_UP_EXPIRED_MESSAGE,
+  TURN_CEILING_WARNING_MESSAGE,
+  TURN_STALLED_MESSAGE,
+  TURN_TIME_LIMIT_MESSAGE,
 } from "../validations/conversation";
 import { logger } from "../lib/logger";
 
@@ -125,12 +130,11 @@ const START_RETRY_SECONDS = 30;
  * one-edit law; a future automation source must inherit background rank by
  * that single edit), AGE-CAPPED: a background turn that has already waited
  * this long ranks as user-visible, so sustained user load delays automations
- * but can never starve them. (Unbounded, the only exit was the 30-minute
- * turn ceiling — whose raw UPDATE bypasses `settleAutomationRun`, leaving a
- * starved cron's `lastOutcome` stale; that pre-existing gap is tracked as
- * plans/sandbox-platform-issues.md's "cron outcome bookkeeping" item, not
- * fixed here.) Measured on the ceiling clock family (retried → promoted →
- * created), the same one-way clocks `reclaimStaleTurns` uses.
+ * but can never starve them. (Unbounded, the only exit was the turn ceiling —
+ * whose sweep now returns what it killed so the poll settles the automation's
+ * bookkeeping through `settleSweptTurns`.) Measured on the ceiling clock
+ * family (retried → promoted → created), the same one-way clocks
+ * `reclaimStaleTurns` uses.
  */
 export const WAKE_PRIORITY_AGE_SECONDS = 600;
 
@@ -237,6 +241,26 @@ interface AbortRow {
   conversation_id: string;
   /** From a correlated subquery — typed honestly, filtered at the mapping. */
   sandbox_id: string | null;
+}
+
+/**
+ * A turn a sweep just failed, with the copy it was failed under — returned
+ * so the CALLER can settle automation bookkeeping (`settleSweptTurns`,
+ * turn-service). The pairing lives at the poll rather than in here because
+ * turn-service already imports this module (`signalWork`); the settle
+ * import in this direction would be a cycle.
+ */
+export interface SweptTurn {
+  turnId: string;
+  conversationId: string;
+  error: string;
+  errorCode: "agent_start_failed" | "turn_time_limit" | "turn_stalled";
+}
+
+interface SweptTurnRow {
+  id: string;
+  conversation_id: string;
+  never_started: boolean;
 }
 
 interface SteerRow {
@@ -517,6 +541,15 @@ export const claimDueWork = async (
     // (An earlier comment justified NOT stamping, to avoid postponing the
     // reclaim deadline. Obsolete: `reclaimStaleTurns` measures from
     // `created_at`, which no `updated_at` write can move.)
+    //
+    // `failed` is in the status list for the sweeps: they set the flag while
+    // failing a turn administratively (ceiling or stall) with the sandbox
+    // still working, and this arm is how that orphaned work actually gets
+    // stopped instead of burning tokens under a row nobody is reading. (The
+    // user route can also leave the flag on a failed row by losing a race
+    // with a strand door — see abortTurn's comment; delivering that abort is
+    // equally right, and the supervisor's id check drops any that arrive
+    // after the work already ended.)
     const aborts = await tx.$queryRaw<AbortRow[]>`
       WITH claimed AS (
         SELECT t.id
@@ -525,7 +558,7 @@ export const claimDueWork = async (
         JOIN sandboxes s ON s.agent_id = c.agent_id
         WHERE s.runner_id = ${runnerId}
           AND t.abort_requested = true
-          AND t.status IN ('dispatched', 'running')
+          AND t.status IN ('dispatched', 'running', 'failed')
         ORDER BY t.created_at ASC
         LIMIT ${TURN_LIMIT}
         FOR UPDATE OF t SKIP LOCKED
@@ -639,6 +672,53 @@ export const claimDueWork = async (
       FROM claimed c
       WHERE s.id = c.id
       RETURNING s.id, s.agent_id, s.home_desired_generation
+    `;
+
+    // THE APPROACHING-CEILING WARNING. A running turn inside the warning
+    // window gets one steer telling the agent to wrap up: report the status
+    // of anything it is supervising and end the turn cleanly — instead of
+    // reclaimStaleTurns killing it mid-wait with no handoff. It rides the
+    // existing `turn.message` wire with a SYNTHETIC id (the row's own id,
+    // prefixed): the supervisor injects it like any steer, and the outcome it
+    // reports for that id matches no follow-up row, so the settle pass
+    // no-ops — exactly the right amount of bookkeeping for a message that
+    // has no row. `ceiling_warned_at` is the once-fence, stamped in the same
+    // claim (a lost claim is not retried on purpose: the warning is best
+    // effort, the ceiling itself is the guarantee). Same capability gate as
+    // steers — an older runner would poison its poll batch on the kind, and
+    // its turns just meet the ceiling the way they always have. Measured
+    // from the same clock as the sweep, so the two arms agree on age.
+    const warnBefore = new Date(
+      Date.now() - (TURN_CEILING_SECONDS - TURN_CEILING_WARNING_SECONDS) * 1000,
+    );
+    const ceilingWarnings = await tx.$queryRaw<
+      { id: string; conversation_id: string; sandbox_id: string | null }[]
+    >`
+      WITH claimed AS (
+        SELECT t.id
+        FROM turns t
+        JOIN conversations c ON c.id = t.conversation_id
+        JOIN sandboxes s ON s.agent_id = c.agent_id
+        JOIN runners r ON r.id = s.runner_id
+        WHERE s.runner_id = ${runnerId}
+          AND s.status = 'running'
+          AND t.status = 'running'
+          AND t.ceiling_warned_at IS NULL
+          AND COALESCE(t.retried_at, t.promoted_at, t.created_at) < ${warnBefore}
+          AND (r.capabilities->>'steerMessages')::boolean IS TRUE
+        ORDER BY t.created_at ASC
+        LIMIT ${TURN_LIMIT}
+        FOR UPDATE OF t SKIP LOCKED
+      )
+      UPDATE turns t SET ceiling_warned_at = now()
+      FROM claimed cl
+      WHERE t.id = cl.id
+      RETURNING
+        t.id,
+        t.conversation_id,
+        (SELECT s.id FROM conversations c
+           JOIN sandboxes s ON s.agent_id = c.agent_id
+          WHERE c.id = t.conversation_id) AS sandbox_id
     `;
 
     // Turns whose sandbox is actually up. A queued turn on a sleeping sandbox
@@ -758,6 +838,23 @@ export const claimDueWork = async (
             ]
           : [],
       ),
+      // Ceiling warnings ride the same steer shape — the synthetic id is
+      // namespaced so a `turn.result` outcome for it can never collide with
+      // a real follow-up row's id (uuids have no colon).
+      ...ceilingWarnings.flatMap((row): DueTurnMessage[] =>
+        row.sandbox_id
+          ? [
+              {
+                kind: "turn.message",
+                turnId: `ceiling-warning:${row.id}`,
+                targetTurnId: row.id,
+                conversationId: row.conversation_id,
+                sandboxId: row.sandbox_id,
+                message: TURN_CEILING_WARNING_MESSAGE,
+              },
+            ]
+          : [],
+      ),
     ];
   });
 };
@@ -800,7 +897,7 @@ export const listConversationsWithParkedFollowUps = async (): Promise<
  * Called from the runner work poll — the control plane's only regular tick
  * (§3.3: there is no background loop anywhere).
  */
-export const reclaimStaleTurns = async (): Promise<number> => {
+export const reclaimStaleTurns = async (): Promise<SweptTurn[]> => {
   // Measured from CREATION, not `updated_at`: the re-dispatch arm above
   // stamps `updated_at` every time it hands a stale turn back to a runner,
   // so an `updated_at` deadline is one a re-dispatching turn postpones
@@ -817,26 +914,104 @@ export const reclaimStaleTurns = async (): Promise<number> => {
   //
   // The copy tells two truths, not one: a turn whose `started_at` is NULL
   // never ran for a second — its sandbox never came up — and burying it
-  // under "ran longer than the limit" was a lie users acted on. It gets the
+  // under the time-limit copy was a lie users acted on. It gets the
   // never-started copy plus the code that renders it as a quiet notice.
+  //
+  // A STARTED turn also gets `abort_requested = true` in the same statement:
+  // failing the row unblocks the conversation, but the sandbox is still
+  // working — the abort claim arm (its `failed` leg) is what actually stops
+  // that orphan on the owning runner's next poll. A never-started turn has
+  // nothing to stop, so the flag is cleared rather than set there.
+  //
+  // Two clocks, deliberately: the full ceiling is a WORK budget, and a turn
+  // whose `started_at` is NULL never worked a second — it is a start that
+  // wedged past every faster door (patience parks at 150s, stale claims
+  // re-claim at 300s, a REPORTED death revives or strands immediately), so
+  // giving it the whole 6h before "the agent never got to this message"
+  // would block the conversation for hours to say nothing happened. It keeps
+  // the old 30-minute bound (or the ceiling itself when the operator sets
+  // one lower).
   const ceiling = new Date(Date.now() - TURN_CEILING_SECONDS * 1000);
-  const active = await db.$executeRaw`
+  const neverStartedCeiling = new Date(
+    Date.now() - Math.min(TURN_CEILING_SECONDS, 1800) * 1000,
+  );
+  const swept = await db.$queryRaw<SweptTurnRow[]>`
     UPDATE turns SET
       status = 'failed',
       error = CASE WHEN started_at IS NULL
         THEN ${AGENT_NEVER_STARTED_MESSAGE}
-        ELSE 'This turn ran longer than the limit and was ended.' END,
+        ELSE ${TURN_TIME_LIMIT_MESSAGE} END,
       error_code = CASE WHEN started_at IS NULL
         THEN 'agent_start_failed'
-        ELSE NULL END,
+        ELSE 'turn_time_limit' END,
+      abort_requested = (started_at IS NOT NULL),
       finished_at = now(),
       updated_at = now()
     WHERE status IN ('queued', 'dispatched', 'running')
-      AND COALESCE(retried_at, promoted_at, created_at) < ${ceiling}
+      AND COALESCE(retried_at, promoted_at, created_at) <
+        CASE WHEN started_at IS NULL
+          THEN ${neverStartedCeiling}
+          ELSE ${ceiling} END
+    RETURNING id, conversation_id, (started_at IS NULL) AS never_started
   `;
 
-  if (active > 0) log.warn({ active }, "reclaimed turns past the ceiling");
-  return active;
+  if (swept.length > 0) {
+    log.warn({ active: swept.length }, "reclaimed turns past the ceiling");
+  }
+  return swept.map((row) => ({
+    turnId: row.id,
+    conversationId: row.conversation_id,
+    error: row.never_started
+      ? AGENT_NEVER_STARTED_MESSAGE
+      : TURN_TIME_LIMIT_MESSAGE,
+    errorCode: row.never_started ? "agent_start_failed" : "turn_time_limit",
+  }));
+};
+
+/**
+ * Fail RUNNING turns whose liveness clock went silent — the primary wedge
+ * detector. The supervisor heartbeats `last_progress_at` (~60s) for the whole
+ * life of a turn, whatever the agent is doing, so a stamp older than the
+ * stall window means the thing writing it is gone: the sandbox died without
+ * reporting, wedged, or lost its channel. The ceiling above still backstops
+ * everything, but this is what turns "wait out the whole ceiling" into
+ * minutes.
+ *
+ * `last_progress_at IS NOT NULL` is the skew fence: a turn run by an agent
+ * image that predates the heartbeat never stamps the clock, and this arm
+ * must never touch it — it stays ceiling-bounded exactly as before.
+ *
+ * Same posture as the ceiling sweep: raw fail + `abort_requested`, with the
+ * abort claim arm stopping the (possibly still live) worker, and the caller
+ * settling automation bookkeeping from the returned rows.
+ */
+export const failStalledTurns = async (): Promise<SweptTurn[]> => {
+  const stallBefore = new Date(Date.now() - TURN_STALL_SECONDS * 1000);
+  const swept = await db.$queryRaw<{ id: string; conversation_id: string }[]>`
+    UPDATE turns SET
+      status = 'failed',
+      error = ${TURN_STALLED_MESSAGE},
+      error_code = 'turn_stalled',
+      abort_requested = true,
+      finished_at = now(),
+      updated_at = now()
+    WHERE status = 'running'
+      AND last_progress_at IS NOT NULL
+      AND last_progress_at < ${stallBefore}
+    RETURNING id, conversation_id
+  `;
+  if (swept.length > 0) {
+    log.warn(
+      { stalled: swept.length },
+      "failed turns with a stalled heartbeat",
+    );
+  }
+  return swept.map((row) => ({
+    turnId: row.id,
+    conversationId: row.conversation_id,
+    error: TURN_STALLED_MESSAGE,
+    errorCode: "turn_stalled",
+  }));
 };
 
 /**

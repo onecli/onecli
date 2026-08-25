@@ -57,7 +57,7 @@ const SALES_MANAGED_ERROR = `This organization's plan is managed by our sales te
 const holdsSalesManagedPrice = (sub: Stripe.Subscription): boolean =>
   sub.items.data.some((i) => SALES_MANAGED_PRICE_IDS.includes(i.price.id));
 
-const INVALID_PLAN_ERROR = "Invalid plan. Must be 'pro', 'team' or 'scale'.";
+const INVALID_PLAN_ERROR = "Invalid plan. Must be 'team' or 'scale'.";
 
 const RETIRED_PLAN_ERROR =
   "This plan is no longer offered. Pick one of the current plans instead.";

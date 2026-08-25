@@ -241,6 +241,23 @@ describe("turn events on the wire", () => {
     ).toBe(false);
   });
 
+  it("round-trips turn.progress — identity only, and every id required", () => {
+    const beat = {
+      kind: "turn.progress",
+      sandboxId: "sb-1",
+      conversationId: "cv-1",
+      turnId: "t-1",
+    };
+    expect(runnerEventSchema.parse(beat)).toEqual(beat);
+    expect(
+      runnerEventSchema.safeParse({
+        kind: "turn.progress",
+        conversationId: "cv-1",
+        turnId: "t-1",
+      }).success,
+    ).toBe(false);
+  });
+
   it("round-trips turn.finished carrying usage and the session ref", () => {
     const event = runnerEventSchema.parse({
       kind: "turn.finished",

@@ -8,6 +8,10 @@ import {
   STRIPE_SCALE_SELF_HOSTED_YEARLY_PRICE_ID,
   STRIPE_SCALE_YEARLY_PRICE_ID,
   STRIPE_TEAM_BASE_PRICE_ID,
+  STRIPE_TEAM_HOSTED_PRICE_ID,
+  STRIPE_TEAM_HOSTED_YEARLY_PRICE_ID,
+  STRIPE_TEAM_LEGACY_199_PRICE_ID,
+  STRIPE_TEAM_LEGACY_199_YEARLY_PRICE_ID,
   STRIPE_TEAM_LEGACY_PRICE_ID,
   STRIPE_TEAM_YEARLY_PRICE_ID,
 } from "./env";
@@ -29,15 +33,22 @@ export const buildPriceToPlan = (
 export const PRICE_TO_PLAN: Record<string, Plan> = buildPriceToPlan([
   [STRIPE_PRO_PRICE_ID, "pro"],
   [STRIPE_PRO_YEARLY_PRICE_ID, "pro"],
+  // The Aug-2026 BYOC Team prices ($149/mo, $1,490/yr) — what checkout sells.
   [STRIPE_TEAM_BASE_PRICE_ID, "team"],
   [STRIPE_TEAM_YEARLY_PRICE_ID, "team"],
-  // Pre-July-2026 $200/mo Team price. Subscriptions keep billing on a
-  // retired price until they next switch plans, so a retired price must stay
-  // mapped while ANY live subscription holds it — dropping a live price id
-  // silently resolves those orgs to the "pro" fallback and rewrites their
-  // plan in the DB. (The July-2026 $149 pair was dropped only after a
-  // live-Stripe audit found zero remaining subscriptions.)
-  [STRIPE_TEAM_LEGACY_PRICE_ID, "team"],
+  // Hosted "models included" Team prices ($499/mo, $4,990/yr) — same plan
+  // limits, sales-managed until the platform provides hosted models.
+  [STRIPE_TEAM_HOSTED_PRICE_ID, "team"],
+  [STRIPE_TEAM_HOSTED_YEARLY_PRICE_ID, "team"],
+  // Retired Team prices. Subscriptions keep billing on a retired price until
+  // they next switch plans, so a retired price must stay mapped while ANY
+  // live subscription holds it — dropping a live price id silently resolves
+  // those orgs to the "pro" fallback and rewrites their plan in the DB.
+  // Live-Stripe audit 2026-08-24: 6 subs on $199/mo, 3 on $200/mo.
+  [STRIPE_TEAM_LEGACY_199_PRICE_ID, "team-legacy"],
+  [STRIPE_TEAM_LEGACY_199_YEARLY_PRICE_ID, "team-legacy"],
+  // Pre-July-2026 $200/mo Team price.
+  [STRIPE_TEAM_LEGACY_PRICE_ID, "team-legacy"],
   [STRIPE_SCALE_PRICE_ID, "scale"],
   [STRIPE_SCALE_YEARLY_PRICE_ID, "scale"],
   // Managed self-hosting (sales-managed, dashboard-created).

@@ -221,7 +221,7 @@ export const BillingContent = ({
                   rel="noopener noreferrer"
                   className="text-muted-foreground mt-3 text-xs hover:underline"
                 >
-                  Self-hosted in your VPC? $1,499/mo. Talk to us
+                  Need more than {plan.limits.maxMembers} seats? Talk to us
                 </a>
               )}
 

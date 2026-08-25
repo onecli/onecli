@@ -5,6 +5,7 @@ import { ArrowRight, Infinity as InfinityIcon } from "lucide-react";
 import { Button } from "@onecli/ui/components/button";
 import { cn } from "@onecli/ui/lib/utils";
 import { useOrgPrefix } from "@/lib/org-navigation";
+import { getPlanConfig, normalizePlan } from "@onecli/api/ee/billing/plans";
 import type { UsageOverview } from "@/ee/billing/api-request-actions";
 
 const RING_SIZE = 44;
@@ -86,8 +87,8 @@ export const PlanUsageContent = ({ data }: { data: UsageOverview }) => {
       {/* Header */}
       <div className="flex items-center justify-between gap-4 border-b px-5 py-3">
         <p className="text-muted-foreground text-sm">
-          <span className="text-foreground font-medium capitalize">
-            {data.plan}
+          <span className="text-foreground font-medium">
+            {getPlanConfig(normalizePlan(data.plan)).name}
           </span>{" "}
           plan {anyAtLimit ? "- quota limit reached" : "usage"}
         </p>

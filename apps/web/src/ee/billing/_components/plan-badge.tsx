@@ -8,12 +8,15 @@ import { Skeleton } from "@onecli/ui/components/skeleton";
 import { extractOrgId, generateOrgPrefix } from "@/lib/org-navigation";
 import { getUserOrgRole } from "@/ee/team/actions";
 import type { OrgRole } from "@onecli/api/ee/services/authorization-service";
+import { getPlanConfig, normalizePlan } from "@onecli/api/ee/billing/plans";
 import { usePlanUsage, isFlaggedOverLimit } from "../use-plan-usage";
 
 const PLAN_STYLES: Record<string, string> = {
   free: "border-border bg-muted text-muted-foreground hover:bg-accent hover:text-foreground",
   pro: "border-brand/30 bg-brand/10 text-brand hover:bg-brand/20",
   team: "border-purple-500/30 bg-purple-500/10 text-purple-600 dark:text-purple-400 hover:bg-purple-500/20",
+  "team-legacy":
+    "border-purple-500/30 bg-purple-500/10 text-purple-600 dark:text-purple-400 hover:bg-purple-500/20",
   scale:
     "border-sky-500/30 bg-sky-500/10 text-sky-600 dark:text-sky-400 hover:bg-sky-500/20",
   enterprise:
@@ -57,7 +60,9 @@ export const PlanBadge = () => {
     );
   }
 
-  const badgeStyle = `rounded-full border px-2 py-0.5 text-[11px] font-medium capitalize leading-none ${PLAN_STYLES[plan] ?? PLAN_STYLES.free}`;
+  const badgeStyle = `rounded-full border px-2 py-0.5 text-[11px] font-medium leading-none ${PLAN_STYLES[plan] ?? PLAN_STYLES.free}`;
+  // Display name from the catalog — the raw id would render "team-legacy".
+  const planName = getPlanConfig(normalizePlan(plan)).name;
 
   if (isAdmin(role)) {
     return (
@@ -65,10 +70,10 @@ export const PlanBadge = () => {
         href={`${orgPrefix}/billing`}
         className={`${badgeStyle} transition-colors`}
       >
-        {plan}
+        {planName}
       </Link>
     );
   }
 
-  return <span className={badgeStyle}>{plan}</span>;
+  return <span className={badgeStyle}>{planName}</span>;
 };

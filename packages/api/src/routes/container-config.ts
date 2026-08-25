@@ -1,5 +1,4 @@
 import { Hono } from "hono";
-import { db } from "@onecli/db";
 import type { ApiEnv } from "../types";
 import { authMiddleware, requireWorkspaceId } from "../middleware/auth";
 import {
@@ -20,36 +19,6 @@ export {
   injectableSecretWhere,
   findInjectableSecretOfType,
 } from "../services/container-config-service";
-
-/**
- * Mark the onboarding survey to record that the agent container is up.
- * Skips the write if already marked to avoid repeated DB calls.
- */
-const markAgentConnected = async (workspaceId: string) => {
-  const survey = await db.onboardingSurvey.findUnique({
-    where: { workspaceId },
-    select: { setupState: true },
-  });
-
-  if (!survey) return;
-
-  const state =
-    survey.setupState && typeof survey.setupState === "object"
-      ? (survey.setupState as Record<string, unknown>)
-      : {};
-
-  if (state.connectedAt) return;
-
-  await db.onboardingSurvey.update({
-    where: { workspaceId },
-    data: {
-      setupState: {
-        ...state,
-        connectedAt: new Date().toISOString(),
-      },
-    },
-  });
-};
 
 export const containerConfigRoutes = () => {
   const app = new Hono<ApiEnv>();
@@ -153,9 +122,6 @@ export const containerConfigRoutes = () => {
           503,
         );
       }
-
-      // Fire-and-forget: mark agent as connected
-      markAgentConnected(workspaceId).catch(() => {});
 
       return c.json(result.config);
     } catch (err) {

@@ -26,7 +26,7 @@ export class QuotaExceededError extends ServiceError {
   constructor(resource: string, current: number, limit: number, plan: Plan) {
     super(
       "FORBIDDEN",
-      `${resource} limit reached (${current}/${limit} on ${plan} plan). Upgrade to add more.`,
+      `${resource} limit reached (${current}/${limit} on the ${getPlanConfig(plan).name} plan). Upgrade to add more.`,
     );
     this.name = "QuotaExceededError";
     this.resource = resource;
@@ -75,7 +75,7 @@ const getOrgLimits = async (
   const planLimits = getPlanConfig(plan).limits;
   // maxAgentsOverride / maxMembersOverride are the ops-set per-org caps (SQL
   // only, no UI): null = plan default; a value replaces the plan's limit in
-  // both directions (600 raises scale's 50 agents, 0 blocks all creation).
+  // both directions (600 raises scale's 20 agents, 0 blocks all creation).
   // Applied to the plan limits here so every caller — the invite gate, the
   // pre-check dialog and the usage page — shares one answer.
   return {

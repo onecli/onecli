@@ -61,6 +61,7 @@ export const TurnBlock = ({
   rendered,
   followUps,
   modelsHref,
+  onConnectModelKey,
 }: {
   turn: Turn;
   rendered: RenderedTurn | undefined;
@@ -70,6 +71,9 @@ export const TurnBlock = ({
   followUps?: Turn[];
   /** Where "Connect a model key" goes; omitted outside the agent page. */
   modelsHref?: string;
+  /** Open the add-key dialog IN PLACE (preferred over the Models link when
+   *  provided): the fix happens over the chat instead of leaving it. */
+  onConnectModelKey?: () => void;
 }) => {
   const active = isActiveTurn(turn);
   // The transcript stream's raw `error` event lands a beat before the turns
@@ -163,9 +167,16 @@ export const TurnBlock = ({
               (keyFixLabel ? (
                 <TurnNotice
                   message={errorText}
-                  {...(modelsHref && {
-                    action: { href: modelsHref, label: keyFixLabel },
-                  })}
+                  {...(turn.errorCode === "no_model_key" && onConnectModelKey
+                    ? {
+                        action: {
+                          onClick: onConnectModelKey,
+                          label: keyFixLabel,
+                        },
+                      }
+                    : modelsHref && {
+                        action: { href: modelsHref, label: keyFixLabel },
+                      })}
                 />
               ) : friendlyFailure ? (
                 <TurnNotice message={errorText} />

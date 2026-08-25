@@ -66,3 +66,22 @@ export const hasActiveTurn = (turns: Turn[] | undefined): boolean =>
  */
 export const hasUnsettledTurn = (turns: Turn[] | undefined): boolean =>
   turns?.some((turn) => UNSETTLED.includes(turn.status)) ?? false;
+
+/**
+ * The turn the chat's in-place key door may RE-SEND once a key attaches:
+ * only the newest thing the user themselves asked (trailing platform rows —
+ * `userId` null, a cron report landing after the failed ask — don't change
+ * what "just asked" means), only when it failed for lack of a key, only when
+ * nothing would be silently lost (a failed turn's attachments are bound rows
+ * the server refuses to re-bind, so a resend would ship without its files),
+ * and only while nothing is running. Anything older stays a notice the user
+ * re-sends deliberately — resurrecting a stale question is worse than
+ * under-firing.
+ */
+export const resendableKeylessTurn = (turns: Turn[]): Turn | null => {
+  const last = [...turns].reverse().find((turn) => turn.userId !== null);
+  if (!last || last.errorCode !== "no_model_key") return null;
+  if (last.attachments.length > 0) return null;
+  if (hasActiveTurn(turns)) return null;
+  return last;
+};

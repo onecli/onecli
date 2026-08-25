@@ -18,6 +18,10 @@ const hoisted = vi.hoisted(() => ({
   secretsData: [] as Secret[],
 }));
 
+vi.mock("next/navigation", () => ({
+  usePathname: () => "/w/ws-1/agents/agent-1/models",
+}));
+
 vi.mock("@/hooks/use-secrets", () => ({
   useSecrets: () => ({ data: hoisted.secretsData, isPending: false }),
 }));
@@ -183,5 +187,15 @@ describe("ModelsSection", () => {
 
     await userEvent.click(screen.getByTestId("tab-add"));
     expect(screen.getByTestId("create-open")).toHaveTextContent("true");
+  });
+
+  it("links Manage to the workspace's LLM keys page, derived from the pathname", () => {
+    // connectionsPath, never a hardcoded /connections path — a bare one 404s
+    // everywhere on the org-scoped surface.
+    renderSection();
+    expect(screen.getByRole("link", { name: "Manage" })).toHaveAttribute(
+      "href",
+      "/w/ws-1/connections/llms",
+    );
   });
 });

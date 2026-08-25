@@ -14,6 +14,7 @@ import { NO_MODEL_KEY_MESSAGE } from "../validations/conversation";
 import {
   claimDueWork,
   expireWedgedFollowUps,
+  failStalledTurns,
   reclaimStaleTurns,
   releaseClaim,
   parkUnstartableClaim,
@@ -41,7 +42,12 @@ import {
   listMissingSandboxIds,
   listRunnerSandboxes,
 } from "../services/sandbox-service";
-import { applyTurnEvents, finishTurn } from "../services/turn-service";
+import {
+  applyTurnEvents,
+  applyTurnProgress,
+  finishTurn,
+  settleSweptTurns,
+} from "../services/turn-service";
 import { buildTurnContext } from "../services/turn-context-service";
 import { MAX_TURN_CONTEXT_CHARS } from "@onecli/agent-protocol";
 import { buildHomeSyncItem } from "../services/home-sync-service";
@@ -132,9 +138,23 @@ export const runnerRoutes = () => {
     // where overdue work gets swept. Failure is not fatal: the sweep is a
     // recovery path, and losing one pass costs one poll interval — never
     // taking the poll itself down, which would stop dispatch entirely.
-    await reclaimStaleTurns().catch((err: unknown) =>
-      log.warn({ err }, "stale-turn sweep failed"),
-    );
+    //
+    // Each sweep's settle rides its own chain: the sweeps' raw UPDATEs bypass
+    // `finishTurn` (whose late real report is a fenced no-op), so the
+    // returned rows are the ONLY chance to book a swept cron/watch run's
+    // outcome and deliver its report. Paired here rather than inside
+    // due-work because turn-service already imports due-work (`signalWork`).
+    await reclaimStaleTurns()
+      .then(settleSweptTurns)
+      .catch((err: unknown) => log.warn({ err }, "stale-turn sweep failed"));
+
+    // The liveness arm: RUNNING turns whose supervisor heartbeat went silent.
+    // Right after the ceiling sweep, same posture — recovery first, dispatch
+    // second. The abort the sweep flags is claimed further down this very
+    // poll (claimDueWork's abort arm), so fail and stop land together.
+    await failStalledTurns()
+      .then(settleSweptTurns)
+      .catch((err: unknown) => log.warn({ err }, "stalled-turn sweep failed"));
 
     // Scheduled tasks fire here too (step 7): dueness is computed at poll
     // time, and a fire is just a turn creation — the claim arms below then
@@ -396,6 +416,13 @@ export const runnerRoutes = () => {
               event.conversationId,
               event.turnId,
               event.events,
+            );
+            break;
+          case "turn.progress":
+            await applyTurnProgress(
+              { runnerId, sandboxId: event.sandboxId },
+              event.conversationId,
+              event.turnId,
             );
             break;
           case "turn.finished":

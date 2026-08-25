@@ -75,6 +75,11 @@ describe("checkDashboardRedirect (billing edition)", () => {
     await expect(checkDashboardRedirect()).resolves.toBeNull();
   });
 
+  it("leaves a grandfathered team-legacy org's owner alone", async () => {
+    state.subscriptionStatus = "team-legacy";
+    await expect(checkDashboardRedirect()).resolves.toBeNull();
+  });
+
   it("leaves an owner who completed onboarding alone", async () => {
     state.onboardingCompletedAt = new Date();
     await expect(checkDashboardRedirect()).resolves.toBeNull();

@@ -5,9 +5,10 @@ import {
   hasUnsettledTurn,
   isJoinedTurn,
   isJoiningTurn,
+  resendableKeylessTurn,
 } from "./turns";
 
-const turn = (status: Turn["status"]): Turn => ({
+const turn = (status: Turn["status"], overrides: Partial<Turn> = {}): Turn => ({
   id: `t-${status}`,
   conversationId: "cv",
   status,
@@ -22,6 +23,7 @@ const turn = (status: Turn["status"]): Turn => ({
   startedAt: null,
   finishedAt: null,
   createdAt: "2026-08-10T00:00:00.000Z",
+  ...overrides,
 });
 
 describe("the poll predicate", () => {
@@ -52,5 +54,71 @@ describe("follow-up narrowing", () => {
     expect(isJoiningTurn(turn("joined"))).toBe(false);
     expect(isJoinedTurn(turn("joined"))).toBe(true);
     expect(isJoinedTurn(turn("running"))).toBe(false);
+  });
+});
+
+describe("the in-place key door's resend guard", () => {
+  const keyless = (overrides: Partial<Turn> = {}) =>
+    turn("failed", {
+      errorCode: "no_model_key",
+      message: "the ask",
+      ...overrides,
+    });
+
+  it("re-sends the message the user just asked", () => {
+    const turns = [turn("done", { id: "t0" }), keyless({ id: "t1" })];
+    expect(resendableKeylessTurn(turns)?.message).toBe("the ask");
+  });
+
+  it("skips trailing platform rows — a cron report landing after the failed ask doesn't change what was just asked", () => {
+    const turns = [
+      keyless({ id: "t1" }),
+      turn("done", { id: "t2", userId: null, source: "cron" }),
+    ];
+    expect(resendableKeylessTurn(turns)?.id).toBe("t1");
+  });
+
+  it("never resurrects an older question — only the newest user turn qualifies", () => {
+    const turns = [keyless({ id: "t1" }), turn("done", { id: "t2" })];
+    expect(resendableKeylessTurn(turns)).toBeNull();
+  });
+
+  it("only fires for a keyless failure, not any failure", () => {
+    expect(
+      resendableKeylessTurn([
+        turn("failed", { errorCode: "model_provider_error" }),
+      ]),
+    ).toBeNull();
+    expect(resendableKeylessTurn([turn("failed")])).toBeNull();
+  });
+
+  it("never re-sends a platform-authored row (its message is a header, not the user's words)", () => {
+    expect(
+      resendableKeylessTurn([keyless({ userId: null, source: "cron" })]),
+    ).toBeNull();
+  });
+
+  it("refuses when the failed turn carried files — bound attachments can never ride a second send", () => {
+    const withFile = keyless({
+      attachments: [
+        {
+          id: "att-1",
+          name: "spec.pdf",
+          mimeType: "application/pdf",
+          sizeBytes: 10,
+          status: "bound",
+        },
+      ],
+    });
+    expect(resendableKeylessTurn([withFile])).toBeNull();
+  });
+
+  it("waits its turn — nothing re-sends while a run is active", () => {
+    const turns = [turn("running", { id: "t0" }), keyless({ id: "t1" })];
+    expect(resendableKeylessTurn(turns)).toBeNull();
+  });
+
+  it("an empty thread has nothing to re-send", () => {
+    expect(resendableKeylessTurn([])).toBeNull();
   });
 });

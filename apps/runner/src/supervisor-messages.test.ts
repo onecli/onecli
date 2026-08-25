@@ -70,6 +70,26 @@ describe("supervisor message handler", () => {
     ]);
   });
 
+  it("relays a progress heartbeat as its own report, never through the collector", () => {
+    // Its own single-event post on purpose: an old control plane rejecting
+    // the unknown kind must lose one heartbeat, not a transcript batch. And
+    // the sandboxId is the channel's, whatever the body claimed.
+    const { reported, added, flushed } = drive([
+      { kind: "progress", turnId: "t1", conversationId: "cv1" },
+    ]);
+
+    expect(reported).toEqual([
+      {
+        kind: "turn.progress",
+        sandboxId: "sb-1",
+        conversationId: "cv1",
+        turnId: "t1",
+      },
+    ]);
+    expect(added).toEqual([]);
+    expect(flushed).toEqual([]);
+  });
+
   it("attributes every message to the AUTHENTICATED sandbox", () => {
     // A supervisor may only ever speak for itself: the id comes from the
     // channel, never from a body it chose.

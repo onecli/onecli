@@ -1,4 +1,4 @@
-import { apiGet, apiPost, apiDelete } from "./client";
+import { apiGet, apiPost, apiDelete, workspaceScope } from "./client";
 import type { PendingInvitation, CreateInvitationInput } from "./types";
 
 // Team invitations. Free on every edition — the org routes are admin-only,
@@ -13,8 +13,15 @@ export const list = () => apiGet<PendingInvitation[]>(orgBase);
  * actually went out — a deployment with no mail provider gets `emailed: false`
  * rather than a false claim of delivery.
  */
-export const create = (input: CreateInvitationInput) =>
-  apiPost<{ id: string; joinUrl: string; emailed: boolean }>(orgBase, input);
+export const create = (
+  input: CreateInvitationInput,
+  options: { workspaceId?: string } = {},
+) =>
+  apiPost<{ id: string; joinUrl: string; emailed: boolean }>(
+    orgBase,
+    input,
+    workspaceScope(options.workspaceId),
+  );
 
 export const cancel = (invitationId: string) =>
   apiDelete(`${orgBase}/${invitationId}`);

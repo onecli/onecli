@@ -27,6 +27,7 @@ const services = vi.hoisted(() => ({
   firstAttachmentName: vi.fn(),
   claimDueWork: vi.fn(),
   reclaimStaleTurns: vi.fn(),
+  failStalledTurns: vi.fn(),
   releaseClaim: vi.fn(),
   waitForWork: vi.fn(),
   buildSandboxStartPayload: vi.fn(),
@@ -101,6 +102,7 @@ vi.mock("../services/attachment-service", () => ({
 vi.mock("../services/due-work", () => ({
   claimDueWork: services.claimDueWork,
   reclaimStaleTurns: services.reclaimStaleTurns,
+  failStalledTurns: services.failStalledTurns,
   expireWedgedFollowUps: services.expireWedgedFollowUps,
   releaseClaim: services.releaseClaim,
   waitForWork: services.waitForWork,
@@ -169,7 +171,9 @@ beforeEach(() => {
   services.runnerUpdate.mockResolvedValue({});
   services.claimDueWork.mockResolvedValue([]);
   services.buildTurnContext.mockResolvedValue(null);
-  services.reclaimStaleTurns.mockResolvedValue(0);
+  // The sweeps return what they killed so the poll can settle it.
+  services.reclaimStaleTurns.mockResolvedValue([]);
+  services.failStalledTurns.mockResolvedValue([]);
   services.fireDueCrons.mockResolvedValue(0);
   services.fireDueWatches.mockResolvedValue(0);
   services.promoteParkedFollowUps.mockResolvedValue(0);
@@ -314,6 +318,8 @@ describe("the stale-turn sweep runs on the poll", () => {
       body: JSON.stringify({ wait: 0 }),
     });
     expect(services.reclaimStaleTurns).toHaveBeenCalled();
+    // The liveness arm rides the same tick.
+    expect(services.failStalledTurns).toHaveBeenCalled();
   });
 
   it("still dispatches when the sweep fails", async () => {

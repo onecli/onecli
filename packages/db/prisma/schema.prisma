@@ -714,7 +714,7 @@ model Turn {
   // for a turn that never ran because the agent has no model key. Null for
   // every failure whose message says everything there is to say.
   errorCode      String? @map("error_code")
-  usage          Json? // token counts, recorded at turn.done
+  usage          Json? // token counts from the terminal report — salvaged even when the close lost the race to a sweep
 
   // ── Mid-run follow-ups ────────────────────────────────────────────────
   // A message sent while a turn was active is a FOLLOW-UP row: born
@@ -741,6 +741,17 @@ model Turn {
   // purpose clock (house law: never `updatedAt`), and deliberately absent
   // from `turnSelect` — the retry is invisible to readers.
   retriedAt        DateTime? @map("retried_at")
+  // Stamped when the approaching-ceiling warning was steered into this
+  // turn's live run (at most once) — the fence that keeps the warning arm
+  // from re-delivering on every poll. Single-purpose clock (house law).
+  ceilingWarnedAt  DateTime? @map("ceiling_warned_at")
+  // The liveness clock: refreshed by the supervisor's ~60s progress
+  // heartbeat while the turn is RUNNING. A running turn whose stamp goes
+  // stale is failed as `turn_stalled` (due-work's stall arm); NULL means the
+  // agent image predates the heartbeat, and only the ceiling applies.
+  // Single-purpose clock (house law: never `updatedAt` — re-dispatch stamps
+  // that), and absent from `turnSelect` like its siblings.
+  lastProgressAt   DateTime? @map("last_progress_at")
 
   startedAt  DateTime? @map("started_at")
   finishedAt DateTime? @map("finished_at")

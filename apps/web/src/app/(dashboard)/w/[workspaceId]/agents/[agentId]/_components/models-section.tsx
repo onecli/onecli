@@ -1,14 +1,15 @@
 "use client";
 
-import { useMemo, useRef, useState } from "react";
+import { useState } from "react";
+import Link from "next/link";
+import { usePathname } from "next/navigation";
 import { Plus } from "lucide-react";
 import { Button } from "@onecli/ui/components/button";
-import { useAttachSecret } from "@/hooks/use-grants";
+import { useCreateThenAttachSecret } from "@/hooks/use-create-then-attach-secret";
 import { useSecrets } from "@/hooks/use-secrets";
 import { SecretDialog } from "@/app/(dashboard)/w/[workspaceId]/connections/_components/secret-dialog";
-import { secrets as secretsApi } from "@/lib/api";
 import type { Secret } from "@/lib/api";
-import type { CreateSecretInput } from "@onecli/api/validations/secret";
+import { connectionsPath } from "@/lib/navigation";
 import { ModelCard } from "./model-card";
 import { SecretGrantsTab } from "./secret-grants-tab";
 
@@ -20,10 +21,10 @@ import { SecretGrantsTab } from "./secret-grants-tab";
  * error pointed to.
  */
 export const ModelsSection = ({ agentId }: { agentId: string }) => {
+  const pathname = usePathname();
   const [dialogOpen, setDialogOpen] = useState(false);
   const [editing, setEditing] = useState<Secret | null>(null);
   const [editOpen, setEditOpen] = useState(false);
-  const attachSecret = useAttachSecret();
 
   // Same pool predicate as SecretGrantsTab's llm kind. While the list is
   // empty (or still loading) the empty state's own door carries the CTA —
@@ -33,25 +34,9 @@ export const ModelsSection = ({ agentId }: { agentId: string }) => {
     (s) => s.type !== "generic",
   );
 
-  // Create-then-attach: SecretDialog's own onSaved carries no id, so the
-  // create call is intercepted (the SecretActions seam) to remember it, and
-  // the attach fires after the save completes.
-  const createdSecretId = useRef<string | null>(null);
-  const secretActions = useMemo(
-    () => ({
-      createSecret: async (input: CreateSecretInput) => {
-        const created = await secretsApi.create(input);
-        createdSecretId.current = created.id;
-        return created;
-      },
-    }),
-    [],
-  );
-  const onSaved = () => {
-    const secretId = createdSecretId.current;
-    createdSecretId.current = null;
-    if (secretId) attachSecret.mutate({ agentId, secretId });
-  };
+  // Create-then-attach: a key minted here is granted to THIS agent the
+  // moment it lands (the shared SecretActions interception seam).
+  const { secretActions, onSaved } = useCreateThenAttachSecret(agentId);
 
   return (
     <div className="flex flex-col gap-6">
@@ -68,12 +53,20 @@ export const ModelsSection = ({ agentId }: { agentId: string }) => {
               whichever key is attached.
             </p>
           </div>
-          {hasLlmKeys && (
-            <Button size="sm" onClick={() => setDialogOpen(true)}>
-              <Plus className="size-4" aria-hidden />
-              Add LLM key
+          <div className="flex items-center gap-2">
+            {/* The workspace's LLM keys page: every key, every agent it's
+                attached to — the management view this per-agent list is a
+                slice of. */}
+            <Button asChild size="sm" variant="outline">
+              <Link href={connectionsPath({ pathname }, "/llms")}>Manage</Link>
             </Button>
-          )}
+            {hasLlmKeys && (
+              <Button size="sm" onClick={() => setDialogOpen(true)}>
+                <Plus className="size-4" aria-hidden />
+                Add LLM key
+              </Button>
+            )}
+          </div>
         </div>
         <SecretGrantsTab
           agentId={agentId}

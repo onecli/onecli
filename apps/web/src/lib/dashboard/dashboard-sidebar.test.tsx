@@ -135,6 +135,15 @@ describe("org tier: the hosted-only entries follow the availability wire", () =>
     await screen.findByText("Channels");
     expect(screen.getByText("Skills")).toBeDefined();
   });
+
+  it("the footer never shows a version line on cloud", async () => {
+    state.runners = { registered: true, online: true };
+    renderSidebar();
+    // Settle on the wire-driven nav, then prove the self-host-only version
+    // caption (the wire reports version "test") stayed out of the footer.
+    await screen.findByText("Channels");
+    expect(screen.queryByText("vtest")).toBeNull();
+  });
 });
 
 describe("workspace tier: the agent rows through the real wire", () => {

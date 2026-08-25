@@ -9,6 +9,7 @@ import {
   AT_CAPACITY_MESSAGE,
   IMAGE_UNAVAILABLE_MESSAGE,
   MODEL_PROVIDER_ERROR_MESSAGE,
+  TURN_STALLED_MESSAGE,
 } from "../validations/conversation.js";
 
 /**
@@ -227,6 +228,12 @@ beforeAll(async () => {
   process.env.GATEWAY_CA_CERT =
     "-----BEGIN CERTIFICATE-----\npg-proof-fake-ca\n-----END CERTIFICATE-----";
   process.env.SANDBOX_IDLE_STOP_SECONDS = "600";
+  // Pin the turn clocks: the ageing literals below are written against
+  // THESE values, not the production defaults — bumping a default must
+  // never silently un-age a test fixture.
+  process.env.TURN_CEILING_SECONDS = "1800";
+  process.env.TURN_CEILING_WARNING_SECONDS = "300";
+  process.env.TURN_STALL_SECONDS = "600";
   // The start payload carries the gateway CA, and without one every compose
   // answers `unavailable` before it reaches the credential rule under test.
   // CI has no ca.pem on disk (a dev machine does), so state it explicitly
@@ -832,6 +839,42 @@ describe.skipIf(!PROOF_URL)("abort dispatch", () => {
     expect(second.filter((c) => c.kind === "turn.abort")).toHaveLength(0);
   });
 
+  it("delivers the abort for a SWEEP-failed turn — the orphan gets stopped", async () => {
+    // The ceiling/stall sweeps fail the row and set the flag; the claim
+    // arm's `failed` leg is what carries the stop to the sandbox that is
+    // still working. Once, like every abort — then never again.
+    const { conversationId, sandboxId } = await seedTalkable("abort-swept");
+    const turn = await turns.createTurn(
+      WORKSPACE,
+      conversationId,
+      "long one",
+      WEB_A,
+    );
+    await dueWork.claimDueWork(RUNNER_A, 5);
+    await turns.applyTurnEvents(
+      reporter(RUNNER_A, sandboxId),
+      conversationId,
+      turn.id,
+      [{ type: "turn.started" }],
+    );
+    await db.$executeRaw`UPDATE turns SET created_at = now() - interval '90 minutes' WHERE id = ${turn.id}`;
+    await dueWork.reclaimStaleTurns();
+
+    const first = await dueWork.claimDueWork(RUNNER_A, 5);
+    expect(first).toContainEqual({
+      kind: "turn.abort",
+      turnId: turn.id,
+      conversationId,
+      sandboxId,
+    });
+    const second = await dueWork.claimDueWork(RUNNER_A, 5);
+    expect(second.filter((c) => c.kind === "turn.abort")).toHaveLength(0);
+    // The claim cleared the flag; the row stays failed.
+    const row = await db.turn.findUnique({ where: { id: turn.id } });
+    expect(row?.status).toBe("failed");
+    expect(row?.abortRequested).toBe(false);
+  });
+
   it("does NOT re-deliver the turn it just aborted", async () => {
     // Both arms run in one transaction, and SKIP LOCKED does not skip a row
     // this transaction already locked — so an abort that leaves the turn
@@ -1398,12 +1441,23 @@ describe.skipIf(!PROOF_URL)("stale-turn reclaim", () => {
     // Aged by CREATION, which is the clock a re-dispatch cannot postpone.
     await db.$executeRaw`UPDATE turns SET created_at = now() - interval '90 minutes' WHERE id = ${turn.id}`;
 
-    expect(await dueWork.reclaimStaleTurns()).toBeGreaterThanOrEqual(1);
+    const swept = await dueWork.reclaimStaleTurns();
+    expect(swept.length).toBeGreaterThanOrEqual(1);
+    expect(swept).toContainEqual(
+      expect.objectContaining({
+        turnId: turn.id,
+        conversationId,
+        errorCode: "turn_time_limit",
+      }),
+    );
 
     const row = await db.turn.findUnique({ where: { id: turn.id } });
     expect(row?.status).toBe("failed");
-    expect(row?.error).toContain("longer than the limit");
-    expect(row?.errorCode).toBeNull();
+    expect(row?.error).toContain("reached its time limit");
+    expect(row?.errorCode).toBe("turn_time_limit");
+    // Failing the row is half the job — the sweep also flags the orphan so
+    // the abort claim arm's failed leg actually stops the work.
+    expect(row?.abortRequested).toBe(true);
     const next = await turns.createTurn(
       WORKSPACE,
       conversationId,
@@ -1432,6 +1486,9 @@ describe.skipIf(!PROOF_URL)("stale-turn reclaim", () => {
     expect(row?.status).toBe("failed");
     expect(row?.error).toBe(AGENT_NEVER_STARTED_MESSAGE);
     expect(row?.errorCode).toBe("agent_start_failed");
+    // Nothing ever ran, so there is nothing to stop: no abort flag.
+    // MUTATION-PROOF for the `(started_at IS NOT NULL)` arm of the flag.
+    expect(row?.abortRequested).toBe(false);
   });
 
   it("a fresh revival restarts the ceiling budget", async () => {
@@ -1469,6 +1526,145 @@ describe.skipIf(!PROOF_URL)("stale-turn reclaim", () => {
 
     const row = await db.turn.findUnique({ where: { id: turn.id } });
     expect(row?.status).toBe("dispatched");
+  });
+});
+
+/** A running, fenced turn — the shape the heartbeat and stall tests start
+ * from (shared by the two describes below). */
+const seedRunningTurn = async (suffix: string) => {
+  const { conversationId, sandboxId } = await seedTalkable(suffix);
+  const turn = await turns.createTurn(WORKSPACE, conversationId, "w", WEB_A);
+  await dueWork.claimDueWork(RUNNER_A, 5);
+  await turns.applyTurnEvents(
+    reporter(RUNNER_A, sandboxId),
+    conversationId,
+    turn.id,
+    [{ type: "turn.started" }],
+  );
+  return { conversationId, sandboxId, turnId: turn.id };
+};
+
+describe.skipIf(!PROOF_URL)("turn progress stamping", () => {
+  it("stamps the liveness clock and the sandbox idle clock together", async () => {
+    const { conversationId, sandboxId, turnId } =
+      await seedRunningTurn("progress");
+    await db.sandbox.update({
+      where: { id: sandboxId },
+      data: { lastActiveAt: new Date(Date.now() - 10 * 60_000) },
+    });
+
+    await turns.applyTurnProgress(
+      reporter(RUNNER_A, sandboxId),
+      conversationId,
+      turnId,
+    );
+
+    const row = await db.turn.findUnique({ where: { id: turnId } });
+    expect(row?.lastProgressAt).not.toBeNull();
+    const box = await db.sandbox.findUnique({ where: { id: sandboxId } });
+    expect(box!.lastActiveAt!.getTime()).toBeGreaterThan(Date.now() - 5_000);
+  });
+
+  it("an ORPHAN's heartbeat moves neither clock", async () => {
+    // A sweep already failed the turn; the sandbox is still working and
+    // still heartbeating. Stamping the sandbox's idle clock here would let
+    // an orphan defer its own idle-stop forever. MUTATION-PROOF for the
+    // `status = 'running'` guard and the matched-row gate.
+    const { conversationId, sandboxId, turnId } =
+      await seedRunningTurn("progress-orphan");
+    await db.turn.update({
+      where: { id: turnId },
+      data: { status: "failed", finishedAt: new Date() },
+    });
+    const before = new Date(Date.now() - 10 * 60_000);
+    await db.sandbox.update({
+      where: { id: sandboxId },
+      data: { lastActiveAt: before },
+    });
+
+    await turns.applyTurnProgress(
+      reporter(RUNNER_A, sandboxId),
+      conversationId,
+      turnId,
+    );
+
+    const row = await db.turn.findUnique({ where: { id: turnId } });
+    expect(row?.lastProgressAt).toBeNull();
+    const box = await db.sandbox.findUnique({ where: { id: sandboxId } });
+    expect(box!.lastActiveAt!.getTime()).toBe(before.getTime());
+  });
+
+  it("a foreign sandbox cannot stamp another agent's turn", async () => {
+    // Same law as every reporter write: the fence is the authenticated
+    // sandbox, not the payload's ids.
+    const { conversationId, turnId } = await seedRunningTurn("progress-mine");
+    const foreign = await seedTalkable("progress-foreign");
+
+    await turns.applyTurnProgress(
+      reporter(RUNNER_A, foreign.sandboxId),
+      conversationId,
+      turnId,
+    );
+
+    const row = await db.turn.findUnique({ where: { id: turnId } });
+    expect(row?.lastProgressAt).toBeNull();
+  });
+});
+
+describe.skipIf(!PROOF_URL)("the stall arm", () => {
+  it("fails a running turn whose heartbeat went silent past the window", async () => {
+    const { conversationId, turnId } = await seedRunningTurn("stall-silent");
+    // Last heartbeat 11 minutes ago, against the pinned 600s window.
+    await db.$executeRaw`UPDATE turns SET last_progress_at = now() - interval '11 minutes' WHERE id = ${turnId}`;
+
+    const swept = await dueWork.failStalledTurns();
+
+    expect(swept).toContainEqual({
+      turnId,
+      conversationId,
+      error: TURN_STALLED_MESSAGE,
+      errorCode: "turn_stalled",
+    });
+    const row = await db.turn.findUnique({ where: { id: turnId } });
+    expect(row?.status).toBe("failed");
+    expect(row?.error).toBe(TURN_STALLED_MESSAGE);
+    expect(row?.errorCode).toBe("turn_stalled");
+    // Flagged for the abort claim arm — silence does not mean stopped.
+    expect(row?.abortRequested).toBe(true);
+    // And the conversation is free again.
+    const next = await turns.createTurn(WORKSPACE, conversationId, "n", WEB_A);
+    expect(next.status).toBe("queued");
+  });
+
+  it("leaves a turn whose heartbeat is fresh", async () => {
+    const { conversationId, sandboxId, turnId } =
+      await seedRunningTurn("stall-fresh");
+    await turns.applyTurnProgress(
+      reporter(RUNNER_A, sandboxId),
+      conversationId,
+      turnId,
+    );
+
+    await dueWork.failStalledTurns();
+
+    const row = await db.turn.findUnique({ where: { id: turnId } });
+    expect(row?.status).toBe("running");
+  });
+
+  it("never touches a turn that has NO heartbeat clock — the skew fence", async () => {
+    // An agent image that predates the heartbeat never stamps the clock:
+    // its turns stay ceiling-bounded exactly as before, however long they
+    // run. Pins the behavior; the explicit `IS NOT NULL` in the arm is
+    // stated intent (SQL's null comparison already excludes these rows, so
+    // dropping the predicate alone would not change the outcome).
+    const { turnId } = await seedRunningTurn("stall-skew");
+    await db.$executeRaw`UPDATE turns SET created_at = now() - interval '25 minutes' WHERE id = ${turnId}`;
+
+    await dueWork.failStalledTurns();
+
+    const row = await db.turn.findUnique({ where: { id: turnId } });
+    expect(row?.status).toBe("running");
+    expect(row?.lastProgressAt).toBeNull();
   });
 });
 
@@ -1966,6 +2162,125 @@ describe.skipIf(!PROOF_URL)("the runner fence on turn reporting", () => {
       select: { harnessSessionRef: true },
     });
     expect(conversation?.harnessSessionRef).toBe("sess-legit");
+  });
+
+  it("SALVAGES usage and the session ref from a report that lost to a sweep", async () => {
+    // The ceiling failed the turn while the sandbox was still working; the
+    // real close arrives late and its status write is a fenced no-op. The
+    // two things only the report knows — what the turn cost, and where its
+    // session lives — must survive anyway: without the ref, the NEXT turn
+    // resumes a stranger.
+    const { conversationId, sandboxId } = await seedTalkable(
+      "salvage-ok",
+      RUNNER_A,
+    );
+    const turn = await turns.createTurn(WORKSPACE, conversationId, "l", WEB_A);
+    await dueWork.claimDueWork(RUNNER_A, 5);
+    await turns.applyTurnEvents(
+      reporter(RUNNER_A, sandboxId),
+      conversationId,
+      turn.id,
+      [{ type: "turn.started" }],
+    );
+    await db.$executeRaw`UPDATE turns SET created_at = now() - interval '90 minutes' WHERE id = ${turn.id}`;
+    await dueWork.reclaimStaleTurns();
+
+    await turns.finishTurn({
+      reporter: reporter(RUNNER_A, sandboxId),
+      conversationId,
+      turnId: turn.id,
+      status: "done",
+      usage: { inputTokens: 12, outputTokens: 34 },
+      sessionRef: "sess-salvaged",
+    });
+
+    const row = await db.turn.findUnique({ where: { id: turn.id } });
+    // The sweep's verdict stands — the loser rewrites nothing about the row
+    // itself except the usage it alone knows.
+    expect(row?.status).toBe("failed");
+    expect(row?.errorCode).toBe("turn_time_limit");
+    expect(row?.usage).toEqual({ inputTokens: 12, outputTokens: 34 });
+    const conversation = await db.conversation.findUnique({
+      where: { id: conversationId },
+      select: { harnessSessionRef: true },
+    });
+    expect(conversation?.harnessSessionRef).toBe("sess-salvaged");
+  });
+
+  it("the salvage keeps the fence: a foreign sandbox's late report writes NOTHING", async () => {
+    const victim = await seedTalkable("salvage-v", RUNNER_A);
+    const attacker = await seedTalkable("salvage-a", RUNNER_A);
+    const turn = await turns.createTurn(
+      WORKSPACE,
+      victim.conversationId,
+      "l",
+      WEB_A,
+    );
+    await dueWork.claimDueWork(RUNNER_A, 5);
+    await turns.applyTurnEvents(
+      reporter(RUNNER_A, victim.sandboxId),
+      victim.conversationId,
+      turn.id,
+      [{ type: "turn.started" }],
+    );
+    await db.$executeRaw`UPDATE turns SET created_at = now() - interval '90 minutes' WHERE id = ${turn.id}`;
+    await dueWork.reclaimStaleTurns();
+
+    await turns.finishTurn({
+      reporter: reporter(RUNNER_A, attacker.sandboxId),
+      conversationId: victim.conversationId,
+      turnId: turn.id,
+      status: "done",
+      usage: { inputTokens: 1, outputTokens: 1 },
+      sessionRef: "neighbour-controlled-session",
+    });
+
+    const row = await db.turn.findUnique({ where: { id: turn.id } });
+    expect(row?.usage).toBeNull();
+    const conversation = await db.conversation.findUnique({
+      where: { id: victim.conversationId },
+      select: { harnessSessionRef: true },
+    });
+    expect(conversation?.harnessSessionRef).toBeNull();
+  });
+
+  it("the salvage never repoints a conversation that already moved on", async () => {
+    // A NEWER turn is underway when the dying boot's late report lands: its
+    // own close will persist a fresher ref, and the stale one must not win.
+    // Usage still salvages — it belongs to the dead turn, not the live one.
+    const { conversationId, sandboxId } = await seedTalkable(
+      "salvage-moved-on",
+      RUNNER_A,
+    );
+    const turn = await turns.createTurn(WORKSPACE, conversationId, "l", WEB_A);
+    await dueWork.claimDueWork(RUNNER_A, 5);
+    await turns.applyTurnEvents(
+      reporter(RUNNER_A, sandboxId),
+      conversationId,
+      turn.id,
+      [{ type: "turn.started" }],
+    );
+    await db.$executeRaw`UPDATE turns SET created_at = now() - interval '90 minutes' WHERE id = ${turn.id}`;
+    await dueWork.reclaimStaleTurns();
+    // The conversation is free again — the user sends the next message.
+    await turns.createTurn(WORKSPACE, conversationId, "next", WEB_A);
+
+    await turns.finishTurn({
+      reporter: reporter(RUNNER_A, sandboxId),
+      conversationId,
+      turnId: turn.id,
+      status: "done",
+      usage: { inputTokens: 5, outputTokens: 6 },
+      sessionRef: "stale-boot-session",
+    });
+
+    const row = await db.turn.findUnique({ where: { id: turn.id } });
+    expect(row?.usage).toEqual({ inputTokens: 5, outputTokens: 6 });
+    const conversation = await db.conversation.findUnique({
+      where: { id: conversationId },
+      select: { harnessSessionRef: true },
+    });
+    expect(conversation?.harnessSessionRef).toBeNull();
   });
 
   it("marks the turn running when the sandbox says it started", async () => {

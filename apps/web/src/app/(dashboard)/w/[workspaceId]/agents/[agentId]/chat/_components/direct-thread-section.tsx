@@ -2,13 +2,18 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
+import { toast } from "sonner";
 import { Button } from "@onecli/ui/components/button";
 import { Skeleton } from "@onecli/ui/components/skeleton";
 import { MAX_JOINING_FOLLOW_UPS } from "@onecli/api/validations/conversation";
 import { queryKeys } from "@/lib/api/keys";
 import { ApiError } from "@/lib/api/client";
 import { foldTranscript } from "@/lib/chat/transcript";
-import { activeTurn, isJoiningTurn } from "@/lib/chat/turns";
+import {
+  activeTurn,
+  isJoiningTurn,
+  resendableKeylessTurn,
+} from "@/lib/chat/turns";
 import {
   useAbortTurn,
   useDirectConversation,
@@ -22,6 +27,9 @@ import { usePathname } from "next/navigation";
 import { agentSectionPath } from "@/lib/navigation";
 import { useAgentPageAgent } from "../../_components/agent-page-frame";
 import { EmptyState } from "../../_components/empty-state";
+import { useCreateThenAttachSecret } from "@/hooks/use-create-then-attach-secret";
+import { SecretDialog } from "@/app/(dashboard)/w/[workspaceId]/connections/_components/secret-dialog";
+import type { Turn } from "@/lib/api";
 import { ChatThread } from "./chat-thread";
 import { Composer } from "./composer";
 import { OfflineBanner } from "./offline-banner";
@@ -82,6 +90,46 @@ export const DirectThreadSection = () => {
 
   const turns = turnsQuery.data ?? [];
   const active = activeTurn(turns);
+
+  // In-place model-key door for the no_model_key notice: the shared
+  // create-then-attach seam, mounted OVER the chat so fixing the gap never
+  // navigates away from the conversation. Once the key attaches, the message
+  // that failed for lack of one is re-sent so the agent answers the thing
+  // the user already asked. Turns are read FRESH from the cache — two awaits
+  // pass between the save click and the attach settling, so a render-time
+  // closure would be stale — and `resendableKeylessTurn` holds the guards
+  // (the user's own newest turn only, no attachments, nothing running).
+  // Known-accepted: React Query drops mutate callbacks after unmount, so
+  // navigating away mid-attach skips the resend; the notice still offers
+  // the manual path.
+  const [keyDialogOpen, setKeyDialogOpen] = useState(false);
+  const { secretActions: keySecretActions, onSaved: onKeySaved } =
+    useCreateThenAttachSecret(agentId, {
+      onAttached: () => {
+        if (conversationId === undefined) return;
+        const fresh =
+          qc.getQueryData<Turn[]>(
+            queryKeys.conversations.turns(conversationId),
+          ) ?? [];
+        const failed = resendableKeylessTurn(fresh);
+        if (failed) {
+          sendMessage.mutate({ message: failed.message });
+          return;
+        }
+        // No resend fired (files on the failed turn, something running, an
+        // older question) — the attach still worked, and silence here would
+        // read as failure. Say so; name the manual step when files are why.
+        const lastOwn = [...fresh]
+          .reverse()
+          .find((turn) => turn.userId !== null);
+        toast.success(
+          lastOwn?.errorCode === "no_model_key" &&
+            lastOwn.attachments.length > 0
+            ? "Model key connected. Re-send your message to include its files."
+            : "Model key connected.",
+        );
+      },
+    });
 
   // The cap refusal ("give me a moment to catch up") describes a STATE — a
   // full parked backlog — so it clears itself once that state passes. The
@@ -217,8 +265,17 @@ export const DirectThreadSection = () => {
           pending={pending}
           conversationId={conversationId}
           modelsHref={agentSectionPath(pathname, agentId, "models")}
+          onConnectModelKey={() => setKeyDialogOpen(true)}
         />
       )}
+
+      <SecretDialog
+        open={keyDialogOpen}
+        onOpenChange={setKeyDialogOpen}
+        onSaved={onKeySaved}
+        allowedTypes={["anthropic", "openai"]}
+        secretActions={keySecretActions}
+      />
 
       {stream.status === "reconnecting" && (
         <p className="text-muted-foreground animate-pulse px-4 py-1 text-center text-xs">

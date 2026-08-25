@@ -161,8 +161,8 @@ describe("assertCanInviteMember (seats = members + pending invites)", () => {
     },
   );
 
-  it("reports members + pending invites in the usage overview", async () => {
-    state.subscriptionStatus = "team";
+  it("reports members + pending invites in the usage overview (legacy team keeps its 10 seats)", async () => {
+    state.subscriptionStatus = "team-legacy";
     state.count = 7;
     state.inviteCount = 2;
     const overview = await getUsageOverview("org-1");
@@ -315,7 +315,7 @@ describe("getOrgLimits entitlement gate (via assertCanCreateSecret)", () => {
 });
 
 describe("team-tier asserts (scale, enterprise ⊇ team)", () => {
-  it.each(["team", "scale", "enterprise"])(
+  it.each(["team", "team-legacy", "scale", "enterprise"])(
     "allows granular access and workspace sharing on the %s plan",
     async (status) => {
       state.subscriptionStatus = status;
@@ -343,11 +343,11 @@ describe("team-tier asserts (scale, enterprise ⊇ team)", () => {
 
 describe("assertCanCreateAgent + per-org maxAgentsOverride", () => {
   it("allows creation below the plan limit and blocks at it (no override)", async () => {
-    state.subscriptionStatus = "scale"; // 50 agents
-    state.agentCount = 49;
+    state.subscriptionStatus = "scale"; // 20 agents
+    state.agentCount = 19;
     await expect(assertCanCreateAgent("org-1")).resolves.toBeUndefined();
 
-    state.agentCount = 50;
+    state.agentCount = 20;
     try {
       await assertCanCreateAgent("org-1");
       expect.unreachable("should have thrown QuotaExceededError");
@@ -355,8 +355,8 @@ describe("assertCanCreateAgent + per-org maxAgentsOverride", () => {
       expect(err).toBeInstanceOf(QuotaExceededError);
       const quota = err as QuotaExceededError;
       expect(quota.resource).toBe("agents");
-      expect(quota.current).toBe(50);
-      expect(quota.limit).toBe(50);
+      expect(quota.current).toBe(20);
+      expect(quota.limit).toBe(20);
       expect(quota.plan).toBe("scale");
     }
   });
@@ -364,7 +364,7 @@ describe("assertCanCreateAgent + per-org maxAgentsOverride", () => {
   it("lets an override raise the cap past the plan limit", async () => {
     state.subscriptionStatus = "scale";
     state.maxAgentsOverride = 600;
-    state.agentCount = 526; // far over scale's 50, under the override
+    state.agentCount = 526; // far over scale's 20, under the override
     await expect(assertCanCreateAgent("org-1")).resolves.toBeUndefined();
 
     state.agentCount = 600;
@@ -428,9 +428,9 @@ describe("assertCanCreateAgent + per-org maxAgentsOverride", () => {
 
 describe("assertCanInviteMember + per-org maxMembersOverride", () => {
   it("lets an override raise the seat cap past the plan limit", async () => {
-    state.subscriptionStatus = "scale"; // 25 seats
+    state.subscriptionStatus = "scale"; // 10 seats
     state.maxMembersOverride = 50;
-    state.count = 30; // over scale's 25, under the override
+    state.count = 30; // over scale's 10, under the override
     state.inviteCount = 4;
     await expect(assertCanInviteMember("org-1")).resolves.toBeUndefined();
 
@@ -451,7 +451,7 @@ describe("assertCanInviteMember + per-org maxMembersOverride", () => {
   });
 
   it("replaces the plan limit in both directions (an override can tighten)", async () => {
-    state.subscriptionStatus = "team"; // 10 seats
+    state.subscriptionStatus = "team"; // 5 seats
     state.maxMembersOverride = 2;
     state.count = 2;
     await expect(assertCanInviteMember("org-1")).rejects.toBeInstanceOf(
@@ -478,7 +478,7 @@ describe("assertCanInviteMember + per-org maxMembersOverride", () => {
       overview.resources.map((r) => [r.name, r.limit]),
     );
     expect(byName["Members"]).toBe(50);
-    expect(byName["Agents"]).toBe(50); // scale's plan default, not overridden
+    expect(byName["Agents"]).toBe(20); // scale's plan default, not overridden
     expect(byName["Workspaces"]).toBe(Infinity);
   });
 

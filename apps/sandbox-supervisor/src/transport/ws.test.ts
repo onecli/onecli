@@ -201,6 +201,32 @@ describe("connection", () => {
     expect(sockets[0]!.sent.length).toBeLessThanOrEqual(MAX_OUTBOUND_MESSAGES);
   });
 
+  it("drops liveness heartbeats while the channel is down — never buffers them", async () => {
+    // A beat that would sit in a dead channel's backlog is stale on arrival,
+    // and a long outage's worth of them would flood the runner's report
+    // queue on reconnect — racing the very turn.result frames the backlog
+    // exists to preserve. The next timer tick re-beats within a minute of
+    // the channel coming back; other kinds still buffer.
+    const { transport, sockets } = setup();
+    transport.send({ kind: "progress", turnId: "t1", conversationId: "cv1" });
+    transport.send({ kind: "ready", harness: "fake" });
+    sockets[0]!.open();
+
+    const kinds = sockets[0]!.sent.map(
+      (raw) => (JSON.parse(raw) as { kind: string }).kind,
+    );
+    expect(kinds).toContain("ready");
+    expect(kinds).not.toContain("progress");
+
+    // And a beat sent while the socket IS open writes through like anything
+    // else — the drop is a disconnected-only rule.
+    transport.send({ kind: "progress", turnId: "t1", conversationId: "cv1" });
+    const after = sockets[0]!.sent.map(
+      (raw) => (JSON.parse(raw) as { kind: string }).kind,
+    );
+    expect(after).toContain("progress");
+  });
+
   it("gives up after the attempt limit and ends the stream", async () => {
     const { transport, sockets } = setup({ maxAttempts: 1 });
     sockets[0]!.fail();

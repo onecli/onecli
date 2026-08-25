@@ -31,6 +31,10 @@ export const onboardingRoutes = () => {
       // body is optional
     }
 
+    // The web flow no longer reads setupState (v2 onboarding dropped the
+    // install/test-run steps) — the bookkeeping below is kept deliberately:
+    // shipped install scripts in the wild POST here, and installType /
+    // installedAt / connectedAt remain operator-queryable install telemetry.
     const rawType = body.type;
     const installType =
       rawType === "migrate"

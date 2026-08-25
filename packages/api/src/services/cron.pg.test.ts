@@ -48,6 +48,8 @@ beforeAll(async () => {
   // NEXT_PUBLIC_EDITION is cloud — these assertions are flat-team semantics.
   process.env.EDITION = "onprem";
   process.env.NEXT_PUBLIC_EDITION = "onprem";
+  // The sweep-settle test ages a run against THIS value, not the prod default.
+  process.env.TURN_CEILING_SECONDS = "1800";
 
   ({ db } = await import("@onecli/db"));
   dueWork = await import("./due-work");
@@ -516,6 +518,50 @@ describe.skipIf(!PROOF_URL)("settling and delivery", () => {
     });
     expect(cron.lastOutcome).toBe("ok");
     expect(cron.consecutiveFailures).toBe(0);
+  });
+
+  it("a ceiling-swept run still settles: outcome, strike, and the delivery", async () => {
+    // The sweep's raw UPDATE bypasses finishTurn (whose late real report is
+    // a fenced no-op), so the sweep's returned rows are the ONLY settle
+    // chance — this is the route's pairing, verbatim. Without it, a
+    // ceiling-killed schedule showed a stale lastOutcome forever and never
+    // counted a strike.
+    const { cronId, run, originId } = await fireAndGetRun("sweep-settle");
+    // Started, so the sweep files it under the time-limit copy (a
+    // never-started run gets the start-failure arm instead).
+    await db.turn.update({
+      where: { id: run.id },
+      data: { startedAt: new Date() },
+    });
+    await db.$executeRaw`UPDATE turns SET created_at = now() - interval '40 minutes' WHERE id = ${run.id}`;
+
+    await turnService.settleSweptTurns(await dueWork.reclaimStaleTurns());
+
+    const cron = await db.agentCron.findUniqueOrThrow({
+      where: { id: cronId },
+      select: { lastOutcome: true, consecutiveFailures: true },
+    });
+    expect(cron.lastOutcome).toBe("failed");
+    expect(cron.consecutiveFailures).toBe(1);
+
+    const delivery = await db.turn.findFirstOrThrow({
+      where: { conversationId: originId, source: "cron" },
+      select: { id: true },
+    });
+    const text = await db.turnEvent.findFirstOrThrow({
+      where: { turnId: delivery.id, type: "text" },
+      select: { payload: true },
+    });
+    expect((text.payload as { text: string }).text).toContain("time limit");
+
+    // And the sweep flagged the orphan for the abort claim arm's failed leg.
+    const row = await db.turn.findUniqueOrThrow({
+      where: { id: run.id },
+      select: { abortRequested: true, errorCode: true, status: true },
+    });
+    expect(row.status).toBe("failed");
+    expect(row.errorCode).toBe("turn_time_limit");
+    expect(row.abortRequested).toBe(true);
   });
 
   it("a failed run delivers the failure and counts toward auto-disable", async () => {

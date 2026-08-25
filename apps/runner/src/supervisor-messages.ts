@@ -254,6 +254,19 @@ export const createSupervisorMessageHandler = ({
           message.event,
         );
         break;
+      case "progress":
+        // The liveness heartbeat rides `report()` as its own single-event
+        // post, never the collector: heartbeats must not delay transcript
+        // batches, and a control plane that predates the kind rejects one
+        // heartbeat's POST instead of poisoning a shared batch. As with
+        // `event`, `sandboxId` is the authenticated channel's.
+        report({
+          kind: "turn.progress",
+          sandboxId,
+          conversationId: message.conversationId,
+          turnId: message.turnId,
+        });
+        break;
       case "turn.result":
         // Anything still buffered belongs before the terminal report.
         collector.flush(message.turnId);

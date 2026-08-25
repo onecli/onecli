@@ -37,6 +37,8 @@ interface ChatThreadProps {
   conversationId: string;
   /** Where a "connect a model key" notice points. */
   modelsHref?: string;
+  /** In-place add-key door for the no_model_key notice. */
+  onConnectModelKey?: () => void;
 }
 
 export const ChatThread = ({
@@ -45,6 +47,7 @@ export const ChatThread = ({
   pending,
   conversationId,
   modelsHref,
+  onConnectModelKey,
 }: ChatThreadProps) => {
   const targetIds = new Set(turns.map((turn) => turn.id));
   const followUpsByTarget = new Map<string, Turn[]>();
@@ -103,6 +106,7 @@ export const ChatThread = ({
                   rendered={folded.get(turn.id)}
                   followUps={followUpsByTarget.get(turn.id)}
                   modelsHref={modelsHref}
+                  onConnectModelKey={onConnectModelKey}
                 />
                 {cardsAfterTurn.get(turn.id)?.map(({ approval, settled }) => (
                   <InlineApprovalItem

@@ -47,7 +47,13 @@ vi.mock("@/lib/onboarding/actions", () => ({
 vi.mock("@/lib/workspaces/actions", () => ({ getActiveWorkspacePath }));
 
 vi.mock("@/lib/onboarding/onboarding-context", () => ({
-  OnboardingProvider: ({ children }: { children: React.ReactNode }) => children,
+  OnboardingProvider: ({
+    children,
+    initialWorkspaceId,
+  }: {
+    children: React.ReactNode;
+    initialWorkspaceId: string | null;
+  }) => <div data-workspace={initialWorkspaceId ?? ""}>{children}</div>,
 }));
 vi.mock("@/lib/onboarding/_components/flow-chrome", () => ({
   FlowChrome: ({ children }: { children: React.ReactNode }) => (
@@ -57,19 +63,16 @@ vi.mock("@/lib/onboarding/_components/flow-chrome", () => ({
 vi.mock("@/lib/onboarding/_components/onboarding-footer", () => ({
   OnboardingFooter: () => null,
 }));
-vi.mock("@/lib/onboarding/_components/skip-introduction-link", () => ({
-  SkipIntroductionLink: () => null,
+vi.mock("@/lib/onboarding/_components/onboarding-escape-hatch", () => ({
+  OnboardingEscapeHatch: () => null,
 }));
 
 import OnboardingLayout from "./onboarding-layout";
 
 const emptyProgress = {
   discovery: [],
-  interests: [],
-  flowType: null,
-  agent: null,
   agentName: null,
-  setupStage: "pending" as const,
+  createdAgentId: null,
 };
 
 beforeEach(() => {
@@ -83,10 +86,30 @@ beforeEach(() => {
 afterEach(cleanup);
 
 describe("onboarding layout boot (billing edition)", () => {
-  it("boots the flow for a free, not-yet-onboarded user", async () => {
+  it("boots the flow for a free, not-yet-onboarded user, with the boot-resolved workspace", async () => {
     render(<OnboardingLayout>step</OnboardingLayout>);
-    expect(await screen.findByTestId("flow")).toHaveTextContent("step");
+    const flow = await screen.findByTestId("flow");
+    expect(flow).toHaveTextContent("step");
+    // The default workspace is parsed off the active-workspace path so the
+    // flow's API calls can target a workspace the onboarding URL doesn't carry.
+    expect(flow.parentElement).toHaveAttribute("data-workspace", "p1");
     expect(replace).not.toHaveBeenCalled();
+  });
+
+  it("bounces a completed user to the dashboard — onboarding has no return door", async () => {
+    checkOnboardingComplete.mockResolvedValue(true);
+    render(<OnboardingLayout>step</OnboardingLayout>);
+    await waitFor(() => expect(replace).toHaveBeenCalledWith("/w/p1/overview"));
+    expect(screen.queryByTestId("flow")).toBeNull();
+  });
+
+  it("bounces when no workspace resolved — the flow can't create into nowhere", async () => {
+    // ensureUserDefaultOrgAndWorkspace found no default workspace: the active
+    // path is /create-org, which is where the user must go first.
+    getActiveWorkspacePath.mockResolvedValue("/create-org");
+    render(<OnboardingLayout>step</OnboardingLayout>);
+    await waitFor(() => expect(replace).toHaveBeenCalledWith("/create-org"));
+    expect(screen.queryByTestId("flow")).toBeNull();
   });
 
   it("FAILS OPEN when a boot action rejects — home, never an eternal spinner", async () => {

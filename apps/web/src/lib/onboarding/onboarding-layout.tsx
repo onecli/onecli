@@ -1,8 +1,8 @@
 "use client";
 
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect } from "react";
 import Image from "next/image";
-import { usePathname, useRouter } from "next/navigation";
+import { useRouter } from "next/navigation";
 import { useTheme } from "next-themes";
 import { Moon, Sun, LogOut, Loader2 } from "lucide-react";
 import { Button } from "@onecli/ui/components/button";
@@ -13,15 +13,19 @@ import {
   getOnboardingProgress,
 } from "@/lib/onboarding/actions";
 import { getActiveWorkspacePath } from "@/lib/workspaces/actions";
+import { WORKSPACE_PATH_RE } from "@/lib/navigation";
 import { OnboardingProvider } from "@/lib/onboarding/onboarding-context";
-import {
-  isStepAllowed,
-  stepSlugFromPathname,
-  type OnboardingProgress,
-} from "@/lib/onboarding/steps";
+import { type OnboardingProgress } from "@/lib/onboarding/steps";
 import { FlowChrome } from "@/lib/onboarding/_components/flow-chrome";
 import { OnboardingFooter } from "@/lib/onboarding/_components/onboarding-footer";
-import { SkipIntroductionLink } from "@/lib/onboarding/_components/skip-introduction-link";
+import { OnboardingEscapeHatch } from "@/lib/onboarding/_components/onboarding-escape-hatch";
+
+interface OnboardingBoot {
+  progress: OnboardingProgress;
+  /** The default workspace the flow creates into — resolved once at boot so
+   * the API calls can target a workspace the URL doesn't carry. */
+  workspaceId: string;
+}
 
 export default function OnboardingLayout({
   children,
@@ -31,12 +35,8 @@ export default function OnboardingLayout({
   const { resolvedTheme, setTheme } = useTheme();
   const { signOut, isAuthenticated, isLoading } = useAuth();
   const router = useRouter();
-  const pathname = usePathname();
-  // The completion bounce is decided once per hard mount, against the landing
-  // path — in-session step navigation must never re-trigger it.
-  const initialPathRef = useRef(pathname);
   const [signingOut, setSigningOut] = useState(false);
-  const [boot, setBoot] = useState<OnboardingProgress | null>(null);
+  const [boot, setBoot] = useState<OnboardingBoot | null>(null);
 
   useEffect(() => {
     if (isLoading) return;
@@ -62,22 +62,17 @@ export default function OnboardingLayout({
         getActiveWorkspacePath(),
         getOnboardingProgress(),
       ]);
-      // Completed users may stay only on a mid-flow step their saved progress
-      // supports: fetching the install script marks onboarding complete
-      // server-side, so a refresh on /coding-agent, /autonomous-agent or /run
-      // (or on /agent after going back) must not eject them. Everything else
-      // — the index, /welcome, or a step their progress can't reach — bounces
-      // to the dashboard. Decided once per hard mount; in-session step
-      // navigation never re-triggers it.
-      const landingSlug = stepSlugFromPathname(initialPathRef.current);
-      const completedMayStay =
-        landingSlug !== null &&
-        landingSlug !== "welcome" &&
-        isStepAllowed(landingSlug, progress);
-      if (status !== "free" || (complete && !completedMayStay)) {
+      // Completed means done: the flow stamps completion only on its final
+      // click, which navigates away — so a completed user landing anywhere in
+      // onboarding is a returning visitor, and the dashboard is their home.
+      // A path without a workspace ("/create-org": the lazy default-workspace
+      // creation found nothing) also bounces — the flow can't create an agent
+      // with nowhere to put it, and that page is the way to get one.
+      const workspaceId = path.match(WORKSPACE_PATH_RE)?.[1];
+      if (status !== "free" || complete || !workspaceId) {
         router.replace(path);
       } else {
-        setBoot(progress);
+        setBoot({ progress, workspaceId });
       }
     };
     // Fail OPEN: a broken boot must never strand the user on the spinner.
@@ -93,62 +88,67 @@ export default function OnboardingLayout({
 
   return (
     <div className="flex min-h-svh flex-col">
-      <header className="mx-auto flex h-14 w-full max-w-5xl shrink-0 items-center justify-between border-b px-6">
-        <Image
-          src="/onecli-full-logo.png"
-          alt="OneCLI"
-          width={110}
-          height={32}
-          priority
-          className="dark:hidden"
-        />
-        <Image
-          src="/onecli-full-logo-dark.png"
-          alt="OneCLI"
-          width={110}
-          height={32}
-          priority
-          className="hidden dark:block"
-        />
-        <div className="flex items-center gap-1">
-          <Button
-            variant="ghost"
-            size="icon-sm"
-            onClick={() =>
-              setTheme(resolvedTheme === "dark" ? "light" : "dark")
-            }
-          >
-            <Sun className="size-4 rotate-0 scale-100 transition-all dark:-rotate-90 dark:scale-0" />
-            <Moon className="absolute size-4 rotate-90 scale-0 transition-all dark:rotate-0 dark:scale-100" />
-            <span className="sr-only">Toggle theme</span>
-          </Button>
-          <Button
-            variant="ghost"
-            size="sm"
-            onClick={handleSignOut}
-            disabled={signingOut}
-          >
-            {signingOut ? (
-              <Loader2 className="size-4 animate-spin" />
-            ) : (
-              <LogOut className="size-4" />
-            )}
-            {signingOut ? "Signing out..." : "Sign out"}
-          </Button>
+      <header className="border-b">
+        <div className="mx-auto flex h-14 w-full max-w-5xl items-center justify-between px-6">
+          <Image
+            src="/onecli-full-logo.png"
+            alt="OneCLI"
+            width={110}
+            height={32}
+            priority
+            className="dark:hidden"
+          />
+          <Image
+            src="/onecli-full-logo-dark.png"
+            alt="OneCLI"
+            width={110}
+            height={32}
+            priority
+            className="hidden dark:block"
+          />
+          <div className="flex items-center gap-1">
+            <Button
+              variant="ghost"
+              size="icon-sm"
+              onClick={() =>
+                setTheme(resolvedTheme === "dark" ? "light" : "dark")
+              }
+            >
+              <Sun className="size-4 rotate-0 scale-100 transition-all dark:-rotate-90 dark:scale-0" />
+              <Moon className="absolute size-4 rotate-90 scale-0 transition-all dark:rotate-0 dark:scale-100" />
+              <span className="sr-only">Toggle theme</span>
+            </Button>
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={handleSignOut}
+              disabled={signingOut}
+            >
+              {signingOut ? (
+                <Loader2 className="size-4 animate-spin" />
+              ) : (
+                <LogOut className="size-4" />
+              )}
+              {signingOut ? "Signing out..." : "Sign out"}
+            </Button>
+          </div>
         </div>
       </header>
 
-      <div className="flex flex-1 flex-col items-center overflow-y-auto px-4 pt-[4vh] pb-4 md:px-8">
+      <div className="flex flex-1 flex-col items-center overflow-y-auto px-4 pb-4 md:px-8">
         {boot ? (
-          <OnboardingProvider initial={boot}>
+          <OnboardingProvider
+            initialProgress={boot.progress}
+            initialWorkspaceId={boot.workspaceId}
+          >
             <FlowChrome>{children}</FlowChrome>
             <OnboardingFooter>
-              <SkipIntroductionLink />
+              <OnboardingEscapeHatch />
             </OnboardingFooter>
           </OnboardingProvider>
         ) : (
           <>
-            <div className="flex items-center justify-center pt-[20vh]">
+            <div className="my-auto flex items-center justify-center">
               <Loader2 className="text-muted-foreground size-5 animate-spin" />
             </div>
             <OnboardingFooter />

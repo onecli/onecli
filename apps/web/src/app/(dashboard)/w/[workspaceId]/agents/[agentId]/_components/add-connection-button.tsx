@@ -1,13 +1,10 @@
 "use client";
 
-import { useMemo, useRef } from "react";
 import { usePathname } from "next/navigation";
 import { Plus } from "lucide-react";
 import { Button } from "@onecli/ui/components/button";
-import { useAttachSecret } from "@/hooks/use-grants";
+import { useCreateThenAttachSecret } from "@/hooks/use-create-then-attach-secret";
 import { SecretDialog } from "@/app/(dashboard)/w/[workspaceId]/connections/_components/secret-dialog";
-import { secrets as secretsApi } from "@/lib/api";
-import type { CreateSecretInput } from "@onecli/api/validations/secret";
 import { ConnectAppPickerDialog } from "./connect-app-picker-dialog";
 
 /**
@@ -38,27 +35,11 @@ export const AddConnectionButton = ({
   onSecretOpenChange: (open: boolean) => void;
 }) => {
   const pathname = usePathname();
-  const attachSecret = useAttachSecret();
 
-  // Create-then-attach for the custom tab: SecretDialog's own onSaved carries
-  // no id, so the create call is intercepted (the SecretActions seam) to
-  // remember it, and the attach fires after the save completes.
-  const createdSecretId = useRef<string | null>(null);
-  const secretActions = useMemo(
-    () => ({
-      createSecret: async (input: CreateSecretInput) => {
-        const created = await secretsApi.create(input);
-        createdSecretId.current = created.id;
-        return created;
-      },
-    }),
-    [],
-  );
-  const onSecretSaved = () => {
-    const secretId = createdSecretId.current;
-    createdSecretId.current = null;
-    if (secretId) attachSecret.mutate({ agentId, secretId });
-  };
+  // Create-then-attach for the custom tab: a secret minted here is granted
+  // to THIS agent the moment it lands (the shared SecretActions seam).
+  const { secretActions, onSaved: onSecretSaved } =
+    useCreateThenAttachSecret(agentId);
 
   return (
     <>

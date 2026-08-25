@@ -243,13 +243,42 @@ export const SANDBOX_IDLE_STOP_SECONDS = positiveInt(
 );
 
 /**
- * Ceiling on a single turn, from when it was posted. A turn that never reaches
- * a terminal state blocks its conversation permanently (the active-turn
- * index), so this bound is what guarantees a conversation always recovers.
+ * Wall-clock backstop on a single turn, from when it was posted. Liveness is
+ * the stall clock below (a wedged turn dies in minutes, not hours); this
+ * bound only exists so a live-but-runaway agent cannot burn tokens forever,
+ * so it is generous — long supervision turns are legitimate. Both together
+ * are what guarantee a conversation always recovers (the active-turn index
+ * makes a stuck non-terminal turn a permanently blocked conversation).
  */
 export const TURN_CEILING_SECONDS = positiveInt(
   process.env.TURN_CEILING_SECONDS,
-  1800,
+  21600,
+);
+
+/**
+ * How long before the ceiling the in-flight warning steers into the live
+ * run (`claimDueWork`'s approaching-ceiling arm): enough runway for the
+ * agent to stop waiting, summarize supervised work, and close the turn
+ * cleanly — instead of dying mid-sleep with no handoff. Generous because
+ * steers inject only at safe points between tool rounds, and a long tool
+ * call (a swarm await, a bg wait) can defer consumption by many minutes.
+ */
+export const TURN_CEILING_WARNING_SECONDS = positiveInt(
+  process.env.TURN_CEILING_WARNING_SECONDS,
+  900,
+);
+
+/**
+ * The liveness clock: a RUNNING turn whose supervisor stopped stamping
+ * progress (`turns.last_progress_at`, heartbeat ~60s) for this long is
+ * wedged — its sandbox died, wedged silently, or lost its channel — and is
+ * failed as `turn_stalled` so the conversation unblocks in minutes instead
+ * of waiting out the ceiling. Turns from agent images that predate the
+ * heartbeat never stamp the clock and stay under the ceiling alone.
+ */
+export const TURN_STALL_SECONDS = positiveInt(
+  process.env.TURN_STALL_SECONDS,
+  600,
 );
 
 /**

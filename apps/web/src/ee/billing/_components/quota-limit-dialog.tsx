@@ -4,6 +4,7 @@ import Link from "next/link";
 import { ArrowRight, Gauge } from "lucide-react";
 import { generateOrgPrefix } from "@/lib/org-navigation";
 import { Button } from "@onecli/ui/components/button";
+import { getPlanConfig, normalizePlan } from "@onecli/api/ee/billing/plans";
 import { UpgradeDialogShell } from "@/lib/components/upgrade-dialog-shell";
 import { UsageBar } from "./usage-bar";
 
@@ -38,7 +39,7 @@ export const QuotaLimitDialog = ({
       onOpenChange={onOpenChange}
       icon={<Gauge className="size-6 text-amber-500" />}
       title={`${resourceName} limit reached`}
-      description={`Your ${plan} plan includes ${limit} ${noun}. Upgrade your plan to create more.`}
+      description={`Your ${getPlanConfig(normalizePlan(plan)).name} plan includes ${limit} ${noun}. Upgrade your plan to create more.`}
       footer={
         <div className="flex w-full gap-3">
           <Button

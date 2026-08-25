@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useRef, useMemo } from "react";
+import { useState, useEffect, useRef, useMemo, type RefObject } from "react";
 import Image from "next/image";
 import { useInvalidateGatewayCache } from "@/hooks/use-invalidate-cache";
 import { toast } from "sonner";
@@ -37,6 +37,7 @@ import { secrets } from "@/lib/api";
 import { queryKeys } from "@/lib/api/keys";
 import type { CreateSecretInput } from "@onecli/api/validations/secret";
 import type { SecretActions } from "./types";
+import { CopyableCommand } from "./copyable-command";
 import {
   OnePasswordPickerDialog,
   type OpDisplay,
@@ -57,6 +58,17 @@ import {
 } from "@onecli/api/validations/secret";
 
 type SecretType = "anthropic" | "openai" | "generic";
+
+/**
+ * Hand focus to an input once it exists — the value input when the name
+ * arrives pre-filled (the VALUE is the missing piece), the name input when
+ * it doesn't. The 100ms outruns Radix's open-autofocus and the type→form
+ * re-render (the input may not be in the DOM at call time); the
+ * optional-chained ref makes a post-close timer a no-op.
+ */
+const focusInputSoon = (ref: RefObject<HTMLInputElement | null>) => {
+  setTimeout(() => ref.current?.focus(), 100);
+};
 
 interface SecretTypeOption {
   value: SecretType;
@@ -221,6 +233,7 @@ export const SecretDialog = ({
   const invalidateCache = useInvalidateGatewayCache();
   const queryClient = useQueryClient();
   const valueInputRef = useRef<HTMLInputElement>(null);
+  const nameInputRef = useRef<HTMLInputElement>(null);
   const [step, setStep] = useState<"type" | "form">("type");
   const [saving, setSaving] = useState(false);
 
@@ -354,7 +367,7 @@ export const SecretDialog = ({
         setValueFormat(prefill.valueFormat ?? "Bearer {value}");
         setParamName(prefill.paramName ?? "");
         setParamFormat(prefill.paramFormat ?? "");
-        setTimeout(() => valueInputRef.current?.focus(), 100);
+        focusInputSoon(valueInputRef);
       } else if (defaultType) {
         const option = SECRET_TYPE_OPTIONS.find((o) => o.value === defaultType);
         setStep("form");
@@ -368,6 +381,12 @@ export const SecretDialog = ({
         setValueFormat("Bearer {value}");
         setParamName("");
         setParamFormat("");
+        // No nameDefault (the generic door): the name is the missing piece.
+        // On a REOPEN the input mounts with the PREVIOUS session's name still
+        // in state (this effect resets it a beat later), so its mount-time
+        // autoFocus can compute false — the explicit focus covers that.
+        if (option?.nameDefault) focusInputSoon(valueInputRef);
+        else focusInputSoon(nameInputRef);
       } else {
         setStep("type");
         setType("anthropic");
@@ -390,6 +409,7 @@ export const SecretDialog = ({
     setHostPattern(option?.hostDefault ?? "");
     setName(option?.nameDefault ?? "");
     setStep("form");
+    if (option?.nameDefault) focusInputSoon(valueInputRef);
   };
 
   const hasPathTarget =
@@ -696,9 +716,10 @@ export const SecretDialog = ({
                     ) : (
                       <>
                         Run{" "}
-                        <code className="bg-muted rounded px-1 py-0.5 text-[11px]">
-                          codex login --device-auth
-                        </code>{" "}
+                        <CopyableCommand
+                          command="codex login --device-auth"
+                          toastMessage="Copied. Run it in your terminal, then upload the auth.json it writes."
+                        />{" "}
                         and upload the auth.json file.{" "}
                         <a
                           href="https://onecli.sh/docs/integrations/openai#setup-codex-oauth"
@@ -717,9 +738,10 @@ export const SecretDialog = ({
               {type === "openai" && isEdit && isOAuthMode && (
                 <p className="text-muted-foreground text-xs">
                   Run{" "}
-                  <code className="bg-muted rounded px-1 py-0.5 text-[11px]">
-                    codex login --device-auth
-                  </code>{" "}
+                  <CopyableCommand
+                    command="codex login --device-auth"
+                    toastMessage="Copied. Run it in your terminal, then upload the auth.json it writes."
+                  />{" "}
                   and upload the auth.json file.{" "}
                   <a
                     href="https://onecli.sh/docs/integrations/openai#setup-codex-oauth"
@@ -735,6 +757,7 @@ export const SecretDialog = ({
               <div className="space-y-2">
                 <Label htmlFor="secret-name">Name</Label>
                 <Input
+                  ref={nameInputRef}
                   id="secret-name"
                   placeholder={
                     type === "anthropic"
@@ -748,7 +771,10 @@ export const SecretDialog = ({
                   value={name}
                   onChange={(e) => setName(e.target.value)}
                   onBlur={() => setNameTouched(true)}
-                  autoFocus
+                  // Focus lands here only when the name opens EMPTY; a
+                  // pre-filled name hands the cursor to the value input (see
+                  // the open effect and handleSelectType).
+                  autoFocus={!name.trim()}
                   className={cn(showNameError && "border-destructive")}
                 />
                 {showNameError && (
@@ -896,7 +922,22 @@ export const SecretDialog = ({
                       ) : (
                         <p className="text-muted-foreground text-xs">
                           {type === "anthropic" ? (
-                            "Paste your API key or OAuth token from the Anthropic Console."
+                            <>
+                              Paste a key from the{" "}
+                              <a
+                                href="https://platform.claude.com/settings/keys"
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                className="text-foreground underline underline-offset-2"
+                              >
+                                Anthropic Console
+                              </a>
+                              , or a token from{" "}
+                              <CopyableCommand
+                                command="claude setup-token"
+                                toastMessage="Copied. Run it in your terminal, then paste the token here."
+                              />
+                            </>
                           ) : type === "openai" ? (
                             <>
                               Paste your API key, or{" "}

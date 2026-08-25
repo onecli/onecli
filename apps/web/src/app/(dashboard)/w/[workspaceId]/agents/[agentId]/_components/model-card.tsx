@@ -110,13 +110,22 @@ export const ModelCard = ({ agentId }: { agentId: string }) => {
           aria-hidden
         />
         <div className="min-w-0">
-          <p className="text-sm font-medium break-words">
-            Running {data.selected.model}
-          </p>
+          <div className="flex flex-wrap items-center gap-x-2">
+            <p className="text-sm font-medium break-words">
+              Running {data.selected.model}
+            </p>
+            {/* The same quiet confirmation an app connection gets (the brand
+                dot, per connected-tab): the key is in and working, said once,
+                in brand green — the subtitle below no longer repeats it. */}
+            <p className="text-brand flex items-center gap-1.5 text-xs font-medium">
+              <span className="bg-brand size-2 rounded-full" aria-hidden />
+              {data.providerLabel} key connected
+            </p>
+          </div>
           <p className="text-muted-foreground text-sm">
             {data.selected.overridden
-              ? `Your choice, on the ${data.providerLabel} key connected below.`
-              : `The default for your ${data.providerLabel} key. Change it here if you'd rather run something else.`}
+              ? "Your choice, on the key connected below."
+              : "The default for this key. Change it here if you'd rather run something else."}
           </p>
         </div>
       </div>

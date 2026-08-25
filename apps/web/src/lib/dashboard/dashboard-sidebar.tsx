@@ -7,6 +7,7 @@ import { usePathname } from "next/navigation";
 import { ChevronLeft } from "lucide-react";
 import { NavMain } from "@dashboard/nav-main";
 import { NavUser } from "@/lib/dashboard/nav-user";
+import { SidebarVersion } from "@/lib/dashboard/sidebar-version";
 import { OrgSwitcher } from "@/lib/dashboard/org-switcher";
 import { AgentsGroup } from "@/lib/dashboard/agents-group";
 import { getNavItems, workspaceNavItems } from "@/lib/nav-config";
@@ -163,6 +164,7 @@ export const DashboardSidebar = ({
           </div>
         )}
         <NavUser />
+        <SidebarVersion />
       </SidebarFooter>
       <SidebarRail />
     </Sidebar>

@@ -5,7 +5,7 @@ import {
   type TurnUsage,
 } from "@onecli/agent-protocol";
 import { ServiceError } from "./errors";
-import { signalWork } from "./due-work";
+import { signalWork, type SweptTurn } from "./due-work";
 import { type PublishedEvent } from "./event-bus";
 import { getEventBus } from "../providers/event-bus";
 import {
@@ -709,8 +709,11 @@ export const abortTurn = async (
     }
 
     // In flight: the runner picks up the abort on its next poll, which the
-    // signal wakes immediately. `abortRequested` on an already-terminal row
-    // is inert (the abort claim arm only reads dispatched/running).
+    // signal wakes immediately. If the turn went terminal under us, the flag
+    // is either inert (`done`/`aborted` — the claim arm never reads those) or
+    // exactly right (`failed` — the claim arm's failed leg exists to stop a
+    // sweep-killed turn's still-working sandbox, which is also what this
+    // race left behind).
     await db.turn.update({
       where: { id: turn.id },
       data: { abortRequested: true },
@@ -863,6 +866,42 @@ export const applyTurnEvents = async (
   // Publish AFTER commit: a subscriber must never see an event that a
   // rollback un-happened, and never one the fence rejected.
   if (published) getEventBus().publish(conversationId, published);
+};
+
+/**
+ * Stamp the turn-liveness clock from a supervisor heartbeat.
+ *
+ * One fenced write: the turn must be RUNNING and belong to the authenticated
+ * reporter (the same two facts as `turnBelongsToReporter`, folded into the
+ * `where` so the stamp and the fence are one statement). The status guard is
+ * load-bearing twice over — a heartbeat for a turn a sweep already failed is
+ * an orphan's, and an orphan must move neither the stall clock nor the idle
+ * clock — which is why `sandbox.lastActiveAt` is stamped only when the turn
+ * row matched.
+ */
+export const applyTurnProgress = async (
+  reporter: ReporterIdentity,
+  conversationId: string,
+  turnId: string,
+): Promise<void> => {
+  const { count } = await db.turn.updateMany({
+    where: {
+      id: turnId,
+      conversationId,
+      status: "running",
+      conversation: {
+        agent: {
+          sandbox: { id: reporter.sandboxId, runnerId: reporter.runnerId },
+        },
+      },
+    },
+    data: { lastProgressAt: new Date() },
+  });
+  if (count === 0) return;
+  await db.sandbox.updateMany({
+    where: { id: reporter.sandboxId },
+    data: { lastActiveAt: new Date() },
+  });
 };
 
 export interface FinishTurnInput {
@@ -1078,9 +1117,10 @@ export const finishTurn = async (input: FinishTurnInput): Promise<void> => {
   }
 
   if (count === 0) {
-    // Either the turn does not exist, or it is not this runner's to finish.
-    // Deliberately one message for both: a runner learns nothing about what
-    // else the control plane holds.
+    // Either the turn does not exist, or it is not this runner's to finish,
+    // or a sweep (ceiling / stall) or strand door already failed it and this
+    // is the real work's late report. Deliberately one message for all of
+    // them: a runner learns nothing about what else the control plane holds.
     log.warn(
       {
         ...input.reporter,
@@ -1089,6 +1129,64 @@ export const finishTurn = async (input: FinishTurnInput): Promise<void> => {
       },
       "finish for a turn this sandbox does not host",
     );
+
+    // THE SALVAGE. When the lost race was against a sweep, the report in
+    // hand is the only copy of two things the sweep could not know: what the
+    // turn cost (`usage`) and where its session lives (`sessionRef` — the
+    // resume handle without which the NEXT turn starts a stranger). Each is
+    // one fenced statement: the write happens only if the named turn is this
+    // reporter's (the full reporter fence — the cross-tenant tests pin it)
+    // AND already terminal, so a bogus id or a foreign sandbox still writes
+    // nothing, and the won-close path above remains the only writer for live
+    // turns. Everything else about the report stays dropped on purpose — the
+    // sweep already settled the automation, and a failed row's copy must not
+    // be rewritten by the loser.
+    if (input.usage) {
+      await db.turn.updateMany({
+        where: {
+          id: input.turnId,
+          conversationId: input.conversationId,
+          status: { in: ["failed", "aborted"] },
+          // Never overwrite: a won close that recorded usage keeps its word.
+          usage: { equals: Prisma.DbNull },
+          conversation: {
+            agent: {
+              sandbox: {
+                id: input.reporter.sandboxId,
+                runnerId: input.reporter.runnerId,
+              },
+            },
+          },
+        },
+        data: { usage: input.usage },
+      });
+    }
+    if (input.sessionRef) {
+      // The extra `none: active` leg is the dying-boot guard: if a NEWER
+      // turn is already underway, its own close will persist a fresher ref —
+      // a stale boot's ref must not repoint a conversation that moved on.
+      await db.conversation.updateMany({
+        where: {
+          id: input.conversationId,
+          agent: {
+            sandbox: {
+              id: input.reporter.sandboxId,
+              runnerId: input.reporter.runnerId,
+            },
+          },
+          turns: {
+            some: {
+              id: input.turnId,
+              status: { in: ["failed", "aborted"] },
+            },
+            none: {
+              status: { in: ACTIVE_TURN_STATUSES as unknown as string[] },
+            },
+          },
+        },
+        data: { harnessSessionRef: input.sessionRef },
+      });
+    }
     return;
   }
 
@@ -1126,9 +1224,47 @@ export const finishTurn = async (input: FinishTurnInput): Promise<void> => {
 const cleanAutomationName = (raw: string): string =>
   stripControl(raw).replace(/\n/g, " ").trim().slice(0, 100);
 
+/**
+ * What the settle chain actually reads — the identity of the run and how it
+ * ended, nothing reporter-shaped. Narrowed from `FinishTurnInput` so the
+ * sweeps (which have no reporter — the control plane itself ended the turn)
+ * can settle through the same chain as a real close.
+ */
+type AutomationSettleInput = Pick<
+  FinishTurnInput,
+  "conversationId" | "turnId" | "status" | "error" | "errorCode"
+>;
+
+/**
+ * Settle automation bookkeeping for turns a SWEEP failed (ceiling / stall).
+ * The sweeps' raw UPDATEs bypass `finishTurn`, and its late real report is a
+ * fenced no-op — so without this, a ceiling-killed cron kept a stale
+ * `lastOutcome` forever, never counted a failure strike, and never delivered
+ * its report. Exactly-once holds structurally: the sweep's
+ * `UPDATE … RETURNING` yields only rows it actually transitioned, and the
+ * losing close can never settle (it returns before the settle call). Rows
+ * settle independently — one broken conversation must not starve the rest.
+ */
+export const settleSweptTurns = async (swept: SweptTurn[]): Promise<void> => {
+  for (const turn of swept) {
+    await settleAutomationRun({
+      conversationId: turn.conversationId,
+      turnId: turn.turnId,
+      status: "failed",
+      error: turn.error,
+      errorCode: turn.errorCode,
+    }).catch((err) =>
+      log.warn(
+        { err, turnId: turn.turnId, conversationId: turn.conversationId },
+        "automation settle failed after sweep",
+      ),
+    );
+  }
+};
+
 /** The run's report body — its last text event, or a status-shaped fallback.
  * Shared by both automation kinds so their delivery reads identically. */
-const runReport = async (input: FinishTurnInput): Promise<string> => {
+const runReport = async (input: AutomationSettleInput): Promise<string> => {
   // A coded failure reports its CANONICAL copy, same as the turn row — the
   // raw wire error must not reach the automation's delivery surface either.
   // Either detail also makes the transcript read below unnecessary.
@@ -1152,7 +1288,9 @@ const runReport = async (input: FinishTurnInput): Promise<string> => {
 /** A finished non-human run settles its automation source. Dispatches on the
  * conversation's `source`: crons carry outcome bookkeeping + auto-disable;
  * watches are one-shot (status already `fired`), so they only deliver. */
-const settleAutomationRun = async (input: FinishTurnInput): Promise<void> => {
+const settleAutomationRun = async (
+  input: AutomationSettleInput,
+): Promise<void> => {
   const conversation = await db.conversation.findUnique({
     where: { id: input.conversationId },
     select: { source: true, externalRef: true },
@@ -1223,7 +1361,7 @@ const settleAutomationRun = async (input: FinishTurnInput): Promise<void> => {
  * human stopped it) delivers nothing, matching the cron posture.
  */
 const settleWatchRun = async (
-  input: FinishTurnInput,
+  input: AutomationSettleInput,
   watchId: string,
 ): Promise<void> => {
   if (input.status === "aborted") return;

@@ -53,11 +53,13 @@ const ready = (data: AgentModels) =>
 describe("ModelCard", () => {
   it("says what the agent runs and WHY, when nobody has chosen", () => {
     // The point of the card: a provider-driven default should read as a
-    // consequence of the connected key, not as a mystery.
+    // consequence of the connected key, not as a mystery. The provider is
+    // named ONCE — by the connected line, not the subtitle too.
     ready(view());
     render(<ModelCard agentId="a1" />);
     expect(screen.getByText("Running claude-sonnet-5")).toBeInTheDocument();
-    expect(screen.getByText(/default for your Anthropic key/)).toBeVisible();
+    expect(screen.getByText("Anthropic key connected")).toBeVisible();
+    expect(screen.getByText(/The default for this key/)).toBeVisible();
   });
 
   it("attributes the choice to the user once one is made", () => {
@@ -83,6 +85,7 @@ describe("ModelCard", () => {
     );
     render(<ModelCard agentId="a1" />);
     expect(screen.getByText("No model key connected")).toBeInTheDocument();
+    expect(screen.queryByText(/Anthropic key connected/)).toBeNull();
     expect(screen.queryByLabelText("Model")).toBeNull();
   });
 

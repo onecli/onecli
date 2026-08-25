@@ -27,21 +27,35 @@ describe("buildPriceToPlan", () => {
     expect(map[""]).toBeUndefined();
   });
 
-  it("resolves many price ids onto one plan (monthly, yearly, legacy, self-hosted)", () => {
+  it("resolves many price ids onto one plan (monthly, yearly, hosted, legacy, self-hosted)", () => {
+    // Mirrors the production split: current BYOC + hosted prices → "team",
+    // the retired $199/$1,990/$200 prices → "team-legacy" (their
+    // grandfathered limits).
     const map = buildPriceToPlan([
-      ["price_team_199", "team"],
-      ["price_team_yearly", "team"],
-      ["price_team_legacy_200", "team"],
+      ["price_team_149", "team"],
+      ["price_team_149_yearly", "team"],
+      ["price_team_hosted", "team"],
+      ["price_team_hosted_yearly", "team"],
+      ["price_team_199", "team-legacy"],
+      ["price_team_199_yearly", "team-legacy"],
+      ["price_team_legacy_200", "team-legacy"],
       ["price_scale", "scale"],
       ["price_scale_yearly", "scale"],
       ["price_scale_self_hosted", "scale"],
       ["price_scale_self_hosted_yearly", "scale"],
     ]);
-    expect(map["price_team_legacy_200"]).toBe("team");
-    expect(map["price_team_yearly"]).toBe("team");
+    expect(map["price_team_legacy_200"]).toBe("team-legacy");
+    expect(map["price_team_199"]).toBe("team-legacy");
+    expect(map["price_team_149_yearly"]).toBe("team");
+    expect(map["price_team_hosted"]).toBe("team");
     expect(
       Object.entries(map)
         .filter(([, plan]) => plan === "team")
+        .map(([id]) => id),
+    ).toHaveLength(4);
+    expect(
+      Object.entries(map)
+        .filter(([, plan]) => plan === "team-legacy")
         .map(([id]) => id),
     ).toHaveLength(3);
     expect(

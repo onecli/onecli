@@ -341,6 +341,19 @@ export const supervisorMessageSchema = z
       conversationId: z.string().min(1),
       event: agentEventSchema,
     }),
+    /**
+     * The turn-liveness heartbeat: sent on a timer (~60s) for the whole life
+     * of an in-flight turn, whatever the agent is doing — deliberately NOT an
+     * AgentEvent, so it can never land in a transcript, and deliberately its
+     * own frame, so an old control plane rejecting the unknown kind poisons
+     * nothing but the heartbeat itself (the runner relays it as a single-event
+     * post). Silence past the stall window is what fails the turn.
+     */
+    z.object({
+      kind: z.literal("progress"),
+      turnId: z.string().min(1),
+      conversationId: z.string().min(1),
+    }),
     z.object({
       kind: z.literal("turn.result"),
       turnId: z.string().min(1),

@@ -6,6 +6,7 @@ import { agents } from "@/lib/api";
 import type {
   AgentDetail,
   AgentEffort,
+  CreateAgentInput,
   MintSshCertificateSource,
 } from "@/lib/api/types";
 import { queryKeys } from "@/lib/api/keys";
@@ -56,7 +57,7 @@ export const useAgentsForWorkspace = (workspaceId: string, enabled = true) =>
 export const useCreateAgent = () => {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: agents.create,
+    mutationFn: (input: CreateAgentInput) => agents.create(input),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: queryKeys.agents.root() });
       qc.invalidateQueries({ queryKey: queryKeys.counts.all() });
@@ -86,11 +87,20 @@ export const useCreateAgent = () => {
 export const useCreateHostedAgent = () => {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: (input: {
+    // workspaceId targets a workspace the URL doesn't carry (onboarding) —
+    // the server re-fences it against the caller's memberships. From such
+    // URLs the gateway-cache flush below is a no-op (it scopes by the URL's
+    // workspace), which is safe: a just-created agent has no stale cache
+    // entry to flush.
+    mutationFn: ({
+      workspaceId,
+      ...input
+    }: {
       name: string;
       identifier: string;
       instructions?: string;
-    }) => agents.create({ ...input, kind: "hosted" }),
+      workspaceId?: string;
+    }) => agents.create({ ...input, kind: "hosted" }, { workspaceId }),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: queryKeys.agents.root() });
       qc.invalidateQueries({ queryKey: queryKeys.counts.all() });

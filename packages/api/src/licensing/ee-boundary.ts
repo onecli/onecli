@@ -93,7 +93,7 @@ export const SEAMS: readonly Seam[] = [
   {
     from: "apps/web/src/lib/**",
     why: "DEBT. Free surfaces that statically embed an enterprise or hosted-platform control: quota dialogs and plan badges (inert without billing), workspace sharing, member provisioning and role management. Each render now sits behind the unified gate (usePlanGate locks by plan on cloud and by license on self-host), but the static imports remain; this number must only go down.",
-    count: 45,
+    count: 43,
   },
   {
     from: "packages/api/src/routes/**",
@@ -113,7 +113,7 @@ export const SEAMS: readonly Seam[] = [
  * must lower the seam count AND this total in the same change, so freed slack
  * can never be silently re-spent elsewhere.
  */
-export const CROSSING_DEBT = 50;
+export const CROSSING_DEBT = 48;
 
 /**
  * Dynamic (`import(...)` / `next/dynamic`) reaches into licensed code. These

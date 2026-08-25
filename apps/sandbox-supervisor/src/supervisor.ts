@@ -69,6 +69,15 @@ import {
 export const MAX_ANSWER_CHARS = 256_000;
 
 /**
+ * Cadence of the turn-liveness heartbeat (`progress` frames). Comfortably
+ * inside the control plane's stall window (TURN_STALL_SECONDS, default 600s)
+ * so one dropped frame never reads as a wedge, and cheap enough to run
+ * unconditionally for every in-flight turn. A constant, not an env knob —
+ * the stall window is the tunable; the heartbeat just has to beat it.
+ */
+export const PROGRESS_INTERVAL_MS = 60_000;
+
+/**
  * The signal path (index.ts) exits immediately without running the loop's
  * `finally`, so a running supervisor registers a synchronous cleanup here
  * that the handler can call before `process.exit` — today, SIGTERM'ing every
@@ -502,6 +511,26 @@ export const runSupervisor = async (
     /** Whether THIS turn was the one an abort cancelled. */
     const wasAborted = () => runtime.abortedTurnId === item.turnId;
 
+    // The turn-liveness heartbeat: while this turn is in flight, tell the
+    // control plane it is alive on a timer — whatever the agent is doing.
+    // Turn events can go quiet for a long time legitimately (a bg wait, a
+    // swarm await, hidden reasoning), so liveness is THIS process being up,
+    // not the transcript moving; the stall arm fails the turn when these
+    // stop. Started with the claim (a turn waiting on the session or the
+    // sync queue is alive too), unref'd per the house law (observer.ts —
+    // no supervisor handle may hold a finished container's event loop), and
+    // cleared first in the `finally`. Frames buffering while the channel is
+    // down are fine: the outbound cap drops oldest, and delivery after a
+    // reconnect just stamps late.
+    const progressTimer = setInterval(() => {
+      transport.send({
+        kind: "progress",
+        turnId: item.turnId,
+        conversationId: item.conversationId,
+      });
+    }, config.progressIntervalMs ?? PROGRESS_INTERVAL_MS);
+    progressTimer.unref();
+
     // Steer bookkeeping starts clean, and entries aimed at any OTHER turn are
     // pruned: the conversation serializes turns, so once this one is active
     // every other target is terminal — those entries can never join, and the
@@ -700,6 +729,7 @@ export const runSupervisor = async (
         ...(followUps && { followUps }),
       });
     } finally {
+      clearInterval(progressTimer);
       runtime.activeTurnId = undefined;
       runtime.pendingAborts.delete(item.turnId);
       if (runtime.abortedTurnId === item.turnId) {

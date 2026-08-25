@@ -1,4 +1,5 @@
 import type { InstanceInfo } from "@/lib/api/types";
+import { ApiError } from "@/lib/api/client";
 
 /**
  * Whether the hosted surface exists at all, and what to say when it does but
@@ -55,6 +56,21 @@ export const OFFLINE_MESSAGE =
 /** The same state at the create door — a new agent has nowhere to start. */
 export const OFFLINE_CREATE_MESSAGE =
   "Your agents are offline. A new agent can't start until they're back.";
+
+/** Hosted-create refusals in our vocabulary — never the API's (§3.13).
+ * Shared by every hosted-create surface (the agents dialog, onboarding). */
+export const hostedCreateRefusalCopy = (error: Error): string => {
+  if (error instanceof ApiError) {
+    // The collision is on the DERIVED identifier — two different names can
+    // normalize to the same one, so don't claim the name itself is taken.
+    if (error.status === 409)
+      return "An agent with a matching identifier already exists. Pick a different name.";
+    // Hosted-create's only 422 today is "no host available" (validation
+    // failures are 400s, duplicates 409s) — revisit if that ever changes.
+    if (error.status === 422) return OFFLINE_CREATE_MESSAGE;
+  }
+  return error.message;
+};
 
 /**
  * The one honest sentence about where agent files live (§3.9), keyed off the

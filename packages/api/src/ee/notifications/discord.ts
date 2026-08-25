@@ -46,9 +46,6 @@ type EventPayload = {
   };
   onboarding_completed: {
     email: string;
-    flowType?: string | null;
-    intent?: string | null;
-    agent?: string | null;
     agentName?: string | null;
   };
   app_request: {
@@ -149,38 +146,10 @@ const formatEmbed = <T extends EventType>(event: T, data: EventPayload[T]) => {
       };
     }
     case "onboarding_completed": {
-      const { email, flowType, intent, agent, agentName } =
-        data as EventPayload["onboarding_completed"];
-      const INTENT_LABELS: Record<string, string> = {
-        "new-agent": "Create a New Agent",
-        "existing-agent": "Integrate Existing Agent",
-      };
-      const AGENT_LABELS: Record<string, string> = {
-        nanoclaw: "NanoClaw",
-        openclaw: "OpenClaw",
-        paperclip: "Paperclip",
-        hermes: "Hermes",
-        ironclaw: "IronClaw",
-        "claude-code": "Claude Code",
-        cursor: "Cursor",
-        codex: "Codex",
-        "github-copilot": "GitHub Copilot",
-      };
-      const FLOW_LABELS: Record<string, string> = {
-        coding: "Coding Agent",
-        autonomous: "Autonomous Agent",
-      };
+      const { email, agentName } = data as EventPayload["onboarding_completed"];
       const lines: string[] = [`**${email}** completed onboarding`];
-      if (flowType)
-        lines.push(`**Flow:** ${FLOW_LABELS[flowType] ?? flowType}`);
-      if (intent) lines.push(`**Intent:** ${INTENT_LABELS[intent] ?? intent}`);
-      if (agent) {
-        const label =
-          agent === "other" && agentName
-            ? `Other - ${agentName}`
-            : (AGENT_LABELS[agent] ?? agent);
-        lines.push(`**Agent:** ${label}`);
-      }
+      // The hosted agent created during the flow — absent on the skip path.
+      if (agentName) lines.push(`**Agent:** ${agentName}`);
       return {
         title: `Onboarding Completed [${ENV_LABEL}]`,
         description: lines.join("\n"),

@@ -91,6 +91,22 @@ describe("transport schemas", () => {
     expect(workItemSchema.parse(abort)).toEqual(abort);
   });
 
+  it("round-trips the progress heartbeat — identity only, no payload", () => {
+    const beat = { kind: "progress", turnId: "t1", conversationId: "cv1" };
+    expect(supervisorMessageSchema.parse(beat)).toEqual(beat);
+    expect(
+      supervisorMessageSchema.safeParse({ kind: "progress", turnId: "t1" })
+        .success,
+    ).toBe(false);
+    expect(
+      supervisorMessageSchema.safeParse({
+        kind: "progress",
+        turnId: "",
+        conversationId: "cv1",
+      }).success,
+    ).toBe(false);
+  });
+
   it("round-trips supervisor messages with embedded canonical events", () => {
     const msg = {
       kind: "event",

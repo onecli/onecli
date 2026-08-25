@@ -19,7 +19,6 @@ import { Textarea } from "@onecli/ui/components/textarea";
 import { cn } from "@onecli/ui/lib/utils";
 import { validateDisplayName } from "@onecli/api/validations/display-name";
 import { INSTRUCTIONS_MAX_LENGTH } from "@onecli/api/validations/agent";
-import { ApiError } from "@/lib/api/client";
 import { agentChatPath } from "@/lib/navigation";
 import { nameToIdentifier } from "@/lib/agents/agent-identifier";
 import { useCreateHostedAgent } from "@/hooks/use-agents";
@@ -27,7 +26,10 @@ import {
   useHomeDurabilityMessage,
   useHostedAvailability,
 } from "@/hooks/use-hosted-availability";
-import { OFFLINE_CREATE_MESSAGE } from "@/lib/agents/availability";
+import {
+  OFFLINE_CREATE_MESSAGE,
+  hostedCreateRefusalCopy,
+} from "@/lib/agents/availability";
 import { SecretDialog } from "@/app/(dashboard)/w/[workspaceId]/connections/_components/secret-dialog";
 
 interface NewHostedAgentDialogProps {
@@ -37,20 +39,6 @@ interface NewHostedAgentDialogProps {
 
 /** The name the field opens with, so nobody faces an empty required box. */
 const DEFAULT_AGENT_NAME = "Donna";
-
-/** Refusals in our vocabulary — never the API's (§3.13). */
-const refusalCopy = (error: Error): string => {
-  if (error instanceof ApiError) {
-    // The collision is on the DERIVED identifier — two different names can
-    // normalize to the same one, so don't claim the name itself is taken.
-    if (error.status === 409)
-      return "An agent with a matching identifier already exists. Pick a different name.";
-    // Hosted-create's only 422 today is "no host available" (validation
-    // failures are 400s, duplicates 409s) — revisit if that ever changes.
-    if (error.status === 422) return OFFLINE_CREATE_MESSAGE;
-  }
-  return error.message;
-};
 
 /**
  * Creating a hosted agent: ONE question, a name, and then you're in the chat.
@@ -268,7 +256,7 @@ export const NewHostedAgentDialog = ({
             )}
             {createAgent.error && (
               <p className="bg-destructive/10 text-destructive rounded-md px-3 py-2 text-xs">
-                {refusalCopy(createAgent.error)}
+                {hostedCreateRefusalCopy(createAgent.error)}
               </p>
             )}
 

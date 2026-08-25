@@ -18,6 +18,7 @@ describe("normalizePlan", () => {
     expect(normalizePlan("free")).toBe("free");
     expect(normalizePlan("pro")).toBe("pro");
     expect(normalizePlan("team")).toBe("team");
+    expect(normalizePlan("team-legacy")).toBe("team-legacy");
     expect(normalizePlan("scale")).toBe("scale");
     expect(normalizePlan("enterprise")).toBe("enterprise");
   });
@@ -35,6 +36,13 @@ describe("plan ranking", () => {
     expect(planRank("pro")).toBeLessThan(planRank("team"));
     expect(planRank("team")).toBeLessThan(planRank("scale"));
     expect(planRank("scale")).toBeLessThan(planRank("enterprise"));
+  });
+
+  it("ties team-legacy with team (legacy orgs keep team features, neither reads as a downgrade)", () => {
+    expect(planRank("team-legacy")).toBe(planRank("team"));
+    expect(isPlanAtLeast("team-legacy", "team")).toBe(true);
+    expect(isPlanAtLeast("team", "team-legacy")).toBe(true);
+    expect(isPlanAtLeast("team-legacy", "scale")).toBe(false);
   });
 
   it("treats scale and enterprise as at least team (team features stay unlocked)", () => {
@@ -67,8 +75,9 @@ describe("agent hard caps", () => {
   it("caps agents per tier (no overage anywhere)", () => {
     expect(getPlanConfig("free").limits.maxAgents).toBe(2);
     expect(getPlanConfig("pro").limits.maxAgents).toBe(3);
-    expect(getPlanConfig("team").limits.maxAgents).toBe(20);
-    expect(getPlanConfig("scale").limits.maxAgents).toBe(50);
+    expect(getPlanConfig("team").limits.maxAgents).toBe(10);
+    expect(getPlanConfig("team-legacy").limits.maxAgents).toBe(20);
+    expect(getPlanConfig("scale").limits.maxAgents).toBe(20);
     expect(getPlanConfig("enterprise").limits.maxAgents).toBe(Infinity);
   });
 });
@@ -77,16 +86,18 @@ describe("seat caps", () => {
   it("caps human seats per tier (retired pro stays uncapped)", () => {
     expect(getPlanConfig("free").limits.maxMembers).toBe(3);
     expect(getPlanConfig("pro").limits.maxMembers).toBe(Infinity);
-    expect(getPlanConfig("team").limits.maxMembers).toBe(10);
-    expect(getPlanConfig("scale").limits.maxMembers).toBe(25);
+    expect(getPlanConfig("team").limits.maxMembers).toBe(5);
+    expect(getPlanConfig("team-legacy").limits.maxMembers).toBe(10);
+    expect(getPlanConfig("scale").limits.maxMembers).toBe(10);
     expect(getPlanConfig("enterprise").limits.maxMembers).toBe(Infinity);
   });
 });
 
 describe("pricing", () => {
-  it("prices the tiers per the July 2026 model", () => {
+  it("prices the tiers per the Aug 2026 model (BYOC prices)", () => {
     expect(getPlanConfig("pro").price).toBe(25);
-    expect(getPlanConfig("team").price).toBe(199);
+    expect(getPlanConfig("team").price).toBe(149);
+    expect(getPlanConfig("team-legacy").price).toBe(199);
     expect(getPlanConfig("scale").price).toBe(499);
   });
 
@@ -98,16 +109,28 @@ describe("pricing", () => {
 });
 
 describe("self-serve surface", () => {
-  it("keeps enterprise OUT of the purchasable PLANS grid", () => {
-    expect(PLANS).toHaveLength(4);
-    expect(PLANS.map((p) => p.id)).toEqual(["free", "pro", "team", "scale"]);
+  it("keeps enterprise OUT of the purchasable PLANS grid, rank-ordered", () => {
+    expect(PLANS).toHaveLength(5);
+    expect(PLANS.map((p) => p.id)).toEqual([
+      "free",
+      "pro",
+      "team",
+      "team-legacy",
+      "scale",
+    ]);
   });
 
-  it("offers retired pro only to orgs already on it", () => {
+  it("offers retired plans only to orgs already on them", () => {
     expect(offeredPlans("pro").map((p) => p.id)).toEqual([
       "free",
       "pro",
       "team",
+      "scale",
+    ]);
+    expect(offeredPlans("team-legacy").map((p) => p.id)).toEqual([
+      "free",
+      "team",
+      "team-legacy",
       "scale",
     ]);
     for (const plan of ["free", "team", "scale", "enterprise"] as const) {
@@ -124,6 +147,7 @@ describe("self-serve surface", () => {
     expect(isSalesManagedPlan("free")).toBe(false);
     expect(isSalesManagedPlan("pro")).toBe(false);
     expect(isSalesManagedPlan("team")).toBe(false);
+    expect(isSalesManagedPlan("team-legacy")).toBe(false);
     expect(isSalesManagedPlan("scale")).toBe(false);
   });
 

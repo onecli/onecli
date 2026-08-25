@@ -249,6 +249,18 @@ export const createWsTransport = (
     },
 
     send(message: SupervisorMessage): void {
+      // Liveness heartbeats are only worth anything fresh: a beat that would
+      // sit in a dead channel's backlog is stale on arrival, and a long
+      // outage's worth of them would flood the runner's report queue on
+      // reconnect — racing the very `turn.result` frames the backlog exists
+      // to preserve. Every other kind still buffers; the next timer tick
+      // re-beats within a minute of the channel coming back.
+      if (
+        message.kind === "progress" &&
+        (!socket || socket.readyState !== WebSocket.OPEN)
+      ) {
+        return;
+      }
       outbound.push(JSON.stringify(message));
       if (outbound.length > MAX_OUTBOUND_MESSAGES) {
         const dropped = outbound.length - MAX_OUTBOUND_MESSAGES;

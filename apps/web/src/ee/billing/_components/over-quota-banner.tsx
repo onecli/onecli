@@ -4,6 +4,7 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { AlertTriangle, ArrowUpRight } from "lucide-react";
 import { generateOrgPrefix } from "@/lib/org-navigation";
+import { getPlanConfig, normalizePlan } from "@onecli/api/ee/billing/plans";
 import {
   usePlanUsage,
   isFlaggedOverLimit,
@@ -62,7 +63,7 @@ export const OverQuotaBanner = () => {
               /{r.limit} {r.name.toLowerCase()}
             </span>
           ))}{" "}
-          on the {usage?.plan} plan.
+          on the {getPlanConfig(normalizePlan(usage?.plan ?? "")).name} plan.
         </p>
       </div>
       <span className="flex shrink-0 items-center gap-1 text-xs font-medium text-amber-600 transition-colors group-hover:text-amber-500 dark:text-amber-400 dark:group-hover:text-amber-300">

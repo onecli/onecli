@@ -289,6 +289,40 @@ describe("resume", () => {
   });
 });
 
+describe("the turn-liveness heartbeat", () => {
+  it("beats for the whole life of a turn and stops with it", async () => {
+    // The control plane's stall arm fails a running turn whose heartbeat
+    // goes silent — so the beat must run whatever the turn is doing, and
+    // must NOT outlive the turn (a beat for a finished turn is an orphan's,
+    // and the API refuses it; sending one anyway is noise on every idle
+    // conversation).
+    const t = createTestTransport();
+    const run = runSupervisor(
+      { ...config(home("sup-beat-")), progressIntervalMs: 10 },
+      createFakeHarness({ script: longScript }),
+      t.transport,
+    );
+
+    t.push(deliver("t1", "cv-a", { message: "go" }));
+    await t.until(() => t.of("progress").length >= 2, "two heartbeats");
+    // Every beat names the turn it vouches for.
+    for (const beat of t.of("progress")) {
+      expect(beat).toEqual({
+        kind: "progress",
+        turnId: "t1",
+        conversationId: "cv-a",
+      });
+    }
+
+    await t.until(() => t.of("turn.result").length === 1, "the turn to end");
+    const atClose = t.of("progress").length;
+    // The timer died in the turn's finally: no beat lands after the close.
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    expect(t.of("progress").length).toBe(atClose);
+    await t.finish(run);
+  });
+});
+
 describe("abort while a turn is running", () => {
   it("lands mid-turn — the regression the restructure exists to prevent", async () => {
     const t = createTestTransport();
