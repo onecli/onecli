@@ -1,5 +1,13 @@
 # Changelog
 
+## [2.2.3](https://github.com/onecli/onecli/compare/v2.2.2...v2.2.3) (2026-08-26)
+
+
+### Bug Fixes
+
+* per-conversation jcode sessions + busy self-heal, agent report-back contract, standalone ssh-terminator app ([#518](https://github.com/onecli/onecli/issues/518)) ([c536924](https://github.com/onecli/onecli/commit/c536924594886d7a93101397cddf74073379bfaa))
+* self-host SSH docker backend + default-on provisioning, one-shot schedules, visible swarm/watch wakes ([#522](https://github.com/onecli/onecli/issues/522)) ([1a9f721](https://github.com/onecli/onecli/commit/1a9f72125ffd365eb72eb81620da6c0a7d903f6c))
+
 ## [2.2.2](https://github.com/onecli/onecli/compare/v2.2.1...v2.2.2) (2026-08-25)
 
 
