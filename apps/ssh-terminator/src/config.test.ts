@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { formatEd25519PublicKeyLine } from "@onecli/ssh-cert";
 import { ConfigError } from "./errors";
-import { loadTerminatorConfig } from "./config";
+import { loadTerminatorConfig, type TerminatorBackendConfig } from "./config";
 import { createTestCa } from "./test-fixtures";
 
 const CA_LINE = formatEd25519PublicKeyLine(createTestCa().publicKey);
@@ -15,8 +15,30 @@ const baseEnv = (): NodeJS.ProcessEnv => ({
   TERMINATOR_BROKER_TOKEN: "broker-secret",
 });
 
+/** The docker-arm base: same core, no kube signal anywhere. */
+const dockerEnv = (): NodeJS.ProcessEnv => {
+  const env = baseEnv();
+  delete env.TERMINATOR_MANAGER_URL;
+  delete env.TERMINATOR_BROKER_TOKEN;
+  return env;
+};
+
+const kubeArm = (
+  backend: TerminatorBackendConfig,
+): Extract<TerminatorBackendConfig, { kind: "kube" }> => {
+  if (backend.kind !== "kube") throw new Error("expected the kube arm");
+  return backend;
+};
+
+const dockerArm = (
+  backend: TerminatorBackendConfig,
+): Extract<TerminatorBackendConfig, { kind: "docker" }> => {
+  if (backend.kind !== "docker") throw new Error("expected the docker arm");
+  return backend;
+};
+
 describe("loadTerminatorConfig", () => {
-  it("loads with defaults", () => {
+  it("loads with defaults (kube arm inferred from the manager URL)", () => {
     const config = loadTerminatorConfig(baseEnv());
     expect(config.port).toBe(2222);
     expect(config.healthPort).toBe(8091);
@@ -25,9 +47,10 @@ describe("loadTerminatorConfig", () => {
     expect(config.maxSessionsPerIp).toBe(8);
     expect(config.preauthPerIpPerMinute).toBe(12);
     expect(config.preauthTimeoutSeconds).toBe(30);
-    expect(config.kubeCaFile).toBe("/var/run/onecli/kube-root-ca/ca.crt");
     expect(config.caPublicKey).toHaveLength(32);
-    expect(config.kubeServer).toBeNull();
+    const kube = kubeArm(config.backend);
+    expect(kube.kubeCaFile).toBe("/var/run/onecli/kube-root-ca/ca.crt");
+    expect(kube.kubeServer).toBeNull();
   });
 
   it("derives the API server address from the injected kubelet env", () => {
@@ -36,7 +59,7 @@ describe("loadTerminatorConfig", () => {
       KUBERNETES_SERVICE_HOST: "10.100.0.1",
       KUBERNETES_SERVICE_PORT: "443",
     });
-    expect(config.kubeServer).toBe("https://10.100.0.1:443");
+    expect(kubeArm(config.backend).kubeServer).toBe("https://10.100.0.1:443");
   });
 
   it("brackets an IPv6 API server host", () => {
@@ -45,7 +68,7 @@ describe("loadTerminatorConfig", () => {
       KUBERNETES_SERVICE_HOST: "fd00::1",
       KUBERNETES_SERVICE_PORT: "443",
     });
-    expect(config.kubeServer).toBe("https://[fd00::1]:443");
+    expect(kubeArm(config.backend).kubeServer).toBe("https://[fd00::1]:443");
   });
 
   it.each([
@@ -53,7 +76,6 @@ describe("loadTerminatorConfig", () => {
     ["TERMINATOR_CA_PUBLIC_KEY", "trust anchor"],
     ["TERMINATOR_CONTROL_PLANE_URL", "control plane"],
     ["TERMINATOR_CONTROL_PLANE_TOKEN", "control plane secret"],
-    ["TERMINATOR_MANAGER_URL", "manager"],
     ["TERMINATOR_BROKER_TOKEN", "broker secret"],
   ])("refuses to boot without %s", (key) => {
     const env = baseEnv();
@@ -74,7 +96,7 @@ describe("loadTerminatorConfig", () => {
     const config = loadTerminatorConfig(env);
     expect(config.hostKeySecretArn).toContain("secret:hk");
     expect(config.controlPlaneSecretArn).toContain("secret:cp");
-    expect(config.brokerSecretArn).toContain("secret:bk");
+    expect(kubeArm(config.backend).brokerSecretArn).toContain("secret:bk");
     expect(config.metricNamespace).toBe("OneCLI/SandboxPlatform/dev");
   });
 
@@ -127,6 +149,64 @@ describe("loadTerminatorConfig", () => {
     });
     expect(config.port).toBe(2022);
     expect(config.maxSessionsPerIp).toBe(3);
-    expect(config.kubeCaFile).toBe("/tmp/ca.crt");
+    expect(kubeArm(config.backend).kubeCaFile).toBe("/tmp/ca.crt");
+  });
+});
+
+describe("loadTerminatorConfig — substrate selection", () => {
+  it("selects the docker arm with a default socket when no kube signal exists", () => {
+    const config = loadTerminatorConfig(dockerEnv());
+    expect(dockerArm(config.backend).socketPath).toBe("/var/run/docker.sock");
+  });
+
+  it("honors TERMINATOR_DOCKER_SOCKET", () => {
+    const config = loadTerminatorConfig({
+      ...dockerEnv(),
+      TERMINATOR_DOCKER_SOCKET: "/tmp/docker.sock",
+    });
+    expect(dockerArm(config.backend).socketPath).toBe("/tmp/docker.sock");
+  });
+
+  it("an explicit TERMINATOR_BACKEND=kube without a manager URL fails loud (message-identical)", () => {
+    expect(() =>
+      loadTerminatorConfig({ ...dockerEnv(), TERMINATOR_BACKEND: "kube" }),
+    ).toThrow(/TERMINATOR_MANAGER_URL is required/);
+  });
+
+  it("an explicit TERMINATOR_BACKEND=docker wins over kube signals", () => {
+    const config = loadTerminatorConfig({
+      ...baseEnv(),
+      TERMINATOR_BACKEND: "docker",
+    });
+    expect(config.backend.kind).toBe("docker");
+  });
+
+  // The anti-misfence guard: a cloud pod that loses its manager URL must
+  // still select kube and refuse loud — never silently boot a docker arm
+  // with no socket (this loader's founding law).
+  it("a kubelet-injected env selects kube and fails loud without the manager URL", () => {
+    expect(() =>
+      loadTerminatorConfig({
+        ...dockerEnv(),
+        KUBERNETES_SERVICE_HOST: "10.100.0.1",
+        KUBERNETES_SERVICE_PORT: "443",
+      }),
+    ).toThrow(/TERMINATOR_MANAGER_URL is required/);
+  });
+
+  it("a Secrets-Manager host key selects kube and fails loud without the manager URL", () => {
+    const env = dockerEnv();
+    delete env.TERMINATOR_HOST_KEY;
+    env.TERMINATOR_HOST_KEY_SECRET_ARN = "arn:aws:secretsmanager:x:1:secret:hk";
+    env.SANDBOX_METRIC_NAMESPACE = "OneCLI/SandboxPlatform/dev";
+    expect(() => loadTerminatorConfig(env)).toThrow(
+      /TERMINATOR_MANAGER_URL is required/,
+    );
+  });
+
+  it("refuses an unknown TERMINATOR_BACKEND value", () => {
+    expect(() =>
+      loadTerminatorConfig({ ...dockerEnv(), TERMINATOR_BACKEND: "podman" }),
+    ).toThrow(/TERMINATOR_BACKEND/);
   });
 });

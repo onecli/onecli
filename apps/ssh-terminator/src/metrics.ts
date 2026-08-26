@@ -145,6 +145,22 @@ export const createTerminatorMetrics = (
   return metrics;
 };
 
+/**
+ * The non-cloud arm: a deliberate no-op. A self-host or dev run has no
+ * CloudWatch (and often no AWS credentials at all) — publishing would just
+ * warn-loop once a minute forever. Selected by config presence (no
+ * Secrets-Manager host-key ARN), never by edition.
+ */
+export const createNoopTerminatorMetrics = (): TerminatorMetrics => ({
+  sessionOpened: () => undefined,
+  sessionClosed: () => undefined,
+  authFailure: () => undefined,
+  preauthRefusal: () => undefined,
+  wakeWaitSeconds: () => undefined,
+  flush: () => Promise.resolve(),
+  startPump: () => () => Promise.resolve(),
+});
+
 /** Test twin — records instead of publishing. */
 export interface FakeTerminatorMetrics extends TerminatorMetrics {
   counts: {

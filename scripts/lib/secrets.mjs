@@ -55,6 +55,21 @@ export const SECRET_SPECS = [
     isValid: nonEmpty,
     comment: "The channel adapter's rnr_ twin: same one-value-two-processes deal.",
   },
+  {
+    key: "SSH_TERMINATOR_SECRET",
+    generate: base64Key,
+    isValid: nonEmpty,
+    // The api and the ssh-terminator share this ONE value (the terminator's
+    // control-plane token = the api's SSH_TERMINATOR_SECRET). Cloud injects
+    // it from Secrets Manager, and the coupled SSH key material (CA key,
+    // host key) is provisioned only outside cloud by ensureSshEnv — so mint
+    // this only outside cloud too, or the surface half-arms (a live
+    // /v1/ssh-terminator with no CA behind it).
+    skipWhenAbsent: (resolved) =>
+      (resolved.EDITION ?? "").trim().toLowerCase() === "cloud",
+    comment:
+      "Shared api↔ssh-terminator secret (the terminator's control-plane token). One value, two processes.",
+  },
 ];
 
 /**

@@ -73,6 +73,36 @@ export const requireSystemConversation = async (
 };
 
 /**
+ * The purpose-built path the doctrine above demands: a PLATFORM wake turn
+ * running INSIDE the direct thread the watched work belongs to, so the
+ * report is the turn itself instead of a materialized copy from a hidden
+ * conversation. Deliberately the mirror image of `requireSystemConversation`:
+ * this door admits ONLY direct threads, only for the named agent — and it is
+ * reachable solely through `TurnOrigin.directWake`, which every route stamps
+ * server-side and none exposes. The creator/owner fence (who may be woken
+ * into this thread) lives at the fire site, which holds both rows.
+ */
+export const requireDirectWakeConversation = async (
+  workspaceId: string,
+  conversationId: string,
+  agentId: string,
+) => {
+  const conversation = await db.conversation.findFirst({
+    where: {
+      id: conversationId,
+      agentId,
+      agent: { workspaceId },
+      direct: true,
+    },
+    select: { ...conversationSelect, harnessSessionRef: true, lastSeq: true },
+  });
+  if (!conversation) {
+    throw new ServiceError("NOT_FOUND", "Conversation not found");
+  }
+  return conversation;
+};
+
+/**
  * Load a conversation the caller is allowed to see. The fence walks the
  * relation (`agent.workspaceId`) plus the direct-thread owner check, so it is
  * one query, not a fetch-then-check.

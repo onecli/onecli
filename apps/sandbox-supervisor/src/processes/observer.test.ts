@@ -226,6 +226,56 @@ describe("the implicit wake watch", () => {
       turnId: "turn-1",
     });
   });
+
+  it("a snapshot's OWN context beats the active-turn heuristic — a sibling's turn cannot steal the anchor", async () => {
+    const { observer, sent, snapshots } = rig({
+      // The wrong chat: some OTHER conversation's turn is running.
+      activeTurn: () => ({ conversationId: "conv-sibling", turnId: "turn-x" }),
+    });
+    snapshots.push(
+      task({
+        status: "exited",
+        wantsWake: true,
+        context: { conversationId: "conv-owner" },
+      }),
+    );
+    await observer.poll();
+    const proc = latest(sent, "task-1");
+    expect(proc?.conversationId).toBe("conv-owner");
+    expect(proc?.watches[0]).toMatchObject({ conversationId: "conv-owner" });
+    // Conversation-only anchor: no turn id is invented.
+    expect(proc?.watches[0]?.turnId).toBeUndefined();
+  });
+
+  it("a snapshot's wakePrompt replaces the generic implicit prompt", async () => {
+    const { observer, sent, snapshots } = rig();
+    snapshots.push(
+      task({
+        status: "exited",
+        wantsWake: true,
+        wakePrompt: "Helpers finished — collect and deliver the ranking.",
+      }),
+    );
+    await observer.poll();
+    expect(latest(sent, "task-1")?.watches[0]?.prompt).toBe(
+      "Helpers finished — collect and deliver the ranking.",
+    );
+  });
+
+  it("a born-terminal snapshot's output rides the excerpt into the triggered watch", async () => {
+    const { observer, sent, snapshots } = rig();
+    snapshots.push(
+      task({
+        status: "exited",
+        wantsWake: true,
+        outputDelta: "🐝 all members done: alpha, beta",
+      }),
+    );
+    await observer.poll();
+    const watch = latest(sent, "task-1")?.watches[0];
+    expect(watch?.status).toBe("triggered");
+    expect(watch?.excerpt).toContain("all members done");
+  });
 });
 
 describe("boundaries with the owned world", () => {

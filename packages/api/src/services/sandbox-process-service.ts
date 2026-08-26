@@ -1,6 +1,7 @@
 import { db, Prisma } from "@onecli/db";
 import type { ProcessState, RunnerEvent } from "@onecli/agent-protocol";
 import { resolveVerifiedContext } from "./platform-tool-service";
+import { markWatchFirePending } from "./due-work";
 import { logger } from "../lib/logger";
 
 const log = logger.child({ component: "sandbox-process-service" });
@@ -240,6 +241,12 @@ const upsertWatches = async (
           }),
         },
       });
+      // A triggered watch is due work the parked poll cannot see (the fire
+      // pass runs at the top of the handler): mark the fire pass pending
+      // and wake the polls — the first taker runs ONE pass, so trigger→fire
+      // drops from the 0–25s poll window to ~a second without a fire pass
+      // per waiter per ordinary message.
+      if (w.status === "triggered") markWatchFirePending();
     }
   }
 };

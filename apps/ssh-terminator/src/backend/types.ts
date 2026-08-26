@@ -74,6 +74,14 @@ export interface ExecHandle {
    * reports that honestly as `relay_error`.
    */
   exited: Promise<number>;
+  /**
+   * Tear the exec down and free its transport — called by the relay when the
+   * SSH channel ends by anything other than the guest exiting (a client
+   * disconnect, an idle/revocation close). Idempotent: the relay may call it
+   * more than once, and a backend whose transport already self-closes on
+   * stdin-EOF may make it a no-op.
+   */
+  dispose(): void;
 }
 
 export class ExecDisconnectedError extends Error {
@@ -83,11 +91,21 @@ export class ExecDisconnectedError extends Error {
   }
 }
 
+/** What the SSH client asked for on this channel — seam vocabulary: command
+ *  construction is SUBSTRATE policy (identity mechanics differ per substrate:
+ *  kube exec lands as root and wraps in an identity drop; docker exec already
+ *  lands as the container user), so backends receive the request, never a
+ *  pre-built argv. */
+export type RelayRequest =
+  | { kind: "shell" }
+  | { kind: "exec"; command: string }
+  | { kind: "sftp" };
+
 /** Opens one byte pipe into the target the resolver answered with. */
 export interface ExecBackend<T> {
   exec(
     target: T,
-    command: string[],
+    request: RelayRequest,
     io: ExecIo,
     tty: boolean,
   ): Promise<ExecHandle>;

@@ -19,6 +19,7 @@ export const HOST_DEV_PACKAGES = [
   "@onecli/gateway",
   "@onecli/runner",
   "@onecli/channel-adapter",
+  "@onecli/ssh-terminator",
 ];
 
 /**

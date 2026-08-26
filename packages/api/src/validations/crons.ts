@@ -12,7 +12,13 @@ import { z } from "zod";
  * which is exactly the "exists but can never fire" row the model forbids.
  */
 
-export const CRON_DISABLED_REASONS = ["authorization", "failures"] as const;
+export const CRON_DISABLED_REASONS = [
+  "authorization",
+  "failures",
+  // A one-shot (or otherwise exhausted) schedule that fired its last
+  // occurrence — terminal by design, not broken.
+  "completed",
+] as const;
 export type CronDisabledReason = (typeof CRON_DISABLED_REASONS)[number];
 
 export const CRON_OUTCOMES = ["ok", "failed", "skipped_busy"] as const;

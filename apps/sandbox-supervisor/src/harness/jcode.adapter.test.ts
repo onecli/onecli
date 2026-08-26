@@ -31,10 +31,14 @@ interface FakeCall {
   args: unknown[];
 }
 
-/** The mock connection, as tests see it: frames can be pushed mid-stream. */
+/** The mock connection, as tests see it: frames can be pushed mid-stream,
+ * the stream can be ended from outside (a daemon death), and named emitter
+ * events (the SDK's per-kind channels) can be raised. */
 interface PushableClient {
   sessionId: string;
   push(frame: unknown): void;
+  end(): void;
+  emitNamed(event: string, frame: unknown): void;
 }
 
 const state: {
@@ -49,6 +53,11 @@ const state: {
   busyRefusals: number;
   history: { role: string; content: string }[];
   historyError: Error | null;
+  /** Rejections dealt to getHistory calls one at a time (barrier retries). */
+  historyErrorQueue: Error[];
+  /** When set, getHistory records the call, then holds until this resolves —
+   * the deterministic way to keep the spawn barrier standing in a test. */
+  historyGate: Promise<void> | null;
   softInterruptError: Error | null;
   setModelError: Error | null;
   setEffortError: Error | null;
@@ -62,6 +71,8 @@ const state: {
   busyRefusals: 0,
   history: [],
   historyError: null,
+  historyErrorQueue: [],
+  historyGate: null,
   softInterruptError: null,
   setModelError: null,
   setEffortError: null,
@@ -88,6 +99,21 @@ vi.mock("@1jehuang/jcode-sdk", () => {
         this.frames.push(frame);
       }
     }
+    end() {
+      this.streamDone = true;
+      const waiter = this.streamWaiter;
+      this.streamWaiter = undefined;
+      waiter?.({ value: undefined, done: true });
+    }
+    private readonly namedHandlers = new Map<
+      string,
+      ((frame: unknown) => void)[]
+    >();
+    emitNamed(event: string, frame: unknown) {
+      for (const handler of this.namedHandlers.get(event) ?? []) {
+        handler(frame);
+      }
+    }
     static connect(options: Record<string, unknown>) {
       state.connects.push({ options });
       state.sessionCounter += 1;
@@ -95,7 +121,11 @@ vi.mock("@1jehuang/jcode-sdk", () => {
       state.clients.push(client);
       return Promise.resolve(client);
     }
-    on() {}
+    on(event: string, handler: (frame: unknown) => void) {
+      const list = this.namedHandlers.get(event) ?? [];
+      list.push(handler);
+      this.namedHandlers.set(event, list);
+    }
     close() {
       record("close", this.sessionId);
       return Promise.resolve();
@@ -124,14 +154,20 @@ vi.mock("@1jehuang/jcode-sdk", () => {
     }
     sendMessage(sessionId: string, content: string) {
       record("sendMessage", sessionId, content);
-      if (state.busyRefusals > 0) {
-        state.busyRefusals -= 1;
-        // The daemon's refusal: a broadcast error frame, never a rejection
-        // (the SDK's send is fire-and-forget) — exactly the live shape.
-        this.push({ ev: "error", message: "Already processing a message" });
-      } else {
-        for (const frame of state.events) this.push(frame);
-      }
+      // Delivery rides a macrotask, matching the wire: the real daemon
+      // never streams a turn's frames inside the send call itself, and the
+      // adapter's spawn barrier (an instant getHistory here) must win the
+      // race exactly as it does live. FIFO within the one timeout.
+      setTimeout(() => {
+        if (state.busyRefusals > 0) {
+          state.busyRefusals -= 1;
+          // The daemon's refusal: a broadcast error frame, never a rejection
+          // (the SDK's send is fire-and-forget) — exactly the live shape.
+          this.push({ ev: "error", message: "Already processing a message" });
+        } else {
+          for (const frame of state.events) this.push(frame);
+        }
+      }, 0);
       return Promise.resolve();
     }
     softInterrupt(sessionId: string, content: string, urgent?: boolean) {
@@ -145,16 +181,22 @@ vi.mock("@1jehuang/jcode-sdk", () => {
       return Promise.resolve();
     }
     getHistory(sessionId: string) {
+      // Recorded synchronously — call-order assertions depend on it.
       record("getHistory", sessionId);
-      return state.historyError
-        ? Promise.reject(state.historyError)
+      const queued = state.historyErrorQueue.shift();
+      if (queued) return Promise.reject(queued);
+      if (state.historyError) return Promise.reject(state.historyError);
+      const gate = state.historyGate;
+      return gate
+        ? gate.then(() => state.history)
         : Promise.resolve(state.history);
     }
     cancel(sessionId: string) {
       record("cancel", sessionId);
       return Promise.resolve();
     }
-    respondToPermission() {
+    respondToPermission(sessionId: string, requestId: string, verdict: string) {
+      record("respondToPermission", sessionId, requestId, verdict);
       return Promise.resolve();
     }
     events(): AsyncIterableIterator<unknown> {
@@ -222,6 +264,7 @@ const startSession = async (options?: {
   effort?: "low" | "medium" | "high" | "max";
   resumeSessionRef?: string;
   harness?: ReturnType<typeof createJcodeHarness>;
+  context?: { conversationId: string };
 }) => {
   const harness = options?.harness ?? createJcodeHarness();
   const homeDir = mkdtempSync(join(tmpdir(), "jcode-adapter-"));
@@ -232,6 +275,7 @@ const startSession = async (options?: {
     ...(options?.resumeSessionRef && {
       resumeSessionRef: options.resumeSessionRef,
     }),
+    ...(options?.context && { context: options.context }),
   });
   return { harness, session, homeDir };
 };
@@ -249,6 +293,8 @@ beforeEach(() => {
   state.busyRefusals = 0;
   state.history = [];
   state.historyError = null;
+  state.historyErrorQueue = [];
+  state.historyGate = null;
   state.softInterruptError = null;
   state.setModelError = null;
   state.setEffortError = null;
@@ -297,6 +343,12 @@ describe("the connection model", () => {
     expect(options.env?.JCODE_SWARM_MAX_CONCURRENT_AGENTS).toBe("8");
     expect(options.env?.JCODE_SWARM_SPAWN_MODE).toBe("headless");
     expect(options.env?.JCODE_DISABLE_CLAUDE_MCP).toBe("1");
+    // External wake ownership: the daemon proposes, the platform disposes —
+    // no invisible self-wake turns (v0.81+; inert on older daemons).
+    expect(options.env?.JCODE_WAKE_MODE).toBe("external");
+    // The platform-tool cliff fence: never let the auto mode swap mcp__*
+    // definitions for a generic search/call pair.
+    expect(options.env?.JCODE_MCP_TOOLS).toBe("eager");
   });
 
   it("a resume ref held by a LIVE conversation mints a FRESH session — never steals", async () => {
@@ -754,5 +806,361 @@ describe("the jcode steer plumbing", () => {
     expect(order).toContain("cancel");
     let next = await iterator.next();
     while (!next.done) next = await iterator.next();
+  });
+});
+
+describe("the spawn barrier", () => {
+  beforeEach(() => {
+    // Keep the heal cycle fast; afterEach restores the real backoff.
+    BUSY_RESEND_DELAYS_MS.splice(0, BUSY_RESEND_DELAYS_MS.length, 10, 10, 10);
+  });
+
+  const tick = (ms = 0) => new Promise((resolve) => setTimeout(resolve, ms));
+
+  const drain = async (
+    iterator: AsyncIterator<AgentEvent>,
+  ): Promise<AgentEvent[]> => {
+    const events: AgentEvent[] = [];
+    let next = await iterator.next();
+    while (!next.done) {
+      events.push(next.value);
+      next = await iterator.next();
+    }
+    return events;
+  };
+
+  it("a self-wake run's frames are quarantined — never yielded, never our terminal", async () => {
+    // Our turn's frames are pushed manually AFTER the gate opens — the wire
+    // truth (our turn cannot stream before it spawned), which the flat
+    // macrotask delivery of state.events cannot express under a held gate.
+    state.events = [];
+    let openGate = () => {};
+    state.historyGate = new Promise<void>((resolve) => {
+      openGate = resolve;
+    });
+    const { session } = await startSession();
+    const iterator = session
+      .runTurn({ message: "task" })
+      [Symbol.asyncIterator]();
+    await iterator.next(); // turn.started
+
+    // The wake run streams while the barrier stands: text, a tool, usage,
+    // a permission prompt, and a FAILURE terminal — every one another run's.
+    const client = state.clients[0];
+    client?.push({ ev: "text_delta", text: "WAKE-LEAK imagery" });
+    client?.push({ ev: "tool_start", call_id: "w1", name: "bash" });
+    client?.push({ ev: "token_usage", input: 999, output: 999 });
+    client?.push({
+      ev: "permission_request",
+      request_id: "wp1",
+      tool_name: "bash",
+      description: "",
+    });
+    client?.push({ ev: "error", message: "the wake run failed" });
+    await tick(5);
+
+    // Our turn spawns: the barrier reply lands, then our frames.
+    state.historyGate = null;
+    openGate();
+    await tick(5);
+    client?.push({ ev: "text_delta", text: "ours" });
+    client?.push({ ev: "turn_done" });
+
+    const events = await drain(iterator);
+
+    expect(
+      events.some(
+        (e) => e.type === "text.delta" && e.text.includes("WAKE-LEAK"),
+      ),
+    ).toBe(false);
+    expect(events.some((e) => e.type === "tool.started")).toBe(false);
+    // The foreign failure was NOT adopted as our terminal.
+    expect(events.at(-1)?.type).toBe("turn.done");
+    expect(
+      events.some((e) => e.type === "text.delta" && e.text === "ours"),
+    ).toBe(true);
+    // A foreign usage report is the wake run's spend, never ours.
+    expect(
+      (events.at(-1) as { usage?: unknown } | undefined)?.usage,
+    ).toBeUndefined();
+    // The foreign permission prompt was still answered — unanswered, it
+    // would wedge the daemon (and the mutex our send waits on) forever.
+    expect(callsOf("respondToPermission")).toHaveLength(1);
+    // The exclusion is never silent: exactly one warn notice, pre-terminal.
+    const notices = events.filter((e) => e.type === "notice");
+    expect(notices).toHaveLength(1);
+    expect(notices[0]).toMatchObject({ level: "warn" });
+    expect((notices[0] as { text: string }).text).toContain("overlapped");
+  }, 15_000);
+
+  it("a busy refusal stamped foreign still heals — the refusal outranks the quarantine", async () => {
+    // The wire order is fixed: the refusal broadcasts while the daemon
+    // processes our send, i.e. strictly before any barrier reply — so it
+    // ALWAYS arrives under a pending barrier. Quarantining it would kill
+    // the self-heal; this is the pin that it never happens.
+    state.busyRefusals = 1;
+    state.events = [
+      { ev: "text_delta", text: "the real answer" },
+      { ev: "turn_done" },
+    ];
+    let openGate = () => {};
+    state.historyGate = new Promise<void>((resolve) => {
+      openGate = resolve;
+    });
+    const { session } = await startSession();
+    const iterator = session
+      .runTurn({ message: "task" })
+      [Symbol.asyncIterator]();
+    await iterator.next(); // turn.started
+    // Orphan residue precedes the refusal — its discard is the heal's,
+    // silent, and must never mint the exclusion notice.
+    state.clients[0]?.push({ ev: "text_delta", text: "ORPHAN-RESIDUE" });
+    await tick(5);
+    state.historyGate = null;
+    openGate();
+
+    const events = await drain(iterator);
+
+    const order = state.calls.map((c) => c.method);
+    expect(order).toContain("cancel");
+    expect(callsOf("sendMessage")).toHaveLength(2);
+    expect(events.at(-1)?.type).toBe("turn.done");
+    expect(
+      events.some(
+        (e) => e.type === "text.delta" && e.text.includes("real answer"),
+      ),
+    ).toBe(true);
+    expect(
+      events.some(
+        (e) => e.type === "text.delta" && e.text.includes("ORPHAN-RESIDUE"),
+      ),
+    ).toBe(false);
+    expect(events.some((e) => e.type === "notice")).toBe(false);
+  }, 15_000);
+
+  it("frames in the subscribe→send gap are quarantined — the former known residual", async () => {
+    // An orphan finishing naturally in the gap used to land its terminal in
+    // `held` and read as an instant empty end. Now it is foreign like any
+    // pre-barrier frame, and the accepted send streams normally after it.
+    state.events = [{ ev: "text_delta", text: "ours" }, { ev: "turn_done" }];
+    const { session } = await startSession();
+    const iterator = session
+      .runTurn({ message: "task" })
+      [Symbol.asyncIterator]();
+    // Pushed before the first pull: these sit in the stream buffer ahead of
+    // everything, exactly like a dying orphan's last frames.
+    state.clients[0]?.push({ ev: "text_delta", text: "GAP-ORPHAN tail" });
+    state.clients[0]?.push({ ev: "turn_done" });
+
+    const events = await drain(iterator);
+
+    expect(
+      events.some(
+        (e) => e.type === "text.delta" && e.text.includes("GAP-ORPHAN"),
+      ),
+    ).toBe(false);
+    expect(
+      events.some((e) => e.type === "text.delta" && e.text === "ours"),
+    ).toBe(true);
+    expect(events.at(-1)?.type).toBe("turn.done");
+    // The dropped text is reported.
+    expect(events.filter((e) => e.type === "notice")).toHaveLength(1);
+  }, 15_000);
+
+  it("the barrier retries through SDK timeouts and the turn completes", async () => {
+    const timeoutError = () =>
+      Object.assign(new Error("no reply to get_history within 30000ms"), {
+        code: "timeout",
+      });
+    state.historyErrorQueue = [timeoutError(), timeoutError()];
+    state.events = [{ ev: "text_delta", text: "ours" }, { ev: "turn_done" }];
+    const { session } = await startSession();
+
+    const events = await collect(session.runTurn({ message: "task" }));
+
+    expect(events.at(-1)?.type).toBe("turn.done");
+    expect(
+      events.some((e) => e.type === "text.delta" && e.text === "ours"),
+    ).toBe(true);
+    // Two timed-out attempts, then the resolving one. No steers, so the
+    // reconcile never reads history — the count is the barrier's alone.
+    expect(callsOf("getHistory")).toHaveLength(3);
+  }, 15_000);
+
+  it("a non-timeout barrier failure opens the gate after ONE attempt", async () => {
+    // `disconnected`, an unknown session, a closing channel — retrying
+    // cannot help, and quarantining forever would silence a healthy turn.
+    state.historyErrorQueue = [new Error("boom")];
+    state.events = [{ ev: "text_delta", text: "ours" }, { ev: "turn_done" }];
+    const { session } = await startSession();
+
+    const events = await collect(session.runTurn({ message: "task" }));
+
+    expect(events.at(-1)?.type).toBe("turn.done");
+    expect(
+      events.some((e) => e.type === "text.delta" && e.text === "ours"),
+    ).toBe(true);
+    expect(callsOf("getHistory")).toHaveLength(1);
+  }, 15_000);
+
+  it("a stale non-error reply (ev history, reply_to) is never a turn event", async () => {
+    // A timed-out barrier attempt's late reply re-enters the stream as an
+    // `ev:"history"` frame carrying reply_to — dropped, never content.
+    state.events = [{ ev: "text_delta", text: "working" }, { ev: "turn_done" }];
+    const { session } = await startSession();
+    const iterator = session
+      .runTurn({ message: "task" })
+      [Symbol.asyncIterator]();
+    await iterator.next(); // turn.started
+    state.clients[0]?.push({ ev: "history", reply_to: 8, messages: [] });
+
+    const events = await drain(iterator);
+
+    expect(events.at(-1)?.type).toBe("turn.done");
+    expect(events.some((e) => e.type === "error")).toBe(false);
+    expect(events.some((e) => e.type === "notice")).toBe(false);
+  }, 15_000);
+
+  it("an abort under a standing barrier ends the turn within the tick", async () => {
+    // While the barrier stands the request loop is frozen daemon-side — the
+    // abort cannot be confirmed by a cancel frame, so the live loop's tick
+    // honors it directly instead of hanging for the foreign run's life.
+    state.events = [];
+    state.historyGate = new Promise<void>(() => {}); // never opens
+    const { session } = await startSession();
+    const iterator = session
+      .runTurn({ message: "task" })
+      [Symbol.asyncIterator]();
+    await iterator.next(); // turn.started
+
+    const started = Date.now();
+    const drained = drain(iterator);
+    await tick(5);
+    await session.abort();
+    const events = await drained;
+
+    expect(events.at(-1)?.type).toBe("turn.done");
+    // Bounded by the settle window plus one live-loop tick, with margin.
+    expect(Date.now() - started).toBeLessThan(5_000);
+    // The heal never ran: one send, no resend answered the aborted turn.
+    expect(callsOf("sendMessage")).toHaveLength(1);
+  }, 15_000);
+
+  it("stream death under a standing barrier fails visibly and still reports the drop", async () => {
+    state.events = [];
+    state.historyGate = new Promise<void>(() => {}); // never opens
+    const { session } = await startSession();
+    const iterator = session
+      .runTurn({ message: "task" })
+      [Symbol.asyncIterator]();
+    await iterator.next(); // turn.started
+    const client = state.clients[0];
+    client?.push({ ev: "text_delta", text: "WAKE-LEAK before death" });
+    await tick(5);
+    client?.end();
+
+    const events = await drain(iterator);
+
+    const terminal = events.at(-1);
+    expect(terminal?.type).toBe("error");
+    expect((terminal as { message?: string }).message).toContain(
+      "ended unexpectedly",
+    );
+    expect(
+      events.some(
+        (e) => e.type === "text.delta" && e.text.includes("WAKE-LEAK"),
+      ),
+    ).toBe(false);
+    // No trusted frame ever arrived, so the end-of-turn flush owns the story.
+    expect(events.filter((e) => e.type === "notice")).toHaveLength(1);
+  }, 15_000);
+
+  it("a clean turn quarantines nothing and mints no notice", async () => {
+    state.events = [{ ev: "text_delta", text: "plain" }, { ev: "turn_done" }];
+    const { session } = await startSession();
+
+    const events = await collect(session.runTurn({ message: "task" }));
+
+    expect(events.at(-1)?.type).toBe("turn.done");
+    expect(
+      events.some((e) => e.type === "text.delta" && e.text === "plain"),
+    ).toBe(true);
+    expect(events.some((e) => e.type === "notice")).toBe(false);
+  });
+});
+
+describe("the external wake listener", () => {
+  /** The harness's merged feed, polled the way the observer does. Bash and
+   * swarm sources fail harmlessly in this rig (no registry, no socket) —
+   * the merge isolates per source, so only wake entries come back. */
+  const wakeTasks = async (harness: ReturnType<typeof createJcodeHarness>) => {
+    const tasks = (await harness.backgroundTasks?.poll()) ?? [];
+    return tasks.filter((t) => t.ref.startsWith("wake:"));
+  };
+
+  it("mirrors an owned session's wake request as a synthetic task bound to its conversation", async () => {
+    const { harness } = await startSession({
+      context: { conversationId: "cv-lead" },
+    });
+
+    state.clients[0]?.emitNamed("wake_requested", {
+      ev: "wake_requested",
+      session_id: state.clients[0].sessionId,
+      reason: "swarm_await_completed",
+      notification: "🐝 all members done",
+    });
+
+    const tasks = await wakeTasks(harness);
+    expect(tasks).toHaveLength(1);
+    expect(tasks[0]).toMatchObject({
+      status: "exited",
+      wantsWake: true,
+      context: { conversationId: "cv-lead" },
+    });
+    expect(tasks[0]?.outputDelta).toContain("all members done");
+  });
+
+  it("drops a wake for a session this connection does not own (helper/broadcast wakes)", async () => {
+    const { harness } = await startSession({
+      context: { conversationId: "cv-lead" },
+    });
+
+    state.clients[0]?.emitNamed("wake_requested", {
+      ev: "wake_requested",
+      session_id: "someone-elses-session",
+      reason: "swarm_await_completed",
+      notification: "not ours",
+    });
+
+    expect(await wakeTasks(harness)).toHaveLength(0);
+  });
+
+  it("drops a wake when the session has no conversation to anchor to", async () => {
+    // No context passed at startSession — nothing to attribute the wake to.
+    const { harness } = await startSession();
+
+    state.clients[0]?.emitNamed("wake_requested", {
+      ev: "wake_requested",
+      session_id: state.clients[0].sessionId,
+      reason: "swarm_await_completed",
+      notification: "anchorless",
+    });
+
+    expect(await wakeTasks(harness)).toHaveLength(0);
+  });
+
+  it("drops background_task_completed — the registry mirror is that wake's single producer", async () => {
+    const { harness } = await startSession({
+      context: { conversationId: "cv-lead" },
+    });
+
+    state.clients[0]?.emitNamed("wake_requested", {
+      ev: "wake_requested",
+      session_id: state.clients[0].sessionId,
+      reason: "background_task_completed",
+      notification: "task done",
+    });
+
+    expect(await wakeTasks(harness)).toHaveLength(0);
   });
 });

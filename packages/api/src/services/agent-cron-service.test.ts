@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { CRON_JITTER_MAX_SECONDS, computeNextFire } from "./agent-cron-service";
+import {
+  CRON_JITTER_MAX_SECONDS,
+  computeNextFire,
+  nextFireOrNull,
+} from "./agent-cron-service";
 import { ServiceError } from "./errors";
 
 /** Jitter pinned to zero — these cases prove the OCCURRENCE math alone. */
@@ -61,9 +65,11 @@ describe("computeNextFire", () => {
     expect(atMax.getTime()).toBe(occurrence + 59_999);
   });
 
-  it("a one-shot schedule (no following occurrence) takes the full ceiling", () => {
-    // croner accepts an ISO datetime as a one-shot pattern; with no following
-    // occurrence the gap is unbounded and the 300s ceiling alone applies.
+  it("a one-shot schedule (no following occurrence) takes NO jitter at all", () => {
+    // croner accepts an ISO datetime as a one-shot pattern. The jitter exists
+    // to spread recurring cohorts; a one-shot has no cohort — "remind me at
+    // 09:00" fires at 09:00, never 09:04. (Flipped deliberately in the
+    // one-shot-schedules change: it previously took the full 300s ceiling.)
     const occurrence = Date.parse("2026-12-01T09:00:00.000Z");
     const atMax = computeNextFire(
       "2026-12-01T09:00:00",
@@ -71,7 +77,26 @@ describe("computeNextFire", () => {
       new Date("2026-08-07T00:00:00Z"),
       () => 0.999999,
     );
-    expect(atMax.getTime()).toBe(occurrence + 299_999);
+    expect(atMax.getTime()).toBe(occurrence);
+  });
+
+  it("nextFireOrNull returns null for an exhausted schedule where the door throws", () => {
+    // The fire path's read: a spent one-shot has NOTHING next — that is a
+    // normal completion state, not an error. The throwing wrapper stays for
+    // the doors, which must keep refusing a schedule that never fires at all.
+    const spent = nextFireOrNull(
+      "2026-12-01T09:00:00",
+      "UTC",
+      new Date("2026-12-01T09:00:01Z"),
+    );
+    expect(spent).toBeNull();
+    expect(() =>
+      computeNextFire(
+        "2026-12-01T09:00:00",
+        "UTC",
+        new Date("2026-12-01T09:00:01Z"),
+      ),
+    ).toThrow(/never fires/);
   });
 
   it("rejects an invalid expression with the engine's own words", () => {

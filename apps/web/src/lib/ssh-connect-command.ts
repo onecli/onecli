@@ -19,6 +19,12 @@ const shellSingleQuote = (value: string): string =>
 export const SSH_CERT_PATH = "~/.ssh/id_ed25519-cert.pub";
 
 export const buildSshConnectCommand = (
-  minted: Pick<MintedSshCertificate, "certificate" | "user" | "host">,
-): string =>
-  `printf '%s\\n' ${shellSingleQuote(minted.certificate)} > ${SSH_CERT_PATH} && ssh ${minted.user}@${minted.host}`;
+  minted: Pick<MintedSshCertificate, "certificate" | "user" | "host" | "port">,
+): string => {
+  // Emit `-p` only for a non-default port: cloud is 22, so its command
+  // stays byte-identical, and an older API that answers without a port is
+  // treated as 22 too.
+  const portFlag =
+    minted.port !== undefined && minted.port !== 22 ? `-p ${minted.port} ` : "";
+  return `printf '%s\\n' ${shellSingleQuote(minted.certificate)} > ${SSH_CERT_PATH} && ssh ${portFlag}${minted.user}@${minted.host}`;
+};

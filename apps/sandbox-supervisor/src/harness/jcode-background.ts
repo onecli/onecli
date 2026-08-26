@@ -11,13 +11,12 @@ import { log } from "../log";
 /**
  * jcode's background-task registry, read the way jcode itself writes it
  * (verified against v0.71.1 source, the exact vendored commit; re-verified
- * against v0.78.1 at the pin bump — format unchanged, plus one additive
- * field: `stall_wake_seconds` arms a jcode-internal stall watchdog whose
- * wake is independent of the task's own `wake` flag. "stalled" is only a
- * WAIT reason, never a status, so the enum below stays exact and the
- * passthrough absorbs the new field; the platform prompt already steers
- * agents off runtime-level wake channels). Everything vendor-format-specific
- * lives HERE — the generic observer never sees a file (invariant 9).
+ * at the v0.78.1 and v0.81.1 pin bumps — format byte-identical, plus one
+ * additive field: `stall_wake_seconds` arms a jcode-internal stall watchdog
+ * independent of the task's own `wake` flag. "stalled" is only a WAIT
+ * reason, never a status, so the enum below stays exact and the passthrough
+ * absorbs the field). Everything vendor-format-specific lives HERE — the
+ * generic observer never sees a file (invariant 9).
  *
  * The registry: `$TMPDIR/jcode-bg-tasks/<id>.status.json` (rich task state,
  * rewritten whole on every change) + `<id>.output` (append-only interleaved
@@ -26,10 +25,14 @@ import { log } from "../log";
  *
  * Two format facts that shape the mapping:
  * - `notify` serde-defaults TRUE on every background bash call, while `wake`
- *   defaults false and is what jcode's own completion path keys its self-wake
- *   on (`if task.wake && run_live_turn_if_idle…`). So the platform's wake
- *   intent is `wake` ALONE — treating notify as wake intent would fire a
- *   platform wake turn for every fire-and-forget task.
+ *   defaults false and is the completion path's wake key. Under external
+ *   wake ownership (JCODE_WAKE_MODE=external, v0.81+) the daemon no longer
+ *   runs a self-wake turn for it — it emits a `wake_requested` event, which
+ *   the adapter deliberately DROPS for completions (jcode-wake.ts): THIS
+ *   mirror is that wake's single producer (poll-derived, durable, with the
+ *   real output tail), and two producers would double-wake every task. The
+ *   platform's wake intent is `wake` ALONE — treating notify as wake intent
+ *   would fire a platform wake turn for every fire-and-forget task.
  * - `spawn_with_notify` also registers jcode-internal work (its self-dev
  *   build queue, communicate) under other `tool_name`s; only `bash` tasks
  *   are the agent's background work, so only those are mirrored.

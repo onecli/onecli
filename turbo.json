@@ -167,6 +167,8 @@
     "SSH_CA_KMS_KEY_ARN",
     "SSH_CA_PRIVATE_KEY",
     "SSH_HOST",
+    "SSH_PORT",
+    "ONECLI_DOCKER_E2E",
     "SSH_CERT_TTL_SECONDS",
     "SSH_CERT_MINTS_PER_HOUR",
     "SSH_MAX_SESSIONS_PER_AGENT",
@@ -188,6 +190,11 @@
     "@onecli/gateway#build": {
       "inputs": ["src/**", "Cargo.toml", "Cargo.lock"],
       "outputs": ["target/release/**"]
+    },
+    "@onecli/ssh-terminator#dev": {
+      "cache": false,
+      "persistent": true,
+      "passThroughEnv": ["TERMINATOR_*"]
     },
     "@onecli/gateway#dev": {
       "cache": false,

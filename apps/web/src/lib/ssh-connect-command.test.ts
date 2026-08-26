@@ -33,4 +33,21 @@ describe("buildSshConnectCommand", () => {
     });
     expect(command).toContain("'evil'\\'' ; rm -rf ~ ; '\\'''");
   });
+
+  it("omits -p for the default port (22) — cloud's command is unchanged", () => {
+    expect(buildSshConnectCommand({ ...MINTED, port: 22 })).toBe(
+      buildSshConnectCommand(MINTED),
+    );
+    expect(buildSshConnectCommand({ ...MINTED, port: 22 })).not.toContain(
+      "-p ",
+    );
+  });
+
+  it("emits -p for a non-default self-host port", () => {
+    expect(buildSshConnectCommand({ ...MINTED, port: 10257 })).toBe(
+      "printf '%s\\n' 'ssh-ed25519-cert-v01@openssh.com AAAAIHNzaC8x+Base64/Blob=' " +
+        "> ~/.ssh/id_ed25519-cert.pub && " +
+        "ssh -p 10257 2f4d0375-01f1-4d9d-9a9d-80538785a71c@ssh.onecli.test",
+    );
+  });
 });

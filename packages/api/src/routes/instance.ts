@@ -1,5 +1,5 @@
 import { Hono } from "hono";
-import { EDITION_INFO, SSH_HOST } from "../lib/env";
+import { EDITION_INFO, SSH_HOST, SSH_PORT } from "../lib/env";
 import { isEntitled } from "../lib/entitlements";
 import { resolveOriginsFromEnv } from "../lib/public-origins";
 import { getRunnerAvailability } from "../services/runner-service";
@@ -44,8 +44,9 @@ export const instanceRoutes = (version?: string) => {
       },
       // The SSH front door (sandbox-platform step 5): absent means "not on
       // this deployment" — the optional-field contract `runners` set. Only
-      // the public DNS host, never CA or session facts.
-      ...(sshAvailable() ? { ssh: { host: SSH_HOST } } : {}),
+      // the public DNS host and port, never CA or session facts. Cloud
+      // advertises :22 (the NLB); self-host an unprivileged high port.
+      ...(sshAvailable() ? { ssh: { host: SSH_HOST, port: SSH_PORT } } : {}),
     });
   });
 

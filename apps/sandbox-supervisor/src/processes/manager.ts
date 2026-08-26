@@ -66,7 +66,10 @@ const STOP_GRACE_MS = 5_000;
 
 export interface TurnContext {
   conversationId: string;
-  turnId: string;
+  /** Absent when the anchor is a CONVERSATION without a live turn — a
+   * harness wake request arriving between turns. The wire's context fields
+   * are optional either way, and the control plane verifies both. */
+  turnId?: string;
 }
 
 /**
@@ -76,7 +79,7 @@ export interface TurnContext {
  * already holds the machine awake; it is the RESULT that evaporates).
  */
 export const TURN_END_SAFETY_NET_PROMPT =
-  "A background task was still running when your turn ended without any watch on it. Check its outcome (process_status shows its output) and report the result concisely — the report is delivered to the chat where the task was started. If nothing needs reporting, say so briefly.";
+  "A background task was still running when your turn ended without any watch on it. Check its outcome (process_status shows its output) and report the result concisely — your report reaches the chat this task belongs to. If nothing needs reporting, say so briefly.";
 
 export type ToolOutcome = {
   ok: boolean;

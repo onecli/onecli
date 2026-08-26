@@ -1,5 +1,5 @@
 import { existsSync, mkdirSync, rmSync } from "node:fs";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   bundledJcodeBinary,
@@ -21,7 +21,10 @@ import {
 import { log } from "../log";
 import { platformToolsSocketPath } from "../platform-tools";
 import { writeManagedFile } from "../home/fs";
+import { mergeBackgroundTasks } from "./background-merge";
 import { createJcodeBackgroundTasks } from "./jcode-background";
+import { createJcodeSwarmTasks } from "./jcode-swarm";
+import { createJcodeWakeFeed } from "./jcode-wake";
 
 /**
  * The jcode adapter — the anti-corruption layer of §3.5. Everything
@@ -30,7 +33,7 @@ import { createJcodeBackgroundTasks } from "./jcode-background";
  * (invariant 9).
  *
  * Every switch below was verified against jcode v0.71.x source and
- * re-verified against v0.78.1 at the pin bump, 2026-08-19
+ * re-verified against v0.78.1 (2026-08-19) and v0.81.1 (2026-08-26) at the pin bumps
  * (see plans/hosted-agents-v2.md §3.2/§3.5):
  * - `inheritLogins: false` — never import host provider logins (zero-cred).
  * - `JCODE_NO_TELEMETRY=1` — telemetry is on by default upstream.
@@ -69,7 +72,7 @@ import { createJcodeBackgroundTasks } from "./jcode-background";
  *   proxy like everything else. `memory` joined the list with the memory
  *   write-back amendment (§3.8): `[features] memory=false` alone disables
  *   only the auto-recall/extraction machinery — the native tool registers
- *   unconditionally (verified in v0.71.1, still true in v0.78.1) and would write durable,
+ *   unconditionally (verified in v0.71.1, still true through v0.81.1) and would write durable,
  *   platform-invisible JSON graphs; the platform's memory/ files and
  *   memory_* tools are the ONLY memory. Its state is purged per boot too
  *   (cleanJcodeKnowledgeStores).
@@ -141,7 +144,7 @@ export const resolveJcodeBinary = (): string => {
  * `JCODE_NO_AUTO_UPDATE` stops checks, downloads, and the mid-run exec — but
  * it does NOT gate binary RESOLUTION: jcode's daemon prefers
  * `builds/shared-server` → `builds/stable` over the spawned file (verified in
- * v0.71.1 and re-verified in v0.78.1: `dispatch.rs` spawn_server → `paths.rs`
+ * v0.71.1 and re-verified through v0.81.1: `dispatch.rs` spawn_server → `paths.rs`
  * shared_server_update_candidate, no env check). A volume that self-updated
  * before the pin would therefore keep booting its downloaded daemon under our
  * pinned client — a bridge/daemon version split upstream itself documents as
@@ -181,7 +184,7 @@ export const cleanJcodeUpdaterState = (jcodeHome: string): void => {
  *
  *  - native memory/notes JSON graphs: `[features] memory=false` disables the
  *    auto-recall machinery but NOT the `memory` tool (verified in v0.71.1,
- *    still true in v0.78.1 — the tool registers unconditionally), so the tool
+ *    still true in v0.81.1 — the tool registers unconditionally), so the tool
  *    is disabled via JCODE_DISABLED_TOOLS below and any state it ever wrote
  *    is deleted;
  *  - unmanaged skill-stash dirs jcode loads on existence (home
@@ -238,7 +241,7 @@ export const cleanJcodeKnowledgeStores = (
 // this adapter share one symlink-hardened write — the law lives there.
 
 /**
- * TRAP (verified in v0.71.1, re-verified unchanged in v0.78.1): the
+ * TRAP (verified in v0.71.1, re-verified unchanged through v0.81.1): the
  * `[sponsors]` section must stay exactly `enabled = false` with NO
  * `endpoint` key. The harness "repairs" a
  * section holding enabled=false PLUS its default endpoint back to enabled —
@@ -259,12 +262,28 @@ check_updates = false
 [provider]
 stream_idle_timeout_secs = 300
 
+[tools]
+mcp_tools = "eager"
+
 [auth]
 trusted_external_sources = ["claude_code_native_credentials"]
 
 [sponsors]
 enabled = false
 `;
+
+/**
+ * The platform-tool cliff fence. Since v0.79.1 the harness defaults
+ * \`mcp_tools = "auto"\`: above an 8k-token threshold it silently REPLACES
+ * every mcp__* tool definition with a generic search/call pair — which
+ * would strip the platform tools (processes, watches, memory, schedules)
+ * out of the model's tool list the day their combined definitions cross
+ * the line (we sit near half of it today). Pinned eager in BOTH places:
+ * the config statement above and this env fence (reload-fingerprinted
+ * upstream, so it reapplies on every config load and an agent editing its
+ * own config.toml cannot flip it back).
+ */
+export const JCODE_MCP_TOOLS_ENV_VALUE = "eager";
 
 /**
  * Sub-agent fan-out is ALWAYS ON for hosted agents (a product decision:
@@ -279,7 +298,7 @@ export const SWARM_WORKER_CAP = 8;
  * The launch-env half of the swarm posture — like JCODE_DISABLED_TOOLS,
  * this constant IS the env the launch call passes, exported so the pin
  * test asserts the exact strings the harness parses. Env overrides beat
- * config.toml on EVERY config load (verified in v0.78.1
+ * config.toml on EVERY config load (verified in v0.78.1, unchanged in v0.81.1
  * `env_overrides.rs` / `config.rs`: both keys are in the reload
  * fingerprint), so an agent editing its own config.toml cannot raise the
  * cap — THIS is the hard stop, at the harness's spawn-admission gate.
@@ -317,7 +336,44 @@ If a spawn or swarm call is refused right after your computer starts,
 retry once before concluding the tooling is unavailable — membership can
 take a moment to settle.
 After collecting a helper's report, stop or clean up that helper — idle
-helpers hold memory for nothing.`;
+helpers hold memory for nothing.
+Helpers also appear as observed background processes: process_status shows
+a helper's state and its final report, and watches can cover it. A turn
+that ends while helpers are still running gets their completion reported
+back automatically — prefer ending your turn over busy-waiting on a long
+helper.`;
+
+/**
+ * THE SWARM TOOL'S PROMPT SLOT — replaces the harness's built-in swarm
+ * routing guidance, which the fan-out tool embeds in its own model-visible
+ * description. Owned for the same reason as system-prompt.md: the built-in
+ * text is the vendor's voice (and at the pinned version it is self-
+ * contradictory — it advises passing a per-spawn model that the tool schema
+ * no longer accepts, naming vendor models unavailable here). Worker models
+ * are operator-controlled at this version, so the honest guidance is
+ * structure only. Written to BOTH resolution slots (project + home) with
+ * the same heal-at-boot law as the system prompt; the identity rule
+ * applies — no vendor or model names in these bytes.
+ */
+export const SWARM_PROMPT_OVERRIDE = `Guidance for spawning helper agents.
+
+- Worker models are chosen by the platform. There is no per-helper model
+  choice — never try to set one.
+- Always pass a short label when spawning (for example "api reviewer") so
+  each helper's purpose is visible.
+- Only the root session spawns helpers; helpers complete their one task and
+  report back, never spawning their own.
+- A helper's FINAL REPLY is the only report you receive — in each helper's
+  task prompt, tell it to end its reply with the complete deliverable
+  (full text, never a summary of it).
+- Read helper status and reports with process_status. Helpers are NOT
+  background tasks: the bg tool cannot see them and cannot wait for them.
+- The platform tracks helpers on its own: their completion is reported
+  back to your chat automatically, so prefer ending your turn over waiting
+  in it. To wait in-turn anyway, use this tool's own await action — one
+  call, no polling.
+- After collecting a helper's report, stop that helper — idle helpers hold
+  memory for nothing.`;
 
 /**
  * The harness-native tools the platform turns off, exported so the pin test
@@ -383,9 +439,9 @@ it passes.
 Use the todo tool to plan and track multi-step work.
 The platform tracks background tasks however you start them and delivers
 watch wake-ups to the chat. To be woken when a background task completes,
-arm process_watch — do not use any runtime-level wake or self-notify option;
-wake-ups raised outside the platform run invisibly and their results reach
-no one.
+arm process_watch; a wake requested through your runtime's own options is
+honored the same way — it arrives as a platform wake in the chat the work
+belongs to.
 Nothing runs between your turns: once a turn ends, nothing wakes you except
 a person's message, a schedule, or a watch. Never end a turn promising to
 check on something or report back unless you have FIRST armed what will
@@ -447,6 +503,21 @@ export const preparePromptFiles = (
   writeManagedFile(
     join(projectPromptDir, "system-prompt.md"),
     systemPrompt,
+    0o444,
+  );
+
+  // The swarm tool's own prompt slot — same two-slot, same-bytes law. The
+  // PROJECT slot resolves against the daemon's working directory (which is
+  // this home), so it covers every session; the home slot is the fall-
+  // through that keeps us covered if that resolution ever changes.
+  writeManagedFile(
+    join(jcodeHome, "swarm-prompt.md"),
+    SWARM_PROMPT_OVERRIDE,
+    0o444,
+  );
+  writeManagedFile(
+    join(projectPromptDir, "swarm-prompt.md"),
+    SWARM_PROMPT_OVERRIDE,
     0o444,
   );
 
@@ -729,7 +800,7 @@ const isHarnessRefusal = (error: unknown): boolean => {
  *
  * jcode drains its soft-interrupt queue at a safe point, joins the grouped
  * texts with "\n\n", and appends them as ONE fresh user message (verified in
- * v0.71.1 `interrupts.rs`; byte-identical in v0.78.1). So each steer's text
+ * v0.71.1 `interrupts.rs`; byte-identical through v0.81.1). So each steer's text
  * always lands inside a
  * SINGLE history entry, and the match is per-entry substring, longest steer
  * first, consuming each matched span:
@@ -804,6 +875,24 @@ export const BUSY_RESEND_DELAYS_MS = [2_000, 5_000, 10_000, 30_000, 60_000];
 /** How long a heal round drains orphan residue before resending. */
 const ORPHAN_DRAIN_MIN_MS = 250;
 
+/** While the spawn barrier stands, the live loop wakes on this tick to honor
+ * an abort (the daemon's cancel confirmation is stuck behind the frozen
+ * request loop) and to keep the quarantine responsive. */
+const BARRIER_TICK_MS = 250;
+
+/** Foreign-frame kinds worth counting when quarantined — the ones the live
+ * loop would otherwise have surfaced or recorded. Everything else (acks,
+ * status broadcasts) is dropped by the default arm even when trusted. */
+const QUARANTINE_COUNTED = new Set([
+  "text_delta",
+  "reasoning_delta",
+  "tool_start",
+  "tool_done",
+  "token_usage",
+  "turn_done",
+  "error",
+]);
+
 class JcodeSession implements HarnessSession {
   readonly sessionRef: string;
   /**
@@ -850,17 +939,50 @@ class JcodeSession implements HarnessSession {
     let terminal: Extract<AgentEvent, { type: "turn.done" | "error" }> | null =
       null;
 
+    // THE SPAWN BARRIER. The daemon can run turns it did not receive from
+    // us, and their frames are indistinguishable from ours: no ids on
+    // deltas, and the bridge drops the self-started terminal. External wake
+    // ownership (JCODE_WAKE_MODE=external, v0.81+) removes the BIG source —
+    // background/fan-out/comm self-wake turns — but the barrier stays as
+    // defense-in-depth: two daemon turn-starters remain ungated upstream
+    // (`notify_session`, interrupted-session recovery), abandoned orphans of
+    // our own are version-independent, and the mode is an env we set, not a
+    // guarantee. A send landing mid foreign turn is ACCEPTED (the busy
+    // refusal keys on per-connection state such turns never set) and waits
+    // on the daemon's agent mutex — which freezes this connection's request
+    // loop. So a request issued AFTER the send can only be answered once OUR
+    // turn has spawned: its reply is the barrier, and every frame received
+    // before it is provably another run's. Our own first delta needs a full
+    // model roundtrip past the spawn, so it can never precede the barrier.
+    // Armed from TURN START (frames in the subscribe→send gap are foreign
+    // too — an orphan finishing naturally in that gap used to read as an
+    // instant empty end; now it is quarantined like any foreign frame).
+    let barrierPending = true;
+    let barrierStopped = false;
+    let droppedForeignFrames = 0;
+    let droppedForeignTextChars = 0;
+    let exclusionNoticeSent = false;
+    const exclusionNotice = (): Extract<AgentEvent, { type: "notice" }> => ({
+      type: "notice",
+      level: "warn",
+      text: "Output from a background run on this agent overlapped with your message and was excluded from this reply. Ask the agent to repeat anything you were expecting.",
+    });
+
     // ONE background reader owns `stream.next()` for the turn's whole life.
     // The SDK iterator holds a single waker slot, so racing `next()` against
     // timers directly would orphan a waker and silently drop the frame that
     // resolves it — every timed read below goes through this queue instead.
-    const queue: ApiEvent[] = [];
+    // Frames are stamped foreign AT ENQUEUE, not when processed: the barrier
+    // flips while the consumer may be parked mid-`yield`, and a flag checked
+    // at processing time would launder pre-barrier frames received across
+    // that suspension. Enqueue order is stream order — the honest oracle.
+    const queue: { frame: ApiEvent; foreign: boolean }[] = [];
     let streamEnded = false;
     let wakeReader: (() => void) | undefined;
     const pump = (async () => {
       try {
         for await (const frame of stream) {
-          queue.push(frame);
+          queue.push({ frame, foreign: barrierPending });
           wakeReader?.();
           wakeReader = undefined;
         }
@@ -873,13 +995,13 @@ class JcodeSession implements HarnessSession {
         wakeReader = undefined;
       }
     })();
-    /** Next frame, or "ended", or — when a deadline is given — "timeout". */
-    const nextFrame = async (
+    /** Next entry, or "ended", or — when a deadline is given — "timeout". */
+    const nextEntry = async (
       deadline?: number,
-    ): Promise<ApiEvent | "ended" | "timeout"> => {
+    ): Promise<{ frame: ApiEvent; foreign: boolean } | "ended" | "timeout"> => {
       for (;;) {
-        const frame = queue.shift();
-        if (frame !== undefined) return frame;
+        const entry = queue.shift();
+        if (entry !== undefined) return entry;
         if (streamEnded) return "ended";
         const waitMs =
           deadline === undefined ? undefined : deadline - Date.now();
@@ -898,11 +1020,32 @@ class JcodeSession implements HarnessSession {
     };
     /** An orphaned reply to one of our own timed-out requests — the daemon
      * answered after the SDK gave up, and the SDK re-emits unmatched replies
-     * as events. A request reply is never a turn terminal (observed live: a
-     * deferred set_reasoning_effort reply killing an unrelated stream). */
+     * as events. A request reply is never a turn event, whatever its `ev`
+     * (observed live: a deferred set_reasoning_effort reply killing an
+     * unrelated stream; barrier attempts add stale `history` replies). */
     const isStaleReply = (frame: ApiEvent): boolean =>
-      frame.ev === "error" &&
       (frame as { reply_to?: number }).reply_to !== undefined;
+    /** Count-and-drop a foreign frame. Only the counts survive — the notice
+     * needs no content, and foreign usage/tools must not be recorded. Frames
+     * the live loop would ignore anyway (acks, status broadcasts — our own
+     * send's `message_accepted` always precedes the barrier reply) are not
+     * counted: they are dropped either way and would page on every turn. */
+    const quarantine = (frame: ApiEvent): void => {
+      if (frame.ev === "permission_request") {
+        // A foreign run's unanswered permission prompt would wedge the
+        // daemon (and the mutex our send waits on) forever — auto-allow it
+        // exactly like our own, just without surfacing anything.
+        void this.client
+          .respondToPermission(this.sessionRef, frame.request_id, "allow")
+          .catch(() => {});
+        return;
+      }
+      if (!QUARANTINE_COUNTED.has(frame.ev)) return;
+      droppedForeignFrames += 1;
+      if (frame.ev === "text_delta" || frame.ev === "reasoning_delta") {
+        droppedForeignTextChars += frame.text.length;
+      }
+    };
 
     try {
       // Drop interrupts leaked from a previous turn's very end: jcode holds
@@ -915,33 +1058,64 @@ class JcodeSession implements HarnessSession {
       this.pendingSteers = [];
       this.abortRequested = false;
       this.turnActive = true;
+      // A stale floor from a previous turn must never survive into this
+      // one's reconcile: if the barrier below never resolves (stream death
+      // mid-freeze), reconcile degrades to the content anchor — the safe
+      // direction (a duplicate beats a loss) — instead of matching against
+      // an old-era window.
+      this.turnHistoryBaseline = null;
 
       // Inline vision: our TurnImage translates to jcode's [mediaType,
       // base64] tuple HERE and nowhere else (invariant 9 — the vendor shape
       // never crosses the adapter boundary). The daemon prepends the images
       // as content blocks in the same user message (verified v0.71.1,
-      // unchanged in v0.78.1).
+      // unchanged through v0.81.1).
       const images = (input.images ?? []).map((image): [string, string] => [
         image.mediaType,
         image.dataBase64,
       ]);
       const imagesArg = images.length > 0 ? images : undefined;
 
-      // The reconcile window's floor, captured by INDEX right after each
-      // send, while nothing can have injected yet (injection points exist
-      // only inside the turn loop, after the first model stream) — re-read
-      // after every self-heal resend below, since the resend is the message
-      // the daemon actually took. Best-effort: a failed read falls back to
-      // the content anchor at reconcile time.
-      const captureBaseline = async () => {
-        this.turnHistoryBaseline = await this.client
-          .getHistory(this.sessionRef)
-          .then((history) => history.length)
-          .catch(() => null);
+      // Arm the spawn barrier: a `get_history` issued right after each send.
+      // Its reply doubles as the reconcile window's floor (captured by INDEX
+      // at our spawn — everything the wake turn appended sits below it, and
+      // injection points exist only inside our own turn loop) and as the
+      // barrier that declares earlier frames foreign. NOT awaited inline:
+      // during a self-wake turn the request loop is frozen and the read
+      // would hang for the whole wake turn. Sequential retries, no delay —
+      // the SDK's own request timeout is the pacing, and keeping one attempt
+      // always queued means the barrier drops within ms of our spawn. Any
+      // non-timeout failure opens the gate with a null floor (the content
+      // anchor covers reconcile) rather than quarantining forever.
+      const armBarrier = () => {
+        barrierPending = true;
+        void (async () => {
+          for (;;) {
+            if (barrierStopped) return;
+            // An abort stops the retries but leaves the barrier PENDING: the
+            // live loop's tick is what honors the abort, and it only ticks
+            // while the barrier stands.
+            if (this.abortRequested) return;
+            try {
+              const history = await this.client.getHistory(this.sessionRef);
+              if (!barrierStopped) this.turnHistoryBaseline = history.length;
+            } catch (error) {
+              if (errorCode(error) === "timeout" && !barrierStopped) {
+                log("warn", "spawn barrier read timed out; retrying", {
+                  sessionRef: this.sessionRef,
+                });
+                continue;
+              }
+              if (!barrierStopped) this.turnHistoryBaseline = null;
+            }
+            barrierPending = false;
+            return;
+          }
+        })();
       };
 
       await this.client.sendMessage(this.sessionRef, input.message, imagesArg);
-      await captureBaseline();
+      armBarrier();
       yield { type: "turn.started" };
 
       for (const text of this.pendingNotices.splice(0))
@@ -970,11 +1144,12 @@ class JcodeSession implements HarnessSession {
         }
         const windowEnd = Date.now() + BUSY_DETECT_WINDOW_MS;
         for (;;) {
-          const frame = await nextFrame(windowEnd);
+          const entry = await nextEntry(windowEnd);
           // Window elapsed or stream gone: the held frames are ours; the
           // live loop below owns the rest (including synthesizing the
           // unexpected-end terminal).
-          if (frame === "timeout" || frame === "ended") break settle;
+          if (entry === "timeout" || entry === "ended") break settle;
+          const frame = entry.frame;
           if (isStaleReply(frame)) continue;
           if (
             frame.ev === "error" &&
@@ -985,12 +1160,21 @@ class JcodeSession implements HarnessSession {
             // The cancelled orphan's own death rattle, not our terminal.
             continue;
           }
+          // The busy check MUST run before the foreign quarantine: the
+          // refusal is broadcast while the daemon processes our send — i.e.
+          // strictly before the barrier reply — so it always arrives stamped
+          // foreign, and quarantining it would kill the self-heal.
           if (
             frame.ev === "error" &&
             BUSY_REFUSAL_SHAPE.test(frame.message ?? "")
           ) {
             // Our send was refused — everything held so far was the orphan's.
+            // The orphan's discard has always been silent (the heal is the
+            // recovery, not an incident): the foreign counters reset with it
+            // so no exclusion notice is minted for healed residue.
             held.length = 0;
+            droppedForeignFrames = 0;
+            droppedForeignTextChars = 0;
             if (healRound >= BUSY_RESEND_DELAYS_MS.length) {
               terminal = {
                 type: "error",
@@ -1009,7 +1193,7 @@ class JcodeSession implements HarnessSession {
                 ORPHAN_DRAIN_MIN_MS,
               );
             for (;;) {
-              const drained = await nextFrame(drainEnd);
+              const drained = await nextEntry(drainEnd);
               if (drained === "timeout" || drained === "ended") break;
               if (this.abortRequested) break;
             }
@@ -1023,17 +1207,24 @@ class JcodeSession implements HarnessSession {
               input.message,
               imagesArg,
             );
-            await captureBaseline();
+            armBarrier();
             continue settle;
+          }
+          // Pre-barrier frames are another run's — the self-wake turn our
+          // accepted send is queued behind (or an orphan finishing in the
+          // subscribe→send gap, the residual this closes). Count and drop;
+          // never held, never a terminal. (Residual: the barrier reply and
+          // a neighbouring broadcast ride different daemon-side paths to
+          // one socket writer, so the stamp can be wrong by a microtask's
+          // worth of frames at the handoff — the same class as the model
+          // roundtrip margin, and harmless at that scale.)
+          if (entry.foreign) {
+            quarantine(frame);
+            continue;
           }
           held.push(frame);
           // A non-busy terminal inside the window is ours: a busy refusal
           // always precedes any orphan frame that could follow our send.
-          // (Known residual: an orphan that finishes NATURALLY in the few-ms
-          // gap between our subscribe and the daemon processing our send can
-          // land its terminal here and read as an instant empty end — it
-          // needs an abandoned run plus ms-precision timing, and the next
-          // message recovers.)
           if (frame.ev === "turn_done" || frame.ev === "error") break settle;
         }
       }
@@ -1044,9 +1235,45 @@ class JcodeSession implements HarnessSession {
       // has streamed (post-progress it cannot be a send refusal).
       let progressed = false;
       while (!terminal) {
-        const frame = held.shift() ?? (await nextFrame());
-        if (frame === "ended" || frame === "timeout") break;
-        const event = frame;
+        // While the barrier is pending our send is queued behind a foreign
+        // run and the daemon's request loop is frozen — an abort's `cancel`
+        // cannot be read until the freeze ends. The short tick keeps the
+        // abort honored (and the exclusion notice prompt) instead of hanging
+        // for the foreign run's whole life; the queued send does spawn a
+        // ghost turn at unfreeze, but the abort's queued cancel sits right
+        // behind it in FIFO, and the next turn's busy-heal is the second
+        // belt. Post-barrier, the daemon's own frames are the honest clock.
+        // Held frames were already classified by the settle phase (foreign
+        // ones never reached `held`), so they re-enter trusted; fresh ones
+        // carry their enqueue stamp.
+        const heldFrame = held.shift();
+        const entry =
+          heldFrame !== undefined
+            ? { frame: heldFrame, foreign: false }
+            : await nextEntry(
+                barrierPending ? Date.now() + BARRIER_TICK_MS : undefined,
+              );
+        if (entry === "ended") break;
+        if (entry === "timeout") {
+          if (this.abortRequested && barrierPending) {
+            terminal = { type: "turn.done" };
+            break;
+          }
+          continue;
+        }
+        const event = entry.frame;
+        if (isStaleReply(event)) continue;
+        if (entry.foreign) {
+          quarantine(event);
+          continue;
+        }
+        // The exclusion is never silent: one warn notice ahead of our own
+        // frames tells the reader overlapping background output was kept
+        // out of this reply (it survives in the session's own history).
+        if (!exclusionNoticeSent && droppedForeignTextChars > 0) {
+          exclusionNoticeSent = true;
+          yield exclusionNotice();
+        }
         switch (event.ev) {
           case "text_delta":
             progressed = true;
@@ -1079,12 +1306,12 @@ class JcodeSession implements HarnessSession {
           case "permission_request":
             // Local tool actions are auto-allowed: gating lives at the
             // network boundary (§3.1), where the gateway holds real
-            // approvals. This prompt is jcode-internal only.
-            await this.client.respondToPermission(
-              this.sessionRef,
-              event.request_id,
-              "allow",
-            );
+            // approvals. This prompt is jcode-internal only. Caught: during
+            // a frozen request loop the response itself times out, and a
+            // best-effort allow must not fail the turn.
+            await this.client
+              .respondToPermission(this.sessionRef, event.request_id, "allow")
+              .catch(() => {});
             break;
           case "turn_done":
             terminal = { type: "turn.done", ...(usage ? { usage } : {}) };
@@ -1092,8 +1319,7 @@ class JcodeSession implements HarnessSession {
           case "error": {
             // A failed turn emits `error` INSTEAD of `turn_done` (verified) —
             // terminating here is what keeps the loop from hanging forever.
-            // Orphaned request replies are the one exception (see above).
-            if (isStaleReply(event)) break;
+            // (Orphaned request replies were already skipped above.)
             // A busy refusal that outran the settle window (a loaded daemon
             // can answer late) still gets its honest code — no retry at this
             // point, but never the silent uncoded shape again.
@@ -1123,6 +1349,22 @@ class JcodeSession implements HarnessSession {
         };
       }
 
+      // A turn that ended without a single trusted frame after the barrier
+      // (stream death, abort under a freeze) still owes the exclusion story.
+      if (!exclusionNoticeSent && droppedForeignTextChars > 0) {
+        exclusionNoticeSent = true;
+        yield exclusionNotice();
+      }
+      // Logged at the end, when the counts are final (frames are counted as
+      // they are consumed, not as they arrive).
+      if (droppedForeignFrames > 0) {
+        log("warn", "spawn barrier quarantined a foreign run's frames", {
+          sessionRef: this.sessionRef,
+          frames: droppedForeignFrames,
+          textChars: droppedForeignTextChars,
+        });
+      }
+
       // ONE exit point: whatever ended the turn, confirm which steers made
       // it in and say so BEFORE the terminal event (the supervisor stops
       // listening after it).
@@ -1131,6 +1373,7 @@ class JcodeSession implements HarnessSession {
       }
       yield terminal;
     } finally {
+      barrierStopped = true;
       this.turnActive = false;
       await stream.return?.(undefined);
       await pump.catch(() => {});
@@ -1250,6 +1493,18 @@ export const createJcodeHarness = (): Harness => {
    */
   const clients = new Set<JcodeClient>();
   const sessionClients = new Map<string, JcodeClient>();
+  /** sessionId → the conversation it serves (from StartSessionOptions.context)
+   * — how a between-turns wake event finds its chat. */
+  const sessionConversations = new Map<string, string>();
+  /** External wake requests, mirrored as synthetic observed tasks. */
+  const wakeFeed = createJcodeWakeFeed();
+  /**
+   * The daemon's LEGACY socket, set once the instance is up. The swarm
+   * mirror's roster query lives on it — the api-bridge (the socket the SDK
+   * dials) drops every swarm frame, so this is the only externally-visible
+   * helper lifecycle at the pinned version (contract in jcode-swarm.ts).
+   */
+  let legacySocketPath: string | undefined;
   /** Connections WE closed — their `close` event is teardown, not death. */
   const deliberateCloses = new WeakSet<JcodeClient>();
   let connectionCounter = 0;
@@ -1269,7 +1524,10 @@ export const createJcodeHarness = (): Harness => {
     deliberateCloses.add(client);
     clients.delete(client);
     for (const [ref, holder] of sessionClients) {
-      if (holder === client) sessionClients.delete(ref);
+      if (holder === client) {
+        sessionClients.delete(ref);
+        sessionConversations.delete(ref);
+      }
     }
     await client.close().catch(() => {});
   };
@@ -1362,6 +1620,15 @@ export const createJcodeHarness = (): Harness => {
         // config — the managed TOML's swarm=true is the switch, these are
         // the limits. See JCODE_SWARM_ENV's doc for the verified mechanics.
         ...JCODE_SWARM_ENV,
+        // EXTERNAL WAKE OWNERSHIP (v0.81+): the daemon never starts turns on
+        // its own — background/swarm-await/comm wakes surface as typed
+        // `wake_requested` events the adapter converts into platform wakes
+        // (jcode-wake.ts). Inert on older daemons (unknown env ignored), so
+        // this ships safely ahead of the image bump. NOT reload-fingerprinted
+        // upstream, which is fine: it is set once here, at spawn.
+        JCODE_WAKE_MODE: "external",
+        // The platform-tool cliff fence — see JCODE_MCP_TOOLS_ENV_VALUE.
+        JCODE_MCP_TOOLS: JCODE_MCP_TOOLS_ENV_VALUE,
         // prepareMcpConfig deletes the Claude-compat MCP files per boot, but
         // jcode re-reads MCP config at every session construction — a file
         // planted mid-container-life would load before the next boot heals
@@ -1385,6 +1652,11 @@ export const createJcodeHarness = (): Harness => {
     launched.process.once("exit", () => {
       fail("jcode instance exited");
     });
+
+    // The SDK pins both sockets into ONE runtime dir (`<jcodeHome>/run`):
+    // `jcode-api.sock` (what it hands back) beside `jcode.sock` (the daemon's
+    // legacy listener the roster mirror queries).
+    legacySocketPath = join(dirname(launched.socketPath), "jcode.sock");
 
     return launched;
   };
@@ -1422,6 +1694,41 @@ export const createJcodeHarness = (): Harness => {
       },
     );
 
+    // EXTERNAL WAKE requests (v0.81+, JCODE_WAKE_MODE=external): the daemon
+    // asks its operator to wake a session instead of starting a turn itself.
+    // A STANDING listener, because the event fires between turns when no
+    // events() iterator is being consumed — and the SDK emits every frame on
+    // a per-kind channel even for kinds its typings predate, so this works
+    // on the pinned client with one local shape. Gated to the session this
+    // connection OWNS (helper/broadcast wakes are not ours to act on), and
+    // attributed via the conversation the session serves. During a turn the
+    // events() iterator sees the same frame and drops it (default arm /
+    // uncounted quarantine) — this listener is the single consumer.
+    connected.on(
+      "wake_requested",
+      (frame: {
+        session_id?: string;
+        reason?: string;
+        notification?: string;
+      }) => {
+        const sessionId = frame.session_id;
+        if (!sessionId || sessionClients.get(sessionId) !== connected) return;
+        const conversationId = sessionConversations.get(sessionId);
+        if (!conversationId) {
+          log("warn", "wake request for a session with no conversation", {
+            sessionId,
+            reason: frame.reason ?? null,
+          });
+          return;
+        }
+        wakeFeed.deliver({
+          reason: frame.reason ?? "",
+          notification: frame.notification ?? "",
+          conversationId,
+        });
+      },
+    );
+
     // THE other death signal. These are unix-socket connections to a local
     // daemon: an unexpected close means the daemon died, and from that moment
     // every request on every connection rejects with "harness connection
@@ -1453,9 +1760,18 @@ export const createJcodeHarness = (): Harness => {
     },
     // The agent starts background work through jcode's OWN tooling by strong
     // reflex (proven live; and disabling that tooling is turn-fatal), so the
-    // platform observes jcode's registry instead of fighting it — see
-    // jcode-background.ts for the format contract.
-    backgroundTasks: createJcodeBackgroundTasks(),
+    // platform observes jcode's registry instead of fighting it — THREE feeds
+    // through one seam: the bash background registry (jcode-background.ts),
+    // the swarm-helper roster (jcode-swarm.ts), and the external wake
+    // requests (jcode-wake.ts), each with its own format contract.
+    backgroundTasks: mergeBackgroundTasks(
+      createJcodeBackgroundTasks(),
+      createJcodeSwarmTasks({
+        legacySocketPath: () => legacySocketPath,
+        leadRefs: () => [...sessionClients.keys()],
+      }),
+      wakeFeed,
+    ),
     onFailure(listener) {
       onFailure = listener;
     },
@@ -1506,6 +1822,12 @@ export const createJcodeHarness = (): Harness => {
           options,
         );
         sessionClients.set(session.session_id, jcode);
+        if (options.context) {
+          sessionConversations.set(
+            session.session_id,
+            options.context.conversationId,
+          );
+        }
         return new JcodeSession(jcode, session.session_id, notices);
       } catch (error) {
         // The connection exists but its session is unusable. Closing the
@@ -1525,6 +1847,7 @@ export const createJcodeHarness = (): Harness => {
       disposing = true;
       await Promise.allSettled([...clients].map((c) => closeClient(c)));
       sessionClients.clear();
+      sessionConversations.clear();
       if (instance) {
         const inst = await instance.catch(() => undefined);
         await inst?.shutdown();

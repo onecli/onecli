@@ -121,9 +121,49 @@ describe("rows", () => {
       screen.getByText(/Auto-disabled: creator lost access/),
     ).toBeInTheDocument();
   });
+
+  it("a completed one-shot reads Completed — neutral, never Auto-disabled", () => {
+    state.crons = [
+      cron({
+        schedule: "2026-08-25T14:00:00",
+        enabled: false,
+        disabledReason: "completed",
+        lastFiredAt: "2026-08-25T14:00:01.000Z",
+        lastOutcome: "ok",
+      }),
+    ];
+    renderSection();
+    // Both the badge and the fire label say Completed; the destructive
+    // auto-disabled copy (a lie for a schedule that ran its course) is absent,
+    // and so is Paused.
+    expect(screen.getAllByText("Completed").length).toBeGreaterThanOrEqual(2);
+    expect(screen.queryByText(/Auto-disabled/)).not.toBeInTheDocument();
+    expect(screen.queryByText("Paused")).not.toBeInTheDocument();
+  });
 });
 
 describe("actions", () => {
+  it("editing a one-shot round-trips through the Once preset", async () => {
+    state.crons = [cron({ schedule: "2026-08-25T14:00:00" })];
+    renderSection();
+    await userEvent.click(
+      screen.getByRole("button", { name: "Edit Daily inbox check" }),
+    );
+    // presetOf detected the ISO shape: the datetime input is seeded from the
+    // stored expression (minutes precision — datetime-local's grain).
+    const onceInput = screen.getByLabelText("On");
+    expect(onceInput).toHaveValue("2026-08-25T14:00");
+    // Save serializes back to croner's fire-once pattern, seconds restored.
+    await userEvent.click(screen.getByRole("button", { name: "Save" }));
+    expect(state.update).toHaveBeenCalledWith(
+      {
+        cronId: "cr-1",
+        input: expect.objectContaining({ schedule: "2026-08-25T14:00:00" }),
+      },
+      expect.anything(),
+    );
+  });
+
   it("Run now force-fires through the mutation", async () => {
     state.crons = [cron()];
     renderSection();

@@ -95,6 +95,11 @@ services:
       SECRET_ENCRYPTION_KEY: ${SECRET_ENCRYPTION_KEY:?put SECRET_ENCRYPTION_KEY in the .env beside this file (head -c 32 /dev/urandom | base64), or install via https://onecli.sh/install}
       # Authenticates gateway↔api internal calls (e.g. vault reads).
       GATEWAY_INTERNAL_SECRET: ${GATEWAY_INTERNAL_SECRET:?put GATEWAY_INTERNAL_SECRET in the .env beside this file (head -c 32 /dev/urandom | base64), or install via https://onecli.sh/install}
+      # The SSH port the dashboard advertises — pinned to the SAME knob that
+      # publishes the terminator's host port, so they can never disagree.
+      # (SSH_HOST, SSH_CA_PRIVATE_KEY and SSH_TERMINATOR_SECRET arrive from the
+      # .env via env_file below; the port is the one that must not double up.)
+      SSH_PORT: ${ONECLI_SSH_PORT:-10257}
       # THE canonical public URL — the address people open OneCLI at. Every
       # other origin derives from it (http means ports mode: api/gateway on
       # the same host's ports; https means proxy mode: one origin, a reverse
@@ -313,6 +318,61 @@ services:
     networks:
       - onecli
       - sandboxes
+
+  # The SSH front door (sandbox-platform step 5): terminates ssh with the
+  # short-lived certificates the api mints and bridges each session into an
+  # agent's container. Rides the `runner` profile — SSH into a hosted agent
+  # is meaningless without the runner — so both install doors enable it by
+  # default and one COMPOSE_PROFILES knob turns the pair off.
+  #
+  # It reaches the daemon exactly like the runner (socket mount + group_add,
+  # cap_drop ALL, no-new-privileges) — the docker backend execs into the
+  # labeled sandbox containers over that socket, so it joins ONLY the `onecli`
+  # network (to reach the api), never the internal `sandboxes` one. Zero
+  # database access, like the runner.
+  ssh-terminator:
+    profiles: ["runner"]
+    image: ghcr.io/onecli/onecli-ssh-terminator:${ONECLI_VERSION:-latest}
+    container_name: onecli-ssh-terminator
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    depends_on:
+      api:
+        condition: service_healthy
+    ports:
+      # A high, loopback-bound-by-default port: an unprivileged listener
+      # can't bind :22, and remote SSH is opt-in via ONECLI_BIND_HOST.
+      - "${ONECLI_BIND_HOST:-127.0.0.1}:${ONECLI_SSH_PORT:-10257}:2222"
+    environment:
+      TERMINATOR_BACKEND: docker
+      TERMINATOR_CONTROL_PLANE_URL: http://api:10256
+      # Its control-plane token IS the api's SSH_TERMINATOR_SECRET (one value,
+      # two processes — the runner/adapter pattern). Not `:?` — compose
+      # interpolates the whole file before filtering by profile, so a required
+      # var here would break `docker compose up` for everyone; the terminator
+      # refuses to start without it (apps/ssh-terminator/src/config.ts).
+      TERMINATOR_CONTROL_PLANE_TOKEN: ${SSH_TERMINATOR_SECRET:-}
+      # The host key and CA PUBLIC line, interpolated from the install's .env.
+      # Deliberately NO `env_file: .env` here (every other app service has one):
+      # this is the platform's only public internet-facing listener AND it
+      # mounts the root-equivalent docker socket, so it must hold the SMALLEST
+      # possible secret surface — never SSH_CA_PRIVATE_KEY (the trust anchor
+      # the grant design assumes a compromised terminator does NOT have),
+      # SECRET_ENCRYPTION_KEY, BETTER_AUTH_SECRET or the DB creds. Everything
+      # it legitimately needs is named right here.
+      TERMINATOR_HOST_KEY: ${TERMINATOR_HOST_KEY:-}
+      TERMINATOR_CA_PUBLIC_KEY: ${TERMINATOR_CA_PUBLIC_KEY:-}
+    volumes:
+      # Root-equivalent on the host: the docker backend execs into sandbox
+      # containers through this socket (never over the network).
+      - /var/run/docker.sock:/var/run/docker.sock
+    group_add:
+      - "${DOCKER_GID:-0}"
+    networks:
+      - onecli
 
   # Channels (step 6): the daemon that holds provider connections (Slack
   # Socket Mode), streams agents' answers back, mirrors web exchanges, and

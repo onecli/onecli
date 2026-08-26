@@ -29,7 +29,7 @@ export const MAX_ATTACHMENT_ROWS_PER_MESSAGE = 20;
 /**
  * Per-image ceiling for INLINE vision (jcode `send_message` images). The
  * Anthropic API refuses images above ~5MB base64 and jcode does NOT resize
- * (verified in v0.71.1, still true in v0.78.1: read.rs base64s raw bytes;
+ * (verified in v0.71.1, still true through v0.81.1: read.rs base64s raw bytes;
  * the provider forwards verbatim) — 3.7MB raw ≈ 4.94MB base64. Bigger
  * images still land on disk and remain readable through the harness's own
  * read tool.
@@ -38,7 +38,7 @@ export const INLINE_IMAGE_MAX_BYTES = 3_700_000;
 
 /**
  * TOTAL inline-image budget per turn. jcode's harness-API socket refuses
- * frames over 16MiB (lib.rs MAX_FRAME_BYTES, v0.71.1 and v0.78.1) and inline images ride
+ * frames over 16MiB (lib.rs MAX_FRAME_BYTES, v0.71.1 through v0.81.1) and inline images ride
  * the SAME frame as the message — five per-image-legal images would blow it.
  * 10MB raw ≈ 13.4MB base64 leaves headroom for the message itself. Packing
  * is by ascending size so the most images fit; the rest degrade to disk.

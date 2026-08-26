@@ -35,6 +35,17 @@ describe("the disabled harness-native tools", () => {
   });
 });
 
+describe("the managed config's tool-surface pin", () => {
+  it("pins mcp_tools=eager — the config half of the platform-tool cliff fence", () => {
+    // Upstream defaults mcp_tools="auto" (v0.79.1+): above a token
+    // threshold every mcp__* definition is silently replaced by a generic
+    // search/call pair — which would strip the platform tools out of the
+    // model's tool list. The env half (JCODE_MCP_TOOLS) is asserted by the
+    // launch wiring; this pins the config statement.
+    expect(managedConfigToml).toMatch(/\[tools\]\nmcp_tools = "eager"/);
+  });
+});
+
 describe("the managed config's update opt-out", () => {
   it("pins check_updates=false — the config half of the version pin", () => {
     // MUTATION-PROOF: drop the key and this fails. The key defaults TRUE

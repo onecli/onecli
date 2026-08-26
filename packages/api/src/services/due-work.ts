@@ -1173,6 +1173,30 @@ export const advanceClaimedCron = async (
   return count > 0;
 };
 
+/**
+ * Retire a claimed schedule whose LAST occurrence this fire is — the one-shot
+ * counterpart of `advanceClaimedCron`, on the same lease CAS (a human edit
+ * mid-claim still wins and the fire is skipped). `enabled=false` removes the
+ * row from the claim predicate, so `nextFireAt` may harmlessly keep the lease
+ * value; `disabledReason:"completed"` is what the dashboard and `list_tasks`
+ * render — a state, never a delete, because deleting a row while its final
+ * run is in flight would drop the run's report (settle looks the row up).
+ */
+export const completeClaimedCron = async (
+  cronId: string,
+  expectedLease: Date,
+): Promise<boolean> => {
+  const { count } = await db.agentCron.updateMany({
+    where: { id: cronId, nextFireAt: expectedLease },
+    data: {
+      enabled: false,
+      disabledReason: "completed",
+      lastFiredAt: new Date(),
+    },
+  });
+  return count > 0;
+};
+
 // ── Background-process watches (step 10) ─────────────────────────────────────
 // The durable side of the watch model. The supervisor detects exit/pattern/
 // silence in memory and reports triggers; the control plane owns the outcomes
@@ -1237,7 +1261,6 @@ export const sweepExpiredWatches = async (): Promise<number> =>
 
 export interface DueWatchFire {
   id: string;
-  kind: string;
   trigger: string | null;
   prompt: string;
   excerpt: string | null;
@@ -1248,11 +1271,12 @@ export interface DueWatchFire {
   workspaceId: string;
   originConversationId: string | null;
   createdByUserId: string | null;
+  /** The arm-time deadline — the in-origin busy-retry loop stops here. */
+  expiresAt: Date;
 }
 
 interface DueWatchFireRow {
   id: string;
-  kind: string;
   trigger: string | null;
   prompt: string;
   excerpt: string | null;
@@ -1263,7 +1287,23 @@ interface DueWatchFireRow {
   workspace_id: string;
   origin_conversation_id: string | null;
   created_by_user_id: string | null;
+  expires_at: Date;
 }
+
+const dueWatchFireFromRow = (row: DueWatchFireRow): DueWatchFire => ({
+  id: row.id,
+  trigger: row.trigger,
+  prompt: row.prompt,
+  excerpt: row.excerpt,
+  processName: row.process_name,
+  processCommand: row.process_command,
+  exitCode: row.exit_code,
+  agentId: row.agent_id,
+  workspaceId: row.workspace_id,
+  originConversationId: row.origin_conversation_id,
+  createdByUserId: row.created_by_user_id,
+  expiresAt: row.expires_at,
+});
 
 /**
  * Claim triggered watches to fire, atomically — the CTE + lease law (NOT the
@@ -1288,7 +1328,7 @@ export const claimTriggeredWatches = async (): Promise<DueWatchFire[]> => {
     FROM claimed cl
     WHERE w.id = cl.id
     RETURNING
-      w.id, w.kind, w.trigger, w.prompt, w.excerpt,
+      w.id, w.trigger, w.prompt, w.excerpt, w.expires_at,
       w.origin_conversation_id, w.created_by_user_id,
       (SELECT p.name FROM sandbox_processes p WHERE p.id = w.process_id) AS process_name,
       (SELECT p.command FROM sandbox_processes p WHERE p.id = w.process_id) AS process_command,
@@ -1300,20 +1340,65 @@ export const claimTriggeredWatches = async (): Promise<DueWatchFire[]> => {
         JOIN sandboxes s ON s.id = p.sandbox_id
         JOIN agents a ON a.id = s.agent_id WHERE p.id = w.process_id) AS workspace_id
   `;
-  return rows.map((row) => ({
-    id: row.id,
-    kind: row.kind,
-    trigger: row.trigger,
-    prompt: row.prompt,
-    excerpt: row.excerpt,
-    processName: row.process_name,
-    processCommand: row.process_command,
-    exitCode: row.exit_code,
-    agentId: row.agent_id,
-    workspaceId: row.workspace_id,
-    originConversationId: row.origin_conversation_id,
-    createdByUserId: row.created_by_user_id,
-  }));
+  return rows.map(dueWatchFireFromRow);
+};
+
+/**
+ * The consolidation absorb: after the LIMIT-bounded claim above splits an
+ * origin's watches across passes, pull the STRAGGLERS of the origins we are
+ * about to fire — same CTE + lease law, no LIMIT competition — so one wake
+ * turn carries the whole batch instead of two turns a pass apart. Bounded by
+ * the origins list (≤ the claim limit) and the same lease, so a dying poller
+ * still retries at-most-once per lease window.
+ */
+export const claimTriggeredWatchesForOrigins = async (
+  originConversationIds: string[],
+): Promise<DueWatchFire[]> => {
+  if (originConversationIds.length === 0) return [];
+  const retryBefore = new Date(Date.now() - WATCH_FIRE_LEASE_SECONDS * 1000);
+  const rows = await db.$queryRaw<DueWatchFireRow[]>`
+    WITH claimed AS (
+      SELECT w.id FROM process_watches w
+      WHERE w.status = 'triggered'
+        AND w.origin_conversation_id = ANY(${originConversationIds})
+        AND (w.fire_claimed_at IS NULL OR w.fire_claimed_at < ${retryBefore})
+      ORDER BY w.triggered_at ASC
+      FOR UPDATE OF w SKIP LOCKED
+    )
+    UPDATE process_watches w
+    SET fire_claimed_at = now(), updated_at = now()
+    FROM claimed cl
+    WHERE w.id = cl.id
+    RETURNING
+      w.id, w.trigger, w.prompt, w.excerpt, w.expires_at,
+      w.origin_conversation_id, w.created_by_user_id,
+      (SELECT p.name FROM sandbox_processes p WHERE p.id = w.process_id) AS process_name,
+      (SELECT p.command FROM sandbox_processes p WHERE p.id = w.process_id) AS process_command,
+      (SELECT p.exit_code FROM sandbox_processes p WHERE p.id = w.process_id) AS exit_code,
+      (SELECT a.id FROM sandbox_processes p
+        JOIN sandboxes s ON s.id = p.sandbox_id
+        JOIN agents a ON a.id = s.agent_id WHERE p.id = w.process_id) AS agent_id,
+      (SELECT a.workspace_id FROM sandbox_processes p
+        JOIN sandboxes s ON s.id = p.sandbox_id
+        JOIN agents a ON a.id = s.agent_id WHERE p.id = w.process_id) AS workspace_id
+  `;
+  return rows.map(dueWatchFireFromRow);
+};
+
+/**
+ * Release the fire claims of triggered watches waiting on a busy origin
+ * conversation. The in-origin fire leaves a CONFLICTed bucket claimed (the
+ * lease is its retry clock, 300s) — this runs when a turn in that
+ * conversation FINISHES, collapsing the worst-case post-busy wait to the
+ * next poll. Best-effort: a miss just waits out the lease.
+ */
+export const releaseWatchFireClaimsForConversation = async (
+  conversationId: string,
+): Promise<void> => {
+  await db.processWatch.updateMany({
+    where: { originConversationId: conversationId, status: "triggered" },
+    data: { fireClaimedAt: null },
+  });
 };
 
 /**
@@ -1399,21 +1484,51 @@ export const signalWork = (): void => {
   }
 };
 
-/** Resolve when work is signalled or `timeoutMs` elapses, whichever is first. */
-export const waitForWork = (timeoutMs: number): Promise<void> =>
+/**
+ * The watch-fire accelerator. `signalWork` fires on EVERY out-of-band event
+ * (each message, sandbox change, grant change …), so a held poll must not
+ * run the fire pass on every signal — that would multiply three global
+ * sweeps by runner count per message (the per-tick-sweep alarm class). The
+ * triggered edge instead MARKS the pass pending and signals; the first
+ * woken poll TAKES the mark and runs one pass. In-process by design, like
+ * the signal itself: the mark lives where the triggering event was
+ * ingested, and a missed mark costs one poll interval, never a lost fire —
+ * every poll's top still runs the pass.
+ */
+let watchFirePending = false;
+
+export const markWatchFirePending = (): void => {
+  watchFirePending = true;
+  signalWork();
+};
+
+export const takeWatchFirePending = (): boolean => {
+  const pending = watchFirePending;
+  watchFirePending = false;
+  return pending;
+};
+
+/**
+ * Resolve when work is signalled or `timeoutMs` elapses, whichever is first.
+ * Resolves `true` on a SIGNAL and `false` on the timeout — the held poll
+ * uses the distinction to run its event-driven passes (the watch fire) only
+ * when something actually happened, never on the steady-state re-check.
+ */
+export const waitForWork = (timeoutMs: number): Promise<boolean> =>
   new Promise((resolve) => {
     let done = false;
-    const finish = () => {
+    const finish = (signaled: boolean) => {
       if (done) return;
       done = true;
       clearTimeout(timer);
-      waiters.delete(finish);
-      resolve();
+      waiters.delete(onSignal);
+      resolve(signaled);
     };
-    const timer = setTimeout(finish, timeoutMs);
+    const onSignal = () => finish(true);
+    const timer = setTimeout(() => finish(false), timeoutMs);
     // Never keep the process alive for a poll that is only waiting.
     timer.unref?.();
-    waiters.add(finish);
+    waiters.add(onSignal);
   });
 
 /** Test seam: the number of polls currently parked on the signal. */

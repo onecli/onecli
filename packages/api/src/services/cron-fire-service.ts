@@ -1,9 +1,14 @@
 import { canAccessWorkspaceAsUser } from "./workspace-access-check";
-import { advanceClaimedCron, claimDueCrons, type DueCron } from "./due-work";
+import {
+  advanceClaimedCron,
+  claimDueCrons,
+  completeClaimedCron,
+  type DueCron,
+} from "./due-work";
 import {
   CRON_FAILURE_DISABLE_THRESHOLD,
-  computeNextFire,
   disableCron,
+  nextFireOrNull,
 } from "./agent-cron-service";
 import { ensureSourcedConversation } from "./conversation-service";
 import { createTurn } from "./turn-service";
@@ -76,9 +81,15 @@ const fireOne = async (cron: DueCron, lease: Date): Promise<void> => {
   // still ours: a human edit mid-claim recomputed next_fire_at through the
   // service, and firing a prompt the user may have just replaced is worse
   // than skipping one occurrence. Computed from now, so downtime coalesces
-  // into one late fire (misfire policy).
-  const next = computeNextFire(cron.schedule, cron.timezone, new Date());
-  const advanced = await advanceClaimedCron(cron.id, lease, next);
+  // into one late fire (misfire policy). NO next occurrence — a one-shot's
+  // final (only) fire, or an expression that exhausted after creation —
+  // retires the row on the same CAS instead: before this branch existed, the
+  // throw here left the lease standing and the row was re-claimed every five
+  // minutes forever, silently.
+  const next = nextFireOrNull(cron.schedule, cron.timezone, new Date());
+  const advanced = next
+    ? await advanceClaimedCron(cron.id, lease, next)
+    : await completeClaimedCron(cron.id, lease);
   if (!advanced) {
     log.info({ cronId: cron.id }, "cron edited mid-claim; skipping this fire");
     return;

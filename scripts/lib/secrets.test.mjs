@@ -23,7 +23,7 @@ const load = (content = "") => {
 const run = (env, shell = {}) =>
   ensureSecrets(env, resolveEnv(env, shell), shell);
 
-test("an empty file gets all five secrets, in valid shapes", () => {
+test("an empty file gets every SECRET_SPECS secret, in valid shapes", () => {
   const env = load();
   const { generated, replaced } = run(env);
   assert.deepEqual(
@@ -46,7 +46,7 @@ test("an empty file gets all five secrets, in valid shapes", () => {
 
 test("valid existing values are never touched — the file is byte-identical", () => {
   const key = Buffer.alloc(32, 7).toString("base64");
-  const content = `BETTER_AUTH_SECRET=keep-me-exactly\nSECRET_ENCRYPTION_KEY=${key}\nGATEWAY_INTERNAL_SECRET=alive\nRUNNER_TOKEN=rnr_custom\nCHANNEL_ADAPTER_TOKEN=cha_custom\n`;
+  const content = `BETTER_AUTH_SECRET=keep-me-exactly\nSECRET_ENCRYPTION_KEY=${key}\nGATEWAY_INTERNAL_SECRET=alive\nRUNNER_TOKEN=rnr_custom\nCHANNEL_ADAPTER_TOKEN=cha_custom\nSSH_TERMINATOR_SECRET=ssh-secret-kept\n`;
   const env = load(content);
   const { generated, replaced } = run(env);
   assert.deepEqual(generated, []);

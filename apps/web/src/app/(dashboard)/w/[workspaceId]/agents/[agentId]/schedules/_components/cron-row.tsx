@@ -15,6 +15,7 @@ export interface CronRowProps {
 }
 
 const nextFireLabel = (cron: AgentCron): string => {
+  if (cron.disabledReason === "completed") return "Completed";
   if (!cron.enabled) return "Paused";
   const next = new Date(cron.nextFireAt);
   return `Next: ${next.toLocaleString(undefined, {
@@ -48,15 +49,23 @@ export const CronRow = ({ agentId, cron, onEdit }: CronRowProps) => {
       <div className="min-w-0 flex-1">
         <div className="flex items-center gap-2">
           <span className="truncate text-sm font-medium">{cron.name}</span>
-          {/* The switch is the status; this badge appears only for the one
-              state the switch cannot express — the platform turned it off. */}
-          {cron.disabledReason && (
-            <Badge variant="destructive" className="px-1.5 py-0 text-[10px]">
-              Auto-disabled
-              {cron.disabledReason === "authorization"
-                ? ": creator lost access"
-                : ": kept failing"}
+          {/* The switch is the status; this badge appears only for states the
+              switch cannot express — the platform turned it off. A completed
+              one-shot is terminal by DESIGN, so it reads neutral, never
+              destructive. */}
+          {cron.disabledReason === "completed" ? (
+            <Badge variant="secondary" className="px-1.5 py-0 text-[10px]">
+              Completed
             </Badge>
+          ) : (
+            cron.disabledReason && (
+              <Badge variant="destructive" className="px-1.5 py-0 text-[10px]">
+                Auto-disabled
+                {cron.disabledReason === "authorization"
+                  ? ": creator lost access"
+                  : ": kept failing"}
+              </Badge>
+            )
           )}
         </div>
         <div className="text-muted-foreground mt-0.5 flex items-center gap-2 text-xs">

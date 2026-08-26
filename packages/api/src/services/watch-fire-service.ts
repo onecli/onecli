@@ -2,6 +2,7 @@ import { db } from "@onecli/db";
 import { canAccessWorkspaceAsUser } from "./workspace-access-check";
 import {
   claimTriggeredWatches,
+  claimTriggeredWatchesForOrigins,
   sweepExpiredWatches,
   sweepLostProcesses,
   sweepWatchCoherence,
@@ -24,10 +25,17 @@ const log = logger.child({ component: "watch-fire" });
  * never block the others or the poll.
  *
  * The CLAIM lives in due-work (the dispatch seam owns dueness); this module
- * owns what a fire IS: a fire-time authorization check, then a normal turn in
- * the watch's own conversation, created through the same funnel as a human
- * message so door-1, the sandbox wake, and the one-active-turn conflict all
- * apply unchanged.
+ * owns what a fire IS. Two destinations, decided per watch:
+ *
+ * - IN-ORIGIN (the product behavior): a watch whose origin is a DIRECT
+ *   conversation the fence admits fires INSIDE that conversation — one
+ *   consolidated turn per origin per pass, resuming the thread's own harness
+ *   session, so the wake's report is the turn itself, streamed live where
+ *   the person is. A busy origin RETRIES on the fire lease (today's silent
+ *   mark-fired drop is gone) until the watch's own expiry downgrades it.
+ * - HIDDEN (the fallback, and everything else): the watch's own sourced
+ *   conversation, exactly as before — a fresh run whose report is delivered
+ *   to the origin by the settle chain.
  */
 
 const cleanName = (raw: string): string =>
@@ -53,34 +61,111 @@ const triggerSentence = (watch: DueWatchFire): string => {
 
 export const buildWatchRunMessage = (watch: DueWatchFire): string => {
   const label = cleanName(watch.processName ?? watch.processCommand);
-  const header = `[Watch on process "${label}" fired: ${triggerSentence(watch)} — triggered automatically, not by a person typing. Do the task below and finish with a concise report; it will be delivered to the chat where this watch was created.]`;
+  // The delivery promise is only made when there IS a chat to deliver to: a
+  // watch with no origin (its arm carried no verifiable context) runs and
+  // settles with its transcript as the only record — promising delivery
+  // there would be a lie the model acts on.
+  const destination = watch.originConversationId
+    ? "it reaches the chat this watch belongs to"
+    : "it is kept as this run's record";
+  const header = `[Watch on process "${label}" fired: ${triggerSentence(watch)} — triggered automatically, not by a person typing. Do the task below and finish with a concise report; ${destination}.]`;
   const excerpt = watch.excerpt
     ? `\n\n[Recent output:]\n${stripControl(watch.excerpt)}`
     : "";
   return `${header}\n\n${watch.prompt}${excerpt}`;
 };
 
-const fireOne = async (watch: DueWatchFire): Promise<void> => {
-  // Fire-time authorization, exactly as crons: a creator who lost workspace
-  // access cannot keep a foothold through a watch they armed earlier. A
-  // one-shot watch has nothing to disable — it is simply canceled.
-  if (watch.createdByUserId) {
-    const workspace = await db.workspace.findUnique({
-      where: { id: watch.workspaceId },
-      select: { id: true, organizationId: true },
+/**
+ * The consolidated in-origin shape: one platform header, then per-watch
+ * blocks — with byte-identical prompts stated ONCE for their whole group
+ * (the safety-net and implicit-wake prompts repeat verbatim across a
+ * batch, and repeating them N times only burns the model's attention).
+ * Whole-block budget keeps the message far under the wire's 100k cap.
+ */
+export const CONSOLIDATED_MESSAGE_BUDGET = 32_000;
+
+export const buildConsolidatedWakeMessage = (
+  watches: DueWatchFire[],
+): string => {
+  if (watches.length === 1) {
+    const only = watches[0];
+    if (only) return buildWatchRunMessage(only);
+  }
+  const header = `[Platform wake: ${watches.length} background task(s) you were watching finished — triggered automatically, not by a person typing. This runs in the chat the work belongs to. Do what each item below asks and give one concise combined report directly in this reply.]`;
+
+  // Group by identical prompt text, preserving first-seen order.
+  const groups = new Map<string, DueWatchFire[]>();
+  for (const watch of watches) {
+    const group = groups.get(watch.prompt);
+    if (group) group.push(watch);
+    else groups.set(watch.prompt, [watch]);
+  }
+
+  const parts: string[] = [header];
+  let used = header.length;
+  let dropped = 0;
+  for (const [prompt, group] of groups) {
+    const lines = group.map((watch) => {
+      const label = cleanName(watch.processName ?? watch.processCommand);
+      const excerpt = watch.excerpt
+        ? `\n[Recent output:]\n${stripControl(watch.excerpt)}`
+        : "";
+      return `- "${label}": ${triggerSentence(watch)}.${excerpt}`;
     });
-    const allowed = workspace
-      ? await canAccessWorkspaceAsUser(watch.createdByUserId, workspace)
-      : false;
+    const block = `${prompt}\n\n${lines.join("\n")}`;
+    if (used + block.length > CONSOLIDATED_MESSAGE_BUDGET) {
+      dropped += group.length;
+      continue;
+    }
+    used += block.length;
+    parts.push(block);
+  }
+  if (dropped > 0) {
+    // Never silent: the model is told the batch was clipped, and
+    // process_status still shows everything.
+    parts.push(
+      `[${dropped} more finished task(s) did not fit this message — check process_status for the rest.]`,
+    );
+  }
+  return parts.join("\n\n");
+};
+
+/**
+ * Fire-time authorization, exactly as crons: the SUBJECT (the watch's
+ * creator, or — for platform-armed watches with no verified creator — the
+ * direct thread's owner) must still hold workspace access. A subject who
+ * lost access cannot keep a foothold through a watch armed earlier.
+ */
+const subjectMayFire = async (
+  subjectUserId: string,
+  workspaceId: string,
+): Promise<boolean> => {
+  const workspace = await db.workspace.findUnique({
+    where: { id: workspaceId },
+    select: { id: true, organizationId: true },
+  });
+  return workspace ? canAccessWorkspaceAsUser(subjectUserId, workspace) : false;
+};
+
+const cancelWatch = async (watchId: string, reason: string): Promise<void> => {
+  await db.processWatch.updateMany({
+    where: { id: watchId, status: "triggered" },
+    data: { status: "canceled" },
+  });
+  log.warn({ watchId, reason }, "watch canceled at fire time");
+};
+
+const fireOne = async (watch: DueWatchFire): Promise<void> => {
+  // A one-shot watch has nothing to disable — an unauthorized one is simply
+  // canceled. Creatorless watches pass here (they carry no user authority
+  // and their hidden run conversation grants none).
+  if (watch.createdByUserId) {
+    const allowed = await subjectMayFire(
+      watch.createdByUserId,
+      watch.workspaceId,
+    );
     if (!allowed) {
-      await db.processWatch.updateMany({
-        where: { id: watch.id, status: "triggered" },
-        data: { status: "canceled" },
-      });
-      log.warn(
-        { watchId: watch.id, agentId: watch.agentId },
-        "watch canceled: creator lost workspace access",
-      );
+      await cancelWatch(watch.id, "creator lost workspace access");
       return;
     }
   }
@@ -137,18 +222,203 @@ const fireOne = async (watch: DueWatchFire): Promise<void> => {
   }
 };
 
+/** The in-origin bucket for one direct conversation, fence already passed. */
+interface WakeBucket {
+  conversationId: string;
+  agentId: string;
+  workspaceId: string;
+  /** The access subject per watch: its creator, or the thread owner. */
+  watches: { watch: DueWatchFire; subjectUserId: string }[];
+}
+
+/**
+ * Fire one origin's bucket as ONE consolidated turn INSIDE the origin
+ * conversation. Outcome table (the order of `markFired` is the contract):
+ * - created (running or born-failed) → every watch marked fired in one
+ *   guarded batch. A born-failed turn (door 1) is ITSELF visible in the
+ *   thread, so no delivery duplicate is materialized.
+ * - CONFLICT (the thread's one-active slot is taken) → nothing marked:
+ *   unexpired watches stay claimed and retry on the fire lease (the old
+ *   path marked them fired and silently dropped the wake); expired ones
+ *   downgrade to the hidden path so a forever-busy thread cannot retry
+ *   past the watch's own deadline.
+ * - anything else → nothing marked; the lease retries.
+ */
+const fireBucket = async (bucket: WakeBucket): Promise<void> => {
+  const message = buildConsolidatedWakeMessage(
+    bucket.watches.map((entry) => entry.watch),
+  );
+  const ids = bucket.watches.map((entry) => entry.watch.id);
+  try {
+    await createTurn(bucket.workspaceId, bucket.conversationId, message, {
+      source: "watch",
+      userId: null,
+      directWake: { agentId: bucket.agentId },
+    });
+    await db.processWatch.updateMany({
+      where: { id: { in: ids }, status: "triggered" },
+      data: { status: "fired", firedAt: new Date() },
+    });
+  } catch (error) {
+    if (error instanceof ServiceError && error.code === "CONFLICT") {
+      const now = Date.now();
+      const expired = bucket.watches.filter(
+        (entry) => entry.watch.expiresAt.getTime() < now,
+      );
+      log.info(
+        {
+          conversationId: bucket.conversationId,
+          waiting: ids.length - expired.length,
+          downgraded: expired.length,
+        },
+        "origin busy; unexpired watches stay claimed for retry",
+      );
+      for (const entry of expired) {
+        await fireOne(entry.watch).catch((err) =>
+          log.error(
+            { err, watchId: entry.watch.id },
+            "hidden-path downgrade failed",
+          ),
+        );
+      }
+      return;
+    }
+    throw error;
+  }
+};
+
+/**
+ * Partition the claimed watches: direct-origin watches whose fence passes
+ * group into per-conversation buckets (one consolidated in-origin turn
+ * each); no-origin, non-direct-origin, and creator/owner-mismatch watches
+ * take the hidden path unchanged. An UNAUTHORIZED subject is neither — the
+ * watch is CANCELED outright (hidden-firing it would still deliver into
+ * the departed subject's thread via the settle chain).
+ */
+const partitionDue = async (
+  due: DueWatchFire[],
+): Promise<{ buckets: WakeBucket[]; singles: DueWatchFire[] }> => {
+  const singles: DueWatchFire[] = [];
+  const withOrigin = due.filter((watch) => watch.originConversationId);
+  const originIds = [
+    ...new Set(withOrigin.map((watch) => watch.originConversationId as string)),
+  ];
+  const conversations =
+    originIds.length > 0
+      ? await db.conversation.findMany({
+          where: { id: { in: originIds } },
+          select: { id: true, agentId: true, direct: true, userId: true },
+        })
+      : [];
+  const byId = new Map(conversations.map((row) => [row.id, row]));
+
+  const buckets = new Map<string, WakeBucket>();
+  const subjectVerdicts = new Map<string, boolean>();
+  for (const watch of due) {
+    const origin = watch.originConversationId
+      ? byId.get(watch.originConversationId)
+      : undefined;
+    // The fence: direct thread, same agent, and the creator — when one is
+    // recorded — must BE the thread owner. Platform-armed watches carry no
+    // creator (their context had no verified turn); for those the thread
+    // owner becomes the access subject, so "no foothold after access loss"
+    // transfers to the person whose DM the report lands in.
+    const ownerSubject =
+      origin &&
+      origin.direct &&
+      origin.agentId === watch.agentId &&
+      origin.userId &&
+      (watch.createdByUserId === null ||
+        watch.createdByUserId === origin.userId)
+        ? origin.userId
+        : null;
+    if (!origin || !ownerSubject) {
+      singles.push(watch);
+      continue;
+    }
+    // Access is per (subject, workspace) — one pass can span workspaces,
+    // so the memo key must carry both or a verdict would leak across.
+    const verdictKey = `${ownerSubject}:${watch.workspaceId}`;
+    let allowed = subjectVerdicts.get(verdictKey);
+    if (allowed === undefined) {
+      allowed = await subjectMayFire(ownerSubject, watch.workspaceId);
+      subjectVerdicts.set(verdictKey, allowed);
+    }
+    if (!allowed) {
+      await cancelWatch(watch.id, "wake subject lost workspace access");
+      continue;
+    }
+    const bucket = buckets.get(origin.id) ?? {
+      conversationId: origin.id,
+      agentId: watch.agentId,
+      workspaceId: watch.workspaceId,
+      watches: [],
+    };
+    bucket.watches.push({ watch, subjectUserId: ownerSubject });
+    buckets.set(origin.id, bucket);
+  }
+  return { buckets: [...buckets.values()], singles };
+};
+
 /**
  * Fire everything due. The sweep ORDER matters: lost → coherence → expiry →
  * claim, so this poll's claim already sees the conversions, and expiry runs
  * AFTER coherence so a watch that triggered in time still fires even if its
- * deadline has since passed.
+ * deadline has since passed. After partitioning, the origins about to fire
+ * absorb their STRAGGLERS (watches the LIMIT-bounded claim split into the
+ * next pass) so one wake turn carries the whole batch.
  */
 export const fireDueWatches = async (): Promise<number> => {
   await sweepLostProcesses();
   await sweepWatchCoherence();
   await sweepExpiredWatches();
   const due = await claimTriggeredWatches();
-  for (const watch of due) {
+  const { buckets, singles } = await partitionDue(due);
+
+  if (buckets.length > 0) {
+    const stragglers = await claimTriggeredWatchesForOrigins(
+      buckets.map((bucket) => bucket.conversationId),
+    ).catch((err) => {
+      log.warn({ err }, "straggler claim failed; firing the first batch");
+      return [] as DueWatchFire[];
+    });
+    if (stragglers.length > 0) {
+      const claimedIds = new Set(due.map((watch) => watch.id));
+      const fresh = stragglers.filter((watch) => !claimedIds.has(watch.id));
+      const byConversation = new Map(
+        buckets.map((bucket) => [bucket.conversationId, bucket]),
+      );
+      for (const watch of fresh) {
+        const bucket = watch.originConversationId
+          ? byConversation.get(watch.originConversationId)
+          : undefined;
+        // Same origin ⇒ same fence verdict as the bucket's members, except
+        // the creator check, which is per-watch.
+        const owner = bucket?.watches[0]?.subjectUserId;
+        if (
+          bucket &&
+          owner &&
+          (watch.createdByUserId === null || watch.createdByUserId === owner)
+        ) {
+          bucket.watches.push({ watch, subjectUserId: owner });
+        } else {
+          singles.push(watch);
+        }
+      }
+    }
+  }
+
+  for (const bucket of buckets) {
+    try {
+      await fireBucket(bucket);
+    } catch (err) {
+      log.error(
+        { err, conversationId: bucket.conversationId },
+        "wake bucket fire failed",
+      );
+    }
+  }
+  for (const watch of singles) {
     try {
       await fireOne(watch);
     } catch (err) {

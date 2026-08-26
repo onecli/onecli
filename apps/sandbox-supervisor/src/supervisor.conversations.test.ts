@@ -679,6 +679,101 @@ describe("the answer survives the turn", () => {
 
     expect(textsOf(t, "t1")).toEqual([]);
   });
+
+  it("text resuming after a tool batch starts a new paragraph", async () => {
+    // Distinct assistant messages within one turn used to glue mid-sentence
+    // ("…a different address?Got it — no email…", observed live). A tool
+    // batch between deltas is the message boundary the stream does expose.
+    const t = createTestTransport();
+    const run = runSupervisor(
+      config(home("sup-answer-")),
+      createFakeHarness({
+        script: () => [
+          { type: "text.delta", text: "Part one." },
+          { type: "tool.started", callId: "c1", name: "bash" },
+          { type: "tool.finished", callId: "c1", name: "bash", output: "ok" },
+          { type: "text.delta", text: "Part two." },
+          { type: "turn.done" },
+        ],
+      }),
+      t.transport,
+    );
+
+    t.push(deliver("t1", "cv-a"));
+    await t.until(() => t.of("turn.result").length === 1, "the turn");
+    await t.finish(run);
+
+    expect(textsOf(t, "t1")).toEqual(["Part one.\n\nPart two."]);
+  });
+
+  it("text resuming after a thinking block starts a new paragraph", async () => {
+    const t = createTestTransport();
+    const run = runSupervisor(
+      config(home("sup-answer-")),
+      createFakeHarness({
+        script: () => [
+          { type: "text.delta", text: "Before." },
+          { type: "thinking.delta", text: "hmm" },
+          { type: "text.delta", text: "After." },
+          { type: "turn.done" },
+        ],
+      }),
+      t.transport,
+    );
+
+    t.push(deliver("t1", "cv-a"));
+    await t.until(() => t.of("turn.result").length === 1, "the turn");
+    await t.finish(run);
+
+    expect(textsOf(t, "t1")).toEqual(["Before.\n\nAfter."]);
+  });
+
+  it("never opens the answer with a separator", async () => {
+    // A tool batch before the first word is not a boundary INSIDE the
+    // answer — a leading blank line would also break the empty-answer law
+    // upstream of it.
+    const t = createTestTransport();
+    const run = runSupervisor(
+      config(home("sup-answer-")),
+      createFakeHarness({
+        script: () => [
+          { type: "tool.started", callId: "c1", name: "bash" },
+          { type: "tool.finished", callId: "c1", name: "bash", output: "ok" },
+          { type: "text.delta", text: "Only part." },
+          { type: "turn.done" },
+        ],
+      }),
+      t.transport,
+    );
+
+    t.push(deliver("t1", "cv-a"));
+    await t.until(() => t.of("turn.result").length === 1, "the turn");
+    await t.finish(run);
+
+    expect(textsOf(t, "t1")).toEqual(["Only part."]);
+  });
+
+  it("adjacent deltas of one message never gain a separator", async () => {
+    // The boundary is an interleaved event, not the delta seam itself.
+    const t = createTestTransport();
+    const run = runSupervisor(
+      config(home("sup-answer-")),
+      createFakeHarness({
+        script: () => [
+          { type: "text.delta", text: "One " },
+          { type: "text.delta", text: "message." },
+          { type: "turn.done" },
+        ],
+      }),
+      t.transport,
+    );
+
+    t.push(deliver("t1", "cv-a"));
+    await t.until(() => t.of("turn.result").length === 1, "the turn");
+    await t.finish(run);
+
+    expect(textsOf(t, "t1")).toEqual(["One message."]);
+  });
 });
 
 describe("a harness that dies takes the sandbox with it", () => {
@@ -1077,7 +1172,7 @@ describe("the defensive abort", () => {
 /** A ProcessManager stub that records safety-net calls — the net's timing
  * and gating live in the supervisor; the arming itself is manager-tested. */
 const netStub = () => {
-  const netCalls: { conversationId: string; turnId: string }[] = [];
+  const netCalls: { conversationId: string; turnId?: string }[] = [];
   const manager: ProcessManager = {
     start: () => ({ ok: true }),
     status: () => ({ ok: true }),

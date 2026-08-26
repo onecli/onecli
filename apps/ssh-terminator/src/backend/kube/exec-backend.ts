@@ -1,9 +1,49 @@
 import { PassThrough } from "node:stream";
 import { Exec, KubeConfig, type V1Status } from "@kubernetes/client-node";
 import { logger } from "../../logger";
-import { ExecDisconnectedError, type ExecBackend } from "../types";
+import { AGENT_POSIX_HOME, buildGuestPayload } from "../../relay";
+import {
+  ExecDisconnectedError,
+  type ExecBackend,
+  type RelayRequest,
+} from "../types";
 
 const log = logger.child({ component: "exec-backend" });
+
+/**
+ * Wrap the shared guest payload in this substrate's identity drop.
+ * `pods/exec` lands as in-container root with root's identity env
+ * (HOME=/root, CWD=/app — the boot script's exports are invisible to exec'd
+ * processes), which would break VS Code Remote and default scp/sftp paths,
+ * so every session wraps in the same identity drop the boot phase uses:
+ * explicit identity env, then setpriv to uid-1000 "node", landing in
+ * /workspace (the durable home; ~ is /workspace/.home on the same volume,
+ * so dotfiles — and ~/.vscode-server — survive park/wake).
+ *
+ * Two pinned constraints, both load-bearing:
+ * - NEVER `--reset-env`: it would strip the spawn env, the gateway proxy
+ *   credential included, killing all in-guest egress.
+ * - The drop is UX/consistency, NOT a security boundary — the customer owns
+ *   their guest kernel (privileged container in their own microVM) and can
+ *   re-escalate; the real boundaries stay Kata isolation and the gateway
+ *   network fence.
+ */
+export const buildKubeGuestCommand = (request: RelayRequest): string[] => [
+  "env",
+  `HOME=${AGENT_POSIX_HOME}`,
+  "USER=node",
+  "LOGNAME=node",
+  "setpriv",
+  "--reuid",
+  "node",
+  "--regid",
+  "node",
+  "--init-groups",
+  "--",
+  "sh",
+  "-c",
+  buildGuestPayload(request),
+];
 
 /**
  * The kube substrate's exec backend: one byte pipe into the sandbox via the
@@ -63,7 +103,8 @@ class ResizableStdout extends PassThrough {
 const PING_INTERVAL_MS = 25_000;
 
 export const createKubeExecBackend = (): ExecBackend<KubeExecTarget> => ({
-  async exec(target, command, io, tty) {
+  async exec(target, request, io, tty) {
+    const command = buildKubeGuestCommand(request);
     // Per-session KubeConfig, built by hand: the pod holds no ServiceAccount
     // credentials (automount off), so loadFromCluster() has nothing to read —
     // trust is the mounted root CA file plus the broker-minted token.
@@ -150,6 +191,11 @@ export const createKubeExecBackend = (): ExecBackend<KubeExecTarget> => ({
           stdout.emit("resize");
         },
       }),
+      // Close the pods/exec WebSocket so the API server tears the exec down
+      // when the SSH channel ends before the guest exits. (Client-node also
+      // closes on stdin-EOF, but the relay calls dispose() unconditionally —
+      // idempotent: close() on an already-closed ws is a no-op.)
+      dispose: () => ws.close(),
     };
   },
 });

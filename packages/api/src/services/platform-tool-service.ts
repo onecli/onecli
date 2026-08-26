@@ -7,7 +7,12 @@ import {
   type RunnerToolCallResponse,
 } from "@onecli/agent-protocol";
 import { ServiceError } from "./errors";
-import { createCron, deleteCron, listCrons } from "./agent-cron-service";
+import {
+  createCron,
+  deleteCron,
+  listCrons,
+  nextFireOrNull,
+} from "./agent-cron-service";
 import {
   getMemoryByKey,
   listMemories,
@@ -22,6 +27,7 @@ import {
   cancelTaskArgsSchema,
   scheduleTaskArgsSchema,
 } from "../validations/crons";
+import { AUTOMATION_SOURCES } from "../validations/conversation";
 import {
   memoryGetArgsSchema,
   memoryListArgsSchema,
@@ -74,6 +80,10 @@ export interface ToolContext {
   turnId: string | null;
 }
 
+/** What the resolved context is FOR — "origin" anchors deliveries (watch/
+ * cron reports), "provenance" only records where a write came from. */
+export type ContextPurpose = "origin" | "provenance";
+
 /**
  * Verify a claimed calling-turn context against a fenced agent, keeping only
  * what holds (anchoring, not authority — a forged context degrades delivery,
@@ -83,18 +93,37 @@ export interface ToolContext {
 export const resolveVerifiedContext = async (
   agentId: string,
   claim: { conversationId?: string; turnId?: string },
+  purpose: ContextPurpose = "origin",
 ): Promise<ToolContext> => {
   if (!claim.conversationId) {
     return { originConversationId: null, createdByUserId: null, turnId: null };
   }
   const conversation = await db.conversation.findFirst({
     where: { id: claim.conversationId, agentId },
-    select: { id: true },
+    select: { id: true, source: true },
   });
   if (!conversation) {
     log.warn(
       { agentId, conversationId: claim.conversationId },
       "context claimed a conversation its agent does not hold; ignoring it",
+    );
+    return { originConversationId: null, createdByUserId: null, turnId: null };
+  }
+  // An automation-sourced conversation (a cron/watch run) must never become
+  // an ORIGIN anchor: nothing renders those threads, so a watch anchored
+  // there delivers its report into a black hole — and the mistake chains
+  // (a wake turn arming the next watch at its own hidden conversation).
+  // Web and Slack conversations stay legal anchors; a rejected claim
+  // degrades to no anchor, exactly like a forged one. PROVENANCE consumers
+  // (memory revisions) keep the automation conversation — recording that a
+  // save came from a cron turn is honest, and nothing is delivered there.
+  if (
+    purpose === "origin" &&
+    (AUTOMATION_SOURCES as readonly string[]).includes(conversation.source)
+  ) {
+    log.warn(
+      { agentId, conversationId: claim.conversationId },
+      "context claimed an automation conversation; ignoring it",
     );
     return { originConversationId: null, createdByUserId: null, turnId: null };
   }
@@ -133,11 +162,18 @@ const resolveIdentity = async (
 const resolveContext = (
   identity: ToolIdentity,
   request: RunnerToolCallRequest,
+  purpose: ContextPurpose = "origin",
 ): Promise<ToolContext> =>
-  resolveVerifiedContext(identity.agentId, {
-    ...(request.conversationId && { conversationId: request.conversationId }),
-    ...(request.turnId && { turnId: request.turnId }),
-  });
+  resolveVerifiedContext(
+    identity.agentId,
+    {
+      ...(request.conversationId && {
+        conversationId: request.conversationId,
+      }),
+      ...(request.turnId && { turnId: request.turnId }),
+    },
+    purpose,
+  );
 
 const auditAsCreator = async (
   identity: ToolIdentity,
@@ -336,12 +372,16 @@ export const executeMemoryFileWrite = async (
   }
 
   try {
-    const context = await resolveVerifiedContext(identity.agentId, {
-      ...(request.conversationId && {
-        conversationId: request.conversationId,
-      }),
-      ...(request.turnId && { turnId: request.turnId }),
-    });
+    const context = await resolveVerifiedContext(
+      identity.agentId,
+      {
+        ...(request.conversationId && {
+          conversationId: request.conversationId,
+        }),
+        ...(request.turnId && { turnId: request.turnId }),
+      },
+      "provenance",
+    );
     const { memory, created, noop } = await saveMemoryAudited(
       identity,
       context,
@@ -418,6 +458,12 @@ export const executePlatformTool = async (
           AUDIT_SERVICES.CRON,
           { cronId: cron.id, name: cron.name },
         );
+        // A schedule with no occurrence after its first is a one-shot: it
+        // fires once, reports, and completes. Derived from the expression
+        // (croner is the single authority), never stored.
+        const runsOnce =
+          nextFireOrNull(cron.schedule, cron.timezone, cron.nextFireAt) ===
+          null;
         return {
           ok: true,
           result: {
@@ -426,9 +472,14 @@ export const executePlatformTool = async (
             schedule: cron.schedule,
             timezone: cron.timezone,
             nextFireAt: cron.nextFireAt.toISOString(),
-            note: context.originConversationId
-              ? "Scheduled. Each run reports back to this chat."
-              : "Scheduled. Runs will appear on the agent's Schedules page (this call carried no chat to deliver to).",
+            runsOnce,
+            note: runsOnce
+              ? context.originConversationId
+                ? `Scheduled. Runs once at ${cron.nextFireAt.toISOString()}, then completes; the report is delivered to this chat.`
+                : "Scheduled to run once. The run will appear on the agent's Schedules page (this call carried no chat to deliver to)."
+              : context.originConversationId
+                ? "Scheduled. Each run reports back to this chat."
+                : "Scheduled. Runs will appear on the agent's Schedules page (this call carried no chat to deliver to).",
           },
         };
       }
@@ -480,7 +531,7 @@ export const executePlatformTool = async (
         if (!args.success) {
           return toolError(args.error.issues[0]?.message ?? "Invalid input");
         }
-        const context = await resolveContext(identity, request);
+        const context = await resolveContext(identity, request, "provenance");
         const { memory, created } = await saveMemoryAudited(
           identity,
           context,

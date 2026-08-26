@@ -24,13 +24,20 @@ export const SshConnectSteps = ({
     timeStyle: "short",
   });
 
+  // A non-default port (self-host) changes the connect command (ssh -p) and
+  // the scp flag (uppercase -P) — the copy must say so; cloud stays :22.
+  const nonDefaultPort = minted.port !== undefined && minted.port !== 22;
+
   return (
     <div>
       <h3 className="mb-2 text-sm font-semibold">Connect</h3>
       <p className="text-muted-foreground mb-3 text-sm">
         Run this in your terminal. It saves the certificate next to your key and
         connects; scp, sftp and VS Code Remote SSH then work the same way: same
-        host, same user.
+        host, same user{nonDefaultPort ? `, port ${minted.port}` : ""}.
+        {nonDefaultPort
+          ? ` scp and sftp take the port with an uppercase flag: -P ${minted.port}.`
+          : ""}
       </p>
       <TryDemoCommand
         command={buildSshConnectCommand(minted)}

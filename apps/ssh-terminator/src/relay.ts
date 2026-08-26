@@ -1,12 +1,16 @@
 import { PassThrough } from "node:stream";
 import type { ServerChannel } from "ssh2";
-import type { ExecBackend, ExecHandle } from "./backend/types";
+import type { ExecBackend, ExecHandle, RelayRequest } from "./backend/types";
 
 /**
- * The relay: bridge one ssh2 channel to one exec stream. Command
- * construction and stream wiring live here; WHAT may be relayed was already
- * decided upstream (cert + control plane + resolver).
+ * The relay: bridge one ssh2 channel to one exec stream. Stream wiring and
+ * the shared in-guest PAYLOAD live here; the identity mechanics around the
+ * payload are substrate policy (each ExecBackend builds its own full
+ * command from the request). WHAT may be relayed was already decided
+ * upstream (cert + control plane + resolver).
  */
+
+export type { RelayRequest } from "./backend/types";
 
 /**
  * The guest's durable-home contract, duplicated privately (the
@@ -18,11 +22,6 @@ import type { ExecBackend, ExecHandle } from "./backend/types";
 export const HOME_MOUNT = "/workspace";
 export const AGENT_POSIX_HOME = "/workspace/.home";
 
-export type RelayRequest =
-  | { kind: "shell" }
-  | { kind: "exec"; command: string }
-  | { kind: "sftp" };
-
 /** POSIX single-quote: close, escaped quote, reopen (boot-script.ts's sq). */
 const sq = (value: string): string => `'${value.replaceAll("'", `'\\''`)}'`;
 
@@ -30,23 +29,18 @@ const sq = (value: string): string => `'${value.replaceAll("'", `'\\''`)}'`;
 const SFTP_SERVER_PATH = "/usr/lib/openssh/sftp-server";
 
 /**
- * Build the in-guest command. `pods/exec` lands as in-container root with
- * root's identity env (HOME=/root, CWD=/app — the boot script's exports are
- * invisible to exec'd processes), which would break VS Code Remote and
- * default scp/sftp paths, so every session wraps in the same identity drop
- * the boot phase uses: explicit identity env, then setpriv to uid-1000
- * "node", landing in /workspace (the durable home; ~ is /workspace/.home on
- * the same volume, so dotfiles — and ~/.vscode-server — survive park/wake).
+ * The substrate-neutral in-guest payload: land in the durable home and exec
+ * the requested program. Every substrate runs this exact script (the kube
+ * backend wraps it in its root→node identity drop; the docker backend runs
+ * it directly as node) — the durable-home semantics must never fork between
+ * substrates.
  *
- * Two pinned constraints, both load-bearing:
- * - NEVER `--reset-env`: it would strip the spawn env, the gateway proxy
- *   credential included, killing all in-guest egress.
- * - The drop is UX/consistency, NOT a security boundary — the customer owns
- *   their guest kernel (privileged container in their own microVM) and can
- *   re-escalate; the real boundaries stay Kata isolation and the gateway
- *   network fence.
+ * mkdir: a RUNNING pre-change sandbox predates the entrypoint that creates
+ * the durable home — one idempotent token heals it for this session.
+ * Harmless when it exists; 2>/dev/null + || true keep sftp's byte-exact
+ * pipe clean and the session alive on any failure.
  */
-export const buildGuestCommand = (request: RelayRequest): string[] => {
+export const buildGuestPayload = (request: RelayRequest): string => {
   const target =
     request.kind === "shell"
       ? "bash -l"
@@ -55,27 +49,7 @@ export const buildGuestCommand = (request: RelayRequest): string[] => {
         : // OpenSSH semantics: the command string runs through a shell (this
           // also covers legacy `scp -O`, which arrives as `exec scp -t …`).
           `sh -lc ${sq(request.command)}`;
-  return [
-    "env",
-    `HOME=${AGENT_POSIX_HOME}`,
-    "USER=node",
-    "LOGNAME=node",
-    "setpriv",
-    "--reuid",
-    "node",
-    "--regid",
-    "node",
-    "--init-groups",
-    "--",
-    "sh",
-    "-c",
-    // mkdir: a RUNNING pre-change sandbox predates the entrypoint that
-    // creates the durable home — one idempotent token heals it for this
-    // session, post-drop as node (root never mkdirs the tenant mount).
-    // Harmless when it exists; 2>/dev/null + || true keep sftp's
-    // byte-exact pipe clean and the session alive on any failure.
-    `mkdir -p ${AGENT_POSIX_HOME} 2>/dev/null || true; cd ${HOME_MOUNT} 2>/dev/null || cd /home/node; exec ${target}`,
-  ];
+  return `mkdir -p ${AGENT_POSIX_HOME} 2>/dev/null || true; cd ${HOME_MOUNT} 2>/dev/null || cd /home/node; exec ${target}`;
 };
 
 export interface TerminalSizeSource {
@@ -123,7 +97,7 @@ export const runRelay = async <T>(
 
   const handle: ExecHandle = await options.backend.exec(
     options.target,
-    buildGuestCommand(request),
+    request,
     { stdout, stderr, stdin },
     tty,
   );
@@ -143,6 +117,15 @@ export const runRelay = async <T>(
     stderr.pipe(channel.stderr, { end: false });
   }
 
+  // Tear the exec down when the SSH channel ends by ANYTHING other than the
+  // guest exiting — a client disconnect, an idle/revocation close severing
+  // the channel. Without this the backend's transport (a docker TTY exec
+  // suppresses stdin-EOF propagation, so its hijacked socket would never
+  // close) and the guest process leak for the container's lifetime.
+  // `dispose()` is idempotent; `exited` resolves via the backend's own
+  // close path once the transport drops.
+  channel.once("close", () => handle.dispose());
+
   let unsubscribe: () => void = () => undefined;
   if (handle.resize && pty) {
     const resize = handle.resize;
@@ -157,5 +140,6 @@ export const runRelay = async <T>(
     return code;
   } finally {
     unsubscribe();
+    handle.dispose();
   }
 };

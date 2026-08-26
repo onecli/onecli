@@ -66,6 +66,14 @@ export interface StartSessionOptions {
    * `capabilities.resume`; passing one to a non-resuming adapter is a bug.
    */
   resumeSessionRef?: string;
+  /**
+   * The conversation this session serves. Anchoring, not authority (the
+   * control plane re-verifies every context claim): it lets the adapter
+   * attribute session-scoped harness events — a wake request arriving
+   * between turns — to the right conversation. Optional so adapters and
+   * fixtures that never emit such events need not thread it.
+   */
+  context?: { conversationId: string };
 }
 
 /**
@@ -160,6 +168,22 @@ export interface HarnessBackgroundTask {
    * observer converts that intent into a platform exit-watch, so the wake
    * arrives as a real turn instead of a harness-internal one. */
   wantsWake: boolean;
+  /**
+   * The conversation this task belongs to, when the ADAPTER knows it better
+   * than the observer's active-turn heuristic — a harness-emitted wake
+   * request is anchored to its own session's conversation even when no turn
+   * (or a SIBLING conversation's turn) is running. Snapshot context wins
+   * over the active turn at the observer. Optional and adapter-internal:
+   * the wire's process.state already carries an optional context.
+   */
+  context?: { conversationId: string; turnId?: string };
+  /**
+   * The wake prompt the fired watch should carry, when the generic
+   * "a background task finished" wording would lie (a communication
+   * delivery, a resolved fan-out await). Used only when the observer arms
+   * the implicit wake watch for this task.
+   */
+  wakePrompt?: string;
 }
 
 export interface HarnessBackgroundTasks {

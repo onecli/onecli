@@ -26,6 +26,7 @@ import { EnvFile, resolveEnv } from "./lib/env-file.mjs";
 import { portBusy } from "./lib/ports.mjs";
 import { generatedClientFresh } from "./lib/prisma-client.mjs";
 import { ensureDatabaseUrl, ensureSecrets } from "./lib/secrets.mjs";
+import { DEFAULT_SSH_PORT, ensureSshEnv } from "./lib/ssh-env.mjs";
 
 // fileURLToPath, not `.pathname`: the latter is percent-encoded, so a repo
 // cloned under a path with a space breaks every check and every spawn.
@@ -90,6 +91,13 @@ const DEV_DEFAULTS = {
   // the first run self-heals within one runner poll.
   GATEWAY_CA_PEM_FILE: join(homedir(), ".onecli", "gateway", "ca.pem"),
   CHANNEL_ADAPTER_NAME: "dev",
+  // The dev terminator reaches the api over the host loopback (the api is a
+  // host process here, like the runner's control-plane URL) and its
+  // control-plane token IS the shared SSH_TERMINATOR_SECRET (mapped into the
+  // env below, since it is generated, not a static default). It listens on
+  // the same port the dashboard advertises as SSH_PORT (10257).
+  TERMINATOR_CONTROL_PLANE_URL: "http://localhost:10256",
+  TERMINATOR_PORT: DEFAULT_SSH_PORT,
 };
 
 const ENV_HEADER = [
@@ -357,6 +365,7 @@ const checkPorts = async () => {
     [10255, "gateway"],
     [10256, "api"],
     [8484, "runner control channel"],
+    [10257, "ssh terminator"],
   ])
     if (await portBusy(port)) taken.push(`${port} (${who})`);
   if (taken.length)
@@ -389,8 +398,20 @@ const main = async () => {
   const resolved = resolveEnv(env);
   const { generated, replaced, shadowedInvalid } = ensureSecrets(env, resolved);
   ensureDatabaseUrl(env, resolved);
-  if (env.save() && (generated.length || replaced.length))
-    note(`generated ${[...generated, ...replaced].join(", ")} → .env`);
+  // Self-host SSH out of the box: mint the CA/host key/secret/host/port so
+  // the terminator boots and the dashboard's SSH surface lights up. dev's
+  // hostname is always localhost. Skipped whole on the cloud edition.
+  const sshGenerated = ensureSshEnv(env, resolved, {
+    hostname: "localhost",
+    sshPort: DEFAULT_SSH_PORT,
+  });
+  if (
+    env.save() &&
+    (generated.length || replaced.length || sshGenerated.length)
+  )
+    note(
+      `generated ${[...generated, ...replaced, ...sshGenerated].join(", ")} → .env`,
+    );
   for (const key of replaced)
     warn(
       `${key} in .env was not a usable key (the app rejects it at first use) — replaced it.`,
@@ -409,6 +430,13 @@ const main = async () => {
   const mergedEnv = { ...DEV_DEFAULTS, ...resolveEnv(env) };
   const isCloud = (mergedEnv.EDITION ?? "").trim().toLowerCase() === "cloud";
 
+  // The terminator's control-plane token is the shared SSH_TERMINATOR_SECRET
+  // (one value, two processes — the api verifies what the terminator sends).
+  // Mapped here rather than as a static DEV_DEFAULT because it is generated;
+  // add-if-absent so a shell override still wins.
+  if (mergedEnv.SSH_TERMINATOR_SECRET && !mergedEnv.TERMINATOR_CONTROL_PLANE_TOKEN)
+    mergedEnv.TERMINATOR_CONTROL_PLANE_TOKEN = mergedEnv.SSH_TERMINATOR_SECRET;
+
   // Pre-flight coherence: an unentitled non-cloud config with REDIS_HOST set
   // is GUARANTEED to be refused by the gateway — but only after turbo has
   // painted five panes and the reason has scrolled away. Catch it here.
@@ -421,9 +449,17 @@ const main = async () => {
   // 3 · adapt to the machine. A user-supplied --filter/-F takes over service
   // selection entirely, so the runner checks only run when we own it.
   let skipRunner = false;
+  // The terminator needs ONLY the docker daemon (it execs into agent
+  // containers), never the agent image — a separate flag so a declined image
+  // build disables the runner but leaves SSH-into-an-agent working. It also
+  // must not run unless SSH is actually provisioned (the cloud edition, or an
+  // operator who cleared the keys, leaves it unconfigured — a boot ConfigError
+  // would take the whole persistent fan-out down).
+  let skipTerminator = !mergedEnv.TERMINATOR_HOST_KEY;
   if (!userFiltered && runnerInThisCheckout()) {
     if (!dockerUp()) {
       skipRunner = true;
+      skipTerminator = true;
       warn(
         "Docker is down — starting without hosted agents (runner skipped).",
         "Start Docker and re-run pnpm dev to enable them.",
@@ -447,6 +483,7 @@ const main = async () => {
     skipRunner || userFiltered
       ? `${dim("▸")} web :10254   api :10256   gateway :10255${dim(userFiltered ? "" : "   (no runner — hosted agents are off)")}`
       : `${dim("▸")} web :10254   api :10256   gateway :10255   runner :8484` +
+          `${skipTerminator ? "" : "   ssh :10257"}` +
           `${dim("   (a sandbox needs a GRANTED model key before it will start)")}`,
   );
 
@@ -461,6 +498,7 @@ const main = async () => {
     // one such process exiting takes every persistent dev task down with it.
     ...devExcludeFilters(),
     ...(skipRunner ? ["--filter=!@onecli/runner"] : []),
+    ...(skipTerminator ? ["--filter=!@onecli/ssh-terminator"] : []),
     ...userArgs,
   ];
   const child = spawn(join(ROOT, "node_modules/.bin/turbo"), turboArgs, {

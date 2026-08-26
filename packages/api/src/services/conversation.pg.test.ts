@@ -1901,7 +1901,9 @@ describe.skipIf(!PROOF_URL)("waking a sleeping agent", () => {
 
     await turns.createTurn(WORKSPACE, conversationId, "now please", WEB_A);
 
-    await expect(waiting).resolves.toBeUndefined();
+    // `true` = woken by the SIGNAL, not the timeout — the distinction the
+    // held poll uses to run its event-driven passes.
+    await expect(waiting).resolves.toBe(true);
   });
 });
 

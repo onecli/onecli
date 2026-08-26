@@ -29,7 +29,7 @@ import {
  * own session may have already seen the completion (the harness's internal
  * wake), so the prompt asks for a report either way — never a redo. */
 export const IMPLICIT_WAKE_PROMPT =
-  "A background task you started on this machine has finished. Check its outcome (process_status shows its output) and report the result concisely — the report is delivered to the chat where you started it. If you already handled this completion, just summarize the outcome.";
+  "A background task you started on this machine has finished. Check its outcome (process_status shows its output) and report the result concisely — your report reaches the chat this task belongs to. If you already handled this completion, just summarize the outcome.";
 
 export interface ProcessObserverOptions {
   manager: ProcessManager;
@@ -73,10 +73,12 @@ export const createProcessObserver = (
       for (const snapshot of snapshots) {
         if (terminalSeen.has(snapshot.ref)) continue;
 
-        const applied = options.manager.observeUpsert(
-          snapshot,
-          options.activeTurn(),
-        );
+        // The snapshot's own context wins over the active-turn heuristic:
+        // between turns there IS no active turn, and during a SIBLING
+        // conversation's turn the heuristic would anchor the entry to the
+        // wrong chat. Only adapters that truly know the owner set it.
+        const context = snapshot.context ?? options.activeTurn();
+        const applied = options.manager.observeUpsert(snapshot, context);
         if (applied.overCap) {
           if (!warnedRefs.has(snapshot.ref)) {
             warnedRefs.add(snapshot.ref);
@@ -95,12 +97,15 @@ export const createProcessObserver = (
               {
                 processId: snapshot.ref,
                 kind: "exit",
-                prompt: IMPLICIT_WAKE_PROMPT,
+                // A wake-shaped snapshot may carry its own honest wording
+                // (a resolved fan-out await, a message from another agent);
+                // the generic prompt covers plain background tasks.
+                prompt: snapshot.wakePrompt ?? IMPLICIT_WAKE_PROMPT,
                 // The MAX, not the default: a day-long build's wake must
                 // still land.
                 expiresInSeconds: WATCH_EXPIRES_MAX_SECONDS,
               },
-              options.activeTurn(),
+              context,
             );
             const watchId = (armed.result as { watchId?: string } | undefined)
               ?.watchId;

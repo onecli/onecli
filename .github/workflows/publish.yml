@@ -32,7 +32,7 @@ jobs:
         # the sandbox base, the runner is the daemon that spawns it. `migrations`
         # is the one-shot schema runner the api gates on. Paths derive by
         # convention (docker/<service>.Dockerfile).
-        service: [web, gateway, api, migrations, runner, agent, channel-adapter]
+        service: [web, gateway, api, migrations, runner, agent, channel-adapter, ssh-terminator]
         arch: [amd64, arm64]
         include:
           - arch: amd64
@@ -109,7 +109,7 @@ jobs:
         # the sandbox base, the runner is the daemon that spawns it. `migrations`
         # is the one-shot schema runner the api gates on. Paths derive by
         # convention (docker/<service>.Dockerfile).
-        service: [web, gateway, api, migrations, runner, agent, channel-adapter]
+        service: [web, gateway, api, migrations, runner, agent, channel-adapter, ssh-terminator]
     permissions:
       contents: read
       packages: write

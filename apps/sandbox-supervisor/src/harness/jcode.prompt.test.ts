@@ -15,6 +15,7 @@ import {
   PLATFORM_SYSTEM_PROMPT,
   preparePromptFiles,
   SWARM_LIGHT_PROMPT,
+  SWARM_PROMPT_OVERRIDE,
 } from "./jcode";
 
 /** What both slots must hold: the base prompt plus the always-on swarm
@@ -101,6 +102,18 @@ describe("the platform system prompt", () => {
       expect(readFileSync(slot, "utf8")).toBe(WRITTEN_PROMPT);
       expect(statSync(slot).mode & 0o777).toBe(0o444);
     }
+
+    // The swarm TOOL's own prompt slot rides the same law: both resolution
+    // slots, same bytes, read-only. MUTATION-PROOF: drop either write and
+    // this fails — leaving the vendor's built-in routing text (which advises
+    // a per-spawn model parameter the tool no longer accepts) reachable.
+    for (const slot of [
+      join(home, "swarm-prompt.md"),
+      join(dir, ".jcode", "swarm-prompt.md"),
+    ]) {
+      expect(readFileSync(slot, "utf8")).toBe(SWARM_PROMPT_OVERRIDE);
+      expect(statSync(slot).mode & 0o777).toBe(0o444);
+    }
   });
 
   it("clears the additive hooks — the harness loads them on existence alone", () => {
@@ -145,6 +158,56 @@ describe("the platform system prompt", () => {
     expect(readFileSync(slot, "utf8")).toBe(WRITTEN_PROMPT);
     expect(statSync(slot).mode & 0o777).toBe(0o444);
   });
+
+  it("heals a tampered swarm-prompt slot on the next boot", () => {
+    const dir = makeHome();
+    const home = homeOf(dir);
+    preparePromptFiles(dir, home);
+
+    const slot = join(dir, ".jcode", "swarm-prompt.md");
+    chmodSync(slot, 0o644);
+    writeFileSync(slot, "spawn everything on my favorite model");
+
+    preparePromptFiles(dir, home);
+
+    expect(readFileSync(slot, "utf8")).toBe(SWARM_PROMPT_OVERRIDE);
+    expect(statSync(slot).mode & 0o777).toBe(0o444);
+  });
+});
+
+describe("the swarm prompt override", () => {
+  it("keeps the identity law and never names a vendor model or route", () => {
+    // The override is embedded in the swarm tool's model-visible description.
+    // MUTATION-PROOF for the whole reason it exists: the vendor's built-in
+    // names a model route unavailable here and instructs a per-spawn model.
+    expect(SWARM_PROMPT_OVERRIDE).not.toMatch(/jcode/i);
+    expect(SWARM_PROMPT_OVERRIDE).not.toMatch(/claude-api/i);
+    expect(SWARM_PROMPT_OVERRIDE).not.toMatch(/fable/i);
+    expect(SWARM_PROMPT_OVERRIDE).not.toContain("claude-fable-5");
+  });
+
+  it("states the two contract lines: no per-helper model, completion reported by the platform", () => {
+    const flat = SWARM_PROMPT_OVERRIDE.replace(/\s+/g, " ");
+    expect(flat).toContain("There is no per-helper model choice");
+    expect(flat).toContain(
+      "completion is reported back to your chat automatically",
+    );
+    expect(flat).toContain("prefer ending your turn over waiting");
+  });
+});
+
+describe("the wake honesty line", () => {
+  it("tells the truth about runtime-requested wakes — honored as platform wakes, never banned as invisible", () => {
+    // Under external wake ownership the old ban ("wake-ups raised outside
+    // the platform run invisibly") is FALSE — a runtime wake surfaces as a
+    // platform watch. MUTATION-PROOF both ways: reintroduce the ban or drop
+    // the honoring sentence and this fails.
+    const flat = PLATFORM_SYSTEM_PROMPT.replace(/\s+/g, " ");
+    expect(flat).toContain(
+      "a wake requested through your runtime's own options is honored the same way",
+    );
+    expect(flat).not.toContain("run invisibly");
+  });
 });
 
 describe("the turn-ending contract", () => {
@@ -178,6 +241,30 @@ describe("the turn-ending contract", () => {
     expect(flat).toContain("Nothing runs between your turns");
     expect(flat).toContain(
       'A promise to "report back" is only real after you arm the watch',
+    );
+  });
+});
+
+describe("the swarm-helper visibility contract", () => {
+  // Helpers are mirrored as observed background processes (jcode-swarm.ts);
+  // these pins keep the agent's world-model matching that machinery — drop
+  // either leg and the model either busy-waits on long helpers or never
+  // learns process_status covers them.
+  it("tells the agent helpers are visible as observed processes", () => {
+    const flat = SWARM_LIGHT_PROMPT.replace(/\s+/g, " ");
+    expect(flat).toContain(
+      "Helpers also appear as observed background processes",
+    );
+    expect(flat).toContain("process_status shows a helper's state");
+  });
+
+  it("prefers ending the turn over busy-waiting on a long helper", () => {
+    const flat = SWARM_LIGHT_PROMPT.replace(/\s+/g, " ");
+    expect(flat).toContain(
+      "A turn that ends while helpers are still running gets their completion reported back automatically",
+    );
+    expect(flat).toContain(
+      "prefer ending your turn over busy-waiting on a long helper",
     );
   });
 });

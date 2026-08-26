@@ -18,6 +18,7 @@ import {
   reclaimStaleTurns,
   releaseClaim,
   parkUnstartableClaim,
+  takeWatchFirePending,
   waitForWork,
 } from "../services/due-work";
 import { createLogClaimWait } from "../services/claim-wait-log";
@@ -367,7 +368,17 @@ export const runnerRoutes = () => {
 
       const remaining = deadline - Date.now();
       if (remaining <= 0) return c.json({ items: [] });
-      await waitForWork(Math.min(remaining, RECHECK_MS));
+      const signaled = await waitForWork(Math.min(remaining, RECHECK_MS));
+      // A SIGNAL wake with the watch-fire mark pending means a watch just
+      // flipped to triggered — run the fire pass here so trigger→fire is
+      // ~a second. The take() is one-shot, so of all the polls a signal
+      // wakes, exactly one pays for the pass, and ordinary signals (each
+      // message wakes every held poll) never run it at all.
+      if (signaled && takeWatchFirePending()) {
+        await fireDueWatches().catch((err: unknown) =>
+          log.warn({ err }, "in-hold watch fire pass failed"),
+        );
+      }
     }
   });
 

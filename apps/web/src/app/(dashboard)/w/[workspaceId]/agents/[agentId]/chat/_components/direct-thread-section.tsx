@@ -88,8 +88,31 @@ export const DirectThreadSection = () => {
     [stream.events],
   );
 
-  const turns = turnsQuery.data ?? [];
+  const turnsData = turnsQuery.data;
+  const turns = useMemo(() => turnsData ?? [], [turnsData]);
   const active = activeTurn(turns);
+
+  // The belt for a turn the stream knows about but the turns list does not:
+  // a platform-created row (a watch/cron delivery) can land while the poll
+  // is off, and ChatThread renders ROWS — a streamed turnId with no row shows
+  // nothing. One invalidate per unseen id, guarded by a ref so a slow refetch
+  // cannot loop; reset when the conversation changes.
+  const chasedTurnIdsRef = useRef(new Set<string>());
+  useEffect(() => {
+    chasedTurnIdsRef.current = new Set();
+  }, [conversationId]);
+  useEffect(() => {
+    if (conversationId === undefined) return;
+    const known = new Set(turns.map((turn) => turn.id));
+    const unseen = [...folded.keys()].filter(
+      (id) => !known.has(id) && !chasedTurnIdsRef.current.has(id),
+    );
+    if (unseen.length === 0) return;
+    for (const id of unseen) chasedTurnIdsRef.current.add(id);
+    qc.invalidateQueries({
+      queryKey: queryKeys.conversations.turns(conversationId),
+    });
+  }, [conversationId, folded, turns, qc]);
 
   // In-place model-key door for the no_model_key notice: the shared
   // create-then-attach seam, mounted OVER the chat so fixing the gap never

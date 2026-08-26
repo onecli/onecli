@@ -500,6 +500,55 @@ describe.skipIf(!PROOF_URL)("the state machine", () => {
       ).status,
     ).toBe("triggered");
   });
+
+  it("a triggered edge marks the watch-fire pass pending, exactly once", async () => {
+    const agentId = await seedAgent("wfp");
+    const sb = await seedSandbox("wfp", agentId, "running", {
+      containerRef: "c",
+    });
+    const expiresAt = new Date(Date.now() + 3_600_000).toISOString();
+    dueWork.takeWatchFirePending(); // drain whatever earlier tests left
+
+    // An armed frame is NOT a fire edge.
+    await processes.applyProcessState(
+      RUNNER_A,
+      stateEvent(sb, "c", {
+        ref: "p-1",
+        watches: [
+          {
+            ref: "w-1",
+            kind: "exit",
+            prompt: "report",
+            status: "armed",
+            expiresAt,
+          },
+        ],
+      }),
+    );
+    expect(dueWork.takeWatchFirePending()).toBe(false);
+
+    // The triggered edge marks the pass pending; take() is one-shot, so of
+    // all the polls the signal wakes, exactly one runs the fire.
+    await processes.applyProcessState(
+      RUNNER_A,
+      stateEvent(sb, "c", {
+        ref: "p-1",
+        watches: [
+          {
+            ref: "w-1",
+            kind: "exit",
+            prompt: "report",
+            status: "triggered",
+            trigger: "exited",
+            triggeredAt: new Date().toISOString(),
+            expiresAt,
+          },
+        ],
+      }),
+    );
+    expect(dueWork.takeWatchFirePending()).toBe(true);
+    expect(dueWork.takeWatchFirePending()).toBe(false);
+  });
 });
 
 describe.skipIf(!PROOF_URL)("keep-awake (the stop arm)", () => {
@@ -1384,3 +1433,266 @@ describe.skipIf(!PROOF_URL)(
     });
   },
 );
+
+describe.skipIf(!PROOF_URL)("the in-origin wake (direct origins)", () => {
+  const directOrigin = (agentId: string) =>
+    db.conversation.create({
+      data: { agentId, source: "web", direct: true, userId: USER },
+      select: { id: true },
+    });
+
+  const armTriggeredWithOrigin = async (
+    sb: string,
+    originId: string,
+    suffix: string,
+    overrides: Record<string, unknown> = {},
+  ) => {
+    const proc = await db.sandboxProcess.create({
+      data: {
+        sandboxId: sb,
+        ref: `p-${suffix}`,
+        containerRef: "c",
+        command: `job ${suffix}`,
+        name: `job-${suffix}`,
+        status: "exited",
+        exitCode: 0,
+        endedAt: new Date(),
+        startedAt: new Date(),
+      },
+      select: { id: true },
+    });
+    return db.processWatch.create({
+      data: {
+        processId: proc.id,
+        ref: `w-${suffix}`,
+        kind: "exit",
+        prompt: "Report the result.",
+        status: "triggered",
+        trigger: "exited",
+        triggeredAt: new Date(),
+        expiresAt: new Date(Date.now() + 3_600_000),
+        originConversationId: originId,
+        createdByUserId: USER,
+        ...overrides,
+      },
+      select: { id: true },
+    });
+  };
+
+  it("fires ONE consolidated turn INSIDE the direct origin — no hidden conversation", async () => {
+    const agentId = await seedAgent("inorigin");
+    const sb = await seedSandbox("inorigin", agentId, "running", {
+      containerRef: "c",
+    });
+    const origin = await directOrigin(agentId);
+    const wa = await armTriggeredWithOrigin(sb, origin.id, "a");
+    const wb = await armTriggeredWithOrigin(sb, origin.id, "b");
+
+    await watchFire.fireDueWatches();
+
+    const originTurns = await db.turn.findMany({
+      where: { conversationId: origin.id },
+      select: { message: true, source: true, userId: true },
+    });
+    expect(originTurns).toHaveLength(1);
+    expect(originTurns[0]?.source).toBe("watch");
+    expect(originTurns[0]?.userId).toBeNull();
+    expect(originTurns[0]?.message).toContain("2 background task(s)");
+    expect(originTurns[0]?.message).toContain('"job-a"');
+    expect(originTurns[0]?.message).toContain('"job-b"');
+    // The shared prompt is stated once, not per watch.
+    expect(originTurns[0]?.message.split("Report the result.")).toHaveLength(2);
+
+    // No hidden per-watch conversation was minted for either watch.
+    expect(
+      await db.conversation.count({
+        where: {
+          agentId,
+          source: "watch",
+          externalRef: { in: [wa.id, wb.id] },
+        },
+      }),
+    ).toBe(0);
+    const statuses = await db.processWatch.findMany({
+      where: { id: { in: [wa.id, wb.id] } },
+      select: { status: true },
+    });
+    expect(statuses.map((row) => row.status)).toEqual(["fired", "fired"]);
+  });
+
+  it("a busy origin keeps the wake CLAIMED for retry, and the freed slot releases it", async () => {
+    const agentId = await seedAgent("inorigin-busy");
+    const sb = await seedSandbox("inorigin-busy", agentId, "running", {
+      containerRef: "c",
+    });
+    const origin = await directOrigin(agentId);
+    const blocker = await db.turn.create({
+      data: {
+        conversationId: origin.id,
+        message: "still typing",
+        status: "queued",
+        source: "web",
+        userId: USER,
+      },
+      select: { id: true },
+    });
+    const watch = await armTriggeredWithOrigin(sb, origin.id, "busy");
+
+    await watchFire.fireDueWatches();
+
+    // Not fired, not dropped — claimed, waiting on the lease.
+    const afterBusy = await db.processWatch.findUniqueOrThrow({
+      where: { id: watch.id },
+      select: { status: true, fireClaimedAt: true },
+    });
+    expect(afterBusy.status).toBe("triggered");
+    expect(afterBusy.fireClaimedAt).not.toBeNull();
+    expect(await db.turn.count({ where: { conversationId: origin.id } })).toBe(
+      1,
+    );
+
+    // The finished-turn nudge puts the bucket back in the next poll's reach.
+    await dueWork.releaseWatchFireClaimsForConversation(origin.id);
+    expect(
+      (
+        await db.processWatch.findUniqueOrThrow({
+          where: { id: watch.id },
+          select: { fireClaimedAt: true },
+        })
+      ).fireClaimedAt,
+    ).toBeNull();
+
+    await db.turn.delete({ where: { id: blocker.id } });
+    await watchFire.fireDueWatches();
+
+    const turns = await db.turn.findMany({
+      where: { conversationId: origin.id },
+      select: { source: true },
+    });
+    expect(turns).toHaveLength(1);
+    expect(turns[0]?.source).toBe("watch");
+    expect(
+      (
+        await db.processWatch.findUniqueOrThrow({
+          where: { id: watch.id },
+          select: { status: true },
+        })
+      ).status,
+    ).toBe("fired");
+  });
+
+  it("a busy origin DOWNGRADES an expired watch to the hidden path", async () => {
+    const agentId = await seedAgent("inorigin-exp");
+    const sb = await seedSandbox("inorigin-exp", agentId, "running", {
+      containerRef: "c",
+    });
+    const origin = await directOrigin(agentId);
+    await db.turn.create({
+      data: {
+        conversationId: origin.id,
+        message: "still typing",
+        status: "queued",
+        source: "web",
+        userId: USER,
+      },
+    });
+    const watch = await armTriggeredWithOrigin(sb, origin.id, "exp", {
+      expiresAt: new Date(Date.now() - 1_000),
+    });
+
+    await watchFire.fireDueWatches();
+
+    // The hidden run conversation exists and carries the fire.
+    const hidden = await db.conversation.findFirst({
+      where: { agentId, source: "watch", externalRef: watch.id },
+      select: { id: true },
+    });
+    expect(hidden).not.toBeNull();
+    expect(await db.turn.count({ where: { conversationId: hidden!.id } })).toBe(
+      1,
+    );
+    expect(
+      (
+        await db.processWatch.findUniqueOrThrow({
+          where: { id: watch.id },
+          select: { status: true },
+        })
+      ).status,
+    ).toBe("fired");
+  });
+
+  it("an in-origin wake turn's close settles nothing extra — the turn IS the report", async () => {
+    const agentId = await seedAgent("inorigin-settle");
+    await grantLlmKey(agentId, "inorigin-settle");
+    const sb = await seedSandbox("inorigin-settle", agentId, "running", {
+      containerRef: "c",
+    });
+    const origin = await directOrigin(agentId);
+    await armTriggeredWithOrigin(sb, origin.id, "settle");
+
+    await watchFire.fireDueWatches();
+    const wake = await db.turn.findFirstOrThrow({
+      where: { conversationId: origin.id, source: "watch" },
+      select: { id: true },
+    });
+    // The reporter fence needs dispatched/running — flip it the way the
+    // runner would, then close.
+    await db.turn.update({
+      where: { id: wake.id },
+      data: { status: "running" },
+    });
+    await turnService.finishTurn({
+      reporter: { sandboxId: sb, runnerId: RUNNER_A },
+      conversationId: origin.id,
+      turnId: wake.id,
+      status: "done",
+    });
+
+    // No delivery duplicate materialized: the wake turn is the only row.
+    expect(await db.turn.count({ where: { conversationId: origin.id } })).toBe(
+      1,
+    );
+  });
+
+  it("a creator that is not the thread owner keeps the hidden path — never a DM write", async () => {
+    const agentId = await seedAgent("inorigin-foreign");
+    const sb = await seedSandbox("inorigin-foreign", agentId, "running", {
+      containerRef: "c",
+    });
+    const stranger = await db.user.upsert({
+      where: { id: `${P}stranger` },
+      create: {
+        id: `${P}stranger`,
+        email: `${P}stranger@example.com`,
+        externalAuthId: `${P}s`,
+      },
+      update: {},
+      select: { id: true },
+    });
+    const origin = await db.conversation.create({
+      data: { agentId, source: "web", direct: true, userId: stranger.id },
+      select: { id: true },
+    });
+    const watch = await armTriggeredWithOrigin(sb, origin.id, "foreign");
+
+    await watchFire.fireDueWatches();
+
+    // The WAKE ran in the hidden per-watch conversation, not the DM. (The
+    // door-1 refusal delivery — a born-done record — may still land in the
+    // origin; that is the hidden path's own, pre-existing behavior.)
+    expect(
+      await db.turn.count({
+        where: { conversationId: origin.id, status: { not: "done" } },
+      }),
+    ).toBe(0);
+    const hidden = await db.conversation.findFirst({
+      where: { agentId, source: "watch", externalRef: watch.id },
+      select: { id: true },
+    });
+    expect(hidden).not.toBeNull();
+    expect(await db.turn.count({ where: { conversationId: hidden!.id } })).toBe(
+      1,
+    );
+    await db.user.delete({ where: { id: stranger.id } });
+  });
+});

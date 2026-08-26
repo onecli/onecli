@@ -48,6 +48,7 @@ export const v1Client = (
 
 export interface TranscriptEvent {
   seq: number;
+  turnId: string;
   type: string;
   payload: Record<string, unknown>;
 }
@@ -110,9 +111,115 @@ export const waitFor = async <T>(
 export interface TurnRow {
   id: string;
   status: string;
+  source?: string;
+  userId?: string | null;
+  message?: string;
   error?: string | null;
   errorCode?: string | null;
 }
+
+/**
+ * A live tail of the conversation's SSE stream, for asserting that events
+ * actually FLOW to an attached consumer (history reads cannot prove that).
+ * Deliberately not built on `v1Client` — its 30s request timeout would cut
+ * the tail. Frames are parsed off the `event:`/`id:`/`data:` lines;
+ * keep-alive comments are skipped.
+ */
+export interface StreamTap {
+  frames: { id?: string; event?: string; data: TranscriptEvent }[];
+  waitForFrame(
+    predicate: (frame: { event?: string; data: TranscriptEvent }) => boolean,
+    label: string,
+    timeoutMs?: number,
+  ): Promise<void>;
+  close(): Promise<void>;
+}
+
+export const openStream = async (
+  origin: string,
+  apiKey: string,
+  workspaceId: string,
+  conversationId: string,
+  opts: { since?: number } = {},
+): Promise<StreamTap> => {
+  const controller = new AbortController();
+  const since = opts.since !== undefined ? `?since=${opts.since}` : "";
+  const response = await fetch(
+    `${origin}/v1/conversations/${conversationId}/stream${since}`,
+    {
+      headers: {
+        authorization: `Bearer ${apiKey}`,
+        "x-workspace-id": workspaceId,
+        accept: "text/event-stream",
+      },
+      signal: controller.signal,
+    },
+  );
+  if (!response.ok || response.body === null) {
+    controller.abort();
+    throw new Error(`stream open failed: ${response.status}`);
+  }
+
+  const frames: StreamTap["frames"] = [];
+  const reader = response.body.getReader();
+  const pump = (async () => {
+    const decoder = new TextDecoder();
+    let buffer = "";
+    try {
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        let boundary = buffer.indexOf("\n\n");
+        while (boundary !== -1) {
+          const raw = buffer.slice(0, boundary);
+          buffer = buffer.slice(boundary + 2);
+          boundary = buffer.indexOf("\n\n");
+          let id: string | undefined;
+          let event: string | undefined;
+          let data = "";
+          for (const line of raw.split("\n")) {
+            if (line.startsWith(":")) continue; // keep-alive comment
+            if (line.startsWith("id:")) id = line.slice(3).trim();
+            else if (line.startsWith("event:")) event = line.slice(6).trim();
+            else if (line.startsWith("data:")) data += line.slice(5).trim();
+          }
+          if (data === "") continue;
+          try {
+            frames.push({
+              id,
+              event,
+              data: JSON.parse(data) as TranscriptEvent,
+            });
+          } catch {
+            // Non-JSON data lines are not transcript frames; skip.
+          }
+        }
+      }
+    } catch {
+      // Aborted or upstream closed — the tap is done either way.
+    }
+  })();
+
+  return {
+    frames,
+    async waitForFrame(predicate, label, timeoutMs = 60_000) {
+      const deadline = Date.now() + timeoutMs;
+      while (Date.now() < deadline) {
+        if (frames.some(predicate)) return;
+        await new Promise((r) => setTimeout(r, 100));
+      }
+      throw new Error(
+        `timed out waiting for stream frame: ${label}; saw ${frames.length} frames: ${JSON.stringify(frames.slice(-5)).slice(0, 1_500)}`,
+      );
+    },
+    async close() {
+      controller.abort();
+      await reader.cancel().catch(() => {});
+      await pump;
+    },
+  };
+};
 
 /** One turn's current row, read off the conversation's turns list (there is
  * deliberately no GET /v1/turns/:id — turns are a conversation's resource). */

@@ -31,11 +31,17 @@ import type { AgentCron } from "@/lib/api";
  * message surfaces verbatim on refusal.
  */
 
-type Preset = "daily" | "hourly" | "custom";
+type Preset = "daily" | "hourly" | "once" | "custom";
+
+/** The one-shot form: an ISO 8601 local datetime (croner reads it as a
+ * fire-once pattern in the schedule's timezone; no offset by design — the
+ * timezone field governs). */
+const ONCE_SHAPE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2})?$/;
 
 const presetOf = (schedule: string): Preset => {
   if (/^\d{1,2} \d{1,2} \* \* \*$/.test(schedule)) return "daily";
   if (/^\d{1,2} \* \* \* \*$/.test(schedule)) return "hourly";
+  if (ONCE_SHAPE.test(schedule)) return "once";
   return "custom";
 };
 
@@ -71,6 +77,7 @@ export const CronDialog = ({
   const [preset, setPreset] = useState<Preset>("daily");
   const [time, setTime] = useState("09:00");
   const [minute, setMinute] = useState("0");
+  const [onceAt, setOnceAt] = useState("");
   const [custom, setCustom] = useState("0 9 * * *");
   const [timezone, setTimezone] = useState(browserTimezone());
 
@@ -86,6 +93,7 @@ export const CronDialog = ({
       if (detected === "daily") setTime(timeOf(editing.schedule));
       if (detected === "hourly")
         setMinute(editing.schedule.split(" ")[0] ?? "0");
+      if (detected === "once") setOnceAt(editing.schedule.slice(0, 16));
       if (detected === "custom") setCustom(editing.schedule);
     } else {
       setName("");
@@ -93,6 +101,7 @@ export const CronDialog = ({
       setPreset("daily");
       setTime("09:00");
       setMinute("0");
+      setOnceAt("");
       setCustom("0 9 * * *");
       setTimezone(browserTimezone());
     }
@@ -100,6 +109,12 @@ export const CronDialog = ({
 
   const schedule = (): string | null => {
     if (preset === "custom") return custom.trim() || null;
+    if (preset === "once") {
+      // datetime-local yields "YYYY-MM-DDTHH:mm"; croner wants full seconds.
+      const value = onceAt.trim();
+      if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/.test(value)) return null;
+      return `${value}:00`;
+    }
     if (preset === "hourly") {
       const parsed = Number.parseInt(minute, 10);
       if (Number.isNaN(parsed) || parsed < 0 || parsed > 59) return null;
@@ -118,7 +133,9 @@ export const CronDialog = ({
       toast.error(
         preset === "daily"
           ? "Enter a time like 14:00"
-          : "Enter a valid schedule",
+          : preset === "once"
+            ? "Pick a date and time"
+            : "Enter a valid schedule",
       );
       return;
     }
@@ -181,7 +198,7 @@ export const CronDialog = ({
 
           <div className="grid grid-cols-2 gap-3">
             <div className="space-y-1.5">
-              <Label>Repeats</Label>
+              <Label>Runs</Label>
               <Select
                 value={preset}
                 onValueChange={(value) => setPreset(value as Preset)}
@@ -192,6 +209,7 @@ export const CronDialog = ({
                 <SelectContent>
                   <SelectItem value="daily">Every day</SelectItem>
                   <SelectItem value="hourly">Every hour</SelectItem>
+                  <SelectItem value="once">Once, at a set time</SelectItem>
                   <SelectItem value="custom">Custom (cron)</SelectItem>
                 </SelectContent>
               </Select>
@@ -216,6 +234,17 @@ export const CronDialog = ({
                     value={minute}
                     onChange={(event) => setMinute(event.target.value)}
                     placeholder="0"
+                  />
+                </>
+              )}
+              {preset === "once" && (
+                <>
+                  <Label htmlFor="cron-once">On</Label>
+                  <Input
+                    id="cron-once"
+                    type="datetime-local"
+                    value={onceAt}
+                    onChange={(event) => setOnceAt(event.target.value)}
                   />
                 </>
               )}

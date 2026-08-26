@@ -60,8 +60,9 @@ export const SchedulesSection = () => {
         <div>
           <h2 className="text-base font-semibold">Schedules</h2>
           <p className="text-muted-foreground text-sm">
-            Recurring tasks this agent runs on its own. Each run reports back to
-            the chat the schedule was created from.
+            Tasks this agent runs on its own, on a repeating schedule or once at
+            a set time. Each run reports back to the chat the schedule was
+            created from.
           </p>
         </div>
         {crons.length > 0 && (

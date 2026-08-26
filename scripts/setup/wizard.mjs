@@ -53,6 +53,10 @@ const resolvedPorts = (env) => {
     gatewayPort: r.ONECLI_GATEWAY_PORT || "10255",
     apiPort: r.ONECLI_API_PORT || "10256",
     postgresPort: r.POSTGRES_PORT || "5432",
+    // Published only when the runner profile is on (the ssh-terminator
+    // service rides it), but checked unconditionally — the default is fixed
+    // and a squatter here fails the same way as any other published port.
+    sshPort: r.ONECLI_SSH_PORT || "10257",
   };
 };
 
@@ -62,13 +66,14 @@ const resolvedPorts = (env) => {
  * only runs when the project has no live containers.
  */
 const ensurePortsFree = async (env, opts) => {
-  const { bind, appPort, gatewayPort, apiPort, postgresPort } =
+  const { bind, appPort, gatewayPort, apiPort, postgresPort, sshPort } =
     resolvedPorts(env);
   const watched = [
     [appPort, "dashboard"],
     [gatewayPort, "gateway"],
     [apiPort, "api"],
     [postgresPort, "postgres"],
+    [sshPort, "ssh"],
   ];
   for (;;) {
     const conflicts = [];

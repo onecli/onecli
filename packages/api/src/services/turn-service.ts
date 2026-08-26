@@ -5,11 +5,16 @@ import {
   type TurnUsage,
 } from "@onecli/agent-protocol";
 import { ServiceError } from "./errors";
-import { signalWork, type SweptTurn } from "./due-work";
+import {
+  releaseWatchFireClaimsForConversation,
+  signalWork,
+  type SweptTurn,
+} from "./due-work";
 import { type PublishedEvent } from "./event-bus";
 import { getEventBus } from "../providers/event-bus";
 import {
   requireConversation,
+  requireDirectWakeConversation,
   requireSystemConversation,
 } from "./conversation-service";
 import { findAgentLlmBlocker } from "./llm-credential-service";
@@ -196,12 +201,21 @@ export interface TurnOrigin {
   source: ConversationSource;
   /**
    * The speaker — or `null` for a turn the PLATFORM creates (a cron fire,
-   * step 7; watches later). Null is not "anonymous": it routes through
+   * step 7; watch fires). Null is not "anonymous": it routes through
    * `requireSystemConversation`, which fences by workspace and refuses direct
    * threads outright — the platform speaks only into sourced conversations,
    * never into someone's private thread through this door.
    */
   userId: string | null;
+  /**
+   * The ONE sanctioned exception to the direct-thread refusal above: a watch
+   * wake running in the direct conversation the watched work belongs to, so
+   * the report is the turn itself. Honored only with `userId: null`, routed
+   * through `requireDirectWakeConversation` (agent + direct fences in the
+   * WHERE), and stamped exclusively by watch-fire-service after its
+   * creator/owner check — no route ever populates TurnOrigin from a client.
+   */
+  directWake?: { agentId: string };
 }
 
 /**
@@ -251,7 +265,13 @@ export const createTurn = async (
 ) => {
   const conversation =
     origin.userId === null
-      ? await requireSystemConversation(workspaceId, conversationId)
+      ? origin.directWake
+        ? await requireDirectWakeConversation(
+            workspaceId,
+            conversationId,
+            origin.directWake.agentId,
+          )
+        : await requireSystemConversation(workspaceId, conversationId)
       : await requireConversation(workspaceId, conversationId, origin.userId);
 
   try {
@@ -1217,6 +1237,17 @@ export const finishTurn = async (input: FinishTurnInput): Promise<void> => {
       "automation settle failed after turn close",
     ),
   );
+
+  // A busy-origin watch bucket waits out its fire lease; this conversation
+  // just freed its slot, so put those watches back in the next poll's reach.
+  // Best-effort — a miss retries at the lease anyway.
+  await releaseWatchFireClaimsForConversation(input.conversationId).catch(
+    (err) =>
+      log.warn(
+        { err, conversationId: input.conversationId },
+        "watch fire-claim release failed after turn close",
+      ),
+  );
 };
 
 /** Delivery headers repeat the automation's operator/agent-named label —
@@ -1413,9 +1444,10 @@ export const materializeAutomationDelivery = async (
 
     const { lastSeq } = await tx.conversation.update({
       where: { id: originConversationId },
-      data: { lastSeq: { increment: 1 } },
+      data: { lastSeq: { increment: 2 } },
       select: { lastSeq: true },
     });
+    const textSeq = lastSeq - 1;
 
     const turn = await tx.turn.create({
       data: {
@@ -1433,19 +1465,36 @@ export const materializeAutomationDelivery = async (
       select: { id: true },
     });
 
-    const event = { type: "text" as const, text: report };
-    await tx.turnEvent.create({
-      data: {
-        conversationId: originConversationId,
-        turnId: turn.id,
-        seq: lastSeq,
-        type: "text",
-        payload: event as unknown as Prisma.InputJsonValue,
-      },
+    // TWO events, text then turn.done — the terminal is what tells every
+    // live consumer "a turn row exists and is finished". Without it the
+    // open web thread never learns the delivery landed (its new-turn signal
+    // is the boundary set turn.started|turn.done|error), and the delivery's
+    // transcript records a turn that never ends. Same seq discipline: both
+    // rows under the one row-lock increment, published together.
+    const textEvent = { type: "text" as const, text: report };
+    const doneEvent = { type: "turn.done" as const };
+    await tx.turnEvent.createMany({
+      data: [
+        {
+          conversationId: originConversationId,
+          turnId: turn.id,
+          seq: textSeq,
+          type: "text",
+          payload: textEvent as unknown as Prisma.InputJsonValue,
+        },
+        {
+          conversationId: originConversationId,
+          turnId: turn.id,
+          seq: lastSeq,
+          type: "turn.done",
+          payload: doneEvent as unknown as Prisma.InputJsonValue,
+        },
+      ],
     });
 
     return [
-      { seq: lastSeq, turnId: turn.id, type: "text", event },
+      { seq: textSeq, turnId: turn.id, type: "text", event: textEvent },
+      { seq: lastSeq, turnId: turn.id, type: "turn.done", event: doneEvent },
     ] satisfies PublishedEvent[];
   });
 

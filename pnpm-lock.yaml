@@ -277,6 +277,9 @@ importers:
       ssh2:
         specifier: ^1.17.0
         version: 1.17.0
+      undici:
+        specifier: ^8.0.0
+        version: 8.10.0
     devDependencies:
       '@onecli/eslint-config':
         specifier: workspace:*
@@ -296,6 +299,9 @@ importers:
       pino-pretty:
         specifier: ^13.1.3
         version: 13.1.3
+      tsx:
+        specifier: ^4.19.4
+        version: 4.23.12
       typescript:
         specifier: ^5.8.3
         version: 5.9.2

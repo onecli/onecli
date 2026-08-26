@@ -491,3 +491,113 @@ test("ONECLI_KEEP_SANDBOXES works from the env file, not just an export", () => 
   assert.deepEqual(r.calls, [], "docker must not be called at all");
   rmSync(r.home, { recursive: true, force: true });
 });
+
+// ── SSH front door provisioning (--provision-ssh-env) ──────────────────────
+// The real key generation runs inside a node container; here a stubbed docker
+// emits fixed fake material so the append-once / single-line-quoted / secret
+// / idempotency laws are executable without a daemon.
+// The stub emits the fake material verbatim from a file — no JS-string-literal
+// layer, so the backslash-n bytes reach the .env exactly as the real node
+// container would emit them (each PEM value ONE physical line, internal
+// newlines the two-char sequence the wizard's reader and compose cook back).
+const BS = String.fromCharCode(92); // a single backslash
+const escLine = (key, v) => `${key}="${v.split("\n").join(`${BS}n`)}"`;
+const FAKE_MATERIAL =
+  [
+    escLine("SSH_CA_PRIVATE_KEY", "-----BEGIN PRIVATE KEY-----\nFAKECA\n-----END PRIVATE KEY-----\n"),
+    'TERMINATOR_CA_PUBLIC_KEY="ssh-ed25519 FAKECALINE"',
+    escLine("TERMINATOR_HOST_KEY", "-----BEGIN OPENSSH PRIVATE KEY-----\nFAKEHOST\n-----END OPENSSH PRIVATE KEY-----\n"),
+  ].join("\n") + "\n";
+const SSH_DOCKER_STUB = [
+  'import { appendFileSync, readFileSync } from "node:fs";',
+  "const args = process.argv.slice(2);",
+  'appendFileSync(process.env.STUB_LOG, args.join(" ") + "\\n");',
+  'if (args[0] === "run") process.stdout.write(readFileSync(process.env.FAKE_MATERIAL, "utf8"));',
+  "process.exit(0);",
+].join("\n");
+
+const runSshStubbed = (envFile) => {
+  const home = mkdtempSync(join(tmpdir(), "onecli-ssh-test-"));
+  mkdirSync(join(home, ".onecli"), { recursive: true });
+  const envPath = join(home, ".onecli", ".env");
+  if (envFile) writeFileSync(envPath, envFile);
+  const stub = join(home, "stub-docker.mjs");
+  const log = join(home, "docker-calls.log");
+  const material = join(home, "fake-material.txt");
+  writeFileSync(stub, SSH_DOCKER_STUB);
+  writeFileSync(material, FAKE_MATERIAL);
+  writeFileSync(log, "");
+  const result = { home, envPath };
+  try {
+    result.stdout = execFileSync("sh", [SCRIPT, "--provision-ssh-env"], {
+      env: {
+        PATH: process.env.PATH,
+        HOME: home,
+        ONECLI_DOCKER_CMD: `node ${stub}`,
+        STUB_LOG: log,
+        FAKE_MATERIAL: material,
+      },
+      encoding: "utf8",
+    });
+    result.status = 0;
+  } catch (err) {
+    result.status = err.status;
+    result.stdout = err.stdout ?? "";
+    result.stderr = err.stderr ?? "";
+  }
+  result.env = readFileSync(envPath, "utf8");
+  result.calls = readFileSync(log, "utf8").trim().split("\n").filter(Boolean);
+  return result;
+};
+
+test("provisions the SSH front door's coupled key material", () => {
+  // provision_ssh_env writes only the coupled material — SSH_TERMINATOR_SECRET
+  // is minted unconditionally in the main secret block (door parity), not here.
+  const r = runSshStubbed("ONECLI_EXTERNAL_URL=http://box.example:10254\n");
+  assert.match(r.env, /^SSH_CA_PRIVATE_KEY="-----BEGIN PRIVATE KEY-----\\n/m);
+  assert.match(r.env, /^TERMINATOR_CA_PUBLIC_KEY="ssh-ed25519 FAKECALINE"$/m);
+  assert.match(r.env, /^TERMINATOR_HOST_KEY="-----BEGIN OPENSSH PRIVATE KEY-----\\n/m);
+  // SSH_HOST derives from the external URL's hostname; SSH_PORT is NEVER
+  // written here (compose's ONECLI_SSH_PORT is the single knob).
+  assert.match(r.env, /^SSH_HOST=box\.example$/m);
+  assert.ok(!/^SSH_PORT=/m.test(r.env), "SSH_PORT must not be written by the compose door");
+  // Each multi-line PEM is ONE physical line (\n-escaped), never raw newlines.
+  for (const line of r.env.split("\n"))
+    assert.ok(!line.startsWith("-----"), "a PEM leaked as a raw line: " + line);
+  rmSync(r.home, { recursive: true, force: true });
+});
+
+test("SSH provisioning is idempotent — a complete set is never re-minted", () => {
+  const existing =
+    'SSH_CA_PRIVATE_KEY="-----BEGIN PRIVATE KEY-----\\nKEEP\\n-----END PRIVATE KEY-----\\n"\n' +
+    'TERMINATOR_HOST_KEY="-----BEGIN OPENSSH PRIVATE KEY-----\\nKEEPHOST\\n-----END OPENSSH PRIVATE KEY-----\\n"\n' +
+    'TERMINATOR_CA_PUBLIC_KEY="ssh-ed25519 KEEPLINE"\n' +
+    "SSH_TERMINATOR_SECRET=keep-this\nSSH_HOST=keep.example\n";
+  const r = runSshStubbed(existing);
+  assert.match(r.env, /KEEP/);
+  assert.match(r.env, /SSH_TERMINATOR_SECRET=keep-this/);
+  assert.match(r.env, /SSH_HOST=keep\.example/);
+  // The generator container must not have run (the full set is present).
+  assert.ok(
+    !r.calls.some((c) => c.startsWith("run ")),
+    "must not regenerate a complete set",
+  );
+  rmSync(r.home, { recursive: true, force: true });
+});
+
+test("SSH provisioning HEALS a partial set — CA present but host key missing", () => {
+  // The exact half-armed state (operator cleared the host key to rotate, or a
+  // partial restore) that would otherwise crash-loop the terminator.
+  const partial =
+    'SSH_CA_PRIVATE_KEY="-----BEGIN PRIVATE KEY-----\\nOLD\\n-----END PRIVATE KEY-----\\n"\n' +
+    "SSH_TERMINATOR_SECRET=keep-this\n";
+  const r = runSshStubbed(partial);
+  // The generator ran and the missing coupled lines are now present.
+  assert.ok(
+    r.calls.some((c) => c.startsWith("run ")),
+    "must regenerate to heal a partial set",
+  );
+  assert.match(r.env, /^TERMINATOR_HOST_KEY=/m);
+  assert.match(r.env, /^TERMINATOR_CA_PUBLIC_KEY=/m);
+  rmSync(r.home, { recursive: true, force: true });
+});

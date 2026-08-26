@@ -180,6 +180,90 @@ detect_docker_gid() {
   esac
 }
 
+# The SSH front door's key material, minted inside ONE node container (the
+# detect_docker_gid precedent — docker is already required, and this needs no
+# host openssl/ssh-keygen). Emits three `.env` lines, values \n-escaped and
+# double-quoted so compose and the wizard's env reader both cook them back to
+# real newlines. Self-contained: the container has only vanilla node, so the
+# openssh-key-v1 host-key encoder is inlined (it mirrors
+# scripts/lib/openssh-key.mjs, which the terminator's vitest validates against
+# the real ssh2 parser). ssh2 rejects a PKCS#8 ed25519 host key — hence the
+# custom format for the host key while the CA stays PKCS#8 for the api signer.
+GEN_SSH_MATERIAL_JS='
+const c = require("node:crypto");
+const s = (b) => { const l = Buffer.alloc(4); l.writeUInt32BE(b.length, 0); return Buffer.concat([l, b]); };
+const t = (x) => s(Buffer.from(x, "utf8"));
+// CA: ed25519 PKCS#8 PEM (the api'"'"'s onprem signer parses this).
+const ca = c.generateKeyPairSync("ed25519");
+const caPem = ca.privateKey.export({ type: "pkcs8", format: "pem" }).toString();
+const caPub = ca.publicKey.export({ format: "der", type: "spki" }).subarray(-32);
+const caLine = "ssh-ed25519 " + Buffer.concat([t("ssh-ed25519"), s(caPub)]).toString("base64");
+// Host key: ed25519 openssh-key-v1 (the format ssh2 accepts).
+const h = c.generateKeyPairSync("ed25519");
+const hPub = h.publicKey.export({ format: "der", type: "spki" }).subarray(-32);
+const hSeed = h.privateKey.export({ format: "der", type: "pkcs8" }).subarray(-32);
+const hPriv = Buffer.concat([hSeed, hPub]);
+const pubBlob = Buffer.concat([t("ssh-ed25519"), s(hPub)]);
+const chk = c.randomBytes(4);
+let priv = Buffer.concat([chk, chk, t("ssh-ed25519"), s(hPub), s(hPriv), t("")]);
+for (let p = 1; priv.length % 8 !== 0; p++) priv = Buffer.concat([priv, Buffer.from([p])]);
+const body = Buffer.concat([
+  Buffer.from("openssh-key-v1\0", "binary"),
+  t("none"), t("none"), s(Buffer.alloc(0)),
+  (() => { const n = Buffer.alloc(4); n.writeUInt32BE(1, 0); return n; })(),
+  s(pubBlob), s(priv),
+]);
+const hostKey = "-----BEGIN OPENSSH PRIVATE KEY-----\n" + (body.toString("base64").match(/.{1,70}/g).join("\n")) + "\n-----END OPENSSH PRIVATE KEY-----\n";
+const esc = (v) => "\"" + v.replace(/\n/g, "\\n") + "\"";
+process.stdout.write("SSH_CA_PRIVATE_KEY=" + esc(caPem) + "\n");
+process.stdout.write("TERMINATOR_CA_PUBLIC_KEY=" + esc(caLine) + "\n");
+process.stdout.write("TERMINATOR_HOST_KEY=" + esc(hostKey) + "\n");
+'
+
+# Provision the SSH front door into $ENV_FILE — gated on the runner profile
+# (SSH into a hosted agent is meaningless without one), all-or-nothing (a
+# half-provision would light the dashboard'"'"'s SSH surface behind a 401 door),
+# idempotent (an existing SSH_CA_PRIVATE_KEY means already done).
+provision_ssh_env() {
+  # The shared api<->terminator secret is minted unconditionally in the main
+  # secret block (door parity); here we mint only the coupled key material.
+  # Idempotent — and it heals a PARTIAL prior run: skip only when ALL THREE
+  # coupled values are present. A .env with the CA but no host key (an
+  # operator who cleared the host key to rotate it, or a partial restore)
+  # would otherwise crash-loop the terminator; regenerate the set instead.
+  if [ -f "$ENV_FILE" ] &&
+    grep -q "^SSH_CA_PRIVATE_KEY=" "$ENV_FILE" &&
+    grep -q "^TERMINATOR_HOST_KEY=" "$ENV_FILE" &&
+    grep -q "^TERMINATOR_CA_PUBLIC_KEY=" "$ENV_FILE"; then
+    return 0
+  fi
+  # Mint the key material in a node container (the detect_docker_gid
+  # precedent). This is the one Docker HUB pull in the flow, so retry once
+  # against a transient blip; on persistent failure FAIL LOUD rather than
+  # leaving the terminator (which rides the runner profile) to crash-loop and
+  # abort `up -d --wait` with an opaque error. Unquoted $DOCKER by the file's
+  # convention — it may be `node /stub` in tests.
+  _material=$($DOCKER run --rm node:22.23.2-alpine node -e "$GEN_SSH_MATERIAL_JS" 2>/dev/null)
+  if [ -z "$_material" ]; then
+    _material=$($DOCKER run --rm node:22.23.2-alpine node -e "$GEN_SSH_MATERIAL_JS" 2>/dev/null)
+  fi
+  if [ -z "$_material" ]; then
+    echo "Error: could not generate the SSH front door's key material." >&2
+    echo "It needs a one-time pull of node:22.23.2-alpine; check Docker Hub reachability and re-run the installer." >&2
+    echo "(Or set COMPOSE_PROFILES without 'runner' to install without hosted agents / SSH.)" >&2
+    return 1
+  fi
+  printf '%s\n' "$_material" >> "$ENV_FILE"
+  # SSH_HOST rides the resolved external hostname; SSH_PORT stays the compose
+  # default (ONECLI_SSH_PORT), never written here (one knob).
+  resolve_display_urls
+  _ssh_host="${RESOLVED_EXTERNAL#*://}"
+  _ssh_host="${_ssh_host%%:*}"
+  ensure_env_value SSH_HOST "${_ssh_host:-localhost}"
+  chmod 600 "$ENV_FILE"
+  return 0
+}
+
 # Pre-2.0 all-in-one images auto-generated the encryption key inside the
 # app-data volume; the split stack requires it as an env var. Carry it over so
 # an upgraded install keeps decrypting its existing secrets.
@@ -543,7 +627,7 @@ main() {
   # reason; defaults stay implicit.
 
   ensure_env_value ONECLI_BIND_HOST "$ONECLI_BIND_HOST"
-  for pair in "ONECLI_APP_PORT:${ONECLI_APP_PORT:-}" "ONECLI_GATEWAY_PORT:${ONECLI_GATEWAY_PORT:-}" "ONECLI_API_PORT:${ONECLI_API_PORT:-}" "POSTGRES_PORT:${POSTGRES_PORT:-}"; do
+  for pair in "ONECLI_APP_PORT:${ONECLI_APP_PORT:-}" "ONECLI_GATEWAY_PORT:${ONECLI_GATEWAY_PORT:-}" "ONECLI_API_PORT:${ONECLI_API_PORT:-}" "POSTGRES_PORT:${POSTGRES_PORT:-}" "ONECLI_SSH_PORT:${ONECLI_SSH_PORT:-}"; do
     _var="${pair%%:*}"
     _val="${pair#*:}"
     if [ -n "$_val" ]; then
@@ -573,6 +657,11 @@ main() {
     # Channels (opt-in, same posture): the Slack adapter's anchor. Provisioned
     # up front; starting the adapter needs COMPOSE_PROFILES=channel-adapter.
     ensure_env_secret CHANNEL_ADAPTER_TOKEN "$(generate_channel_adapter_token)"
+    # The api<->ssh-terminator shared secret — minted unconditionally like the
+    # runner/adapter tokens (and like the setup wizard's SECRET_SPECS), so the
+    # doors stay in parity; the coupled SSH key material is provisioned later,
+    # only when the runner profile is on (provision_ssh_env).
+    ensure_env_secret SSH_TERMINATOR_SECRET ""
     ensure_env_value DOCKER_GID "$(detect_docker_gid)"
     # Hosted agents ON by default — they are what a fresh install is for.
     # `${COMPOSE_PROFILES-runner}`: an exported empty value opts out; an
@@ -580,6 +669,14 @@ main() {
     ensure_env_value COMPOSE_PROFILES "${COMPOSE_PROFILES-runner}"
     # The canonical public URL (validated, persisted, frozen, or hinted).
     provision_external_url || exit 1
+    # SSH into hosted agents — provisioned AFTER the external URL (SSH_HOST
+    # derives from it) and only when the runner profile is on (the
+    # ssh-terminator service rides it; no dead door otherwise). Uses the same
+    # runner_profile_on helper as every other consumer so a quoted
+    # COMPOSE_PROFILES="runner" is matched, not silently skipped.
+    if runner_profile_on; then
+      provision_ssh_env || exit 1
+    fi
   fi
 
   # ── Stop existing services ──
@@ -612,7 +709,7 @@ main() {
   fi
 
   if [ "$STACK" = "split" ]; then
-    for pair in "ONECLI_APP_PORT:$(env_or_file ONECLI_APP_PORT):10254" "ONECLI_GATEWAY_PORT:$(env_or_file ONECLI_GATEWAY_PORT):10255" "ONECLI_API_PORT:$(env_or_file ONECLI_API_PORT):10256"; do
+    for pair in "ONECLI_APP_PORT:$(env_or_file ONECLI_APP_PORT):10254" "ONECLI_GATEWAY_PORT:$(env_or_file ONECLI_GATEWAY_PORT):10255" "ONECLI_API_PORT:$(env_or_file ONECLI_API_PORT):10256" "ONECLI_SSH_PORT:$(env_or_file ONECLI_SSH_PORT):10257"; do
       var="${pair%%:*}"
       _rest="${pair#*:}"
       port="${_rest%%:*}"
@@ -695,6 +792,10 @@ main() {
     if runner_profile_on; then
       echo "  Agents:     hosted agents are ON (the runner mounts the Docker socket to start sandboxes;"
       echo "              disable with COMPOSE_PROFILES= in $ENV_FILE)"
+      _ssh_host="${RESOLVED_EXTERNAL#*://}"
+      _ssh_host="${_ssh_host%%:*}"
+      _ssh_port=$(env_or_file ONECLI_SSH_PORT)
+      echo "  SSH:        ssh into agents on ${_ssh_host:-localhost}:${_ssh_port:-10257} (open it from an agent's SSH page)"
       if [ -n "$REAP_KEPT" ]; then
         echo "              running sandboxes left alone (ONECLI_KEEP_SANDBOXES is set); they keep the"
         echo "              old agent image until they next restart"
@@ -745,6 +846,18 @@ if [ "$1" = "--provision-url-env" ]; then
   mkdir -p "$INSTALL_DIR"
   ensure_env_value ONECLI_BIND_HOST "$ONECLI_BIND_HOST"
   provision_external_url || exit 1
+  exit 0
+fi
+
+# Hidden verification hook: run ONLY the SSH provisioning against
+# $HOME/.onecli/.env, through $ONECLI_DOCKER_CMD, so tests can assert the
+# append-once / single-line-quoted / idempotency law with a stubbed docker
+# that emits fake key material (real key generation needs the node container).
+if [ "$1" = "--provision-ssh-env" ]; then
+  mkdir -p "$INSTALL_DIR"
+  ONECLI_BIND_HOST=$(env_or_file ONECLI_BIND_HOST)
+  ONECLI_BIND_HOST="${ONECLI_BIND_HOST:-127.0.0.1}"
+  provision_ssh_env || exit 1
   exit 0
 fi
 

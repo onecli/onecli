@@ -179,6 +179,15 @@ const positiveInt = (raw: string | undefined, fallback: number): number => {
   return Number.isInteger(parsed) && parsed > 0 ? parsed : fallback;
 };
 
+/**
+ * Public SSH endpoint PORT. Default 22 — cloud fronts the terminator with an
+ * NLB on :22, so the advertised port and the generated connect command stay
+ * exactly as before. Self-host publishes an unprivileged high port instead
+ * (a default-on listener cannot bind :22), which the client honors via
+ * `ssh -p`.
+ */
+export const SSH_PORT = positiveInt(process.env.SSH_PORT, 22);
+
 /** Minted certificate lifetime — gates NEW auth only, never live sessions. */
 export const SSH_CERT_TTL_SECONDS = positiveInt(
   process.env.SSH_CERT_TTL_SECONDS,

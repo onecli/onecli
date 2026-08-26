@@ -7,6 +7,7 @@
 
 import { resolveEnv } from "../lib/env-file.mjs";
 import { ensureSecrets } from "../lib/secrets.mjs";
+import { ensureSshEnv } from "../lib/ssh-env.mjs";
 import {
   detectBindHost,
   detectDockerGid,
@@ -231,6 +232,29 @@ export const provisionEnv = async (envFile, opts) => {
       comment:
         "Group of /var/run/docker.sock as CONTAINERS see it (Docker Desktop's host view is wrong).",
     });
+
+  // SSH into hosted agents rides the runner profile — meaningless without it,
+  // and gating here means a --no-runner install advertises no dead door.
+  // Provisioned AFTER the external URL is frozen, so SSH_HOST derives from the
+  // real hostname (not a stale localhost). Skipped whole on the cloud edition.
+  const runnerOn = profiles
+    .split(",")
+    .map((p) => p.trim())
+    .includes("runner");
+  if (runnerOn) {
+    const { external } = resolveDisplayUrls(envFile);
+    let hostname = "localhost";
+    try {
+      hostname = new URL(external).hostname;
+    } catch {
+      /* keep localhost — provisioning must never crash the wizard */
+    }
+    const sshGenerated = ensureSshEnv(envFile, resolveEnv(envFile, {}), {
+      hostname,
+    });
+    if (sshGenerated.length)
+      log.step(`Generated ${sshGenerated.join(", ")} (SSH into hosted agents)`);
+  }
 
   return { profiles };
 };

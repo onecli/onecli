@@ -33,6 +33,10 @@ services:
     build:
       context: ..
       dockerfile: docker/runner.Dockerfile
+  ssh-terminator:
+    build:
+      context: ..
+      dockerfile: docker/ssh-terminator.Dockerfile
   channel-adapter:
     build:
       context: ..

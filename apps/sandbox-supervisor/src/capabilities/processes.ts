@@ -39,8 +39,8 @@ you through watches.
   started other ways — with their recent output.
 - process_watch wakes you ONCE when something happens to any listed task:
   "exit" (it ended), "pattern" (a literal text appears in its output), or
-  "silence" (no output for N seconds). Your watch prompt runs in a new
-  conversation and its report is delivered to this chat. Watches expire
+  "silence" (no output for N seconds). Your watch prompt runs automatically
+  and its report reaches this chat. Watches expire
   (default 4 hours), and every watch also fires if the process ends first,
   whatever its kind — so say in the prompt what to do in each case. This is
   THE way to be woken about background work; a wake requested through your
@@ -63,7 +63,15 @@ const startSchema = z
   .strict();
 
 const statusSchema = z
-  .object({ processId: z.string().min(1).max(100).optional() })
+  .object({
+    processId: z.string().min(1).max(100).optional(),
+    // Accepted and ignored: harness-native tools take this key to lift
+    // output truncation, and models reflexively pass it here too (observed
+    // live). The recent tail is already returned in full, so honoring the
+    // key is a no-op — but rejecting it turns a harmless habit into a
+    // failed call and a red row in the chat.
+    accept_large_output: z.boolean().optional(),
+  })
   .strict();
 
 const stopSchema = z.object({ processId: z.string().min(1).max(100) }).strict();
@@ -151,13 +159,22 @@ export const createProcessTools = (
           type: "string",
           description: "A process id from process_start or the list.",
         },
+        accept_large_output: {
+          type: "boolean",
+          description:
+            "Accepted for compatibility; output is already returned in full.",
+        },
       },
       additionalProperties: false,
     },
     execute: async (args) => {
       const parsed = statusSchema.safeParse(args ?? {});
       if (!parsed.success) return parseFailure(parsed.error.issues[0]?.message);
-      return manager.status(parsed.data);
+      return manager.status({
+        ...(parsed.data.processId !== undefined && {
+          processId: parsed.data.processId,
+        }),
+      });
     },
   },
   {
@@ -180,7 +197,7 @@ export const createProcessTools = (
   },
   {
     name: "process_watch",
-    description: `Wake yourself ONCE when something happens to a background process: kind "exit" (it ends), "pattern" (a literal text appears in its output — needs \`pattern\`), or "silence" (no output for N seconds — needs \`silenceSeconds\`). Your prompt then runs in a new conversation and its report is delivered to the chat where you armed the watch. Every watch also fires if the process ends first, whatever its kind. Expires after expiresInSeconds (default ${WATCH_EXPIRES_DEFAULT_SECONDS}).`,
+    description: `Wake yourself ONCE when something happens to a background process: kind "exit" (it ends), "pattern" (a literal text appears in its output — needs \`pattern\`), or "silence" (no output for N seconds — needs \`silenceSeconds\`). Your prompt then runs automatically and its report reaches the chat where you armed the watch. Every watch also fires if the process ends first, whatever its kind. Expires after expiresInSeconds (default ${WATCH_EXPIRES_DEFAULT_SECONDS}).`,
     inputSchema: {
       type: "object",
       properties: {

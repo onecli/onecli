@@ -607,7 +607,12 @@ export interface InstanceInfo {
    * front door) means "no SSH here" — the rail auto-hides the agent's SSH
    * section off it — never a crash and never a teased dead door.
    */
-  ssh?: { host: string };
+  ssh?: {
+    host: string;
+    /** Public SSH port. Optional: an older API answers without it (assume
+     *  22). Cloud is 22 (the NLB); self-host a high port. */
+    port?: number;
+  };
 }
 
 /**
@@ -645,6 +650,9 @@ export interface MintedSshCertificate {
   certificate: string;
   /** The public SSH endpoint to connect to. */
   host: string;
+  /** Public SSH port. Optional: an older API answers without it (assume 22,
+   *  the connect command omits `-p`). */
+  port?: number;
   /** The SSH username — the immutable agent id, the cert's principal. */
   user: string;
   serial: string;

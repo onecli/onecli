@@ -101,7 +101,14 @@ const cronOf = (schedule: string, timezone: string): Cron => {
 export const CRON_JITTER_MAX_SECONDS = 300;
 
 /**
- * The next occurrence strictly after `from`, in the schedule's own zone.
+ * The next occurrence strictly after `from`, in the schedule's own zone — or
+ * NULL when the schedule has no further occurrence. Null is a normal state,
+ * not an error: croner natively reads an ISO 8601 datetime as a fire-ONCE
+ * pattern, so a spent one-shot (and any expression whose occurrences exhaust
+ * after creation) simply has nothing next. The fire path converts null into
+ * completion; the doors wrap this in `computeNextFire`, which refuses a
+ * schedule that never fires AT ALL as a creation-time error.
+ *
  * Computed from NOW at fire time, deliberately — downtime coalesces into one
  * late fire instead of a backlog (misfire policy, decided in the plan).
  *
@@ -111,9 +118,40 @@ export const CRON_JITTER_MAX_SECONDS = 300;
  * is capped at half the gap to the FOLLOWING occurrence, never a flat 300s:
  * an every-minute schedule jittered past its next slot would silently skip
  * occurrences on the healthy path, which only downtime is allowed to do.
+ * A ONE-SHOT takes NO jitter: the spreading exists for recurring cohorts,
+ * and "remind me at 15:00" has no cohort — it fires at 15:00, not 15:04.
  * Everything downstream (`advanceClaimedCron`'s CAS, the dashboard's
  * nextFireAt, `list_tasks`) sees the jittered time — displayed fire times
  * are the real fire times.
+ */
+export const nextFireOrNull = (
+  schedule: string,
+  timezone: string,
+  from: Date,
+  random: () => number = Math.random,
+): Date | null => {
+  assertValidTimezone(timezone);
+  const cron = cronOf(schedule, timezone);
+  const next = cron.nextRun(from);
+  if (!next) return null;
+  // The following occurrence bounds the jitter; no following occurrence
+  // means a one-shot, which fires exactly when it says.
+  const following = cron.nextRun(next);
+  if (!following) return next;
+  const gapMs = following.getTime() - next.getTime();
+  const ceilingMs = Math.min(
+    CRON_JITTER_MAX_SECONDS * 1000,
+    Math.floor(gapMs / 2),
+  );
+  const jitterMs = ceilingMs > 0 ? Math.floor(random() * ceilingMs) : 0;
+  return new Date(next.getTime() + jitterMs);
+};
+
+/**
+ * The doors' wrapper: a schedule that never fires is refused at creation and
+ * on edit/re-enable — an "exists but can never fire" row is exactly what the
+ * validation-by-construction doctrine forbids. (A PAST one-shot datetime is
+ * refused here too, correctly.)
  */
 export const computeNextFire = (
   schedule: string,
@@ -121,25 +159,14 @@ export const computeNextFire = (
   from: Date,
   random: () => number = Math.random,
 ): Date => {
-  assertValidTimezone(timezone);
-  const cron = cronOf(schedule, timezone);
-  const next = cron.nextRun(from);
+  const next = nextFireOrNull(schedule, timezone, from, random);
   if (!next) {
     throw new ServiceError(
       "UNPROCESSABLE",
       "This schedule never fires. Check the expression",
     );
   }
-  // The following occurrence bounds the jitter; a schedule with no further
-  // occurrence (a one-shot) takes the full ceiling.
-  const following = cron.nextRun(next);
-  const gapMs = following ? following.getTime() - next.getTime() : Infinity;
-  const ceilingMs = Math.min(
-    CRON_JITTER_MAX_SECONDS * 1000,
-    Math.floor(gapMs / 2),
-  );
-  const jitterMs = ceilingMs > 0 ? Math.floor(random() * ceilingMs) : 0;
-  return new Date(next.getTime() + jitterMs);
+  return next;
 };
 
 /** The agent fence both doors share — workspace-scoped, hosted-only. */
@@ -173,7 +200,17 @@ export const createCron = async (
   origin: CronOrigin,
 ): Promise<AgentCronView> => {
   await requireHostedAgent(workspaceId, agentId);
-  const held = await db.agentCron.count({ where: { agentId } });
+  // Completed one-shots are inert (out of the claim predicate forever), so
+  // they don't count against the cap — a reminder-happy agent must not evict
+  // its recurring schedules. Paused rows still count (unchanged semantics).
+  // NULL-SAFE on purpose: `not: "completed"` alone would drop NULL-reason
+  // rows from the count (SQL null semantics) and quietly disable the cap.
+  const held = await db.agentCron.count({
+    where: {
+      agentId,
+      OR: [{ disabledReason: null }, { disabledReason: { not: "completed" } }],
+    },
+  });
   if (held >= MAX_CRONS_PER_AGENT) {
     throw new ServiceError(
       "UNPROCESSABLE",
@@ -290,12 +327,18 @@ export const runCronNow = async (
     data: { nextFireAt: new Date() },
   });
   if (count === 0) {
-    // Fenced read to say WHICH refusal honestly (absent vs paused).
+    // Fenced read to say WHICH refusal honestly (absent vs completed vs paused).
     const exists = await db.agentCron.findFirst({
       where: { id: cronId, agentId },
-      select: { id: true },
+      select: { id: true, disabledReason: true },
     });
     if (!exists) throw new ServiceError("NOT_FOUND", "Schedule not found");
+    if (exists.disabledReason === "completed") {
+      throw new ServiceError(
+        "UNPROCESSABLE",
+        "This schedule already ran to completion",
+      );
+    }
     throw new ServiceError("UNPROCESSABLE", "This schedule is paused");
   }
   const cron = await db.agentCron.findFirstOrThrow({

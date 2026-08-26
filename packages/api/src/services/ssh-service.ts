@@ -18,6 +18,7 @@ import {
   SSH_CERT_MINTS_PER_HOUR,
   SSH_CERT_TTL_SECONDS,
   SSH_HOST,
+  SSH_PORT,
   SSH_IDLE_TIMEOUT_SECONDS,
   SSH_MAX_SESSION_SECONDS,
   SSH_MAX_SESSIONS_PER_AGENT,
@@ -79,6 +80,8 @@ const asEd25519Signer = async (
 export interface MintedSshCertificate {
   certificate: string;
   host: string;
+  /** Public SSH port — 22 on cloud (the NLB), a high port on self-host. */
+  port: number;
   /** The SSH username — the immutable agent id (the cert's principal). */
   user: string;
   serial: string;
@@ -209,6 +212,7 @@ export const mintSshCertificate = async (
   return {
     certificate: built.line,
     host: SSH_HOST,
+    port: SSH_PORT,
     user: agentId,
     serial: built.serial.toString(),
     expiresAt: validBefore.toISOString(),

@@ -335,6 +335,113 @@ describe.skipIf(!PROOF_URL)("the schedule cap", () => {
   });
 });
 
+describe.skipIf(!PROOF_URL)("one-shot schedules", () => {
+  /** An ISO local datetime (croner's fire-once pattern) already in the past,
+   * armed due — the exact shape that used to wedge the fire loop forever. */
+  const seedDueOneShot = async (agentId: string, suffix: string) => {
+    const occurrence = new Date(Date.now() - 120_000);
+    const cron = await db.agentCron.create({
+      data: {
+        agentId,
+        name: `${P}${suffix}`,
+        prompt: `do the ${suffix} thing once`,
+        schedule: occurrence.toISOString().slice(0, 19),
+        timezone: "UTC",
+        nextFireAt: new Date(Date.now() - 60_000),
+      },
+      select: { id: true },
+    });
+    return cron.id;
+  };
+
+  it("fires exactly once, completes the row, and is NEVER re-claimed", async () => {
+    // MUTATION-PROOF both ways: revert the fireOne branch (throwing
+    // computeNextFire) and the first fire creates no turn; drop the
+    // completing CAS and the later polls re-claim and re-fire.
+    const agentId = await seedAgent("once");
+    await grantLlmKey(agentId, "once-key");
+    const cronId = await seedDueOneShot(agentId, "once");
+
+    expect(await cronFire.fireDueCrons()).toBe(1);
+
+    const conversation = await db.conversation.findFirstOrThrow({
+      where: { agentId, source: "cron", externalRef: cronId },
+      select: { id: true },
+    });
+    const turns = await db.turn.findMany({
+      where: { conversationId: conversation.id },
+      select: { status: true, source: true },
+    });
+    expect(turns).toHaveLength(1);
+    expect(turns[0]?.source).toBe("cron");
+
+    const cron = await db.agentCron.findUniqueOrThrow({
+      where: { id: cronId },
+      select: { enabled: true, disabledReason: true, lastFiredAt: true },
+    });
+    expect(cron.enabled).toBe(false);
+    expect(cron.disabledReason).toBe("completed");
+    expect(cron.lastFiredAt).not.toBeNull();
+
+    // The forever-reclaim regression pin: further polls claim NOTHING and
+    // no second turn ever appears.
+    expect(await cronFire.fireDueCrons()).toBe(0);
+    expect(await cronFire.fireDueCrons()).toBe(0);
+    expect(
+      await db.turn.count({ where: { conversationId: conversation.id } }),
+    ).toBe(1);
+  });
+
+  it("completed one-shots do not count against the schedule cap", async () => {
+    const agentId = await seedAgent("once-cap");
+    await db.agentCron.createMany({
+      data: Array.from({ length: 20 }, (_, i) => ({
+        agentId,
+        name: `${P}once-cap-${i}`,
+        prompt: "p",
+        schedule: i === 0 ? "2026-01-01T09:00:00" : "0 9 * * *",
+        timezone: "UTC",
+        nextFireAt: new Date(Date.now() + 3_600_000),
+        ...(i === 0 && { enabled: false, disabledReason: "completed" }),
+      })),
+    });
+    const cronService = await import("./agent-cron-service");
+    const created = await cronService.createCron(
+      WORKSPACE,
+      agentId,
+      {
+        name: `${P}once-cap-new`,
+        prompt: "p",
+        schedule: "0 10 * * *",
+        timezone: "UTC",
+      },
+      { originConversationId: null, createdByUserId: null },
+    );
+    expect(created.id).toBeTruthy();
+  });
+
+  it("run-now on a completed one-shot reads the honest refusal", async () => {
+    const agentId = await seedAgent("once-run");
+    const cron = await db.agentCron.create({
+      data: {
+        agentId,
+        name: `${P}once-run`,
+        prompt: "p",
+        schedule: "2026-01-01T09:00:00",
+        timezone: "UTC",
+        nextFireAt: new Date(),
+        enabled: false,
+        disabledReason: "completed",
+      },
+      select: { id: true },
+    });
+    const cronService = await import("./agent-cron-service");
+    await expect(
+      cronService.runCronNow(WORKSPACE, agentId, cron.id),
+    ).rejects.toThrow(/already ran to completion/);
+  });
+});
+
 describe.skipIf(!PROOF_URL)("firing", () => {
   it("a fire is a real turn in the cron's own conversation, and it wakes the parked sandbox", async () => {
     const agentId = await seedAgent("fire");
@@ -506,11 +613,22 @@ describe.skipIf(!PROOF_URL)("settling and delivery", () => {
 
     const text = await db.turnEvent.findFirstOrThrow({
       where: { turnId: deliveries[0]!.id, type: "text" },
-      select: { payload: true },
+      select: { payload: true, seq: true },
     });
     expect((text.payload as { text: string }).text).toContain(
       "the settle report body",
     );
+
+    // The delivery ANNOUNCES itself: a terminal event right after the text,
+    // contiguous seq — this is what tells a live client (whose new-turn
+    // signal is the boundary set) that a delivery row exists and is done.
+    // MUTATION-PROOF: drop the turn.done write in the materializer and this
+    // fails; break the seq discipline and the contiguity check fails.
+    const done = await db.turnEvent.findFirstOrThrow({
+      where: { turnId: deliveries[0]!.id, type: "turn.done" },
+      select: { seq: true },
+    });
+    expect(done.seq).toBe(text.seq + 1);
 
     const cron = await db.agentCron.findUniqueOrThrow({
       where: { id: cronId },

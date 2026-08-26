@@ -1,29 +1,24 @@
 import { spawn } from "node:child_process";
 import type { ExecBackend } from "./backend/types";
+import { buildGuestPayload } from "./relay";
 
 /**
- * Test twin of the Kubernetes exec backend: runs the relay's command as a
- * local child process. The real guest command is wrapped in the identity
- * drop (`env … setpriv … -- sh -c <script>`) which cannot run on a dev
- * machine, so by default everything through the `--` fence is stripped and
- * the trailing `sh -c <script>` runs locally — the e2e suite additionally
- * rewrites guest-only paths in the script via `mapCommand`.
+ * Test twin of a real substrate backend: runs the shared guest payload as a
+ * local child process (`sh -c <script>`). The guest paths in the payload do
+ * not exist on a dev machine, so the e2e suite rewrites them via
+ * `mapCommand`.
  */
 
 export interface LocalExecBackendOptions {
   mapCommand?: (command: string[]) => string[];
 }
 
-const stripIdentityWrapper = (command: string[]): string[] => {
-  const fence = command.lastIndexOf("--");
-  return fence >= 0 ? command.slice(fence + 1) : command;
-};
-
 export const createLocalExecBackend = <T>(
   options: LocalExecBackendOptions = {},
 ): ExecBackend<T> => ({
-  exec(_target, command, io) {
-    const argv = (options.mapCommand ?? stripIdentityWrapper)(command);
+  exec(_target, request, io) {
+    const command = ["sh", "-c", buildGuestPayload(request)];
+    const argv = options.mapCommand ? options.mapCommand(command) : command;
     const program = argv[0];
     if (!program) {
       return Promise.reject(new Error("empty exec command"));
@@ -48,6 +43,14 @@ export const createLocalExecBackend = <T>(
       });
     });
 
-    return Promise.resolve({ exited });
+    return Promise.resolve({
+      exited,
+      // Kill the child when the SSH channel ends before it exits (the relay
+      // calls dispose() unconditionally; killing an already-exited child is a
+      // harmless no-op).
+      dispose: () => {
+        child.kill();
+      },
+    });
   },
 });
