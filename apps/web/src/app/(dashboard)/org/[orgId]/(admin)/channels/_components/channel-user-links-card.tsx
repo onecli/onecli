@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Trash2 } from "lucide-react";
 import { toast } from "sonner";
 import { Badge } from "@onecli/ui/components/badge";
@@ -55,6 +55,19 @@ export const ChannelUserLinksCard = () => {
   // field rather than hiding manual links entirely.
   const members = useOrgMembersList(slackConnected);
 
+  // The manual form is the RARE path (auto email-match covers most members),
+  // so it stays folded behind one small button until an admin needs it.
+  // Opening/closing the fold unmounts the control that had focus, so focus
+  // is handed off by hand (the integration card's paste-fold pattern): into
+  // the first field on open, back to the disclosure on Cancel.
+  const [formOpen, setFormOpen] = useState(false);
+  const disclosureRef = useRef<HTMLButtonElement>(null);
+  const restoreDisclosureFocus = useRef(false);
+  useEffect(() => {
+    if (formOpen || !restoreDisclosureFocus.current) return;
+    restoreDisclosureFocus.current = false;
+    disclosureRef.current?.focus();
+  }, [formOpen]);
   const [selectedUserId, setSelectedUserId] = useState("");
   const [manualUserId, setManualUserId] = useState("");
   const [externalUserId, setExternalUserId] = useState("");
@@ -78,6 +91,7 @@ export const ChannelUserLinksCard = () => {
           setSelectedUserId("");
           setManualUserId("");
           setExternalUserId("");
+          setFormOpen(false);
           toast.success("Link added");
         },
         onError: (err) => toast.error(err.message),
@@ -106,52 +120,84 @@ export const ChannelUserLinksCard = () => {
           </p>
         ) : (
           <>
-            <form onSubmit={submit} className="flex flex-wrap items-end gap-2">
-              {usePicker ? (
-                <Select
-                  value={selectedUserId || undefined}
-                  onValueChange={setSelectedUserId}
-                >
-                  <SelectTrigger className="w-56" aria-label="Member">
-                    <SelectValue placeholder="Pick a member" />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {(members.data ?? []).map((m) => (
-                      <SelectItem key={m.userId} value={m.userId}>
-                        {m.name ?? m.email}
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-              ) : (
-                <Input
-                  value={manualUserId}
-                  onChange={(e) => setManualUserId(e.target.value)}
-                  placeholder="User ID"
-                  aria-label="User ID"
-                  className="w-56 font-mono text-sm"
-                />
-              )}
-              <Input
-                value={externalUserId}
-                onChange={(e) => setExternalUserId(e.target.value)}
-                placeholder="U0123ABCDEF"
-                aria-label="Slack member ID"
-                className="w-44 font-mono text-sm"
-              />
+            {!formOpen && (
               <Button
-                type="submit"
+                ref={disclosureRef}
                 variant="outline"
-                disabled={!ready || addLink.isPending}
-                loading={addLink.isPending}
+                size="sm"
+                onClick={() => setFormOpen(true)}
               >
-                {addLink.isPending ? "Adding…" : "Add link"}
+                Link manually
               </Button>
-              <p className="text-muted-foreground w-full text-xs">
-                The Slack member ID is on the member&apos;s Slack profile →
-                three-dot menu → Copy member ID.
-              </p>
-            </form>
+            )}
+            {formOpen && (
+              <form
+                onSubmit={submit}
+                className="flex flex-wrap items-end gap-2"
+              >
+                {usePicker ? (
+                  <Select
+                    value={selectedUserId || undefined}
+                    onValueChange={setSelectedUserId}
+                  >
+                    {/* Focus hand-off: the disclosure that had focus just
+                        unmounted. */}
+                    <SelectTrigger
+                      className="w-56"
+                      aria-label="Member"
+                      autoFocus={formOpen}
+                    >
+                      <SelectValue placeholder="Pick a member" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {(members.data ?? []).map((m) => (
+                        <SelectItem key={m.userId} value={m.userId}>
+                          {m.name ?? m.email}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                ) : (
+                  <Input
+                    value={manualUserId}
+                    onChange={(e) => setManualUserId(e.target.value)}
+                    placeholder="User ID"
+                    aria-label="User ID"
+                    className="w-56 font-mono text-sm"
+                    autoFocus={formOpen}
+                  />
+                )}
+                <Input
+                  value={externalUserId}
+                  onChange={(e) => setExternalUserId(e.target.value)}
+                  placeholder="U0123ABCDEF"
+                  aria-label="Slack member ID"
+                  className="w-44 font-mono text-sm"
+                />
+                <Button
+                  type="submit"
+                  variant="outline"
+                  disabled={!ready || addLink.isPending}
+                  loading={addLink.isPending}
+                >
+                  {addLink.isPending ? "Adding…" : "Add link"}
+                </Button>
+                <Button
+                  type="button"
+                  variant="ghost"
+                  onClick={() => {
+                    restoreDisclosureFocus.current = true;
+                    setFormOpen(false);
+                  }}
+                >
+                  Cancel
+                </Button>
+                <p className="text-muted-foreground w-full text-xs">
+                  The Slack member ID is on the member&apos;s Slack profile:
+                  three-dot menu, then Copy member ID.
+                </p>
+              </form>
+            )}
 
             {links.length === 0 ? (
               <p className="text-muted-foreground text-sm">

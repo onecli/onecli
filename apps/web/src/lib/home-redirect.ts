@@ -21,6 +21,13 @@ export const resolveHomeRedirect = async (): Promise<string> => {
     return inviteCallback;
   }
 
+  // A parked post-auth return (a Slack-directory install finish): a plain
+  // return-here with NO invitation semantics — a brand-new user must still
+  // get their org bootstrapped by this very sync, or they land back on the
+  // finish page org-less. Cleared only after the sync succeeds, like the
+  // claim marker.
+  const postAuthCallback = localStorage.getItem("postAuthCallbackUrl");
+
   const res = await apiFetch("/v1/auth/session");
   // Identity conflict (relink rejected) or a session-policy 401 (require
   // SSO): the login page owns the error UX — its own session sync hits the
@@ -31,6 +38,10 @@ export const resolveHomeRedirect = async (): Promise<string> => {
   // misroute an existing user to org creation.
   if (res.status === 429) return "/auth/login";
   if (!res.ok) return "/create-org";
+  if (postAuthCallback) {
+    localStorage.removeItem("postAuthCallbackUrl");
+    return postAuthCallback;
+  }
   const data = (await res.json()) as { workspaceId?: string };
 
   // Validate the last-viewed-org cookie against the user's actual memberships

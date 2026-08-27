@@ -29,6 +29,8 @@ export interface AgentChannelPresence {
   /** The app's handle in the workspace (Slack: "donna"), where we know it. */
   identityName: string | null;
   tenant: { externalId: string; name: string | null };
+  /** The member who attached this presence, for the "Managed by" line. */
+  managedBy: { name: string | null; email: string } | null;
   /** Group threads the presence is live in (direct DMs stay private). */
   groupThreads: { externalThreadId: string; createdAt: string }[];
 }
@@ -38,6 +40,13 @@ export interface AgentChannelsView {
   /** What an attach would use right now — and, on servers that offer a
    * choice, what it could use instead (absent on older servers). */
   posture: { transport: ChannelTransport; available?: ChannelTransport[] };
+  /** The org the agent's workspace belongs to — the "set up Slack at the
+   * org level" deep-link target. */
+  organizationId: string;
+  /** Whether the CALLER may open that target (it sits behind the org admin
+   * layout, which silently bounces non-admins). Absent on older servers —
+   * treat as true (the pre-existing behavior: show the link). */
+  viewerIsOrgAdmin?: boolean;
   orgIntegrations: {
     provider: ChannelProvider;
     connected: boolean;
@@ -106,6 +115,29 @@ export interface OrgChannelsView {
   integrations: OrgChannelIntegration[];
   userLinks: ChannelUserLink[];
   adapter: { online: boolean; lastSeenAt: string | null };
+  /** The deployment-wide shared app. `available` is the ADVERTISE signal
+   * (configured + public origin); `installation` is returned whenever this
+   * org's workspace install exists, so an install made from Slack's side
+   * stays visible (and removable) even while `available` is false.
+   * Optional: absent on servers that predate the shared app (the deploy
+   * checkboxes can skew web ahead of the api-server). */
+  sharedApp?: {
+    available: boolean;
+    /** The install carries a user token that mints agent apps: the config
+     * token paste is optional while this is true. */
+    canMintAgentApps: boolean;
+    /** A NEW install would capture the minting scopes (the deployment's app
+     * is Slack-approved as a manager app). Decides which face the setup
+     * choice leads with: the OneCLI app when true, the token paste when
+     * false (the app is onboarding-only until approval). Absent on older
+     * servers — treat as false. */
+    installMintsAgentApps?: boolean;
+    installation: {
+      tenant: { externalId: string; name: string | null };
+      botUserId: string | null;
+      createdAt: string;
+    } | null;
+  };
 }
 
 // Encoded like `agents.get`: the agent id can arrive DECODED from the URL
@@ -185,3 +217,41 @@ export const removeUserLink = (provider: ChannelProvider, linkId: string) =>
   apiDelete(
     `/v1/org/channels/${provider}/user-links/${encodeURIComponent(linkId)}`,
   );
+
+/** Mint the "Add to Slack" consent URL for the deployment's shared app. */
+export const startSharedInstall = (provider: ChannelProvider) =>
+  apiPost<{ installUrl: string }>(
+    `/v1/org/channels/${provider}/shared-install`,
+    {},
+  );
+
+/** Spend a code parked by an install that began in Slack's app directory,
+ * binding that workspace to the caller's named org. The org travels as an
+ * explicit header: the /slack/installed page carries no org in its URL, so
+ * the path-derived scope apiFetch computes is empty there — and the server
+ * re-fences the header against the caller's active memberships anyway. */
+export const inspectSharedInstall = (
+  provider: ChannelProvider,
+  code: string,
+  organizationId: string,
+) =>
+  apiPost<{ team: { externalId: string; name: string | null }; claim: string }>(
+    `/v1/org/channels/${provider}/finish-install/inspect`,
+    { code },
+    { headers: { "X-Organization-Id": organizationId } },
+  );
+
+export const finishSharedInstall = (
+  provider: ChannelProvider,
+  claim: string,
+  organizationId: string,
+) =>
+  apiPost<{ organizationId: string }>(
+    `/v1/org/channels/${provider}/finish-install`,
+    { claim },
+    { headers: { "X-Organization-Id": organizationId } },
+  );
+
+/** Disconnect the org's shared-app install. */
+export const disconnectSharedInstall = (provider: ChannelProvider) =>
+  apiDelete(`/v1/org/channels/${provider}/shared-install`);

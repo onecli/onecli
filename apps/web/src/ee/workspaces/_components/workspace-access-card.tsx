@@ -7,6 +7,7 @@ import { isPlanAtLeast, type Plan } from "@onecli/api/ee/billing/plans";
 import { useGuardedUpgrade } from "@/ee/billing/use-guarded-upgrade";
 import { PlanSwitchDialog } from "@/ee/billing/_components/plan-switch-dialog";
 import { useWorkspaceAccess } from "@/hooks/use-workspace-access";
+import { usePlanGate } from "@/lib/plan-gate";
 import { WorkspaceAccessDialog } from "./workspace-access-dialog";
 
 interface WorkspaceAccessCardProps {
@@ -24,6 +25,13 @@ export const WorkspaceAccessCard = ({
   plan,
 }: WorkspaceAccessCardProps) => {
   const isTeam = isPlanAtLeast(plan, "team");
+  // Sharing is enterprise-licensed on self-host: an unlicensed deployment
+  // reports the top plan (no billing), so `isTeam` alone would open the dialog
+  // and its /access + /members fetches would 403 off the API's
+  // requireEnterprise gate. Locked → suppress the fetch, open the license
+  // dialog from the button instead.
+  const planGate = usePlanGate();
+  const sharingLocked = planGate.isLocked("workspace_sharing");
   const {
     startUpgrade,
     checkoutLoading,
@@ -32,7 +40,10 @@ export const WorkspaceAccessCard = ({
     closeSwitchDialog,
   } = useGuardedUpgrade(plan);
   const [manageOpen, setManageOpen] = useState(false);
-  const { data, isPending, isError } = useWorkspaceAccess(workspaceId, isTeam);
+  const { data, isPending, isError } = useWorkspaceAccess(
+    workspaceId,
+    isTeam && !sharingLocked,
+  );
 
   const sharedPeople = (data?.users ?? []).filter((u) => !u.isOwner).length;
   const sharedGroups = (data?.groups ?? []).length;
@@ -55,13 +66,30 @@ export const WorkspaceAccessCard = ({
           <div>
             <h3 className="text-base font-semibold">Workspace access</h3>
             <p className="text-muted-foreground text-sm">
-              {isTeam
+              {isTeam || sharingLocked
                 ? "Share this workspace with teammates and groups. Members can use it; owners and org admins can also manage it."
                 : "Upgrade to the Team plan to share this workspace with your teammates."}
             </p>
           </div>
           <div className="flex items-center justify-between gap-4">
-            {isTeam ? (
+            {/* The license branch outranks the plan branch: this page derives
+                `plan` straight from subscriptionStatus (null on self-host →
+                "free"), so `isTeam` alone would render the cloud upgrade CTA
+                on an unlicensed self-host — a Stripe flow that doesn't exist
+                there. Locked → license message + the guarded button. */}
+            {sharingLocked ? (
+              <>
+                <p className="text-muted-foreground text-sm">
+                  Requires a OneCLI Enterprise license
+                </p>
+                <Button
+                  variant="outline"
+                  onClick={() => planGate.guard("workspace_sharing")}
+                >
+                  Manage access
+                </Button>
+              </>
+            ) : isTeam ? (
               <>
                 {isPending ? (
                   <div className="bg-muted h-4 w-24 animate-pulse rounded" />
@@ -88,7 +116,7 @@ export const WorkspaceAccessCard = ({
         </div>
       </Card>
 
-      {isTeam && (
+      {isTeam && !sharingLocked && (
         <WorkspaceAccessDialog
           workspaceId={workspaceId}
           open={manageOpen}

@@ -120,6 +120,10 @@ export type SlackDoorCall =
       replyThreadTs: string;
       /** The triggering message's own ts — where the receipt reaction sits. */
       messageTs: string;
+      /** True when the event was an `app_mention` — addressed to the bot.
+       * Plain thread follow-ups (no mention) are false; the dispatchers use
+       * this to fence unjoined/unbound thread chatter. */
+      isMention: boolean;
     }
   | {
       door: "invite";
@@ -175,6 +179,7 @@ export const interpretSlackEvent = (
       replyChannel: mention.channel,
       replyThreadTs: threadRoot,
       messageTs: mention.ts,
+      isMention: true,
     };
   }
 
@@ -237,6 +242,7 @@ export const interpretSlackEvent = (
         replyChannel: message.channel,
         replyThreadTs: message.thread_ts,
         messageTs: message.ts,
+        isMention: false,
       };
     }
     return { door: "ignore", reason: "channel-chatter" };

@@ -21,6 +21,10 @@ export const useAgentChannels = (agentId: string) =>
   useQuery({
     queryKey: queryKeys.channels.agent(agentId),
     queryFn: () => channels.agentView(agentId),
+    // This page's truth changes in ANOTHER tab (Slack's install/uninstall
+    // pages) and the round-trip is often under the global 30s staleTime,
+    // which would swallow the focus refetch. Always refetch on return.
+    staleTime: 0,
   });
 
 /** The paste floor's step 0 — fetched only while the floor is on screen.

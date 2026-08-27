@@ -318,6 +318,10 @@ export const JCODE_SWARM_ENV = {
  * enforced by JCODE_SWARM_ENV above, recursion is refused by the harness
  * itself (worker spawns are root-only), and the effort sentinels the
  * prompt bans are never granted by the platform (see JCODE_EFFORT).
+ * Also carries the compact deliverable-extraction laws (files for long
+ * deliverables, one-at-a-time collection, no messages after completion,
+ * verify before stopping) — the full statement and its rationale live in
+ * SWARM_PROMPT_OVERRIDE below.
  * Kept as one block so the pin test can assert it.
  */
 export const SWARM_LIGHT_PROMPT = `
@@ -335,8 +339,14 @@ graph's deep mode — flat one-level fan-out is the only supported shape.
 If a spawn or swarm call is refused right after your computer starts,
 retry once before concluding the tooling is unavailable — membership can
 take a moment to settle.
-After collecting a helper's report, stop or clean up that helper — idle
-helpers hold memory for nothing.
+Every relay of helper text truncates long content: in each helper's task
+prompt, name an exact file path for any deliverable longer than a
+paragraph and have the helper write the complete deliverable there and
+end its reply with it. Collect finished helpers one at a time, and never
+message a helper that has already completed — such messages report
+success yet are silently dropped.
+After a helper's deliverable is verified in hand, stop or clean up that
+helper — idle helpers hold memory for nothing.
 Helpers also appear as observed background processes: process_status shows
 a helper's state and its final report, and watches can cover it. A turn
 that ends while helpers are still running gets their completion reported
@@ -351,7 +361,13 @@ helper.`;
  * contradictory — it advises passing a per-spawn model that the tool schema
  * no longer accepts, naming vendor models unavailable here). Worker models
  * are operator-controlled at this version, so the honest guidance is
- * structure only. Written to BOTH resolution slots (project + home) with
+ * structure only. The collection laws below encode measured behavior at
+ * the pinned version: every relay of helper text truncates long content
+ * (transcript reads cap each message, a multi-helper await caps the whole
+ * result), a message to a completed helper is dropped after reporting
+ * success, and a stopped helper is unrecoverable — so a named file is the
+ * only whole-fidelity deliverable channel, and stops must come after
+ * collection. Written to BOTH resolution slots (project + home) with
  * the same heal-at-boot law as the system prompt; the identity rule
  * applies — no vendor or model names in these bytes.
  */
@@ -363,17 +379,28 @@ export const SWARM_PROMPT_OVERRIDE = `Guidance for spawning helper agents.
   each helper's purpose is visible.
 - Only the root session spawns helpers; helpers complete their one task and
   report back, never spawning their own.
-- A helper's FINAL REPLY is the only report you receive — in each helper's
-  task prompt, tell it to end its reply with the complete deliverable
-  (full text, never a summary of it).
+- A helper's FINAL REPLY is the only report you receive, and every relay
+  of helper text truncates long content. So in each helper's task prompt,
+  name an exact file path for any deliverable longer than a paragraph and
+  tell the helper to write the complete deliverable there, then end its
+  reply with the complete deliverable too (full text, never a summary of
+  it). Collect a long deliverable by reading its file — transcript reads
+  truncate and cannot recover what a reply left out.
+- Collect helpers ONE at a time: an await over several helpers truncates
+  their replies to fit one shared result; a helper awaited alone gets the
+  whole result to itself.
+- Never message a helper that has already completed: delivery reports
+  success, but nothing is listening and the message is silently dropped.
+  Messages reach a helper only while its turn is still running.
 - Read helper status and reports with process_status. Helpers are NOT
   background tasks: the bg tool cannot see them and cannot wait for them.
 - The platform tracks helpers on its own: their completion is reported
   back to your chat automatically, so prefer ending your turn over waiting
   in it. To wait in-turn anyway, use this tool's own await action — one
   call, no polling.
-- After collecting a helper's report, stop that helper — idle helpers hold
-  memory for nothing.`;
+- Stop a helper only after its deliverable is verified in hand (the file
+  read, or the full text in your context) — a stopped helper is gone for
+  good. Then do stop it: idle helpers hold memory for nothing.`;
 
 /**
  * The harness-native tools the platform turns off, exported so the pin test

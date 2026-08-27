@@ -333,6 +333,7 @@ beforeEach(() => {
       if (appId === "A100")
         return {
           id: "pr-1",
+          status: "active",
           identityRef: "UBOT",
           credentials: ENCRYPTED_PRESENCE_CREDS,
           agent: { id: "ag-1", imageKey: null },
@@ -340,6 +341,7 @@ beforeEach(() => {
       if (appId === "A-CACHE" || appId === "A-STALE")
         return {
           id: `pr-${appId}`,
+          status: "active",
           identityRef: "UBOT",
           credentials: ENCRYPTED_PRESENCE_CREDS,
           agent: { id: "ag-1", imageKey: null },
@@ -349,6 +351,7 @@ beforeEach(() => {
       if (appId === "A-ICON")
         return {
           id: "pr-icon",
+          status: "active",
           identityRef: "UBOT",
           credentials: ENCRYPTED_PRESENCE_CREDS,
           agent: { id: "ag-icon", imageKey: "k".repeat(32) },
@@ -391,6 +394,12 @@ describe("GET /v1/org/channels where roles are ENFORCED (CAPS.rbac on)", () => {
       integrations: [],
       userLinks: [],
       adapter: { online: false, lastSeenAt: null },
+      sharedApp: {
+        available: false,
+        canMintAgentApps: false,
+        installMintsAgentApps: false,
+        installation: null,
+      },
     });
   });
 
@@ -1016,7 +1025,13 @@ describe("/v1/agents/:agentId/channels", () => {
       headers: WORKSPACE_HEADERS,
     });
     expect(res.status).toBe(200);
-    expect(services.getAgentChannels).toHaveBeenCalledWith("p1", "ag-1");
+    // The third arg is the CALLER — the service resolves whether they may
+    // take the admin-gated "set up Slack for the org" deep link.
+    expect(services.getAgentChannels).toHaveBeenCalledWith(
+      "p1",
+      "ag-1",
+      "user-1",
+    );
   });
 
   it("creates a presence (201) as the authenticated user, and audits", async () => {
@@ -1691,11 +1706,26 @@ describe("GET /v1/channels/slack/oauth/callback", () => {
     expect(await res.text()).toContain("This install link is not valid");
   });
 
-  it("missing state or code is refused WITHOUT calling the service", async () => {
+  it("a missing code is refused WITHOUT calling the service", async () => {
     const res = await appRbacOff.request(
-      "/v1/channels/slack/oauth/callback?code=only-a-code",
+      "/v1/channels/slack/oauth/callback?state=only-a-state",
     );
     expect(res.status).toBe(400);
+    expect(services.completePresenceFromOAuth).not.toHaveBeenCalled();
+  });
+
+  it("a code with NO state parks at the app (the marketplace install path)", async () => {
+    // An install begun in Slack's app directory has no state to sign — no
+    // OneCLI session existed when it started. Refusing it (the old behavior)
+    // is what a Marketplace reviewer would have seen.
+    const res = await appRbacOff.request(
+      "/v1/channels/slack/oauth/callback?code=directory-code",
+    );
+    expect(res.status).toBe(302);
+    expect(res.headers.get("location")).toBe(
+      "https://app.example.test/slack/installed?code=directory-code",
+    );
+    // Nothing is exchanged yet: the org is unknown until someone signs in.
     expect(services.completePresenceFromOAuth).not.toHaveBeenCalled();
   });
 

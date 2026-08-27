@@ -1,7 +1,10 @@
 "use client";
 
+import Link from "next/link";
 import { useState } from "react";
 import { ExternalLink } from "lucide-react";
+import { AppIcon } from "@/lib/components/app-icon";
+import { slack as slackApp } from "@onecli/api/apps/slack";
 import { toast } from "sonner";
 import { Button } from "@onecli/ui/components/button";
 import {
@@ -25,6 +28,11 @@ interface SlackAttachCardProps {
   /** A pending presence resumes on ITS stamped transport. */
   pendingTransport?: ChannelTransport;
   hasOrgCredentials: boolean;
+  /** Where "connect Slack for your organization" points. */
+  organizationId: string;
+  /** Whether the caller may OPEN that page (it's admin-gated): members get
+   * "ask an admin" copy instead of a link that silently bounces them. */
+  viewerIsOrgAdmin: boolean;
   /** A `pending_setup` presence exists: re-running create returns fresh URLs. */
   resuming: boolean;
 }
@@ -63,6 +71,8 @@ export const SlackAttachCard = ({
   posture,
   pendingTransport,
   hasOrgCredentials,
+  organizationId,
+  viewerIsOrgAdmin,
   resuming,
 }: SlackAttachCardProps) => {
   const attach = useAttachChannel(agentId, "slack");
@@ -182,7 +192,43 @@ export const SlackAttachCard = ({
           <SlackTransportPicker value={picked} onValueChange={pickTransport} />
         )}
 
-        {!hasOrgCredentials ? (
+        {/* No org credential + events posture: the fix lives at the ORG
+            level (one token paste powers every agent), so point there
+            instead of dumping the manual manifest floor on this page. The
+            socket posture keeps the floor — its manual steps are physically
+            unavoidable (Slack has no API for app-level tokens), and the org
+            token alone cannot finish a socket install. */}
+        {!hasOrgCredentials && transport === "events" ? (
+          <div className="flex flex-col items-center gap-1.5 rounded-xl border border-dashed px-6 py-10 text-center">
+            <span className="bg-card mb-2 flex size-12 items-center justify-center rounded-2xl border shadow-sm">
+              <AppIcon icon={slackApp.icon} name={slackApp.name} size={26} />
+            </span>
+            <p className="text-sm font-medium">
+              Connect Slack for your organization first
+            </p>
+            <p className="text-muted-foreground max-w-sm text-sm">
+              One admin does it once. After that, every agent joins Slack in one
+              click.
+            </p>
+            {viewerIsOrgAdmin ? (
+              <Button size="sm" className="mt-3" asChild>
+                <Link href={`/org/${organizationId}/channels`}>
+                  Set up Slack for the organization
+                </Link>
+              </Button>
+            ) : (
+              // The org Channels page is admin-gated and would silently
+              // bounce a member — name the ask instead of a dead link.
+              <p className="text-muted-foreground mt-3 max-w-sm text-sm">
+                Ask an organization admin to connect Slack in the
+                organization&apos;s Channels settings.
+              </p>
+            )}
+          </div>
+        ) : !hasOrgCredentials ? (
+          // Reachable only on the SOCKET posture — the events posture routed
+          // to the org-setup pointer above. The floor keeps its events arm
+          // for generality; unused from here by design.
           <SlackManifestFloor
             agentId={agentId}
             transport={transport}
@@ -194,8 +240,24 @@ export const SlackAttachCard = ({
             settingsUrl={attach.data.settingsUrl}
           />
         ) : (
-          <div className="space-y-2">
-            <Button onClick={startGuided} loading={attach.isPending}>
+          <div className="flex flex-col items-center gap-1.5 rounded-xl border border-dashed px-6 py-10 text-center">
+            <span className="bg-card mb-2 flex size-12 items-center justify-center rounded-2xl border shadow-sm">
+              <AppIcon icon={slackApp.icon} name={slackApp.name} size={26} />
+            </span>
+            <p className="text-sm font-medium">
+              {resuming ? "Finish adding to Slack" : "Not in Slack yet"}
+            </p>
+            <p className="text-muted-foreground max-w-sm text-sm">
+              {transport === "events"
+                ? "One click creates the app and opens the install page. Nothing to paste."
+                : "Creates the Slack app from your workspace credential. Then paste two tokens to finish."}
+            </p>
+            <Button
+              size="sm"
+              className="mt-3"
+              onClick={startGuided}
+              loading={attach.isPending}
+            >
               {attach.isPending
                 ? transport === "events"
                   ? "Adding…"
@@ -206,13 +268,8 @@ export const SlackAttachCard = ({
                     ? "Add to Slack"
                     : "Create app"}
             </Button>
-            <p className="text-muted-foreground text-xs">
-              {transport === "events"
-                ? "Creates the Slack app and opens the install page. One click, nothing to paste."
-                : "Creates the Slack app from your workspace credential. Then paste two tokens to finish."}
-            </p>
             {blockedInstallUrl && (
-              <Button variant="outline" size="sm" asChild>
+              <Button variant="outline" size="sm" className="mt-1" asChild>
                 <a href={blockedInstallUrl} target="_blank" rel="noreferrer">
                   Open the Slack install page
                   <ExternalLink className="size-3.5" />

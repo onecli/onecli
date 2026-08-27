@@ -67,7 +67,12 @@ export const LoginContent = () => {
         // URL and the redirect, and only the consumed marker is cleared, so
         // an abandoned invite can still resume on a later sign-in.
         const claimCallback = localStorage.getItem("claimCallbackUrl");
-        const pendingCallback = claimCallback ?? inviteCallback;
+        // A parked post-auth return (a Slack-directory install finish):
+        // plain return-here, NO invitation semantics — a brand-new user must
+        // still get their org bootstrapped by this sync.
+        const postAuthCallback = localStorage.getItem("postAuthCallbackUrl");
+        const pendingCallback =
+          claimCallback ?? inviteCallback ?? postAuthCallback;
 
         // An invited signup suppresses the org bootstrap: they are joining
         // someone else's organization, not starting their own.
@@ -81,7 +86,11 @@ export const LoginContent = () => {
         if (res.ok) {
           if (pendingCallback) {
             localStorage.removeItem(
-              claimCallback ? "claimCallbackUrl" : "inviteCallbackUrl",
+              claimCallback
+                ? "claimCallbackUrl"
+                : inviteCallback
+                  ? "inviteCallbackUrl"
+                  : "postAuthCallbackUrl",
             );
             router.replace(pendingCallback);
           } else {

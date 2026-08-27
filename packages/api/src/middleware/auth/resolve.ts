@@ -68,6 +68,13 @@ export const resolveWorkspaceId = async (
     // workspace explicitly (from the URL); onprem keeps the header-less fallback
     // for local flows. Mirrors the gateway's session workspace resolution.
     if (IS_CLOUD) return null;
+    // An EXPLICIT org scope beats the implicit fallback: an org-scoped call
+    // (`x-organization-id`, no workspace) from a multi-org self-host user
+    // must resolve the org IT NAMES — the fallback would silently re-scope
+    // the request to the first-joined org's workspace, making every other
+    // org's pages (and the Slack finish-install bind) read the wrong tenant.
+    // The named org is membership-fenced in `resolveOrganizationId`.
+    if (request.headers.get("x-organization-id")) return null;
     const fallback = await findUserDefaultWorkspace(userId);
     return fallback?.id ?? null;
   }

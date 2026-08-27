@@ -139,6 +139,8 @@ export const ChannelsSection = () => {
           // baked one in); a fresh attach starts from the deployment's posture.
           pendingTransport={slack?.transport}
           hasOrgCredentials={hasOrgCredentials}
+          organizationId={data.organizationId}
+          viewerIsOrgAdmin={data.viewerIsOrgAdmin ?? true}
           resuming={slack?.status === "pending_setup"}
         />
       )}

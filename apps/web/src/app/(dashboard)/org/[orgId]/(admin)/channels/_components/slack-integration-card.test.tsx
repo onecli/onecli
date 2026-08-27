@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { render, screen, within } from "@testing-library/react";
+import { cleanup, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { OrgChannelsView } from "@/lib/api";
@@ -45,6 +45,7 @@ const view = (overrides: Partial<OrgChannelsView> = {}): OrgChannelsView => ({
   integrations: [],
   userLinks: [],
   adapter: { online: true, lastSeenAt: new Date().toISOString() },
+  sharedApp: { available: false, canMintAgentApps: false, installation: null },
   ...overrides,
 });
 
@@ -66,6 +67,51 @@ beforeEach(() => {
   state.disconnectPending = false;
   mocks.connect.mockClear();
   mocks.disconnect.mockReset();
+});
+
+describe("in the choice state", () => {
+  it("as the ALTERNATIVE: carries the recommended way back only when the row provides it", async () => {
+    const user = userEvent.setup();
+    const onSwap = vi.fn();
+    render(<SlackIntegrationCard choice={{ role: "alternative", onSwap }} />);
+
+    expect(
+      screen.getByText(/For workspaces that can't install the OneCLI app/),
+    ).toBeInTheDocument();
+    await user.click(
+      screen.getByRole("button", {
+        name: /Use the OneCLI Slack app instead \(recommended\)/,
+      }),
+    );
+    expect(onSwap).toHaveBeenCalledTimes(1);
+
+    cleanup();
+    render(<SlackIntegrationCard />);
+    expect(
+      screen.queryByRole("button", { name: /Use the OneCLI Slack app/ }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: /or add the OneCLI app/ }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("LEADING (pre-approval): plain description, small onboarding swap under the form", async () => {
+    const user = userEvent.setup();
+    const onSwap = vi.fn();
+    render(<SlackIntegrationCard choice={{ role: "leading", onSwap }} />);
+
+    // The leading face never frames itself as the fallback.
+    expect(
+      screen.queryByText(/For workspaces that can't install/),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: /Use the OneCLI Slack app/ }),
+    ).not.toBeInTheDocument();
+    await user.click(
+      screen.getByRole("button", { name: /or add the OneCLI app/ }),
+    );
+    expect(onSwap).toHaveBeenCalledTimes(1);
+  });
 });
 
 describe("unconnected", () => {
@@ -93,22 +139,16 @@ describe("connected", () => {
     state.view = view({ integrations: [integration()] });
     render(<SlackIntegrationCard />);
 
-    expect(screen.getByText("Acme")).toBeInTheDocument();
-    expect(screen.getByText("T123")).toBeInTheDocument();
+    expect(screen.getByText(/Acme/)).toBeInTheDocument();
+    expect(screen.getByText(/T123/)).toBeInTheDocument();
     expect(screen.getByText(/3 agent apps/)).toBeInTheDocument();
-    expect(screen.getByText(/token rotated/)).toBeInTheDocument();
+    expect(screen.getByText("Connected")).toBeInTheDocument();
     expect(
       screen.getByRole("button", { name: "Disconnect" }),
     ).toBeInTheDocument();
     expect(
       screen.queryByLabelText("App Configuration refresh token"),
     ).not.toBeInTheDocument();
-  });
-
-  it("shows the workspace's initials", () => {
-    state.view = view({ integrations: [integration()] });
-    render(<SlackIntegrationCard />);
-    expect(screen.getByText("AC")).toBeInTheDocument();
   });
 });
 
@@ -247,6 +287,84 @@ describe("removal in every state", () => {
     const dialog = screen.getByRole("alertdialog");
     expect(
       within(dialog).getByText(/1 agent app and 1 member link/),
+    ).toBeInTheDocument();
+  });
+});
+
+describe("minting via the shared app", () => {
+  const mintingView = (): OrgChannelsView =>
+    view({
+      integrations: [
+        integration({
+          hasCredentials: false,
+          needsCredentials: false,
+          presenceCount: 0,
+        }),
+      ],
+      sharedApp: {
+        available: true,
+        canMintAgentApps: true,
+        installation: {
+          tenant: { externalId: "T123", name: "Acme" },
+          botUserId: "UBOT",
+          createdAt: new Date().toISOString(),
+        },
+      },
+    });
+
+  it("reads Connected and folds the paste away — the shared install mints, no token needed", () => {
+    state.view = mintingView();
+    render(<SlackIntegrationCard />);
+
+    expect(
+      screen.getByText(/created through the shared OneCLI app/),
+    ).toBeInTheDocument();
+    expect(screen.getByText("Connected")).toBeInTheDocument();
+    expect(
+      screen.queryByLabelText("App Configuration refresh token"),
+    ).not.toBeInTheDocument();
+  });
+
+  it("the small disclosure unfolds the paste form as the fallback; Cancel folds it back", async () => {
+    const user = userEvent.setup();
+    state.view = mintingView();
+    render(<SlackIntegrationCard />);
+
+    await user.click(
+      screen.getByRole("button", {
+        name: /paste an App Configuration token/,
+      }),
+    );
+    expect(
+      screen.getByLabelText("App Configuration refresh token"),
+    ).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Cancel" }));
+    expect(
+      screen.queryByLabelText("App Configuration refresh token"),
+    ).not.toBeInTheDocument();
+  });
+
+  it("keeps the adapter-offline notice visible (the old early-return hid it)", () => {
+    state.view = {
+      ...mintingView(),
+      adapter: { online: false, lastSeenAt: null },
+    };
+    render(<SlackIntegrationCard />);
+    expect(screen.getByText(/Channels are offline/)).toBeInTheDocument();
+  });
+});
+
+describe("deploy skew", () => {
+  it("renders (paste form intact) against a server that predates sharedApp", () => {
+    // web can deploy ahead of the api-server (the deploy checkboxes): the
+    // older view carries NO sharedApp key, and the card must not throw.
+    const skewed = view();
+    delete (skewed as { sharedApp?: unknown }).sharedApp;
+    state.view = skewed;
+    render(<SlackIntegrationCard />);
+    expect(
+      screen.getByLabelText("App Configuration refresh token"),
     ).toBeInTheDocument();
   });
 });

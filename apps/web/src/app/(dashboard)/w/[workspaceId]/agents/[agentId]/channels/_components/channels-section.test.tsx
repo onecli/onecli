@@ -69,6 +69,7 @@ const view = (
 ): AgentChannelsView => ({
   presences: [],
   posture: { transport: "events", available: ["events"] },
+  organizationId: "org-1",
   orgIntegrations: [
     { provider: "slack", connected: true, hasCredentials: true },
   ],
@@ -86,6 +87,7 @@ const activePresence = (
   identityRef: "U777",
   identityName: "donna",
   tenant: { externalId: "T1", name: "Acme" },
+  managedBy: { name: "Jonathan", email: "jonathan@onecli.sh" },
   groupThreads: [],
   ...overrides,
 });
@@ -165,25 +167,22 @@ describe("the guided socket arm", () => {
   });
 });
 
-describe("the paste floor (no org credential)", () => {
-  it("shows the manifest step and the EVENTS fields: bot token + signing secret + app id", () => {
+describe("no org credential", () => {
+  it("EVENTS posture points at the ORG setup instead of the manual floor", () => {
     state.view = view({ orgIntegrations: [] });
     renderSection();
 
     expect(
-      screen.getByText("Create a Slack app from this manifest"),
-    ).toBeInTheDocument();
+      screen.getByRole("link", { name: "Set up Slack for the organization" }),
+    ).toHaveAttribute("href", "/org/org-1/channels");
+    // The scary manual arm is gone from the events posture entirely.
     expect(
-      screen.getByRole("link", { name: /Create app on api\.slack\.com/ }),
-    ).toHaveAttribute("href", "https://api.slack.com/apps?new_app=1");
-
-    expect(screen.getByLabelText("Bot token")).toBeInTheDocument();
-    expect(screen.getByLabelText("Signing secret")).toBeInTheDocument();
-    expect(screen.getByLabelText("App ID")).toBeInTheDocument();
-    expect(screen.queryByLabelText("App-level token")).not.toBeInTheDocument();
+      screen.queryByText("Create a Slack app from this manifest"),
+    ).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("Bot token")).not.toBeInTheDocument();
   });
 
-  it("swaps the signing secret for the app-level token on the SOCKET floor", () => {
+  it("the SOCKET floor keeps the manual fields (Slack has no API for its tokens)", () => {
     state.view = view({
       orgIntegrations: [],
       posture: { transport: "socket", available: ["socket"] },
@@ -196,25 +195,21 @@ describe("the paste floor (no org credential)", () => {
     expect(screen.queryByLabelText("Signing secret")).not.toBeInTheDocument();
   });
 
-  it("submits the pasted floor credentials", async () => {
+  it("submits the pasted SOCKET floor credentials", async () => {
     const user = userEvent.setup();
-    state.view = view({ orgIntegrations: [] });
+    state.view = view({
+      orgIntegrations: [],
+      posture: { transport: "socket" },
+    });
     renderSection();
 
     await user.type(screen.getByLabelText("Bot token"), "xoxb-bot");
-    await user.type(screen.getByLabelText("Signing secret"), "sig");
+    await user.type(screen.getByLabelText("App-level token"), "xapp-1");
     await user.type(screen.getByLabelText("App ID"), "A999");
     await user.click(screen.getByRole("button", { name: "Finish setup" }));
 
     expect(mocks.complete).toHaveBeenCalledWith(
-      {
-        botToken: "xoxb-bot",
-        appId: "A999",
-        signingSecret: "sig",
-        // The server advertised `available`, so the wire names the effective
-        // transport explicitly (here the deployment default).
-        transport: "events",
-      },
+      { botToken: "xoxb-bot", appId: "A999", appToken: "xapp-1" },
       expect.anything(),
     );
   });
@@ -225,8 +220,9 @@ describe("the attached card", () => {
     state.view = view({ presences: [activePresence()] });
     renderSection();
 
-    expect(screen.getByText("Support Triage @ Acme")).toBeInTheDocument();
-    expect(screen.getByText("Events")).toBeInTheDocument();
+    expect(screen.getByText("@donna")).toBeInTheDocument();
+    expect(screen.getByText("Managed by Jonathan")).toBeInTheDocument();
+    expect(screen.getByText("Connected")).toBeInTheDocument();
     expect(screen.getByRole("link", { name: /Open in Slack/ })).toHaveAttribute(
       "href",
       "https://slack.com/app_redirect?app=A123&team=T1",

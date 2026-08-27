@@ -1782,6 +1782,176 @@ describe.skipIf(!PROOF_URL)("createPresence (the guided arm)", () => {
     // Neither the resume nor the refusal minted a second Slack app.
     expect(slackCallsFor("apps.manifest.create")).toHaveLength(1);
   });
+
+  it("a socket-stamped pending row RESUMES under an events-only posture — the stamp wins, nothing is discarded", async () => {
+    // The stamp-wins law's other direction: the row says socket while the
+    // deployment has drifted to events-ONLY (https origin + cloud edition, so
+    // socket is not even offered to a NEW create). A socket resume needs no
+    // URL rebuild, so it can always finish — the self-heal discard must NOT
+    // fire, or a retry click would silently uninstall the user's real app.
+    initSelfUrl(EVENTS_SELF_URL);
+    const integration = await seedIntegration({});
+    const agentId = await seedAgent("guided-stamp-socket");
+    const staleKey = await db.apiKey.create({
+      data: {
+        key: `oc_${P}stamp-socket-key`,
+        userId: ADMIN,
+        userEmail: `${ADMIN}@example.com`,
+        workspaceId: WORKSPACE,
+        scope: "workspace",
+        kind: "service",
+      },
+      select: { id: true },
+    });
+    const pending = await seedPresence(agentId, integration.id, {
+      status: "pending_setup",
+      externalId: "A-SOCK-STALE",
+      apiKeyId: staleKey.id,
+      credentials: await getCrypto().encrypt(
+        JSON.stringify({
+          clientId: "client-sock",
+          clientSecret: "cs-sock",
+          signingSecret: "ss-sock",
+        }),
+      ),
+    });
+
+    // `isOnpremEdition()` reads env call-time, so this flip is visible without
+    // a re-import — and MUST be restored (the suite's semantics are onprem;
+    // see the beforeAll pin's worker-leak warning).
+    process.env.EDITION = "cloud";
+    process.env.NEXT_PUBLIC_EDITION = "cloud";
+    try {
+      const resumed = await agentChannels.createPresence(
+        WORKSPACE,
+        agentId,
+        "slack",
+        ADMIN,
+      );
+      expect(resumed.presenceId).toBe(pending.id);
+      expect(resumed.transport).toBe("socket");
+      expect(resumed.installUrl).toBeNull();
+    } finally {
+      process.env.EDITION = "onprem";
+      process.env.NEXT_PUBLIC_EDITION = "onprem";
+    }
+
+    // No discard side effects: the row survives, its service key survives,
+    // and Slack heard NOTHING (no uninstall, no second manifest create).
+    expect(
+      await db.agentChannel.findUnique({ where: { id: pending.id } }),
+    ).not.toBeNull();
+    expect(
+      await db.apiKey.findUnique({ where: { id: staleKey.id } }),
+    ).not.toBeNull();
+    expect(slackCalls).toHaveLength(0);
+  });
+
+  it("DISCARDS a pending events row whose consent URL can no longer be rebuilt, and mints fresh in the SAME call", async () => {
+    // The self-heal arm. An events resume is only viable while the stored
+    // credentials can rebuild the consent URL; this row's blob never captured
+    // a client id (interrupted before the manifest response was stored, or a
+    // paste-floor shape), so `rebuildSetupUrls` answers installUrl: null and
+    // the retry click must discard-and-remint rather than hand back a dead
+    // resume. MUTATION-TESTED: skip the discard's `revokeServiceApiKey` (or
+    // its row delete / uninstall dispatch) and this test goes red.
+    initSelfUrl(EVENTS_SELF_URL);
+    const integration = await seedIntegration({
+      credentials: await integrationCredentials(12 * 3600),
+    });
+    const agentId = await seedAgent("guided-discard");
+    const staleKey = await db.apiKey.create({
+      data: {
+        key: `oc_${P}discard-stale-key`,
+        userId: ADMIN,
+        userEmail: `${ADMIN}@example.com`,
+        workspaceId: WORKSPACE,
+        scope: "workspace",
+        kind: "service",
+      },
+      select: { id: true },
+    });
+    const staleCredentialsJson = JSON.stringify({
+      botToken: "xoxb-stale",
+      clientSecret: "cs-stale",
+    });
+    const stale = await db.agentChannel.create({
+      data: {
+        agentId,
+        integrationId: integration.id,
+        provider: "slack",
+        externalId: "A-STALE",
+        transport: "events",
+        status: "pending_setup",
+        credentials: await getCrypto().encrypt(staleCredentialsJson),
+        apiKeyId: staleKey.id,
+        createdByUserId: ADMIN,
+      },
+      select: { id: true },
+    });
+    scriptManifestCreate();
+    // The best-effort remote uninstall is observed at the provider seam: the
+    // Slack impl then no-ops at the HTTP seam on THIS row, because the same
+    // missing client id that killed the rebuild also gates `apps.uninstall`.
+    // Wrapped by hand — the method is OPTIONAL on the provider interface, so
+    // `vi.spyOn` cannot type it; the wrap still calls through to the real
+    // implementation.
+    const { CHANNEL_PROVIDERS } = await import("./registry");
+    const slackProvider = CHANNEL_PROVIDERS.slack;
+    const realUninstall =
+      slackProvider.uninstallRemotePresence?.bind(slackProvider);
+    if (!realUninstall) {
+      throw new Error("the slack provider must expose uninstallRemotePresence");
+    }
+    const uninstallCalls: { credentialsJson: string | null }[] = [];
+    slackProvider.uninstallRemotePresence = async (input) => {
+      uninstallCalls.push(input);
+      return realUninstall(input);
+    };
+
+    try {
+      const result = await agentChannels.createPresence(
+        WORKSPACE,
+        agentId,
+        "slack",
+        ADMIN,
+      );
+
+      // A FRESH mint, not a resume: a new remote app and a LIVE consent URL.
+      expect(result.presenceId).not.toBe(stale.id);
+      expect(result.transport).toBe("events");
+      expect(result.installUrl).toContain("client_id=client-1");
+      expect(result.installUrl).toContain("&state=");
+      expect(slackCallsFor("apps.manifest.create")).toHaveLength(1);
+
+      // The stale row is GONE...
+      expect(
+        await db.agentChannel.findUnique({ where: { id: stale.id } }),
+      ).toBeNull();
+      // ...its service key was revoked (revoke = the row is deleted)...
+      expect(
+        await db.apiKey.findUnique({ where: { id: staleKey.id } }),
+      ).toBeNull();
+      // ...and the remote uninstall was ATTEMPTED on the stale row's own
+      // decrypted credentials (HTTP no-op here — see the wrap comment above).
+      expect(uninstallCalls).toEqual([
+        { credentialsJson: staleCredentialsJson },
+      ]);
+      expect(slackCallsFor("apps.uninstall")).toHaveLength(0);
+
+      // Exactly ONE presence remains: the fresh pending_setup row.
+      const rows = await db.agentChannel.findMany({
+        where: { agentId },
+        select: { id: true, status: true, externalId: true },
+      });
+      expect(rows).toHaveLength(1);
+      expect(rows[0]!.id).toBe(result.presenceId);
+      expect(rows[0]!.status).toBe("pending_setup");
+      expect(rows[0]!.externalId).toBe("A100");
+    } finally {
+      slackProvider.uninstallRemotePresence = realUninstall;
+    }
+  });
 });
 
 describe.skipIf(!PROOF_URL)("completePresence (the paste floor)", () => {
@@ -2299,9 +2469,15 @@ describe.skipIf(!PROOF_URL)("detachPresence", () => {
       deleteRemote: false,
     });
 
-    expect(
-      await db.agentChannel.findUnique({ where: { id: presence.id } }),
-    ).toBeNull();
+    // Detach WITHOUT delete keeps the row as a pending_setup shell so the
+    // next attach reuses the SAME Slack app instead of minting a sibling.
+    const shell = await db.agentChannel.findUnique({
+      where: { id: presence.id },
+      select: { status: true, externalId: true, apiKeyId: true },
+    });
+    expect(shell?.status).toBe("pending_setup");
+    expect(shell?.externalId).toBe(presence.externalId);
+    expect(shell?.apiKeyId).toBeNull();
     expect(
       await db.channelThreadLink.count({
         where: { agentChannelId: presence.id },
@@ -2315,6 +2491,18 @@ describe.skipIf(!PROOF_URL)("detachPresence", () => {
     expect(
       await db.conversation.findUnique({ where: { id: conversation.id } }),
     ).not.toBeNull();
+
+    // And the next attach RESUMES this shell: same row, same app id, no
+    // second apps.manifest.create.
+    const before = slackCallsFor("apps.manifest.create").length;
+    const resumed = await agentChannels.createPresence(
+      WORKSPACE,
+      agentId,
+      "slack",
+      ADMIN,
+    );
+    expect(resumed.presenceId).toBe(presence.id);
+    expect(slackCallsFor("apps.manifest.create")).toHaveLength(before);
   });
 
   it("deleteRemote asks Slack to delete the app, via a fresh org credential", async () => {

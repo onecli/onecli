@@ -127,6 +127,7 @@ exports[`enterprise-license boundary > the licensed file set changes only by del
     "team/_components/team-upgrade-banner.tsx",
     "team/actions.ts",
     "team/claim-page.tsx",
+    "workspaces/_components/workspace-access-card.test.tsx",
     "workspaces/_components/workspace-access-card.tsx",
     "workspaces/_components/workspace-access-dialog.tsx",
   ],

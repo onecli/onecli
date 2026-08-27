@@ -49,6 +49,7 @@ import { isPlanAtLeast, type Plan } from "@onecli/api/ee/billing/plans";
 import type { WorkspaceOwner } from "@onecli/api/ee/services/workspace-service";
 import { useRenameWorkspace, useDeleteWorkspace } from "@/hooks/use-workspaces";
 import { setDefaultOrgCookie } from "@/lib/auth/set-active-scope";
+import { usePlanGate } from "@/lib/plan-gate";
 import { WorkspaceAccessDialog } from "@/ee/workspaces/_components/workspace-access-dialog";
 
 interface Props {
@@ -75,6 +76,7 @@ export const WorkspaceCard = ({
   plan,
 }: Props) => {
   const isTeam = isPlanAtLeast(plan, "team");
+  const planGate = usePlanGate();
   const router = useRouter();
   const [pending, startTransition] = useTransition();
   const [shareOpen, setShareOpen] = useState(false);
@@ -193,6 +195,12 @@ export const WorkspaceCard = ({
                   <DropdownMenuItem
                     onClick={(e) => {
                       e.stopPropagation();
+                      // Sharing is enterprise-licensed on self-host: an
+                      // unlicensed deployment reports the top plan (no billing),
+                      // so without this guard the dialog would open and its
+                      // /access + /members fetches would 403 off the API's
+                      // requireEnterprise gate. Open the license dialog instead.
+                      if (planGate.guard("workspace_sharing")) return;
                       setShareOpen(true);
                     }}
                   >
