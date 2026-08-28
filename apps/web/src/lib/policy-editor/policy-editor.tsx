@@ -21,7 +21,7 @@ import { identityText, targetText } from "./policy-preview/policy-rule-display";
 import { DeleteRuleDialog } from "./delete-rule-dialog";
 // The staged-publish chrome, org guardrails, and directory names are the
 // edition seam: EE aliases this to the real chrome; OSS renders none of it
-// (immediate apply, project scope only).
+// (immediate apply, workspace scope only).
 // MUST be the alias key, never a relative path: turbopack resolveAlias only
 // rewrites as-written `@/` specifiers, so a relative import would load the OSS
 // module in every edition.
@@ -35,7 +35,7 @@ import { PolicyRuleForm } from "./policy-rule-form";
 import { PolicyRulesTable } from "./policy-rules-table";
 
 export interface PolicyEditorProps {
-  /** "project" renders org guardrails read-only above the editable project rules;
+  /** "workspace" renders org guardrails read-only above the editable workspace rules;
    * "organization" edits the org guardrails directly. */
   scope: PageScope;
 }
@@ -57,7 +57,7 @@ export const PolicyEditor = ({ scope }: PolicyEditorProps) => {
   // Directory identities are what org rules target — resolved through the
   // edition seam (EE: the org-admin-gated directory reads; OSS: always
   // undefined, identities fall back to the raw id). The agent-name lookup that
-  // used to sit here went with the project page in step 6: `useAgents` was
+  // used to sit here went with the workspace page in step 6: `useAgents` was
   // already disabled at org scope, so this reads identically.
   const directoryName = useDirectoryNames();
 
@@ -232,7 +232,7 @@ export const PolicyEditor = ({ scope }: PolicyEditorProps) => {
                     : "rules can never apply."}
                 </span>{" "}
                 <span className="text-muted-foreground">
-                  A rule above them already decides everything they match — look
+                  A rule above them already decides everything they match. Look
                   for the Unreachable, Conflicts, and Duplicate tags below.
                 </span>
               </p>
@@ -251,9 +251,9 @@ export const PolicyEditor = ({ scope }: PolicyEditorProps) => {
             }
             // The uniform per-level default law (step 9): each level's verdict
             // is its first matching rule, else its Default Rule — deny wins.
-            // The gateway enforces the project default like the org one; Block
-            // turns the project into an allowlist (org allows must be mirrored
-            // by a project rule), so the row is editable at both scopes.
+            // The gateway enforces the workspace default like the org one; Block
+            // turns the workspace into an allowlist (org allows must be mirrored
+            // by a workspace rule), so the row is editable at both scopes.
             defaultRule={draftDefault.data ?? null}
             scope={scope}
             diffState={policyDiff?.rowState}

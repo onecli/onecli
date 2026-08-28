@@ -42,7 +42,6 @@ export const googleSearchConsole: AppDefinition = {
     buildAuthUrl: buildGoogleAuthUrl,
     exchangeCode: exchangeGoogleCode,
   },
-  available: true,
   configurable: {
     fields: googleConfigFields,
     envDefaults: googleEnvDefaults,

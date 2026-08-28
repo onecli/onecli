@@ -2,10 +2,10 @@ export interface AuthUser {
   id: string;
   email: string;
   name?: string;
-  // Active project id, returned by /v1/auth/session. Used by client-side
-  // redirects to land on /p/[projectId]/... rather than the unscoped legacy
+  // Active workspace id, returned by /v1/auth/session. Used by client-side
+  // redirects to land on /w/[workspaceId]/... rather than the unscoped legacy
   // /overview URL.
-  projectId?: string;
+  workspaceId?: string;
   // Whether the auth provider proved ownership of `email` (e.g. a verified
   // email claim). Optional — adapters that don't know leave it unset.
   emailVerified?: boolean;
@@ -24,8 +24,21 @@ export interface AuthContextValue {
   isAuthenticated: boolean;
   isLoading: boolean;
   user: AuthUser | null;
-  signIn: () => Promise<void>;
+  // `callbackURL` is where the browser should land after a federated
+  // round-trip — used by invited signups, whose invitation token lives in the
+  // page URL and would otherwise be lost across the redirect. Self-hosted
+  // only; the Cognito arm ignores it (its callback is fixed by the pool
+  // configuration).
+  signIn: (options?: { callbackURL?: string }) => Promise<void>;
   signOut: () => Promise<void>;
+  // Email + password (self-hosted only, undefined on cloud, which signs in
+  // through Cognito). Both reject with a message the form renders as-is.
+  signInWithPassword?: (email: string, password: string) => Promise<void>;
+  signUpWithPassword?: (input: {
+    name: string;
+    email: string;
+    password: string;
+  }) => Promise<void>;
   // Email OTP flow (cloud-only, undefined in OSS mode)
   signUpWithEmail?: (email: string) => Promise<EmailOtpStep>;
   signInWithEmail?: (email: string) => Promise<EmailOtpStep>;

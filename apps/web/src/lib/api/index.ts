@@ -3,9 +3,12 @@ import * as secrets from "./secrets";
 import * as policy from "./policy";
 import * as connections from "./connections";
 import * as grants from "./grants";
-import * as projects from "./projects";
-import * as projectAccess from "./project-access";
+import * as workspaces from "./workspaces";
+import * as workspaceAccess from "./workspace-access";
 import * as domains from "./domains";
+import * as invitations from "./invitations";
+import * as provisions from "./provisions";
+import * as org from "./org";
 import * as orgMembers from "./org-members";
 import * as groups from "./groups";
 import * as roleMappings from "./role-mappings";
@@ -13,12 +16,20 @@ import * as ssoConnections from "./sso-connections";
 import * as ssoEnforcement from "./sso-enforcement";
 import * as scimTokens from "./scim-tokens";
 import * as counts from "./counts";
+import * as instance from "./instance";
 import * as appBlocklist from "./app-blocklist";
 import * as appConfig from "./app-config";
 import * as appAvailability from "./app-availability";
 import * as appPermissions from "./app-permissions";
 import * as vaults from "./vaults";
 import * as dropbox from "./dropbox";
+import * as conversations from "./conversations";
+import * as attachments from "./attachments";
+import * as channels from "./channels";
+import * as crons from "./crons";
+import * as memories from "./memories";
+import * as skills from "./skills";
+import * as sshKeys from "./ssh-keys";
 
 export {
   agents,
@@ -26,9 +37,12 @@ export {
   policy,
   connections,
   grants,
-  projects,
-  projectAccess,
+  workspaces,
+  workspaceAccess,
   domains,
+  invitations,
+  provisions,
+  org,
   orgMembers,
   groups,
   roleMappings,
@@ -36,12 +50,20 @@ export {
   ssoEnforcement,
   scimTokens,
   counts,
+  instance,
   appBlocklist,
   appConfig,
   appAvailability,
   appPermissions,
   vaults,
   dropbox,
+  conversations,
+  attachments,
+  channels,
+  crons,
+  memories,
+  skills,
+  sshKeys,
 };
 export type {
   Agent,
@@ -49,15 +71,17 @@ export type {
   Secret,
   CreatedSecret,
   Connection,
-  Project,
-  ProjectAccessBindings,
-  ProjectAccessUserRow,
-  ProjectAccessGroupRow,
-  SetProjectAccessInput,
+  Workspace,
+  WorkspaceAccessBindings,
+  WorkspaceAccessUserRow,
+  WorkspaceAccessGroupRow,
+  SetWorkspaceAccessInput,
   OrgDomain,
   OrgSsoEnforcement,
   OrgMemberRow,
   UpdateOrgMemberInput,
+  PendingInvitation,
+  CreateInvitationInput,
   DirectoryPage,
   DirectoryListParams,
   GroupRow,
@@ -91,8 +115,53 @@ export type {
   AgentGrantsSummary,
   AgentWithGrantsSummary,
   GrantsSummaryEntry,
+  InstanceInfo,
+  OrgInfo,
+  SshKey,
+  MintSshCertificateSource,
+  MintedSshCertificate,
+  AttachmentMeta,
+  Conversation,
+  ConversationSource,
+  Turn,
+  TurnStatus,
+  TurnUsage,
+  TurnEvent,
+  TurnEventKind,
+  TranscriptPage,
+  AbortTurnResult,
 } from "./types";
 export type { CreatePolicyRuleInput, UpdatePolicyRuleInput } from "./policy";
+export type {
+  AgentChannelPresence,
+  AgentChannelsView,
+  ChannelPresenceStatus,
+  ChannelProvider,
+  ChannelSetupMaterial,
+  ChannelTransport,
+  ChannelUserLink,
+  CompletePresenceInput,
+  CreatePresenceResult,
+  OrgChannelIntegration,
+  OrgChannelsView,
+} from "./channels";
+export type { AgentCron, CronInput, CronUpdate } from "./crons";
+export type {
+  AgentMemory,
+  AgentMemorySummary,
+  MemoryInput,
+  MemoryPatch,
+  MemoryRevision,
+  MemoryRevisionPreview,
+  MemorySearchHit,
+} from "./memories";
+export type {
+  Skill,
+  SkillFileInput,
+  SkillInput,
+  SkillPatch,
+  SkillSummary,
+} from "./skills";
 export { appsPath } from "./scope";
 export type { PageScope } from "./scope";
 export type { AppConfigStatus } from "./app-config";
@@ -103,5 +172,12 @@ export type {
   AppToolGroupSummary,
   AppPermissionDefinitionSummary,
 } from "@onecli/api/apps/app-permissions/types";
-export { apiGet, apiPost, apiPatch, apiPut, apiDelete } from "./client";
+export {
+  apiGet,
+  apiPost,
+  apiPatch,
+  apiPut,
+  apiDelete,
+  ApiError,
+} from "./client";
 export { queryKeys } from "./keys";

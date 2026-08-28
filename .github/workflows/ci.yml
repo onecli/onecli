@@ -1,14 +1,30 @@
 name: CI
 
+# Hand-owned by this repo (not synced): the tree is shared with the upstream
+# dev repo, but each repo owns its own CI. Job shapes deliberately mirror the
+# upstream ci.yml that runs on the SAME tree, so a change that is green
+# upstream stays green here.
+
 on:
   pull_request:
     branches: [main]
+
+permissions:
+  contents: read
+  pull-requests: read
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 env:
+  # One codebase, two runtime editions (`cloud` / `onprem`, onprem default).
+  # The build/test jobs run with the cloud-edition ambient env — the exact
+  # configuration continuously proven on this tree — and the dedicated
+  # "onprem default lane" step below re-proves the self-host default with the
+  # edition unset. CI artifacts are never shipped; published images build the
+  # onprem edition in publish.yml.
+  NEXT_PUBLIC_EDITION: cloud
   TURBO_TOKEN: ${{ secrets.TURBO_TOKEN }}
   TURBO_TEAM: ${{ secrets.TURBO_TEAM }}
 
@@ -27,6 +43,30 @@ jobs:
           filters: |
             rust:
               - 'apps/gateway/**'
+              # The black-box E2E suite lives outside apps/gateway, so without
+              # this its own changes would never run it.
+              - 'apps/gateway-e2e/**'
+              # The gateway's DB integration tests read these tables via raw SQL
+              # (not compile-checked), so a schema change must re-run them to
+              # catch drift.
+              - 'packages/db/prisma/**'
+              # The gateway enforce tests read fixtures written by this seeder;
+              # a change to it must re-run them.
+              - 'packages/api/src/ee/testing/**'
+              # The E2E suite is the only guard on the TS↔Rust KMS envelope
+              # contract: TypeScript writes the ciphertext, the Rust gateway
+              # decrypts it. A change to the encryptor must re-run it.
+              - 'packages/api/src/ee/kms-crypto.ts'
+              # The session-cookie E2E is the only guard on the TS↔Rust cookie
+              # contract: TypeScript issues the cookie, the Rust gateway
+              # validates it. A change to either must re-run it.
+              - 'packages/api/src/lib/better-auth.ts'
+              - 'packages/api/src/lib/better-auth-contract.ts'
+              # The golden corpus + TS evaluator are byte-shared with two Rust
+              # consumers (corpus_test.rs, oss_parity_test.rs); a corpus-only
+              # change must re-run them or the count pins detonate on the next
+              # unrelated rust-touching PR.
+              - 'packages/api/src/services/policy-translation/**'
               - '.github/workflows/ci.yml'
 
       - name: Setup Node.js
@@ -37,11 +77,17 @@ jobs:
         if: steps.changes.outputs.rust == 'true'
         uses: dtolnay/rust-toolchain@stable
 
+      # `shared-key` puts every lane in one cache family: this job writes it,
+      # the hosted-e2e job restores it, and the optional ci-cache-seed
+      # workflow (see the commented block at the bottom of this file) keeps it
+      # warm across PRs. Without a main-branch seeder, the first run of each
+      # PR compiles the gateway cold (~14 min).
       - name: Cache Rust
         if: steps.changes.outputs.rust == 'true'
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: apps/gateway -> target
+          shared-key: gateway-debug
 
       - name: Clippy
         if: steps.changes.outputs.rust == 'true'
@@ -51,9 +97,136 @@ jobs:
         if: steps.changes.outputs.rust == 'true'
         run: pnpm --filter @onecli/gateway lint
 
+      # The cloud edition's workspace-key usage recheck (db.rs `user_can_manage_workspace`)
+      # is exercised by DB integration tests that need a real Postgres.
+      - name: Start Postgres for gateway DB tests
+        if: steps.changes.outputs.rust == 'true'
+        run: |
+          # max_connections is raised for the E2E suite below: every test there
+          # holds its own gateway pool (up to 5) plus a Prisma client.
+          docker run -d --name gw-test-db \
+            -e POSTGRES_USER=ci -e POSTGRES_PASSWORD=ci -e POSTGRES_DB=onecli \
+            -p 5434:5432 postgres:18-alpine -c max_connections=200
+          # Start the two E2E containers here rather than at their readiness
+          # steps further down. `docker run -d` still blocks on the image pull,
+          # so the pull itself does NOT overlap the cargo build — what this buys
+          # is having Redis and MiniStack finish *initialising* while the test
+          # lanes run, so their readiness probes below return immediately.
+          docker run -d --name gw-test-redis -p 6379:6379 redis:7-alpine
+          docker run -d --name gw-test-kms -p 4566:4566 \
+            ministackorg/ministack@sha256:c3c2e86f19ff8024aca7488fd0827e2d66117effca0b0c9553088d68d9556a86
+          # Probe over TCP (-h localhost), not the container's Unix socket: the
+          # image reports socket-ready during its init phase, before the TCP
+          # listener and the onecli DB exist — which would flake migrate deploy.
+          for _ in $(seq 30); do
+            docker exec gw-test-db pg_isready -h localhost -U ci -d onecli && break
+            sleep 1
+          done
+          pnpm --filter @onecli/db exec prisma migrate deploy
+          # The E2E suite clones a private database per test from this template,
+          # so migrations run once rather than per test. Provisioned here, next
+          # to the migrate above, so a broken migration fails the job in seconds
+          # instead of after the ~15-minute cargo test matrix.
+          docker exec gw-test-db psql -U ci -d onecli -v ON_ERROR_STOP=1 \
+            -c 'CREATE DATABASE onecli_e2e_template'
+          DATABASE_URL=postgresql://ci:ci@127.0.0.1:5434/onecli_e2e_template \
+            pnpm --filter @onecli/db exec prisma migrate deploy
+        env:
+          DATABASE_URL: postgresql://ci:ci@localhost:5434/onecli
+
+      # Seed the fixtures the EE enforce tests read
+      # (apps/gateway/src/policy_engine/enforce_pg_test.rs). Type-safe via the
+      # generated @onecli/db client; runs against the same gw-test-db as the tests.
+      - name: Seed gateway enforce fixtures
+        if: steps.changes.outputs.rust == 'true'
+        run: pnpm --filter @onecli/api-server exec tsx ../../packages/api/src/ee/testing/gateway-enforce-seed.ts
+        env:
+          DATABASE_URL: postgresql://ci:ci@localhost:5434/onecli
+
       - name: Test
         if: steps.changes.outputs.rust == 'true'
         run: pnpm --filter @onecli/gateway test
+        env:
+          GATEWAY_TEST_DATABASE_URL: postgresql://ci:ci@localhost:5434/onecli
+
+      # ── Black-box E2E ──────────────────────────────────────────────────────
+      # Extra steps in THIS job rather than a job of their own: they reuse the
+      # warm cargo cache, the Postgres already running above, and Node from the
+      # setup step. See apps/gateway-e2e/README.md.
+
+      # The cloud edition connects to Redis unconditionally at startup — both
+      # the cache store and the approval store require it, and the in-crate
+      # #[cfg(test)] fallback does not apply to a spawned binary.
+      - name: Wait for Redis
+        if: steps.changes.outputs.rust == 'true'
+        run: |
+          for _ in $(seq 30); do
+            docker exec gw-test-redis redis-cli ping 2>/dev/null | grep -q PONG && break
+            sleep 1
+          done
+          # Assert rather than hope: a probe that only times out would resurface
+          # later as an unrelated-looking gateway boot failure.
+          docker exec gw-test-redis redis-cli ping | grep -q PONG
+
+      # KMS emulator. MiniStack (MIT), not LocalStack — its Community edition
+      # was discontinued in March 2026 and the remaining free tier is
+      # non-commercial only. Pinned by digest: `latest` on a credential-handling
+      # emulator is both a supply-chain and a reproducibility hazard.
+      #
+      # AWS_ENDPOINT_URL_KMS is all the production code needs to reach it —
+      # packages/api/src/ee/kms-crypto.ts and apps/gateway/src/ee/crypto.rs both
+      # pick it up unmodified.
+      - name: Wait for the KMS emulator and mint a key
+        if: steps.changes.outputs.rust == 'true'
+        run: |
+          # A functional probe, not a TCP one: in the AWS SDK an unreachable
+          # endpoint and a missing credential produce indistinguishable errors,
+          # so prove KMS actually answers before anything can misattribute it.
+          for _ in $(seq 30); do
+            aws --endpoint-url "$AWS_ENDPOINT_URL_KMS" kms list-keys >/dev/null 2>&1 && break
+            sleep 1
+          done
+          aws --endpoint-url "$AWS_ENDPOINT_URL_KMS" kms list-keys >/dev/null
+          # One key per run, shared by the fixtures (which mint envelopes) and
+          # the gateway (which decrypts them).
+          ARN=$(aws --endpoint-url "$AWS_ENDPOINT_URL_KMS" kms create-key \
+                  --description 'onecli gateway E2E' \
+                  --query KeyMetadata.Arn --output text)
+          echo "KMS_KEY_ARN=$ARN" >> "$GITHUB_ENV"
+        env:
+          # 127.0.0.1, never localhost: Node 17+ resolves localhost with
+          # verbatim DNS ordering and can answer ::1 first.
+          AWS_ENDPOINT_URL_KMS: http://127.0.0.1:4566
+          AWS_REGION: us-east-1
+          AWS_ACCESS_KEY_ID: test
+          AWS_SECRET_ACCESS_KEY: test
+
+      # Built as its own step so a compile failure reports as a compile
+      # failure, not an E2E failure. One edition-less binary — the runtime
+      # EDITION env selects behavior.
+      - name: Build the gateway
+        if: steps.changes.outputs.rust == 'true'
+        run: cargo build --manifest-path apps/gateway/Cargo.toml --bin onecli-gateway
+
+      # Spawns the REAL binary (EDITION=cloud in the spawn env) per test against
+      # a freshly cloned database, a real Redis and a real KMS. Runs after the
+      # in-crate lane so a failure here is never misattributed to it.
+      - name: E2E (cloud edition)
+        if: steps.changes.outputs.rust == 'true'
+        run: pnpm --filter @onecli/gateway-e2e test:e2e:no-build
+        env:
+          GATEWAY_E2E_BIN: ${{ github.workspace }}/apps/gateway/target/debug/onecli-gateway
+          E2E_ADMIN_DATABASE_URL: postgresql://ci:ci@127.0.0.1:5434/postgres
+          E2E_TEMPLATE_DB: onecli_e2e_template
+          # Deliberately scoped to this step, never job-wide: the cache store keys
+          # its in-memory test fallback on REDIS_HOST being ABSENT, so a job-wide
+          # value would silently re-point the in-crate cargo lanes at this container.
+          E2E_REDIS_HOST: 127.0.0.1
+          E2E_REDIS_PORT: "6379"
+          AWS_ENDPOINT_URL_KMS: http://127.0.0.1:4566
+          AWS_REGION: us-east-1
+          AWS_ACCESS_KEY_ID: test
+          AWS_SECRET_ACCESS_KEY: test
 
   lint:
     name: Lint & Format
@@ -87,6 +260,23 @@ jobs:
       - name: Build
         run: pnpm build --filter='!@onecli/gateway'
 
+      # The tool→endpoint permission mapping is server-internal; the providers
+      # barrel is client-reachable, so one wrong import would ship it to every
+      # browser. The build above runs as the cloud edition — assert a
+      # permission-id marker never lands in a client chunk.
+      - name: Client-bundle guard (permission mapping stays server-side)
+        run: |
+          if grep -rq "dashboards_list" apps/web/.next/static/chunks/; then
+            echo "::error::permission-mapping marker found in client chunks — a client-reachable module imports the app-permission catalog (apps/app-permissions)"
+            exit 1
+          fi
+          # Positive control: the marker must exist in the server graph, or the
+          # guard is testing nothing.
+          grep -rq "dashboards_list" apps/web/.next/server/ || {
+            echo "::error::client-bundle guard positive control failed — marker not found in the server graph (marker renamed?)"
+            exit 1
+          }
+
       - name: Check for Prisma changes
         id: prisma-changes
         run: |
@@ -107,3 +297,160 @@ jobs:
             --exit-code; EXIT_CODE=$?
           docker rm -f shadow-db
           exit $EXIT_CODE
+
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup Node.js
+        uses: ./.github/actions/setup-node
+
+      # The `.pg.test.ts` suites drive REAL writes and read them back the way the
+      # gateway does — the only level at which a "which rows land in which
+      # generation" bug is visible. They skip when the URL is unset, so wiring it
+      # here is what makes them a permanent guard rather than a local-only one.
+      - name: Start Postgres for the policy proof suites
+        run: |
+          docker run -d --name policy-proof-db \
+            -e POSTGRES_USER=ci -e POSTGRES_PASSWORD=ci -e POSTGRES_DB=onecli \
+            -p 5440:5432 postgres:18-alpine
+          for _ in $(seq 30); do
+            docker exec policy-proof-db pg_isready -h localhost -U ci -d onecli && break
+            sleep 1
+          done
+          pnpm --filter @onecli/db exec prisma migrate deploy
+        env:
+          DATABASE_URL: postgresql://ci:ci@localhost:5440/onecli
+
+      # Includes the licensing/enterprise-lock suites: @onecli/api's `test`
+      # script runs the whole package (src/licensing included), so the
+      # `pnpm --filter @onecli/api test:licensing` subset needs no step of its
+      # own — it runs here and again in the onprem lane below.
+      - name: Test
+        run: pnpm test --filter='!@onecli/gateway'
+        env:
+          POLICY_PROOF_DATABASE_URL: postgresql://ci:ci@localhost:5440/onecli
+
+      # The dev-launcher/setup-wizard env engine (scripts/lib) — plain
+      # node:test, no turbo package, so it needs its own step.
+      - name: Test (scripts)
+        run: pnpm run test:scripts
+
+      # The suites stub the edition per file, but module-LOAD reads resolve from
+      # the ambient env (NEXT_PUBLIC_EDITION=cloud job-wide) — re-run the API
+      # package with the edition unset so the onprem default path (the edition
+      # self-hosters actually run, EE lock suite included) stays proven.
+      - name: Test (onprem default lane)
+        run: env -u EDITION -u NEXT_PUBLIC_EDITION pnpm --filter @onecli/api test
+        env:
+          POLICY_PROOF_DATABASE_URL: postgresql://ci:ci@localhost:5440/onecli
+
+  # The hosted-path black-box suite: real gateway binary, real api-server
+  # child, real runner, real sandbox containers from the agent image,
+  # per-test template-clone databases. Path-filtered like the rust job — it
+  # is the most expensive lane in this file — and carries an explicit timeout
+  # (a hung container wait must never ride the 6-hour default).
+  hosted-e2e:
+    name: Hosted E2E
+    runs-on: ubuntu-latest
+    # 30 covers the cold path (measured 21-22m with no warm cache — the norm
+    # here until the ci-cache-seed workflow below is enabled; warm runs are
+    # ~8m). A timeout kill must stay distinguishable from a hung container.
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Check for changes
+        id: changes
+        uses: dorny/paths-filter@v3
+        with:
+          filters: |
+            hosted:
+              - 'apps/hosted-e2e/**'
+              - 'apps/runner/**'
+              - 'apps/sandbox-supervisor/**'
+              - 'apps/gateway/**'
+              # The suite spawns apps/api-server/src/index.ts as its
+              # api-server child, so its own changes must re-run it.
+              - 'apps/api-server/**'
+              - 'packages/agent-protocol/**'
+              # The control plane IS half the suite's subject: dispatch,
+              # doors, fences, the spawn-env contract.
+              - 'packages/api/**'
+              - 'packages/db/prisma/**'
+              - 'docker/agent.Dockerfile'
+              - 'docker/agent-entrypoint.sh'
+              - '.github/workflows/ci.yml'
+
+      - name: Setup Node
+        if: steps.changes.outputs.hosted == 'true'
+        uses: ./.github/actions/setup-node
+
+      - name: Install Rust
+        if: steps.changes.outputs.hosted == 'true'
+        uses: dtolnay/rust-toolchain@stable
+
+      # Same shared-key as the rust job (and the optional seed workflow), so
+      # this lane restores an existing build instead of recompiling cold
+      # (~14 min, the job's dominant cost). Consume-only: the rust job and
+      # the seeder own the writes.
+      - name: Cache cargo
+        if: steps.changes.outputs.hosted == 'true'
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: apps/gateway -> target
+          shared-key: gateway-debug
+          save-if: "false"
+
+      - name: Build the gateway
+        if: steps.changes.outputs.hosted == 'true'
+        run: cargo build --manifest-path apps/gateway/Cargo.toml --bin onecli-gateway
+
+      - name: Set up Docker Buildx
+        if: steps.changes.outputs.hosted == 'true'
+        uses: docker/setup-buildx-action@v4
+
+      # The one image with a network download in its build (the vendored
+      # jcode runtime) — the gha cache is what keeps warm runs inside the
+      # timeout. Scope deliberately distinct from publish.yml's.
+      - name: Build the agent image
+        if: steps.changes.outputs.hosted == 'true'
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: docker/agent.Dockerfile
+          tags: onecli-agent:ci
+          load: true
+          cache-from: type=gha,scope=ci-agent
+          cache-to: type=gha,mode=max,scope=ci-agent
+
+      - name: Start Postgres
+        if: steps.changes.outputs.hosted == 'true'
+        run: |
+          docker run -d --name he2e-postgres \
+            -e POSTGRES_USER=ci -e POSTGRES_PASSWORD=ci -e POSTGRES_DB=postgres \
+            -p 5435:5432 postgres:18-alpine -c max_connections=200
+          for i in $(seq 1 30); do
+            pg_isready -h localhost -p 5435 -U ci && break
+            sleep 1
+          done
+
+      - name: Migrate the template database
+        if: steps.changes.outputs.hosted == 'true'
+        run: |
+          docker exec he2e-postgres psql -U ci -d postgres -c 'CREATE DATABASE onecli_he2e_template'
+          DATABASE_URL=postgresql://ci:ci@localhost:5435/onecli_he2e_template \
+            pnpm --filter @onecli/db exec prisma migrate deploy
+
+      - name: Hosted E2E (deep lane)
+        if: steps.changes.outputs.hosted == 'true'
+        run: pnpm --filter @onecli/hosted-e2e test:e2e:no-build
+        env:
+          E2E_ADMIN_DATABASE_URL: postgresql://ci:ci@localhost:5435/postgres
+          E2E_TEMPLATE_DB: onecli_he2e_template
+          E2E_GATEWAY_BIN: ${{ github.workspace }}/apps/gateway/target/debug/onecli-gateway
+          E2E_AGENT_IMAGE: onecli-agent:ci

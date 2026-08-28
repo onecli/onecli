@@ -3,7 +3,7 @@ import { setCookie, getCookie, deleteCookie } from "hono/cookie";
 import { z } from "zod";
 import { db } from "@onecli/db";
 import type { ApiEnv } from "../types";
-import { authMiddleware, requireProjectId, auth } from "../middleware/auth";
+import { authMiddleware, requireWorkspaceId, auth } from "../middleware/auth";
 import { getApp, getApps } from "../apps/registry";
 import {
   getAppPermissionDefinition,
@@ -23,7 +23,11 @@ import {
 } from "../lib/oauth-state";
 import { NODE_ENV } from "../lib/env";
 import { dashboardUrl } from "../lib/dashboard-url";
-import { getRequestOrigin, getAppOrigin } from "../lib/request-origin";
+import {
+  getApiCallbackOrigin,
+  getAppOrigin,
+  getRequestOrigin,
+} from "../lib/request-origin";
 import { buildFragmentBridgeHtml } from "../lib/fragment-bridge";
 import {
   invalidateGatewayCache,
@@ -76,13 +80,13 @@ export const appRoutes = () => {
   // ── GET /apps ── list all apps ─────────────────────────────────────────
   app.get("/", authMiddleware, async (c) => {
     const auth = c.get("auth");
-    const projectId = requireProjectId(auth);
+    const workspaceId = requireWorkspaceId(auth);
 
-    // EE (orgAppConfig seam): org-level configs surface on apps that have no
-    // project row, marked `source: "organization"`. OSS: no seam — empty map.
+    // Org tier (orgAppConfig seam, boot-injected on every edition): org-level
+    // configs surface on apps that have no workspace row, marked `source: "organization"`.
     const [configs, connections, orgConfigsResult] = await Promise.all([
       db.appConfig.findMany({
-        where: { projectId },
+        where: { workspaceId },
         select: {
           provider: true,
           enabled: true,
@@ -90,7 +94,7 @@ export const appRoutes = () => {
           createdAt: true,
         },
       }),
-      listConnections({ projectId }),
+      listConnections({ workspaceId }),
       getOrgAppConfig()?.listEnabledConfigs(auth.organizationId),
     ]);
     const orgConfigs = orgConfigsResult ?? {};
@@ -115,7 +119,9 @@ export const appRoutes = () => {
       return {
         id: a.id,
         name: a.name,
-        available: a.available,
+        // Deprecated wire field: always true since apps became universal —
+        // kept because older CLIs read a missing field as false.
+        available: true,
         connectionType: a.connectionMethod.type,
         configurable: !!a.configurable,
         config: config
@@ -157,7 +163,7 @@ export const appRoutes = () => {
   app.get("/connections", authMiddleware, async (c) => {
     const auth = c.get("auth");
     const connections = await listConnections({
-      projectId: requireProjectId(auth),
+      workspaceId: requireWorkspaceId(auth),
       organizationId: auth.organizationId,
     });
     return c.json({ connections });
@@ -169,7 +175,7 @@ export const appRoutes = () => {
     const provider = c.req.param("provider");
     const connections = await listConnectionsByProvider(
       {
-        projectId: requireProjectId(auth),
+        workspaceId: requireWorkspaceId(auth),
         organizationId: auth.organizationId,
       },
       provider,
@@ -216,30 +222,30 @@ export const appRoutes = () => {
   // the param route.
   app.get("/configured", authMiddleware, async (c) => {
     const auth = c.get("auth");
-    // EE (orgAppConfig seam): org-level configs count as configured for every
-    // project in the org. OSS: no seam — project rows only, as before.
+    // Org tier (orgAppConfig seam): org-level configs count as configured for every
+    // workspace in the org.
     const [providers, orgConfigs] = await Promise.all([
-      listConfiguredProviders({ projectId: requireProjectId(auth) }),
+      listConfiguredProviders({ workspaceId: requireWorkspaceId(auth) }),
       getOrgAppConfig()?.listEnabledConfigs(auth.organizationId),
     ]);
     if (!orgConfigs) return c.json(providers);
     return c.json([...new Set([...providers, ...Object.keys(orgConfigs)])]);
   });
 
-  // ── GET /apps/available ── app-availability allowlist for this project ──
+  // ── GET /apps/available ── app-availability allowlist for this workspace ──
   // Backs the connect-picker filter (policy-engine step 7). `restricted:false`
-  // (OSS — no seam — or an "open" org) means every app is available and the
+  // (no availability provider — self-host — or an "open" org) means every app is available and the
   // picker is unfiltered; `restricted:true` carries the exact provider set a
-  // project may connect, mirroring the gateway's runtime availability read.
+  // workspace may connect, mirroring the gateway's runtime availability read.
   // Registered before /:provider so "available" is not captured as a provider.
   app.get("/available", authMiddleware, async (c) => {
     const auth = c.get("auth");
-    const projectId = requireProjectId(auth);
+    const workspaceId = requireWorkspaceId(auth);
     const providers = await getAppAvailability()?.getAvailableProviders(
-      projectId,
+      workspaceId,
       auth.organizationId,
     );
-    // `undefined` (no seam / OSS) and `null` (org in "open" mode) both mean
+    // `undefined` (no availability provider — self-host) and `null` (org in "open" mode) both mean
     // unrestricted — never leak an empty allowlist as "nothing available".
     return c.json(
       providers == null
@@ -251,7 +257,7 @@ export const appRoutes = () => {
   // ── GET /apps/env-defaults ── providers with platform default creds ────
   // Reports this API process's env — the same env resolveAppCredentials
   // reads during the OAuth flows.
-  app.get("/env-defaults", auth({ requireProject: false }), async (c) => {
+  app.get("/env-defaults", auth({ requireWorkspace: false }), async (c) => {
     const providers = getApps()
       .filter((appDef) => {
         const envDefaults = appDef.configurable?.envDefaults;
@@ -267,11 +273,11 @@ export const appRoutes = () => {
   // ── GET /apps/permission-definitions ── tool catalogs (all providers) ──
   // Public projection only (id/name/description per tool); the endpoint
   // mapping never leaves the server. Registered before the /:provider param
-  // routes; filtered through getApp so editions that register a permission
-  // definition without its app (e.g. onprem's aws-role) don't advertise it.
+  // routes; filtered through getApp so an edition that registers a permission
+  // definition without its app doesn't advertise it.
   app.get(
     "/permission-definitions",
-    auth({ requireProject: false }),
+    auth({ requireWorkspace: false }),
     async (c) => {
       const definitions = getAppPermissionDefinitions()
         .filter((def) => getApp(def.provider))
@@ -283,7 +289,7 @@ export const appRoutes = () => {
   // ── GET /apps/:provider ── single app detail ───────────────────────────
   app.get("/:provider", authMiddleware, async (c) => {
     const auth = c.get("auth");
-    const projectId = requireProjectId(auth);
+    const workspaceId = requireWorkspaceId(auth);
     const provider = c.req.param("provider")!;
     const appDef = getApp(provider);
     if (!appDef) {
@@ -291,9 +297,9 @@ export const appRoutes = () => {
     }
 
     const [config, providerConnections] = await Promise.all([
-      getAppConfig({ projectId }, provider),
+      getAppConfig({ workspaceId }, provider),
       db.appConnection.findMany({
-        where: { projectId, provider },
+        where: { workspaceId, provider },
         select: {
           id: true,
           label: true,
@@ -306,9 +312,9 @@ export const appRoutes = () => {
     ]);
     const connection = providerConnections[0] ?? null;
 
-    // EE (orgAppConfig seam): an org-level config stands in when the project
-    // has no row of its own (inventory-faithful: a project row, even disabled,
-    // is shown as-is). OSS: no seam — always null.
+    // Org tier (orgAppConfig seam): an org-level config stands in when the workspace
+    // has no row of its own (inventory-faithful: a workspace row, even disabled,
+    // is shown as-is).
     const orgConfig = config
       ? null
       : ((await getOrgAppConfig()?.getEnabledConfig(
@@ -328,14 +334,16 @@ export const appRoutes = () => {
         // than the localhost default nobody but a local dev can open.
         `This app is not configured yet. Go to ${dashboardUrl(
           `/connections?connect=${provider}`,
-          { projectId },
+          { workspaceId },
           getRequestOrigin(c.req.raw),
         )} to set up your credentials.`;
 
     return c.json({
       id: appDef.id,
       name: appDef.name,
-      available: appDef.available,
+      // Deprecated wire field: always true since apps became universal —
+      // kept because older CLIs read a missing field as false.
+      available: true,
       connectionType: appDef.connectionMethod.type,
       configurable: !!appDef.configurable,
       config: config
@@ -368,7 +376,7 @@ export const appRoutes = () => {
   // ── GET /apps/:provider/authorize ── OAuth redirect ────────────────────
   app.get(
     "/:provider/authorize",
-    auth({ requireProject: false }),
+    auth({ requireWorkspace: false }),
     async (c) => {
       const provider = c.req.param("provider")!;
       const auth = c.get("auth");
@@ -381,7 +389,7 @@ export const appRoutes = () => {
       if (orgResponse) return orgResponse;
 
       // Fail loud: an explicit org context with no wired org handler must not
-      // silently fall through to a project-scoped connection.
+      // silently fall through to a workspace-scoped connection.
       if (c.req.query("_org")) {
         return c.json(
           {
@@ -392,14 +400,10 @@ export const appRoutes = () => {
         );
       }
 
-      const projectId = requireProjectId(auth);
+      const workspaceId = requireWorkspaceId(auth);
       const appDef = getApp(provider);
 
-      if (
-        !appDef ||
-        !appDef.available ||
-        appDef.connectionMethod.type !== "oauth"
-      ) {
+      if (!appDef || appDef.connectionMethod.type !== "oauth") {
         return c.json(
           { error: `Provider "${provider}" is not available` },
           400,
@@ -414,7 +418,7 @@ export const appRoutes = () => {
       // end, and sign it: the callback is unauthenticated, so re-deriving it
       // there from request headers lets the caller influence the destination.
       const state = signOAuthState({
-        projectId,
+        workspaceId,
         provider,
         nonce: generateNonce(),
         origin: getAppOrigin(c.req.raw),
@@ -423,7 +427,7 @@ export const appRoutes = () => {
       });
 
       const resolved = await resolveAppCredentials(
-        projectId,
+        workspaceId,
         appDef,
         auth.organizationId,
       );
@@ -438,10 +442,10 @@ export const appRoutes = () => {
 
       const { values: creds } = resolved;
 
-      const redirectUri = `${getRequestOrigin(c.req.raw)}/v1/apps/${provider}/callback`;
+      const redirectUri = `${getApiCallbackOrigin(c.req.raw)}/v1/apps/${provider}/callback`;
       const scopes = appDef.connectionMethod.defaultScopes ?? [];
 
-      const authUrl = appDef.connectionMethod.buildAuthUrl({
+      const authUrl = await appDef.connectionMethod.buildAuthUrl({
         appCredentials: creds,
         redirectUri,
         scopes,
@@ -463,7 +467,7 @@ export const appRoutes = () => {
   // ── GET /apps/:provider/callback ── OAuth callback ─────────────────────
   app.get("/:provider/callback", async (c) => {
     const provider = c.req.param("provider")!;
-    const apiOrigin = getRequestOrigin(c.req.raw);
+    const apiOrigin = getApiCallbackOrigin(c.req.raw);
 
     // Resolve the state before anything else can redirect or render. It arrives
     // in the query, or in the `oauth_state` cookie `/authorize` set on this exact
@@ -481,8 +485,9 @@ export const appRoutes = () => {
       state?.provider === provider ? state.origin : undefined;
 
     // Two different questions, and conflating them is what broke this before.
-    // `apiOrigin` is who answered the callback — it must build the redirect_uri
-    // for the token exchange below. `appOrigin` is where the browser goes next,
+    // `apiOrigin` is this deployment's api-server origin — it must build the
+    // redirect_uri for the token exchange below, resolved exactly as
+    // `/authorize` resolved it. `appOrigin` is where the browser goes next,
     // which is a dashboard page and may live on another host entirely, so it
     // comes from the origin committed to at `/authorize` rather than from this
     // unauthenticated request's headers. A state minted before that field
@@ -531,16 +536,16 @@ export const appRoutes = () => {
         return errorRedirect("Invalid state parameter");
       }
 
-      if (!state.projectId) {
-        return errorRedirect("Missing project in state");
+      if (!state.workspaceId) {
+        return errorRedirect("Missing workspace in state");
       }
 
-      const stateProject = await db.project.findUnique({
-        where: { id: state.projectId },
+      const stateWorkspace = await db.workspace.findUnique({
+        where: { id: state.workspaceId },
         select: { organizationId: true },
       });
-      if (!stateProject) return errorRedirect("Project not found");
-      const stateOrgId = stateProject.organizationId;
+      if (!stateWorkspace) return errorRedirect("Workspace not found");
+      const stateOrgId = stateWorkspace.organizationId;
 
       // Microsoft can send duplicate callbacks -- the first with a valid code
       // (which succeeds) and the second with error=server_error. If a
@@ -549,7 +554,7 @@ export const appRoutes = () => {
       if (c.req.query("error")) {
         const recentCutoff = new Date(Date.now() - 30_000);
         const existing = await listConnectionsByProvider(
-          { projectId: state.projectId },
+          { workspaceId: state.workspaceId },
           provider,
         );
         const justCreated = existing.find(
@@ -564,7 +569,7 @@ export const appRoutes = () => {
           // Same attach-step params as the primary success path — this IS the
           // success redirect for the connection the first callback created.
           successParams.set("connected", justCreated.id);
-          successParams.set("projectId", state.projectId);
+          successParams.set("workspaceId", state.workspaceId);
           return c.redirect(
             `${appOrigin}/app-connect/${provider}?${successParams}`,
           );
@@ -572,7 +577,7 @@ export const appRoutes = () => {
       }
 
       const resolved = await resolveAppCredentials(
-        state.projectId,
+        state.workspaceId,
         appDef,
         stateOrgId,
       );
@@ -582,7 +587,6 @@ export const appRoutes = () => {
 
       const redirectUri = `${apiOrigin}/v1/apps/${provider}/callback`;
 
-      // Extract all query params as callback params
       const url = new URL(c.req.url);
       const callbackParams = Object.fromEntries(url.searchParams.entries());
 
@@ -600,7 +604,7 @@ export const appRoutes = () => {
         const identity = extractLabel(metadata)?.toLowerCase().trim();
         if (identity) {
           const existing = await listConnectionsByProvider(
-            { projectId: state.projectId },
+            { workspaceId: state.workspaceId },
             provider,
           );
           const duplicate = existing.find(
@@ -610,8 +614,6 @@ export const appRoutes = () => {
         }
       }
 
-      await getConnectionHooks().beforeConnect(stateOrgId, appDef);
-
       // The freshly-CREATED connection id rides the success redirect so the
       // popup can offer the post-connect attach step. Reconnects deliberately
       // don't — the existing connection keeps whatever grants it has.
@@ -619,7 +621,7 @@ export const appRoutes = () => {
 
       if (reconnectId) {
         await reconnectConnection(
-          { projectId: state.projectId },
+          { workspaceId: state.workspaceId },
           reconnectId,
           credentials,
           {
@@ -631,7 +633,7 @@ export const appRoutes = () => {
       } else {
         await getConnectionHooks().beforeCreate(stateOrgId);
         const fresh = await createConnection(
-          { projectId: state.projectId },
+          { workspaceId: state.workspaceId },
           provider,
           credentials,
           {
@@ -645,24 +647,24 @@ export const appRoutes = () => {
 
       if (appDef.blocklist?.length) {
         await initBlocklistDefaults(
-          { projectId: state.projectId },
+          { workspaceId: state.workspaceId },
           provider,
           appDef.blocklist,
         );
       }
 
-      invalidateGatewayCacheForAccount(state.projectId);
+      invalidateGatewayCacheForAccount(state.workspaceId);
 
       const successParams = new URLSearchParams({ status: "success" });
       if (state.agentName) {
         successParams.set("agent_name", state.agentName as string);
       }
       // `connected` (NOT `connectionId` — that param means "re-authenticate
-      // this connection" on the popup page) + the project, so the popup can
+      // this connection" on the popup page) + the workspace, so the popup can
       // offer grants for the brand-new connection.
       if (createdId) {
         successParams.set("connected", createdId);
-        successParams.set("projectId", state.projectId);
+        successParams.set("workspaceId", state.workspaceId);
       }
 
       deleteCookie(c, "oauth_state", {
@@ -681,151 +683,167 @@ export const appRoutes = () => {
   });
 
   // ── POST /apps/:provider/connect ── direct connect ─────────────────────
-  app.post("/:provider/connect", auth({ requireProject: false }), async (c) => {
-    const auth = c.get("auth");
-    const provider = c.req.param("provider")!;
-    const appDef = getApp(provider);
+  app.post(
+    "/:provider/connect",
+    auth({ requireWorkspace: false }),
+    async (c) => {
+      const auth = c.get("auth");
+      const provider = c.req.param("provider")!;
+      const appDef = getApp(provider);
 
-    if (!appDef || !appDef.available) {
-      return c.json({ error: `Provider "${provider}" is not available` }, 400);
-    }
+      if (!appDef) {
+        return c.json(
+          { error: `Provider "${provider}" is not available` },
+          400,
+        );
+      }
 
-    const body = (await c.req
-      .json()
-      .catch(() => null)) as ConnectRequestBody | null;
+      const body = (await c.req
+        .json()
+        .catch(() => null)) as ConnectRequestBody | null;
 
-    const resolved = await resolveConnectCredentials(provider, appDef, body);
-    if (!resolved.ok) {
-      return c.json({ error: resolved.error }, 400);
-    }
-    const { credentials, scopes, metadata, activeMethod, fields } = resolved;
+      const resolved = await resolveConnectCredentials(provider, appDef, body);
+      if (!resolved.ok) {
+        return c.json({ error: resolved.error }, 400);
+      }
+      const { credentials, scopes, metadata, activeMethod, fields } = resolved;
 
-    const connectionOpts = {
-      scopes,
-      metadata,
-      label: body?.label?.trim() || undefined,
-    };
+      const connectionOpts = {
+        scopes,
+        metadata,
+        label: body?.label?.trim() || undefined,
+      };
 
-    const orgResponse = await getOAuthOrg().tryHandleOrgConnect(
-      auth,
-      c.req.raw,
-      provider,
-      credentials,
-      connectionOpts,
-      body?.connectionId,
-      fields,
-    );
-    if (orgResponse) return orgResponse;
-
-    // Fail loud: the caller explicitly asked for an org-scoped connection but
-    // no org handler is wired on this server — reject instead of silently
-    // creating a project-scoped connection.
-    if (c.req.header("x-organization-id")) {
-      return c.json(
-        {
-          error:
-            "Organization-scoped connections are not supported on this server",
-        },
-        400,
-      );
-    }
-
-    const projectId = requireProjectId(auth);
-    await getConnectionHooks().beforeConnect(auth.organizationId, appDef);
-
-    // Project-scoped connect starts with no config link — body-provided
-    // credentials have no minting config. The credentials-import branch below
-    // re-links to the project config it saves; the explicit `undefined` also
-    // clears any stale link when reconnecting an existing connection.
-    const projectConnectionOpts = { ...connectionOpts, appConfigId: undefined };
-
-    let connection: { id: string };
-    // The freshly-CREATED connection (never a reconnect/duplicate): the popup's
-    // post-connect attach step only offers grants for brand-new connections —
-    // an existing one already has whatever grants it has.
-    let created: { id: string; label: string | null } | null = null;
-
-    if (body?.connectionId) {
-      connection = await reconnectConnection(
-        { projectId },
-        body.connectionId,
+      const orgResponse = await getOAuthOrg().tryHandleOrgConnect(
+        auth,
+        c.req.raw,
+        provider,
         credentials,
-        projectConnectionOpts,
+        connectionOpts,
+        body?.connectionId,
+        fields,
       );
-    } else {
-      const existing = await listConnectionsByProvider({ projectId }, provider);
-      const effectiveLabel =
-        connectionOpts.label || extractLabel(metadata) || null;
+      if (orgResponse) return orgResponse;
 
-      const duplicate = effectiveLabel
-        ? existing.find(
-            (conn) =>
-              conn.label?.toLowerCase().trim() ===
-              effectiveLabel.toLowerCase().trim(),
-          )
-        : existing[0];
+      // Fail loud: the caller explicitly asked for an org-scoped connection but
+      // no org handler is wired on this server — reject instead of silently
+      // creating a workspace-scoped connection.
+      if (c.req.header("x-organization-id")) {
+        return c.json(
+          {
+            error:
+              "Organization-scoped connections are not supported on this server",
+          },
+          400,
+        );
+      }
 
-      if (duplicate) {
+      const workspaceId = requireWorkspaceId(auth);
+
+      // Workspace-scoped connect starts with no config link — body-provided
+      // credentials have no minting config. The credentials-import branch below
+      // re-links to the workspace config it saves; the explicit `undefined` also
+      // clears any stale link when reconnecting an existing connection.
+      const workspaceConnectionOpts = {
+        ...connectionOpts,
+        appConfigId: undefined,
+      };
+
+      let connection: { id: string };
+      // The freshly-CREATED connection (never a reconnect/duplicate): the popup's
+      // post-connect attach step only offers grants for brand-new connections —
+      // an existing one already has whatever grants it has.
+      let created: { id: string; label: string | null } | null = null;
+
+      if (body?.connectionId) {
         connection = await reconnectConnection(
-          { projectId },
-          duplicate.id,
+          { workspaceId },
+          body.connectionId,
           credentials,
-          projectConnectionOpts,
+          workspaceConnectionOpts,
         );
       } else {
-        await getConnectionHooks().beforeCreate(auth.organizationId);
-        const fresh = await createConnection(
-          { projectId },
+        const existing = await listConnectionsByProvider(
+          { workspaceId },
           provider,
-          credentials,
-          projectConnectionOpts,
         );
-        connection = fresh;
-        created = { id: fresh.id, label: fresh.label };
+        const effectiveLabel =
+          connectionOpts.label || extractLabel(metadata) || null;
+
+        const duplicate = effectiveLabel
+          ? existing.find(
+              (conn) =>
+                conn.label?.toLowerCase().trim() ===
+                effectiveLabel.toLowerCase().trim(),
+            )
+          : existing[0];
+
+        if (duplicate) {
+          connection = await reconnectConnection(
+            { workspaceId },
+            duplicate.id,
+            credentials,
+            workspaceConnectionOpts,
+          );
+        } else {
+          await getConnectionHooks().beforeCreate(auth.organizationId);
+          const fresh = await createConnection(
+            { workspaceId },
+            provider,
+            credentials,
+            workspaceConnectionOpts,
+          );
+          connection = fresh;
+          created = { id: fresh.id, label: fresh.label };
+        }
       }
-    }
 
-    if (appDef.blocklist?.length) {
-      await initBlocklistDefaults({ projectId }, provider, appDef.blocklist);
-    }
+      if (appDef.blocklist?.length) {
+        await initBlocklistDefaults(
+          { workspaceId },
+          provider,
+          appDef.blocklist,
+        );
+      }
 
-    if (
-      activeMethod.type === "credentials_import" &&
-      !fields.privateKey &&
-      fields.clientId &&
-      fields.clientSecret
-    ) {
-      const savedConfig = await saveAppConfigWithoutDisconnect(
-        { projectId },
-        provider,
-        fields.clientId,
-        fields.clientSecret,
+      if (
+        activeMethod.type === "credentials_import" &&
+        !fields.privateKey &&
+        fields.clientId &&
+        fields.clientSecret
+      ) {
+        const savedConfig = await saveAppConfigWithoutDisconnect(
+          { workspaceId },
+          provider,
+          fields.clientId,
+          fields.clientSecret,
+        );
+        // This connection was imported alongside its own workspace config — record
+        // that provenance so config removal/refresh can find it.
+        await linkConnectionToAppConfig(
+          { workspaceId },
+          connection.id,
+          savedConfig.id,
+        );
+      }
+
+      invalidateGatewayCache(c.req.raw);
+
+      // `connection` is present only for a brand-new connection — the popup's
+      // attach step keys on it (reconnects keep their existing grants).
+      return c.json(
+        created ? { success: true, connection: created } : { success: true },
       );
-      // This connection was imported alongside its own project config — record
-      // that provenance so config removal/refresh can find it.
-      await linkConnectionToAppConfig(
-        { projectId },
-        connection.id,
-        savedConfig.id,
-      );
-    }
-
-    invalidateGatewayCache(c.req.raw);
-
-    // `connection` is present only for a brand-new connection — the popup's
-    // attach step keys on it (reconnects keep their existing grants).
-    return c.json(
-      created ? { success: true, connection: created } : { success: true },
-    );
-  });
+    },
+  );
 
   // ── GET /apps/:provider/permission-definition ── tool catalog ──────────
   // The static permission catalog (groups + toolIds) that
-  // GET/PUT /rules/permissions/:provider operate on. Global data — no project
-  // context required, so org-key callers work without X-Project-Id.
+  // GET/PUT /rules/permissions/:provider operate on. Global data — no workspace
+  // context required, so org-key callers work without X-Workspace-Id.
   app.get(
     "/:provider/permission-definition",
-    auth({ requireProject: false }),
+    auth({ requireWorkspace: false }),
     async (c) => {
       const provider = c.req.param("provider")!;
       if (!getApp(provider)) {
@@ -847,15 +865,15 @@ export const appRoutes = () => {
     const auth = c.get("auth");
     const provider = c.req.param("provider")!;
     const config = await getAppConfig(
-      { projectId: requireProjectId(auth) },
+      { workspaceId: requireWorkspaceId(auth) },
       provider,
     );
     if (config?.enabled) return c.json(config);
 
-    // EE (orgAppConfig seam): no enabled project row — report the org-level
-    // config as configured, marked `source: "organization"` so the project
-    // config form knows there is no project row to edit. Org settings are
-    // deliberately not exposed on the project surface.
+    // Org tier (orgAppConfig seam): no enabled workspace row — report the org-level
+    // config as configured, marked `source: "organization"` so the workspace
+    // config form knows there is no workspace row to edit. Org settings are
+    // deliberately not exposed on the workspace surface.
     const orgConfig = await getOrgAppConfig()?.getEnabledConfig(
       auth.organizationId,
       provider,
@@ -890,17 +908,17 @@ export const appRoutes = () => {
       return c.json({ error: "Invalid request body" }, 400);
     }
 
-    const projectId = requireProjectId(auth);
+    const workspaceId = requireWorkspaceId(auth);
     await withAudit(
       () =>
         upsertAppConfig(
-          { projectId },
+          { workspaceId },
           provider,
           values,
           appDef.configurable!.fields,
         ),
       () => ({
-        projectId,
+        workspaceId,
         userId: auth.userId,
         userEmail: auth.userEmail,
         action: AUDIT_ACTIONS.UPDATE,
@@ -917,11 +935,11 @@ export const appRoutes = () => {
   app.delete("/:provider/config", authMiddleware, async (c) => {
     const auth = c.get("auth");
     const provider = c.req.param("provider")!;
-    const projectId = requireProjectId(auth);
+    const workspaceId = requireWorkspaceId(auth);
     await withAudit(
-      () => deleteAppConfig({ projectId }, provider),
+      () => deleteAppConfig({ workspaceId }, provider),
       () => ({
-        projectId,
+        workspaceId,
         userId: auth.userId,
         userEmail: auth.userEmail,
         action: AUDIT_ACTIONS.DELETE,
@@ -945,12 +963,12 @@ export const appRoutes = () => {
         400,
       );
     }
-    const projectId = requireProjectId(auth);
+    const workspaceId = requireWorkspaceId(auth);
     await withAudit(
       () =>
-        toggleAppConfigEnabled({ projectId }, provider, parsed.data.enabled),
+        toggleAppConfigEnabled({ workspaceId }, provider, parsed.data.enabled),
       () => ({
-        projectId,
+        workspaceId,
         userId: auth.userId,
         userEmail: auth.userEmail,
         action: AUDIT_ACTIONS.UPDATE,
@@ -965,13 +983,13 @@ export const appRoutes = () => {
   // ── GET /apps/:provider/blocklist ── list blocklist state ─────────────
   app.get("/:provider/blocklist", authMiddleware, async (c) => {
     const auth = c.get("auth");
-    const projectId = requireProjectId(auth);
+    const workspaceId = requireWorkspaceId(auth);
     const provider = c.req.param("provider")!;
     const appDef = getApp(provider);
     if (!appDef) return c.json({ error: "Unknown provider" }, 404);
 
     const states = await getBlocklistState(
-      { projectId, organizationId: auth.organizationId },
+      { workspaceId, organizationId: auth.organizationId },
       provider,
       appDef.blocklist ?? [],
     );
@@ -981,7 +999,7 @@ export const appRoutes = () => {
   // ── POST /apps/:provider/blocklist ── activate one of the app's hosts ──
   app.post("/:provider/blocklist", authMiddleware, async (c) => {
     const auth = c.get("auth");
-    const projectId = requireProjectId(auth);
+    const workspaceId = requireWorkspaceId(auth);
     const provider = c.req.param("provider")!;
     const appDef = getApp(provider);
     if (!appDef) return c.json({ error: "Unknown provider" }, 404);
@@ -995,7 +1013,7 @@ export const appRoutes = () => {
       return c.json({ error: "Provide { hostId }" }, 400);
     }
     const result = await activateBlocklistHost(
-      { projectId },
+      { workspaceId },
       provider,
       body.hostId,
       appDef.blocklist ?? [],
@@ -1008,14 +1026,14 @@ export const appRoutes = () => {
   // ── PATCH /apps/:provider/blocklist/:ruleId ── toggle enabled ─────────
   app.patch("/:provider/blocklist/:ruleId", authMiddleware, async (c) => {
     const auth = c.get("auth");
-    const projectId = requireProjectId(auth);
+    const workspaceId = requireWorkspaceId(auth);
     const ruleId = c.req.param("ruleId")!;
 
     const body = await c.req.json().catch(() => null);
     if (body?.enabled === undefined)
       return c.json({ error: "enabled is required" }, 400);
 
-    await toggleBlocklistRule({ projectId }, ruleId, body.enabled);
+    await toggleBlocklistRule({ workspaceId }, ruleId, body.enabled);
     invalidateGatewayCache(c.req.raw);
     return c.json({ success: true });
   });
@@ -1023,10 +1041,10 @@ export const appRoutes = () => {
   // ── DELETE /apps/:provider/blocklist/:ruleId ── remove blocklist rule ──
   app.delete("/:provider/blocklist/:ruleId", authMiddleware, async (c) => {
     const auth = c.get("auth");
-    const projectId = requireProjectId(auth);
+    const workspaceId = requireWorkspaceId(auth);
     const ruleId = c.req.param("ruleId")!;
 
-    await removeBlocklistRule({ projectId }, ruleId);
+    await removeBlocklistRule({ workspaceId }, ruleId);
     invalidateGatewayCache(c.req.raw);
     return c.body(null, 204);
   });

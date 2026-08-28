@@ -255,7 +255,6 @@ export const vertexAi: AppDefinition = {
     },
   },
   labelHint: 'e.g. "prod-project", "experiments"',
-  available: true,
   credentialStubs: [
     {
       path: "~/.config/gcloud/application_default_credentials.json",

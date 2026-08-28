@@ -48,5 +48,4 @@ export const flyio: AppDefinition = {
     },
   },
   labelHint: 'e.g. "production", "side-project"',
-  available: true,
 };

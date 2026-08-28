@@ -13,13 +13,34 @@ export const AUDIT_ACTIONS = {
   DELETE: "delete",
   REGENERATE: "regenerate",
   DISCONNECT: "disconnect",
+  // Channels (step 6): a gateway approval decided from a provider surface —
+  // the audit row that names the human clicker, since the gateway's own
+  // `approved_by` can only carry the service key's owner.
+  APPROVE: "approve",
+  DENY: "deny",
   // Policy engine: snapshot the draft policy set into the published set.
   PUBLISH: "publish",
-  // EE-only (partner layer): a user claims a partner-created org as its owner.
-  CLAIM: "claim",
+  // Memory (step 8): scrub one revision's snapshot in place — the one
+  // deliberate history rewrite, first-class so compliance can grep for it.
+  REDACT: "redact",
   // EE-only (identity): a claimed resource passed its ownership proof
   // (e.g. an org domain's DNS TXT check).
   VERIFY: "verify",
+  // Team invitations (free on every edition): offering someone a place in the
+  // organization, and their redeeming it. Distinct from CREATE/UPDATE because
+  // an invitation is an offer — the membership it produces is audited too, and
+  // reading "invite" then "accept" is how the join is reconstructed.
+  INVITE: "invite",
+  ACCEPT: "accept",
+  // SSH front door (sandbox-platform step 5): a short-lived user certificate
+  // signed for a (user, agent) pair — an access GRANT, so first-class rather
+  // than CREATE. Metadata carries ids + the cert serial, never key material.
+  MINT: "mint",
+  // A live shell/scp/sftp session opening and closing. A human-driven shell
+  // is new policy surface — these two rows are the entire session record
+  // (content recording is deliberately out of scope, privacy posture).
+  SESSION_OPEN: "session_open",
+  SESSION_CLOSE: "session_close",
 } as const;
 
 export const AUDIT_SERVICES = {
@@ -35,15 +56,27 @@ export const AUDIT_SERVICES = {
   API_KEY: "api-key",
   APP_CONNECTION: "app-connection",
   APP_CONFIG: "app-config",
+  // Channels (hosted-agents v2 step 6): org provider integrations and
+  // per-agent presences (Slack first). Free — audited from the API routes.
+  CHANNEL: "channel",
+  // Scheduled tasks (hosted-agents v2 step 7): per-agent crons. Free —
+  // audited from the API routes; agent-authored tool calls are not audited
+  // here (the fired turns are their own record).
+  CRON: "cron",
+  // Agent memory (hosted-agents v2 step 8): per-agent durable memory with
+  // revision history. Free — audited from the API routes; agent tool WRITES
+  // are audited under the resolved creating user (viaAgent), reads never.
+  MEMORY: "memory",
+  // Skills (hosted-agents v2 step 9): user-authored capabilities materialized
+  // into sandboxes. Free — audited from the API routes on both doors
+  // (workspace and org); agents cannot author skills at all.
+  SKILL: "skill",
   // EE-only (policy-engine step 7): the org app-availability allowlist
   // (toggle + per-principal grants).
   APP_AVAILABILITY: "app-availability",
-  PROJECT: "project",
+  WORKSPACE: "workspace",
   ORGANIZATION: "organization",
-  // EE-only (partner layer)
-  PARTNER: "partner",
-  PARTNER_SECRET: "partner-secret",
-  // EE-only (budget module): per-(secret, org) spend caps
+  // EE-only (budget module, dormant): per-(secret, org) spend caps
   BUDGET: "budget",
   // EE-only (identity linking): auth-identity relink decisions
   AUTH: "auth",
@@ -60,6 +93,16 @@ export const AUDIT_SERVICES = {
   ROLE_MAPPING: "role-mapping",
   // EE-only (directory): bearer tokens for the org's SCIM endpoint
   SCIM_TOKEN: "scim-token",
+  // Team invitations. Free — collaboration is not an enterprise feature; the
+  // membership rows an accepted invitation creates stay under MEMBER.
+  INVITATION: "invitation",
+  // EE-only (member provisioning): pre-minted placeholder accounts handed out
+  // via claim links. CREATE = minted, ACCEPT = claimed.
+  PROVISION: "provision",
+  // SSH front door (sandbox-platform step 5): certificate mints (MINT) and
+  // terminator-reported session open/close. Free shared code, dark without
+  // an SSH CA configured; sourceIp in metadata is terminator-reported.
+  SSH: "ssh",
 } as const;
 
 export const AUDIT_STATUS = {
@@ -70,8 +113,6 @@ export const AUDIT_STATUS = {
 export const AUDIT_SOURCE = {
   APP: "app",
   API: "api",
-  // EE-only (partner layer): actions performed via the Partner API/portal.
-  PARTNER: "partner",
   // EE-only (identity): state created by an SSO login itself (JIT joins,
   // connection activation) rather than by an interactive admin action.
   SSO_JIT: "sso-jit",
@@ -94,7 +135,7 @@ export type AuditSource = (typeof AUDIT_SOURCE)[keyof typeof AUDIT_SOURCE];
 // ─── Service ──────────────────────────────────────────────────────────────────
 
 export interface AuditEventParams {
-  projectId?: string;
+  workspaceId?: string;
   organizationId?: string;
   userId: string;
   userEmail: string;
@@ -140,9 +181,9 @@ export type AuditParams = Omit<AuditEventParams, "status"> & {
  *
  * @example
  * return withAudit(
- *   () => createSecretService(projectId, input),
+ *   () => createSecretService(workspaceId, input),
  *   (secret) => ({
- *     projectId, userId,
+ *     workspaceId, userId,
  *     action: AUDIT_ACTIONS.CREATE,
  *     service: AUDIT_SERVICES.SECRET,
  *     metadata: { secretId: secret.id },
@@ -159,7 +200,7 @@ export const withAudit = async <T>(
     status: AUDIT_STATUS.SUCCESS,
     ...params,
   });
-  if (params.projectId) invalidateGatewayCacheForAccount(params.projectId);
+  if (params.workspaceId) invalidateGatewayCacheForAccount(params.workspaceId);
   if (params.organizationId)
     invalidateGatewayCacheForOrg(params.organizationId);
   return result;

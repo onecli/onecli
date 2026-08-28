@@ -4,14 +4,19 @@ import {
 } from "../validations/policy";
 
 /**
- * Resource axes — the TS twin of the gateway's `ee/granular_access.rs`
- * `ResourceAxis`, and the single definition of what "one resource is inside
+ * LICENSED-MIRROR: deliberate Apache twin of the gateway's licensed
+ * `ee/granular_access.rs` `ResourceAxis`. Free reflection routes and client
+ * bundles execute this file, so it must NOT move into `ee/` — declared in
+ * ee-boundary.ts LICENSED_MIRRORS.
+ *
+ * Resource axes — the single definition of what "one resource is inside
  * another" means for a session policy ("Resources": which repositories or
  * folders an injected credential may reach).
  *
  * It lives here, outside `ee/`, because the shared reflection and grants
- * services compose scopes and must build standalone. The functions are pure and
- * inert in editions that store no session policies.
+ * services compose scopes and must build standalone (and the module is
+ * client-bundle-reachable). The functions are pure and inert in editions that
+ * store no session policies.
  *
  * ⚠ These rules must stay byte-identical to the gateway's — the gateway is what
  * actually enforces them, and a divergence would show the operator one scope

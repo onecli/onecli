@@ -1,5 +1,61 @@
 # Changelog
 
+## [2.2.3](https://github.com/onecli/onecli/compare/v2.2.2...v2.2.3) (2026-08-26)
+
+
+### Bug Fixes
+
+* per-conversation jcode sessions + busy self-heal, agent report-back contract, standalone ssh-terminator app ([#518](https://github.com/onecli/onecli/issues/518)) ([c536924](https://github.com/onecli/onecli/commit/c536924594886d7a93101397cddf74073379bfaa))
+* self-host SSH docker backend + default-on provisioning, one-shot schedules, visible swarm/watch wakes ([#522](https://github.com/onecli/onecli/issues/522)) ([1a9f721](https://github.com/onecli/onecli/commit/1a9f72125ffd365eb72eb81620da6c0a7d903f6c))
+
+## [2.2.2](https://github.com/onecli/onecli/compare/v2.2.1...v2.2.2) (2026-08-25)
+
+
+### Bug Fixes
+
+* heartbeat turn liveness + 6h ceiling, onboarding v2, in-place model-key recovery, plan catalog, self-host version line ([#515](https://github.com/onecli/onecli/issues/515)) ([909da33](https://github.com/onecli/onecli/commit/909da33a7edc71719ff11b6e40aeca6ef0f26537))
+
+## [2.2.1](https://github.com/onecli/onecli/compare/v2.2.0...v2.2.1) (2026-08-24)
+
+
+### Bug Fixes
+
+* user-chosen Slack transport, removable org workspaces in every state, agent-image upgrades on self-host ([#513](https://github.com/onecli/onecli/issues/513)) ([b2ff642](https://github.com/onecli/onecli/commit/b2ff64240124e09ae23bb5501b637764d4656e39))
+
+## [2.2.0](https://github.com/onecli/onecli/compare/v2.1.0...v2.2.0) (2026-08-24)
+
+
+### Features
+
+* **turns:** 1h ceiling, pre-ceiling wrap-up warning, honest time-limit copy ([#510](https://github.com/onecli/onecli/issues/510)) ([fd44ea0](https://github.com/onecli/onecli/commit/fd44ea0c54f0521f2a06ea8ef75691ee2c10b8fb))
+
+## [2.1.0](https://github.com/onecli/onecli/compare/v2.0.1...v2.1.0) (2026-08-24)
+
+
+### Features
+
+* SSH front door, registered keys, durable sandbox homes, hosted-agent fan-out ([#508](https://github.com/onecli/onecli/issues/508)) ([f383b31](https://github.com/onecli/onecli/commit/f383b3185e3a52907da531510d5d659b79e7460a))
+
+
+### Bug Fixes
+
+* coded model-provider refusals, stale approval cards, and pinned-connection path fallback ([#504](https://github.com/onecli/onecli/issues/504)) ([ff7a192](https://github.com/onecli/onecli/commit/ff7a1921a95943d19066567b274c1d3c9c157c14))
+
+## [2.0.1](https://github.com/onecli/onecli/compare/v2.0.0...v2.0.1) (2026-08-18)
+
+
+### Bug Fixes
+
+* chat-native approval cards, cross-surface sync, and channel seams ([#501](https://github.com/onecli/onecli/issues/501)) ([3513c69](https://github.com/onecli/onecli/commit/3513c69f0edfd4d35920499a154385c5e61e081b))
+* restore GitHub-detectable Apache-2.0 LICENSE ([#499](https://github.com/onecli/onecli/issues/499)) ([17e7db1](https://github.com/onecli/onecli/commit/17e7db175fad1c070829e2f12f78ac1205d522d6))
+
+## [2.0.0](https://github.com/onecli/onecli/compare/v1.45.0...v2.0.0) (2026-08-18)
+
+
+### Features
+
+* OneCLI v2 - workspaces, split services, hosted agents ([#497](https://github.com/onecli/onecli/issues/497)) ([612ce80](https://github.com/onecli/onecli/commit/612ce802701c2b8532a77c56cbc5e020f42edd90))
+
 ## [1.45.0](https://github.com/onecli/onecli/compare/v1.44.0...v1.45.0) (2026-07-31)
 
 

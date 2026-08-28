@@ -25,25 +25,19 @@ pub(crate) const CONNECTION_ID_HEADER: &str = "x-onecli-connection-id";
 /// Header name for listing available connections (response).
 pub(crate) const CONNECTIONS_HEADER: &str = "x-onecli-connections";
 
-/// Which ORG/PROJECT credential pool a connecting agent draws from. Since
-/// attach-model step 7 the v2 selection IS the whole story for those tiers:
-/// every agent is rule-selected, and the retired `agents.secret_mode` column
-/// is never read (it drops in step 8). The PARTNER secret tier rides OUTSIDE
-/// this classification: partner secrets are org infrastructure a rule cannot
-/// even name (`assertTargetsValid` forbids it), so `resolve_secret_injections`
-/// injects them unconditionally — a grant-less agent must still keep
-/// partner-provided (budget-metered) keys.
+/// Which ORG/WORKSPACE credential pool a connecting agent draws from. Since
+/// attach-model step 7 the v2 selection IS the whole story: every agent is
+/// rule-selected (the legacy `agents.secret_mode` column is dropped).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum InjectionPool {
     /// A rule-driven selection: the fenced pool narrowed to what the agent's
     /// v2 allow rules name.
     RuleSelected,
-    /// No selection: nothing from the org/project pool is injected (the
-    /// grant-independent partner tier still is). Since step 10 the old
-    /// per-agent grant tables are unread, and since step 7 there is no
-    /// all-mode fallback — an empty selection injects NOTHING from these
-    /// tiers, or a deliberately restricted agent would silently receive every
-    /// org/project credential.
+    /// No selection: nothing from the org/workspace pool is injected. Since
+    /// step 10 the old per-agent grant tables are unread, and since step 7
+    /// there is no all-mode fallback — an empty selection injects NOTHING,
+    /// or a deliberately restricted agent would silently receive every
+    /// org/workspace credential.
     Empty,
 }
 
@@ -86,12 +80,12 @@ pub(crate) struct ConnectResponse {
     pub injection_rules: Vec<InjectionRule>,
     #[serde(default)]
     pub app_connections: Vec<db::AppConnectionRow>,
-    pub project_id: Option<String>,
+    pub workspace_id: Option<String>,
     pub organization_id: Option<String>,
     pub agent_id: Option<String>,
     pub agent_name: Option<String>,
     pub agent_identifier: Option<String>,
-    /// True when the project has credentials (secrets or app connections) for
+    /// True when the workspace has credentials (secrets or app connections) for
     /// this host but the agent can't access them (selective mode). Used to show
     /// a more helpful error ("grant access") instead of "connect the app".
     #[serde(default)]
@@ -100,21 +94,17 @@ pub(crate) struct ConnectResponse {
     /// "enterprise").
     #[serde(default)]
     pub plan: String,
-    /// Cloud-only: pending claim token when this org is a partner-created org
-    /// awaiting claim (claim mode). None otherwise. Inert in OSS.
-    #[serde(default)]
-    pub claim_token: Option<String>,
     /// Cloud-only: spend budgets governing the effective credential for this
     /// host (0/1 in practice — the response is per-host).
     #[serde(default)]
-    pub budget_bindings: Vec<crate::budget::BudgetBinding>,
+    pub budget_bindings: Vec<crate::ee::budget::BudgetBinding>,
     /// Cloud-only: the published new-model policy rules for this connection (org
-    /// and project scopes), loaded here (cached ~60s with the rest of this
+    /// and workspace scopes), loaded here (cached ~60s with the rest of this
     /// response) so the per-request decision path is DB-free. Empty when
     /// the engine is off, or before the org is backfilled.
     #[serde(default)]
     pub policy_rules_v2: db::PolicyV2Rules,
-    /// Cloud-only: the apps this connection's project may reach (step 7), resolved
+    /// Cloud-only: the apps this connection's workspace may reach (step 7), resolved
     /// here (cached ~60s with the rest of this response) so the per-request app
     /// pre-check is DB-free. Unrestricted (every app available) in OSS, when the
     /// org's availability mode is "open", or when enforcement is off.
@@ -189,12 +179,24 @@ fn granular_scoping_requested(session_policy: Option<&serde_json::Value>) -> boo
 fn stamp_resource_scopes(
     connections: &mut [db::AppConnectionRow],
     selection: &db::InjectSelection,
+    entitled: bool,
 ) {
     for c in connections {
-        c.session_policy = crate::ee_apps::compose_resource_scope(
-            selection.boundaries.get(&c.id),
-            selection.connections.get(&c.id).and_then(|p| p.as_ref()),
-        );
+        // Resources (#39) and the org resource boundary (#40) are licensed.
+        // Unlicensed, no session policy is ever stamped — this is the single
+        // producer (the row SELECTs hard-code NULL), so every per-request
+        // granular hook short-circuits on `None` and credentials inject
+        // unscoped. That includes the NARROWING kind of policy: with the flag
+        // off no EE behavior runs, protective or not (decided posture; the
+        // console surfaces affected grants as not enforced).
+        c.session_policy = if entitled {
+            crate::ee::granular_access::intersect_policies(
+                selection.boundaries.get(&c.id),
+                selection.connections.get(&c.id).and_then(|p| p.as_ref()),
+            )
+        } else {
+            None
+        };
     }
 }
 
@@ -216,7 +218,7 @@ pub(crate) struct PendingInjection {
     pub decrypted_json: String,
     pub hostname: String,
     pub cache_key: String,
-    pub project_id: String,
+    pub workspace_id: String,
 }
 
 /// Cached injection result including host rewrite, so cache hits preserve routing.
@@ -329,7 +331,8 @@ impl PolicyEngine {
         let policy_rules_v2 = crate::policy_engine::load_connect_v2(
             &self.pool,
             &agent.organization_id,
-            &agent.project_id,
+            &agent.workspace_id,
+            crate::edition::entitled(),
         )
         .await
         .map_err(db_err)?;
@@ -351,7 +354,7 @@ impl PolicyEngine {
         // scoped to a different agent.
         let has_credentials = !injection_rules.is_empty() || !app_connections.is_empty();
 
-        // Check if the project has credentials (secrets or app connections) for
+        // Check if the workspace has credentials (secrets or app connections) for
         // this host that the agent's grants don't attach — surfaced as an
         // `access_restricted` error pointing at the attach surface instead of a
         // generic credential-not-found.
@@ -360,18 +363,15 @@ impl PolicyEngine {
 
         let plan = plan_for_subscription_status(&agent.subscription_status).to_string();
 
-        // Cloud-only: resolve claim-mode state once here (cached with the rest
-        // of ConnectResponse for 60s). No-op in OSS (returns None).
-        let claim_token =
-            crate::partner::claim_token_for_org(&self.pool, &agent.organization_id).await;
-
-        // Cloud-only: resolve which apps this project may connect (step 7), cached
-        // here so the per-request pre-check is DB-free. "All available" in OSS,
-        // when the org's availability mode is "open", or when enforcement is off.
+        // Licensed (#29): resolve which apps this workspace may connect (step 7),
+        // cached here so the per-request pre-check is DB-free. "All available"
+        // unlicensed, when the org's availability mode is "open", or when
+        // enforcement is off.
         let available_apps = crate::policy_engine::load_available_apps(
             &self.pool,
             &agent.organization_id,
-            &agent.project_id,
+            &agent.workspace_id,
+            crate::edition::entitled(),
         )
         .await;
 
@@ -379,14 +379,13 @@ impl PolicyEngine {
             intercept: has_credentials || access_restricted,
             injection_rules,
             app_connections,
-            project_id: Some(agent.project_id.clone()),
+            workspace_id: Some(agent.workspace_id.clone()),
             organization_id: Some(agent.organization_id.clone()),
             agent_id: Some(agent.id.clone()),
             agent_name: Some(agent.name.clone()),
             agent_identifier: agent.identifier.clone(),
             access_restricted,
             plan,
-            claim_token,
             budget_bindings,
             policy_rules_v2,
             available_apps,
@@ -400,47 +399,34 @@ impl PolicyEngine {
         agent: &db::AgentRow,
         hostname: &str,
         selection: &db::InjectSelection,
-    ) -> Result<(Vec<InjectionRule>, Vec<crate::budget::BudgetBinding>), ConnectError> {
-        // The PARTNER tier is GRANT-INDEPENDENT (attach-model steps 5+7): a
-        // rule cannot name a partner secret (`assertTargetsValid`), so grants
-        // can never carry that tier — it is injected in every arm, at LOWEST
-        // precedence: later same-header injections override earlier ones, so
-        // org/project values always win. `inherited_secret_rows` is a no-op
-        // stub outside the cloud edition (returns an empty Vec).
+    ) -> Result<(Vec<InjectionRule>, Vec<crate::ee::budget::BudgetBinding>), ConnectError> {
         let secrets = match secret_pool(selection) {
             InjectionPool::RuleSelected => {
                 // Rule-driven: the agent's allow rules name specific secrets
                 // (`secret_ids`) and/or "all secrets at a level"
-                // (`secret_scopes`). Fetch the ORG/PROJECT-fenced candidate
+                // (`secret_scopes`). Fetch the ORG/WORKSPACE-fenced candidate
                 // pool and NARROW to the named ids OR the named levels (a
-                // secret's own `scope` — "organization" / "project"). The
+                // secret's own `scope` — "organization" / "workspace"). The
                 // org-fence is on the FETCH, so a rule naming another org's
-                // secret can't pull it (the id simply isn't in the pool). The
-                // selection never filters the partner tier (above).
-                let (partner_rows, org_result, project_result) = tokio::join!(
-                    crate::partner::inherited_secret_rows(&self.pool, &agent.organization_id),
+                // secret can't pull it (the id simply isn't in the pool).
+                let (org_result, workspace_result) = tokio::join!(
                     db::find_secrets_by_org(&self.pool, &agent.organization_id),
-                    db::find_secrets_by_project(&self.pool, &agent.project_id),
+                    db::find_secrets_by_workspace(&self.pool, &agent.workspace_id),
                 );
                 let mut selected = org_result.map_err(db_err)?;
-                selected.extend(project_result.map_err(db_err)?);
+                selected.extend(workspace_result.map_err(db_err)?);
                 selected.retain(|s| {
                     selection.secret_ids.contains(&s.id)
                         || selection.secret_scopes.contains(&s.scope)
                 });
-                let mut merged = partner_rows;
-                merged.extend(selected);
-                merged
+                selected
             }
-            // An agent with no rule-driven selection has no granted org/project
-            // secrets → only the grant-independent partner tier is injected.
-            // WHICH org/project secrets an agent gets comes solely from its v2
-            // allow rules (incl. the frozen equipment rules that mirror its old
-            // grants) — there is no `agent_secrets` fallback since step 10, and
-            // no all-mode fallback since step 7.
-            InjectionPool::Empty => {
-                crate::partner::inherited_secret_rows(&self.pool, &agent.organization_id).await
-            }
+            // An agent with no rule-driven selection injects nothing: WHICH
+            // org/workspace secrets an agent gets comes solely from its v2 allow
+            // rules (incl. the frozen equipment rules that mirror its old
+            // grants) — the legacy per-agent grant tables are dropped, and
+            // there has been no all-mode fallback since step 7.
+            InjectionPool::Empty => Vec::new(),
         };
 
         let matching: Vec<_> = secrets
@@ -461,7 +447,7 @@ impl PolicyEngine {
             // Resolve the value from its source (inline column or live 1Password
             // reference); a failure skips the secret, exactly as a decrypt
             // failure always has.
-            let Some(value) = self.resolve_secret_value(secret, &agent.project_id).await else {
+            let Some(value) = self.resolve_secret_value(secret, &agent.workspace_id).await else {
                 continue;
             };
 
@@ -508,11 +494,17 @@ impl PolicyEngine {
             });
         }
 
-        // Cloud-only: resolve spend budgets for the effective partner credential
-        // among the host-filtered secrets. The budget module owns which partner
-        // secret is effective (by scope, not shadowed). No-op in OSS.
-        let budget_bindings =
-            crate::budget::resolve_bindings(&self.pool, &agent.organization_id, &matching).await;
+        // Resolve spend budgets governing the effective credential among the
+        // host-filtered secrets. Dormant today — nothing produces
+        // budget-eligible secrets (see `ee::budget`) — kept for a future
+        // budget surface. No-op in OSS.
+        let budget_bindings = crate::ee::budget::resolve_bindings(
+            &self.pool,
+            &agent.organization_id,
+            &matching,
+            crate::edition::entitled(),
+        )
+        .await;
 
         Ok((rules, budget_bindings))
     }
@@ -524,7 +516,7 @@ impl PolicyEngine {
     async fn resolve_secret_value(
         &self,
         secret: &db::SecretRow,
-        project_id: &str,
+        workspace_id: &str,
     ) -> Option<String> {
         match secret.value_source.as_str() {
             "onepassword" => {
@@ -536,7 +528,7 @@ impl PolicyEngine {
                     );
                     return None;
                 };
-                match self.onepassword.resolve_ref(project_id, op_ref).await {
+                match self.onepassword.resolve_ref(workspace_id, op_ref).await {
                     Ok(v) => Some(v),
                     Err(e) => {
                         warn!(
@@ -598,16 +590,16 @@ impl PolicyEngine {
                 // Rule-driven: the agent's allow rules name SPECIFIC connections
                 // (`kind=connection`) and/or ALL connections of a provider at a
                 // level (`kind=app` + `connection_scope`). Fetch the
-                // ORG/PROJECT-fenced pool and keep the connections a rule
+                // ORG/WORKSPACE-fenced pool and keep the connections a rule
                 // selects: a named id, or a (provider, scope) match. Attach the
                 // scope each one may reach below. Org-fence on the FETCH → a
                 // foreign id/scope can't pull a foreign connection.
-                let (org_result, project_result) = tokio::join!(
+                let (org_result, workspace_result) = tokio::join!(
                     db::find_app_connections_by_org(&self.pool, &agent.organization_id),
-                    db::find_app_connections_by_project(&self.pool, &agent.project_id),
+                    db::find_app_connections_by_workspace(&self.pool, &agent.workspace_id),
                 );
                 let mut merged = org_result.map_err(db_err)?;
-                merged.extend(project_result.map_err(db_err)?);
+                merged.extend(workspace_result.map_err(db_err)?);
                 merged.retain(|c| {
                     selection.connections.contains_key(&c.id)
                         || selection
@@ -615,13 +607,17 @@ impl PolicyEngine {
                             .iter()
                             .any(|(provider, scope)| *provider == c.provider && *scope == c.scope)
                 });
-                stamp_resource_scopes(&mut merged, selection);
+                // Org-scoped credentials inject on every tier; only the
+                // resource-scope stamping stays licensed (#39/#40) —
+                // unlicensed, org connections inject UNSCOPED.
+                let entitled = crate::edition::entitled();
+                stamp_resource_scopes(&mut merged, selection, entitled);
                 merged
             }
             // An agent with no rule-driven selection reaches no app connections
             // → none injected. As with secrets, WHICH connections an agent gets
-            // comes solely from its v2 allow rules — there is no
-            // `agent_app_connections` fallback since step 10, and no all-mode
+            // comes solely from its v2 allow rules — the legacy per-agent
+            // grant tables are dropped, and there has been no all-mode
             // fallback since step 7.
             InjectionPool::Empty => Vec::new(),
         };
@@ -647,7 +643,7 @@ impl PolicyEngine {
         request_path: Option<&str>,
         connection_id: Option<&str>,
         organization_id: &str,
-        project_id: &str,
+        workspace_id: &str,
         cache: &dyn CacheStore,
     ) -> Result<AppConnectionResult, ConnectError> {
         if app_connections.is_empty() {
@@ -665,9 +661,39 @@ impl PolicyEngine {
                         .collect(),
                 });
             };
-            return self
-                .resolve_connection_injections(conn, hostname, organization_id, project_id, cache)
-                .await;
+            // A pinned id only decides WHICH account to use — it cannot decide
+            // which PROVIDER serves the path. On a path-scoped shared host
+            // (www.googleapis.com: Gmail /gmail/*, Calendar /calendar/*,
+            // Drive /drive/*) an id naming a different provider than the
+            // request path builds rules that self-select to a path this
+            // request isn't on, so NOTHING injects and the upstream 401
+            // surfaces as a bogus `access_restricted` — a credential the
+            // agent HAS looks unattached. When another attached connection
+            // does serve this path, ignore the mismatched pin and fall through
+            // to path narrowing below.
+            let pin_serves = provider_serves_request(&conn.provider, hostname, request_path);
+            let another_serves = || {
+                app_connections.iter().any(|c| {
+                    c.id != conn.id && provider_serves_request(&c.provider, hostname, request_path)
+                })
+            };
+            if pin_serves || !another_serves() {
+                return self
+                    .resolve_connection_injections(
+                        conn,
+                        hostname,
+                        organization_id,
+                        workspace_id,
+                        cache,
+                    )
+                    .await;
+            }
+            debug!(
+                connection_id = %conn.id,
+                provider = %conn.provider,
+                host = %hostname,
+                "pinned connection does not serve this request path; falling back to path narrowing"
+            );
         }
 
         // On path-scoped shared hosts (e.g. www.googleapis.com, where Gmail,
@@ -687,7 +713,7 @@ impl PolicyEngine {
         if app_connections.len() == 1 {
             let conn = &app_connections[0];
             let mut result = self
-                .resolve_connection_injections(conn, hostname, organization_id, project_id, cache)
+                .resolve_connection_injections(conn, hostname, organization_id, workspace_id, cache)
                 .await?;
             if let AppConnectionResult::Rules {
                 provider,
@@ -772,7 +798,7 @@ impl PolicyEngine {
                         conn,
                         hostname,
                         organization_id,
-                        project_id,
+                        workspace_id,
                         cache,
                     )
                     .await?
@@ -843,7 +869,7 @@ impl PolicyEngine {
         conn: &db::AppConnectionRow,
         hostname: &str,
         organization_id: &str,
-        project_id: &str,
+        workspace_id: &str,
         cache: &dyn CacheStore,
     ) -> Result<AppConnectionResult, ConnectError> {
         let policy_suffix = conn
@@ -852,7 +878,7 @@ impl PolicyEngine {
             .map(|sp| format!(":{sp}"))
             .unwrap_or_default();
         let cache_key = format!(
-            "app_injection:{organization_id}:{project_id}:{}:{hostname}{policy_suffix}",
+            "app_injection:{organization_id}:{workspace_id}:{}:{hostname}{policy_suffix}",
             conn.id
         );
 
@@ -919,7 +945,7 @@ impl PolicyEngine {
         // scope, so the request is refused for it (`hooks::refuse_empty_scope`)
         // rather than quietly proceeding uncredentialed, which would read as
         // unmanaged traffic and escape the deny-defaults.
-        if crate::ee_apps::scope_reaches_nothing(conn.session_policy.as_ref()) {
+        if crate::ee::granular_access::denies_everything(conn.session_policy.as_ref()) {
             return Ok(AppConnectionResult::Rules {
                 rules: Vec::new(),
                 token_expires_at: None,
@@ -943,7 +969,8 @@ impl PolicyEngine {
         //
         // Only this shape defers. An ordinary expired-token refresh is
         // persisted and would be needed by the next allowed request anyway, so
-        // deferring it would buy nothing. OSS has no scopers and never defers.
+        // deferring it would buy nothing. Session policies are EE grant data,
+        // so an OSS deployment never defers.
         // The scoper is keyed by CREDENTIAL type (`github_app`), which lives in
         // the credentials payload — not by provider name (`github-app`), which
         // would silently match nothing and defer nothing.
@@ -954,7 +981,7 @@ impl PolicyEngine {
             .unwrap_or_default();
         let needs_token = apps::needs_access_token(&conn.provider);
         if needs_token
-            && crate::ee_apps::has_token_scoper(cred_type)
+            && crate::ee::granular_access::has_token_scoper(cred_type)
             && granular_scoping_requested(conn.session_policy.as_ref())
             && !apps::host_has_intercept_rules(hostname)
         {
@@ -973,7 +1000,7 @@ impl PolicyEngine {
                     decrypted_json,
                     hostname: hostname.to_string(),
                     cache_key,
-                    project_id: project_id.to_string(),
+                    workspace_id: workspace_id.to_string(),
                 }],
             });
         }
@@ -983,7 +1010,7 @@ impl PolicyEngine {
                 conn,
                 &decrypted_json,
                 hostname,
-                project_id,
+                workspace_id,
                 &cache_key,
                 cache,
             )
@@ -1018,7 +1045,7 @@ impl PolicyEngine {
             &pending.conn,
             &pending.decrypted_json,
             &pending.hostname,
-            &pending.project_id,
+            &pending.workspace_id,
             &pending.cache_key,
             cache,
         )
@@ -1034,7 +1061,7 @@ impl PolicyEngine {
         conn: &db::AppConnectionRow,
         decrypted_json: &str,
         hostname: &str,
-        project_id: &str,
+        workspace_id: &str,
         cache_key: &str,
         cache: &dyn CacheStore,
     ) -> Option<(Vec<InjectionRule>, Option<String>, Option<i64>)> {
@@ -1044,7 +1071,7 @@ impl PolicyEngine {
             self.resolve_access_token(
                 decrypted_json,
                 &conn.provider,
-                project_id,
+                workspace_id,
                 &conn.id,
                 conn.session_policy.as_ref(),
             )
@@ -1148,12 +1175,12 @@ impl PolicyEngine {
         Some((rules, rewrite_host, expires_at))
     }
 
-    /// Check if the project or org has any credentials (secrets or app connections) for this
+    /// Check if the workspace or org has any credentials (secrets or app connections) for this
     /// host that the agent can't access. Used to distinguish "not connected" from
     /// "connected but agent lacks access" in selective mode.
     async fn has_available_credentials(&self, agent: &db::AgentRow, hostname: &str) -> bool {
-        // Check 1: project or org has manual secrets matching this host
-        match db::find_secrets_by_project(&self.pool, &agent.project_id).await {
+        // Check 1: workspace or org has manual secrets matching this host
+        match db::find_secrets_by_workspace(&self.pool, &agent.workspace_id).await {
             Ok(secrets) => {
                 if secrets.iter().any(|s| {
                     secret_inject::secret_host_patterns(&s.type_, &s.host_pattern)
@@ -1184,15 +1211,15 @@ impl PolicyEngine {
             }
         }
 
-        // Check 2: project or org has app connections for this host
+        // Check 2: workspace or org has app connections for this host
         let providers = apps::providers_for_host(hostname);
         if providers.is_empty() {
             return false;
         }
 
-        let has_project_conns = match db::find_app_connections_by_project(
+        let has_workspace_conns = match db::find_app_connections_by_workspace(
             &self.pool,
-            &agent.project_id,
+            &agent.workspace_id,
         )
         .await
         {
@@ -1204,7 +1231,7 @@ impl PolicyEngine {
                 false
             }
         };
-        if has_project_conns {
+        if has_workspace_conns {
             return true;
         }
 
@@ -1228,7 +1255,7 @@ impl PolicyEngine {
         &self,
         json: &str,
         provider: &str,
-        project_id: &str,
+        workspace_id: &str,
         connection_id: &str,
         session_policy: Option<&serde_json::Value>,
     ) -> Option<(String, Option<i64>)> {
@@ -1247,7 +1274,7 @@ impl PolicyEngine {
 
         // Any non-empty session policy means scoped access is required.
         // Provider-specific interpretation (e.g. GitHub repos) is handled by
-        // ee_apps::try_refresh_credentials, not here. Shares its definition with
+        // granular_access::scope_token, not here. Shares its definition with
         // the deferral predicate so the two can never disagree about whether a
         // request needs a freshly minted credential.
         let needs_scoped_token = granular_scoping_requested(session_policy);
@@ -1272,15 +1299,15 @@ impl PolicyEngine {
                 .as_secs() as i64;
 
             if effective_expires_at.is_some_and(|exp| exp < now) || needs_scoped_token {
-                // Try cloud-specific refresh first, then shared credential types.
-                // WHICH one answered matters: only the cloud path consults the
-                // scoper, so only it can have produced a SCOPED credential. The
-                // shared fallback mints the ordinary broad one — treating that
-                // as scoped would let a policy the scoper declined (an axis it
-                // does not recognize, say) pass the fail-closed check below
-                // while nothing enforces it.
+                // Try the granular-access token scoper first, then the shared
+                // credential types. WHICH one answered matters: only the scoper
+                // can have produced a SCOPED credential. The shared fallback
+                // mints the ordinary broad one — treating that as scoped would
+                // let a policy the scoper declined (an axis it does not
+                // recognize, say) pass the fail-closed check below while
+                // nothing enforces it.
                 let scoped =
-                    crate::ee_apps::try_refresh_credentials(&cred_type, &creds, session_policy)
+                    crate::ee::granular_access::scope_token(&cred_type, &creds, session_policy)
                         .await;
                 let from_scoper = scoped.is_some();
                 let refresh_result = match scoped {
@@ -1315,7 +1342,7 @@ impl PolicyEngine {
                     // Authorized user / default: refresh via OAuth refresh_token
                     if let Some(config) = apps::refresh_config(provider) {
                         let byoc = self
-                            .resolve_byoc_credentials(project_id, provider, connection_id)
+                            .resolve_byoc_credentials(workspace_id, provider, connection_id)
                             .await;
                         let (byoc_id, byoc_secret) = match &byoc {
                             Some((id, secret)) => (Some(id.as_str()), Some(secret.as_str())),
@@ -1371,7 +1398,7 @@ impl PolicyEngine {
         // the broad credential would leave the restriction silently dead.
         if needs_scoped_token
             && !scoped_token_minted
-            && !crate::ee_apps::has_request_guard(provider)
+            && !crate::ee::granular_access::has_request_guard(provider)
         {
             warn!(
                 provider = %provider,
@@ -1421,19 +1448,19 @@ impl PolicyEngine {
     /// Prefers the config that *minted* the connection (the provenance link):
     /// its refresh token is bound to that OAuth client, so refresh must reuse it
     /// even when the tier order below would now pick a different row (e.g. an
-    /// org-minted connection whose project later added its own config). Falls
-    /// back to the project's own AppConfig row, then the organization-level row
+    /// org-minted connection whose workspace later added its own config). Falls
+    /// back to the workspace's own AppConfig row, then the organization-level row
     /// (EE editions only), for connections with no link (env-minted, no-config
     /// methods, or pre-dating the link) *and* for a link that resolves but
     /// yields no usable pair (config disabled, wrong provider, or missing
-    /// clientId/clientSecret). The org tier is consulted whenever the project
+    /// clientId/clientSecret). The org tier is consulted whenever the workspace
     /// tier yields no usable pair — row absent OR present but missing
     /// clientId/clientSecret — the same completeness semantics as the Node
-    /// resolver's project → org chain. Returns
+    /// resolver's workspace → org chain. Returns
     /// `Some((client_id, client_secret))` when a usable pair exists.
     async fn resolve_byoc_credentials(
         &self,
-        project_id: &str,
+        workspace_id: &str,
         provider: &str,
         connection_id: &str,
     ) -> Option<(String, String)> {
@@ -1449,22 +1476,22 @@ impl PolicyEngine {
             debug!(
                 connection_id = %connection_id,
                 provider = %provider,
-                "linked app config yielded no usable BYOC pair; falling back to project/org chain"
+                "linked app config yielded no usable BYOC pair; falling back to workspace/org chain"
             );
         }
 
-        let project_row = db::find_app_config(&self.pool, project_id, provider)
+        let workspace_row = db::find_app_config(&self.pool, workspace_id, provider)
             .await
             .map_err(|e| warn!(error = %e, "failed to query BYOC app config"))
             .ok()
             .flatten();
-        if let Some(row) = project_row {
+        if let Some(row) = workspace_row {
             if let Some(pair) = self.extract_byoc_pair(row).await {
                 return Some(pair);
             }
         }
 
-        let org_row = self.find_org_app_config(project_id, provider).await?;
+        let org_row = self.find_org_app_config(workspace_id, provider).await?;
         self.extract_byoc_pair(org_row).await
     }
 
@@ -1497,15 +1524,15 @@ impl PolicyEngine {
         Some((client_id, client_secret))
     }
 
-    /// Org-level BYOC fallback: the app config of the project's organization.
-    /// EE editions only — OSS has no way to create org-level app configs.
-    #[cfg(not(edition_oss))]
+    /// Org-level BYOC fallback: the app config of the workspace's organization.
+    /// Org-level app configs are created only through the EE org surface, so on
+    /// an OSS deployment there are no org rows and this degrades to `None`.
     async fn find_org_app_config(
         &self,
-        project_id: &str,
+        workspace_id: &str,
         provider: &str,
     ) -> Option<db::AppConfigRow> {
-        let organization_id = db::find_organization_id_by_project(&self.pool, project_id)
+        let organization_id = db::find_organization_id_by_workspace(&self.pool, workspace_id)
             .await
             .map_err(|e| warn!(error = %e, "failed to resolve org for BYOC fallback"))
             .ok()
@@ -1515,16 +1542,6 @@ impl PolicyEngine {
             .map_err(|e| warn!(error = %e, "failed to query org BYOC app config"))
             .ok()
             .flatten()
-    }
-
-    /// OSS: no org tier — org-level app configs are an EE surface.
-    #[cfg(edition_oss)]
-    async fn find_org_app_config(
-        &self,
-        _project_id: &str,
-        _provider: &str,
-    ) -> Option<db::AppConfigRow> {
-        None
     }
 }
 
@@ -1538,23 +1555,22 @@ fn db_err(e: anyhow::Error) -> ConnectError {
 
 /// Resolve with caching. Checks the generic `CacheStore` first, then
 /// queries the DB if needed. The cache key is namespaced as
-/// `connect:{project_id}:{agent_token}:{hostname}` so that cache
-/// invalidation can target all entries for a project by prefix.
+/// `connect:{workspace_id}:{agent_token}:{hostname}` so that cache
+/// invalidation can target all entries for a workspace by prefix.
 pub(crate) async fn resolve(
     agent_token: &str,
     hostname: &str,
     policy_engine: &PolicyEngine,
     cache: &dyn CacheStore,
 ) -> Result<ConnectResponse, ConnectError> {
-    // Look up agent first — needed for project_id in cache key.
+    // Look up agent first — needed for workspace_id in cache key.
     let agent = policy_engine.find_agent(agent_token).await?;
 
     let cache_key = format!(
         "connect:{}:{}:{agent_token}:{hostname}",
-        agent.organization_id, agent.project_id
+        agent.organization_id, agent.workspace_id
     );
 
-    // Check cache
     if let Some(response) = cache.get::<ConnectResponse>(&cache_key).await {
         debug!(host = %hostname, intercept = response.intercept, "resolve: cache hit");
         return Ok(response);
@@ -1565,13 +1581,12 @@ pub(crate) async fn resolve(
     // Query the database (agent already resolved, avoids re-querying)
     let response = policy_engine.resolve_uncached(&agent, hostname).await?;
 
-    // Cache the response
     cache.set(&cache_key, &response, CACHE_TTL_SECS).await;
 
     Ok(response)
 }
 
-/// Resolve with caching, using a known `project_id` to skip the agent DB
+/// Resolve with caching, using a known `workspace_id` to skip the agent DB
 /// query on cache hits. Designed for per-request resolution inside MITM
 /// tunnels where the agent identity is already known from CONNECT time.
 ///
@@ -1579,13 +1594,13 @@ pub(crate) async fn resolve(
 /// On cache miss: falls back to full resolution (agent query + DB).
 pub(crate) async fn resolve_from_cache(
     organization_id: &str,
-    project_id: &str,
+    workspace_id: &str,
     agent_token: &str,
     hostname: &str,
     policy_engine: &PolicyEngine,
     cache: &dyn CacheStore,
 ) -> Result<ConnectResponse, ConnectError> {
-    let cache_key = format!("connect:{organization_id}:{project_id}:{agent_token}:{hostname}");
+    let cache_key = format!("connect:{organization_id}:{workspace_id}:{agent_token}:{hostname}");
 
     if let Some(response) = cache.get::<ConnectResponse>(&cache_key).await {
         return Ok(response);
@@ -1686,7 +1701,7 @@ impl PolicyEngine {
 pub(crate) async fn seed_app_injection_cache(
     cache: &Arc<dyn CacheStore>,
     organization_id: &str,
-    project_id: &str,
+    workspace_id: &str,
     conn: &db::AppConnectionRow,
     hostname: &str,
     rules: Vec<InjectionRule>,
@@ -1699,7 +1714,7 @@ pub(crate) async fn seed_app_injection_cache(
         .map(|sp| format!(":{sp}"))
         .unwrap_or_default();
     let key = format!(
-        "app_injection:{organization_id}:{project_id}:{}:{hostname}{policy_suffix}",
+        "app_injection:{organization_id}:{workspace_id}:{}:{hostname}{policy_suffix}",
         conn.id
     );
     let entry = CachedAppInjection {
@@ -1721,7 +1736,7 @@ pub(crate) async fn seed_app_injection_cache(
 /// needed) and for rules whose stored host matches the request host.
 ///
 /// The comparison is on the FULL normalized host — never a single DNS label —
-/// so `nanos.jfrog.io` does not match `evil.jfrog.io`.
+/// so `mycompany.jfrog.io` does not match `evil.jfrog.io`.
 fn credential_host_mismatch(
     provider: &str,
     creds: Option<&serde_json::Value>,
@@ -1781,14 +1796,12 @@ mod tests {
     }
 
     // ── Injection pool (attach-model step 7) ────────────────────────────
-    // The v2 selection is the WHOLE story for the ORG/PROJECT tiers: the old
+    // The v2 selection is the WHOLE story for the ORG/WORKSPACE tiers: the old
     // per-agent grant tables became unread in step 10 and the all-mode merge
     // died in step 7, so there is nothing left to fall back to. The
     // load-bearing property is that an agent with nothing selected draws
     // NOTHING from those tiers — anything else would hand a deliberately
-    // restricted agent every credential in the project and org. (The partner
-    // secret tier is grant-independent and rides outside this classification —
-    // see `resolve_secret_injections`.)
+    // restricted agent every credential in the workspace and org.
 
     fn selection_with_secret(id: &str) -> db::InjectSelection {
         db::InjectSelection {
@@ -1810,7 +1823,7 @@ mod tests {
         assert_eq!(
             secret_pool(&empty),
             InjectionPool::Empty,
-            "no secret selection injects nothing from the org/project tiers (only the partner tier rides outside)"
+            "no secret selection injects nothing from the org/workspace tiers"
         );
         assert_eq!(
             connection_pool(&empty),
@@ -1843,7 +1856,7 @@ mod tests {
         );
         assert_eq!(
             secret_pool(&db::InjectSelection {
-                secret_scopes: vec!["project".to_string()],
+                secret_scopes: vec!["workspace".to_string()],
                 ..Default::default()
             }),
             InjectionPool::RuleSelected,
@@ -1855,7 +1868,7 @@ mod tests {
         );
         assert_eq!(
             connection_pool(&db::InjectSelection {
-                app_scopes: vec![("github".to_string(), "project".to_string())],
+                app_scopes: vec![("github".to_string(), "workspace".to_string())],
                 ..Default::default()
             }),
             InjectionPool::RuleSelected,
@@ -1870,14 +1883,13 @@ mod tests {
             intercept: true,
             injection_rules: vec![],
             app_connections: vec![],
-            project_id: None,
+            workspace_id: None,
             organization_id: None,
             agent_id: None,
             agent_name: None,
             agent_identifier: None,
             access_restricted: false,
             plan: "pro".to_string(),
-            claim_token: None,
             budget_bindings: vec![],
             policy_rules_v2: db::PolicyV2Rules::default(),
             available_apps: db::AvailableApps::default(),
@@ -1916,14 +1928,13 @@ mod tests {
                 injections: vec![],
             }],
             app_connections: vec![],
-            project_id: Some("proj_1".to_string()),
+            workspace_id: Some("proj_1".to_string()),
             organization_id: Some("org_1".to_string()),
             agent_id: Some("agent_1".to_string()),
             agent_name: Some("Test".to_string()),
             agent_identifier: None,
             access_restricted: false,
             plan: "pro".to_string(),
-            claim_token: None,
             budget_bindings: vec![],
             policy_rules_v2: db::PolicyV2Rules::default(),
             available_apps: db::AvailableApps::default(),
@@ -1958,14 +1969,13 @@ mod tests {
             intercept: true,
             injection_rules: vec![],
             app_connections: vec![],
-            project_id: Some("proj_restricted".to_string()),
+            workspace_id: Some("proj_restricted".to_string()),
             organization_id: Some("org_restricted".to_string()),
             agent_id: Some("agent_selective".to_string()),
             agent_name: Some("Selective Agent".to_string()),
             agent_identifier: None,
             access_restricted: true,
             plan: "pro".to_string(),
-            claim_token: None,
             budget_bindings: vec![],
             policy_rules_v2: db::PolicyV2Rules::default(),
             available_apps: db::AvailableApps::default(),
@@ -1984,7 +1994,7 @@ mod tests {
             .await;
         let cached = cached.expect("should be cached");
         assert!(cached.access_restricted);
-        assert_eq!(cached.project_id.as_deref(), Some("proj_restricted"));
+        assert_eq!(cached.workspace_id.as_deref(), Some("proj_restricted"));
     }
 
     // ── host_matches ────────────────────────────────────────────────────
@@ -2063,12 +2073,12 @@ mod tests {
         let creds = serde_json::json!({
             "access_token": "t",
             "token": "t",
-            "subdomain": "nanos.jfrog.io",
+            "subdomain": "mycompany.jfrog.io",
         });
         assert!(!credential_host_mismatch(
             "jfrog-artifactory",
             Some(&creds),
-            "nanos.jfrog.io"
+            "mycompany.jfrog.io"
         ));
     }
 
@@ -2076,19 +2086,19 @@ mod tests {
     fn credential_host_mismatch_false_with_scheme_and_case() {
         // Stored value may be a full URL or differently-cased; both sides are
         // normalized before comparison.
-        let creds = serde_json::json!({ "subdomain": "https://Nanos.JFrog.io/" });
+        let creds = serde_json::json!({ "subdomain": "https://MyCompany.JFrog.io/" });
         assert!(!credential_host_mismatch(
             "jfrog-artifactory",
             Some(&creds),
-            "nanos.jfrog.io"
+            "mycompany.jfrog.io"
         ));
     }
 
     #[test]
     fn credential_host_mismatch_other_tenant() {
         // A malicious dependency hitting evil.jfrog.io must NOT receive the
-        // token stored for nanos.jfrog.io.
-        let creds = serde_json::json!({ "subdomain": "nanos.jfrog.io" });
+        // token stored for mycompany.jfrog.io.
+        let creds = serde_json::json!({ "subdomain": "mycompany.jfrog.io" });
         assert!(credential_host_mismatch(
             "jfrog-artifactory",
             Some(&creds),
@@ -2103,20 +2113,20 @@ mod tests {
         assert!(credential_host_mismatch(
             "jfrog-artifactory",
             Some(&creds),
-            "nanos.jfrog.io"
+            "mycompany.jfrog.io"
         ));
         // Empty subdomain.
         let empty = serde_json::json!({ "subdomain": "" });
         assert!(credential_host_mismatch(
             "jfrog-artifactory",
             Some(&empty),
-            "nanos.jfrog.io"
+            "mycompany.jfrog.io"
         ));
         // No credentials at all.
         assert!(credential_host_mismatch(
             "jfrog-artifactory",
             None,
-            "nanos.jfrog.io"
+            "mycompany.jfrog.io"
         ));
     }
 
@@ -2124,11 +2134,11 @@ mod tests {
     fn credential_host_mismatch_similar_subdomain() {
         // The gate compares the FULL host, so a stored host must not be matched
         // by a similarly-named subdomain on the same suffix.
-        let creds = serde_json::json!({ "subdomain": "nanos.jfrog.io" });
+        let creds = serde_json::json!({ "subdomain": "mycompany.jfrog.io" });
         assert!(credential_host_mismatch(
             "jfrog-artifactory",
             Some(&creds),
-            "nanos-clone.jfrog.io"
+            "mycompany-clone.jfrog.io"
         ));
     }
 
@@ -2138,7 +2148,7 @@ mod tests {
         db::AppConnectionRow {
             id: id.into(),
             provider: provider.into(),
-            scope: "project".into(),
+            scope: "workspace".into(),
             credentials: None,
             label: None,
             metadata: None,
@@ -2280,7 +2290,10 @@ mod tests {
         .await;
 
         // An explicit x-onecli-connection-id is a deliberate override: the
-        // serves-path gate does not apply.
+        // serves-path gate does not apply — unless another attached
+        // connection actually serves the path (see the fallback test below).
+        // Here the pinned connection is the only one, so the pin stands even
+        // off-path.
         let res = engine
             .resolve_app_injection_for_request(
                 std::slice::from_ref(&c),
@@ -2309,6 +2322,146 @@ mod tests {
                 );
             }
             _ => panic!("expected Rules"),
+        }
+    }
+
+    #[tokio::test]
+    async fn mismatched_pin_falls_back_to_the_connection_that_serves_the_path() {
+        // A Gmail connection id pinned on a CALENDAR request (the shared
+        // www.googleapis.com host). The pin names an account, not a provider:
+        // honoring it would build only /gmail/* rules, which self-select away
+        // from this path, so nothing injects and Google's 401 surfaces as a
+        // bogus `access_restricted`. The Calendar connection serves the path,
+        // so it wins instead.
+        let engine = PolicyEngine::test_stub();
+        let store = new_store().await;
+        let cal = conn("c1", "google-calendar");
+        let gm = conn("c2", "gmail");
+        seed_app_injection(
+            &store,
+            &cal,
+            "www.googleapis.com",
+            vec![bearer_rule("/calendar/*", "cal")],
+            None,
+            Some("Cal"),
+        )
+        .await;
+        seed_app_injection(
+            &store,
+            &gm,
+            "www.googleapis.com",
+            vec![bearer_rule("/gmail/*", "gm")],
+            None,
+            Some("Gm"),
+        )
+        .await;
+
+        let conns = vec![cal, gm.clone()];
+        let res = engine
+            .resolve_app_injection_for_request(
+                &conns,
+                "www.googleapis.com",
+                Some("/calendar/v3/calendars/primary/events"),
+                Some("c2"),
+                "o1",
+                "p1",
+                &*store,
+            )
+            .await
+            .unwrap();
+        match res {
+            AppConnectionResult::Rules {
+                connection_id,
+                rules,
+                ..
+            } => {
+                assert_eq!(
+                    connection_id.as_deref(),
+                    Some("c1"),
+                    "the calendar connection serves this path and must win"
+                );
+                assert!(rules.iter().any(|r| r.path_pattern == "/calendar/*"));
+            }
+            _ => panic!("expected Rules"),
+        }
+
+        // With no other connection serving the path, the pin still stands.
+        let only_gmail = vec![gm];
+        let res = engine
+            .resolve_app_injection_for_request(
+                &only_gmail,
+                "www.googleapis.com",
+                Some("/calendar/v3/calendars/primary/events"),
+                Some("c2"),
+                "o1",
+                "p1",
+                &*store,
+            )
+            .await
+            .unwrap();
+        assert!(matches!(res, AppConnectionResult::Rules { .. }));
+    }
+
+    #[tokio::test]
+    async fn mismatched_pin_with_two_serving_accounts_stays_ambiguous() {
+        // A Gmail pin on a CALENDAR path where TWO Calendar accounts are
+        // attached: ignoring the pin must never silently pick one of them —
+        // account choice is the agent's, so the fallback lands on the same
+        // Ambiguous 409 the no-pin path would give (the response names the
+        // choices and the pin header to send).
+        let engine = PolicyEngine::test_stub();
+        let store = new_store().await;
+        let cal_a = conn("c1", "google-calendar");
+        let cal_b = conn("c2", "google-calendar");
+        let gm = conn("c3", "gmail");
+        seed_app_injection(
+            &store,
+            &cal_a,
+            "www.googleapis.com",
+            vec![bearer_rule("/calendar/*", "cal-a")],
+            None,
+            Some("Cal A"),
+        )
+        .await;
+        seed_app_injection(
+            &store,
+            &cal_b,
+            "www.googleapis.com",
+            vec![bearer_rule("/calendar/*", "cal-b")],
+            None,
+            Some("Cal B"),
+        )
+        .await;
+        seed_app_injection(
+            &store,
+            &gm,
+            "www.googleapis.com",
+            vec![bearer_rule("/gmail/*", "gm")],
+            None,
+            Some("Gm"),
+        )
+        .await;
+
+        let conns = vec![cal_a, cal_b, gm];
+        let res = engine
+            .resolve_app_injection_for_request(
+                &conns,
+                "www.googleapis.com",
+                Some("/calendar/v3/calendars/primary/events"),
+                Some("c3"),
+                "o1",
+                "p1",
+                &*store,
+            )
+            .await
+            .unwrap();
+        match res {
+            AppConnectionResult::Ambiguous { connections } => {
+                let mut ids: Vec<&str> = connections.iter().map(|c| c.id.as_str()).collect();
+                ids.sort_unstable();
+                assert_eq!(ids, vec!["c1", "c2"], "both Calendar accounts offered");
+            }
+            _ => panic!("expected Ambiguous"),
         }
     }
 
@@ -2466,7 +2619,7 @@ mod stamp_resource_scopes_tests {
         db::AppConnectionRow {
             id: id.into(),
             provider: "github-app".into(),
-            scope: "project".into(),
+            scope: "workspace".into(),
             credentials: None,
             label: None,
             metadata: None,
@@ -2493,9 +2646,7 @@ mod stamp_resource_scopes_tests {
     }
 
     /// The whole truth table of what a connection may reach, by how it was
-    /// granted and whether the organization bounds it. EE only: composing a
-    /// boundary is what the EE seam does, and OSS never produces one.
-    #[cfg(not(edition_oss))]
+    /// granted and whether the organization bounds it.
     #[test]
     fn stamps_the_scope_each_connection_may_actually_reach() {
         let mut rows = vec![conn("named"), conn("by-provider"), conn("unbounded")];
@@ -2520,7 +2671,7 @@ mod stamp_resource_scopes_tests {
             ],
         );
 
-        stamp_resource_scopes(&mut rows, &sel);
+        stamp_resource_scopes(&mut rows, &sel, true);
 
         assert_eq!(
             rows[0].session_policy,
@@ -2539,32 +2690,13 @@ mod stamp_resource_scopes_tests {
         );
     }
 
-    /// OSS enforces no resource boundaries — it has no guard that could — so
-    /// the seam leaves a selection untouched even if one were planted. Pinned
-    /// so the composition can never leak into an edition that cannot honour it.
-    #[cfg(edition_oss)]
-    #[test]
-    fn oss_leaves_the_selection_untouched() {
-        let mut rows = vec![conn("c1")];
-        let sel = selection(
-            &[("c1", Some(serde_json::json!({ "repositories": ["org/z"] })))],
-            &[("c1", serde_json::json!({ "repositories": ["org/a"] }))],
-        );
-        stamp_resource_scopes(&mut rows, &sel);
-        assert_eq!(
-            rows[0].session_policy,
-            Some(serde_json::json!({ "repositories": ["org/z"] }))
-        );
-    }
-
     #[test]
     fn a_connection_with_neither_reaches_everything_it_always_did() {
         let mut rows = vec![conn("plain")];
-        stamp_resource_scopes(&mut rows, &selection(&[("plain", None)], &[]));
+        stamp_resource_scopes(&mut rows, &selection(&[("plain", None)], &[]), true);
         assert_eq!(rows[0].session_policy, None);
     }
 
-    #[cfg(not(edition_oss))]
     #[test]
     fn a_boundary_disjoint_from_the_selection_reaches_nothing() {
         let mut rows = vec![conn("c1")];
@@ -2572,12 +2704,33 @@ mod stamp_resource_scopes_tests {
             &[("c1", Some(serde_json::json!({ "repositories": ["org/z"] })))],
             &[("c1", serde_json::json!({ "repositories": ["org/a"] }))],
         );
-        stamp_resource_scopes(&mut rows, &sel);
+        stamp_resource_scopes(&mut rows, &sel, true);
         assert_eq!(
             rows[0].session_policy,
             Some(serde_json::json!({ "repositories": [] })),
             "an empty overlap is the deny-all sentinel, not an absent scope"
         );
+    }
+
+    #[test]
+    fn unlicensed_stamps_no_session_policy_at_all() {
+        // #39/#40: with the flag off no scope is stamped — selection AND
+        // boundary alike are ignored, so the credential injects unscoped
+        // (deliberate: no EE behavior survives unlicensed, narrowing included).
+        let mut rows = vec![conn("named"), conn("by-provider")];
+        let sel = selection(
+            &[(
+                "named",
+                Some(serde_json::json!({ "repositories": ["org/a"] })),
+            )],
+            &[(
+                "by-provider",
+                serde_json::json!({ "repositories": ["org/b"] }),
+            )],
+        );
+        stamp_resource_scopes(&mut rows, &sel, false);
+        assert_eq!(rows[0].session_policy, None);
+        assert_eq!(rows[1].session_policy, None);
     }
 }
 
@@ -2614,7 +2767,7 @@ mod deferred_injection_tests {
         db::AppConnectionRow {
             id: "c-gh".into(),
             provider: "github-app".into(),
-            scope: "project".into(),
+            scope: "workspace".into(),
             credentials: Some(creds),
             label: Some("gh".into()),
             metadata: None,
@@ -2639,9 +2792,8 @@ mod deferred_injection_tests {
     /// The point of the deferral: a resource-scoped connection yields no rules
     /// during resolution — the credential is minted only once the request is
     /// allowed — while still reporting that it WILL inject, so the request
-    /// stays managed and the deny-defaults keep applying. EE editions only:
-    /// the deferral exists exactly where a token scoper does.
-    #[cfg(not(edition_oss))]
+    /// stays managed and the deny-defaults keep applying. The deferral exists
+    /// exactly where a token scoper does, and the scoper compiles everywhere.
     #[tokio::test]
     async fn a_resource_scoped_connection_defers_its_credential() {
         let engine = PolicyEngine::test_stub();
@@ -2672,44 +2824,6 @@ mod deferred_injection_tests {
                 assert_eq!(pending[0].conn.id, "c-gh");
             }
             _ => panic!("expected Rules"),
-        }
-    }
-
-    /// OSS never defers — it has no token scoper, so a session policy on a
-    /// connection (only plantable by hand there) changes nothing about WHEN the
-    /// credential resolves. Pinned so the deferral can never leak into OSS.
-    #[cfg(edition_oss)]
-    #[tokio::test]
-    async fn oss_never_defers_a_credential() {
-        let engine = PolicyEngine::test_stub();
-        let cache = store().await;
-        let conn = github_conn(
-            &engine,
-            Some(serde_json::json!({ "repositories": ["org/a"] })),
-        )
-        .await;
-
-        let result = engine
-            .resolve_app_injection_for_request(
-                std::slice::from_ref(&conn),
-                "api.github.com",
-                Some("/repos/org/a"),
-                None,
-                "org-1",
-                "proj-1",
-                &*cache,
-            )
-            .await
-            .expect("resolution");
-
-        match result {
-            AppConnectionResult::Rules { pending, .. } => {
-                assert!(pending.is_empty(), "OSS must never defer");
-            }
-            // The fake credentials cannot complete a real refresh here, so the
-            // eager path may resolve to nothing at all — equally undeferred.
-            AppConnectionResult::NoConnections => {}
-            _ => panic!("expected Rules or NoConnections"),
         }
     }
 
@@ -2749,7 +2863,6 @@ mod deferred_injection_tests {
     /// minted, nothing is injected. The stored credential is the unrestricted
     /// one — handing it over would grant exactly the access the policy exists
     /// to withhold, and it would do so silently.
-    #[cfg(not(edition_oss))]
     #[tokio::test]
     async fn a_scoped_credential_that_cannot_be_minted_injects_nothing() {
         let engine = PolicyEngine::test_stub();
@@ -2769,7 +2882,7 @@ mod deferred_injection_tests {
                         .expect("decrypt"),
                     hostname: "api.github.com".to_string(),
                     cache_key: "app_injection:test:deny-all".to_string(),
-                    project_id: "proj-1".to_string(),
+                    workspace_id: "proj-1".to_string(),
                 },
                 &*cache,
             )
@@ -2785,7 +2898,6 @@ mod deferred_injection_tests {
     /// credential: the guard is what restricts each call, so withholding the
     /// token would not tighten anything — it would break granular access
     /// altogether. Only token-scoped providers withhold when the mint fails.
-    #[cfg(not(edition_oss))]
     #[tokio::test]
     async fn a_request_guarded_provider_keeps_its_credential_under_a_scope() {
         let engine = PolicyEngine::test_stub();
@@ -2798,7 +2910,7 @@ mod deferred_injection_tests {
         let conn = db::AppConnectionRow {
             id: "c-dbx".into(),
             provider: "dropbox".into(),
-            scope: "project".into(),
+            scope: "workspace".into(),
             credentials: Some(creds),
             label: Some("dbx".into()),
             metadata: None,

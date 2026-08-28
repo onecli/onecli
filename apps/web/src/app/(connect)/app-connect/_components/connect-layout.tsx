@@ -56,7 +56,6 @@ export const ConnectLayout = ({
           </div>
         </div>
 
-        {/* Title */}
         <h1 className="text-center text-lg font-semibold leading-snug tracking-tight">
           OneCLI wants to connect
           <br />
@@ -67,7 +66,6 @@ export const ConnectLayout = ({
       {/* Body */}
       <div className="px-8 pb-8">{children}</div>
 
-      {/* Progress bar */}
       {progress !== null && (
         <Progress
           value={progress}

@@ -2,13 +2,14 @@
   "name": "@onecli/gateway",
   "version": "0.1.0",
   "private": true,
+  "license": "Apache-2.0",
   "scripts": {
     "build": "cargo build --release",
-    "dev": "cargo run --features \"${EDITION:-}\"",
-    "check": "cargo clippy -- -D warnings && cargo fmt --check",
+    "dev": "cargo run",
+    "check": "cargo clippy --all-targets -- -D warnings && cargo fmt --check",
     "lint": "cargo fmt --check",
     "format:check": "cargo fmt --check",
-    "check-types": "cargo clippy -- -D warnings",
+    "check-types": "cargo clippy --all-targets -- -D warnings",
     "test": "cargo test"
   }
 }

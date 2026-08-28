@@ -59,7 +59,7 @@ pub(crate) struct BudgetCharge {
 pub(crate) struct RequestEvent {
     #[allow(dead_code)] // read by cloud telemetry (Redis counters), unused in OSS
     pub org_id: String,
-    pub project_id: String,
+    pub workspace_id: String,
     pub agent_id: String,
     #[allow(dead_code)] // read by cloud telemetry (PostHog), unused in OSS
     pub agent_name: String,
@@ -88,6 +88,36 @@ pub(crate) struct RequestEvent {
     /// The v2 policy rule that decided this request (rule- or default-decided).
     /// `None` for plain allows and whenever the legacy path decided.
     pub matched_rule: Option<crate::policy::MatchedRule>,
+}
+
+impl crate::gateway::hooks::RequestMeta {
+    /// Build the telemetry event for this request, optionally carrying a metered
+    /// budget charge. Single mapping point so the default and budget paths agree.
+    /// Lives here (not in `hooks`) because both the request hooks and the budget
+    /// meter share it.
+    pub(crate) fn into_event(self, budget_charge: Option<BudgetCharge>) -> RequestEvent {
+        RequestEvent {
+            org_id: self.org_id,
+            workspace_id: self.workspace_id,
+            agent_id: self.agent_id,
+            agent_name: self.agent_name,
+            method: self.method,
+            host: self.host,
+            path: self.path,
+            provider: self.provider,
+            status: self.status,
+            latency_ms: self.latency_ms,
+            injection_count: self.injection_count,
+            timestamp: self.timestamp,
+            injected: self.injected,
+            decision: self.decision.unwrap_or(RequestDecision::Allowed),
+            connection_label: self.connection_label,
+            existing_log_id: self.existing_log_id,
+            log_id: None,
+            budget_charge,
+            matched_rule: self.matched_rule,
+        }
+    }
 }
 
 pub(crate) static SENDER: OnceLock<mpsc::Sender<RequestEvent>> = OnceLock::new();
@@ -195,7 +225,7 @@ pub(crate) async fn shutdown(deadline: std::time::Duration) {
 /// Accepts `&[&RequestEvent]` so callers can filter before extracting.
 pub(crate) struct BatchColumns {
     pub ids: Vec<String>,
-    pub project_ids: Vec<String>,
+    pub workspace_ids: Vec<String>,
     pub agent_ids: Vec<String>,
     pub methods: Vec<String>,
     pub hosts: Vec<String>,
@@ -218,7 +248,7 @@ pub(crate) fn extract_columns(events: &[&RequestEvent]) -> BatchColumns {
                     .unwrap_or_else(|| uuid::Uuid::new_v4().to_string())
             })
             .collect(),
-        project_ids: events.iter().map(|e| e.project_id.clone()).collect(),
+        workspace_ids: events.iter().map(|e| e.workspace_id.clone()).collect(),
         agent_ids: events.iter().map(|e| e.agent_id.clone()).collect(),
         methods: events.iter().map(|e| e.method.clone()).collect(),
         hosts: events.iter().map(|e| e.host.clone()).collect(),
@@ -241,7 +271,7 @@ mod tests {
     fn base_event() -> RequestEvent {
         RequestEvent {
             org_id: "org1".into(),
-            project_id: "p1".into(),
+            workspace_id: "p1".into(),
             agent_id: "a1".into(),
             agent_name: "test".into(),
             method: "POST".into(),

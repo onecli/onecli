@@ -19,20 +19,22 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@onecli/ui/components/select";
-import { useAgentsForProject } from "@/hooks/use-agents";
-import { useProjectsList } from "@/hooks/use-projects";
+import { useAgentsForWorkspace } from "@/hooks/use-agents";
+import { useWorkspacesList } from "@/hooks/use-workspaces";
+import { getStartedPath } from "@/lib/agents/get-started-target";
 
 interface GetStartedPickerProps {
-  /** The org to pick a project from; null keeps the dialog closed. */
+  /** The org to pick a workspace from; null keeps the dialog closed. */
   organizationId: string | null;
   onOpenChange: (open: boolean) => void;
 }
 
-// The org/account-scope front door to the Install page: pick a project of
-// THIS org (explicit header override, server-fenced against the caller's
-// memberships), then an agent, then land on that project's Install page with
-// the choice preselected. A router, not a content surface — the instructions
-// live only on the page.
+// The org/account-scope front door to your agent: pick a workspace of THIS org
+// (explicit header override, server-fenced against the caller's memberships),
+// then land wherever `getStartedPath` says — that workspace's existing agent,
+// or the create flow when it has none. Only asks what the URL cannot answer —
+// the workspace — and a single visible workspace skips even that. A router,
+// not a content surface: the create form itself lives on the roster.
 export const GetStartedPicker = ({
   organizationId,
   onOpenChange,
@@ -40,132 +42,108 @@ export const GetStartedPicker = ({
   const router = useRouter();
   const open = organizationId !== null;
 
-  const [projectId, setProjectId] = useState<string>("");
-  const [agentId, setAgentId] = useState<string>("");
+  // Only the EXPLICIT pick is state; whether it was decided for you is derived
+  // below, never stored alongside it.
+  const [picked, setPicked] = useState<string>("");
 
-  const { data: projects = [], isPending: projectsPending } = useProjectsList({
-    organizationId: organizationId ?? undefined,
-    enabled: open,
-  });
+  const { data: workspaces = [], isPending: workspacesPending } =
+    useWorkspacesList({
+      organizationId: organizationId ?? undefined,
+      enabled: open,
+    });
+  // One workspace answers the only question this dialog asks, so it answers
+  // itself and never renders the Select. Derived during render, not copied
+  // into state by an effect that would flash the question for a frame.
+  const onlyWorkspace = workspaces.length === 1 ? workspaces[0] : undefined;
+  const workspaceId = picked || (onlyWorkspace?.id ?? "");
+  const autoSkip = picked === "" && onlyWorkspace !== undefined;
+
+  // The chosen workspace's agents decide create-vs-chat — only the chosen one
+  // is read, never one request per listed workspace.
   const { data: agents = [], isPending: agentsPending } =
-    useAgentsForProject(projectId);
+    useAgentsForWorkspace(workspaceId);
 
-  // Reset on every open; a single visible project needs no choice.
+  // Reset on every close so the next open starts clean.
   useEffect(() => {
-    if (!open) {
-      setProjectId("");
-      setAgentId("");
-    }
+    if (!open) setPicked("");
   }, [open]);
-  useEffect(() => {
-    const only = projects.length === 1 ? projects[0] : undefined;
-    if (open && only) setProjectId(only.id);
-  }, [open, projects]);
-  useEffect(() => {
-    setAgentId((current) =>
-      current && agents.some((a) => a.id === current)
-        ? current
-        : ((agents.find((a) => a.isDefault) ?? agents[0])?.id ?? ""),
-    );
-  }, [agents]);
 
-  const selectedAgent = agents.find((a) => a.id === agentId);
-
-  const handleContinue = () => {
-    if (!projectId || !selectedAgent) return;
-    const query = selectedAgent.isDefault
-      ? ""
-      : `?agent=${encodeURIComponent(selectedAgent.identifier)}`;
+  // Navigating IS a side effect, so this one stays an effect. It waits until
+  // the destination is known: routing on a half-loaded agent list would send
+  // someone who HAS an agent to the create form.
+  useEffect(() => {
+    if (!open || !autoSkip || !workspaceId || agentsPending) return;
     onOpenChange(false);
-    router.push(`/p/${projectId}/install${query}`);
-  };
+    router.push(getStartedPath(workspaceId, agents));
+  }, [
+    open,
+    autoSkip,
+    workspaceId,
+    agentsPending,
+    agents,
+    onOpenChange,
+    router,
+  ]);
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="sm:max-w-md">
         <DialogHeader>
-          <DialogTitle>Get started</DialogTitle>
+          {/* Names the QUESTION, not the destination — create-vs-chat isn't
+              known until a workspace is picked. */}
+          <DialogTitle>Choose a workspace</DialogTitle>
           <DialogDescription>
-            Choose where you&apos;ll run your agent.
+            Your agents live in a workspace. Pick the one to open.
           </DialogDescription>
         </DialogHeader>
 
-        {projectsPending ? (
+        {workspacesPending || autoSkip ? (
           <div className="flex items-center justify-center py-8">
             <Loader2 className="text-muted-foreground size-5 animate-spin" />
           </div>
-        ) : projects.length === 0 ? (
+        ) : workspaces.length === 0 ? (
           <p className="text-muted-foreground py-2 text-sm">
-            You don&apos;t have access to any projects in this organization yet.{" "}
+            You don&apos;t have access to any workspaces in this organization
+            yet.{" "}
             <Link
-              href={`/org/${organizationId}/projects`}
+              href={`/org/${organizationId}/workspaces`}
               className="text-foreground font-medium underline underline-offset-2"
               onClick={() => onOpenChange(false)}
             >
-              Go to projects
+              Go to workspaces
             </Link>
           </p>
         ) : (
           <div className="flex flex-col gap-4">
             <div className="flex flex-col gap-1.5">
-              <label className="text-xs font-medium" id="gsp-project-label">
-                Project
+              <label className="text-xs font-medium" id="gsp-workspace-label">
+                Workspace
               </label>
-              <Select value={projectId} onValueChange={setProjectId}>
+              <Select value={workspaceId} onValueChange={setPicked}>
                 <SelectTrigger
                   className="w-full"
-                  aria-labelledby="gsp-project-label"
+                  aria-labelledby="gsp-workspace-label"
                 >
-                  <SelectValue placeholder="Select a project" />
+                  <SelectValue placeholder="Select a workspace" />
                 </SelectTrigger>
                 <SelectContent>
-                  {projects.map((project) => (
-                    <SelectItem key={project.id} value={project.id}>
-                      {project.name ?? project.slug ?? project.id}
+                  {workspaces.map((workspace) => (
+                    <SelectItem key={workspace.id} value={workspace.id}>
+                      {workspace.name ?? workspace.slug ?? workspace.id}
                     </SelectItem>
                   ))}
                 </SelectContent>
               </Select>
-            </div>
-
-            <div className="flex flex-col gap-1.5">
-              <label className="text-xs font-medium" id="gsp-agent-label">
-                Agent
-              </label>
-              <Select
-                value={agentId}
-                onValueChange={setAgentId}
-                disabled={!projectId || agentsPending}
-              >
-                <SelectTrigger
-                  className="w-full"
-                  aria-labelledby="gsp-agent-label"
-                >
-                  <SelectValue
-                    placeholder={
-                      projectId ? "Select an agent" : "Pick a project first"
-                    }
-                  />
-                </SelectTrigger>
-                <SelectContent>
-                  {agents.map((agent) => (
-                    <SelectItem key={agent.id} value={agent.id}>
-                      {agent.name}
-                      {agent.isDefault ? " (default)" : ""}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-              <p className="text-muted-foreground text-xs">
-                Preselected to the project&apos;s default — most people just hit
-                Continue.
-              </p>
             </div>
 
             <Button
               variant="brand"
-              onClick={handleContinue}
-              disabled={!projectId || !selectedAgent}
+              onClick={() => {
+                if (!workspaceId) return;
+                onOpenChange(false);
+                router.push(getStartedPath(workspaceId, agents));
+              }}
+              disabled={!workspaceId || agentsPending}
             >
               Continue
             </Button>

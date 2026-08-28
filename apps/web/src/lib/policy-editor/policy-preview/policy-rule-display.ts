@@ -100,7 +100,7 @@ export const targetText = (target: PolicyRuleTarget): string => {
       const n = target.tools.length;
       if (target.connectionScope) {
         const level =
-          target.connectionScope === "organization" ? "org" : "project";
+          target.connectionScope === "organization" ? "org" : "workspace";
         // Tools narrow which endpoints match; empty = all connections' traffic.
         if (n === 0) return `${target.provider} · all connections (${level})`;
         return `${target.provider} · ${n} tool${n === 1 ? "" : "s"} (${level})`;
@@ -118,7 +118,8 @@ export const targetText = (target: PolicyRuleTarget): string => {
     case "secret":
       // Step 8: "all secrets at a level" vs a specific secret.
       if (target.secretScope) {
-        const level = target.secretScope === "organization" ? "org" : "project";
+        const level =
+          target.secretScope === "organization" ? "org" : "workspace";
         return `All secrets (${level})`;
       }
       return "Secret";

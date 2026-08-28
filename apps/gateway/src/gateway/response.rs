@@ -20,9 +20,10 @@ pub(super) fn proxy_auth_required() -> Response<axum::body::Body> {
 /// Response body type used by [`super::forward::forward_request`].
 pub(crate) type ForwardBody<S> = Either<Full<Bytes>, S>;
 
-/// Where dashboard links point when `APP_URL` says nothing. Right for a
-/// loopback install, wrong for anyone reaching OneCLI on another address —
-/// which is why `main` warns at startup rather than letting it pass silently.
+/// Where dashboard links point when nothing configures a public URL. Right
+/// for a loopback install, wrong for anyone reaching OneCLI on another
+/// address — which is why `main` warns at startup rather than letting it
+/// pass silently.
 pub(crate) const DASHBOARD_URL_FALLBACK: &str = "http://localhost:10254";
 
 /// The configured public URL, or `None` when there isn't one.
@@ -37,29 +38,123 @@ fn normalize_app_url(raw: Option<&str>) -> Option<String> {
     (!trimmed.is_empty()).then(|| trimmed.to_string())
 }
 
-/// Whether the dashboard links are built from a configured `APP_URL` or from
-/// the fallback. Drives the startup warning in `main`.
-///
-/// Deliberately derived from [`dashboard_url`] rather than re-reading the
-/// environment: the warning then describes the value actually in use, and cannot
-/// drift from it if the env changes after the cache is populated.
-pub(crate) fn app_url_is_configured() -> bool {
-    dashboard_url() != DASHBOARD_URL_FALLBACK
+/// How the dashboard URL was decided. Drives the startup warnings in `main`.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum DashboardUrlSource {
+    /// `ONECLI_EXTERNAL_URL`, the canonical var.
+    Canonical,
+    /// The legacy `APP_URL` alias (kept working, forever).
+    Alias,
+    /// Seeded from a non-loopback `ONECLI_BIND_HOST` — the pre-refactor
+    /// compose behavior, preserved for one release and warned. Deleted next
+    /// major.
+    LegacyBind,
+    /// Nothing configured: [`DASHBOARD_URL_FALLBACK`].
+    Fallback,
 }
 
-/// Resolve the OneCLI dashboard base URL from `APP_URL`, falling back to
-/// [`DASHBOARD_URL_FALLBACK`]. Cached after first call.
-pub(crate) fn dashboard_url() -> &'static str {
-    static URL: std::sync::OnceLock<String> = std::sync::OnceLock::new();
-    URL.get_or_init(|| {
-        normalize_app_url(std::env::var("APP_URL").ok().as_deref())
-            .unwrap_or_else(|| DASHBOARD_URL_FALLBACK.to_string())
+pub(crate) struct ResolvedDashboardUrl {
+    pub(crate) url: String,
+    pub(crate) source: DashboardUrlSource,
+    /// The losing `APP_URL` value when it disagreed with the canonical var.
+    pub(crate) alias_conflict: Option<String>,
+}
+
+/// LEGACY(next-major): a bind host that used to seed the compose URL
+/// defaults: non-blank, non-loopback, non-wildcard. Everything else never
+/// seeded anything. Delete with the ledger in
+/// packages/api/src/lib/public-origins.ts.
+fn seedable_bind_host(raw: Option<&str>) -> Option<&str> {
+    let trimmed = raw?.trim();
+    const NEVER_SEEDS: [&str; 7] = [
+        "",
+        "127.0.0.1",
+        "::1",
+        "[::1]",
+        "localhost",
+        "0.0.0.0",
+        "::",
+    ];
+    (!NEVER_SEEDS.contains(&trimmed) && trimmed != "[::]").then_some(trimmed)
+}
+
+/// The pure mirror of the Node resolver's chain head:
+/// `ONECLI_EXTERNAL_URL ?? APP_URL ?? legacy-bind-seed ?? fallback`.
+/// Env-free so it is table-testable ([`dashboard_url`] caches in a `OnceLock`
+/// and cannot be re-evaluated under a different environment).
+fn resolve_dashboard_url(
+    external: Option<&str>,
+    app_url: Option<&str>,
+    bind_host: Option<&str>,
+    app_port: Option<&str>,
+) -> ResolvedDashboardUrl {
+    let alias = normalize_app_url(app_url);
+    if let Some(url) = normalize_app_url(external) {
+        let alias_conflict = alias.filter(|a| *a != url);
+        return ResolvedDashboardUrl {
+            url,
+            source: DashboardUrlSource::Canonical,
+            alias_conflict,
+        };
+    }
+    if let Some(url) = alias {
+        return ResolvedDashboardUrl {
+            url,
+            source: DashboardUrlSource::Alias,
+            alias_conflict: None,
+        };
+    }
+    if let Some(bind) = seedable_bind_host(bind_host) {
+        let port = app_port
+            .map(str::trim)
+            .filter(|p| !p.is_empty() && p.chars().all(|c| c.is_ascii_digit()))
+            .unwrap_or("10254");
+        // Bracket a bare IPv6 literal so it can carry the port.
+        let host = if bind.contains(':') && !bind.starts_with('[') {
+            format!("[{bind}]")
+        } else {
+            bind.to_string()
+        };
+        return ResolvedDashboardUrl {
+            url: format!("http://{host}:{port}"),
+            source: DashboardUrlSource::LegacyBind,
+            alias_conflict: None,
+        };
+    }
+    ResolvedDashboardUrl {
+        url: DASHBOARD_URL_FALLBACK.to_string(),
+        source: DashboardUrlSource::Fallback,
+        alias_conflict: None,
+    }
+}
+
+/// The process-wide resolution, cached after first call — a post-first-read
+/// env change is invisible by contract.
+pub(crate) fn resolved_dashboard() -> &'static ResolvedDashboardUrl {
+    static RESOLVED: std::sync::OnceLock<ResolvedDashboardUrl> = std::sync::OnceLock::new();
+    RESOLVED.get_or_init(|| {
+        resolve_dashboard_url(
+            std::env::var("ONECLI_EXTERNAL_URL").ok().as_deref(),
+            std::env::var("APP_URL").ok().as_deref(),
+            std::env::var("ONECLI_BIND_HOST").ok().as_deref(),
+            std::env::var("ONECLI_APP_PORT").ok().as_deref(),
+        )
     })
 }
 
-fn scoped_url(base: &str, path: &str, project_id: Option<&str>) -> String {
-    match project_id {
-        Some(pid) => format!("{base}/p/{pid}{path}"),
+/// The OneCLI dashboard base URL. Cached after first call.
+///
+/// `main`'s startup warnings branch on [`resolved_dashboard`]'s source
+/// directly — derived from the same cached resolution as this value, so the
+/// warning always describes the URL actually in use and cannot drift from it
+/// if the env changes after the cache is populated.
+pub(crate) fn dashboard_url() -> &'static str {
+    &resolved_dashboard().url
+}
+
+fn scoped_url(base: &str, path: &str, workspace_id: Option<&str>) -> String {
+    match workspace_id {
+        Some(pid) => format!("{base}/w/{pid}{path}"),
         None => format!("{base}{path}"),
     }
 }
@@ -149,9 +244,9 @@ pub(crate) fn app_not_connected<S>(
     provider: &str,
     display_name: &str,
     agent_name: Option<&str>,
-    project_id: Option<&str>,
+    workspace_id: Option<&str>,
 ) -> Response<ForwardBody<S>> {
-    let base = scoped_url(dashboard_url(), "", project_id);
+    let base = scoped_url(dashboard_url(), "", workspace_id);
     let connect_url = match agent_name {
         Some(name) => format!(
             "{base}/connections?connect={provider}&source=agent&agent_name={}",
@@ -178,9 +273,9 @@ pub(crate) fn app_not_connected_unknown_provider<S>(
     status: StatusCode,
     hostname: &str,
     agent_name: Option<&str>,
-    project_id: Option<&str>,
+    workspace_id: Option<&str>,
 ) -> Response<ForwardBody<S>> {
-    let base = scoped_url(dashboard_url(), "", project_id);
+    let base = scoped_url(dashboard_url(), "", workspace_id);
     let encoded_host = utf8_percent_encode(hostname, NON_ALPHANUMERIC);
     let connect_url = match agent_name {
         Some(name) => format!(
@@ -212,17 +307,17 @@ pub(crate) fn access_restricted<S>(
     status: StatusCode,
     provider: &str,
     display_name: &str,
-    project_id: Option<&str>,
+    workspace_id: Option<&str>,
 ) -> Response<ForwardBody<S>> {
     // Point at the app's connections page: since attach-model step 6 the
-    // project policy console is gone, and each account card there carries the
+    // workspace policy console is gone, and each account card there carries the
     // "Agent access" dialog — the surface that actually attaches a credential
     // to an agent. (Before step 6 this pointed at the policy console, which
     // was then the only place a grant could be authored.)
     let manage_url = scoped_url(
         dashboard_url(),
         &format!("/connections/apps/{provider}"),
-        project_id,
+        workspace_id,
     );
     with_no_retry(json_error(
         status,
@@ -244,9 +339,9 @@ pub(crate) fn credential_not_found<S>(
     status: StatusCode,
     hostname: &str,
     path: &str,
-    project_id: Option<&str>,
+    workspace_id: Option<&str>,
 ) -> Response<ForwardBody<S>> {
-    let base = scoped_url(dashboard_url(), "", project_id);
+    let base = scoped_url(dashboard_url(), "", workspace_id);
     let encoded_host = utf8_percent_encode(hostname, NON_ALPHANUMERIC);
     let secret_url =
         format!("{base}/connections/custom?create=generic&host={encoded_host}&path=%2F%2A");
@@ -406,13 +501,13 @@ pub(crate) fn blocked_by_policy<S>(
     method: &str,
     path: &str,
     rule_name: &str,
-    project_id: Option<&str>,
+    workspace_id: Option<&str>,
 ) -> Response<ForwardBody<S>> {
-    // The agents page: a project-scope block now comes from the agent's own
+    // The agents page: a workspace-scope block now comes from the agent's own
     // grants (changeable there) or from an organization guardrail (which a
-    // project member cannot change at all) — so the link informs rather than
+    // workspace member cannot change at all) — so the link informs rather than
     // promising an edit.
-    let agents_url = scoped_url(dashboard_url(), "/agents", project_id);
+    let agents_url = scoped_url(dashboard_url(), "/agents", workspace_id);
     with_no_retry(json_error(
         StatusCode::FORBIDDEN,
         serde_json::json!({
@@ -435,9 +530,9 @@ pub(crate) fn blocked_by_default_policy<S>(
     method: &str,
     path: &str,
     host: &str,
-    project_id: Option<&str>,
+    workspace_id: Option<&str>,
 ) -> Response<ForwardBody<S>> {
-    let agents_url = scoped_url(dashboard_url(), "/agents", project_id);
+    let agents_url = scoped_url(dashboard_url(), "/agents", workspace_id);
     let hostname = host.split(':').next().unwrap_or(host);
     with_no_retry(json_error(
         StatusCode::FORBIDDEN,
@@ -453,34 +548,6 @@ pub(crate) fn blocked_by_default_policy<S>(
             "host": hostname,
             "path": path,
             "dashboard_url": agents_url,
-        }),
-    ))
-}
-
-/// 403 Forbidden — the request targets an app that is not available to this
-/// project (the org's app-availability allowlist, step 7). Availability is an
-/// org-level, admin-managed posture, so — unlike the project-scoped policy
-/// blocks — there is no per-project dashboard deep link here.
-pub(crate) fn app_unavailable<S>(
-    provider: &str,
-    method: &str,
-    path: &str,
-    host: &str,
-) -> Response<ForwardBody<S>> {
-    let hostname = host.split(':').next().unwrap_or(host);
-    with_no_retry(json_error(
-        StatusCode::FORBIDDEN,
-        serde_json::json!({
-            "error": "app_unavailable",
-            "message": format!(
-                "The \"{provider}\" app is not available to this project. \
-                 {method} {hostname}{path} was blocked. An organization admin \
-                 can grant access on the App Availability page."
-            ),
-            "provider": provider,
-            "method": method,
-            "host": hostname,
-            "path": path,
         }),
     ))
 }
@@ -524,6 +591,35 @@ mod tests {
     type TestBody =
         ForwardBody<futures_util::stream::Empty<Result<hyper::body::Frame<Bytes>, reqwest::Error>>>;
 
+    // House copy style: no em dashes in user-facing text (the web app pins
+    // the same rule in ui-copy-guard.test.ts). Gateway refusal messages are
+    // relayed verbatim by agents into chat and Slack, so they are user-facing
+    // copy too. This scans THIS FILE's source for em dashes inside string
+    // literals — comments keep theirs (not copy).
+    #[test]
+    fn response_messages_hold_no_em_dashes() {
+        let source = include_str!("response.rs");
+        for (i, line) in source.lines().enumerate() {
+            let trimmed = line.trim_start();
+            if trimmed.starts_with("//") || trimmed.starts_with('*') {
+                continue;
+            }
+            // Only flag lines where the dash sits inside a quoted run.
+            if line.contains('\u{2014}') {
+                let in_string = line
+                    .split('"')
+                    .enumerate()
+                    .any(|(idx, seg)| idx % 2 == 1 && seg.contains('\u{2014}'));
+                assert!(
+                    !in_string,
+                    "em dash in a user-facing message at response.rs:{}: {}",
+                    i + 1,
+                    line.trim()
+                );
+            }
+        }
+    }
+
     // A blank value must read as "unconfigured", not as a configured empty
     // string — otherwise every dashboard link becomes "/connections" with no
     // host, and the startup warning that would have flagged it stays quiet.
@@ -549,23 +645,92 @@ mod tests {
         );
     }
 
-    // `main` branches on this to decide whether to warn. Asserting the two agree
-    // is what keeps the warning honest: if `dashboard_url` ever resolved the
-    // fallback while this reported "configured", the operator would be told
-    // nothing while every link pointed at localhost.
+    // `main`'s warnings branch on the cached resolution's source. Asserting
+    // that `dashboard_url` and the source come from ONE resolution is what
+    // keeps the warning honest: a Fallback source must mean the fallback URL
+    // is actually in use.
     //
-    // Env-free: `dashboard_url` caches in a `OnceLock`, so whichever value this
+    // Env-free: the resolution caches in a `OnceLock`, so whichever value this
     // process resolved first is the one under test either way — and mutating
-    // APP_URL here would race the rest of the suite.
+    // env vars here would race the rest of the suite.
     #[test]
-    fn app_url_is_configured_agrees_with_the_url_actually_in_use() {
-        assert_eq!(
-            app_url_is_configured(),
-            dashboard_url() != DASHBOARD_URL_FALLBACK
-        );
-        if !app_url_is_configured() {
+    fn startup_warning_source_agrees_with_the_url_actually_in_use() {
+        let resolved = resolved_dashboard();
+        assert_eq!(dashboard_url(), resolved.url);
+        if resolved.source == DashboardUrlSource::Fallback {
             assert_eq!(dashboard_url(), DASHBOARD_URL_FALLBACK);
         }
+    }
+
+    // The chain head, table-tested env-free (the pure mirror of the Node
+    // resolver): canonical beats alias, alias keeps working, a non-loopback
+    // bind seeds (warned via source), loopback and wildcard binds never do.
+    #[test]
+    fn resolve_dashboard_url_prefers_the_canonical_var() {
+        let r = resolve_dashboard_url(
+            Some("http://canonical.example:10254"),
+            Some("http://alias.example:10254"),
+            None,
+            None,
+        );
+        assert_eq!(r.url, "http://canonical.example:10254");
+        assert_eq!(r.source, DashboardUrlSource::Canonical);
+        assert_eq!(
+            r.alias_conflict.as_deref(),
+            Some("http://alias.example:10254")
+        );
+    }
+
+    #[test]
+    fn resolve_dashboard_url_reports_no_conflict_when_alias_agrees() {
+        let r = resolve_dashboard_url(
+            Some("http://same.example:10254"),
+            Some("http://same.example:10254/"),
+            None,
+            None,
+        );
+        assert_eq!(r.source, DashboardUrlSource::Canonical);
+        assert_eq!(r.alias_conflict, None);
+    }
+
+    #[test]
+    fn resolve_dashboard_url_keeps_the_alias_working() {
+        let r = resolve_dashboard_url(None, Some("http://172.17.0.1:10254"), None, None);
+        assert_eq!(r.url, "http://172.17.0.1:10254");
+        assert_eq!(r.source, DashboardUrlSource::Alias);
+    }
+
+    #[test]
+    fn resolve_dashboard_url_seeds_from_a_non_loopback_bind() {
+        let r = resolve_dashboard_url(None, None, Some("10.0.0.5"), Some("24812"));
+        assert_eq!(r.url, "http://10.0.0.5:24812");
+        assert_eq!(r.source, DashboardUrlSource::LegacyBind);
+
+        // Default port when the port var is absent or malformed.
+        let r = resolve_dashboard_url(None, None, Some("172.17.0.1"), Some("nope"));
+        assert_eq!(r.url, "http://172.17.0.1:10254");
+    }
+
+    #[test]
+    fn resolve_dashboard_url_never_seeds_from_loopback_or_wildcard_binds() {
+        for bind in ["127.0.0.1", "localhost", "::1", "0.0.0.0", "::", " ", ""] {
+            let r = resolve_dashboard_url(None, None, Some(bind), None);
+            assert_eq!(r.url, DASHBOARD_URL_FALLBACK, "bind {bind:?} must not seed");
+            assert_eq!(r.source, DashboardUrlSource::Fallback);
+        }
+    }
+
+    #[test]
+    fn resolve_dashboard_url_brackets_a_bare_ipv6_bind() {
+        let r = resolve_dashboard_url(None, None, Some("fd00::7"), None);
+        assert_eq!(r.url, "http://[fd00::7]:10254");
+    }
+
+    #[test]
+    fn resolve_dashboard_url_treats_blank_heads_as_unset() {
+        let r = resolve_dashboard_url(Some("  "), Some(""), None, None);
+        assert_eq!(r.url, DASHBOARD_URL_FALLBACK);
+        assert_eq!(r.source, DashboardUrlSource::Fallback);
     }
 
     #[test]
@@ -749,7 +914,7 @@ mod tests {
             .as_str()
             .unwrap()
             .contains("does not have access"));
-        // Since attach-model step 6 the project policy console does not exist,
+        // Since attach-model step 6 the workspace policy console does not exist,
         // so the remediation link must reach a surface that can actually grant
         // the credential: the app's connections page, whose account cards carry
         // the "Agent access" dialog. A link ending in "/policy" would 404.

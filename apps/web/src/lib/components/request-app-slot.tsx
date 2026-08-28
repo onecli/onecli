@@ -1,17 +1,20 @@
-import { Plus } from "lucide-react";
+"use client";
+
+import { IS_CLOUD } from "@/lib/env";
+import { RequestAppSlot as CloudRequestAppSlot } from "@/ee/apps/request-app-slot";
+import { LocalRequestAppSlot } from "@/lib/components/request-app-slot-local";
 
 /**
- * OSS default "Request an app" slot — links to the OSS repo's issue form
- * pre-labeled `app-request`.
+ * Edition dispatcher for the "Request an app" slot, rendered as the first
+ * item in the Apps grid: cloud opens an in-app dialog that collects the
+ * request, emails the user an acknowledgment via Resend, and pings Discord;
+ * other editions link to the OSS repo's GitHub issue form instead (the
+ * Resend/Discord plumbing isn't configured there, so the in-app promise
+ * would be false).
  *
- * Cloud aliases this module to `@/ee/apps/request-app-slot` via
- * turbopack `resolveAlias` in `next.config.js`. The EE override opens
- * an in-app dialog that collects the request and emails the user an
- * acknowledgment via Resend.
- *
- * Both variants accept optional controlled props so the parent can open the
- * request dialog programmatically (e.g., via `?request=` URL param). OSS
- * ignores them; cloud wires them to the in-app dialog.
+ * Accepts optional controlled props so the parent can open the dialog
+ * programmatically (e.g., via `?request=` URL param from the gateway).
+ * The non-cloud arm ignores them — it has no dialog.
  */
 
 export interface RequestAppSlotProps {
@@ -21,36 +24,9 @@ export interface RequestAppSlotProps {
   initialUrl?: string;
 }
 
-const ISSUE_BODY_TEMPLATE = `**Website:**
-
-**How you'd use this with OneCLI:**
-`;
-
-const GITHUB_ISSUE_URL = `https://github.com/onecli/onecli/issues/new?${new URLSearchParams(
-  {
-    labels: "app request",
-    title: "App request: ",
-    body: ISSUE_BODY_TEMPLATE,
-  },
-).toString()}`;
-
-export const RequestAppSlot = ({}: RequestAppSlotProps = {}) => (
-  <a
-    href={GITHUB_ISSUE_URL}
-    target="_blank"
-    rel="noopener noreferrer"
-    className="group flex items-center justify-between rounded-xl border border-dashed border-muted-foreground/40 bg-card/40 px-4 py-3 transition-colors cursor-pointer hover:bg-accent/50 hover:border-solid"
-  >
-    <div className="flex items-center gap-3">
-      <div className="flex size-9 shrink-0 items-center justify-center rounded-lg bg-muted">
-        <Plus className="size-4 text-muted-foreground transition-colors group-hover:text-foreground" />
-      </div>
-      <div className="flex flex-col">
-        <span className="text-sm font-medium">Request an app</span>
-        <span className="text-muted-foreground text-xs">
-          Open an issue on GitHub
-        </span>
-      </div>
-    </div>
-  </a>
-);
+export const RequestAppSlot = (props: RequestAppSlotProps = {}) =>
+  IS_CLOUD ? (
+    <CloudRequestAppSlot {...props} />
+  ) : (
+    <LocalRequestAppSlot {...props} />
+  );

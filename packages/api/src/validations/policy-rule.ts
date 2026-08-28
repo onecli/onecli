@@ -1,8 +1,5 @@
 import { z } from "zod";
 
-export const policyModeSchema = z.enum(["allow", "deny"]);
-export type PolicyMode = z.infer<typeof policyModeSchema>;
-
 export const ruleConditionSchema = z.object({
   target: z.enum(["body"]),
   operator: z.enum(["contains"]),

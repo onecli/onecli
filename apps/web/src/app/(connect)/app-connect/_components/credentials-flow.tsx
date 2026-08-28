@@ -50,7 +50,7 @@ export interface CredentialsFlowProps {
   /** Carries the freshly-created connection (absent on reconnects). */
   onSuccess: (connection?: { id: string; label: string | null }) => void;
   onError: (message: string) => void;
-  projectId?: string;
+  workspaceId?: string;
   orgId?: string;
   /** Connection method to connect with, when the app offers more than one. */
   method?: string;
@@ -67,7 +67,7 @@ export const CredentialsFlow = ({
   hiddenFields,
   onSuccess,
   onError,
-  projectId,
+  workspaceId,
   orgId,
   method,
   onBack,
@@ -147,7 +147,7 @@ export const CredentialsFlow = ({
           ...(method ? { method } : {}),
         }),
         headers: {
-          ...(projectId ? { "X-Project-Id": projectId } : {}),
+          ...(workspaceId ? { "X-Workspace-Id": workspaceId } : {}),
           ...(orgId ? { "X-Organization-Id": orgId } : {}),
         },
       });

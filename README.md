@@ -5,8 +5,8 @@
 </picture>
 
 <p align="center">
-  <b>The secret vault for AI agents.</b><br/>
-  Store once. Inject anywhere. Agents never see the keys.
+  <b>The agent harness built for teams.</b><br/>
+  A pro assistant for companies. Give every employee a secured, sandboxed personal agent.
 </p>
 
 <p align="center">
@@ -18,18 +18,67 @@
 ---
 
 <picture>
-  <source media="(prefers-color-scheme: dark)" srcset="assets/onecli-flow-dark.gif">
-  <source media="(prefers-color-scheme: light)" srcset="assets/onecli-flow-light.gif">
-  <img alt="How OneCLI works" src="assets/onecli-flow-light.gif" width="100%">
+  <source media="(prefers-color-scheme: dark)" srcset="assets/onecli-hero-dark.gif">
+  <source media="(prefers-color-scheme: light)" srcset="assets/onecli-hero-light.gif">
+  <img alt="Every teammate gets an agent. Sandboxed, guarded by one gateway, keys never leave." src="assets/onecli-hero-light.gif" width="100%">
 </picture>
 
-## What is OneCLI?
+## Quick Start
 
-OneCLI is an open-source gateway that sits between your AI agents and the services they call. Instead of baking API keys into every agent, you store credentials once in OneCLI and the gateway injects them transparently. Agents never see the secrets.
+### Cloud-hosted: [onecli.sh](https://onecli.sh)
 
-**Why we built it:** AI agents need to call dozens of APIs, but giving each agent raw credentials is a security risk. OneCLI solves this with a single gateway that handles auth, so you get one place to manage access, rotate keys, and see what every agent is doing.
+### Self-hosted
 
-**How it works:** You store your real API credentials in OneCLI and give your agents placeholder keys (e.g. `FAKE_KEY`). When an agent makes an HTTP call through the gateway, the OneCLI gateway matches the request to the right credentials, swaps the `FAKE_KEY` for the `REAL_KEY`, decrypts them, and injects them into the outbound request. The agent never touches the real secrets. It just makes normal HTTP calls and the gateway handles the swap.
+```bash
+git clone https://github.com/onecli/onecli.git && cd onecli
+pnpm install
+pnpm run setup
+```
+
+Open http://localhost:10254
+
+## What is OneCLI v2?
+
+OneCLI is an open-source platform for running AI agents as a team. You create an agent per person, give each agent the access it needs, and it works in a sandbox, routed through a gateway that injects the credentials and enforces your policy.
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="assets/onecli-flow-dark.gif">
+  <source media="(prefers-color-scheme: light)" srcset="assets/onecli-flow-light.gif">
+  <img alt="How credential injection works" src="assets/onecli-flow-light.gif" width="100%">
+</picture>
+
+## Why we built OneCLI?
+
+OneCLI started as a credential vault for AI agents, built in Rust. We found that most of the demand came from individuals and teams running autonomous agents like [Hermes](https://github.com/NousResearch/hermes-agent), [OpenClaw](https://openclaw.ai) and [NanoClaw](https://github.com/nanocoai/nanoclaw). People wanted agents that do real work for the person running them, but two parts were missing:
+
+1. managing secrets and permissions.
+2. and for teams - multiplayer management.
+
+Every autonomous agent out there is built for one person. And for one person, they're great. The moment you need to replicate that across a team, it gets messy: spinning up each agent, deciding what each one can and cannot do, hosting them, keeping track of whose agent is whose.
+
+So we shifted, and built OneCLI v2.
+
+## Built for teams
+
+- **Your identity provider, integrated**: provision agents on behalf of each employee's identity, straight from the company IdP.
+- **An agent per person**: everyone in the workspace gets their own sandboxed agent, reachable from the dashboard or Slack.
+- **One policy, enforced everywhere**: manage the team policy in one place, that any agent in the workspaces would be enforced by.
+- **Deterministic human-in-the-loop approvals**: in the chat itself, for things you need 100% control over, like sending the email, deleting the Linear ticket, emptying an S3 bucket.
+- **Global connections**: shared at the team level, like LLM keys or service accounts, granted per agent without ever being handed to one.
+
+## The agent
+
+An agent is a durable thing, not a single prompt. It has:
+
+- **A computer**: its own isolated sandbox, with a filesystem and a shell. The only way out is the gateway, so it can reach what you granted and nothing else.
+- **A conversation**: its own page in the dashboard, or Slack. Images and files included. A message sent while the agent is working redirects it right away instead of queueing behind it.
+- **Memory**: what the agent learns is kept by the platform, so it is never lost. You can read and edit it any time.
+- **Skills**: instructions and helpers you write once, always available to the agent.
+- **A schedule**: the agent can plan future work, and the platform wakes it at the right time.
+- **Credentials it never sees**: each agent gets only the access you granted, and the gateway enforces it on every request. Or connect Bitwarden or 1Password for [on-demand injection](docs/vault-integration.md), with nothing stored on the server.
+- **Its own Slack app**: connect it once and it answers in channels and DMs under its own name and avatar, with files and images. Delete the agent and its Slack app goes with it.
+
+Agents run on your own infrastructure. The runner is outbound-only and holds no inbound ports, so a laptop, a homelab, or a VPC behind NAT all work with no ingress and no tunnel.
 
 ## Architecture
 
@@ -39,106 +88,40 @@ OneCLI is an open-source gateway that sits between your AI agents and the servic
   <img alt="OneCLI Architecture" src="assets/onecli-architecture-dark.svg" width="100%">
 </picture>
 
-- **[Rust Gateway](apps/gateway)**: fast HTTP gateway that intercepts outbound requests and injects credentials. Agents authenticate with access tokens via `Proxy-Authorization` headers.
-- **[Web Dashboard](apps/web)**: Next.js app for managing agents, secrets, and permissions. Provides the API the gateway uses to resolve which credentials to inject for each request.
-- **Secret Store**: AES-256-GCM encrypted credential storage. Secrets are decrypted only at request time, matched by host and path patterns, and injected by the gateway as headers or URL query parameters.
-
-## Quick Start
-
-The fastest way to run OneCLI locally:
-
-```bash
-curl -fsSL https://onecli.sh/install | sh
-```
-
-Or, if you prefer to run it manually:
-
-```bash
-git clone https://github.com/onecli/onecli.git
-cd onecli
-docker compose -f docker/docker-compose.yml up -d --wait
-```
-
-Open **http://localhost:10254**, create an agent, add your secrets, and point your agent's HTTP gateway to `localhost:10255`.
-
-> The Quick Start runs OneCLI in **local mode** (single-user, no login), so no `.env` or `NEXTAUTH_SECRET` is required. To enable Google OAuth for multiple users, set `NEXTAUTH_SECRET` and the Google credentials (see [Configuration](#configuration)).
-
-## Features
-
-- **Transparent credential injection**: agents make normal HTTP calls, the gateway handles auth
-- **Encrypted secret storage**: AES-256-GCM encryption at rest, decrypted only at request time
-- **Host & path matching**: route secrets to the right API endpoints with pattern matching
-- **Multi-agent support**: each agent gets its own access token with scoped permissions
-- **Easy setup**: `curl -fsSL https://onecli.sh/install | sh` starts everything (app + PostgreSQL)
-- **Two auth modes**: single-user (no login) for local use, or Google OAuth for teams
-- **Rust gateway**: fast, memory-safe HTTP gateway with MITM interception for HTTPS
-- **[Vault integration](docs/vault-integration.md)**: connect Bitwarden (or other password managers) for on-demand credential injection without storing secrets on the server
-
-## Project Structure
-
-```
-apps/
-  web/            # Next.js app (dashboard + API, port 10254)
-  gateway/        # Rust gateway (credential injection, port 10255)
-packages/
-  db/             # Prisma ORM + migrations
-  ui/             # Shared UI components (shadcn/ui)
-docker/
-  Dockerfile      # App image (gateway + web)
-  docker-compose.yml
-```
+- **[Web Dashboard](apps/web)**: Next.js app. Create agents, chat with them, edit their memory and skills, manage connections, secrets and grants.
+- **[API Server](apps/api-server)**: the control plane. Owns the database, the conversation plane, and the work queue the runner polls.
+- **[Rust Gateway](apps/gateway)**: intercepts outbound requests (HTTPS included, via MITM) and injects credentials. Agents authenticate with access tokens via `Proxy-Authorization` headers.
+- **[Runner](apps/runner)**: starts, parks and reaps agent sandboxes. Outbound-only, and never touches the database.
+- **[Sandbox Supervisor](apps/sandbox-supervisor)**: runs inside each sandbox, speaking a vendor-neutral harness interface so the agent runtime is swappable.
+- **[SSH Terminator](apps/ssh-terminator)**: the SSH front door — terminates `ssh` connections with short-lived certificates and bridges them into agent sandboxes through a pluggable substrate backend.
+- **[Channel Adapter](apps/channel-adapter)**: the Slack daemon, one app per agent.
+- **Secret Store**: AES-256-GCM at rest, decrypted only at request time, matched by host and path pattern, injected as headers or query parameters.
 
 ## Local Development
 
-### Prerequisites
-
-- **[mise](https://mise.jdx.dev)** (installs Node.js, pnpm, and other tools)
-- **Rust** (for the gateway)
-- **Docker** (for PostgreSQL)
-
-### Setup
-
 ```bash
+git clone https://github.com/onecli/onecli.git && cd onecli
 mise install
 pnpm install
-cp .env.example .env
-pnpm db:generate
-pnpm db:up          # Start PostgreSQL
-pnpm db:migrate     # Apply migrations
 pnpm dev
 ```
 
-Dashboard at **http://localhost:10254**, gateway at **http://localhost:10255**.
-
-### Commands
-
-| Command            | Description                     |
-| ------------------ | ------------------------------- |
-| `pnpm dev`         | Start web + gateway in dev mode |
-| `pnpm build`       | Production build                |
-| `pnpm check`       | Lint + types + format           |
-| `pnpm db:up`       | Start PostgreSQL (Docker)       |
-| `pnpm db:down`     | Stop PostgreSQL                 |
-| `pnpm db:generate` | Generate Prisma client          |
-| `pnpm db:migrate`  | Run database migrations         |
-| `pnpm db:studio`   | Open Prisma Studio              |
-
-## Configuration
-
-All environment variables are optional for local development:
-
-| Variable                | Description                       | Default            |
-| ----------------------- | --------------------------------- | ------------------ |
-| `DATABASE_URL`          | PostgreSQL connection string      | See `.env.example` |
-| `NEXTAUTH_SECRET`       | Enables Google OAuth (multi-user) | Single-user mode   |
-| `GOOGLE_CLIENT_ID`      | Google OAuth client ID            | —                  |
-| `GOOGLE_CLIENT_SECRET`  | Google OAuth client secret        | —                  |
-| `SECRET_ENCRYPTION_KEY` | AES-256-GCM encryption key        | Auto-generated     |
+That's the whole setup: `pnpm dev` generates `.env` with every required secret, starts PostgreSQL, applies migrations, and runs the full stack. Prerequisites, the command reference, project structure, and configuration live in [docs/development.md](docs/development.md).
 
 ## Contributing
 
-We welcome contributions! Please read our [Contributing Guide](CONTRIBUTING.md) and [Code of Conduct](CODE_OF_CONDUCT.md) before getting started.
+Contributions are welcome. Read the [Contributing Guide](CONTRIBUTING.md) and [Code of Conduct](CODE_OF_CONDUCT.md) before getting started. Contributions are accepted under the terms of the [Contributor License Agreement](CLA.md).
+
+## Security
+
+To report a vulnerability, please follow our [Security Policy](SECURITY.md). Do not open a public issue for security reports.
 
 ## License
 
-[Apache-2.0](LICENSE)
+[Apache-2.0](LICENSE), with one exception: the `ee/` directories hold
+enterprise features under the [OneCLI Enterprise License](LICENSE-ENTERPRISE),
+each carrying a notice that points at it. That license is free for development,
+testing and evaluation, and requires a subscription for production use.
+Everything else is Apache-2.0 and can be self-hosted in production with no
+commercial license. [LICENSE-ENTERPRISE](LICENSE-ENTERPRISE) carries the
+authoritative list of licensed paths.

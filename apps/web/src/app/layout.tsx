@@ -4,8 +4,8 @@ import { Source_Serif_4 } from "next/font/google";
 import "@onecli/ui/globals.css";
 import "./globals.css";
 import { AuthProvider } from "@/providers/auth-provider";
-import { getAuthMode } from "@/lib/auth/auth-mode";
-import { GATEWAY_API_URL, IS_CLOUD } from "@/lib/env";
+import { IS_CLOUD } from "@/lib/env";
+import { apiOrigin, gatewayHttpOrigin } from "@onecli/api/lib/public-origins";
 import { QueryProvider } from "@/providers/query-provider";
 import { ThemeProvider } from "@/providers/theme-provider";
 import { Toaster } from "@onecli/ui/components/sonner";
@@ -24,10 +24,27 @@ const sourceSerif = Source_Serif_4({
   variable: "--font-serif",
 });
 
-// Auth mode is determined at runtime from /app/data/runtime-config.json
-// (written by the Docker entrypoint). force-dynamic ensures the layout
-// re-renders per request instead of serving prebuilt static pages.
+// The API/gateway origins are runtime decisions (env-derived), not build-time
+// ones — the same prebuilt image serves any deployment. force-dynamic ensures
+// the layout re-renders per request instead of baking the localhost fallbacks
+// injected below into a prebuilt page.
 export const dynamic = "force-dynamic";
+
+// What the injected script (below) sets the browser-side origins to.
+//
+// Dev: the dev server proxies `/v1`, `/auth` and `/gw` under its own origin
+// (`next.config.js` rewrites), so the browser must call the origin it is
+// already on — whatever that is. `location.origin` resolves it in the browser,
+// which is what makes an ngrok tunnel work with zero config: the injected
+// value cannot name a tunnel hostname the server does not know.
+//
+// Production: the absolute env-configured URLs, injected per request because a
+// prebuilt image cannot bake a deployment's addresses. Browsers talk to the
+// api-server and gateway directly.
+const browserOriginScript = () =>
+  process.env.NODE_ENV === "development"
+    ? `window.__GATEWAY_API_URL__=location.origin+"/gw";window.__API_URL__=location.origin`
+    : `window.__GATEWAY_API_URL__=${JSON.stringify(gatewayHttpOrigin())};window.__API_URL__=${JSON.stringify(apiOrigin())}`;
 
 export const viewport: Viewport = {
   width: "device-width",
@@ -51,15 +68,13 @@ export default function RootLayout({
 }: Readonly<{
   children: React.ReactNode;
 }>) {
-  const authMode = getAuthMode();
-
   return (
     <html lang="en" suppressHydrationWarning className="bg-background">
       {!IS_CLOUD && (
         <head>
           <script
             dangerouslySetInnerHTML={{
-              __html: `window.__GATEWAY_API_URL__=${JSON.stringify(GATEWAY_API_URL)}`,
+              __html: browserOriginScript(),
             }}
           />
         </head>
@@ -68,7 +83,7 @@ export default function RootLayout({
         className={`${geistSans.variable} ${geistMono.variable} ${sourceSerif.variable}`}
         suppressHydrationWarning
       >
-        <AuthProvider authMode={authMode}>
+        <AuthProvider>
           <QueryProvider>
             <ThemeProvider
               attribute="class"

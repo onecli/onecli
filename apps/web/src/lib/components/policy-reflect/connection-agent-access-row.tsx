@@ -2,14 +2,8 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import {
-  Ban,
-  Bot,
-  CircleCheck,
-  CircleMinus,
-  Hand,
-  Settings2,
-} from "lucide-react";
+import { Ban, CircleCheck, CircleMinus, Hand, Settings2 } from "lucide-react";
+import { AgentIcon } from "@/lib/agents/agent-icon";
 import { Button } from "@onecli/ui/components/button";
 import { Switch } from "@onecli/ui/components/switch";
 import { cn } from "@onecli/ui/lib/utils";
@@ -21,10 +15,10 @@ import {
   useDetachConnectionForAgent,
   useSetConnectionGrantForAgent,
 } from "@/hooks/use-grants";
-import { agentPath } from "@/lib/navigation";
+import { agentSectionPath } from "@/lib/navigation";
 
 // One agent row of the connection "Agent access" dialog — the step-4 editable
-// version, mirroring the agent page's row-state machine: project-granted
+// version, mirroring the agent page's row-state machine: workspace-granted
 // (detachable), org-granted (locked on), unattached (attachable).
 //
 // The row carries AT MOST ONE status element, and only when it says something
@@ -84,7 +78,7 @@ const AccessPill = ({ access }: { access: AgentAccessStatus }) => {
 
 /**
  * The secondary line under the agent name — only for provenance the switch
- * cannot express. An ordinary project grant says nothing: since the attach
+ * cannot express. An ordinary workspace grant says nothing: since the attach
  * model every attached agent has a compiled rule literally named
  * "Grant: <agent> · <account>", so naming it here was both pure noise and a
  * leak of an internal identifier into the product.
@@ -95,24 +89,24 @@ const attachDetail = (orgGranted: boolean): string | null =>
 interface ConnectionAgentAccessRowProps {
   connectionId: string;
   agent: EffectiveAgentEntry;
-  /** agentId ∈ the connection's project grants (the grants API view). */
-  projectGranted: boolean;
+  /** agentId ∈ the connection's workspace grants (the grants API view). */
+  workspaceGranted: boolean;
 }
 
 export const ConnectionAgentAccessRow = ({
   connectionId,
   agent,
-  projectGranted,
+  workspaceGranted,
 }: ConnectionAgentAccessRowProps) => {
   const pathname = usePathname();
   const attach = useSetConnectionGrantForAgent();
   const detach = useDetachConnectionForAgent();
   const busy = attach.isPending || detach.isPending;
 
-  // Injected by an ORG rule (not a project grant): locked on — not detachable
-  // at project level.
+  // Injected by an ORG rule (not a workspace grant): locked on — not detachable
+  // at workspace level.
   const orgGranted =
-    !projectGranted &&
+    !workspaceGranted &&
     agent.credential.status === "viaRule" &&
     agent.credential.provenance.some((p) => p.scope === "organization");
 
@@ -133,13 +127,16 @@ export const ConnectionAgentAccessRow = ({
           ? "approval"
           : null;
 
-  const manageHref = `${agentPath(pathname, agent.agentId)}?tab=apps&connection=${connectionId}&manage=1`;
+  const manageHref = `${agentSectionPath(pathname, agent.agentId, "connections")}?connection=${encodeURIComponent(connectionId)}&manage=1`;
 
   return (
     <div className="flex items-center justify-between gap-3 py-2.5">
       <span className="flex min-w-0 items-center gap-2.5">
         <span className="bg-muted flex size-6 shrink-0 items-center justify-center rounded-md">
-          <Bot className="text-muted-foreground size-3.5" aria-hidden="true" />
+          <AgentIcon
+            className="text-muted-foreground size-3.5"
+            aria-hidden="true"
+          />
         </span>
         <span className="min-w-0">
           <span className="block truncate text-sm">{agent.name}</span>
@@ -182,9 +179,9 @@ export const ConnectionAgentAccessRow = ({
         </Button>
         <Switch
           size="sm"
-          checked={projectGranted || orgGranted}
+          checked={workspaceGranted || orgGranted}
           disabled={busy || orgGranted}
-          aria-label={`${projectGranted || orgGranted ? "Detach" : "Attach"} ${agent.name}`}
+          aria-label={`${workspaceGranted || orgGranted ? "Detach" : "Attach"} ${agent.name}`}
           onCheckedChange={(next) => {
             if (next) {
               attach.mutate({

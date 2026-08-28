@@ -1,22 +1,22 @@
 import { db } from "@onecli/db";
-import { GATEWAY_API_URL } from "./env";
+import { getGatewayInternalUrl } from "./env";
 
 export const invalidateGatewayCache = (request: Request) => {
   const authorization = request.headers.get("authorization");
   const cookie = request.headers.get("cookie");
-  // Forward the project the request was scoped to. The cloud gateway requires
-  // X-Project-Id for session (Cognito) auth — without it the flush 401s (and
-  // previously hit the user's *default* project instead of this one). API-key
-  // auth ignores it (the key carries its project), so this is safe for the
+  // Forward the workspace the request was scoped to. The cloud gateway requires
+  // X-Workspace-Id for session (Cognito) auth — without it the flush 401s (and
+  // previously hit the user's *default* workspace instead of this one). API-key
+  // auth ignores it (the key carries its workspace), so this is safe for the
   // SDK/CLI and for OSS.
-  const projectId = request.headers.get("x-project-id");
+  const workspaceId = request.headers.get("x-workspace-id");
 
   const headers: Record<string, string> = {};
   if (authorization) headers["authorization"] = authorization;
   if (cookie) headers["cookie"] = cookie;
-  if (projectId) headers["x-project-id"] = projectId;
+  if (workspaceId) headers["x-workspace-id"] = workspaceId;
 
-  fetch(`${GATEWAY_API_URL}/v1/cache/invalidate`, {
+  fetch(`${getGatewayInternalUrl()}/v1/cache/invalidate`, {
     method: "POST",
     headers,
   }).catch(() => {});
@@ -29,16 +29,16 @@ export const invalidateGatewayCache = (request: Request) => {
  */
 export const invalidateGatewayCacheForKeys = (keys: string[]) => {
   for (const key of keys) {
-    fetch(`${GATEWAY_API_URL}/v1/cache/invalidate`, {
+    fetch(`${getGatewayInternalUrl()}/v1/cache/invalidate`, {
       method: "POST",
       headers: { authorization: `Bearer ${key}` },
     }).catch(() => {});
   }
 };
 
-export const invalidateGatewayCacheForAccount = (projectId: string) => {
+export const invalidateGatewayCacheForAccount = (workspaceId: string) => {
   db.apiKey
-    .findFirst({ where: { projectId }, select: { key: true } })
+    .findFirst({ where: { workspaceId }, select: { key: true } })
     .then((apiKey) => {
       if (!apiKey) return;
       invalidateGatewayCacheForKeys([apiKey.key]);
@@ -49,9 +49,9 @@ export const invalidateGatewayCacheForAccount = (projectId: string) => {
 export const invalidateGatewayCacheForOrg = (organizationId: string) => {
   db.apiKey
     .findMany({
-      where: { project: { organizationId } },
+      where: { workspace: { organizationId } },
       select: { key: true },
-      distinct: ["projectId"],
+      distinct: ["workspaceId"],
     })
     .then((keys) => invalidateGatewayCacheForKeys(keys.map((k) => k.key)))
     .catch(() => {});

@@ -3,20 +3,21 @@
   "private": true,
   "scripts": {
     "build": "dotenv -e .env -- turbo run build",
-    "dev": "dotenv -e .env -- turbo run dev --ui stream",
-    "dev:web": "dotenv -e .env -- turbo run dev --filter=@onecli/web --ui stream",
+    "dev": "node scripts/dev.mjs",
+    "setup": "node scripts/setup/index.mjs",
     "lint": "turbo run lint",
     "lint:fix": "turbo run lint:fix",
     "format": "prettier --write \"**/*.{ts,tsx,js,jsx,md,css,json}\" && pnpm --filter @onecli/db prisma format",
     "format:check": "prettier --check \"**/*.{ts,tsx,js,jsx,md,css,json}\" && pnpm --filter @onecli/db prisma format --check",
     "check-types": "turbo run check-types",
-    "check": "turbo run lint check-types && pnpm run format:check",
+    "check": "turbo run lint check-types && pnpm run format:check && pnpm run test:scripts && pnpm run test:licensing",
+    "test:scripts": "node --test 'scripts/**/*.test.mjs'",
+    "test:licensing": "pnpm --filter @onecli/api test:licensing",
     "fix": "turbo run lint:fix && pnpm run format",
-    "db:up": "docker compose -f docker/docker-compose.yml up postgres -d",
-    "db:down": "docker compose -f docker/docker-compose.yml down postgres",
-    "db:nuke": "docker compose -f docker/docker-compose.yml down postgres -v",
-    "redis:up": "docker run -d --name onecli-redis -p 6379:6379 redis:7-alpine",
-    "redis:down": "docker stop onecli-redis && docker rm -v onecli-redis",
+    "agent:build": "docker build -f docker/agent.Dockerfile -t onecli-agent:dev .",
+    "db:up": "docker compose --project-directory . -f docker/docker-compose.dev.yml up -d --wait postgres",
+    "db:down": "docker compose --project-directory . -f docker/docker-compose.dev.yml down postgres",
+    "db:nuke": "docker compose --project-directory . -f docker/docker-compose.dev.yml down -v",
     "db:generate": "pnpm --filter @onecli/db prisma generate",
     "db:push": "dotenv -e .env -- pnpm --filter @onecli/db prisma db push",
     "db:migrate": "dotenv -e .env -- pnpm --filter @onecli/db db:migrate",
@@ -25,6 +26,7 @@
     "prepare": "husky"
   },
   "devDependencies": {
+    "@clack/prompts": "1.7.0",
     "dotenv-cli": "^11.0.0",
     "husky": "^9.1.7",
     "lint-staged": "^16.3.1",
@@ -35,13 +37,18 @@
   },
   "packageManager": "pnpm@9.0.0",
   "engines": {
-    "node": ">=18"
+    "node": ">=22"
   },
-  "version": "1.45.0",
-  "license": "Apache-2.0",
+  "version": "2.2.3",
+  "license": "Apache-2.0 AND LicenseRef-OneCLI-Enterprise",
   "lint-staged": {
     "*.{ts,tsx,js,jsx,md,css,json}": [
       "prettier --write"
     ]
+  },
+  "pnpm": {
+    "overrides": {
+      "openid-client": "6.8.5"
+    }
   }
 }

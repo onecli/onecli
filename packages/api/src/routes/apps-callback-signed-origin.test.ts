@@ -13,7 +13,7 @@ import type { ApiEnv } from "../types";
  */
 
 vi.hoisted(() => {
-  process.env.NEXT_PUBLIC_EDITION = "onprem-slim";
+  process.env.NEXT_PUBLIC_EDITION = "onprem";
   process.env.SECRET_ENCRYPTION_KEY = "test-oauth-state-secret";
   process.env.OAUTH_STATE_SECRET = "test-oauth-state-secret";
 });
@@ -25,7 +25,7 @@ vi.mock("@onecli/db", () => ({ Prisma: {}, db: {} }));
 vi.mock("../apps/registry", () => ({
   getApp: (id: string) =>
     id === "signedapp"
-      ? { id, name: id, available: true, connectionMethod: { type: "oauth" } }
+      ? { id, name: id, connectionMethod: { type: "oauth" } }
       : // A fragment-callback provider (Trello-shaped): the token comes back in
         // the URL fragment, so the first hit has no token query param and the
         // handler answers with the fragment-bridge page instead of redirecting.
@@ -33,7 +33,6 @@ vi.mock("../apps/registry", () => ({
         ? {
             id,
             name: id,
-            available: true,
             connectionMethod: {
               type: "oauth",
               fragmentCallback: { paramName: "token" },
@@ -49,14 +48,14 @@ import { signOAuthState, generateNonce } from "../lib/oauth-state";
 const SIGNED_ORIGIN = "https://signed.example.com";
 const FORGED_HOST = "forged.example.com";
 
-// No projectId, so the handler stops at "Missing project in state" — the first
+// No workspaceId, so the handler stops at "Missing workspace in state" — the first
 // redirect *after* the origin is re-resolved from the verified state, which is
 // exactly the branch under test. Keeps the test off the database entirely.
 const stateWithout = (extra: Record<string, unknown> = {}) =>
   signOAuthState({ provider: "signedapp", nonce: generateNonce(), ...extra });
 
-const MISSING_PROJECT =
-  "/app-connect/signedapp?status=error&message=Missing%20project%20in%20state";
+const MISSING_WORKSPACE =
+  "/app-connect/signedapp?status=error&message=Missing%20workspace%20in%20state";
 
 describe("oauth callback origin comes from the signed state", () => {
   let app: Hono<ApiEnv>;
@@ -91,7 +90,7 @@ describe("oauth callback origin comes from the signed state", () => {
 
     expect(res.status).toBe(302);
     expect(res.headers.get("location")).toBe(
-      `${SIGNED_ORIGIN}${MISSING_PROJECT}`,
+      `${SIGNED_ORIGIN}${MISSING_WORKSPACE}`,
     );
     expect(res.headers.get("location")).not.toContain(FORGED_HOST);
   });
@@ -105,7 +104,7 @@ describe("oauth callback origin comes from the signed state", () => {
 
     expect(res.status).toBe(302);
     expect(res.headers.get("location")).toBe(
-      `https://configured.example.com${MISSING_PROJECT}`,
+      `https://configured.example.com${MISSING_WORKSPACE}`,
     );
   });
 
@@ -120,7 +119,7 @@ describe("oauth callback origin comes from the signed state", () => {
 
     expect(res.status).toBe(302);
     expect(res.headers.get("location")).toBe(
-      `https://proxy.example.com${MISSING_PROJECT}`,
+      `https://proxy.example.com${MISSING_WORKSPACE}`,
     );
   });
 
@@ -136,7 +135,7 @@ describe("oauth callback origin comes from the signed state", () => {
 
     expect(res.status).toBe(302);
     expect(res.headers.get("location")).toBe(
-      `https://proxy.example.com${MISSING_PROJECT}`,
+      `https://proxy.example.com${MISSING_WORKSPACE}`,
     );
   });
 

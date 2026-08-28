@@ -153,3 +153,32 @@
     display: none;
   }
 }
+
+/* The message-scroller viewport's scroll affordances. `scrollbar-none` is the
+   auto-scroll variant's hide (same effect as scrollbar-hide; named to match
+   the shadcn component's classes). */
+@utility scrollbar-thin {
+  scrollbar-width: thin;
+}
+
+@utility scrollbar-none {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+  &::-webkit-scrollbar {
+    display: none;
+  }
+}
+
+@utility scrollbar-gutter-stable {
+  scrollbar-gutter: stable;
+}
+
+/* Fade the last few lines at the viewport's bottom edge so clipped content
+   reads as "more below", not as a hard cut. */
+@utility scroll-fade-b {
+  mask-image: linear-gradient(
+    to bottom,
+    black calc(100% - 2rem),
+    transparent 100%
+  );
+}

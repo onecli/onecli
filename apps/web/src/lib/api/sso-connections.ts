@@ -6,7 +6,7 @@ import type {
   UpdateSsoConnectionInput,
 } from "./types";
 
-// SSO connections are organization-scoped only — no project variant.
+// SSO connections are organization-scoped only — no workspace variant.
 const base = "/v1/org/sso/connections";
 
 export const list = () => apiGet<OrgSsoConnection[]>(base);

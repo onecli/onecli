@@ -2,7 +2,7 @@
 //!
 //! Contains all Bitwarden-specific logic: `RemoteClient` lifecycle, PSK pairing,
 //! Noise protocol, credential caching, and session restore. Per-account sessions are
-//! stored in a `DashMap<project_id, Arc<BitwardenUserSession>>`.
+//! stored in a `DashMap<workspace_id, Arc<BitwardenUserSession>>`.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -107,7 +107,7 @@ fn deserialize_bytes_opt<'de, D: serde::Deserializer<'de>>(
     }
 }
 
-// ── Per-project session ───────────────────────────────────────────────────
+// ── Per-workspace session ───────────────────────────────────────────────────
 
 struct CachedCredential {
     data: Option<CredentialData>,
@@ -169,7 +169,7 @@ impl BitwardenVaultProvider {
             loop {
                 interval.tick().await;
 
-                // Collect project_ids to evict (don't hold DashMap iter across await)
+                // Collect workspace_ids to evict (don't hold DashMap iter across await)
                 let to_evict: Vec<String> = sessions
                     .iter()
                     .filter_map(|entry| {
@@ -182,30 +182,30 @@ impl BitwardenVaultProvider {
                     })
                     .collect();
 
-                for project_id in to_evict {
+                for workspace_id in to_evict {
                     // Remove from map first — new requests will re-create from DB
-                    if let Some((_, session)) = sessions.remove(&project_id) {
+                    if let Some((_, session)) = sessions.remove(&workspace_id) {
                         // Acquire lock to ensure no in-flight credential request, then drop the handle
                         let mut guard = session.client.lock().await;
                         guard.take(); // dropping the handle disconnects
                         session.credential_cache.clear();
                         session.is_ready.store(false, Ordering::Relaxed);
-                        info!(project_id = %project_id, "bitwarden: evicted idle session");
+                        info!(workspace_id = %workspace_id, "bitwarden: evicted idle session");
                     }
                 }
             }
         });
     }
 
-    /// Load an existing session from memory or DB. Returns `None` if the project
+    /// Load an existing session from memory or DB. Returns `None` if the workspace
     /// has never paired (no VaultConnection row). Does NOT generate a new identity.
-    async fn load_session(&self, project_id: &str) -> Result<Option<Arc<BitwardenUserSession>>> {
-        if let Some(session) = self.sessions.get(project_id) {
+    async fn load_session(&self, workspace_id: &str) -> Result<Option<Arc<BitwardenUserSession>>> {
+        if let Some(session) = self.sessions.get(workspace_id) {
             return Ok(Some(Arc::clone(session.value())));
         }
 
-        // Load from DB — if no row, project has never paired
-        let row = match db::find_vault_connection(&self.pool, project_id, "bitwarden").await? {
+        // Load from DB — if no row, workspace has never paired
+        let row = match db::find_vault_connection(&self.pool, workspace_id, "bitwarden").await? {
             Some(r) => r,
             None => return Ok(None),
         };
@@ -214,7 +214,7 @@ impl BitwardenVaultProvider {
             Some(v) => match decrypt_connection_data(&self.crypto, v).await {
                 Ok(cd) => Some(cd),
                 Err(e) => {
-                    warn!(error = ?e, project_id, "failed to decrypt vault connection data");
+                    warn!(error = ?e, workspace_id, "failed to decrypt vault connection data");
                     None
                 }
             },
@@ -239,12 +239,12 @@ impl BitwardenVaultProvider {
         });
 
         self.sessions
-            .insert(project_id.to_string(), Arc::clone(&session));
+            .insert(workspace_id.to_string(), Arc::clone(&session));
         Ok(Some(session))
     }
 
     /// Create a new session with a fresh identity for pairing.
-    fn create_pairing_session(&self, project_id: &str) -> Arc<BitwardenUserSession> {
+    fn create_pairing_session(&self, workspace_id: &str) -> Arc<BitwardenUserSession> {
         let session = Arc::new(BitwardenUserSession {
             client: Mutex::new(None),
             identity: BitwardenIdentityProvider::generate(),
@@ -257,16 +257,16 @@ impl BitwardenVaultProvider {
         });
 
         self.sessions
-            .insert(project_id.to_string(), Arc::clone(&session));
+            .insert(workspace_id.to_string(), Arc::clone(&session));
         session
     }
 
-    /// Create a connected `RemoteClient` for a project session.
+    /// Create a connected `RemoteClient` for a workspace session.
     /// Always passes the identity's key_data to the connection store so write-throughs
     /// never null it out — even for fresh pairings where connection_data is None.
     async fn create_and_connect_client(
         &self,
-        project_id: &str,
+        workspace_id: &str,
         session: &BitwardenUserSession,
     ) -> Result<RemoteClient> {
         let proxy_client = DefaultProxyClient::from_url(self.config.proxy_url.clone());
@@ -275,7 +275,7 @@ impl BitwardenVaultProvider {
         let identity_provider = session.identity.clone_provider();
         let connection_store = BitwardenConnectionStore::new(
             self.pool.clone(),
-            project_id.to_string(),
+            workspace_id.to_string(),
             key_data,
             Arc::clone(&self.crypto),
             session.connection_data.as_ref(),
@@ -294,7 +294,7 @@ impl BitwardenVaultProvider {
         .map_err(|e| anyhow!("failed to connect remote client: {e}"))?;
 
         Self::spawn_notification_listener(
-            project_id.to_string(),
+            workspace_id.to_string(),
             notifications,
             Arc::clone(&session.last_error),
             Arc::clone(&session.is_ready),
@@ -305,7 +305,7 @@ impl BitwardenVaultProvider {
 
     /// Consumes notifications from the `RemoteClient` for logging and readiness tracking.
     fn spawn_notification_listener(
-        project_id: String,
+        workspace_id: String,
         mut notifications: mpsc::Receiver<RemoteClientNotification>,
         last_error: Arc<std::sync::Mutex<Option<String>>>,
         is_ready: Arc<AtomicBool>,
@@ -314,11 +314,11 @@ impl BitwardenVaultProvider {
             while let Some(notif) = notifications.recv().await {
                 match &notif {
                     RemoteClientNotification::Connecting => {
-                        info!(project_id = %project_id, "bitwarden: connecting");
+                        info!(workspace_id = %workspace_id, "bitwarden: connecting");
                     }
                     RemoteClientNotification::Connected { fingerprint } => {
                         info!(
-                            project_id = %project_id,
+                            workspace_id = %workspace_id,
                             fingerprint = %hex::encode(fingerprint.0),
                             "bitwarden: connected"
                         );
@@ -332,20 +332,20 @@ impl BitwardenVaultProvider {
                     } => {
                         is_ready.store(*can_request_credentials, Ordering::Relaxed);
                         info!(
-                            project_id = %project_id,
+                            workspace_id = %workspace_id,
                             can_request = can_request_credentials,
                             "bitwarden: ready"
                         );
                     }
                     RemoteClientNotification::CredentialReceived { credential, .. } => {
-                        info!(project_id = %project_id, credential = ?credential, "bitwarden: credential received");
+                        info!(workspace_id = %workspace_id, credential = ?credential, "bitwarden: credential received");
                     }
                     RemoteClientNotification::Error { message, context } => {
                         let detail = match context {
                             Some(ctx) => format!("{message} ({ctx})"),
                             None => message.clone(),
                         };
-                        warn!(project_id = %project_id, error = %detail, "bitwarden: error");
+                        warn!(workspace_id = %workspace_id, error = %detail, "bitwarden: error");
                         if let Ok(mut err) = last_error.lock() {
                             *err = Some(detail);
                         }
@@ -353,13 +353,13 @@ impl BitwardenVaultProvider {
                     RemoteClientNotification::Disconnected { reason } => {
                         is_ready.store(false, Ordering::Relaxed);
                         let detail = reason.as_deref().unwrap_or("unknown reason").to_string();
-                        warn!(project_id = %project_id, reason = %detail, "bitwarden: disconnected");
+                        warn!(workspace_id = %workspace_id, reason = %detail, "bitwarden: disconnected");
                         if let Ok(mut err) = last_error.lock() {
                             *err = Some(format!("Disconnected: {detail}"));
                         }
                     }
                     _ => {
-                        info!(project_id = %project_id, notif = ?notif, "bitwarden: notification");
+                        info!(workspace_id = %workspace_id, notif = ?notif, "bitwarden: notification");
                     }
                 }
             }
@@ -375,7 +375,7 @@ impl VaultProvider for BitwardenVaultProvider {
         "bitwarden"
     }
 
-    async fn pair(&self, project_id: &str, params: &serde_json::Value) -> Result<PairResult> {
+    async fn pair(&self, workspace_id: &str, params: &serde_json::Value) -> Result<PairResult> {
         let psk_hex = params
             .get("psk_hex")
             .and_then(|v| v.as_str())
@@ -390,9 +390,9 @@ impl VaultProvider for BitwardenVaultProvider {
         let remote_fingerprint = parse_fingerprint(fingerprint_hex)
             .ok_or_else(|| anyhow!("invalid fingerprint: must be 32 hex-encoded bytes"))?;
 
-        let session = match self.load_session(project_id).await? {
+        let session = match self.load_session(workspace_id).await? {
             Some(s) => s,
-            None => self.create_pairing_session(project_id),
+            None => self.create_pairing_session(workspace_id),
         };
 
         // Create the DB row BEFORE pairing so that ConnectionStore::save()'s
@@ -406,14 +406,16 @@ impl VaultProvider for BitwardenVaultProvider {
         let encrypted_cd = encrypt_connection_data(&self.crypto, &initial_cd).await?;
         db::upsert_vault_connection(
             &self.pool,
-            project_id,
+            workspace_id,
             "bitwarden",
             "paired",
             Some(&encrypted_cd),
         )
         .await?;
 
-        let client = self.create_and_connect_client(project_id, &session).await?;
+        let client = self
+            .create_and_connect_client(workspace_id, &session)
+            .await?;
 
         client
             .pair_with_psk(psk, remote_fingerprint)
@@ -421,7 +423,7 @@ impl VaultProvider for BitwardenVaultProvider {
             .map_err(|e| anyhow!("PSK pairing failed: {e}"))?;
 
         info!(
-            project_id = %project_id,
+            workspace_id = %workspace_id,
             fingerprint = %fingerprint_hex,
             "bitwarden: paired via PSK"
         );
@@ -441,11 +443,11 @@ impl VaultProvider for BitwardenVaultProvider {
 
     async fn request_credential(
         &self,
-        project_id: &str,
+        workspace_id: &str,
         hostname: &str,
     ) -> Option<VaultCredential> {
-        // Load existing session — returns None if project never paired
-        let session = match self.load_session(project_id).await {
+        // Load existing session — returns None if workspace never paired
+        let session = match self.load_session(workspace_id).await {
             Ok(Some(s)) => s,
             _ => return None,
         };
@@ -486,15 +488,15 @@ impl VaultProvider for BitwardenVaultProvider {
 
                 let fp = fingerprint?;
 
-                match self.create_and_connect_client(project_id, &session).await {
+                match self.create_and_connect_client(workspace_id, &session).await {
                     Ok(client) => match client.load_cached_connection(fp).await {
                         Ok(()) => {
-                            info!(project_id = %project_id, "bitwarden: lazy session restored");
+                            info!(workspace_id = %workspace_id, "bitwarden: lazy session restored");
                             *client_guard = Some(client);
                         }
                         Err(e) => {
                             let msg = format!("Session restore failed: {e}");
-                            warn!(project_id = %project_id, error = %msg, "bitwarden: lazy restore failed");
+                            warn!(workspace_id = %workspace_id, error = %msg, "bitwarden: lazy restore failed");
                             if let Ok(mut err) = session.last_error.lock() {
                                 *err = Some(msg);
                             }
@@ -507,7 +509,7 @@ impl VaultProvider for BitwardenVaultProvider {
                     },
                     Err(e) => {
                         let msg = format!("Connection failed: {e}");
-                        warn!(project_id = %project_id, error = %msg, "bitwarden: failed to create client for lazy restore");
+                        warn!(workspace_id = %workspace_id, error = %msg, "bitwarden: failed to create client for lazy restore");
                         if let Ok(mut err) = session.last_error.lock() {
                             *err = Some(msg);
                         }
@@ -543,7 +545,7 @@ impl VaultProvider for BitwardenVaultProvider {
             }
             Ok(Err(e)) => {
                 let msg = e.to_string();
-                warn!(project_id = %project_id, hostname = %hostname, error = %msg, "bitwarden: credential request failed");
+                warn!(workspace_id = %workspace_id, hostname = %hostname, error = %msg, "bitwarden: credential request failed");
                 if let Ok(mut err) = session.last_error.lock() {
                     if err.is_none() {
                         *err = Some(msg);
@@ -555,7 +557,7 @@ impl VaultProvider for BitwardenVaultProvider {
                 None
             }
             Err(_) => {
-                warn!(project_id = %project_id, hostname = %hostname, "bitwarden: credential request timed out");
+                warn!(workspace_id = %workspace_id, hostname = %hostname, "bitwarden: credential request timed out");
                 if let Ok(mut err) = session.last_error.lock() {
                     if err.is_none() {
                         *err = Some(
@@ -590,8 +592,8 @@ impl VaultProvider for BitwardenVaultProvider {
         })
     }
 
-    async fn status(&self, project_id: &str) -> ProviderStatus {
-        let session = match self.load_session(project_id).await {
+    async fn status(&self, workspace_id: &str) -> ProviderStatus {
+        let session = match self.load_session(workspace_id).await {
             Ok(Some(s)) => s,
             _ => {
                 return ProviderStatus {
@@ -616,15 +618,15 @@ impl VaultProvider for BitwardenVaultProvider {
         }
     }
 
-    async fn disconnect(&self, project_id: &str) -> Result<()> {
-        if let Some((_, session)) = self.sessions.remove(project_id) {
+    async fn disconnect(&self, workspace_id: &str) -> Result<()> {
+        if let Some((_, session)) = self.sessions.remove(workspace_id) {
             let mut guard = session.client.lock().await;
             guard.take(); // dropping the handle disconnects
             session.credential_cache.clear();
             session.is_ready.store(false, Ordering::Relaxed);
         }
 
-        info!(project_id = %project_id, "bitwarden: disconnected");
+        info!(workspace_id = %workspace_id, "bitwarden: disconnected");
         Ok(())
     }
 

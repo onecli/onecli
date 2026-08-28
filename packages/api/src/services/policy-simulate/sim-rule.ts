@@ -23,7 +23,7 @@ export interface SimRuleMeta {
   id: string;
   logicalId: string;
   name: string;
-  scope: "organization" | "project";
+  scope: "organization" | "workspace";
   source: string;
 }
 
@@ -66,7 +66,8 @@ const secretTargetHosts = (
     const host = secretHosts.byId.get(target.secretId);
     return host === undefined ? [] : [host];
   }
-  if (target.secretScope === "project") return [...secretHosts.projectHosts];
+  if (target.secretScope === "workspace")
+    return [...secretHosts.workspaceHosts];
   if (target.secretScope === "organization") return [...secretHosts.orgHosts];
   return [];
 };
@@ -89,7 +90,7 @@ const decodeTarget = (
         tools: target.appTools,
         connectionScope:
           target.appConnectionScope === "organization" ||
-          target.appConnectionScope === "project"
+          target.appConnectionScope === "workspace"
             ? target.appConnectionScope
             : null,
       };
@@ -164,11 +165,11 @@ export const toSimRule = (
     id: row.id,
     logicalId: row.logicalId,
     name: row.name,
-    scope: row.scope === "organization" ? "organization" : "project",
+    scope: row.scope === "organization" ? "organization" : "workspace",
     source: row.source,
   },
   rule: {
-    scope: row.scope === "organization" ? "organization" : "project",
+    scope: row.scope === "organization" ? "organization" : "workspace",
     priority: row.priority,
     isDefault: row.isDefault,
     source:

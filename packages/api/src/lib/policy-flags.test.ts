@@ -1,11 +1,11 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { isOssEdition } from "./policy-flags";
+import { isOnpremEdition } from "./policy-flags";
 
-// The OSS edition drives how the shared policy service phrases capability
+// The onprem edition drives how the shared policy service phrases capability
 // rejections (a OneCLI Cloud pointer there, byte-identical everywhere else), so
 // the edition resolution itself is pinned: EDITION first, NEXT_PUBLIC_EDITION as
-// the fallback, and an unset/unknown value parsing as OSS.
-describe("isOssEdition", () => {
+// the fallback, and an unset/unknown value parsing as onprem.
+describe("isOnpremEdition", () => {
   const originalEdition = process.env.EDITION;
   const originalPublicEdition = process.env.NEXT_PUBLIC_EDITION;
 
@@ -18,20 +18,19 @@ describe("isOssEdition", () => {
   });
 
   it.each([
-    ["oss", true],
-    ["onprem-slim", false],
-    ["onprem-full", false],
+    ["onprem", true],
+    ["oss", true], // legacy value parses as onprem
     ["cloud", false],
-    ["", true], // unset edition parses as oss
+    ["", true], // unset edition parses as onprem
   ])("edition %s → %s", (edition, expected) => {
     delete process.env.NEXT_PUBLIC_EDITION;
     process.env.EDITION = edition;
-    expect(isOssEdition()).toBe(expected);
+    expect(isOnpremEdition()).toBe(expected);
   });
 
   it("falls back to NEXT_PUBLIC_EDITION when EDITION is unset", () => {
     delete process.env.EDITION;
     process.env.NEXT_PUBLIC_EDITION = "cloud";
-    expect(isOssEdition()).toBe(false);
+    expect(isOnpremEdition()).toBe(false);
   });
 });

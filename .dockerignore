@@ -1,21 +1,29 @@
+# NOTE: unlike .gitignore, .dockerignore patterns are anchored to the context
+# root — a bare `node_modules` matches only the top-level directory. Nested
+# matches need an explicit `**/` prefix.
+
 # Dependencies
 node_modules
+**/node_modules
 
 # Build outputs
 .next
+**/.next
 out
 dist
+**/dist
 cdk.out
 apps/gateway/target
+**/.turbo
 
 # Local data (prevent leaking local PGlite, CA certs, secrets)
 data
 apps/web/data
 
-# Environment files
-.env
-.env.*
-!.env.example
+# Environment files — including docker/.env, the self-host install's secrets
+**/.env
+**/.env.*
+!**/.env.example
 
 # Git / tooling
 .git
@@ -25,8 +33,19 @@ apps/web/data
 .idea
 .DS_Store
 .claude
+.mise.toml
+
+# Never needed by an image build
+assets
+docs
+plans
+test
+cloud-scripts
+packages/infra
+.github
 
 # Misc
 coverage
-*.pem
+**/coverage
+**/*.pem
 npm-debug.log*

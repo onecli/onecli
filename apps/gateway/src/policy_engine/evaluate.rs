@@ -1,29 +1,35 @@
-//! The OSS first-match evaluator: ONE level (project), the single-level
-//! reduction of the uniform per-level law — the first matching rule decides,
-//! else the project Default Rule is the terminal (its Block gated by the
-//! `enforce_deny` carve), else allow.
+//! The first-match policy engine (mirrors evaluator.ts).
 //!
-//! Matching routes through the gateway's own `connect::host_matches` +
-//! `policy::matches_request`, so path globs, methods, the git-receive-pack
-//! bridge, and the (no-op in OSS) condition arm are byte-identical to the
-//! legacy path.
+//! Two-level: per-scope first-match (org, then workspace), combined by strictest,
+//! with each level's Default Rule as its fallback verdict (deny wins). Splitting
+//! the levels and combining by strictest lets a WORKSPACE agent-scoped rule shadow
+//! (loosen or tighten) a workspace all-agents rule, while NEVER letting a workspace
+//! rule override an org rule — first-match ranks agent-scoped rules above
+//! all-agents rules within the workspace level via priority.
+//!
+//! The per-rule network MATCH routes through the gateway's own
+//! `connect::host_matches` + `policy::matches_request`, so matching is
+//! byte-identical to the live path (path glob, method, conditions, and the
+//! git-receive-pack bridge).
 
 use crate::policy::{matches_request, PolicyAction, PolicyRule};
 
-use super::types::{Identity, Outcome, Request, Rule, Target};
+#[cfg(test)]
+use super::types::Decision;
+use super::types::{strictness_rank, Action, Identity, NewRule, PolicyRequest, Scope, Target};
 
-/// Empty identities = "any agent"; an `Agent` identity matches by id; `Other`
-/// (a stored directory identity) never matches.
-fn identity_matches(rule: &Rule, request: &Request) -> bool {
+fn identity_matches(rule: &NewRule, request: &PolicyRequest) -> bool {
     rule.identities.is_empty()
         || rule.identities.iter().any(|i| match i {
             Identity::Agent(id) => *id == request.agent_id,
-            Identity::Other => false,
+            Identity::User(id) => request.user_ids.contains(id),
+            Identity::Group(id) => request.group_ids.contains(id),
+            Identity::Unresolved => false,
         })
 }
 
-/// A throwaway `policy::PolicyRule` so the network match runs the gateway's
-/// exact `matches_request` (the action is irrelevant to matching).
+/// Build a throwaway `policy::PolicyRule` so the network match routes through the
+/// gateway's exact `matches_request`. The action is irrelevant to matching.
 fn pseudo_rule(
     path_pattern: Option<&str>,
     method: Option<String>,
@@ -38,7 +44,12 @@ fn pseudo_rule(
     }
 }
 
-fn target_matches(target: &Target, rule: &Rule, request: &Request, body: Option<&[u8]>) -> bool {
+fn target_matches(
+    target: &Target,
+    rule: &NewRule,
+    request: &PolicyRequest,
+    body: Option<&[u8]>,
+) -> bool {
     match target {
         Target::Network {
             host_pattern,
@@ -62,9 +73,11 @@ fn target_matches(target: &Target, rule: &Rule, request: &Request, body: Option<
             body,
             &rule.conditions,
         ),
-        // A connection target matches only when it is the request's winning
-        // injected connection AND the provider/tools fan-out hits. No winner →
-        // never matches (fail-closed for allow AND block).
+        // A connection target binds to the account that won injection: it
+        // matches only when this request's winning injected connection is
+        // exactly this one AND the provider/tools fan-out hits (the same
+        // expansion as `App`). No winner (uncredentialed, secret-served, or the
+        // non-serving wipe) → never matches — fail-closed for allow AND block.
         Target::Connection {
             id,
             provider,
@@ -81,8 +94,11 @@ fn target_matches(target: &Target, rule: &Rule, request: &Request, body: Option<
                     &rule.conditions,
                 )
         }
-        // A secret target gates its resolved host(s), host-only. Empty patterns
-        // (unresolved/deleted secret) never match — fail-closed.
+        // A secret gates its host: it matches when the request host matches ANY of
+        // the secret's resolved host patterns (host-only, mirroring the connect-time
+        // injection filter so permit ⟺ inject). `request.host` is already
+        // port-stripped (the policy host), so `host_matches` needs no extra strip.
+        // Empty patterns (unresolved/deleted secret) → never matches (fail-closed).
         Target::Secret { host_patterns } => host_patterns
             .iter()
             .any(|h| crate::connect::host_matches(&request.host, h)),
@@ -90,11 +106,15 @@ fn target_matches(target: &Target, rule: &Rule, request: &Request, body: Option<
     }
 }
 
-/// A non-default rule matches only when it names at least one target AND one of
-/// them matches. Empty targets = matches NOTHING: "match everything" is the
-/// Default Rule's job, never an empty list — which also neutralizes a rule
-/// orphaned to zero targets by an FK cascade (fail-closed).
-fn rule_matches(rule: &Rule, request: &Request, body: Option<&[u8]>) -> bool {
+fn rule_matches(rule: &NewRule, request: &PolicyRequest, body: Option<&[u8]>) -> bool {
+    // A non-default rule matches only when it names at least one target AND one of
+    // them matches. Empty targets = matches NOTHING (fail-closed): "match every
+    // request" is the Default Rule's terminal job or an explicit network wildcard,
+    // never an empty target list. This also neutralizes an orphaned rule whose only
+    // connection/secret target was deleted (the FK cascade leaves it with zero
+    // targets) — it goes inert instead of silently matching everything. Only
+    // non-default rules reach here (`first_match` skips the default, whose "any" is
+    // its level's default fallback), so the terminal Default Rules are unaffected.
     identity_matches(rule, request)
         && !rule.targets.is_empty()
         && rule
@@ -103,51 +123,160 @@ fn rule_matches(rule: &Rule, request: &Request, body: Option<&[u8]>) -> bool {
             .any(|t| target_matches(t, rule, request, body))
 }
 
-/// First matching non-default rule in `(priority, id)` order. The id tie-break
-/// makes equal priorities total and deterministic, agreeing with the DB's
-/// `ORDER BY r.priority, r.id` (ids are lowercase-hex UUIDs, so Rust byte order
-/// equals the Postgres collation).
-fn first_match<'a>(rules: &'a [Rule], request: &Request, body: Option<&[u8]>) -> Option<&'a Rule> {
-    let mut ordered: Vec<&'a Rule> = rules.iter().filter(|r| !r.is_default).collect();
-    ordered.sort_by(|a, b| a.priority.cmp(&b.priority).then_with(|| a.id.cmp(&b.id)));
-    ordered
-        .into_iter()
-        .find(|rule| rule_matches(rule, request, body))
+struct LevelMatch<'a> {
+    rank: u8,
+    rule: &'a NewRule,
 }
 
-/// Decide the request: the first matching rule wins (allow or block — an
-/// explicit project allow opens its own Default-Block, allowlist-style);
-/// otherwise the project Default Rule is the terminal, its Block enforced only
-/// under the `enforce_deny` carve (credentialed, non-LLM traffic); otherwise
-/// allow. This is exactly the EE evaluator's project arm with no org level
-/// contributing a verdict.
+/// First matching rule in priority order within one scope.
+fn first_match<'a>(
+    rules: &[&'a NewRule],
+    request: &PolicyRequest,
+    body: Option<&[u8]>,
+) -> Option<LevelMatch<'a>> {
+    let mut ordered: Vec<&'a NewRule> = rules.to_vec();
+    // Priority, then id: a total, deterministic order even if two rules share a
+    // priority (mirrors the TS evaluator + `ORDER BY r.priority, r.id`). `id` is a
+    // lowercase-hex UUID, so Rust byte order == Postgres `ORDER BY id` collation —
+    // the two ports agree on ties; a mixed-case PK format would break that.
+    ordered.sort_by(|a, b| a.priority.cmp(&b.priority).then_with(|| a.id.cmp(&b.id)));
+    for rule in ordered {
+        if rule_matches(rule, request, body) {
+            return Some(LevelMatch {
+                rank: strictness_rank(rule),
+                rule,
+            });
+        }
+    }
+    None
+}
+
+#[cfg(test)]
+fn to_decision(rule: &NewRule) -> Decision {
+    if rule.action == Action::Block {
+        return Decision::block();
+    }
+    if rule.require_approval {
+        return Decision::allow_approval();
+    }
+    match (rule.rate_limit, rule.rate_limit_window) {
+        (Some(limit), Some(window)) => Decision::allow_rate(limit, window),
+        _ => Decision::allow(),
+    }
+}
+
+/// The winning outcome of a first-match evaluation: a concrete rule, a
+/// deny-default (either level's Default Rule Block, when enforced — carrying
+/// THAT Default Rule so telemetry can attribute it, org-first when both
+/// block), or a plain allow. The live enforce path needs the winning RULE
+/// (its id/name + rate modifier); the corpus/materialization path collapses
+/// it to a `Decision`.
+pub(super) enum Outcome<'a> {
+    Rule(&'a NewRule),
+    DenyDefault(Option<&'a NewRule>),
+    Allow,
+}
+
+/// The uniform per-level default law (step 9): each level's verdict is its
+/// first matching rule, else its Default Rule; the stricter verdict wins
+/// (deny-wins). A level with no rules and no Default Rule contributes no
+/// verdict. Default-Block verdicts are gated by the `enforce_deny` carve
+/// (managed, non-LLM requests only); explicit rule blocks are unconditional.
+/// Mirrors evaluateNew.
 pub(super) fn evaluate_outcome<'a>(
-    rules: &'a [Rule],
-    request: &Request,
+    rules: &'a [NewRule],
+    request: &PolicyRequest,
     body: Option<&[u8]>,
 ) -> Outcome<'a> {
-    if let Some(rule) = first_match(rules, request, body) {
-        return Outcome::Rule(rule);
+    let org_explicit: Vec<&NewRule> = rules
+        .iter()
+        .filter(|r| !r.is_default && r.scope == Scope::Organization)
+        .collect();
+    let workspace_explicit: Vec<&NewRule> = rules
+        .iter()
+        .filter(|r| !r.is_default && r.scope == Scope::Workspace)
+        .collect();
+
+    let org_match = first_match(&org_explicit, request, body);
+    let workspace_match = first_match(&workspace_explicit, request, body);
+
+    // A Default Rule Block is a HARD FLOOR at its level: the org default's Block
+    // may not be opened by a workspace ALLOW (only an org allow rule or an org
+    // allow posture opens the door), and symmetrically a workspace default Block
+    // (allowlist mode) may not be opened by an org ALLOW — an org allow is
+    // "permission"; the workspace mirrors the allows it wants. Computed up front
+    // so the one-sided match arms can defer to them.
+    let org_default = rules
+        .iter()
+        .find(|r| r.is_default && r.scope == Scope::Organization);
+    let org_default_blocks =
+        org_default.is_some_and(|d| d.action == Action::Block && request.enforce_deny());
+    let workspace_default = rules
+        .iter()
+        .find(|r| r.is_default && r.scope == Scope::Workspace);
+    let workspace_default_blocks =
+        workspace_default.is_some_and(|d| d.action == Action::Block && request.enforce_deny());
+
+    // Combine by strictest (lower rank = stricter); on a tie keep the org match
+    // so the org rate modifier wins, matching the oracle's org-first Pass 3.
+    let best = match (org_match, workspace_match) {
+        (Some(o), Some(p)) => Some(if p.rank < o.rank { p } else { o }),
+        // A lone org ALLOW can't punch through the workspace default Block
+        // (allowlist mode) — defer to the deny-default below. An org BLOCK still
+        // applies (it only tightens). Approval/rate rules are Action::Allow, so
+        // they defer too — symmetric with the org-floor arm below.
+        (Some(o), None) if o.rule.action == Action::Allow && workspace_default_blocks => None,
+        (Some(o), None) => Some(o),
+        // A lone workspace ALLOW can't punch through the org default Block (the hard
+        // floor) — defer to the deny-default below. A workspace BLOCK still applies
+        // (it only tightens), and an allow-posture org lets the workspace allow win.
+        (None, Some(p)) if p.rule.action == Action::Allow && org_default_blocks => None,
+        (None, Some(p)) => Some(p),
+        (None, None) => None,
+    };
+    if let Some(m) = best {
+        return Outcome::Rule(m.rule);
     }
-    let default = rules.iter().find(|r| r.is_default);
-    if let Some(d) = default {
-        if d.action == super::types::Action::Block && request.enforce_deny() {
-            return Outcome::DenyDefault(d);
-        }
+
+    // No explicit rule survived → the level defaults decide; deny wins.
+    // Attribution is org-first (the org default is the outer floor).
+    if org_default_blocks {
+        return Outcome::DenyDefault(org_default);
+    }
+    if workspace_default_blocks {
+        return Outcome::DenyDefault(workspace_default);
     }
     Outcome::Allow
 }
 
+/// Decide `request` against a rule set, collapsed to a normalized `Decision` — the
+/// cross-port corpus parity path (the live enforce path uses `evaluate` →
+/// `PolicyDecision`). Mirrors evaluateNew. Test-only since the shadow was retired.
+#[cfg(test)]
+pub(super) fn evaluate_new(
+    rules: &[NewRule],
+    request: &PolicyRequest,
+    body: Option<&[u8]>,
+) -> Decision {
+    match evaluate_outcome(rules, request, body) {
+        Outcome::Rule(rule) => to_decision(rule),
+        Outcome::DenyDefault(_) => Decision::block_by_default(),
+        Outcome::Allow => Decision::allow(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::super::types::{Action, RateWindow};
     use super::*;
 
-    fn rule(id: &str, priority: usize, action: Action) -> Rule {
-        Rule {
+    /// A minimal non-default workspace rule that matches `request()` — empty
+    /// identities ("any") + a `Network` target on the request host.
+    fn matching_rule(id: &str, priority: usize, action: Action) -> NewRule {
+        NewRule {
             id: id.to_string(),
-            logical_id: format!("l-{id}"),
-            name: id.to_string(),
+            logical_id: id.to_string(),
+            name: String::new(),
+            scope: Scope::Workspace,
             priority,
             is_default: false,
             identities: Vec::new(),
@@ -164,200 +293,37 @@ mod tests {
         }
     }
 
-    fn default_rule(action: Action) -> Rule {
-        let mut r = rule("default", 99, action);
-        r.is_default = true;
-        r.targets = Vec::new();
-        r
-    }
-
-    fn request() -> Request {
-        Request {
+    fn request() -> PolicyRequest {
+        PolicyRequest {
             host: "api.example.com".to_string(),
             path: "/x".to_string(),
             method: "GET".to_string(),
             agent_id: "agent-1".to_string(),
+            user_ids: Vec::new(),
+            group_ids: Vec::new(),
             has_injections: false,
             is_llm_host: false,
             winning_connection_id: None,
         }
     }
 
-    fn injected_request() -> Request {
-        Request {
-            has_injections: true,
-            ..request()
-        }
-    }
-
-    /// The per-account law, all four directions: a `Connection` target matches
-    /// iff (the request's winning injected connection == its id) AND the
-    /// provider catalog fan-out hits. Lockstep twin of the EE corpus arms
-    /// 6b/6c/11/12 and the TS `connection target binds to the winner` block.
+    /// Two rules sharing a priority resolve by `id` (lower first), NOT by
+    /// insertion/DB-row order — so first-match is deterministic and agrees with
+    /// `ORDER BY r.priority, r.id` and the TS evaluator. The reversed-order case
+    /// is the one that would fail under the old stable `sort_by_key(priority)`.
     #[test]
-    fn connection_target_binds_to_the_winning_connection() {
-        let conn_block = |id: &str| {
-            let mut r = rule("c-rule", 1, Action::Block);
-            r.targets = vec![Target::Connection {
-                id: id.to_string(),
-                provider: "gmail".to_string(),
-                tools: Vec::new(),
-            }];
-            r
-        };
-        let req_via = |winner: Option<&str>| Request {
-            host: "gmail.googleapis.com".to_string(),
-            path: "/gmail/v1/users/me/messages".to_string(),
-            method: "GET".to_string(),
-            agent_id: "agent-1".to_string(),
-            has_injections: true,
-            is_llm_host: false,
-            winning_connection_id: winner.map(str::to_string),
-        };
-        let rules = vec![conn_block("c1")];
+    fn equal_priority_first_match_is_deterministic_by_id() {
+        let a = matching_rule("a", 5, Action::Allow);
+        let b = matching_rule("b", 5, Action::Block);
+        let req = request();
 
-        // Matching winner on the provider's catalog host → the block binds.
-        assert!(matches!(
-            evaluate_outcome(&rules, &req_via(Some("c1")), None),
-            Outcome::Rule(r) if r.action == Action::Block
-        ));
-        // A same-provider sibling account → no match (the deliberate change
-        // from the provider-wide decode).
-        assert!(matches!(
-            evaluate_outcome(&rules, &req_via(Some("c2")), None),
-            Outcome::Allow
-        ));
-        // No winner (secret-served / uncredentialed) → no match (fail-closed).
-        assert!(matches!(
-            evaluate_outcome(&rules, &req_via(None), None),
-            Outcome::Allow
-        ));
-        // Winner equality alone is not enough: a host outside the provider's
-        // catalog fails the fan-out gate.
-        let mut off_host = req_via(Some("c1"));
-        off_host.host = "api.github.com".to_string();
-        assert!(matches!(
-            evaluate_outcome(&rules, &off_host, None),
-            Outcome::Allow
-        ));
-    }
+        let ab = first_match(&[&a, &b], &req, None).expect("a matches");
+        assert_eq!(ab.rule.id, "a", "lower id wins");
 
-    #[test]
-    fn first_match_wins_by_priority() {
-        let rules = vec![rule("b", 1, Action::Block), rule("a", 0, Action::Allow)];
-        match evaluate_outcome(&rules, &request(), None) {
-            Outcome::Rule(r) => assert_eq!(r.id, "a"),
-            _ => panic!("expected a rule match"),
-        }
-    }
-
-    #[test]
-    fn equal_priority_ties_break_by_id_regardless_of_input_order() {
-        for rules in [
-            vec![rule("a", 5, Action::Allow), rule("b", 5, Action::Block)],
-            vec![rule("b", 5, Action::Block), rule("a", 5, Action::Allow)],
-        ] {
-            match evaluate_outcome(&rules, &request(), None) {
-                Outcome::Rule(r) => assert_eq!(r.id, "a", "lower id wins the tie"),
-                _ => panic!("expected a rule match"),
-            }
-        }
-    }
-
-    #[test]
-    fn agent_identity_scopes_and_other_never_matches() {
-        let mut agent_scoped = rule("scoped", 0, Action::Block);
-        agent_scoped.identities = vec![Identity::Agent("agent-1".to_string())];
-        let mut other = rule("directory", 1, Action::Block);
-        other.identities = vec![Identity::Other];
-        let allow = rule("any", 2, Action::Allow);
-
-        let rules = vec![agent_scoped, other, allow];
-        match evaluate_outcome(&rules, &request(), None) {
-            Outcome::Rule(r) => assert_eq!(r.id, "scoped"),
-            _ => panic!("expected the agent-scoped match"),
-        }
-        let mut foreign = request();
-        foreign.agent_id = "agent-2".to_string();
-        match evaluate_outcome(&rules, &foreign, None) {
-            // The directory identity must NOT match — the any-agent allow wins.
-            Outcome::Rule(r) => assert_eq!(r.id, "any"),
-            _ => panic!("expected the any-agent match"),
-        }
-    }
-
-    #[test]
-    fn empty_target_rule_is_inert() {
-        let mut orphan = rule("orphan", 0, Action::Block);
-        orphan.targets = Vec::new();
-        let control = rule("control", 1, Action::Allow);
-        match evaluate_outcome(&[orphan, control], &request(), None) {
-            Outcome::Rule(r) => assert_eq!(r.id, "control"),
-            _ => panic!("expected the control match"),
-        }
-    }
-
-    #[test]
-    fn default_block_enforces_only_under_the_carve() {
-        let rules = vec![default_rule(Action::Block)];
-        // Uncredentialed → the carve spares it.
-        assert!(matches!(
-            evaluate_outcome(&rules, &request(), None),
-            Outcome::Allow
-        ));
-        // Credentialed non-LLM → blocked, attributed to the Default Rule.
-        match evaluate_outcome(&rules, &injected_request(), None) {
-            Outcome::DenyDefault(d) => assert!(d.is_default),
-            _ => panic!("expected the deny-default"),
-        }
-        // LLM host → spared.
-        let mut llm = injected_request();
-        llm.is_llm_host = true;
-        assert!(matches!(
-            evaluate_outcome(&rules, &llm, None),
-            Outcome::Allow
-        ));
-    }
-
-    #[test]
-    fn explicit_allow_opens_the_default_block() {
-        let rules = vec![rule("open", 0, Action::Allow), default_rule(Action::Block)];
-        match evaluate_outcome(&rules, &injected_request(), None) {
-            Outcome::Rule(r) => assert_eq!(r.id, "open"),
-            _ => panic!("expected the allow rule to win over the default block"),
-        }
-    }
-
-    #[test]
-    fn default_allow_is_neutral() {
-        let rules = vec![default_rule(Action::Allow)];
-        assert!(matches!(
-            evaluate_outcome(&rules, &injected_request(), None),
-            Outcome::Allow
-        ));
-    }
-
-    #[test]
-    fn conditioned_rule_matches_with_no_body_in_oss() {
-        // OSS's condition arm is the no-op (vacuously true) — a conditioned
-        // block matches exactly like the legacy OSS gateway treated it. This
-        // pins the posture; if OSS ever ships real condition matching, this
-        // test must flip with it.
-        let mut conditioned = rule("cond", 0, Action::Block);
-        conditioned.conditions = serde_json::from_str(
-            r#"[{"target":"body","operator":"contains","value":"never-present"}]"#,
-        )
-        .ok();
-        match evaluate_outcome(&[conditioned], &request(), None) {
-            Outcome::Rule(r) => assert_eq!(r.id, "cond"),
-            _ => panic!("expected the conditioned rule to match vacuously"),
-        }
-    }
-
-    #[test]
-    fn rate_window_secs_mapping() {
-        assert_eq!(RateWindow::Minute.secs(), 60);
-        assert_eq!(RateWindow::Hour.secs(), 3600);
-        assert_eq!(RateWindow::Day.secs(), 86400);
+        let ba = first_match(&[&b, &a], &req, None).expect("a matches");
+        assert_eq!(
+            ba.rule.id, "a",
+            "reversed insertion order still picks the lower id"
+        );
     }
 }

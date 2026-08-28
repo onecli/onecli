@@ -1,13 +1,11 @@
-import { readdirSync, readFileSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import path from "node:path";
 
 const isCloud = process.env.NEXT_PUBLIC_EDITION === "cloud";
-const isOnpremFull = process.env.NEXT_PUBLIC_EDITION === "onprem-full";
-const isOnpremSlim = process.env.NEXT_PUBLIC_EDITION === "onprem-slim";
 
 // Build-time app version, exposed to the app as NEXT_PUBLIC_APP_VERSION (client +
 // server, inlined by Next). Cloud stamps APP_VERSION (semver + short git sha, e.g.
-// "1.38.0+f6cca6e5") as a build arg; OSS / self-host / local falls back to the
+// "1.38.0+f6cca6e5") as a build arg; onprem / self-host / local falls back to the
 // monorepo root package.json version, else "dev". process.cwd() is apps/web here.
 const resolveAppVersion = () => {
   if (process.env.APP_VERSION) return process.env.APP_VERSION;
@@ -25,201 +23,135 @@ const resolveAppVersion = () => {
 };
 const appVersion = resolveAppVersion();
 
-// Dashboard paths that cloud intentionally serves at the SAME bare URL as OSS (shared).
-// Empty today: cloud namespaces every dashboard feature under /p, /org, /account, so no
-// bare (dashboard) path is shared. Escape hatch if OSS ever adds a dashboard route cloud
-// also wants to keep bare — add it here and it won't be 404'd.
-const CLOUD_SHARED_DASHBOARD_PATHS = new Set([]);
+// `next dev` only (see `rewrites` below): NODE_ENV is "development" exactly
+// under the dev server, so production builds bake no rewrites at all.
+const isDev = process.env.NODE_ENV === "development";
 
-// Bare OSS dashboard route segments, read from the filesystem at build time so new OSS
-// dashboard routes are covered automatically with no list to maintain. Excludes route
-// groups "(x)", private "_x", dynamic "[x]", parallel "@x", and files via a positive
-// name pattern. process.cwd() is apps/web during `next dev`/`next build`.
-const getOssDashboardSegments = () => {
-  const dir = path.join(process.cwd(), "src", "app", "(dashboard)");
-  try {
-    return readdirSync(dir, { withFileTypes: true })
-      .filter((e) => e.isDirectory() && /^[a-z0-9][a-z0-9-]*$/.test(e.name))
-      .map((e) => `/${e.name}`)
-      .filter((p) => !CLOUD_SHARED_DASHBOARD_PATHS.has(p));
-  } catch {
-    return [];
-  }
-};
-
-// All EE editions (cloud + both onprems) resolve app credentials project →
-// org → env; the RSC/server-action seed (`checkAppConfigExists`) must see the
-// same org tier, so the action is swapped for an org-aware variant.
-const ORG_APP_CONFIG_ALIASES = {
-  "@/lib/actions/app-config": "@/ee/actions/app-config",
-};
-
-// The boot-policy seam, swapped per edition. OSS converts a pre-cutover
-// instance's LEGACY policy into v2, runs the read-only guard
-// (`services/policy-legacy-migration/` — TEMPORARY, see its README), then the
-// step-5 grant conversion (`services/policy-grant-conversion/` — also
-// TEMPORARY). Every EE edition swaps to a NO-OP: cloud has nothing legacy to
-// convert, its fleet is grant-converted (imports convert inline via
-// migrate-import), and an onprem instance in either state should surface a
-// report to an operator rather than be rewritten unattended.
-const POLICY_MIGRATE_ALIASES = {
-  "@/lib/policy-migrate": "@/ee/policy-migrate",
-};
-
-// The shared policy editor with its EE-differentiating chrome behind seams: the
-// staged publish surface + directory names, the org identity picker, and the
-// granular resource-scope editor. Since attach-model step 6 the editor is
-// reached ONLY from the ORG policy page, so these aliases are load-bearing for
-// cloud and onprem-full and inert for the flat editions (oss, onprem-slim),
-// which mount no org scope and therefore never import the tree. The mapping is
-// kept for the flat editions anyway: it costs nothing, and dropping it would
-// silently downgrade the seams if a flat edition ever gained the org UI.
-const POLICY_EDITOR_ALIASES = {
-  "@/lib/policy-editor/editor-chrome": "@/ee/policy-editor/editor-chrome",
-  "@/lib/policy-editor/identity-picker": "@/ee/policy-editor/identity-picker",
-  "@/lib/policy-editor/resource-scope": "@/ee/policy-editor/resource-scope",
-  "@/lib/policy-editor/publish-mode": "@/ee/policy-editor/publish-mode",
-  // The behavioral-conditions builder rides with the editor seam: every EE
-  // edition is entitled (onprem now ENFORCES conditions via the EE
-  // condition_match arm, so it must author them too); the OSS module stays
-  // the locked upsell card. Cloud also carries this key in CLOUD_ALIASES;
-  // duplicating it here is how both onprem maps get it.
-  "@/lib/components/condition-builder": "@/ee/components/condition-builder",
-};
-
-// Cloud edition swaps these web import paths to cloud implementations (turbopack
-// resolveAlias, applied only when isCloud). This config runs in plain Node, so the
-// key→value map lives here directly. The onprem-full edition selects a curated
-// subset below (ONPREM_FULL_ALIASES).
-const CLOUD_ALIASES = {
-  ...ORG_APP_CONFIG_ALIASES,
-  ...POLICY_MIGRATE_ALIASES,
-  ...POLICY_EDITOR_ALIASES,
-  "@/lib/auth/auth-provider": "@/ee/auth/cognito-provider",
-  "@/lib/auth/auth-server": "@/ee/auth/cognito-server",
-  "@/lib/actions/resolve-user": "@/ee/auth/resolve-user",
-  "@/lib/nav-config": "@/ee/nav-config",
-  "@dashboard/dashboard-sidebar": "@/ee/dashboard/dashboard-sidebar",
-  "@dashboard/dashboard-header": "@/ee/dashboard/dashboard-header",
-  "@/lib/gateway-auth": "@/ee/gateway-auth",
-  "@/lib/auth/login-content": "@/ee/auth/login-content",
-  "@/lib/user-plan": "@/ee/user-plan",
-  "@/lib/components/request-app-slot": "@/ee/apps/request-app-slot",
-  "@/lib/home-redirect": "@/ee/home-redirect",
-  "@/lib/components/pro-app-dialog": "@/ee/apps/pro-app-dialog",
-  "@/lib/components/condition-builder": "@/ee/components/condition-builder",
-  "@/lib/dashboard/session-redirect": "@/ee/dashboard/session-redirect",
-  "@/lib/granular-access": "@/ee/granular-access",
-  "@/lib/plan-gate": "@/ee/billing/plan-gate",
-
-  // Cloud initialization (api, server actions, client)
-  "@/lib/init/api": "@/ee/init/api",
-  "@/lib/init/server": "@/ee/init/server",
-  "@/lib/init/client": "@/ee/init/client",
-
-  // Cloud API fetch (Bearer token auth for external api-server)
-  "@/lib/api-fetch": "@/ee/api-fetch",
-};
-
-// Both onprem editions inject the real cloud app definitions via an onprem init seam
-// (api/server/client) so the cloud-only apps are connectable with the customer's own
-// OAuth credentials (BYO), while keeping local crypto/auth (no KMS/Cognito/cloud routes).
-const ONPREM_INIT_ALIASES = {
-  "@/lib/init/api": "@/ee/onprem/init/api",
-  "@/lib/init/server": "@/ee/onprem/init/server",
-  "@/lib/init/client": "@/ee/onprem/init/client",
-};
-
-// Both onprem editions are the fully-entitled enterprise edition: report the top
-// plan (so premium/teamOnly apps + features aren't shown as locked) and get the
-// granular-access policy dialogs. The backend already allows everything for onprem.
-const ONPREM_ENTITLEMENT_ALIASES = {
-  "@/lib/user-plan": "@/ee/onprem/user-plan",
-  "@/lib/granular-access": CLOUD_ALIASES["@/lib/granular-access"],
-};
-
-// The onprem-full edition reuses the cloud ORG-UI implementations + the org-aware home
-// redirect (org routes, nav, dashboard chrome) but keeps the OSS defaults for auth
-// (local), resolve-user (its project context already works for a single org), and billing
-// (none). It adds the onprem init seam (cloud app defs) + one onprem-specific module:
-// api-fetch (local cookie auth + project-scoped headers, no bearer token). The cloud
-// org-context helpers are imported directly by the org pages and work as-is for onprem
-// (members are "owner").
-const ONPREM_FULL_ALIASES = {
-  ...ONPREM_INIT_ALIASES,
-  ...ONPREM_ENTITLEMENT_ALIASES,
-  ...ORG_APP_CONFIG_ALIASES,
-  ...POLICY_MIGRATE_ALIASES,
-  ...POLICY_EDITOR_ALIASES,
-  // org-UI + org-aware redirect → cloud implementations (reuse the cloud mappings above)
-  "@/lib/nav-config": CLOUD_ALIASES["@/lib/nav-config"],
-  "@dashboard/dashboard-sidebar": CLOUD_ALIASES["@dashboard/dashboard-sidebar"],
-  "@dashboard/dashboard-header": CLOUD_ALIASES["@dashboard/dashboard-header"],
-  "@/lib/dashboard/session-redirect":
-    CLOUD_ALIASES["@/lib/dashboard/session-redirect"],
-  "@/lib/home-redirect": CLOUD_ALIASES["@/lib/home-redirect"],
-  // onprem-specific: local cookie auth + project-scoped headers
-  "@/lib/api-fetch": "@/ee/onprem/api-fetch",
-};
-
-// onprem-slim keeps the flat OSS surface (local auth, OSS api-fetch) + only adds the
-// onprem init seam so cloud apps are connectable via BYO.
-const ONPREM_SLIM_ALIASES = {
-  ...ONPREM_INIT_ALIASES,
-  ...ONPREM_ENTITLEMENT_ALIASES,
-  ...ORG_APP_CONFIG_ALIASES,
-  ...POLICY_MIGRATE_ALIASES,
-  ...POLICY_EDITOR_ALIASES,
-};
+// Where the dev server proxies `/v1`, better-auth and the gateway to. These are
+// the services' addresses on the local network — deliberately NOT the public
+// `API_URL`/`GATEWAY_API_URL`: a dev who points those at a tunnel would send
+// the proxy hop back out through the tunnel it came from (web → tunnel → web,
+// a loop). The same internal-address vars the rest of the stack already uses.
+const devApiUrl = (
+  process.env.INTERNAL_API_URL ?? "http://localhost:10256"
+).replace(/\/+$/, "");
+const devGatewayUrl = (
+  process.env.GATEWAY_INTERNAL_URL ?? "http://localhost:10255"
+).replace(/\/+$/, "");
 
 /** @type {import('next').NextConfig} */
 const nextConfig = {
   output: "standalone",
   poweredByHeader: false,
-  compress: !isCloud, // Cloud: CloudFront handles compression at the edge; OSS: Next.js compresses
+  // Cloud: CloudFront compresses at the edge. Onprem prod: Next.js compresses.
+  // Dev: OFF — the dev server's gzip middleware buffers proxied responses, and
+  // the single-origin rewrites now carry the conversation SSE stream and the
+  // approvals long-poll through it; compressing those would stall live chat
+  // until the stream ended. Dev has no bandwidth concern to trade for it.
+  compress: !isCloud && !isDev,
   serverExternalPackages: ["@onecli/db", "@1password/sdk"],
   env: {
-    NEXT_PUBLIC_EDITION: process.env.NEXT_PUBLIC_EDITION || "oss",
-    // Baked in at build time (like EDITION): the slim-demo image is built with
-    // this set to "1", inlining the demo caps into the bundle so a runtime
-    // `-e NEXT_PUBLIC_ONECLI_DEMO=…` cannot lift them. Every other build leaves
-    // it "0" and the demo asserts are no-ops.
-    NEXT_PUBLIC_ONECLI_DEMO: process.env.NEXT_PUBLIC_ONECLI_DEMO || "0",
+    // One codebase, two editions selected at runtime: `cloud` (the hosted
+    // platform) or `onprem` (self-hosted — the default). No build-time module
+    // swapping: code branches on the CAPS/IS_CLOUD capability layer instead.
+    NEXT_PUBLIC_EDITION: process.env.NEXT_PUBLIC_EDITION || "onprem",
     NEXT_PUBLIC_APP_VERSION: appVersion,
-    NEXT_PUBLIC_API_URL: process.env.API_DOMAIN
-      ? `${isCloud && process.env.NODE_ENV !== "development" ? "https" : "http"}://${process.env.API_DOMAIN}`
-      : "http://localhost:10255",
-    NEXT_PUBLIC_GATEWAY_API_URL: process.env.GATEWAY_API_DOMAIN
-      ? `${isCloud && process.env.NODE_ENV !== "development" ? "https" : "http"}://${process.env.GATEWAY_API_DOMAIN}`
-      : "http://localhost:10255",
+    // Baked ONLY when a value was actually provided — full URLs first (what
+    // cloud CI passes), the bare-domain vars as a DEPRECATED fallback for
+    // older build invocations. LEGACY(next-major): delete the fallback here
+    // and the API_DOMAIN/GATEWAY_API_DOMAIN rows in turbo.json together
+    // (ledger: packages/api/src/lib/public-origins.ts).
+    //
+    // No localhost fallback here, deliberately: an env{} key is INLINED into
+    // the SERVER bundle too, where a baked localhost would read as a
+    // configured override and beat the resolver's runtime derivation (the
+    // prebuilt self-host image would advertise localhost regardless of
+    // ONECLI_EXTERNAL_URL). Left un-baked, the server reads runtime env and
+    // the browser bottoms out at the resolver's identical code default.
+    ...(process.env.NEXT_PUBLIC_API_URL || process.env.API_DOMAIN
+      ? {
+          NEXT_PUBLIC_API_URL:
+            process.env.NEXT_PUBLIC_API_URL ||
+            `${isCloud && process.env.NODE_ENV !== "development" ? "https" : "http"}://${process.env.API_DOMAIN}`,
+        }
+      : {}),
+    ...(process.env.NEXT_PUBLIC_GATEWAY_API_URL ||
+    process.env.GATEWAY_API_DOMAIN
+      ? {
+          NEXT_PUBLIC_GATEWAY_API_URL:
+            process.env.NEXT_PUBLIC_GATEWAY_API_URL ||
+            `${isCloud && process.env.NODE_ENV !== "development" ? "https" : "http"}://${process.env.GATEWAY_API_DOMAIN}`,
+        }
+      : {}),
   },
-  turbopack: {
-    resolveAlias: isCloud
-      ? CLOUD_ALIASES
-      : isOnpremFull
-        ? ONPREM_FULL_ALIASES
-        : isOnpremSlim
-          ? ONPREM_SLIM_ALIASES
-          : {},
-  },
-  // No `redirects()`: the legacy Rules page and the policyMode toggle retired
-  // at step 10 and used to bounce to the project policy console — which itself
-  // retired at attach-model step 6. There is nowhere left to send those
-  // bookmarks, so they 404 like any other removed route; project access is
-  // authored on the agent and connection pages now.
-  async rewrites() {
-    // Cloud and onprem-full ship the OSS bare dashboard routes too (they may only add
-    // files), but only serve them namespaced under /p, /org, /account. Shadow each bare
-    // path (and its subpaths) before the filesystem route matches, rewriting to Next's
-    // built-in not-found route ("/_not-found") so the existing app/not-found.tsx renders
-    // with a real 404 and the requested URL is preserved. Flat editions (oss,
-    // onprem-slim): no-op.
-    if (!isCloud && !isOnpremFull) return [];
-    const beforeFiles = getOssDashboardSegments().flatMap((seg) => [
-      { source: seg, destination: "/_not-found" },
-      { source: `${seg}/:path*`, destination: "/_not-found" },
-    ]);
-    return { beforeFiles };
+  // `redirects()` carries MOVED routes only — never retired ones. The legacy
+  // Rules page and the policyMode toggle still 404 like any other removed
+  // route, because there is nowhere left to send them.
+  //
+  // The /p/ → /w/ rules exist only for the project→workspace rename
+  // (temporary — remove with the compat layer, see
+  // packages/api/src/lib/legacy-project-compat.ts): ids survived the rename
+  // migration verbatim, so old /p/ deep links map 1:1 onto /w/.
+  redirects: async () => [
+    // Every pre-rename deep link ever delivered (bookmarks, Slack approval
+    // notifications, gateway-minted connect URLs). Permanent: /p/ is never
+    // coming back, so a cached 308 stays correct even after this rule goes.
+    // `:path+` (not `*`): a bare /p never existed, so it stays a plain 404
+    // instead of a permanently-cached redirect to an equally-bare /w.
+    { source: "/p/:path+", destination: "/w/:path+", permanent: true },
+    // The docs' two hardcoded pre-org dashboard links.
+    { source: "/projects", destination: "/", permanent: false },
+    // Install did not retire, it moved under Workspace Settings, and the
+    // setup one-liner it shows is exactly the kind of page people bookmark
+    // and paste to a teammate. Permanent, because the move is.
+    {
+      source: "/w/:workspaceId/install",
+      destination: "/w/:workspaceId/settings/install",
+      permanent: true,
+    },
+  ],
+  //
+  // `rewrites()` exists for exactly one reason: to serve the whole DEV stack
+  // on a SINGLE ORIGIN. better-auth issues the session cookie for the host
+  // that answered, and browsers scope cookies by host — so in dev, where the
+  // dashboard (:10254), api-server (:10256) and gateway (:10255) are separate
+  // processes, one tunnel (ngrok, Cloudflare Tunnel) in front of any single
+  // port could never carry a session. Proxying the API's prefixes and the
+  // gateway under the dev server's own origin means one tunnel to :10254
+  // serves the whole product, and the cookie is always same-origin.
+  //
+  // Dev only: production self-hosts either share one hostname (ports differ —
+  // cookies don't care) or split onto sibling subdomains, where the session
+  // cookie spans the shared parent domain (see `resolveCookieDomain` in
+  // @onecli/api). Production browsers talk to the api-server directly.
+  //
+  // `afterFiles`, never `beforeFiles`: the filesystem router must win first,
+  // or these would shadow the dashboard's own `/auth/login`, `/auth/signup`,
+  // `/auth/cli` pages and the `/v1/health` deploy probe. `/gw` is a stripped
+  // prefix of our own invention — the gateway's browser routes live under
+  // `/v1/*` too, so they'd collide with the api-server's without one. Dev-only
+  // but edition-agnostic: cloud PRODUCTION has CloudFront and a bearer token,
+  // but cloud DEV behind one tunnel needs the same single origin. For that
+  // cloud-dev tunnel, set BOTH baked vars at dev-server start —
+  // NEXT_PUBLIC_API_URL=<tunnel-origin> and
+  // NEXT_PUBLIC_GATEWAY_API_URL=<tunnel-origin>/gw — since cloud skips the
+  // runtime origin injection onprem gets; these rewrites then carry both legs.
+  rewrites: !isDev
+    ? undefined
+    : async () => ({
+        afterFiles: [
+          { source: "/v1/:path*", destination: `${devApiUrl}/v1/:path*` },
+          { source: "/auth/:path*", destination: `${devApiUrl}/auth/:path*` },
+          { source: "/gw/:path*", destination: `${devGatewayUrl}/:path*` },
+        ],
+      }),
+  // The proxy above holds long-lived responses open — the approvals long-poll
+  // sits silent for ~30s and the conversation stream is an indefinite SSE.
+  // Next's proxy defaults to a 30s timeout, which would clip both; this is an
+  // inactivity timeout, so heartbeat-bearing streams live indefinitely under
+  // it. Inert outside dev (no rewrites exist to proxy).
+  experimental: {
+    proxyTimeout: 120_000,
   },
 };
 

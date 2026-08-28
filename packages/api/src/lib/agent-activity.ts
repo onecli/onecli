@@ -2,9 +2,9 @@ import { formatRelative } from "./format";
 
 /**
  * Lookback for an agent's `lastSeenAt` on the agents list: the newest
- * request_logs row inside this window. Bounded so the per-project group-by
- * rides the (project_id, created_at) index instead of walking a busy
- * project's whole log history — and mirrored by `agentLastSeen` below, which
+ * request_logs row inside this window. Bounded so the per-workspace group-by
+ * rides the (workspace_id, created_at) index instead of walking a busy
+ * workspace's whole log history — and mirrored by `agentLastSeen` below, which
  * needs the same number to tell "never used" from "quiet longer than the
  * window". Client-safe (no db/next imports) for exactly that reason.
  */

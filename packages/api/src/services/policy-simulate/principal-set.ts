@@ -1,13 +1,18 @@
 import { db } from "@onecli/db";
 
-// The TS mirror of the gateway's connect-time `find_principal_set` CTE
-// (apps/gateway/src/db.rs) — the set of principals the policy engine matches an
-// agent's requests against: the humans the agent inherits from its project's
-// ProjectAccess (direct users + members of granted groups, ACTIVE org members
+// LICENSED-MIRROR: deliberate Apache twin of the gateway's licensed
+// principal CTE (apps/gateway/src/ee/principals/resolve.rs). Free hot paths
+// execute this file (credential injection, grants summaries, reflections),
+// so it must NOT move into ee/ — declared in ee-boundary.ts LICENSED_MIRRORS.
+//
+// The TS mirror of the gateway's connect-time `find_principal_set` CTE —
+// the set of principals the policy engine matches an
+// agent's requests against: the humans the agent inherits from its workspace's
+// WorkspaceAccess (direct users + members of granted groups, ACTIVE org members
 // only), and every directory group those humans belong to. Role-agnostic
 // (presence-only) and ORG-FENCED on every arm — a granted group or a user's
 // membership in ANOTHER org's groups can never leak in. Agent-independent, so
-// one resolution covers every agent of the project. Off the hot path (backs
+// one resolution covers every agent of the workspace. Off the hot path (backs
 // the read-only reflections); the gateway resolves its own
 // set at connect. Keep in lockstep with the CTE.
 
@@ -17,12 +22,12 @@ export interface PrincipalSet {
 }
 
 export const resolvePrincipalSet = async (
-  projectId: string,
+  workspaceId: string,
   organizationId: string,
 ): Promise<PrincipalSet> => {
-  // ProjectAccess rows: direct users + candidate granted groups.
-  const accessRows = await db.projectAccess.findMany({
-    where: { projectId },
+  // WorkspaceAccess rows: direct users + candidate granted groups.
+  const accessRows = await db.workspaceAccess.findMany({
+    where: { workspaceId },
     select: { userId: true, groupId: true },
   });
   const directUserIds = accessRows.flatMap((r) => (r.userId ? [r.userId] : []));
@@ -40,7 +45,7 @@ export const resolvePrincipalSet = async (
       ).map((g) => g.id)
     : [];
 
-  // candidate_users: direct ProjectAccess users ∪ members of the direct groups.
+  // candidate_users: direct WorkspaceAccess users ∪ members of the direct groups.
   const groupMemberUserIds = directGroups.length
     ? (
         await db.groupMember.findMany({
@@ -54,7 +59,7 @@ export const resolvePrincipalSet = async (
   ];
 
   // all_users: only ACTIVE org members contribute — a suspended member is
-  // excluded, mirroring the people-gate `user_can_manage_project`.
+  // excluded, mirroring the people-gate `user_can_manage_workspace`.
   const userIds = candidateUserIds.length
     ? (
         await db.organizationMember.findMany({

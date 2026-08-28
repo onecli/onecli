@@ -12,7 +12,7 @@ import type { NewRule, PolicyRequest } from "./types";
 // attribution facets the corpus can't see (which rule/level/managed decided).
 
 const rule = (over: Partial<NewRule>): NewRule => ({
-  scope: "project",
+  scope: "workspace",
   priority: 0,
   isDefault: false,
   source: "custom",
@@ -52,11 +52,11 @@ const orgDefault = (action: "allow" | "block"): NewRule =>
     action,
     targets: [],
   });
-const projectDefault = (action: "allow" | "block"): NewRule =>
+const workspaceDefault = (action: "allow" | "block"): NewRule =>
   rule({
-    scope: "project",
+    scope: "workspace",
     isDefault: true,
-    name: `project default ${action}`,
+    name: `workspace default ${action}`,
     action,
     targets: [],
   });
@@ -65,7 +65,7 @@ describe("evaluatePolicyOutcome attribution", () => {
   it("names the explicit rule that decided", () => {
     const block = rule({ name: "block-example", action: "block" });
     const outcome = evaluatePolicyOutcome(
-      [block, orgDefault("allow"), projectDefault("allow")],
+      [block, orgDefault("allow"), workspaceDefault("allow")],
       request(),
     );
 
@@ -75,7 +75,7 @@ describe("evaluatePolicyOutcome attribution", () => {
 
   it("attributes a deny-default to the ORG default first when both block", () => {
     const od = orgDefault("block");
-    const pd = projectDefault("block");
+    const pd = workspaceDefault("block");
     const outcome = evaluatePolicyOutcome([od, pd], request());
 
     expect(outcome).toEqual({
@@ -89,20 +89,20 @@ describe("evaluatePolicyOutcome attribution", () => {
     });
   });
 
-  it("attributes a lone project default Block (allowlist mode) to the project", () => {
-    const pd = projectDefault("block");
+  it("attributes a lone workspace default Block (allowlist mode) to the workspace", () => {
+    const pd = workspaceDefault("block");
     const outcome = evaluatePolicyOutcome([orgDefault("allow"), pd], request());
 
     expect(outcome).toEqual({
       kind: "denyDefault",
-      level: "project",
+      level: "workspace",
       rule: pd,
     });
   });
 
   it("reports an unmanaged allow (deny-defaults disarmed by the carve)", () => {
     const outcome = evaluatePolicyOutcome(
-      [orgDefault("block"), projectDefault("block")],
+      [orgDefault("block"), workspaceDefault("block")],
       request({ hasInjections: false }),
     );
 
@@ -112,7 +112,7 @@ describe("evaluatePolicyOutcome attribution", () => {
 
   it("reports a managed allow when every default allows", () => {
     const outcome = evaluatePolicyOutcome(
-      [orgDefault("allow"), projectDefault("allow")],
+      [orgDefault("allow"), workspaceDefault("allow")],
       request({ host: "other.example.com" }),
     );
 

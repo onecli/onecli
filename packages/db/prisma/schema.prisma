@@ -7,70 +7,70 @@ datasource db {
   url      = env("DATABASE_URL")
 }
 
-// ── Organization, Project & User ────────────────────────────────────────
+// ── Organization, Workspace & User ────────────────────────────────────────
 
 // Cloud-only: an Organization is the billing + collaboration entity. Holds
 // subscription state, Stripe customer, and members. A user may belong to
 // multiple organizations (today: one auto-created on signup; future: invited
-// to others, can create more). Projects under an org share its plan/quotas.
+// to others, can create more). Workspaces under an org share its plan/quotas.
 model Organization {
-  id                  String    @id @default(uuid())
+  id                  String   @id @default(uuid())
   name                String
-  slug                String    @unique
-  stripeCustomerId    String?   @unique @map("stripe_customer_id")
-  subscriptionStatus  String    @default("free") @map("subscription_status")
+  slug                String   @unique
+  stripeCustomerId    String?  @unique @map("stripe_customer_id")
+  subscriptionStatus  String   @default("free") @map("subscription_status")
   // Cloud-only (inert in OSS): ops-set per-org agent-cap override (SQL only,
   // no UI) — lets a self-serve org exceed its plan's maxAgents without moving
   // to the sales-managed enterprise plan. Null = plan default.
-  maxAgentsOverride   Int?      @map("max_agents_override")
-  awsExternalId       String?   @map("aws_external_id")
-  /// DEPRECATED (policy engine step 10, 2026-07). Frozen: the default posture
-  /// lives on each scope's Default Rule in `policy_rules_v2`. Never written; the
-  /// only reader is `services/policy-legacy-migration/`, which seeds a converted
-  /// project's Default Rule from it. Goes with that directory and the tables.
-  policyMode          String    @default("allow") @map("policy_mode") // "allow" | "deny"
+  maxAgentsOverride   Int?     @map("max_agents_override")
+  // Cloud-only (inert in OSS): ops-set per-org seat-cap override (SQL only,
+  // no UI) — the seat twin of maxAgentsOverride, for negotiated deals that
+  // buy extra seats without moving to the sales-managed enterprise plan.
+  // Null = plan default. Seats in use = members + pending invitations, so
+  // this caps that same total.
+  maxMembersOverride  Int?     @map("max_members_override")
+  awsExternalId       String?  @map("aws_external_id")
   // App-availability posture (step 7): "open" = every app connectable (default,
   // = today's behavior); "restricted" = allowlist — an app is available to a
-  // project when an AppAvailabilityRule that grants it names one of the project's
-  // ProjectAccess people. Cloud/EE-only (directory-dependent); inert in OSS.
-  appAvailabilityMode String    @default("open") @map("app_availability_mode") // "open" | "restricted"
-  // Cloud-only (inert in OSS): set when this org was created by a Partner.
-  partnerId           String?   @map("partner_id")
-  // Cloud-only (inert in OSS): set when the org detaches from its partner —
-  // stops inheriting partner secrets but keeps partnerId for attribution.
-  partnerDetachedAt   DateTime? @map("partner_detached_at")
+  // workspace when an AppAvailabilityRule that grants it names one of the workspace's
+  // WorkspaceAccess people. Cloud/EE-only (directory-dependent); inert in OSS.
+  appAvailabilityMode String   @default("open") @map("app_availability_mode") // "open" | "restricted"
   // Cloud-only (inert in OSS): members of this org's verified domains must
   // sign in through the org's SSO connection (break-glass via
   // OrganizationMember.ssoExempt).
-  ssoRequired         Boolean   @default(false) @map("sso_required")
+  ssoRequired         Boolean  @default(false) @map("sso_required")
   // Cloud-only (inert in OSS): first SSO login on a verified domain
   // auto-joins the org as a member.
-  jitEnabled          Boolean   @default(true) @map("jit_enabled")
-  createdAt           DateTime  @default(now()) @map("created_at")
-  updatedAt           DateTime  @updatedAt @map("updated_at")
+  jitEnabled          Boolean  @default(true) @map("jit_enabled")
+  // The org's creation world on the hosted cloud platform: false = hosted-only
+  // creation (the default for every org), true = BYO-only creation (hosted
+  // starts with an onboarding call). Set MANUALLY by the cloud operator —
+  // never written by application code. Inert on self-host, where creation is
+  // ungated in both directions.
+  byoLegacy           Boolean  @default(false) @map("byo_legacy")
+  createdAt           DateTime @default(now()) @map("created_at")
+  updatedAt           DateTime @updatedAt @map("updated_at")
 
-  projects             Project[]
+  workspaces           Workspace[]
   members              OrganizationMember[]
   invitations          Invitation[]
-  userProvisions       UserProvision[]
   secrets              Secret[]
   appConnections       AppConnection[]
   appConfigs           AppConfig[]
-  policyRules          PolicyRule[]
   policyRulesV2        PolicyRuleV2[]
   apiKeys              ApiKey[]
   auditLogs            AuditLog[]
-  partner              Partner?                    @relation(fields: [partnerId], references: [id])
-  partnerClaim         PartnerClaim?
   budgets              Budget[] // cloud-only: per-secret spend budgets for this org (inert in OSS)
+  skills               Skill[]
   domains              OrganizationDomain[]
   ssoConnections       OrganizationSsoConnection[]
   scimTokens           OrganizationScimToken[]
   groups               Group[]
   appAvailabilityRules AppAvailabilityRule[]
   groupRoleMappings    GroupRoleMapping[]
+  channelIntegrations  ChannelIntegration[]
+  userProvisions       UserProvision[]
 
-  @@index([partnerId])
   @@map("organizations")
 }
 
@@ -183,7 +183,7 @@ model OrganizationScimToken {
   @@map("organization_scim_tokens")
 }
 
-model Project {
+model Workspace {
   id                 String   @id @default(uuid())
   name               String?
   organizationId     String   @map("organization_id")
@@ -194,30 +194,37 @@ model Project {
   createdAt          DateTime @default(now()) @map("created_at")
   updatedAt          DateTime @updatedAt @map("updated_at")
 
-  createdByUser    User?             @relation("ProjectCreator", fields: [createdByUserId], references: [id])
+  createdByUser    User?             @relation("WorkspaceCreator", fields: [createdByUserId], references: [id])
   organization     Organization      @relation(fields: [organizationId], references: [id])
   apiKeys          ApiKey[]
   agents           Agent[]
   secrets          Secret[]
-  policyRules      PolicyRule[]
   policyRulesV2    PolicyRuleV2[]
   auditLogs        AuditLog[]
   vaultConnections VaultConnection[]
   onboardingSurvey OnboardingSurvey?
   appConnections   AppConnection[]
   appConfigs       AppConfig[]
-  budgets          Budget[] // cloud-only: per-secret spend budgets for this project (inert in OSS)
-  accessBindings   ProjectAccess[]
+  budgets          Budget[] // cloud-only: per-secret spend budgets for this workspace (inert in OSS)
+  accessBindings   WorkspaceAccess[]
+  skills           Skill[]
 
   @@unique([organizationId, slug])
   @@index([organizationId])
-  @@map("projects")
+  @@map("workspaces")
 }
 
 model User {
   id                    String    @id @default(uuid())
   email                 String    @unique
   name                  String?
+  // Self-host identity layer (better-auth): whether the provider proved
+  // ownership of `email`. Inert on cloud, where Cognito owns verification.
+  emailVerified         Boolean   @default(false) @map("email_verified")
+  // Avatar URL from the sign-in provider. Written by better-auth on the
+  // self-hosted edition (a social profile always carries one); unused on
+  // cloud, where the dashboard renders initials.
+  image                 String?
   // Cloud-only (inert in OSS): the SCIM `name` object (formatted/givenName/
   // familyName/…) stored losslessly so IdP-provisioned attributes round-trip;
   // `name` above stays the display string.
@@ -238,92 +245,1085 @@ model User {
   sentInvitations               Invitation[]                  @relation("InvitationCreator")
   apiKeys                       ApiKey[]
   auditLogs                     AuditLog[]
-  createdProjects               Project[]                     @relation("ProjectCreator")
+  createdWorkspaces             Workspace[]                   @relation("WorkspaceCreator")
   onboardingSurveys             OnboardingSurvey[]
-  createdAgentSecrets           AgentSecret[]                 @relation("AgentSecretCreator")
-  updatedAgentSecrets           AgentSecret[]                 @relation("AgentSecretUpdater")
-  provisionedAs                 UserProvision?                @relation("ProvisionedUser")
-  createdProvisions             UserProvision[]               @relation("ProvisionCreator")
-  partnerMemberships            PartnerMember[]
-  partnerPlaceholderClaim       PartnerClaim?                 @relation("PartnerPlaceholder")
   createdDomains                OrganizationDomain[]          @relation("OrganizationDomainCreator")
   createdSsoConnections         OrganizationSsoConnection[]   @relation("OrganizationSsoConnectionCreator")
   createdScimTokens             OrganizationScimToken[]       @relation("OrganizationScimTokenCreator")
   groupMemberships              GroupMember[]                 @relation("GroupMemberUser")
   createdGroupMembers           GroupMember[]                 @relation("GroupMemberCreator")
-  projectAccess                 ProjectAccess[]               @relation("ProjectAccessUser")
-  createdProjectAccess          ProjectAccess[]               @relation("ProjectAccessCreator")
+  workspaceAccess               WorkspaceAccess[]             @relation("WorkspaceAccessUser")
+  createdWorkspaceAccess        WorkspaceAccess[]             @relation("WorkspaceAccessCreator")
   createdPolicyRulesV2          PolicyRuleV2[]                @relation("PolicyRuleV2Creator")
   policyRuleIdentities          PolicyRuleIdentity[]          @relation("PolicyRuleIdentityUser")
   appAvailabilityRuleIdentities AppAvailabilityRuleIdentity[] @relation("AppAvailabilityRuleIdentityUser")
   createdAppAvailabilityRules   AppAvailabilityRule[]         @relation("AppAvailabilityRuleCreator")
+  directConversations           Conversation[]                @relation("ConversationOwner")
+  authoredTurns                 Turn[]                        @relation("TurnAuthor")
+  uploadedAttachments           ConversationAttachment[]      @relation("AttachmentUploader")
+  createdCrons                  AgentCron[]                   @relation("CronCreator")
+  channelUserLinks              ChannelUserLink[]             @relation("ChannelUserLinkUser")
+  createdChannelIntegrations    ChannelIntegration[]          @relation("ChannelIntegrationCreator")
+  createdAgentChannels          AgentChannel[]                @relation("AgentChannelCreator")
+  memoryRevisionsAuthored       AgentMemoryRevision[]         @relation("MemoryRevisionAuthor")
+  memoryRedactions              AgentMemoryRevision[]         @relation("MemoryRevisionRedactor")
+  skillsCreated                 Skill[]                       @relation("SkillCreator")
+  processesCreated              SandboxProcess[]              @relation("ProcessCreator")
+  watchesCreated                ProcessWatch[]                @relation("WatchCreator")
+  sessions                      Session[]
+  accounts                      Account[]
+  sshKeys                       UserSshKey[]
+  provisionedAs                 UserProvision?                @relation("ProvisionedUser")
+  createdProvisions             UserProvision[]               @relation("ProvisionCreator")
 
   @@map("users")
 }
 
 model ApiKey {
   id             String   @id @default(uuid())
-  scope          String   @default("project") // "project" | "organization"
-  projectId      String?  @map("project_id")
+  scope          String   @default("workspace") // "workspace" | "organization"
+  workspaceId    String?  @map("workspace_id")
   organizationId String?  @map("organization_id")
   userId         String   @map("user_id")
   userEmail      String   @map("user_email")
   key            String   @unique // "oc_..." or "oc_org_..." prefix
   name           String?
+  // "user" = a person's own key (the CLI/dashboard key — at most one per
+  // user+scope, which regenerate/ensure rely on) | "service" = minted by the
+  // platform for a machine consumer (e.g. a channel presence's approvals
+  // key). Service keys are invisible to the personal-key flows: regenerate,
+  // ensure, and the key-listing UI all filter kind "user".
+  kind           String   @default("user") // "user" | "service"
   createdAt      DateTime @default(now()) @map("created_at")
   updatedAt      DateTime @updatedAt @map("updated_at")
 
-  user         User          @relation(fields: [userId], references: [id])
-  project      Project?      @relation(fields: [projectId], references: [id])
-  organization Organization? @relation(fields: [organizationId], references: [id])
+  user          User           @relation(fields: [userId], references: [id])
+  workspace     Workspace?     @relation(fields: [workspaceId], references: [id])
+  organization  Organization?  @relation(fields: [organizationId], references: [id])
+  agentChannels AgentChannel[]
 
   @@index([userId])
-  @@index([projectId])
+  @@index([workspaceId])
   @@index([organizationId])
   @@index([scope])
   @@map("api_keys")
 }
 
-// ── Workspace data (scoped by projectId) ────────────────────────────────
+// ── Workspace data (scoped by workspaceId) ──────────────────────────────────
 
 model Agent {
-  id          String   @id @default(uuid())
-  projectId   String   @map("project_id")
-  name        String
-  identifier  String // user-provided machine-readable ID, unique per project
-  accessToken String   @unique @map("access_token") // "aoc_..." prefix, used for gateway auth
-  isDefault   Boolean  @default(false) @map("is_default")
-  /// RETIRED (attach-model step 7): the gateway no longer reads this column —
-  /// injection is driven solely by grant rules, so a lingering "all" value
-  /// drives nothing. It exists only as the idempotency predicate of
-  /// `services/policy-grant-conversion/` (its README is the removal
-  /// checklist): the converter materializes an "all" agent's pool as grants
-  /// and flips it to "selective" on every web boot, and `migrate-import` — the
-  /// one writer of "all" left, preserving an older export's value — relies on
-  /// that predicate to convert right after its transaction commits. Every
-  /// creation site writes "selective" explicitly (the column default below is
-  /// dead weight). The column drops in step 8, deleting the converter with it.
-  secretMode  String   @default("all") @map("secret_mode") // "all" or "selective"
-  createdAt   DateTime @default(now()) @map("created_at")
-  updatedAt   DateTime @updatedAt @map("updated_at")
-  project     Project  @relation(fields: [projectId], references: [id])
+  id            String    @id @default(uuid())
+  workspaceId   String    @map("workspace_id")
+  name          String
+  identifier    String // user-provided machine-readable ID, unique per workspace
+  accessToken   String    @unique @map("access_token") // "aoc_..." prefix, used for gateway auth
+  // DEPRECATED: never written anymore and surfaced nowhere. Kept nullable for
+  // pre-v2 rows so /v1/container-config can resolve an unpinned machine to the
+  // workspace's legacy default agent. New agents get NULL.
+  isDefault     Boolean?  @map("is_default")
+  // "byo" (bring-your-own: laptops, CI) | "hosted" (a platform-run sandbox).
+  // On the hosted cloud platform, which kind an org may CREATE is picked by
+  // Organization.byoLegacy (the creation worlds); existing agents of either
+  // kind keep working everywhere. Self-host creation is ungated.
+  kind          String    @default("byo") // "byo" | "hosted"
+  // Hosted only — which harness adapter runs inside the sandbox. One value
+  // today ("jcode"); the column is the seam that keeps a second adapter cheap.
+  harness       String?
+  // Hosted only — the user's model OVERRIDE, not "the model this agent runs".
+  // Null is the normal, healthy state: the granted LLM key names a provider,
+  // and that provider supplies the default (§3.10). The PROVIDER's own id
+  // (`claude-sonnet-4-6`), never a harness alias — translating is the
+  // adapter's job (§3.5).
+  model         String?
+  // Which provider the override above belongs to, so a key swap can drop it
+  // rather than point the agent at a model its new key cannot serve. Never
+  // inferred from the id: harness catalogs carry ids like `opus-4.6` and
+  // `gpt-oss-120b-medium` where a prefix rule gets the provider wrong.
+  // Coherence with `model`/`effort` is enforced by a CHECK constraint in the
+  // migration (Prisma cannot express it).
+  modelProvider String?   @map("model_provider")
+  // Hosted only — the reasoning-effort override, on OUR scale (see
+  // `AgentEffort`). Governed by the same `modelProvider` stamp as `model`.
+  effort        String?
+  // Hosted only — the per-agent brief (§3.11): the user-authored "what this
+  // agent is for", rendered at the top of its generated CLAUDE.md/AGENTS.md.
+  instructions  String?
+  // The agent's avatar — raster bytes inline (the attachments precedent:
+  // self-host's api container has no disk besides Postgres, and one capped
+  // image per agent is tiny). `imageKey` is the unguessable serving token:
+  // Slack fetches `icon_url` unauthenticated, so the public GET is fenced by
+  // this 128-bit random key, rotated on every image change.
+  imageData     Bytes?    @map("image_data")
+  imageMime     String?   @map("image_mime")
+  imageKey      String?   @map("image_key")
+  createdAt     DateTime  @default(now()) @map("created_at")
+  updatedAt     DateTime  @updatedAt @map("updated_at")
+  workspace     Workspace @relation(fields: [workspaceId], references: [id])
 
-  agentSecrets         AgentSecret[]
-  agentAppConnections  AgentAppConnection[]
-  policyRules          PolicyRule[]
   policyRuleIdentities PolicyRuleIdentity[]
+  sandbox              Sandbox?
+  conversations        Conversation[]
+  channels             AgentChannel[]
+  crons                AgentCron[]
+  memories             AgentMemory[]
+  skills               Skill[]
 
-  @@unique([projectId, identifier])
-  @@index([projectId])
+  @@unique([workspaceId, identifier])
+  @@index([workspaceId])
   @@map("agents")
+}
+
+// A registered runner daemon — the outbound-only service that spawns and
+// parks hosted-agent sandboxes (plans/hosted-agents-v2.md §3.3). Rows are
+// minted by the runner registration API (step 3); the model lands first so
+// Sandbox can reference it.
+model Runner {
+  id           String    @id @default(uuid())
+  name         String
+  token        String    @unique // "rnr_..." prefix; minted at registration (step 3)
+  scope        String    @default("instance") // "instance" (one runner serves the install); org/workspace scoping is additive later
+  capabilities Json?
+  lastSeenAt   DateTime? @map("last_seen_at")
+  createdAt    DateTime  @default(now()) @map("created_at")
+  updatedAt    DateTime  @updatedAt @map("updated_at")
+
+  sandboxes Sandbox[]
+
+  @@map("runners")
+}
+
+// A hosted agent's computer: the per-agent compute record. One sandbox per
+// agent; the container is disposable, the home is durable behind the
+// opaque homeRef (§3.9's home seam — meaning is backend-defined).
+model Sandbox {
+  id           String    @id @default(uuid())
+  agentId      String    @unique @map("agent_id")
+  runnerId     String    @map("runner_id")
+  status       String    @default("unprovisioned") // "unprovisioned" | "starting" | "running" | "stopped" | "failed"
+  containerRef String?   @map("container_ref")
+  homeRef      String?   @map("home_ref") // opaque, backend-defined (§3.9)
+  lastActiveAt DateTime? @map("last_active_at")
+
+  // The home projection's sync clock (step 9). `desired` is bumped by
+  // any write that changes the materialized file set (skills, memory, brief,
+  // name); `applied` is set only by the supervisor's home.synced ack.
+  // Due when applied < desired AND status = 'running' — a bump never wakes a
+  // parked sandbox (the credential-edit precedent): a parked one gets current
+  // truth at its next spawn, whose start claim resets applied to 0 so every
+  // boot begins with a full sync. Defaults desired=1/applied=0 on purpose:
+  // the very first sync is unconditional. `homeSyncClaimedAt` is this
+  // arm's ONLY recovery clock (updated_at stays the start/stop arms' stale
+  // clock — clocks are single-purpose).
+  homeDesiredGeneration Int       @default(1) @map("home_desired_generation")
+  homeAppliedGeneration Int       @default(0) @map("home_applied_generation")
+  homeSyncClaimedAt     DateTime? @map("home_sync_claimed_at")
+
+  createdAt   DateTime         @default(now()) @map("created_at")
+  updatedAt   DateTime         @updatedAt @map("updated_at")
+  agent       Agent            @relation(fields: [agentId], references: [id], onDelete: Cascade)
+  runner      Runner           @relation(fields: [runnerId], references: [id])
+  processes   SandboxProcess[]
+  sshSessions SshSession[]
+
+  @@index([runnerId])
+  @@map("sandboxes")
+}
+
+// ── Background processes + watches (plans/hosted-agents-v2.md step 10, §3.9) ──
+// A supervisor-managed background process in a hosted agent's sandbox. Truth
+// about LIVENESS is supervisor-side (the process is a child of the supervisor
+// inside the container); these rows are the durable mirror the keep-awake
+// rule and the poll-time sweeps read. `containerRef` is the step-9 sync-ack
+// lesson made a column: sandbox rows survive respawns while containers do
+// not, so a row whose ref is not the sandbox's CURRENT one must never read
+// as live. Rows are keyed (sandboxId, ref) with a supervisor-chosen ref —
+// a forged ref cannot cross a tenant boundary by construction.
+model SandboxProcess {
+  id           String  @id @default(uuid())
+  sandboxId    String  @map("sandbox_id")
+  // Supervisor-chosen per-boot id (uuid); every write keys (sandboxId, ref).
+  ref          String
+  // Runner-stamped at report time — never taken from the supervisor payload.
+  containerRef String  @map("container_ref")
+  command      String
+  name         String?
+  // "running" | "exited" | "stopped" | "lost". `lost` is control-plane-
+  // authored only (the poll-time sweep); it never arrives on the wire.
+  status       String  @default("running")
+  exitCode     Int?    @map("exit_code")
+  signal       String?
+  // Last ~1k chars of interleaved stdout+stderr, refreshed by state frames.
+  tail         String?
+
+  // Arm-time turn context — anchoring, not authority (the crons doctrine):
+  // verified at first insert, write-once, droppable when forged.
+  originConversationId String? @map("origin_conversation_id")
+  createdByUserId      String? @map("created_by_user_id")
+
+  startedAt DateTime  @map("started_at")
+  endedAt   DateTime? @map("ended_at")
+  createdAt DateTime  @default(now()) @map("created_at")
+  updatedAt DateTime  @updatedAt @map("updated_at")
+
+  sandbox            Sandbox        @relation(fields: [sandboxId], references: [id], onDelete: Cascade)
+  originConversation Conversation?  @relation("ProcessOrigin", fields: [originConversationId], references: [id], onDelete: SetNull)
+  createdBy          User?          @relation("ProcessCreator", fields: [createdByUserId], references: [id], onDelete: SetNull)
+  watches            ProcessWatch[]
+
+  @@unique([sandboxId, ref])
+  // The stop arm's keep-awake probe (§3.9) reads (sandbox_id, status).
+  @@index([sandboxId, status])
+  // The lost sweep scans running rows across all sandboxes.
+  @@index([status])
+  @@map("sandbox_processes")
+}
+
+// A ONE-SHOT wake condition on a process: exit, output pattern (literal
+// substring — never a regex, by decision), or silence. Detection lives in
+// supervisor memory and dies with the container; the control plane owns the
+// durable outcomes — firing the turn, the lost conversion, and expiry.
+// `fireClaimedAt` is this row's ONLY claim clock (single-purpose, never
+// updated_at — the due-work law). Nothing ever re-arms a watch.
+model ProcessWatch {
+  id             String  @id @default(uuid())
+  processId      String  @map("process_id")
+  ref            String
+  // "exit" | "pattern" | "silence" — payload coherence is a migration CHECK.
+  kind           String
+  pattern        String?
+  silenceSeconds Int?    @map("silence_seconds")
+  // Agent-authored: what the fired turn is instructed to do.
+  prompt         String
+  // "armed" | "triggered" | "expired" | "canceled" | "fired". `fired` is
+  // control-plane-authored (the fire pass); `trigger` says why it triggered.
+  status         String  @default("armed")
+  // "exited" | "matched" | "silent" | "lost" (`lost` is CP-authored).
+  trigger        String?
+  excerpt        String?
+
+  expiresAt     DateTime  @map("expires_at")
+  triggeredAt   DateTime? @map("triggered_at")
+  firedAt       DateTime? @map("fired_at")
+  fireClaimedAt DateTime? @map("fire_claimed_at")
+
+  originConversationId String? @map("origin_conversation_id")
+  createdByUserId      String? @map("created_by_user_id")
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  process            SandboxProcess @relation(fields: [processId], references: [id], onDelete: Cascade)
+  originConversation Conversation?  @relation("WatchOrigin", fields: [originConversationId], references: [id], onDelete: SetNull)
+  createdBy          User?          @relation("WatchCreator", fields: [createdByUserId], references: [id], onDelete: SetNull)
+
+  @@unique([processId, ref])
+  // The keep-awake watch probe per process.
+  @@index([processId, status])
+  // The fire claim scan + the expiry sweep.
+  @@index([status, expiresAt])
+  @@map("process_watches")
+}
+
+// ── SSH front door (plans/sandbox-platform.md step 5, §3.8) ──
+// One customer SSH session into a hosted agent's sandbox, reported by the
+// SSH terminator over its own authenticated surface. LIVENESS truth is the
+// lease (`lastHeartbeatAt` within the lease window) — never the status
+// column alone: a crashed terminator reports nothing, so every consumer
+// (keep-awake, the start-dueness arm, the per-agent cap) reads the lease and
+// the stale-session sweep closes lease-expired rows (`lease_expired`). The
+// terminator writes `closed` on every clean exit path; `closeReason` says
+// why ("client_disconnect" | "revoked" | "max_duration" | "idle_timeout" |
+// "agent_deleted" | "wake_timeout" | "relay_error" | "lease_expired" | ...).
+model SshSession {
+  id          String @id @default(uuid())
+  sandboxId   String @map("sandbox_id")
+  agentId     String @map("agent_id")
+  workspaceId String @map("workspace_id")
+  userId      String @map("user_id")
+  userEmail   String @map("user_email")
+  // Terminator-reported (the control plane never sees the TCP peer) — audit
+  // metadata, not tamper-proof truth.
+  sourceIp    String @map("source_ip")
+  certSerial  String @map("cert_serial")
+  // "open" | "closed"
+  status      String @default("open")
+
+  openedAt        DateTime  @default(now()) @map("opened_at")
+  attachedAt      DateTime? @map("attached_at")
+  lastHeartbeatAt DateTime  @default(now()) @map("last_heartbeat_at")
+  closedAt        DateTime? @map("closed_at")
+  closeReason     String?   @map("close_reason")
+
+  sandbox Sandbox @relation(fields: [sandboxId], references: [id], onDelete: Cascade)
+
+  // The keep-awake arm's per-sandbox lease probe (due-work.ts).
+  @@index([sandboxId, status])
+  // The per-agent session cap count.
+  @@index([agentId, status])
+  // The stale-session sweep: `status='open' AND last_heartbeat_at < …` runs
+  // on EVERY runner poll across ALL sandboxes (not sandbox-scoped), so it
+  // needs a status-leading index — the sandbox_id-leading ones above cannot
+  // serve it, and the sweep would otherwise sequential-scan a table that only
+  // ever grows (closed rows are audit history, pruned only by cascade).
+  // The reclaimStaleTurns precedent rides Turn's `@@index([status, updatedAt])`.
+  @@index([status, lastHeartbeatAt])
+  @@map("ssh_session")
+}
+
+// A user's registered SSH public key — the identity half of the SSH front
+// door's mint flow. Rows are owned by the person, not a workspace: the same
+// key authenticates them to every agent they can reach, so the registry
+// lives beside their identity and dies with it (cascade). Only PUBLIC key
+// material is ever stored, and a row grants nothing by itself — every mint
+// and session-open still re-runs the full access law.
+model UserSshKey {
+  id          String @id @default(uuid())
+  userId      String @map("user_id")
+  // User-supplied label ("MacBook Pro"). Not unique: two laptops may share
+  // a name; the fingerprint below is the identity.
+  name        String
+  // Canonical "ssh-ed25519 <base64>" line rebuilt from the PARSED key —
+  // never the raw paste, whose free-text comment would make the same key
+  // read as two different strings.
+  publicKey   String @map("public_key")
+  // OpenSSH SHA256 fingerprint ("SHA256:<base64, no padding>"), computed
+  // server-side from the key blob — the display and dedupe identity. Never
+  // accepted from the client, or the unique constraint below is bypassable.
+  fingerprint String
+
+  createdAt  DateTime  @default(now()) @map("created_at")
+  // Stamped when a certificate is minted from this key.
+  lastUsedAt DateTime? @map("last_used_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  // The settings list and the duplicate check on registration; the leading
+  // user_id column also serves every per-user lookup, so no separate index.
+  @@unique([userId, fingerprint])
+  @@map("user_ssh_keys")
+}
+
+// One SSH certificate mint — the rate-limit counter for
+// POST /v1/agents/:id/ssh-certificate. Deliberately its own table rather
+// than counting audit rows: audit writes are best-effort/never-throw, and a
+// limiter must not under-count when they fail. Rows are pruned by the
+// stale-session sweep after 24h.
+model SshCertMint {
+  id        String   @id @default(uuid())
+  userId    String   @map("user_id")
+  agentId   String   @map("agent_id")
+  createdAt DateTime @default(now()) @map("created_at")
+
+  // The windowed per-(user, agent) count.
+  @@index([userId, agentId, createdAt])
+  // The prune sweep.
+  @@index([createdAt])
+  @@map("ssh_cert_mint")
+}
+
+// One continuous exchange with a hosted agent (plans/hosted-agents-v2.md
+// step 4). An agent has exactly one computer but MANY conversations, because
+// work arrives from sources whose contexts must not bleed into each other —
+// a 3am cron run must not land in the middle of yesterday's chat.
+//
+// Each conversation owns its own harness session inside the shared sandbox
+// (§3.6): `harnessSessionRef` is the opaque handle the supervisor passes back
+// to `startSession({ resumeSessionRef })` so a later turn resumes THIS
+// conversation rather than someone else's.
+model Conversation {
+  id                String   @id @default(uuid())
+  agentId           String   @map("agent_id")
+  // Where the conversation comes from. `externalRef` is that source's own id
+  // (a Slack thread ts, a cron id) — the pair is what keeps sources apart.
+  source            String   @default("web") // "web" | "slack" | "cron" | "watch"
+  externalRef       String?  @map("external_ref")
+  // The direct thread's owner (step 6's per-user amendment to §3.18): a
+  // user's conversation with an agent is ONE thread no matter the surface —
+  // their web chat and their Slack DM read and write this same row — and each
+  // user has their OWN. At most one per (agent, user), enforced by a partial
+  // unique index (WHERE "direct") hand-appended in the migration —
+  // deliberately NOT @@unique here, for the same Prisma-6 differ reason as
+  // Turn's one-active lock below. A CHECK (also migration-only) guarantees a
+  // direct row always carries its owner; group/source conversations leave
+  // this null. Cascade: a deleted user takes their private threads with them.
+  userId            String?  @map("user_id")
+  // True = a user's direct thread (see userId above). Only the get-or-create
+  // door mints direct rows; POST /v1/conversations cannot set this.
+  //
+  // On a direct row `source` records only which door minted it and carries no
+  // meaning — the web and provider surfaces share the thread by design, which
+  // is exactly what `source`/`externalRef` keep APART for every other
+  // conversation.
+  direct            Boolean  @default(false)
+  title             String?
+  // Opaque, adapter-defined (§3.6). Null until the first turn starts a session.
+  harnessSessionRef String?  @map("harness_session_ref")
+  // The transcript's monotonic cursor, handed out by an atomic increment on
+  // THIS row. The row lock is held to commit, so per conversation `seq` order
+  // is commit order — which is what makes "fetch history, then tail from the
+  // last seq" lossless. A global sequence would not: values are assigned at
+  // nextval time, so a lower seq can commit later and be tailed past forever.
+  lastSeq           Int      @default(0) @map("last_seq")
+  createdAt         DateTime @default(now()) @map("created_at")
+  updatedAt         DateTime @updatedAt @map("updated_at")
+
+  agent         Agent                    @relation(fields: [agentId], references: [id], onDelete: Cascade)
+  user          User?                    @relation("ConversationOwner", fields: [userId], references: [id], onDelete: Cascade)
+  turns         Turn[]
+  events        TurnEvent[]
+  attachments   ConversationAttachment[]
+  threadLink    ChannelThreadLink?
+  cronsHere     AgentCron[]              @relation("CronOrigin")
+  processesHere SandboxProcess[]         @relation("ProcessOrigin")
+  watchesHere   ProcessWatch[]           @relation("WatchOrigin")
+
+  @@unique([agentId, source, externalRef])
+  @@index([agentId, createdAt])
+  @@map("conversations")
+}
+
+// One round of work: a message in, the agent's whole response out (which may
+// include thinking, several tool calls, and streamed text). Not one message —
+// the turn is the unit the transcript groups by, usage attaches to, and abort
+// cancels.
+//
+// At most one ACTIVE turn per conversation, enforced by a partial unique index
+// over ("queued","dispatched","running") — hand-appended in the migration
+// because Prisma's @@unique carries no WHERE clause. Deliberately NOT declared
+// as @@unique here: Prisma 6's differ ignores the WHERE and would fight it.
+model Turn {
+  id             String  @id @default(uuid())
+  conversationId String  @map("conversation_id")
+  status         String  @default("queued") // "queued" | "dispatched" | "running" | "done" | "failed" | "aborted" | "joining" | "joined"
+  // Which door created this turn — "web" or a channel provider id ("slack").
+  // On a shared direct thread this is what tells surfaces apart: the mirror
+  // suppresses echoes by it, and the web renders a quiet origin chip from it.
+  source         String  @default("web")
+  // Who spoke. On a direct thread this matches the thread owner; on a group
+  // conversation it attributes the speaker per turn. SetNull: group history
+  // outlives a deleted user, attribution drops.
+  userId         String? @map("user_id")
+  message        String
+  // Set when someone asks an in-flight turn to stop. The turn stays active
+  // until the sandbox confirms — a request is not an outcome, and a sandbox
+  // that never answers is recovered by the stale-turn sweep instead.
+  abortRequested Boolean @default(false) @map("abort_requested")
+  error          String?
+  // A machine-readable reason beside the human `error`, set only when the UI
+  // has to do something other than print the sentence — today, offer the fix
+  // for a turn that never ran because the agent has no model key. Null for
+  // every failure whose message says everything there is to say.
+  errorCode      String? @map("error_code")
+  usage          Json? // token counts from the terminal report — salvaged even when the close lost the race to a sweep
+
+  // ── Mid-run follow-ups ────────────────────────────────────────────────
+  // A message sent while a turn was active is a FOLLOW-UP row: born
+  // "joining" (never an active status, so it coexists with the partial
+  // index), steered into its target's live run, and either confirmed
+  // "joined" (terminal) or promoted in place to "queued" to run as the next
+  // turn. `followUpOfTurnId` is the target — kept after promotion as
+  // provenance. No FK: the target's deletion cascades through the shared
+  // conversation, and a dangling id here is inert.
+  followUpOfTurnId String?   @map("follow_up_of_turn_id")
+  // The steer claim's own clock, stamped when the dispatch arm hands this
+  // follow-up to a runner. Single-purpose (never `updatedAt`, the house
+  // law): its presence is also the settle fence's proof that "joined" can
+  // only follow a delivery the control plane itself stamped.
+  steerDeliveredAt DateTime? @map("steer_delivered_at")
+  // Stamped when a parked follow-up is promoted to "queued". The turn
+  // ceiling measures promoted rows from HERE, not `createdAt` — a follow-up
+  // parked late in a long turn must get a full turn's budget of its own.
+  promotedAt       DateTime? @map("promoted_at")
+  // Stamped when a cold-dead dispatch (the harness died before ANY observable
+  // work — the turn never left "dispatched") was revived in place back to
+  // "queued". The once-fence: a second death finds it set and fails the turn
+  // terminally. Also restarts the ceiling budget, like `promotedAt`. Single-
+  // purpose clock (house law: never `updatedAt`), and deliberately absent
+  // from `turnSelect` — the retry is invisible to readers.
+  retriedAt        DateTime? @map("retried_at")
+  // Stamped when the approaching-ceiling warning was steered into this
+  // turn's live run (at most once) — the fence that keeps the warning arm
+  // from re-delivering on every poll. Single-purpose clock (house law).
+  ceilingWarnedAt  DateTime? @map("ceiling_warned_at")
+  // The liveness clock: refreshed by the supervisor's ~60s progress
+  // heartbeat while the turn is RUNNING. A running turn whose stamp goes
+  // stale is failed as `turn_stalled` (due-work's stall arm); NULL means the
+  // agent image predates the heartbeat, and only the ceiling applies.
+  // Single-purpose clock (house law: never `updatedAt` — re-dispatch stamps
+  // that), and absent from `turnSelect` like its siblings.
+  lastProgressAt   DateTime? @map("last_progress_at")
+
+  startedAt  DateTime? @map("started_at")
+  finishedAt DateTime? @map("finished_at")
+  createdAt  DateTime  @default(now()) @map("created_at")
+  updatedAt  DateTime  @updatedAt @map("updated_at")
+
+  conversation Conversation             @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  user         User?                    @relation("TurnAuthor", fields: [userId], references: [id], onDelete: SetNull)
+  events       TurnEvent[]
+  attachments  ConversationAttachment[]
+
+  @@index([conversationId, createdAt])
+  @@index([status, updatedAt])
+  @@index([followUpOfTurnId])
+  @@map("turns")
+}
+
+// A file/image a user sent into a hosted-agent conversation (web upload or
+// Slack file_share). The repo's FIRST Bytes column, deliberately: self-host's
+// api container has no writable disk besides Postgres, and every byte is
+// size-capped at the doors (MAX_ATTACHMENT_BYTES). Reads/writes go ONLY
+// through the AttachmentBlobStore provider seam — `storageRef` is the
+// per-row backend dispatch key (the ciphertext-shape pattern applied to
+// blobs): null = bytes inline in `data`; a future scalable store (S3) writes
+// its own key here and leaves `data` null, so mixed rows coexist and a cloud
+// cutover needs no migration.
+//
+// Lifecycle: "pending" (uploaded, not yet on a turn — swept after 24h) →
+// "bound" (attached to its turn inside the turn-create transaction; the
+// steer arm's carve-out reads this table, so the bind MUST be transactional
+// with the turn row) | "failed" (a Slack fetch that never yielded bytes —
+// `error` says why; renders as a failed chip and a context-note mention).
+model ConversationAttachment {
+  id             String   @id @default(uuid())
+  conversationId String   @map("conversation_id")
+  turnId         String?  @map("turn_id")
+  // Uploader (web) / authenticated speaker (Slack). SetNull like Turn.userId:
+  // history outlives a deleted user, attribution drops.
+  userId         String?  @map("user_id")
+  source         String   @default("web") // door: "web" | a channel provider id
+  name           String // sanitized (sanitizeAttachmentName) — safe as a path segment
+  mimeType       String   @map("mime_type")
+  sizeBytes      Int      @map("size_bytes")
+  sha256         String
+  data           Bytes?
+  storageRef     String?  @map("storage_ref")
+  status         String   @default("pending") // "pending" | "bound" | "failed"
+  error          String?
+  createdAt      DateTime @default(now()) @map("created_at")
+
+  conversation Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  turn         Turn?        @relation(fields: [turnId], references: [id], onDelete: Cascade)
+  user         User?        @relation("AttachmentUploader", fields: [userId], references: [id], onDelete: SetNull)
+
+  @@index([conversationId, createdAt])
+  @@index([turnId])
+  // The stale-pending sweep runs on EVERY runner poll (seconds): without a
+  // status-leading index it sequential-scans the table — and this is the one
+  // table that holds megabyte rows.
+  @@index([status, createdAt])
+  @@map("conversation_attachments")
+}
+
+// The durable transcript. NOT every event the sandbox emits: under the delta
+// law (§3.17) streamed text is ephemeral and coalesced, and only bounded rows
+// land here — messages, tool calls, lifecycle — so a turn costs a handful of
+// rows rather than one per token. Append-only, like AuditLog.
+model TurnEvent {
+  id             String   @id @default(uuid())
+  conversationId String   @map("conversation_id")
+  turnId         String   @map("turn_id")
+  // Monotonic per conversation (see Conversation.lastSeq). Doubles as the SSE
+  // `id:` field, so a reconnect resumes from exactly where it left off.
+  seq            Int
+  type           String // an AgentEvent type — the canonical vocabulary, never a vendor one
+  payload        Json?
+  createdAt      DateTime @default(now()) @map("created_at")
+
+  conversation Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  turn         Turn         @relation(fields: [turnId], references: [id], onDelete: Cascade)
+
+  @@unique([conversationId, seq])
+  @@index([turnId, seq])
+  @@map("turn_events")
+}
+
+// A scheduled task on a hosted agent (plans/hosted-agents-v2.md step 7). The
+// schedule lives HERE, never in the sandbox (§3.7: a native scheduler would
+// write state where the platform cannot see, govern, or display it) — dueness
+// is computed at runner-poll time from `nextFireAt` (§3.3: no background
+// loop), and a fire is just a normal turn in the cron's own conversation
+// (source "cron", externalRef = this row's id — that unique pair is what
+// makes one persistent run-conversation per cron race-safe for free).
+model AgentCron {
+  id       String @id @default(uuid())
+  agentId  String @map("agent_id")
+  // Short label; shows in the dashboard, the delivery header, and the
+  // context-bridge note, so the user can tell schedules apart.
+  name     String
+  // The stored run instruction, fired verbatim (behind the scheduled-run
+  // header) as the turn message.
+  prompt   String
+  // 5-field cron expression, read in `timezone` (an IANA zone name). The
+  // expression is validated by the same library that computes occurrences
+  // (croner), so a row that exists is always advanceable.
+  schedule String
+  timezone String
+
+  // The pause switch (user-controlled). Auto-disable ALSO clears this and
+  // records why in disabledReason — "authorization" (the creator lost workspace
+  // access) | "failures" (5 consecutive failed runs). A user re-enabling
+  // clears the reason.
+  enabled        Boolean @default(true)
+  disabledReason String? @map("disabled_reason")
+
+  // Where run reports are delivered (decided with the user, 2026-08-07):
+  // the conversation the schedule was created FROM — a direct thread or a
+  // channel conversation. SetNull: losing the origin quiets delivery, never
+  // the schedule.
+  originConversationId String? @map("origin_conversation_id")
+  // Fire-time authorization anchor: the human whose authority the schedule
+  // runs under. Null only for creators we could not resolve; SetNull keeps
+  // the schedule when the user goes (it then runs on agent authority alone).
+  createdByUserId      String? @map("created_by_user_id")
+
+  // The claim predicate. Claiming stamps a short lease here (now + 5min)
+  // inside the FOR UPDATE SKIP LOCKED statement, then the real next
+  // occurrence — computed in JS from `now` so downtime coalesces into ONE
+  // late fire — replaces it before the turn is created.
+  nextFireAt          DateTime  @map("next_fire_at")
+  lastFiredAt         DateTime? @map("last_fired_at")
+  // "ok" | "failed" | "skipped_busy" (previous run still going)
+  lastOutcome         String?   @map("last_outcome")
+  consecutiveFailures Int       @default(0) @map("consecutive_failures")
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  agent              Agent         @relation(fields: [agentId], references: [id], onDelete: Cascade)
+  originConversation Conversation? @relation("CronOrigin", fields: [originConversationId], references: [id], onDelete: SetNull)
+  createdBy          User?         @relation("CronCreator", fields: [createdByUserId], references: [id], onDelete: SetNull)
+
+  @@index([enabled, nextFireAt])
+  @@index([agentId])
+  @@map("agent_crons")
+}
+
+// ── Memory: what an agent knows, visible and correctable (plans/hosted-agents-v2.md step 8, §3.8) ──
+// Truth lives HERE, never in the sandbox: every write goes through the MCP
+// tools or the dashboard (both into agent-memory-service). The head row is
+// the current state, materialized for fast reads, the turn-start index, and
+// query-time search; agent_memory_revisions holds a full snapshot of every
+// state that ever existed. Agent-level only by decision (2026-08-07):
+// workspace-shared memory is a recorded maybe-later (plans/v2-todo.md), and
+// nothing here blocks that additive migration.
+model AgentMemory {
+  id              String  @id @default(uuid())
+  agentId         String  @map("agent_id")
+  // The stable handle: kebab-case, the memory_save upsert target, and
+  // (step 9) the projected file name. Immutable after create — it is the
+  // agent's own reference to this memory.
+  key             String
+  title           String?
+  // The one-line index entry. Null = the turn-start index derives a line
+  // from content at render time — deliberately not stored, so a content
+  // edit can never desync a stored derivation.
+  description     String?
+  // Markdown body. Two door-specific bounds: memory_save keeps
+  // MEMORY_CONTENT_MAX_LENGTH (12k — the tool-args ceiling); the dashboard
+  // and the memory-file harvest accept MEMORY_FILE_CONTENT_MAX_CHARS (100k),
+  // gated by the exact frame-deliverability check (memoryFileFitsFrame).
+  content         String
+  // The revision allocator, mirroring Conversation.lastSeq: bumped by an
+  // atomic increment inside every write transaction, so the row lock
+  // serializes concurrent saves and seq order is commit order. Doubles as
+  // "total saves ever" (pruning deletes old rows, never renumbers).
+  lastRevisionSeq Int     @default(0) @map("last_revision_seq")
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  agent     Agent                 @relation(fields: [agentId], references: [id], onDelete: Cascade)
+  revisions AgentMemoryRevision[]
+
+  // The leading column also serves plain agentId lookups — no separate index.
+  @@unique([agentId, key])
+  @@map("agent_memories")
+}
+
+// Full snapshots of a memory's state AS WRITTEN — the repo's first history
+// table. Append-only with ONE deliberate exception: redaction scrubs a
+// snapshot in place (that is redaction's entire point; the stamp and the
+// audit log record that it happened). The head always mirrors the
+// highest-seq revision, which is why redacting the latest is refused.
+// Retention: the newest MEMORY_REVISIONS_RETAINED rows, pruned in the save
+// transaction; lastRevisionSeq keeps counting.
+model AgentMemoryRevision {
+  id              String @id @default(uuid())
+  memoryId        String @map("memory_id")
+  // 1-based, allocated by AgentMemory.lastRevisionSeq. Dense except the
+  // pruned prefix.
+  seq             Int
+  // "save" (create, edit, tool upsert) | "restore" (snapshot copied from an
+  // earlier revision; creation is just save at seq 1). Redaction is NOT an
+  // op — it is a scrub of an existing row, recorded by the stamp below.
+  // Coherence with restoredFromSeq is a CHECK in the migration (Prisma
+  // cannot express it).
+  op              String
+  restoredFromSeq Int?   @map("restored_from_seq")
+
+  // The snapshot: head state at this seq. On a redacted revision all three
+  // are scrubbed.
+  title       String?
+  description String?
+  content     String
+
+  // "user" (dashboard/API) | "agent" (the tool channel). Tells you how to
+  // read authorUserId: for "user" it IS the editor; for "agent" it is the
+  // resolved via-user whose ask the write carried (the cron-audit
+  // precedent), null when the turn had none (e.g. a scheduled run).
+  authorKind   String  @map("author_kind")
+  authorUserId String? @map("author_user_id")
+  // Denormalized at write time (the AuditLog convention): attribution
+  // survives user deletion, which SetNulls the FK.
+  authorEmail  String? @map("author_email")
+
+  // Provenance, PLAIN STRINGS by design — no FK: direct threads cascade-
+  // delete with their user, and history must dangle gracefully, never
+  // follow. The UI resolves live and shows a miss as a deleted origin.
+  conversationId String? @map("conversation_id")
+  turnId         String? @map("turn_id")
+
+  // The scrub stamp. redactedBy is SetNull — a redaction outlives its
+  // redactor (hence the one-way CHECK in the migration).
+  redactedAt       DateTime? @map("redacted_at")
+  redactedByUserId String?   @map("redacted_by_user_id")
+
+  createdAt DateTime @default(now()) @map("created_at")
+
+  memory     AgentMemory @relation(fields: [memoryId], references: [id], onDelete: Cascade)
+  authorUser User?       @relation("MemoryRevisionAuthor", fields: [authorUserId], references: [id], onDelete: SetNull)
+  redactedBy User?       @relation("MemoryRevisionRedactor", fields: [redactedByUserId], references: [id], onDelete: SetNull)
+
+  @@unique([memoryId, seq])
+  @@map("agent_memory_revisions")
+}
+
+// ── Skills: user-authored capabilities as files (plans/hosted-agents-v2.md step 9, §3.7/§3.8) ──
+// Truth lives HERE; the sandbox copy is a regenerated read-only projection
+// (the memory-projection law). Three tiers — agent / workspace / organization —
+// with exactly one owner column set (CHECKs in the migration; Prisma cannot
+// express them). The same NAME may exist at different tiers: the composer
+// materializes the most specific one (agent > workspace > organization).
+model Skill {
+  id             String  @id @default(uuid())
+  // "agent" | "workspace" | "organization" — pinned to whichever owner column
+  // is set by the scope-coherence CHECK (migration).
+  scope          String
+  agentId        String? @map("agent_id")
+  workspaceId    String? @map("workspace_id")
+  organizationId String? @map("organization_id")
+
+  // THE directory name inside the sandbox (.agents/skills/<name>/) — kebab,
+  // ≤64, immutable after create ("onecli-gateway" is reserved). Immutability
+  // is what keeps the supervisor's prune-by-manifest honest across edits.
+  name        String
+  // Required: it IS the frontmatter line the harness reads to decide when to
+  // load the skill. Single line, ≤500 (validations/skills.ts).
+  description String
+  // The SKILL.md body. ≤24_000; body + extra files together are capped by
+  // MAX_SKILL_TOTAL_CHARS — the sync-frame budget governor.
+  content     String
+  // Pause without delete: a disabled row simply leaves the projection; it
+  // does NOT veto a same-named row at a broader tier (filtered before the
+  // shadow merge).
+  enabled     Boolean @default(true)
+
+  // Human authorship (skills are human-authored; no revision history —
+  // unlike memory's agent-written churn). Email denormalized at write time,
+  // the AuditLog convention: attribution survives user deletion.
+  createdByUserId String? @map("created_by_user_id")
+  createdByEmail  String? @map("created_by_email")
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  // Agent tier dies with its agent. Workspace/org tiers are Restrict ON
+  // PURPOSE: the hand-written service cascades own them
+  // (deleteWorkspaceContent / deleteOrganizationContent) — a forgotten entry
+  // fails the delete loudly instead of silently orphaning rows.
+  agent        Agent?        @relation(fields: [agentId], references: [id], onDelete: Cascade)
+  workspace    Workspace?    @relation(fields: [workspaceId], references: [id], onDelete: Restrict)
+  organization Organization? @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+  createdBy    User?         @relation("SkillCreator", fields: [createdByUserId], references: [id], onDelete: SetNull)
+  files        SkillFile[]
+
+  // Per-owner name uniqueness, one plain unique per tier: the one-owner
+  // CHECK zeroes the other columns and Postgres NULLS DISTINCT keeps NULL
+  // rows out of contention, so no partial index is needed and everything
+  // stays in PSL. Leading columns double as the tier lookup indexes.
+  @@unique([agentId, name])
+  @@unique([workspaceId, name])
+  @@unique([organizationId, name])
+  @@map("skills")
+}
+
+// Extra files of one skill (references, templates) — the repo's first
+// multi-file content, deliberately a child table rather than a Json blob.
+// `path` is RELATIVE under .agents/skills/<name>/, ≤2 segments, each
+// starting [a-z0-9] (".." and absolute paths are unrepresentable by the
+// validation pattern; the composer re-verifies containment as the braces).
+// "skill.md" is refused — it collides with the rendered SKILL.md on
+// case-insensitive filesystems.
+model SkillFile {
+  id      String @id @default(uuid())
+  skillId String @map("skill_id")
+  path    String
+  content String // ≤24_000; counted into MAX_SKILL_TOTAL_CHARS
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  skill Skill @relation(fields: [skillId], references: [id], onDelete: Cascade)
+
+  @@unique([skillId, path])
+  @@map("skill_files")
+}
+
+// ── Channels: external messaging surfaces (plans/hosted-agents-v2.md step 6) ──
+// The platform layer is provider-neutral: "slack" is the first provider id,
+// WhatsApp/Teams are later entries in the same registry. Provider-specific
+// payloads live in encrypted, provider-opaque JSON blobs (getCrypto()) —
+// never as provider-shaped columns.
+
+// The org's link to one provider tenant (Slack: a workspace). The stored
+// credential is the org-level automation credential (Slack: the rotating
+// app-configuration token pair {accessToken, refreshToken}) and it is
+// OPTIONAL by design: the paste floor mints integrations with no credential —
+// the org credential is an accelerator, never a gate (§3.16).
+model ChannelIntegration {
+  id                   String    @id @default(uuid())
+  organizationId       String    @map("organization_id")
+  provider             String // "slack"
+  externalId           String    @map("external_id") // provider tenant id (Slack: team id)
+  name                 String?
+  credentials          String? // encrypted provider JSON; null on paste-floor integrations
+  credentialsRotatedAt DateTime? @map("credentials_rotated_at")
+  // The proactive sweep's claim lease (the claim-CTE pattern): stamped when a
+  // sweep pass claims this row so N adapter instances' hourly sweeps rotate
+  // DISJOINT sets — Slack's config-token refresh half is single-use, so two
+  // concurrent rotations of one row would consume it twice and brick the
+  // credential. Single-purpose clock: NEVER `credentialsRotatedAt` (that is
+  // the staleness truth; leasing on it would push a crashed claimer's retry
+  // to the 12h token expiry with zero margin).
+  rotateClaimedAt      DateTime? @map("rotate_claimed_at")
+  createdByUserId      String?   @map("created_by_user_id")
+  createdAt            DateTime  @default(now()) @map("created_at")
+  updatedAt            DateTime  @updatedAt @map("updated_at")
+
+  organization  Organization      @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  createdBy     User?             @relation("ChannelIntegrationCreator", fields: [createdByUserId], references: [id], onDelete: SetNull)
+  agentChannels AgentChannel[]
+  userLinks     ChannelUserLink[]
+
+  @@unique([organizationId, provider])
+  @@index([provider, externalId])
+  @@map("channel_integrations")
+}
+
+// The agent's presence on a provider (Slack: its own app — own name, own DM).
+// One presence per provider per agent; a second provider later is another row,
+// never a second meaning for this one.
+model AgentChannel {
+  id                  String    @id @default(uuid())
+  agentId             String    @map("agent_id")
+  integrationId       String    @map("integration_id")
+  provider            String // "slack"
+  externalId          String    @map("external_id") // provider app id (Slack: app id)
+  identityRef         String?   @map("identity_ref") // the presence's own identity (Slack: bot user id)
+  /// The app's own display handle on the provider (Slack: the bot's `user`
+  /// from `auth.test`, e.g. "donna"). Captured at completion from a call we
+  /// already make. Nullable: the events arm completes via OAuth, and older
+  /// presences predate this — surfaces fall back to the external id.
+  identityName        String?   @map("identity_name")
+  // "events" = the provider calls our public HTTPS inbound routes (the
+  // one-click posture) | "socket" = the adapter holds an outbound connection
+  // (the no-ingress floor). Stamped at create from the deployment posture —
+  // the provider manifest baked one or the other, so the presence must
+  // remember which it is. Switching = detach/re-attach in v2.
+  transport           String
+  // Encrypted provider JSON. Slack: {clientId, clientSecret, signingSecret,
+  // botToken?, appToken?} — client creds + signing secret arrive from
+  // apps.manifest.create and are needed for the events arm's OAuth exchange
+  // and inbound signature verification before any bot token exists.
+  credentials         String?
+  // "needs_attention" = the approvals service key is being refused (its owner
+  // lost workspace access); everything else about the presence keeps working.
+  status              String    @default("pending_setup") // "pending_setup" | "active" | "disabled" | "needs_attention"
+  createdByUserId     String?   @map("created_by_user_id")
+  // The service API key (ApiKey.kind "service") the adapter uses to list and
+  // decide gateway approvals for this presence. Revoked at detach.
+  apiKeyId            String?   @map("api_key_id")
+  // The presence-ownership claim (§3.17): which adapter instance serves this
+  // presence, under a lease renewed by its config poll. ⚠️ These two columns
+  // are written by RAW SQL ONLY (channel-adapter-service.ts) — a Prisma
+  // update would bump `updatedAt`, which is a config-feed etag input, and a
+  // lease renewal that busts the etag every poll recreates the KMS decrypt
+  // storm the ownership design exists to kill. `SetNull` on the owner FK
+  // makes adapter-row reaping safe: the presence becomes unowned and is
+  // claimed on a peer's next poll.
+  ownerAdapterId      String?   @map("owner_adapter_id")
+  ownerLeaseExpiresAt DateTime? @map("owner_lease_expires_at")
+  createdAt           DateTime  @default(now()) @map("created_at")
+  updatedAt           DateTime  @updatedAt @map("updated_at")
+
+  agent           Agent                   @relation(fields: [agentId], references: [id], onDelete: Cascade)
+  integration     ChannelIntegration      @relation(fields: [integrationId], references: [id], onDelete: Cascade)
+  ownerAdapter    ChannelAdapter?         @relation("PresenceOwner", fields: [ownerAdapterId], references: [id], onDelete: SetNull)
+  createdBy       User?                   @relation("AgentChannelCreator", fields: [createdByUserId], references: [id], onDelete: SetNull)
+  apiKey          ApiKey?                 @relation(fields: [apiKeyId], references: [id], onDelete: SetNull)
+  threadLinks     ChannelThreadLink[]
+  ingestedEvents  ChannelIngestedEvent[]
+  approvalPrompts ChannelApprovalPrompt[]
+  turnReceipts    ChannelTurnReceipt[]
+
+  @@unique([agentId, provider])
+  // Unique, not merely indexed: the inbound webhook arm resolves a presence by
+  // (provider, externalId=Slack app id), and the app id is USER-SUPPLIED on the
+  // paste floor with no ownership proof (auth.test returns team/bot, never the
+  // app id). Two presences sharing one app id would let a hostile tenant squat
+  // a victim's app id and shadow their inbound routing. The unique makes the
+  // collision a CONFLICT at attach instead.
+  @@unique([provider, externalId])
+  @@index([integrationId])
+  @@index([ownerAdapterId])
+  @@map("agent_channels")
+}
+
+// Provider user ↔ platform user, per integration. Minted lazily on a
+// verified-email match or explicitly by an org admin; the workspace-access
+// fence is always evaluated on the PLATFORM user this resolves to.
+model ChannelUserLink {
+  id             String   @id @default(uuid())
+  integrationId  String   @map("integration_id")
+  externalUserId String   @map("external_user_id")
+  userId         String   @map("user_id")
+  linkedVia      String   @map("linked_via") // "email" | "manual"
+  createdAt      DateTime @default(now()) @map("created_at")
+
+  integration ChannelIntegration @relation(fields: [integrationId], references: [id], onDelete: Cascade)
+  user        User               @relation("ChannelUserLinkUser", fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([integrationId, externalUserId])
+  @@unique([integrationId, userId])
+  @@map("channel_user_links")
+}
+
+// Provider thread ↔ conversation: the adapter's routing table. "direct" rows
+// bind a user's provider DM to their one direct thread; "group" rows bind a
+// provider-defined group thread (Slack: "<channelId>:<threadRootTs>") to its
+// own conversation.
+model ChannelThreadLink {
+  id               String    @id @default(uuid())
+  agentChannelId   String    @map("agent_channel_id")
+  conversationId   String    @unique @map("conversation_id")
+  externalThreadId String    @map("external_thread_id")
+  kind             String // "direct" | "group"
+  externalUserId   String?   @map("external_user_id") // direct rows: the provider user
+  // Mirror/catch-up progress: createdAt of the last finished turn this link
+  // has posted to the provider. Persisted here so an adapter restart never
+  // double-posts and a missed answer is caught up exactly once.
+  mirrorCursor     DateTime? @map("mirror_cursor")
+  createdAt        DateTime  @default(now()) @map("created_at")
+  updatedAt        DateTime  @updatedAt @map("updated_at")
+
+  agentChannel AgentChannel @relation(fields: [agentChannelId], references: [id], onDelete: Cascade)
+  conversation Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+
+  @@unique([agentChannelId, externalThreadId])
+  @@map("channel_thread_links")
+}
+
+// At-least-once delivery insurance: providers redeliver events (unacked
+// envelopes, reconnects, webhook retries), and adapter memory dies with the
+// process — so idempotency lives HERE. Doors insert first; a P2002 means
+// "already ingested" and the door answers duplicate. Pruned opportunistically
+// (>24h) on insert.
+model ChannelIngestedEvent {
+  id             String   @id @default(uuid())
+  agentChannelId String   @map("agent_channel_id")
+  eventId        String   @map("event_id")
+  createdAt      DateTime @default(now()) @map("created_at")
+
+  agentChannel AgentChannel @relation(fields: [agentChannelId], references: [id], onDelete: Cascade)
+
+  @@unique([agentChannelId, eventId])
+  @@map("channel_ingested_events")
+}
+
+// One approval, one provider prompt. Recorded BEFORE posting so a restarted
+// adapter neither re-posts a card nor loses the handle it needs to update one
+// on decide/expiry.
+model ChannelApprovalPrompt {
+  id                 String    @id @default(uuid())
+  approvalId         String    @unique @map("approval_id")
+  agentChannelId     String    @map("agent_channel_id")
+  externalThreadId   String    @map("external_thread_id")
+  externalMessageRef String?   @map("external_message_ref")
+  state              String    @default("pending") // "pending" | "decided" | "expired"
+  // The gateway's own deadline for this approval, recorded at claim time so a
+  // restarted adapter re-arms the card with the REAL expiry instead of
+  // guessing — otherwise a fast restart marks a still-live approval "timed
+  // out" minutes early.
+  expiresAt          DateTime? @map("expires_at")
+  createdAt          DateTime  @default(now()) @map("created_at")
+  updatedAt          DateTime  @updatedAt @map("updated_at")
+
+  agentChannel AgentChannel @relation(fields: [agentChannelId], references: [id], onDelete: Cascade)
+
+  @@map("channel_approval_prompts")
+}
+
+// The reaction receipt: an accepted provider message is marked "seen" with an
+// emoji reaction, removed once the answer posts. One row per turn, written by
+// the detached post-accept task and deleted by the cursor-advance clear; a
+// provider-side ledger only — no Turn FK on purpose (rows are pruned by age
+// >24h on insert, which also covers turns whose cursor never advances).
+model ChannelTurnReceipt {
+  id             String   @id @default(uuid())
+  turnId         String   @unique @map("turn_id")
+  agentChannelId String   @map("agent_channel_id")
+  // Provider-opaque address of the USER's message the reaction sits on
+  // (Slack: channel id + message ts).
+  channel        String
+  messageTs      String   @map("message_ts")
+  reaction       String
+  createdAt      DateTime @default(now()) @map("created_at")
+
+  agentChannel AgentChannel @relation(fields: [agentChannelId], references: [id], onDelete: Cascade)
+
+  @@map("channel_turn_receipts")
+}
+
+// A registered channel-adapter daemon — the outbound service that holds
+// provider connections and posts answers/mirrors/approval prompts. Mirrors
+// Runner's shape: the token is the operator-provisioned anchor
+// (CHANNEL_ADAPTER_TOKEN), the row is minted at registration.
+model ChannelAdapter {
+  id         String    @id @default(uuid())
+  name       String
+  token      String    @unique // "cha_..." prefix — the anchor (legacy) or a per-instance mint
+  // "anchor" = the legacy shared-anchor identity (old binaries present the
+  // anchor itself; at most one such row per configured anchor). "instance" =
+  // a per-instance credential minted at registration. Drives the steal/reap
+  // rules and the config-feed etag recipe — anchor callers keep mirror
+  // cursors folded into the etag (their only CAS-seed source), instance
+  // callers get the floor per work item instead.
+  kind       String    @default("anchor") // "anchor" | "instance"
+  lastSeenAt DateTime? @map("last_seen_at")
+  createdAt  DateTime  @default(now()) @map("created_at")
+  updatedAt  DateTime  @updatedAt @map("updated_at")
+
+  ownedChannels AgentChannel[] @relation("PresenceOwner")
+
+  @@map("channel_adapters")
 }
 
 model Secret {
   id              String        @id @default(uuid())
-  scope           String        @default("project") // "project" | "organization" | "partner"
-  projectId       String?       @map("project_id")
+  scope           String        @default("workspace") // "workspace" | "organization"
+  workspaceId     String?       @map("workspace_id")
   organizationId  String?       @map("organization_id")
-  partnerId       String?       @map("partner_id") // cloud-only: set when scope = "partner"
   name            String
   type            String // "anthropic", "generic"
   // Value source: "inline" (encryptedValue) or "onepassword" (resolved from opRef at request time)
@@ -336,75 +1336,27 @@ model Secret {
   metadata        Json? // type-specific metadata (anthropic: { authMode: "api-key" | "oauth" })
   createdAt       DateTime      @default(now()) @map("created_at")
   updatedAt       DateTime      @updatedAt @map("updated_at")
-  project         Project?      @relation(fields: [projectId], references: [id])
+  workspace       Workspace?    @relation(fields: [workspaceId], references: [id])
   organization    Organization? @relation(fields: [organizationId], references: [id])
-  partner         Partner?      @relation(fields: [partnerId], references: [id])
 
-  agentSecrets      AgentSecret[]
   budgets           Budget[] // cloud-only: spend budgets on this secret (inert in OSS)
   policyRuleTargets PolicyRuleTarget[]
 
-  @@index([projectId])
+  @@index([workspaceId])
   @@index([organizationId])
-  @@index([partnerId])
   @@index([scope])
   @@map("secrets")
 }
 
-/// DEPRECATED (policy engine step 10, 2026-07). The gateway and the console both
-/// run on `policy_rules_v2`. Nothing reads these rows to decide or inject, and
-/// nothing writes a policy here any more — the app blocklist was ported to
-/// `policy_rules_v2` in the same step.
-/// REMAINING COUPLING (the drop checklist):
-///   1. `services/policy-legacy-migration/` READS these rows on every OSS boot
-///      and converts them (the grace-period migration — its README is the
-///      removal checklist). The whole directory goes with the table.
-///   2. `services/policy-migration-guard.ts` counts rows here on boot to report
-///      anything the conversion did not cover. Delete with the table.
-///   3. `ee/services/{project,organization}-service.ts` `deleteMany` here so a
-///      project/org delete isn't blocked by the FK. Delete with the table.
-/// Scheduled for removal in ~2027, once the OSS grace period ends.
-model PolicyRule {
-  id              String        @id @default(uuid())
-  scope           String        @default("project") // "project" | "organization" (partner reserved)
-  projectId       String?       @map("project_id")
-  organizationId  String?       @map("organization_id")
-  partnerId       String?       @map("partner_id") // cloud-only, reserved for future partner-level rules (inert)
-  agentId         String?       @map("agent_id") // null = all agents, set = one agent only (project-scoped only)
-  name            String
-  hostPattern     String        @map("host_pattern") // "gmail.googleapis.com" or "*.googleapis.com"
-  pathPattern     String?       @map("path_pattern") // "/gmail/v1/users/me/messages/send" or "/gmail/*"
-  method          String? // "POST", null = all methods
-  action          String // "block" | "rate_limit" | "manual_approval"
-  enabled         Boolean
-  rateLimit       Int?          @map("rate_limit") // max requests per window (only for rate_limit action)
-  rateLimitWindow String?       @map("rate_limit_window") // "minute" | "hour" | "day"
-  metadata        Json?         @map("metadata") // e.g. { source: "app_permission", provider, toolId }
-  conditions      Json?         @map("conditions") // behavioral conditions: [{ target, operator, value, key? }]
-  createdAt       DateTime      @default(now()) @map("created_at")
-  updatedAt       DateTime      @updatedAt @map("updated_at")
-  project         Project?      @relation(fields: [projectId], references: [id])
-  organization    Organization? @relation(fields: [organizationId], references: [id])
-  agent           Agent?        @relation(fields: [agentId], references: [id], onDelete: Cascade)
-  partner         Partner?      @relation(fields: [partnerId], references: [id])
-
-  @@index([projectId])
-  @@index([organizationId])
-  @@index([partnerId])
-  @@index([scope])
-  @@map("policy_rules")
-}
-
 // ── Unified policy engine ──────────────────────────────────────────────────
 // Priority-ordered, first-match rules — the LIVE policy model since the step-5
-// cutover. The deprecated `policy_rules` above is frozen; the rename to
-// `policy_rules` happens when that table is dropped.
+// cutover.
 
 model PolicyRuleV2 {
   id              String   @id @default(uuid())
-  scope           String // "organization" | "project"
+  scope           String // "organization" | "workspace"
   organizationId  String?  @map("organization_id")
-  projectId       String?  @map("project_id")
+  workspaceId     String?  @map("workspace_id")
   status          String   @default("draft") // "draft" | "published" (gateway reads published)
   generation      Int      @default(0) // published snapshot number (rollback)
   priority        Int // first-match order within a scope (lower = earlier)
@@ -434,14 +1386,14 @@ model PolicyRuleV2 {
   updatedAt       DateTime @updatedAt @map("updated_at")
 
   organization  Organization?        @relation(fields: [organizationId], references: [id], onDelete: Cascade)
-  project       Project?             @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  workspace     Workspace?           @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
   createdByUser User?                @relation("PolicyRuleV2Creator", fields: [createdByUserId], references: [id])
   identities    PolicyRuleIdentity[]
   targets       PolicyRuleTarget[]
 
-  @@index([scope, organizationId, projectId, status, priority])
+  @@index([scope, organizationId, workspaceId, status, priority])
   @@index([organizationId])
-  @@index([projectId])
+  @@index([workspaceId])
   @@map("policy_rules_v2")
 }
 
@@ -481,13 +1433,13 @@ model PolicyRuleTarget {
   // kind = connection target the tools narrow the connection's provider app the
   // same way; injection still injects the whole connection regardless.
   appTools           String[] @default([]) @map("app_tools")
-  // kind = app (step 8): "organization" | "project" → inject ALL the agent's
+  // kind = app (step 8): "organization" | "workspace" → inject ALL the agent's
   // connections of `appProvider` at that level. NULL = the app-permission
   // block/allow rule (no injection). Only set when kind = "app".
   appConnectionScope String?  @map("app_connection_scope")
   appConnectionId    String?  @map("app_connection_id") // kind = connection
   secretId           String?  @map("secret_id") // kind = secret
-  // kind = secret (step 8): "organization" | "project" → inject ALL the agent's
+  // kind = secret (step 8): "organization" | "workspace" → inject ALL the agent's
   // secrets at that level ("all secrets"). Mutually exclusive with `secretId`
   // (specific secret). Only set when kind = "secret".
   secretScope        String?  @map("secret_scope")
@@ -510,42 +1462,9 @@ model PolicyRuleTarget {
   @@map("policy_rule_targets")
 }
 
-/// DEPRECATED (policy engine step 10, 2026-07). Per-agent credential grants are
-/// `source="equipment"` rules in `policy_rules_v2` now. These rows are frozen at
-/// whatever the last bridge run left. NOTHING in the serving path reads them —
-/// the gateway's `inject_select`, the console reflections, and
-/// `routes/container-config.ts` were all re-sourced onto the v2 rules in step 10.
-/// REMAINING COUPLING (the drop checklist):
-///   1. `services/policy-legacy-migration/read-legacy.ts` READS these on every
-///      OSS boot to convert them into equipment rules (the grace-period
-///      migration). The whole directory goes with the table.
-///   2. `ee/services/project-service.ts` `deleteMany`s these on project delete
-///      (FK), and `apps/web/src/ee/account/actions.ts` NULLs
-///      `created_by_user_id` / `updated_by_user_id` on account delete (FK).
-///      Both go with the table.
-///   3. `ee/routes/migrate-import.ts` still ACCEPTS an `agentSecrets` payload arm
-///      from an older self-hosted exporter — it only reports them as skipped and
-///      never writes here, so it is independent of this table's lifetime.
-/// Scheduled for removal in ~2027.
-model AgentSecret {
-  agentId         String   @map("agent_id")
-  secretId        String   @map("secret_id")
-  createdByUserId String?  @map("created_by_user_id")
-  updatedByUserId String?  @map("updated_by_user_id")
-  createdAt       DateTime @default(now()) @map("created_at")
-  updatedAt       DateTime @updatedAt @map("updated_at")
-  agent           Agent    @relation(fields: [agentId], references: [id], onDelete: Cascade)
-  secret          Secret   @relation(fields: [secretId], references: [id], onDelete: Cascade)
-  createdByUser   User?    @relation("AgentSecretCreator", fields: [createdByUserId], references: [id])
-  updatedByUser   User?    @relation("AgentSecretUpdater", fields: [updatedByUserId], references: [id])
-
-  @@id([agentId, secretId])
-  @@map("agent_secrets")
-}
-
 model AuditLog {
   id             String        @id @default(uuid())
-  projectId      String?       @map("project_id")
+  workspaceId    String?       @map("workspace_id")
   organizationId String?       @map("organization_id")
   userId         String        @map("user_id")
   userEmail      String        @map("user_email")
@@ -555,18 +1474,18 @@ model AuditLog {
   source         String        @default("app")
   metadata       Json?
   createdAt      DateTime      @default(now()) @map("created_at")
-  project        Project?      @relation(fields: [projectId], references: [id])
+  workspace      Workspace?    @relation(fields: [workspaceId], references: [id])
   organization   Organization? @relation(fields: [organizationId], references: [id])
   user           User          @relation(fields: [userId], references: [id])
 
-  @@index([projectId, createdAt])
+  @@index([workspaceId, createdAt])
   @@index([organizationId, createdAt])
   @@map("audit_logs")
 }
 
 model RequestLog {
   id                   String   @id @default(uuid())
-  projectId            String   @map("project_id")
+  workspaceId          String   @map("workspace_id")
   agentId              String   @map("agent_id")
   method               String
   host                 String
@@ -583,13 +1502,13 @@ model RequestLog {
   matchedRuleLogicalId String?  @map("matched_rule_logical_id")
   createdAt            DateTime @default(now()) @map("created_at")
 
-  @@index([projectId, createdAt])
+  @@index([workspaceId, createdAt])
   @@map("request_logs")
 }
 
 model VaultConnection {
   id              String    @id @default(uuid())
-  projectId       String    @map("project_id")
+  workspaceId     String    @map("workspace_id")
   provider        String
   name            String?
   status          String
@@ -597,25 +1516,25 @@ model VaultConnection {
   lastConnectedAt DateTime? @map("last_connected_at")
   createdAt       DateTime  @default(now()) @map("created_at")
   updatedAt       DateTime  @updatedAt @map("updated_at")
-  project         Project   @relation(fields: [projectId], references: [id])
+  workspace       Workspace @relation(fields: [workspaceId], references: [id])
 
-  @@unique([projectId, provider])
+  @@unique([workspaceId, provider])
   @@map("vault_connections")
 }
 
 model OnboardingSurvey {
-  id         String   @id @default(uuid())
-  projectId  String   @unique @map("project_id")
-  userId     String   @map("user_id")
-  userEmail  String   @map("user_email")
-  useCase    String?  @map("use_case")
-  discovery  String[] @default([])
-  responses  Json     @default("{}")
-  setupState Json?    @map("setup_state")
-  createdAt  DateTime @default(now()) @map("created_at")
-  updatedAt  DateTime @updatedAt @map("updated_at")
-  project    Project  @relation(fields: [projectId], references: [id])
-  user       User     @relation(fields: [userId], references: [id])
+  id          String    @id @default(uuid())
+  workspaceId String    @unique @map("workspace_id")
+  userId      String    @map("user_id")
+  userEmail   String    @map("user_email")
+  useCase     String?   @map("use_case")
+  discovery   String[]  @default([])
+  responses   Json      @default("{}")
+  setupState  Json?     @map("setup_state")
+  createdAt   DateTime  @default(now()) @map("created_at")
+  updatedAt   DateTime  @updatedAt @map("updated_at")
+  workspace   Workspace @relation(fields: [workspaceId], references: [id])
+  user        User      @relation(fields: [userId], references: [id])
 
   @@map("onboarding_surveys")
 }
@@ -623,89 +1542,59 @@ model OnboardingSurvey {
 // ── App connections ──────────────────────────────────────────────────────
 
 model AppConnection {
-  id                  String               @id @default(uuid())
-  scope               String               @default("project") // "project" | "organization" (partner reserved)
-  projectId           String?              @map("project_id")
-  organizationId      String?              @map("organization_id")
-  partnerId           String?              @map("partner_id") // cloud-only, reserved for future partner-level app connections (inert)
+  id                String             @id @default(uuid())
+  scope             String             @default("workspace") // "workspace" | "organization"
+  workspaceId       String?            @map("workspace_id")
+  organizationId    String?            @map("organization_id")
   // The AppConfig whose credentials minted this connection (OAuth refresh
   // tokens are bound to that client). Null = platform/env credentials, a
   // connection method that needs no config, or minted before this link.
-  appConfigId         String?              @map("app_config_id")
-  provider            String // "github", "gmail", "google-calendar", "google-drive", etc.
-  label               String?              @map("label") // auto-populated from metadata (email/username)
-  status              String               @default("connected")
-  credentials         String?              @map("credentials") // encrypted JSON (access_token, refresh_token, etc.)
-  scopes              String[]             @default([])
-  metadata            Json? // non-secret info (username, org, email)
-  connectedAt         DateTime             @default(now()) @map("connected_at")
-  updatedAt           DateTime             @updatedAt @map("updated_at")
-  project             Project?             @relation(fields: [projectId], references: [id])
-  organization        Organization?        @relation(fields: [organizationId], references: [id])
-  partner             Partner?             @relation(fields: [partnerId], references: [id])
-  appConfig           AppConfig?           @relation(fields: [appConfigId], references: [id], onDelete: SetNull)
-  agentAppConnections AgentAppConnection[]
-  policyRuleTargets   PolicyRuleTarget[]
+  appConfigId       String?            @map("app_config_id")
+  provider          String // "github", "gmail", "google-calendar", "google-drive", etc.
+  label             String?            @map("label") // auto-populated from metadata (email/username)
+  status            String             @default("connected")
+  credentials       String?            @map("credentials") // encrypted JSON (access_token, refresh_token, etc.)
+  scopes            String[]           @default([])
+  metadata          Json? // non-secret info (username, org, email)
+  connectedAt       DateTime           @default(now()) @map("connected_at")
+  updatedAt         DateTime           @updatedAt @map("updated_at")
+  workspace         Workspace?         @relation(fields: [workspaceId], references: [id])
+  organization      Organization?      @relation(fields: [organizationId], references: [id])
+  appConfig         AppConfig?         @relation(fields: [appConfigId], references: [id], onDelete: SetNull)
+  policyRuleTargets PolicyRuleTarget[]
 
-  @@index([projectId, provider])
+  @@index([workspaceId, provider])
   @@index([organizationId, provider])
-  @@index([partnerId])
   @@index([scope])
   @@index([appConfigId])
   @@map("app_connections")
 }
 
-/// DEPRECATED (policy engine step 10, 2026-07). Per-agent connection grants are
-/// `source="equipment"` rules in `policy_rules_v2` now, and their
-/// `session_policy` resource scoping rides those rules' `conditions` (the bridge
-/// carried it verbatim; `ee/policy_engine/inject_select.rs` reads it from there).
-/// These rows are frozen and nothing in the serving path reads them — same
-/// re-sourcing as `AgentSecret` above.
-/// REMAINING COUPLING: `services/policy-legacy-migration/read-legacy.ts` reads
-/// them on OSS boot to convert them, and `ee/services/project-service.ts`
-/// `deleteMany`s them on project delete (FK). Both go with the table.
-/// Scheduled for removal in ~2027, once the OSS grace period ends.
-model AgentAppConnection {
-  agentId         String        @map("agent_id")
-  appConnectionId String        @map("app_connection_id")
-  sessionPolicy   Json?         @map("session_policy")
-  createdAt       DateTime      @default(now()) @map("created_at")
-  updatedAt       DateTime      @updatedAt @map("updated_at")
-  agent           Agent         @relation(fields: [agentId], references: [id], onDelete: Cascade)
-  appConnection   AppConnection @relation(fields: [appConnectionId], references: [id], onDelete: Cascade)
-
-  @@id([agentId, appConnectionId])
-  @@map("agent_app_connections")
-}
-
 model AppConfig {
   id             String          @id @default(uuid())
-  scope          String          @default("project") // "project" | "organization" (partner reserved)
-  projectId      String?         @map("project_id")
+  scope          String          @default("workspace") // "workspace" | "organization"
+  workspaceId    String?         @map("workspace_id")
   organizationId String?         @map("organization_id")
-  partnerId      String?         @map("partner_id") // cloud-only, reserved for future partner-level app config (inert)
   provider       String // "github", "gmail", "google-calendar", "google-drive"
   enabled        Boolean         @default(false)
   credentials    String?         @map("credentials") // encrypted (clientSecret)
   settings       Json? // plain (clientId, scopes)
   createdAt      DateTime        @default(now()) @map("created_at")
   updatedAt      DateTime        @updatedAt @map("updated_at")
-  project        Project?        @relation(fields: [projectId], references: [id])
+  workspace      Workspace?      @relation(fields: [workspaceId], references: [id])
   organization   Organization?   @relation(fields: [organizationId], references: [id])
-  partner        Partner?        @relation(fields: [partnerId], references: [id])
   // Connections minted with this config's credentials (see AppConnection.appConfigId).
   connections    AppConnection[]
 
-  @@unique([projectId, provider])
+  @@unique([workspaceId, provider])
   @@unique([organizationId, provider])
-  @@index([partnerId])
   @@index([scope])
   @@map("app_configs")
 }
 
-// ── Groups, project access & role mappings ───────────────────────────────
+// ── Groups, workspace access & role mappings ───────────────────────────────
 // Human principals (user | group) for the enterprise directory. Groups gate
-// project access (ProjectAccess) and drive org roles (GroupRoleMapping).
+// workspace access (WorkspaceAccess) and drive org roles (GroupRoleMapping).
 
 // A human group — manually managed, or provisioned from the customer IdP via
 // SCIM (source "scim" rows are locked to IdP management).
@@ -721,7 +1610,7 @@ model Group {
   organization Organization @relation(fields: [organizationId], references: [id])
 
   members                       GroupMember[]
-  projectAccess                 ProjectAccess[]
+  workspaceAccess               WorkspaceAccess[]
   roleMapping                   GroupRoleMapping?
   policyRuleIdentities          PolicyRuleIdentity[]
   appAvailabilityRuleIdentities AppAvailabilityRuleIdentity[]
@@ -748,32 +1637,32 @@ model GroupMember {
   @@map("group_members")
 }
 
-// Project access bindings — the project's human gate (GRANT semantics: a row
-// grants access; agents live in projects, so no machine columns here).
+// Workspace access bindings — the workspace's human gate (GRANT semantics: a row
+// grants access; agents live in workspaces, so no machine columns here).
 // Exactly one of userId/groupId per row (DB CHECK).
-model ProjectAccess {
+model WorkspaceAccess {
   id              String   @id @default(uuid())
-  projectId       String   @map("project_id")
+  workspaceId     String   @map("workspace_id")
   userId          String?  @map("user_id")
   groupId         String?  @map("group_id")
   // Management role on a USER binding (step 13c): "owner" may rename/share/delete
-  // the project; "member" is a plain use grant. Group bindings stay role-less in
+  // the workspace; "member" is a plain use grant. Group bindings stay role-less in
   // v1 (member). Only consulted for management — usage (13b) is role-blind.
   role            String   @default("member") // "owner" | "member"
   createdByUserId String?  @map("created_by_user_id") // null = system write (creator seed)
   createdAt       DateTime @default(now()) @map("created_at")
   updatedAt       DateTime @updatedAt @map("updated_at")
 
-  project       Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
-  user          User?   @relation("ProjectAccessUser", fields: [userId], references: [id], onDelete: Cascade)
-  group         Group?  @relation(fields: [groupId], references: [id], onDelete: Cascade)
-  createdByUser User?   @relation("ProjectAccessCreator", fields: [createdByUserId], references: [id])
+  workspace     Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  user          User?     @relation("WorkspaceAccessUser", fields: [userId], references: [id], onDelete: Cascade)
+  group         Group?    @relation(fields: [groupId], references: [id], onDelete: Cascade)
+  createdByUser User?     @relation("WorkspaceAccessCreator", fields: [createdByUserId], references: [id])
 
-  @@unique([projectId, userId])
-  @@unique([projectId, groupId])
+  @@unique([workspaceId, userId])
+  @@unique([workspaceId, groupId])
   @@index([userId])
   @@index([groupId])
-  @@map("project_access")
+  @@map("workspace_access")
 }
 
 // Org-scoped app-availability rules (step 7): a named rule grants a SET of apps
@@ -837,13 +1726,16 @@ model GroupRoleMapping {
   @@map("group_role_mappings")
 }
 
-// ── Provisioned users ───────────────────────────────────────────────────
-
+// EE (licensed): a pre-minted placeholder account an org admin hands out via a
+// claim link (POST /v1/team/provisions → APP_URL/claim?token=…). The table
+// predates the workspace rename and carries live pre-2.0 production data, so
+// `workspaceId` deliberately has NO relation — it mirrors prod's bare unique
+// column (renamed from project_id by its own migration, not the big rename).
 model UserProvision {
   id                 String    @id @default(uuid())
   organizationId     String    @map("organization_id")
   userId             String    @unique @map("user_id")
-  projectId          String    @unique @map("project_id")
+  workspaceId        String    @unique @map("workspace_id")
   role               String // "admin" | "member"
   token              String    @unique
   status             String    @default("pending") // "pending" | "claimed" | "expired"
@@ -864,87 +1756,15 @@ model UserProvision {
   @@map("user_provisions")
 }
 
-// ── Partner (cloud-only) ────────────────────────────────────────────────
-// A Partner is a reseller/agency that sits ABOVE Organization. It creates orgs
-// via the Partner API, provides inherited (lowest-priority) partner secrets, and
-// hands out claim links. Cloud-only behaviour; these tables/columns are inert in
-// OSS (no OSS code reads or writes them), mirroring CliAuthSession/UserProvision.
-
-model Partner {
-  id        String   @id @default(uuid())
-  name      String
-  slug      String   @unique
-  apiKey    String   @unique @map("api_key") // "oc_partner_" + 32 hex
-  status    String   @default("active") // "active" | "suspended"
-  createdAt DateTime @default(now()) @map("created_at")
-  updatedAt DateTime @updatedAt @map("updated_at")
-
-  members        PartnerMember[]
-  organizations  Organization[]
-  secrets        Secret[]
-  appConnections AppConnection[]
-  appConfigs     AppConfig[]
-  policyRules    PolicyRule[]
-  partnerClaims  PartnerClaim[]
-
-  @@map("partners")
-}
-
-// Links a Cognito user (User row) to a Partner for partner-portal access.
-// Mirrors OrganizationMember; supports multiple staff per partner.
-model PartnerMember {
-  partnerId String   @map("partner_id")
-  userId    String   @map("user_id")
-  userEmail String   @map("user_email")
-  role      String   @default("owner") // "owner" | "admin" | "member" (partner-staff role)
-  createdAt DateTime @default(now()) @map("created_at")
-
-  partner Partner @relation(fields: [partnerId], references: [id])
-  user    User    @relation(fields: [userId], references: [id])
-
-  @@id([partnerId, userId])
-  // A user belongs to at most one partner (the portal / API-key resolution is
-  // single-partner). Unique — not just an index — enforces that at the DB level.
-  @@unique([userId])
-  @@map("partner_members")
-}
-
-// Claim record for a partner-pre-created (unclaimed) organization. Mirrors
-// UserProvision: a placeholder OWNER holds the org+project until a real Cognito
-// user claims it via the token and is promoted to OWNER.
-model PartnerClaim {
-  id                String    @id @default(uuid())
-  partnerId         String    @map("partner_id")
-  organizationId    String    @unique @map("organization_id")
-  projectId         String    @map("project_id")
-  placeholderUserId String?   @unique @map("placeholder_user_id")
-  token             String    @unique
-  status            String    @default("pending") // "pending" | "claimed" | "expired"
-  expiresAt         DateTime? @map("expires_at") // null = never expires (partner orgs are long-lived)
-  claimedAt         DateTime? @map("claimed_at")
-  claimedByUserId   String?   @map("claimed_by_user_id")
-  claimedByEmail    String?   @map("claimed_by_email")
-  createdAt         DateTime  @default(now()) @map("created_at")
-
-  partner      Partner      @relation(fields: [partnerId], references: [id])
-  organization Organization @relation(fields: [organizationId], references: [id])
-  placeholder  User?        @relation("PartnerPlaceholder", fields: [placeholderUserId], references: [id], onDelete: SetNull)
-
-  @@index([token])
-  @@index([partnerId])
-  @@index([status])
-  @@map("partner_claims")
-}
-
 // Cloud-only (inert in OSS): a spend budget on a secret for a consuming scope.
-// Scope-agnostic — partner-ness is implied by the bound secret's scope, so the
-// same model serves a future non-partner flow (org/project capping its own key).
-// Now: secretId = a partner secret, organizationId = the consuming org.
+// DORMANT — no surface creates budgets since the partner layer was removed;
+// kept (with the gateway budget engine) for a future budget flow (an org or
+// workspace capping its own key).
 model Budget {
   id             String   @id @default(uuid())
   secretId       String   @map("secret_id")
   organizationId String?  @map("organization_id")
-  projectId      String?  @map("project_id") // future non-partner scoping
+  workspaceId    String?  @map("workspace_id") // future workspace-level scoping
   limitCents     Int      @map("limit_cents")
   period         String   @default("monthly") // "monthly" | "total"
   createdBy      String   @map("created_by")
@@ -953,7 +1773,7 @@ model Budget {
 
   secret       Secret        @relation(fields: [secretId], references: [id], onDelete: Cascade)
   organization Organization? @relation(fields: [organizationId], references: [id])
-  project      Project?      @relation(fields: [projectId], references: [id])
+  workspace    Workspace?    @relation(fields: [workspaceId], references: [id])
 
   @@unique([secretId, organizationId]) // one budget per (secret, consuming org)
   @@index([secretId])
@@ -976,7 +1796,7 @@ model BudgetSpend {
   @@map("budget_spends")
 }
 
-// ── Standalone (no project scoping) ─────────────────────────────────────
+// ── Standalone (no workspace scoping) ─────────────────────────────────────
 
 model ResendBadEmail {
   id        String   @id @default(uuid())
@@ -1009,4 +1829,83 @@ model CliAuthSession {
   createdAt DateTime @default(now()) @map("created_at")
 
   @@map("cli_auth_sessions")
+}
+
+// ── Self-host identity (better-auth) ──────────────────────────────────────
+//
+// The three tables better-auth owns on the self-hosted edition. Cloud runs on
+// Cognito and never writes them; they are inert there, like every other
+// edition-specific table in this schema.
+//
+// Model and FIELD names are the ones better-auth's adapter addresses (it
+// speaks Prisma client names, never physical columns), so they stay camelCase
+// and the snake_case columns come from `@map` as everywhere else. The Rust
+// gateway reads `sessions` directly in SQL, so it is the one consumer that
+// depends on the physical names below.
+
+/// A logged-in browser session. The cookie carries `token` (signed with
+/// BETTER_AUTH_SECRET); validating a request is a lookup on this row, so
+/// deleting it — sign-out, revocation — takes effect immediately everywhere,
+/// including at the gateway.
+model Session {
+  id        String   @id @default(uuid())
+  token     String   @unique
+  userId    String   @map("user_id")
+  expiresAt DateTime @map("expires_at")
+  ipAddress String?  @map("ip_address")
+  userAgent String?  @map("user_agent")
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  // Expired rows are only cleaned up when their own token is presented again,
+  // so a sweep needs this to stay cheap as the table accumulates.
+  @@index([expiresAt])
+  @@map("sessions")
+}
+
+/// A credential attached to a user: `providerId: "credential"` holds the
+/// password hash, a social provider holds its OAuth tokens. One row per
+/// (provider, provider-side account).
+model Account {
+  id                    String    @id @default(uuid())
+  userId                String    @map("user_id")
+  accountId             String    @map("account_id")
+  providerId            String    @map("provider_id")
+  password              String?
+  accessToken           String?   @map("access_token")
+  refreshToken          String?   @map("refresh_token")
+  idToken               String?   @map("id_token")
+  accessTokenExpiresAt  DateTime? @map("access_token_expires_at")
+  refreshTokenExpiresAt DateTime? @map("refresh_token_expires_at")
+  scope                 String?
+  createdAt             DateTime  @default(now()) @map("created_at")
+  updatedAt             DateTime  @updatedAt @map("updated_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  // Indexed, deliberately NOT unique: better-auth's own schema declares no
+  // uniqueness here and its link path has no conflict handling, so a
+  // constraint would turn a harmless duplicate into a 500. This is the lookup
+  // it actually performs.
+  @@index([providerId, accountId])
+  @@index([userId])
+  @@map("accounts")
+}
+
+/// Short-lived proof tokens (email verification, password reset). Keyed by
+/// `identifier` rather than a user id — the subject may not have an account
+/// yet — and swept by expiry.
+model Verification {
+  id         String   @id @default(uuid())
+  identifier String
+  value      String
+  expiresAt  DateTime @map("expires_at")
+  createdAt  DateTime @default(now()) @map("created_at")
+  updatedAt  DateTime @updatedAt @map("updated_at")
+
+  @@index([identifier])
+  @@map("verifications")
 }

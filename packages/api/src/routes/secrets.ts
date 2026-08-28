@@ -1,6 +1,6 @@
 import { Hono } from "hono";
 import type { ApiEnv } from "../types";
-import { authMiddleware, requireProjectId } from "../middleware/auth";
+import { authMiddleware, requireWorkspaceId } from "../middleware/auth";
 import { invalidateGatewayCache } from "../lib/gateway-invalidate";
 import {
   listSecrets,
@@ -19,7 +19,7 @@ export const secretRoutes = () => {
   app.get("/", async (c) => {
     const auth = c.get("auth");
     const secrets = await listSecrets({
-      projectId: requireProjectId(auth),
+      workspaceId: requireWorkspaceId(auth),
       organizationId: auth.organizationId,
     });
     return c.json(secrets);
@@ -40,8 +40,10 @@ export const secretRoutes = () => {
     await getResourceHooks().beforeCreateSecret(auth.organizationId);
 
     const secret = await createSecret(
-      { projectId: requireProjectId(auth) },
+      { workspaceId: requireWorkspaceId(auth) },
       parsed.data,
+      // The grantor recorded on any grant the service auto-attaches.
+      auth.userId,
     );
     invalidateGatewayCache(c.req.raw);
     return c.json(secret, 201);
@@ -61,7 +63,7 @@ export const secretRoutes = () => {
     }
 
     await updateSecret(
-      { projectId: requireProjectId(auth) },
+      { workspaceId: requireWorkspaceId(auth) },
       secretId,
       parsed.data,
     );
@@ -73,7 +75,7 @@ export const secretRoutes = () => {
   app.delete("/:secretId", async (c) => {
     const auth = c.get("auth");
     const secretId = c.req.param("secretId");
-    await deleteSecret({ projectId: requireProjectId(auth) }, secretId);
+    await deleteSecret({ workspaceId: requireWorkspaceId(auth) }, secretId);
     invalidateGatewayCache(c.req.raw);
     return c.body(null, 204);
   });

@@ -136,7 +136,7 @@ export const monday: AppDefinition = {
     exchangeCode: async ({ appCredentials, callbackParams, redirectUri }) => {
       if (callbackParams.error) {
         throw new Error(
-          `Monday.com authorization error: ${callbackParams.error} — ${callbackParams.error_description ?? "no description"}`,
+          `Monday.com authorization error: ${callbackParams.error} (${callbackParams.error_description ?? "no description"})`,
         );
       }
 
@@ -163,7 +163,7 @@ export const monday: AppDefinition = {
       if (!tokenRes.ok) {
         const errorBody = await tokenRes.text();
         throw new Error(
-          `Monday.com token exchange failed: ${tokenRes.status} ${tokenRes.statusText} — ${errorBody}`,
+          `Monday.com token exchange failed: ${tokenRes.status} ${tokenRes.statusText} (${errorBody})`,
         );
       }
 
@@ -232,7 +232,6 @@ export const monday: AppDefinition = {
       return { credentials, scopes, metadata };
     },
   },
-  available: true,
   configurable: {
     hint: "Create an app in the Monday.com Developer Center.",
     fields: [

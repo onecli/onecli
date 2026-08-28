@@ -1,15 +1,17 @@
 import type { AppAvailabilityProvider } from "./types";
+import { createEditionSlot } from "./edition-state";
 
-// OSS default: no provider — availability is never restricted, so the connect
-// picker shows every app (unchanged from before the seam). The EE editions
-// register a provider that reads the org allowlist.
-let _appAvailability: AppAvailabilityProvider | null = null;
+// Edition default: cloud filters the connect picker by the org allowlist —
+// injected by `ensureEditionDefaults()`, keeping the cloud module out of
+// client bundles; onprem has no provider (availability is never restricted).
+const slot = createEditionSlot<AppAvailabilityProvider | null>(
+  "appAvailability",
+  null,
+);
 
-export const initAppAvailability = (
-  provider: AppAvailabilityProvider | null,
-) => {
-  _appAvailability = provider;
-};
+/** Package-internal: the edition-defaults injector. Not exported from the barrel. */
+export const setDefaultAppAvailability = (p: AppAvailabilityProvider) =>
+  slot.setCloudDefault(p);
 
 export const getAppAvailability = (): AppAvailabilityProvider | null =>
-  _appAvailability;
+  slot.get();

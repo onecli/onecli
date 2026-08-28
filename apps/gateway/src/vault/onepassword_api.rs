@@ -33,10 +33,11 @@ impl std::fmt::Display for OpError {
     }
 }
 
-/// Where the Node app answers when nothing overrides it. The gateway and the
-/// app share a container in every self-hosted layout, so loopback is the
-/// address, not a guess.
-const INTERNAL_API_URL_DEFAULT: &str = "http://localhost:10254";
+/// Where the api-server answers when nothing overrides it — the bare-metal /
+/// dev default. Containerized layouts always set `INTERNAL_API_URL` (the
+/// self-host compose points it at the api service, cloud at the in-VPC
+/// api-server).
+const INTERNAL_API_URL_DEFAULT: &str = "http://localhost:10256";
 
 /// Base URL of the internal Node API: `INTERNAL_API_URL` when set (cloud points
 /// it at the in-VPC api-server, e.g. `http://api-server:10256`), else loopback.

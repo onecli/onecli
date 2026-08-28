@@ -357,10 +357,10 @@ mod tests {
 
     #[test]
     fn create_calendar_extracts_title() {
-        let body = br#"{"summary":"Project X"}"#;
+        let body = br#"{"summary":"Workspace X"}"#;
         let s = summarize("POST", "/calendar/v3/calendars", Some(body));
         assert_eq!(s.action, "Create calendar");
-        assert_eq!(detail(&s, "Title"), Some("Project X"));
+        assert_eq!(detail(&s, "Title"), Some("Workspace X"));
     }
 
     #[test]

@@ -1,7 +1,17 @@
 name: onecli
 
+# The OneCLI self-host stack: dashboard (web), API (api), MITM gateway, and —
+# behind profiles — the hosted-agents runner and the Slack channel adapter.
+# `pnpm run setup` (from a checkout) and `scripts/install.sh` (curl | sh) both
+# provision everything, required secrets included, into the `.env` beside the
+# compose file. For a fully manual `docker compose up`, first put
+# SECRET_ENCRYPTION_KEY, GATEWAY_INTERNAL_SECRET and BETTER_AUTH_SECRET in a
+# `.env` beside this file (generate each with: head -c 32 /dev/urandom | base64).
+
 services:
   postgres:
+    # NOTE: docker-compose.dev.yml carries a verbatim copy of this service for
+    # `pnpm db:up` — any edit here must be mirrored there.
     image: postgres:18-alpine
     restart: unless-stopped
     environment:
@@ -21,48 +31,392 @@ services:
     networks:
       - onecli
 
-  onecli:
-    image: ghcr.io/onecli/onecli:${ONECLI_VERSION:-latest}
-    container_name: onecli
-    restart: unless-stopped
+  # One-shot: applies database migrations, then exits. The api waits for it to
+  # complete successfully, and web + gateway wait on the api's health check, so
+  # a ready api still means a ready schema. Requires Docker Compose >= 2.19
+  # (one-shot dependencies under `up --wait`). The image shares ONECLI_VERSION
+  # with every service: migrations and the code reading the schema always move
+  # together.
+  migrations:
+    image: ghcr.io/onecli/onecli-migrations:${ONECLI_VERSION:-latest}
+    container_name: onecli-migrations
+    restart: "no"
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
     depends_on:
       postgres:
         condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-onecli}:${POSTGRES_PASSWORD:-onecli}@postgres:5432/${POSTGRES_DB:-onecli}
+    env_file:
+      # Same rule as the api service: only the install's own .env.
+      - path: .env
+        required: false
+    networks:
+      - onecli
+
+  # The api serves once the migrations one-shot has completed, and web +
+  # gateway wait on its health check — a ready api means a ready schema.
+  api:
+    image: ghcr.io/onecli/onecli-api:${ONECLI_VERSION:-latest}
+    container_name: onecli-api
+    restart: unless-stopped
+    # Hardening (all OneCLI services): the processes run as non-root users
+    # baked into the images and need no Linux capabilities; never let them
+    # gain privileges either.
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrations:
+        condition: service_completed_successfully
+    ports:
+      - "${ONECLI_BIND_HOST:-127.0.0.1}:${ONECLI_API_PORT:-10256}:10256"
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-onecli}:${POSTGRES_PASSWORD:-onecli}@postgres:5432/${POSTGRES_DB:-onecli}
+      # Self-hosted default: each user owns one organization (raise to allow more).
+      MAX_ORGS_PER_USER: ${MAX_ORGS_PER_USER:-1}
+      # Enterprise features (SSO & SCIM, directory groups, RBAC, workspace
+      # sharing, app availability, resource-level access, multi-org,
+      # provisioning, the members directory API, spend budgets, multi-instance
+      # operation) unlock with
+      # ENTERPRISE_ENABLED=true — requires a OneCLI Enterprise license.
+      # Org credentials are FREE and need no flag.
+      ENTERPRISE_ENABLED: ${ENTERPRISE_ENABLED:-}
+      BETTER_AUTH_SECRET: ${BETTER_AUTH_SECRET:?put BETTER_AUTH_SECRET in the .env beside this file (openssl rand -base64 32), or install via https://onecli.sh/install}
+      # Encrypts stored secrets at rest — losing it orphans them, so it is
+      # required rather than generated per start. install.sh creates and
+      # persists it in the `.env` beside this file.
+      SECRET_ENCRYPTION_KEY: ${SECRET_ENCRYPTION_KEY:?put SECRET_ENCRYPTION_KEY in the .env beside this file (head -c 32 /dev/urandom | base64), or install via https://onecli.sh/install}
+      # Authenticates gateway↔api internal calls (e.g. vault reads).
+      GATEWAY_INTERNAL_SECRET: ${GATEWAY_INTERNAL_SECRET:?put GATEWAY_INTERNAL_SECRET in the .env beside this file (head -c 32 /dev/urandom | base64), or install via https://onecli.sh/install}
+      # The SSH port the dashboard advertises — pinned to the SAME knob that
+      # publishes the terminator's host port, so they can never disagree.
+      # (SSH_HOST, SSH_CA_PRIVATE_KEY and SSH_TERMINATOR_SECRET arrive from the
+      # .env via env_file below; the port is the one that must not double up.)
+      SSH_PORT: ${ONECLI_SSH_PORT:-10257}
+      # THE canonical public URL — the address people open OneCLI at. Every
+      # other origin derives from it (http means ports mode: api/gateway on
+      # the same host's ports; https means proxy mode: one origin, a reverse
+      # proxy routes /v1, /auth and /gw). install.sh and the setup wizard
+      # write it into the `.env` beside this file; unset means localhost.
+      ONECLI_EXTERNAL_URL: ${ONECLI_EXTERNAL_URL:-}
+      # Legacy alias and per-origin overrides (split-host installs). Kept
+      # working forever; pass-throughs only — the services derive their own
+      # defaults, compose no longer seeds URLs from the bind address.
+      APP_URL: ${APP_URL:-}
+      API_URL: ${API_URL:-}
+      GATEWAY_API_URL: ${GATEWAY_API_URL:-}
+      # Extra browser origins the auth layer should trust (comma-separated),
+      # for installs reachable at more than one address (IP + DNS name).
+      ONECLI_TRUSTED_ORIGINS: ${ONECLI_TRUSTED_ORIGINS:-}
+      # Publish-plane facts the in-container derivation needs: the (warned,
+      # one-release) legacy bind seed and the ports-mode port numbers.
+      # LEGACY(next-major): the ONECLI_BIND_HOST rows here and on the web,
+      # gateway and channel-adapter services exist only to feed that seed
+      # (ledger: packages/api/src/lib/public-origins.ts).
+      ONECLI_BIND_HOST: ${ONECLI_BIND_HOST:-}
+      ONECLI_APP_PORT: ${ONECLI_APP_PORT:-10254}
+      ONECLI_API_PORT: ${ONECLI_API_PORT:-10256}
+      ONECLI_GATEWAY_PORT: ${ONECLI_GATEWAY_PORT:-10255}
+      # Session-cookie scope for split-host installs (dashboard and API on
+      # sibling subdomains). Auto-derived from the app/api origins when they
+      # share a parent domain; set to pin a scope, or `none` to force host-only.
+      BETTER_AUTH_COOKIE_DOMAIN: ${BETTER_AUTH_COOKIE_DOMAIN:-}
+      # In-network address of the gateway for server-side cache flushes (the
+      # public origin isn't routable from inside this container).
+      GATEWAY_INTERNAL_URL: http://gateway:10255
+      # The proxy address handed to CONTAINERS (agent sandboxes and any
+      # containerized BYO agent on this stack). It must resolve from inside a
+      # container on this stack's networks, which the code default
+      # `host.docker.internal` does not on Linux. The old GATEWAY_BASE_URL
+      # name keeps working as a permanent read-alias (nested default).
+      ONECLI_AGENT_PROXY_ADDRESS: ${ONECLI_AGENT_PROXY_ADDRESS:-${GATEWAY_BASE_URL:-gateway:10255}}
+      # Hosted agents: the registration anchor for the runner plane. Unset =
+      # no runner can register, and the hosted surface stays dark.
+      RUNNER_TOKEN: ${RUNNER_TOKEN:-}
+      # Channels: the adapter's registration anchor — pinned here exactly like
+      # RUNNER_TOKEN so the api and the adapter service always read the SAME
+      # interpolated value (a checkout's root .env must not shadow it).
+      CHANNEL_ADAPTER_TOKEN: ${CHANNEL_ADAPTER_TOKEN:-}
+    volumes:
+      # Read-only view of the gateway's data dir: the api serves the gateway's
+      # CA certificate (written to /app/data/gateway/ca.pem) to install flows.
+      - app-data:/app/data:ro
+    env_file:
+      # ONLY the install's own config (`pnpm run setup` writes it beside this
+      # file in a checkout; install.sh puts it at $HOME/.onecli/.env — also the
+      # file Compose reads for the interpolation above). A checkout's repo-root
+      # .env is the DEV file for host processes and must never reach these
+      # containers: a cloud developer's REDIS_HOST or EDITION would break or
+      # silently flip a self-host stack.
+      - path: .env
+        required: false
+    networks:
+      - onecli
+
+  web:
+    image: ghcr.io/onecli/onecli-web:${ONECLI_VERSION:-latest}
+    container_name: onecli-web
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    depends_on:
+      api:
+        condition: service_healthy
     ports:
       - "${ONECLI_BIND_HOST:-127.0.0.1}:${ONECLI_APP_PORT:-10254}:10254"
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-onecli}:${POSTGRES_PASSWORD:-onecli}@postgres:5432/${POSTGRES_DB:-onecli}
+      MAX_ORGS_PER_USER: ${MAX_ORGS_PER_USER:-1}
+      # Enterprise features (SSO & SCIM, directory groups, RBAC, workspace
+      # sharing, app availability, resource-level access, multi-org,
+      # provisioning, the members directory API, spend budgets, multi-instance
+      # operation) unlock with
+      # ENTERPRISE_ENABLED=true — requires a OneCLI Enterprise license.
+      # Org credentials are FREE and need no flag.
+      ENTERPRISE_ENABLED: ${ENTERPRISE_ENABLED:-}
+      BETTER_AUTH_SECRET: ${BETTER_AUTH_SECRET:?put BETTER_AUTH_SECRET in the .env beside this file (openssl rand -base64 32), or install via https://onecli.sh/install}
+      SECRET_ENCRYPTION_KEY: ${SECRET_ENCRYPTION_KEY:?put SECRET_ENCRYPTION_KEY in the .env beside this file (head -c 32 /dev/urandom | base64), or install via https://onecli.sh/install}
+      # Same resolver inputs as the api service: the dashboard derives the
+      # api/gateway origins and hands them to the browser at runtime
+      # (prebuilt images cannot bake a deployment's URL).
+      ONECLI_EXTERNAL_URL: ${ONECLI_EXTERNAL_URL:-}
+      APP_URL: ${APP_URL:-}
+      API_URL: ${API_URL:-}
+      GATEWAY_API_URL: ${GATEWAY_API_URL:-}
+      ONECLI_TRUSTED_ORIGINS: ${ONECLI_TRUSTED_ORIGINS:-}
+      ONECLI_BIND_HOST: ${ONECLI_BIND_HOST:-}
+      ONECLI_APP_PORT: ${ONECLI_APP_PORT:-10254}
+      ONECLI_API_PORT: ${ONECLI_API_PORT:-10256}
+      ONECLI_GATEWAY_PORT: ${ONECLI_GATEWAY_PORT:-10255}
+      # Same value as the api service's: the web server builds the identical
+      # auth factory for its server-rendered session reads.
+      BETTER_AUTH_COOKIE_DOMAIN: ${BETTER_AUTH_COOKIE_DOMAIN:-}
+      # In-network address of the gateway for server-side cache flushes.
+      GATEWAY_INTERNAL_URL: http://gateway:10255
+    env_file:
+      # Only the install's own .env — same rule as the api service (a
+      # checkout's repo-root dev .env never reaches the containers).
+      - path: .env
+        required: false
+    networks:
+      - onecli
+
+  gateway:
+    image: ghcr.io/onecli/onecli-gateway:${ONECLI_VERSION:-latest}
+    container_name: onecli-gateway
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    depends_on:
+      api:
+        condition: service_healthy
+    ports:
       - "${ONECLI_BIND_HOST:-127.0.0.1}:${ONECLI_GATEWAY_PORT:-10255}:10255"
     environment:
       DATABASE_URL: postgresql://${POSTGRES_USER:-onecli}:${POSTGRES_PASSWORD:-onecli}@postgres:5432/${POSTGRES_DB:-onecli}
-      NEXTAUTH_SECRET: ${NEXTAUTH_SECRET:-}
+      BETTER_AUTH_SECRET: ${BETTER_AUTH_SECRET:?put BETTER_AUTH_SECRET in the .env beside this file (openssl rand -base64 32), or install via https://onecli.sh/install}
+      # Same enterprise flag as the api/web services above; on the gateway it
+      # additionally licenses multi-instance operation (Redis-backed stores).
+      ENTERPRISE_ENABLED: ${ENTERPRISE_ENABLED:-}
+      SECRET_ENCRYPTION_KEY: ${SECRET_ENCRYPTION_KEY:?put SECRET_ENCRYPTION_KEY in the .env beside this file (head -c 32 /dev/urandom | base64), or install via https://onecli.sh/install}
+      GATEWAY_INTERNAL_SECRET: ${GATEWAY_INTERNAL_SECRET:?put GATEWAY_INTERNAL_SECRET in the .env beside this file (head -c 32 /dev/urandom | base64), or install via https://onecli.sh/install}
       # The public URL users reach OneCLI on. The gateway needs it to build the
       # links it puts in agent-facing responses — it answers proxy calls, so it
-      # has no browser request to derive an address from.
-      #
-      # The default below assumes you reach OneCLI at the address Docker binds
-      # to, which holds for a local or single-host install. When it doesn't — a
-      # tunnel, a reverse proxy, a real domain — set APP_URL instead of relying
-      # on it: either export it, or put it in a `.env` beside this file.
-      APP_URL: ${APP_URL:-http://${ONECLI_BIND_HOST:-127.0.0.1}:${ONECLI_APP_PORT:-10254}}
-      GATEWAY_API_URL: http://${ONECLI_BIND_HOST:-127.0.0.1}:${ONECLI_GATEWAY_PORT:-10255}
-      # Where the gateway reaches the Node API. Both run in this one container
-      # (see docker/entrypoint.sh), so it is a loopback call and never leaves it.
-      #
-      # Set explicitly because images before this file's release resolve it as
-      # `INTERNAL_API_URL, else APP_URL, else loopback` — and APP_URL is now
-      # settable to a real public address. Naming it here keeps those images from
-      # sending internal vault calls out over the internet, whatever version the
-      # `image:` above pins.
-      INTERNAL_API_URL: http://localhost:10254
+      # has no browser request to derive an address from. Its Rust chain head
+      # mirrors the resolver: ONECLI_EXTERNAL_URL, the APP_URL alias, then the
+      # warned legacy bind seed.
+      ONECLI_EXTERNAL_URL: ${ONECLI_EXTERNAL_URL:-}
+      APP_URL: ${APP_URL:-}
+      ONECLI_BIND_HOST: ${ONECLI_BIND_HOST:-}
+      ONECLI_APP_PORT: ${ONECLI_APP_PORT:-10254}
+      # Where the gateway reaches the api service (internal vault calls — never
+      # the public API_URL, which can name a real external host).
+      INTERNAL_API_URL: http://api:10256
     volumes:
       - app-data:/app/data
     env_file:
-      # Beside this file — where an installed layout puts it ($HOME/.onecli/.env,
-      # which is also the file Compose reads for the interpolation above).
+      # Only the install's own .env — same rule as the api service (a
+      # checkout's repo-root dev .env never reaches the containers).
       - path: .env
         required: false
-      # Repo root, for a checkout where this file lives under docker/. Last, so
-      # it keeps winning in that layout.
-      - path: ../.env
+    networks:
+      # Dual-homed on purpose: the gateway is the ONLY thing a sandbox can
+      # reach, and it can only be that if it sits on the sandboxes' otherwise
+      # routeless network as well as the main one.
+      - onecli
+      - sandboxes
+
+  # Hosted agents: the daemon that starts, parks, and reaps agent sandboxes.
+  # Profile-gated: a plain `docker compose up` starts it only when
+  # COMPOSE_PROFILES=runner is in the .env beside this file — which both
+  # install front doors (`pnpm run setup`, install.sh) write BY DEFAULT, with
+  # an opt-out. Disable it by emptying that line (install.sh's
+  # `down --remove-orphans` then cleans it up). It mounts the Docker socket —
+  # that grant is what lets it start sandbox containers.
+  #
+  # It holds NO published ports (it dials out), and never touches the
+  # database — the migrations service owns migrations, the api every read.
+  runner:
+    profiles: ["runner"]
+    image: ghcr.io/onecli/onecli-runner:${ONECLI_VERSION:-latest}
+    container_name: onecli-runner
+    restart: unless-stopped
+    # Docker-socket access is pure group membership (group_add below) — it
+    # needs no capability, so the full drop applies here too.
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    depends_on:
+      api:
+        condition: service_healthy
+    environment:
+      # Its credential AND its registration anchor — the api service reads the
+      # same value, which is what makes registration zero-touch.
+      # Not `:?` — compose interpolates the WHOLE file before it filters by
+      # profile, so a required variable here would break `docker compose up`
+      # for everyone, runner or not. The runner refuses to start without it
+      # (see apps/runner/src/config.ts), which is the right place to fail.
+      RUNNER_TOKEN: ${RUNNER_TOKEN:-}
+      RUNNER_CONTROL_PLANE_URL: http://api:10256
+      RUNNER_NAME: ${RUNNER_NAME:-compose}
+      RUNNER_BACKEND: docker
+      RUNNER_AGENT_IMAGE: ${RUNNER_AGENT_IMAGE:-ghcr.io/onecli/onecli-agent:${ONECLI_VERSION:-latest}}
+      # The isolated network sandboxes live on (created by the runner, with
+      # no route off the host — the gateway is dual-homed onto it above).
+      RUNNER_SANDBOX_NETWORK: ${RUNNER_SANDBOX_NETWORK:-onecli-sandboxes}
+      # How a sandbox addresses this runner's control channel.
+      RUNNER_ADVERTISED_HOST: onecli-runner
+      RUNNER_MAX_SANDBOXES: ${RUNNER_MAX_SANDBOXES:-4}
+      RUNNER_SANDBOX_MEMORY_MB: ${RUNNER_SANDBOX_MEMORY_MB:-2048}
+      RUNNER_SANDBOX_CPUS: ${RUNNER_SANDBOX_CPUS:-1}
+    volumes:
+      # Root-equivalent on the host: this is what lets the runner create
+      # sandboxes, and the reason the runner image carries nothing else.
+      - /var/run/docker.sock:/var/run/docker.sock
+    # The runner runs as an unprivileged user, so it needs the socket's group.
+    # The GID differs between Docker Desktop (0) and Linux (docker group);
+    # install.sh detects it and writes DOCKER_GID into the .env.
+    group_add:
+      - "${DOCKER_GID:-0}"
+    env_file:
+      # Only the install's own .env — same rule as the api service (a
+      # checkout's repo-root dev .env never reaches the containers).
+      - path: .env
+        required: false
+    networks:
+      - onecli
+      - sandboxes
+
+  # The SSH front door (sandbox-platform step 5): terminates ssh with the
+  # short-lived certificates the api mints and bridges each session into an
+  # agent's container. Rides the `runner` profile — SSH into a hosted agent
+  # is meaningless without the runner — so both install doors enable it by
+  # default and one COMPOSE_PROFILES knob turns the pair off.
+  #
+  # It reaches the daemon exactly like the runner (socket mount + group_add,
+  # cap_drop ALL, no-new-privileges) — the docker backend execs into the
+  # labeled sandbox containers over that socket, so it joins ONLY the `onecli`
+  # network (to reach the api), never the internal `sandboxes` one. Zero
+  # database access, like the runner.
+  ssh-terminator:
+    profiles: ["runner"]
+    image: ghcr.io/onecli/onecli-ssh-terminator:${ONECLI_VERSION:-latest}
+    container_name: onecli-ssh-terminator
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    depends_on:
+      api:
+        condition: service_healthy
+    ports:
+      # A high, loopback-bound-by-default port: an unprivileged listener
+      # can't bind :22, and remote SSH is opt-in via ONECLI_BIND_HOST.
+      - "${ONECLI_BIND_HOST:-127.0.0.1}:${ONECLI_SSH_PORT:-10257}:2222"
+    environment:
+      TERMINATOR_BACKEND: docker
+      TERMINATOR_CONTROL_PLANE_URL: http://api:10256
+      # Its control-plane token IS the api's SSH_TERMINATOR_SECRET (one value,
+      # two processes — the runner/adapter pattern). Not `:?` — compose
+      # interpolates the whole file before filtering by profile, so a required
+      # var here would break `docker compose up` for everyone; the terminator
+      # refuses to start without it (apps/ssh-terminator/src/config.ts).
+      TERMINATOR_CONTROL_PLANE_TOKEN: ${SSH_TERMINATOR_SECRET:-}
+      # The host key and CA PUBLIC line, interpolated from the install's .env.
+      # Deliberately NO `env_file: .env` here (every other app service has one):
+      # this is the platform's only public internet-facing listener AND it
+      # mounts the root-equivalent docker socket, so it must hold the SMALLEST
+      # possible secret surface — never SSH_CA_PRIVATE_KEY (the trust anchor
+      # the grant design assumes a compromised terminator does NOT have),
+      # SECRET_ENCRYPTION_KEY, BETTER_AUTH_SECRET or the DB creds. Everything
+      # it legitimately needs is named right here.
+      TERMINATOR_HOST_KEY: ${TERMINATOR_HOST_KEY:-}
+      TERMINATOR_CA_PUBLIC_KEY: ${TERMINATOR_CA_PUBLIC_KEY:-}
+    volumes:
+      # Root-equivalent on the host: the docker backend execs into sandbox
+      # containers through this socket (never over the network).
+      - /var/run/docker.sock:/var/run/docker.sock
+    group_add:
+      - "${DOCKER_GID:-0}"
+    networks:
+      - onecli
+
+  # Channels (step 6): the daemon that holds provider connections (Slack
+  # Socket Mode), streams agents' answers back, mirrors web exchanges, and
+  # posts approval cards. OPT-IN — `channel-adapter` profile, enabled by
+  # COMPOSE_PROFILES=channel-adapter in the .env (comma-join with `runner`
+  # to run both: COMPOSE_PROFILES=runner,channel-adapter).
+  #
+  # No published ports (it dials out), no database (a /v1 API client only),
+  # and DELIBERATELY not on the `sandboxes` network: its traffic is platform
+  # traffic to Slack, not agent traffic — it must never ride the governed
+  # gateway path, and nothing a sandbox can reach may reach it.
+  channel-adapter:
+    profiles: ["channel-adapter"]
+    image: ghcr.io/onecli/onecli-channel-adapter:${ONECLI_VERSION:-latest}
+    container_name: onecli-channel-adapter
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    depends_on:
+      api:
+        condition: service_healthy
+    environment:
+      # Its credential AND its registration anchor — the api service reads
+      # the same value (zero-touch registration, the runner's pattern).
+      # Not `:?` — compose interpolates the WHOLE file before it filters by
+      # profile; a required variable here would break `docker compose up`
+      # for everyone. The adapter refuses to start without it instead.
+      CHANNEL_ADAPTER_TOKEN: ${CHANNEL_ADAPTER_TOKEN:-}
+      CONTROL_PLANE_URL: http://api:10256
+      GATEWAY_API_URL: http://gateway:10255
+      # The dashboard address the model-key buttons in Slack posts point at —
+      # the adapter mirrors the resolver's chain head (canonical, alias, then
+      # the warned legacy bind seed; nothing set means the buttons are omitted).
+      ONECLI_EXTERNAL_URL: ${ONECLI_EXTERNAL_URL:-}
+      APP_URL: ${APP_URL:-}
+      ONECLI_BIND_HOST: ${ONECLI_BIND_HOST:-}
+      ONECLI_APP_PORT: ${ONECLI_APP_PORT:-10254}
+      CHANNEL_ADAPTER_NAME: ${CHANNEL_ADAPTER_NAME:-compose}
+    env_file:
+      # Only the install's own .env — same rule as the api service (a
+      # checkout's repo-root dev .env never reaches the containers).
+      - path: .env
         required: false
     networks:
       - onecli
@@ -74,3 +428,11 @@ volumes:
 networks:
   onecli:
     driver: bridge
+  # Where hosted-agent sandboxes live. `internal` means no route out of the
+  # host: the ONLY thing reachable from a sandbox is the gateway, which is
+  # dual-homed onto this network. This is the egress boundary — enforced by
+  # the network rather than by proxy env vars, which an agent could unset.
+  sandboxes:
+    name: ${RUNNER_SANDBOX_NETWORK:-onecli-sandboxes}
+    driver: bridge
+    internal: true

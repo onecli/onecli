@@ -224,7 +224,6 @@ pub(crate) struct ResolvedRules {
     /// cached token that should be served instead of forwarding.
     pub intercept_token: Option<InterceptToken>,
     /// Normalized plan name for quota enforcement ("free", "pro", "team").
-    #[cfg_attr(not(edition_cloud), allow(dead_code))]
     pub plan: String,
     /// Rewritten upstream host (e.g., Datadog us5 → api.us5.datadoghq.com).
     pub rewrite_host: Option<String>,
@@ -236,13 +235,9 @@ pub(crate) struct ResolvedRules {
     /// Provider-specific body transform resolved from the app connection.
     /// The handler decides per-request whether to act.
     pub body_transform: Option<crate::apps::BodyTransform>,
-    /// Cloud-only: pending claim token when the org is in claim mode. Inert in OSS.
-    #[cfg_attr(not(edition_cloud), allow(dead_code))]
-    pub claim_token: Option<String>,
     /// Per-agent resource policy (e.g. Dropbox folder allowlist) for the
     /// connection serving this host. Consumed by the cloud request guard to
     /// enforce granular access; `None` in the common, unrestricted case.
-    #[cfg_attr(not(edition_cloud), allow(dead_code))]
     pub session_policy: Option<serde_json::Value>,
     /// Id of the app connection that won injection for this request; `None`
     /// when no connection serves it (secret/vault/uncredentialed traffic, the
@@ -251,13 +246,12 @@ pub(crate) struct ResolvedRules {
     pub winning_connection_id: Option<String>,
     /// Cloud-only: spend budgets governing the effective credential for this host
     /// (0/1 in practice).
-    #[cfg_attr(not(edition_cloud), allow(dead_code))]
-    pub budget_bindings: Vec<crate::budget::BudgetBinding>,
+    pub budget_bindings: Vec<crate::ee::budget::BudgetBinding>,
     /// The published new-model policy rules for this connection (from
     /// `ConnectResponse`), passed to the enforce seam. Empty when the
     /// engine is off, or before the org is backfilled.
     pub policy_rules_v2: crate::db::PolicyV2Rules,
-    /// The apps this connection's project may reach (from `ConnectResponse`), for
+    /// The apps this connection's workspace may reach (from `ConnectResponse`), for
     /// the per-request availability pre-check. Unrestricted (all available) in
     /// OSS, when the org is "open", or when enforcement is off.
     pub available_apps: crate::db::AvailableApps,
@@ -312,20 +306,16 @@ async fn resolve_rules(
     connection_id: Option<&str>,
     request_path: Option<&str>,
 ) -> Result<ResolveResult, crate::connect::ConnectError> {
-    let project_id = ctx.project_id.as_deref().ok_or_else(|| {
-        crate::connect::ConnectError::Internal("MITM session missing project_id".to_string())
+    let workspace_id = ctx.workspace_id.as_deref().ok_or_else(|| {
+        crate::connect::ConnectError::Internal("MITM session missing workspace_id".to_string())
     })?;
     let organization_id = ctx.organization_id.as_deref().ok_or_else(|| {
         crate::connect::ConnectError::Internal("MITM session missing organization_id".to_string())
     })?;
-    let agent_token = ctx.agent_token.as_deref().ok_or_else(|| {
-        crate::connect::ConnectError::Internal("MITM session missing agent_token".to_string())
-    })?;
-
     let resp = connect::resolve_from_cache(
         organization_id,
-        project_id,
-        agent_token,
+        workspace_id,
+        &ctx.agent_token,
         hostname,
         engine,
         cache,
@@ -363,7 +353,7 @@ async fn resolve_rules(
                 request_path,
                 connection_id,
                 organization_id,
-                project_id,
+                workspace_id,
                 cache,
             )
             .await
@@ -481,7 +471,6 @@ async fn resolve_rules(
             connection_label,
             finalizer,
             body_transform,
-            claim_token: resp.claim_token,
             session_policy,
             winning_connection_id,
             budget_bindings: resp.budget_bindings,
@@ -501,12 +490,12 @@ mod tests {
 
     fn ctx() -> ProxyContext {
         ProxyContext {
-            project_id: Some("p1".to_string()),
+            workspace_id: Some("p1".to_string()),
             organization_id: Some("o1".to_string()),
             agent_id: None,
             agent_name: None,
             agent_identifier: None,
-            agent_token: Some("tok".to_string()),
+            agent_token: "tok".to_string(),
         }
     }
 
@@ -514,7 +503,7 @@ mod tests {
         db::AppConnectionRow {
             id: id.to_string(),
             provider: provider.to_string(),
-            scope: "project".to_string(),
+            scope: "workspace".to_string(),
             credentials: None,
             label: None,
             metadata: None,
@@ -551,7 +540,7 @@ mod tests {
         let resp = ConnectResponse {
             injection_rules: secrets,
             app_connections: connections,
-            project_id: Some("p1".to_string()),
+            workspace_id: Some("p1".to_string()),
             organization_id: Some("o1".to_string()),
             ..Default::default()
         };

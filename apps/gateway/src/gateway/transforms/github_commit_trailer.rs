@@ -14,7 +14,7 @@ use tracing::debug;
 /// Agent identity to inject into commit messages.
 struct AgentCommitIdentity<'a> {
     agent_name: &'a str,
-    project_id: &'a str,
+    workspace_id: &'a str,
 }
 
 /// Attempt to inject a commit identity trailer into the request body.
@@ -27,7 +27,7 @@ pub(crate) async fn try_inject_trailer(
     path: &str,
     body: reqwest::Body,
     agent_name: &str,
-    project_id: &str,
+    workspace_id: &str,
 ) -> anyhow::Result<reqwest::Body> {
     if !is_commit_request(host, method, path) {
         return Ok(body);
@@ -35,7 +35,7 @@ pub(crate) async fn try_inject_trailer(
 
     let identity = AgentCommitIdentity {
         agent_name,
-        project_id,
+        workspace_id,
     };
 
     let bytes = super::super::body::buffer_body(body).await?;
@@ -71,7 +71,7 @@ fn inject_commit_trailer(body: &[u8], identity: &AgentCommitIdentity) -> Option<
     let prefix = format!("[{}] ", identity.agent_name);
     let trailer = format!(
         "\n\nOn-Behalf-Of: {}[onecli] ({})",
-        identity.agent_name, identity.project_id
+        identity.agent_name, identity.workspace_id
     );
     if message.contains("On-Behalf-Of:") {
         return None;
@@ -200,7 +200,7 @@ mod tests {
         });
         let identity = AgentCommitIdentity {
             agent_name: "deploy-bot",
-            project_id: "proj_abc123",
+            workspace_id: "proj_abc123",
         };
 
         let result = inject_commit_trailer(body.to_string().as_bytes(), &identity).unwrap();
@@ -219,7 +219,7 @@ mod tests {
         });
         let identity = AgentCommitIdentity {
             agent_name: "deploy-bot",
-            project_id: "proj_abc123",
+            workspace_id: "proj_abc123",
         };
 
         let result = inject_commit_trailer(body.to_string().as_bytes(), &identity);

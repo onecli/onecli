@@ -50,7 +50,7 @@ export const linkedin: AppDefinition = {
     exchangeCode: async ({ appCredentials, callbackParams, redirectUri }) => {
       if (callbackParams.error) {
         throw new Error(
-          `LinkedIn authorization error: ${callbackParams.error} — ${callbackParams.error_description ?? "no description"}`,
+          `LinkedIn authorization error: ${callbackParams.error} (${callbackParams.error_description ?? "no description"})`,
         );
       }
 
@@ -81,7 +81,7 @@ export const linkedin: AppDefinition = {
       if (!tokenRes.ok) {
         const errorBody = await tokenRes.text();
         throw new Error(
-          `LinkedIn token exchange failed: ${tokenRes.status} ${tokenRes.statusText} — ${errorBody}`,
+          `LinkedIn token exchange failed: ${tokenRes.status} ${tokenRes.statusText} (${errorBody})`,
         );
       }
 
@@ -147,7 +147,6 @@ export const linkedin: AppDefinition = {
       return { credentials, scopes, metadata };
     },
   },
-  available: true,
   configurable: {
     hint: "Create an app in the LinkedIn Developer Portal.",
     fields: [

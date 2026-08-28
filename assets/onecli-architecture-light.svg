@@ -1,4 +1,4 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 460" fill="none">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 660" fill="none">
   <style>
     text { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif; }
   </style>
@@ -6,76 +6,97 @@
     <marker id="arrowhead" viewBox="0 0 10 7" refX="10" refY="3.5" markerWidth="8" markerHeight="7" orient="auto-start-reverse">
       <polygon points="0 0, 10 3.5, 0 7" fill="#16a34a" fill-opacity="0.7"/>
     </marker>
-    <filter id="shadow">
-      <feDropShadow dx="0" dy="1" stdDeviation="3" flood-color="#000" flood-opacity="0.08"/>
-    </filter>
   </defs>
 
   <!-- Background -->
-  <rect width="960" height="460" rx="12" fill="#ffffff"/>
+  <rect width="960" height="660" rx="12" fill="#ffffff"/>
 
-  <!-- ===== ROW 1: AI AGENTS ===== -->
-  <text x="480" y="24" text-anchor="middle" fill="#656d76" font-size="11" font-weight="500" letter-spacing="0.5">AI Agents</text>
+  <!-- ===== ROW 1: CHAT SURFACES ===== -->
+  <text x="480" y="24" text-anchor="middle" fill="#656d76" font-size="11" font-weight="500" letter-spacing="0.5">You, in the dashboard or Slack</text>
 
-  <rect x="95" y="38" width="170" height="50" rx="10" fill="#f6f8fa" stroke="#d0d7de" stroke-width="1"/>
-  <text x="180" y="68" text-anchor="middle" fill="#1f2328" font-size="13" font-weight="500">OpenClaw</text>
+  <rect x="250" y="38" width="210" height="50" rx="10" fill="#f6f8fa" stroke="#d0d7de" stroke-width="1"/>
+  <text x="355" y="68" text-anchor="middle" fill="#1f2328" font-size="13" font-weight="500">Web Dashboard</text>
 
-  <rect x="295" y="38" width="170" height="50" rx="10" fill="#f6f8fa" stroke="#d0d7de" stroke-width="1"/>
-  <text x="380" y="68" text-anchor="middle" fill="#1f2328" font-size="13" font-weight="500">NanoClaw</text>
+  <rect x="500" y="38" width="210" height="50" rx="10" fill="#f6f8fa" stroke="#d0d7de" stroke-width="1"/>
+  <text x="605" y="68" text-anchor="middle" fill="#1f2328" font-size="13" font-weight="500">Slack (Channel Adapter)</text>
 
-  <rect x="495" y="38" width="170" height="50" rx="10" fill="#f6f8fa" stroke="#d0d7de" stroke-width="1"/>
-  <text x="580" y="68" text-anchor="middle" fill="#1f2328" font-size="13" font-weight="500">IronClaw</text>
+  <!-- Arrows: surfaces -> control plane -->
+  <line x1="355" y1="88" x2="355" y2="126" stroke="#16a34a" stroke-width="1.5" stroke-opacity="0.4" marker-end="url(#arrowhead)"/>
+  <line x1="605" y1="88" x2="605" y2="126" stroke="#16a34a" stroke-width="1.5" stroke-opacity="0.4" marker-end="url(#arrowhead)"/>
 
-  <rect x="695" y="38" width="170" height="50" rx="10" fill="#f6f8fa" stroke="#d0d7de" stroke-width="1"/>
-  <text x="780" y="68" text-anchor="middle" fill="#1f2328" font-size="13" font-weight="500">Any Agent</text>
+  <!-- ===== ROW 2: CONTROL PLANE ===== -->
+  <rect x="270" y="130" width="420" height="64" rx="10" fill="#ffffff" stroke="#16a34a" stroke-width="1.5" stroke-opacity="0.55"/>
+  <text x="480" y="156" text-anchor="middle" fill="#1f2328" font-size="14" font-weight="600">API Server</text>
+  <text x="480" y="177" text-anchor="middle" fill="#656d76" font-size="11.5">control plane · database · conversations · work queue</text>
 
-  <!-- Arrows: agents → gateway -->
-  <line x1="180" y1="88" x2="180" y2="148" stroke="#16a34a" stroke-width="1.5" stroke-opacity="0.4" marker-end="url(#arrowhead)"/>
-  <line x1="380" y1="88" x2="380" y2="148" stroke="#16a34a" stroke-width="1.5" stroke-opacity="0.4" marker-end="url(#arrowhead)"/>
-  <line x1="580" y1="88" x2="580" y2="148" stroke="#16a34a" stroke-width="1.5" stroke-opacity="0.4" marker-end="url(#arrowhead)"/>
-  <line x1="780" y1="88" x2="780" y2="148" stroke="#16a34a" stroke-width="1.5" stroke-opacity="0.4" marker-end="url(#arrowhead)"/>
+  <!-- Runner polls the API: arrow points up, the runner is outbound-only -->
+  <line x1="480" y1="252" x2="480" y2="198" stroke="#16a34a" stroke-width="1.5" stroke-opacity="0.4" marker-end="url(#arrowhead)"/>
+  <text x="492" y="230" fill="#656d76" font-size="10.5" font-style="italic">polls, outbound-only</text>
 
-  <!-- ===== ROW 2: ONECLI GATEWAY ===== -->
-  <rect x="70" y="152" width="820" height="142" rx="14" fill="none" stroke="#16a34a" stroke-width="1.5" stroke-opacity="0.2"/>
-  <text x="480" y="178" text-anchor="middle" fill="#16a34a" font-size="11" font-weight="600" letter-spacing="1.5">ONECLI GATEWAY</text>
+  <!-- ===== ROW 3: SANDBOX ORCHESTRATION LAYER ===== -->
+  <rect x="70" y="256" width="820" height="204" rx="14" fill="none" stroke="#16a34a" stroke-width="1.5" stroke-opacity="0.2" stroke-dasharray="6 5"/>
+  <text x="480" y="282" text-anchor="middle" fill="#16a34a" font-size="11" font-weight="600" letter-spacing="1.5">SANDBOX ORCHESTRATION LAYER</text>
 
-  <!-- Web Dashboard -->
-  <rect x="105" y="190" width="230" height="80" rx="10" fill="#ffffff" stroke="#d0d7de" stroke-width="1" filter="url(#shadow)"/>
-  <text x="220" y="224" text-anchor="middle" fill="#1f2328" font-size="14" font-weight="600">Web Dashboard</text>
-  <text x="220" y="244" text-anchor="middle" fill="#656d76" font-size="11">Agent &amp; secret management</text>
+  <rect x="100" y="316" width="170" height="84" rx="10" fill="#f6f8fa" stroke="#d0d7de" stroke-width="1"/>
+  <text x="185" y="352" text-anchor="middle" fill="#1f2328" font-size="13" font-weight="600">Runner</text>
+  <text x="185" y="372" text-anchor="middle" fill="#656d76" font-size="10.5">starts · parks · reaps</text>
 
-  <!-- Rust Gateway (highlighted) -->
-  <rect x="365" y="190" width="230" height="80" rx="10" fill="#ffffff" stroke="#16a34a" stroke-width="1.5" stroke-opacity="0.5" filter="url(#shadow)"/>
-  <text x="480" y="224" text-anchor="middle" fill="#1f2328" font-size="14" font-weight="600">Rust Gateway</text>
-  <text x="480" y="244" text-anchor="middle" fill="#656d76" font-size="11">Credential injection</text>
+  <!-- Runner -> sandboxes -->
+  <line x1="270" y1="358" x2="306" y2="358" stroke="#16a34a" stroke-width="1.5" stroke-opacity="0.4" marker-end="url(#arrowhead)"/>
 
-  <!-- Secret Store -->
-  <rect x="625" y="190" width="230" height="80" rx="10" fill="#ffffff" stroke="#d0d7de" stroke-width="1" filter="url(#shadow)"/>
-  <text x="740" y="224" text-anchor="middle" fill="#1f2328" font-size="14" font-weight="600">Secret Store</text>
-  <text x="740" y="244" text-anchor="middle" fill="#656d76" font-size="11">AES-256-GCM · PGlite / Postgres</text>
+  <!-- Sandboxes: one per agent -->
+  <g>
+    <rect x="310" y="300" width="170" height="116" rx="10" fill="#ffffff" stroke="#8b949e" stroke-width="1.2" stroke-dasharray="5 4"/>
+    <text x="395" y="322" text-anchor="middle" fill="#656d76" font-size="9.5" font-weight="600" letter-spacing="1">SANDBOX</text>
+    <rect x="326" y="334" width="138" height="64" rx="8" fill="#f6f8fa" stroke="#d0d7de" stroke-width="1"/>
+    <text x="395" y="361" text-anchor="middle" fill="#1f2328" font-size="12.5" font-weight="600">maya's agent</text>
+    <text x="395" y="381" text-anchor="middle" fill="#656d76" font-size="10">supervisor inside</text>
+  </g>
+  <g>
+    <rect x="510" y="300" width="170" height="116" rx="10" fill="#ffffff" stroke="#8b949e" stroke-width="1.2" stroke-dasharray="5 4"/>
+    <text x="595" y="322" text-anchor="middle" fill="#656d76" font-size="9.5" font-weight="600" letter-spacing="1">SANDBOX</text>
+    <rect x="526" y="334" width="138" height="64" rx="8" fill="#f6f8fa" stroke="#d0d7de" stroke-width="1"/>
+    <text x="595" y="361" text-anchor="middle" fill="#1f2328" font-size="12.5" font-weight="600">sam's agent</text>
+    <text x="595" y="381" text-anchor="middle" fill="#656d76" font-size="10">supervisor inside</text>
+  </g>
+  <g>
+    <rect x="710" y="300" width="170" height="116" rx="10" fill="#ffffff" stroke="#8b949e" stroke-width="1.2" stroke-dasharray="5 4"/>
+    <text x="795" y="322" text-anchor="middle" fill="#656d76" font-size="9.5" font-weight="600" letter-spacing="1">SANDBOX</text>
+    <rect x="726" y="334" width="138" height="64" rx="8" fill="#f6f8fa" stroke="#d0d7de" stroke-width="1"/>
+    <text x="795" y="361" text-anchor="middle" fill="#1f2328" font-size="12.5" font-weight="600">ana's agent</text>
+    <text x="795" y="381" text-anchor="middle" fill="#656d76" font-size="10">supervisor inside</text>
+  </g>
 
-  <!-- Dashed connections between components -->
-  <line x1="335" y1="230" x2="365" y2="230" stroke="#656d76" stroke-width="1" stroke-dasharray="4 3" stroke-opacity="0.4"/>
-  <line x1="595" y1="230" x2="625" y2="230" stroke="#656d76" stroke-width="1" stroke-dasharray="4 3" stroke-opacity="0.4"/>
+  <!-- Sandboxes -> gateway: the only route out -->
+  <line x1="395" y1="416" x2="395" y2="484" stroke="#16a34a" stroke-width="1.5" stroke-opacity="0.4" marker-end="url(#arrowhead)"/>
+  <line x1="595" y1="416" x2="595" y2="484" stroke="#16a34a" stroke-width="1.5" stroke-opacity="0.4" marker-end="url(#arrowhead)"/>
+  <path d="M 795 416 L 795 452 Q 795 462 785 462 L 700 462 Q 690 462 690 472 L 690 484" stroke="#16a34a" stroke-width="1.5" stroke-opacity="0.4" fill="none" marker-end="url(#arrowhead)"/>
+  <text x="480" y="446" fill="#656d76" font-size="10.5" font-style="italic" text-anchor="middle">only egress</text>
 
-  <!-- Arrows: gateway → APIs -->
-  <line x1="180" y1="294" x2="180" y2="350" stroke="#16a34a" stroke-width="1.5" stroke-opacity="0.4" marker-end="url(#arrowhead)"/>
-  <line x1="380" y1="294" x2="380" y2="350" stroke="#16a34a" stroke-width="1.5" stroke-opacity="0.4" marker-end="url(#arrowhead)"/>
-  <line x1="580" y1="294" x2="580" y2="350" stroke="#16a34a" stroke-width="1.5" stroke-opacity="0.4" marker-end="url(#arrowhead)"/>
-  <line x1="780" y1="294" x2="780" y2="350" stroke="#16a34a" stroke-width="1.5" stroke-opacity="0.4" marker-end="url(#arrowhead)"/>
+  <!-- ===== ROW 4: GATEWAY + SECRET STORE ===== -->
+  <rect x="280" y="488" width="420" height="64" rx="10" fill="#ffffff" stroke="#16a34a" stroke-width="1.6" stroke-opacity="0.85"/>
+  <text x="490" y="514" text-anchor="middle" fill="#1f2328" font-size="14" font-weight="600">Rust Gateway</text>
+  <text x="490" y="535" text-anchor="middle" fill="#656d76" font-size="11.5">grants · policy · credential injection</text>
 
-  <!-- ===== ROW 3: EXTERNAL APIs ===== -->
-  <text x="480" y="370" text-anchor="middle" fill="#656d76" font-size="11" font-weight="500" letter-spacing="0.5">External APIs</text>
+  <rect x="732" y="488" width="158" height="64" rx="10" fill="#f6f8fa" stroke="#d0d7de" stroke-width="1"/>
+  <text x="811" y="514" text-anchor="middle" fill="#1f2328" font-size="13" font-weight="600">Secret Store</text>
+  <text x="811" y="534" text-anchor="middle" fill="#656d76" font-size="10.5">AES-256-GCM</text>
+  <line x1="700" y1="520" x2="732" y2="520" stroke="#8b949e" stroke-width="1" stroke-dasharray="4 4"/>
 
-  <rect x="95" y="380" width="170" height="50" rx="10" fill="#f6f8fa" stroke="#d0d7de" stroke-width="1"/>
-  <text x="180" y="410" text-anchor="middle" fill="#1f2328" font-size="13" font-weight="500">Anthropic</text>
+  <!-- Gateway -> services -->
+  <path d="M 330 552 L 240 586" stroke="#16a34a" stroke-width="1.5" stroke-opacity="0.4" fill="none" marker-end="url(#arrowhead)"/>
+  <line x1="420" y1="552" x2="404" y2="588" stroke="#16a34a" stroke-width="1.5" stroke-opacity="0.4" marker-end="url(#arrowhead)"/>
+  <line x1="560" y1="552" x2="576" y2="588" stroke="#16a34a" stroke-width="1.5" stroke-opacity="0.4" marker-end="url(#arrowhead)"/>
+  <path d="M 650 552 L 740 586" stroke="#16a34a" stroke-width="1.5" stroke-opacity="0.4" fill="none" marker-end="url(#arrowhead)"/>
 
-  <rect x="295" y="380" width="170" height="50" rx="10" fill="#f6f8fa" stroke="#d0d7de" stroke-width="1"/>
-  <text x="380" y="410" text-anchor="middle" fill="#1f2328" font-size="13" font-weight="500">OpenAI</text>
-
-  <rect x="495" y="380" width="170" height="50" rx="10" fill="#f6f8fa" stroke="#d0d7de" stroke-width="1"/>
-  <text x="580" y="410" text-anchor="middle" fill="#1f2328" font-size="13" font-weight="500">GitHub</text>
-
-  <rect x="695" y="380" width="170" height="50" rx="10" fill="#f6f8fa" stroke="#d0d7de" stroke-width="1"/>
-  <text x="780" y="410" text-anchor="middle" fill="#1f2328" font-size="13" font-weight="500">Any API</text>
+  <!-- ===== ROW 5: SERVICES ===== -->
+  <text x="480" y="583" text-anchor="middle" fill="#656d76" font-size="0">External services</text>
+  <rect x="140" y="594" width="160" height="46" rx="10" fill="#f6f8fa" stroke="#d0d7de" stroke-width="1"/>
+  <text x="220" y="622" text-anchor="middle" fill="#1f2328" font-size="13" font-weight="500">GitHub</text>
+  <rect x="320" y="594" width="160" height="46" rx="10" fill="#f6f8fa" stroke="#d0d7de" stroke-width="1"/>
+  <text x="400" y="622" text-anchor="middle" fill="#1f2328" font-size="13" font-weight="500">Stripe</text>
+  <rect x="500" y="594" width="160" height="46" rx="10" fill="#f6f8fa" stroke="#d0d7de" stroke-width="1"/>
+  <text x="580" y="622" text-anchor="middle" fill="#1f2328" font-size="13" font-weight="500">Gmail</text>
+  <rect x="680" y="594" width="160" height="46" rx="10" fill="#f6f8fa" stroke="#d0d7de" stroke-width="1"/>
+  <text x="760" y="622" text-anchor="middle" fill="#1f2328" font-size="13" font-weight="500">Any API</text>
 </svg>

@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-// The policy rule-load services' contracts: every read is org/project-FENCED
+// The policy rule-load services' contracts: every read is org/workspace-FENCED
 // at the query level (cross-org isolation), the rule load mirrors the GATEWAY's
 // load (enabled-only, defaults included, equipment dropped, max published
 // generation), and the row→rule mapper decodes all three identity kinds +
@@ -33,7 +33,7 @@ vi.mock("@onecli/db", () => {
   return {
     Prisma: {},
     db: {
-      projectAccess: model("projectAccess"),
+      workspaceAccess: model("workspaceAccess"),
       group: model("group"),
       groupMember: model("groupMember"),
       organizationMember: model("organizationMember"),
@@ -64,7 +64,7 @@ beforeEach(() => {
 
 describe("resolvePrincipalSet (find_principal_set mirror)", () => {
   it("org-fences every arm and filters suspended members", async () => {
-    state.results.set("projectAccess.findMany", [
+    state.results.set("workspaceAccess.findMany", [
       { userId: "u1", groupId: null },
       { userId: null, groupId: "g1" },
     ]);
@@ -94,7 +94,7 @@ describe("resolvePrincipalSet (find_principal_set mirror)", () => {
   });
 
   it("expands the surviving users' groups org-fenced", async () => {
-    state.results.set("projectAccess.findMany", [
+    state.results.set("workspaceAccess.findMany", [
       { userId: "u1", groupId: null },
     ]);
     state.results.set("organizationMember.findMany", [{ userId: "u1" }]);
@@ -113,9 +113,9 @@ describe("resolvePrincipalSet (find_principal_set mirror)", () => {
 });
 
 describe("loadSecretHosts (find_secret_hosts mirror)", () => {
-  it("fences to the acting org+project and splits levels", async () => {
+  it("fences to the acting org+workspace and splits levels", async () => {
     state.results.set("secret.findMany", [
-      { id: "s1", hostPattern: "api.a.com", scope: "project" },
+      { id: "s1", hostPattern: "api.a.com", scope: "workspace" },
       { id: "s2", hostPattern: "api.b.com", scope: "organization" },
     ]);
 
@@ -123,18 +123,18 @@ describe("loadSecretHosts (find_secret_hosts mirror)", () => {
 
     expect(whereOf("secret")).toEqual({
       OR: [
-        { projectId: "p1" },
+        { workspaceId: "p1" },
         { organizationId: "org-1", scope: "organization" },
       ],
     });
-    expect(set.projectHosts).toEqual(["api.a.com"]);
+    expect(set.workspaceHosts).toEqual(["api.a.com"]);
     expect(set.orgHosts).toEqual(["api.b.com"]);
     expect(set.byId.get("s2")).toBe("api.b.com");
   });
 });
 
 describe("loadConnectionProviders (find_connection_providers mirror)", () => {
-  it("fences to the acting org+project — a foreign connection id can never resolve", async () => {
+  it("fences to the acting org+workspace — a foreign connection id can never resolve", async () => {
     state.results.set("appConnection.findMany", [
       { id: "c1", provider: "gmail" },
       { id: "c2", provider: "github" },
@@ -146,7 +146,7 @@ describe("loadConnectionProviders (find_connection_providers mirror)", () => {
     // rule naming another org's connection id resolves to nothing (fail-closed).
     expect(whereOf("appConnection")).toEqual({
       OR: [
-        { projectId: "p1" },
+        { workspaceId: "p1" },
         { organizationId: "org-1", scope: "organization" },
       ],
     });
@@ -158,14 +158,14 @@ describe("loadConnectionProviders (find_connection_providers mirror)", () => {
 describe("loadRulesForSimulation (gateway-load mirror)", () => {
   it("loads enabled non-equipment rules, defaults INCLUDED", async () => {
     await loadRulesForSimulation(
-      { scope: "project", projectId: "p1" },
+      { scope: "workspace", workspaceId: "p1" },
       "draft",
     );
 
     const where = whereOf("policyRuleV2");
     expect(where).toEqual({
-      scope: "project",
-      projectId: "p1",
+      scope: "workspace",
+      workspaceId: "p1",
       status: "draft",
       enabled: true,
       source: { not: "equipment" },
@@ -205,7 +205,7 @@ describe("loadRulesForSimulation (gateway-load mirror)", () => {
   // enforces `ORDER BY r.priority, r.id`.
   it("orders by (priority, id) — the gateway-consistent tie-break", async () => {
     await loadRulesForSimulation(
-      { scope: "project", projectId: "p1" },
+      { scope: "workspace", workspaceId: "p1" },
       "draft",
     );
     const find = state.calls.find(
@@ -223,8 +223,8 @@ describe("loadRulesForSimulation (gateway-load mirror)", () => {
 const simRow = (over: Partial<SimRuleRow>): SimRuleRow =>
   ({
     id: "r1",
-    scope: "project",
-    projectId: "p1",
+    scope: "workspace",
+    workspaceId: "p1",
     organizationId: null,
     status: "published",
     generation: 1,
@@ -280,7 +280,7 @@ const targetRow = (
 
 const emptyHosts = {
   byId: new Map<string, string>(),
-  projectHosts: [],
+  workspaceHosts: [],
   orgHosts: [],
 };
 
@@ -309,7 +309,7 @@ describe("toSimRule (decode_row mirror, full fidelity)", () => {
   it("resolves a specific secret target to its fenced host, fail-closed", () => {
     const hosts = {
       byId: new Map([["s1", "api.a.com"]]),
-      projectHosts: ["api.a.com"],
+      workspaceHosts: ["api.a.com"],
       orgHosts: ["api.o.com"],
     };
     const { rule } = toSimRule(

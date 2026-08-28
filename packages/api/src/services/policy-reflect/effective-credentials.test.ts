@@ -5,7 +5,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 // under the rules (Usable / Limited / Blocked) — an all-mode agent BLOCKED from
 // a provider reads "Blocked", not "available" (the user's reported case). Plus
 // the inject_select injectable-set law (all-mode pool / selective assigned ∪
-// rule grants, explicit-identity-only, pool grants expanded), the org+project
+// rule grants, explicit-identity-only, pool grants expanded), the org+workspace
 // fence on rule-named ids (cross-org bait), and collapsed org redaction. The db
 // is mocked at the boundary; queries are routed by their where/select shape.
 
@@ -37,7 +37,7 @@ vi.mock("@onecli/db", () => {
     Prisma: {},
     db: {
       agent: model("agent"),
-      projectAccess: model("projectAccess"),
+      workspaceAccess: model("workspaceAccess"),
       group: model("group"),
       groupMember: model("groupMember"),
       organizationMember: model("organizationMember"),
@@ -62,8 +62,8 @@ beforeEach(() => {
 const simRow = (over: Partial<SimRuleRow>): SimRuleRow =>
   ({
     id: "r1",
-    scope: "project",
-    projectId: "p1",
+    scope: "workspace",
+    workspaceId: "p1",
     organizationId: null,
     status: "published",
     generation: 1,
@@ -124,20 +124,20 @@ type SecretRow = {
   name: string;
   hostPattern: string;
   scope?: string;
-  projectId?: string | null;
+  workspaceId?: string | null;
 };
 type ConnRow = {
   id: string;
   label: string | null;
   provider: string;
   scope?: string;
-  projectId?: string | null;
+  workspaceId?: string | null;
 };
 
 const armStubs = (opts: {
   agent?: { id: string } | null;
   orgRows?: SimRuleRow[];
-  projectRows?: SimRuleRow[];
+  workspaceRows?: SimRuleRow[];
   poolSecrets?: SecretRow[];
   poolConnections?: ConnRow[];
   ruleSecrets?: SecretRow[];
@@ -160,7 +160,7 @@ const armStubs = (opts: {
     const rows =
       where.scope === "organization"
         ? (opts.orgRows ?? [])
-        : (opts.projectRows ?? []);
+        : (opts.workspaceRows ?? []);
     const excluded = where.source?.not;
     return rows.filter(
       (r: { source?: string }) =>
@@ -190,7 +190,7 @@ const armStubs = (opts: {
 };
 
 const CTX = {
-  projectId: "p1",
+  workspaceId: "p1",
   organizationId: "org-1",
   viewerSeesOrgRules: true,
 };
@@ -210,13 +210,13 @@ describe("the effective-access framing (the user's case)", () => {
         targetRow({
           kind: "app",
           appProvider: "gmail",
-          appConnectionScope: "project",
+          appConnectionScope: "workspace",
         }),
       ],
     });
     armStubs({
       agent: { id: "agent-1" },
-      projectRows: [
+      workspaceRows: [
         blockGmail,
         simRow({
           id: "r-g1",
@@ -274,7 +274,7 @@ describe("the effective-access framing (the user's case)", () => {
     });
     armStubs({
       agent: { id: "agent-1" },
-      projectRows: [
+      workspaceRows: [
         approveGmail,
         simRow({
           id: "r-g1",
@@ -315,7 +315,7 @@ describe("the effective-access framing (the user's case)", () => {
     });
     armStubs({
       agent: { id: "agent-1" },
-      projectRows: [
+      workspaceRows: [
         blockHost,
         simRow({
           id: "r-s1",
@@ -353,7 +353,7 @@ describe("the injectable set (inject_select mirror)", () => {
     // would vanish here while the gateway still injects it.
     armStubs({
       agent: { id: "agent-1" },
-      projectRows: [
+      workspaceRows: [
         simRow({
           logicalId: "equip-gmail",
           name: "Gmail",
@@ -380,14 +380,14 @@ describe("the injectable set (inject_select mirror)", () => {
     expect(byId.get("c1")?.provenance).toEqual([
       {
         kind: "rule",
-        scope: "project",
+        scope: "workspace",
         rule: { logicalId: "equip-gmail", name: "Gmail" },
       },
     ]);
     expect(byId.get("c2")?.provenance).toEqual([
       {
         kind: "rule",
-        scope: "project",
+        scope: "workspace",
         rule: { logicalId: "grant-gh", name: "GitHub for agent-1" },
       },
     ]);
@@ -398,7 +398,7 @@ describe("the injectable set (inject_select mirror)", () => {
   it("PLANTED BAIT: an empty-identity allow rule NEVER grants a credential", async () => {
     armStubs({
       agent: { id: "agent-1" },
-      projectRows: [
+      workspaceRows: [
         simRow({
           logicalId: "bait",
           name: "Any-identity allow",
@@ -413,15 +413,15 @@ describe("the injectable set (inject_select mirror)", () => {
     expect(JSON.stringify(result)).not.toContain("cx");
   });
 
-  it("a secretScope grant EXPANDS to each project secret, tagged with the rule", async () => {
+  it("a secretScope grant EXPANDS to each workspace secret, tagged with the rule", async () => {
     armStubs({
       agent: { id: "agent-1" },
-      projectRows: [
+      workspaceRows: [
         simRow({
           logicalId: "pool",
-          name: "All project secrets",
+          name: "All workspace secrets",
           identities: [identityRow({ agentId: "agent-1" })],
-          targets: [targetRow({ kind: "secret", secretScope: "project" })],
+          targets: [targetRow({ kind: "secret", secretScope: "workspace" })],
         }),
       ],
       scopeSecrets: [
@@ -429,15 +429,15 @@ describe("the injectable set (inject_select mirror)", () => {
           id: "s1",
           name: "A",
           hostPattern: "api.a.com",
-          scope: "project",
-          projectId: "p1",
+          scope: "workspace",
+          workspaceId: "p1",
         },
         {
           id: "s2",
           name: "B",
           hostPattern: "api.b.com",
-          scope: "project",
-          projectId: "p1",
+          scope: "workspace",
+          workspaceId: "p1",
         },
       ],
     });
@@ -446,8 +446,8 @@ describe("the injectable set (inject_select mirror)", () => {
     expect(result.secrets[0]?.provenance).toEqual([
       {
         kind: "rule",
-        scope: "project",
-        rule: { logicalId: "pool", name: "All project secrets" },
+        scope: "workspace",
+        rule: { logicalId: "pool", name: "All workspace secrets" },
       },
     ]);
   });
@@ -462,14 +462,14 @@ describe("fencing + redaction", () => {
     const call = state.calls.find((c) => c.model === "agent");
     expect((call?.args as { where: unknown }).where).toEqual({
       id: "foreign",
-      projectId: "p1",
+      workspaceId: "p1",
     });
   });
 
   it("CROSS-ORG BAIT: a rule-named foreign secret resolves to nothing", async () => {
     armStubs({
       agent: { id: "agent-1" },
-      projectRows: [
+      workspaceRows: [
         simRow({
           logicalId: "evil",
           name: "Names a foreign secret",
@@ -481,7 +481,7 @@ describe("fencing + redaction", () => {
     });
     const result = await effectiveCredentials("agent-1", CTX);
     expect(result.secrets).toHaveLength(0);
-    // the resolve carried the org+project fence.
+    // the resolve carried the org+workspace fence.
     const resolve = state.calls.filter(
       (c) =>
         c.model === "secret" &&
@@ -490,7 +490,7 @@ describe("fencing + redaction", () => {
     expect((resolve?.args as { where: unknown }).where).toEqual({
       id: { in: ["foreign-secret"] },
       OR: [
-        { projectId: "p1" },
+        { workspaceId: "p1" },
         { organizationId: "org-1", scope: "organization" },
       ],
     });
@@ -501,7 +501,7 @@ describe("fencing + redaction", () => {
     simRow({
       id: logicalId,
       scope: "organization",
-      projectId: null,
+      workspaceId: null,
       organizationId: "org-1",
       logicalId,
       name,

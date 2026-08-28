@@ -1,5 +1,571 @@
 {
+  "affinity": {
+    "create_company": {
+      "hostPattern": "api.affinity.co",
+      "paths": [
+        "/v2/companies",
+        "/organizations"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "create_list_entry": {
+      "hostPattern": "api.affinity.co",
+      "paths": [
+        "/v2/lists/*/list-entries",
+        "/lists/*/list-entries"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "create_note": {
+      "hostPattern": "api.affinity.co",
+      "paths": [
+        "/v2/notes"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "create_person": {
+      "hostPattern": "api.affinity.co",
+      "paths": [
+        "/v2/persons",
+        "/persons"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "delete_list_entry": {
+      "hostPattern": "api.affinity.co",
+      "paths": [
+        "/v2/lists/*/list-entries/*",
+        "/lists/*/list-entries/*"
+      ],
+      "methods": [
+        "DELETE"
+      ]
+    },
+    "get_company": {
+      "hostPattern": "api.affinity.co",
+      "paths": [
+        "/v2/companies/*"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "get_person": {
+      "hostPattern": "api.affinity.co",
+      "paths": [
+        "/v2/persons/*"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_companies": {
+      "hostPattern": "api.affinity.co",
+      "paths": [
+        "/v2/companies"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_lists": {
+      "hostPattern": "api.affinity.co",
+      "paths": [
+        "/v2/lists"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_notes": {
+      "hostPattern": "api.affinity.co",
+      "paths": [
+        "/v2/notes"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_opportunities": {
+      "hostPattern": "api.affinity.co",
+      "paths": [
+        "/v2/opportunities"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_persons": {
+      "hostPattern": "api.affinity.co",
+      "paths": [
+        "/v2/persons"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "mcp": {
+      "hostPattern": "mcp.affinity.co",
+      "paths": [
+        "/*"
+      ],
+      "methods": []
+    },
+    "update_person": {
+      "hostPattern": "api.affinity.co",
+      "paths": [
+        "/v2/persons/*"
+      ],
+      "methods": [
+        "PATCH"
+      ]
+    }
+  },
+  "attio": {
+    "create_comment": {
+      "hostPattern": "api.attio.com",
+      "paths": [
+        "/v2/threads/*/comments"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "create_list_entry": {
+      "hostPattern": "api.attio.com",
+      "paths": [
+        "/v2/lists/*/entries"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "create_note": {
+      "hostPattern": "api.attio.com",
+      "paths": [
+        "/v2/notes"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "create_record": {
+      "hostPattern": "api.attio.com",
+      "paths": [
+        "/v2/objects/*/records"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "create_task": {
+      "hostPattern": "api.attio.com",
+      "paths": [
+        "/v2/tasks"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "create_webhook": {
+      "hostPattern": "api.attio.com",
+      "paths": [
+        "/v2/webhooks"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "delete_list_entry": {
+      "hostPattern": "api.attio.com",
+      "paths": [
+        "/v2/lists/*/entries/*"
+      ],
+      "methods": [
+        "DELETE"
+      ]
+    },
+    "delete_note": {
+      "hostPattern": "api.attio.com",
+      "paths": [
+        "/v2/notes/*"
+      ],
+      "methods": [
+        "DELETE"
+      ]
+    },
+    "delete_record": {
+      "hostPattern": "api.attio.com",
+      "paths": [
+        "/v2/objects/*/records/*"
+      ],
+      "methods": [
+        "DELETE"
+      ]
+    },
+    "delete_task": {
+      "hostPattern": "api.attio.com",
+      "paths": [
+        "/v2/tasks/*"
+      ],
+      "methods": [
+        "DELETE"
+      ]
+    },
+    "delete_webhook": {
+      "hostPattern": "api.attio.com",
+      "paths": [
+        "/v2/webhooks/*"
+      ],
+      "methods": [
+        "DELETE"
+      ]
+    },
+    "get_list": {
+      "hostPattern": "api.attio.com",
+      "paths": [
+        "/v2/lists/*"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "get_note": {
+      "hostPattern": "api.attio.com",
+      "paths": [
+        "/v2/notes/*"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "get_object": {
+      "hostPattern": "api.attio.com",
+      "paths": [
+        "/v2/objects/*"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "get_record": {
+      "hostPattern": "api.attio.com",
+      "paths": [
+        "/v2/objects/*/records/*"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "get_task": {
+      "hostPattern": "api.attio.com",
+      "paths": [
+        "/v2/tasks/*"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "get_webhook": {
+      "hostPattern": "api.attio.com",
+      "paths": [
+        "/v2/webhooks/*"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "get_workspace_member": {
+      "hostPattern": "api.attio.com",
+      "paths": [
+        "/v2/workspace_members/*"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_comments": {
+      "hostPattern": "api.attio.com",
+      "paths": [
+        "/v2/threads/*/comments"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_entries": {
+      "hostPattern": "api.attio.com",
+      "paths": [
+        "/v2/lists/*/entries/query"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "list_lists": {
+      "hostPattern": "api.attio.com",
+      "paths": [
+        "/v2/lists"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_notes": {
+      "hostPattern": "api.attio.com",
+      "paths": [
+        "/v2/notes"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_objects": {
+      "hostPattern": "api.attio.com",
+      "paths": [
+        "/v2/objects"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_records": {
+      "hostPattern": "api.attio.com",
+      "paths": [
+        "/v2/objects/*/records/query"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "list_tasks": {
+      "hostPattern": "api.attio.com",
+      "paths": [
+        "/v2/tasks"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_webhooks": {
+      "hostPattern": "api.attio.com",
+      "paths": [
+        "/v2/webhooks"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_workspace_members": {
+      "hostPattern": "api.attio.com",
+      "paths": [
+        "/v2/workspace_members"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "self": {
+      "hostPattern": "api.attio.com",
+      "paths": [
+        "/v2/self"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "update_list_entry": {
+      "hostPattern": "api.attio.com",
+      "paths": [
+        "/v2/lists/*/entries/*"
+      ],
+      "methods": [
+        "PATCH"
+      ]
+    },
+    "update_record": {
+      "hostPattern": "api.attio.com",
+      "paths": [
+        "/v2/objects/*/records/*"
+      ],
+      "methods": [
+        "PATCH"
+      ]
+    },
+    "update_task": {
+      "hostPattern": "api.attio.com",
+      "paths": [
+        "/v2/tasks/*"
+      ],
+      "methods": [
+        "PATCH"
+      ]
+    },
+    "update_webhook": {
+      "hostPattern": "api.attio.com",
+      "paths": [
+        "/v2/webhooks/*"
+      ],
+      "methods": [
+        "PATCH"
+      ]
+    }
+  },
   "aws": {
+    "cloudformation_access": {
+      "hostPattern": "cloudformation.*.amazonaws.com",
+      "paths": [
+        "/*"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "cloudwatch_logs_access": {
+      "hostPattern": "logs.*.amazonaws.com",
+      "paths": [
+        "/*"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "dynamodb_access": {
+      "hostPattern": "dynamodb.*.amazonaws.com",
+      "paths": [
+        "/*"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "ec2_access": {
+      "hostPattern": "ec2.*.amazonaws.com",
+      "paths": [
+        "/*"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "iam_access": {
+      "hostPattern": "iam.amazonaws.com",
+      "paths": [
+        "/*"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "lambda_delete": {
+      "hostPattern": "lambda.*.amazonaws.com",
+      "paths": [
+        "/2015-03-31/functions/*"
+      ],
+      "methods": [
+        "DELETE"
+      ]
+    },
+    "lambda_get_function": {
+      "hostPattern": "lambda.*.amazonaws.com",
+      "paths": [
+        "/2015-03-31/functions/*"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "lambda_invoke": {
+      "hostPattern": "lambda.*.amazonaws.com",
+      "paths": [
+        "/2015-03-31/functions/*/invocations"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "lambda_list_functions": {
+      "hostPattern": "lambda.*.amazonaws.com",
+      "paths": [
+        "/2015-03-31/functions"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "s3_delete": {
+      "hostPattern": "s3.*.amazonaws.com",
+      "paths": [
+        "/*"
+      ],
+      "methods": [
+        "DELETE"
+      ]
+    },
+    "s3_list_buckets": {
+      "hostPattern": "s3.*.amazonaws.com",
+      "paths": [
+        "/"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "s3_read_objects": {
+      "hostPattern": "s3.*.amazonaws.com",
+      "paths": [
+        "/*"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "s3_upload": {
+      "hostPattern": "s3.*.amazonaws.com",
+      "paths": [
+        "/*"
+      ],
+      "methods": [
+        "PUT"
+      ]
+    },
+    "secrets_manager_access": {
+      "hostPattern": "secretsmanager.*.amazonaws.com",
+      "paths": [
+        "/*"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "ses_send": {
+      "hostPattern": "email.*.amazonaws.com",
+      "paths": [
+        "/v2/email/outbound-emails"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "sts_access": {
+      "hostPattern": "sts.*.amazonaws.com",
+      "paths": [
+        "/*"
+      ],
+      "methods": [
+        "POST"
+      ]
+    }
+  },
+  "aws-role": {
     "cloudformation_access": {
       "hostPattern": "cloudformation.*.amazonaws.com",
       "paths": [
@@ -407,6 +973,188 @@
       ]
     }
   },
+  "datadog": {
+    "apm_services": {
+      "hostPattern": "*.datadoghq.com",
+      "paths": [
+        "/api/v1/service_dependencies"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "dashboards_create": {
+      "hostPattern": "*.datadoghq.com",
+      "paths": [
+        "/api/v1/dashboard"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "dashboards_delete": {
+      "hostPattern": "*.datadoghq.com",
+      "paths": [
+        "/api/v1/dashboard/*"
+      ],
+      "methods": [
+        "DELETE"
+      ]
+    },
+    "dashboards_get": {
+      "hostPattern": "*.datadoghq.com",
+      "paths": [
+        "/api/v1/dashboard/*"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "dashboards_list": {
+      "hostPattern": "*.datadoghq.com",
+      "paths": [
+        "/api/v1/dashboard"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "dashboards_update": {
+      "hostPattern": "*.datadoghq.com",
+      "paths": [
+        "/api/v1/dashboard/*"
+      ],
+      "methods": [
+        "PUT"
+      ]
+    },
+    "events_list": {
+      "hostPattern": "*.datadoghq.com",
+      "paths": [
+        "/api/v1/events"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "events_post": {
+      "hostPattern": "*.datadoghq.com",
+      "paths": [
+        "/api/v1/events"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "hosts_list": {
+      "hostPattern": "*.datadoghq.com",
+      "paths": [
+        "/api/v1/hosts"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "logs_config_read": {
+      "hostPattern": "*.datadoghq.com",
+      "paths": [
+        "/api/v2/logs/*"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "logs_search": {
+      "hostPattern": "*.datadoghq.com",
+      "paths": [
+        "/api/v2/logs/*"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "logs_submit": {
+      "hostPattern": "*.datadoghq.com",
+      "paths": [
+        "/api/v2/logs"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "metrics_list": {
+      "hostPattern": "*.datadoghq.com",
+      "paths": [
+        "/api/v1/metrics"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "metrics_query": {
+      "hostPattern": "*.datadoghq.com",
+      "paths": [
+        "/api/v1/query"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "monitors_create": {
+      "hostPattern": "*.datadoghq.com",
+      "paths": [
+        "/api/v1/monitor"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "monitors_delete": {
+      "hostPattern": "*.datadoghq.com",
+      "paths": [
+        "/api/v1/monitor/*"
+      ],
+      "methods": [
+        "DELETE"
+      ]
+    },
+    "monitors_get": {
+      "hostPattern": "*.datadoghq.com",
+      "paths": [
+        "/api/v1/monitor/*"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "monitors_list": {
+      "hostPattern": "*.datadoghq.com",
+      "paths": [
+        "/api/v1/monitor"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "monitors_update": {
+      "hostPattern": "*.datadoghq.com",
+      "paths": [
+        "/api/v1/monitor/*"
+      ],
+      "methods": [
+        "PUT"
+      ]
+    },
+    "slos_list": {
+      "hostPattern": "*.datadoghq.com",
+      "paths": [
+        "/api/v1/slo"
+      ],
+      "methods": [
+        "GET"
+      ]
+    }
+  },
   "docker": {
     "create_repository": {
       "hostPattern": "hub.docker.com",
@@ -598,6 +1346,98 @@
       "methods": [
         "POST"
       ]
+    }
+  },
+  "fathom": {
+    "create_webhook": {
+      "hostPattern": "api.fathom.ai",
+      "paths": [
+        "/external/v1/webhooks"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "delete_webhook": {
+      "hostPattern": "api.fathom.ai",
+      "paths": [
+        "/external/v1/webhooks/*"
+      ],
+      "methods": [
+        "DELETE"
+      ]
+    },
+    "get_recording_summary": {
+      "hostPattern": "api.fathom.ai",
+      "paths": [
+        "/external/v1/recordings/*/summary"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "get_recording_transcript": {
+      "hostPattern": "api.fathom.ai",
+      "paths": [
+        "/external/v1/recordings/*/transcript"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_meetings": {
+      "hostPattern": "api.fathom.ai",
+      "paths": [
+        "/external/v1/meetings"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_team_members": {
+      "hostPattern": "api.fathom.ai",
+      "paths": [
+        "/external/v1/team_members"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_teams": {
+      "hostPattern": "api.fathom.ai",
+      "paths": [
+        "/external/v1/teams"
+      ],
+      "methods": [
+        "GET"
+      ]
+    }
+  },
+  "fireflies": {
+    "graphql_mutation": {
+      "hostPattern": "api.fireflies.ai",
+      "paths": [
+        "/graphql"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "graphql_query": {
+      "hostPattern": "api.fireflies.ai",
+      "paths": [
+        "/graphql"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "mcp_access": {
+      "hostPattern": "api.fireflies.ai",
+      "paths": [
+        "/mcp"
+      ],
+      "methods": []
     }
   },
   "flyio": {
@@ -1215,6 +2055,15 @@
         "GET"
       ]
     },
+    "get_profile": {
+      "hostPattern": "gmail.googleapis.com",
+      "paths": [
+        "/gmail/v1/users/*/profile"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
     "get_thread": {
       "hostPattern": "gmail.googleapis.com",
       "paths": [
@@ -1484,6 +2333,15 @@
       ],
       "methods": [
         "DELETE"
+      ]
+    },
+    "get_calendar": {
+      "hostPattern": "www.googleapis.com",
+      "paths": [
+        "/calendar/v3/calendars/*"
+      ],
+      "methods": [
+        "GET"
       ]
     },
     "get_event": {
@@ -2298,6 +3156,226 @@
       ]
     }
   },
+  "granola": {
+    "get_note": {
+      "hostPattern": "public-api.granola.ai",
+      "paths": [
+        "/v1/notes/*"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_folders": {
+      "hostPattern": "public-api.granola.ai",
+      "paths": [
+        "/v1/folders"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_notes": {
+      "hostPattern": "public-api.granola.ai",
+      "paths": [
+        "/v1/notes"
+      ],
+      "methods": [
+        "GET"
+      ]
+    }
+  },
+  "hubspot": {
+    "create_association": {
+      "hostPattern": "api.hubapi.com",
+      "paths": [
+        "/crm/v4/objects/*/*/associations/*"
+      ],
+      "methods": [
+        "PUT"
+      ]
+    },
+    "create_company": {
+      "hostPattern": "api.hubapi.com",
+      "paths": [
+        "/crm/v3/objects/companies"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "create_contact": {
+      "hostPattern": "api.hubapi.com",
+      "paths": [
+        "/crm/v3/objects/contacts"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "create_deal": {
+      "hostPattern": "api.hubapi.com",
+      "paths": [
+        "/crm/v3/objects/deals"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "create_ticket": {
+      "hostPattern": "api.hubapi.com",
+      "paths": [
+        "/crm/v3/objects/tickets"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "delete_association": {
+      "hostPattern": "api.hubapi.com",
+      "paths": [
+        "/crm/v4/objects/*/*/associations/*"
+      ],
+      "methods": [
+        "DELETE"
+      ]
+    },
+    "get_company": {
+      "hostPattern": "api.hubapi.com",
+      "paths": [
+        "/crm/v3/objects/companies/*"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "get_contact": {
+      "hostPattern": "api.hubapi.com",
+      "paths": [
+        "/crm/v3/objects/contacts/*"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "get_deal": {
+      "hostPattern": "api.hubapi.com",
+      "paths": [
+        "/crm/v3/objects/deals/*"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "get_ticket": {
+      "hostPattern": "api.hubapi.com",
+      "paths": [
+        "/crm/v3/objects/tickets/*"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_associations": {
+      "hostPattern": "api.hubapi.com",
+      "paths": [
+        "/crm/v4/objects/*/*/associations/*"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_companies": {
+      "hostPattern": "api.hubapi.com",
+      "paths": [
+        "/crm/v3/objects/companies"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_contacts": {
+      "hostPattern": "api.hubapi.com",
+      "paths": [
+        "/crm/v3/objects/contacts"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_deals": {
+      "hostPattern": "api.hubapi.com",
+      "paths": [
+        "/crm/v3/objects/deals"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_owners": {
+      "hostPattern": "api.hubapi.com",
+      "paths": [
+        "/crm/v3/owners"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_tickets": {
+      "hostPattern": "api.hubapi.com",
+      "paths": [
+        "/crm/v3/objects/tickets"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "search_crm": {
+      "hostPattern": "api.hubapi.com",
+      "paths": [
+        "/crm/v3/objects/*/search"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "update_company": {
+      "hostPattern": "api.hubapi.com",
+      "paths": [
+        "/crm/v3/objects/companies/*"
+      ],
+      "methods": [
+        "PATCH"
+      ]
+    },
+    "update_contact": {
+      "hostPattern": "api.hubapi.com",
+      "paths": [
+        "/crm/v3/objects/contacts/*"
+      ],
+      "methods": [
+        "PATCH"
+      ]
+    },
+    "update_deal": {
+      "hostPattern": "api.hubapi.com",
+      "paths": [
+        "/crm/v3/objects/deals/*"
+      ],
+      "methods": [
+        "PATCH"
+      ]
+    },
+    "update_ticket": {
+      "hostPattern": "api.hubapi.com",
+      "paths": [
+        "/crm/v3/objects/tickets/*"
+      ],
+      "methods": [
+        "PATCH"
+      ]
+    }
+  },
   "jira": {
     "add_comment": {
       "hostPattern": "api.atlassian.com",
@@ -2412,6 +3490,78 @@
       ]
     }
   },
+  "linear": {
+    "create_comment": {
+      "hostPattern": "api.linear.app",
+      "paths": [
+        "/graphql"
+      ],
+      "methods": []
+    },
+    "create_issue": {
+      "hostPattern": "api.linear.app",
+      "paths": [
+        "/graphql"
+      ],
+      "methods": []
+    },
+    "delete_issue": {
+      "hostPattern": "api.linear.app",
+      "paths": [
+        "/graphql"
+      ],
+      "methods": []
+    },
+    "get_issue": {
+      "hostPattern": "api.linear.app",
+      "paths": [
+        "/graphql"
+      ],
+      "methods": []
+    },
+    "list_issues": {
+      "hostPattern": "api.linear.app",
+      "paths": [
+        "/graphql"
+      ],
+      "methods": []
+    },
+    "list_labels": {
+      "hostPattern": "api.linear.app",
+      "paths": [
+        "/graphql"
+      ],
+      "methods": []
+    },
+    "list_projects": {
+      "hostPattern": "api.linear.app",
+      "paths": [
+        "/graphql"
+      ],
+      "methods": []
+    },
+    "list_teams": {
+      "hostPattern": "api.linear.app",
+      "paths": [
+        "/graphql"
+      ],
+      "methods": []
+    },
+    "search": {
+      "hostPattern": "api.linear.app",
+      "paths": [
+        "/graphql"
+      ],
+      "methods": []
+    },
+    "update_issue": {
+      "hostPattern": "api.linear.app",
+      "paths": [
+        "/graphql"
+      ],
+      "methods": []
+    }
+  },
   "linkedin": {
     "create_comment": {
       "hostPattern": "api.linkedin.com",
@@ -2496,6 +3646,190 @@
       ],
       "methods": [
         "GET"
+      ]
+    }
+  },
+  "microsoft-onenote": {
+    "create_notebook": {
+      "hostPattern": "graph.microsoft.com",
+      "paths": [
+        "/v1.0/me/onenote/notebooks"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "create_page": {
+      "hostPattern": "graph.microsoft.com",
+      "paths": [
+        "/v1.0/me/onenote/sections/*/pages"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "create_section": {
+      "hostPattern": "graph.microsoft.com",
+      "paths": [
+        "/v1.0/me/onenote/notebooks/*/sections"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "delete_page": {
+      "hostPattern": "graph.microsoft.com",
+      "paths": [
+        "/v1.0/me/onenote/pages/*"
+      ],
+      "methods": [
+        "DELETE"
+      ]
+    },
+    "get_notebook": {
+      "hostPattern": "graph.microsoft.com",
+      "paths": [
+        "/v1.0/me/onenote/notebooks/*"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "get_page_content": {
+      "hostPattern": "graph.microsoft.com",
+      "paths": [
+        "/v1.0/me/onenote/pages/*/content"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_notebook_sections": {
+      "hostPattern": "graph.microsoft.com",
+      "paths": [
+        "/v1.0/me/onenote/notebooks/*/sections"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_notebooks": {
+      "hostPattern": "graph.microsoft.com",
+      "paths": [
+        "/v1.0/me/onenote/notebooks"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_pages": {
+      "hostPattern": "graph.microsoft.com",
+      "paths": [
+        "/v1.0/me/onenote/pages"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_section_pages": {
+      "hostPattern": "graph.microsoft.com",
+      "paths": [
+        "/v1.0/me/onenote/sections/*/pages"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_sections": {
+      "hostPattern": "graph.microsoft.com",
+      "paths": [
+        "/v1.0/me/onenote/sections"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "update_page": {
+      "hostPattern": "graph.microsoft.com",
+      "paths": [
+        "/v1.0/me/onenote/pages/*/content"
+      ],
+      "methods": [
+        "PATCH"
+      ]
+    }
+  },
+  "microsoft-word": {
+    "create_folder": {
+      "hostPattern": "graph.microsoft.com",
+      "paths": [
+        "/v1.0/me/drive/root/children"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "delete_file": {
+      "hostPattern": "graph.microsoft.com",
+      "paths": [
+        "/v1.0/me/drive/items/*"
+      ],
+      "methods": [
+        "DELETE"
+      ]
+    },
+    "download_file": {
+      "hostPattern": "graph.microsoft.com",
+      "paths": [
+        "/v1.0/me/drive/items/*/content"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "get_file": {
+      "hostPattern": "graph.microsoft.com",
+      "paths": [
+        "/v1.0/me/drive/items/*"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_files": {
+      "hostPattern": "graph.microsoft.com",
+      "paths": [
+        "/v1.0/me/drive/root/children"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "search_files": {
+      "hostPattern": "graph.microsoft.com",
+      "paths": [
+        "/v1.0/me/drive/root/search(*)"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "update_file": {
+      "hostPattern": "graph.microsoft.com",
+      "paths": [
+        "/v1.0/me/drive/items/*"
+      ],
+      "methods": [
+        "PATCH"
+      ]
+    },
+    "upload_file": {
+      "hostPattern": "graph.microsoft.com",
+      "paths": [
+        "/v1.0/me/drive/items/*/content"
+      ],
+      "methods": [
+        "PUT"
       ]
     }
   },
@@ -2865,6 +4199,183 @@
       ]
     }
   },
+  "outlook-calendar": {
+    "create_event": {
+      "hostPattern": "graph.microsoft.com",
+      "paths": [
+        "/v1.0/me/events"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "delete_event": {
+      "hostPattern": "graph.microsoft.com",
+      "paths": [
+        "/v1.0/me/events/*"
+      ],
+      "methods": [
+        "DELETE"
+      ]
+    },
+    "get_event": {
+      "hostPattern": "graph.microsoft.com",
+      "paths": [
+        "/v1.0/me/events/*"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_calendars": {
+      "hostPattern": "graph.microsoft.com",
+      "paths": [
+        "/v1.0/me/calendars"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_default_events": {
+      "hostPattern": "graph.microsoft.com",
+      "paths": [
+        "/v1.0/me/events"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_events": {
+      "hostPattern": "graph.microsoft.com",
+      "paths": [
+        "/v1.0/me/calendars/*/events"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "respond_event": {
+      "hostPattern": "graph.microsoft.com",
+      "paths": [
+        "/v1.0/me/events/*/accept",
+        "/v1.0/me/events/*/decline",
+        "/v1.0/me/events/*/tentativelyAccept"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "update_event": {
+      "hostPattern": "graph.microsoft.com",
+      "paths": [
+        "/v1.0/me/events/*"
+      ],
+      "methods": [
+        "PATCH"
+      ]
+    }
+  },
+  "outlook-mail": {
+    "create_draft": {
+      "hostPattern": "graph.microsoft.com",
+      "paths": [
+        "/v1.0/me/messages"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "delete_message": {
+      "hostPattern": "graph.microsoft.com",
+      "paths": [
+        "/v1.0/me/messages/*"
+      ],
+      "methods": [
+        "DELETE"
+      ]
+    },
+    "forward_message": {
+      "hostPattern": "graph.microsoft.com",
+      "paths": [
+        "/v1.0/me/messages/*/forward"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "get_message": {
+      "hostPattern": "graph.microsoft.com",
+      "paths": [
+        "/v1.0/me/messages/*"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_folder_messages": {
+      "hostPattern": "graph.microsoft.com",
+      "paths": [
+        "/v1.0/me/mailFolders/*/messages"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_folders": {
+      "hostPattern": "graph.microsoft.com",
+      "paths": [
+        "/v1.0/me/mailFolders"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_messages": {
+      "hostPattern": "graph.microsoft.com",
+      "paths": [
+        "/v1.0/me/messages"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "move_message": {
+      "hostPattern": "graph.microsoft.com",
+      "paths": [
+        "/v1.0/me/messages/*/move"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "reply_message": {
+      "hostPattern": "graph.microsoft.com",
+      "paths": [
+        "/v1.0/me/messages/*/reply"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "send_mail": {
+      "hostPattern": "graph.microsoft.com",
+      "paths": [
+        "/v1.0/me/sendMail"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "update_message": {
+      "hostPattern": "graph.microsoft.com",
+      "paths": [
+        "/v1.0/me/messages/*"
+      ],
+      "methods": [
+        "PATCH"
+      ]
+    }
+  },
   "resend": {
     "create_batch": {
       "hostPattern": "api.resend.com",
@@ -2899,6 +4410,233 @@
         "/emails"
       ],
       "methods": [
+        "POST"
+      ]
+    }
+  },
+  "sentry": {
+    "create_deploy": {
+      "hostPattern": "*.sentry.io",
+      "paths": [
+        "/api/0/organizations/*/releases/*/deploys/"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "create_release": {
+      "hostPattern": "*.sentry.io",
+      "paths": [
+        "/api/0/organizations/*/releases/"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "delete_issue": {
+      "hostPattern": "*.sentry.io",
+      "paths": [
+        "/api/0/issues/*"
+      ],
+      "methods": [
+        "DELETE"
+      ]
+    },
+    "get_issue": {
+      "hostPattern": "*.sentry.io",
+      "paths": [
+        "/api/0/issues/*"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "get_organization": {
+      "hostPattern": "*.sentry.io",
+      "paths": [
+        "/api/0/organizations/*"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "get_project": {
+      "hostPattern": "*.sentry.io",
+      "paths": [
+        "/api/0/projects/*/*"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "get_user": {
+      "hostPattern": "*.sentry.io",
+      "paths": [
+        "/api/0/users/me/"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_issue_events": {
+      "hostPattern": "*.sentry.io",
+      "paths": [
+        "/api/0/issues/*/events/"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_issues": {
+      "hostPattern": "*.sentry.io",
+      "paths": [
+        "/api/0/projects/*/*/issues/"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_members": {
+      "hostPattern": "*.sentry.io",
+      "paths": [
+        "/api/0/organizations/*/members/"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_organizations": {
+      "hostPattern": "*.sentry.io",
+      "paths": [
+        "/api/0/organizations/"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_projects": {
+      "hostPattern": "*.sentry.io",
+      "paths": [
+        "/api/0/organizations/*/projects/"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_teams": {
+      "hostPattern": "*.sentry.io",
+      "paths": [
+        "/api/0/organizations/*/teams/"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "update_issue": {
+      "hostPattern": "*.sentry.io",
+      "paths": [
+        "/api/0/issues/*"
+      ],
+      "methods": [
+        "PUT"
+      ]
+    }
+  },
+  "slack": {
+    "add_reaction": {
+      "hostPattern": "slack.com",
+      "paths": [
+        "/api/reactions.add"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "auth_test": {
+      "hostPattern": "slack.com",
+      "paths": [
+        "/api/auth.test"
+      ],
+      "methods": [
+        "GET",
+        "POST"
+      ]
+    },
+    "channel_history": {
+      "hostPattern": "slack.com",
+      "paths": [
+        "/api/conversations.history"
+      ],
+      "methods": [
+        "GET",
+        "POST"
+      ]
+    },
+    "channel_info": {
+      "hostPattern": "slack.com",
+      "paths": [
+        "/api/conversations.info"
+      ],
+      "methods": [
+        "GET",
+        "POST"
+      ]
+    },
+    "channel_replies": {
+      "hostPattern": "slack.com",
+      "paths": [
+        "/api/conversations.replies"
+      ],
+      "methods": [
+        "GET",
+        "POST"
+      ]
+    },
+    "list_channels": {
+      "hostPattern": "slack.com",
+      "paths": [
+        "/api/conversations.list"
+      ],
+      "methods": [
+        "GET",
+        "POST"
+      ]
+    },
+    "list_users": {
+      "hostPattern": "slack.com",
+      "paths": [
+        "/api/users.list"
+      ],
+      "methods": [
+        "GET",
+        "POST"
+      ]
+    },
+    "post_message": {
+      "hostPattern": "slack.com",
+      "paths": [
+        "/api/chat.postMessage"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "update_message": {
+      "hostPattern": "slack.com",
+      "paths": [
+        "/api/chat.update"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "user_info": {
+      "hostPattern": "slack.com",
+      "paths": [
+        "/api/users.info"
+      ],
+      "methods": [
+        "GET",
         "POST"
       ]
     }
@@ -3384,6 +5122,269 @@
       ]
     }
   },
+  "x": {
+    "block_user": {
+      "hostPattern": "api.x.com",
+      "paths": [
+        "/2/users/*/blocking"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "create_bookmark": {
+      "hostPattern": "api.x.com",
+      "paths": [
+        "/2/users/*/bookmarks"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "create_list": {
+      "hostPattern": "api.x.com",
+      "paths": [
+        "/2/lists"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "create_tweet": {
+      "hostPattern": "api.x.com",
+      "paths": [
+        "/2/tweets"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "delete_bookmark": {
+      "hostPattern": "api.x.com",
+      "paths": [
+        "/2/users/*/bookmarks/*"
+      ],
+      "methods": [
+        "DELETE"
+      ]
+    },
+    "delete_tweet": {
+      "hostPattern": "api.x.com",
+      "paths": [
+        "/2/tweets/*"
+      ],
+      "methods": [
+        "DELETE"
+      ]
+    },
+    "follow": {
+      "hostPattern": "api.x.com",
+      "paths": [
+        "/2/users/*/following"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "get_me": {
+      "hostPattern": "api.x.com",
+      "paths": [
+        "/2/users/me"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "get_mentions": {
+      "hostPattern": "api.x.com",
+      "paths": [
+        "/2/users/*/mentions"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "get_timeline": {
+      "hostPattern": "api.x.com",
+      "paths": [
+        "/2/users/*/tweets"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "get_tweet": {
+      "hostPattern": "api.x.com",
+      "paths": [
+        "/2/tweets/*"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "get_user": {
+      "hostPattern": "api.x.com",
+      "paths": [
+        "/2/users/*"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "hide_reply": {
+      "hostPattern": "api.x.com",
+      "paths": [
+        "/2/tweets/*/hidden"
+      ],
+      "methods": [
+        "PUT"
+      ]
+    },
+    "like_tweet": {
+      "hostPattern": "api.x.com",
+      "paths": [
+        "/2/users/*/likes"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "list_blocks": {
+      "hostPattern": "api.x.com",
+      "paths": [
+        "/2/users/*/blocking"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_bookmarks": {
+      "hostPattern": "api.x.com",
+      "paths": [
+        "/2/users/*/bookmarks"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_dm_events": {
+      "hostPattern": "api.x.com",
+      "paths": [
+        "/2/dm_events"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_followers": {
+      "hostPattern": "api.x.com",
+      "paths": [
+        "/2/users/*/followers"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_following": {
+      "hostPattern": "api.x.com",
+      "paths": [
+        "/2/users/*/following"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_liked_tweets": {
+      "hostPattern": "api.x.com",
+      "paths": [
+        "/2/users/*/liked_tweets"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_lists": {
+      "hostPattern": "api.x.com",
+      "paths": [
+        "/2/users/*/owned_lists"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_mutes": {
+      "hostPattern": "api.x.com",
+      "paths": [
+        "/2/users/*/muting"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "mute_user": {
+      "hostPattern": "api.x.com",
+      "paths": [
+        "/2/users/*/muting"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "retweet": {
+      "hostPattern": "api.x.com",
+      "paths": [
+        "/2/users/*/retweets"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "search_tweets": {
+      "hostPattern": "api.x.com",
+      "paths": [
+        "/2/tweets/search/recent"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "send_dm": {
+      "hostPattern": "api.x.com",
+      "paths": [
+        "/2/dm_conversations/*/messages"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "unfollow": {
+      "hostPattern": "api.x.com",
+      "paths": [
+        "/2/users/*/following/*"
+      ],
+      "methods": [
+        "DELETE"
+      ]
+    },
+    "unlike_tweet": {
+      "hostPattern": "api.x.com",
+      "paths": [
+        "/2/users/*/likes/*"
+      ],
+      "methods": [
+        "DELETE"
+      ]
+    },
+    "upload_media": {
+      "hostPattern": "api.x.com",
+      "paths": [
+        "/2/media/upload"
+      ],
+      "methods": [
+        "POST"
+      ]
+    }
+  },
   "youtube": {
     "delete_video": {
       "hostPattern": "www.googleapis.com",
@@ -3455,6 +5456,343 @@
       ],
       "methods": [
         "PUT"
+      ]
+    }
+  },
+  "zoho-crm": {
+    "create_account": {
+      "hostPattern": "www.zohoapis.com",
+      "paths": [
+        "/crm/v8/Accounts"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "create_contact": {
+      "hostPattern": "www.zohoapis.com",
+      "paths": [
+        "/crm/v8/Contacts"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "create_deal": {
+      "hostPattern": "www.zohoapis.com",
+      "paths": [
+        "/crm/v8/Deals"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "create_lead": {
+      "hostPattern": "www.zohoapis.com",
+      "paths": [
+        "/crm/v8/Leads"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "create_task": {
+      "hostPattern": "www.zohoapis.com",
+      "paths": [
+        "/crm/v8/Tasks"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "delete_account": {
+      "hostPattern": "www.zohoapis.com",
+      "paths": [
+        "/crm/v8/Accounts/*"
+      ],
+      "methods": [
+        "DELETE"
+      ]
+    },
+    "delete_contact": {
+      "hostPattern": "www.zohoapis.com",
+      "paths": [
+        "/crm/v8/Contacts/*"
+      ],
+      "methods": [
+        "DELETE"
+      ]
+    },
+    "delete_deal": {
+      "hostPattern": "www.zohoapis.com",
+      "paths": [
+        "/crm/v8/Deals/*"
+      ],
+      "methods": [
+        "DELETE"
+      ]
+    },
+    "delete_lead": {
+      "hostPattern": "www.zohoapis.com",
+      "paths": [
+        "/crm/v8/Leads/*"
+      ],
+      "methods": [
+        "DELETE"
+      ]
+    },
+    "delete_task": {
+      "hostPattern": "www.zohoapis.com",
+      "paths": [
+        "/crm/v8/Tasks/*"
+      ],
+      "methods": [
+        "DELETE"
+      ]
+    },
+    "get_account": {
+      "hostPattern": "www.zohoapis.com",
+      "paths": [
+        "/crm/v8/Accounts/*"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "get_contact": {
+      "hostPattern": "www.zohoapis.com",
+      "paths": [
+        "/crm/v8/Contacts/*"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "get_deal": {
+      "hostPattern": "www.zohoapis.com",
+      "paths": [
+        "/crm/v8/Deals/*"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "get_lead": {
+      "hostPattern": "www.zohoapis.com",
+      "paths": [
+        "/crm/v8/Leads/*"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "get_org": {
+      "hostPattern": "www.zohoapis.com",
+      "paths": [
+        "/crm/v8/org"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "get_settings": {
+      "hostPattern": "www.zohoapis.com",
+      "paths": [
+        "/crm/v8/settings/*"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "get_task": {
+      "hostPattern": "www.zohoapis.com",
+      "paths": [
+        "/crm/v8/Tasks/*"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_accounts": {
+      "hostPattern": "www.zohoapis.com",
+      "paths": [
+        "/crm/v8/Accounts"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_contacts": {
+      "hostPattern": "www.zohoapis.com",
+      "paths": [
+        "/crm/v8/Contacts"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_deals": {
+      "hostPattern": "www.zohoapis.com",
+      "paths": [
+        "/crm/v8/Deals"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_leads": {
+      "hostPattern": "www.zohoapis.com",
+      "paths": [
+        "/crm/v8/Leads"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_tasks": {
+      "hostPattern": "www.zohoapis.com",
+      "paths": [
+        "/crm/v8/Tasks"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_users": {
+      "hostPattern": "www.zohoapis.com",
+      "paths": [
+        "/crm/v8/users"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "search_records": {
+      "hostPattern": "www.zohoapis.com",
+      "paths": [
+        "/crm/v8/coql"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "update_account": {
+      "hostPattern": "www.zohoapis.com",
+      "paths": [
+        "/crm/v8/Accounts/*"
+      ],
+      "methods": [
+        "PUT"
+      ]
+    },
+    "update_contact": {
+      "hostPattern": "www.zohoapis.com",
+      "paths": [
+        "/crm/v8/Contacts/*"
+      ],
+      "methods": [
+        "PUT"
+      ]
+    },
+    "update_deal": {
+      "hostPattern": "www.zohoapis.com",
+      "paths": [
+        "/crm/v8/Deals/*"
+      ],
+      "methods": [
+        "PUT"
+      ]
+    },
+    "update_lead": {
+      "hostPattern": "www.zohoapis.com",
+      "paths": [
+        "/crm/v8/Leads/*"
+      ],
+      "methods": [
+        "PUT"
+      ]
+    },
+    "update_task": {
+      "hostPattern": "www.zohoapis.com",
+      "paths": [
+        "/crm/v8/Tasks/*"
+      ],
+      "methods": [
+        "PUT"
+      ]
+    }
+  },
+  "zoom": {
+    "create_meeting": {
+      "hostPattern": "api.zoom.us",
+      "paths": [
+        "/v2/users/*/meetings"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "delete_meeting": {
+      "hostPattern": "api.zoom.us",
+      "paths": [
+        "/v2/meetings/*"
+      ],
+      "methods": [
+        "DELETE"
+      ]
+    },
+    "get_meeting": {
+      "hostPattern": "api.zoom.us",
+      "paths": [
+        "/v2/meetings/*"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "get_recording_files": {
+      "hostPattern": "api.zoom.us",
+      "paths": [
+        "/v2/meetings/*/recordings"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "get_user": {
+      "hostPattern": "api.zoom.us",
+      "paths": [
+        "/v2/users/me"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_meetings": {
+      "hostPattern": "api.zoom.us",
+      "paths": [
+        "/v2/users/*/meetings"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_recordings": {
+      "hostPattern": "api.zoom.us",
+      "paths": [
+        "/v2/users/*/recordings"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "update_meeting": {
+      "hostPattern": "api.zoom.us",
+      "paths": [
+        "/v2/meetings/*"
+      ],
+      "methods": [
+        "PATCH"
       ]
     }
   }

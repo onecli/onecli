@@ -31,7 +31,7 @@ export const connectionGrantSchema = z
     // The attached ⇔ allow∪ask ≠ ∅ invariant: an all-blocked grant is a detach.
     {
       message:
-        "Custom access needs at least one allowed or approval tool — detach instead.",
+        "Custom access needs at least one allowed or approval tool. To block everything, detach instead.",
     },
   )
   .refine(

@@ -1,0 +1,124 @@
+import { z } from "zod";
+import {
+  CHANNEL_PROVIDER_IDS,
+  CHANNEL_TRANSPORTS,
+} from "../services/channels/types";
+
+/**
+ * Zod surfaces for the channel routes (step 6). One definition per union —
+ * the services import from `services/channels/types`; these schemas are the
+ * HTTP shells around them.
+ */
+
+export const channelProviderSchema = z.enum(CHANNEL_PROVIDER_IDS);
+
+/** The connection-mode vocabulary — the manifest GET validates its
+ * `?transport=` with this directly (query params are bare strings). */
+export const channelTransportSchema = z.enum(CHANNEL_TRANSPORTS);
+
+/** POST /v1/agents/:agentId/channels/:provider: the caller's connection-mode
+ * choice — optional, the deployment posture decides when omitted. */
+export const attachPresenceSchema = z
+  .object({
+    transport: channelTransportSchema.optional(),
+  })
+  .strict();
+
+/** PUT /v1/org/channels/:provider/credentials */
+export const connectIntegrationSchema = z
+  .object({
+    credential: z.string().trim().min(1).max(4_000),
+  })
+  .strict();
+
+/** POST /v1/org/channels/:provider/user-links */
+export const addUserLinkSchema = z
+  .object({
+    externalUserId: z.string().trim().min(1).max(200),
+    userId: z.string().trim().min(1).max(200),
+  })
+  .strict();
+
+/** POST /v1/agents/:agentId/channels/:provider/complete */
+export const completePresenceSchema = z
+  .object({
+    botToken: z.string().trim().min(1).max(500),
+    appToken: z.string().trim().min(1).max(500).optional(),
+    signingSecret: z.string().trim().min(1).max(500).optional(),
+    appId: z.string().trim().min(1).max(100).optional(),
+    transport: channelTransportSchema.optional(),
+  })
+  .strict();
+
+/** DELETE /v1/agents/:agentId/channels/:provider */
+export const detachPresenceSchema = z
+  .object({
+    deleteRemote: z.boolean().optional(),
+  })
+  .strict();
+
+// ── The adapter's wire (routes/channel-adapter.ts) ──────────────────────────
+// Registration validates with `adapterRegisterRequestSchema` from
+// @onecli/agent-protocol (the shared wire), not a local copy.
+
+export const adapterIngestSchema = z
+  .object({
+    presenceId: z.string().trim().min(1),
+    eventId: z.string().trim().min(1).max(500),
+    event: z.unknown(),
+    // No `email` on purpose — the control plane resolves the speaker itself
+    // (a caller-asserted email is an impersonation vector; see channel-wire).
+  })
+  .strict();
+
+export const adapterDecisionSchema = z
+  .object({
+    presenceId: z.string().trim().min(1),
+    approvalId: z.string().trim().min(1).max(500),
+    decision: z.enum(["approve", "deny"]),
+    clickerExternalUserId: z.string().trim().min(1).max(200),
+  })
+  .strict();
+
+export const adapterPromptClaimSchema = z
+  .object({
+    approvalId: z.string().trim().min(1).max(500),
+    presenceId: z.string().trim().min(1),
+    externalThreadId: z.string().trim().min(1).max(500),
+    /** ISO; the gateway's real deadline, re-armed on restart. */
+    expiresAt: z.string().datetime().nullable(),
+  })
+  .strict();
+
+export const adapterPromptMessageSchema = z
+  .object({
+    approvalId: z.string().trim().min(1).max(500),
+    externalMessageRef: z.string().trim().min(1).max(500),
+  })
+  .strict();
+
+export const adapterPromptSettleSchema = z
+  .object({
+    approvalId: z.string().trim().min(1).max(500),
+    state: z.enum(["decided", "expired"]),
+  })
+  .strict();
+
+export const adapterCursorSchema = z
+  .object({
+    linkId: z.string().trim().min(1),
+    /** ISO timestamps; `expect: null` claims a virgin cursor. */
+    expect: z.string().datetime().nullable(),
+    next: z.string().datetime(),
+    /** The claimed turn — lets a WINNING claim clear the turn's reaction
+     * receipt (the answer is posting, so the "seen" mark comes off). */
+    turnId: z.string().trim().min(1).optional(),
+  })
+  .strict();
+
+export const adapterApprovalHealthSchema = z
+  .object({
+    presenceId: z.string().trim().min(1),
+    healthy: z.boolean(),
+  })
+  .strict();

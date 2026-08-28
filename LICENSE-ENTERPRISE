@@ -1,0 +1,78 @@
+OneCLI Enterprise License
+
+Copyright (c) 2025-present ChartDB, Inc.
+
+This license governs the enterprise components of OneCLI. It applies ONLY to
+the paths enumerated below.
+
+THE LICENSED PATHS. The list below is authoritative. This file is the only
+place the paths are enumerated. Every other document in this repository refers
+back to this list rather than restating it.
+
+    apps/web/src/ee/
+    packages/api/src/ee/
+    apps/gateway/src/ee/
+    apps/gateway/src/ee.rs
+
+Those paths are NOT covered by the Apache License. No rights under the Apache
+License, including the rights to use, reproduce, modify, distribute or
+sublicense, are granted with respect to those paths. Each of the licensed
+directories carries a notice pointing back at this file, so the license
+travels with the code it covers.
+
+All other files in this repository are licensed under the Apache License,
+Version 2.0, and may be self-hosted in production with no commercial license.
+See the LICENSE and NOTICE files at the root of the repository.
+
+Those enterprise components and their associated documentation files (the
+"Software") are licensed under the following terms:
+
+1. LICENSE GRANT
+
+   Subject to the terms of this license, ChartDB, Inc. grants you a limited,
+   non-exclusive, non-transferable license to use, copy, and modify the
+   Software for:
+
+   - Development, testing, and evaluation purposes
+   - Internal non-production use
+   - Preparing and submitting contributions to the OneCLI project
+
+   Production use of the Software requires a valid OneCLI Enterprise
+   subscription.
+
+   Subject to the foregoing, you are free to modify the Software and publish
+   patches to it. ChartDB, Inc. retains all right, title, and interest in and
+   to the Software and to all such modifications and patches, and a modified
+   version of the Software may only be used in production with a valid OneCLI
+   Enterprise subscription. Contributions submitted to the OneCLI project are
+   governed by the OneCLI Contributor License Agreement (CLA.md at the root
+   of this repository).
+
+2. RESTRICTIONS
+
+   You may not:
+
+   - Use the Software, or any modified version of it, in production without a
+     valid Enterprise subscription
+   - Redistribute, sublicense, sell, or transfer the Software, except as
+     expressly permitted in Section 1 (publishing patches and submitting
+     contributions to the OneCLI project)
+   - Remove or alter any proprietary notices in the Software
+
+3. ENTERPRISE SUBSCRIPTION
+
+   Production deployment of enterprise features requires an active OneCLI
+   Enterprise subscription. Contact sales@onecli.sh for licensing information.
+
+4. DISCLAIMER
+
+   THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+   IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+   FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
+
+5. LIMITATION OF LIABILITY
+
+   IN NO EVENT SHALL CHARTDB, INC. BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+   LIABILITY ARISING FROM THE USE OF THE SOFTWARE.
+
+For questions about enterprise licensing, contact: sales@onecli.sh

@@ -13,26 +13,26 @@ export interface BlocklistHostState {
   custom: boolean;
   name: string;
   hostPattern: string;
-  scope: "organization" | "project" | null;
+  scope: "organization" | "workspace" | null;
 }
 
 const basePath = (provider: string, scope: PageScope) =>
   appsPath(scope, `/${provider}/blocklist`);
 
-export const list = (provider: string, scope: PageScope = "project") =>
+export const list = (provider: string, scope: PageScope = "workspace") =>
   apiGet<BlocklistHostState[]>(basePath(provider, scope));
 
 export const activateHost = (
   provider: string,
   hostId: string,
-  scope: PageScope = "project",
+  scope: PageScope = "workspace",
 ) => apiPost<BlocklistHostState>(basePath(provider, scope), { hostId });
 
 export const toggle = (
   provider: string,
   ruleId: string,
   enabled: boolean,
-  scope: PageScope = "project",
+  scope: PageScope = "workspace",
 ) =>
   apiPatch<{ success: true }>(`${basePath(provider, scope)}/${ruleId}`, {
     enabled,
@@ -41,5 +41,5 @@ export const toggle = (
 export const remove = (
   provider: string,
   ruleId: string,
-  scope: PageScope = "project",
+  scope: PageScope = "workspace",
 ) => apiDelete(`${basePath(provider, scope)}/${ruleId}`);

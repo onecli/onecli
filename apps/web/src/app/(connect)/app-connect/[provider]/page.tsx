@@ -13,7 +13,7 @@ interface Props {
      * distinct from `connectionId`, which means "re-authenticate". */
     connected?: string;
     agent_name?: string;
-    projectId?: string;
+    workspaceId?: string;
     orgId?: string;
   }>;
 }
@@ -26,12 +26,12 @@ export default async function ConnectPage({ params, searchParams }: Props) {
     connectionId,
     connected,
     agent_name,
-    projectId,
+    workspaceId,
     orgId,
   } = await searchParams;
 
   const app = getApp(provider);
-  if (!app || !app.available) notFound();
+  if (!app) notFound();
 
   // Check if platform defaults are available (server-only env var check)
   let hasEnvDefaults = false;
@@ -83,7 +83,7 @@ export default async function ConnectPage({ params, searchParams }: Props) {
       connectionId={connectionId}
       connectedId={connected}
       agentName={agent_name}
-      projectId={projectId}
+      workspaceId={workspaceId}
       orgId={orgId}
     />
   );

@@ -1,35 +1,33 @@
 "use client";
 
-// Alias key on purpose — in EE builds this whole module is aliased away, so
-// this import only ever resolves here in the flat editions, where it is the
-// SHARED registry (configs without picker dialogs).
+import dynamic from "next/dynamic";
 import { granularAccessConfigs } from "@/lib/granular-access";
-import type { Connection } from "@/lib/api";
+import { IS_CLOUD } from "@/lib/env";
+import type { ResourceScopeFieldsProps } from "@/ee/policy-editor/_components/resource-scope-fields";
+
+export type { ResourceScopeFieldsProps };
+
+// Loaded on demand so the provider pickers (GitHub repos, Dropbox folders +
+// their hooks) stay out of the onprem chunk — `IS_CLOUD` is a runtime value the
+// bundler cannot fold, so a plain import would ship them to every edition.
+const EeResourceScopeFields = dynamic(
+  () =>
+    import("@/ee/policy-editor/_components/resource-scope-fields").then(
+      (m) => m.ResourceScopeFields,
+    ),
+  { ssr: false },
+);
 
 /**
- * The OSS resource-scope seam (step 9.5): granular per-resource scoping
- * (GitHub repositories / Dropbox folders on a connection's injected
- * credential) is a OneCLI Cloud capability — the OSS gateway has no guard to
- * enforce it and the API locks it with a 422. Rendered only where the real
- * editor would appear (a supported provider, editable context), as a locked
- * capability hint. The EE editions alias this file to
- * `@/ee/policy-editor/resource-scope` (the real fields).
+ * Granular per-resource scoping (GitHub repositories / Dropbox folders on a
+ * connection's injected credential). Cloud renders the real editor; onprem
+ * shows a locked capability hint matching the API's 422
+ * (`policy-onprem-locks`) until the licensing work revisits entitlement.
  */
+export const ResourceScopeFields = (props: ResourceScopeFieldsProps) => {
+  if (IS_CLOUD) return <EeResourceScopeFields {...props} />;
 
-export interface ResourceScopeFieldsProps {
-  connection: Connection;
-  policy: Record<string, unknown> | null;
-  onChange: (policy: Record<string, unknown> | null) => void;
-  /** Read-only contexts never show an upsell hint. */
-  readOnly?: boolean;
-  /** Accepted for prop parity with the EE editor; OSS has no org scope, so
-   * there is never a boundary to narrow within. */
-  orgPolicy?: Record<string, unknown> | null;
-}
-
-export const ResourceScopeFields: (
-  props: ResourceScopeFieldsProps,
-) => React.JSX.Element | null = ({ connection, readOnly = false }) => {
+  const { connection, readOnly = false } = props;
   const meta = (connection.metadata as Record<string, unknown> | null) ?? {};
   const config = granularAccessConfigs.get(connection.provider);
   if (!config?.isSupported(meta) || readOnly) return null;

@@ -1,0 +1,43 @@
+# Build-from-source overlay: the same stack as docker-compose.yml, with every
+# image built from this checkout instead of pulled from a registry.
+#
+#   docker compose -f docker/docker-compose.yml -f docker/docker-compose.build.yml build
+#
+# `pnpm run setup` uses this in its "build from source" mode (and offers it
+# when the published images cannot be pulled). Each service keeps its `image:`
+# name from the main file, so the build result is tagged exactly where a later
+# `up` looks for it. The agent sandbox image is NOT a compose service — build
+# it separately with `pnpm agent:build` (setup's source mode does).
+#
+# Paths are relative to THIS file: context `..` is the repo root, dockerfile
+# paths resolve from that context.
+
+services:
+  migrations:
+    build:
+      context: ..
+      dockerfile: docker/migrations.Dockerfile
+  api:
+    build:
+      context: ..
+      dockerfile: docker/api.Dockerfile
+  web:
+    build:
+      context: ..
+      dockerfile: docker/web.Dockerfile
+  gateway:
+    build:
+      context: ..
+      dockerfile: docker/gateway.Dockerfile
+  runner:
+    build:
+      context: ..
+      dockerfile: docker/runner.Dockerfile
+  ssh-terminator:
+    build:
+      context: ..
+      dockerfile: docker/ssh-terminator.Dockerfile
+  channel-adapter:
+    build:
+      context: ..
+      dockerfile: docker/channel-adapter.Dockerfile

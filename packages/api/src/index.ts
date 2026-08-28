@@ -1,5 +1,6 @@
 export { createApiApp } from "./app";
 export type { CreateApiAppOptions } from "./app";
+export { ensureEditionDefaults } from "./edition-defaults";
 export type {
   SessionProvider,
   SessionUser,
@@ -12,7 +13,6 @@ export type { CryptoService } from "./lib/crypto-types";
 export type { ApiEnv } from "./types";
 export {
   initSession,
-  initEeApps,
   initCrypto,
   initRoleResolver,
   initRuleActionGate,

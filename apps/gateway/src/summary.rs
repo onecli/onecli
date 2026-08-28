@@ -14,12 +14,10 @@
 //! # Adding an app summarizer
 //!
 //! Implement [`RequestSummarizer`] on a zero-sized struct in its own submodule
-//! and register it in [`summarizer`]. OSS apps (Gmail, Google Calendar) live in
-//! `summary/`; cloud-only apps (Outlook, …) register in `cloud_summary` with no
-//! OSS change. Anything not matched falls back to [`generic::summarize`], which
-//! redacts secret-looking values and hard-caps length. This mirrors the
-//! per-provider plugin pattern in `granular_access` and the OSS/cloud provider
-//! split in `apps`.
+//! under `summary/` and register it in [`summarizer`]. Anything not matched
+//! falls back to [`generic::summarize`], which redacts secret-looking values
+//! and hard-caps length. This mirrors the per-provider plugin pattern in
+//! `granular_access`.
 
 use serde::{Deserialize, Serialize};
 
@@ -28,6 +26,8 @@ pub(crate) mod mime;
 mod generic;
 mod gmail;
 mod google_calendar;
+mod outlook_calendar;
+mod outlook_mail;
 
 // ── Limits ───────────────────────────────────────────────────────────────
 
@@ -147,15 +147,19 @@ pub(crate) trait RequestSummarizer: Sync {
 
 static GMAIL: gmail::Gmail = gmail::Gmail;
 static GOOGLE_CALENDAR: google_calendar::GoogleCalendar = google_calendar::GoogleCalendar;
+static OUTLOOK_MAIL: outlook_mail::OutlookMail = outlook_mail::OutlookMail;
+static OUTLOOK_CALENDAR: outlook_calendar::OutlookCalendar = outlook_calendar::OutlookCalendar;
 
-/// Resolve the summarizer for a OneCLI provider id. OSS providers match here;
-/// unknown ids fall through to the cloud registry (an empty stub in OSS builds),
-/// mirroring `apps::all_providers` chaining `ee_apps::providers`.
+/// Resolve the summarizer for a OneCLI provider id. `None` for providers
+/// without a dedicated summarizer — the caller falls back to the generic
+/// rendering.
 fn summarizer(provider: &str) -> Option<&'static dyn RequestSummarizer> {
     match provider {
         "gmail" => Some(&GMAIL),
         "google-calendar" => Some(&GOOGLE_CALENDAR),
-        _ => crate::cloud_summary::summarizer(provider),
+        "outlook-mail" => Some(&OUTLOOK_MAIL),
+        "outlook-calendar" => Some(&OUTLOOK_CALENDAR),
+        _ => None,
     }
 }
 
@@ -184,7 +188,7 @@ pub(crate) fn summarize_request(
         .unwrap_or_else(|| generic::summarize(&req))
 }
 
-// ── Shared helpers (used across submodules, including the cloud registry) ─────
+// ── Shared helpers (used across submodules) ──────────────────────────────────
 
 /// Truncate to at most `max` characters (not bytes), appending `…` when cut.
 pub(crate) fn clamp(s: &str, max: usize) -> String {
@@ -211,6 +215,21 @@ pub(crate) fn path_segment_before<'a>(path: &'a str, suffix: &str) -> Option<&'a
     path.strip_suffix(suffix)?
         .rsplit('/')
         .find(|s| !s.is_empty())
+}
+
+/// Comma-joined `emailAddress.address` values from a Microsoft Graph person array
+/// (`toRecipients`, `ccRecipients`, `attendees`, …), capped at `limit`. `None`
+/// when the field is absent or has no addresses. Shared by the Graph summarizers,
+/// which all carry people in this `{ emailAddress: { address } }` shape.
+fn email_addresses(value: &serde_json::Value, key: &str, limit: usize) -> Option<String> {
+    let list: Vec<&str> = value
+        .get(key)?
+        .as_array()?
+        .iter()
+        .filter_map(|p| p.get("emailAddress")?.get("address")?.as_str())
+        .take(limit)
+        .collect();
+    (!list.is_empty()).then(|| list.join(", "))
 }
 
 // ── Tests ────────────────────────────────────────────────────────────────────

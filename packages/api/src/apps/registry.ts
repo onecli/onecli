@@ -1,5 +1,7 @@
 import type { AppDefinition } from "./types";
-import { getEeApps } from "../providers";
+// This registry is CLIENT-SAFE: it is imported by client components, so it —
+// and every definition it pulls in — must stay free of Node builtins (OAuth
+// handlers that need them load them lazily via `await import("node:...")`).
 import { confluence } from "./confluence";
 import { docker } from "./docker";
 import { github } from "./github";
@@ -38,6 +40,24 @@ import { trello } from "./trello";
 import { monday } from "./monday";
 import { vercel } from "./vercel";
 import { jfrogArtifactory } from "./jfrog-artifactory";
+import { datadog } from "./datadog";
+import { outlookMail } from "./outlook-mail";
+import { outlookCalendar } from "./outlook-calendar";
+import { microsoftWord } from "./microsoft-word";
+import { microsoftOnenote } from "./microsoft-onenote";
+import { awsRole } from "./aws-role";
+import { affinity } from "./affinity";
+import { zoom } from "./zoom";
+import { sentry } from "./sentry";
+import { granola } from "./granola";
+import { hubspot } from "./hubspot";
+import { linear } from "./linear";
+import { attio } from "./attio";
+import { x } from "./x";
+import { fathom } from "./fathom";
+import { slack } from "./slack";
+import { fireflies } from "./fireflies";
+import { zohoCrm } from "./zoho-crm";
 
 const staticApps: AppDefinition[] = [
   gmail,
@@ -78,12 +98,27 @@ const staticApps: AppDefinition[] = [
   trello,
   vercel,
   jfrogArtifactory,
+  datadog,
+  outlookMail,
+  outlookCalendar,
+  microsoftWord,
+  microsoftOnenote,
+  awsRole,
+  affinity,
+  zoom,
+  sentry,
+  hubspot,
+  granola,
+  linear,
+  attio,
+  x,
+  fathom,
+  slack,
+  fireflies,
+  zohoCrm,
 ];
 
-export const getApps = (): AppDefinition[] => {
-  const apps = [...staticApps, ...getEeApps()];
-  return apps;
-};
+export const getApps = (): AppDefinition[] => [...staticApps];
 
 export const getApp = (id: string): AppDefinition | undefined =>
   getApps().find((app) => app.id === id);

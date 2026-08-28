@@ -1,0 +1,91 @@
+# CLA enforcement. On every pull request (and on PR comments), the
+# contributor-assistant action checks each commit author of the PR against the
+# signature store in onecli/cla-signatures. Unsigned contributors get a bot
+# comment asking them to sign by replying with the exact sign phrase; the
+# signature is recorded once, keyed by GitHub user id, and counts for every
+# repository that shares the store. `recheck` as a comment re-triggers the
+# check. The canonical agreement text lives in CLA.md at the repo root.
+#
+# SAFETY INVARIANT — pull_request_target runs on the base branch with
+# write-capable secrets. That is safe here ONLY because this workflow never
+# checks out or executes PR code. Do not add a checkout step.
+#
+# This file is hand-owned by this repo (not part of the upstream sync); its
+# authored source lives in the upstream dev repo. It requires the
+# ONECLI_CLA_SIGNATURES_PAT repository secret (fine-grained, scoped to
+# onecli/cla-signatures only, Contents read/write) — without it the check
+# fails on every PR.
+
+name: CLA
+
+on:
+  issue_comment:
+    types: [created]
+  pull_request_target:
+    types: [opened, closed, synchronize]
+
+permissions:
+  # The action re-runs the earlier failed workflow run once a signature lands.
+  actions: write
+  # Signatures live in the remote onecli/cla-signatures repo; this repo's
+  # token only ever reads. Writes go through ONECLI_CLA_SIGNATURES_PAT below.
+  contents: read
+  pull-requests: write
+  statuses: write
+
+# No concurrency block on purpose: after a contributor signs, the action uses
+# the Actions API (hence `actions: write`) to re-run the failed
+# pull_request_target run, and a cancel-in-progress group could cancel exactly
+# the run that is flipping the check green. issue_comment runs all share the
+# default-branch ref, which would make any ref-keyed group meaningless anyway.
+
+jobs:
+  cla:
+    name: CLA Assistant
+    # True in this repo; keeps forks (which lack the signature-store PAT)
+    # from running the check at all.
+    if: github.repository == 'onecli/onecli'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check CLA Signatures
+        # The two comment bodies mirror the action's DEFAULT `recheck` keyword
+        # and sign phrase exactly. If custom-pr-sign-comment is ever set, this
+        # expression must change in lockstep or signing comments are ignored.
+        if: (github.event.comment.body == 'recheck' || github.event.comment.body == 'I have read the CLA Document and I hereby sign the CLA') || github.event_name == 'pull_request_target'
+        # Pinned to the exact commit of the v2.6.1 tag: upstream archived the
+        # project in March 2026, so the pin will never need to move — and a SHA
+        # (unlike the tag) cannot be re-pointed if the now-unwatched org is
+        # ever compromised. Same reasoning as the digest-pinned ministack
+        # image in ci.yml.
+        uses: contributor-assistant/github-action@ca4a40a7d1004f18d9960b404b97e5f30a505a08 # v2.6.1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Fine-grained PAT scoped to the onecli/cla-signatures repository
+          # ONLY, with Contents read/write and nothing else. Required for all
+          # remote signature-store access (the store is a private repo, and
+          # the action routes both reads and writes through this token), so
+          # without this secret the check fails on every PR.
+          PERSONAL_ACCESS_TOKEN: ${{ secrets.ONECLI_CLA_SIGNATURES_PAT }}
+        with:
+          remote-organization-name: onecli
+          remote-repository-name: cla-signatures
+          # The action owns this file: it creates it on first need and matches
+          # signers by GitHub user id. Never pre-create or hand-edit it.
+          path-to-signatures: signatures/version1/cla.json
+          path-to-document: https://github.com/onecli/onecli/blob/main/CLA.md
+          # The signature branch must NOT be protected — the action pushes to it.
+          branch: main
+          # Empty on purpose. github-actions[bot] is hard-filtered by the
+          # action itself (user id 41898282), and release-please PRs here are
+          # opened with a personal token (release.yml: ONECLI_OSS_RELEASE), so
+          # their author signs like any human. Allowlist entries match exactly
+          # unless they contain `*`, which does an unanchored contains-match —
+          # if a machine account ever opens PRs, add its exact login here,
+          # never a wildcard.
+          allowlist: ""
+          # The action's default (true) locks EVERY closed PR — merged or not,
+          # CLA activity or not (verified in v2.6.1 main.ts: the only checks
+          # are action == 'closed' and this flag). On this public repo that
+          # would end all post-merge discussion, and the signature record of
+          # truth is the remote store, which a PR lock does not protect.
+          lock-pullrequest-aftermerge: "false"

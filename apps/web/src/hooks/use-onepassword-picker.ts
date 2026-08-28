@@ -14,7 +14,7 @@ import { queryKeys } from "@/lib/api/keys";
 const STALE_TIME = 60_000;
 
 /**
- * Whether 1Password is connected for this project. Deduped across every mounted
+ * Whether 1Password is connected for this workspace. Deduped across every mounted
  * SecretDialog (one query key), and gated by `enabled` so closed dialogs don't
  * poll the gateway.
  */

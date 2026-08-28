@@ -1,7 +1,7 @@
 //! 1Password vault provider.
 //!
 //! Owns the connection — the encrypted Service-Account token stored in
-//! `vault_connection` — plus the per-project session and a small resolve cache.
+//! `vault_connection` — plus the per-workspace session and a small resolve cache.
 //! 1Password is **not** a hostname-matched vault racer like Bitwarden; it is a
 //! *value source* for explicit secrets. A secret with `value_source =
 //! "onepassword"` carries an `op://vault/item/field` reference that the
@@ -106,7 +106,7 @@ impl OnePasswordVaultProvider {
                 for key in to_evict {
                     if let Some((_, session)) = sessions_clone.remove(&key) {
                         session.ref_cache.clear();
-                        info!(project_id = %key, "evicted idle 1Password session");
+                        info!(workspace_id = %key, "evicted idle 1Password session");
                     }
                 }
             }
@@ -119,18 +119,18 @@ impl OnePasswordVaultProvider {
         }
     }
 
-    /// Load an existing session from memory or DB. Returns `None` if the project
+    /// Load an existing session from memory or DB. Returns `None` if the workspace
     /// has never paired. Decrypts the SA token into memory (held for resolution).
     async fn load_session(
         &self,
-        project_id: &str,
+        workspace_id: &str,
     ) -> Result<Option<Arc<OnePasswordSession>>, VaultError> {
-        if let Some(session) = self.sessions.get(project_id) {
+        if let Some(session) = self.sessions.get(workspace_id) {
             *session.last_used.lock().expect("session lock poisoned") = Instant::now();
             return Ok(Some(Arc::clone(&session)));
         }
 
-        let row = match db::find_vault_connection(&self.pool, project_id, "onepassword").await {
+        let row = match db::find_vault_connection(&self.pool, workspace_id, "onepassword").await {
             Ok(Some(row)) => row,
             Ok(None) => return Ok(None),
             Err(e) => {
@@ -151,8 +151,8 @@ impl OnePasswordVaultProvider {
             .decrypt(&config.encrypted_service_account_token)
             .await
             .map_err(|e| {
-                warn!(project_id, "failed to decrypt service account token: {e}");
-                VaultError::Internal("token decryption failed — re-pair to fix".into())
+                warn!(workspace_id, "failed to decrypt service account token: {e}");
+                VaultError::Internal("token decryption failed; re-pair to fix".into())
             })?;
 
         let session = Arc::new(OnePasswordSession {
@@ -164,26 +164,26 @@ impl OnePasswordVaultProvider {
             last_ok: Mutex::new(None),
         });
         self.sessions
-            .insert(project_id.to_string(), Arc::clone(&session));
+            .insert(workspace_id.to_string(), Arc::clone(&session));
         Ok(Some(session))
     }
 
     // ── Value-source resolution (the secret-injection path) ──────────────
 
     /// Resolve an `op://vault/item/field` reference to its secret value for a
-    /// project's 1Password connection. Cached by `op_ref` with the same TTL /
+    /// workspace's 1Password connection. Cached by `op_ref` with the same TTL /
     /// cooldown as before. Errors classify so the caller can skip the secret the
     /// same way it skips one whose stored value fails to decrypt.
     ///
-    /// There is one 1Password connection per project, so the reference resolves
-    /// via that project's connection (the `project_id` session).
+    /// There is one 1Password connection per workspace, so the reference resolves
+    /// via that workspace's connection (the `workspace_id` session).
     pub(crate) async fn resolve_ref(
         &self,
-        project_id: &str,
+        workspace_id: &str,
         op_ref: &str,
     ) -> Result<String, VaultError> {
         let session = self
-            .load_session(project_id)
+            .load_session(workspace_id)
             .await?
             .ok_or_else(|| VaultError::NotFound("1Password is not connected".into()))?;
 
@@ -251,9 +251,9 @@ impl OnePasswordVaultProvider {
 
     pub(crate) async fn list_vaults(
         &self,
-        project_id: &str,
+        workspace_id: &str,
     ) -> Result<serde_json::Value, VaultError> {
-        let session = self.picker_session(project_id).await?;
+        let session = self.picker_session(workspace_id).await?;
         onepassword_api::list_vaults(&session.decrypted_sa_token)
             .await
             .map_err(op_err_to_vault)
@@ -261,10 +261,10 @@ impl OnePasswordVaultProvider {
 
     pub(crate) async fn list_items(
         &self,
-        project_id: &str,
+        workspace_id: &str,
         vault_id: &str,
     ) -> Result<serde_json::Value, VaultError> {
-        let session = self.picker_session(project_id).await?;
+        let session = self.picker_session(workspace_id).await?;
         onepassword_api::list_items(&session.decrypted_sa_token, vault_id)
             .await
             .map_err(op_err_to_vault)
@@ -272,11 +272,11 @@ impl OnePasswordVaultProvider {
 
     pub(crate) async fn list_fields(
         &self,
-        project_id: &str,
+        workspace_id: &str,
         vault_id: &str,
         item_id: &str,
     ) -> Result<serde_json::Value, VaultError> {
-        let session = self.picker_session(project_id).await?;
+        let session = self.picker_session(workspace_id).await?;
         onepassword_api::list_fields(&session.decrypted_sa_token, vault_id, item_id)
             .await
             .map_err(op_err_to_vault)
@@ -286,9 +286,9 @@ impl OnePasswordVaultProvider {
     /// the session so callers borrow the SA token instead of cloning it.
     async fn picker_session(
         &self,
-        project_id: &str,
+        workspace_id: &str,
     ) -> Result<Arc<OnePasswordSession>, VaultError> {
-        self.load_session(project_id)
+        self.load_session(workspace_id)
             .await?
             .ok_or_else(|| VaultError::NotFound("1Password is not connected".into()))
     }
@@ -302,7 +302,7 @@ impl VaultProvider for OnePasswordVaultProvider {
         "onepassword"
     }
 
-    async fn pair(&self, project_id: &str, params: &serde_json::Value) -> Result<PairResult> {
+    async fn pair(&self, workspace_id: &str, params: &serde_json::Value) -> Result<PairResult> {
         let token = params
             .get("service_account_token")
             .and_then(|v| v.as_str())
@@ -323,11 +323,11 @@ impl VaultProvider for OnePasswordVaultProvider {
             encrypted_service_account_token: encrypted,
         };
         let cd = serde_json::to_value(&config)?;
-        db::upsert_vault_connection(&self.pool, project_id, "onepassword", "paired", Some(&cd))
+        db::upsert_vault_connection(&self.pool, workspace_id, "onepassword", "paired", Some(&cd))
             .await?;
 
         // Drop any cached session so the next request reloads the new token.
-        self.sessions.remove(project_id);
+        self.sessions.remove(workspace_id);
         Ok(PairResult {
             display_name: Some("1Password".into()),
         })
@@ -338,14 +338,14 @@ impl VaultProvider for OnePasswordVaultProvider {
     /// so it never participates in the Bitwarden-style credential race.
     async fn request_credential(
         &self,
-        _project_id: &str,
+        _workspace_id: &str,
         _hostname: &str,
     ) -> Option<VaultCredential> {
         None
     }
 
-    async fn status(&self, project_id: &str) -> ProviderStatus {
-        let session = match self.load_session(project_id).await {
+    async fn status(&self, workspace_id: &str) -> ProviderStatus {
+        let session = match self.load_session(workspace_id).await {
             Ok(Some(s)) => s,
             Ok(None) => {
                 return ProviderStatus {
@@ -377,8 +377,8 @@ impl VaultProvider for OnePasswordVaultProvider {
         }
     }
 
-    async fn disconnect(&self, project_id: &str) -> Result<()> {
-        if let Some((_, session)) = self.sessions.remove(project_id) {
+    async fn disconnect(&self, workspace_id: &str) -> Result<()> {
+        if let Some((_, session)) = self.sessions.remove(workspace_id) {
             session.ref_cache.clear();
         }
         Ok(())

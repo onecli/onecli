@@ -4,8 +4,15 @@
 //! the request and stores a [`PendingApproval`] here. The SDK long-polls for
 //! pending approvals and submits decisions via the gateway API.
 //!
-//! OSS uses an in-memory `DashMap` backend with `tokio::sync` channels.
-//! Cloud swaps this module via `#[cfg(edition_cloud)]` to use Redis.
+//! Two backends behind one trait, selected at startup by [`create_store`]:
+//! Redis when `REDIS_HOST` is set (multi-instance deployments), else an
+//! in-memory `DashMap` with `tokio::sync` channels.
+//!
+//! **Redis decision delivery uses `BLPOP`** (not pub/sub) to avoid the
+//! subscribe-before-publish race condition that would lose decisions
+//! submitted between `store()` and `SUBSCRIBE`. New-approval notifications
+//! use pub/sub — the race there is benign (the SDK just polls again in 30s
+//! if a notification is missed).
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -35,7 +42,15 @@ const BROADCAST_CAPACITY: usize = 16;
 pub(crate) struct PendingApproval {
     pub id: String,
     pub organization_id: String,
-    pub project_id: String,
+    /// Deserialize-only rename compat (temporary — deletion recipe in
+    /// `compat.rs`): a post-rename binary reads PRE-rename Redis payloads
+    /// (`project_id`), so approvals created before a deploy that crosses the
+    /// rename survive onto new pods. The REVERSE is deliberately uncovered —
+    /// rows a new pod writes are invisible to not-yet-replaced old pods for
+    /// the rolling window, bounded by the 190s Redis TTL (and moot under the
+    /// planned scale-to-zero cutover).
+    #[serde(alias = "project_id")]
+    pub workspace_id: String,
     pub agent_id: String,
     pub agent_name: String,
     pub agent_identifier: Option<String>,
@@ -65,7 +80,8 @@ pub(crate) enum ApprovalDecision {
 ///
 /// `approved_by` carries the deciding user (from the gateway `AuthUser`), or
 /// `None` for a system auto-deny on timeout/cleanup. It is delivered to the
-/// held request so it can be stamped onto the request log.
+/// held request so it can be stamped onto the request log (for Redis it is
+/// serialized as the decision payload).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct DecisionOutcome {
     pub decision: ApprovalDecision,
@@ -75,37 +91,58 @@ pub(crate) struct DecisionOutcome {
 
 // ── DecisionReceiver ───────────────────────────────────────────────────
 
-/// Opaque receiver returned by [`ApprovalStore::prepare_wait`].
+/// One waiter behind [`ApprovalStore::prepare_wait`].
 ///
 /// Must be created **before** calling `store()` to avoid a race where the
-/// SDK submits a decision before the gateway starts listening.
-pub(crate) struct DecisionReceiver {
+/// SDK submits a decision before the gateway starts listening. A trait object
+/// rather than an enum so this shared module does not have to name every
+/// backend — each store constructs its own waiter, and the Redis waiter lives
+/// with its store in `crate::ee::ha`.
+#[async_trait]
+pub(crate) trait DecisionWait: Send {
+    /// Wait for a decision with timeout. Returns `None` on timeout (= auto-deny).
+    async fn wait(self: Box<Self>, timeout: Duration) -> Option<DecisionOutcome>;
+}
+
+/// Opaque receiver returned by [`ApprovalStore::prepare_wait`].
+pub(crate) type DecisionReceiver = Box<dyn DecisionWait>;
+
+/// In-memory waiter: a watch channel completed by `submit_decision`.
+struct InMemoryDecisionWait {
     rx: watch::Receiver<Option<DecisionOutcome>>,
 }
 
-impl DecisionReceiver {
-    /// Wait for a decision with timeout. Returns `None` on timeout (= auto-deny).
-    pub async fn wait(mut self, timeout: Duration) -> Option<DecisionOutcome> {
-        // Check if decision was already made (e.g., very fast SDK response).
-        if let Some(outcome) = self.rx.borrow().clone() {
-            return Some(outcome);
-        }
-
-        // Wait for the value to change, with timeout.
-        tokio::time::timeout(timeout, async {
-            loop {
-                // `changed()` returns Err if the sender is dropped (cleanup).
-                if self.rx.changed().await.is_err() {
-                    return None;
-                }
-                if let Some(outcome) = self.rx.borrow().clone() {
-                    return Some(outcome);
-                }
-            }
-        })
-        .await
-        .unwrap_or_default()
+#[async_trait]
+impl DecisionWait for InMemoryDecisionWait {
+    async fn wait(self: Box<Self>, timeout: Duration) -> Option<DecisionOutcome> {
+        wait_in_memory(self.rx, timeout).await
     }
+}
+
+/// Watch-channel wait: resolves as soon as `submit_decision` stores an outcome.
+async fn wait_in_memory(
+    mut rx: watch::Receiver<Option<DecisionOutcome>>,
+    timeout: Duration,
+) -> Option<DecisionOutcome> {
+    // Check if decision was already made (e.g., very fast SDK response).
+    if let Some(outcome) = rx.borrow().clone() {
+        return Some(outcome);
+    }
+
+    // Wait for the value to change, with timeout.
+    tokio::time::timeout(timeout, async {
+        loop {
+            // `changed()` returns Err if the sender is dropped (cleanup).
+            if rx.changed().await.is_err() {
+                return None;
+            }
+            if let Some(outcome) = rx.borrow().clone() {
+                return Some(outcome);
+            }
+        }
+    })
+    .await
+    .unwrap_or_default()
 }
 
 // ── ApprovalGuard ──────────────────────────────────────────────────────
@@ -122,7 +159,7 @@ impl DecisionReceiver {
 pub(crate) struct ApprovalGuard {
     approval_id: Option<String>,
     org_id: String,
-    project_id: String,
+    workspace_id: String,
     store: Arc<dyn ApprovalStore>,
     log_id: Option<String>,
     pool: Option<sqlx::PgPool>,
@@ -132,13 +169,13 @@ impl ApprovalGuard {
     pub fn new(
         id: String,
         org_id: String,
-        project_id: String,
+        workspace_id: String,
         store: Arc<dyn ApprovalStore>,
     ) -> Self {
         Self {
             approval_id: Some(id),
             org_id,
-            project_id,
+            workspace_id,
             store,
             log_id: None,
             pool: None,
@@ -163,11 +200,11 @@ impl Drop for ApprovalGuard {
         if let Some(id) = self.approval_id.take() {
             let store = Arc::clone(&self.store);
             let org_id = self.org_id.clone();
-            let project_id = self.project_id.clone();
+            let workspace_id = self.workspace_id.clone();
             let log_id = self.log_id.take();
             let pool = self.pool.take();
             tokio::spawn(async move {
-                store.remove(&org_id, &project_id, &id).await;
+                store.remove(&org_id, &workspace_id, &id).await;
                 if let (Some(log_id), Some(pool)) = (log_id, pool) {
                     if let Err(e) = sqlx::query(
                         "UPDATE request_logs \
@@ -197,7 +234,7 @@ pub(crate) trait ApprovalStore: Send + Sync {
     ///
     /// **Must be called before `store()`** to prevent a race condition where
     /// the SDK submits a decision before the gateway starts listening.
-    async fn prepare_wait(&self, org_id: &str, project_id: &str, id: &str) -> DecisionReceiver;
+    async fn prepare_wait(&self, org_id: &str, workspace_id: &str, id: &str) -> DecisionReceiver;
 
     /// Store a pending approval and notify long-polling waiters.
     ///
@@ -209,29 +246,27 @@ pub(crate) trait ApprovalStore: Send + Sync {
     async fn get_pending(
         &self,
         org_id: &str,
-        project_id: &str,
+        workspace_id: &str,
         id: &str,
     ) -> Option<PendingApproval>;
 
-    /// List all non-expired pending approvals for a project.
-    async fn list_pending(&self, org_id: &str, project_id: &str) -> Vec<PendingApproval>;
+    /// List all non-expired pending approvals for a workspace.
+    async fn list_pending(&self, org_id: &str, workspace_id: &str) -> Vec<PendingApproval>;
 
-    /// List all non-expired pending approvals across every project in an org.
-    /// Backs the cloud + onprem org poll (`GET /v1/org/approvals/pending`); OSS
-    /// has no org scope, so the method is compiled out there.
-    #[cfg(not(edition_oss))]
+    /// List all non-expired pending approvals across every workspace in an org.
+    /// Backs the org poll (`GET /v1/org/approvals/pending`, `ee/org_routes`).
     async fn list_pending_for_org(&self, org_id: &str) -> Vec<PendingApproval>;
 
     /// Remove a pending approval (after decision or expiry).
-    async fn remove(&self, org_id: &str, project_id: &str, id: &str);
+    async fn remove(&self, org_id: &str, workspace_id: &str, id: &str);
 
-    /// Block until a new approval arrives for this project, or timeout.
+    /// Block until a new approval arrives for this workspace, or timeout.
     /// Returns `true` if notified, `false` on timeout.
-    async fn wait_for_new(&self, org_id: &str, project_id: &str, timeout: Duration) -> bool;
+    async fn wait_for_new(&self, org_id: &str, workspace_id: &str, timeout: Duration) -> bool;
 
-    /// Block until a new approval arrives in any of the org's projects, or
-    /// timeout. Org-scoped counterpart of [`wait_for_new`]; OSS-excluded.
-    #[cfg(not(edition_oss))]
+    /// Block until a new approval arrives in any of the org's workspaces, or
+    /// timeout. Org-scoped counterpart of [`wait_for_new`]; backs the org
+    /// long-poll (`ee/org_routes`).
     async fn wait_for_new_for_org(&self, org_id: &str, timeout: Duration) -> bool;
 
     /// Submit a decision for a pending approval. Wakes the held request.
@@ -240,7 +275,7 @@ pub(crate) trait ApprovalStore: Send + Sync {
     async fn submit_decision(
         &self,
         org_id: &str,
-        project_id: &str,
+        workspace_id: &str,
         id: &str,
         decision: ApprovalDecision,
         approved_by: Option<String>,
@@ -253,7 +288,7 @@ struct InMemoryApprovalStore {
     /// Pending approvals: approval_id → PendingApproval.
     pending: DashMap<String, PendingApproval>,
 
-    /// Long-polling wake-up: project_id → broadcast::Sender<()>.
+    /// Long-polling wake-up: workspace_id → broadcast::Sender<()>.
     new_notify: DashMap<String, broadcast::Sender<()>>,
 
     /// Decision delivery: approval_id → watch::Sender<Option<DecisionOutcome>>.
@@ -272,24 +307,23 @@ impl InMemoryApprovalStore {
 
 #[async_trait]
 impl ApprovalStore for InMemoryApprovalStore {
-    async fn prepare_wait(&self, _org_id: &str, _project_id: &str, id: &str) -> DecisionReceiver {
+    async fn prepare_wait(&self, _org_id: &str, _workspace_id: &str, id: &str) -> DecisionReceiver {
         let (tx, rx) = watch::channel(None);
         self.decisions.insert(id.to_string(), tx);
-        DecisionReceiver { rx }
+        Box::new(InMemoryDecisionWait { rx })
     }
 
     async fn store(&self, approval: &PendingApproval) -> anyhow::Result<()> {
         self.pending.insert(approval.id.clone(), approval.clone());
 
-        // Notify any long-pollers for this project.
-        let notify_key = format!("{}:{}", approval.organization_id, approval.project_id);
+        // Notify any long-pollers for this workspace.
+        let notify_key = format!("{}:{}", approval.organization_id, approval.workspace_id);
         if let Some(sender) = self.new_notify.get(&notify_key) {
             let _ = sender.send(()); // ok if no receivers
         }
 
-        // Wake a cross-project org poll too (keyed by org only — distinct from
-        // the "{org}:{project}" per-project key, so the two never collide).
-        #[cfg(not(edition_oss))]
+        // Wake a cross-workspace org poll too (keyed by org only — distinct from
+        // the "{org}:{workspace}" per-workspace key, so the two never collide).
         if let Some(sender) = self.new_notify.get(&approval.organization_id) {
             let _ = sender.send(());
         }
@@ -300,7 +334,7 @@ impl ApprovalStore for InMemoryApprovalStore {
     async fn get_pending(
         &self,
         _org_id: &str,
-        _project_id: &str,
+        _workspace_id: &str,
         id: &str,
     ) -> Option<PendingApproval> {
         let entry = self.pending.get(id)?;
@@ -313,16 +347,15 @@ impl ApprovalStore for InMemoryApprovalStore {
         }
     }
 
-    async fn list_pending(&self, _org_id: &str, project_id: &str) -> Vec<PendingApproval> {
+    async fn list_pending(&self, _org_id: &str, workspace_id: &str) -> Vec<PendingApproval> {
         let now = unix_now();
         self.pending
             .iter()
-            .filter(|e| e.project_id == project_id && e.expires_at > now)
+            .filter(|e| e.workspace_id == workspace_id && e.expires_at > now)
             .map(|e| e.value().clone())
             .collect()
     }
 
-    #[cfg(not(edition_oss))]
     async fn list_pending_for_org(&self, org_id: &str) -> Vec<PendingApproval> {
         let now = unix_now();
         self.pending
@@ -332,13 +365,13 @@ impl ApprovalStore for InMemoryApprovalStore {
             .collect()
     }
 
-    async fn remove(&self, _org_id: &str, _project_id: &str, id: &str) {
+    async fn remove(&self, _org_id: &str, _workspace_id: &str, id: &str) {
         self.pending.remove(id);
         self.decisions.remove(id);
     }
 
-    async fn wait_for_new(&self, org_id: &str, project_id: &str, timeout: Duration) -> bool {
-        let notify_key = format!("{org_id}:{project_id}");
+    async fn wait_for_new(&self, org_id: &str, workspace_id: &str, timeout: Duration) -> bool {
+        let notify_key = format!("{org_id}:{workspace_id}");
         // Get or create broadcast sender, subscribe, then drop the guard
         // before awaiting (critical: never hold DashMap guard across .await).
         let mut rx = {
@@ -352,7 +385,6 @@ impl ApprovalStore for InMemoryApprovalStore {
         tokio::time::timeout(timeout, rx.recv()).await.is_ok()
     }
 
-    #[cfg(not(edition_oss))]
     async fn wait_for_new_for_org(&self, org_id: &str, timeout: Duration) -> bool {
         // Org-scoped notify keyed by the bare org id (see `store`). Never held
         // across an await: subscribe under the guard, drop it, then wait.
@@ -370,7 +402,7 @@ impl ApprovalStore for InMemoryApprovalStore {
     async fn submit_decision(
         &self,
         _org_id: &str,
-        _project_id: &str,
+        _workspace_id: &str,
         id: &str,
         decision: ApprovalDecision,
         approved_by: Option<String>,
@@ -389,7 +421,7 @@ impl ApprovalStore for InMemoryApprovalStore {
 }
 
 /// Current unix timestamp in seconds.
-fn unix_now() -> u64 {
+pub(crate) fn unix_now() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
@@ -398,6 +430,7 @@ fn unix_now() -> u64 {
 
 /// Background task that cleans up expired approvals every 30 seconds.
 /// Sends `Deny` through decision channels to unblock held requests.
+/// In-memory only — the Redis backend expires keys via their TTLs.
 fn start_cleanup_task(store: Arc<InMemoryApprovalStore>) {
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(Duration::from_secs(CLEANUP_INTERVAL_SECS));
@@ -426,17 +459,27 @@ fn start_cleanup_task(store: Arc<InMemoryApprovalStore>) {
                 debug!(count = expired.len(), "cleaned up expired approvals");
             }
 
-            // Prune notification channels for projects with no pending approvals.
+            // Prune notification channels for workspaces with no pending approvals.
             // Prevents unbounded growth of the new_notify map over time.
-            store
-                .new_notify
-                .retain(|project_id, _| store.pending.iter().any(|e| e.project_id == *project_id));
+            store.new_notify.retain(|workspace_id, _| {
+                store
+                    .pending
+                    .iter()
+                    .any(|e| e.workspace_id == *workspace_id)
+            });
         }
     });
 }
 
-/// Create the in-memory approval store and start the cleanup task.
+/// Create the approval store for this deployment: Redis (+BLPOP delivery) when
+/// `REDIS_HOST` is set, else the in-memory store with its cleanup task. The
+/// Redis backend is licensed multi-instance operation (`crate::ee::ha`);
+/// unlicensed deployments never reach it — the startup entitlement check
+/// refuses a Redis-configured unlicensed gateway before stores are built.
 pub(crate) async fn create_store() -> anyhow::Result<Arc<dyn ApprovalStore>> {
+    if crate::cache::redis_host_configured() {
+        return crate::ee::ha::redis_approval_store().await;
+    }
     let store = Arc::new(InMemoryApprovalStore::new());
     start_cleanup_task(Arc::clone(&store));
     Ok(store)
@@ -454,12 +497,12 @@ mod tests {
 
     const TEST_ORG: &str = "org-1";
 
-    fn make_approval(id: &str, project_id: &str) -> PendingApproval {
+    fn make_approval(id: &str, workspace_id: &str) -> PendingApproval {
         let now = unix_now();
         PendingApproval {
             id: id.to_string(),
             organization_id: TEST_ORG.to_string(),
-            project_id: project_id.to_string(),
+            workspace_id: workspace_id.to_string(),
             agent_id: "agent-1".to_string(),
             agent_name: "Test Agent".to_string(),
             agent_identifier: Some("test-agent".to_string()),
@@ -475,11 +518,11 @@ mod tests {
         }
     }
 
-    fn make_expired_approval(id: &str, project_id: &str) -> PendingApproval {
+    fn make_expired_approval(id: &str, workspace_id: &str) -> PendingApproval {
         PendingApproval {
             id: id.to_string(),
             organization_id: TEST_ORG.to_string(),
-            project_id: project_id.to_string(),
+            workspace_id: workspace_id.to_string(),
             agent_id: "agent-1".to_string(),
             agent_name: "Test Agent".to_string(),
             agent_identifier: Some("test-agent".to_string()),
@@ -725,45 +768,42 @@ mod tests {
         assert!(!got_new);
     }
 
-    // ── Org-scoped listing / long-poll (cloud + onprem; OSS-excluded) ───────
+    // ── Org-scoped listing / long-poll ──────────────────────────────────────
 
-    #[cfg(not(edition_oss))]
-    fn make_approval_in_org(id: &str, org_id: &str, project_id: &str) -> PendingApproval {
+    fn make_approval_in_org(id: &str, org_id: &str, workspace_id: &str) -> PendingApproval {
         PendingApproval {
             organization_id: org_id.to_string(),
-            ..make_approval(id, project_id)
+            ..make_approval(id, workspace_id)
         }
     }
 
-    #[cfg(not(edition_oss))]
     #[tokio::test]
-    async fn list_pending_for_org_unions_projects() {
+    async fn list_pending_for_org_unions_workspaces() {
         let store = new_store().await;
-        let a1 = make_approval("a1", "proj-1");
-        let a2 = make_approval("a2", "proj-2");
+        let a1 = make_approval("a1", "ws-1");
+        let a2 = make_approval("a2", "ws-2");
 
-        let _ = store.prepare_wait(TEST_ORG, "proj-1", "a1").await;
+        let _ = store.prepare_wait(TEST_ORG, "ws-1", "a1").await;
         store.store(&a1).await.unwrap();
-        let _ = store.prepare_wait(TEST_ORG, "proj-2", "a2").await;
+        let _ = store.prepare_wait(TEST_ORG, "ws-2", "a2").await;
         store.store(&a2).await.unwrap();
 
         let mut pending = store.list_pending_for_org(TEST_ORG).await;
         pending.sort_by(|a, b| a.id.cmp(&b.id));
         assert_eq!(pending.len(), 2);
-        assert_eq!((&*pending[0].id, &*pending[0].project_id), ("a1", "proj-1"));
-        assert_eq!((&*pending[1].id, &*pending[1].project_id), ("a2", "proj-2"));
+        assert_eq!((&*pending[0].id, &*pending[0].workspace_id), ("a1", "ws-1"));
+        assert_eq!((&*pending[1].id, &*pending[1].workspace_id), ("a2", "ws-2"));
     }
 
-    #[cfg(not(edition_oss))]
     #[tokio::test]
     async fn list_pending_for_org_isolates_orgs() {
         let store = new_store().await;
-        let mine = make_approval_in_org("a1", "org-1", "proj-1");
-        let other = make_approval_in_org("a2", "org-2", "proj-9");
+        let mine = make_approval_in_org("a1", "org-1", "ws-1");
+        let other = make_approval_in_org("a2", "org-2", "ws-9");
 
-        let _ = store.prepare_wait("org-1", "proj-1", "a1").await;
+        let _ = store.prepare_wait("org-1", "ws-1", "a1").await;
         store.store(&mine).await.unwrap();
-        let _ = store.prepare_wait("org-2", "proj-9", "a2").await;
+        let _ = store.prepare_wait("org-2", "ws-9", "a2").await;
         store.store(&other).await.unwrap();
 
         let pending = store.list_pending_for_org("org-1").await;
@@ -771,16 +811,15 @@ mod tests {
         assert_eq!(pending[0].id, "a1");
     }
 
-    #[cfg(not(edition_oss))]
     #[tokio::test]
     async fn list_pending_for_org_filters_expired() {
         let store = new_store().await;
-        let valid = make_approval("a1", "proj-1");
-        let expired = make_expired_approval("a2", "proj-2");
+        let valid = make_approval("a1", "ws-1");
+        let expired = make_expired_approval("a2", "ws-2");
 
-        let _ = store.prepare_wait(TEST_ORG, "proj-1", "a1").await;
+        let _ = store.prepare_wait(TEST_ORG, "ws-1", "a1").await;
         store.store(&valid).await.unwrap();
-        let _ = store.prepare_wait(TEST_ORG, "proj-2", "a2").await;
+        let _ = store.prepare_wait(TEST_ORG, "ws-2", "a2").await;
         store.store(&expired).await.unwrap();
 
         let pending = store.list_pending_for_org(TEST_ORG).await;
@@ -788,16 +827,15 @@ mod tests {
         assert_eq!(pending[0].id, "a1");
     }
 
-    #[cfg(not(edition_oss))]
     #[tokio::test]
-    async fn wait_for_new_for_org_notified_on_store_in_any_project() {
+    async fn wait_for_new_for_org_notified_on_store_in_any_workspace() {
         let store = new_store().await;
 
         let store2 = Arc::clone(&store);
         tokio::spawn(async move {
             tokio::time::sleep(Duration::from_millis(50)).await;
-            let approval = make_approval("a1", "proj-7");
-            let _ = store2.prepare_wait(TEST_ORG, "proj-7", "a1").await;
+            let approval = make_approval("a1", "ws-7");
+            let _ = store2.prepare_wait(TEST_ORG, "ws-7", "a1").await;
             store2.store(&approval).await.unwrap();
         });
 

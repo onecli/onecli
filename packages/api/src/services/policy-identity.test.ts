@@ -1,22 +1,22 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 // Focused unit tests for step-6 identity authz + plan-gate: the level restriction
-// (project → agent/any; org → user/group/any), the org-scoped
+// (workspace → agent/any; org → user/group/any), the org-scoped
 // ownership check (the IDOR guard), and the directory-identity plan token. Both
-// helpers are DB-light, so we mock @onecli/db with the project lookup + the
+// helpers are DB-light, so we mock @onecli/db with the workspace lookup + the
 // per-kind counts (each returns a fixed number the test sets to match/mismatch
 // the ids it passes).
 const state = vi.hoisted(() => ({
-  projectOrg: "org-1" as string | null,
+  workspaceOrg: "org-1" as string | null,
   counts: { agent: 0, user: 0, group: 0 },
 }));
 
 vi.mock("@onecli/db", () => ({
   Prisma: { JsonNull: "JsonNull" },
   db: {
-    project: {
+    workspace: {
       findUnique: async () =>
-        state.projectOrg ? { organizationId: state.projectOrg } : null,
+        state.workspaceOrg ? { organizationId: state.workspaceOrg } : null,
     },
     agent: { count: async () => state.counts.agent },
     organizationMember: { count: async () => state.counts.user },
@@ -28,7 +28,7 @@ const { assertIdentitiesValid, gatedActions, rowHasDirectoryIdentity } =
   await import("./policy-service");
 
 const orgScope = { scope: "organization" as const, organizationId: "org-1" };
-const projectScope = { scope: "project" as const, projectId: "proj-1" };
+const workspaceScope = { scope: "workspace" as const, workspaceId: "proj-1" };
 
 describe("gatedActions", () => {
   it("emits identity_directory for a directory identity", () => {
@@ -55,7 +55,7 @@ describe("gatedActions", () => {
 
 describe("assertIdentitiesValid — level restriction", () => {
   beforeEach(() => {
-    state.projectOrg = "org-1";
+    state.workspaceOrg = "org-1";
     // One owned row per kind so the ownership check passes for single-id cases.
     state.counts = { agent: 1, user: 1, group: 1 };
   });
@@ -63,22 +63,22 @@ describe("assertIdentitiesValid — level restriction", () => {
   it("allows 'any' (empty identities) at either level", async () => {
     await expect(assertIdentitiesValid(orgScope, [])).resolves.toBeUndefined();
     await expect(
-      assertIdentitiesValid(projectScope, []),
+      assertIdentitiesValid(workspaceScope, []),
     ).resolves.toBeUndefined();
   });
 
-  it("rejects a directory identity on a project rule", async () => {
+  it("rejects a directory identity on a workspace rule", async () => {
     await expect(
-      assertIdentitiesValid(projectScope, [{ type: "group", id: "g1" }]),
+      assertIdentitiesValid(workspaceScope, [{ type: "group", id: "g1" }]),
     ).rejects.toMatchObject({ code: "UNPROCESSABLE" });
     await expect(
-      assertIdentitiesValid(projectScope, [{ type: "user", id: "u1" }]),
+      assertIdentitiesValid(workspaceScope, [{ type: "user", id: "u1" }]),
     ).rejects.toMatchObject({ code: "UNPROCESSABLE" });
   });
 
-  it("rejects a mixed agent + directory identity on a project rule", async () => {
+  it("rejects a mixed agent + directory identity on a workspace rule", async () => {
     await expect(
-      assertIdentitiesValid(projectScope, [
+      assertIdentitiesValid(workspaceScope, [
         { type: "agent", id: "a1" },
         { type: "group", id: "g1" },
       ]),
@@ -91,9 +91,9 @@ describe("assertIdentitiesValid — level restriction", () => {
     ).rejects.toMatchObject({ code: "UNPROCESSABLE" });
   });
 
-  it("allows an agent on a project rule and a group on an org rule", async () => {
+  it("allows an agent on a workspace rule and a group on an org rule", async () => {
     await expect(
-      assertIdentitiesValid(projectScope, [{ type: "agent", id: "a1" }]),
+      assertIdentitiesValid(workspaceScope, [{ type: "agent", id: "a1" }]),
     ).resolves.toBeUndefined();
     await expect(
       assertIdentitiesValid(orgScope, [{ type: "group", id: "g1" }]),
@@ -103,7 +103,7 @@ describe("assertIdentitiesValid — level restriction", () => {
 
 describe("assertIdentitiesValid — ownership (IDOR guard)", () => {
   beforeEach(() => {
-    state.projectOrg = "org-1";
+    state.workspaceOrg = "org-1";
     state.counts = { agent: 0, user: 0, group: 0 };
   });
 
@@ -134,10 +134,10 @@ describe("assertIdentitiesValid — ownership (IDOR guard)", () => {
     ).rejects.toMatchObject({ code: "UNPROCESSABLE" });
   });
 
-  it("fails BAD_REQUEST when the project's org can't be resolved", async () => {
-    state.projectOrg = null;
+  it("fails BAD_REQUEST when the workspace's org can't be resolved", async () => {
+    state.workspaceOrg = null;
     await expect(
-      assertIdentitiesValid(projectScope, [{ type: "agent", id: "a1" }]),
+      assertIdentitiesValid(workspaceScope, [{ type: "agent", id: "a1" }]),
     ).rejects.toMatchObject({ code: "BAD_REQUEST" });
   });
 });

@@ -1,6 +1,7 @@
 import type { ErrorHandler } from "hono";
 import type { ContentfulStatusCode } from "hono/utils/http-status";
 import { ServiceError, type ServiceErrorCode } from "../services/errors";
+import { SlackApiError } from "../services/channels/providers/slack/slack-api";
 import { logger } from "../lib/logger";
 
 const STATUS_MAP = {
@@ -10,6 +11,7 @@ const STATUS_MAP = {
   CONFLICT: 409,
   FORBIDDEN: 403,
   GONE: 410,
+  RATE_LIMITED: 429,
 } as const satisfies Record<ServiceErrorCode, ContentfulStatusCode>;
 
 const ERROR_TYPE_MAP: Record<ServiceErrorCode, string> = {
@@ -19,6 +21,7 @@ const ERROR_TYPE_MAP: Record<ServiceErrorCode, string> = {
   CONFLICT: "invalid_request_error",
   FORBIDDEN: "authentication_error",
   GONE: "invalid_request_error",
+  RATE_LIMITED: "rate_limit_error",
 };
 
 const DOCS_URL = "https://onecli.sh/docs/api-reference";
@@ -40,6 +43,21 @@ export const errorHandler: ErrorHandler = (err, c) => {
         },
       },
       STATUS_MAP[err.code] ?? (500 as const),
+    );
+  }
+  // A Slack API refusal reaching here is a bad-input outcome the user can act
+  // on (an expired token, `managed_app_limit_reached`, …), not a server bug —
+  // surface Slack's own code as a 422 rather than a blank 500. The plan
+  // requires these codes reach the user verbatim.
+  if (err instanceof SlackApiError) {
+    return c.json(
+      {
+        error: {
+          message: `Slack rejected the request (${err.code}).`,
+          type: "validation_error",
+        },
+      },
+      422,
     );
   }
   logger.error({ err }, "unhandled api error");

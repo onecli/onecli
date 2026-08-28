@@ -1,0 +1,30 @@
+{
+  "name": "@onecli/api-server",
+  "version": "0.0.0",
+  "private": true,
+  "license": "Apache-2.0",
+  "type": "module",
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "build": "node build.mjs",
+    "start": "node dist/index.mjs",
+    "check-types": "tsc --noEmit",
+    "lint": "eslint --max-warnings 0",
+    "lint:fix": "eslint --fix --max-warnings 0"
+  },
+  "dependencies": {
+    "@hono/node-server": "^1.14.1",
+    "@onecli/api": "workspace:*",
+    "@onecli/db": "workspace:*",
+    "hono": "^4.12.0",
+    "jose": "^6.0.11",
+    "pino": "^10.3.1"
+  },
+  "devDependencies": {
+    "@onecli/eslint-config": "workspace:*",
+    "@onecli/typescript-config": "workspace:*",
+    "esbuild": "^0.28.0",
+    "tsx": "^4.19.4",
+    "typescript": "^5.8.3"
+  }
+}

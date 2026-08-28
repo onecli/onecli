@@ -266,7 +266,6 @@ export const githubApp: AppDefinition = {
       };
     },
   },
-  available: true,
   configurable: {
     fields: [
       {

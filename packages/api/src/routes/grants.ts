@@ -1,7 +1,7 @@
 import { Hono } from "hono";
 import type { ApiEnv } from "../types";
 import type { AuthContext } from "../providers";
-import { authMiddleware, requireProjectId } from "../middleware/auth";
+import { authMiddleware, requireWorkspaceId } from "../middleware/auth";
 import { ServiceError } from "../services/errors";
 import {
   withAudit,
@@ -24,7 +24,7 @@ import {
 } from "../services/grants-service";
 
 // ── The attach-model grants surface (plans/project-attach-model.md §4.3) ────
-// Project scope only — org policy stays the rules surface. Two orientations
+// Workspace scope only — org policy stays the rules surface. Two orientations
 // over the same service: the agent side (the step-3 tabs) composes onto
 // /v1/agents, the connection side (the step-4 dialog) onto /v1/connections,
 // following the policy-reflect mount pattern. Every mutation wraps withAudit,
@@ -32,12 +32,12 @@ import {
 // gateway injects and decides, so the flush is load-bearing.
 
 const grantScope = (auth: AuthContext): GrantScope => ({
-  projectId: requireProjectId(auth),
+  workspaceId: requireWorkspaceId(auth),
   organizationId: auth.organizationId,
 });
 
 const auditBase = (auth: AuthContext) => ({
-  projectId: requireProjectId(auth),
+  workspaceId: requireWorkspaceId(auth),
   userId: auth.userId,
   userEmail: auth.userEmail,
   service: AUDIT_SERVICES.GRANT,

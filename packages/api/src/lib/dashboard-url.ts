@@ -1,4 +1,4 @@
-import { APP_URL } from "./env";
+import { appOrigin } from "./public-origins";
 import { configuredAppUrl } from "./app-origin";
 
 /**
@@ -17,11 +17,11 @@ import { configuredAppUrl } from "./app-origin";
  */
 export const dashboardUrl = (
   path: string,
-  scope?: { projectId?: string; organizationId?: string },
+  scope?: { workspaceId?: string; organizationId?: string },
   fallbackOrigin?: string,
 ): string => {
-  const base = configuredAppUrl() ?? fallbackOrigin ?? APP_URL;
-  if (scope?.projectId) return `${base}/p/${scope.projectId}${path}`;
+  const base = configuredAppUrl() ?? fallbackOrigin ?? appOrigin();
+  if (scope?.workspaceId) return `${base}/w/${scope.workspaceId}${path}`;
   if (scope?.organizationId)
     return `${base}/org/${scope.organizationId}${path}`;
   return `${base}${path}`;

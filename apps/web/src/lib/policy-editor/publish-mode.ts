@@ -1,24 +1,19 @@
-import { policy } from "@/lib/api";
 import type { PageScope } from "@/lib/api";
 
 /**
- * The OSS publish-mode seam (step 9.5): IMMEDIATE APPLY. OSS's editor has no
- * staged-publish surface (§2.9 keeps preview/publish in OneCLI Cloud), so
- * every write publishes right away — matching the legacy OSS editor, where
- * every change was live on save. Chained inside the mutation, so the button's
- * pending state covers write + publish and the cache invalidation that follows
- * sees the published truth.
+ * The publish-mode seam for the policy editor.
  *
- * If the publish half ever fails, the write IS staged in the draft; the next
- * successful write publishes the WHOLE draft (snapshot semantics), so the
- * state self-heals. The EE editions alias this file to
- * `@/ee/policy-editor/publish-mode` (per-scope since attach-model step 2:
- * project write-through, org staged).
+ * ORG scope is STAGED: writes land in the draft and publishing is the explicit
+ * reviewed Apply Changes flow (the staged chrome). Org is now the only scope
+ * this editor serves — attach-model step 6 removed the workspace console, and
+ * with it the workspace write-through arm that used to publish on every write.
+ * Workspace-level publishing did not disappear: it moved server-side, into the
+ * grants API's atomic write-then-publish transaction.
  */
-export const afterPolicyWrite = async (scope: PageScope): Promise<void> => {
-  await policy.publish(scope);
-};
+export const afterPolicyWrite: (scope: PageScope) => Promise<void> = () =>
+  // Staged by design — nothing to do after a write.
+  Promise.resolve();
 
-/** The rule drawer's subtitle — OSS applies writes immediately (no draft). */
+/** The rule drawer's subtitle. */
 export const ruleSheetDescription: (scope: PageScope) => string = () =>
-  "Who this applies to, what it targets, and what happens. Changes apply immediately.";
+  "Who this applies to, what it targets, and what happens. Saved as a draft. Publish to enforce.";

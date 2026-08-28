@@ -46,7 +46,7 @@ export const DeleteRuleDialog = ({
             {!rule
               ? ""
               : isGrant
-                ? `The agents named by “${rule.name}” will stop receiving this credential — requests that need it will fail.`
+                ? `The agents named by “${rule.name}” will stop receiving this credential. Requests that need it will fail.`
                 : `“${rule.name}” will be removed.`}
           </AlertDialogDescription>
         </AlertDialogHeader>

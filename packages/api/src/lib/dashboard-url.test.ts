@@ -47,11 +47,15 @@ describe("dashboardUrl", () => {
     );
   });
 
-  it("keeps the project- and org-scoped path shapes", () => {
+  it("keeps the workspace- and org-scoped path shapes", () => {
     unconfigured();
     expect(
-      dashboardUrl("/connections", { projectId: "p1" }, "https://box.example"),
-    ).toBe("https://box.example/p/p1/connections");
+      dashboardUrl(
+        "/connections",
+        { workspaceId: "p1" },
+        "https://box.example",
+      ),
+    ).toBe("https://box.example/w/p1/connections");
     expect(
       dashboardUrl("/billing", { organizationId: "o1" }, "https://box.example"),
     ).toBe("https://box.example/org/o1/billing");

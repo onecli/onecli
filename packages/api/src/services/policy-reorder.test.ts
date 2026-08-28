@@ -2,7 +2,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 // The server half of manual ordering: `reorderPolicyRules` must (a) take the
 // per-scope advisory lock BEFORE reading, (b) fence its read to the caller's
-// scope (a foreign — e.g. another org's/project's — rule id can never pass the
+// scope (a foreign — e.g. another org's/workspace's — rule id can never pass the
 // membership check: cross-scope isolation at the QUERY level), (c) reject any
 // non-permutation (missing / duplicate / foreign ids) with 409 CONFLICT, and
 // (d) write dense 1-based priorities in the given order. A concurrent lockless
@@ -33,7 +33,7 @@ const FakeKnownRequestError = vi.hoisted(
 
 const dtoRow = vi.hoisted(() => (id: string, priority: number) => ({
   id,
-  scope: "project",
+  scope: "workspace",
   status: "draft",
   generation: 0,
   priority,
@@ -103,7 +103,7 @@ vi.mock("@onecli/db", () => {
 
 const { reorderPolicyRules } = await import("./policy-service");
 
-const SCOPE = { projectId: "p1" };
+const SCOPE = { workspaceId: "p1" };
 
 beforeEach(() => {
   state.draftIds = ["a", "b", "c"];
@@ -130,8 +130,8 @@ describe("reorderPolicyRules", () => {
     await reorderPolicyRules(SCOPE, ["a", "b", "c"]);
 
     expect(state.lastWhere).toMatchObject({
-      scope: "project",
-      projectId: "p1",
+      scope: "workspace",
+      workspaceId: "p1",
       status: "draft",
       isDefault: false,
     });

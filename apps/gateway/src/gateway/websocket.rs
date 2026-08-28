@@ -123,10 +123,10 @@ pub(super) async fn handle_websocket(
     // never blocked. WebSocket upgrades are GET. Matches on `policy_host`
     // (pre-rewrite + port-stripped), NOT the port-bearing/rewritten `host`.
     if let Some(provider) =
-        crate::apps::app_availability_block(policy_host, &path, &rules.available_apps)
+        crate::ee::principals::app_availability_block(policy_host, &path, &rules.available_apps)
     {
-        warn!(host = %policy_host, path = %path, provider = %provider, "WebSocket app unavailable to project — refusing request");
-        return Ok(response::app_unavailable(
+        warn!(host = %policy_host, path = %path, provider = %provider, "WebSocket app unavailable to workspace — refusing request");
+        return Ok(crate::ee::response::app_unavailable(
             &provider,
             "GET",
             &path,
@@ -158,7 +158,7 @@ pub(super) async fn handle_websocket(
                 "GET",
                 &path,
                 host,
-                proxy_ctx.project_id.as_deref(),
+                proxy_ctx.workspace_id.as_deref(),
             ));
         }
         PolicyDecision::Blocked { rule_name } => {
@@ -167,7 +167,7 @@ pub(super) async fn handle_websocket(
                 "GET",
                 &path,
                 rule_name,
-                proxy_ctx.project_id.as_deref(),
+                proxy_ctx.workspace_id.as_deref(),
             ));
         }
         PolicyDecision::RateLimited {
@@ -185,16 +185,16 @@ pub(super) async fn handle_websocket(
                 "GET",
                 &path,
                 "Manual approval required",
-                proxy_ctx.project_id.as_deref(),
+                proxy_ctx.workspace_id.as_deref(),
             ));
         }
         PolicyDecision::Allow => {}
     }
 
-    // Claim mode: block non-LLM WebSocket upgrades until the project is claimed
-    // (cloud-only; no-op in OSS). injection_count is 0 here, so quota is skipped.
-    // WebSocket upgrades are GET with no inspectable body (the resource guard
-    // is a no-op here; Dropbox/folder traffic never arrives over WebSocket).
+    // Run the pre-forward guards (budget, granular access) on the upgrade.
+    // injection_count is 0 here, so quota is skipped. WebSocket upgrades are
+    // GET with no inspectable body (the resource guard is a no-op here;
+    // Dropbox/folder traffic never arrives over WebSocket).
     if let Some(resp) = hooks::pre_forward(
         rules,
         proxy_ctx,
@@ -231,7 +231,7 @@ pub(super) async fn handle_websocket(
             .await
         {
             Ok(rules) => rules,
-            Err(resp) => return Ok(resp),
+            Err(resp) => return Ok(*resp),
         };
 
     let mut upstream_path = path.clone();
@@ -432,7 +432,7 @@ fn emit_telemetry(
     );
 
     if let (Some(pid), Some(aid)) = (
-        proxy_ctx.project_id.as_deref(),
+        proxy_ctx.workspace_id.as_deref(),
         proxy_ctx.agent_id.as_deref(),
     ) {
         let hostname = super::strip_port(host);
@@ -445,7 +445,7 @@ fn emit_telemetry(
                 .as_deref()
                 .unwrap_or("")
                 .to_string(),
-            project_id: pid.to_string(),
+            workspace_id: pid.to_string(),
             agent_id: aid.to_string(),
             agent_name: proxy_ctx
                 .agent_name

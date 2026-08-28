@@ -5,7 +5,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { Loader2 } from "lucide-react";
 import { Button } from "@onecli/ui/components/button";
 import { IS_CLOUD } from "@/lib/env";
-import { API_ORIGIN, getAuthToken, getProjectId } from "@/lib/api-fetch";
+import { API_ORIGIN, getAuthToken, getWorkspaceId } from "@/lib/api-fetch";
 import { ConnectLayout } from "./connect-layout";
 import { ConnectSuccess } from "./connect-success";
 import { CredentialsFlow } from "./credentials-flow";
@@ -60,7 +60,7 @@ interface ConnectFlowProps {
   agentName?: string;
   preContent?: ReactNode;
   hiddenFields?: Record<string, string>;
-  projectId?: string;
+  workspaceId?: string;
   orgId?: string;
 }
 
@@ -74,7 +74,7 @@ export const ConnectFlow = ({
   agentName,
   preContent,
   hiddenFields,
-  projectId: explicitProjectId,
+  workspaceId: explicitWorkspaceId,
   orgId,
 }: ConnectFlowProps) => {
   const [state, setState] = useState<FlowState>(
@@ -101,14 +101,14 @@ export const ConnectFlow = ({
 
     const token = await getAuthToken();
     if (token) params.set("_token", token);
-    const projectId = explicitProjectId || getProjectId();
-    if (projectId) params.set("_project", projectId);
+    const workspaceId = explicitWorkspaceId || getWorkspaceId();
+    if (workspaceId) params.set("_workspace", workspaceId);
     if (orgId) params.set("_org", orgId);
 
     const qs = params.toString();
     const authorizeUrl = `${API_ORIGIN}/v1/apps/${app.id}/authorize${qs ? `?${qs}` : ""}`;
     window.location.href = authorizeUrl;
-  }, [app.id, connectionId, agentName, explicitProjectId, orgId]);
+  }, [app.id, connectionId, agentName, explicitWorkspaceId, orgId]);
 
   // Countdown timer for auto-redirect
   useEffect(() => {
@@ -163,7 +163,7 @@ export const ConnectFlow = ({
         connectionId={connectionId}
         preContent={preContent}
         hiddenFields={hiddenFields}
-        projectId={explicitProjectId}
+        workspaceId={explicitWorkspaceId}
         orgId={orgId}
         onBack={() => setMode("oauth")}
         onSuccess={(connection) => {
@@ -193,7 +193,7 @@ export const ConnectFlow = ({
         connectionId={connectionId}
         preContent={preContent}
         hiddenFields={hiddenFields}
-        projectId={explicitProjectId}
+        workspaceId={explicitWorkspaceId}
         orgId={orgId}
         onSuccess={(connection) => {
           setCreatedConnectionId(connection?.id);

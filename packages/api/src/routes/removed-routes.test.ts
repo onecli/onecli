@@ -9,24 +9,28 @@ import type { ApiEnv } from "../types";
 // (`/agents`, `/connections`), so a too-greedy pattern would turn a working
 // endpoint into a 410. Every removed path below is paired with a live sibling.
 //
-// Authenticated with an org key + X-Project-Id (the onprem-slim shape, so no
-// role resolver is needed), because the live routers' auth middleware runs
-// before a shim on the same base path — an anonymous caller gets 401, which is
-// correct but would not exercise the shims.
+// Authenticated with an org key + X-Workspace-Id (pinned oss, where CAPS.rbac is
+// off so no role resolver is needed), because the live routers' auth middleware
+// runs before a shim on the same base path — an anonymous caller gets 401,
+// which is correct but would not exercise the shims.
 
 const ORG = "org-1";
-const PROJECT = "proj-1";
+const WORKSPACE = "proj-1";
 const ORG_KEY = "oc_org_test-key";
 
 vi.hoisted(() => {
-  process.env.NEXT_PUBLIC_EDITION = "onprem-slim";
+  process.env.NEXT_PUBLIC_EDITION = "onprem";
   process.env.SECRET_ENCRYPTION_KEY = "test-secret";
   process.env.OAUTH_STATE_SECRET = "test-secret";
 });
 
 vi.mock("@onecli/db", () => ({
-  Prisma: {},
+  // The live /v1/agents handler behind the not-410 probe reads the held-awake
+  // signal via a raw grouped query; `sql` must be constructible and the raw
+  // read answerable for the probe to stay sub-500.
+  Prisma: { sql: () => ({}) },
   db: {
+    $queryRaw: async () => [],
     apiKey: {
       findUnique: async ({ where }: { where: { key?: string } }) =>
         where.key === ORG_KEY
@@ -45,16 +49,18 @@ vi.mock("@onecli/db", () => ({
       findFirst: async () => ({ organizationId: ORG }),
       findUnique: async () => ({ organizationId: ORG, role: "admin" }),
     },
-    project: {
+    workspace: {
       findFirst: async ({ where }: { where?: { id?: string } }) =>
         where?.id
-          ? where.id === PROJECT
+          ? where.id === WORKSPACE
             ? { id: where.id, organizationId: ORG, createdByUserId: "user-1" }
             : null
-          : { id: PROJECT, organizationId: ORG },
+          : { id: WORKSPACE, organizationId: ORG },
       findUnique: async () => ({ organizationId: ORG }),
     },
     agent: { findMany: async () => [], findFirst: async () => null },
+    // The live /v1/agents sibling walks listAgents' last-seen probe.
+    requestLog: { groupBy: async () => [] },
     appConnection: { findMany: async () => [], findFirst: async () => null },
     secret: { findMany: async () => [] },
     policyRuleV2: {
@@ -73,7 +79,7 @@ beforeAll(async () => {
 });
 
 const authed = {
-  headers: { Authorization: `Bearer ${ORG_KEY}`, "x-project-id": PROJECT },
+  headers: { Authorization: `Bearer ${ORG_KEY}`, "x-workspace-id": WORKSPACE },
 };
 
 const status = async (method: string, path: string): Promise<number> =>
@@ -98,7 +104,7 @@ describe("removed old-model endpoints answer 410, not 404", () => {
     ["PATCH", "/v1/agents/agent-1/secret-mode"],
     ["GET", "/v1/connections/conn-1/agents"],
     ["PUT", "/v1/connections/conn-1/agents"],
-    // Attach-model step 6: project-scope policy CRUD retired. Enumerated, not
+    // Attach-model step 6: workspace-scope policy CRUD retired. Enumerated, not
     // wildcarded — the reflection on the same base path must stay live (see
     // the "is not 410" table below).
     ["GET", "/v1/policy/rules"],
@@ -115,9 +121,9 @@ describe("removed old-model endpoints answer 410, not 404", () => {
   });
 
   it("every 410 body names the replacement, so a client can act on it", async () => {
-    // Project-scope shims point at the GRANTS surface. Pointing them at
-    // /v1/policy (as they did before step 6) would send a project client to
-    // another 410 — that path is retired at project scope now.
+    // Workspace-scope shims point at the GRANTS surface. Pointing them at
+    // /v1/policy (as they did before step 6) would send a workspace client to
+    // another 410 — that path is retired at workspace scope now.
     for (const path of [
       "/v1/rules",
       "/v1/agents/agent-1/secrets",
@@ -167,6 +173,11 @@ describe("the shims stay scoped to the paths they replace", () => {
       "the app-permissions reflection",
     ],
   ])("%s (%s) is not 410", async (path) => {
-    expect(await status("GET", path)).not.toBe(410);
+    const code = await status("GET", path);
+    expect(code).not.toBe(410);
+    // A 5xx here is never the mount regression this table guards — it means
+    // the db double above fell behind a live handler's reads, which would
+    // otherwise pass as "not 410" while spraying error logs.
+    expect(code).toBeLessThan(500);
   });
 });

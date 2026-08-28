@@ -1,7 +1,7 @@
-//! HTTP gateway server: connection handling, MITM interception, and tunneling.
+//! HTTP gateway server: connection handling and MITM interception.
 //!
 //! This module owns the `GatewayServer` struct and the core request flow:
-//! accept → authenticate → resolve (via [`connect`]) → MITM or tunnel.
+//! accept → authenticate → resolve (via [`connect`]) → MITM.
 //!
 //! Axum handles normal HTTP routes (/healthz). CONNECT requests are intercepted
 //! before reaching the router via a `tower::service_fn` wrapper, following the
@@ -10,30 +10,18 @@
 //! Sub-modules handle specific stages of the proxy pipeline:
 //! - [`forward`]: request forwarding, header filtering, unconnected app interception
 //! - [`mitm`]: TLS interception with generated leaf certificates
-//! - [`tunnel`]: direct TCP tunneling for non-intercepted domains
 //! - [`response`]: pre-built gateway error responses
 
 mod body;
-#[cfg(edition_cloud)]
-#[path = "ee/response.rs"]
-mod ee_response;
-mod finalizers;
+pub(crate) mod finalizers;
 pub(crate) mod forward;
 mod hints;
-#[cfg(edition_oss)]
-pub(crate) mod hooks;
-#[cfg(any(edition_onprem_slim, edition_onprem_full))]
-#[path = "ee/onprem/hooks.rs"]
-pub(crate) mod hooks;
-#[cfg(edition_cloud)]
-#[path = "ee/hooks.rs"]
 pub(crate) mod hooks;
 mod mitm;
 // `pub(crate)` so `main` can report at startup whether dashboard links will be
 // built from a configured APP_URL or from the fallback.
 pub(crate) mod response;
 mod transforms;
-mod tunnel;
 mod websocket;
 
 use std::net::SocketAddr;
@@ -53,7 +41,7 @@ use tower::ServiceExt;
 use tower_http::cors::CorsLayer;
 use tracing::{debug, info, info_span, warn, Instrument};
 
-use crate::approval::{ApprovalDecision, ApprovalStore, APPROVAL_TIMEOUT_SECS};
+use crate::approval::{ApprovalDecision, ApprovalStore, PendingApproval, APPROVAL_TIMEOUT_SECS};
 use crate::auth::AuthUser;
 use crate::ca::CertificateAuthority;
 use crate::cache::CacheStore;
@@ -72,12 +60,14 @@ const ACCEPT_RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis
 /// Wrapped in `Arc` and shared across all requests within a MITM session.
 #[derive(Debug)]
 pub(crate) struct ProxyContext {
-    pub project_id: Option<String>,
+    pub workspace_id: Option<String>,
     pub organization_id: Option<String>,
     pub agent_id: Option<String>,
     pub agent_name: Option<String>,
     pub agent_identifier: Option<String>,
-    pub agent_token: Option<String>,
+    /// The proxy credential this session authenticated with. Always present:
+    /// both proxy handlers refuse untokened requests before building a context.
+    pub agent_token: String,
 }
 
 /// Shared state for the gateway, passed to all request handlers.
@@ -247,6 +237,18 @@ fn parse_skip_verify_hosts() -> Vec<String> {
         .collect()
 }
 
+/// `GATEWAY_DANGER_ACCEPT_INVALID_CERTS` disables upstream TLS verification
+/// for EVERY host the gateway injects credentials into, so only an explicit
+/// truthy value (`true`/`1`, the same spellings `ENTERPRISE_ENABLED` accepts)
+/// enables it. A bare presence check would turn `=false` or an empty export
+/// into a gateway that silently verifies nothing.
+fn parse_danger_accept_invalid_certs(raw: Option<&str>) -> bool {
+    matches!(
+        raw.map(str::trim),
+        Some(v) if v.eq_ignore_ascii_case("true") || v == "1"
+    )
+}
+
 /// Returns true if `host` matches any pattern in `patterns`.
 ///
 /// - `*.example.com` matches `sub.example.com` but NOT `example.com` itself.
@@ -274,11 +276,15 @@ impl GatewayServer {
         cache: Arc<dyn CacheStore>,
         approval_store: Arc<dyn ApprovalStore>,
     ) -> Self {
-        let global_skip = std::env::var("GATEWAY_DANGER_ACCEPT_INVALID_CERTS").is_ok();
+        let global_skip = parse_danger_accept_invalid_certs(
+            std::env::var("GATEWAY_DANGER_ACCEPT_INVALID_CERTS")
+                .ok()
+                .as_deref(),
+        );
         let skip_verify_hosts = Arc::new(parse_skip_verify_hosts());
 
         if global_skip {
-            warn!("GATEWAY_DANGER_ACCEPT_INVALID_CERTS is set: TLS verification disabled for ALL upstream hosts");
+            warn!("GATEWAY_DANGER_ACCEPT_INVALID_CERTS is enabled: TLS verification disabled for ALL upstream hosts");
         } else if !skip_verify_hosts.is_empty() {
             info!(hosts = ?skip_verify_hosts.as_ref(), "TLS verification disabled for matched hosts (GATEWAY_SKIP_VERIFY_HOSTS)");
         }
@@ -322,9 +328,12 @@ impl GatewayServer {
                 hyper::header::AUTHORIZATION,
                 hyper::header::ACCEPT,
                 // Cloud scopes browser → gateway vault calls to the active
-                // project via this header; it must be allow-listed or the CORS
+                // workspace via this header; it must be allow-listed or the CORS
                 // preflight blocks the request. (OSS never sends it.)
-                hyper::header::HeaderName::from_static("x-project-id"),
+                hyper::header::HeaderName::from_static("x-workspace-id"),
+                // Rename compat (temporary): old browser callers still send
+                // the pre-rename header.
+                crate::compat::LEGACY_WORKSPACE_HEADER,
             ])
             .allow_methods([
                 Method::GET,
@@ -417,10 +426,9 @@ impl GatewayServer {
                 axum::routing::post(submit_approval_decision),
             );
 
-        // Org-scoped routes are mounted via an edition-swapped seam
-        // (`ee/org_routes.rs` for cloud + onprem, an identity stub for OSS — see
-        // `main.rs`), so the org handler never reaches the OSS build.
-        let axum_router = crate::org_routes::mount(axum_router)
+        // Org-scoped routes (`ee/org_routes.rs`) mount in every edition; an
+        // org-less credential is rejected per-handler (403).
+        let axum_router = crate::ee::org_routes::mount(axum_router)
             .layer(cors_layer)
             .fallback(fallback)
             .with_state(self.state.clone());
@@ -481,7 +489,7 @@ async fn me(auth: AuthUser) -> String {
     auth.user_id
 }
 
-/// Invalidate all cached CONNECT responses for the authenticated project.
+/// Invalidate all cached CONNECT responses for the authenticated workspace.
 /// Called by the web app after secret/rule mutations so agents pick up
 /// changes immediately instead of waiting for the 60-second TTL.
 async fn invalidate_cache(
@@ -489,32 +497,34 @@ async fn invalidate_cache(
     State(state): State<GatewayState>,
 ) -> impl axum::response::IntoResponse {
     let span = info_span!("cache_invalidate",
-        project_id = %auth.project_id,
+        workspace_id = %auth.workspace_id,
         user_id = %auth.user_id,
         auth_method = %auth.auth_method,
     );
     async move {
-        let org_id =
-            match db::find_organization_id_by_project(&state.policy_engine.pool, &auth.project_id)
-                .await
-            {
-                Ok(Some(oid)) => oid,
-                other => {
-                    warn!(
-                        error = ?other.err(),
-                        "cache invalidation: failed to resolve org_id; using broad prefix"
-                    );
-                    String::new()
-                }
-            };
+        let org_id = match db::find_organization_id_by_workspace(
+            &state.policy_engine.pool,
+            &auth.workspace_id,
+        )
+        .await
+        {
+            Ok(Some(oid)) => oid,
+            other => {
+                warn!(
+                    error = ?other.err(),
+                    "cache invalidation: failed to resolve org_id; using broad prefix"
+                );
+                String::new()
+            }
+        };
 
         state
             .cache
-            .del_by_prefix(&format!("app_injection:{org_id}:{}:", auth.project_id))
+            .del_by_prefix(&format!("app_injection:{org_id}:{}:", auth.workspace_id))
             .await;
         state
             .cache
-            .del_by_prefix(&format!("connect:{org_id}:{}:", auth.project_id))
+            .del_by_prefix(&format!("connect:{org_id}:{}:", auth.workspace_id))
             .await;
         info!("cache invalidated");
         (
@@ -544,16 +554,17 @@ async fn get_pending_approvals(
     axum::extract::Query(params): axum::extract::Query<PendingParams>,
 ) -> impl axum::response::IntoResponse {
     let span = info_span!("approval_poll",
-        project_id = %auth.project_id,
+        workspace_id = %auth.workspace_id,
         user_id = %auth.user_id,
         auth_method = %auth.auth_method,
     );
     async move {
-        let org_id = db::find_organization_id_by_project(&state.policy_engine.pool, &auth.project_id)
-            .await
-            .ok()
-            .flatten()
-            .unwrap_or_default();
+        let org_id =
+            db::find_organization_id_by_workspace(&state.policy_engine.pool, &auth.workspace_id)
+                .await
+                .ok()
+                .flatten()
+                .unwrap_or_default();
 
         let exclude: std::collections::HashSet<&str> = params
             .exclude
@@ -564,7 +575,10 @@ async fn get_pending_approvals(
 
         info!(exclude_count = exclude.len(), "approval poll started");
 
-        let mut pending = state.approval_store.list_pending(&org_id, &auth.project_id).await;
+        let mut pending = state
+            .approval_store
+            .list_pending(&org_id, &auth.workspace_id)
+            .await;
         pending.retain(|a| !exclude.contains(a.id.as_str()));
 
         let mut long_polled = false;
@@ -577,40 +591,56 @@ async fn get_pending_approvals(
             let got_new = tokio::select! {
                 got_new = state.approval_store.wait_for_new(
                     &org_id,
-                    &auth.project_id,
+                    &auth.workspace_id,
                     std::time::Duration::from_secs(30),
                 ) => got_new,
                 _ = shutdown_signal.wait() => false,
             };
             if got_new {
-                let mut fresh = state.approval_store.list_pending(&org_id, &auth.project_id).await;
+                let mut fresh = state
+                    .approval_store
+                    .list_pending(&org_id, &auth.workspace_id)
+                    .await;
                 fresh.retain(|a| !exclude.contains(a.id.as_str()));
                 pending = fresh;
             }
         }
 
-        info!(count = pending.len(), long_polled, "approval poll completed");
+        info!(
+            count = pending.len(),
+            long_polled, "approval poll completed"
+        );
 
         axum::Json(serde_json::json!({
-            "requests": pending.iter().map(|a| serde_json::json!({
-                "id": a.id,
-                "projectId": a.project_id,
-                "method": a.method,
-                "url": format!("{}://{}{}", a.scheme, a.host, a.path),
-                "host": a.host,
-                "path": a.path,
-                "headers": a.headers,
-                "bodyPreview": a.body_preview,
-                "summary": a.summary,
-                "agent": { "id": a.agent_id, "name": a.agent_name, "externalId": a.agent_identifier },
-                "createdAt": format_unix_ts(a.created_at),
-                "expiresAt": format_unix_ts(a.expires_at),
-            })).collect::<Vec<_>>(),
+            "requests": pending.iter().map(pending_approval_row).collect::<Vec<_>>(),
             "timeoutSeconds": APPROVAL_TIMEOUT_SECS,
         }))
     }
     .instrument(span)
     .await
+}
+
+/// Render a pending approval as its poll-row wire shape. Shared with the org
+/// poll (`org_routes`), which must stay byte-identical to this one.
+pub(crate) fn pending_approval_row(a: &PendingApproval) -> serde_json::Value {
+    let mut row = serde_json::json!({
+        "id": a.id,
+        "workspaceId": a.workspace_id,
+        "method": a.method,
+        "url": format!("{}://{}{}", a.scheme, a.host, a.path),
+        "host": a.host,
+        "path": a.path,
+        "headers": a.headers,
+        "bodyPreview": a.body_preview,
+        "summary": a.summary,
+        "agent": { "id": a.agent_id, "name": a.agent_name, "externalId": a.agent_identifier },
+        "createdAt": format_unix_ts(a.created_at),
+        "expiresAt": format_unix_ts(a.expires_at),
+    });
+    // Rename compat (temporary): dual-emit the legacy `projectId` field old
+    // SDKs read and echo back as the decision's scope header.
+    crate::compat::dual_emit_legacy_workspace(&mut row, &a.workspace_id);
+    row
 }
 
 /// Submit a decision for a pending manual approval request.
@@ -621,28 +651,28 @@ async fn submit_approval_decision(
     axum::Json(body): axum::Json<DecisionBody>,
 ) -> impl axum::response::IntoResponse {
     let span = info_span!("approval_decision",
-        project_id = %auth.project_id,
+        workspace_id = %auth.workspace_id,
         user_id = %auth.user_id,
         auth_method = %auth.auth_method,
         approval_id = %approval_id,
     );
     async move {
         let org_id =
-            db::find_organization_id_by_project(&state.policy_engine.pool, &auth.project_id)
+            db::find_organization_id_by_workspace(&state.policy_engine.pool, &auth.workspace_id)
                 .await
                 .ok()
                 .flatten()
                 .unwrap_or_default();
 
-        // O(1) lookup — verify approval exists and belongs to this project.
+        // O(1) lookup — verify approval exists and belongs to this workspace.
         match state
             .approval_store
-            .get_pending(&org_id, &auth.project_id, &approval_id)
+            .get_pending(&org_id, &auth.workspace_id, &approval_id)
             .await
         {
-            Some(a) if a.project_id == auth.project_id => {}
+            Some(a) if a.workspace_id == auth.workspace_id => {}
             _ => {
-                warn!("approval decision rejected: not found or wrong project");
+                warn!("approval decision rejected: not found or wrong workspace");
                 return (
                     StatusCode::NOT_FOUND,
                     axum::Json(serde_json::json!({ "error": "approval_not_found" })),
@@ -661,7 +691,7 @@ async fn submit_approval_decision(
             .approval_store
             .submit_decision(
                 &org_id,
-                &auth.project_id,
+                &auth.workspace_id,
                 &approval_id,
                 body.decision,
                 Some(auth.user_id),
@@ -768,7 +798,7 @@ async fn handle_connection(
 
 // ── CONNECT handling ────────────────────────────────────────────────────
 
-/// Handle a CONNECT request: authenticate, resolve policy, then MITM or tunnel.
+/// Handle a CONNECT request: authenticate, resolve policy, then MITM.
 async fn handle_connect(
     req: Request<Incoming>,
     peer_addr: SocketAddr,
@@ -782,51 +812,52 @@ async fn handle_connect(
 
     let hostname = strip_port(&host).to_string();
 
-    // Extract agent token from Proxy-Authorization header.
-    let agent_token = inject::extract_agent_token(&req).filter(|t| !t.is_empty());
+    // Extract agent token from Proxy-Authorization header. A CONNECT with no
+    // token is refused outright: serving it would mean a raw tunnel — bytes
+    // copied to any host the client names, with no policy, no injection, and
+    // no audit — an open relay wherever this gateway is the only route out of
+    // a sandbox network.
+    let Some(agent_token) = inject::extract_agent_token(&req).filter(|t| !t.is_empty()) else {
+        warn!(
+            peer = %peer_addr,
+            host = %host,
+            "CONNECT rejected: no agent token"
+        );
+        return Ok(response::proxy_auth_required());
+    };
 
-    // Resolve at CONNECT time for the intercept decision and agent identity.
+    // Resolve at CONNECT time for the agent identity and the injection posture.
     // DB injection/policy rules are NOT frozen here — they're re-resolved
     // per request inside the MITM tunnel from cache (see mitm.rs).
-    let (mut intercept, project_id, organization_id, agent_id, agent_name, agent_identifier) =
-        if let Some(ref token) = agent_token {
-            match connect::resolve(token, &hostname, &state.policy_engine, &*state.cache).await {
-                Ok(resp) => (
-                    resp.intercept,
-                    resp.project_id,
-                    resp.organization_id,
-                    resp.agent_id,
-                    resp.agent_name,
-                    resp.agent_identifier,
-                ),
-                Err(ConnectError::InvalidToken) => {
-                    warn!(peer = %peer_addr, host = %host, "CONNECT rejected: invalid agent token");
-                    return Ok(response::proxy_auth_required());
-                }
-                Err(ConnectError::Internal(e)) => {
-                    warn!(peer = %peer_addr, host = %host, error = %e, "CONNECT rejected: internal error");
-                    return Ok(response::bad_gateway());
-                }
-            }
-        } else {
-            (false, None, None, None, None, None)
-        };
+    let resp = match connect::resolve(&agent_token, &hostname, &state.policy_engine, &*state.cache)
+        .await
+    {
+        Ok(resp) => resp,
+        Err(ConnectError::InvalidToken) => {
+            warn!(peer = %peer_addr, host = %host, "CONNECT rejected: invalid agent token");
+            return Ok(response::proxy_auth_required());
+        }
+        Err(ConnectError::Internal(e)) => {
+            warn!(peer = %peer_addr, host = %host, error = %e, "CONNECT rejected: internal error");
+            return Ok(response::bad_gateway());
+        }
+    };
 
     // Vault fallback: resolved at CONNECT time and passed to mitm as a frozen
-    // fallback. Vault queries are expensive (network calls to Bitwarden), so
-    // they're not repeated per request. DB secrets (re-resolved per request
-    // from cache) take precedence when available.
+    // fallback, but only when DB resolution found no injection for this host.
+    // Vault queries are expensive (network calls to Bitwarden), so they're not
+    // repeated per request. DB secrets (re-resolved per request from cache)
+    // take precedence when available.
     let mut vault_injection_rules = vec![];
-    if !intercept {
-        if let Some(ref aid) = project_id {
+    if !resp.intercept {
+        if let Some(ref aid) = resp.workspace_id {
             if let Some(cred) = state.vault_service.request_credential(aid, &hostname).await {
                 let vault_rules = inject::vault_credential_to_rules(&hostname, &cred);
                 if !vault_rules.is_empty() {
-                    intercept = true;
                     vault_injection_rules = vault_rules;
                     info!(
                         host = %hostname,
-                        project_id = %aid,
+                        workspace_id = %aid,
                         "using vault credential"
                     );
                 }
@@ -834,27 +865,28 @@ async fn handle_connect(
         }
     }
 
-    // Force MITM for all authenticated agent requests so the gateway can
-    // intercept auth errors (401/403/400) and provide actionable guidance
-    // (credential_not_found, app_not_connected, access_restricted).
-    if !intercept && agent_token.is_some() {
-        intercept = true;
-    }
+    // Every session is MITM'd — even one with no injection rules — so the
+    // gateway can intercept auth errors (401/403/400) and provide actionable
+    // guidance (credential_not_found, app_not_connected, access_restricted).
+    let connect::ConnectResponse {
+        workspace_id,
+        organization_id,
+        agent_id,
+        agent_name,
+        agent_identifier,
+        ..
+    } = resp;
 
     let session_span = info_span!("session",
         peer = %peer_addr,
         host = %host,
-        project_id = project_id.as_deref().unwrap_or("-"),
+        workspace_id = workspace_id.as_deref().unwrap_or("-"),
         org_id = organization_id.as_deref().unwrap_or("-"),
         agent = agent_name.as_deref().unwrap_or("-"),
         agent_id = agent_id.as_deref().unwrap_or("-"),
     );
 
-    info!(
-        parent: &session_span,
-        mode = if intercept { "mitm" } else { "tunnel" },
-        "CONNECT"
-    );
+    info!(parent: &session_span, "CONNECT");
 
     let ca = Arc::clone(&state.ca);
     let skip_verify = host_matches_skip_verify(&hostname, &state.skip_verify_hosts);
@@ -874,12 +906,12 @@ async fn handle_connect(
     let cache = Arc::clone(&state.cache);
     let approval_store = Arc::clone(&state.approval_store);
     let proxy_ctx = Arc::new(ProxyContext {
-        project_id,
+        workspace_id,
         organization_id,
         agent_id,
         agent_name,
         agent_identifier,
-        agent_token: agent_token.clone(),
+        agent_token,
     });
 
     // Taken here, before the spawn, so the session is tracked from the moment
@@ -891,31 +923,22 @@ async fn handle_connect(
         async move {
             match hyper::upgrade::on(req).await {
                 Ok(upgraded) => {
-                    let result = if intercept {
-                        // A MITM session is HTTP: the drain waits for it, and
-                        // its inner connection gets its own graceful shutdown.
-                        let _guard = session_guard;
-                        mitm::mitm(
-                            upgraded,
-                            &host,
-                            &ca,
-                            http_client,
-                            ws_connector,
-                            vault_injection_rules,
-                            cache,
-                            proxy_ctx,
-                            approval_store,
-                            Arc::clone(&state.policy_engine),
-                        )
-                        .await
-                    } else {
-                        // A raw tunnel is an indefinite byte pipe with no
-                        // request boundary to finish on. Waiting for one would
-                        // mean every shutdown takes the full deadline, so it is
-                        // deliberately untracked and cut when the process exits.
-                        drop(session_guard);
-                        tunnel::tunnel(upgraded, &host).await
-                    };
+                    // A MITM session is HTTP: the drain waits for it, and
+                    // its inner connection gets its own graceful shutdown.
+                    let _guard = session_guard;
+                    let result = mitm::mitm(
+                        upgraded,
+                        &host,
+                        &ca,
+                        http_client,
+                        ws_connector,
+                        vault_injection_rules,
+                        cache,
+                        proxy_ctx,
+                        approval_store,
+                        Arc::clone(&state.policy_engine),
+                    )
+                    .await;
                     if let Err(e) = result {
                         warn!(host = %host, error = ?e, "connection error");
                     }
@@ -956,24 +979,39 @@ async fn handle_http_proxy(
     };
     let hostname = strip_port(&authority).to_string();
 
-    let agent_token = inject::extract_agent_token(&req).filter(|t| !t.is_empty());
+    // The same refusal as CONNECT. Absolute-form is the OTHER way a client
+    // reaches an arbitrary host through this proxy — a plain
+    // `GET http://host/…` the gateway forwards over the original scheme — so
+    // an untokened one is exactly as ungoverned as an untokened tunnel.
+    // Refuse it wherever a tunnel would be refused.
+    let Some(agent_token) = inject::extract_agent_token(&req).filter(|t| !t.is_empty()) else {
+        warn!(
+            peer = %peer_addr,
+            host = %authority,
+            "HTTP proxy rejected: no agent token"
+        );
+        return Ok(response::proxy_auth_required());
+    };
 
     let connection_id = connect::extract_connection_id(req.headers());
 
-    let mut resolved = if let Some(ref token) = agent_token {
-        match connect::resolve(token, &hostname, &state.policy_engine, &*state.cache).await {
-            Ok(resp) => resp,
-            Err(ConnectError::InvalidToken) => {
-                warn!(peer = %peer_addr, host = %authority, "HTTP proxy rejected: invalid agent token");
-                return Ok(response::proxy_auth_required());
-            }
-            Err(ConnectError::Internal(e)) => {
-                warn!(peer = %peer_addr, host = %authority, error = %e, "HTTP proxy rejected: internal error");
-                return Ok(response::bad_gateway());
-            }
+    let mut resolved = match connect::resolve(
+        &agent_token,
+        &hostname,
+        &state.policy_engine,
+        &*state.cache,
+    )
+    .await
+    {
+        Ok(resp) => resp,
+        Err(ConnectError::InvalidToken) => {
+            warn!(peer = %peer_addr, host = %authority, "HTTP proxy rejected: invalid agent token");
+            return Ok(response::proxy_auth_required());
         }
-    } else {
-        connect::ConnectResponse::default()
+        Err(ConnectError::Internal(e)) => {
+            warn!(peer = %peer_addr, host = %authority, error = %e, "HTTP proxy rejected: internal error");
+            return Ok(response::bad_gateway());
+        }
     };
 
     // Per-request app connection disambiguation — app rules MERGE with the
@@ -993,7 +1031,7 @@ async fn handle_http_proxy(
     let mut pending_injections: Vec<crate::connect::PendingInjection> = Vec::new();
     if !resolved.app_connections.is_empty() {
         let oid = resolved.organization_id.as_deref().unwrap_or("");
-        let pid = resolved.project_id.as_deref().unwrap_or("");
+        let pid = resolved.workspace_id.as_deref().unwrap_or("");
         let request_path = req.uri().path_and_query().map(|pq| pq.as_str());
         let secret_rules = std::mem::take(&mut resolved.injection_rules);
         let secrets_serve = inject::rules_serve_path(&secret_rules, request_path);
@@ -1062,12 +1100,12 @@ async fn handle_http_proxy(
     // it will inject once allowed, and a vault credential adopted here would
     // land on the same host alongside it.
     if resolved.injection_rules.is_empty() && pending_injections.is_empty() {
-        if let Some(ref aid) = resolved.project_id {
+        if let Some(ref aid) = resolved.workspace_id {
             if let Some(cred) = state.vault_service.request_credential(aid, &hostname).await {
                 let vault_rules = inject::vault_credential_to_rules(&hostname, &cred);
                 if !vault_rules.is_empty() {
                     resolved.injection_rules = vault_rules;
-                    info!(host = %hostname, project_id = %aid, "http_proxy: using vault credential");
+                    info!(host = %hostname, workspace_id = %aid, "http_proxy: using vault credential");
                 }
             }
         }
@@ -1076,7 +1114,7 @@ async fn handle_http_proxy(
     let session_span = info_span!("session",
         peer = %peer_addr,
         host = %authority,
-        project_id = resolved.project_id.as_deref().unwrap_or("-"),
+        workspace_id = resolved.workspace_id.as_deref().unwrap_or("-"),
         org_id = resolved.organization_id.as_deref().unwrap_or("-"),
         agent = resolved.agent_name.as_deref().unwrap_or("-"),
         agent_id = resolved.agent_id.as_deref().unwrap_or("-"),
@@ -1090,7 +1128,7 @@ async fn handle_http_proxy(
     );
 
     let proxy_ctx = ProxyContext {
-        project_id: resolved.project_id,
+        workspace_id: resolved.workspace_id,
         organization_id: resolved.organization_id,
         agent_id: resolved.agent_id,
         agent_name: resolved.agent_name,
@@ -1110,7 +1148,6 @@ async fn handle_http_proxy(
         connection_label: None,
         finalizer: resolved_finalizer,
         body_transform: resolved_body_transform,
-        claim_token: resolved.claim_token,
         session_policy: resolved_session_policy,
         winning_connection_id: resolved_connection_id,
         budget_bindings: resolved.budget_bindings,
@@ -1143,7 +1180,6 @@ async fn handle_http_proxy(
 
     connect::inject_connections_header(&mut resp, &resolved.app_connections);
 
-    // Convert the response body type to match the axum::body::Body return type
     Ok(resp.map(axum::body::Body::new))
 }
 
@@ -1181,6 +1217,21 @@ mod tests {
         INIT_CRYPTO.call_once(|| {
             let _ = rustls::crypto::ring::default_provider().install_default();
         });
+    }
+
+    /// The global kill-switch must demand an explicit truthy value: under the
+    /// old presence-check semantics, `=false`, `=0`, or an empty export
+    /// silently disabled TLS verification for every upstream host.
+    #[test]
+    fn danger_accept_invalid_certs_requires_explicit_truthy_value() {
+        assert!(parse_danger_accept_invalid_certs(Some("true")));
+        assert!(parse_danger_accept_invalid_certs(Some("TRUE")));
+        assert!(parse_danger_accept_invalid_certs(Some(" 1 ")));
+        assert!(!parse_danger_accept_invalid_certs(Some("false")));
+        assert!(!parse_danger_accept_invalid_certs(Some("0")));
+        assert!(!parse_danger_accept_invalid_certs(Some("")));
+        assert!(!parse_danger_accept_invalid_certs(Some("yes")));
+        assert!(!parse_danger_accept_invalid_certs(None));
     }
 
     /// Named for what it actually checks. An earlier version looped over both
@@ -1335,28 +1386,6 @@ mod tests {
     #[test]
     fn skip_verify_empty_patterns_never_matches() {
         assert!(!host_matches_skip_verify("anything.com", &[]));
-    }
-
-    // ── parse_skip_verify_patterns ─────────────────────────────────────
-
-    /// Helper: parse a raw comma-separated string the same way `parse_skip_verify_hosts` does.
-    fn parse_patterns(input: &str) -> Vec<String> {
-        input
-            .split(',')
-            .map(|s| s.trim().to_lowercase())
-            .filter(|s| !s.is_empty())
-            .collect()
-    }
-
-    #[test]
-    fn parse_skip_verify_splits_and_trims() {
-        let hosts = parse_patterns(" foo.com , *.bar.com , baz.io ");
-        assert_eq!(hosts, vec!["foo.com", "*.bar.com", "baz.io"]);
-    }
-
-    #[test]
-    fn parse_skip_verify_empty_input() {
-        assert!(parse_patterns("").is_empty());
     }
 
     // ── is_http_proxy_request ──────────────────────────────────────────

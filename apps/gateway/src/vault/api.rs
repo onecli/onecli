@@ -21,11 +21,11 @@ pub(crate) async fn vault_pair(
     Path(provider): Path<String>,
     Json(params): Json<serde_json::Value>,
 ) -> impl IntoResponse {
-    let span = info_span!("vault_pair", project_id = %auth.project_id, provider = %provider);
+    let span = info_span!("vault_pair", workspace_id = %auth.workspace_id, provider = %provider);
     async move {
         match state
             .vault_service
-            .pair(&auth.project_id, &provider, &params)
+            .pair(&auth.workspace_id, &provider, &params)
             .await
         {
             Ok(result) => (
@@ -54,11 +54,11 @@ pub(crate) async fn vault_status(
     State(state): State<GatewayState>,
     Path(provider): Path<String>,
 ) -> impl IntoResponse {
-    let span = info_span!("vault_status", project_id = %auth.project_id, provider = %provider);
+    let span = info_span!("vault_status", workspace_id = %auth.workspace_id, provider = %provider);
     async move {
         match state
             .vault_service
-            .status(&auth.project_id, &provider)
+            .status(&auth.workspace_id, &provider)
             .await
         {
             Some(status) => (
@@ -89,11 +89,12 @@ pub(crate) async fn vault_disconnect(
     State(state): State<GatewayState>,
     Path(provider): Path<String>,
 ) -> impl IntoResponse {
-    let span = info_span!("vault_disconnect", project_id = %auth.project_id, provider = %provider);
+    let span =
+        info_span!("vault_disconnect", workspace_id = %auth.workspace_id, provider = %provider);
     async move {
         match state
             .vault_service
-            .disconnect(&auth.project_id, &provider)
+            .disconnect(&auth.workspace_id, &provider)
             .await
         {
             Ok(()) => (
@@ -125,7 +126,7 @@ pub(crate) async fn vault_op_vaults(
     let vaults = state
         .policy_engine
         .onepassword
-        .list_vaults(&auth.project_id)
+        .list_vaults(&auth.workspace_id)
         .await?;
     Ok(Json(vaults))
 }
@@ -139,7 +140,7 @@ pub(crate) async fn vault_op_items(
     let items = state
         .policy_engine
         .onepassword
-        .list_items(&auth.project_id, &vault_id)
+        .list_items(&auth.workspace_id, &vault_id)
         .await?;
     Ok(Json(items))
 }
@@ -153,7 +154,7 @@ pub(crate) async fn vault_op_fields(
     let fields = state
         .policy_engine
         .onepassword
-        .list_fields(&auth.project_id, &vault_id, &item_id)
+        .list_fields(&auth.workspace_id, &vault_id, &item_id)
         .await?;
     Ok(Json(fields))
 }

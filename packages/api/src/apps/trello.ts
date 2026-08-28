@@ -79,7 +79,6 @@ export const trello: AppDefinition = {
       };
     },
   },
-  available: true,
   configurable: {
     hint: "Create a Power-Up at trello.com/power-ups/admin to get your API key.",
     fields: [

@@ -19,8 +19,8 @@ import type { Secret } from "@/lib/api";
 export interface SecretTargetState {
   mode: "specific" | "all";
   secretIds: string[];
-  /** Only meaningful for `mode === "all"`; the org/project level to inject. */
-  level: "organization" | "project";
+  /** Only meaningful for `mode === "all"`; the org/workspace level to inject. */
+  level: "organization" | "workspace";
 }
 
 export interface SecretTargetFieldsProps {
@@ -28,8 +28,8 @@ export interface SecretTargetFieldsProps {
   onChange: (next: SecretTargetState) => void;
   /** Secrets available at the rule's scope. */
   secrets: Secret[];
-  /** An ORG rule may choose the injection level (org or project); a PROJECT rule
-   * is fixed to its own project. */
+  /** An ORG rule may choose the injection level (org or workspace); a WORKSPACE rule
+   * is fixed to its own workspace. */
   isOrgRule: boolean;
   showError: boolean;
   error: string | null;
@@ -37,8 +37,8 @@ export interface SecretTargetFieldsProps {
 
 /**
  * The Secret target authoring surface: target either specific secret(s), or "all
- * secrets" at a chosen level (an org rule can reach down to project-level secrets;
- * a project rule is project-only). On an allow rule the target permits those
+ * secrets" at a chosen level (an org rule can reach down to workspace-level secrets;
+ * a workspace rule is workspace-only). On an allow rule the target permits those
  * secrets' hosts and injects them; on a block rule it blocks them. Mirrors
  * {@link AppTargetFields}.
  */
@@ -119,7 +119,8 @@ export const SecretTargetFields = ({
               onValueChange={(level) =>
                 onChange({
                   ...value,
-                  level: level === "organization" ? "organization" : "project",
+                  level:
+                    level === "organization" ? "organization" : "workspace",
                 })
               }
             >
@@ -130,14 +131,14 @@ export const SecretTargetFields = ({
                 <SelectItem value="organization">
                   All organization secrets
                 </SelectItem>
-                <SelectItem value="project">
-                  All of the project&apos;s custom secrets
+                <SelectItem value="workspace">
+                  All of the workspace&apos;s custom secrets
                 </SelectItem>
               </SelectContent>
             </Select>
           ) : (
             <p className="text-xs text-muted-foreground">
-              All of this project&apos;s custom secrets.
+              All of this workspace&apos;s custom secrets.
             </p>
           )}
         </div>

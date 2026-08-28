@@ -1,85 +1,35 @@
 "use client";
 
-import { useCallback, useMemo, type ReactNode } from "react";
-import {
-  SessionProvider,
-  useSession,
-  signIn as nextAuthSignIn,
-  signOut as nextAuthSignOut,
-} from "next-auth/react";
-import { AuthContext } from "@/providers/auth-provider";
-import type { AuthUser, AuthContextValue } from "@/lib/auth/types";
-import type { AuthMode } from "@/lib/auth/auth-mode";
+import type { ReactNode } from "react";
+import dynamic from "next/dynamic";
+import { IS_CLOUD } from "@/lib/env";
+import { OnpremAuthProvider } from "@/lib/auth/auth-provider-onprem";
 
-const LOCAL_USER: AuthUser = {
-  id: "local-admin",
-  email: "admin@localhost",
-  name: "Admin",
-};
+/**
+ * Cloud arm loaded lazily so the Cognito/Amplify (+ analytics) graph stays out
+ * of the shared client bundle on non-cloud editions; the full-page spinner
+ * matches the dashboard/login loading state shown until auth resolves anyway.
+ */
+const CognitoAuthProvider = dynamic(
+  () => import("@/ee/auth/cognito-provider").then((m) => m.AuthProviderImpl),
+  {
+    ssr: false,
+    loading: () => (
+      <div className="flex h-svh items-center justify-center">
+        <div className="text-brand h-8 w-8 animate-spin rounded-full border-2 border-current border-t-transparent" />
+      </div>
+    ),
+  },
+);
 
-const LocalAuthProvider = ({ children }: { children: ReactNode }) => {
-  const value = useMemo<AuthContextValue>(
-    () => ({
-      isAuthenticated: true,
-      isLoading: false,
-      user: LOCAL_USER,
-      signIn: async () => {},
-      signOut: async () => {},
-    }),
-    [],
+/**
+ * Edition dispatcher for the auth provider: cloud renders the Cognito/Amplify
+ * provider; other editions read the self-hosted session cookie. The cloud arm
+ * loads as a lazy chunk — the edition flag picks one at runtime.
+ */
+export const AuthProviderImpl = ({ children }: { children: ReactNode }) =>
+  IS_CLOUD ? (
+    <CognitoAuthProvider>{children}</CognitoAuthProvider>
+  ) : (
+    <OnpremAuthProvider>{children}</OnpremAuthProvider>
   );
-
-  return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;
-};
-
-const OAuthInner = ({ children }: { children: ReactNode }) => {
-  const { data: session, status } = useSession();
-
-  const user = useMemo<AuthUser | null>(() => {
-    if (!session?.user?.id || !session.user.email) return null;
-    return {
-      id: session.user.id,
-      email: session.user.email,
-      name: session.user.name ?? undefined,
-    };
-  }, [session]);
-
-  const signIn = useCallback(async () => {
-    await nextAuthSignIn("google");
-  }, []);
-
-  const signOut = useCallback(async () => {
-    await nextAuthSignOut({ callbackUrl: "/auth/login" });
-  }, []);
-
-  const value = useMemo<AuthContextValue>(
-    () => ({
-      isAuthenticated: status === "authenticated",
-      isLoading: status === "loading",
-      user,
-      signIn,
-      signOut,
-    }),
-    [status, user, signIn, signOut],
-  );
-
-  return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;
-};
-
-export const AuthProviderImpl = ({
-  children,
-  authMode,
-}: {
-  children: ReactNode;
-  authMode: AuthMode;
-}) => {
-  if (authMode === "local") {
-    return <LocalAuthProvider>{children}</LocalAuthProvider>;
-  }
-
-  return (
-    <SessionProvider>
-      <OAuthInner>{children}</OAuthInner>
-    </SessionProvider>
-  );
-};

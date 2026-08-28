@@ -33,7 +33,7 @@ export const useRevokeScimToken = () => {
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: queryKeys.scimTokens.all() });
       toast.success(
-        "Token revoked — provisioning requests with it stop immediately",
+        "Token revoked. Provisioning requests with it stop immediately",
       );
     },
     onError: () => toast.error("Failed to revoke token"),

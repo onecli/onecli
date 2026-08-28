@@ -19,7 +19,7 @@ import { resolvePrincipalSet } from "./policy-simulate/principal-set";
  *
  * Constant query count regardless of agent count: one agent list, one
  * principal-set resolution (agent-independent by design), two injection-rule
- * loads (org + project, equipment kept), then batched fenced resolutions over
+ * loads (org + workspace, equipment kept), then batched fenced resolutions over
  * the cross-agent unions. Zero engine evaluations.
  */
 
@@ -45,9 +45,19 @@ export interface AgentWithGrantsSummary {
   name: string;
   identifier: string;
   accessToken: string;
-  isDefault: boolean;
-  secretMode: string;
+  kind: string;
   createdAt: Date;
+  /** Attached channel presences — what deletion also removes from the
+   * customer's workspace. */
+  channels: {
+    provider: string;
+    identityName: string | null;
+    externalId: string;
+    /** Presence lifecycle — `pending_setup` until the install completes. */
+    status: string;
+  }[];
+  /** Mirrors listAgents' bounded last-seen probe (null = none in-window). */
+  lastSeenAt: Date | null;
   grantsSummary: AgentGrantsSummary;
 }
 
@@ -56,21 +66,21 @@ const secretKind = (type: string): "secret" | "llm" =>
   type === "generic" ? "secret" : "llm";
 
 export const listAgentsWithGrantsSummary = async (
-  projectId: string,
+  workspaceId: string,
   organizationId: string,
 ): Promise<AgentWithGrantsSummary[]> => {
   const orgBase = { scope: "organization" as const, organizationId };
-  const projectBase = { scope: "project" as const, projectId };
-  const [agents, principals, orgRows, projectRows] = await Promise.all([
-    listAgents(projectId),
-    resolvePrincipalSet(projectId, organizationId),
+  const workspaceBase = { scope: "workspace" as const, workspaceId };
+  const [agents, principals, orgRows, workspaceRows] = await Promise.all([
+    listAgents(workspaceId),
+    resolvePrincipalSet(workspaceId, organizationId),
     loadInjectionRules(orgBase, "published"),
-    loadInjectionRules(projectBase, "published"),
+    loadInjectionRules(workspaceBase, "published"),
   ]);
-  const injectRows = [...orgRows, ...projectRows];
+  const injectRows = [...orgRows, ...workspaceRows];
 
   const secretPool = {
-    OR: [{ projectId }, { organizationId, scope: "organization" }],
+    OR: [{ workspaceId }, { organizationId, scope: "organization" }],
   };
   const connectionPool = { ...secretPool, status: "connected" };
 
@@ -79,8 +89,8 @@ export const listAgentsWithGrantsSummary = async (
   interface Collected {
     secretIds: Set<string>;
     connectionIds: Set<string>;
-    secretLevels: Set<"organization" | "project">;
-    /** `${provider}\n${level}` pairs — the level picks org- vs project-scoped
+    secretLevels: Set<"organization" | "workspace">;
+    /** `${provider}\n${level}` pairs — the level picks org- vs workspace-scoped
      * connections of the provider (inject_select's app_scopes law). */
     providerLevels: Set<string>;
   }
@@ -102,7 +112,7 @@ export const listAgentsWithGrantsSummary = async (
           if (t.secretId) collected.secretIds.add(t.secretId);
           else if (
             t.secretScope === "organization" ||
-            t.secretScope === "project"
+            t.secretScope === "workspace"
           )
             collected.secretLevels.add(t.secretScope);
         } else if (t.kind === "connection" && t.appConnectionId) {
@@ -111,7 +121,7 @@ export const listAgentsWithGrantsSummary = async (
           t.kind === "app" &&
           t.appProvider &&
           (t.appConnectionScope === "organization" ||
-            t.appConnectionScope === "project")
+            t.appConnectionScope === "workspace")
         ) {
           collected.providerLevels.add(
             `${t.appProvider}\n${t.appConnectionScope}`,
@@ -146,7 +156,7 @@ export const listAgentsWithGrantsSummary = async (
             name: true,
             type: true,
             scope: true,
-            projectId: true,
+            workspaceId: true,
           },
         })
       : Promise.resolve([]),
@@ -160,7 +170,7 @@ export const listAgentsWithGrantsSummary = async (
             provider: true,
             label: true,
             scope: true,
-            projectId: true,
+            workspaceId: true,
           },
         })
       : Promise.resolve([]),
@@ -170,9 +180,9 @@ export const listAgentsWithGrantsSummary = async (
 
   const levelOf = (row: {
     scope: string;
-    projectId: string | null;
-  }): "organization" | "project" =>
-    row.scope === "organization" ? "organization" : "project";
+    workspaceId: string | null;
+  }): "organization" | "workspace" =>
+    row.scope === "organization" ? "organization" : "workspace";
 
   return agents.map((agent) => {
     // Every agent was walked above (step 7: there is no all-mode whole-pool

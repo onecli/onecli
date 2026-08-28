@@ -1,6 +1,6 @@
 import { Hono } from "hono";
 import type { ApiEnv } from "../types";
-import { authMiddleware, requireProjectId } from "../middleware/auth";
+import { authMiddleware, requireWorkspaceId } from "../middleware/auth";
 import { getResourceCounts } from "../services/counts-service";
 
 export const countsRoutes = () => {
@@ -10,7 +10,7 @@ export const countsRoutes = () => {
   app.get("/", async (c) => {
     const auth = c.get("auth");
     const counts = await getResourceCounts(
-      requireProjectId(auth),
+      requireWorkspaceId(auth),
       auth.organizationId,
     );
     return c.json(counts);

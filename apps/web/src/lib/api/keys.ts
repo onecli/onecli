@@ -1,19 +1,52 @@
-import { getProjectId, getOrganizationId } from "@/lib/api-fetch";
+import { getWorkspaceId, getOrganizationId } from "@/lib/api-fetch";
 import type { PageScope } from "./scope";
 
 const scope = () =>
-  [getOrganizationId() ?? "default", getProjectId() ?? "default"] as const;
+  [getOrganizationId() ?? "default", getWorkspaceId() ?? "default"] as const;
 
 export const queryKeys = {
   agents: {
-    all: () => ["agents", ...scope()] as const,
+    // The namespace root — the ONE key that sweeps both the URL-scoped keys
+    // below AND the deliberately unscoped for-workspace keys (the sidebar's
+    // rows). Mutations that change agent facts chrome renders (rows, names,
+    // attached channels) invalidate this; all() misses for-workspace.
+    root: () => ["agents"] as const,
+    all: () => [...queryKeys.agents.root(), ...scope()] as const,
     list: () => [...queryKeys.agents.all(), "list"] as const,
     detail: (agentId: string) =>
       [...queryKeys.agents.all(), "detail", agentId] as const,
-    // Explicitly-targeted project (the org-level picker) — keyed by that
-    // project, deliberately outside the URL-derived scope() prefix.
-    forProject: (projectId: string) =>
-      ["agents", "for-project", projectId] as const,
+    models: (agentId: string) =>
+      [...queryKeys.agents.all(), "models", agentId] as const,
+    // Explicitly-targeted workspace (the org-level picker, the sidebar) —
+    // keyed by that workspace, deliberately outside the URL-derived scope()
+    // prefix. Under root(), so the namespace sweep still reaches it.
+    forWorkspace: (workspaceId: string) =>
+      [...queryKeys.agents.root(), "for-workspace", workspaceId] as const,
+  },
+  conversations: {
+    all: () => ["conversations", ...scope()] as const,
+    // The agent's one direct thread (§3.18) — keyed by agent, because that is
+    // how the door addresses it; the row's own id lives in the cached value.
+    // Its query is backed by a PUT, so only ever invalidate it deliberately
+    // (deleting the agent) — never as part of a namespace sweep.
+    direct: (agentId: string) =>
+      [...queryKeys.conversations.all(), "direct", agentId] as const,
+    turns: (conversationId: string) =>
+      [...queryKeys.conversations.all(), "turns", conversationId] as const,
+    // No transcript key: the live transcript is the stream's local state, on
+    // purpose — a cache entry would invite a second source of truth.
+  },
+  attachments: {
+    all: () => ["attachments", ...scope()] as const,
+    // Immutable bytes keyed by id — fetched once (staleTime: Infinity) into
+    // an object URL for chip previews and downloads.
+    blob: (conversationId: string, attachmentId: string) =>
+      [
+        ...queryKeys.attachments.all(),
+        "blob",
+        conversationId,
+        attachmentId,
+      ] as const,
   },
   secrets: {
     all: () => ["secrets", ...scope()] as const,
@@ -21,11 +54,11 @@ export const queryKeys = {
   },
   policy: {
     all: () => ["policy", ...scope()] as const,
-    rules: (pageScope: PageScope = "project") =>
+    rules: (pageScope: PageScope = "workspace") =>
       [...queryKeys.policy.all(), "rules", pageScope] as const,
-    default: (pageScope: PageScope = "project") =>
+    default: (pageScope: PageScope = "workspace") =>
       [...queryKeys.policy.all(), "default", pageScope] as const,
-    lastPublish: (pageScope: PageScope = "project") =>
+    lastPublish: (pageScope: PageScope = "workspace") =>
       [...queryKeys.policy.all(), "last-publish", pageScope] as const,
   },
   domains: {
@@ -41,6 +74,20 @@ export const queryKeys = {
   roleMappings: {
     all: () => ["role-mappings", ...scope()] as const,
     list: () => [...queryKeys.roleMappings.all(), "list"] as const,
+  },
+  invitations: {
+    all: () => ["invitations", ...scope()] as const,
+    list: () => [...queryKeys.invitations.all(), "list"] as const,
+  },
+  org: {
+    // The current-org read (GET /v1/org), keyed per URL scope like every
+    // other namespace. On /w/ pages the org slot is "default" (the org-id
+    // regex only matches /org/ paths) and the WORKSPACE id is the real
+    // discriminator — globally unique, so entries never bleed across orgs; a
+    // workspace switch re-fetches, accepted for a one-row read. A consumer on
+    // a route matching NEITHER regex would key to ["org","default","default"]
+    // and must not trust that entry across org switches.
+    all: () => ["org", ...scope()] as const,
   },
   orgMembers: {
     all: () => ["org-members", ...scope()] as const,
@@ -67,24 +114,24 @@ export const queryKeys = {
   },
   connections: {
     all: () => ["connections", ...scope()] as const,
-    list: (pageScope: PageScope = "project") =>
+    list: (pageScope: PageScope = "workspace") =>
       [...queryKeys.connections.all(), "list", pageScope] as const,
     byProvider: (provider: string) =>
       [...queryKeys.connections.all(), "provider", provider] as const,
   },
-  projectAccess: {
-    all: () => ["project-access", ...scope()] as const,
-    list: (projectId: string) =>
-      [...queryKeys.projectAccess.all(), projectId] as const,
+  workspaceAccess: {
+    all: () => ["workspace-access", ...scope()] as const,
+    list: (workspaceId: string) =>
+      [...queryKeys.workspaceAccess.all(), workspaceId] as const,
   },
-  projects: {
-    all: () => ["projects", ...scope()] as const,
+  workspaces: {
+    all: () => ["workspaces", ...scope()] as const,
     // organizationId only when explicitly overridden (account-route picker).
     list: (organizationId?: string) =>
-      [...queryKeys.projects.all(), "list", organizationId ?? "url"] as const,
+      [...queryKeys.workspaces.all(), "list", organizationId ?? "url"] as const,
   },
   appPermissionDefinitions: {
-    // Global static catalog (identical across orgs/projects) — deliberately
+    // Global static catalog (identical across orgs/workspaces) — deliberately
     // not scope-keyed.
     all: () => ["app-permission-definitions"] as const,
     list: () => [...queryKeys.appPermissionDefinitions.all(), "list"] as const,
@@ -104,6 +151,18 @@ export const queryKeys = {
   counts: {
     all: () => ["counts", ...scope()] as const,
   },
+  // Instance metadata is deployment-global — no org/workspace scope key.
+  instance: {
+    all: () => ["instance"] as const,
+  },
+  // Registered SSH keys are PER-USER, not per-org/workspace — deliberately
+  // unscoped (the instance precedent) so /account/ssh-keys and the agent SSH
+  // page resolve to the SAME cache entry; a scoped key would silently split
+  // the two surfaces.
+  sshKeys: {
+    all: () => ["ssh-keys"] as const,
+    list: () => [...queryKeys.sshKeys.all(), "list"] as const,
+  },
   installInfo: {
     all: () => ["install-info", ...scope()] as const,
   },
@@ -122,6 +181,53 @@ export const queryKeys = {
   approvals: {
     all: () => ["approvals", ...scope()] as const,
     list: () => [...queryKeys.approvals.all(), "list"] as const,
+  },
+  crons: {
+    all: () => ["crons", ...scope()] as const,
+    agent: (agentId: string) =>
+      [...queryKeys.crons.all(), "agent", agentId] as const,
+  },
+  skills: {
+    all: () => ["skills", ...scope()] as const,
+    list: () => [...queryKeys.skills.all(), "list"] as const,
+    detail: (skillId: string) =>
+      [...queryKeys.skills.all(), "detail", skillId] as const,
+    org: () => [...queryKeys.skills.all(), "org"] as const,
+    orgDetail: (skillId: string) =>
+      [...queryKeys.skills.all(), "org", "detail", skillId] as const,
+  },
+  memories: {
+    all: () => ["memories", ...scope()] as const,
+    agent: (agentId: string) =>
+      [...queryKeys.memories.all(), "agent", agentId] as const,
+    detail: (agentId: string, memoryId: string) =>
+      [...queryKeys.memories.all(), "detail", agentId, memoryId] as const,
+    revisions: (agentId: string, memoryId: string) =>
+      [...queryKeys.memories.all(), "revisions", agentId, memoryId] as const,
+    revision: (agentId: string, memoryId: string, revisionId: string) =>
+      [
+        ...queryKeys.memories.all(),
+        "revision",
+        agentId,
+        memoryId,
+        revisionId,
+      ] as const,
+  },
+  channels: {
+    all: () => ["channels", ...scope()] as const,
+    agent: (agentId: string) =>
+      [...queryKeys.channels.all(), "agent", agentId] as const,
+    manifest: (agentId: string, provider: string, transport?: string) =>
+      [
+        ...queryKeys.channels.all(),
+        "manifest",
+        agentId,
+        provider,
+        // Part of the key: flipping the mode picker must refetch, never serve
+        // the other transport's cached manifest.
+        transport ?? "default",
+      ] as const,
+    org: () => [...queryKeys.channels.all(), "org"] as const,
   },
   appBlocklist: {
     all: () => ["appBlocklist", ...scope()] as const,

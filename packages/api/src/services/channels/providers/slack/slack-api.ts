@@ -1,0 +1,457 @@
+import { z } from "zod";
+import { readCappedBinaryBody } from "../../../../lib/read-capped-binary-body";
+
+/**
+ * The control plane's thin Slack Web API client — exactly the methods the
+ * attach/rotate flows call, nothing more. A typed, zod-parsed `fetch` (the
+ * `apps/runner/src/control-plane.ts` shape) instead of `@slack/web-api`:
+ * four simple POSTs do not justify a dependency tree, and parsed-not-cast
+ * responses are the house rule for every wire boundary.
+ *
+ * The adapter has its own sibling client for the runtime methods
+ * (`apps/channel-adapter/src/providers/slack/client.ts`) — two thin clients
+ * in two runtimes beat one shared package.
+ */
+
+/** Call-time read so tests can point at a fake server per invocation. */
+const apiBase = (): string =>
+  process.env.SLACK_API_BASE_URL ?? "https://slack.com/api";
+
+const CALL_TIMEOUT_MS = 15_000;
+
+/**
+ * A Slack refusal (`ok: false`), carrying Slack's own error code verbatim —
+ * the plan requires surfacing codes like `managed_app_limit_reached` to the
+ * user unaltered, so the code is the message.
+ */
+export class SlackApiError extends Error {
+  constructor(
+    public readonly method: string,
+    public readonly code: string,
+  ) {
+    super(`Slack ${method} refused: ${code}`);
+    this.name = "SlackApiError";
+  }
+}
+
+const okEnvelope = z.object({ ok: z.boolean(), error: z.string().optional() });
+
+const slackCall = async <T extends z.ZodType>(
+  method: string,
+  init: {
+    token?: string;
+    /** HTTP Basic credentials — Slack's PREFERRED way to send client_id/
+     * client_secret on oauth.v2.access (keeps them out of the form body). */
+    basicAuth?: { user: string; pass: string };
+    /** Sent as `application/x-www-form-urlencoded` (Slack's lingua franca). */
+    form?: Record<string, string>;
+  },
+  schema: T,
+): Promise<z.infer<T>> => {
+  const response = await fetch(`${apiBase()}/${method}`, {
+    method: "POST",
+    headers: {
+      "content-type": "application/x-www-form-urlencoded; charset=utf-8",
+      ...(init.token && { authorization: `Bearer ${init.token}` }),
+      ...(init.basicAuth && {
+        authorization: `Basic ${Buffer.from(
+          `${init.basicAuth.user}:${init.basicAuth.pass}`,
+        ).toString("base64")}`,
+      }),
+    },
+    body: new URLSearchParams(init.form ?? {}).toString(),
+    signal: AbortSignal.timeout(CALL_TIMEOUT_MS),
+  });
+  if (!response.ok) {
+    throw new Error(`Slack ${method} answered HTTP ${response.status}`);
+  }
+  const body: unknown = await response.json();
+  const envelope = okEnvelope.parse(body);
+  if (!envelope.ok) {
+    throw new SlackApiError(method, envelope.error ?? "unknown_error");
+  }
+  return schema.parse(body);
+};
+
+const rotateResponse = z.object({
+  token: z.string().min(1),
+  refresh_token: z.string().min(1),
+  team_id: z.string().min(1),
+  exp: z.number().int(),
+});
+
+/**
+ * Rotate an app-configuration token pair. Also the VALIDATOR for a pasted
+ * token: rotation both proves the credential works and names the workspace —
+ * and the pasted pair was going to be single-use anyway.
+ */
+export const rotateConfigToken = (refreshToken: string) =>
+  slackCall(
+    "tooling.tokens.rotate",
+    { form: { refresh_token: refreshToken } },
+    rotateResponse,
+  );
+
+const manifestCreateResponse = z.object({
+  app_id: z.string().min(1),
+  credentials: z.object({
+    client_id: z.string().min(1),
+    client_secret: z.string().min(1),
+    signing_secret: z.string().min(1),
+  }),
+  oauth_authorize_url: z.string().min(1),
+});
+
+/** Create an app from a manifest, with a config ACCESS token. */
+export const manifestCreate = (accessToken: string, manifest: unknown) =>
+  slackCall(
+    "apps.manifest.create",
+    { token: accessToken, form: { manifest: JSON.stringify(manifest) } },
+    manifestCreateResponse,
+  );
+
+/** Best-effort remote deletion at detach. */
+export const manifestDelete = (accessToken: string, appId: string) =>
+  slackCall(
+    "apps.manifest.delete",
+    { token: accessToken, form: { app_id: appId } },
+    z.object({}),
+  );
+
+/**
+ * The app's current manifest. `apps.manifest.update` replaces the whole
+ * document, so a rename exports first and edits the result.
+ *
+ * Deliberately loose: pinning a schema would break the round-trip every time
+ * Slack adds a manifest key.
+ */
+export const manifestExport = (accessToken: string, appId: string) =>
+  slackCall(
+    "apps.manifest.export",
+    { token: accessToken, form: { app_id: appId } },
+    z.object({ manifest: z.record(z.string(), z.unknown()) }),
+  );
+
+/** Replace an app's manifest wholesale — pair with `manifestExport`. */
+export const manifestUpdate = (
+  accessToken: string,
+  appId: string,
+  manifest: unknown,
+) =>
+  slackCall(
+    "apps.manifest.update",
+    {
+      token: accessToken,
+      form: { app_id: appId, manifest: JSON.stringify(manifest) },
+    },
+    z.object({}),
+  );
+
+/**
+ * Uninstall an app from the workspace — the first half of removing one, which
+ * teardown runs before deleting the manifest (the pair Slack's own CLI
+ * `delete` performs). It does NOT keep the bot out of the workspace directory:
+ * a bot user is a permanent record and no API removes it.
+ *
+ * Takes the app's OWN client credentials, not a config token — this is
+ * installation-scoped, and revokes every token for that installation.
+ */
+export const appsUninstall = (input: {
+  botToken: string;
+  clientId: string;
+  clientSecret: string;
+}) =>
+  slackCall(
+    "apps.uninstall",
+    {
+      token: input.botToken,
+      form: { client_id: input.clientId, client_secret: input.clientSecret },
+    },
+    z.object({}),
+  );
+
+const authTestResponse = z.object({
+  team_id: z.string().min(1),
+  team: z.string().optional(),
+  /** For a bot token this is the bot's own user id. */
+  user_id: z.string().min(1),
+  /** The bot's own handle ("donna") — what a human sees it called in Slack. */
+  user: z.string().optional(),
+  bot_id: z.string().optional(),
+});
+
+/** Identify a bot token: which workspace, which bot user. */
+export const authTest = (botToken: string) =>
+  slackCall("auth.test", { token: botToken }, authTestResponse);
+
+const postMessageResponse = z.object({
+  channel: z.string().min(1),
+  ts: z.string().min(1),
+});
+
+/**
+ * Post a message — the EVENTS arm's request-scoped replies (refusals, busy
+ * notices, invite refusals). Answer rendering/streaming stays the adapter's
+ * job; this exists so an inbound HTTP event can be answered without waiting
+ * for any poll. Callers pass PRE-ESCAPED text (`escapeSlackText`).
+ */
+export const postMessage = async (
+  botToken: string,
+  input: { channel: string; text: string; threadTs?: string; iconUrl?: string },
+) => {
+  const form = {
+    channel: input.channel,
+    text: input.text,
+    ...(input.threadTs && { thread_ts: input.threadTs }),
+  };
+  if (input.iconUrl) {
+    try {
+      return await slackCall(
+        "chat.postMessage",
+        // The agent's avatar. Needs `chat:write.customize` — a pre-existing
+        // install predating the scope fails the whole post (`missing_scope`),
+        // so that one error retries plain: the refusal must land even when
+        // the icon cannot. No per-token memo here (unlike the adapter's
+        // client): this arm posts refusals only, far too rarely to matter.
+        { token: botToken, form: { ...form, icon_url: input.iconUrl } },
+        postMessageResponse,
+      );
+    } catch (err) {
+      if (!(err instanceof SlackApiError) || err.code !== "missing_scope") {
+        throw err;
+      }
+    }
+  }
+  return slackCall(
+    "chat.postMessage",
+    { token: botToken, form },
+    postMessageResponse,
+  );
+};
+
+/**
+ * Reaction add/remove — the receipt lifecycle. Slack's idempotency refusals
+ * (`already_reacted` / `no_reaction`) are success-shaped: the world is
+ * already in the state we wanted, so they must not throw (a redelivered add
+ * or a double clear would otherwise log as failures forever).
+ */
+const reactionCall = async (
+  method: "reactions.add" | "reactions.remove",
+  botToken: string,
+  input: { channel: string; timestamp: string; name: string },
+): Promise<void> => {
+  try {
+    await slackCall(
+      method,
+      {
+        token: botToken,
+        form: {
+          channel: input.channel,
+          timestamp: input.timestamp,
+          name: input.name,
+        },
+      },
+      okEnvelope,
+    );
+  } catch (err) {
+    if (
+      err instanceof SlackApiError &&
+      (err.code === "already_reacted" || err.code === "no_reaction")
+    ) {
+      return;
+    }
+    throw err;
+  }
+};
+
+export const reactionsAdd = (
+  botToken: string,
+  input: { channel: string; timestamp: string; name: string },
+) => reactionCall("reactions.add", botToken, input);
+
+export const reactionsRemove = (
+  botToken: string,
+  input: { channel: string; timestamp: string; name: string },
+) => reactionCall("reactions.remove", botToken, input);
+
+const filesInfoResponse = z.object({
+  file: z
+    .object({
+      id: z.string().min(1),
+      name: z.string().nullish(),
+      mimetype: z.string().nullish(),
+      size: z.number().int().nullish(),
+      url_private: z.string().nullish(),
+    })
+    .loose(),
+});
+
+/** Full metadata for one file — the Slack Connect stub's follow-up (a
+ * `check_file_info` share carries no name/size/url until asked). Same
+ * `files:read` scope as the download itself. */
+export const filesInfo = (botToken: string, fileId: string) =>
+  slackCall(
+    "files.info",
+    { token: botToken, form: { file: fileId } },
+    filesInfoResponse,
+  );
+
+/**
+ * Which URLs the bot token may EVER be sent to. `url_private` arrives inside
+ * an event payload — attacker-influencable through the signing-secret /
+ * adapter-token trust boundary — and the Authorization header carries the
+ * workspace's bot token, so an unpinned fetch is both an SSRF primitive and
+ * a token exfiltrator (the `isSlackResponseUrl` lesson, applied to files).
+ * Checked on the INITIAL request and on every redirect hop. When
+ * SLACK_API_BASE_URL points at a fake server (the test seam), that exact
+ * origin is the allowed one.
+ */
+export const isSlackFilesUrl = (raw: string): boolean => {
+  let url: URL;
+  try {
+    url = new URL(raw);
+  } catch {
+    return false;
+  }
+  const base = process.env.SLACK_API_BASE_URL;
+  if (base) {
+    try {
+      const baseUrl = new URL(base);
+      return url.protocol === baseUrl.protocol && url.host === baseUrl.host;
+    } catch {
+      // Unparseable override — fall through to the production rule.
+    }
+  }
+  if (url.protocol !== "https:") return false;
+  const host = url.hostname.toLowerCase();
+  return host === "slack.com" || host.endsWith(".slack.com");
+};
+
+export type SlackFileDownload =
+  | { ok: true; bytes: Buffer; contentType: string | null }
+  | { ok: false; reason: string };
+
+const DOWNLOAD_TIMEOUT_MS = 10_000;
+const MAX_DOWNLOAD_REDIRECTS = 3;
+
+/**
+ * Download `url_private` bytes with the bot token. Redirects are followed BY
+ * HAND so every hop re-passes the host pin — `fetch`'s automatic following
+ * would happily replay the Authorization header to wherever Slack (or a
+ * forged payload) pointed. An HTML answer is Slack's login page — the
+ * documented behavior for a missing `files:read` scope — and is refused as
+ * such rather than stored as "the image".
+ */
+export const downloadPrivateFile = async (
+  botToken: string,
+  rawUrl: string,
+  maxBytes: number,
+): Promise<SlackFileDownload> => {
+  let target = rawUrl;
+  for (let hop = 0; hop <= MAX_DOWNLOAD_REDIRECTS; hop += 1) {
+    if (!isSlackFilesUrl(target)) {
+      return { ok: false, reason: "refused a non-Slack download URL" };
+    }
+    let response: Response;
+    try {
+      response = await fetch(target, {
+        headers: { authorization: `Bearer ${botToken}` },
+        redirect: "manual",
+        signal: AbortSignal.timeout(DOWNLOAD_TIMEOUT_MS),
+      });
+    } catch {
+      return { ok: false, reason: "download failed" };
+    }
+
+    if (response.status >= 300 && response.status < 400) {
+      const location = response.headers.get("location");
+      await response.body?.cancel().catch(() => {});
+      if (!location) return { ok: false, reason: "broken redirect" };
+      target = new URL(location, target).toString();
+      continue;
+    }
+    if (!response.ok) {
+      await response.body?.cancel().catch(() => {});
+      return { ok: false, reason: `download answered HTTP ${response.status}` };
+    }
+
+    const contentType = response.headers.get("content-type");
+    if (contentType?.toLowerCase().includes("text/html")) {
+      // Slack serves a login page instead of a 401 when the token lacks
+      // files:read — storing it as the file would be worse than failing.
+      await response.body?.cancel().catch(() => {});
+      return {
+        ok: false,
+        reason:
+          "Slack refused the download (reinstall the app to grant files:read)",
+      };
+    }
+
+    const body = await readCappedBinaryBody(response, maxBytes);
+    if (!body.ok) {
+      return {
+        ok: false,
+        reason:
+          body.reason === "too_large"
+            ? "file too large"
+            : "empty or unreadable download",
+      };
+    }
+    return {
+      ok: true,
+      bytes: body.bytes,
+      contentType: contentType?.split(";")[0]?.trim() ?? null,
+    };
+  }
+  return { ok: false, reason: "too many redirects" };
+};
+
+const usersInfoResponse = z.object({
+  user: z.object({
+    id: z.string().min(1),
+    profile: z
+      .object({
+        email: z.string().optional(),
+        /** Where a manifest rename lands, ASYNCHRONOUSLY — the field the
+         * teardown polls to confirm the tombstone before deleting. */
+        real_name: z.string().optional(),
+      })
+      .optional(),
+  }),
+});
+
+/** A member's profile — the email the lazy account-link matches on. Needs the
+ * bot token's `users:read.email`. */
+export const usersInfo = (botToken: string, userId: string) =>
+  slackCall(
+    "users.info",
+    { token: botToken, form: { user: userId } },
+    usersInfoResponse,
+  );
+
+const oauthAccessResponse = z.object({
+  access_token: z.string().min(1),
+  bot_user_id: z.string().min(1),
+  team: z.object({ id: z.string().min(1), name: z.string().nullish() }),
+});
+
+/** The events arm's code exchange. Client creds go as HTTP Basic (Slack's
+ * documented preference over form params); `redirect_uri` matches the sole
+ * configured redirect URL byte-for-byte (both come from `publicApiUrl()`). */
+export const oauthAccess = (input: {
+  clientId: string;
+  clientSecret: string;
+  code: string;
+  redirectUri: string;
+}) =>
+  slackCall(
+    "oauth.v2.access",
+    {
+      basicAuth: { user: input.clientId, pass: input.clientSecret },
+      form: {
+        code: input.code,
+        redirect_uri: input.redirectUri,
+      },
+    },
+    oauthAccessResponse,
+  );

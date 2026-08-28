@@ -1,9 +1,9 @@
 import { db } from "@onecli/db";
 
 // The TS mirror of the gateway's `find_connection_providers`
-// (apps/gateway/src/db.rs): the providers of the acting org+project app
+// (apps/gateway/src/db.rs): the providers of the acting org+workspace app
 // connections, so a `connection` target can resolve to the provider whose
-// catalog hosts it gates (the step-8 secret symmetry). ORG+PROJECT-FENCED on
+// catalog hosts it gates (the step-8 secret symmetry). ORG+WORKSPACE-FENCED on
 // both arms — a forged/foreign connection id resolves to NOTHING (it simply
 // isn't in the fenced set), which leaves the target unresolved (never matches —
 // fail-closed, like a deleted secret). No status filter: the row's existence is
@@ -11,11 +11,11 @@ import { db } from "@onecli/db";
 
 export const loadConnectionProviders = async (
   organizationId: string,
-  projectId: string,
+  workspaceId: string,
 ): Promise<Map<string, string>> => {
   const rows = await db.appConnection.findMany({
     where: {
-      OR: [{ projectId }, { organizationId, scope: "organization" }],
+      OR: [{ workspaceId }, { organizationId, scope: "organization" }],
     },
     select: { id: true, provider: true },
   });

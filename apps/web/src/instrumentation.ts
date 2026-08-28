@@ -1,4 +1,4 @@
-import { NODE_ENV, LOG_LEVEL, CAPS } from "@/lib/env";
+import { NODE_ENV, LOG_LEVEL } from "@/lib/env";
 
 /**
  * Next.js instrumentation hook — runs once when the server starts.
@@ -16,6 +16,28 @@ export async function register() {
   // per-runtime and the Edge compile drops this whole Node-only branch — via the
   // env re-export the branch survives DCE and the dynamic imports below get
   // traced into node:crypto/node:fs, warning on every Edge build.
+  if (process.env.NEXT_RUNTIME === "nodejs") {
+    // Fill the provider seams (role resolver, team hooks, policy seeder, …)
+    // as a property of the PROCESS, before any request renders. Relying on
+    // `@/lib/init/server` alone (sole importer: lib/actions/resolve-user.ts)
+    // left renders whose module graph never touched that file with EMPTY
+    // seams — on an entitled self-host the role-resolver slot read as null
+    // and `canAccessWorkspaceAsUser` silently denied the workspace's own
+    // owner, bouncing the browser to /org on a fresh install's first open.
+    const { ensureEditionDefaults } = await import("@onecli/api");
+    ensureEditionDefaults();
+
+    // One boot-time report of the advertised addresses this process will
+    // inject into every page, each tagged with where it came from. A
+    // misconfigured ONECLI_EXTERNAL_URL throws here — at startup, with the
+    // fix in the message — instead of 500ing every render.
+    const { formatOriginsBanner, resolveOriginsFromEnv } =
+      await import("@onecli/api/lib/public-origins");
+    const origins = resolveOriginsFromEnv();
+    for (const line of formatOriginsBanner(origins)) console.info(line);
+    for (const warning of origins.warnings) console.warn(warning);
+  }
+
   if (process.env.NEXT_RUNTIME === "nodejs" && NODE_ENV === "production") {
     const pino = (await import("pino")).default;
     const logger = pino({
@@ -34,36 +56,5 @@ export async function register() {
       logger.warn(args.length === 1 ? args[0] : { msg: args.join(" ") });
     console.error = (...args: unknown[]) =>
       logger.error(args.length === 1 ? args[0] : { msg: args.join(" ") });
-
-    // Onprem: eagerly provision the org + operator API key at boot so the
-    // instance is usable via the org key immediately — before anyone opens the
-    // web (headless). Runs for any onprem auth mode; the key is owned by the
-    // bootstrap admin user. Idempotent; never fatal (a failure just falls back to
-    // the lazy first-login bootstrap).
-    if (CAPS.tenancy === "single-org-shared") {
-      try {
-        const { ensureOnpremInstance } =
-          await import("@/lib/auth/ensure-onprem-instance");
-        await ensureOnpremInstance();
-      } catch (err) {
-        console.error(
-          "onprem eager bootstrap failed; will retry lazily on first login",
-          err,
-        );
-      }
-    }
-
-    // Boot policy pass (after the entrypoint's `prisma migrate deploy`),
-    // best-effort in the background — a failure logs loudly but never crashes
-    // the web. The aliased seam (`@/lib/policy-migrate`, swapped per edition):
-    // OSS converts any pre-cutover project's legacy policy into v2, runs the
-    // read-only guard, then the step-5 grant conversion; every EE edition is a
-    // no-op (cloud is fully converted and imports convert inline; onprem gets
-    // a report rather than an unattended rewrite). NOTE the enclosing
-    // `NODE_ENV === "production"` gate: this does not run under `pnpm dev`,
-    // only in the shipped image.
-    void import("@/lib/policy-migrate")
-      .then(({ runPolicyMigration }) => runPolicyMigration())
-      .catch((err) => console.error("[policy-migrate] failed:", err));
   }
 }

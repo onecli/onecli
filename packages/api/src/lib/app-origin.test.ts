@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it } from "vitest";
 import {
+  configuredApiUrl,
   configuredAppUrl,
   normalizeOrigin,
   originFromHeaders,
@@ -52,6 +53,47 @@ describe("configuredAppUrl", () => {
     process.env.APP_URL = "";
     process.env.NEXT_PUBLIC_APP_URL = "https://public.example.com";
     expect(configuredAppUrl()).toBe("https://public.example.com");
+  });
+});
+
+describe("configuredApiUrl", () => {
+  const orig = {
+    API_URL: process.env.API_URL,
+    NEXT_PUBLIC_API_URL: process.env.NEXT_PUBLIC_API_URL,
+  };
+  afterEach(() => {
+    for (const key of ["API_URL", "NEXT_PUBLIC_API_URL"] as const) {
+      if (orig[key] === undefined) delete process.env[key];
+      else process.env[key] = orig[key];
+    }
+  });
+
+  // Same load-bearing case as configuredAppUrl: `undefined` is what lets the
+  // OAuth redirect_uri fall back to the request origin on unconfigured deploys.
+  it("is undefined when nothing is configured", () => {
+    delete process.env.API_URL;
+    delete process.env.NEXT_PUBLIC_API_URL;
+    expect(configuredApiUrl()).toBeUndefined();
+  });
+
+  it("treats empty and whitespace-only values as unconfigured", () => {
+    delete process.env.NEXT_PUBLIC_API_URL;
+    process.env.API_URL = "";
+    expect(configuredApiUrl()).toBeUndefined();
+    process.env.API_URL = "   ";
+    expect(configuredApiUrl()).toBeUndefined();
+  });
+
+  it("returns a configured URL with trailing slashes stripped", () => {
+    process.env.API_URL = "https://api.example.com//";
+    delete process.env.NEXT_PUBLIC_API_URL;
+    expect(configuredApiUrl()).toBe("https://api.example.com");
+  });
+
+  it("falls back to NEXT_PUBLIC_API_URL when API_URL is unset", () => {
+    delete process.env.API_URL;
+    process.env.NEXT_PUBLIC_API_URL = "https://api-public.example.com";
+    expect(configuredApiUrl()).toBe("https://api-public.example.com");
   });
 });
 

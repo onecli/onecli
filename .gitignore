@@ -3,9 +3,20 @@ node_modules
 .pnp
 .pnp.js
 
-# Local env files
+# Local env files. ONE runtime file per checkout: .env, created and topped up
+# by `pnpm dev` (docker/.env — a self-host install's copy, written by
+# `pnpm run setup` — is matched by the same pattern).
 .env
 .env.local
+# The wizard's "Reset" archives (docker/.env.bak-<timestamp>) and the env
+# engine's crash-leftover tmp files hold real secrets — never committable.
+.env.bak-*
+..env.*.tmp
+# Files from the multi-file era — no longer read, still ignored so a leftover
+# personal copy can never be committed.
+.env.oss
+.env.onprem
+.env.dev.local
 .env.development.local
 .env.test.local
 .env.production.local
@@ -47,6 +58,7 @@ data/
 
 # CDK
 cdk.out
+cdk.out.*
 
 # Rust
 apps/gateway/target/

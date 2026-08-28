@@ -41,7 +41,12 @@ export type ConnectionMethod =
        *  of a query parameter. The bridge page extracts the named param from the
        *  fragment and resubmits it as a query parameter for the server. */
       fragmentCallback?: { paramName: string };
-      buildAuthUrl: (params: OAuthBuildAuthUrlParams) => string;
+      /** May be async: the registry graph is client-reachable, so a definition
+       *  needing node builtins (PKCE/JWT crypto) must load them via a lazy
+       *  `await import("node:crypto")` instead of a top-level import. */
+      buildAuthUrl: (
+        params: OAuthBuildAuthUrlParams,
+      ) => string | Promise<string>;
       exchangeCode: (
         params: OAuthExchangeCodeParams,
       ) => Promise<OAuthExchangeResult>;
@@ -92,9 +97,6 @@ export type ConnectionMethod =
         /** Maps JSON keys in the file to field names in the form. */
         keyMap: Record<string, string>;
       };
-    }
-  | {
-      type: "cloud_only";
     };
 
 export interface OAuthConfigField {
@@ -119,10 +121,8 @@ export interface AppDefinition {
    *  connect UI lets the user pick; the connect route resolves the chosen one
    *  via the request's `method` field. */
   additionalMethods?: ConnectionMethod[];
-  available: boolean;
   /** Custom hint for the connection label field (e.g. 'e.g. "staging", "my-org"'). */
   labelHint?: string;
-  teamOnly?: boolean;
   /** Credential stubs for provisioners to write so MCP servers can boot. */
   credentialStubs?: {
     /** Full destination path (e.g., "~/.config/gcloud/application_default_credentials.json"). */

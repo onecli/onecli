@@ -37,32 +37,39 @@ let evaluator: Evaluator;
 
 const P = "grn-";
 const ORG = `${P}org`;
-const PROJECT = `${P}proj`;
+const WORKSPACE = `${P}proj`;
 const OTHER_ORG = `${P}other-org`;
-const OTHER_PROJECT = `${P}other-proj`;
+const OTHER_WORKSPACE = `${P}other-proj`;
 const AGENT = `${P}agent`;
+/** A HOSTED agent — the only kind with a computer a grant has to reach. */
+const HOSTED_AGENT = `${P}hosted`;
+const RUNNER = `${P}runner`;
+const SANDBOX = `${P}sandbox`;
 const CONN_WORK = `${P}conn-work`;
 const CONN_PERSONAL = `${P}conn-personal`;
 const CONN_ORG = `${P}conn-orgshared`;
 const CONN_FOREIGN = `${P}conn-foreign`;
 const SECRET = `${P}secret`;
 
-const SCOPE = { projectId: PROJECT, organizationId: ORG };
+const SCOPE = { workspaceId: WORKSPACE, organizationId: ORG };
 const GMAIL_HOST = "gmail.googleapis.com";
 
 const reset = async () => {
   await db.policyRuleV2.deleteMany({
     where: {
       OR: [
-        { projectId: { startsWith: P } },
+        { workspaceId: { startsWith: P } },
         { organizationId: { startsWith: P } },
       ],
     },
   });
   await db.appConnection.deleteMany({ where: { id: { startsWith: P } } });
   await db.secret.deleteMany({ where: { id: { startsWith: P } } });
+  // Agents cascade their sandboxes and conversations; the runner they sit on
+  // does not, so it goes after them.
   await db.agent.deleteMany({ where: { id: { startsWith: P } } });
-  await db.project.deleteMany({ where: { id: { startsWith: P } } });
+  await db.runner.deleteMany({ where: { id: { startsWith: P } } });
+  await db.workspace.deleteMany({ where: { id: { startsWith: P } } });
   await db.organization.deleteMany({ where: { id: { startsWith: P } } });
 };
 
@@ -81,20 +88,46 @@ beforeAll(async () => {
   for (const id of [ORG, OTHER_ORG]) {
     await db.organization.create({ data: { id, name: id, slug: id } });
   }
-  await db.project.create({
-    data: { id: PROJECT, name: PROJECT, organizationId: ORG },
+  await db.workspace.create({
+    data: { id: WORKSPACE, name: WORKSPACE, organizationId: ORG },
   });
-  await db.project.create({
-    data: { id: OTHER_PROJECT, name: OTHER_PROJECT, organizationId: OTHER_ORG },
+  await db.workspace.create({
+    data: {
+      id: OTHER_WORKSPACE,
+      name: OTHER_WORKSPACE,
+      organizationId: OTHER_ORG,
+    },
   });
   await db.agent.create({
     data: {
       id: AGENT,
-      projectId: PROJECT,
+      workspaceId: WORKSPACE,
       name: "grn agent",
       identifier: AGENT,
       accessToken: "aoc_grn_test_token",
-      secretMode: "selective",
+    },
+  });
+  await db.agent.create({
+    data: {
+      id: HOSTED_AGENT,
+      workspaceId: WORKSPACE,
+      name: "grn hosted agent",
+      identifier: HOSTED_AGENT,
+      accessToken: "aoc_grn_hosted_token",
+      kind: "hosted",
+      harness: "jcode",
+    },
+  });
+  await db.runner.create({
+    data: {
+      id: RUNNER,
+      name: "grn runner",
+      token: `rnr_${P}test`,
+      capabilities: {
+        maxSandboxes: 4,
+        backend: "docker",
+        homeDurability: "resident",
+      },
     },
   });
   const conn = (id: string, over: Record<string, unknown> = {}) =>
@@ -102,9 +135,9 @@ beforeAll(async () => {
       data: {
         id,
         provider: "gmail",
-        scope: "project",
+        scope: "workspace",
         status: "connected",
-        projectId: PROJECT,
+        workspaceId: WORKSPACE,
         label: id,
         ...over,
       },
@@ -113,18 +146,18 @@ beforeAll(async () => {
   await conn(CONN_PERSONAL);
   await conn(CONN_ORG, {
     scope: "organization",
-    projectId: null,
+    workspaceId: null,
     organizationId: ORG,
   });
-  await conn(CONN_FOREIGN, { projectId: OTHER_PROJECT });
+  await conn(CONN_FOREIGN, { workspaceId: OTHER_WORKSPACE });
   await db.secret.create({
     data: {
       id: SECRET,
       name: "grn secret",
       type: "generic",
       hostPattern: "api.grn.example",
-      scope: "project",
-      projectId: PROJECT,
+      scope: "workspace",
+      workspaceId: WORKSPACE,
     },
   });
 });
@@ -136,27 +169,34 @@ afterAll(async () => {
 });
 
 beforeEach(async () => {
+  // The compiler is the unit under test — entitlement gating is not. Under
+  // the CI cloud env the provider slots fail loudly unless injected, so give
+  // every test the permissive defaults this suite always ran with (individual
+  // tests that exercise a real validator re-inject their own below).
+  const providers = await import("../providers");
+  providers.initRuleActionGate({ assertAllowed: async () => {} });
+  providers.initPolicyValidator({ validate: async () => {} });
   if (!PROOF_URL) return;
   await db.policyRuleV2.deleteMany({
     where: {
       OR: [
-        { projectId: { startsWith: P } },
+        { workspaceId: { startsWith: P } },
         { organizationId: { startsWith: P } },
       ],
     },
   });
 });
 
-/** The engine rules exactly as the reflections read them: published project
+/** The engine rules exactly as the reflections read them: published workspace
  * rows → toSimRule (fenced host/provider maps) → the typed evaluator rules. */
 const engineRules = async () => {
   const [rows, hosts, providers] = await Promise.all([
     loaders.loadRulesForSimulation(
-      { scope: "project", projectId: PROJECT },
+      { scope: "workspace", workspaceId: WORKSPACE },
       "published",
     ),
-    secretHosts.loadSecretHosts(ORG, PROJECT),
-    connectionProviders.loadConnectionProviders(ORG, PROJECT),
+    secretHosts.loadSecretHosts(ORG, WORKSPACE),
+    connectionProviders.loadConnectionProviders(ORG, WORKSPACE),
   ]);
   return rows.map((r) => simRule.toSimRule(r, hosts, providers).rule);
 };
@@ -180,7 +220,7 @@ const decide = async (opts: {
 
 const grantRows = (extra: Record<string, unknown> = {}) =>
   db.policyRuleV2.findMany({
-    where: { projectId: PROJECT, source: "grant", ...extra },
+    where: { workspaceId: WORKSPACE, source: "grant", ...extra },
     include: { identities: true, targets: true },
     orderBy: [{ status: "asc" }, { priority: "asc" }],
   });
@@ -214,7 +254,7 @@ describe.skipIf(!PROOF_URL)("grant compiler over real PostgreSQL", () => {
 
     // The injection read (equipment kept) carries the grant too.
     const injectRows = await loaders.loadInjectionRules(
-      { scope: "project", projectId: PROJECT },
+      { scope: "workspace", workspaceId: WORKSPACE },
       "published",
     );
     expect(
@@ -268,7 +308,7 @@ describe.skipIf(!PROOF_URL)("grant compiler over real PostgreSQL", () => {
     expect(blocked.byDefault).toBeFalsy();
 
     // The step-1 winner-binding: the same request via the same-provider
-    // SIBLING matches none of the stack and rides the project's allow default.
+    // SIBLING matches none of the stack and rides the workspace's allow default.
     const viaSibling = await decide({
       path: "/gmail/v1/users/me/messages",
       method: "GET",
@@ -287,7 +327,7 @@ describe.skipIf(!PROOF_URL)("grant compiler over real PostgreSQL", () => {
     );
     const before = await grantRows();
     const genBefore = await db.policyRuleV2.aggregate({
-      where: { projectId: PROJECT, status: "published" },
+      where: { workspaceId: WORKSPACE, status: "published" },
       _max: { generation: true },
     });
 
@@ -305,7 +345,7 @@ describe.skipIf(!PROOF_URL)("grant compiler over real PostgreSQL", () => {
       before.map((r) => r.id).sort(),
     );
     const genAfter = await db.policyRuleV2.aggregate({
-      where: { projectId: PROJECT, status: "published" },
+      where: { workspaceId: WORKSPACE, status: "published" },
       _max: { generation: true },
     });
     expect(genAfter._max.generation).toBe(genBefore._max.generation);
@@ -358,7 +398,7 @@ describe.skipIf(!PROOF_URL)("grant compiler over real PostgreSQL", () => {
     // published truth is asserted through the max-generation loader below.
     expect(await grantRows({ status: "draft" })).toHaveLength(0);
     const published = await loaders.loadRulesForSimulation(
-      { scope: "project", projectId: PROJECT },
+      { scope: "workspace", workspaceId: WORKSPACE },
       "published",
     );
     expect(published.filter((r) => r.source === "grant")).toHaveLength(0);
@@ -411,7 +451,7 @@ describe.skipIf(!PROOF_URL)("grant compiler over real PostgreSQL", () => {
     expect(removed.changed).toBe(true);
     expect(await grantRows({ status: "draft" })).toHaveLength(0);
     const published = await loaders.loadRulesForSimulation(
-      { scope: "project", projectId: PROJECT },
+      { scope: "workspace", workspaceId: WORKSPACE },
       "published",
     );
     expect(published.filter((r) => r.source === "grant")).toHaveLength(0);
@@ -427,11 +467,11 @@ describe.skipIf(!PROOF_URL)("grant compiler over real PostgreSQL", () => {
     );
     const [draftRows, publishedRows] = await Promise.all([
       loaders.loadRulesForSimulation(
-        { scope: "project", projectId: PROJECT },
+        { scope: "workspace", workspaceId: WORKSPACE },
         "draft",
       ),
       loaders.loadRulesForSimulation(
-        { scope: "project", projectId: PROJECT },
+        { scope: "workspace", workspaceId: WORKSPACE },
         "published",
       ),
     ]);
@@ -570,7 +610,7 @@ describe.skipIf(!PROOF_URL)("grant compiler over real PostgreSQL", () => {
     ).toBeNull();
   });
 
-  it("the org boundary bounds what a project may select — and narrowing within it saves", async () => {
+  it("the org boundary bounds what a workspace may select — and narrowing within it saves", async () => {
     // A published ORG rule naming NO identity: the "applies to every agent"
     // shape, which bounds every agent's reach for this connection.
     const orgBase = { scope: "organization", organizationId: ORG };
@@ -733,5 +773,105 @@ describe.skipIf(!PROOF_URL)("grant compiler over real PostgreSQL", () => {
       // The permissive default — leave the registry as the suite found it.
       providers.initPolicyValidator({ validate: async () => {} });
     }
+  });
+});
+
+/**
+ * A grant that never reaches the computer is not a grant.
+ *
+ * The spawn payload names the credential PLACEHOLDER matching the granted
+ * secret's auth mode — `ANTHROPIC_API_KEY` for an API key,
+ * `CLAUDE_CODE_OAUTH_TOKEN` for an OAuth token — and it is composed at
+ * DISPATCH. Nothing used to request a respawn when a grant changed, so
+ * granting a key to a RUNNING hosted agent did nothing at all: proven live,
+ * where the agent answered `credential_not_found` with the grant in place
+ * until an unrelated token regeneration happened to recreate the container.
+ */
+describe.skipIf(!PROOF_URL)("a grant reaches the sandbox", () => {
+  const seedSandbox = (status: string, agentId = HOSTED_AGENT, id = SANDBOX) =>
+    db.sandbox.create({
+      data: {
+        id,
+        agentId,
+        runnerId: RUNNER,
+        status,
+        lastActiveAt: new Date(),
+      },
+    });
+
+  const sandboxStatus = async (id = SANDBOX) =>
+    (await db.sandbox.findUnique({ where: { id } }))?.status;
+
+  beforeEach(async () => {
+    if (!PROOF_URL) return;
+    await db.sandbox.deleteMany({ where: { id: { startsWith: SANDBOX } } });
+  });
+
+  it("granting a secret marks a RUNNING sandbox for respawn", async () => {
+    await seedSandbox("running");
+
+    await grants.setSecretGrant(SCOPE, HOSTED_AGENT, SECRET, null);
+
+    // `unprovisioned` is what the dispatch seam's start arm claims — the next
+    // poll composes a fresh payload and the runner recreates the container.
+    expect(await sandboxStatus()).toBe("unprovisioned");
+  });
+
+  it("REVOKING a secret marks it for respawn too", async () => {
+    await grants.setSecretGrant(SCOPE, HOSTED_AGENT, SECRET, null);
+    await seedSandbox("running");
+
+    await grants.removeSecretGrant(SCOPE, HOSTED_AGENT, SECRET, null);
+
+    // Losing the only OAuth secret flips the placeholder back to
+    // `ANTHROPIC_API_KEY`; a container still advertising the old one would go
+    // on sending a header the gateway no longer fills.
+    expect(await sandboxStatus()).toBe("unprovisioned");
+  });
+
+  it("an idempotent no-op grant does NOT recreate the container", async () => {
+    await grants.setSecretGrant(SCOPE, HOSTED_AGENT, SECRET, null);
+    await seedSandbox("running");
+
+    const again = await grants.setSecretGrant(
+      SCOPE,
+      HOSTED_AGENT,
+      SECRET,
+      null,
+    );
+
+    expect(again.changed).toBe(false);
+    expect(await sandboxStatus()).toBe("running");
+  });
+
+  it("a CONNECTION grant leaves the container alone", async () => {
+    // Nothing about a connection reaches the container: the gateway splices
+    // those credentials at the wire, so the spawn payload is byte-identical
+    // before and after. Respawning would destroy a live session to change
+    // nothing — the planted negative control for the fix above.
+    await seedSandbox("running");
+
+    await grants.setConnectionGrant(
+      SCOPE,
+      HOSTED_AGENT,
+      CONN_WORK,
+      { access: "full" },
+      null,
+    );
+
+    expect(await sandboxStatus()).toBe("running");
+  });
+
+  it("a BYO agent's grant recreates nothing — planted negative control", async () => {
+    // A byo agent brings its own computer, so a grant has nowhere to land. The
+    // sandbox row here is PLANTED — nothing creates one for a byo agent — so
+    // that the `kind` guard is what the assertion rests on rather than the
+    // absence of a row, which would pass with the guard deleted.
+    await seedSandbox("running", AGENT, `${SANDBOX}-byo`);
+
+    const set = await grants.setSecretGrant(SCOPE, AGENT, SECRET, null);
+
+    expect(set.changed).toBe(true);
+    expect(await sandboxStatus(`${SANDBOX}-byo`)).toBe("running");
   });
 });

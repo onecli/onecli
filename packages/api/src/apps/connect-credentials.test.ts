@@ -9,7 +9,6 @@ const apiKeyApp: AppDefinition = {
   name: "Key App",
   icon: "/icons/keyapp.svg",
   description: "API-key test app",
-  available: true,
   connectionMethod: {
     type: "api_key",
     fields: [
@@ -29,7 +28,6 @@ const oauthApp: AppDefinition = {
   name: "OAuth App",
   icon: "/icons/oauthapp.svg",
   description: "OAuth test app",
-  available: true,
   connectionMethod: {
     type: "oauth",
     buildAuthUrl: () => "https://provider.example/auth",
@@ -98,21 +96,6 @@ describe("resolveConnectCredentials", () => {
     expect(result).toEqual({
       ok: false,
       error: 'Provider "oauthapp" has no "carrier_pigeon" connection method',
-    });
-  });
-
-  it("rejects cloud_only methods", async () => {
-    const cloudOnlyApp: AppDefinition = {
-      ...apiKeyApp,
-      id: "cloudy",
-      connectionMethod: { type: "cloud_only" },
-    };
-    const result = await resolveConnectCredentials("cloudy", cloudOnlyApp, {
-      fields: {},
-    });
-    expect(result).toEqual({
-      ok: false,
-      error: 'Provider "cloudy" is only available in OneCLI Cloud',
     });
   });
 

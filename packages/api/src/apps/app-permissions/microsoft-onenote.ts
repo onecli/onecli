@@ -1,0 +1,113 @@
+import type { AppPermissionDefinition } from "./types";
+
+export const microsoftOnenotePermissions: AppPermissionDefinition = {
+  provider: "microsoft-onenote",
+  groups: [
+    {
+      category: "read",
+      tools: [
+        {
+          id: "list_notebooks",
+          name: "List notebooks",
+          description: "List all OneNote notebooks",
+          hostPattern: "graph.microsoft.com",
+          pathPattern: "/v1.0/me/onenote/notebooks",
+          method: "GET",
+        },
+        {
+          id: "get_notebook",
+          name: "Get notebook",
+          description: "Retrieve a specific notebook",
+          hostPattern: "graph.microsoft.com",
+          pathPattern: "/v1.0/me/onenote/notebooks/*",
+          method: "GET",
+        },
+        {
+          id: "list_sections",
+          name: "List sections",
+          description: "List all notebook sections",
+          hostPattern: "graph.microsoft.com",
+          pathPattern: "/v1.0/me/onenote/sections",
+          method: "GET",
+        },
+        {
+          id: "list_notebook_sections",
+          name: "List notebook sections",
+          description: "List sections in a specific notebook",
+          hostPattern: "graph.microsoft.com",
+          pathPattern: "/v1.0/me/onenote/notebooks/*/sections",
+          method: "GET",
+        },
+        {
+          id: "list_pages",
+          name: "List pages",
+          description: "List all OneNote pages",
+          hostPattern: "graph.microsoft.com",
+          pathPattern: "/v1.0/me/onenote/pages",
+          method: "GET",
+        },
+        {
+          id: "list_section_pages",
+          name: "List section pages",
+          description: "List pages in a specific section",
+          hostPattern: "graph.microsoft.com",
+          pathPattern: "/v1.0/me/onenote/sections/*/pages",
+          method: "GET",
+        },
+        {
+          id: "get_page_content",
+          name: "Get page content",
+          description: "Retrieve the HTML content of a page",
+          hostPattern: "graph.microsoft.com",
+          pathPattern: "/v1.0/me/onenote/pages/*/content",
+          method: "GET",
+        },
+      ],
+    },
+    {
+      category: "write",
+      tools: [
+        {
+          id: "create_notebook",
+          name: "Create notebook",
+          description: "Create a new OneNote notebook",
+          hostPattern: "graph.microsoft.com",
+          pathPattern: "/v1.0/me/onenote/notebooks",
+          method: "POST",
+        },
+        {
+          id: "create_section",
+          name: "Create section",
+          description: "Create a new section in a notebook",
+          hostPattern: "graph.microsoft.com",
+          pathPattern: "/v1.0/me/onenote/notebooks/*/sections",
+          method: "POST",
+        },
+        {
+          id: "create_page",
+          name: "Create page",
+          description: "Create a new page in a section",
+          hostPattern: "graph.microsoft.com",
+          pathPattern: "/v1.0/me/onenote/sections/*/pages",
+          method: "POST",
+        },
+        {
+          id: "update_page",
+          name: "Update page",
+          description: "Update the content of a page",
+          hostPattern: "graph.microsoft.com",
+          pathPattern: "/v1.0/me/onenote/pages/*/content",
+          method: "PATCH",
+        },
+        {
+          id: "delete_page",
+          name: "Delete page",
+          description: "Delete a page",
+          hostPattern: "graph.microsoft.com",
+          pathPattern: "/v1.0/me/onenote/pages/*",
+          method: "DELETE",
+        },
+      ],
+    },
+  ],
+};

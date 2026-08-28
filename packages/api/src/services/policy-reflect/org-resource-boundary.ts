@@ -8,16 +8,23 @@ import { injectionIdentityMatches } from "./injection";
 import { intersectPolicies } from "../../lib/resource-axis";
 
 /**
+ * LICENSED-MIRROR: deliberate Apache twin of the gateway's boundary
+ * derivation (`collect_boundaries`, apps/gateway/src/policy_engine/inject_select.rs
+ * — itself dual-use shared code whose resource-scope composition delegates to
+ * the licensed `ee/granular_access`). The free effective-permissions
+ * reflection executes this file, so it must NOT move into `ee/` — declared in
+ * ee-boundary.ts LICENSED_MIRRORS.
+ *
  * The ORGANIZATION's resource boundary for one (agent, connection): how far the
- * org allows that connection's injected credential to reach, whatever a project
+ * org allows that connection's injected credential to reach, whatever a workspace
  * grant then selects within it.
  *
- * Mirrors the gateway's `collect_boundaries` (`ee/policy_engine/inject_select.rs`)
- * exactly, including its identity law — which is the DECISION engine's, not the
- * injection engine's: a rule naming no identity bounds EVERY agent. The two
- * laws differ deliberately. Granting a credential to "everyone by omission"
- * would be a leak, but restricting everyone is the plain reading of an
- * organization-wide rule and can only tighten access.
+ * Mirrors the gateway's `collect_boundaries` exactly, including its identity
+ * law — which is the DECISION engine's, not the injection engine's: a rule
+ * naming no identity bounds EVERY agent. The two laws differ deliberately.
+ * Granting a credential to "everyone by omission" would be a leak, but
+ * restricting everyone is the plain reading of an organization-wide rule and
+ * can only tighten access.
  */
 const boundaryIdentityMatches = (
   identities: SimRuleRow["identities"],
@@ -95,16 +102,16 @@ export const orgResourceBoundary = (
 };
 
 /**
- * The PROJECT's own selection for one (agent, connection) — the grant stack's
+ * The WORKSPACE's own selection for one (agent, connection) — the grant stack's
  * session policy, under the injection engine's EXPLICIT-identity law (a rule
  * naming nobody grants nobody a credential, so it selects nothing either).
  */
-export const projectResourceSelection = (
-  projectInjectionRows: SimRuleRow[],
+export const workspaceResourceSelection = (
+  workspaceInjectionRows: SimRuleRow[],
   agentId: string,
   principals: PrincipalSet,
   connectionId: string,
 ): SessionPolicyInput | null =>
-  foldSessionPolicy(projectInjectionRows, connectionId, (identities) =>
+  foldSessionPolicy(workspaceInjectionRows, connectionId, (identities) =>
     injectionIdentityMatches(identities, agentId, principals),
   );

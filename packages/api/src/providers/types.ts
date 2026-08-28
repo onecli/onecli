@@ -11,16 +11,16 @@ export const ROLE_HIERARCHY: Record<OrgRole, number> = {
 };
 
 /**
- * How the caller authenticated. A `project` key is bound to a single project and
- * is confined to it on project-management routes; `organization` keys and user
+ * How the caller authenticated. A `workspace` key is bound to a single workspace and
+ * is confined to it on workspace-management routes; `organization` keys and user
  * `session`s carry the user's full org-wide authority. Set by the auth middleware.
  */
-export type AuthScope = "project" | "organization" | "session";
+export type AuthScope = "workspace" | "organization" | "session";
 
 export interface AuthContext {
   userId: string;
   userEmail: string;
-  projectId?: string;
+  workspaceId?: string;
   organizationId: string;
   role?: OrgRole;
   scope?: AuthScope;
@@ -57,6 +57,40 @@ export interface RoleResolver {
   getUserRole(userId: string, organizationId: string): Promise<OrgRole | null>;
 }
 
+/** The (workspace, org) pair every workspace-access question is asked about. */
+export interface WorkspaceRef {
+  readonly id: string;
+  readonly organizationId: string;
+}
+
+/**
+ * The SSH certificate authority behind the front door (step 5): mints user
+ * certificates and session grants. Both operations are async because the
+ * cloud implementation signs inside KMS (the private key is non-extractable);
+ * the onprem twin wraps a local PEM. `getPublicKey` returns the raw 32-byte
+ * ed25519 key; `sign` returns the raw 64-byte signature over exactly the
+ * given bytes.
+ */
+export interface SshCaSigner {
+  getPublicKey(): Promise<Buffer>;
+  sign(data: Buffer): Promise<Buffer>;
+}
+
+/**
+ * The licensed workspace-access + org-admin resolution behind the shared
+ * predicates in `services/workspace-access-check.ts`. RBAC deployments (cloud,
+ * licensed self-host) answer through the injected implementation — the
+ * admin-or-binding rule with the suspension invariant; non-RBAC deployments
+ * never consult this (the shared predicates short-circuit to allowed).
+ */
+export interface WorkspaceAccessChecker {
+  canAccessWorkspaceAsUser(
+    userId: string,
+    workspace: WorkspaceRef,
+  ): Promise<boolean>;
+  userIsOrgAdmin(userId: string, organizationId: string): Promise<boolean>;
+}
+
 /** An explicit session rejection: the message shown to the user + a stable code. */
 export interface SessionDenial {
   error: string;
@@ -73,6 +107,14 @@ export type SessionEnforcer = (
   session: SessionUser,
   user: { id: string; email: string },
 ) => Promise<SessionDenial | null>;
+
+/**
+ * Edition throttle applied to /auth/session BEFORE the session read, so a
+ * refusal (429) precedes every DB write the bootstrap performs. Cloud injects
+ * the per-IP Redis limiter; never registered in OSS — self-host requests are
+ * never throttled here.
+ */
+export type SessionThrottle = import("hono").MiddlewareHandler;
 
 export interface OAuthOrgHandlers {
   tryHandleOrgAuthorize: (
@@ -100,13 +142,13 @@ export interface OAuthOrgHandlers {
 }
 
 /**
- * Org-level app-config reads backing the project → org → env credential
- * fallback. EE-only capability: org-level app configs are writable only
- * through the EE org surface, so OSS never registers a provider and the org
- * tier is skipped everywhere (project → env, unchanged).
+ * Org-level app-config reads backing the workspace → org → env credential
+ * fallback. Shared across editions: the implementation rides the DB client,
+ * so it is boot-injected by `ensureEditionDefaults()` on every server (never
+ * statically imported here — the providers barrel is client-reachable).
  */
 export interface OrgAppConfigProvider {
-  /** Org-row-or-env credential resolution (mirrors the project resolver). */
+  /** Org-row-or-env credential resolution (mirrors the workspace resolver). */
   resolveCredentials(
     organizationId: string,
     app: AppDefinition,
@@ -132,12 +174,12 @@ export interface OrgAppConfigProvider {
  */
 export interface AppAvailabilityProvider {
   /**
-   * The app-provider ids available to a project, or `null` when availability is
+   * The app-provider ids available to a workspace, or `null` when availability is
    * unrestricted (the org is in "open" mode) — the caller then treats every app
    * as available. Scoped to the acting org; never leaks other orgs' grants.
    */
   getAvailableProviders(
-    projectId: string,
+    workspaceId: string,
     organizationId: string,
   ): Promise<string[] | null>;
 }

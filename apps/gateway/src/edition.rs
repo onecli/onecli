@@ -1,55 +1,63 @@
-//! Build edition identity for the gateway.
+//! Runtime edition identity for the gateway.
 //!
-//! The active edition is selected at build time via Cargo features and surfaced
-//! as positive `edition_*` cfgs by `build.rs` (OSS is implicit — no edition
-//! feature). This module exposes them as a runtime value so code can branch on
-//! `edition()` / `capabilities()` instead of scattering `#[cfg(...)]`.
+//! One binary serves both editions; the `EDITION` env var selects at startup:
+//! `cloud` → Cloud, anything else or unset → Onprem (the self-hosted default —
+//! the legacy `oss` value also lands here). Read once into a `OnceLock` so the
+//! value cannot change mid-process, the same pattern as the auth secret
+//! (`auth.rs`). Code with an edition branch should take `Edition` as a
+//! parameter (table-testable) and read `edition()` only at the call site.
 
-// `build.rs` sets `edition_conflict` when more than one edition feature is
-// enabled at once. Fail loudly here rather than silently picking one.
-#[cfg(edition_conflict)]
-compile_error!("at most one OneCLI edition feature may be enabled at a time (e.g. `cloud`)");
+use std::sync::OnceLock;
 
-/// The distribution edition this binary was built as.
+/// The distribution edition this process is running as.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Edition {
-    Oss,
+    /// Self-hosted (the default for any `EDITION` value other than `cloud`).
+    Onprem,
     Cloud,
-    OnpremSlim,
-    OnpremFull,
 }
 
-/// The edition selected at build time.
-pub const fn edition() -> Edition {
-    if cfg!(edition_cloud) {
-        Edition::Cloud
-    } else if cfg!(edition_onprem_slim) {
-        Edition::OnpremSlim
-    } else if cfg!(edition_onprem_full) {
-        Edition::OnpremFull
-    } else {
-        Edition::Oss
+fn parse(raw: Option<&str>) -> Edition {
+    match raw.map(str::trim) {
+        Some(v) if v.eq_ignore_ascii_case("cloud") => Edition::Cloud,
+        _ => Edition::Onprem,
     }
 }
 
-/// Capabilities derived from the build edition — the seam for runtime branches
-/// as they migrate off `#[cfg]`. Extend with capability fields as consumers
-/// appear (e.g. tenancy, crypto backend).
-#[derive(Debug, Clone, Copy)]
-pub struct Capabilities {
-    pub edition: Edition,
-    /// Whether demo-mode hard caps are baked in (the `demo` Cargo feature).
-    /// Orthogonal to `edition` — only ever combined with `onprem-slim` to build
-    /// the `slim-poc` image. A runtime env var cannot change it.
-    pub demo: bool,
+/// The edition selected by the `EDITION` env var, read once at first use.
+pub fn edition() -> Edition {
+    static EDITION: OnceLock<Edition> = OnceLock::new();
+    *EDITION.get_or_init(|| parse(std::env::var("EDITION").ok().as_deref()))
 }
 
-/// Capabilities for the current build edition.
-pub const fn capabilities() -> Capabilities {
-    Capabilities {
-        edition: edition(),
-        demo: cfg!(demo_enabled),
+/// Whether this deployment may run enterprise features. Cloud is always
+/// entitled (billing plans gate there); self-host opts in with
+/// `ENTERPRISE_ENABLED=true` under the OneCLI Enterprise License. Forcing
+/// cloud inside the parser (not at call sites) keeps every `EDITION=cloud`
+/// path — including the whole e2e suite — behaviorally identical with or
+/// without the flag.
+fn parse_entitled(raw: Option<&str>, edition: Edition) -> bool {
+    match edition {
+        Edition::Cloud => true,
+        Edition::Onprem => matches!(
+            raw.map(str::trim),
+            Some(v) if v.eq_ignore_ascii_case("true") || v == "1"
+        ),
     }
+}
+
+/// The entitlement for this process, read once at first use. Code with an
+/// entitlement branch should take `entitled: bool` as a parameter
+/// (table-testable) and read `entitled()` only at the call site — never on
+/// the per-request path; every gate sits at load/startup.
+pub fn entitled() -> bool {
+    static ENTITLED: OnceLock<bool> = OnceLock::new();
+    *ENTITLED.get_or_init(|| {
+        parse_entitled(
+            std::env::var("ENTERPRISE_ENABLED").ok().as_deref(),
+            edition(),
+        )
+    })
 }
 
 #[cfg(test)]
@@ -57,19 +65,36 @@ mod tests {
     use super::*;
 
     #[test]
-    fn edition_matches_build() {
-        #[cfg(edition_cloud)]
-        assert_eq!(edition(), Edition::Cloud);
-        #[cfg(edition_oss)]
-        assert_eq!(edition(), Edition::Oss);
-        #[cfg(edition_onprem_slim)]
-        assert_eq!(edition(), Edition::OnpremSlim);
-        #[cfg(edition_onprem_full)]
-        assert_eq!(edition(), Edition::OnpremFull);
+    fn cloud_parses_case_insensitively_and_trimmed() {
+        assert_eq!(parse(Some("cloud")), Edition::Cloud);
+        assert_eq!(parse(Some("  CLOUD ")), Edition::Cloud);
     }
 
     #[test]
-    fn demo_matches_build() {
-        assert_eq!(capabilities().demo, cfg!(demo_enabled));
+    fn everything_else_is_onprem() {
+        assert_eq!(parse(None), Edition::Onprem);
+        assert_eq!(parse(Some("")), Edition::Onprem);
+        assert_eq!(parse(Some("oss")), Edition::Onprem); // legacy value
+        assert_eq!(parse(Some("garbage")), Edition::Onprem);
+    }
+
+    #[test]
+    fn cloud_is_always_entitled_regardless_of_flag() {
+        assert!(parse_entitled(None, Edition::Cloud));
+        assert!(parse_entitled(Some("false"), Edition::Cloud));
+        assert!(parse_entitled(Some("garbage"), Edition::Cloud));
+    }
+
+    #[test]
+    fn onprem_requires_the_explicit_opt_in() {
+        assert!(parse_entitled(Some("true"), Edition::Onprem));
+        assert!(parse_entitled(Some(" TRUE "), Edition::Onprem));
+        assert!(parse_entitled(Some("1"), Edition::Onprem));
+
+        assert!(!parse_entitled(None, Edition::Onprem));
+        assert!(!parse_entitled(Some(""), Edition::Onprem));
+        assert!(!parse_entitled(Some("false"), Edition::Onprem));
+        assert!(!parse_entitled(Some("yes"), Edition::Onprem));
+        assert!(!parse_entitled(Some("0"), Edition::Onprem));
     }
 }

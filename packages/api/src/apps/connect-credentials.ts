@@ -1,6 +1,6 @@
 import type { AppDefinition, ConnectionMethod } from "./types";
 
-/** Request body accepted by the direct-connect endpoints (project and org). */
+/** Request body accepted by the direct-connect endpoints (workspace and org). */
 export interface ConnectRequestBody {
   fields?: Record<string, string>;
   connectionId?: string;
@@ -8,7 +8,7 @@ export interface ConnectRequestBody {
   method?: string;
 }
 
-/** A connection method that accepts direct credentials (not OAuth/cloud-only). */
+/** A connection method that accepts direct credentials (not OAuth). */
 export type DirectConnectionMethod = Extract<
   ConnectionMethod,
   { type: "api_key" | "credentials_import" }
@@ -28,10 +28,10 @@ export type ResolvedConnectCredentials =
 /**
  * Resolve a direct-connect request body into stored credentials: pick the
  * connection method, validate the submitted fields, and exchange/shape them
- * into `{credentials, scopes, metadata}`. Shared by the project-scoped
+ * into `{credentials, scopes, metadata}`. Shared by the workspace-scoped
  * (`POST /apps/:provider/connect`) and org-scoped
  * (`POST /org/apps/:provider/connect`) endpoints — every guard returns the
- * exact error string the project endpoint has always produced, so extraction
+ * exact error string the workspace endpoint has always produced, so extraction
  * is behavior-preserving.
  */
 export const resolveConnectCredentials = async (
@@ -64,13 +64,6 @@ export const resolveConnectCredentials = async (
     return {
       ok: false,
       error: `Provider "${provider}" uses OAuth flow, not direct credentials`,
-    };
-  }
-
-  if (activeMethod.type === "cloud_only") {
-    return {
-      ok: false,
-      error: `Provider "${provider}" is only available in OneCLI Cloud`,
     };
   }
 

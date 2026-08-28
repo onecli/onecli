@@ -46,9 +46,9 @@ export const grantedSecretSelection = (
   rules: SimRuleRow[],
   agentId: string,
   principals: PrincipalSet,
-): { ids: string[]; levels: Set<"project" | "organization"> } => {
+): { ids: string[]; levels: Set<"workspace" | "organization"> } => {
   const ids = new Set<string>();
-  const levels = new Set<"project" | "organization">();
+  const levels = new Set<"workspace" | "organization">();
   for (const row of rules) {
     if (row.isDefault || row.action !== "allow") continue;
     if (!injectionIdentityMatches(row.identities, agentId, principals))
@@ -56,7 +56,7 @@ export const grantedSecretSelection = (
     for (const t of row.targets) {
       if (t.kind !== "secret") continue;
       if (t.secretId) ids.add(t.secretId);
-      else if (t.secretScope === "project") levels.add("project");
+      else if (t.secretScope === "workspace") levels.add("workspace");
       else if (t.secretScope === "organization") levels.add("organization");
     }
   }
@@ -101,8 +101,8 @@ export const buildInjectionProbe = (params: {
           if (t.secretId) {
             const host = params.secretHosts.byId.get(t.secretId);
             if (host !== undefined) secretPatterns.push(host);
-          } else if (t.secretScope === "project") {
-            secretPatterns.push(...params.secretHosts.projectHosts);
+          } else if (t.secretScope === "workspace") {
+            secretPatterns.push(...params.secretHosts.workspaceHosts);
           } else if (t.secretScope === "organization") {
             secretPatterns.push(...params.secretHosts.orgHosts);
           }
@@ -114,7 +114,7 @@ export const buildInjectionProbe = (params: {
         } else if (t.kind === "app") {
           if (
             t.appProvider &&
-            (t.appConnectionScope === "project" ||
+            (t.appConnectionScope === "workspace" ||
               t.appConnectionScope === "organization")
           ) {
             // Provider-level: we fold the provider without checking that a live

@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.hoisted(() => {
-  process.env.NEXT_PUBLIC_EDITION = "onprem-slim";
+  process.env.NEXT_PUBLIC_EDITION = "cloud";
 });
 
 interface WriteData {
@@ -58,7 +58,7 @@ beforeEach(() => {
 describe("createConnection persists provenance", () => {
   it("writes the appConfigId when provided", async () => {
     await createConnection(
-      { projectId: "p-1" },
+      { workspaceId: "p-1" },
       "prov",
       { token: "t" },
       {
@@ -69,7 +69,7 @@ describe("createConnection persists provenance", () => {
   });
 
   it("writes null when no appConfigId is given (env / no-config mint)", async () => {
-    await createConnection({ projectId: "p-1" }, "prov", { token: "t" });
+    await createConnection({ workspaceId: "p-1" }, "prov", { token: "t" });
     expect(store.createData?.appConfigId).toBeNull();
   });
 });
@@ -77,7 +77,7 @@ describe("createConnection persists provenance", () => {
 describe("reconnectConnection provenance is opt-in per key presence", () => {
   it("writes the appConfigId when a re-mint passes it", async () => {
     await reconnectConnection(
-      { projectId: "p-1" },
+      { workspaceId: "p-1" },
       "conn-1",
       { token: "t" },
       {
@@ -89,7 +89,7 @@ describe("reconnectConnection provenance is opt-in per key presence", () => {
 
   it("clears the link when a re-mint passes appConfigId: undefined", async () => {
     await reconnectConnection(
-      { projectId: "p-1" },
+      { workspaceId: "p-1" },
       "conn-1",
       { token: "t" },
       {
@@ -101,13 +101,13 @@ describe("reconnectConnection provenance is opt-in per key presence", () => {
   });
 
   it("preserves the existing link when options omit the key (token-persist)", async () => {
-    await reconnectConnection({ projectId: "p-1" }, "conn-1", { token: "t" });
+    await reconnectConnection({ workspaceId: "p-1" }, "conn-1", { token: "t" });
     expect(store.updateData && "appConfigId" in store.updateData).toBe(false);
   });
 
   it("preserves the link when options carry other fields but not appConfigId", async () => {
     await reconnectConnection(
-      { projectId: "p-1" },
+      { workspaceId: "p-1" },
       "conn-1",
       { token: "t" },
       {
@@ -120,11 +120,11 @@ describe("reconnectConnection provenance is opt-in per key presence", () => {
 
 describe("linkConnectionToAppConfig", () => {
   it("writes the appConfigId under a scope-guarded where (credentials-import provenance)", async () => {
-    await linkConnectionToAppConfig({ projectId: "p-1" }, "conn-1", "cfg-9");
+    await linkConnectionToAppConfig({ workspaceId: "p-1" }, "conn-1", "cfg-9");
     expect(store.updateManyArgs?.data).toEqual({ appConfigId: "cfg-9" });
     expect(store.updateManyArgs?.where).toMatchObject({
       id: "conn-1",
-      projectId: "p-1",
+      workspaceId: "p-1",
     });
   });
 

@@ -1,0 +1,949 @@
+import { randomBytes } from "node:crypto";
+import { db, Prisma } from "@onecli/db";
+import { getCrypto } from "../../providers";
+import { signOAuthState, verifyOAuthState } from "../../lib/oauth-state";
+import { ServiceError } from "../errors";
+import { createServiceApiKey, revokeServiceApiKey } from "../api-key-service";
+import { channelProvider } from "./registry";
+import {
+  availableTransports,
+  defaultTransport,
+  publicApiUrl,
+  resolveTransport,
+} from "./posture";
+import { withFreshIntegrationCredentials } from "./channel-integration-service";
+import type {
+  ChannelProviderId,
+  ChannelTransport,
+  PresenceIdentity,
+} from "./types";
+import { RUNNER_ONLINE_THRESHOLD_SECONDS } from "../../lib/env";
+import { logger } from "../../lib/logger";
+
+const log = logger.child({ component: "agent-channel-service" });
+
+/**
+ * The per-agent channel presence lifecycle (attach → active → detach).
+ *
+ * Two completion doors, one activation core: the socket arm and the paste
+ * floor complete with pasted tokens (`completePresence`); the events arm
+ * completes when the OAuth callback lands (`completePresenceFromOAuth`).
+ * Both converge on `activatePresence`, which resolves the integration row,
+ * stores credentials, and mints the approvals service key.
+ */
+
+/** How long an install link (the signed OAuth state) stays valid. */
+const OAUTH_STATE_TTL_MS = 30 * 60 * 1000;
+
+const presenceSelect = {
+  id: true,
+  provider: true,
+  externalId: true,
+  identityRef: true,
+  identityName: true,
+  transport: true,
+  status: true,
+  apiKeyId: true,
+  createdAt: true,
+  // Deliberately NOT the integration's `credentials`: this select backs the
+  // create/update RETURN value, which the complete route hands to the browser.
+  // Even as ciphertext, an org automation credential must never leave the
+  // server (the "credentials never leave the server" rule).
+  integration: {
+    select: { id: true, externalId: true, name: true },
+  },
+} as const;
+
+/** The agent fence every entry point shares — workspace-scoped, hosted-only. */
+const requireHostedAgent = async (workspaceId: string, agentId: string) => {
+  const agent = await db.agent.findFirst({
+    where: { id: agentId, workspaceId },
+    select: {
+      id: true,
+      name: true,
+      kind: true,
+      workspace: { select: { id: true, organizationId: true } },
+    },
+  });
+  if (!agent) throw new ServiceError("NOT_FOUND", "Agent not found");
+  if (agent.kind !== "hosted") {
+    throw new ServiceError(
+      "UNPROCESSABLE",
+      "Only hosted agents can join channels",
+    );
+  }
+  return agent;
+};
+
+export interface AgentChannelStatus {
+  provider: ChannelProviderId;
+  status: string;
+  transport: ChannelTransport;
+  externalId: string;
+  identityRef: string | null;
+  /** The app's handle in the workspace (Slack: "donna"), where we know it. */
+  identityName: string | null;
+  tenant: { externalId: string; name: string | null };
+  /** Group threads the presence is live in (direct DMs stay private). */
+  groupThreads: { externalThreadId: string; createdAt: Date }[];
+}
+
+export interface AgentChannelsView {
+  presences: AgentChannelStatus[];
+  /** What an attach would use right now, and what it could choose instead. */
+  posture: { transport: ChannelTransport; available: ChannelTransport[] };
+  /** Per provider: does the org hold an automation credential? */
+  orgIntegrations: {
+    provider: ChannelProviderId;
+    connected: boolean;
+    hasCredentials: boolean;
+  }[];
+  adapter: { online: boolean; lastSeenAt: Date | null };
+}
+
+/**
+ * Fill in the handle of any presence that lacks one, using its own stored
+ * credential. Presences created before the column existed have none, and the
+ * delete confirmation wants to name the app a human recognizes rather than
+ * fall back to its opaque id.
+ *
+ * Scoped to a single agent and driven by the Channels page, which is the one
+ * place a presence is looked at directly — deliberately NOT the agents list,
+ * where it would put a fan-out of Slack calls on a hot read. Internally
+ * failure-proof, and only ever writes a name onto a row that has none, so it
+ * cannot fight a rename captured at completion.
+ */
+export const backfillIdentityNames = async (agentId: string): Promise<void> => {
+  const rows = await db.agentChannel.findMany({
+    where: { agentId, identityName: null, credentials: { not: null } },
+    select: { id: true, provider: true, credentials: true },
+  });
+
+  for (const row of rows) {
+    try {
+      const provider = channelProvider(row.provider as ChannelProviderId);
+      if (!provider.fetchIdentityName || !row.credentials) continue;
+      const name = await provider.fetchIdentityName({
+        credentialsJson: await getCrypto().decrypt(row.credentials),
+      });
+      if (!name) continue;
+      await db.agentChannel.updateMany({
+        where: { id: row.id, identityName: null },
+        data: { identityName: name },
+      });
+    } catch (err) {
+      log.debug({ err, presenceId: row.id }, "identity-name backfill skipped");
+    }
+  }
+};
+
+export const getAgentChannels = async (
+  workspaceId: string,
+  agentId: string,
+): Promise<AgentChannelsView> => {
+  const agent = await requireHostedAgent(workspaceId, agentId);
+
+  // The Channels section is where a presence is looked at, so it is the
+  // natural place to fill in a handle we never captured. Awaited so the same
+  // response carries it; internally failure-proof.
+  await backfillIdentityNames(agent.id);
+
+  const [presences, integrations, adapter] = await Promise.all([
+    db.agentChannel.findMany({
+      where: { agentId: agent.id },
+      select: {
+        ...presenceSelect,
+        threadLinks: {
+          where: { kind: "group" },
+          select: { externalThreadId: true, createdAt: true },
+          orderBy: { createdAt: "asc" },
+        },
+      },
+      orderBy: { createdAt: "asc" },
+    }),
+    db.channelIntegration.findMany({
+      where: { organizationId: agent.workspace.organizationId },
+      select: { provider: true, credentials: true },
+    }),
+    db.channelAdapter.findFirst({
+      orderBy: { lastSeenAt: "desc" },
+      select: { lastSeenAt: true },
+    }),
+  ]);
+
+  return {
+    presences: presences.map((p) => ({
+      provider: p.provider as ChannelProviderId,
+      status: p.status,
+      transport: p.transport as ChannelTransport,
+      externalId: p.externalId,
+      identityRef: p.identityRef,
+      identityName: p.identityName,
+      tenant: {
+        externalId: p.integration.externalId,
+        name: p.integration.name,
+      },
+      groupThreads: p.threadLinks,
+    })),
+    posture: {
+      transport: defaultTransport(),
+      available: availableTransports(),
+    },
+    orgIntegrations: integrations.map((i) => ({
+      provider: i.provider as ChannelProviderId,
+      connected: true,
+      hasCredentials: i.credentials !== null,
+    })),
+    adapter: {
+      online: adapter?.lastSeenAt ? isAdapterOnline(adapter.lastSeenAt) : false,
+      lastSeenAt: adapter?.lastSeenAt ?? null,
+    },
+  };
+};
+
+/** Same liveness window the runner uses — one vocabulary for "offline". */
+const isAdapterOnline = (lastSeenAt: Date): boolean =>
+  Date.now() - lastSeenAt.getTime() < RUNNER_ONLINE_THRESHOLD_SECONDS * 1000;
+
+/** The paste floor's step 0: the provider's setup document. */
+export const getSetupMaterial = async (
+  workspaceId: string,
+  agentId: string,
+  provider: ChannelProviderId,
+  requestedTransport?: ChannelTransport,
+) => {
+  const agent = await requireHostedAgent(workspaceId, agentId);
+  const transport = resolveTransport(requestedTransport);
+  return {
+    transport,
+    material: channelProvider(provider).buildSetupMaterial({
+      agentName: agent.name,
+      transport,
+      publicApiUrl: publicApiUrl(),
+    }),
+  };
+};
+
+export interface CreatePresenceResult {
+  presenceId: string;
+  transport: ChannelTransport;
+  /** Events arm: the one-click consent URL. */
+  installUrl: string | null;
+  /** Socket arm: where the app-level token is generated + Install lives. */
+  settingsUrl: string;
+}
+
+/**
+ * The guided arm: create the provider app from the org's automation
+ * credential. The presence row is persisted `pending_setup` the moment the
+ * remote app exists, so a half-finished attach is tracked, resumable, and
+ * never an orphan only Slack knows about.
+ */
+export const createPresence = async (
+  workspaceId: string,
+  agentId: string,
+  provider: ChannelProviderId,
+  actorUserId: string,
+  requestedTransport?: ChannelTransport,
+): Promise<CreatePresenceResult> => {
+  const agent = await requireHostedAgent(workspaceId, agentId);
+  const organizationId = agent.workspace.organizationId;
+
+  const existing = await db.agentChannel.findUnique({
+    where: { agentId_provider: { agentId: agent.id, provider } },
+    select: {
+      id: true,
+      status: true,
+      externalId: true,
+      transport: true,
+      credentials: true,
+    },
+  });
+  if (existing && existing.status !== "pending_setup") {
+    throw new ServiceError(
+      "CONFLICT",
+      "This agent already has a Slack app. Detach it first.",
+    );
+  }
+  if (
+    existing &&
+    requestedTransport &&
+    requestedTransport !== existing.transport
+  ) {
+    throw new ServiceError(
+      "CONFLICT",
+      "Setup already started with a different connection mode. Start over to switch.",
+    );
+  }
+
+  // A resumed attach stays on the row's stamp (the provider-side app config
+  // baked it in); only a fresh create consults the request and the posture.
+  // The OAuth state is minted per that transport — mint it off the current
+  // default and a socket resume would carry a useless state while an events
+  // resume under a changed posture would lose its install URL.
+  const transport = existing
+    ? (existing.transport as ChannelTransport)
+    : resolveTransport(requestedTransport);
+  const oauthState =
+    transport === "events"
+      ? signOAuthState({
+          provider,
+          nonce: randomBytes(16).toString("hex"),
+          kind: "channel-install",
+          agentId: agent.id,
+          workspaceId,
+          issuedAt: Date.now(),
+        })
+      : null;
+
+  // A pending row from an interrupted attach: rebuild the human-facing URLs
+  // from what we stored instead of minting a second Slack app.
+  if (existing) {
+    return {
+      presenceId: existing.id,
+      transport: transport,
+      ...(await rebuildSetupUrls(provider, existing.id, oauthState)),
+    };
+  }
+
+  return withFreshIntegrationCredentials(
+    organizationId,
+    provider,
+    async (accessToken, integrationId) => {
+      const created = await channelProvider(provider).createManagedPresence({
+        accessToken,
+        agentName: agent.name,
+        transport,
+        publicApiUrl: publicApiUrl(),
+        oauthState,
+      });
+      const encrypted = await getCrypto().encrypt(created.credentialsJson);
+      const row = await db.agentChannel.create({
+        data: {
+          agentId: agent.id,
+          integrationId,
+          provider,
+          externalId: created.externalId,
+          transport,
+          credentials: encrypted,
+          status: "pending_setup",
+          createdByUserId: actorUserId,
+        },
+        select: { id: true },
+      });
+      return {
+        presenceId: row.id,
+        transport,
+        installUrl: created.installUrl,
+        settingsUrl: created.settingsUrl,
+      };
+    },
+  );
+};
+
+/** Rebuild install/settings URLs for a resumed pending attach — provider-
+ * dispatched: the URLs are provider-shaped, and only the provider knows the
+ * full scope list its consent URL must grant. */
+const rebuildSetupUrls = async (
+  provider: ChannelProviderId,
+  presenceId: string,
+  oauthState: string | null,
+): Promise<{ installUrl: string | null; settingsUrl: string }> => {
+  const row = await db.agentChannel.findUniqueOrThrow({
+    where: { id: presenceId },
+    select: { externalId: true, transport: true, credentials: true },
+  });
+  const credentialsJson = row.credentials
+    ? await getCrypto().decrypt(row.credentials)
+    : null;
+  return channelProvider(provider).rebuildSetupUrls({
+    externalId: row.externalId,
+    transport: row.transport as ChannelTransport,
+    credentialsJson,
+    oauthState,
+  });
+};
+
+/**
+ * The shared activation core both completion doors land on: bind the
+ * integration row (paste floor may be minting it, credential-less), store
+ * the presence's credentials, and mint the approvals service key.
+ */
+const activatePresence = async (input: {
+  presenceId: string | null;
+  agent: { id: string; name: string; workspaceId: string };
+  organizationId: string;
+  provider: ChannelProviderId;
+  transport: ChannelTransport;
+  externalId: string;
+  identity: PresenceIdentity;
+  credentialsJson: string;
+  actorUserId: string;
+}) => {
+  const integration = await db.channelIntegration.findUnique({
+    where: {
+      organizationId_provider: {
+        organizationId: input.organizationId,
+        provider: input.provider,
+      },
+    },
+    select: { id: true, externalId: true, name: true },
+  });
+
+  if (
+    integration &&
+    integration.externalId !== input.identity.tenant.externalId
+  ) {
+    throw new ServiceError(
+      "CONFLICT",
+      "This app belongs to a different Slack workspace than the one connected to your organization.",
+    );
+  }
+
+  const integrationId = integration
+    ? integration.id
+    : (
+        await db.channelIntegration.create({
+          data: {
+            organizationId: input.organizationId,
+            provider: input.provider,
+            externalId: input.identity.tenant.externalId,
+            name: input.identity.tenant.name,
+            createdByUserId: input.actorUserId,
+          },
+          select: { id: true },
+        })
+      ).id;
+
+  // Backfill the tenant name the config-token flow could not learn.
+  if (integration && !integration.name && input.identity.tenant.name) {
+    await db.channelIntegration.update({
+      where: { id: integration.id },
+      data: { name: input.identity.tenant.name },
+    });
+  }
+
+  const serviceKey = await createServiceApiKey(
+    input.actorUserId,
+    { workspaceId: input.agent.workspaceId },
+    `Slack · ${input.agent.name}`,
+  );
+
+  const encrypted = await getCrypto().encrypt(input.credentialsJson);
+  const data = {
+    integrationId,
+    externalId: input.externalId,
+    identityRef: input.identity.identityRef,
+    identityName: input.identity.identityName ?? null,
+    transport: input.transport,
+    credentials: encrypted,
+    status: "active",
+    apiKeyId: serviceKey.id,
+  };
+
+  try {
+    return input.presenceId
+      ? await db.agentChannel.update({
+          where: { id: input.presenceId },
+          data,
+          select: presenceSelect,
+        })
+      : await db.agentChannel.create({
+          data: {
+            ...data,
+            agentId: input.agent.id,
+            provider: input.provider,
+            createdByUserId: input.actorUserId,
+          },
+          select: presenceSelect,
+        });
+  } catch (err) {
+    // The presence write failed — don't strand the service key we just minted
+    // (it is invisible to the personal-key flows and would otherwise be
+    // orphaned with no owner-facing way to revoke it).
+    await revokeServiceApiKey(serviceKey.id).catch(() => {});
+    if (
+      err instanceof Prisma.PrismaClientKnownRequestError &&
+      err.code === "P2002"
+    ) {
+      // The `(provider, externalId)` unique: this Slack app is already
+      // attached to another agent (or someone pasted a foreign app id).
+      throw new ServiceError(
+        "CONFLICT",
+        "That Slack app is already connected to an agent. Each agent needs its own Slack app.",
+      );
+    }
+    throw err;
+  }
+};
+
+/**
+ * The pasted-tokens completion door (socket arm + the whole paste floor).
+ * `appId` is required when no guided create ran (the floor) — the events
+ * inbound routes look presences up by it, and Slack shows it plainly on the
+ * app's Basic Information page.
+ */
+export const completePresence = async (
+  workspaceId: string,
+  agentId: string,
+  provider: ChannelProviderId,
+  input: {
+    botToken: string;
+    appToken?: string;
+    signingSecret?: string;
+    appId?: string;
+    transport?: ChannelTransport;
+  },
+  actorUserId: string,
+) => {
+  const agent = await requireHostedAgent(workspaceId, agentId);
+
+  const existing = await db.agentChannel.findUnique({
+    where: { agentId_provider: { agentId: agent.id, provider } },
+    select: {
+      id: true,
+      status: true,
+      externalId: true,
+      transport: true,
+      credentials: true,
+    },
+  });
+  if (existing && existing.status !== "pending_setup") {
+    throw new ServiceError(
+      "CONFLICT",
+      "This agent already has a Slack app. Detach it first.",
+    );
+  }
+  if (existing && input.transport && input.transport !== existing.transport) {
+    throw new ServiceError(
+      "CONFLICT",
+      "Setup already started with a different connection mode. Start over to switch.",
+    );
+  }
+
+  // A pending row keeps its stamp (the provider-side app config baked it in);
+  // only the floor's no-row paste consults the request and the posture.
+  const transport = existing
+    ? (existing.transport as ChannelTransport)
+    : resolveTransport(input.transport);
+
+  const externalId = existing?.externalId ?? input.appId?.trim();
+  if (!externalId) {
+    throw new ServiceError(
+      "UNPROCESSABLE",
+      "The App ID is required. Copy it from the app's Basic Information page.",
+    );
+  }
+
+  const existingJson = existing?.credentials
+    ? await getCrypto().decrypt(existing.credentials)
+    : null;
+
+  const completed = await channelProvider(provider).completePresence({
+    pasted: {
+      botToken: input.botToken,
+      ...(input.appToken && { appToken: input.appToken }),
+      ...(input.signingSecret && { signingSecret: input.signingSecret }),
+    },
+    existingCredentialsJson: existingJson,
+    transport,
+  });
+
+  return activatePresence({
+    presenceId: existing?.id ?? null,
+    agent: { id: agent.id, name: agent.name, workspaceId },
+    organizationId: agent.workspace.organizationId,
+    provider,
+    transport,
+    externalId,
+    identity: completed.identity,
+    credentialsJson: completed.credentialsJson,
+    actorUserId,
+  });
+};
+
+/**
+ * The events arm's completion door — invoked by the OAuth callback route
+ * after it verified the signed state. Resolves the pending presence by
+ * (agent, provider) from the state payload, never from anything the browser
+ * chose.
+ */
+export const completePresenceFromOAuth = async (input: {
+  state: string;
+  code: string;
+  redirectUri: string;
+}) => {
+  const payload = verifyOAuthState(input.state);
+  if (
+    !payload ||
+    payload.kind !== "channel-install" ||
+    typeof payload.agentId !== "string" ||
+    typeof payload.workspaceId !== "string" ||
+    typeof payload.issuedAt !== "number" ||
+    Date.now() - payload.issuedAt > OAUTH_STATE_TTL_MS
+  ) {
+    throw new ServiceError("UNPROCESSABLE", "This install link is not valid");
+  }
+  const provider = payload.provider as ChannelProviderId;
+
+  const agent = await requireHostedAgent(payload.workspaceId, payload.agentId);
+  const presence = await db.agentChannel.findUnique({
+    where: { agentId_provider: { agentId: agent.id, provider } },
+    select: {
+      id: true,
+      status: true,
+      externalId: true,
+      transport: true,
+      credentials: true,
+      createdByUserId: true,
+    },
+  });
+  if (
+    !presence ||
+    presence.status !== "pending_setup" ||
+    !presence.credentials
+  ) {
+    throw new ServiceError("UNPROCESSABLE", "This install link is not valid");
+  }
+
+  // The attach belongs to whoever started it — the callback carries no
+  // session of its own, and the approvals key must borrow a REAL user's
+  // authority. If that user is gone, the link is dead; a fresh attach names
+  // a new owner.
+  if (!presence.createdByUserId) {
+    throw new ServiceError("UNPROCESSABLE", "This install link is not valid");
+  }
+
+  const credentialsJson = await getCrypto().decrypt(presence.credentials);
+  const exchanged = await channelProvider(provider).exchangeOAuthCode({
+    code: input.code,
+    redirectUri: input.redirectUri,
+    credentialsJson,
+  });
+
+  const activated = await activatePresence({
+    presenceId: presence.id,
+    agent: { id: agent.id, name: agent.name, workspaceId: payload.workspaceId },
+    organizationId: agent.workspace.organizationId,
+    provider,
+    transport: presence.transport as ChannelTransport,
+    externalId: presence.externalId,
+    identity: exchanged.identity,
+    credentialsJson: exchanged.credentialsJson,
+    actorUserId: presence.createdByUserId,
+  });
+
+  // The callback route sends the browser home — to THIS agent's Channels
+  // section, resolved from the verified state, never from anything Slack (or
+  // the browser) chose.
+  return {
+    presence: activated,
+    agentId: agent.id,
+    workspaceId: payload.workspaceId,
+  };
+};
+
+/**
+ * Rename the remote app to a tombstone before it is torn down, so the record it
+ * leaves behind does not squat a person's name. Shared because both teardown
+ * paths need it in the same position: first, while the app is still installed.
+ *
+ * ANSWERS WHETHER THE NAME LANDED, and the caller must not delete unless it
+ * did — a delete that races the rename freezes the agent's name onto the corpse
+ * forever. Never throws.
+ */
+const renameRemoteTombstone = async (
+  organizationId: string,
+  provider: ChannelProviderId,
+  presence: {
+    externalId: string;
+    identityRef: string | null;
+    credentialsJson: string | null;
+  },
+): Promise<boolean> => {
+  const rename = channelProvider(provider).renameRemotePresence;
+  if (!rename) return false;
+  try {
+    return await withFreshIntegrationCredentials(
+      organizationId,
+      provider,
+      (accessToken) =>
+        rename({
+          accessToken,
+          externalId: presence.externalId,
+          credentialsJson: presence.credentialsJson,
+          identityRef: presence.identityRef,
+        }),
+    );
+  } catch (err) {
+    log.warn(
+      { err, provider, appId: presence.externalId },
+      "could not rename the remote app before teardown; it keeps its old name",
+    );
+    return false;
+  }
+};
+
+/**
+ * Push a renamed agent's new name onto its live remote apps (the Slack app's
+ * display name), so the bot in the customer's workspace tracks the agent.
+ * Best-effort per presence and NEVER throws: a rename must not fail because
+ * a provider is unreachable or the org never connected a config token —
+ * those orgs simply keep the old remote name.
+ */
+export const syncAgentPresenceNames = async (
+  agent: { id: string; organizationId: string },
+  name: string,
+): Promise<void> => {
+  // The whole body sits inside the try — the caller fires this with a bare
+  // `void`, so a rejection anywhere (the findMany included) would be an
+  // unhandled rejection, not a logged skip.
+  try {
+    const presences = await db.agentChannel.findMany({
+      where: {
+        agentId: agent.id,
+        status: { in: ["active", "needs_attention"] },
+      },
+      select: { provider: true, externalId: true },
+    });
+
+    for (const presence of presences) {
+      const provider = presence.provider as ChannelProviderId;
+      const sync = channelProvider(provider).syncRemotePresenceName;
+      if (!sync) continue;
+      try {
+        await withFreshIntegrationCredentials(
+          agent.organizationId,
+          provider,
+          (accessToken) =>
+            sync({ accessToken, externalId: presence.externalId, name }),
+        );
+      } catch (err) {
+        log.warn(
+          { err, agentId: agent.id, provider, appId: presence.externalId },
+          "could not sync the agent's new name onto the remote app; it keeps the old one",
+        );
+      }
+    }
+  } catch (err) {
+    log.warn(
+      { err: String(err), agentId: agent.id },
+      "agent name sync skipped",
+    );
+  }
+};
+
+/**
+ * Tear down every channel presence an agent holds — the agent-deletion path.
+ *
+ * Deleting the agent row alone would cascade `AgentChannel` away and leave the
+ * provider-side app alive: a bot still sitting in the customer's workspace,
+ * its approvals service key still valid, and nothing left in our database
+ * pointing at either. So deletion has to run the same teardown a detach does.
+ *
+ * Best-effort per presence, like `detachPresence`: a provider that refuses the
+ * remote delete must not block the agent's deletion, or a revoked Slack
+ * credential would make an agent permanently undeletable. Rows are left for
+ * the caller's cascade.
+ */
+export const teardownAgentPresences = async (agent: {
+  id: string;
+  organizationId: string;
+}): Promise<void> => {
+  const presences = await db.agentChannel.findMany({
+    where: { agentId: agent.id },
+    select: {
+      provider: true,
+      externalId: true,
+      identityRef: true,
+      apiKeyId: true,
+      credentials: true,
+    },
+  });
+
+  for (const presence of presences) {
+    const provider = presence.provider as ChannelProviderId;
+    const credentialsJson = presence.credentials
+      ? await getCrypto()
+          .decrypt(presence.credentials)
+          .catch(() => null)
+      : null;
+
+    // Rename FIRST, while the app is still installed and exportable. Needs the
+    // org config token, so orgs without one keep the old name — the same orgs
+    // that cannot delete the record either.
+    const renamed = await renameRemoteTombstone(
+      agent.organizationId,
+      provider,
+      {
+        externalId: presence.externalId,
+        identityRef: presence.identityRef,
+        credentialsJson,
+      },
+    );
+
+    // Outside the org-credential wrapper ON PURPOSE: it must still happen for
+    // an org that never connected a config token.
+    await channelProvider(provider)
+      .uninstallRemotePresence?.({ credentialsJson })
+      .catch((err: unknown) =>
+        log.warn(
+          { err, agentId: agent.id, provider },
+          "remote app uninstall failed during agent deletion; continuing",
+        ),
+      );
+
+    // Only delete an app we successfully renamed: an app still wearing the
+    // agent's name is left ALIVE (recoverable) rather than frozen forever.
+    if (!renamed) {
+      log.warn(
+        { agentId: agent.id, provider, appId: presence.externalId },
+        "skipping remote app deletion: the tombstone rename did not land, and a deleted app can never be renamed",
+      );
+    } else {
+      try {
+        await withFreshIntegrationCredentials(
+          agent.organizationId,
+          provider,
+          (accessToken) =>
+            channelProvider(provider).deleteRemotePresence({
+              accessToken,
+              externalId: presence.externalId,
+            }),
+        );
+      } catch (err) {
+        log.warn(
+          { err, agentId: agent.id, provider },
+          "remote app deletion failed during agent deletion; continuing",
+        );
+      }
+    }
+    // The service key outlives the cascade (`onDelete: SetNull`), so it must
+    // be revoked explicitly or it stays a live credential with no owner.
+    if (presence.apiKeyId) {
+      await revokeServiceApiKey(presence.apiKeyId).catch((err) =>
+        log.warn(
+          { err, agentId: agent.id, provider },
+          "service key revoke failed during agent deletion; continuing",
+        ),
+      );
+    }
+  }
+};
+
+/**
+ * Tear down every channel presence in a whole WORKSPACE — the workspace- and
+ * org-deletion paths, and offboarding (removing a member deletes their
+ * personal workspaces).
+ *
+ * Separate from `teardownAgentPresences` because deletion runs inside a
+ * transaction and these are network calls: the provider must be told BEFORE
+ * the rows go, and no HTTP request belongs inside a `db.$transaction`.
+ */
+export const teardownWorkspacePresences = async (
+  workspaceId: string,
+): Promise<void> => {
+  const workspace = await db.workspace.findUnique({
+    where: { id: workspaceId },
+    select: { organizationId: true },
+  });
+  if (!workspace) return;
+
+  const agents = await db.agent.findMany({
+    where: { workspaceId, channels: { some: {} } },
+    select: { id: true },
+  });
+
+  for (const agent of agents) {
+    await teardownAgentPresences({
+      id: agent.id,
+      organizationId: workspace.organizationId,
+    });
+  }
+};
+
+/**
+ * Detach: revoke the service key, delete the presence (links cascade;
+ * conversations deliberately survive — history is the user's). Remote app
+ * deletion is best-effort and only where the org credential allows it.
+ */
+export const detachPresence = async (
+  workspaceId: string,
+  agentId: string,
+  provider: ChannelProviderId,
+  options: { deleteRemote: boolean },
+): Promise<void> => {
+  const agent = await requireHostedAgent(workspaceId, agentId);
+  const presence = await db.agentChannel.findUnique({
+    where: { agentId_provider: { agentId: agent.id, provider } },
+    select: {
+      id: true,
+      externalId: true,
+      identityRef: true,
+      apiKeyId: true,
+      credentials: true,
+    },
+  });
+  if (!presence) throw new ServiceError("NOT_FOUND", "No Slack app attached");
+
+  if (options.deleteRemote) {
+    const credentialsJson = presence.credentials
+      ? await getCrypto()
+          .decrypt(presence.credentials)
+          .catch(() => null)
+      : null;
+
+    // Same order as the agent path: rename while the app is still installed,
+    // then uninstall, then delete the record.
+    const renamed = await renameRemoteTombstone(
+      agent.workspace.organizationId,
+      provider,
+      {
+        externalId: presence.externalId,
+        identityRef: presence.identityRef,
+        credentialsJson,
+      },
+    );
+
+    // See teardownAgentPresences: the uninstall runs on the presence's own
+    // credentials, so it survives an org with no config token.
+    await channelProvider(provider)
+      .uninstallRemotePresence?.({ credentialsJson })
+      .catch((err: unknown) =>
+        log.warn(
+          { err, agentId, provider },
+          "remote app uninstall failed; detaching anyway",
+        ),
+      );
+
+    // See teardownAgentPresences: an unrenamed app is left alive.
+    if (!renamed) {
+      log.warn(
+        { agentId, provider, appId: presence.externalId },
+        "skipping remote app deletion: the tombstone rename did not land, and a deleted app can never be renamed",
+      );
+    } else {
+      try {
+        await withFreshIntegrationCredentials(
+          agent.workspace.organizationId,
+          provider,
+          (accessToken) =>
+            channelProvider(provider).deleteRemotePresence({
+              accessToken,
+              externalId: presence.externalId,
+            }),
+        );
+      } catch (err) {
+        // Best-effort by contract: a failed remote delete must never leave the
+        // platform half-detached. The user can remove the app in Slack's UI.
+        log.warn(
+          { err, agentId, provider },
+          "remote app deletion failed; detaching locally anyway",
+        );
+      }
+    }
+  }
+
+  if (presence.apiKeyId) await revokeServiceApiKey(presence.apiKeyId);
+  await db.agentChannel.delete({ where: { id: presence.id } });
+};

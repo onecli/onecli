@@ -20,8 +20,7 @@ import {
   type PolicyRuleRow,
   type PolicyScopeBase,
 } from "./policy-service";
-// The pure compiler half lives in grants-compile so the step-5 converter
-// (`policy-grant-conversion/`) writes byte-identical stacks; see its header.
+// The pure compiler half lives in grants-compile; see its header.
 import {
   compileConnectionStack,
   compileSecretGrant,
@@ -33,6 +32,9 @@ import {
   type CompiledRule,
 } from "./grants-compile";
 import type { ConnectionGrantInput } from "../validations/grants";
+import { requestSandboxRespawn } from "./sandbox-service";
+import { resolveAgentLlmCredential } from "./llm-credential-service";
+import { signalWork } from "./due-work";
 
 /**
  * The attach-model grants surface (plans/project-attach-model.md, step 2).
@@ -56,15 +58,15 @@ import type { ConnectionGrantInput } from "../validations/grants";
  * the next write by construction (delete-then-recompile).
  *
  * Fencing deliberately DIFFERS from `assertTargetsValid` (which forbids a
- * project rule naming org resources): the attach list spans the project's own
+ * workspace rule naming org resources): the attach list spans the workspace's own
  * connections/secrets AND org-shared ones — exactly the union the gateway's
- * fenced connect-time maps load — never foreign or partner rows.
+ * fenced connect-time maps load — never foreign rows.
  */
 
 type Tx = Prisma.TransactionClient;
 
 export interface GrantScope {
-  projectId: string;
+  workspaceId: string;
   organizationId: string;
 }
 
@@ -72,7 +74,7 @@ export interface AgentGrantConnection {
   connectionId: string;
   provider: string;
   label: string | null;
-  scope: "project" | "organization";
+  scope: "workspace" | "organization";
   access: "full" | "custom";
   allow: string[];
   ask: string[];
@@ -86,7 +88,7 @@ export interface AgentGrantSecret {
   secretId: string;
   name: string;
   type: string;
-  scope: "project" | "organization";
+  scope: "workspace" | "organization";
 }
 
 export interface AgentGrants {
@@ -118,26 +120,104 @@ export interface GrantMutationResult {
 }
 
 const base = (scope: GrantScope): PolicyScopeBase => ({
-  scope: "project",
-  projectId: scope.projectId,
+  scope: "workspace",
+  workspaceId: scope.workspaceId,
 });
 
-/** The attach pool: the project's own resources plus org-shared ones under the
- * acting org. Foreign, partner-scoped, and nonexistent ids miss this fence. */
+/** The attach pool: the workspace's own resources plus org-shared ones under the
+ * acting org. Foreign and nonexistent ids miss this fence. */
 const poolWhere = (scope: GrantScope) => ({
   OR: [
-    { projectId: scope.projectId },
+    { workspaceId: scope.workspaceId },
     { organizationId: scope.organizationId, scope: "organization" },
   ],
 });
 
 const requireAgent = async (scope: GrantScope, agentId: string) => {
   const agent = await db.agent.findFirst({
-    where: { id: agentId, projectId: scope.projectId },
-    select: { id: true, name: true },
+    where: { id: agentId, workspaceId: scope.workspaceId },
+    // `kind` decides whether the grant has a computer to reach — see
+    // `applySecretGrantToSandbox`.
+    select: { id: true, name: true, kind: true },
   });
   if (!agent) throw new ServiceError("NOT_FOUND", "Agent not found.");
   return agent;
+};
+
+/**
+ * A SECRET grant changes what a hosted agent's container is built from, so the
+ * container has to be built again.
+ *
+ * The spawn payload names the credential placeholder that matches the granted
+ * secret's auth mode — `ANTHROPIC_API_KEY` for an API key, `CLAUDE_CODE_OAUTH_TOKEN`
+ * for an OAuth token — and it is composed at DISPATCH, from the grants that
+ * exist then. A grant made afterwards therefore reaches the gateway
+ * immediately and the running container never at all: proven live, where the
+ * agent kept answering `credential_not_found` with the grant in place until an
+ * unrelated token regeneration happened to respawn it. Same declarative fix
+ * regeneration already uses (`agent-service`) — mark it and let the ordinary
+ * start path compose the new payload.
+ *
+ * CONNECTION grants deliberately do not do this. Nothing about them reaches
+ * the container: the gateway splices those credentials at the wire, so the
+ * spawn payload is byte-identical before and after, and respawning would
+ * destroy a working session to change nothing.
+ *
+ * A `byo` agent has no sandbox at all, so this is a hosted-only concern.
+ */
+const applySecretGrantToSandbox = async (
+  scope: GrantScope,
+  agent: { id: string; kind: string },
+): Promise<void> => {
+  if (agent.kind !== "hosted") return;
+  await dropStaleModelOverride(scope, agent.id);
+  await requestSandboxRespawn(agent.id, scope.workspaceId);
+  signalWork();
+};
+
+/**
+ * Forget a model choice that belonged to a provider this agent no longer has
+ * a key for (§3.10).
+ *
+ * The override carries the provider it was made under precisely so this is
+ * possible: swapping an Anthropic key for an OpenAI one must not leave the
+ * agent pointed at a Claude model its new key cannot serve. Clearing it lands
+ * the agent on the new provider's default, which is a working state.
+ *
+ * Here rather than in `updateAgent` because this is the edit that invalidates
+ * it — the granted key changing is the event, not the user editing a field.
+ * `resolveAgentModel` also ignores a mismatched stamp when it reads, so a case
+ * this misses degrades to the default instead of misbehaving.
+ */
+const dropStaleModelOverride = async (
+  scope: GrantScope,
+  agentId: string,
+): Promise<void> => {
+  const agent = await db.agent.findFirst({
+    where: { id: agentId, workspaceId: scope.workspaceId },
+    select: {
+      id: true,
+      workspaceId: true,
+      modelProvider: true,
+      workspace: { select: { organizationId: true } },
+    },
+  });
+  if (!agent?.modelProvider) return;
+
+  const credential = await resolveAgentLlmCredential(
+    { id: agent.id, workspaceId: agent.workspaceId },
+    agent.workspace.organizationId,
+  );
+  if (credential?.provider === agent.modelProvider) return;
+
+  await db.agent.update({
+    where: { id: agentId },
+    // All three together — the table's CHECK constraint rejects a half-cleared
+    // override, and it would be meaningless anyway.
+    data: { model: null, effort: null, modelProvider: null },
+    // The bare update would read the whole row back — image_data included.
+    select: { id: true },
+  });
 };
 
 const requireConnection = async (scope: GrantScope, connectionId: string) => {
@@ -167,7 +247,7 @@ const grantResources = (rows: PolicyRuleRow[]): SessionPolicyInput | null => {
 
 /**
  * Refuse a resource selection that reaches outside the organization's boundary
- * for this (agent, connection). The project narrows within what the org allows;
+ * for this (agent, connection). The workspace narrows within what the org allows;
  * picking beyond it would compose to a smaller scope than asked for — or to
  * nothing — so say so at write time instead of letting it fail silently later.
  *
@@ -187,7 +267,7 @@ const assertWithinOrgBoundary = async (
   };
   const [orgRows, principals] = await Promise.all([
     loadInjectionRules(orgBase, "published"),
-    resolvePrincipalSet(scope.projectId, scope.organizationId),
+    resolvePrincipalSet(scope.workspaceId, scope.organizationId),
   ]);
   const boundary = orgResourceBoundary(
     orgRows,
@@ -395,7 +475,7 @@ export const getAgentGrants = async (
         connectionId: c.id,
         provider: c.provider,
         label: c.label,
-        scope: c.scope === "organization" ? "organization" : "project",
+        scope: c.scope === "organization" ? "organization" : "workspace",
         ...stackToGrant(stack),
         resources: grantResources(stack),
       };
@@ -404,7 +484,7 @@ export const getAgentGrants = async (
       secretId: s.id,
       name: s.name,
       type: s.type,
-      scope: s.scope === "organization" ? "organization" : "project",
+      scope: s.scope === "organization" ? "organization" : "workspace",
     })),
   };
 };
@@ -598,6 +678,7 @@ export const setSecretGrant = async (
       target: { kind: "secret", secret: { connect: { id: secretId } } },
     })),
   );
+  await applySecretGrantToSandbox(scope, agent);
   return {
     grants: await getAgentGrants(scope, agentId),
     changed: true,
@@ -634,6 +715,10 @@ export const removeSecretGrant = async (
     },
     [],
   );
+  // Revocation moves the payload too — losing the only OAuth secret flips the
+  // placeholder back to `ANTHROPIC_API_KEY`, and a container still advertising
+  // the old one would keep sending a header the gateway no longer fills.
+  await applySecretGrantToSandbox(scope, agent);
   return {
     grants: await getAgentGrants(scope, agentId),
     changed: true,

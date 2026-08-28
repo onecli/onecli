@@ -37,7 +37,7 @@ export const exchangeGoogleCode = async ({
 }: OAuthExchangeCodeParams): Promise<OAuthExchangeResult> => {
   if (callbackParams.error) {
     throw new Error(
-      `Google authorization error: ${callbackParams.error} — ${callbackParams.error_description ?? "no description"}`,
+      `Google authorization error: ${callbackParams.error} (${callbackParams.error_description ?? "no description"})`,
     );
   }
 
@@ -60,7 +60,7 @@ export const exchangeGoogleCode = async ({
   if (!tokenRes.ok) {
     const errorBody = await tokenRes.text();
     throw new Error(
-      `Google token exchange failed: ${tokenRes.status} ${tokenRes.statusText} — ${errorBody}`,
+      `Google token exchange failed: ${tokenRes.status} ${tokenRes.statusText} (${errorBody})`,
     );
   }
 
@@ -94,7 +94,6 @@ export const exchangeGoogleCode = async ({
   // Google returns scopes space-separated (not comma like GitHub)
   const scopes = tokenData.scope?.split(" ").filter(Boolean) ?? [];
 
-  // Fetch user info for metadata
   let metadata: Record<string, unknown> | undefined;
   const userRes = await fetch("https://www.googleapis.com/oauth2/v2/userinfo", {
     headers: { Authorization: `Bearer ${tokenData.access_token}` },

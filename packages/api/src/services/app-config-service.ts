@@ -18,10 +18,10 @@ const disconnectIfConnected = async (
   // their existence check), pass its id to skip re-resolving it for the sweep.
   knownConfigId?: string,
 ) => {
-  // Org-scope removal also drops the project connections this config minted:
+  // Org-scope removal also drops the workspace connections this config minted:
   // their OAuth refresh tokens are bound to the client credentials being
   // removed, so refresh would fail against a different client. The provenance
-  // FK finds exactly those — across every project, and nothing this config
+  // FK finds exactly those — across every workspace, and nothing this config
   // didn't mint. OSS never has org rows, so this arm is inert there.
   const orgConfigId = isOrgScope(scope)
     ? (knownConfigId ??
@@ -38,7 +38,7 @@ const disconnectIfConnected = async (
   });
   if (orgConfigId) {
     await db.appConnection.deleteMany({
-      where: { appConfigId: orgConfigId, scope: "project" },
+      where: { appConfigId: orgConfigId, scope: "workspace" },
     });
   }
 };
@@ -135,15 +135,15 @@ export const getAppConfigCredentialsById = async (
 /**
  * The blast radius of removing or replacing an org-scoped app config: the
  * connections that would be disconnected. `orgConnections` are the config's own
- * org-scoped connections; `projectConnections` are the project connections it
- * minted (the provenance FK), across every project. Surfaced in the org admin's
- * confirm dialog — org scope only (a project config has no cross-project
+ * org-scoped connections; `workspaceConnections` are the workspace connections it
+ * minted (the provenance FK), across every workspace. Surfaced in the org admin's
+ * confirm dialog — org scope only (a workspace config has no cross-workspace
  * fan-out).
  */
 export const countAppConfigDependents = async (
   scope: ResourceScope,
   provider: string,
-): Promise<{ orgConnections: number; projectConnections: number }> => {
+): Promise<{ orgConnections: number; workspaceConnections: number }> => {
   const [orgConnections, row] = await Promise.all([
     db.appConnection.count({ where: { ...scopeWhere(scope), provider } }),
     db.appConfig.findUnique({
@@ -152,13 +152,13 @@ export const countAppConfigDependents = async (
     }),
   ]);
 
-  const projectConnections = row
+  const workspaceConnections = row
     ? await db.appConnection.count({
-        where: { appConfigId: row.id, scope: "project" },
+        where: { appConfigId: row.id, scope: "workspace" },
       })
     : 0;
 
-  return { orgConnections, projectConnections };
+  return { orgConnections, workspaceConnections };
 };
 
 export const upsertAppConfig = async (

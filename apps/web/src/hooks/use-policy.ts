@@ -17,7 +17,7 @@ import { queryKeys } from "@/lib/api/keys";
 import { afterPolicyWrite } from "@/lib/policy-editor/publish-mode";
 
 /** The editable draft rules (excludes the terminal Default Rule). */
-export const usePolicyRules = (scope: PageScope = "project") =>
+export const usePolicyRules = (scope: PageScope = "workspace") =>
   useQuery({
     queryKey: queryKeys.policy.rules(scope),
     queryFn: () => policy.listRules(scope, "draft"),
@@ -25,13 +25,13 @@ export const usePolicyRules = (scope: PageScope = "project") =>
 
 /** The active published rules — compared against the draft to detect unpublished
  * changes (the "you have changes to publish" indicator). */
-export const usePublishedPolicyRules = (scope: PageScope = "project") =>
+export const usePublishedPolicyRules = (scope: PageScope = "workspace") =>
   useQuery({
     queryKey: [...queryKeys.policy.rules(scope), "published"],
     queryFn: () => policy.listRules(scope, "published"),
   });
 
-export const usePolicyDefault = (scope: PageScope = "project") =>
+export const usePolicyDefault = (scope: PageScope = "workspace") =>
   useQuery({
     queryKey: queryKeys.policy.default(scope),
     queryFn: () => policy.getDefault(scope, "draft"),
@@ -39,14 +39,14 @@ export const usePolicyDefault = (scope: PageScope = "project") =>
 
 /** The published Default Rule — compared against the draft default to fold the
  * terminal rule into the "unpublished changes" indicator. */
-export const usePublishedPolicyDefault = (scope: PageScope = "project") =>
+export const usePublishedPolicyDefault = (scope: PageScope = "workspace") =>
   useQuery({
     queryKey: [...queryKeys.policy.default(scope), "published"],
     queryFn: () => policy.getDefault(scope, "published"),
   });
 
 /** Who last applied this scope's policy, and when (null = never published). */
-export const usePolicyLastPublish = (scope: PageScope = "project") =>
+export const usePolicyLastPublish = (scope: PageScope = "workspace") =>
   useQuery({
     queryKey: queryKeys.policy.lastPublish(scope),
     queryFn: () => policy.lastPublish(scope),
@@ -66,7 +66,7 @@ const useInvalidatePolicy = () => {
   };
 };
 
-export const useCreatePolicyRule = (scope: PageScope = "project") => {
+export const useCreatePolicyRule = (scope: PageScope = "workspace") => {
   const invalidate = useInvalidatePolicy();
   return useMutation({
     mutationFn: (input: CreatePolicyRuleInput) =>
@@ -79,7 +79,7 @@ export const useCreatePolicyRule = (scope: PageScope = "project") => {
   });
 };
 
-export const useUpdatePolicyRule = (scope: PageScope = "project") => {
+export const useUpdatePolicyRule = (scope: PageScope = "workspace") => {
   const invalidate = useInvalidatePolicy();
   return useMutation({
     mutationFn: ({ id, input }: { id: string; input: UpdatePolicyRuleInput }) =>
@@ -92,7 +92,7 @@ export const useUpdatePolicyRule = (scope: PageScope = "project") => {
   });
 };
 
-export const useDeletePolicyRule = (scope: PageScope = "project") => {
+export const useDeletePolicyRule = (scope: PageScope = "workspace") => {
   const invalidate = useInvalidatePolicy();
   return useMutation({
     mutationFn: (id: string) =>
@@ -111,7 +111,7 @@ export const useDeletePolicyRule = (scope: PageScope = "project") => {
  * flight), rolls back on error, and settles on the server's list. Takes the
  * FULL ordered id list — build it with `buildReorderIds`.
  */
-export const useReorderPolicyRules = (scope: PageScope = "project") => {
+export const useReorderPolicyRules = (scope: PageScope = "workspace") => {
   const qc = useQueryClient();
   const rulesKey = queryKeys.policy.rules(scope);
   return useMutation({
@@ -149,7 +149,7 @@ export const useReorderPolicyRules = (scope: PageScope = "project") => {
   });
 };
 
-export const useSetPolicyDefault = (scope: PageScope = "project") => {
+export const useSetPolicyDefault = (scope: PageScope = "workspace") => {
   const invalidate = useInvalidatePolicy();
   return useMutation({
     mutationFn: (action: "allow" | "block") =>
@@ -162,13 +162,13 @@ export const useSetPolicyDefault = (scope: PageScope = "project") => {
   });
 };
 
-export const usePublishPolicy = (scope: PageScope = "project") => {
+export const usePublishPolicy = (scope: PageScope = "workspace") => {
   const invalidate = useInvalidatePolicy();
   return useMutation({
     mutationFn: () => policy.publish(scope),
     onSuccess: () => {
       invalidate();
-      toast.success("Changes applied — now enforced");
+      toast.success("Changes applied and now enforced");
     },
     onError: (err: Error) => toast.error(err.message),
   });

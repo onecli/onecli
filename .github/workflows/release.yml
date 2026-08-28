@@ -1,3 +1,8 @@
+# Cuts OneCLI releases with release-please on every push to main: it maintains
+# the rolling release PR, and merging that PR creates the vX.Y.Z tag that
+# triggers publish.yml. The repository guard makes this workflow a no-op
+# anywhere but onecli/onecli (forks and mirrored copies included). Never
+# delete this file — synced copies propagate a deletion.
 name: Release
 
 on:
@@ -11,6 +16,7 @@ permissions:
 
 jobs:
   release:
+    if: github.repository == 'onecli/onecli'
     runs-on: ubuntu-latest
     steps:
       - name: release-please

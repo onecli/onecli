@@ -1,7 +1,8 @@
 //! Generic key-value cache with TTL.
 //!
-//! OSS uses an in-memory `DashMap` backend. Cloud swaps this module
-//! via `#[cfg(edition_cloud)]` to use Redis.
+//! Two backends behind one trait, selected at startup by [`create_store`]:
+//! Redis (`ConnectionManager`, ElastiCache with TLS + AUTH) when `REDIS_HOST`
+//! is set, else an in-memory `DashMap` for single-instance deployments.
 //!
 //! All values are serialized to JSON — the `CacheStore` trait is
 //! type-agnostic. Consumers use namespaced keys to avoid collisions
@@ -41,6 +42,10 @@ pub(crate) trait CacheStore: Send + Sync {
     /// Sets TTL only on first increment (new key / expired key).
     /// Returns the new count, or `None` on error (graceful fallback).
     async fn incr(&self, key: &str, ttl_secs: u64) -> Option<u64>;
+
+    /// Atomically increment a counter at `key` by `amount`.
+    /// Sets TTL only on first increment (new key).
+    async fn incrby(&self, key: &str, amount: u64, ttl_secs: u64) -> Option<u64>;
 }
 
 /// Extension methods for typed get/set on any `CacheStore`.
@@ -66,10 +71,29 @@ impl dyn CacheStore + '_ {
     }
 }
 
-/// Create the cache store for this build.
-/// OSS: in-memory DashMap. Cloud: Redis (swapped via `#[cfg]`).
+/// Whether a non-blank REDIS_HOST is configured (shared by both stores).
+pub(crate) fn redis_host_configured() -> bool {
+    std::env::var("REDIS_HOST").is_ok_and(|v| !v.trim().is_empty())
+}
+
+/// Create the cache store for this deployment.
+///
+/// With `REDIS_HOST` set, connects to Redis via `REDIS_HOST`, `REDIS_PORT`,
+/// `REDIS_PASSWORD`. Uses `rediss://` (TLS) by default; set `REDIS_TLS=false`
+/// for local dev (plain Docker Redis without TLS). Without `REDIS_HOST`, falls
+/// back to the in-memory store (single-instance deployments, unit tests). The
+/// Redis backend is licensed multi-instance operation and lives in
+/// `crate::ee::ha`; unlicensed deployments never reach it — a Redis-configured
+/// unlicensed gateway refuses to start (`crate::ee::ha::check_ha_entitlement`).
 pub(crate) async fn create_store() -> anyhow::Result<std::sync::Arc<dyn CacheStore>> {
-    Ok(std::sync::Arc::new(InMemoryCacheStore::new()))
+    // A blank REDIS_HOST counts as unset, matching check_ha_entitlement and
+    // check_cloud_startup_env — `REDIS_HOST=` in an env file must not select
+    // a Redis store pointed at an empty hostname.
+    if !redis_host_configured() {
+        return Ok(std::sync::Arc::new(InMemoryCacheStore::new()));
+    }
+
+    crate::ee::ha::redis_cache_store().await
 }
 
 // ── In-memory implementation ─────────────────────────────────────────────
@@ -79,7 +103,8 @@ struct CachedEntry {
     expires_at: Instant,
 }
 
-/// In-memory cache backed by `DashMap`. Used in OSS (single-instance).
+/// In-memory cache backed by `DashMap`. Used when `REDIS_HOST` is not set
+/// (single-instance deployments).
 ///
 /// Expired entries are evicted lazily on read — no background reaper.
 /// Acceptable for the gateway's bounded key space (one entry per
@@ -133,6 +158,10 @@ impl CacheStore for InMemoryCacheStore {
     }
 
     async fn incr(&self, key: &str, ttl_secs: u64) -> Option<u64> {
+        self.incrby(key, 1, ttl_secs).await
+    }
+
+    async fn incrby(&self, key: &str, amount: u64, ttl_secs: u64) -> Option<u64> {
         let now = Instant::now();
         let ttl = Duration::from_secs(ttl_secs);
 
@@ -141,13 +170,12 @@ impl CacheStore for InMemoryCacheStore {
             expires_at: now + ttl,
         });
 
-        // Reset if expired
         if entry.expires_at <= now {
             entry.data = "0".to_string();
             entry.expires_at = now + ttl;
         }
 
-        let count: u64 = entry.data.parse().unwrap_or(0) + 1;
+        let count: u64 = entry.data.parse().unwrap_or(0) + amount;
         entry.data = count.to_string();
         Some(count)
     }
@@ -245,5 +273,21 @@ mod tests {
         store.set("typed", &data, 60).await;
         let result: Option<MyData> = store.get("typed").await;
         assert_eq!(result, Some(data));
+    }
+
+    #[tokio::test]
+    async fn incr_counts_up_and_incrby_adds() {
+        let store = new_store();
+        assert_eq!(store.incr("counter", 60).await, Some(1));
+        assert_eq!(store.incr("counter", 60).await, Some(2));
+        assert_eq!(store.incrby("counter", 5, 60).await, Some(7));
+    }
+
+    #[tokio::test]
+    async fn incr_resets_after_expiry() {
+        let store = new_store();
+        // TTL=0 means the entry is already expired when the next incr runs.
+        assert_eq!(store.incr("counter", 0).await, Some(1));
+        assert_eq!(store.incr("counter", 60).await, Some(1));
     }
 }

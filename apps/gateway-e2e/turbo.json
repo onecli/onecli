@@ -1,0 +1,28 @@
+{
+  "$schema": "https://v2-7-6.turborepo.dev/schema.json",
+  "extends": ["//"],
+  "tasks": {
+    "test:e2e": {
+      // Never cacheable: these tests spawn a real binary against a live
+      // Postgres, Redis and KMS emulator, so a cache hit would report success
+      // for infrastructure that was never touched.
+      "cache": false,
+      "passThroughEnv": [
+        "CI",
+        "PATH",
+        "GATEWAY_E2E_BIN",
+        "GATEWAY_E2E_KEEP_DB",
+        "GATEWAY_E2E_RUST_LOG",
+        "E2E_ADMIN_DATABASE_URL",
+        "E2E_TEMPLATE_DB",
+        "E2E_REDIS_HOST",
+        "E2E_REDIS_PORT",
+        "AWS_ENDPOINT_URL_KMS",
+        "AWS_REGION",
+        "AWS_ACCESS_KEY_ID",
+        "AWS_SECRET_ACCESS_KEY",
+        "KMS_KEY_ARN"
+      ]
+    }
+  }
+}

@@ -65,7 +65,6 @@ export const confluence: AppDefinition = {
     buildAuthUrl: buildAtlassianAuthUrl,
     exchangeCode: exchangeAtlassianCode,
   },
-  available: true,
   configurable: {
     fields: atlassianConfigFields,
     envDefaults: atlassianEnvDefaults,

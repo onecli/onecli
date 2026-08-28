@@ -1,6 +1,11 @@
 # Vault Integration
 
-Connect an external password manager to OneCLI so the gateway can inject credentials on-demand, without storing them on the server. Currently supports [Bitwarden](https://bitwarden.com) via the [Agent Access SDK](https://github.com/bitwarden/agent-access).
+Connect an external password manager to OneCLI so the gateway can inject credentials on-demand, without storing them on the server. Two providers are supported, with different models:
+
+- **[Bitwarden](https://bitwarden.com)** (via the [Agent Access SDK](https://github.com/bitwarden/agent-access)) — an on-demand fallback: when no server-stored secret matches a request, the gateway asks your vault for a credential by domain.
+- **[1Password](https://1password.com)** (via a Service Account) — a value source for explicit secrets: a secret can reference `op://vault/item/field` instead of storing an encrypted value, and the gateway resolves the reference at request time.
+
+Most of this page covers the Bitwarden flow; see [1Password](#1password) below for its setup.
 
 ## How It Works
 
@@ -30,7 +35,7 @@ This generates a pairing code (two 64-character hex strings joined by `_`). Keep
 
 ### 2. Pair in the web dashboard
 
-Open **http://localhost:10254** > **Secrets** > **Bitwarden Vault** card. Paste the pairing code and click **Connect Vault**.
+Open **http://localhost:10254**, pick your workspace, then go to **Connections** > **Vaults** > **Bitwarden**. Paste the pairing code and click **Connect Vault**.
 
 The gateway establishes an encrypted Noise protocol session with your Bitwarden app through a WebSocket relay.
 
@@ -66,23 +71,31 @@ To use this with Anthropic, store your API key as the password in a Bitwarden lo
 - Sessions unused for 30 minutes are evicted from memory. The next request restores them from the database automatically.
 - If a session can't be restored (e.g. the Bitwarden app was reinstalled), disconnect in the UI and pair again with a new code.
 
+## 1Password
+
+1Password connects with a [Service Account](https://developer.1password.com/docs/service-accounts/) token instead of app pairing, and it is not a hostname-matched fallback: it supplies values for secrets you explicitly point at it. A secret with an `op://vault/item/field` reference is resolved through the 1Password SDK at request time, so the value never sits in the OneCLI database.
+
+Setup: **Connections** > **Vaults** > **1Password**, paste a Service Account token, then create secrets that reference vault items (the UI has a vault/item/field picker backed by `GET /v1/vault/onepassword/{vaults,items,fields}`).
+
 ## Architecture
 
-The vault system is provider-agnostic. Bitwarden is the first implementation. Future providers (1Password, etc.) can be added by implementing the `VaultProvider` trait.
+The vault system is provider-agnostic: each provider implements the `VaultProvider` trait, and pairing/status/disconnect are served on provider-generic routes.
 
 ```
-Browser ──► Gateway /v1/vault/bitwarden/pair   (pairing)
+Browser ──► Gateway /v1/vault/:provider/pair   (pairing / connecting)
 Agent   ──► Gateway CONNECT host:443            (credential injection)
               │
-              ├─ DB secrets matched? ──► inject from DB
-              └─ No match + vault paired? ──► ask Bitwarden ──► inject
+              ├─ DB secrets matched? ──► inject from DB (op:// values resolve via 1Password)
+              └─ No match + Bitwarden paired? ──► ask Bitwarden ──► inject
 ```
 
 Key files:
 
-| File                    | Role                                                |
-| ----------------------- | --------------------------------------------------- |
-| `vault/mod.rs`          | `VaultProvider` trait + `VaultService` orchestrator |
-| `vault/bitwarden.rs`    | Bitwarden provider (sessions, pairing, caching)     |
-| `vault/bitwarden_db.rs` | DB-backed identity + session storage                |
-| `vault/api.rs`          | REST endpoints for pair/status/disconnect           |
+| File                       | Role                                                        |
+| -------------------------- | ----------------------------------------------------------- |
+| `vault/mod.rs`             | `VaultProvider` trait + `VaultService` orchestrator         |
+| `vault/bitwarden.rs`       | Bitwarden provider (sessions, pairing, caching)             |
+| `vault/bitwarden_db.rs`    | DB-backed identity + session storage                        |
+| `vault/onepassword.rs`     | 1Password provider (Service Account session, `op://` cache) |
+| `vault/onepassword_api.rs` | Bridge to the Node 1Password SDK service                    |
+| `vault/api.rs`             | REST endpoints for pair/status/disconnect + the 1P picker   |

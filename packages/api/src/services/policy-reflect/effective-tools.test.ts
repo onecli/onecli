@@ -2,7 +2,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 // The effective-app-permissions reflection's contracts (step 9.7b): the
 // AGREEMENT LAW (per-tool verdicts ≡ an independent per-variant composition of
-// the real evaluator on the same seeded rules), org/project fencing at the
+// the real evaluator on the same seeded rules), org/workspace fencing at the
 // query level, the simulate redaction contract (org rule names never reach a
 // non-admin response — planted bait), the DERIVED injection basis (an
 // unconnected app leaves the deny-default unenforced), baseline honesty
@@ -41,7 +41,7 @@ vi.mock("@onecli/db", () => {
     Prisma: {},
     db: {
       agent: model("agent"),
-      projectAccess: model("projectAccess"),
+      workspaceAccess: model("workspaceAccess"),
       group: model("group"),
       groupMember: model("groupMember"),
       organizationMember: model("organizationMember"),
@@ -82,8 +82,8 @@ beforeEach(() => {
 const simRow = (over: Partial<SimRuleRow>): SimRuleRow =>
   ({
     id: "r1",
-    scope: "project",
-    projectId: "p1",
+    scope: "workspace",
+    workspaceId: "p1",
     organizationId: null,
     status: "published",
     generation: 1,
@@ -139,21 +139,21 @@ const targetRow = (
 
 const emptyHosts = {
   byId: new Map<string, string>(),
-  projectHosts: [] as string[],
+  workspaceHosts: [] as string[],
   orgHosts: [] as string[],
 };
 const emptyProviders = new Map<string, string>();
 
 // ── stub arming ──────────────────────────────────────────────────────────────
 
-const AGENT = { id: "agent-1", projectId: "p1" };
+const AGENT = { id: "agent-1", workspaceId: "p1" };
 
 /** Arm the concurrent reads: rules by scope; the two secret reads told apart by
  * their select shape (loadSecretHosts selects id/scope, the probe doesn't); the
  * two appConnection reads by the probe's status filter. */
 const armStubs = (opts: {
   orgRows?: SimRuleRow[];
-  projectRows?: SimRuleRow[];
+  workspaceRows?: SimRuleRow[];
   agent?: { id: string } | null;
   probeConnections?: { provider: string }[];
   providerRows?: { id: string; provider: string }[];
@@ -173,7 +173,7 @@ const armStubs = (opts: {
     const rows =
       where.scope === "organization"
         ? (opts.orgRows ?? [])
-        : (opts.projectRows ?? []);
+        : (opts.workspaceRows ?? []);
     const excluded = where.source?.not;
     return rows.filter(
       (r: { source?: string }) =>
@@ -251,9 +251,9 @@ const expectedVerdicts = (
   return out;
 };
 
-const PROJECT_CTX = {
-  scope: "project" as const,
-  projectId: "p1",
+const WORKSPACE_CTX = {
+  scope: "workspace" as const,
+  workspaceId: "p1",
   organizationId: "org-1",
   viewerSeesOrgRules: true,
 };
@@ -265,7 +265,7 @@ describe("the agreement law (per-tool verdicts ≡ the evaluator)", () => {
     const orgAllow = simRow({
       id: "o1",
       scope: "organization",
-      projectId: null,
+      workspaceId: null,
       organizationId: "org-1",
       logicalId: "org-allow",
       name: "Org gmail rate",
@@ -275,7 +275,7 @@ describe("the agreement law (per-tool verdicts ≡ the evaluator)", () => {
       priority: 1,
       targets: [targetRow({ kind: "app", appProvider: "gmail" })],
     });
-    const projectBlock = simRow({
+    const workspaceBlock = simRow({
       id: "p-block",
       logicalId: "block-deletes",
       name: "Block gmail deletes",
@@ -302,24 +302,24 @@ describe("the agreement law (per-tool verdicts ≡ the evaluator)", () => {
           id: "t-grant",
           kind: "app",
           appProvider: "gmail",
-          appConnectionScope: "project",
+          appConnectionScope: "workspace",
         }),
       ],
     });
     armStubs({
       orgRows: [orgAllow],
-      projectRows: [projectBlock, gmailGrant],
+      workspaceRows: [workspaceBlock, gmailGrant],
       probeConnections: [{ provider: "gmail" }],
     });
 
     const result = await effectiveAppPermissions(
       { provider: "gmail", agentId: "agent-1" },
-      PROJECT_CTX,
+      WORKSPACE_CTX,
     );
 
     const expected = expectedVerdicts(
       "gmail",
-      [orgAllow, projectBlock, gmailGrant],
+      [orgAllow, workspaceBlock, gmailGrant],
       {
         hasInjections: true, // the grant attaches every gmail host
       },
@@ -354,11 +354,11 @@ describe("the agreement law (per-tool verdicts ≡ the evaluator)", () => {
         }),
       ],
     });
-    armStubs({ projectRows: [postBlock] });
+    armStubs({ workspaceRows: [postBlock] });
 
     const result = await effectiveAppPermissions(
       { provider: "jira", agentId: "agent-1" },
-      PROJECT_CTX,
+      WORKSPACE_CTX,
     );
 
     const expected = expectedVerdicts("jira", [postBlock], {
@@ -376,7 +376,7 @@ describe("the agreement law (per-tool verdicts ≡ the evaluator)", () => {
 
 describe("derived injection basis", () => {
   it("an unconnected app leaves the deny-default unenforced (unmanaged)", async () => {
-    const projectDefault = simRow({
+    const workspaceDefault = simRow({
       id: "d1",
       logicalId: "default",
       name: "Default",
@@ -385,11 +385,11 @@ describe("derived injection basis", () => {
       action: "block",
       priority: 10_000,
     });
-    armStubs({ projectRows: [projectDefault] });
+    armStubs({ workspaceRows: [workspaceDefault] });
 
     const result = await effectiveAppPermissions(
       { provider: "gmail", agentId: "agent-1" },
-      PROJECT_CTX,
+      WORKSPACE_CTX,
     );
 
     expect(result.basis.credentialAttached).toBe(false);
@@ -402,7 +402,7 @@ describe("derived injection basis", () => {
   });
 
   it("a connected app enforces the deny-default (block, attributed)", async () => {
-    const projectDefault = simRow({
+    const workspaceDefault = simRow({
       id: "d1",
       logicalId: "default",
       name: "Default",
@@ -412,8 +412,8 @@ describe("derived injection basis", () => {
       priority: 10_000,
     });
     armStubs({
-      projectRows: [
-        projectDefault,
+      workspaceRows: [
+        workspaceDefault,
         // Step 7: attachment comes from a grant, not a pool. EQUIPMENT-source:
         // it feeds the injection basis but is dropped from decisions — the
         // injected-yet-undecided shape this carve exists for (an ordinary
@@ -430,7 +430,7 @@ describe("derived injection basis", () => {
               id: "t-grant",
               kind: "app",
               appProvider: "gmail",
-              appConnectionScope: "project",
+              appConnectionScope: "workspace",
             }),
           ],
         }),
@@ -440,21 +440,21 @@ describe("derived injection basis", () => {
 
     const result = await effectiveAppPermissions(
       { provider: "gmail", agentId: "agent-1" },
-      PROJECT_CTX,
+      WORKSPACE_CTX,
     );
 
     expect(result.basis.credentialAttached).toBe(true);
     for (const group of result.groups) {
       for (const tool of group.tools) {
         expect(tool.verdict).toBe("block");
-        expect(tool.decidedBy).toEqual({ kind: "default", scope: "project" });
+        expect(tool.decidedBy).toEqual({ kind: "default", scope: "workspace" });
       }
     }
   });
 
   it("F1: a selective agent's RULE-GRANTED connection makes its tools managed, not unmanaged", async () => {
-    // Selective agent, ZERO assigned credentials, a project allow rule granting
-    // connection c1 (gmail) narrowed to reads, + project Default Block. The
+    // Selective agent, ZERO assigned credentials, a workspace allow rule granting
+    // connection c1 (gmail) narrowed to reads, + workspace Default Block. The
     // grant must fold into the injection probe (inject_select.rs) so the WRITE
     // tools — which the read-only grant doesn't permit — are deny-default
     // BLOCKED, not "unmanaged". Pre-fix (assigned-only probe) they'd read
@@ -473,7 +473,7 @@ describe("derived injection basis", () => {
         }),
       ],
     });
-    const projectDefault = simRow({
+    const workspaceDefault = simRow({
       id: "d1",
       logicalId: "default",
       name: "Default",
@@ -484,7 +484,7 @@ describe("derived injection basis", () => {
     });
     armStubs({
       agent: { id: "agent-1" },
-      projectRows: [grant, projectDefault],
+      workspaceRows: [grant, workspaceDefault],
       // c1 resolves to gmail via loadConnectionProviders; it is NOT in the
       // assigned pool (probeConnections empty) — only the RULE grants it.
       providerRows: [{ id: "c1", provider: "gmail" }],
@@ -492,7 +492,7 @@ describe("derived injection basis", () => {
 
     const result = await effectiveAppPermissions(
       { provider: "gmail", agentId: "agent-1" },
-      PROJECT_CTX,
+      WORKSPACE_CTX,
     );
 
     // The grant folded in → gmail is managed for this agent.
@@ -507,7 +507,7 @@ describe("derived injection basis", () => {
 describe("buildInjectionProbe (the inject_select mirror)", () => {
   const SECRET_HOSTS = {
     byId: new Map([["s1", "api.secretco.com"]]),
-    projectHosts: ["api.secretco.com"],
+    workspaceHosts: ["api.secretco.com"],
     orgHosts: [] as string[],
   };
   const CONN_PROVIDERS = new Map([["c1", "gmail"]]);
@@ -545,7 +545,7 @@ describe("buildInjectionProbe (the inject_select mirror)", () => {
   it("folds a secretScope pool grant to the level's hosts", () => {
     const probe = probeFor({ id: "agent-1" }, [
       connGrant({
-        targets: [targetRow({ kind: "secret", secretScope: "project" })],
+        targets: [targetRow({ kind: "secret", secretScope: "workspace" })],
       }),
     ]);
     expect(probe("api.secretco.com")).toBe(true);
@@ -591,12 +591,12 @@ describe("F2: agreeing variants never read as `mixed`", () => {
     viewerSeesOrgRules = true,
   ) => {
     armStubs({
-      projectRows: rows.filter((r) => r.scope === "project"),
+      workspaceRows: rows.filter((r) => r.scope === "workspace"),
       orgRows: rows.filter((r) => r.scope === "organization"),
     });
     const result = await effectiveAppPermissions(
       { provider: "jira", agentId: "agent-1" },
-      { ...PROJECT_CTX, viewerSeesOrgRules },
+      { ...WORKSPACE_CTX, viewerSeesOrgRules },
     );
     return result.groups
       .flatMap((g) => g.tools)
@@ -640,7 +640,7 @@ describe("F2: agreeing variants never read as `mixed`", () => {
     const orgGet = jqlRule({
       id: "o-get",
       scope: "organization",
-      projectId: null,
+      workspaceId: null,
       organizationId: "org-1",
       logicalId: "og",
       name: "Org GET",
@@ -656,7 +656,7 @@ describe("F2: agreeing variants never read as `mixed`", () => {
     const orgPost = jqlRule({
       id: "o-post",
       scope: "organization",
-      projectId: null,
+      workspaceId: null,
       organizationId: "org-1",
       logicalId: "op",
       name: "Org POST",
@@ -682,18 +682,18 @@ describe("fencing", () => {
     await expect(
       effectiveAppPermissions(
         { provider: "gmail", agentId: "foreign-agent" },
-        PROJECT_CTX,
+        WORKSPACE_CTX,
       ),
     ).rejects.toThrow("Agent not found");
     expect(whereOf("agent")).toEqual({
       id: "foreign-agent",
-      projectId: "p1",
+      workspaceId: "p1",
     });
   });
 
   it("an unknown provider is NOT FOUND before any rule read", async () => {
     await expect(
-      effectiveAppPermissions({ provider: "no-such-app" }, PROJECT_CTX),
+      effectiveAppPermissions({ provider: "no-such-app" }, WORKSPACE_CTX),
     ).rejects.toThrow("No permission catalog");
     expect(state.calls.filter((c) => c.model === "policyRuleV2")).toHaveLength(
       0,
@@ -707,7 +707,7 @@ describe("redaction (the simulate contract)", () => {
     simRow({
       id: "ob1",
       scope: "organization",
-      projectId: null,
+      workspaceId: null,
       organizationId: "org-1",
       logicalId: "org-l1",
       name: BAIT,
@@ -719,7 +719,7 @@ describe("redaction (the simulate contract)", () => {
     armStubs({ orgRows: [orgBlock()] });
     const result = await effectiveAppPermissions(
       { provider: "gmail", agentId: "agent-1" },
-      { ...PROJECT_CTX, viewerSeesOrgRules: false },
+      { ...WORKSPACE_CTX, viewerSeesOrgRules: false },
     );
     const tool = result.groups[0]!.tools[0]!;
     expect(tool.verdict).toBe("block");
@@ -737,7 +737,7 @@ describe("redaction (the simulate contract)", () => {
     armStubs({ orgRows: [orgBlock()] });
     const result = await effectiveAppPermissions(
       { provider: "gmail", agentId: "agent-1" },
-      PROJECT_CTX,
+      WORKSPACE_CTX,
     );
     expect(result.groups[0]!.tools[0]!.decidedBy).toMatchObject({
       kind: "rule",
@@ -750,7 +750,7 @@ describe("redaction (the simulate contract)", () => {
     const orgRate = simRow({
       id: "or1",
       scope: "organization",
-      projectId: null,
+      workspaceId: null,
       organizationId: "org-1",
       logicalId: "org-rate",
       name: BAIT,
@@ -762,7 +762,7 @@ describe("redaction (the simulate contract)", () => {
     armStubs({ orgRows: [orgRate] });
     const result = await effectiveAppPermissions(
       { provider: "gmail", agentId: "agent-1" },
-      { ...PROJECT_CTX, viewerSeesOrgRules: false },
+      { ...WORKSPACE_CTX, viewerSeesOrgRules: false },
     );
     const tool = result.groups[0]!.tools[0]!;
     expect(tool.verdict).toBe("allow");
@@ -782,7 +782,7 @@ describe("baseline honesty", () => {
     simRow({
       id: "ob2",
       scope: "organization",
-      projectId: null,
+      workspaceId: null,
       organizationId: "org-1",
       logicalId: "org-grp",
       name: "Group-only block",
@@ -795,7 +795,7 @@ describe("baseline honesty", () => {
     armStubs({ orgRows: [identityScopedBlock()] });
     const result = await effectiveAppPermissions(
       { provider: "gmail" }, // no agentId → baseline
-      PROJECT_CTX,
+      WORKSPACE_CTX,
     );
     // The group-scoped block does NOT bite the baseline…
     for (const group of result.groups) {
@@ -812,22 +812,22 @@ describe("baseline honesty", () => {
     armStubs({ orgRows: [identityScopedBlock()] });
     const result = await effectiveAppPermissions(
       { provider: "gmail" },
-      { ...PROJECT_CTX, viewerSeesOrgRules: false },
+      { ...WORKSPACE_CTX, viewerSeesOrgRules: false },
     );
     expect(result.variesByIdentity).toBe(0);
   });
 
-  it("an agent whose project inherits the group gets the identity-scoped verdict", async () => {
+  it("an agent whose workspace inherits the group gets the identity-scoped verdict", async () => {
     armStubs({ orgRows: [identityScopedBlock()] });
-    // The project grants group g1 via ProjectAccess → g1 lands in the
+    // The workspace grants group g1 via WorkspaceAccess → g1 lands in the
     // resolved principal set (org-fenced by the group read).
-    state.results.set("projectAccess.findMany", [
+    state.results.set("workspaceAccess.findMany", [
       { userId: null, groupId: "g1" },
     ]);
     state.results.set("group.findMany", [{ id: "g1" }]);
     const result = await effectiveAppPermissions(
       { provider: "gmail", agentId: "agent-1" },
-      PROJECT_CTX,
+      WORKSPACE_CTX,
     );
     for (const group of result.groups) {
       for (const tool of group.tools) {
@@ -842,7 +842,7 @@ describe("org-scope variant", () => {
     const orgAllow = simRow({
       id: "o1",
       scope: "organization",
-      projectId: null,
+      workspaceId: null,
       organizationId: "org-1",
       logicalId: "org-allow",
       name: "Org allow",
@@ -860,7 +860,7 @@ describe("org-scope variant", () => {
       },
     );
 
-    // Only the org side was read — no project-scoped rule load happened. There
+    // Only the org side was read — no workspace-scoped rule load happened. There
     // are two reads (the decision set and the injection set, which differ by
     // whether `equipment` is included); BOTH must be org-scoped.
     const ruleReads = state.calls.filter(
@@ -890,7 +890,7 @@ describe("org-scope variant", () => {
           viewerSeesOrgRules: true,
         },
       ),
-    ).rejects.toThrow("project-level");
+    ).rejects.toThrow("workspace-level");
   });
 });
 
@@ -901,7 +901,7 @@ describe("the no-endpoint-leak constraint", () => {
         simRow({
           id: "o1",
           scope: "organization",
-          projectId: null,
+          workspaceId: null,
           organizationId: "org-1",
           logicalId: "org-allow",
           name: "Org allow",
@@ -913,7 +913,7 @@ describe("the no-endpoint-leak constraint", () => {
     });
     const result = await effectiveAppPermissions(
       { provider: "gmail", agentId: "agent-1" },
-      PROJECT_CTX,
+      WORKSPACE_CTX,
     );
     const serialized = JSON.stringify(result);
     for (const leaked of [
@@ -953,7 +953,7 @@ describe("per-connection reflection (decisions bind to the winner)", () => {
     });
   const arm = () =>
     armStubs({
-      projectRows: [connAllow(), denyDefault()],
+      workspaceRows: [connAllow(), denyDefault()],
       providerRows: [
         { id: "c-work", provider: "gmail" },
         { id: "c-personal", provider: "gmail" },
@@ -965,7 +965,7 @@ describe("per-connection reflection (decisions bind to the winner)", () => {
     arm();
     const result = await effectiveAppPermissions(
       { provider: "gmail", agentId: "agent-1" },
-      PROJECT_CTX,
+      WORKSPACE_CTX,
     );
     const tools = result.groups.flatMap((g) => g.tools);
     expect(tools.length).toBeGreaterThan(0);
@@ -982,7 +982,7 @@ describe("per-connection reflection (decisions bind to the winner)", () => {
     state.results.set("appConnection.findFirst", { id: "c-work" });
     const work = await effectiveAppPermissions(
       { provider: "gmail", agentId: "agent-1", connectionId: "c-work" },
-      PROJECT_CTX,
+      WORKSPACE_CTX,
     );
     expect(
       work.groups.flatMap((g) => g.tools).every((t) => t.verdict === "allow"),
@@ -992,7 +992,7 @@ describe("per-connection reflection (decisions bind to the winner)", () => {
     state.results.set("appConnection.findFirst", { id: "c-personal" });
     const personal = await effectiveAppPermissions(
       { provider: "gmail", agentId: "agent-1", connectionId: "c-personal" },
-      PROJECT_CTX,
+      WORKSPACE_CTX,
     );
     expect(
       personal.groups
@@ -1007,7 +1007,7 @@ describe("per-connection reflection (decisions bind to the winner)", () => {
     await expect(
       effectiveAppPermissions(
         { provider: "gmail", agentId: "agent-1", connectionId: "c-foreign" },
-        PROJECT_CTX,
+        WORKSPACE_CTX,
       ),
     ).rejects.toThrow("Connection not found");
   });
@@ -1018,7 +1018,7 @@ describe("orgCeiling (the org level evaluated alone)", () => {
     simRow({
       scope: "organization",
       organizationId: "org-1",
-      projectId: null,
+      workspaceId: null,
       ...over,
     });
   const gmailApp = () => [targetRow({ kind: "app", appProvider: "gmail" })];
@@ -1029,7 +1029,7 @@ describe("orgCeiling (the org level evaluated alone)", () => {
     return tools;
   };
 
-  it("stays visible under a STRICTER project rule (the invisible-floor case)", async () => {
+  it("stays visible under a STRICTER workspace rule (the invisible-floor case)", async () => {
     armStubs({
       orgRows: [
         orgRow({
@@ -1041,11 +1041,11 @@ describe("orgCeiling (the org level evaluated alone)", () => {
           targets: gmailApp(),
         }),
       ],
-      projectRows: [
+      workspaceRows: [
         simRow({
           id: "pb1",
           logicalId: "lpb1",
-          name: "project block",
+          name: "workspace block",
           action: "block",
           targets: [targetRow({ kind: "app", appProvider: "gmail" })],
         }),
@@ -1054,13 +1054,13 @@ describe("orgCeiling (the org level evaluated alone)", () => {
     });
     const result = await effectiveAppPermissions(
       { provider: "gmail", agentId: "agent-1" },
-      PROJECT_CTX,
+      WORKSPACE_CTX,
     );
     for (const tool of flat(result)) {
-      // The combined verdict is the stricter project block…
+      // The combined verdict is the stricter workspace block…
       expect(tool.verdict).toBe("block");
       expect(
-        tool.decidedBy?.kind === "rule" && tool.decidedBy.scope === "project",
+        tool.decidedBy?.kind === "rule" && tool.decidedBy.scope === "workspace",
       ).toBe(true);
       // …and the org floor is STILL reported — the whole point of the field.
       expect(tool.orgCeiling).toBe("approval");
@@ -1078,11 +1078,11 @@ describe("orgCeiling (the org level evaluated alone)", () => {
           targets: gmailApp(),
         }),
       ],
-      projectRows: [
+      workspaceRows: [
         simRow({
           id: "pa1",
           logicalId: "lpa1",
-          name: "project allow",
+          name: "workspace allow",
           action: "allow",
           targets: [targetRow({ kind: "app", appProvider: "gmail" })],
         }),
@@ -1091,7 +1091,7 @@ describe("orgCeiling (the org level evaluated alone)", () => {
     });
     const result = await effectiveAppPermissions(
       { provider: "gmail", agentId: "agent-1" },
-      PROJECT_CTX,
+      WORKSPACE_CTX,
     );
     for (const tool of flat(result)) {
       expect(tool.verdict).toBe("block");
@@ -1101,11 +1101,11 @@ describe("orgCeiling (the org level evaluated alone)", () => {
 
   it("is null when the org is silent", async () => {
     armStubs({
-      projectRows: [
+      workspaceRows: [
         simRow({
           id: "pa2",
           logicalId: "lpa2",
-          name: "project allow",
+          name: "workspace allow",
           action: "allow",
           targets: [targetRow({ kind: "app", appProvider: "gmail" })],
         }),
@@ -1114,7 +1114,7 @@ describe("orgCeiling (the org level evaluated alone)", () => {
     });
     const result = await effectiveAppPermissions(
       { provider: "gmail", agentId: "agent-1" },
-      PROJECT_CTX,
+      WORKSPACE_CTX,
     );
     for (const tool of flat(result)) {
       expect(tool.verdict).toBe("allow");
@@ -1139,7 +1139,7 @@ describe("orgCeiling (the org level evaluated alone)", () => {
     });
     const result = await effectiveAppPermissions(
       { provider: "gmail", agentId: "agent-1" },
-      PROJECT_CTX,
+      WORKSPACE_CTX,
     );
     for (const tool of flat(result)) {
       expect(tool.verdict).toBe("unmanaged");
@@ -1161,7 +1161,7 @@ describe("orgCeiling (the org level evaluated alone)", () => {
         }),
       ],
       probeConnections: [{ provider: "gmail" }],
-      projectRows: [
+      workspaceRows: [
         // Step 7: attachment comes from a grant, not a pool.
         simRow({
           id: "r-grant",
@@ -1174,7 +1174,7 @@ describe("orgCeiling (the org level evaluated alone)", () => {
               id: "t-grant",
               kind: "app",
               appProvider: "gmail",
-              appConnectionScope: "project",
+              appConnectionScope: "workspace",
             }),
           ],
         }),
@@ -1182,7 +1182,7 @@ describe("orgCeiling (the org level evaluated alone)", () => {
     });
     const result = await effectiveAppPermissions(
       { provider: "gmail", agentId: "agent-1" },
-      PROJECT_CTX,
+      WORKSPACE_CTX,
     );
     for (const tool of flat(result)) {
       expect(tool.verdict).toBe("block");
@@ -1200,7 +1200,7 @@ describe("orgResources (the org resource floor mirror)", () => {
     simRow({
       id,
       scope: "organization",
-      projectId: null,
+      workspaceId: null,
       organizationId: "org-1",
       logicalId: `l-${id}`,
       name: `org ${id}`,
@@ -1219,7 +1219,7 @@ describe("orgResources (the org resource floor mirror)", () => {
   const reflect = (viewerSeesOrgRules = true) =>
     effectiveAppPermissions(
       { provider: "gmail", agentId: "agent-1", connectionId: "conn-1" },
-      { ...PROJECT_CTX, viewerSeesOrgRules },
+      { ...WORKSPACE_CTX, viewerSeesOrgRules },
     );
 
   it("exposes an identity-matched org session policy — values-only, viewer-independent", async () => {
@@ -1298,11 +1298,11 @@ describe("orgResources (the org resource floor mirror)", () => {
     expect((await reflect()).orgResources).toBeNull();
   });
 
-  it("project rows never feed it, and it is null without an explicit connection", async () => {
-    const projectPolicy = simRow({
+  it("workspace rows never feed it, and it is null without an explicit connection", async () => {
+    const workspacePolicy = simRow({
       id: "p1r",
       logicalId: "l-p1r",
-      name: "project grant",
+      name: "workspace grant",
       action: "allow",
       source: "grant",
       conditions: { folders: ["/x"] } as SimRuleRow["conditions"],
@@ -1315,20 +1315,20 @@ describe("orgResources (the org resource floor mirror)", () => {
         }),
       ],
     });
-    armStubs({ projectRows: [projectPolicy] });
+    armStubs({ workspaceRows: [workspacePolicy] });
     state.results.set("appConnection.findFirst", { id: "conn-1" });
     expect((await reflect()).orgResources).toBeNull();
 
     armStubs({ orgRows: [orgConnAllow("o1", { repositories: ["org/a"] })] });
     const noConnection = await effectiveAppPermissions(
       { provider: "gmail", agentId: "agent-1" },
-      PROJECT_CTX,
+      WORKSPACE_CTX,
     );
     expect(noConnection.orgResources).toBeNull();
   });
 });
 
-describe("resource scopes (org boundary ∩ project selection)", () => {
+describe("resource scopes (org boundary ∩ workspace selection)", () => {
   const connTarget = (id: string) =>
     targetRow({ id: `t-${id}`, kind: "connection", appConnectionId: "conn-1" });
 
@@ -1340,7 +1340,7 @@ describe("resource scopes (org boundary ∩ project selection)", () => {
     simRow({
       id,
       scope: "organization",
-      projectId: null,
+      workspaceId: null,
       organizationId: "org-1",
       logicalId: `l-${id}`,
       name: `org ${id}`,
@@ -1350,11 +1350,11 @@ describe("resource scopes (org boundary ∩ project selection)", () => {
       targets: [connTarget(id)],
     });
 
-  const projectGrant = (conditions: unknown): SimRuleRow =>
+  const workspaceGrant = (conditions: unknown): SimRuleRow =>
     simRow({
       id: "p-grant",
       logicalId: "l-p-grant",
-      name: "project grant",
+      name: "workspace grant",
       source: "grant",
       action: "allow",
       conditions: conditions as SimRuleRow["conditions"],
@@ -1364,13 +1364,13 @@ describe("resource scopes (org boundary ∩ project selection)", () => {
 
   const reflect = async (opts: {
     orgRows?: SimRuleRow[];
-    projectRows?: SimRuleRow[];
+    workspaceRows?: SimRuleRow[];
   }) => {
     armStubs(opts);
     state.results.set("appConnection.findFirst", { id: "conn-1" });
     return effectiveAppPermissions(
       { provider: "gmail", agentId: "agent-1", connectionId: "conn-1" },
-      PROJECT_CTX,
+      WORKSPACE_CTX,
     );
   };
 
@@ -1381,7 +1381,7 @@ describe("resource scopes (org boundary ∩ project selection)", () => {
       orgRows: [
         orgRule("o1", { repositories: ["buckle/electron", "buckle/api"] }),
       ],
-      projectRows: [projectGrant({ repositories: ["buckle/api"] })],
+      workspaceRows: [workspaceGrant({ repositories: ["buckle/api"] })],
     }).then((result) => {
       expect(result.orgResources).toEqual({
         repositories: ["buckle/electron", "buckle/api"],
@@ -1392,10 +1392,10 @@ describe("resource scopes (org boundary ∩ project selection)", () => {
     });
   });
 
-  it("a project pick outside the boundary composes to nothing", async () => {
+  it("a workspace pick outside the boundary composes to nothing", async () => {
     const result = await reflect({
       orgRows: [orgRule("o1", { repositories: ["org/a"] })],
-      projectRows: [projectGrant({ repositories: ["org/z"] })],
+      workspaceRows: [workspaceGrant({ repositories: ["org/z"] })],
     });
     expect(result.effectiveResources).toEqual({ repositories: [] });
   });
@@ -1403,15 +1403,15 @@ describe("resource scopes (org boundary ∩ project selection)", () => {
   it("either scope alone stands on its own", async () => {
     const orgOnly = await reflect({
       orgRows: [orgRule("o1", { folders: ["/clients"] })],
-      projectRows: [projectGrant(null)],
+      workspaceRows: [workspaceGrant(null)],
     });
     expect(orgOnly.effectiveResources).toEqual({ folders: ["/clients"] });
 
-    const projectOnly = await reflect({
-      projectRows: [projectGrant({ folders: ["/clients/acme"] })],
+    const workspaceOnly = await reflect({
+      workspaceRows: [workspaceGrant({ folders: ["/clients/acme"] })],
     });
-    expect(projectOnly.orgResources).toBeNull();
-    expect(projectOnly.effectiveResources).toEqual({
+    expect(workspaceOnly.orgResources).toBeNull();
+    expect(workspaceOnly.effectiveResources).toEqual({
       folders: ["/clients/acme"],
     });
   });
@@ -1423,7 +1423,7 @@ describe("resource scopes (org boundary ∩ project selection)", () => {
           identityRow({ id: "i-g", groupId: "other-group" }),
         ]),
       ],
-      projectRows: [projectGrant({ repositories: ["proj/b"] })],
+      workspaceRows: [workspaceGrant({ repositories: ["proj/b"] })],
     });
     expect(result.orgResources).toBeNull();
     expect(result.effectiveResources).toEqual({ repositories: ["proj/b"] });

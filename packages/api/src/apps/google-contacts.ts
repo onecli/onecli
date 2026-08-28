@@ -38,7 +38,7 @@ export const googleContacts: AppDefinition = {
         scope: "https://www.googleapis.com/auth/contacts.other.readonly",
         name: "Read other contacts",
         description:
-          "View 'other contacts' — auto-saved people you've emailed but not added",
+          "View 'other contacts': auto-saved people you've emailed but not added",
         access: "read",
       },
       {
@@ -63,7 +63,6 @@ export const googleContacts: AppDefinition = {
     buildAuthUrl: buildGoogleAuthUrl,
     exchangeCode: exchangeGoogleCode,
   },
-  available: true,
   configurable: {
     fields: googleConfigFields,
   },

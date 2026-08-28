@@ -115,13 +115,13 @@ registerAppPermission({
   ],
 });
 
-const SCOPE = { projectId: "p1", organizationId: "org-1" };
+const SCOPE = { workspaceId: "p1", organizationId: "org-1" };
 const AGENT = { id: "agent-1", name: "Cody" };
 const CONNECTION = {
   id: "conn-1",
   provider: "granttest",
   label: "work@example.com",
-  scope: "project",
+  scope: "workspace",
 };
 
 const callsOf = (model: string, op: string) =>
@@ -202,7 +202,7 @@ describe("setConnectionGrant", () => {
     expect(creates.map((c) => c.priority)).toEqual([5, 6, 7, 8]);
     // ask ≠ ∅ routes through the plan gate with the manual_approval action.
     expect(gate.assertAllowed).toHaveBeenCalledWith(
-      { scope: "project", projectId: "p1" },
+      { scope: "workspace", workspaceId: "p1" },
       ["manual_approval"],
     );
   });
@@ -243,7 +243,7 @@ describe("setConnectionGrant", () => {
     expect(result.changed).toBe(true);
   });
 
-  it("fences the connection to the project + org-shared pool; a miss is NOT_FOUND", async () => {
+  it("fences the connection to the workspace + org-shared pool; a miss is NOT_FOUND", async () => {
     state.results.set("appConnection.findFirst", null);
     await expect(
       setConnectionGrant(
@@ -259,12 +259,12 @@ describe("setConnectionGrant", () => {
         where: Record<string, unknown>;
       }
     ).where;
-    // The attach pool: own project OR org-shared under the acting org —
-    // deliberately wider than assertTargetsValid, never foreign/partner.
+    // The attach pool: own workspace OR org-shared under the acting org —
+    // deliberately wider than assertTargetsValid, never foreign.
     expect(where).toEqual({
       id: "conn-foreign",
       OR: [
-        { projectId: "p1" },
+        { workspaceId: "p1" },
         { organizationId: "org-1", scope: "organization" },
       ],
     });

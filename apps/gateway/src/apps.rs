@@ -18,6 +18,8 @@ pub(crate) enum AuthStrategy {
     Bearer,
     /// `Authorization: Basic base64("x-access-token:{token}")`
     BasicXAccessToken,
+    /// `Authorization: Zoho-oauthtoken {token}` — Zoho's OAuth header scheme.
+    ZohoOauthtoken,
     /// No `Authorization` header — auth injected via `credential_headers` only.
     None,
 }
@@ -30,7 +32,6 @@ pub(crate) enum RequestFinalizer {
     /// AWS Signature Version 4 — signs the request with IAM credentials.
     AwsSigV4,
     /// AWS STS AssumeRole — resolves temporary credentials, then signs with SigV4.
-    #[cfg(edition_cloud)]
     AwsAssumeRole,
 }
 
@@ -237,6 +238,104 @@ static LINKEDIN_REFRESH: RefreshConfig = RefreshConfig {
     body_format: TokenBodyFormat::Form,
     client_auth: ClientCredentialMethod::Body,
 };
+
+/// Refresh config for Sentry OAuth API.
+static SENTRY_REFRESH: RefreshConfig = RefreshConfig {
+    token_url: "https://sentry.io/oauth/token/",
+    client_id_env: "SENTRY_CLIENT_ID",
+    client_secret_env: "SENTRY_CLIENT_SECRET",
+    body_format: TokenBodyFormat::Form,
+    client_auth: ClientCredentialMethod::Body,
+};
+
+/// Refresh config for Zoom OAuth API (uses Basic auth for client credentials).
+static ZOOM_REFRESH: RefreshConfig = RefreshConfig {
+    token_url: "https://zoom.us/oauth/token",
+    client_id_env: "ZOOM_CLIENT_ID",
+    client_secret_env: "ZOOM_CLIENT_SECRET",
+    body_format: TokenBodyFormat::Form,
+    client_auth: ClientCredentialMethod::BasicAuth,
+};
+
+/// Shared refresh config for all Microsoft 365 OAuth APIs (Outlook Mail, Calendar, Word, OneNote).
+static MICROSOFT_REFRESH: RefreshConfig = RefreshConfig {
+    token_url: "https://login.microsoftonline.com/common/oauth2/v2.0/token",
+    client_id_env: "MICROSOFT_CLIENT_ID",
+    client_secret_env: "MICROSOFT_CLIENT_SECRET",
+    body_format: TokenBodyFormat::Form,
+    client_auth: ClientCredentialMethod::Body,
+};
+
+/// Refresh config for Linear OAuth API.
+static LINEAR_REFRESH: RefreshConfig = RefreshConfig {
+    token_url: "https://api.linear.app/oauth/token",
+    client_id_env: "LINEAR_CLIENT_ID",
+    client_secret_env: "LINEAR_CLIENT_SECRET",
+    body_format: TokenBodyFormat::Form,
+    client_auth: ClientCredentialMethod::Body,
+};
+
+/// Refresh config for Fathom AI OAuth API.
+static FATHOM_REFRESH: RefreshConfig = RefreshConfig {
+    token_url: "https://api.fathom.ai/external/v1/oauth2/token",
+    client_id_env: "FATHOM_CLIENT_ID",
+    client_secret_env: "FATHOM_CLIENT_SECRET",
+    body_format: TokenBodyFormat::Form,
+    client_auth: ClientCredentialMethod::Body,
+};
+
+/// Refresh config for X (Twitter) OAuth API (uses Basic auth for client credentials).
+static X_REFRESH: RefreshConfig = RefreshConfig {
+    token_url: "https://api.x.com/2/oauth2/token",
+    client_id_env: "X_CLIENT_ID",
+    client_secret_env: "X_CLIENT_SECRET",
+    body_format: TokenBodyFormat::Form,
+    client_auth: ClientCredentialMethod::BasicAuth,
+};
+
+/// Refresh config for HubSpot OAuth API.
+static HUBSPOT_REFRESH: RefreshConfig = RefreshConfig {
+    token_url: "https://api.hubapi.com/oauth/2026-03/token",
+    client_id_env: "HUBSPOT_CLIENT_ID",
+    client_secret_env: "HUBSPOT_CLIENT_SECRET",
+    body_format: TokenBodyFormat::Form,
+    client_auth: ClientCredentialMethod::Body,
+};
+
+/// Refresh config for Zoho CRM OAuth (BYO clients only — the env vars match
+/// the definition's envDefaults, so an operator-configured client refreshes).
+static ZOHO_CRM_REFRESH: RefreshConfig = RefreshConfig {
+    token_url: "https://accounts.zoho.com/oauth/v2/token",
+    client_id_env: "ZOHO_CRM_CLIENT_ID",
+    client_secret_env: "ZOHO_CRM_CLIENT_SECRET",
+    body_format: TokenBodyFormat::Form,
+    client_auth: ClientCredentialMethod::Body,
+};
+
+/// Maps a Datadog site code to its regional hostname, preserving the full
+/// subdomain prefix — including compound ones like `http-intake.logs`.
+fn datadog_host_for_site(site: &str, original_host: &str) -> Option<String> {
+    let suffixes = [".datadoghq.com", ".datadoghq.eu", ".ddog-gov.com"];
+    let subdomain = suffixes
+        .iter()
+        .find_map(|s| original_host.strip_suffix(s))
+        .unwrap_or(original_host.split('.').next().unwrap_or("api"));
+
+    let prefix = if !site.is_empty() {
+        subdomain
+            .strip_suffix(&format!(".{site}"))
+            .unwrap_or(subdomain)
+    } else {
+        subdomain
+    };
+
+    Some(match site {
+        "us1" | "" => format!("{prefix}.datadoghq.com"),
+        "eu" | "eu1" => format!("{prefix}.datadoghq.eu"),
+        "gov" | "us1-fed" => format!("{prefix}.ddog-gov.com"),
+        other => format!("{prefix}.{other}.datadoghq.com"),
+    })
+}
 
 // ── Provider registry ──────────────────────────────────────────────────
 
@@ -1107,16 +1206,547 @@ static APP_PROVIDERS: &[AppProvider] = &[
         finalizer: None,
         body_transform: None,
     },
+    AppProvider {
+        provider: "aws-role",
+        display_name: "AWS Role",
+        host_rules: &[
+            HostRule {
+                pattern: HostPattern::Suffix(".amazonaws.com"),
+                path_prefix: None,
+                strategy: AuthStrategy::None,
+                intercept: false,
+                credential_host_field: None,
+            },
+            HostRule {
+                pattern: HostPattern::Suffix(".api.aws"),
+                path_prefix: None,
+                strategy: AuthStrategy::None,
+                intercept: false,
+                credential_host_field: None,
+            },
+        ],
+        refresh: None,
+        metadata_headers: &[],
+        credential_headers: &[
+            CredentialHeader {
+                credential_field: "roleArn",
+                header_name: "x-onecli-aws-role-arn",
+            },
+            CredentialHeader {
+                credential_field: "externalId",
+                header_name: "x-onecli-aws-external-id",
+            },
+            CredentialHeader {
+                credential_field: "region",
+                header_name: "x-onecli-aws-assume-region",
+            },
+        ],
+        credential_params: &[],
+        host_rewrite: None,
+        finalizer: Some(RequestFinalizer::AwsAssumeRole),
+        body_transform: None,
+    },
+    AppProvider {
+        provider: "datadog",
+        display_name: "Datadog",
+        host_rules: &[
+            HostRule {
+                pattern: HostPattern::Suffix(".datadoghq.com"),
+                path_prefix: None,
+                strategy: AuthStrategy::None,
+                intercept: false,
+                credential_host_field: None,
+            },
+            HostRule {
+                pattern: HostPattern::Suffix(".datadoghq.eu"),
+                path_prefix: None,
+                strategy: AuthStrategy::None,
+                intercept: false,
+                credential_host_field: None,
+            },
+            HostRule {
+                pattern: HostPattern::Suffix(".ddog-gov.com"),
+                path_prefix: None,
+                strategy: AuthStrategy::None,
+                intercept: false,
+                credential_host_field: None,
+            },
+        ],
+        refresh: None,
+        metadata_headers: &[],
+        credential_headers: &[
+            CredentialHeader {
+                credential_field: "apiKey",
+                header_name: "DD-API-KEY",
+            },
+            CredentialHeader {
+                credential_field: "appKey",
+                header_name: "DD-APPLICATION-KEY",
+            },
+        ],
+        credential_params: &[],
+        host_rewrite: Some(&HostRewrite {
+            credential_field: "site",
+            template: datadog_host_for_site,
+        }),
+        finalizer: None,
+        body_transform: None,
+    },
+    AppProvider {
+        provider: "outlook-mail",
+        display_name: "Outlook Mail",
+        host_rules: &[
+            HostRule {
+                pattern: HostPattern::Exact("graph.microsoft.com"),
+                path_prefix: Some("/v1.0/me/messages"),
+                strategy: AuthStrategy::Bearer,
+                intercept: false,
+                credential_host_field: None,
+            },
+            HostRule {
+                pattern: HostPattern::Exact("graph.microsoft.com"),
+                path_prefix: Some("/v1.0/me/mailFolders"),
+                strategy: AuthStrategy::Bearer,
+                intercept: false,
+                credential_host_field: None,
+            },
+            HostRule {
+                pattern: HostPattern::Exact("graph.microsoft.com"),
+                path_prefix: Some("/v1.0/me/sendMail"),
+                strategy: AuthStrategy::Bearer,
+                intercept: false,
+                credential_host_field: None,
+            },
+            HostRule {
+                pattern: HostPattern::Exact("graph.microsoft.com"),
+                path_prefix: Some("/v1.0/me/mailboxSettings"),
+                strategy: AuthStrategy::Bearer,
+                intercept: false,
+                credential_host_field: None,
+            },
+            HostRule {
+                pattern: HostPattern::Exact("graph.microsoft.com"),
+                path_prefix: Some("/v1.0/me/inferenceClassification"),
+                strategy: AuthStrategy::Bearer,
+                intercept: false,
+                credential_host_field: None,
+            },
+            HostRule {
+                pattern: HostPattern::Exact("graph.microsoft.com"),
+                path_prefix: Some("/v1.0/me/outlook"),
+                strategy: AuthStrategy::Bearer,
+                intercept: false,
+                credential_host_field: None,
+            },
+            HostRule {
+                pattern: HostPattern::Exact("graph.microsoft.com"),
+                path_prefix: Some("/v1.0/me/getMailTips"),
+                strategy: AuthStrategy::Bearer,
+                intercept: false,
+                credential_host_field: None,
+            },
+            HostRule {
+                pattern: HostPattern::Exact("graph.microsoft.com"),
+                path_prefix: Some("/v1.0/me/translateExchangeIds"),
+                strategy: AuthStrategy::Bearer,
+                intercept: false,
+                credential_host_field: None,
+            },
+            HostRule {
+                pattern: HostPattern::Exact("graph.microsoft.com"),
+                path_prefix: Some("/v1.0/me/contacts"),
+                strategy: AuthStrategy::Bearer,
+                intercept: false,
+                credential_host_field: None,
+            },
+            HostRule {
+                pattern: HostPattern::Exact("graph.microsoft.com"),
+                path_prefix: Some("/v1.0/me/contactFolders"),
+                strategy: AuthStrategy::Bearer,
+                intercept: false,
+                credential_host_field: None,
+            },
+        ],
+        refresh: Some(&MICROSOFT_REFRESH),
+        metadata_headers: &[],
+        credential_headers: &[],
+        credential_params: &[],
+        host_rewrite: None,
+        finalizer: None,
+        body_transform: None,
+    },
+    AppProvider {
+        provider: "outlook-calendar",
+        display_name: "Outlook Calendar",
+        host_rules: &[
+            HostRule {
+                pattern: HostPattern::Exact("graph.microsoft.com"),
+                path_prefix: Some("/v1.0/me/calendar"),
+                strategy: AuthStrategy::Bearer,
+                intercept: false,
+                credential_host_field: None,
+            },
+            HostRule {
+                pattern: HostPattern::Exact("graph.microsoft.com"),
+                path_prefix: Some("/v1.0/me/events"),
+                strategy: AuthStrategy::Bearer,
+                intercept: false,
+                credential_host_field: None,
+            },
+            HostRule {
+                pattern: HostPattern::Exact("graph.microsoft.com"),
+                path_prefix: Some("/v1.0/me/findMeetingTimes"),
+                strategy: AuthStrategy::Bearer,
+                intercept: false,
+                credential_host_field: None,
+            },
+            HostRule {
+                pattern: HostPattern::Exact("graph.microsoft.com"),
+                path_prefix: Some("/v1.0/me/reminderView"),
+                strategy: AuthStrategy::Bearer,
+                intercept: false,
+                credential_host_field: None,
+            },
+        ],
+        refresh: Some(&MICROSOFT_REFRESH),
+        metadata_headers: &[],
+        credential_headers: &[],
+        credential_params: &[],
+        host_rewrite: None,
+        finalizer: None,
+        body_transform: None,
+    },
+    AppProvider {
+        provider: "microsoft-word",
+        display_name: "Microsoft Word",
+        host_rules: &[
+            HostRule {
+                pattern: HostPattern::Exact("graph.microsoft.com"),
+                path_prefix: Some("/v1.0/me/drive"),
+                strategy: AuthStrategy::Bearer,
+                intercept: false,
+                credential_host_field: None,
+            },
+            HostRule {
+                pattern: HostPattern::Exact("graph.microsoft.com"),
+                path_prefix: Some("/v1.0/drives"),
+                strategy: AuthStrategy::Bearer,
+                intercept: false,
+                credential_host_field: None,
+            },
+            HostRule {
+                pattern: HostPattern::Exact("graph.microsoft.com"),
+                path_prefix: Some("/v1.0/sites"),
+                strategy: AuthStrategy::Bearer,
+                intercept: false,
+                credential_host_field: None,
+            },
+            HostRule {
+                pattern: HostPattern::Exact("graph.microsoft.com"),
+                path_prefix: Some("/v1.0/shares"),
+                strategy: AuthStrategy::Bearer,
+                intercept: false,
+                credential_host_field: None,
+            },
+            HostRule {
+                pattern: HostPattern::Exact("graph.microsoft.com"),
+                path_prefix: Some("/v1.0/me/followedSites"),
+                strategy: AuthStrategy::Bearer,
+                intercept: false,
+                credential_host_field: None,
+            },
+        ],
+        refresh: Some(&MICROSOFT_REFRESH),
+        metadata_headers: &[],
+        credential_headers: &[],
+        credential_params: &[],
+        host_rewrite: None,
+        finalizer: None,
+        body_transform: None,
+    },
+    AppProvider {
+        provider: "microsoft-onenote",
+        display_name: "Microsoft OneNote",
+        host_rules: &[
+            HostRule {
+                pattern: HostPattern::Exact("graph.microsoft.com"),
+                path_prefix: Some("/v1.0/me/onenote/"),
+                strategy: AuthStrategy::Bearer,
+                intercept: false,
+                credential_host_field: None,
+            },
+            HostRule {
+                pattern: HostPattern::Exact("graph.microsoft.com"),
+                path_prefix: Some("/beta/me/onenote/"),
+                strategy: AuthStrategy::Bearer,
+                intercept: false,
+                credential_host_field: None,
+            },
+        ],
+        refresh: Some(&MICROSOFT_REFRESH),
+        metadata_headers: &[],
+        credential_headers: &[],
+        credential_params: &[],
+        host_rewrite: None,
+        finalizer: None,
+        body_transform: None,
+    },
+    AppProvider {
+        provider: "zoom",
+        display_name: "Zoom",
+        host_rules: &[HostRule {
+            pattern: HostPattern::Exact("api.zoom.us"),
+            path_prefix: None,
+            strategy: AuthStrategy::Bearer,
+            intercept: false,
+            credential_host_field: None,
+        }],
+        refresh: Some(&ZOOM_REFRESH),
+        metadata_headers: &[],
+        credential_headers: &[],
+        credential_params: &[],
+        host_rewrite: None,
+        finalizer: None,
+        body_transform: None,
+    },
+    AppProvider {
+        provider: "affinity",
+        display_name: "Affinity",
+        host_rules: &[
+            HostRule {
+                pattern: HostPattern::Exact("api.affinity.co"),
+                path_prefix: None,
+                strategy: AuthStrategy::Bearer,
+                intercept: false,
+                credential_host_field: None,
+            },
+            HostRule {
+                pattern: HostPattern::Exact("mcp.affinity.co"),
+                path_prefix: None,
+                strategy: AuthStrategy::Bearer,
+                intercept: false,
+                credential_host_field: None,
+            },
+        ],
+        refresh: None,
+        metadata_headers: &[],
+        credential_headers: &[],
+        credential_params: &[],
+        host_rewrite: None,
+        finalizer: None,
+        body_transform: None,
+    },
+    AppProvider {
+        provider: "sentry",
+        display_name: "Sentry",
+        host_rules: &[
+            HostRule {
+                pattern: HostPattern::Exact("sentry.io"),
+                path_prefix: None,
+                strategy: AuthStrategy::Bearer,
+                intercept: false,
+                credential_host_field: None,
+            },
+            HostRule {
+                pattern: HostPattern::Suffix(".sentry.io"),
+                path_prefix: None,
+                strategy: AuthStrategy::Bearer,
+                intercept: false,
+                credential_host_field: None,
+            },
+        ],
+        refresh: Some(&SENTRY_REFRESH),
+        metadata_headers: &[],
+        credential_headers: &[],
+        credential_params: &[],
+        host_rewrite: None,
+        finalizer: None,
+        body_transform: None,
+    },
+    AppProvider {
+        provider: "granola",
+        display_name: "Granola",
+        host_rules: &[HostRule {
+            pattern: HostPattern::Exact("public-api.granola.ai"),
+            path_prefix: None,
+            strategy: AuthStrategy::Bearer,
+            intercept: false,
+            credential_host_field: None,
+        }],
+        refresh: None,
+        metadata_headers: &[],
+        credential_headers: &[],
+        credential_params: &[],
+        host_rewrite: None,
+        finalizer: None,
+        body_transform: None,
+    },
+    AppProvider {
+        provider: "hubspot",
+        display_name: "HubSpot",
+        host_rules: &[
+            HostRule {
+                pattern: HostPattern::Exact("api.hubapi.com"),
+                path_prefix: None,
+                strategy: AuthStrategy::Bearer,
+                intercept: false,
+                credential_host_field: None,
+            },
+            HostRule {
+                pattern: HostPattern::Exact("api.hubspot.com"),
+                path_prefix: None,
+                strategy: AuthStrategy::Bearer,
+                intercept: false,
+                credential_host_field: None,
+            },
+        ],
+        refresh: Some(&HUBSPOT_REFRESH),
+        metadata_headers: &[],
+        credential_headers: &[],
+        credential_params: &[],
+        host_rewrite: None,
+        finalizer: None,
+        body_transform: None,
+    },
+    AppProvider {
+        provider: "linear",
+        display_name: "Linear",
+        host_rules: &[HostRule {
+            pattern: HostPattern::Exact("api.linear.app"),
+            path_prefix: None,
+            strategy: AuthStrategy::Bearer,
+            intercept: false,
+            credential_host_field: None,
+        }],
+        refresh: Some(&LINEAR_REFRESH),
+        metadata_headers: &[],
+        credential_headers: &[],
+        credential_params: &[],
+        host_rewrite: None,
+        finalizer: None,
+        body_transform: None,
+    },
+    AppProvider {
+        provider: "fathom",
+        display_name: "Fathom",
+        host_rules: &[HostRule {
+            pattern: HostPattern::Exact("api.fathom.ai"),
+            path_prefix: None,
+            strategy: AuthStrategy::Bearer,
+            intercept: false,
+            credential_host_field: None,
+        }],
+        refresh: Some(&FATHOM_REFRESH),
+        metadata_headers: &[],
+        credential_headers: &[],
+        credential_params: &[],
+        host_rewrite: None,
+        finalizer: None,
+        body_transform: None,
+    },
+    AppProvider {
+        provider: "attio",
+        display_name: "Attio",
+        host_rules: &[HostRule {
+            pattern: HostPattern::Exact("api.attio.com"),
+            path_prefix: None,
+            strategy: AuthStrategy::Bearer,
+            intercept: false,
+            credential_host_field: None,
+        }],
+        // Attio access tokens are non-expiring and there is no refresh grant.
+        refresh: None,
+        metadata_headers: &[],
+        credential_headers: &[],
+        credential_params: &[],
+        host_rewrite: None,
+        finalizer: None,
+        body_transform: None,
+    },
+    AppProvider {
+        provider: "x",
+        display_name: "X",
+        host_rules: &[HostRule {
+            pattern: HostPattern::Exact("api.x.com"),
+            path_prefix: None,
+            strategy: AuthStrategy::Bearer,
+            intercept: false,
+            credential_host_field: None,
+        }],
+        refresh: Some(&X_REFRESH),
+        metadata_headers: &[],
+        credential_headers: &[],
+        credential_params: &[],
+        host_rewrite: None,
+        finalizer: None,
+        body_transform: None,
+    },
+    AppProvider {
+        provider: "slack",
+        display_name: "Slack",
+        host_rules: &[HostRule {
+            pattern: HostPattern::Exact("slack.com"),
+            path_prefix: None,
+            strategy: AuthStrategy::Bearer,
+            intercept: false,
+            credential_host_field: None,
+        }],
+        refresh: None,
+        metadata_headers: &[],
+        credential_headers: &[],
+        credential_params: &[],
+        host_rewrite: None,
+        finalizer: None,
+        body_transform: None,
+    },
+    AppProvider {
+        provider: "fireflies",
+        display_name: "Fireflies",
+        // One host rule with `path_prefix: None` injects the bearer key on every
+        // path of api.fireflies.ai — covering both the GraphQL API (/graphql) and
+        // the hosted MCP server (/mcp), which share the same API key.
+        host_rules: &[HostRule {
+            pattern: HostPattern::Exact("api.fireflies.ai"),
+            path_prefix: None,
+            strategy: AuthStrategy::Bearer,
+            intercept: false,
+            credential_host_field: None,
+        }],
+        refresh: None,
+        metadata_headers: &[],
+        credential_headers: &[],
+        credential_params: &[],
+        host_rewrite: None,
+        finalizer: None,
+        body_transform: None,
+    },
+    AppProvider {
+        provider: "zoho-crm",
+        display_name: "Zoho CRM",
+        // US data center only, by construction: the definition hardcodes
+        // accounts.zoho.com and defaults api_domain to www.zohoapis.com.
+        host_rules: &[HostRule {
+            pattern: HostPattern::Exact("www.zohoapis.com"),
+            path_prefix: None,
+            strategy: AuthStrategy::ZohoOauthtoken,
+            intercept: false,
+            credential_host_field: None,
+        }],
+        refresh: Some(&ZOHO_CRM_REFRESH),
+        metadata_headers: &[],
+        credential_headers: &[],
+        credential_params: &[],
+        host_rewrite: None,
+        finalizer: None,
+        body_transform: None,
+    },
 ];
 
 // ── Public API ─────────────────────────────────────────────────────────
 
-/// Iterate over all registered providers, including the EE-provided cloud-app providers
-/// added by the `ee_apps` module.
+/// Iterate over all registered providers.
 fn all_providers() -> impl Iterator<Item = &'static AppProvider> {
-    APP_PROVIDERS
-        .iter()
-        .chain(crate::ee_apps::providers().iter())
+    APP_PROVIDERS.iter()
 }
 
 /// Return the request finalizer for the first matching provider, if any.
@@ -1219,41 +1849,6 @@ pub(crate) fn providers_for_host(hostname: &str) -> Vec<&'static str> {
     providers
 }
 
-/// The app-availability pre-check (step 7). Returns `Some(provider)` when the
-/// request targets a known app provider that is NOT available to the connection's
-/// project — the caller refuses it. Returns `None` (allowed) when availability is
-/// unrestricted (the common case / OSS / enforcement off), when the request does
-/// not target an identifiable app provider (a raw/unknown host, or an ambiguous
-/// shared host — so the LLM host and un-managed traffic are structurally never
-/// blocked), or when the targeted provider IS available. Pure + DB-free — the
-/// available set was resolved once at connection resolution.
-#[must_use]
-pub(crate) fn app_availability_block(
-    host: &str,
-    path: &str,
-    available: &crate::db::AvailableApps,
-) -> Option<String> {
-    if !available.restricted {
-        return None;
-    }
-    // Normalize the host (strip port + lowercase) before provider identification.
-    // Registry matching is exact + port-less, so a port-bearing CONNECT authority
-    // (`gmail.googleapis.com:443`) or a mixed-case Host (`Gmail.Googleapis.Com`)
-    // would otherwise identify no provider and silently slip past the gate. This
-    // is a security gate, so it normalizes here even though provider matching
-    // elsewhere (credential injection) is case-sensitive — there a miss just
-    // fails safe (no creds → 401). Only restricted orgs reach this (the common
-    // `restricted: false` path returned above), so the allocation is off the
-    // prod/OSS hot path. (The port strip is a hard-won regression lesson.)
-    let host = crate::gateway::strip_port(host).to_ascii_lowercase();
-    match provider_for_host_and_path(&host, path) {
-        Some((provider, _)) if !available.providers.iter().any(|p| p == provider) => {
-            Some(provider.to_string())
-        }
-        _ => None,
-    }
-}
-
 /// Return the path pattern for the first matching host rule of a provider.
 /// For providers with multiple rules on the same host, use `build_app_injection_rules` instead.
 #[cfg(test)]
@@ -1295,6 +1890,10 @@ pub(crate) fn build_app_injections(provider: &str, hostname: &str, token: &str) 
                 value: format!("Basic {encoded}"),
             }]
         }
+        AuthStrategy::ZohoOauthtoken => vec![Injection::SetHeader {
+            name: "authorization".to_string(),
+            value: format!("Zoho-oauthtoken {token}"),
+        }],
         AuthStrategy::None => vec![],
     }
 }
@@ -1332,6 +1931,10 @@ pub(crate) fn build_app_injection_rules(
                         value: format!("Basic {encoded}"),
                     }]
                 }
+                AuthStrategy::ZohoOauthtoken => vec![Injection::SetHeader {
+                    name: "authorization".to_string(),
+                    value: format!("Zoho-oauthtoken {token}"),
+                }],
                 AuthStrategy::None => vec![],
             };
             (pattern, injections)
@@ -1490,7 +2093,7 @@ pub(crate) fn credential_host_field(provider: &str, hostname: &str) -> Option<&'
 /// Normalize a host for equality comparison: strip any `scheme://` prefix, cut
 /// at the first path separator, drop a trailing `:port`, and lowercase.
 /// Both the request host and the stored credential host are normalized before
-/// comparison so `"https://Nanos.JFrog.io/"` and `"nanos.jfrog.io"` match.
+/// comparison so `"https://MyCompany.JFrog.io/"` and `"mycompany.jfrog.io"` match.
 #[must_use]
 pub(crate) fn normalize_host(s: &str) -> String {
     let mut h = s.trim();
@@ -2793,146 +3396,6 @@ mod tests {
         );
     }
 
-    // ── app_availability_block (step 7) ────────────────────────────────
-
-    /// Build an `AvailableApps` allowlist for tests.
-    fn available(restricted: bool, providers: &[&str]) -> crate::db::AvailableApps {
-        crate::db::AvailableApps {
-            restricted,
-            providers: providers.iter().map(|s| (*s).to_string()).collect(),
-        }
-    }
-
-    #[test]
-    fn app_availability_block_open_allows_everything() {
-        // "open" org (the default / OSS / enforcement off): never blocks, even a
-        // provider absent from the (empty) list.
-        let open = available(false, &[]);
-        assert_eq!(
-            app_availability_block("gmail.googleapis.com", "/gmail/v1/users/me", &open),
-            None
-        );
-        assert_eq!(
-            app_availability_block("api.github.com", "/user", &open),
-            None
-        );
-    }
-
-    #[test]
-    fn app_availability_block_restricted_allows_granted_provider() {
-        let restricted = available(true, &["gmail", "github"]);
-        assert_eq!(
-            app_availability_block("gmail.googleapis.com", "/gmail/v1/users/me", &restricted),
-            None
-        );
-        assert_eq!(
-            app_availability_block("api.github.com", "/user", &restricted),
-            None
-        );
-    }
-
-    #[test]
-    fn app_availability_block_restricted_blocks_ungranted_provider() {
-        let restricted = available(true, &["slack"]);
-        assert_eq!(
-            app_availability_block("gmail.googleapis.com", "/gmail/v1/users/me", &restricted),
-            Some("gmail".to_string())
-        );
-        assert_eq!(
-            app_availability_block("api.github.com", "/user", &restricted),
-            Some("github".to_string())
-        );
-    }
-
-    #[test]
-    fn app_availability_block_never_blocks_raw_or_llm_hosts() {
-        // Restricted with an empty allowlist: even so, un-managed raw hosts and the
-        // LLM host resolve to no provider, so they are structurally never blocked
-        // (the enforce-deny / lifeline carve, for free).
-        let restricted = available(true, &[]);
-        assert_eq!(
-            app_availability_block("api.openai.com", "/v1/chat/completions", &restricted),
-            None
-        );
-        assert_eq!(
-            app_availability_block("api.anthropic.com", "/v1/messages", &restricted),
-            None
-        );
-        assert_eq!(
-            app_availability_block("example.com", "/anything", &restricted),
-            None
-        );
-    }
-
-    #[test]
-    fn app_availability_block_shared_host_disambiguates_by_path() {
-        // A shared host (www.googleapis.com) is governed per-provider by path.
-        let restricted = available(true, &["gmail"]);
-        // Granted provider on its path → allowed.
-        assert_eq!(
-            app_availability_block("www.googleapis.com", "/gmail/v1/users/me", &restricted),
-            None
-        );
-        // Ungranted provider on its path → blocked.
-        assert_eq!(
-            app_availability_block("www.googleapis.com", "/calendar/v3/calendars", &restricted),
-            Some("google-calendar".to_string())
-        );
-    }
-
-    #[test]
-    fn app_availability_block_shared_host_unknown_path_fails_open() {
-        // An ambiguous shared-host path resolves to no provider → not blocked
-        // (deliberate fail-open on ambiguity; policy + enforce-deny still govern).
-        let restricted = available(true, &[]);
-        assert_eq!(
-            app_availability_block(
-                "www.googleapis.com",
-                "/some-unknown-api/v1/resource",
-                &restricted
-            ),
-            None
-        );
-    }
-
-    #[test]
-    fn app_availability_block_strips_port_before_matching() {
-        // The real call site passes a host that carries the CONNECT-authority
-        // port (`:443`); the registry hosts are port-less, so the block must
-        // strip the port first or it would identify NO provider and silently
-        // never block. Regression guard for that class of port-handling bugs.
-        let restricted = available(true, &["slack"]);
-        assert_eq!(
-            app_availability_block(
-                "gmail.googleapis.com:443",
-                "/gmail/v1/users/me",
-                &restricted
-            ),
-            Some("gmail".to_string())
-        );
-        // ...and a granted provider on a port-bearing host is still allowed.
-        let granted = available(true, &["gmail"]);
-        assert_eq!(
-            app_availability_block("gmail.googleapis.com:443", "/gmail/v1/users/me", &granted),
-            None
-        );
-    }
-
-    #[test]
-    fn app_availability_block_is_case_insensitive_on_host() {
-        // A mixed-case Host must not slip past the gate — it normalizes to lower
-        // before matching, else `Gmail.Googleapis.Com` identifies no provider.
-        let restricted = available(true, &["slack"]);
-        assert_eq!(
-            app_availability_block(
-                "Gmail.Googleapis.Com:443",
-                "/gmail/v1/users/me",
-                &restricted
-            ),
-            Some("gmail".to_string())
-        );
-    }
-
     // ── host_has_path_scoped_providers ─────────────────────────────────
 
     #[test]
@@ -3182,14 +3645,14 @@ mod tests {
     #[test]
     fn providers_for_jfrog_host() {
         assert_eq!(
-            providers_for_host("nanos.jfrog.io"),
+            providers_for_host("mycompany.jfrog.io"),
             vec!["jfrog-artifactory"]
         );
     }
 
     #[test]
     fn provider_for_host_jfrog() {
-        let result = provider_for_host("nanos.jfrog.io");
+        let result = provider_for_host("mycompany.jfrog.io");
         assert_eq!(result, Some(("jfrog-artifactory", "JFrog Artifactory")));
     }
 
@@ -3213,7 +3676,7 @@ mod tests {
 
     #[test]
     fn jfrog_uses_bearer() {
-        let injections = build_app_injections("jfrog-artifactory", "nanos.jfrog.io", "t");
+        let injections = build_app_injections("jfrog-artifactory", "mycompany.jfrog.io", "t");
         assert_eq!(injections.len(), 1);
         assert_eq!(
             injections[0],
@@ -3239,7 +3702,7 @@ mod tests {
     #[test]
     fn jfrog_has_credential_host_field() {
         assert_eq!(
-            credential_host_field("jfrog-artifactory", "nanos.jfrog.io"),
+            credential_host_field("jfrog-artifactory", "mycompany.jfrog.io"),
             Some("subdomain")
         );
     }
@@ -3255,25 +3718,949 @@ mod tests {
 
     #[test]
     fn normalize_host_passthrough() {
-        assert_eq!(normalize_host("nanos.jfrog.io"), "nanos.jfrog.io");
+        assert_eq!(normalize_host("mycompany.jfrog.io"), "mycompany.jfrog.io");
     }
 
     #[test]
     fn normalize_host_strips_scheme_path_port_and_lowercases() {
         assert_eq!(
-            normalize_host("https://Nanos.JFrog.io/artifactory/api"),
-            "nanos.jfrog.io"
+            normalize_host("https://MyCompany.JFrog.io/artifactory/api"),
+            "mycompany.jfrog.io"
         );
-        assert_eq!(normalize_host("nanos.jfrog.io:443"), "nanos.jfrog.io");
         assert_eq!(
-            normalize_host("  HTTP://NANOS.JFROG.IO  "),
-            "nanos.jfrog.io"
+            normalize_host("mycompany.jfrog.io:443"),
+            "mycompany.jfrog.io"
         );
-        assert_eq!(normalize_host("nanos.jfrog.io/"), "nanos.jfrog.io");
+        assert_eq!(
+            normalize_host("  HTTP://MYCOMPANY.JFROG.IO  "),
+            "mycompany.jfrog.io"
+        );
+        assert_eq!(normalize_host("mycompany.jfrog.io/"), "mycompany.jfrog.io");
     }
 
     #[test]
     fn normalize_host_empty() {
         assert_eq!(normalize_host(""), "");
+    }
+
+    // ── Slack ─────────────────────────────────────────────────────
+
+    #[test]
+    fn providers_for_slack_host() {
+        assert_eq!(providers_for_host("slack.com"), vec!["slack"]);
+    }
+
+    #[test]
+    fn provider_for_host_slack() {
+        let result = provider_for_host("slack.com");
+        assert_eq!(result, Some(("slack", "Slack")));
+    }
+
+    #[test]
+    fn slack_api_uses_bearer() {
+        let injections = build_app_injections("slack", "slack.com", "xoxb-test123");
+        assert_eq!(injections.len(), 1);
+        assert_eq!(
+            injections[0],
+            Injection::SetHeader {
+                name: "authorization".to_string(),
+                value: "Bearer xoxb-test123".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn slack_has_no_refresh_config() {
+        assert!(refresh_config("slack").is_none());
+    }
+
+    #[test]
+    fn slack_does_not_match_other_slack_hosts() {
+        assert!(providers_for_host("api.slack.com").is_empty());
+        assert!(providers_for_host("www.slack.com").is_empty());
+    }
+
+    // ── Zoom ──────────────────────────────────────────────────────
+
+    #[test]
+    fn providers_for_zoom_host() {
+        assert_eq!(providers_for_host("api.zoom.us"), vec!["zoom"]);
+    }
+
+    #[test]
+    fn provider_for_host_zoom() {
+        let result = provider_for_host("api.zoom.us");
+        assert_eq!(result, Some(("zoom", "Zoom")));
+    }
+
+    #[test]
+    fn zoom_api_uses_bearer() {
+        let injections = build_app_injections("zoom", "api.zoom.us", "eyJ0eXAi.zoom_test");
+        assert_eq!(injections.len(), 1);
+        assert_eq!(
+            injections[0],
+            Injection::SetHeader {
+                name: "authorization".to_string(),
+                value: "Bearer eyJ0eXAi.zoom_test".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn zoom_refresh_uses_form_and_basic_auth() {
+        let config = refresh_config("zoom").expect("zoom should have refresh config");
+        assert!(matches!(config.body_format, TokenBodyFormat::Form));
+        assert!(matches!(
+            config.client_auth,
+            ClientCredentialMethod::BasicAuth
+        ));
+    }
+
+    #[test]
+    fn zoom_needs_access_token() {
+        assert!(needs_access_token("zoom"));
+    }
+
+    #[test]
+    fn zoom_no_false_positives() {
+        assert!(providers_for_host("zoom.us").is_empty());
+        assert!(providers_for_host("www.zoom.us").is_empty());
+    }
+
+    // ── LinkedIn ──────────────────────────────────────────────────
+
+    #[test]
+    fn providers_for_linkedin_host() {
+        assert_eq!(providers_for_host("api.linkedin.com"), vec!["linkedin"]);
+    }
+
+    #[test]
+    fn provider_for_host_linkedin() {
+        let result = provider_for_host("api.linkedin.com");
+        assert_eq!(result, Some(("linkedin", "LinkedIn")));
+    }
+
+    #[test]
+    fn linkedin_api_uses_bearer() {
+        let injections = build_app_injections("linkedin", "api.linkedin.com", "AQXNnd2kXITHE.test");
+        assert_eq!(injections.len(), 1);
+        assert_eq!(
+            injections[0],
+            Injection::SetHeader {
+                name: "authorization".to_string(),
+                value: "Bearer AQXNnd2kXITHE.test".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn linkedin_has_refresh_config() {
+        let cfg = refresh_config("linkedin").expect("linkedin should have refresh config");
+        assert_eq!(
+            cfg.token_url,
+            "https://www.linkedin.com/oauth/v2/accessToken"
+        );
+    }
+
+    #[test]
+    fn linkedin_needs_access_token() {
+        assert!(needs_access_token("linkedin"));
+    }
+
+    #[test]
+    fn linkedin_no_false_positives() {
+        assert!(providers_for_host("linkedin.com").is_empty());
+        assert!(providers_for_host("www.linkedin.com").is_empty());
+    }
+
+    // ── Supabase ──────────────────────────────────────────────────
+
+    #[test]
+    fn providers_for_supabase_host() {
+        assert_eq!(providers_for_host("api.supabase.com"), vec!["supabase"]);
+    }
+
+    #[test]
+    fn provider_for_host_supabase() {
+        let result = provider_for_host("api.supabase.com");
+        assert_eq!(result, Some(("supabase", "Supabase")));
+    }
+
+    #[test]
+    fn supabase_api_uses_bearer() {
+        let injections = build_app_injections("supabase", "api.supabase.com", "sbp_test123");
+        assert_eq!(injections.len(), 1);
+        assert_eq!(
+            injections[0],
+            Injection::SetHeader {
+                name: "authorization".to_string(),
+                value: "Bearer sbp_test123".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn supabase_refresh_uses_form_and_basic_auth() {
+        let config = refresh_config("supabase").expect("supabase should have refresh config");
+        assert!(matches!(config.body_format, TokenBodyFormat::Form));
+        assert!(matches!(
+            config.client_auth,
+            ClientCredentialMethod::BasicAuth
+        ));
+    }
+
+    #[test]
+    fn supabase_no_false_positives() {
+        assert!(providers_for_host("supabase.com").is_empty());
+        assert!(providers_for_host("www.supabase.com").is_empty());
+    }
+
+    // ── Affinity ──────────────────────────────────────────────────
+
+    #[test]
+    fn providers_for_affinity_api_host() {
+        assert_eq!(providers_for_host("api.affinity.co"), vec!["affinity"]);
+    }
+
+    #[test]
+    fn providers_for_affinity_mcp_host() {
+        assert_eq!(providers_for_host("mcp.affinity.co"), vec!["affinity"]);
+    }
+
+    #[test]
+    fn provider_for_host_affinity_api() {
+        let result = provider_for_host("api.affinity.co");
+        assert_eq!(result, Some(("affinity", "Affinity")));
+    }
+
+    #[test]
+    fn provider_for_host_affinity_mcp() {
+        let result = provider_for_host("mcp.affinity.co");
+        assert_eq!(result, Some(("affinity", "Affinity")));
+    }
+
+    #[test]
+    fn affinity_api_uses_bearer() {
+        let injections = build_app_injections("affinity", "api.affinity.co", "test_api_key");
+        assert_eq!(injections.len(), 1);
+        assert_eq!(
+            injections[0],
+            Injection::SetHeader {
+                name: "authorization".to_string(),
+                value: "Bearer test_api_key".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn affinity_mcp_uses_bearer() {
+        let injections = build_app_injections("affinity", "mcp.affinity.co", "test_api_key");
+        assert_eq!(injections.len(), 1);
+        assert_eq!(
+            injections[0],
+            Injection::SetHeader {
+                name: "authorization".to_string(),
+                value: "Bearer test_api_key".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn affinity_has_no_refresh_config() {
+        assert!(refresh_config("affinity").is_none());
+    }
+
+    #[test]
+    fn affinity_needs_access_token() {
+        assert!(needs_access_token("affinity"));
+    }
+
+    #[test]
+    fn affinity_no_false_positives() {
+        assert!(providers_for_host("affinity.co").is_empty());
+        assert!(providers_for_host("www.affinity.co").is_empty());
+    }
+
+    // ── Datadog ──────────────────────────────────────────────────
+
+    #[test]
+    fn providers_for_datadog_hosts() {
+        assert_eq!(providers_for_host("api.datadoghq.com"), vec!["datadog"]);
+        assert_eq!(providers_for_host("api.us3.datadoghq.com"), vec!["datadog"]);
+        assert_eq!(providers_for_host("api.us5.datadoghq.com"), vec!["datadog"]);
+        assert_eq!(providers_for_host("api.ap1.datadoghq.com"), vec!["datadog"]);
+        assert_eq!(providers_for_host("api.ap2.datadoghq.com"), vec!["datadog"]);
+        assert_eq!(providers_for_host("api.datadoghq.eu"), vec!["datadog"]);
+        assert_eq!(providers_for_host("api.ddog-gov.com"), vec!["datadog"]);
+        assert_eq!(providers_for_host("api.us2.ddog-gov.com"), vec!["datadog"]);
+    }
+
+    #[test]
+    fn providers_for_datadog_mcp_hosts() {
+        assert_eq!(providers_for_host("mcp.datadoghq.com"), vec!["datadog"]);
+        assert_eq!(providers_for_host("mcp.datadoghq.eu"), vec!["datadog"]);
+        assert_eq!(providers_for_host("mcp.ddog-gov.com"), vec!["datadog"]);
+    }
+
+    #[test]
+    fn datadog_no_false_positives() {
+        assert!(providers_for_host("datadoghq.com").is_empty());
+        assert!(providers_for_host("datadoghq.eu").is_empty());
+        assert!(providers_for_host("ddog-gov.com").is_empty());
+    }
+
+    #[test]
+    fn provider_for_host_datadog() {
+        let result = provider_for_host("api.datadoghq.com");
+        assert_eq!(result, Some(("datadog", "Datadog")));
+    }
+
+    #[test]
+    fn datadog_rewrite_host_api() {
+        let creds = serde_json::json!({"site": "us5", "apiKey": "k", "appKey": "a"});
+        assert_eq!(
+            rewrite_host("datadog", &creds, "api.datadoghq.com"),
+            Some("api.us5.datadoghq.com".to_string()),
+        );
+    }
+
+    #[test]
+    fn datadog_rewrite_host_mcp() {
+        let creds = serde_json::json!({"site": "us5", "apiKey": "k", "appKey": "a"});
+        assert_eq!(
+            rewrite_host("datadog", &creds, "mcp.datadoghq.com"),
+            Some("mcp.us5.datadoghq.com".to_string()),
+        );
+    }
+
+    #[test]
+    fn datadog_rewrite_host_mcp_us1_unchanged() {
+        let creds = serde_json::json!({"site": "us1", "apiKey": "k", "appKey": "a"});
+        assert_eq!(
+            rewrite_host("datadog", &creds, "mcp.datadoghq.com"),
+            Some("mcp.datadoghq.com".to_string()),
+        );
+    }
+
+    #[test]
+    fn datadog_rewrite_host_eu() {
+        let creds = serde_json::json!({"site": "eu", "apiKey": "k", "appKey": "a"});
+        assert_eq!(
+            rewrite_host("datadog", &creds, "api.datadoghq.com"),
+            Some("api.datadoghq.eu".to_string()),
+        );
+        assert_eq!(
+            rewrite_host("datadog", &creds, "mcp.datadoghq.com"),
+            Some("mcp.datadoghq.eu".to_string()),
+        );
+    }
+
+    #[test]
+    fn datadog_rewrite_host_compound_subdomain() {
+        let creds = serde_json::json!({"site": "us5", "apiKey": "k", "appKey": "a"});
+        assert_eq!(
+            rewrite_host("datadog", &creds, "http-intake.logs.us5.datadoghq.com"),
+            Some("http-intake.logs.us5.datadoghq.com".to_string()),
+        );
+    }
+
+    #[test]
+    fn datadog_rewrite_host_compound_subdomain_generic() {
+        let creds = serde_json::json!({"site": "us5", "apiKey": "k", "appKey": "a"});
+        assert_eq!(
+            rewrite_host("datadog", &creds, "http-intake.logs.datadoghq.com"),
+            Some("http-intake.logs.us5.datadoghq.com".to_string()),
+        );
+    }
+
+    #[test]
+    fn datadog_no_auth_header_injected() {
+        let injections = build_app_injections("datadog", "api.datadoghq.com", "unused");
+        assert!(
+            injections.is_empty(),
+            "Datadog should not inject Authorization header"
+        );
+    }
+
+    #[test]
+    fn datadog_credential_headers_defined() {
+        let headers = credential_headers("datadog");
+        assert_eq!(headers.len(), 2);
+        assert_eq!(headers[0].credential_field, "apiKey");
+        assert_eq!(headers[0].header_name, "DD-API-KEY");
+        assert_eq!(headers[1].credential_field, "appKey");
+        assert_eq!(headers[1].header_name, "DD-APPLICATION-KEY");
+    }
+
+    // ── AWS Role ──────────────────────────────────────────────────
+
+    #[test]
+    fn finalizer_for_provider_aws_role() {
+        assert_eq!(
+            finalizer_for_provider("aws-role"),
+            Some(RequestFinalizer::AwsAssumeRole)
+        );
+    }
+
+    #[test]
+    fn aws_role_not_shadowed_by_aws_in_host_lookup() {
+        let host_finalizer = finalizer_for_host("s3.us-east-1.amazonaws.com");
+        let role_finalizer = finalizer_for_provider("aws-role");
+        assert_eq!(
+            host_finalizer,
+            Some(RequestFinalizer::AwsSigV4),
+            "host lookup returns AwsSigV4 (first match)"
+        );
+        assert_eq!(
+            role_finalizer,
+            Some(RequestFinalizer::AwsAssumeRole),
+            "provider lookup returns AwsAssumeRole (connection-aware)"
+        );
+    }
+
+    // ── Microsoft OneNote ─────────────────────────────────────────
+
+    #[test]
+    fn providers_for_microsoft_onenote_host() {
+        let providers = providers_for_host("graph.microsoft.com");
+        assert!(
+            providers.contains(&"microsoft-onenote"),
+            "expected microsoft-onenote provider for graph.microsoft.com"
+        );
+    }
+
+    #[test]
+    fn microsoft_onenote_path_disambiguation() {
+        use crate::apps::provider_for_host_and_path;
+        let result =
+            provider_for_host_and_path("graph.microsoft.com", "/v1.0/me/onenote/notebooks");
+        assert_eq!(result, Some(("microsoft-onenote", "Microsoft OneNote")));
+    }
+
+    #[test]
+    fn microsoft_onenote_beta_path() {
+        use crate::apps::provider_for_host_and_path;
+        let result = provider_for_host_and_path(
+            "graph.microsoft.com",
+            "/beta/me/onenote/pages/abc123/content",
+        );
+        assert_eq!(result, Some(("microsoft-onenote", "Microsoft OneNote")));
+    }
+
+    #[test]
+    fn microsoft_onenote_uses_bearer() {
+        let injections = build_app_injections(
+            "microsoft-onenote",
+            "graph.microsoft.com",
+            "eyJ0eXAi.onenote_test",
+        );
+        assert_eq!(injections.len(), 1);
+        assert_eq!(
+            injections[0],
+            Injection::SetHeader {
+                name: "authorization".to_string(),
+                value: "Bearer eyJ0eXAi.onenote_test".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn microsoft_onenote_has_refresh_config() {
+        let cfg = refresh_config("microsoft-onenote")
+            .expect("microsoft-onenote should have refresh config");
+        assert_eq!(
+            cfg.token_url,
+            "https://login.microsoftonline.com/common/oauth2/v2.0/token"
+        );
+    }
+
+    #[test]
+    fn microsoft_onenote_no_conflict_with_outlook_mail() {
+        use crate::apps::provider_for_host_and_path;
+        let result = provider_for_host_and_path("graph.microsoft.com", "/v1.0/me/messages/abc123");
+        assert_eq!(result, Some(("outlook-mail", "Outlook Mail")));
+    }
+
+    #[test]
+    fn microsoft_onenote_no_conflict_with_outlook_calendar() {
+        use crate::apps::provider_for_host_and_path;
+        let result = provider_for_host_and_path("graph.microsoft.com", "/v1.0/me/events/abc123");
+        assert_eq!(result, Some(("outlook-calendar", "Outlook Calendar")));
+    }
+
+    // ── Dropbox ──────────────────────────────────────────────────
+
+    #[test]
+    fn providers_for_dropbox_api_host() {
+        assert_eq!(providers_for_host("api.dropboxapi.com"), vec!["dropbox"]);
+    }
+
+    #[test]
+    fn providers_for_dropbox_content_host() {
+        assert_eq!(
+            providers_for_host("content.dropboxapi.com"),
+            vec!["dropbox"]
+        );
+    }
+
+    #[test]
+    fn provider_for_host_dropbox() {
+        let result = provider_for_host("api.dropboxapi.com");
+        assert_eq!(result, Some(("dropbox", "Dropbox")));
+    }
+
+    #[test]
+    fn dropbox_api_uses_bearer() {
+        let injections = build_app_injections("dropbox", "api.dropboxapi.com", "sl.test_token_abc");
+        assert_eq!(injections.len(), 1);
+        assert_eq!(
+            injections[0],
+            Injection::SetHeader {
+                name: "authorization".to_string(),
+                value: "Bearer sl.test_token_abc".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn dropbox_content_uses_bearer() {
+        let injections =
+            build_app_injections("dropbox", "content.dropboxapi.com", "sl.test_token_abc");
+        assert_eq!(injections.len(), 1);
+        assert_eq!(
+            injections[0],
+            Injection::SetHeader {
+                name: "authorization".to_string(),
+                value: "Bearer sl.test_token_abc".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn dropbox_refresh_uses_form_body_format() {
+        let config = refresh_config("dropbox").expect("dropbox should have refresh config");
+        assert!(matches!(config.body_format, TokenBodyFormat::Form));
+        assert!(matches!(config.client_auth, ClientCredentialMethod::Body));
+    }
+
+    // ── Fly.io ──────────────────────────────────────────────────
+
+    #[test]
+    fn providers_for_flyio_machines_host() {
+        assert_eq!(providers_for_host("api.machines.dev"), vec!["flyio"]);
+    }
+
+    #[test]
+    fn providers_for_flyio_graphql_host() {
+        assert_eq!(providers_for_host("api.fly.io"), vec!["flyio"]);
+    }
+
+    #[test]
+    fn flyio_machines_api_uses_bearer() {
+        let injections = build_app_injections("flyio", "api.machines.dev", "FlyV1 fm2_test123");
+        assert_eq!(injections.len(), 1);
+        assert_eq!(
+            injections[0],
+            Injection::SetHeader {
+                name: "authorization".to_string(),
+                value: "Bearer FlyV1 fm2_test123".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn flyio_graphql_api_uses_bearer() {
+        let injections = build_app_injections("flyio", "api.fly.io", "FlyV1 fm2_test123");
+        assert_eq!(injections.len(), 1);
+        assert_eq!(
+            injections[0],
+            Injection::SetHeader {
+                name: "authorization".to_string(),
+                value: "Bearer FlyV1 fm2_test123".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn provider_for_host_flyio() {
+        let result = provider_for_host("api.machines.dev");
+        assert_eq!(result, Some(("flyio", "Fly.io")));
+    }
+
+    // ── Sentry ───────────────────────────────────────────────────
+
+    #[test]
+    fn providers_for_sentry_host() {
+        assert_eq!(providers_for_host("sentry.io"), vec!["sentry"]);
+    }
+
+    #[test]
+    fn providers_for_sentry_regional_hosts() {
+        assert_eq!(providers_for_host("us.sentry.io"), vec!["sentry"]);
+        assert_eq!(providers_for_host("de.sentry.io"), vec!["sentry"]);
+    }
+
+    #[test]
+    fn sentry_suffix_no_false_positives() {
+        assert!(providers_for_host(".sentry.io").is_empty());
+    }
+
+    #[test]
+    fn provider_for_host_sentry() {
+        let result = provider_for_host("sentry.io");
+        assert_eq!(result, Some(("sentry", "Sentry")));
+    }
+
+    #[test]
+    fn provider_for_host_sentry_regional() {
+        let result = provider_for_host("us.sentry.io");
+        assert_eq!(result, Some(("sentry", "Sentry")));
+    }
+
+    #[test]
+    fn sentry_api_uses_bearer() {
+        let injections = build_app_injections("sentry", "sentry.io", "test_token_abc");
+        assert_eq!(injections.len(), 1);
+        assert_eq!(
+            injections[0],
+            Injection::SetHeader {
+                name: "authorization".to_string(),
+                value: "Bearer test_token_abc".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn sentry_regional_api_uses_bearer() {
+        let injections = build_app_injections("sentry", "us.sentry.io", "test_token_abc");
+        assert_eq!(injections.len(), 1);
+        assert_eq!(
+            injections[0],
+            Injection::SetHeader {
+                name: "authorization".to_string(),
+                value: "Bearer test_token_abc".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn sentry_refresh_uses_form_body_format() {
+        let config = refresh_config("sentry").expect("sentry should have refresh config");
+        assert!(matches!(config.body_format, TokenBodyFormat::Form));
+    }
+
+    // ── Granola ──────────────────────────────────────────────────────
+
+    #[test]
+    fn providers_for_granola_host() {
+        assert_eq!(providers_for_host("public-api.granola.ai"), vec!["granola"]);
+    }
+
+    #[test]
+    fn granola_api_uses_bearer() {
+        let injections = build_app_injections("granola", "public-api.granola.ai", "grn_test123");
+        assert_eq!(injections.len(), 1);
+        assert_eq!(
+            injections[0],
+            Injection::SetHeader {
+                name: "authorization".to_string(),
+                value: "Bearer grn_test123".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn granola_has_no_refresh_config() {
+        assert!(refresh_config("granola").is_none());
+    }
+
+    #[test]
+    fn granola_no_false_positives() {
+        assert!(providers_for_host("granola.ai").is_empty());
+        assert!(providers_for_host("www.granola.ai").is_empty());
+    }
+
+    // ── Fireflies ──────────────────────────────────────────────────────
+
+    #[test]
+    fn providers_for_fireflies_host() {
+        assert_eq!(providers_for_host("api.fireflies.ai"), vec!["fireflies"]);
+    }
+
+    #[test]
+    fn providers_for_zoho_crm_host() {
+        assert_eq!(providers_for_host("www.zohoapis.com"), vec!["zoho-crm"]);
+    }
+
+    #[test]
+    fn zoho_crm_injects_its_oauthtoken_scheme() {
+        let rules = build_app_injection_rules("zoho-crm", "www.zohoapis.com", "tok-1");
+        assert_eq!(rules.len(), 1);
+        match &rules[0].1[..] {
+            [Injection::SetHeader { name, value }] => {
+                assert_eq!(name, "authorization");
+                assert_eq!(value, "Zoho-oauthtoken tok-1");
+            }
+            other => panic!("expected one auth header injection, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn zoho_crm_refresh_uses_form_body_credentials() {
+        let config = refresh_config("zoho-crm").expect("zoho-crm should have refresh config");
+        assert!(matches!(config.body_format, TokenBodyFormat::Form));
+        assert!(matches!(config.client_auth, ClientCredentialMethod::Body));
+    }
+
+    #[test]
+    fn provider_for_host_fireflies() {
+        let result = provider_for_host("api.fireflies.ai");
+        assert_eq!(result, Some(("fireflies", "Fireflies")));
+    }
+
+    #[test]
+    fn fireflies_api_uses_bearer() {
+        let injections = build_app_injections("fireflies", "api.fireflies.ai", "ff_test123");
+        assert_eq!(injections.len(), 1);
+        assert_eq!(
+            injections[0],
+            Injection::SetHeader {
+                name: "authorization".to_string(),
+                value: "Bearer ff_test123".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn fireflies_has_no_refresh_config() {
+        assert!(refresh_config("fireflies").is_none());
+    }
+
+    #[test]
+    fn fireflies_injects_on_both_graphql_and_mcp() {
+        // A single host rule (path_prefix: None) covers both API surfaces.
+        assert!(provider_matches_host_and_path(
+            "fireflies",
+            "api.fireflies.ai",
+            "/graphql"
+        ));
+        assert!(provider_matches_host_and_path(
+            "fireflies",
+            "api.fireflies.ai",
+            "/mcp"
+        ));
+    }
+
+    // ── HubSpot ─────────────────────────────────────────────────────
+
+    #[test]
+    fn providers_for_hubspot_legacy_host() {
+        assert_eq!(providers_for_host("api.hubapi.com"), vec!["hubspot"]);
+    }
+
+    #[test]
+    fn providers_for_hubspot_new_host() {
+        assert_eq!(providers_for_host("api.hubspot.com"), vec!["hubspot"]);
+    }
+
+    #[test]
+    fn provider_for_host_hubspot() {
+        let result = provider_for_host("api.hubapi.com");
+        assert_eq!(result, Some(("hubspot", "HubSpot")));
+    }
+
+    #[test]
+    fn hubspot_api_uses_bearer() {
+        let injections = build_app_injections("hubspot", "api.hubapi.com", "test_token_abc");
+        assert_eq!(injections.len(), 1);
+        assert_eq!(
+            injections[0],
+            Injection::SetHeader {
+                name: "authorization".to_string(),
+                value: "Bearer test_token_abc".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn hubspot_new_host_uses_bearer() {
+        let injections = build_app_injections("hubspot", "api.hubspot.com", "test_token_abc");
+        assert_eq!(injections.len(), 1);
+        assert_eq!(
+            injections[0],
+            Injection::SetHeader {
+                name: "authorization".to_string(),
+                value: "Bearer test_token_abc".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn hubspot_refresh_uses_form_body_format() {
+        let config = refresh_config("hubspot").expect("hubspot should have refresh config");
+        assert!(matches!(config.body_format, TokenBodyFormat::Form));
+    }
+
+    // ── Linear ───────────────────────────────────────────────────────
+
+    #[test]
+    fn providers_for_linear_host() {
+        assert_eq!(providers_for_host("api.linear.app"), vec!["linear"]);
+    }
+
+    #[test]
+    fn provider_for_host_linear() {
+        let result = provider_for_host("api.linear.app");
+        assert_eq!(result, Some(("linear", "Linear")));
+    }
+
+    #[test]
+    fn linear_api_uses_bearer() {
+        let injections = build_app_injections("linear", "api.linear.app", "lin_oauth_test");
+        assert_eq!(injections.len(), 1);
+        assert_eq!(
+            injections[0],
+            Injection::SetHeader {
+                name: "authorization".to_string(),
+                value: "Bearer lin_oauth_test".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn linear_refresh_uses_form_body_format() {
+        let config = refresh_config("linear").expect("linear should have refresh config");
+        assert!(matches!(config.body_format, TokenBodyFormat::Form));
+    }
+
+    #[test]
+    fn linear_does_not_match_other_linear_hosts() {
+        assert!(providers_for_host("linear.app").is_empty());
+        assert!(providers_for_host("linear.com").is_empty());
+    }
+
+    // ── Fathom ──────────────────────────────────────────────────────
+
+    #[test]
+    fn providers_for_fathom_host() {
+        assert_eq!(providers_for_host("api.fathom.ai"), vec!["fathom"]);
+    }
+
+    #[test]
+    fn provider_for_host_fathom() {
+        let result = provider_for_host("api.fathom.ai");
+        assert_eq!(result, Some(("fathom", "Fathom")));
+    }
+
+    #[test]
+    fn fathom_api_uses_bearer() {
+        let injections = build_app_injections("fathom", "api.fathom.ai", "test_token_abc");
+        assert_eq!(injections.len(), 1);
+        assert_eq!(
+            injections[0],
+            Injection::SetHeader {
+                name: "authorization".to_string(),
+                value: "Bearer test_token_abc".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn fathom_refresh_uses_form_body_format() {
+        let config = refresh_config("fathom").expect("fathom should have refresh config");
+        assert!(matches!(config.body_format, TokenBodyFormat::Form));
+        assert!(matches!(config.client_auth, ClientCredentialMethod::Body));
+    }
+
+    #[test]
+    fn fathom_needs_access_token() {
+        assert!(needs_access_token("fathom"));
+    }
+
+    #[test]
+    fn fathom_no_false_positives() {
+        assert!(providers_for_host("fathom.ai").is_empty());
+        assert!(providers_for_host("fathom.video").is_empty());
+        assert!(providers_for_host("www.fathom.ai").is_empty());
+    }
+
+    // ── Attio ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn providers_for_attio_host() {
+        assert_eq!(providers_for_host("api.attio.com"), vec!["attio"]);
+    }
+
+    #[test]
+    fn provider_for_host_attio() {
+        let result = provider_for_host("api.attio.com");
+        assert_eq!(result, Some(("attio", "Attio")));
+    }
+
+    #[test]
+    fn attio_api_uses_bearer() {
+        let injections = build_app_injections("attio", "api.attio.com", "test_token");
+        assert_eq!(injections.len(), 1);
+        assert_eq!(
+            injections[0],
+            Injection::SetHeader {
+                name: "authorization".to_string(),
+                value: "Bearer test_token".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn attio_does_not_match_other_attio_hosts() {
+        assert!(providers_for_host("attio.com").is_empty());
+        assert!(providers_for_host("app.attio.com").is_empty());
+    }
+
+    // ── X (Twitter) ─────────────────────────────────────────────────
+
+    #[test]
+    fn providers_for_x_api_host() {
+        assert_eq!(providers_for_host("api.x.com"), vec!["x"]);
+    }
+
+    #[test]
+    fn provider_for_host_x() {
+        let result = provider_for_host("api.x.com");
+        assert_eq!(result, Some(("x", "X")));
+    }
+
+    #[test]
+    fn x_api_uses_bearer() {
+        let injections = build_app_injections("x", "api.x.com", "test_token_abc");
+        assert_eq!(injections.len(), 1);
+        assert_eq!(
+            injections[0],
+            Injection::SetHeader {
+                name: "authorization".to_string(),
+                value: "Bearer test_token_abc".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn x_refresh_uses_form_and_basic_auth() {
+        let config = refresh_config("x").expect("x should have refresh config");
+        assert!(matches!(config.body_format, TokenBodyFormat::Form));
+        assert!(matches!(
+            config.client_auth,
+            ClientCredentialMethod::BasicAuth
+        ));
+    }
+
+    #[test]
+    fn x_needs_access_token() {
+        assert!(needs_access_token("x"));
+    }
+
+    #[test]
+    fn x_no_false_positives() {
+        assert!(providers_for_host("x.com").is_empty());
+        assert!(providers_for_host("twitter.com").is_empty());
+        assert!(providers_for_host("www.twitter.com").is_empty());
     }
 }

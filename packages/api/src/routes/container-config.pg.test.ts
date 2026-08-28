@@ -8,14 +8,14 @@ import { proofDatabaseUrl } from "../testing/pg-proof.js";
  * Two properties that only a database can settle, and neither had a guard:
  *
  *  1. The FENCE. An agent's grants name secret ids; the gateway resolves them
- *     by retaining from the org/project-fenced pool, so a rule naming a
+ *     by retaining from the org/workspace-fenced pool, so a rule naming a
  *     foreign secret yields nothing. Fencing the rules does not fence their
  *     target ids — this asserts the query itself is fenced.
- *  2. PRECEDENCE. The gateway merges partner → org → project with later
- *     injections overriding, so the project secret is the one actually
+ *  2. PRECEDENCE. The gateway merges org → workspace with later
+ *     injections overriding, so the workspace secret is the one actually
  *     injected. An unordered `findFirst` over an OR returns whatever Postgres
  *     reaches first, which is how the container ends up with an org secret's
- *     auth mode while the gateway injects the project's.
+ *     auth mode while the gateway injects the workspace's.
  *
  * Env-gated like the other proof suites; see app-blocklist-service.pg.test.ts.
  */
@@ -31,14 +31,14 @@ let route: Route;
 const P = "ccfg-";
 const ORG = `${P}org`;
 const OTHER_ORG = `${P}other-org`;
-const PROJECT = `${P}proj`;
-const OTHER_PROJECT = `${P}other-proj`;
+const WORKSPACE = `${P}proj`;
+const OTHER_WORKSPACE = `${P}other-proj`;
 const AGENT = `${P}agent`;
 
 const secret = (
   id: string,
   over: Partial<{
-    projectId: string | null;
+    workspaceId: string | null;
     organizationId: string | null;
     scope: string;
     type: string;
@@ -50,8 +50,8 @@ const secret = (
   type: over.type ?? "anthropic",
   encryptedValue: "x",
   hostPattern: "api.anthropic.com",
-  scope: over.scope ?? "project",
-  projectId: over.projectId === undefined ? PROJECT : over.projectId,
+  scope: over.scope ?? "workspace",
+  workspaceId: over.workspaceId === undefined ? WORKSPACE : over.workspaceId,
   organizationId: over.organizationId ?? null,
   metadata: { authMode: over.authMode ?? "api-key" },
 });
@@ -60,8 +60,8 @@ const secret = (
 const grant = async (logicalId: string, secretId: string) => {
   await db.policyRuleV2.create({
     data: {
-      scope: "project",
-      projectId: PROJECT,
+      scope: "workspace",
+      workspaceId: WORKSPACE,
       status: "published",
       generation: 1,
       priority: 10,
@@ -79,7 +79,7 @@ const grant = async (logicalId: string, secretId: string) => {
 };
 
 const resolve = async () =>
-  route.injectableSecretWhere({ id: AGENT }, PROJECT, ORG);
+  route.injectableSecretWhere({ id: AGENT }, WORKSPACE, ORG);
 
 const matchedIds = async (): Promise<string[]> => {
   const where = await resolve();
@@ -97,7 +97,7 @@ const reset = async () => {
   await db.policyRuleV2.deleteMany({ where: { logicalId: { startsWith: P } } });
   await db.secret.deleteMany({ where: { id: { startsWith: P } } });
   await db.agent.deleteMany({ where: { id: { startsWith: P } } });
-  await db.project.deleteMany({ where: { id: { startsWith: P } } });
+  await db.workspace.deleteMany({ where: { id: { startsWith: P } } });
   await db.organization.deleteMany({ where: { id: { startsWith: P } } });
 };
 
@@ -110,20 +110,23 @@ beforeAll(async () => {
   for (const id of [ORG, OTHER_ORG]) {
     await db.organization.create({ data: { id, name: id, slug: id } });
   }
-  await db.project.create({
-    data: { id: PROJECT, name: PROJECT, organizationId: ORG },
+  await db.workspace.create({
+    data: { id: WORKSPACE, name: WORKSPACE, organizationId: ORG },
   });
-  await db.project.create({
-    data: { id: OTHER_PROJECT, name: OTHER_PROJECT, organizationId: OTHER_ORG },
+  await db.workspace.create({
+    data: {
+      id: OTHER_WORKSPACE,
+      name: OTHER_WORKSPACE,
+      organizationId: OTHER_ORG,
+    },
   });
   await db.agent.create({
     data: {
       id: AGENT,
-      projectId: PROJECT,
+      workspaceId: WORKSPACE,
       name: AGENT,
       identifier: AGENT,
       accessToken: `aoc_${P}`,
-      secretMode: "selective",
     },
   });
 });
@@ -169,11 +172,11 @@ describe.skipIf(!PROOF_URL)(
       await db.secret.createMany({
         data: [
           secret(`${P}foreign-org`, {
-            projectId: null,
+            workspaceId: null,
             organizationId: OTHER_ORG,
             scope: "organization",
           }),
-          secret(`${P}foreign-proj`, { projectId: OTHER_PROJECT }),
+          secret(`${P}foreign-proj`, { workspaceId: OTHER_WORKSPACE }),
         ],
       });
       await grant(`${P}g-bait-1`, `${P}foreign-org`);
@@ -186,17 +189,17 @@ describe.skipIf(!PROOF_URL)(
         data: [
           secret(`${P}mine`),
           secret(`${P}org`, {
-            projectId: null,
+            workspaceId: null,
             organizationId: ORG,
             scope: "organization",
           }),
-          secret(`${P}foreign-proj`, { projectId: OTHER_PROJECT }),
+          secret(`${P}foreign-proj`, { workspaceId: OTHER_WORKSPACE }),
         ],
       });
       await db.policyRuleV2.create({
         data: {
-          scope: "project",
-          projectId: PROJECT,
+          scope: "workspace",
+          workspaceId: WORKSPACE,
           status: "published",
           generation: 1,
           priority: 10,
@@ -208,23 +211,23 @@ describe.skipIf(!PROOF_URL)(
           action: "allow",
           requireApproval: false,
           identities: { create: [{ agentId: AGENT }] },
-          targets: { create: [{ kind: "secret", secretScope: "project" }] },
+          targets: { create: [{ kind: "secret", secretScope: "workspace" }] },
         },
       });
-      // The other project's secret is also scope="project" — only the fence keeps
+      // The other workspace's secret is also scope="workspace" — only the fence keeps
       // it out.
       await expect(matchedIds()).resolves.toEqual([`${P}mine`]);
     });
 
-    it("PRECEDENCE: the project secret wins over an org one of the same type", async () => {
+    it("PRECEDENCE: the workspace secret wins over an org one of the same type", async () => {
       // Insert the org row FIRST so an unordered findFirst would return it. The
-      // gateway's merge puts project last with later overriding earlier, so the
-      // container must read the project's auth mode or it is configured for the
+      // gateway's merge puts workspace last with later overriding earlier, so the
+      // container must read the workspace's auth mode or it is configured for the
       // wrong credential. Both rows are granted — precedence is only visible
       // when more than one secret is reachable at all.
       await db.secret.create({
         data: secret(`${P}org-oauth`, {
-          projectId: null,
+          workspaceId: null,
           organizationId: ORG,
           scope: "organization",
           authMode: "oauth",

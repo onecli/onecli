@@ -11,17 +11,17 @@ import type {
 } from "./types";
 
 // ── The new first-match policy engine ───────────────────────────────────────
-// Two-level: per-scope first-match (org, then project), combined by strictest,
+// Two-level: per-scope first-match (org, then workspace), combined by strictest,
 // with each level's Default Rule as its fallback verdict (deny wins). This is the
 // engine step 4 (shadow) and step 5 (cutover) adopt; the golden corpus asserts
 // evaluateNew(translatePolicy(state)) == evaluateOracle(state).
 //
-// Why two levels rather than one merged list: the gateway lets a PROJECT
-// agent-scoped rule shadow (loosen or tighten) a project all-agents rule, but
-// NEVER lets a project rule override an org rule. A single merged first-match
+// Why two levels rather than one merged list: the gateway lets a WORKSPACE
+// agent-scoped rule shadow (loosen or tighten) a workspace all-agents rule, but
+// NEVER lets a workspace rule override an org rule. A single merged first-match
 // can honor at most one of "agent loosens all-agents" (needs identity to beat
 // strictness) and "org is un-overridable" (needs strictness to beat identity).
-// Splitting org/project and combining by strictest honors both.
+// Splitting org/workspace and combining by strictest honors both.
 
 const identityMatches = (rule: NewRule, request: PolicyRequest): boolean =>
   rule.identities.length === 0 ||
@@ -165,54 +165,54 @@ export const evaluatePolicyOutcome = (
   const orgDefault = rules.find(
     (r) => r.isDefault && r.scope === "organization",
   );
-  const projectDefault = rules.find(
-    (r) => r.isDefault && r.scope === "project",
+  const workspaceDefault = rules.find(
+    (r) => r.isDefault && r.scope === "workspace",
   );
   const orgExplicit = rules.filter(
     (r) => !r.isDefault && r.scope === "organization",
   );
-  const projectExplicit = rules.filter(
-    (r) => !r.isDefault && r.scope === "project",
+  const workspaceExplicit = rules.filter(
+    (r) => !r.isDefault && r.scope === "workspace",
   );
 
   const orgMatch = firstMatch(orgExplicit, request);
-  const projectMatch = firstMatch(projectExplicit, request);
+  const workspaceMatch = firstMatch(workspaceExplicit, request);
 
   // A Default Rule Block is a HARD FLOOR at its level: the org default's Block
-  // may not be opened by a project ALLOW (only an org allow rule or an org allow
-  // posture opens the door), and symmetrically a project default Block
+  // may not be opened by a workspace ALLOW (only an org allow rule or an org allow
+  // posture opens the door), and symmetrically a workspace default Block
   // (allowlist mode) may not be opened by an org ALLOW — an org allow is
-  // "permission"; the project mirrors the allows it wants.
+  // "permission"; the workspace mirrors the allows it wants.
   const enforceDeny = request.hasInjections && !request.isLlmHost;
   const orgDefaultBlocks = orgDefault?.action === "block" && enforceDeny;
-  const projectDefaultBlocks =
-    projectDefault?.action === "block" && enforceDeny;
+  const workspaceDefaultBlocks =
+    workspaceDefault?.action === "block" && enforceDeny;
 
-  // A lone org ALLOW can't punch through the project default Block (allowlist
+  // A lone org ALLOW can't punch through the workspace default Block (allowlist
   // mode) — drop it so it falls through to the deny-default. An org BLOCK still
   // applies (it only tightens). Approval/rate rules are action "allow", so they
   // defer too — symmetric with the org floor below.
   const effectiveOrg =
-    projectMatch === null &&
+    workspaceMatch === null &&
     orgMatch?.rule.action === "allow" &&
-    projectDefaultBlocks
+    workspaceDefaultBlocks
       ? null
       : orgMatch;
 
-  // A lone project ALLOW can't punch through the org default Block — drop it so it
-  // falls through to the deny-default. A project BLOCK still applies (it only
-  // tightens); an allow-posture org lets the project allow win.
-  const effectiveProject =
+  // A lone workspace ALLOW can't punch through the org default Block — drop it so it
+  // falls through to the deny-default. A workspace BLOCK still applies (it only
+  // tightens); an allow-posture org lets the workspace allow win.
+  const effectiveWorkspace =
     orgMatch === null &&
-    projectMatch?.rule.action === "allow" &&
+    workspaceMatch?.rule.action === "allow" &&
     orgDefaultBlocks
       ? null
-      : projectMatch;
+      : workspaceMatch;
 
   // Combine the two level results by strictest (lower rank = stricter); on a tie
   // keep the org match (reduce's left bias) so the org rate modifier wins,
   // matching the oracle's org-first Pass 3.
-  const candidates = [effectiveOrg, effectiveProject].filter(
+  const candidates = [effectiveOrg, effectiveWorkspace].filter(
     (m): m is LevelMatch => m !== null,
   );
   if (candidates.length > 0) {
@@ -229,11 +229,11 @@ export const evaluatePolicyOutcome = (
       rule: orgDefault ?? null,
     };
   }
-  if (projectDefaultBlocks) {
+  if (workspaceDefaultBlocks) {
     return {
       kind: "denyDefault",
-      level: "project",
-      rule: projectDefault ?? null,
+      level: "workspace",
+      rule: workspaceDefault ?? null,
     };
   }
   return { kind: "allow", managed: enforceDeny };

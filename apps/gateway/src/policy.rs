@@ -41,7 +41,7 @@ pub(crate) struct PolicyRule {
 /// The v2 rule that decided a request — recorded into telemetry so Activity
 /// can say "decided by rule X". `logical_id` is the generation-stable identity
 /// (row ids regenerate on every publish); the name is a display snapshot;
-/// `scope` ("organization" | "project") lets the read side apply per-viewer
+/// `scope` ("organization" | "workspace") lets the read side apply per-viewer
 /// visibility to org rule names. Legacy decisions carry `None` (old-model
 /// rules have no logical id).
 #[derive(Debug, Clone)]
@@ -87,7 +87,7 @@ pub(crate) enum PolicyDecision {
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn check_rate_limit(
     org_id: &str,
-    project_id: &str,
+    workspace_id: &str,
     rule_id: &str,
     rule_name: &str,
     max_requests: u64,
@@ -100,7 +100,7 @@ pub(crate) async fn check_rate_limit(
         .unwrap_or_default()
         .as_secs();
     let window_id = now / window_secs.max(1);
-    let key = format!("rate:{org_id}:{project_id}:{rule_id}:{agent_token}:{window_id}");
+    let key = format!("rate:{org_id}:{workspace_id}:{rule_id}:{agent_token}:{window_id}");
 
     match cache.incr(&key, window_secs).await {
         Some(count) if count > max_requests => {

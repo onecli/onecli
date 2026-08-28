@@ -18,7 +18,7 @@ import type { SessionPolicyInput } from "../../validations/policy";
 import { intersectPolicies } from "../../lib/resource-axis";
 import {
   orgResourceBoundary,
-  projectResourceSelection,
+  workspaceResourceSelection,
 } from "./org-resource-boundary";
 import {
   resolvePrincipalSet,
@@ -54,7 +54,7 @@ import { buildInjectionProbe } from "./injection";
 // DETAILS are org-admin-only; a non-admin sees `redacted: true` provenance and
 // org rules are excluded from the `variesByIdentity` disclosure count.
 // `orgResources` deliberately discloses the org rule's repo/folder VALUES —
-// never the rule's name or identity — to project viewers: the same posture as
+// never the rule's name or identity — to workspace viewers: the same posture as
 // the rate-limit values above, and for GitHub the repo list is already visible
 // via the connection's own metadata.
 //
@@ -74,13 +74,17 @@ export type EffectiveToolVerdict =
 
 export type EffectiveProvenance =
   | { kind: "rule"; scope: "organization"; redacted: true }
-  | { kind: "rule"; scope: "organization" | "project"; rule: ProvenanceRuleRef }
+  | {
+      kind: "rule";
+      scope: "organization" | "workspace";
+      rule: ProvenanceRuleRef;
+    }
   /** A level's Default Rule blocked (the deny-default terminal). */
-  | { kind: "default"; scope: "organization" | "project" };
+  | { kind: "default"; scope: "organization" | "workspace" };
 
-/** What the ORG level alone says about a tool — the ceiling the project may
+/** What the ORG level alone says about a tool — the ceiling the workspace may
  * tighten under but never loosen past. Derived from an org-rules-only engine
- * run, so it stays visible even when a stricter project rule wins the combined
+ * run, so it stays visible even when a stricter workspace rule wins the combined
  * verdict. Carries no rule ref (members may learn THAT the org constrains,
  * never which rule — the §2.9 redaction posture). `null` = the org is silent
  * (no matching rule, allow posture, or the enforce-deny carve passed it). */
@@ -114,20 +118,20 @@ export interface EffectiveAppPermissionsResult {
     /** Whether any of the provider's hosts has a credential attached for this
      * basis (derived — the injection-probe approximation). */
     credentialAttached: boolean;
-    scope: "organization" | "project";
+    scope: "organization" | "workspace";
   };
   /** Identity-scoped rules relevant to this provider that the BASELINE view
    * cannot show (they only match specific agents/groups) — scoped to the
    * viewer's visibility like `bodyConditionsSkipped`. */
   variesByIdentity: number;
   /** The ORG's resource boundary ("Resources") for this (agent, connection) —
-   * how far the organization allows the credential to reach, which a project
+   * how far the organization allows the credential to reach, which a workspace
    * selection narrows within but can never exceed. Only computed for an
    * explicit `agentId` + `connectionId`; null = the org does not restrict (or
    * no explicit basis). Discloses values only — see the redaction contract. */
   orgResources: SessionPolicyInput | null;
   /** What the credential actually reaches: the org boundary composed with the
-   * project's selection. An empty list means the two do not overlap and the
+   * workspace's selection. An empty list means the two do not overlap and the
    * credential reaches nothing (the gateway refuses every request). */
   effectiveResources: SessionPolicyInput | null;
   groups: EffectiveToolGroupResult[];
@@ -139,15 +143,15 @@ export interface EffectiveAppPermissionsInput {
   /** Reflect for ONE specific connection: synthesized requests carry it as the
    * winning injected connection, so per-account rules bind exactly as the
    * gateway would. Absent = the provider-level view (per-account differences
-   * fold to `mixed`). Project scope only, like `agentId`. */
+   * fold to `mixed`). Workspace scope only, like `agentId`. */
   connectionId?: string;
 }
 
 export interface EffectiveAppPermissionsCtx {
-  scope: "organization" | "project";
+  scope: "organization" | "workspace";
   organizationId: string;
-  /** Required at project scope; absent at org scope. */
-  projectId?: string;
+  /** Required at workspace scope; absent at org scope. */
+  workspaceId?: string;
   /** Org-admin viewers see org rule details; everyone else gets redaction. */
   viewerSeesOrgRules: boolean;
 }
@@ -195,10 +199,10 @@ const loadInjectionPool = async (
     return { secretHostPatterns: [], providers: [] };
   }
   const poolWhere =
-    ctx.scope === "project"
+    ctx.scope === "workspace"
       ? {
           OR: [
-            { projectId: ctx.projectId },
+            { workspaceId: ctx.workspaceId },
             { organizationId: ctx.organizationId, scope: "organization" },
           ],
         }
@@ -538,36 +542,39 @@ export const effectiveAppPermissions = async (
       `No permission catalog for provider: ${input.provider}`,
     );
   }
-  if (ctx.scope === "project" && !ctx.projectId) {
-    throw new ServiceError("BAD_REQUEST", "Project scope requires a project.");
+  if (ctx.scope === "workspace" && !ctx.workspaceId) {
+    throw new ServiceError(
+      "BAD_REQUEST",
+      "Workspace scope requires a workspace.",
+    );
   }
 
-  // The agent must belong to the caller's project — a foreign id is simply not
+  // The agent must belong to the caller's workspace — a foreign id is simply not
   // found (existence is never revealed across the fence). Baseline when omitted.
   let agent: { id: string } | null = null;
   if (input.agentId !== undefined) {
-    if (ctx.scope !== "project") {
+    if (ctx.scope !== "workspace") {
       throw new ServiceError(
         "BAD_REQUEST",
-        "Agent-scoped reflection is project-level.",
+        "Agent-scoped reflection is workspace-level.",
       );
     }
     agent = await db.agent.findFirst({
-      where: { id: input.agentId, projectId: ctx.projectId },
+      where: { id: input.agentId, workspaceId: ctx.workspaceId },
       select: { id: true },
     });
     if (!agent) throw new ServiceError("NOT_FOUND", "Agent not found.");
   }
 
   // Same fence for an explicit connection: it must be THIS provider's and
-  // visible to the caller's scope (project-owned or org-shared) — a foreign id
+  // visible to the caller's scope (workspace-owned or org-shared) — a foreign id
   // is simply not found (existence is never revealed across the fence).
   let connection: { id: string } | null = null;
   if (input.connectionId !== undefined) {
-    if (ctx.scope !== "project") {
+    if (ctx.scope !== "workspace") {
       throw new ServiceError(
         "BAD_REQUEST",
-        "Connection-scoped reflection is project-level.",
+        "Connection-scoped reflection is workspace-level.",
       );
     }
     connection = await db.appConnection.findFirst({
@@ -575,7 +582,7 @@ export const effectiveAppPermissions = async (
         id: input.connectionId,
         provider: input.provider,
         OR: [
-          { projectId: ctx.projectId },
+          { workspaceId: ctx.workspaceId },
           { organizationId: ctx.organizationId, scope: "organization" },
         ],
       },
@@ -590,44 +597,44 @@ export const effectiveAppPermissions = async (
     scope: "organization" as const,
     organizationId: ctx.organizationId,
   };
-  const projectBase =
-    ctx.scope === "project" && ctx.projectId
-      ? { scope: "project" as const, projectId: ctx.projectId }
+  const workspaceBase =
+    ctx.scope === "workspace" && ctx.workspaceId
+      ? { scope: "workspace" as const, workspaceId: ctx.workspaceId }
       : null;
 
   const [
     orgRows,
-    projectRows,
+    workspaceRows,
     orgInjectRows,
-    projectInjectRows,
+    workspaceInjectRows,
     principals,
     secretHosts,
     connectionProviders,
     pool,
   ] = await Promise.all([
     loadRulesForSimulation(orgBase, "published"),
-    projectBase
-      ? loadRulesForSimulation(projectBase, "published")
+    workspaceBase
+      ? loadRulesForSimulation(workspaceBase, "published")
       : Promise.resolve([]),
     // Injection rules keep `equipment`; the decision rules above drop it.
     loadInjectionRules(orgBase, "published"),
-    projectBase
-      ? loadInjectionRules(projectBase, "published")
+    workspaceBase
+      ? loadInjectionRules(workspaceBase, "published")
       : Promise.resolve([]),
     // The `agent &&` clause is load-bearing even though the set no longer
     // depends on the agent: the agent-less BASELINE view must not inherit the
-    // project's users/groups, or identity-scoped verdicts would leak into it
+    // workspace's users/groups, or identity-scoped verdicts would leak into it
     // while `variesByIdentity` reports 0.
-    agent && ctx.projectId
-      ? resolvePrincipalSet(ctx.projectId, ctx.organizationId)
+    agent && ctx.workspaceId
+      ? resolvePrincipalSet(ctx.workspaceId, ctx.organizationId)
       : Promise.resolve({ userIds: [], groupIds: [] }),
-    loadSecretHosts(ctx.organizationId, ctx.projectId ?? ""),
-    loadConnectionProviders(ctx.organizationId, ctx.projectId ?? ""),
+    loadSecretHosts(ctx.organizationId, ctx.workspaceId ?? ""),
+    loadConnectionProviders(ctx.organizationId, ctx.workspaceId ?? ""),
     loadInjectionPool(agent, ctx),
   ]);
 
-  const allRows = [...orgRows, ...projectRows];
-  const injectRows = [...orgInjectRows, ...projectInjectRows];
+  const allRows = [...orgRows, ...workspaceRows];
+  const injectRows = [...orgInjectRows, ...workspaceInjectRows];
   const simRules: SimRule[] = allRows.map((row) =>
     toSimRule(row, secretHosts, connectionProviders),
   );
@@ -708,7 +715,7 @@ export const effectiveAppPermissions = async (
   ];
   const disclosable = ctx.viewerSeesOrgRules
     ? simRules
-    : simRules.filter((s) => s.meta.scope === "project");
+    : simRules.filter((s) => s.meta.scope === "workspace");
   const variesByIdentity = disclosable.filter((s) => {
     if (s.rule.isDefault || s.rule.identities.length === 0) return false;
     return s.rule.targets.some((t) => {
@@ -738,7 +745,7 @@ export const effectiveAppPermissions = async (
       agent && connection
         ? {
             orgInjectRows,
-            projectInjectRows,
+            workspaceInjectRows,
             agentId: agent.id,
             principals,
             connectionId: connection.id,
@@ -754,7 +761,7 @@ export const effectiveAppPermissions = async (
 const resourceScopes = (
   basis: {
     orgInjectRows: SimRuleRow[];
-    projectInjectRows: SimRuleRow[];
+    workspaceInjectRows: SimRuleRow[];
     agentId: string;
     principals: PrincipalSet;
     connectionId: string;
@@ -770,14 +777,14 @@ const resourceScopes = (
     basis.principals,
     basis.connectionId,
   );
-  const projectResources = projectResourceSelection(
-    basis.projectInjectRows,
+  const workspaceResources = workspaceResourceSelection(
+    basis.workspaceInjectRows,
     basis.agentId,
     basis.principals,
     basis.connectionId,
   );
   return {
     orgResources,
-    effectiveResources: intersectPolicies(orgResources, projectResources),
+    effectiveResources: intersectPolicies(orgResources, workspaceResources),
   };
 };

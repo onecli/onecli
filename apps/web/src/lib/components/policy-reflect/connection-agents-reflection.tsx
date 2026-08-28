@@ -2,7 +2,8 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { Bot, Check, Loader2, TriangleAlert } from "lucide-react";
+import { Check, Loader2, TriangleAlert } from "lucide-react";
+import { AgentIcon } from "@/lib/agents/agent-icon";
 import { Button } from "@onecli/ui/components/button";
 import {
   Dialog,
@@ -14,7 +15,7 @@ import {
 } from "@onecli/ui/components/dialog";
 import { useConnectionEffectiveAgents } from "@/lib/api/policy-visibility";
 import { useConnectionGrants } from "@/hooks/use-grants";
-import { withProjectPrefix } from "@/lib/navigation";
+import { withWorkspacePrefix } from "@/lib/navigation";
 import type { ConnectionAgentsReflectionProps } from "@/lib/components/policy-reflect";
 import { ConnectionAgentAccessRow } from "./connection-agent-access-row";
 
@@ -42,7 +43,7 @@ export const ConnectionAgentsReflection = ({
   const grantsQuery = useConnectionGrants(connectionId, open);
 
   // Toggles must never render over unknown grant state — both the effective
-  // view AND the grants view have to resolve first (the project-access rule).
+  // view AND the grants view have to resolve first (the workspace-access rule).
   const isPending = effectiveQuery.isPending || grantsQuery.isPending;
   const isError = effectiveQuery.isError || grantsQuery.isError;
   const result = effectiveQuery.data;
@@ -73,7 +74,7 @@ export const ConnectionAgentsReflection = ({
               </div>
               <DialogDescription className="text-xs leading-relaxed">
                 Turn on the agents that should be able to use this connection.
-                Changes apply immediately — you can adjust them any time.
+                Changes apply immediately. You can adjust them any time.
               </DialogDescription>
             </>
           ) : (
@@ -117,7 +118,7 @@ export const ConnectionAgentsReflection = ({
           ) : !result || result.agents.length === 0 ? (
             <div className="flex flex-col items-center gap-3 py-8 text-center">
               <div className="bg-muted flex size-10 items-center justify-center rounded-full">
-                <Bot
+                <AgentIcon
                   className="text-muted-foreground size-4"
                   aria-hidden="true"
                 />
@@ -129,7 +130,7 @@ export const ConnectionAgentsReflection = ({
                 </p>
               </div>
               <Button variant="outline" size="sm" asChild>
-                <Link href={withProjectPrefix(pathname, "/agents")}>
+                <Link href={withWorkspacePrefix(pathname, "/agents")}>
                   Go to Agents
                 </Link>
               </Button>
@@ -138,7 +139,7 @@ export const ConnectionAgentsReflection = ({
             <>
               {!result.catalog && (
                 <p className="bg-muted/40 text-muted-foreground mb-1 rounded-md border px-3 py-2 text-xs">
-                  This app has no permission catalog — access is governed by
+                  This app has no permission catalog. Access is governed by
                   network rules only.
                 </p>
               )}
@@ -150,7 +151,7 @@ export const ConnectionAgentsReflection = ({
                     key={agent.agentId}
                     connectionId={connectionId}
                     agent={agent}
-                    projectGranted={grantedAgentIds.has(agent.agentId)}
+                    workspaceGranted={grantedAgentIds.has(agent.agentId)}
                   />
                 ))}
               </div>
@@ -159,7 +160,7 @@ export const ConnectionAgentsReflection = ({
         </div>
 
         {/* No "Manage in Policy" escape hatch: the rows self-serve, and the
-            project policy page is on its way out (step 6) — new UI must not
+            workspace policy page is on its way out (step 6) — new UI must not
             advertise a dying surface. */}
         <DialogFooter className="border-border/50 border-t px-6 py-4">
           <Button onClick={() => onOpenChange(false)}>

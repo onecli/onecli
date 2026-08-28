@@ -7,14 +7,26 @@ const isDev = NODE_ENV === "development";
 
 const errors: Record<string, { title: string; description: React.ReactNode }> =
   {
-    "oauth-misconfigured": {
-      title: "OAuth not configured",
+    "missing-auth-secret": {
+      title: "Auth secret not configured",
       description: (
-        <p>
-          <Code>NEXTAUTH_SECRET</Code> is set but <Code>GOOGLE_CLIENT_ID</Code>{" "}
-          and <Code>GOOGLE_CLIENT_SECRET</Code> are missing. Either provide all
-          three or remove <Code>NEXTAUTH_SECRET</Code> to use local mode.
-        </p>
+        <div className="space-y-3">
+          <p>
+            <Code>BETTER_AUTH_SECRET</Code> is not set, so sessions cannot be
+            signed and nobody can log in. Generate one, add it to your
+            environment, and restart:
+          </p>
+          <pre className="bg-muted overflow-x-auto rounded-lg px-3 py-2 text-xs">
+            {`openssl rand -base64 32`}
+          </pre>
+          <p className="text-xs">
+            Upgrading from an earlier version? This variable used to be called{" "}
+            <Code>NEXTAUTH_SECRET</Code>. Rename it rather than generating a new
+            value. Everyone signs in again afterwards either way, and your
+            Google OAuth redirect URI now points at the API server (
+            <Code>/auth/callback/google</Code>).
+          </p>
+        </div>
       ),
     },
     "missing-encryption-key": {

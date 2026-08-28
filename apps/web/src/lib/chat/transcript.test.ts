@@ -1,0 +1,143 @@
+import { describe, expect, it } from "vitest";
+import type { TurnEvent } from "@/lib/api/types";
+import { foldTranscript, highestSeq, mergeEvents } from "./transcript";
+
+/**
+ * The reader's logic, tested where it can be: `apps/web` has no component
+ * harness, so the decisions live in pure functions and the components stay
+ * thin enough to verify by looking.
+ */
+
+let seq = 0;
+const event = (
+  turnId: string,
+  type: TurnEvent["type"],
+  payload: Record<string, unknown> = {},
+): TurnEvent => ({ seq: (seq += 1), turnId, type, payload });
+
+describe("foldTranscript", () => {
+  it("REPLACES delta text with the durable answer instead of appending", () => {
+    // A live tail receives both the deltas and the final `text`. Appending
+    // renders every answer twice — the single most likely way to get this
+    // wrong, and invisible until you actually watch a turn stream.
+    const turns = foldTranscript([
+      event("t1", "text.delta", { text: "It is " }),
+      event("t1", "text.delta", { text: "4." }),
+      event("t1", "text", { text: "It is 4." }),
+      event("t1", "turn.done"),
+    ]);
+
+    expect(turns[0]?.text).toBe("It is 4.");
+  });
+
+  it("repairs a reader that joined mid-turn and missed the deltas", () => {
+    // History carries no deltas at all, so for this reader the answer exists
+    // only in the `text` event.
+    const turns = foldTranscript([
+      event("t1", "text", { text: "full answer" }),
+    ]);
+    expect(turns[0]?.text).toBe("full answer");
+  });
+
+  it("streams text before the answer lands", () => {
+    const turns = foldTranscript([
+      event("t1", "text.delta", { text: "think" }),
+      event("t1", "text.delta", { text: "ing…" }),
+    ]);
+    expect(turns[0]?.text).toBe("thinking…");
+    expect(turns[0]?.ended).toBe(false);
+  });
+
+  it("pairs a tool's finish onto its start", () => {
+    const turns = foldTranscript([
+      event("t1", "tool.started", { callId: "c1", name: "bash" }),
+      event("t1", "tool.finished", {
+        callId: "c1",
+        name: "bash",
+        output: "ok",
+      }),
+    ]);
+
+    expect(turns[0]?.tools).toEqual([
+      { callId: "c1", name: "bash", output: "ok" },
+    ]);
+  });
+
+  it("shows a running tool as started-without-output", () => {
+    const turns = foldTranscript([
+      event("t1", "tool.started", { callId: "c1", name: "bash" }),
+    ]);
+    expect(turns[0]?.tools[0]?.output).toBeUndefined();
+  });
+
+  it("keeps a finish whose start never arrived", () => {
+    // Dropping it would silently hide work the agent actually did.
+    const turns = foldTranscript([
+      event("t1", "tool.finished", { callId: "c9", name: "curl", output: "x" }),
+    ]);
+    expect(turns[0]?.tools).toHaveLength(1);
+  });
+
+  it("surfaces an error rather than stopping silently", () => {
+    const turns = foldTranscript([
+      event("t1", "error", { message: "credential_not_found" }),
+    ]);
+    expect(turns[0]?.error).toBe("credential_not_found");
+    expect(turns[0]?.ended).toBe(true);
+  });
+
+  it("keeps turns in arrival order and separates them", () => {
+    const turns = foldTranscript([
+      event("t1", "text", { text: "first" }),
+      event("t2", "text", { text: "second" }),
+    ]);
+    expect(turns.map((t) => t.turnId)).toEqual(["t1", "t2"]);
+    expect(turns.map((t) => t.text)).toEqual(["first", "second"]);
+  });
+});
+
+describe("mergeEvents", () => {
+  it("is idempotent — a replayed event does not duplicate the transcript", () => {
+    // The stream replays history before it tails, and a reconnect replays from
+    // a cursor, so the same event legitimately arrives twice.
+    const a = event("t1", "text", { text: "hi" });
+    expect(mergeEvents([a], [a])).toEqual([a]);
+  });
+
+  it("orders by seq regardless of arrival order", () => {
+    const first = {
+      seq: 1,
+      turnId: "t1",
+      type: "turn.started" as const,
+      payload: {},
+    };
+    const third = {
+      seq: 3,
+      turnId: "t1",
+      type: "turn.done" as const,
+      payload: {},
+    };
+    const second = { seq: 2, turnId: "t1", type: "text" as const, payload: {} };
+
+    expect(mergeEvents([first, third], [second]).map((e) => e.seq)).toEqual([
+      1, 2, 3,
+    ]);
+  });
+
+  it("returns what it held when nothing arrived", () => {
+    const held = [event("t1", "turn.done")];
+    expect(mergeEvents(held, [])).toBe(held);
+  });
+});
+
+describe("highestSeq", () => {
+  it("is the resume cursor, and 0 for an empty transcript", () => {
+    expect(highestSeq([])).toBe(0);
+    expect(
+      highestSeq([
+        { seq: 4, turnId: "t", type: "text", payload: {} },
+        { seq: 9, turnId: "t", type: "turn.done", payload: {} },
+      ]),
+    ).toBe(9);
+  });
+});

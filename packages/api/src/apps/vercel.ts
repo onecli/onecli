@@ -48,5 +48,4 @@ export const vercel: AppDefinition = {
       return null;
     },
   },
-  available: true,
 };

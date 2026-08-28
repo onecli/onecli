@@ -10,10 +10,10 @@ const state = vi.hoisted(() => ({
   creates: [] as { data: Record<string, unknown> }[],
   deleteManyCalls: 0,
   deleteManyWheres: [] as unknown[],
-  // For assertSessionPolicyValid: the project→org resolution, the (already
+  // For assertSessionPolicyValid: the workspace→org resolution, the (already
   // scope-fenced) connection rows the mock returns, the `where` each fence query
   // is called with, and the validator invocations.
-  projectOrg: "org-1" as string | null,
+  workspaceOrg: "org-1" as string | null,
   connections: [] as { provider: string; metadata: unknown }[],
   connectionWheres: [] as unknown[],
   validatorCalls: [] as {
@@ -45,9 +45,11 @@ vi.mock("@onecli/db", () => ({
       };
       return fn(tx);
     },
-    project: {
+    workspace: {
       findUnique: async () =>
-        state.projectOrg == null ? null : { organizationId: state.projectOrg },
+        state.workspaceOrg == null
+          ? null
+          : { organizationId: state.workspaceOrg },
     },
     // getPolicyDefault's read path: no persisted default → the virtual one.
     policyRuleV2: {
@@ -139,15 +141,15 @@ describe("backfillPublishScope", () => {
     expect(published?.targets.create[0]?.method).toBe("get");
   });
 
-  it("maps a project scope + preserves the org Default Rule flag", async () => {
-    const result = await backfillPublishScope({ projectId: "proj-1" }, [
+  it("maps a workspace scope + preserves the org Default Rule flag", async () => {
+    const result = await backfillPublishScope({ workspaceId: "proj-1" }, [
       { ...networkRule, isDefault: true, identities: [], targets: [] },
     ]);
     expect(result.generation).toBe(1);
     const published = state.creates[1]?.data;
     expect(published).toMatchObject({
-      scope: "project",
-      projectId: "proj-1",
+      scope: "workspace",
+      workspaceId: "proj-1",
       isDefault: true,
     });
   });
@@ -160,7 +162,7 @@ describe("assertSessionPolicyValid", () => {
   });
 
   beforeEach(() => {
-    state.projectOrg = "org-1";
+    state.workspaceOrg = "org-1";
     state.connections = [];
     state.connectionWheres = [];
     state.validatorCalls = [];
@@ -175,7 +177,7 @@ describe("assertSessionPolicyValid", () => {
 
   it("is a no-op for behavioral (array) conditions", async () => {
     await assertSessionPolicyValid(
-      { scope: "project", projectId: "p1" },
+      { scope: "workspace", workspaceId: "p1" },
       [connTarget("c1")],
       [{ target: "body", operator: "contains", value: "x" }],
       "allow",
@@ -186,7 +188,7 @@ describe("assertSessionPolicyValid", () => {
 
   it("is a no-op for null conditions", async () => {
     await assertSessionPolicyValid(
-      { scope: "project", projectId: "p1" },
+      { scope: "workspace", workspaceId: "p1" },
       [connTarget("c1")],
       null,
       "allow",
@@ -197,7 +199,7 @@ describe("assertSessionPolicyValid", () => {
   it("rejects a session policy on a BLOCK (a block injects nothing)", async () => {
     await expect(
       assertSessionPolicyValid(
-        { scope: "project", projectId: "p1" },
+        { scope: "workspace", workspaceId: "p1" },
         [connTarget("c1")],
         { repositories: ["a/b"] },
         "block",
@@ -211,7 +213,7 @@ describe("assertSessionPolicyValid", () => {
     // service throw is the ONLY thing stopping a two-PATCH entitlement bypass.
     await expect(
       assertSessionPolicyValid(
-        { scope: "project", projectId: "p1" },
+        { scope: "workspace", workspaceId: "p1" },
         [{ kind: "network", hostPattern: "x" }],
         { repositories: ["a/b"] },
         "allow",
@@ -220,20 +222,20 @@ describe("assertSessionPolicyValid", () => {
     expect(state.validatorCalls).toHaveLength(0);
   });
 
-  it("validates fenced to the PROJECT scope; dedups ids; a foreign id is dropped (cross-org)", async () => {
+  it("validates fenced to the WORKSPACE scope; dedups ids; a foreign id is dropped (cross-org)", async () => {
     // Two distinct ids requested, only ONE in-scope row returned by the fence →
     // exactly one validate() call. A foreign id resolves to nothing and is never
     // validated — the query-level cross-org fence.
     state.connections = [{ provider: "github", metadata: { repos: ["a/b"] } }];
     await assertSessionPolicyValid(
-      { scope: "project", projectId: "p1" },
+      { scope: "workspace", workspaceId: "p1" },
       [connTarget("c1"), connTarget("c1"), connTarget("c2")],
       { repositories: ["a/b"] },
       "allow",
     );
     expect(state.connectionWheres[0]).toEqual({
       id: { in: ["c1", "c2"] }, // deduped
-      projectId: "p1", // fenced to the acting project
+      workspaceId: "p1", // fenced to the acting workspace
     });
     expect(state.validatorCalls).toHaveLength(1);
     expect(state.validatorCalls[0]).toMatchObject({
@@ -259,11 +261,11 @@ describe("assertSessionPolicyValid", () => {
     expect(state.validatorCalls[0]).toMatchObject({ organizationId: "org-9" });
   });
 
-  it("throws when the project's organization can't be resolved", async () => {
-    state.projectOrg = null;
+  it("throws when the workspace's organization can't be resolved", async () => {
+    state.workspaceOrg = null;
     await expect(
       assertSessionPolicyValid(
-        { scope: "project", projectId: "ghost" },
+        { scope: "workspace", workspaceId: "ghost" },
         [connTarget("c1")],
         { repositories: ["a/b"] },
         "allow",
@@ -284,8 +286,8 @@ describe("the default-rule posture (both scopes allow)", () => {
     expect(dto.action).toBe("allow");
   });
 
-  it("virtual project default is allow", async () => {
-    const dto = await getPolicyDefault({ projectId: "p-1" });
+  it("virtual workspace default is allow", async () => {
+    const dto = await getPolicyDefault({ workspaceId: "p-1" });
     expect(dto.isDefault).toBe(true);
     expect(dto.action).toBe("allow");
   });

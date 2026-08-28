@@ -4,7 +4,7 @@ import { asciiLower, hostMatches, pathMatches } from "./path-match";
 // ZERO-FALSE-POSITIVE by construction: a warning is emitted only when it is
 // PROVABLE from the literal rule data that the later rule can never take
 // effect — every undecidable comparison (group-membership inclusion, app↔network
-// cross-kind, wildcard⊇wildcard patterns, secret host sets, org↔project
+// cross-kind, wildcard⊇wildcard patterns, secret host sets, org↔workspace
 // cross-level) is skipped, costing recall but never precision. The match
 // semantics mirrored here are the engine's (evaluate.rs):
 // first match in priority order wins; empty identities = any principal; empty

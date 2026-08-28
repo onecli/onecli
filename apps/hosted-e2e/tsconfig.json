@@ -1,0 +1,11 @@
+{
+  "extends": "@onecli/typescript-config/base.json",
+  "compilerOptions": {
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "noEmit": true,
+    "types": ["node"]
+  },
+  "include": ["src", "tests", "vitest.config.ts"],
+  "exclude": ["node_modules"]
+}

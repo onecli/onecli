@@ -1,133 +1,32 @@
-#[cfg(edition_oss)]
 mod auth;
 
-#[cfg(any(edition_onprem_slim, edition_onprem_full))]
-#[path = "ee/onprem/auth.rs"]
-mod auth;
-
-#[cfg(edition_cloud)]
-#[path = "ee/auth.rs"]
-mod auth;
-
-mod ca;
-
-#[cfg(not(edition_cloud))]
-mod cache;
-
-#[cfg(edition_cloud)]
-#[path = "ee/cache.rs"]
-mod cache;
-
-#[cfg(not(edition_cloud))]
 mod approval;
-
-#[cfg(edition_cloud)]
-#[path = "ee/approval.rs"]
-mod approval;
-
 mod apps;
-
-#[cfg(edition_oss)]
-mod ee_apps;
-
-#[cfg(not(edition_oss))]
-#[path = "ee/ee_apps.rs"]
-mod ee_apps;
-
-#[cfg(edition_oss)]
-mod org_routes;
-
-#[cfg(not(edition_oss))]
-#[path = "ee/org_routes.rs"]
-mod org_routes;
+mod ca;
+mod cache;
+mod compat;
+mod condition_match;
 
 mod connect;
-
-// Body-condition matcher (step 9.5): the real matcher rides with the full EE
-// engine — onprem included, else a v2 `body contains` block rule would never
-// see a body there and fail OPEN. The OSS arm stays the no-op (conditions are
-// carried but never evaluated in OSS, matching its legacy behavior).
-#[cfg(edition_oss)]
-mod condition_match;
-
-#[cfg(not(edition_oss))]
-#[path = "ee/condition_match.rs"]
-mod condition_match;
-
-#[cfg(not(edition_cloud))]
-mod crypto;
-
-#[cfg(edition_cloud)]
-#[path = "ee/crypto.rs"]
 mod crypto;
 
 mod db;
 mod default_interceptions;
 mod edition;
+// Enterprise feature modules (`src/ee/`) — the paths the enterprise license
+// covers. Compiled into every edition; see `ee.rs`.
+mod ee;
 mod gateway;
 mod inject;
 mod policy;
 mod secret_inject;
 mod shutdown;
 mod summary;
-
-// Cloud-only request summarizers for manual-approval cards. OSS build uses the
-// no-op `cloud_summary.rs` stub; the cloud build swaps in `ee/cloud_summary.rs`
-// (+ the `ee/cloud_summary/` submodules). Mirrors the `ee_apps` split, and
-// is the fall-through arm of `summary`'s per-provider dispatch.
-#[cfg(not(edition_cloud))]
-mod cloud_summary;
-
-#[cfg(edition_cloud)]
-#[path = "ee/cloud_summary.rs"]
-mod cloud_summary;
-
+mod telemetry;
 mod telemetry_core;
 mod util;
 mod version;
 
-#[cfg(not(edition_cloud))]
-mod telemetry;
-
-#[cfg(edition_cloud)]
-#[path = "ee/telemetry.rs"]
-mod telemetry;
-
-// Partner layer (cloud-only). OSS build uses the no-op `partner.rs` stub; the
-// cloud build swaps in `ee/partner.rs` (+ the `ee/partner/` submodules).
-#[cfg(not(edition_cloud))]
-mod partner;
-
-#[cfg(edition_cloud)]
-#[path = "ee/partner.rs"]
-mod partner;
-
-// Granular access (EE — cloud + onprem): generic per-agent scoping for app
-// connections — token-level (e.g. GitHub repo-scoped tokens) or request-level
-// (e.g. Dropbox folder allowlist). No OSS stub: referenced only from the cloud/
-// onprem hooks + ee_apps modules, which are all cfg'd out for oss.
-#[cfg(not(edition_oss))]
-#[path = "ee/granular_access.rs"]
-mod granular_access;
-
-// Budget layer (cloud-only). OSS build uses the no-op `budget.rs` stub; the
-// cloud build swaps in `ee/budget.rs` (+ the `ee/budget/` submodules).
-#[cfg(not(edition_cloud))]
-mod budget;
-
-#[cfg(edition_cloud)]
-#[path = "ee/budget.rs"]
-mod budget;
-
-// Policy engine (step 9.5): OSS compiles the minimal project-only first-match
-// core (src/policy_engine.rs + src/policy_engine/); every EE edition — cloud AND
-// both onprems — swaps in the full engine (ee/policy_engine.rs, org scope +
-// principals + availability).
-#[cfg(edition_oss)]
-mod policy_engine;
-
-#[cfg(not(edition_oss))]
-#[path = "ee/policy_engine.rs"]
 mod policy_engine;
 
 mod vault;
@@ -160,6 +59,11 @@ struct Cli {
     /// Data directory for CA certificates and persistent state.
     #[arg(long, default_value = default_data_dir())]
     data_dir: PathBuf,
+
+    /// Probe a running gateway's /healthz on --port and exit 0/1. Lets the
+    /// image healthcheck run without curl/wget in the runtime image.
+    #[arg(long)]
+    healthcheck: bool,
 }
 
 /// Cap on the final telemetry flush, inside the overall shutdown budget.
@@ -187,6 +91,14 @@ async fn main() -> Result<()> {
         std::process::exit(1);
     }
 
+    let cli = Cli::parse();
+
+    // Healthcheck self-probe: before the tracing stack (silent output) and
+    // after the rustls provider install above (reqwest needs it). Exits.
+    if cli.healthcheck {
+        run_healthcheck(cli.port).await;
+    }
+
     // Initialize logging — JSON for production (CloudWatch), text for dev
     let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
 
@@ -201,8 +113,6 @@ async fn main() -> Result<()> {
         tracing_subscriber::fmt().with_env_filter(env_filter).init();
     }
 
-    let cli = Cli::parse();
-
     // Before anything that can block: as PID 1 the kernel discards a SIGTERM
     // whose handler is still the default, so until this runs the process
     // cannot be stopped by anything short of SIGKILL. A signal arriving during
@@ -210,36 +120,80 @@ async fn main() -> Result<()> {
     // first poll.
     shutdown::install();
 
-    // Expand ~ in data dir
     let data_dir = expand_tilde(&cli.data_dir);
 
-    let caps = edition::capabilities();
+    // The e2e suite asserts the boot line's `edition` field (Debug shape, e.g.
+    // "Cloud") — keep the key and value format stable.
     info!(
         data_dir = %data_dir.display(),
-        edition = ?caps.edition,
-        demo = caps.demo,
+        edition = ?crate::edition::edition(),
         "starting onecli-gateway"
     );
+
+    // Cloud fail-fast: a cloud process missing a hard dependency (or holding a
+    // config that must never run there) dies loudly at startup instead of
+    // degrading into onprem-ish behavior mid-request.
+    if edition::edition() == edition::Edition::Cloud {
+        check_cloud_startup_env(
+            std::env::var("COGNITO_USER_POOL_ID").ok().as_deref(),
+            std::env::var("REDIS_HOST").ok().as_deref(),
+            std::env::var("KMS_KEY_ARN").ok().as_deref(),
+        )?;
+    }
+
+    // Multi-instance operation (#7) is licensed: a Redis-backed self-host —
+    // the config that exists to run >1 gateway — refuses to start unlicensed,
+    // mirroring the cloud fail-fast above. Every feature works on the
+    // in-memory stores; unset REDIS_HOST to run unlicensed.
+    crate::ee::ha::check_ha_entitlement(
+        std::env::var("REDIS_HOST").ok().as_deref(),
+        crate::edition::entitled(),
+    )?;
 
     // The gateway puts absolute links into the responses agents relay to humans
     // ("open this URL to connect the app"). It answers proxy traffic, so unlike
     // the web app it has no incoming browser request to derive its own address
-    // from — APP_URL is the only thing that can tell it. Say so once, loudly,
-    // rather than emitting links that look real and go nowhere.
-    if !gateway::response::app_url_is_configured() {
-        warn!(
-            fallback = gateway::response::DASHBOARD_URL_FALLBACK,
-            "APP_URL is not set — links in agent-facing responses will point at \
-             the fallback and will not open for anyone reaching OneCLI on a \
-             different address. Set APP_URL to the URL users browse to."
-        );
+    // from — the configured external URL is the only thing that can tell it.
+    // Say so once, loudly, rather than emitting links that look real and go
+    // nowhere. All three warnings derive from the cached resolution, so they
+    // describe the value actually in use.
+    {
+        use gateway::response::DashboardUrlSource;
+        let resolved = gateway::response::resolved_dashboard();
+        match resolved.source {
+            DashboardUrlSource::Fallback => warn!(
+                fallback = gateway::response::DASHBOARD_URL_FALLBACK,
+                "ONECLI_EXTERNAL_URL is not set — links in agent-facing \
+                 responses will point at the fallback and will not open for \
+                 anyone reaching OneCLI on a different address. Set \
+                 ONECLI_EXTERNAL_URL (the legacy APP_URL alias also works) to \
+                 the URL users browse to."
+            ),
+            DashboardUrlSource::LegacyBind => warn!(
+                url = resolved.url.as_str(),
+                "ONECLI_BIND_HOST is seeding the dashboard URL (deprecated, \
+                 removed next major). Pin it: add ONECLI_EXTERNAL_URL={} to \
+                 the .env beside docker-compose.yml.",
+                resolved.url
+            ),
+            DashboardUrlSource::Canonical => {
+                if let Some(alias) = resolved.alias_conflict.as_deref() {
+                    warn!(
+                        canonical = resolved.url.as_str(),
+                        alias,
+                        "ONECLI_EXTERNAL_URL and APP_URL disagree; \
+                         ONECLI_EXTERNAL_URL wins. Remove the APP_URL line \
+                         unless the difference is intentional."
+                    );
+                }
+            }
+            DashboardUrlSource::Alias => {}
+        }
     }
 
-    // Load or generate CA
     let ca = CertificateAuthority::load_or_generate(&data_dir).await?;
     info!("CA certificate loaded");
 
-    // Connect to PostgreSQL
     // Support both DATABASE_URL (OSS) and individual DB_* vars (cloud ECS from Secrets Manager)
     let database_url = match std::env::var("DATABASE_URL") {
         Ok(url) => url,
@@ -250,7 +204,7 @@ async fn main() -> Result<()> {
             let user = std::env::var("DB_USERNAME").context("DB_USERNAME env var must be set")?;
             let pass = std::env::var("DB_PASSWORD").context("DB_PASSWORD env var must be set")?;
             let name = std::env::var("DB_NAME").unwrap_or_else(|_| "onecli".to_string());
-            format!("postgresql://{user}:{pass}@{host}:{port}/{name}")
+            database_url_from_parts(&host, &port, &user, &pass, &name)
         }
     };
     let pool = db::create_pool(&database_url).await?;
@@ -260,9 +214,9 @@ async fn main() -> Result<()> {
     // the server — so the shutdown sequence needs its own handle to close it.
     let shutdown_pool = pool.clone();
 
-    // Load crypto service for secret decryption
-    // OSS: AES-256-GCM with local key from SECRET_ENCRYPTION_KEY
-    // Cloud: KMS envelope decryption (calls KMS Decrypt for each data key)
+    // Load crypto service for secret decryption/encryption.
+    // SECRET_ENCRYPTION_KEY set → local AES-256-GCM; else KMS envelope.
+    // Decrypt dispatches per ciphertext, so a mixed database keeps working.
     let crypto = Arc::new(crypto::CryptoService::from_env().await?);
     info!("crypto service initialized");
 
@@ -280,7 +234,6 @@ async fn main() -> Result<()> {
         onepassword: Arc::clone(&onepassword),
     });
 
-    // Initialize vault service with Bitwarden + 1Password providers.
     let proxy_url = std::env::var("BITWARDEN_PROXY_URL")
         .unwrap_or_else(|_| "wss://ap.lesspassword.dev".to_string());
     let bitwarden = BitwardenVaultProvider::new(
@@ -292,13 +245,11 @@ async fn main() -> Result<()> {
     let vault_service = Arc::new(VaultService::new(providers, policy_engine.pool.clone()));
     info!("vault service initialized");
 
-    // Initialize cache store
-    // OSS: in-memory DashMap. Cloud: Redis (ElastiCache with TLS + AUTH).
+    // Redis (ElastiCache with TLS + AUTH) when REDIS_HOST is set, else in-memory.
     let cache = cache::create_store().await?;
     info!("cache store created");
 
-    // Initialize approval store for manual approval policy action
-    // OSS: in-memory DashMap + tokio channels. Cloud: Redis + BLPOP.
+    // Redis + BLPOP when REDIS_HOST is set, else in-memory DashMap + channels.
     let approval_store = approval::create_store().await?;
     info!("approval store created");
 
@@ -348,4 +299,167 @@ fn expand_tilde(path: &Path) -> PathBuf {
         }
     }
     path.to_path_buf()
+}
+
+/// Assemble a postgres URL from the individual DB_* parts (cloud ECS injects
+/// them from Secrets Manager). Username and password are percent-encoded —
+/// RDS-managed passwords contain special characters that would corrupt the
+/// URL. Env values come in as parameters so tests never mutate process env.
+fn database_url_from_parts(host: &str, port: &str, user: &str, pass: &str, name: &str) -> String {
+    use percent_encoding::{utf8_percent_encode, NON_ALPHANUMERIC};
+    let user = utf8_percent_encode(user, NON_ALPHANUMERIC);
+    let pass = utf8_percent_encode(pass, NON_ALPHANUMERIC);
+    format!("postgresql://{user}:{pass}@{host}:{port}/{name}")
+}
+
+/// Self-probe for container healthchecks (`onecli-gateway --healthcheck`):
+/// GET /healthz on 127.0.0.1:{port}, exit 0 on a 2xx, exit 1 otherwise. The
+/// explicit exits matter — the release profile is panic=abort, so any
+/// unwind-free failure path must still produce a clean 0/1 for Docker/ECS.
+async fn run_healthcheck(port: u16) -> ! {
+    let healthy = healthcheck_ok(port).await;
+    std::process::exit(if healthy { 0 } else { 1 });
+}
+
+async fn healthcheck_ok(port: u16) -> bool {
+    // .no_proxy(): with a proxy env var set, reqwest would send the request
+    // absolute-form through the proxy — and the gateway dispatches
+    // absolute-form requests down its own proxy path, never to /healthz.
+    // Failures go to stderr, which `docker inspect` and the ECS console keep
+    // as the probe's output — an unhealthy verdict should say why.
+    let client = match reqwest::Client::builder()
+        .no_proxy()
+        .timeout(std::time::Duration::from_secs(3))
+        .build()
+    {
+        Ok(client) => client,
+        Err(error) => {
+            eprintln!("healthcheck: building the probe client failed: {error}");
+            return false;
+        }
+    };
+    match client
+        .get(format!("http://127.0.0.1:{port}/healthz"))
+        .send()
+        .await
+    {
+        Ok(response) if response.status().is_success() => true,
+        Ok(response) => {
+            eprintln!("healthcheck: /healthz answered {}", response.status());
+            false
+        }
+        Err(error) => {
+            eprintln!("healthcheck: probing /healthz failed: {error}");
+            false
+        }
+    }
+}
+
+/// Cloud fail-fast: refuse to start a cloud-edition process that is missing a
+/// hard dependency.
+///
+/// `COGNITO_USER_POOL_ID`, `REDIS_HOST`, and `KMS_KEY_ARN` must be set and
+/// non-blank — each has an implicit fallback (self-hosted session auth,
+/// in-memory stores, local AES) that is wrong on cloud. Env values come in as
+/// parameters so tests never mutate process env.
+fn check_cloud_startup_env(
+    cognito_user_pool_id: Option<&str>,
+    redis_host: Option<&str>,
+    kms_key_arn: Option<&str>,
+) -> Result<()> {
+    for (name, value) in [
+        ("COGNITO_USER_POOL_ID", cognito_user_pool_id),
+        ("REDIS_HOST", redis_host),
+        ("KMS_KEY_ARN", kms_key_arn),
+    ] {
+        if value.is_none_or(|v| v.trim().is_empty()) {
+            anyhow::bail!("EDITION=cloud requires the {name} env var to be set");
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn database_url_from_parts_is_table_driven() {
+        // (host, port, user, pass, name) → expected URL. The special-character
+        // rows are MUTATION-PROOF: drop the percent-encoding and they fail —
+        // an RDS-managed password with `@:/?#[]%` would corrupt the URL.
+        let cases: &[(&str, &str, &str, &str, &str, &str)] = &[
+            (
+                "db.internal",
+                "5432",
+                "onecli",
+                "plain",
+                "onecli",
+                "postgresql://onecli:plain@db.internal:5432/onecli",
+            ),
+            (
+                "db.internal",
+                "6543",
+                "user@corp",
+                "p@ss:w/rd?#[]%",
+                "onecli",
+                "postgresql://user%40corp:p%40ss%3Aw%2Frd%3F%23%5B%5D%25@db.internal:6543/onecli",
+            ),
+            (
+                "db.internal",
+                "5432",
+                "onecli",
+                "pässwörd",
+                "onecli",
+                "postgresql://onecli:p%C3%A4ssw%C3%B6rd@db.internal:5432/onecli",
+            ),
+        ];
+
+        for (host, port, user, pass, name, want) in cases {
+            assert_eq!(
+                database_url_from_parts(host, port, user, pass, name),
+                *want,
+                "parts ({host:?}, {port:?}, {user:?}, {pass:?}, {name:?})"
+            );
+        }
+    }
+
+    #[test]
+    fn cloud_startup_env_check_is_table_driven() {
+        let ok = Some("value");
+        // (cognito, redis, kms) → expected error fragment (None = starts).
+        #[allow(clippy::type_complexity)]
+        let cases: &[(Option<&str>, Option<&str>, Option<&str>, Option<&str>)] = &[
+            // Fully configured → starts.
+            (ok, ok, ok, None),
+            // Each hard dependency missing or blank → bails naming the var.
+            (None, ok, ok, Some("COGNITO_USER_POOL_ID")),
+            (Some("  "), ok, ok, Some("COGNITO_USER_POOL_ID")),
+            (ok, None, ok, Some("REDIS_HOST")),
+            (ok, Some(""), ok, Some("REDIS_HOST")),
+            (ok, ok, None, Some("KMS_KEY_ARN")),
+            (ok, ok, Some(""), Some("KMS_KEY_ARN")),
+        ];
+
+        for (cognito, redis, kms, want_err) in cases {
+            let result = check_cloud_startup_env(*cognito, *redis, *kms);
+            match want_err {
+                None => assert!(
+                    result.is_ok(),
+                    "expected Ok for ({cognito:?}, {redis:?}, {kms:?}): {result:?}"
+                ),
+                Some(fragment) => {
+                    let err = result
+                        .expect_err(&format!(
+                            "expected Err for ({cognito:?}, {redis:?}, {kms:?})"
+                        ))
+                        .to_string();
+                    assert!(
+                        err.contains(fragment),
+                        "error {err:?} does not name {fragment:?}"
+                    );
+                }
+            }
+        }
+    }
 }

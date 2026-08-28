@@ -1,18 +1,13 @@
 export interface ResourceScope {
-  projectId?: string;
+  workspaceId?: string;
   organizationId?: string;
-  // EE-only: partner-scoped resources. Inert in OSS (never set there).
-  partnerId?: string;
 }
 
 export const scopeWhere = (scope: ResourceScope) => {
-  if (scope.partnerId) {
-    return { partnerId: scope.partnerId, scope: "partner" as const };
-  }
-  if (scope.projectId && scope.organizationId) {
+  if (scope.workspaceId && scope.organizationId) {
     return {
       OR: [
-        { projectId: scope.projectId },
+        { workspaceId: scope.workspaceId },
         {
           organizationId: scope.organizationId,
           scope: "organization" as const,
@@ -26,19 +21,16 @@ export const scopeWhere = (scope: ResourceScope) => {
       scope: "organization" as const,
     };
   }
-  if (scope.projectId) {
-    return { projectId: scope.projectId };
+  if (scope.workspaceId) {
+    return { workspaceId: scope.workspaceId };
   }
-  throw new Error("ResourceScope must have projectId or organizationId");
+  throw new Error("ResourceScope must have workspaceId or organizationId");
 };
 
 export const scopeCreate = (scope: ResourceScope) => {
-  if (scope.partnerId) {
-    return { partnerId: scope.partnerId, scope: "partner" as const };
-  }
-  if (scope.projectId && scope.organizationId) {
+  if (scope.workspaceId && scope.organizationId) {
     throw new Error(
-      "Cannot create a resource with both projectId and organizationId",
+      "Cannot create a resource with both workspaceId and organizationId",
     );
   }
   if (scope.organizationId) {
@@ -47,16 +39,13 @@ export const scopeCreate = (scope: ResourceScope) => {
       scope: "organization" as const,
     };
   }
-  if (scope.projectId) {
-    return { projectId: scope.projectId, scope: "project" as const };
+  if (scope.workspaceId) {
+    return { workspaceId: scope.workspaceId, scope: "workspace" as const };
   }
-  throw new Error("ResourceScope must have projectId or organizationId");
+  throw new Error("ResourceScope must have workspaceId or organizationId");
 };
 
 export const scopeOwnership = (scope: ResourceScope, id: string) => {
-  if (scope.partnerId) {
-    return { id, partnerId: scope.partnerId, scope: "partner" as const };
-  }
   if (scope.organizationId) {
     return {
       id,
@@ -64,10 +53,10 @@ export const scopeOwnership = (scope: ResourceScope, id: string) => {
       scope: "organization" as const,
     };
   }
-  if (scope.projectId) {
-    return { id, projectId: scope.projectId };
+  if (scope.workspaceId) {
+    return { id, workspaceId: scope.workspaceId };
   }
-  throw new Error("ResourceScope must have projectId or organizationId");
+  throw new Error("ResourceScope must have workspaceId or organizationId");
 };
 
 export const appConfigKey = (scope: ResourceScope, provider: string) => {
@@ -79,13 +68,13 @@ export const appConfigKey = (scope: ResourceScope, provider: string) => {
       },
     };
   }
-  if (scope.projectId) {
+  if (scope.workspaceId) {
     return {
-      projectId_provider: { projectId: scope.projectId, provider },
+      workspaceId_provider: { workspaceId: scope.workspaceId, provider },
     };
   }
-  throw new Error("ResourceScope must have projectId or organizationId");
+  throw new Error("ResourceScope must have workspaceId or organizationId");
 };
 
 export const isOrgScope = (scope: ResourceScope): boolean =>
-  !!scope.organizationId && !scope.projectId;
+  !!scope.organizationId && !scope.workspaceId;

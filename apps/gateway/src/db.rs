@@ -25,7 +25,7 @@ pub(crate) struct AgentRow {
     pub id: String,
     pub name: String,
     pub identifier: Option<String>,
-    pub project_id: String,
+    pub workspace_id: String,
     pub organization_id: String,
     pub subscription_status: String,
 }
@@ -34,11 +34,8 @@ pub(crate) struct AgentRow {
 #[derive(Debug, FromRow)]
 pub(crate) struct SecretRow {
     pub id: String,
-    /// "project" | "organization" | "partner". Lets the budget layer identify the
-    /// partner-tier credential by its actual scope — regardless of how the secret
-    /// was resolved (inherited vs. selectively assigned to an agent). Read only by
-    /// the cloud budget module (`BudgetSecret` impl), hence the cfg'd allow.
-    #[cfg_attr(not(edition_cloud), allow(dead_code))]
+    /// "workspace" | "organization". Read by the budget module (`BudgetSecret`
+    /// impl) to identify a budget-eligible credential by its actual scope.
     pub scope: String,
     #[sqlx(rename = "type")]
     pub type_: String,
@@ -61,19 +58,18 @@ pub(crate) struct UserRow {
     pub id: String,
 }
 
-/// An API key row from the `api_keys` table (project-scoped).
+/// An API key row from the `api_keys` table (workspace-scoped).
 #[derive(Debug, FromRow)]
 pub(crate) struct ApiKeyRow {
     pub user_id: String,
-    pub project_id: String,
+    pub workspace_id: String,
 }
 
 /// An org-scoped API key row from the `api_keys` table.
 ///
-/// EE-only (cloud + onprem): org keys are mintable only via the cloud UI and
-/// the onprem bootstrap, and only those editions' auth forks consult them —
-/// gating them out keeps org-key auth out of the OSS build entirely.
-#[cfg(not(edition_oss))]
+/// Queried by the merged auth path in every edition (`auth.rs`); the
+/// admin/owner ROLE recheck on top is cloud-gated, while active-membership
+/// liveness is checked everywhere.
 #[derive(Debug, FromRow)]
 pub(crate) struct OrgApiKeyRow {
     pub user_id: String,
@@ -93,7 +89,7 @@ pub(crate) struct VaultConnectionRow {
 
 // ── Queries ─────────────────────────────────────────────────────────────
 
-/// Look up a user by their external auth ID (e.g. OAuth `sub` claim or "local-admin").
+/// Look up a user by their external auth ID (the identity provider's subject).
 pub(crate) async fn find_user_by_external_auth_id(
     pool: &PgPool,
     external_auth_id: &str,
@@ -105,24 +101,47 @@ pub(crate) async fn find_user_by_external_auth_id(
         .context("querying user by external_auth_id")
 }
 
-/// Find the default project ID for a user (OSS only).
+/// Resolve a live browser session to its user.
 ///
-/// Resolves user → first organization → first project in that organization.
+/// The session table is the self-hosted identity layer's source of truth
+/// (better-auth writes it): the cookie carries this token, and signing out or
+/// revoking deletes the row, so a withdrawn session stops resolving here the
+/// moment it is withdrawn — no token lifetime to wait out. Expiry is checked
+/// in the query for the same reason: the row outlives its validity until
+/// something sweeps it.
+pub(crate) async fn find_user_by_session_token(
+    pool: &PgPool,
+    token: &str,
+) -> Result<Option<UserRow>> {
+    sqlx::query_as::<_, UserRow>(
+        r#"SELECT u.id
+           FROM sessions s
+           JOIN users u ON u.id = s.user_id
+           WHERE s.token = $1 AND s.expires_at > (now() AT TIME ZONE 'utc')
+           LIMIT 1"#,
+    )
+    .bind(token)
+    .fetch_optional(pool)
+    .await
+    .context("querying user by session token")
+}
+
+/// Find the default workspace ID for a user (onprem session fallback).
+///
+/// Resolves user → first organization → first workspace in that organization.
 /// Mirrors the web's `resolveUser()` (apps/web/src/lib/actions/resolve-user.ts).
 ///
-/// OSS-only: the cloud edition is multi-project and never falls back to a
-/// default project — it requires an explicit `X-Project-Id` and validates it
-/// with [`user_can_access_project`]. Gating this `not(cloud)` makes that a
-/// compile-time guarantee (a cloud caller fails to build).
-#[cfg(not(edition_cloud))]
-pub(crate) async fn find_default_project_id_by_user(
+/// Only called on the onprem session fallback: the cloud edition is
+/// multi-workspace and never falls back to a default workspace — it requires an
+/// explicit `X-Workspace-Id` and validates it with [`user_can_access_workspace`].
+pub(crate) async fn find_default_workspace_id_by_user(
     pool: &PgPool,
     user_id: &str,
 ) -> Result<Option<String>> {
     let row: Option<(String,)> = sqlx::query_as(
         r#"SELECT p.id
            FROM organization_members om
-           INNER JOIN projects p ON p.organization_id = om.organization_id
+           INNER JOIN workspaces p ON p.organization_id = om.organization_id
            WHERE om.user_id = $1 AND om.status <> 'suspended'
            ORDER BY om.created_at ASC, p.created_at ASC
            LIMIT 1"#,
@@ -130,15 +149,15 @@ pub(crate) async fn find_default_project_id_by_user(
     .bind(user_id)
     .fetch_optional(pool)
     .await
-    .context("querying default project for user via organization_members")?;
+    .context("querying default workspace for user via organization_members")?;
 
     Ok(row.map(|(id,)| id))
 }
 
-/// Look up an API key (`oc_...`) and return its user_id and project_id.
+/// Look up an API key (`oc_...`) and return its user_id and workspace_id.
 pub(crate) async fn find_api_key(pool: &PgPool, key: &str) -> Result<Option<ApiKeyRow>> {
     sqlx::query_as::<_, ApiKeyRow>(
-        r#"SELECT user_id, project_id FROM api_keys WHERE key = $1 LIMIT 1"#,
+        r#"SELECT user_id, workspace_id FROM api_keys WHERE key = $1 LIMIT 1"#,
     )
     .bind(key)
     .fetch_optional(pool)
@@ -147,7 +166,6 @@ pub(crate) async fn find_api_key(pool: &PgPool, key: &str) -> Result<Option<ApiK
 }
 
 /// Look up an org-scoped API key (`oc_org_...`) and return its user_id and organization_id.
-#[cfg(not(edition_oss))]
 pub(crate) async fn find_org_api_key(pool: &PgPool, key: &str) -> Result<Option<OrgApiKeyRow>> {
     sqlx::query_as::<_, OrgApiKeyRow>(
         r#"SELECT user_id, organization_id
@@ -161,106 +179,53 @@ pub(crate) async fn find_org_api_key(pool: &PgPool, key: &str) -> Result<Option<
     .context("querying org api_keys by key")
 }
 
-/// Verify that a project belongs to the given organization.
-#[cfg(not(edition_oss))]
-pub(crate) async fn verify_project_in_org(
+/// Verify that a workspace belongs to the given organization.
+pub(crate) async fn verify_workspace_in_org(
     pool: &PgPool,
-    project_id: &str,
+    workspace_id: &str,
     organization_id: &str,
 ) -> Result<bool> {
-    let row: Option<(String,)> =
-        sqlx::query_as(r#"SELECT id FROM projects WHERE id = $1 AND organization_id = $2 LIMIT 1"#)
-            .bind(project_id)
-            .bind(organization_id)
-            .fetch_optional(pool)
-            .await
-            .context("verifying project belongs to organization")?;
+    let row: Option<(String,)> = sqlx::query_as(
+        r#"SELECT id FROM workspaces WHERE id = $1 AND organization_id = $2 LIMIT 1"#,
+    )
+    .bind(workspace_id)
+    .bind(organization_id)
+    .fetch_optional(pool)
+    .await
+    .context("verifying workspace belongs to organization")?;
     Ok(row.is_some())
 }
 
-/// Verify that a user may access a project — i.e. the project belongs to an
+/// Verify that a user may access a workspace — i.e. the workspace belongs to an
 /// organization the user is a member of. Scopes cloud browser (Cognito)
-/// requests to the `X-Project-Id` they specify instead of a default project.
-#[cfg(edition_cloud)]
-pub(crate) async fn user_can_access_project(
+/// requests to the `X-Workspace-Id` they specify instead of a default workspace.
+pub(crate) async fn user_can_access_workspace(
     pool: &PgPool,
     user_id: &str,
-    project_id: &str,
+    workspace_id: &str,
 ) -> Result<bool> {
     let row: Option<(String,)> = sqlx::query_as(
         r#"SELECT p.id
            FROM organization_members om
-           INNER JOIN projects p ON p.organization_id = om.organization_id
+           INNER JOIN workspaces p ON p.organization_id = om.organization_id
            WHERE om.user_id = $1 AND p.id = $2
              AND om.status <> 'suspended'
            LIMIT 1"#,
     )
     .bind(user_id)
-    .bind(project_id)
+    .bind(workspace_id)
     .fetch_optional(pool)
     .await
-    .context("verifying user has access to project")?;
+    .context("verifying user has access to workspace")?;
     Ok(row.is_some())
 }
 
-/// Whether a project API key's user may still USE its project — re-checked on
-/// every project-key auth so a key stops working once its user loses access
-/// (demotion, suspension, removal, or an unshared project).
-///
-/// Named `manage` for historical reasons; it is really the project-key *usage*
-/// gate, and it mirrors the web's `canAccessProjectAsUser`
-/// (`packages/api/src/middleware/auth/resolve.ts`) exactly: the user must be an
-/// ACTIVE (non-suspended) member of the project's organization, and then either
-/// an org admin/owner, or the holder of a `ProjectAccess` binding — directly
-/// (`user_id`) or through a group they belong to. Bindings are the sole
-/// per-project grant since step 13b; `created_by_user_id` is no longer read
-/// (pure provenance), so a creator who is no longer an active member — suspended
-/// or removed — is denied like anyone else. Cloud-only.
-#[cfg(edition_cloud)]
-pub(crate) async fn user_can_manage_project(
-    pool: &PgPool,
-    user_id: &str,
-    project_id: &str,
-) -> Result<bool> {
-    let row: Option<(String,)> = sqlx::query_as(
-        // Active-membership INNER JOIN is the suspension/removal gate (mirrors
-        // `if (!role) return false`); then admin-or-binding. The two EXISTS are
-        // the two `projectAccessBindingArms` — a direct user binding, or one via
-        // a group the user is a member of.
-        r#"SELECT p.id
-           FROM projects p
-           INNER JOIN organization_members om
-             ON om.organization_id = p.organization_id
-            AND om.user_id = $1
-            AND om.status <> 'suspended'
-           WHERE p.id = $2
-             AND (
-               om.role IN ('owner', 'admin')
-               OR EXISTS (
-                 SELECT 1 FROM project_access pa
-                 WHERE pa.project_id = p.id AND pa.user_id = $1
-               )
-               OR EXISTS (
-                 SELECT 1 FROM project_access pa
-                 JOIN group_members gm ON gm.group_id = pa.group_id
-                 WHERE pa.project_id = p.id AND gm.user_id = $1
-               )
-             )
-           LIMIT 1"#,
-    )
-    .bind(user_id)
-    .bind(project_id)
-    .fetch_optional(pool)
-    .await
-    .context("verifying project-key user still has access to project")?;
-    Ok(row.is_some())
-}
-
-/// Whether a user is an admin or owner of an organization. Re-checked on every
-/// org-scoped API-key auth so the key stops working after a demotion or
-/// suspension.
-#[cfg(not(edition_oss))]
-pub(crate) async fn user_is_org_admin(
+/// Whether a user is an ACTIVE (non-suspended) member of an organization. The
+/// unconditional LIVENESS gate on org-key auth — checked in every edition, so
+/// an org key dies the moment its user is suspended or removed. The
+/// admin/owner ROLE recheck on top ([`crate::ee::rbac::user_is_org_admin`])
+/// runs only on cloud or a licensed self-host.
+pub(crate) async fn user_is_active_org_member(
     pool: &PgPool,
     user_id: &str,
     organization_id: &str,
@@ -269,7 +234,6 @@ pub(crate) async fn user_is_org_admin(
         r#"SELECT user_id
            FROM organization_members
            WHERE user_id = $1 AND organization_id = $2
-             AND role IN ('owner', 'admin')
              AND status <> 'suspended'
            LIMIT 1"#,
     )
@@ -277,7 +241,7 @@ pub(crate) async fn user_is_org_admin(
     .bind(organization_id)
     .fetch_optional(pool)
     .await
-    .context("verifying user is org admin")?;
+    .context("verifying user is an active org member")?;
     Ok(row.is_some())
 }
 
@@ -287,9 +251,9 @@ pub(crate) async fn find_agent_by_token(
     access_token: &str,
 ) -> Result<Option<AgentRow>> {
     sqlx::query_as::<_, AgentRow>(
-        r#"SELECT a.id, a.name, a.identifier, a.project_id, p.organization_id, o.subscription_status
+        r#"SELECT a.id, a.name, a.identifier, a.workspace_id, p.organization_id, o.subscription_status
            FROM agents a
-           JOIN projects p ON a.project_id = p.id
+           JOIN workspaces p ON a.workspace_id = p.id
            JOIN organizations o ON p.organization_id = o.id
            WHERE a.access_token = $1
            LIMIT 1"#,
@@ -300,32 +264,32 @@ pub(crate) async fn find_agent_by_token(
     .context("querying agent by access_token")
 }
 
-/// Look up the organization ID for a project.
-pub(crate) async fn find_organization_id_by_project(
+/// Look up the organization ID for a workspace.
+pub(crate) async fn find_organization_id_by_workspace(
     pool: &PgPool,
-    project_id: &str,
+    workspace_id: &str,
 ) -> Result<Option<String>> {
     let row: Option<(String,)> =
-        sqlx::query_as(r#"SELECT organization_id FROM projects WHERE id = $1 LIMIT 1"#)
-            .bind(project_id)
+        sqlx::query_as(r#"SELECT organization_id FROM workspaces WHERE id = $1 LIMIT 1"#)
+            .bind(workspace_id)
             .fetch_optional(pool)
             .await
-            .context("querying organization_id by project_id")?;
+            .context("querying organization_id by workspace_id")?;
     Ok(row.map(|(oid,)| oid))
 }
 
-/// Find all secrets for a given project.
-pub(crate) async fn find_secrets_by_project(
+/// Find all secrets for a given workspace.
+pub(crate) async fn find_secrets_by_workspace(
     pool: &PgPool,
-    project_id: &str,
+    workspace_id: &str,
 ) -> Result<Vec<SecretRow>> {
     sqlx::query_as::<_, SecretRow>(
-        r#"SELECT id, scope, type, value_source, encrypted_value, op_ref, host_pattern, path_pattern, injection_config, metadata FROM secrets WHERE project_id = $1"#,
+        r#"SELECT id, scope, type, value_source, encrypted_value, op_ref, host_pattern, path_pattern, injection_config, metadata FROM secrets WHERE workspace_id = $1"#,
     )
-    .bind(project_id)
+    .bind(workspace_id)
     .fetch_all(pool)
     .await
-    .context("querying secrets by project_id")
+    .context("querying secrets by workspace_id")
 }
 
 /// Find all organization-level secrets.
@@ -392,13 +356,13 @@ pub(crate) struct PolicyTargetRow {
     pub app_provider: Option<String>,
     #[serde(default)]
     pub app_tools: Vec<String>,
-    /// kind=app (step 8): "organization" | "project" → inject ALL the agent's
+    /// kind=app (step 8): "organization" | "workspace" → inject ALL the agent's
     /// connections of `app_provider` at that level; NULL = the app-permission
     /// block/allow rule (no injection).
     pub app_connection_scope: Option<String>,
     pub app_connection_id: Option<String>,
     pub secret_id: Option<String>,
-    /// kind=secret (step 8): "organization" | "project" → inject ALL the agent's
+    /// kind=secret (step 8): "organization" | "workspace" → inject ALL the agent's
     /// secrets at that level; NULL = a specific `secret_id` target.
     pub secret_scope: Option<String>,
     pub host_pattern: Option<String>,
@@ -438,15 +402,15 @@ pub(crate) struct PolicyRuleV2Row {
 /// builds serialize the same struct.
 #[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub(crate) struct PrincipalSet {
-    /// Human users the agent's project grants via ProjectAccess — directly, or as
+    /// Human users the agent's workspace grants via WorkspaceAccess — directly, or as
     /// members of a granted group.
     pub user_ids: Vec<String>,
-    /// Directory groups to match: those granted to the project directly, plus
+    /// Directory groups to match: those granted to the workspace directly, plus
     /// every group the inherited users belong to (org-fenced).
     pub group_ids: Vec<String>,
 }
 
-/// The published new-model rules for a connection's org + project scopes, loaded
+/// The published new-model rules for a connection's org + workspace scopes, loaded
 /// during connection resolution (cached with `ConnectResponse`). Empty when the
 /// engine is off, the org isn't backfilled, or a load errored — the enforce seam
 /// then reverts to the legacy path. Shared so `ConnectResponse` can carry it;
@@ -454,19 +418,19 @@ pub(crate) struct PrincipalSet {
 #[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub(crate) struct PolicyV2Rules {
     pub org: Vec<PolicyRuleV2Row>,
-    pub project: Vec<PolicyRuleV2Row>,
+    pub workspace: Vec<PolicyRuleV2Row>,
     /// The connection's resolved principal set (step 6). Empty unless some
     /// loaded rule targets a user/group identity (lazy). Only cloud ever
     /// populates it.
     #[serde(default)]
     pub principals: PrincipalSet,
-    /// The org+project custom secrets' host patterns (step 8), so a `secret` target
+    /// The org+workspace custom secrets' host patterns (step 8), so a `secret` target
     /// can permit/deny its host DB-free per request. Empty unless a loaded rule has
     /// a secret target (lazy). Populated by both the OSS core and the EE engine
     /// (`find_secret_hosts` is shared).
     #[serde(default)]
     pub secret_hosts: SecretHosts,
-    /// The org+project app connections' providers, so a `connection` target can
+    /// The org+workspace app connections' providers, so a `connection` target can
     /// resolve to its provider's catalog hosts and permit/deny them DB-free per
     /// request (the step-8 secret symmetry). Empty unless a loaded rule has a
     /// connection target (lazy). Only cloud ever populates it.
@@ -474,10 +438,10 @@ pub(crate) struct PolicyV2Rules {
     pub connection_providers: ConnectionProviders,
 }
 
-/// The host patterns of the acting org+project custom secrets, resolved ONCE at
+/// The host patterns of the acting org+workspace custom secrets, resolved ONCE at
 /// connection resolution (cached with `PolicyV2Rules`) so the block/allow engine
 /// can let a `secret` target PERMIT/deny its host DB-free per request (step 8).
-/// `by_id` serves a specific `secret_id` target; `project_hosts`/`org_hosts` serve
+/// `by_id` serves a specific `secret_id` target; `workspace_hosts`/`org_hosts` serve
 /// a `secret_scope` ("all secrets at a level") target. Each secret contributes ALL
 /// the hosts its credential injects on (`secret_inject::secret_host_patterns`) — a
 /// list, because a typed secret (OpenAI) is valid on several hosts — so enforcement
@@ -487,13 +451,13 @@ pub(crate) struct PolicyV2Rules {
 pub(crate) struct SecretHosts {
     /// A specific secret's id → every host pattern its credential injects on.
     pub by_id: std::collections::HashMap<String, Vec<String>>,
-    /// Every PROJECT-scoped secret's host patterns (for `secret_scope="project"`).
-    pub project_hosts: Vec<String>,
+    /// Every WORKSPACE-scoped secret's host patterns (for `secret_scope="workspace"`).
+    pub workspace_hosts: Vec<String>,
     /// Every ORG-scoped secret's host patterns (for `secret_scope="organization"`).
     pub org_hosts: Vec<String>,
 }
 
-/// The providers of the acting org+project app connections, resolved ONCE at
+/// The providers of the acting org+workspace app connections, resolved ONCE at
 /// connection resolution (cached with `PolicyV2Rules`) so the block/allow engine
 /// can decode a `connection` target to its provider — whose catalog hosts it then
 /// permits/denies, symmetric with a `secret` target (step 8). Fenced at load
@@ -509,8 +473,8 @@ pub(crate) struct ConnectionProviders {
 /// The specific credentials the connect's published v2 rules ALLOW the
 /// requesting agent to have injected — derived ONCE at connect-resolution from
 /// the already-loaded `PolicyV2Rules` (pure, DB-free). Since attach-model step 7
-/// this selection is the WHOLE story for the org/project tiers — every agent is
-/// rule-selected, and the retired `agents.secret_mode` column is never read.
+/// this selection is the WHOLE story for the org/workspace tiers — every agent is
+/// rule-selected (the legacy `agents.secret_mode` column is dropped).
 /// NOT cached on its own — it feeds the resolvers whose output
 /// (`injection_rules` / `app_connections`) is what rides `ConnectResponse`.
 #[derive(Debug, Clone, Default)]
@@ -523,7 +487,7 @@ pub(crate) struct InjectSelection {
     pub connections: std::collections::HashMap<String, Option<serde_json::Value>>,
     /// (provider, level) pairs from `kind=app` allow targets carrying a
     /// `connection_scope`: inject ALL the agent's connections of `provider` at
-    /// that org/project `level`. The grant itself carries no per-connection
+    /// that org/workspace `level`. The grant itself carries no per-connection
     /// sessionPolicy — but the connections it resolves to are still bounded by
     /// `boundaries` below, applied where those ids are read from the database.
     pub app_scopes: Vec<(String, String)>,
@@ -534,16 +498,18 @@ pub(crate) struct InjectSelection {
     /// `app_scopes` (provider-level) grant, which is resolved from the database
     /// long after the rules are folded. Always empty in OSS.
     pub boundaries: std::collections::HashMap<String, serde_json::Value>,
-    /// Levels ("organization" | "project") from `kind=secret` allow targets
+    /// Levels ("organization" | "workspace") from `kind=secret` allow targets
     /// carrying a `secret_scope`: inject ALL the agent's secrets at that level
     /// (a level selection, no per-secret guard).
     pub secret_scopes: Vec<String>,
 }
 
-/// The apps a connection's project may reach (a cloud/EE-only posture,
-/// resolved by the EE loaders at connection resolution). `restricted = false`
-/// — the default, and always in OSS — means EVERY app is available and the
-/// per-request pre-check is a no-op.
+/// The apps a connection's workspace may reach (a licensed posture, resolved
+/// by `crate::ee::principals` at connection resolution). `restricted = false`
+/// — the default, and always on unlicensed deployments — means EVERY app is
+/// available and the per-request pre-check is a no-op. INVARIANT: only the
+/// licensed loader may ever produce `restricted: true` — that one bool is
+/// what keeps the shared per-request path inert without a license.
 #[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub(crate) struct AvailableApps {
     pub restricted: bool,
@@ -572,25 +538,25 @@ pub(crate) const POLICY_V2_SELECT: &str = r#"
     FROM policy_rules_v2 r
 "#;
 
-/// Active published project-scope rules (max published generation), first-match
+/// Active published workspace-scope rules (max published generation), first-match
 /// ordered.
-pub(crate) async fn find_published_policy_rules_v2_by_project(
+pub(crate) async fn find_published_policy_rules_v2_by_workspace(
     pool: &PgPool,
-    project_id: &str,
+    workspace_id: &str,
 ) -> Result<Vec<PolicyRuleV2Row>> {
     sqlx::query_as::<_, PolicyRuleV2Row>(&format!(
         r#"{POLICY_V2_SELECT}
-           WHERE r.project_id = $1 AND r.scope = 'project'
+           WHERE r.workspace_id = $1 AND r.scope = 'workspace'
              AND r.status = 'published' AND r.enabled = true
              AND r.generation = (
                SELECT max(generation) FROM policy_rules_v2
-               WHERE project_id = $1 AND scope = 'project' AND status = 'published')
+               WHERE workspace_id = $1 AND scope = 'workspace' AND status = 'published')
            ORDER BY r.priority, r.id"#
     ))
-    .bind(project_id)
+    .bind(workspace_id)
     .fetch_all(pool)
     .await
-    .context("querying policy_rules_v2 by project_id")
+    .context("querying policy_rules_v2 by workspace_id")
 }
 
 #[derive(sqlx::FromRow)]
@@ -602,29 +568,28 @@ struct SecretHostRow {
     type_: String,
 }
 
-/// Resolve the host patterns of the acting org+project custom secrets so the
+/// Resolve the host patterns of the acting org+workspace custom secrets so the
 /// block/allow engine can let a `secret` target permit/deny its host (step 8).
-/// ORG+PROJECT-FENCED on every arm — a project secret via `project_id = $2` (a
-/// project id is unique and belongs to one org, mirroring `find_secrets_by_project`),
+/// ORG+WORKSPACE-FENCED on every arm — a workspace secret via `workspace_id = $2` (a
+/// workspace id is unique and belongs to one org, mirroring `find_secrets_by_workspace`),
 /// an org secret via `organization_id = $1 AND scope = 'organization'` — so a
 /// forged/foreign `secret_id` or scope can NEVER pull another org's host (it simply
-/// isn't in the fenced set). Partner secrets are excluded (custom secrets are
-/// project/org). Run once at connect (cached with `PolicyV2Rules`); the per-request
-/// path never touches the DB.
+/// isn't in the fenced set). Run once at connect (cached with `PolicyV2Rules`);
+/// the per-request path never touches the DB.
 pub(crate) async fn find_secret_hosts(
     pool: &PgPool,
     organization_id: &str,
-    project_id: &str,
+    workspace_id: &str,
 ) -> Result<SecretHosts> {
     let rows: Vec<SecretHostRow> = sqlx::query_as::<_, SecretHostRow>(
         r#"
         SELECT id, host_pattern, scope, type FROM secrets
-        WHERE project_id = $2
+        WHERE workspace_id = $2
            OR (organization_id = $1 AND scope = 'organization')
         "#,
     )
     .bind(organization_id)
-    .bind(project_id)
+    .bind(workspace_id)
     .fetch_all(pool)
     .await
     .context("resolving secret hosts")?;
@@ -635,7 +600,7 @@ pub(crate) async fn find_secret_hosts(
         // secret like OpenAI covers several), so enforcement == injection.
         let patterns = crate::secret_inject::secret_host_patterns(&row.type_, &row.host_pattern);
         match row.scope.as_str() {
-            "project" => hosts.project_hosts.extend(patterns.iter().cloned()),
+            "workspace" => hosts.workspace_hosts.extend(patterns.iter().cloned()),
             "organization" => hosts.org_hosts.extend(patterns.iter().cloned()),
             _ => {}
         }
@@ -644,10 +609,10 @@ pub(crate) async fn find_secret_hosts(
     Ok(hosts)
 }
 
-/// Resolve the providers of the acting org+project app connections so the
+/// Resolve the providers of the acting org+workspace app connections so the
 /// block/allow engine can decode a `connection` target to its provider's catalog
-/// hosts (the secret symmetry). ORG+PROJECT-FENCED exactly like
-/// `find_secret_hosts` — a project connection via `project_id = $2`, an org
+/// hosts (the secret symmetry). ORG+WORKSPACE-FENCED exactly like
+/// `find_secret_hosts` — a workspace connection via `workspace_id = $2`, an org
 /// connection via `organization_id = $1 AND scope = 'organization'` — so a
 /// forged/foreign connection id can NEVER resolve (it simply isn't in the fenced
 /// set → the target never matches). No status filter: the row's existence is the
@@ -657,17 +622,17 @@ pub(crate) async fn find_secret_hosts(
 pub(crate) async fn find_connection_providers(
     pool: &PgPool,
     organization_id: &str,
-    project_id: &str,
+    workspace_id: &str,
 ) -> Result<ConnectionProviders> {
     let rows: Vec<(String, String)> = sqlx::query_as(
         r#"
         SELECT id, provider FROM app_connections
-        WHERE project_id = $2
+        WHERE workspace_id = $2
            OR (organization_id = $1 AND scope = 'organization')
         "#,
     )
     .bind(organization_id)
-    .bind(project_id)
+    .bind(workspace_id)
     .fetch_all(pool)
     .await
     .context("resolving connection providers")?;
@@ -686,30 +651,29 @@ pub(crate) struct AppConfigRow {
     pub credentials: Option<String>,
 }
 
-/// Find an enabled BYOC app config for a project + provider.
+/// Find an enabled BYOC app config for a workspace + provider.
 pub(crate) async fn find_app_config(
     pool: &PgPool,
-    project_id: &str,
+    workspace_id: &str,
     provider: &str,
 ) -> Result<Option<AppConfigRow>> {
     sqlx::query_as::<_, AppConfigRow>(
         r#"SELECT settings, credentials FROM app_configs
-           WHERE project_id = $1 AND provider = $2 AND enabled = true
+           WHERE workspace_id = $1 AND provider = $2 AND enabled = true
            LIMIT 1"#,
     )
-    .bind(project_id)
+    .bind(workspace_id)
     .bind(provider)
     .fetch_optional(pool)
     .await
-    .context("querying app_config by project_id + provider")
+    .context("querying app_config by workspace_id + provider")
 }
 
 /// Find an enabled org-level BYOC app config for an organization + provider.
 ///
-/// EE-only (cloud + onprem): org-level app configs are writable only through
-/// the EE org surface (`POST /v1/org/apps/:provider/config`); OSS has no way
-/// to create them, so its build carries no org lookup.
-#[cfg(not(edition_oss))]
+/// Org-level app configs are writable only through the EE org surface
+/// (`POST /v1/org/apps/:provider/config`); OSS has no way to create them, so
+/// this lookup simply finds no rows there and degrades to `None`.
 pub(crate) async fn find_app_config_by_org(
     pool: &PgPool,
     organization_id: &str,
@@ -733,13 +697,13 @@ pub(crate) async fn find_app_config_by_org(
 ///
 /// A connection's OAuth refresh token is bound to the client that minted it, so
 /// refresh must reuse exactly that config — even when the resolver's tier order
-/// (project → org) would now select a different row. Returns `None` when the
+/// (workspace → org) would now select a different row. Returns `None` when the
 /// link is null (env-minted, a no-config method, or pre-dating the link), or the
 /// config has since been disabled/removed, or (defence-in-depth) points at a
 /// different provider. The `provider` guard keeps a mislinked FK from ever
 /// handing one provider's client secret to another provider's token endpoint;
 /// every writer links same-provider by construction, so it only ever excludes
-/// corrupt data. Shared across editions: project-tier links exist in OSS; org
+/// corrupt data. Shared across editions: workspace-tier links exist in OSS; org
 /// rows simply never exist there.
 pub(crate) async fn find_app_config_by_connection(
     pool: &PgPool,
@@ -766,7 +730,7 @@ pub(crate) async fn find_app_config_by_connection(
 pub(crate) struct AppConnectionRow {
     pub id: String,
     pub provider: String,
-    /// "organization" | "project" — the connection's level, so a step-8 app
+    /// "organization" | "workspace" — the connection's level, so a step-8 app
     /// target scoped to "all connections at level L" can match by it.
     pub scope: String,
     pub credentials: Option<String>,
@@ -775,18 +739,18 @@ pub(crate) struct AppConnectionRow {
     pub session_policy: Option<serde_json::Value>,
 }
 
-/// Find all connected app connections for a given project.
-pub(crate) async fn find_app_connections_by_project(
+/// Find all connected app connections for a given workspace.
+pub(crate) async fn find_app_connections_by_workspace(
     pool: &PgPool,
-    project_id: &str,
+    workspace_id: &str,
 ) -> Result<Vec<AppConnectionRow>> {
     sqlx::query_as::<_, AppConnectionRow>(
-        r#"SELECT id, provider, scope, credentials, label, metadata, NULL::jsonb AS session_policy FROM app_connections WHERE project_id = $1 AND status = 'connected'"#,
+        r#"SELECT id, provider, scope, credentials, label, metadata, NULL::jsonb AS session_policy FROM app_connections WHERE workspace_id = $1 AND status = 'connected'"#,
     )
-    .bind(project_id)
+    .bind(workspace_id)
     .fetch_all(pool)
     .await
-    .context("querying app_connections by project_id")
+    .context("querying app_connections by workspace_id")
 }
 
 /// Find all organization-level app connections.
@@ -822,37 +786,37 @@ pub(crate) async fn update_app_connection_credentials(
 
 // ── Vault connection queries ────────────────────────────────────────────
 
-/// Find a vault connection for a project + provider pair.
+/// Find a vault connection for a workspace + provider pair.
 pub(crate) async fn find_vault_connection(
     pool: &PgPool,
-    project_id: &str,
+    workspace_id: &str,
     provider: &str,
 ) -> Result<Option<VaultConnectionRow>> {
     sqlx::query_as::<_, VaultConnectionRow>(
-        r#"SELECT id, provider, name, status, connection_data FROM vault_connections WHERE project_id = $1 AND provider = $2 LIMIT 1"#,
+        r#"SELECT id, provider, name, status, connection_data FROM vault_connections WHERE workspace_id = $1 AND provider = $2 LIMIT 1"#,
     )
-    .bind(project_id)
+    .bind(workspace_id)
     .bind(provider)
     .fetch_optional(pool)
     .await
-    .context("querying vault_connection by project_id + provider")
+    .context("querying vault_connection by workspace_id + provider")
 }
 
-/// Upsert a vault connection (insert or update on project_id + provider conflict).
+/// Upsert a vault connection (insert or update on workspace_id + provider conflict).
 pub(crate) async fn upsert_vault_connection(
     pool: &PgPool,
-    project_id: &str,
+    workspace_id: &str,
     provider: &str,
     status: &str,
     connection_data: Option<&serde_json::Value>,
 ) -> Result<()> {
     sqlx::query(
-        r#"INSERT INTO vault_connections (id, project_id, provider, status, connection_data, created_at, updated_at)
+        r#"INSERT INTO vault_connections (id, workspace_id, provider, status, connection_data, created_at, updated_at)
            VALUES (gen_random_uuid()::text, $1, $2, $3, $4, NOW(), NOW())
-           ON CONFLICT (project_id, provider)
+           ON CONFLICT (workspace_id, provider)
            DO UPDATE SET status = $3, connection_data = $4, updated_at = NOW()"#,
     )
-    .bind(project_id)
+    .bind(workspace_id)
     .bind(provider)
     .bind(status)
     .bind(connection_data)
@@ -865,14 +829,14 @@ pub(crate) async fn upsert_vault_connection(
 /// Update only the connection_data JSON for an existing vault connection.
 pub(crate) async fn update_vault_connection_data(
     pool: &PgPool,
-    project_id: &str,
+    workspace_id: &str,
     provider: &str,
     connection_data: &serde_json::Value,
 ) -> Result<()> {
     sqlx::query(
-        r#"UPDATE vault_connections SET connection_data = $3, updated_at = NOW() WHERE project_id = $1 AND provider = $2"#,
+        r#"UPDATE vault_connections SET connection_data = $3, updated_at = NOW() WHERE workspace_id = $1 AND provider = $2"#,
     )
-    .bind(project_id)
+    .bind(workspace_id)
     .bind(provider)
     .bind(connection_data)
     .execute(pool)
@@ -881,14 +845,14 @@ pub(crate) async fn update_vault_connection_data(
     Ok(())
 }
 
-/// Delete a vault connection for a project + provider pair.
+/// Delete a vault connection for a workspace + provider pair.
 pub(crate) async fn delete_vault_connection(
     pool: &PgPool,
-    project_id: &str,
+    workspace_id: &str,
     provider: &str,
 ) -> Result<()> {
-    sqlx::query(r#"DELETE FROM vault_connections WHERE project_id = $1 AND provider = $2"#)
-        .bind(project_id)
+    sqlx::query(r#"DELETE FROM vault_connections WHERE workspace_id = $1 AND provider = $2"#)
+        .bind(workspace_id)
         .bind(provider)
         .execute(pool)
         .await

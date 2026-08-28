@@ -1,43 +1,45 @@
-//! Decode the loaded published project rows into the evaluator's `Rule` list.
-//! The rows are already new-model; this maps shapes and resolves
-//! connection/secret targets through the fenced connect-time maps.
+//! Decode loaded published `policy_rules_v2` rows into the engine's `NewRule`
+//! list. The rows are already new-model, so this is a direct decode. Each scope
+//! carries its own `priority` sequence; the evaluator combines the two levels.
 
 use crate::db::{
     ConnectionProviders, PolicyIdentityRow, PolicyRuleV2Row, PolicyTargetRow, SecretHosts,
 };
 
-use super::types::{Action, Identity, RateWindow, Rule, Target};
+use super::types::{Action, Identity, NewRule, RateWindow, Scope, Target};
 
-/// Agent identities match by id; every other principal kind is a OneCLI Cloud
-/// capability and decodes to `Other`, which never matches — a stored directory
-/// identity narrows its rule to nothing rather than widening it (fail-closed).
+/// Decode each identity row to its `Identity` variant. Exactly one principal
+/// column is set (the DB `one_principal` CHECK); the directory kinds
+/// (user/group, step 6) are matched against the connection's resolved
+/// principal set. A row with no principal → `Unresolved` (never matches;
+/// unreachable given the CHECK). The rows were parsed from the aggregate JSON at
+/// LOAD (`Json<Vec<…>>` on `PolicyRuleV2Row`); here we only map, so the
+/// per-request path never re-parses JSON.
 fn decode_identities(rows: &[PolicyIdentityRow]) -> Vec<Identity> {
     rows.iter()
-        .map(|r| match &r.agent_id {
-            Some(id) => Identity::Agent(id.clone()),
-            None => Identity::Other,
+        .map(|r| {
+            if let Some(id) = &r.agent_id {
+                Identity::Agent(id.clone())
+            } else if let Some(id) = &r.user_id {
+                Identity::User(id.clone())
+            } else if let Some(id) = &r.group_id {
+                Identity::Group(id.clone())
+            } else {
+                Identity::Unresolved
+            }
         })
         .collect()
 }
 
-/// Resolve a `secret` target to the host pattern(s) it gates: a specific
-/// `secret_id` via the fenced by-id map (absent/deleted → none → never
-/// matches), or a `secret_scope` level union. The maps are project-fenced at
-/// load, so a forged/foreign id resolves to nothing.
-fn secret_target_hosts(r: &PolicyTargetRow, secret_hosts: &SecretHosts) -> Vec<String> {
-    if let Some(id) = &r.secret_id {
-        secret_hosts.by_id.get(id).cloned().unwrap_or_default()
-    } else if let Some(scope) = &r.secret_scope {
-        match scope.as_str() {
-            "project" => secret_hosts.project_hosts.clone(),
-            "organization" => secret_hosts.org_hosts.clone(),
-            _ => Vec::new(),
-        }
-    } else {
-        Vec::new()
-    }
-}
-
+/// `network`/`app`/`secret`/`connection` → the matchable targets; an unknown kind
+/// → `Unresolved`. A `secret` target resolves to its credential's host pattern(s)
+/// via `secret_hosts`; a `connection` target resolves through `connection_providers`
+/// (both loaded at connect) to a `Target::Connection` that KEEPS the id — the
+/// decision binds to the connection that wins injection — carrying the target's
+/// own `app_tools` (empty = the whole app, host-only; named = the tool fan-out,
+/// honoring path/method/conditions — the same expansion as an app target). A
+/// missing/deleted/foreign connection id isn't in the fenced map → `Unresolved`
+/// (never matches — fail-closed, like a deleted secret).
 fn decode_targets(
     rows: &[PolicyTargetRow],
     secret_hosts: &SecretHosts,
@@ -57,16 +59,15 @@ fn decode_targets(
                 },
                 None => Target::Unresolved,
             },
-            // A connection target binds the decision to that specific
-            // connection — it matches only when it wins injection (the target's
-            // own tools narrow which endpoints; empty = the whole app). A
-            // missing/deleted/foreign id is not in the fenced map →
-            // `Unresolved` (never matches — fail-closed).
             "connection" => match r
                 .app_connection_id
                 .as_ref()
                 .and_then(|id| connection_providers.by_id.get(id).map(|p| (id, p)))
             {
+                // The id binds the decision to the connection that wins
+                // injection; the target's own `app_tools` narrow which
+                // endpoints match (empty = the connection's whole app).
+                // Injection selection is separate (`inject_select`).
                 Some((id, provider)) => Target::Connection {
                     id: id.clone(),
                     provider: provider.clone(),
@@ -82,6 +83,26 @@ fn decode_targets(
         .collect()
 }
 
+/// Resolve a `secret` target to the host pattern(s) it gates. A specific
+/// `secret_id` → its host pattern(s) — a typed secret (OpenAI) covers several
+/// (absent/deleted from the fenced set → none, so the target never matches —
+/// fail-closed); a `secret_scope` → the union of the
+/// org/workspace secrets' hosts (step 8). `secret_hosts` is org/workspace-fenced at
+/// connect (`find_secret_hosts`), so a forged id/scope resolves to nothing.
+fn secret_target_hosts(r: &PolicyTargetRow, secret_hosts: &SecretHosts) -> Vec<String> {
+    if let Some(id) = &r.secret_id {
+        secret_hosts.by_id.get(id).cloned().unwrap_or_default()
+    } else if let Some(scope) = &r.secret_scope {
+        match scope.as_str() {
+            "workspace" => secret_hosts.workspace_hosts.clone(),
+            "organization" => secret_hosts.org_hosts.clone(),
+            _ => Vec::new(),
+        }
+    } else {
+        Vec::new()
+    }
+}
+
 fn rate_window(name: Option<&str>) -> Option<RateWindow> {
     match name {
         Some("minute") => Some(RateWindow::Minute),
@@ -91,15 +112,20 @@ fn rate_window(name: Option<&str>) -> Option<RateWindow> {
     }
 }
 
+/// Decode one loaded v2 row into a `NewRule`. `scope` comes from which loader
+/// produced it. A malformed rate limit (≤ 0 or unknown window) is dropped to a
+/// plain allow, matching the translator + the old gateway.
 fn decode_row(
     row: &PolicyRuleV2Row,
+    scope: Scope,
     secret_hosts: &SecretHosts,
     connection_providers: &ConnectionProviders,
-) -> Rule {
-    Rule {
+) -> NewRule {
+    NewRule {
         id: row.id.clone(),
         logical_id: row.logical_id.clone(),
         name: row.name.clone(),
+        scope,
         priority: usize::try_from(row.priority).unwrap_or(0),
         is_default: row.is_default,
         identities: decode_identities(&row.identities.0),
@@ -110,8 +136,6 @@ fn decode_row(
             Action::Allow
         },
         require_approval: row.require_approval,
-        // A malformed rate limit (≤ 0 or an unknown window) drops to a plain
-        // allow, matching the legacy loader.
         rate_limit: row
             .rate_limit
             .and_then(|v| u64::try_from(v).ok())
@@ -121,20 +145,33 @@ fn decode_row(
     }
 }
 
-/// Assemble the loaded project rows for the evaluator. `source="equipment"`
-/// rows are injection-only — their connection/secret target names a credential
-/// to inject at connect, not a policy grant — and are DROPPED here. That drop
-/// is load-bearing: a `secret` target PERMITS its host, so an undropped
-/// equipment rule would silently grant network access alongside its injection.
-pub(super) fn assemble(
-    project_rows: &[PolicyRuleV2Row],
+/// Assemble the (borrowed) org + workspace loaded rows into the new-model rule list
+/// the evaluator walks. Borrowed because the rows live in the resolved bundle
+/// (loaded at connection resolution) and are decoded per request off the hot path.
+///
+/// `source="equipment"` rows (step 8) are DROPPED here by SOURCE: they materialize
+/// the equipment/injection model — their connection/secret target names a credential
+/// to inject at connect, not a policy grant — so the block/allow engine must not see
+/// them. Dropping by source is load-bearing now that a `secret` target PERMITS its
+/// host: an undropped equipment secret rule would wrongly grant its host. It also
+/// neutralizes a rule orphaned to zero targets by an FK cascade when its
+/// secret/connection is deleted (the Layer-1 empty-targets guard catches that too).
+pub(super) fn assemble_v2(
+    org_rows: &[PolicyRuleV2Row],
+    workspace_rows: &[PolicyRuleV2Row],
     secret_hosts: &SecretHosts,
     connection_providers: &ConnectionProviders,
-) -> Vec<Rule> {
-    project_rows
+) -> Vec<NewRule> {
+    org_rows
         .iter()
         .filter(|row| row.source != "equipment")
-        .map(|row| decode_row(row, secret_hosts, connection_providers))
+        .map(|row| decode_row(row, Scope::Organization, secret_hosts, connection_providers))
+        .chain(
+            workspace_rows
+                .iter()
+                .filter(|row| row.source != "equipment")
+                .map(|row| decode_row(row, Scope::Workspace, secret_hosts, connection_providers)),
+        )
         .collect()
 }
 
@@ -144,160 +181,198 @@ mod tests {
     use serde_json::json;
     use sqlx::types::Json;
 
-    fn row(over: impl FnOnce(&mut PolicyRuleV2Row)) -> PolicyRuleV2Row {
-        let mut r = PolicyRuleV2Row {
+    fn row(
+        action: &str,
+        identities: serde_json::Value,
+        targets: serde_json::Value,
+    ) -> PolicyRuleV2Row {
+        // The rows arrive pre-decoded (Json<Vec<…>>); parse the fixture JSON the
+        // same way the load path does.
+        PolicyRuleV2Row {
             id: "r1".to_string(),
-            logical_id: "l1".to_string(),
+            logical_id: "lr1".to_string(),
             name: "rule".to_string(),
             source: "custom".to_string(),
-            priority: 0,
+            priority: 3,
             is_default: false,
-            action: "allow".to_string(),
+            action: action.to_string(),
             rate_limit: None,
             rate_limit_window: None,
             require_approval: false,
             conditions: None,
-            identities: Json(Vec::new()),
-            targets: Json(Vec::new()),
-        };
-        over(&mut r);
-        r
-    }
-
-    fn target(v: serde_json::Value) -> PolicyTargetRow {
-        serde_json::from_value(v).expect("target row")
+            identities: Json(serde_json::from_value(identities).unwrap_or_default()),
+            targets: Json(serde_json::from_value(targets).unwrap_or_default()),
+        }
     }
 
     #[test]
-    fn equipment_rows_are_dropped_from_the_decision_walk() {
-        let rows = vec![
-            row(|r| r.source = "equipment".to_string()),
-            row(|r| r.id = "keep".to_string()),
-        ];
-        let rules = assemble(
+    fn decodes_agent_identity_and_network_target() {
+        let rows = vec![row(
+            "block",
+            json!([{ "agentId": "a1", "userId": null, "groupId": null }]),
+            json!([{ "kind": "network", "hostPattern": "api.example.com", "pathPattern": "/*", "method": "GET" }]),
+        )];
+        let rules = assemble_v2(
+            &[],
             &rows,
             &SecretHosts::default(),
             &ConnectionProviders::default(),
         );
         assert_eq!(rules.len(), 1);
-        assert_eq!(rules[0].id, "keep");
+        assert_eq!(rules[0].action, Action::Block);
+        assert_eq!(rules[0].scope, Scope::Workspace);
+        assert_eq!(rules[0].priority, 3);
+        match &rules[0].identities[..] {
+            [Identity::Agent(id)] => assert_eq!(id, "a1"),
+            other => panic!("expected one agent identity, got {other:?}"),
+        }
+        match &rules[0].targets[..] {
+            [Target::Network {
+                host_pattern,
+                method,
+                ..
+            }] => {
+                assert_eq!(host_pattern, "api.example.com");
+                assert_eq!(method.as_deref(), Some("GET"));
+            }
+            other => panic!("expected one network target, got {other:?}"),
+        }
     }
 
     #[test]
-    fn directory_identities_decode_to_other_never_agent() {
-        let rows = vec![row(|r| {
-            r.identities = Json(vec![serde_json::from_value(
-                json!({"agentId": null, "userId": null, "groupId": "g1"}),
-            )
-            .expect("identity row")]);
-        })];
-        let rules = assemble(
+    fn decodes_app_target() {
+        let rows = vec![row(
+            "allow",
+            json!([]),
+            json!([{ "kind": "app", "appProvider": "gmail", "appTools": ["read_emails"] }]),
+        )];
+        let rules = assemble_v2(
             &rows,
+            &[],
             &SecretHosts::default(),
             &ConnectionProviders::default(),
         );
-        assert!(matches!(rules[0].identities[0], Identity::Other));
+        assert_eq!(rules[0].scope, Scope::Organization);
+        match &rules[0].targets[..] {
+            [Target::App { provider, tools }] => {
+                assert_eq!(provider, "gmail");
+                assert_eq!(tools, &["read_emails".to_string()]);
+            }
+            other => panic!("expected one app target, got {other:?}"),
+        }
     }
 
     #[test]
-    fn connection_target_resolves_via_the_fenced_map_else_unresolved() {
-        let mut providers = ConnectionProviders::default();
-        providers
-            .by_id
-            .insert("c1".to_string(), "github".to_string());
-        let rows = vec![row(|r| {
-            r.targets = Json(vec![
-                target(json!({"kind": "connection", "appConnectionId": "c1", "appTools": []})),
-                target(json!({"kind": "connection", "appConnectionId": "missing", "appTools": []})),
-            ]);
-        })];
-        let rules = assemble(&rows, &SecretHosts::default(), &providers);
-        assert!(matches!(
-            &rules[0].targets[0],
-            Target::Connection { id, provider, .. } if id == "c1" && provider == "github"
-        ));
-        assert!(matches!(rules[0].targets[1], Target::Unresolved));
-    }
-
-    #[test]
-    fn secret_target_resolves_hosts_by_id_and_scope() {
-        let mut hosts = SecretHosts::default();
-        hosts
-            .by_id
-            .insert("s1".to_string(), vec!["api.example.com".to_string()]);
-        hosts.project_hosts.push("p.example.com".to_string());
-        let rows = vec![row(|r| {
-            r.targets = Json(vec![
-                target(json!({"kind": "secret", "secretId": "s1"})),
-                target(json!({"kind": "secret", "secretScope": "project"})),
-                target(json!({"kind": "secret", "secretId": "deleted"})),
-            ]);
-        })];
-        let rules = assemble(&rows, &hosts, &ConnectionProviders::default());
-        assert!(
-            matches!(&rules[0].targets[0], Target::Secret { host_patterns } if host_patterns == &["api.example.com".to_string()])
-        );
-        assert!(
-            matches!(&rules[0].targets[1], Target::Secret { host_patterns } if host_patterns == &["p.example.com".to_string()])
-        );
-        assert!(
-            matches!(&rules[0].targets[2], Target::Secret { host_patterns } if host_patterns.is_empty())
-        );
-    }
-
-    #[test]
-    fn openai_secret_target_resolves_every_injected_host() {
-        // `find_secret_hosts` expands an OpenAI secret to its full injection
-        // surface (`secret_host_patterns`); a specific-secret rule then enforces
-        // on ALL of them — so a block/approval rule can't be dodged via ChatGPT /
-        // the other OpenAI hosts the one credential is injected on.
-        let mut hosts = SecretHosts::default();
-        hosts.by_id.insert(
-            "s1".to_string(),
-            crate::secret_inject::secret_host_patterns("openai", "api.openai.com"),
-        );
-        let rows = vec![row(|r| {
-            r.targets = Json(vec![target(json!({"kind": "secret", "secretId": "s1"}))]);
-        })];
-        let rules = assemble(&rows, &hosts, &ConnectionProviders::default());
-        let Target::Secret { host_patterns } = &rules[0].targets[0] else {
-            panic!("expected a secret target");
-        };
-        assert_eq!(
-            host_patterns,
-            &[
-                "api.openai.com".to_string(),
-                "chatgpt.com".to_string(),
-                "*.chatgpt.com".to_string(),
-                "*.openai.com".to_string(),
-            ]
-        );
-    }
-
-    #[test]
-    fn malformed_rate_limit_drops_to_plain_allow() {
+    fn decodes_directory_identities() {
+        // Step 6: user / group identities decode to their own
+        // variants (matched against the connection's principal set), no longer
+        // `Unresolved`.
         let rows = vec![
-            row(|r| {
-                r.rate_limit = Some(0);
-                r.rate_limit_window = Some("minute".to_string());
-            }),
-            row(|r| {
-                r.rate_limit = Some(5);
-                r.rate_limit_window = Some("week".to_string());
-            }),
-            row(|r| {
-                r.rate_limit = Some(5);
-                r.rate_limit_window = Some("hour".to_string());
-            }),
+            row(
+                "allow",
+                json!([{ "agentId": null, "userId": "u1", "groupId": null }]),
+                json!([]),
+            ),
+            row(
+                "allow",
+                json!([{ "agentId": null, "userId": null, "groupId": "g1" }]),
+                json!([]),
+            ),
         ];
-        let rules = assemble(
+        let rules = assemble_v2(
+            &rows,
+            &[],
+            &SecretHosts::default(),
+            &ConnectionProviders::default(),
+        );
+        assert!(matches!(&rules[0].identities[..], [Identity::User(id)] if id == "u1"));
+        assert!(matches!(&rules[1].identities[..], [Identity::Group(id)] if id == "g1"));
+    }
+
+    #[test]
+    fn connection_target_resolves_to_its_connection() {
+        // A connection target decodes through the fenced connect-time provider
+        // map to a `Connection` target that KEEPS the id — decisions bind to
+        // the connection that wins injection (no tools → the provider's whole
+        // app, host-only, same expansion as `App`).
+        let providers = ConnectionProviders {
+            by_id: [("c1".to_string(), "gmail".to_string())]
+                .into_iter()
+                .collect(),
+        };
+        let rows = vec![row(
+            "allow",
+            json!([{ "agentId": null, "userId": null, "groupId": "g1" }]),
+            json!([{ "kind": "connection", "appConnectionId": "c1" }]),
+        )];
+        let rules = assemble_v2(&[], &rows, &SecretHosts::default(), &providers);
+        assert!(matches!(&rules[0].identities[..], [Identity::Group(id)] if id == "g1"));
+        match &rules[0].targets[..] {
+            [Target::Connection {
+                id,
+                provider,
+                tools,
+            }] => {
+                assert_eq!(id, "c1");
+                assert_eq!(provider, "gmail");
+                assert!(tools.is_empty());
+            }
+            other => panic!("expected a connection target, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn connection_target_unresolved_when_missing_from_fenced_map() {
+        // A connection id absent from the fenced map (deleted in the cache window,
+        // or a forged/foreign id the fence excluded) → `Unresolved` (never
+        // matches — fail-closed, like a deleted secret).
+        let rows = vec![row(
+            "allow",
+            json!([]),
+            json!([{ "kind": "connection", "appConnectionId": "gone" }]),
+        )];
+        let rules = assemble_v2(
+            &[],
             &rows,
             &SecretHosts::default(),
             &ConnectionProviders::default(),
         );
-        assert_eq!(rules[0].rate_limit, None);
-        assert_eq!(rules[1].rate_limit_window, None);
-        assert_eq!(rules[2].rate_limit, Some(5));
-        assert_eq!(rules[2].rate_limit_window, Some(RateWindow::Hour));
+        assert!(matches!(rules[0].targets[..], [Target::Unresolved]));
+    }
+
+    #[test]
+    fn equipment_source_rules_are_dropped_from_block_allow() {
+        // Injection-only: an `equipment` rule (even a well-formed allow) must not
+        // reach the block/allow engine. A `custom` sibling is kept.
+        let mut equip = row("allow", json!([]), json!([]));
+        equip.source = "equipment".to_string();
+        let keep = row("block", json!([]), json!([]));
+        let rules = assemble_v2(
+            &[equip, keep],
+            &[],
+            &SecretHosts::default(),
+            &ConnectionProviders::default(),
+        );
+        assert_eq!(rules.len(), 1);
+        assert_eq!(rules[0].action, Action::Block);
+    }
+
+    #[test]
+    fn decodes_rate_limit_and_drops_malformed() {
+        let mut good = row("allow", json!([]), json!([]));
+        good.rate_limit = Some(100);
+        good.rate_limit_window = Some("hour".to_string());
+        let mut bad = row("allow", json!([]), json!([]));
+        bad.rate_limit = Some(0); // malformed → dropped
+        bad.rate_limit_window = Some("hour".to_string());
+        let rules = assemble_v2(
+            &[good, bad],
+            &[],
+            &SecretHosts::default(),
+            &ConnectionProviders::default(),
+        );
+        assert_eq!(rules[0].rate_limit, Some(100));
+        assert_eq!(rules[0].rate_limit_window, Some(RateWindow::Hour));
+        assert_eq!(rules[1].rate_limit, None);
     }
 }

@@ -193,8 +193,8 @@ impl Budget {
 ///
 /// Returns whether they all did. Anything still running when this returns
 /// false is cut when the process exits — which is the intended outcome for the
-/// indefinite pipes (raw CONNECT tunnels, WebSockets) that deliberately hold
-/// no guard, and the accepted cost for anything else that is genuinely stuck.
+/// indefinite pipes (WebSockets) that deliberately hold no guard, and the
+/// accepted cost for anything else that is genuinely stuck.
 pub(crate) async fn drain_connections(deadline: Duration) -> bool {
     // The lock guard is a temporary in this statement and drops at the
     // semicolon — it must never be held across the await below.

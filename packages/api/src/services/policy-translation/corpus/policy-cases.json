@@ -3,7 +3,7 @@
     "name": "custom block matches exact host+path",
     "rules": [
       {
-        "scope": "project",
+        "scope": "workspace",
         "priority": 0,
         "isDefault": false,
         "source": "custom",
@@ -40,7 +40,7 @@
     "name": "custom block does not match a different path",
     "rules": [
       {
-        "scope": "project",
+        "scope": "workspace",
         "priority": 0,
         "isDefault": false,
         "source": "custom",
@@ -168,7 +168,7 @@
     "name": "allow + requireApproval modifier",
     "rules": [
       {
-        "scope": "project",
+        "scope": "workspace",
         "priority": 1,
         "isDefault": false,
         "source": "custom",
@@ -206,7 +206,7 @@
     "name": "allow + rate-limit modifier",
     "rules": [
       {
-        "scope": "project",
+        "scope": "workspace",
         "priority": 2,
         "isDefault": false,
         "source": "custom",
@@ -245,7 +245,7 @@
     "name": "strictest-wins: a block priority beats a co-matching approval",
     "rules": [
       {
-        "scope": "project",
+        "scope": "workspace",
         "priority": 0,
         "isDefault": false,
         "source": "custom",
@@ -266,7 +266,7 @@
         "conditions": null
       },
       {
-        "scope": "project",
+        "scope": "workspace",
         "priority": 1,
         "isDefault": false,
         "source": "custom",
@@ -303,7 +303,7 @@
     "name": "git receive-pack block also blocks the GET discovery",
     "rules": [
       {
-        "scope": "project",
+        "scope": "workspace",
         "priority": 0,
         "isDefault": false,
         "source": "custom",
@@ -337,7 +337,7 @@
     }
   },
   {
-    "name": "org block is not overridable by a project all-agents allow",
+    "name": "org block is not overridable by a workspace all-agents allow",
     "rules": [
       {
         "scope": "organization",
@@ -361,11 +361,11 @@
         "conditions": null
       },
       {
-        "scope": "project",
+        "scope": "workspace",
         "priority": 0,
         "isDefault": false,
         "source": "custom",
-        "name": "project allow admin",
+        "name": "workspace allow admin",
         "identities": [],
         "targets": [
           {
@@ -395,7 +395,7 @@
     }
   },
   {
-    "name": "strictest-wins across scopes: org allow + project block → block",
+    "name": "strictest-wins across scopes: org allow + workspace block → block",
     "rules": [
       {
         "scope": "organization",
@@ -419,11 +419,11 @@
         "conditions": null
       },
       {
-        "scope": "project",
+        "scope": "workspace",
         "priority": 0,
         "isDefault": false,
         "source": "custom",
-        "name": "project block x",
+        "name": "workspace block x",
         "identities": [],
         "targets": [
           {
@@ -453,10 +453,10 @@
     }
   },
   {
-    "name": "project agent-scoped allow loosens an all-agents block (higher priority)",
+    "name": "workspace agent-scoped allow loosens an all-agents block (higher priority)",
     "rules": [
       {
-        "scope": "project",
+        "scope": "workspace",
         "priority": 0,
         "isDefault": false,
         "source": "custom",
@@ -482,7 +482,7 @@
         "conditions": null
       },
       {
-        "scope": "project",
+        "scope": "workspace",
         "priority": 1,
         "isDefault": false,
         "source": "custom",
@@ -519,7 +519,7 @@
     "name": "the same all-agents block still applies to a different agent",
     "rules": [
       {
-        "scope": "project",
+        "scope": "workspace",
         "priority": 0,
         "isDefault": false,
         "source": "custom",
@@ -545,7 +545,7 @@
         "conditions": null
       },
       {
-        "scope": "project",
+        "scope": "workspace",
         "priority": 1,
         "isDefault": false,
         "source": "custom",
@@ -582,7 +582,7 @@
     "name": "a host-wide block rule blocks the whole host",
     "rules": [
       {
-        "scope": "project",
+        "scope": "workspace",
         "priority": 0,
         "isDefault": false,
         "source": "blocklist",
@@ -619,7 +619,7 @@
     "name": "body-contains condition gates a block (matches)",
     "rules": [
       {
-        "scope": "project",
+        "scope": "workspace",
         "priority": 0,
         "isDefault": false,
         "source": "custom",
@@ -663,7 +663,7 @@
     "name": "body-contains condition does not match → allow",
     "rules": [
       {
-        "scope": "project",
+        "scope": "workspace",
         "priority": 0,
         "isDefault": false,
         "source": "custom",
@@ -707,7 +707,7 @@
     "name": "grouped tool rules: the union approves the second tool's endpoint",
     "rules": [
       {
-        "scope": "project",
+        "scope": "workspace",
         "priority": 0,
         "isDefault": false,
         "source": "app_permission",
@@ -728,7 +728,7 @@
         "conditions": null
       },
       {
-        "scope": "project",
+        "scope": "workspace",
         "priority": 1,
         "isDefault": false,
         "source": "app_permission",
@@ -749,7 +749,7 @@
         "conditions": null
       },
       {
-        "scope": "project",
+        "scope": "workspace",
         "priority": 2,
         "isDefault": false,
         "source": "app_permission",
@@ -787,7 +787,7 @@
     "name": "an agent-scoped tool allow shadows an all-agents block (higher priority)",
     "rules": [
       {
-        "scope": "project",
+        "scope": "workspace",
         "priority": 0,
         "isDefault": false,
         "source": "app_permission",
@@ -813,7 +813,7 @@
         "conditions": null
       },
       {
-        "scope": "project",
+        "scope": "workspace",
         "priority": 1,
         "isDefault": false,
         "source": "app_permission",
@@ -839,7 +839,7 @@
         "conditions": null
       },
       {
-        "scope": "project",
+        "scope": "workspace",
         "priority": 2,
         "isDefault": false,
         "source": "custom",
@@ -860,7 +860,7 @@
         "conditions": null
       },
       {
-        "scope": "project",
+        "scope": "workspace",
         "priority": 3,
         "isDefault": false,
         "source": "app_permission",
@@ -894,7 +894,7 @@
     }
   },
   {
-    "name": "ORG FLOOR: a lone project allow cannot open the org deny-default",
+    "name": "ORG FLOOR: a lone workspace allow cannot open the org deny-default",
     "rules": [
       {
         "scope": "organization",
@@ -911,11 +911,11 @@
         "conditions": null
       },
       {
-        "scope": "project",
+        "scope": "workspace",
         "priority": 0,
         "isDefault": false,
         "source": "custom",
-        "name": "project allow x",
+        "name": "workspace allow x",
         "identities": [],
         "targets": [
           {
@@ -946,7 +946,7 @@
     }
   },
   {
-    "name": "ORG FLOOR is carved: same rules, no injections → the project allow stands",
+    "name": "ORG FLOOR is carved: same rules, no injections → the workspace allow stands",
     "rules": [
       {
         "scope": "organization",
@@ -963,11 +963,11 @@
         "conditions": null
       },
       {
-        "scope": "project",
+        "scope": "workspace",
         "priority": 0,
         "isDefault": false,
         "source": "custom",
-        "name": "project allow x",
+        "name": "workspace allow x",
         "identities": [],
         "targets": [
           {
@@ -997,7 +997,7 @@
     }
   },
   {
-    "name": "ORG FLOOR is carved on an LLM host → the project allow stands",
+    "name": "ORG FLOOR is carved on an LLM host → the workspace allow stands",
     "rules": [
       {
         "scope": "organization",
@@ -1014,11 +1014,11 @@
         "conditions": null
       },
       {
-        "scope": "project",
+        "scope": "workspace",
         "priority": 0,
         "isDefault": false,
         "source": "custom",
-        "name": "project allow x",
+        "name": "workspace allow x",
         "identities": [],
         "targets": [
           {
@@ -1048,10 +1048,10 @@
     }
   },
   {
-    "name": "PROJECT FLOOR: a lone org allow cannot open the project deny-default",
+    "name": "WORKSPACE FLOOR: a lone org allow cannot open the workspace deny-default",
     "rules": [
       {
-        "scope": "project",
+        "scope": "workspace",
         "priority": 100,
         "isDefault": true,
         "source": "default",
@@ -1100,10 +1100,10 @@
     }
   },
   {
-    "name": "an org BLOCK still applies under a project deny-default (explicit beats default)",
+    "name": "an org BLOCK still applies under a workspace deny-default (explicit beats default)",
     "rules": [
       {
-        "scope": "project",
+        "scope": "workspace",
         "priority": 100,
         "isDefault": true,
         "source": "default",
@@ -1151,7 +1151,7 @@
     }
   },
   {
-    "name": "cross-scope strictness: an org rate limit beats a project plain allow",
+    "name": "cross-scope strictness: an org rate limit beats a workspace plain allow",
     "rules": [
       {
         "scope": "organization",
@@ -1175,11 +1175,11 @@
         "conditions": null
       },
       {
-        "scope": "project",
+        "scope": "workspace",
         "priority": 0,
         "isDefault": false,
         "source": "custom",
-        "name": "project allow x",
+        "name": "workspace allow x",
         "identities": [],
         "targets": [
           {
@@ -1211,7 +1211,7 @@
     }
   },
   {
-    "name": "cross-scope strictness: an org approval beats a project plain allow",
+    "name": "cross-scope strictness: an org approval beats a workspace plain allow",
     "rules": [
       {
         "scope": "organization",
@@ -1235,11 +1235,11 @@
         "conditions": null
       },
       {
-        "scope": "project",
+        "scope": "workspace",
         "priority": 0,
         "isDefault": false,
         "source": "custom",
-        "name": "project allow x",
+        "name": "workspace allow x",
         "identities": [],
         "targets": [
           {
@@ -1270,7 +1270,7 @@
     }
   },
   {
-    "name": "an org block is not overridable by a project AGENT-SCOPED allow",
+    "name": "an org block is not overridable by a workspace AGENT-SCOPED allow",
     "rules": [
       {
         "scope": "organization",
@@ -1294,7 +1294,7 @@
         "conditions": null
       },
       {
-        "scope": "project",
+        "scope": "workspace",
         "priority": 0,
         "isDefault": false,
         "source": "custom",
@@ -1336,7 +1336,7 @@
     "name": "connection allow binds to the winning account (allow only via winner)",
     "rules": [
       {
-        "scope": "project",
+        "scope": "workspace",
         "priority": 0,
         "isDefault": false,
         "source": "custom",
@@ -1362,7 +1362,7 @@
         "conditions": null
       },
       {
-        "scope": "project",
+        "scope": "workspace",
         "priority": 100,
         "isDefault": true,
         "source": "default",
@@ -1393,7 +1393,7 @@
     "name": "connection allow does not open a same-provider sibling account",
     "rules": [
       {
-        "scope": "project",
+        "scope": "workspace",
         "priority": 0,
         "isDefault": false,
         "source": "custom",
@@ -1419,7 +1419,7 @@
         "conditions": null
       },
       {
-        "scope": "project",
+        "scope": "workspace",
         "priority": 100,
         "isDefault": true,
         "source": "default",
@@ -1451,7 +1451,7 @@
     "name": "connection target never matches without a winning connection",
     "rules": [
       {
-        "scope": "project",
+        "scope": "workspace",
         "priority": 0,
         "isDefault": false,
         "source": "custom",
@@ -1477,7 +1477,7 @@
         "conditions": null
       },
       {
-        "scope": "project",
+        "scope": "workspace",
         "priority": 100,
         "isDefault": true,
         "source": "default",
@@ -1508,7 +1508,7 @@
     "name": "tool-narrowed connection permits its tool endpoint via the winner",
     "rules": [
       {
-        "scope": "project",
+        "scope": "workspace",
         "priority": 0,
         "isDefault": false,
         "source": "custom",
@@ -1534,7 +1534,7 @@
         "conditions": null
       },
       {
-        "scope": "project",
+        "scope": "workspace",
         "priority": 100,
         "isDefault": true,
         "source": "default",
@@ -1565,7 +1565,7 @@
     "name": "tool-narrowed connection does not match other endpoints of its provider",
     "rules": [
       {
-        "scope": "project",
+        "scope": "workspace",
         "priority": 0,
         "isDefault": false,
         "source": "custom",
@@ -1591,7 +1591,7 @@
         "conditions": null
       },
       {
-        "scope": "project",
+        "scope": "workspace",
         "priority": 100,
         "isDefault": true,
         "source": "default",
@@ -1623,7 +1623,7 @@
     "name": "winner equality alone is not enough: off-catalog host fails the fan-out",
     "rules": [
       {
-        "scope": "project",
+        "scope": "workspace",
         "priority": 0,
         "isDefault": false,
         "source": "custom",
@@ -1649,7 +1649,7 @@
         "conditions": null
       },
       {
-        "scope": "project",
+        "scope": "workspace",
         "priority": 100,
         "isDefault": true,
         "source": "default",
@@ -1678,7 +1678,7 @@
     }
   },
   {
-    "name": "an org whole-app block floors a project connection allow",
+    "name": "an org whole-app block floors a workspace connection allow",
     "rules": [
       {
         "scope": "organization",
@@ -1716,7 +1716,7 @@
         "conditions": null
       },
       {
-        "scope": "project",
+        "scope": "workspace",
         "priority": 0,
         "isDefault": false,
         "source": "custom",
@@ -1742,7 +1742,7 @@
         "conditions": null
       },
       {
-        "scope": "project",
+        "scope": "workspace",
         "priority": 100,
         "isDefault": true,
         "source": "default",

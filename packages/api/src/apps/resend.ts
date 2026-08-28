@@ -40,5 +40,4 @@ export const resend: AppDefinition = {
     },
   },
   labelHint: 'e.g. "transactional", "marketing"',
-  available: true,
 };

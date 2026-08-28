@@ -9,7 +9,7 @@ import type { SessionUser } from "../providers/types";
 // Hermetic to the ambient edition (CI runs with NEXT_PUBLIC_EDITION=cloud):
 // pin before any import evaluates.
 vi.hoisted(() => {
-  process.env.NEXT_PUBLIC_EDITION = "oss";
+  process.env.NEXT_PUBLIC_EDITION = "onprem";
 });
 
 const state = vi.hoisted(() => ({
@@ -20,23 +20,28 @@ const state = vi.hoisted(() => ({
     externalAuthId: string;
   } | null,
   upserts: [] as Record<string, unknown>[],
-  defaultProject: null as { id: string; organizationId: string } | null,
+  defaultWorkspace: null as { id: string; organizationId: string } | null,
   bootstraps: 0,
+  /** Every step that touches identity, in the order it ran. */
+  order: [] as string[],
 }));
 
 vi.mock("@onecli/db", () => ({
   Prisma: { JsonNull: null },
   db: {
     user: {
-      findUnique: async () =>
-        state.dbUser
+      findUnique: async () => {
+        state.order.push("findUnique");
+        return state.dbUser
           ? {
               id: state.dbUser.id,
               email: state.dbUser.email,
               externalAuthId: state.dbUser.externalAuthId,
             }
-          : null,
+          : null;
+      },
       upsert: async (args: Record<string, unknown>) => {
+        state.order.push("upsert");
         state.upserts.push(args);
         return { id: "user-1", email: "guy@acme.com", name: "Guy" };
       },
@@ -44,20 +49,27 @@ vi.mock("@onecli/db", () => ({
   },
 }));
 
-// The org/project side is stateful: the default (proj-1) takes the
+// The org/workspace side is stateful: the default (proj-1) takes the
 // established-user path (no bootstrap); onUserCreated-seam tests null it to
 // drive the bootstrap decision.
 vi.mock("../services/organization-service", () => ({
-  findUserDefaultProject: async () => state.defaultProject,
-  bootstrapOrganization: async () => {
+  findUserDefaultWorkspace: async () => state.defaultWorkspace,
+  ensureUserOrganization: async () => {
     state.bootstraps += 1;
-    return { project: { id: "boot-proj", organizationId: "boot-org" } };
+    return {
+      workspace: { id: "boot-proj", organizationId: "boot-org" },
+      organization: { id: "boot-org" },
+      created: true,
+    };
   },
-  joinSharedOrganization: async () => ({ project: null }),
-  ensureProjectSeeds: async () => {},
+  ensureWorkspaceSeeds: async () => {},
 }));
 
-import { initSession, initSessionEnforcer } from "../providers";
+import {
+  initSession,
+  initSessionEnforcer,
+  initSessionThrottle,
+} from "../providers";
 import { authSessionRoutes, initSessionHooks } from "./auth-session";
 import type { SessionHooks } from "./auth-session";
 
@@ -71,8 +83,9 @@ beforeEach(() => {
   state.session = null;
   state.dbUser = null;
   state.upserts = [];
-  state.defaultProject = { id: "proj-1", organizationId: "org-1" };
+  state.defaultWorkspace = { id: "proj-1", organizationId: "org-1" };
   state.bootstraps = 0;
+  state.order = [];
 });
 
 afterEach(() => {
@@ -80,6 +93,7 @@ afterEach(() => {
   // same worker never inherit a rejecting hook.
   initSessionHooks({});
   initSessionEnforcer(null);
+  initSessionThrottle(null);
 });
 
 describe("GET /auth/session identity-conflict seam", () => {
@@ -149,8 +163,65 @@ describe("GET /auth/session identity-conflict seam", () => {
   });
 });
 
+describe("GET /auth/session beforeIdentitySync seam", () => {
+  it("runs before anything reads a user row", async () => {
+    // Placement is the point. The self-hosted upgrade path uses this hook to
+    // decide WHICH row the session belongs to, and it does that by rewriting
+    // one — so a lookup that ran first would resolve the pre-adoption world
+    // and then provision a second, empty organization beside the real data.
+    initSessionHooks({
+      beforeIdentitySync: async () => {
+        state.order.push("beforeIdentitySync");
+      },
+    });
+    state.session = { id: "ba:sub", email: "guy@acme.com" };
+    state.dbUser = {
+      id: "user-1",
+      email: "guy@acme.com",
+      externalAuthId: "ba:sub",
+    };
+
+    const res = await app.request("/");
+    expect(res.status).toBe(200);
+    expect(state.order).toEqual(["beforeIdentitySync", "findUnique", "upsert"]);
+  });
+
+  it("a failure fails the request instead of provisioning around it", async () => {
+    // Deliberately NOT best-effort, unlike ensureSessionMembership. Carrying
+    // on would bootstrap a fresh organization for an identity whose real data
+    // is still attached to another row — a state no later request could
+    // repair. A 500 is retryable; that silent split is not.
+    initSessionHooks({
+      beforeIdentitySync: async () => {
+        throw new Error("adoption failed");
+      },
+    });
+    state.session = { id: "ba:sub", email: "guy@acme.com" };
+    state.dbUser = null;
+    state.defaultWorkspace = null;
+
+    const res = await app.request("/");
+    expect(res.status).toBe(500);
+    expect(state.bootstraps).toBe(0);
+    expect(state.upserts).toHaveLength(0);
+  });
+
+  it("the default is a no-op (cloud is unaffected)", async () => {
+    state.session = { id: "same-sub", email: "guy@acme.com" };
+    state.dbUser = {
+      id: "user-1",
+      email: "guy@acme.com",
+      externalAuthId: "same-sub",
+    };
+
+    const res = await app.request("/");
+    expect(res.status).toBe(200);
+    expect(state.order).toEqual(["findUnique", "upsert"]);
+  });
+});
+
 describe("GET /auth/session ensureSessionMembership seam", () => {
-  it("calls the hook with the session and the upserted user, before project resolution", async () => {
+  it("calls the hook with the session and the upserted user, before workspace resolution", async () => {
     const calls: Array<{ sessionId: string; userId: string }> = [];
     initSessionHooks({
       ensureSessionMembership: async (session, user) => {
@@ -175,8 +246,8 @@ describe("GET /auth/session ensureSessionMembership seam", () => {
 
     const res = await app.request("/");
     expect(res.status).toBe(200);
-    const body = (await res.json()) as { projectId?: string };
-    expect(body.projectId).toBe("proj-1");
+    const body = (await res.json()) as { workspaceId?: string };
+    expect(body.workspaceId).toBe("proj-1");
   });
 });
 
@@ -208,7 +279,7 @@ describe("GET /auth/session onUserCreated seam", () => {
     recordCreated(calls);
     state.session = { id: "new-sub", email: "new@acme.com" };
     state.dbUser = null;
-    state.defaultProject = null;
+    state.defaultWorkspace = null;
 
     const res = await app.request("/");
     expect(res.status).toBe(200);
@@ -225,7 +296,7 @@ describe("GET /auth/session onUserCreated seam", () => {
     recordCreated(calls, { shouldBootstrapOrg: () => false });
     state.session = { id: "new-sub", email: "new@acme.com" };
     state.dbUser = null;
-    state.defaultProject = null;
+    state.defaultWorkspace = null;
 
     const res = await app.request("/?fromInvitation=1");
     expect(res.status).toBe(200);
@@ -235,18 +306,73 @@ describe("GET /auth/session onUserCreated seam", () => {
     expect(state.bootstraps).toBe(0);
   });
 
-  it("fires with bootstrappedOrg=false when a project already exists (JIT-membership shape)", async () => {
+  it("fires with bootstrappedOrg=false when a workspace already exists (JIT-membership shape)", async () => {
     const calls: CreatedCall[] = [];
     recordCreated(calls);
     state.session = { id: "sso-sub", email: "new@acme.com" };
     state.dbUser = null;
-    // defaultProject stays proj-1: created-without-bootstrap still notifies.
+    // defaultWorkspace stays proj-1: created-without-bootstrap still notifies.
 
     const res = await app.request("/");
     expect(res.status).toBe(200);
     expect(calls).toEqual([
       { email: "guy@acme.com", bootstrappedOrg: false, hasRequest: true },
     ]);
+    expect(state.bootstraps).toBe(0);
+  });
+
+  it("does not bootstrap for an existing user by default (pins cloud)", async () => {
+    // Cognito creates no rows of its own, so a user this request did not
+    // create already has an organization — bootstrapping again would hand
+    // them a second one.
+    state.session = { id: "same-sub", email: "guy@acme.com" };
+    state.dbUser = {
+      id: "user-1",
+      email: "guy@acme.com",
+      externalAuthId: "same-sub",
+    };
+    state.defaultWorkspace = null;
+
+    const res = await app.request("/");
+    expect(res.status).toBe(200);
+    expect(state.bootstraps).toBe(0);
+  });
+
+  it("bootstraps an existing user with no organization when the edition opts in", async () => {
+    // The self-hosted identity layer creates the user row during sign-in, so
+    // by the time this endpoint runs the row always pre-exists. Requiring
+    // "this request created it" would mean such a user is NEVER provisioned —
+    // and that a signup whose provisioning failed could never be repaired.
+    initSessionHooks({ shouldBootstrapOrg: () => true });
+    state.session = { id: "ba-sub", email: "guy@acme.com" };
+    state.dbUser = {
+      id: "user-1",
+      email: "guy@acme.com",
+      externalAuthId: "ba-sub",
+    };
+    state.defaultWorkspace = null;
+
+    const res = await app.request("/");
+    expect(res.status).toBe(200);
+    expect(state.bootstraps).toBe(1);
+    await expect(res.json()).resolves.toMatchObject({
+      workspaceId: "boot-proj",
+    });
+  });
+
+  it("never bootstraps twice for a user who already has a workspace", async () => {
+    initSessionHooks({ shouldBootstrapOrg: () => true });
+    state.session = { id: "ba-sub", email: "guy@acme.com" };
+    state.dbUser = {
+      id: "user-1",
+      email: "guy@acme.com",
+      externalAuthId: "ba-sub",
+    };
+    // defaultWorkspace stays proj-1 — the repair must be keyed on the missing
+    // organization, not run on every session.
+
+    const res = await app.request("/");
+    expect(res.status).toBe(200);
     expect(state.bootstraps).toBe(0);
   });
 
@@ -285,7 +411,7 @@ describe("GET /auth/session sessionEnforcer seam", () => {
     expect(body.code).toBe("sso_required");
     expect(body.error).toContain("single sign-on");
     // Placement proof: the upsert already ran — enforcement is post-identity,
-    // pre-project.
+    // pre-workspace.
     expect(state.upserts).toHaveLength(1);
   });
 
@@ -305,5 +431,42 @@ describe("GET /auth/session sessionEnforcer seam", () => {
     const res = await app.request("/");
     expect(res.status).toBe(200);
     expect(seen).toEqual(["user-1"]);
+  });
+});
+
+describe("GET /auth/session sessionThrottle seam", () => {
+  it("a throttling middleware answers 429 before the session read and every write", async () => {
+    initSessionThrottle(async (c) =>
+      c.json(
+        {
+          error: {
+            message: "Too many requests. Try again shortly.",
+            type: "rate_limit_error",
+          },
+        },
+        429,
+      ),
+    );
+    // A session that WOULD bootstrap: reaching the handler produces a 200 and
+    // an upsert (the passing test below) — so an empty write log here proves
+    // the refusal happened ahead of the handler, not inside it.
+    state.session = { id: "sub-1", email: "guy@acme.com" };
+
+    const res = await app.request("/");
+    expect(res.status).toBe(429);
+    const body = (await res.json()) as { error: { type: string } };
+    expect(body.error.type).toBe("rate_limit_error");
+    // MUTATION-TESTED (placement): move the throttle after the handler's
+    // session read and these go non-empty.
+    expect(state.order).toEqual([]);
+    expect(state.upserts).toHaveLength(0);
+  });
+
+  it("the default (onprem) throttle is null and requests pass untouched", async () => {
+    state.session = { id: "sub-1", email: "guy@acme.com" };
+
+    const res = await app.request("/");
+    expect(res.status).toBe(200);
+    expect(state.upserts).toHaveLength(1);
   });
 });

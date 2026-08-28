@@ -82,7 +82,7 @@ export interface PolicyRulesTableProps {
 /**
  * One policy layer as a section: a titled band, its own column header, the rule
  * rows, and the terminal Default Rule as the last row. The editor stacks these
- * inside a single bordered card (org guardrails, then project rules) so the two
+ * inside a single bordered card (org guardrails, then workspace rules) so the two
  * layers read as one top-to-bottom evaluation rather than two islands.
  *
  * Custom rows drag to reorder (grip = the handle; keyboard: focus it, Space to
