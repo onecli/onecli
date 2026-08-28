@@ -152,6 +152,7 @@ describe("group surfaces", () => {
       replyChannel: "C9999",
       replyThreadTs: "4444.0001",
       messageTs: "4444.0001",
+      isMention: true,
     });
   });
 
@@ -196,6 +197,7 @@ describe("group surfaces", () => {
       replyThreadTs: "2222.0000",
       // The follow-up's OWN ts, not the thread root's.
       messageTs: "2222.0001",
+      isMention: false,
     });
   });
 

@@ -70,6 +70,26 @@ export const agentAppDescription = (clampedName: string): string =>
   clamp(`${clampedName}, a OneCLI hosted agent`, DESCRIPTION_MAX);
 
 /**
+ * The About text WITH provenance: who in the org this app answers to. Slack
+ * shows the description on the app's profile card, so the owner's name and
+ * email give teammates a human to ask about the bot. Clamped inside Slack's
+ * 140-char budget with the owner part sacrificed first — the identity line
+ * must survive whole.
+ */
+export const agentAppDescriptionWithOwner = (
+  clampedName: string,
+  owner: { name: string | null; email: string } | null,
+): string => {
+  const base = agentAppDescription(clampedName);
+  if (!owner) return base;
+  const who = owner.name?.trim()
+    ? `${owner.name.trim()} (${owner.email})`
+    : owner.email;
+  const withOwner = `${base}. Managed by ${who}.`;
+  return withOwner.length <= DESCRIPTION_MAX ? withOwner : base;
+};
+
+/**
  * The live-rename edit: both name fields replaced AND the About description
  * refreshed — but only when the exported description is exactly the one we
  * generated for the OLD name. A description someone customized in Slack's
@@ -86,17 +106,31 @@ export const withSyncedAppName = (
     unknown
   >;
   const oldName = typeof oldInfo.name === "string" ? oldInfo.name : null;
-  if (oldName === null || oldInfo.description !== agentAppDescription(oldName))
+  if (oldName === null || typeof oldInfo.description !== "string") {
     return renamed;
+  }
+  // Ours comes in two generated shapes: the bare identity line, or the
+  // identity line plus a ". Managed by …" owner suffix. Either moves with
+  // the rename (the owner suffix carried over verbatim); anything else is a
+  // human's custom text and is preserved untouched.
+  const bare = agentAppDescription(oldName);
+  const isBare = oldInfo.description === bare;
+  const ownerSuffix =
+    !isBare && oldInfo.description.startsWith(`${bare}. Managed by `)
+      ? oldInfo.description.slice(bare.length)
+      : null;
+  if (!isBare && ownerSuffix === null) return renamed;
   const newInfo = (renamed.display_information ?? {}) as Record<
     string,
     unknown
   >;
+  const newBare = agentAppDescription(newInfo.name as string);
+  const withSuffix = ownerSuffix ? `${newBare}${ownerSuffix}` : newBare;
   return {
     ...renamed,
     display_information: {
       ...newInfo,
-      description: agentAppDescription(newInfo.name as string),
+      description: withSuffix.length <= DESCRIPTION_MAX ? withSuffix : newBare,
     },
   };
 };
@@ -152,12 +186,17 @@ export interface AgentManifestInput {
   /** The deployment's public API origin — required on the events arm, where
    * Slack must be able to call back; null on the socket arm. */
   publicApiUrl: string | null;
+  /** The attaching member — surfaces in the app's About description so
+   * teammates know whose agent this is. Optional: rebuild paths (tombstone,
+   * rename) don't know the owner and keep whatever description exists. */
+  owner?: { name: string | null; email: string } | null;
 }
 
 export const buildAgentManifest = ({
   agentName,
   transport,
   publicApiUrl,
+  owner,
 }: AgentManifestInput): Record<string, unknown> => {
   const name = clamp(agentName.trim() || "OneCLI agent", APP_NAME_MAX);
   const events = transport === "events";
@@ -172,7 +211,9 @@ export const buildAgentManifest = ({
   return {
     display_information: {
       name,
-      description: agentAppDescription(name),
+      description: owner
+        ? agentAppDescriptionWithOwner(name, owner)
+        : agentAppDescription(name),
     },
     features: {
       // Without an enabled, WRITABLE messages tab Slack disables the DM

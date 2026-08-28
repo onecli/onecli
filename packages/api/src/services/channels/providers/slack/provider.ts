@@ -121,8 +121,14 @@ export const slackProvider: ChannelProvider = {
     transport,
     publicApiUrl,
     oauthState,
+    owner,
   }) {
-    const manifest = buildAgentManifest({ agentName, transport, publicApiUrl });
+    const manifest = buildAgentManifest({
+      agentName,
+      transport,
+      publicApiUrl,
+      owner,
+    });
     const created = await manifestCreate(accessToken, manifest);
     const credentialsJson = JSON.stringify({
       clientId: created.credentials.client_id,

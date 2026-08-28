@@ -9,7 +9,7 @@ use sqlx::PgPool;
 
 use crate::cache::CacheStore;
 
-use super::{BudgetBinding, BudgetPeriod};
+use super::{BudgetBinding, BudgetPeriod, BudgetSubject};
 
 /// Long TTL for `total` (lifetime) budgets — kept warm; rebuilt from the DB
 /// floor on expiry so the cap is never silently reset.
@@ -27,8 +27,15 @@ pub(crate) fn period_key(period: BudgetPeriod) -> String {
     }
 }
 
-fn redis_key(secret_id: &str, org_id: &str, period_key: &str) -> String {
-    format!("budget:spend:{secret_id}:{org_id}:{period_key}")
+fn redis_key(secret_id: &str, subject: &BudgetSubject, period_key: &str) -> String {
+    redis_key_raw(secret_id, &subject.to_string(), period_key)
+}
+
+/// The same key from a pre-rendered subject string — the form the telemetry
+/// flush holds (`BudgetCharge.subject`). One format string, two entry points,
+/// so the enforcement read and the flush write can never key differently.
+fn redis_key_raw(secret_id: &str, subject: &str, period_key: &str) -> String {
+    format!("budget:spend:{secret_id}:{subject}:{period_key}")
 }
 
 /// Seconds until the current key should expire. Monthly keys expire at the end
@@ -44,13 +51,20 @@ fn ttl_for_key(period_key: &str) -> u64 {
     (days_in_month - day + 1) * 86_400
 }
 
-async fn db_floor_nanos(pool: &PgPool, secret_id: &str, org_id: &str, period_key: &str) -> i64 {
+async fn db_floor_nanos(
+    pool: &PgPool,
+    secret_id: &str,
+    subject: &BudgetSubject,
+    period_key: &str,
+) -> i64 {
+    // The column keeps its historical name; the value is the rendered
+    // subject (`org:<id>` / `user:<id>`) — see [`BudgetSubject`].
     sqlx::query_scalar::<_, i64>(
         r#"SELECT spent_nanos FROM budget_spends
            WHERE secret_id = $1 AND organization_id = $2 AND period = $3"#,
     )
     .bind(secret_id)
-    .bind(org_id)
+    .bind(subject.to_string())
     .bind(period_key)
     .fetch_optional(pool)
     .await
@@ -78,13 +92,13 @@ pub(crate) async fn read_spent_nanos(
     binding: &BudgetBinding,
 ) -> i64 {
     let pk = period_key(binding.period);
-    let key = redis_key(&binding.secret_id, &binding.organization_id, &pk);
+    let key = redis_key(&binding.secret_id, &binding.subject, &pk);
 
     if let Some(raw) = cache.get_raw(&key).await {
         return raw.parse::<i64>().unwrap_or(0);
     }
 
-    let floor = db_floor_nanos(pool, &binding.secret_id, &binding.organization_id, &pk).await;
+    let floor = db_floor_nanos(pool, &binding.secret_id, &binding.subject, &pk).await;
     cache
         .set_raw(&key, &floor.to_string(), ttl_for_key(&pk))
         .await;
@@ -102,19 +116,20 @@ pub(crate) async fn is_over_budget(
 
 /// Add `nanos` to a budget's spend: atomic Redis `incrby` (hot counter) plus an
 /// upsert into the durable Postgres floor. Called off the request hot path from
-/// the telemetry flush. Errors are logged, never propagated.
+/// the telemetry flush. Errors are logged, never propagated. `subject` is the
+/// pre-rendered attribution string (`org:<id>` / `user:<id>`).
 pub(crate) async fn add_spend(
     cache: &dyn CacheStore,
     pool: &PgPool,
     secret_id: &str,
-    org_id: &str,
+    subject: &str,
     period_key: &str,
     nanos: i64,
 ) {
     if nanos <= 0 {
         return;
     }
-    let key = redis_key(secret_id, org_id, period_key);
+    let key = redis_key_raw(secret_id, subject, period_key);
     if cache
         .incrby(&key, nanos as u64, ttl_for_key(period_key))
         .await
@@ -131,7 +146,7 @@ pub(crate) async fn add_spend(
                          updated_at = NOW()"#,
     )
     .bind(secret_id)
-    .bind(org_id)
+    .bind(subject)
     .bind(period_key)
     .bind(nanos)
     .execute(pool)
@@ -167,8 +182,16 @@ mod tests {
     #[test]
     fn redis_key_namespaced() {
         assert_eq!(
-            redis_key("sec1", "org1", "m:2026-06"),
-            "budget:spend:sec1:org1:m:2026-06"
+            redis_key("sec1", &BudgetSubject::Org("org1".into()), "m:2026-06"),
+            "budget:spend:sec1:org:org1:m:2026-06"
+        );
+        assert_eq!(
+            redis_key(
+                "platform:anthropic",
+                &BudgetSubject::User("u1".into()),
+                "total"
+            ),
+            "budget:spend:platform:anthropic:user:u1:total"
         );
     }
 }

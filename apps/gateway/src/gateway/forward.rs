@@ -387,9 +387,17 @@ pub(crate) async fn forward_request(
     // (e.g. Codex's onecli-managed OAuth refresh), independent of any connected
     // secret or app. Cheap host/path/method pre-match for every request; only a
     // matched, small request gets its body buffered and inspected below.
-    let default_target =
-        default_interceptions::match_target(super::strip_port(host), &path, &method)
-            .filter(|_| content_length_at_most(req.headers(), MAX_DEFAULT_INTERCEPT_BODY));
+    let default_intercept_shape =
+        default_interceptions::match_target(super::strip_port(host), &path, &method);
+    // A request with this shape that the synthetic handler DECLINES is a real
+    // OAuth token exchange (e.g. a fresh `codex login` authorization-code
+    // grant). Its upstream response — success or failure — is part of the
+    // client's own auth protocol and must reach it verbatim: hijacking a
+    // failed exchange with the credential nudge would tell the agent to vault
+    // a secret for the token endpoint, the exact wrong action (#490).
+    let is_real_oauth_exchange = default_intercept_shape.is_some();
+    let default_target = default_intercept_shape
+        .filter(|_| content_length_at_most(req.headers(), MAX_DEFAULT_INTERCEPT_BODY));
 
     // Buffer the request body for condition matching, when the request guard needs
     // to inspect it (e.g. Dropbox folder scoping reads the JSON body), or for a
@@ -958,7 +966,10 @@ pub(crate) async fn forward_request(
 
     // If no credentials were injected and upstream returned 401/403,
     // guide the agent to connect/configure credentials in OneCLI.
+    // Real OAuth exchanges are exempt (see `is_real_oauth_exchange`): their
+    // 401s are the provider talking to the client, not a missing credential.
     if injection_count == 0
+        && !is_real_oauth_exchange
         && (status == StatusCode::UNAUTHORIZED || status == StatusCode::FORBIDDEN)
     {
         let hostname = super::strip_port(host);
@@ -1030,7 +1041,9 @@ pub(crate) async fn forward_request(
 
     // Some APIs (e.g. Google) return 400 instead of 401 for invalid/missing API keys.
     // Buffer the body and check for auth-related keywords before deciding.
-    if injection_count == 0 && status == StatusCode::BAD_REQUEST {
+    // Real OAuth exchanges are exempt here too: a 400 `invalid_grant` from a
+    // token endpoint must reach the client verbatim.
+    if injection_count == 0 && !is_real_oauth_exchange && status == StatusCode::BAD_REQUEST {
         let body_bytes = upstream_resp
             .bytes()
             .await

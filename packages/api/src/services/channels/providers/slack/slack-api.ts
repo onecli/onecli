@@ -19,6 +19,15 @@ const apiBase = (): string =>
 
 const CALL_TIMEOUT_MS = 15_000;
 
+/** Slack rate-limits with 429 + Retry-After (seconds) and expects callers to
+ * honor it; transient 5xxs happen on their edge. One bounded retry pass:
+ * marketplace review exercises rate-limit behavior, and hammering through a
+ * 429 is exactly what fails it. Retries are for the HTTP layer only —
+ * `ok:false` refusals are deterministic and never retried. */
+const MAX_ATTEMPTS = 3;
+const RETRY_AFTER_CAP_MS = 10_000;
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
 /**
  * A Slack refusal (`ok: false`), carrying Slack's own error code verbatim —
  * the plan requires surfacing codes like `managed_app_limit_reached` to the
@@ -45,23 +54,50 @@ const slackCall = async <T extends z.ZodType>(
     basicAuth?: { user: string; pass: string };
     /** Sent as `application/x-www-form-urlencoded` (Slack's lingua franca). */
     form?: Record<string, string>;
+    /** Opt-in 5xx retry — ONLY for idempotent methods (reads, deletes,
+     * wholesale replaces). A 5xx can arrive AFTER Slack committed the call
+     * (their edge failing on the way back), so retrying a create/post/
+     * exchange risks a duplicate app, a double-posted message, or burning a
+     * single-use OAuth code. 429s always retry: rate limiting is by
+     * definition pre-execution. */
+    retry5xx?: boolean;
   },
   schema: T,
 ): Promise<z.infer<T>> => {
-  const response = await fetch(`${apiBase()}/${method}`, {
-    method: "POST",
-    headers: {
-      "content-type": "application/x-www-form-urlencoded; charset=utf-8",
-      ...(init.token && { authorization: `Bearer ${init.token}` }),
-      ...(init.basicAuth && {
-        authorization: `Basic ${Buffer.from(
-          `${init.basicAuth.user}:${init.basicAuth.pass}`,
-        ).toString("base64")}`,
-      }),
-    },
-    body: new URLSearchParams(init.form ?? {}).toString(),
-    signal: AbortSignal.timeout(CALL_TIMEOUT_MS),
-  });
+  let response: Response | null = null;
+  for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+    response = await fetch(`${apiBase()}/${method}`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/x-www-form-urlencoded; charset=utf-8",
+        ...(init.token && { authorization: `Bearer ${init.token}` }),
+        ...(init.basicAuth && {
+          authorization: `Basic ${Buffer.from(
+            `${init.basicAuth.user}:${init.basicAuth.pass}`,
+          ).toString("base64")}`,
+        }),
+      },
+      body: new URLSearchParams(init.form ?? {}).toString(),
+      signal: AbortSignal.timeout(CALL_TIMEOUT_MS),
+    });
+    const retryable =
+      response.status === 429 ||
+      (init.retry5xx === true && response.status >= 500);
+    if (!retryable || attempt === MAX_ATTEMPTS) break;
+    // Missing/empty header must fall to the backoff branch — Number(null)
+    // is 0, which would re-hammer immediately (the exact behavior the
+    // marketplace review fails apps for).
+    const retryAfterHeader = response.headers.get("retry-after");
+    const retryAfterSeconds =
+      retryAfterHeader === null || retryAfterHeader.trim() === ""
+        ? Number.NaN
+        : Number(retryAfterHeader);
+    const waitMs = Number.isFinite(retryAfterSeconds)
+      ? Math.min(retryAfterSeconds * 1000, RETRY_AFTER_CAP_MS)
+      : 500 * attempt;
+    await sleep(waitMs);
+  }
+  if (!response) throw new Error(`Slack ${method} produced no response`);
   if (!response.ok) {
     throw new Error(`Slack ${method} answered HTTP ${response.status}`);
   }
@@ -114,7 +150,7 @@ export const manifestCreate = (accessToken: string, manifest: unknown) =>
 export const manifestDelete = (accessToken: string, appId: string) =>
   slackCall(
     "apps.manifest.delete",
-    { token: accessToken, form: { app_id: appId } },
+    { token: accessToken, form: { app_id: appId }, retry5xx: true },
     z.object({}),
   );
 
@@ -128,7 +164,7 @@ export const manifestDelete = (accessToken: string, appId: string) =>
 export const manifestExport = (accessToken: string, appId: string) =>
   slackCall(
     "apps.manifest.export",
-    { token: accessToken, form: { app_id: appId } },
+    { token: accessToken, form: { app_id: appId }, retry5xx: true },
     z.object({ manifest: z.record(z.string(), z.unknown()) }),
   );
 
@@ -143,6 +179,7 @@ export const manifestUpdate = (
     {
       token: accessToken,
       form: { app_id: appId, manifest: JSON.stringify(manifest) },
+      retry5xx: true,
     },
     z.object({}),
   );
@@ -166,6 +203,7 @@ export const appsUninstall = (input: {
     {
       token: input.botToken,
       form: { client_id: input.clientId, client_secret: input.clientSecret },
+      retry5xx: true,
     },
     z.object({}),
   );
@@ -182,7 +220,7 @@ const authTestResponse = z.object({
 
 /** Identify a bot token: which workspace, which bot user. */
 export const authTest = (botToken: string) =>
-  slackCall("auth.test", { token: botToken }, authTestResponse);
+  slackCall("auth.test", { token: botToken, retry5xx: true }, authTestResponse);
 
 const postMessageResponse = z.object({
   channel: z.string().min(1),
@@ -191,13 +229,19 @@ const postMessageResponse = z.object({
 
 /**
  * Post a message — the EVENTS arm's request-scoped replies (refusals, busy
- * notices, invite refusals). Answer rendering/streaming stays the adapter's
- * job; this exists so an inbound HTTP event can be answered without waiting
- * for any poll. Callers pass PRE-ESCAPED text (`escapeSlackText`).
+ * notices, invite refusals, the shared app's text-only onboarding answers).
+ * Answer rendering/streaming stays the adapter's job; this exists so an
+ * inbound HTTP event can be answered without waiting for any poll. Callers
+ * pass PRE-ESCAPED text (`escapeSlackText`).
  */
 export const postMessage = async (
   botToken: string,
-  input: { channel: string; text: string; threadTs?: string; iconUrl?: string },
+  input: {
+    channel: string;
+    text: string;
+    threadTs?: string;
+    iconUrl?: string;
+  },
 ) => {
   const form = {
     channel: input.channel,
@@ -210,10 +254,14 @@ export const postMessage = async (
         "chat.postMessage",
         // The agent's avatar. Needs `chat:write.customize` — a pre-existing
         // install predating the scope fails the whole post (`missing_scope`),
-        // so that one error retries plain: the refusal must land even when
+        // so that one error retries plain: the reply must land even when
         // the icon cannot. No per-token memo here (unlike the adapter's
-        // client): this arm posts refusals only, far too rarely to matter.
-        { token: botToken, form: { ...form, icon_url: input.iconUrl } },
+        // client): this arm posts request-scoped replies only, far too
+        // rarely to matter.
+        {
+          token: botToken,
+          form: { ...form, icon_url: input.iconUrl },
+        },
         postMessageResponse,
       );
     } catch (err) {
@@ -228,6 +276,35 @@ export const postMessage = async (
     postMessageResponse,
   );
 };
+
+/**
+ * Block Kit message post — the shared app's onboarding reply (a button).
+ * TRUST rule (the adapter's postBlocks law): button URLs are built ONLY from
+ * server-side config (APP_URL + our own token), never from anything a
+ * payload carried; text is pre-escaped by the caller.
+ */
+export const postBlocksMessage = async (
+  botToken: string,
+  input: {
+    channel: string;
+    text: string;
+    blocks: unknown[];
+    threadTs?: string;
+  },
+) =>
+  slackCall(
+    "chat.postMessage",
+    {
+      token: botToken,
+      form: {
+        channel: input.channel,
+        text: input.text,
+        blocks: JSON.stringify(input.blocks),
+        ...(input.threadTs && { thread_ts: input.threadTs }),
+      },
+    },
+    postMessageResponse,
+  );
 
 /**
  * Reaction add/remove — the receipt lifecycle. Slack's idempotency refusals
@@ -250,6 +327,7 @@ const reactionCall = async (
           timestamp: input.timestamp,
           name: input.name,
         },
+        retry5xx: true,
       },
       okEnvelope,
     );
@@ -292,7 +370,7 @@ const filesInfoResponse = z.object({
 export const filesInfo = (botToken: string, fileId: string) =>
   slackCall(
     "files.info",
-    { token: botToken, form: { file: fileId } },
+    { token: botToken, form: { file: fileId }, retry5xx: true },
     filesInfoResponse,
   );
 
@@ -327,6 +405,44 @@ export const isSlackFilesUrl = (raw: string): boolean => {
   return host === "slack.com" || host.endsWith(".slack.com");
 };
 
+/**
+ * Slack's own file CDN domains — where an authenticated `files-pri` download
+ * 302s to. Non-image files redirect to the safe-files CDN
+ * (`slack-files.com/files-pri-safe/…`, a presigned URL that needs NO auth),
+ * so a download that only trusts `*.slack.com` refuses every PDF while
+ * images (served inline from `files.slack.com`) work. These hops are
+ * followed WITHOUT the Authorization header: the presigned URL is its own
+ * credential, and the bot token still never travels beyond
+ * `isSlackFilesUrl` hosts. Kept a separate list from `isSlackFilesUrl` on
+ * purpose — widening THAT pin would send the token to these hosts. Any
+ * redirect outside both sets is still refused without a request: a forged
+ * payload bounced through a slack.com open redirect must not turn the
+ * control plane into a fetch-anything proxy. When SLACK_CDN_BASE_URL points
+ * at a fake server (the test seam), that exact origin is the allowed one.
+ */
+export const isSlackCdnUrl = (raw: string): boolean => {
+  let url: URL;
+  try {
+    url = new URL(raw);
+  } catch {
+    return false;
+  }
+  const base = process.env.SLACK_CDN_BASE_URL;
+  if (base) {
+    try {
+      const baseUrl = new URL(base);
+      return url.protocol === baseUrl.protocol && url.host === baseUrl.host;
+    } catch {
+      // Unparseable override — fall through to the production rule.
+    }
+  }
+  if (url.protocol !== "https:") return false;
+  const host = url.hostname.toLowerCase();
+  return ["slack-files.com", "slack-imgs.com", "slack-edge.com"].some(
+    (domain) => host === domain || host.endsWith(`.${domain}`),
+  );
+};
+
 export type SlackFileDownload =
   | { ok: true; bytes: Buffer; contentType: string | null }
   | { ok: false; reason: string };
@@ -338,7 +454,10 @@ const MAX_DOWNLOAD_REDIRECTS = 3;
  * Download `url_private` bytes with the bot token. Redirects are followed BY
  * HAND so every hop re-passes the host pin — `fetch`'s automatic following
  * would happily replay the Authorization header to wherever Slack (or a
- * forged payload) pointed. An HTML answer is Slack's login page — the
+ * forged payload) pointed. The pin is two-tier: `isSlackFilesUrl` hosts get
+ * the Bearer token; `isSlackCdnUrl` hosts (Slack's presigned file CDN, where
+ * every non-image download 302s) are fetched WITHOUT it; anything else is
+ * refused before any request. An HTML answer is Slack's login page — the
  * documented behavior for a missing `files:read` scope — and is refused as
  * such rather than stored as "the image".
  */
@@ -349,13 +468,16 @@ export const downloadPrivateFile = async (
 ): Promise<SlackFileDownload> => {
   let target = rawUrl;
   for (let hop = 0; hop <= MAX_DOWNLOAD_REDIRECTS; hop += 1) {
-    if (!isSlackFilesUrl(target)) {
+    // The token decision is per-hop and MUST stay in sync with the fence:
+    // only `isSlackFilesUrl` hosts may ever see the Authorization header.
+    const sendToken = isSlackFilesUrl(target);
+    if (!sendToken && !isSlackCdnUrl(target)) {
       return { ok: false, reason: "refused a non-Slack download URL" };
     }
     let response: Response;
     try {
       response = await fetch(target, {
-        headers: { authorization: `Bearer ${botToken}` },
+        headers: sendToken ? { authorization: `Bearer ${botToken}` } : {},
         redirect: "manual",
         signal: AbortSignal.timeout(DOWNLOAD_TIMEOUT_MS),
       });
@@ -409,6 +531,14 @@ export const downloadPrivateFile = async (
 const usersInfoResponse = z.object({
   user: z.object({
     id: z.string().min(1),
+    /** Guest/void flags — the onboarding mint fences on these: a multi- or
+     * single-channel guest (contractor, client) is exactly who an admin
+     * would NOT consider "my team" when consenting to workspace onboarding,
+     * and a deleted or Slack-Connect-external account must never mint. */
+    is_restricted: z.boolean().optional(),
+    is_ultra_restricted: z.boolean().optional(),
+    is_stranger: z.boolean().optional(),
+    deleted: z.boolean().optional(),
     profile: z
       .object({
         email: z.string().optional(),
@@ -425,7 +555,7 @@ const usersInfoResponse = z.object({
 export const usersInfo = (botToken: string, userId: string) =>
   slackCall(
     "users.info",
-    { token: botToken, form: { user: userId } },
+    { token: botToken, form: { user: userId }, retry5xx: true },
     usersInfoResponse,
   );
 
@@ -433,6 +563,17 @@ const oauthAccessResponse = z.object({
   access_token: z.string().min(1),
   bot_user_id: z.string().min(1),
   team: z.object({ id: z.string().min(1), name: z.string().nullish() }),
+  /** The installed app's id (`A…`) — the shared-install flow records it. */
+  app_id: z.string().optional(),
+  /** The installing USER's grant — present when `user_scope` was requested
+   * (the shared install asks for the manifest+managed-install scopes). */
+  authed_user: z
+    .object({
+      id: z.string().min(1),
+      access_token: z.string().optional(),
+      scope: z.string().optional(),
+    })
+    .optional(),
 });
 
 /** The events arm's code exchange. Client creds go as HTTP Basic (Slack's

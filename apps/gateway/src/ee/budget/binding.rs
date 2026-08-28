@@ -9,7 +9,7 @@
 
 use sqlx::PgPool;
 
-use super::{BudgetBinding, BudgetPeriod};
+use super::{BudgetBinding, BudgetPeriod, BudgetSubject};
 
 /// 1 cent = 1e7 nano-dollars (limits are stored human-friendly in cents).
 const NANOS_PER_CENT: i64 = 10_000_000;
@@ -140,7 +140,7 @@ pub(crate) async fn resolve_bindings<S: BudgetSecret>(
             };
             Some(BudgetBinding {
                 secret_id: row.secret_id,
-                organization_id: org_id.to_string(),
+                subject: BudgetSubject::Org(org_id.to_string()),
                 secret_type,
                 limit_nanos: i64::from(row.limit_cents) * NANOS_PER_CENT,
                 period,

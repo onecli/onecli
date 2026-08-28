@@ -56,6 +56,8 @@
 export const AMBIENT_HAZARD_VARS: readonly string[] = [
   // Entitlement — flips CAPS.rbac at module load on onprem
   "ENTERPRISE_ENABLED",
+  // Platform trial credit — presence flips container-config advertisement
+  "PLATFORM_ANTHROPIC_API_KEY",
   // Secrets
   "BETTER_AUTH_SECRET",
   "AUTH_SECRET",
@@ -151,8 +153,17 @@ export const AMBIENT_HAZARD_VARS: readonly string[] = [
   "SSH_SESSION_LEASE_SECONDS",
   // Provider base URLs (test doubles point these at fakes per suite)
   "SLACK_API_BASE_URL",
+  "SLACK_CDN_BASE_URL",
   "ANTHROPIC_API_BASE_URL",
   "OPENAI_API_BASE_URL",
+  // The shared Slack app (deployment config): ambient real credentials would
+  // make the shared arm exist inside tests — the routes and posture helpers
+  // branch on presence, so these must never leak in from a dev shell.
+  "SLACK_SHARED_CLIENT_ID",
+  "SLACK_SHARED_CLIENT_SECRET",
+  "SLACK_SHARED_SIGNING_SECRET",
+  "SLACK_SHARED_APP_ID",
+  "SLACK_SHARED_APP_MANAGER_APPROVED",
   // AWS default credential chain — read inside the SDK, not via a literal
   // process.env, so the source-scan guard can't see these; a dev's live AWS
   // credentials must not be reachable from a test process. AWS_REGION stays

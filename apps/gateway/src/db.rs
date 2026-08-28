@@ -444,8 +444,10 @@ pub(crate) struct PolicyV2Rules {
 /// `by_id` serves a specific `secret_id` target; `workspace_hosts`/`org_hosts` serve
 /// a `secret_scope` ("all secrets at a level") target. Each secret contributes ALL
 /// the hosts its credential injects on (`secret_inject::secret_host_patterns`) — a
-/// list, because a typed secret (OpenAI) is valid on several hosts — so enforcement
-/// covers exactly the injection surface. Populated whenever a loaded rule has a
+/// list, because an OAuth-mode OpenAI secret is valid on several hosts — so
+/// enforcement covers at least the injection surface (injection additionally
+/// carves out `auth.openai.com`; wider enforcement is fail-safe). Populated
+/// whenever a loaded rule has a
 /// secret target (the lazy skip leaves it empty otherwise).
 #[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub(crate) struct SecretHosts {
@@ -566,6 +568,7 @@ struct SecretHostRow {
     scope: String,
     #[sqlx(rename = "type")]
     type_: String,
+    metadata: Option<serde_json::Value>,
 }
 
 /// Resolve the host patterns of the acting org+workspace custom secrets so the
@@ -583,7 +586,7 @@ pub(crate) async fn find_secret_hosts(
 ) -> Result<SecretHosts> {
     let rows: Vec<SecretHostRow> = sqlx::query_as::<_, SecretHostRow>(
         r#"
-        SELECT id, host_pattern, scope, type FROM secrets
+        SELECT id, host_pattern, scope, type, metadata FROM secrets
         WHERE workspace_id = $2
            OR (organization_id = $1 AND scope = 'organization')
         "#,
@@ -596,9 +599,13 @@ pub(crate) async fn find_secret_hosts(
 
     let mut hosts = SecretHosts::default();
     for row in rows {
-        // Expand each secret to EVERY host its credential injects on (a typed
-        // secret like OpenAI covers several), so enforcement == injection.
-        let patterns = crate::secret_inject::secret_host_patterns(&row.type_, &row.host_pattern);
+        // Expand each secret to EVERY host its credential injects on (an
+        // OAuth-mode OpenAI secret covers several), so enforcement ⊇ injection.
+        let patterns = crate::secret_inject::secret_host_patterns(
+            &row.type_,
+            &row.host_pattern,
+            row.metadata.as_ref(),
+        );
         match row.scope.as_str() {
             "workspace" => hosts.workspace_hosts.extend(patterns.iter().cloned()),
             "organization" => hosts.org_hosts.extend(patterns.iter().cloned()),

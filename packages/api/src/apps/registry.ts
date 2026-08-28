@@ -58,6 +58,7 @@ import { fathom } from "./fathom";
 import { slack } from "./slack";
 import { fireflies } from "./fireflies";
 import { zohoCrm } from "./zoho-crm";
+import { snowflake } from "./snowflake";
 
 const staticApps: AppDefinition[] = [
   gmail,
@@ -116,6 +117,7 @@ const staticApps: AppDefinition[] = [
   slack,
   fireflies,
   zohoCrm,
+  snowflake,
 ];
 
 export const getApps = (): AppDefinition[] => [...staticApps];

@@ -54,8 +54,11 @@ export const agentChannelRoutes = () => {
   // GET /agents/:agentId/channels — presences + posture + org-integration
   // availability + adapter liveness: the one payload the section renders.
   app.get("/:agentId/channels", async (c) => {
-    const workspaceId = requireWorkspaceId(c.get("auth"));
-    return c.json(await getAgentChannels(workspaceId, c.req.param("agentId")));
+    const auth = c.get("auth");
+    const workspaceId = requireWorkspaceId(auth);
+    return c.json(
+      await getAgentChannels(workspaceId, c.req.param("agentId"), auth.userId),
+    );
   });
 
   // GET /agents/:agentId/channels/:provider/manifest — the paste floor's

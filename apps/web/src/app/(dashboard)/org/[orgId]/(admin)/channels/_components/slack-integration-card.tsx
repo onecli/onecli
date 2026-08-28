@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { ExternalLink, Loader2 } from "lucide-react";
 import { toast } from "sonner";
 import {
@@ -14,10 +14,12 @@ import {
   AlertDialogTitle,
 } from "@onecli/ui/components/alert-dialog";
 import { Button } from "@onecli/ui/components/button";
+import { Badge } from "@onecli/ui/components/badge";
 import {
   Card,
   CardContent,
   CardDescription,
+  CardFooter,
   CardHeader,
   CardTitle,
 } from "@onecli/ui/components/card";
@@ -26,7 +28,6 @@ import { Skeleton } from "@onecli/ui/components/skeleton";
 import { SecretInput } from "@/components/secret-input";
 import { AppIcon } from "@/lib/components/app-icon";
 import { slack as slackApp } from "@onecli/api/apps/slack";
-import { WorkspaceAvatar } from "./workspace-avatar";
 import {
   useConnectChannelIntegration,
   useDisconnectChannelIntegration,
@@ -39,21 +40,54 @@ import {
  * is automatic server-side; when it fails, `needsCredentials` surfaces the
  * amber re-paste state. A workspace connected only through hand-made apps
  * (the paste floor) appears here too, with the paste form as its upgrade
- * path. Removal exists in every state: Disconnect (live credential) or
- * Remove (dead/absent credential) — the server deletes the row only when no
- * agent apps or member links reference it, so the dialog says which outcome
- * the click buys.
+ * path. While the shared install's user token mints agent apps
+ * (`canMintAgentApps`), the paste becomes optional and folds behind a small
+ * disclosure instead of leading. Removal exists in every state: Disconnect
+ * (live credential) or Remove (dead/absent credential) — the server deletes
+ * the row only when no agent apps or member links reference it, so the
+ * dialog says which outcome the click buys.
  */
-export const SlackIntegrationCard = () => {
+export interface SlackIntegrationCardProps {
+  /** Provided only in the SETUP CHOICE state (nothing connected yet). The
+   * card's ROLE there decides the swap affordance's wording and placement:
+   * `leading` (pre-approval default face — the OneCLI app can't mint agent
+   * apps yet) shows a small "or add the OneCLI app for team onboarding"
+   * under the paste form; `alternative` (post-approval, the OneCLI app
+   * leads) shows the when-you'd-pick-this framing plus the recommended way
+   * back under the description. `onSwap` swaps the surface to the OneCLI app
+   * card (the row owns the swap). Absent everywhere else. */
+  choice?: { role: "leading" | "alternative"; onSwap: () => void };
+}
+
+export const SlackIntegrationCard = ({ choice }: SlackIntegrationCardProps) => {
   const { data, isPending } = useOrgChannels();
   const connect = useConnectChannelIntegration();
   const disconnect = useDisconnectChannelIntegration();
   const [token, setToken] = useState("");
   const [confirmOpen, setConfirmOpen] = useState(false);
+  // The config-token paste, folded away while the shared install already
+  // mints agent apps — kept reachable as the RARE fallback path (same fold
+  // pattern as the manual member link on this page). Opening/closing the
+  // fold unmounts the control that had focus, so focus is handed off by
+  // hand: into the input on open, back to the disclosure on Cancel.
+  const [pasteOpen, setPasteOpen] = useState(false);
+  const pasteDisclosureRef = useRef<HTMLButtonElement>(null);
+  const restoreDisclosureFocus = useRef(false);
+  useEffect(() => {
+    if (pasteOpen || !restoreDisclosureFocus.current) return;
+    restoreDisclosureFocus.current = false;
+    pasteDisclosureRef.current?.focus();
+  }, [pasteOpen]);
 
   const slack = data?.integrations.find((i) => i.provider === "slack");
   const showAdapterOffline =
     data !== undefined && data.integrations.length > 0 && !data.adapter.online;
+
+  // The shared install's user token already mints agent apps: the paste is
+  // optional, not required. The card stays (it owns the adapter-offline
+  // notice and the removal affordances) — only the paste form folds away.
+  // Double-guarded: `sharedApp` is absent on servers predating this feature.
+  const mintsViaShared = data?.sharedApp?.canMintAgentApps ?? false;
 
   // What keeps the workspace row alive: the server deletes it only when no
   // agent apps and no member links reference it — otherwise a disconnect
@@ -110,6 +144,7 @@ export const SlackIntegrationCard = () => {
       {
         onSuccess: (result) => {
           setToken("");
+          setPasteOpen(false);
           toast.success(
             `Connected ${result.tenant.name ?? result.tenant.externalId}`,
           );
@@ -130,6 +165,9 @@ export const SlackIntegrationCard = () => {
           value={token}
           onChange={(e) => setToken(e.target.value)}
           placeholder="xoxe-1-…"
+          // Focus hand-off: when the fold opened this form, the disclosure
+          // button that had focus just unmounted.
+          autoFocus={pasteOpen}
           className="flex-1"
         />
         <Button
@@ -142,7 +180,7 @@ export const SlackIntegrationCard = () => {
         </Button>
       </div>
       <p className="text-muted-foreground text-xs">
-        Generate one under{" "}
+        Generate one at{" "}
         <a
           href="https://api.slack.com/apps"
           target="_blank"
@@ -152,79 +190,131 @@ export const SlackIntegrationCard = () => {
           api.slack.com/apps
           <ExternalLink className="size-3" />
         </a>{" "}
-        → Your App Configuration Tokens. Paste the refresh token here. It
-        enables one-click Slack apps for your agents and rotates automatically
-        from then on.
+        → Your App Configuration Tokens, and paste it once. It rotates
+        automatically from then on.
       </p>
     </form>
   );
 
   return (
     <>
-      <Card>
+      <Card className="flex h-full flex-col">
         <CardHeader>
-          <div className="flex items-center gap-3">
+          <div className="flex items-start gap-3">
             <span className="bg-card flex size-10 shrink-0 items-center justify-center rounded-xl border shadow-sm">
               <AppIcon icon={slackApp.icon} name={slackApp.name} size={22} />
             </span>
-            <div className="min-w-0">
-              <CardTitle>{slackApp.name}</CardTitle>
-              <CardDescription>
-                One workspace credential powers one-click Slack apps for every
-                agent in this organization.
+            <div className="min-w-0 flex-1">
+              <div className="flex items-center justify-between gap-2">
+                <CardTitle>Agent apps</CardTitle>
+                {!isPending && slack && (
+                  <Badge
+                    variant={
+                      slack.hasCredentials || mintsViaShared
+                        ? "default"
+                        : "secondary"
+                    }
+                    className={
+                      slack.hasCredentials || mintsViaShared
+                        ? "bg-emerald-500/15 text-emerald-700 hover:bg-emerald-500/15 dark:text-emerald-400"
+                        : undefined
+                    }
+                  >
+                    {slack.hasCredentials || mintsViaShared
+                      ? "Connected"
+                      : "Token needed"}
+                  </Badge>
+                )}
+              </div>
+              <CardDescription className="mt-1">
+                {choice?.role === "alternative"
+                  ? "For workspaces that can't install the OneCLI app. Each agent gets its own Slack app, created in one click."
+                  : "Each agent gets its own Slack app, created in one click."}
               </CardDescription>
+              {choice?.role === "alternative" && (
+                <button
+                  type="button"
+                  className="text-muted-foreground hover:text-foreground -mb-1 mt-2 py-1 text-xs underline underline-offset-2"
+                  onClick={choice.onSwap}
+                >
+                  Use the OneCLI Slack app instead (recommended)
+                </button>
+              )}
             </div>
           </div>
         </CardHeader>
-        <CardContent className="space-y-4">
+        <CardContent className="flex-1">
           {isPending ? (
             <div className="space-y-2">
               <Skeleton className="h-5 w-48" />
               <Skeleton className="h-9 w-full max-w-lg" />
             </div>
           ) : !slack ? (
-            pasteForm
+            <div className="space-y-2.5">
+              {pasteForm}
+              {choice?.role === "leading" && (
+                <button
+                  type="button"
+                  className="text-muted-foreground hover:text-foreground -my-1 py-1 text-xs underline underline-offset-2"
+                  onClick={choice.onSwap}
+                >
+                  or add the OneCLI app so teammates can join from Slack
+                </button>
+              )}
+            </div>
           ) : (
             <>
-              {slack.needsCredentials && (
-                <p className="rounded-lg border border-amber-500/30 bg-amber-500/10 px-4 py-3 text-sm dark:border-amber-500/40 dark:bg-amber-500/15">
+              {slack.needsCredentials && !mintsViaShared && (
+                <p className="mb-3 rounded-lg border border-amber-500/30 bg-amber-500/10 px-4 py-3 text-sm dark:border-amber-500/40 dark:bg-amber-500/15">
                   The stored token expired and could not be refreshed. Paste a
                   fresh App Configuration refresh token to restore one-click
                   setup.
                 </p>
               )}
-              <div className="bg-muted/40 flex items-center gap-3 rounded-lg border px-3 py-2.5">
-                <WorkspaceAvatar name={slack.name ?? slack.externalId} />
-                <div className="min-w-0 space-y-0.5">
-                  <p className="text-sm font-medium">
-                    {slack.name ?? slack.externalId}
-                    <span className="text-muted-foreground ml-2 font-mono text-xs">
-                      {slack.externalId}
-                    </span>
-                  </p>
-                  <p className="text-muted-foreground text-sm">
-                    {slack.presenceCount === 1
-                      ? "1 agent app"
-                      : `${slack.presenceCount} agent apps`}
-                    {slack.hasCredentials && slack.credentialsRotatedAt && (
-                      <>
-                        {" "}
-                        · token rotated{" "}
-                        {new Date(slack.credentialsRotatedAt).toLocaleString()}
-                      </>
-                    )}
-                  </p>
-                </div>
-              </div>
               {slack.hasCredentials ? (
-                <Button
-                  variant="outline"
-                  size="sm"
-                  className="text-destructive hover:text-destructive"
-                  onClick={() => setConfirmOpen(true)}
-                >
-                  Disconnect
-                </Button>
+                <p className="text-muted-foreground text-sm">
+                  <span className="text-foreground font-medium">
+                    {slack.name ?? slack.externalId}
+                  </span>{" "}
+                  is connected with{" "}
+                  {slack.presenceCount === 1
+                    ? "1 agent app"
+                    : `${slack.presenceCount} agent apps`}
+                  .
+                </p>
+              ) : mintsViaShared ? (
+                // The shared install's user token does the minting; the
+                // config-token paste stays reachable as a small fallback.
+                <div className="space-y-3">
+                  <p className="text-muted-foreground text-sm">
+                    Agent apps are created through the shared OneCLI app. No
+                    configuration token needed.
+                  </p>
+                  {pasteOpen ? (
+                    <div className="space-y-2">
+                      {pasteForm}
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        onClick={() => {
+                          restoreDisclosureFocus.current = true;
+                          setPasteOpen(false);
+                        }}
+                      >
+                        Cancel
+                      </Button>
+                    </div>
+                  ) : (
+                    <button
+                      ref={pasteDisclosureRef}
+                      type="button"
+                      className="text-muted-foreground hover:text-foreground -my-1 py-1 text-xs underline underline-offset-2"
+                      onClick={() => setPasteOpen(true)}
+                    >
+                      or paste an App Configuration token instead
+                    </button>
+                  )}
+                </div>
               ) : (
                 // Connected via hand-made apps only, or the credential died —
                 // either way the paste form is the way (back) to one-click,
@@ -252,11 +342,26 @@ export const SlackIntegrationCard = () => {
           )}
 
           {showAdapterOffline && (
-            <p className="text-sm text-amber-600 dark:text-amber-500">
+            <p className="mt-3 text-sm text-amber-600 dark:text-amber-500">
               Channels are offline. The adapter hasn&apos;t reported in a while.
             </p>
           )}
         </CardContent>
+        {!isPending && slack?.hasCredentials && (
+          <CardFooter className="justify-between border-t">
+            <p className="text-muted-foreground min-w-0 truncate font-mono text-xs">
+              {slack.externalId}
+            </p>
+            <Button
+              variant="ghost"
+              size="sm"
+              className="text-destructive hover:text-destructive shrink-0"
+              onClick={() => setConfirmOpen(true)}
+            >
+              Disconnect
+            </Button>
+          </CardFooter>
+        )}
       </Card>
 
       <AlertDialog open={confirmOpen} onOpenChange={setConfirmOpen}>

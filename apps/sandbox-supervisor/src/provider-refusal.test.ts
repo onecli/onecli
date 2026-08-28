@@ -1,5 +1,38 @@
 import { describe, expect, it } from "vitest";
-import { isProviderRefusal } from "./provider-refusal";
+import { isProviderRefusal, isTrialCreditExhausted } from "./provider-refusal";
+
+/** The gateway's real trial-credit 403 body, as the harness wraps it (the
+ * shape observed live in dev — prose mentions no refusal token, so without
+ * its own code this fell through to the raw red-box passthrough). */
+const TRIAL_CREDIT_403 =
+  'Anthropic API error (403 Forbidden): {"add_key_url":"https://app-dev.onecli.sh/w/x/connections/llms","error":"trial_credit_exhausted","limit_usd":5.0,"message":"Your free OneCLI trial credit ($5.00) is used up. Add your own Anthropic API key in the OneCLI dashboard to keep going: https://app-dev.onecli.sh/w/x/connections/llms","period":"total"}';
+
+describe("isTrialCreditExhausted", () => {
+  it("classifies the gateway's budget_exceeded body", () => {
+    expect(isTrialCreditExhausted(TRIAL_CREDIT_403)).toBe(true);
+  });
+
+  it("matches the code, not prose — a message merely quoting the words does not classify", () => {
+    expect(
+      isTrialCreditExhausted("Error: the budget exceeded our expectations"),
+    ).toBe(false);
+    expect(isTrialCreditExhausted("harness event stream ended")).toBe(false);
+    // The ORG-budget sibling keeps its own code and the raw passthrough:
+    // its message names an admin-configured budget, which is accurate there.
+    expect(
+      isTrialCreditExhausted(
+        '{"error":"budget_exceeded","message":"This organization\'s spend budget for the anthropic key ($50.00 this month) has been reached."}',
+      ),
+    ).toBe(false);
+  });
+
+  // The supervisor checks trial-credit FIRST, so this pair documents the
+  // handoff: the same body must not ALSO read as a generic provider refusal
+  // (whose "check the model key" copy would misdirect — there is no key).
+  it("the trial-credit body is not a generic provider refusal", () => {
+    expect(isProviderRefusal(TRIAL_CREDIT_403)).toBe(false);
+  });
+});
 
 describe("isProviderRefusal", () => {
   it.each([

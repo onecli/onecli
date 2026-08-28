@@ -144,6 +144,21 @@ services:
       # RUNNER_TOKEN so the api and the adapter service always read the SAME
       # interpolated value (a checkout's root .env must not shadow it).
       CHANNEL_ADAPTER_TOKEN: ${CHANNEL_ADAPTER_TOKEN:-}
+      # Channels: the SHARED Slack app — team onboarding from Slack (the bot
+      # answers DMs with an account button). OPTIONAL and advanced: most
+      # self-hosts skip it entirely; per-agent apps work without it. To run
+      # your own, create the app once from the manifest at
+      # GET /v1/org/channels/slack/shared-manifest (needs a public HTTPS
+      # API_URL), then paste its credentials here. All four unset = the
+      # shared arm is simply absent (the default).
+      SLACK_SHARED_CLIENT_ID: ${SLACK_SHARED_CLIENT_ID:-}
+      SLACK_SHARED_CLIENT_SECRET: ${SLACK_SHARED_CLIENT_SECRET:-}
+      SLACK_SHARED_SIGNING_SECRET: ${SLACK_SHARED_SIGNING_SECRET:-}
+      SLACK_SHARED_APP_ID: ${SLACK_SHARED_APP_ID:-}
+      # App-manager user scopes (default off): flip only once Slack has
+      # enrolled the app as an app manager — Slack refuses the scopes
+      # otherwise, failing the install consent screen.
+      SLACK_SHARED_APP_MANAGER_APPROVED: ${SLACK_SHARED_APP_MANAGER_APPROVED:-}
     volumes:
       # Read-only view of the gateway's data dir: the api serves the gateway's
       # CA certificate (written to /app/data/gateway/ca.pem) to install flows.

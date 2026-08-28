@@ -19,6 +19,7 @@ import { eeTeamHooks } from "./ee/hooks/team-hooks";
 import { eeRuleActionGate } from "./ee/hooks/rule-action-gate";
 import { eePolicyValidator } from "./ee/granular-access";
 import { eeNewOrgPolicySeeder } from "./ee/services/new-org-policy-seeder";
+import { eePlatformLlm } from "./ee/services/platform-llm";
 import { onpremNewWorkspacePolicySeeder } from "./services/policy-onprem-seeder";
 import { pgAttachmentBlobStore } from "./services/attachments/pg-blob-store";
 import { setDefaultAttachmentStore } from "./providers/attachment-store";
@@ -38,6 +39,7 @@ import {
   initRoleResolver,
   setDefaultRoleResolver,
 } from "./providers/role-resolver";
+import { setDefaultPlatformLlm } from "./providers/platform-llm";
 import {
   initWorkspaceAccessChecker,
   setDefaultWorkspaceAccessChecker,
@@ -136,6 +138,10 @@ export const ensureEditionDefaults = (): void => {
     setDefaultRuleActionGate(eeRuleActionGate);
     setDefaultPolicyValidator(eePolicyValidator);
     setDefaultNewOrgPolicySeeder(eeNewOrgPolicySeeder);
+    // Platform trial credit: dark by config (no PLATFORM_ANTHROPIC_API_KEY →
+    // the provider answers false), like the SSH CA above — injection never
+    // fails the boot.
+    setDefaultPlatformLlm(eePlatformLlm);
 
     // Cross-pod live transcript fan-out: api runs multiple pods, so the
     // in-process emitter delivers a publish to no one when the runner's event

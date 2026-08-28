@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   agentAppDescription,
+  agentAppDescriptionWithOwner,
   BOT_SCOPES,
   buildAgentManifest,
   tombstoneAppName,
@@ -195,5 +196,55 @@ describe("withSyncedAppName", () => {
     expect(out.display_information.description).toContain(
       "a OneCLI hosted agent",
     );
+  });
+
+  it("carries the Managed-by owner suffix through a rename", () => {
+    const manifest = exported({
+      display_information: {
+        name: "old-name",
+        description: agentAppDescriptionWithOwner("old-name", {
+          name: "Jonathan",
+          email: "jonathan@onecli.sh",
+        }),
+      },
+    });
+    const out = withSyncedAppName(manifest, "New Name") as {
+      display_information: { description: string };
+    };
+    expect(out.display_information.description).toBe(
+      "New Name, a OneCLI hosted agent. Managed by Jonathan (jonathan@onecli.sh).",
+    );
+  });
+});
+
+describe("agentAppDescriptionWithOwner", () => {
+  it("names the owner with their email", () => {
+    expect(
+      agentAppDescriptionWithOwner("Donna", {
+        name: "Jonathan",
+        email: "jonathan@onecli.sh",
+      }),
+    ).toBe(
+      "Donna, a OneCLI hosted agent. Managed by Jonathan (jonathan@onecli.sh).",
+    );
+  });
+
+  it("falls back to the bare email when the owner has no display name", () => {
+    expect(
+      agentAppDescriptionWithOwner("Donna", {
+        name: null,
+        email: "jonathan@onecli.sh",
+      }),
+    ).toBe("Donna, a OneCLI hosted agent. Managed by jonathan@onecli.sh.");
+  });
+
+  it("sacrifices the owner suffix, never the identity line, at the 140 cap", () => {
+    const long = agentAppDescriptionWithOwner("N".repeat(34), {
+      name: "A very long name that overflows the app description budget",
+      email: "very-long-address@example-company-domain.com",
+    });
+    expect(long.length).toBeLessThanOrEqual(140);
+    expect(long).toContain("a OneCLI hosted agent");
+    expect(long).not.toContain("Managed by");
   });
 });

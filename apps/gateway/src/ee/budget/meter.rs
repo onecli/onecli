@@ -57,7 +57,7 @@ pub(crate) fn wrap_metered(
             charge: Some(ChargeCtx {
                 meta,
                 secret_id: binding.secret_id.clone(),
-                org_id: binding.organization_id.clone(),
+                subject: binding.subject.to_string(),
                 period_key: spend::period_key(binding.period),
             }),
         }),
@@ -71,7 +71,8 @@ pub(crate) fn wrap_metered(
 struct ChargeCtx {
     meta: RequestMeta,
     secret_id: String,
-    org_id: String,
+    /// Rendered [`super::BudgetSubject`] (`org:<id>` / `user:<id>`).
+    subject: String,
     period_key: String,
 }
 
@@ -90,7 +91,7 @@ impl MeteringStream {
         let cost_nanos = self.acc.finish();
         let charge = BudgetCharge {
             secret_id: ctx.secret_id,
-            organization_id: ctx.org_id,
+            subject: ctx.subject,
             period_key: ctx.period_key,
             cost_nanos,
         };

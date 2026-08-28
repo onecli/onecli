@@ -1,5 +1,13 @@
 # Changelog
 
+## [2.3.0](https://github.com/onecli/onecli/compare/v2.2.3...v2.3.0) (2026-08-28)
+
+
+### Features
+
+* shared Slack app - team onboarding from Slack ([#523](https://github.com/onecli/onecli/issues/523)) ([8d4381c](https://github.com/onecli/onecli/commit/8d4381c2a40e0b662976313644caccc678dc83e0))
+* Snowflake integration, platform Anthropic trial credit, Slack CDN redirect fix ([#528](https://github.com/onecli/onecli/issues/528)) ([4b94687](https://github.com/onecli/onecli/commit/4b94687e1727b2d74228d0e111045fe98c479505))
+
 ## [2.2.3](https://github.com/onecli/onecli/compare/v2.2.2...v2.2.3) (2026-08-26)
 
 

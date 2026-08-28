@@ -12,6 +12,17 @@ use crate::db;
 use crate::inject::Injection;
 use crate::util;
 
+/// Whether a secret's metadata marks it as an OAuth (ChatGPT session)
+/// credential. Missing/other metadata means api-key — the historical default
+/// and how every pre-authMode row behaves.
+#[must_use]
+pub(crate) fn is_oauth_mode(metadata: Option<&serde_json::Value>) -> bool {
+    metadata
+        .and_then(|m| m.get("authMode"))
+        .and_then(|v| v.as_str())
+        == Some("oauth")
+}
+
 /// Build injection instructions for a secret based on its type.
 pub(crate) fn build_injections(
     secret_type: &str,
@@ -41,12 +52,7 @@ pub(crate) fn build_injections(
         }
 
         "openai" => {
-            let is_oauth = metadata
-                .and_then(|m| m.get("authMode"))
-                .and_then(|v| v.as_str())
-                == Some("oauth");
-
-            if is_oauth {
+            if is_oauth_mode(metadata) {
                 let auth: serde_json::Value = match serde_json::from_str(decrypted_value) {
                     Ok(v) => v,
                     Err(e) => {
@@ -160,19 +166,29 @@ pub(crate) fn build_injections(
 }
 
 /// The host-match patterns a secret of `secret_type` injects its credential on,
-/// given its stored `host_pattern`. Single source of truth shared by the
-/// connect-time injection filter (`connect::resolve_secret_injections`) AND policy
+/// given its stored `host_pattern` and `metadata`. Single source of truth shared
+/// by the connect-time injection filter (`secret_injects_on_host`) AND policy
 /// enforcement (`db::find_secret_hosts` → v2 `Target::Secret`), so injection
-/// coverage == enforcement coverage BY CONSTRUCTION — the secret analog of the
+/// coverage ⊆ enforcement coverage BY CONSTRUCTION — the secret analog of the
 /// provider-registry host fix. Every secret covers its own stored `host_pattern`;
-/// only `openai` adds the extra hosts one OpenAI credential is valid across
-/// (`api.openai.com`, ChatGPT, and their subdomains) regardless of which host it
-/// was stored under. Returned as `host_matches` patterns, so `*.openai.com` covers
-/// every `.openai.com` subdomain.
+/// only an OAuth-mode `openai` secret (`metadata.authMode == "oauth"`) adds the
+/// extra hosts one ChatGPT credential is valid across (`api.openai.com`, ChatGPT,
+/// and their subdomains) regardless of which host it was stored under. An
+/// API-key-mode secret — or one with no metadata at all, which is the same thing
+/// (`build_injections` treats missing metadata as api-key, and the pre-authMode
+/// legacy rows are all API keys) — stays on its stored host: an OpenAI API key is
+/// not a ChatGPT credential, and expanding it both leaked the key beyond its
+/// configured host and broke Codex's OAuth login (#490). Returned as
+/// `host_matches` patterns, so `*.openai.com` covers every `.openai.com`
+/// subdomain.
 #[must_use]
-pub(crate) fn secret_host_patterns(secret_type: &str, host_pattern: &str) -> Vec<String> {
+pub(crate) fn secret_host_patterns(
+    secret_type: &str,
+    host_pattern: &str,
+    metadata: Option<&serde_json::Value>,
+) -> Vec<String> {
     let mut patterns = vec![host_pattern.to_string()];
-    if secret_type == "openai" {
+    if secret_type == "openai" && is_oauth_mode(metadata) {
         for extra in [
             "api.openai.com",
             "chatgpt.com",
@@ -185,6 +201,37 @@ pub(crate) fn secret_host_patterns(secret_type: &str, host_pattern: &str) -> Vec
         }
     }
     patterns
+}
+
+/// OpenAI's OAuth token service. A real Codex authorization-code (or refresh)
+/// exchange there authenticates with its own OAuth parameters — an injected
+/// `Authorization` header makes it fail with 401 `invalid_client` (#490) — and
+/// the default-interception contract promises non-synthetic login requests are
+/// forwarded untouched (`default_interceptions::codex_oauth_refresh`). So
+/// `openai` secrets NEVER inject here, even though the OAuth-mode pattern set
+/// reaches it via `*.openai.com`. Injection-only: enforcement keeps the full
+/// pattern set (a rule on the secret still covers this host — wider is
+/// fail-safe).
+const OPENAI_AUTH_HOST: &str = "auth.openai.com";
+
+/// Whether a secret's credential is injected on `hostname` — the metadata-aware
+/// pattern match minus the `auth.openai.com` carve-out. The connect-time
+/// injection filter (`connect::resolve_secret_injections`) and the availability
+/// probe (`connect::has_available_credentials`) both go through here, so "would
+/// inject" and "counts as an available credential" can never disagree.
+#[must_use]
+pub(crate) fn secret_injects_on_host(
+    secret_type: &str,
+    host_pattern: &str,
+    metadata: Option<&serde_json::Value>,
+    hostname: &str,
+) -> bool {
+    if secret_type == "openai" && hostname.eq_ignore_ascii_case(OPENAI_AUTH_HOST) {
+        return false;
+    }
+    secret_host_patterns(secret_type, host_pattern, metadata)
+        .iter()
+        .any(|p| crate::connect::host_matches(hostname, p))
 }
 
 /// If the OpenAI OAuth access_token is expired, refresh it and persist the
@@ -560,14 +607,15 @@ mod tests {
         assert!(injections.is_empty());
     }
 
-    // ── secret_host_patterns (injection == enforcement, the OpenAI bypass) ────
+    // ── secret_host_patterns (injection ⊆ enforcement, the OpenAI bypass) ────
 
     #[test]
     fn secret_host_patterns_openai_covers_all_its_hosts() {
-        // One OpenAI credential is valid across api.openai.com, ChatGPT, and the
-        // subdomains — enforcement must resolve the same set injection does.
+        // One ChatGPT (OAuth-mode) credential is valid across api.openai.com,
+        // ChatGPT, and the subdomains — enforcement must cover the whole set.
+        let oauth = serde_json::json!({ "authMode": "oauth" });
         assert_eq!(
-            secret_host_patterns("openai", "api.openai.com"),
+            secret_host_patterns("openai", "api.openai.com", Some(&oauth)),
             vec![
                 "api.openai.com".to_string(),
                 "chatgpt.com".to_string(),
@@ -578,10 +626,32 @@ mod tests {
     }
 
     #[test]
+    fn secret_host_patterns_openai_api_key_stays_on_its_host() {
+        // THE #490 REGRESSION GUARD: an API-key secret stored for
+        // api.openai.com must NOT expand to *.openai.com — the expansion
+        // injected `Authorization: Bearer sk-...` into auth.openai.com token
+        // exchanges (401 invalid_client, breaking `codex login`) and sent the
+        // key beyond its configured host.
+        let api_key = serde_json::json!({ "authMode": "api-key" });
+        assert_eq!(
+            secret_host_patterns("openai", "api.openai.com", Some(&api_key)),
+            vec!["api.openai.com".to_string()]
+        );
+        // No metadata ≡ api-key: `build_injections` injects such a secret as a
+        // bearer API key, and the pre-authMode legacy rows are all API keys —
+        // expanding them would recreate the same broken injection.
+        assert_eq!(
+            secret_host_patterns("openai", "api.openai.com", None),
+            vec!["api.openai.com".to_string()]
+        );
+    }
+
+    #[test]
     fn secret_host_patterns_openai_dedups_the_stored_host() {
         // Stored under chatgpt.com (Codex/OAuth mode): same set, no duplicate.
+        let oauth = serde_json::json!({ "authMode": "oauth" });
         assert_eq!(
-            secret_host_patterns("openai", "chatgpt.com"),
+            secret_host_patterns("openai", "chatgpt.com", Some(&oauth)),
             vec![
                 "chatgpt.com".to_string(),
                 "api.openai.com".to_string(),
@@ -595,12 +665,90 @@ mod tests {
     fn secret_host_patterns_other_types_are_just_their_host() {
         // No expansion for symmetric types — enforcement already == injection.
         assert_eq!(
-            secret_host_patterns("anthropic", "api.anthropic.com"),
+            secret_host_patterns("anthropic", "api.anthropic.com", None),
             vec!["api.anthropic.com".to_string()]
         );
         assert_eq!(
-            secret_host_patterns("generic", "internal.example.com"),
+            secret_host_patterns("generic", "internal.example.com", None),
             vec!["internal.example.com".to_string()]
         );
+    }
+
+    // ── secret_injects_on_host (the auth.openai.com carve-out) ──────────────
+
+    #[test]
+    fn openai_secrets_never_inject_on_the_oauth_token_service() {
+        // Real Codex logins must reach auth.openai.com untouched — for BOTH
+        // modes. OAuth-mode reaches it via *.openai.com and an injected Bearer
+        // access token fails the exchange exactly like an API key does.
+        let oauth = serde_json::json!({ "authMode": "oauth" });
+        assert!(!secret_injects_on_host(
+            "openai",
+            "chatgpt.com",
+            Some(&oauth),
+            "auth.openai.com"
+        ));
+        let api_key = serde_json::json!({ "authMode": "api-key" });
+        assert!(!secret_injects_on_host(
+            "openai",
+            "api.openai.com",
+            Some(&api_key),
+            "auth.openai.com"
+        ));
+        // Even a secret explicitly stored FOR auth.openai.com is refused: no
+        // OpenAI credential shape authenticates there via headers.
+        assert!(!secret_injects_on_host(
+            "openai",
+            "auth.openai.com",
+            None,
+            "auth.openai.com"
+        ));
+        // Case-insensitive like every host comparison on this path.
+        assert!(!secret_injects_on_host(
+            "openai",
+            "chatgpt.com",
+            Some(&oauth),
+            "Auth.OpenAI.com"
+        ));
+    }
+
+    #[test]
+    fn secret_injects_on_host_matches_the_pattern_set_elsewhere() {
+        let oauth = serde_json::json!({ "authMode": "oauth" });
+        // OAuth-mode: the expanded set injects on the sibling hosts...
+        assert!(secret_injects_on_host(
+            "openai",
+            "chatgpt.com",
+            Some(&oauth),
+            "api.openai.com"
+        ));
+        assert!(secret_injects_on_host(
+            "openai",
+            "chatgpt.com",
+            Some(&oauth),
+            "chatgpt.com"
+        ));
+        // ...api-key mode only on its stored host...
+        let api_key = serde_json::json!({ "authMode": "api-key" });
+        assert!(secret_injects_on_host(
+            "openai",
+            "api.openai.com",
+            Some(&api_key),
+            "api.openai.com"
+        ));
+        assert!(!secret_injects_on_host(
+            "openai",
+            "api.openai.com",
+            Some(&api_key),
+            "chatgpt.com"
+        ));
+        // ...and the carve-out is OpenAI-scoped: a generic secret a user
+        // deliberately points at auth.openai.com still injects.
+        assert!(secret_injects_on_host(
+            "generic",
+            "auth.openai.com",
+            None,
+            "auth.openai.com"
+        ));
     }
 }

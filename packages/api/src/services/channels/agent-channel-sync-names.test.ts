@@ -48,7 +48,10 @@ describe("syncAgentPresenceNames", () => {
   it("pushes the new name through fresh integration credentials", async () => {
     await syncAgentPresenceNames(AGENT, "New Name");
     expect(db.agentChannel.findMany).toHaveBeenCalledWith({
-      where: { agentId: "ag1", status: { in: ["active", "needs_attention"] } },
+      where: {
+        agentId: "ag1",
+        status: { in: ["active", "needs_attention"] },
+      },
       select: { provider: true, externalId: true },
     });
     expect(seams.syncRemotePresenceName).toHaveBeenCalledWith({

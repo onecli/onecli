@@ -8,9 +8,12 @@ import {
   Card,
   CardContent,
   CardDescription,
+  CardFooter,
   CardHeader,
   CardTitle,
 } from "@onecli/ui/components/card";
+import { AppIcon } from "@/lib/components/app-icon";
+import { slack as slackApp } from "@onecli/api/apps/slack";
 import type { AgentChannelPresence } from "@/lib/api";
 import { SlackDetachDialog } from "./slack-detach-dialog";
 
@@ -36,31 +39,59 @@ export const SlackPresenceCard = ({
   const [detachOpen, setDetachOpen] = useState(false);
   const workspace = presence.tenant.name ?? presence.tenant.externalId;
   const threadCount = presence.groupThreads.length;
+  const attention = presence.status === "needs_attention";
 
   return (
     <>
-      <Card>
+      <Card className="gap-4">
         <CardHeader>
           <div className="flex items-start justify-between gap-3">
-            <div className="min-w-0">
-              <CardTitle className="truncate">
-                {agentName} @ {workspace}
-              </CardTitle>
-              <CardDescription>Slack</CardDescription>
+            <div className="flex min-w-0 items-center gap-3">
+              <span className="bg-card flex size-10 shrink-0 items-center justify-center rounded-xl border shadow-sm">
+                <AppIcon icon={slackApp.icon} name={slackApp.name} size={22} />
+              </span>
+              <div className="min-w-0 space-y-0.5">
+                <CardTitle className="truncate leading-tight">
+                  {presence.identityName
+                    ? `@${presence.identityName}`
+                    : `${agentName} @ ${workspace}`}
+                </CardTitle>
+                <CardDescription className="truncate">
+                  {presence.managedBy
+                    ? `Managed by ${
+                        presence.managedBy.name?.trim() ||
+                        presence.managedBy.email
+                      }`
+                    : workspace}
+                </CardDescription>
+              </div>
             </div>
             <div className="flex shrink-0 items-center gap-1.5">
-              <Badge variant="secondary" className="capitalize">
-                {presence.transport === "events" ? "Events" : "Socket"}
-              </Badge>
-              {presence.status === "disabled" && (
+              {presence.status === "disabled" ? (
                 <Badge variant="secondary">Disabled</Badge>
+              ) : attention ? (
+                <Badge
+                  variant="secondary"
+                  className="border-amber-500/30 bg-amber-500/10 text-amber-600 dark:text-amber-400"
+                >
+                  <span className="size-1.5 rounded-full bg-amber-500" />
+                  Needs attention
+                </Badge>
+              ) : (
+                <Badge
+                  variant="secondary"
+                  className="border-emerald-500/30 bg-emerald-500/10 text-emerald-600 dark:text-emerald-400"
+                >
+                  <span className="size-1.5 rounded-full bg-emerald-500" />
+                  Connected
+                </Badge>
               )}
             </div>
           </div>
         </CardHeader>
-        <CardContent className="space-y-4">
-          {presence.status === "needs_attention" && (
-            <div className="space-y-1 rounded-lg border border-amber-500/30 bg-amber-500/10 px-4 py-3 dark:border-amber-500/40 dark:bg-amber-500/15">
+        <CardContent>
+          {attention && (
+            <div className="mb-3 space-y-1 rounded-lg border border-amber-500/30 bg-amber-500/10 px-4 py-3 dark:border-amber-500/40 dark:bg-amber-500/15">
               <p className="text-sm">
                 Approvals for this agent stopped working: its service key was
                 refused (the member who attached it may have lost workspace
@@ -74,36 +105,35 @@ export const SlackPresenceCard = ({
 
           <p className="text-muted-foreground text-sm">
             {threadCount === 0
-              ? "No group threads yet. Mention the agent in a channel to start one."
+              ? "Message the bot directly, or mention it in a channel to start a group thread."
               : threadCount === 1
                 ? "Active in 1 group thread."
                 : `Active in ${threadCount} group threads.`}
           </p>
-
-          <div className="flex items-center gap-2">
-            <Button variant="outline" size="sm" asChild>
-              <a
-                // `team=` pins the redirect to the installed workspace — without it a
-                // multi-workspace user lands in their DEFAULT workspace, which may
-                // not be the one the agent lives in.
-                href={`https://slack.com/app_redirect?app=${encodeURIComponent(presence.externalId)}&team=${encodeURIComponent(presence.tenant.externalId)}`}
-                target="_blank"
-                rel="noreferrer"
-              >
-                Open in Slack
-                <ExternalLink className="size-3.5" />
-              </a>
-            </Button>
-            <Button
-              variant="outline"
-              size="sm"
-              className="text-destructive hover:text-destructive"
-              onClick={() => setDetachOpen(true)}
-            >
-              Detach
-            </Button>
-          </div>
         </CardContent>
+        <CardFooter className="justify-between gap-2 border-t [.border-t]:pt-4">
+          <Button variant="outline" size="sm" asChild>
+            <a
+              // `team=` pins the redirect to the installed workspace — without it a
+              // multi-workspace user lands in their DEFAULT workspace, which may
+              // not be the one the agent lives in.
+              href={`https://slack.com/app_redirect?app=${encodeURIComponent(presence.externalId)}&team=${encodeURIComponent(presence.tenant.externalId)}`}
+              target="_blank"
+              rel="noreferrer"
+            >
+              Open in Slack
+              <ExternalLink className="size-3.5" />
+            </a>
+          </Button>
+          <Button
+            variant="ghost"
+            size="sm"
+            className="text-muted-foreground hover:text-destructive"
+            onClick={() => setDetachOpen(true)}
+          >
+            Detach
+          </Button>
+        </CardFooter>
       </Card>
 
       <SlackDetachDialog

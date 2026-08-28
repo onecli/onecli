@@ -123,5 +123,14 @@ describe("the swarm posture: always on, fenced by env", () => {
     // "ready" holding server memory until asked about — and a finished
     // worker keeps consuming a cap slot until stopped or reaped).
     expect(SWARM_LIGHT_PROMPT).toContain("stop or clean up");
+    // The deliverable-extraction laws (observed live: every relay of helper
+    // text truncates long content, a message to a completed helper drops
+    // after reporting success, and a stop before collection loses the
+    // deliverable for good). Raw pins — each fragment sits inside one
+    // physical line of the block, like the pins above.
+    expect(SWARM_LIGHT_PROMPT).toContain("name an exact file path");
+    expect(SWARM_LIGHT_PROMPT).toContain("one at a time");
+    expect(SWARM_LIGHT_PROMPT).toContain("already completed");
+    expect(SWARM_LIGHT_PROMPT).toContain("verified in hand");
   });
 });

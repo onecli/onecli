@@ -51,7 +51,9 @@ pub(crate) enum RequestDecision {
 #[allow(dead_code)] // read by cloud telemetry (budget flush), unused in OSS
 pub(crate) struct BudgetCharge {
     pub secret_id: String,
-    pub organization_id: String,
+    /// Rendered budget subject (`org:<id>` / `user:<id>`) — who the spend is
+    /// attributed to. See `ee::budget::BudgetSubject`.
+    pub subject: String,
     pub period_key: String,
     pub cost_nanos: i64,
 }

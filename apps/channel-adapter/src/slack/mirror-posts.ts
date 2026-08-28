@@ -264,6 +264,16 @@ export const slackMirrorPosts: MirrorPosts = {
       button: "Check the model key",
     });
   },
+  async trialCreditExhausted(input) {
+    // Same card shape again; this one's fix is ADDING a key — the agent was
+    // running on OneCLI's free credit and there is no user key to check.
+    await modelKeyCard(input, {
+      headline: "*The free trial credit is used up*",
+      context:
+        "This agent was running on OneCLI's free credit, which ran out. Add your own model key, then send your message again.",
+      button: "Add a model key",
+    });
+  },
   async failureNotice(input) {
     // Platform chrome, not the agent's voice: one plain italic line (the
     // automation caption's treatment), with a warning icon for failures and

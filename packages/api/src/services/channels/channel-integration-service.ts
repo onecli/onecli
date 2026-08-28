@@ -2,6 +2,12 @@ import { db, Prisma } from "@onecli/db";
 import { getCrypto } from "../../providers";
 import { ServiceError } from "../errors";
 import { channelProvider } from "./registry";
+import { sharedSlackApp } from "./providers/slack/shared-app";
+import { SlackApiError } from "./providers/slack/slack-api";
+import {
+  credentialsCanMintApps,
+  type SharedInstallCredentials,
+} from "./shared-install-service";
 import type {
   ChannelProviderId,
   UserLinkSource,
@@ -169,7 +175,9 @@ export const disconnectIntegration = async (
     where: { organizationId_provider: { organizationId, provider } },
     select: {
       id: true,
-      _count: { select: { agentChannels: true, userLinks: true } },
+      _count: {
+        select: { agentChannels: true, userLinks: true, installations: true },
+      },
     },
   });
   if (!existing) throw new ServiceError("NOT_FOUND", "Integration not found");
@@ -178,7 +186,14 @@ export const disconnectIntegration = async (
   // in-flight rotation's count-0 reconcile would otherwise read the unlocked
   // clear as "a stale refusal wiped my pair" and write the freshly rotated,
   // fully LIVE credential back — silently undoing the revocation.
-  if (existing._count.agentChannels === 0 && existing._count.userLinks === 0) {
+  if (
+    existing._count.agentChannels === 0 &&
+    existing._count.userLinks === 0 &&
+    // A live shared-app install rides this row too — deleting it would
+    // cascade the installation away as a side effect of dropping a mere
+    // automation credential.
+    existing._count.installations === 0
+  ) {
     await withIntegrationRotateLock(existing.id, (tx) =>
       tx.channelIntegration.delete({ where: { id: existing.id } }),
     );
@@ -377,6 +392,73 @@ export const withFreshIntegrationCredentials = async <T>(
   provider: ChannelProviderId,
   fn: (accessToken: string, integrationId: string) => Promise<T>,
 ): Promise<T> => {
+  // FAST PATH (managed-apps arm): the shared workspace install carries the
+  // admin's user token with `app_configurations:write` — the same manifest
+  // API the config token drives, minus the paste and the 12h rotation.
+  // Arms on the shared app's credentials. Fall through to the config-token
+  // path when there is no shared app configured, no install, or no user
+  // token on it.
+  if (provider === "slack" && sharedSlackApp() !== null) {
+    const install = await db.channelInstallation.findFirst({
+      where: { provider: "slack", integration: { organizationId } },
+      select: { id: true, integrationId: true, credentials: true },
+    });
+    if (install) {
+      // Decode failures alone fall through to the config token — `fn`'s own
+      // errors must PROPAGATE, never trigger a second run of `fn` on the
+      // other credential (a timed-out-but-succeeded manifest create would
+      // mint a duplicate orphan app in the workspace).
+      let creds: SharedInstallCredentials | null = null;
+      try {
+        creds = JSON.parse(
+          await getCrypto().decrypt(install.credentials),
+        ) as SharedInstallCredentials;
+      } catch (err) {
+        log.warn(
+          { err, organizationId },
+          "shared install credentials unreadable; falling back to the config token",
+        );
+      }
+      if (creds && credentialsCanMintApps(creds) && creds.userToken) {
+        try {
+          return await fn(creds.userToken, install.integrationId);
+        } catch (err) {
+          // Slack gates the manifest API behind approved "app manager"
+          // status (granted at marketplace review). Until then every
+          // mint refuses with invalid_manager_app: record the refusal on
+          // the install so views stop advertising a capability Slack
+          // denies, and fall through to the config token. A reinstall
+          // rewrites the credentials and clears the mark — the natural
+          // retry point once the app is approved.
+          if (
+            err instanceof SlackApiError &&
+            err.code === "invalid_manager_app"
+          ) {
+            log.warn(
+              { organizationId },
+              "slack refused the shared install's user token for manifest calls (app not marketplace-approved); falling back to the config token",
+            );
+            // Compare-and-swap on the exact ciphertext read: the mint call
+            // spans seconds, and a reinstall committing FRESH credentials in
+            // that window must win — re-encrypting the stale tokens over it
+            // would break the just-completed install. Count 0 = someone
+            // rewrote the row; their credentials speak for themselves.
+            await db.channelInstallation.updateMany({
+              where: { id: install.id, credentials: install.credentials },
+              data: {
+                credentials: await getCrypto().encrypt(
+                  JSON.stringify({ ...creds, managerAppRefused: true }),
+                ),
+              },
+            });
+          } else {
+            throw err;
+          }
+        }
+      }
+    }
+  }
+
   const row = await db.channelIntegration.findUnique({
     where: { organizationId_provider: { organizationId, provider } },
     select: { id: true, credentials: true },

@@ -15,7 +15,7 @@ import {
 } from "@onecli/agent-protocol";
 import type { SupervisorConfig } from "./config";
 import { log } from "./log";
-import { isProviderRefusal } from "./provider-refusal";
+import { isProviderRefusal, isTrialCreditExhausted } from "./provider-refusal";
 import { renderHome, type RenderInputs } from "./home/renderer";
 import { applyHomeSync } from "./home/materializer";
 import {
@@ -497,9 +497,11 @@ export const runSupervisor = async (
       failureCode(runtime) ??
       (terminalErrorCode === TURN_FAILURE_CODES.harnessBusy
         ? TURN_FAILURE_CODES.harnessBusy
-        : raw && isProviderRefusal(raw)
-          ? TURN_FAILURE_CODES.modelProviderError
-          : undefined);
+        : raw && isTrialCreditExhausted(raw)
+          ? TURN_FAILURE_CODES.trialCreditExhausted
+          : raw && isProviderRefusal(raw)
+            ? TURN_FAILURE_CODES.modelProviderError
+            : undefined);
 
     /** Everything the agent said this turn, rebuilt from the deltas. */
     let answer = "";
@@ -738,6 +740,7 @@ export const runSupervisor = async (
         // error event is the witness. Sliced at the source per the
         // transport's truncate-at-sender law: this frame must deliver.
         ...((errorCode === TURN_FAILURE_CODES.modelProviderError ||
+          errorCode === TURN_FAILURE_CODES.trialCreditExhausted ||
           errorCode === TURN_FAILURE_CODES.harnessBusy) &&
           terminalError && {
             error: terminalError.slice(0, MAX_TURN_RESULT_ERROR_CHARS),

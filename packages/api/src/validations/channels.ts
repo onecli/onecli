@@ -31,6 +31,24 @@ export const connectIntegrationSchema = z
   })
   .strict();
 
+/** POST /v1/org/channels/:provider/finish-install/inspect — the Slack
+ * authorization code parked by a marketplace install. Opaque to us; bounded
+ * because it rides a URL. */
+export const inspectInstallSchema = z
+  .object({
+    code: z.string().trim().min(1).max(2_000),
+  })
+  .strict();
+
+/** POST /v1/org/channels/:provider/finish-install — the sealed claim the
+ * inspect step returned (HMAC-signed, carries the encrypted exchanged
+ * grant, so it is larger than the code it replaced). */
+export const finishInstallSchema = z
+  .object({
+    claim: z.string().trim().min(1).max(16_000),
+  })
+  .strict();
+
 /** POST /v1/org/channels/:provider/user-links */
 export const addUserLinkSchema = z
   .object({

@@ -1,7 +1,7 @@
 import type { Metadata } from "next";
 import { redirect } from "next/navigation";
 import { db } from "@onecli/db";
-import { normalizePlan } from "@onecli/api/ee/billing/plans";
+import { getWorkspaceQuota } from "@onecli/api/ee/services/quota-service";
 import { canManageWorkspace } from "@onecli/api/ee/services/authorization-service";
 import { getServerSession } from "@/lib/auth/server";
 import { PageHeader } from "@dashboard/page-header";
@@ -43,7 +43,6 @@ export default async function WorkspaceSettingsPage({ params }: Props) {
       id: true,
       name: true,
       organizationId: true,
-      organization: { select: { subscriptionStatus: true } },
     },
   });
   if (!workspace) redirect("/org");
@@ -61,6 +60,14 @@ export default async function WorkspaceSettingsPage({ params }: Props) {
     where: { organizationId: workspace.organizationId },
   });
 
+  // The plan comes from the quota service, NOT raw subscriptionStatus: on
+  // non-billing editions the service reports the top tier, keeping this page
+  // in agreement with the workspaces list. Deriving "free" from the null
+  // status here showed a licensed self-host a dead-end Stripe upgrade CTA
+  // instead of Manage access (the license gate inside the card handles the
+  // unlicensed arm).
+  const { plan } = await getWorkspaceQuota(workspace.organizationId);
+
   return (
     <div className="flex flex-1 flex-col gap-6">
       <PageHeader
@@ -71,12 +78,7 @@ export default async function WorkspaceSettingsPage({ params }: Props) {
         workspaceId={workspace.id}
         currentName={workspace.name}
       />
-      <WorkspaceAccessCard
-        workspaceId={workspace.id}
-        plan={normalizePlan(
-          workspace.organization.subscriptionStatus ?? "free",
-        )}
-      />
+      <WorkspaceAccessCard workspaceId={workspace.id} plan={plan} />
       <DeleteWorkspaceButton
         workspaceId={workspace.id}
         workspaceName={workspace.name}

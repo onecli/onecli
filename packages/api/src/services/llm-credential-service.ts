@@ -1,6 +1,10 @@
 import { db, type Prisma } from "@onecli/db";
 import { getCrypto } from "../providers";
 import {
+  getPlatformLlm,
+  PLATFORM_LLM_SECRET_ID,
+} from "../providers/platform-llm";
+import {
   NO_MODEL_KEY_MESSAGE,
   type TurnErrorCode,
 } from "../validations/conversation";
@@ -34,7 +38,10 @@ export interface ResolvedLlmCredential {
   provider: LlmProviderId;
   secretId: string;
   authMode: "api-key" | "oauth";
-  /** "workspace" | "organization" — which grant won, for explaining the choice. */
+  /**
+   * "workspace" | "organization" — which grant won, for explaining the
+   * choice — or "platform" for the trial-credit credential (see below).
+   */
   scope: string;
   /** 1Password-sourced secrets have no stored value the control plane can read. */
   hasReadableValue: boolean;
@@ -92,6 +99,41 @@ const byPrecedence = (
   return aScope - bScope || aProvider - bProvider || a.id.localeCompare(b.id);
 };
 
+/**
+ * The platform trial credential, when the trial credit applies to this
+ * agent's org/workspace (cloud-only; the licensed provider is injected at
+ * boot — `null` everywhere else, so this resolves nothing on onprem).
+ *
+ * Eligibility is decided on the UNFILTERED org+workspace pool — NOT the
+ * grant-narrowed `where` — mirroring the gateway exactly: an
+ * existing-but-restricted LLM key counts as present, so a restriction is
+ * never bypassed with free credit.
+ *
+ * The shape is honest about what the control plane holds: `hasReadableValue:
+ * false` (the key lives only in the gateway's env; the models catalog serves
+ * its pinned list), sentinel `secretId` (nothing may decrypt or grant it),
+ * and `scope: "platform"` so the UI can explain the provider choice.
+ */
+const platformTrialCredential = async (
+  workspaceId: string,
+  organizationId: string,
+): Promise<ResolvedLlmCredential | null> => {
+  const platform = getPlatformLlm();
+  if (!platform) return null;
+  const pool = await db.secret.findMany({
+    where: { OR: [{ workspaceId }, { organizationId, scope: "organization" }] },
+    select: { type: true, hostPattern: true },
+  });
+  if (!platform.trialCreditApplies(pool)) return null;
+  return {
+    provider: "anthropic",
+    secretId: PLATFORM_LLM_SECRET_ID,
+    authMode: "api-key",
+    scope: "platform",
+    hasReadableValue: false,
+  };
+};
+
 export const resolveAgentLlmCredential = async (
   agent: { id: string; workspaceId: string },
   organizationId: string,
@@ -114,7 +156,8 @@ export const resolveAgentLlmCredential = async (
   });
 
   const winner = candidates.filter(isLlmSecret).sort(byPrecedence)[0];
-  if (!winner) return null;
+  if (!winner)
+    return platformTrialCredential(agent.workspaceId, organizationId);
 
   return {
     provider: winner.type,

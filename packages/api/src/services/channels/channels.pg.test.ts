@@ -102,6 +102,54 @@ let slackHandlers: Record<string, (call: SlackCall) => unknown> = {};
 const slackCallsFor = (method: string) =>
   slackCalls.filter((c) => c.method === method);
 
+// ── The fake Slack file CDN ─────────────────────────────────────────────────
+// A SECOND origin, deliberately distinct from the fake Web API: Slack 302s
+// authenticated non-image downloads to its presigned safe-files CDN
+// (slack-files.com), and the download path treats that host set differently
+// (no Authorization header). Same recording shape as the Web API fake so the
+// tests can assert what each origin was sent.
+
+let cdnServer: Server;
+let cdnCalls: SlackCall[] = [];
+let cdnHandlers: Record<
+  string,
+  (call: SlackCall) => { bytes: Buffer; contentType: string }
+> = {};
+
+const startCdnFake = (): Promise<string> =>
+  new Promise((resolve) => {
+    cdnServer = createServer((req, res) => {
+      req.on("data", () => {});
+      req.on("end", () => {
+        const path = (req.url ?? "/").slice(1);
+        const auth = req.headers.authorization ?? null;
+        const call: SlackCall = {
+          method: path,
+          form: new URLSearchParams(),
+          token: auth?.startsWith("Bearer ") ? auth.slice(7) : null,
+          authorization: auth,
+        };
+        cdnCalls.push(call);
+        const handler = cdnHandlers[path];
+        if (!handler) {
+          res.writeHead(404, { "content-type": "text/plain" });
+          res.end("not scripted");
+          return;
+        }
+        const binary = handler(call);
+        res.writeHead(200, {
+          "content-type": binary.contentType,
+          "content-length": String(binary.bytes.byteLength),
+        });
+        res.end(binary.bytes);
+      });
+    });
+    cdnServer.listen(0, "127.0.0.1", () => {
+      const { port } = cdnServer.address() as AddressInfo;
+      resolve(`http://127.0.0.1:${port}`);
+    });
+  });
+
 const startSlackFake = (): Promise<string> =>
   new Promise((resolve) => {
     slackServer = createServer((req, res) => {
@@ -146,6 +194,19 @@ const startSlackFake = (): Promise<string> =>
               "content-length": String(binary.bytes.byteLength),
             });
             res.end(binary.bytes);
+            return;
+          }
+          // ... or a REDIRECT (`{ __redirect: url }`) — how Slack answers an
+          // authenticated non-image `files-pri` download (302 to the CDN).
+          if (
+            body &&
+            typeof body === "object" &&
+            "__redirect" in (body as Record<string, unknown>)
+          ) {
+            res.writeHead(302, {
+              location: (body as { __redirect: string }).__redirect,
+            });
+            res.end();
             return;
           }
           res.writeHead(200, { "content-type": "application/json" });
@@ -449,6 +510,7 @@ beforeAll(async () => {
 
   // Fakes first: their addresses feed env vars read at module load below.
   const slackUrl = await startSlackFake();
+  const cdnUrl = await startCdnFake();
   const gatewayUrl = await startGatewayFake();
 
   process.env.DATABASE_URL = PROOF_URL;
@@ -464,6 +526,7 @@ beforeAll(async () => {
   process.env.CHANNEL_ADAPTER_TOKEN = ADAPTER_ANCHOR;
   process.env.GATEWAY_INTERNAL_URL = gatewayUrl;
   process.env.SLACK_API_BASE_URL = slackUrl;
+  process.env.SLACK_CDN_BASE_URL = cdnUrl;
   // The reaction chooser's inference calls land on the SAME recording fake
   // (an unscripted method answers ok:false → the chooser falls back to
   // "eyes") — a pg test must never reach a real model origin.
@@ -572,6 +635,8 @@ beforeEach(async () => {
   decryptCache.resetDecryptCacheForTests();
   slackCalls = [];
   slackHandlers = {};
+  cdnCalls = [];
+  cdnHandlers = {};
   gatewayCalls = [];
   gatewayRespond = () => ({ status: 200, body: { success: true } });
   // Default posture: no public HTTPS → socket. Events tests opt in.
@@ -583,6 +648,7 @@ afterAll(async () => {
   await dropAll();
   await db.$disconnect();
   await new Promise((resolve) => slackServer.close(resolve));
+  await new Promise((resolve) => cdnServer.close(resolve));
   await new Promise((resolve) => gatewayServer.close(resolve));
 });
 
@@ -1782,6 +1848,176 @@ describe.skipIf(!PROOF_URL)("createPresence (the guided arm)", () => {
     // Neither the resume nor the refusal minted a second Slack app.
     expect(slackCallsFor("apps.manifest.create")).toHaveLength(1);
   });
+
+  it("a socket-stamped pending row RESUMES under an events-only posture — the stamp wins, nothing is discarded", async () => {
+    // The stamp-wins law's other direction: the row says socket while the
+    // deployment has drifted to events-ONLY (https origin + cloud edition, so
+    // socket is not even offered to a NEW create). A socket resume needs no
+    // URL rebuild, so it can always finish — the self-heal discard must NOT
+    // fire, or a retry click would silently uninstall the user's real app.
+    initSelfUrl(EVENTS_SELF_URL);
+    const integration = await seedIntegration({});
+    const agentId = await seedAgent("guided-stamp-socket");
+    const staleKey = await db.apiKey.create({
+      data: {
+        key: `oc_${P}stamp-socket-key`,
+        userId: ADMIN,
+        userEmail: `${ADMIN}@example.com`,
+        workspaceId: WORKSPACE,
+        scope: "workspace",
+        kind: "service",
+      },
+      select: { id: true },
+    });
+    const pending = await seedPresence(agentId, integration.id, {
+      status: "pending_setup",
+      externalId: "A-SOCK-STALE",
+      apiKeyId: staleKey.id,
+      credentials: await getCrypto().encrypt(
+        JSON.stringify({
+          clientId: "client-sock",
+          clientSecret: "cs-sock",
+          signingSecret: "ss-sock",
+        }),
+      ),
+    });
+
+    // `isOnpremEdition()` reads env call-time, so this flip is visible without
+    // a re-import — and MUST be restored (the suite's semantics are onprem;
+    // see the beforeAll pin's worker-leak warning).
+    process.env.EDITION = "cloud";
+    process.env.NEXT_PUBLIC_EDITION = "cloud";
+    try {
+      const resumed = await agentChannels.createPresence(
+        WORKSPACE,
+        agentId,
+        "slack",
+        ADMIN,
+      );
+      expect(resumed.presenceId).toBe(pending.id);
+      expect(resumed.transport).toBe("socket");
+      expect(resumed.installUrl).toBeNull();
+    } finally {
+      process.env.EDITION = "onprem";
+      process.env.NEXT_PUBLIC_EDITION = "onprem";
+    }
+
+    // No discard side effects: the row survives, its service key survives,
+    // and Slack heard NOTHING (no uninstall, no second manifest create).
+    expect(
+      await db.agentChannel.findUnique({ where: { id: pending.id } }),
+    ).not.toBeNull();
+    expect(
+      await db.apiKey.findUnique({ where: { id: staleKey.id } }),
+    ).not.toBeNull();
+    expect(slackCalls).toHaveLength(0);
+  });
+
+  it("DISCARDS a pending events row whose consent URL can no longer be rebuilt, and mints fresh in the SAME call", async () => {
+    // The self-heal arm. An events resume is only viable while the stored
+    // credentials can rebuild the consent URL; this row's blob never captured
+    // a client id (interrupted before the manifest response was stored, or a
+    // paste-floor shape), so `rebuildSetupUrls` answers installUrl: null and
+    // the retry click must discard-and-remint rather than hand back a dead
+    // resume. MUTATION-TESTED: skip the discard's `revokeServiceApiKey` (or
+    // its row delete / uninstall dispatch) and this test goes red.
+    initSelfUrl(EVENTS_SELF_URL);
+    const integration = await seedIntegration({
+      credentials: await integrationCredentials(12 * 3600),
+    });
+    const agentId = await seedAgent("guided-discard");
+    const staleKey = await db.apiKey.create({
+      data: {
+        key: `oc_${P}discard-stale-key`,
+        userId: ADMIN,
+        userEmail: `${ADMIN}@example.com`,
+        workspaceId: WORKSPACE,
+        scope: "workspace",
+        kind: "service",
+      },
+      select: { id: true },
+    });
+    const staleCredentialsJson = JSON.stringify({
+      botToken: "xoxb-stale",
+      clientSecret: "cs-stale",
+    });
+    const stale = await db.agentChannel.create({
+      data: {
+        agentId,
+        integrationId: integration.id,
+        provider: "slack",
+        externalId: "A-STALE",
+        transport: "events",
+        status: "pending_setup",
+        credentials: await getCrypto().encrypt(staleCredentialsJson),
+        apiKeyId: staleKey.id,
+        createdByUserId: ADMIN,
+      },
+      select: { id: true },
+    });
+    scriptManifestCreate();
+    // The best-effort remote uninstall is observed at the provider seam: the
+    // Slack impl then no-ops at the HTTP seam on THIS row, because the same
+    // missing client id that killed the rebuild also gates `apps.uninstall`.
+    // Wrapped by hand — the method is OPTIONAL on the provider interface, so
+    // `vi.spyOn` cannot type it; the wrap still calls through to the real
+    // implementation.
+    const { CHANNEL_PROVIDERS } = await import("./registry");
+    const slackProvider = CHANNEL_PROVIDERS.slack;
+    const realUninstall =
+      slackProvider.uninstallRemotePresence?.bind(slackProvider);
+    if (!realUninstall) {
+      throw new Error("the slack provider must expose uninstallRemotePresence");
+    }
+    const uninstallCalls: { credentialsJson: string | null }[] = [];
+    slackProvider.uninstallRemotePresence = async (input) => {
+      uninstallCalls.push(input);
+      return realUninstall(input);
+    };
+
+    try {
+      const result = await agentChannels.createPresence(
+        WORKSPACE,
+        agentId,
+        "slack",
+        ADMIN,
+      );
+
+      // A FRESH mint, not a resume: a new remote app and a LIVE consent URL.
+      expect(result.presenceId).not.toBe(stale.id);
+      expect(result.transport).toBe("events");
+      expect(result.installUrl).toContain("client_id=client-1");
+      expect(result.installUrl).toContain("&state=");
+      expect(slackCallsFor("apps.manifest.create")).toHaveLength(1);
+
+      // The stale row is GONE...
+      expect(
+        await db.agentChannel.findUnique({ where: { id: stale.id } }),
+      ).toBeNull();
+      // ...its service key was revoked (revoke = the row is deleted)...
+      expect(
+        await db.apiKey.findUnique({ where: { id: staleKey.id } }),
+      ).toBeNull();
+      // ...and the remote uninstall was ATTEMPTED on the stale row's own
+      // decrypted credentials (HTTP no-op here — see the wrap comment above).
+      expect(uninstallCalls).toEqual([
+        { credentialsJson: staleCredentialsJson },
+      ]);
+      expect(slackCallsFor("apps.uninstall")).toHaveLength(0);
+
+      // Exactly ONE presence remains: the fresh pending_setup row.
+      const rows = await db.agentChannel.findMany({
+        where: { agentId },
+        select: { id: true, status: true, externalId: true },
+      });
+      expect(rows).toHaveLength(1);
+      expect(rows[0]!.id).toBe(result.presenceId);
+      expect(rows[0]!.status).toBe("pending_setup");
+      expect(rows[0]!.externalId).toBe("A100");
+    } finally {
+      slackProvider.uninstallRemotePresence = realUninstall;
+    }
+  });
 });
 
 describe.skipIf(!PROOF_URL)("completePresence (the paste floor)", () => {
@@ -2299,9 +2535,15 @@ describe.skipIf(!PROOF_URL)("detachPresence", () => {
       deleteRemote: false,
     });
 
-    expect(
-      await db.agentChannel.findUnique({ where: { id: presence.id } }),
-    ).toBeNull();
+    // Detach WITHOUT delete keeps the row as a pending_setup shell so the
+    // next attach reuses the SAME Slack app instead of minting a sibling.
+    const shell = await db.agentChannel.findUnique({
+      where: { id: presence.id },
+      select: { status: true, externalId: true, apiKeyId: true },
+    });
+    expect(shell?.status).toBe("pending_setup");
+    expect(shell?.externalId).toBe(presence.externalId);
+    expect(shell?.apiKeyId).toBeNull();
     expect(
       await db.channelThreadLink.count({
         where: { agentChannelId: presence.id },
@@ -2315,6 +2557,18 @@ describe.skipIf(!PROOF_URL)("detachPresence", () => {
     expect(
       await db.conversation.findUnique({ where: { id: conversation.id } }),
     ).not.toBeNull();
+
+    // And the next attach RESUMES this shell: same row, same app id, no
+    // second apps.manifest.create.
+    const before = slackCallsFor("apps.manifest.create").length;
+    const resumed = await agentChannels.createPresence(
+      WORKSPACE,
+      agentId,
+      "slack",
+      ADMIN,
+    );
+    expect(resumed.presenceId).toBe(presence.id);
+    expect(slackCallsFor("apps.manifest.create")).toHaveLength(before);
   });
 
   it("deleteRemote asks Slack to delete the app, via a fresh org credential", async () => {
@@ -3540,6 +3794,119 @@ describe.skipIf(!PROOF_URL)("ingestion — attachments (file_share)", () => {
     });
     expect(attachment.status).toBe("failed");
     expect(attachment.error).toContain("non-Slack");
+  });
+
+  it("a CDN redirect (Slack's non-image shape) is followed WITHOUT the token — PDF lands, bot token never reaches the CDN", async () => {
+    // Slack 302s every authenticated non-image `files-pri` download to its
+    // presigned safe-files CDN (slack-files.com) — a DIFFERENT registrable
+    // domain, refused by the pre-fix pin, which is exactly why PDFs failed
+    // while inline-served images worked. MUTATION-TESTED (both directions):
+    // keep sending the Authorization header on the CDN hop and the
+    // no-token assertion fails — the exfiltration fence is the point.
+    const { agentId, integrationId, presenceId } = await seedChannelAgent(
+      "att-cdn",
+      { presenceCredentials: await botCredentials() },
+    );
+    await linkUser(integrationId, "U111", MEMBER);
+    const slackUrl = process.env.SLACK_API_BASE_URL;
+    const cdnUrl = process.env.SLACK_CDN_BASE_URL;
+    const PDF_BYTES = Buffer.from("%PDF-1.4 tiny bill");
+    slackHandlers["files-pri/T1-F8/bill.pdf"] = () => ({
+      __redirect: `${cdnUrl}/files-pri-safe/T1-F8/bill.pdf?c=1234`,
+    });
+    cdnHandlers["files-pri-safe/T1-F8/bill.pdf?c=1234"] = () => ({
+      bytes: PDF_BYTES,
+      contentType: "application/pdf",
+    });
+
+    const result = await dispatch.dispatchSlackEvent({
+      presenceId,
+      identityRef: "UBOT",
+      event: fileShareEvent("U111", "D907", "whats in there?", [
+        {
+          id: "F8",
+          name: "bill.pdf",
+          mimetype: "application/pdf",
+          size: PDF_BYTES.byteLength,
+          url_private: `${slackUrl}/files-pri/T1-F8/bill.pdf`,
+        },
+      ]),
+      eventId: "Ev-att-cdn",
+    });
+
+    expect(result.kind).toBe("message");
+    if (result.kind !== "message") throw new Error("unreachable");
+    expect(result.outcome.kind).toBe("turn");
+
+    // The Slack-host hop carried the bot token (files:read's subject)...
+    const slackHop = fileDownloadCalls().at(-1);
+    expect(slackHop?.token).toMatch(/^xoxb-/);
+    // ...and the CDN hop carried NO Authorization header at all: the
+    // presigned URL is its own credential, and the bot token must never
+    // travel beyond isSlackFilesUrl hosts.
+    expect(cdnCalls).toHaveLength(1);
+    expect(cdnCalls[0]?.authorization).toBeNull();
+
+    const attachment = await db.conversationAttachment.findFirstOrThrow({
+      where: { conversation: { agentId } },
+    });
+    expect(attachment.status).toBe("bound");
+    expect(attachment.name).toBe("bill.pdf");
+    expect(attachment.mimeType).toBe("application/pdf");
+    expect(Buffer.from(attachment.data ?? []).equals(PDF_BYTES)).toBe(true);
+  });
+
+  it("a redirect to a host on NEITHER list (Slack nor its CDN) is refused without a request", async () => {
+    // The open-redirect arm of the SSRF fence: the INITIAL url passes the
+    // Slack pin, but the redirect target is an arbitrary third origin. The
+    // CDN allowance must not widen into follow-anything — zero requests
+    // reach the rogue host, tokenless or otherwise. MUTATION-TESTED: replace
+    // the isSlackCdnUrl check with `true` and the zero-hit assertion fails.
+    const { agentId, integrationId, presenceId } = await seedChannelAgent(
+      "att-rogue-redirect",
+      { presenceCredentials: await botCredentials() },
+    );
+    await linkUser(integrationId, "U111", MEMBER);
+    const slackUrl = process.env.SLACK_API_BASE_URL;
+    let rogueHits = 0;
+    const rogue = createServer((_req, res) => {
+      rogueHits += 1;
+      res.writeHead(200, { "content-type": "application/pdf" });
+      res.end("stolen");
+    });
+    await new Promise<void>((resolve) =>
+      rogue.listen(0, "127.0.0.1", () => resolve()),
+    );
+    const roguePort = (rogue.address() as AddressInfo).port;
+    try {
+      slackHandlers["files-pri/T1-FA/evil.pdf"] = () => ({
+        __redirect: `http://127.0.0.1:${roguePort}/anywhere`,
+      });
+
+      await dispatch.dispatchSlackEvent({
+        presenceId,
+        identityRef: "UBOT",
+        event: fileShareEvent("U111", "D908", "fetch", [
+          {
+            id: "FA",
+            name: "evil.pdf",
+            mimetype: "application/pdf",
+            size: 8,
+            url_private: `${slackUrl}/files-pri/T1-FA/evil.pdf`,
+          },
+        ]),
+        eventId: "Ev-att-rogue",
+      });
+
+      expect(rogueHits).toBe(0);
+      const attachment = await db.conversationAttachment.findFirstOrThrow({
+        where: { conversation: { agentId } },
+      });
+      expect(attachment.status).toBe("failed");
+      expect(attachment.error).toContain("non-Slack");
+    } finally {
+      await new Promise((resolve) => rogue.close(resolve));
+    }
   });
 
   it("REDELIVERY dedupe also bounds the download — one fetch, one row", async () => {

@@ -29,6 +29,10 @@ export const SecretInput = forwardRef<HTMLInputElement, SecretInputProps>(
           placeholder={placeholder}
           className={cn("pr-10 font-mono text-sm", className)}
           autoFocus={autoFocus}
+          // These are API credentials, not passwords: the browser's password
+          // manager must not offer to save a rotating token.
+          autoComplete="off"
+          spellCheck={false}
         />
         <button
           type="button"

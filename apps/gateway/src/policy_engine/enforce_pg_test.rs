@@ -29,6 +29,7 @@ const ORG: &str = "gwenf-org";
 const WORKSPACE: &str = "gwenf-ws";
 const WORKSPACE_FENCE: &str = "gwenf-ws-b";
 const SECRET_OPENAI: &str = "gwenf-sec-openai";
+const SECRET_OPENAI_KEY: &str = "gwenf-sec-openai-key";
 /// The connection `rule-github-conn` names, and its same-provider sibling —
 /// the pair that makes the per-connection differential falsifiable.
 const CONN_GITHUB: &str = "gwenf-conn-github";
@@ -115,8 +116,9 @@ async fn enforce_over_seeded_fixtures_closes_the_injection_host_bypass() {
     let rules = assemble_v2(&org, &workspace, &secret_hosts, &providers);
     let decide = |r: &PolicyRequest| evaluate_new(&rules, r, None);
 
-    // Fix C — the real find_secret_hosts SQL must resolve EVERY host the OpenAI
-    // credential injects on, so a block on the secret can't be dodged via a sibling host.
+    // Fix C — the real find_secret_hosts SQL must resolve EVERY host the
+    // OAuth-mode OpenAI credential injects on, so a block on the secret can't
+    // be dodged via a sibling host.
     let openai = secret_hosts
         .by_id
         .get(SECRET_OPENAI)
@@ -133,6 +135,24 @@ async fn enforce_over_seeded_fixtures_closes_the_injection_host_bypass() {
             "Fix C: find_secret_hosts must resolve openai host {host}, got {openai:?}"
         );
     }
+
+    // #490 differential — the expansion is gated on `metadata.authMode ==
+    // "oauth"`: the API-key-mode sibling (same type, same stored host) must
+    // resolve to EXACTLY its stored host. An API key is not a ChatGPT
+    // credential, and expanding it injected it into auth.openai.com OAuth
+    // exchanges (401 invalid_client) and onto hosts outside its configured
+    // pattern. Asserted through the real SQL loader so a dropped `metadata`
+    // column in `find_secret_hosts` fails here, not in production.
+    let openai_key = secret_hosts
+        .by_id
+        .get(SECRET_OPENAI_KEY)
+        .cloned()
+        .unwrap_or_default();
+    assert_eq!(
+        openai_key,
+        vec!["api.openai.com".to_string()],
+        "#490: an api-key-mode openai secret must not expand beyond its stored host"
+    );
 
     // (host, method, path, expected, what-it-proves)
     let cases: &[(&str, &str, &str, Decision, &str)] = &[

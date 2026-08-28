@@ -66,6 +66,7 @@ export const APP_CATEGORIES: Record<string, AppCategory> = {
   "mongodb-atlas": "cloud-data",
   dropbox: "cloud-data",
   datadog: "cloud-data",
+  snowflake: "cloud-data",
   "vertex-ai": "cloud-data",
 
   // Communication

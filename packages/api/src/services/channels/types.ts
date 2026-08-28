@@ -149,6 +149,8 @@ export interface ChannelProvider {
     transport: ChannelTransport;
     publicApiUrl: string | null;
     oauthState: string | null;
+    /** The attaching member, for the app's About description. */
+    owner?: { name: string | null; email: string } | null;
   }): Promise<{
     externalId: string;
     credentialsJson: string;

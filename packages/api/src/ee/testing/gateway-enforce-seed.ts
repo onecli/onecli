@@ -41,6 +41,10 @@ export const FIXTURE = {
   workspaceFence: `${P}ws-b`,
   agent: `${P}agent`,
   secretOpenai: `${P}sec-openai`,
+  // An API-KEY-mode OpenAI secret: the host expansion is OAuth-only (#490), so
+  // this one must resolve to exactly its stored host — the differential that
+  // makes the metadata gating falsifiable through the real SQL loader.
+  secretOpenaiKey: `${P}sec-openai-key`,
   connGithub: `${P}conn-github`,
   // A SECOND github connection: with one, per-connection and per-provider
   // decision semantics are indistinguishable — the sibling makes the pg
@@ -100,9 +104,11 @@ const seed = async (): Promise<void> => {
     },
   });
 
-  // An OpenAI secret: enforcement must cover EVERY host its credential injects on,
-  // not just the stored one (the Fix-C asymmetry). No encrypted value needed — the
-  // enforce loaders read only host_pattern/type/scope, never the ciphertext.
+  // An OAuth-mode OpenAI secret: enforcement must cover EVERY host its ChatGPT
+  // credential injects on, not just the stored one (the Fix-C asymmetry). The
+  // authMode metadata is what the gateway's `secret_host_patterns` gates the
+  // expansion on (#490). No encrypted value needed — the enforce loaders read
+  // only host_pattern/type/scope/metadata, never the ciphertext.
   await db.secret.create({
     data: {
       id: FIXTURE.secretOpenai,
@@ -111,6 +117,21 @@ const seed = async (): Promise<void> => {
       hostPattern: "api.openai.com",
       scope: "workspace",
       workspaceId: FIXTURE.workspace,
+      metadata: { authMode: "oauth" },
+    },
+  });
+
+  // The API-key-mode sibling: same type, same stored host, api-key metadata —
+  // its resolved host set must stay exactly ["api.openai.com"].
+  await db.secret.create({
+    data: {
+      id: FIXTURE.secretOpenaiKey,
+      name: "gwenf openai key",
+      type: "openai",
+      hostPattern: "api.openai.com",
+      scope: "workspace",
+      workspaceId: FIXTURE.workspace,
+      metadata: { authMode: "api-key" },
     },
   });
 

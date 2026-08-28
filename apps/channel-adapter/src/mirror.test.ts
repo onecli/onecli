@@ -924,6 +924,60 @@ describe("what gets posted", () => {
     expect("blocks" in posted[0]!.form).toBe(false);
   });
 
+  it("posts the trial-credit card — headline, context line, and an add-key button", async () => {
+    // The no-model-key family with a sharper verb: the agent was running on
+    // OneCLI's free credit and it ran out — there is no user key to check,
+    // the fix is ADDING one. Keyed on the CODE, gated on having a URL.
+    const controlPlane = createFakeControlPlane(transcriptWith(null));
+
+    await mirror({
+      controlPlane,
+      modelsUrl: "https://app.example.com/w/ws1/agents/ag1/models",
+      workItem: item({
+        source: "slack",
+        error: "Trial credit is <done>.",
+        errorCode: "trial_credit_exhausted",
+      }),
+    });
+
+    const posted = slack.callsTo("chat.postMessage");
+    expect(posted).toHaveLength(1);
+    expect(posted[0]?.form.text).toBe("Trial credit is &lt;done&gt;.");
+    const blocks = JSON.parse(posted[0]!.form.blocks!) as {
+      type: string;
+      text?: { text: string };
+      elements?: {
+        type: string;
+        text?: { text: string };
+        url?: string;
+        action_id?: string;
+      }[];
+    }[];
+    expect(blocks[0]?.text?.text).toBe("*The free trial credit is used up*");
+    const button = blocks.find((b) => b.type === "actions")?.elements?.[0];
+    expect(button?.url).toBe("https://app.example.com/w/ws1/agents/ag1/models");
+    expect(button?.action_id).toBe("open_models_page");
+    expect(button?.text?.text).toBe("Add a model key");
+  });
+
+  it("trial-credit degrades to the plain answer when no models URL is configured", async () => {
+    const controlPlane = createFakeControlPlane(transcriptWith(null));
+
+    await mirror({
+      controlPlane,
+      workItem: item({
+        source: "slack",
+        error: "Trial credit is <done>.",
+        errorCode: "trial_credit_exhausted",
+      }),
+    });
+
+    const posted = slack.callsTo("chat.postMessage");
+    expect(posted).toHaveLength(1);
+    expect(posted[0]?.form.text).toBe("Trial credit is &lt;done&gt;.");
+    expect("blocks" in posted[0]!.form).toBe(false);
+  });
+
   it("treats an UNKNOWN error code as a plain answer — no card is invented without a producer", async () => {
     // Cards exist only for codes with a wired arm; anything else takes the
     // plain-answer path even with a models URL configured.

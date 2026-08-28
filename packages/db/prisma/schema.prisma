@@ -264,6 +264,7 @@ model User {
   createdCrons                  AgentCron[]                   @relation("CronCreator")
   channelUserLinks              ChannelUserLink[]             @relation("ChannelUserLinkUser")
   createdChannelIntegrations    ChannelIntegration[]          @relation("ChannelIntegrationCreator")
+  createdChannelInstallations   ChannelInstallation[]         @relation("ChannelInstallationCreator")
   createdAgentChannels          AgentChannel[]                @relation("AgentChannelCreator")
   memoryRevisionsAuthored       AgentMemoryRevision[]         @relation("MemoryRevisionAuthor")
   memoryRedactions              AgentMemoryRevision[]         @relation("MemoryRevisionRedactor")
@@ -1111,14 +1112,52 @@ model ChannelIntegration {
   createdAt            DateTime  @default(now()) @map("created_at")
   updatedAt            DateTime  @updatedAt @map("updated_at")
 
-  organization  Organization      @relation(fields: [organizationId], references: [id], onDelete: Cascade)
-  createdBy     User?             @relation("ChannelIntegrationCreator", fields: [createdByUserId], references: [id], onDelete: SetNull)
+  organization  Organization          @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  createdBy     User?                 @relation("ChannelIntegrationCreator", fields: [createdByUserId], references: [id], onDelete: SetNull)
   agentChannels AgentChannel[]
   userLinks     ChannelUserLink[]
+  installations ChannelInstallation[]
 
   @@unique([organizationId, provider])
   @@index([provider, externalId])
   @@map("channel_integrations")
+}
+
+// One workspace-level install of the SHARED (OneCLI-distributed) provider app
+// (Slack: the "Add to Slack" one-click install). It powers team onboarding
+// (the bot that answers DMs with an account button) and — when the installing
+// admin granted the app-manager user scopes — minting per-agent apps without
+// a pasted config token. `(provider, externalId)` is globally unique: inbound
+// events on the shared app resolve by provider tenant id (Slack: team id),
+// and two orgs claiming one workspace would make that routing ambiguous —
+// the first installer wins, the second gets a conflict at install.
+model ChannelInstallation {
+  id              String   @id @default(uuid())
+  integrationId   String   @map("integration_id")
+  provider        String // "slack"
+  externalId      String   @map("external_id") // provider tenant id (Slack: team id)
+  // The shared app's provider-side id (Slack: the app id from the OAuth
+  // exchange) — recorded so inbound payloads can be cross-checked and so a
+  // deployment that rotates its shared app can tell old installs apart.
+  appId           String   @map("app_id")
+  // The shared bot's own user id (Slack: `U…`) — the inbound arm's echo
+  // guard, so the onboarding bot never answers its own posts.
+  botUserId       String?  @map("bot_user_id")
+  // Encrypted provider JSON (Slack: {botToken, userToken?, userTokenScopes?,
+  // managerAppRefused?}). The user token is the installing admin's app-manager
+  // grant (mints per-agent apps); `managerAppRefused` is the sticky mark set
+  // when Slack answers `invalid_manager_app`, cleared by a reinstall.
+  credentials     String
+  createdByUserId String?  @map("created_by_user_id")
+  createdAt       DateTime @default(now()) @map("created_at")
+  updatedAt       DateTime @updatedAt @map("updated_at")
+
+  integration ChannelIntegration @relation(fields: [integrationId], references: [id], onDelete: Cascade)
+  createdBy   User?              @relation("ChannelInstallationCreator", fields: [createdByUserId], references: [id], onDelete: SetNull)
+
+  @@unique([provider, externalId])
+  @@unique([integrationId, provider])
+  @@map("channel_installations")
 }
 
 // The agent's presence on a provider (Slack: its own app — own name, own DM).
@@ -1129,7 +1168,7 @@ model AgentChannel {
   agentId             String    @map("agent_id")
   integrationId       String    @map("integration_id")
   provider            String // "slack"
-  externalId          String    @map("external_id") // provider app id (Slack: app id)
+  externalId          String    @map("external_id") // the agent's own provider app id (Slack: app id)
   identityRef         String?   @map("identity_ref") // the presence's own identity (Slack: bot user id)
   /// The app's own display handle on the provider (Slack: the bot's `user`
   /// from `auth.test`, e.g. "donna"). Captured at completion from a call we
@@ -1785,6 +1824,11 @@ model Budget {
 // the gateway's Redis hot counter key. The Redis counter is the hot enforcement
 // source of truth; this is the durable floor (rehydrated into Redis on cache miss
 // so a flush can't silently refill a budget). `spentNanos` = nano-dollars (1e-9).
+// `organizationId` holds a RENDERED BUDGET SUBJECT, not a bare org id: the
+// gateway writes `org:<id>` for org budgets and `user:<id>` for the platform
+// trial credit (attributed to the org's founding owner). The column keeps its
+// historical name; the prefix is what makes the value honest. Never join it
+// to organizations without stripping/matching the prefix.
 model BudgetSpend {
   secretId       String   @map("secret_id")
   organizationId String   @map("organization_id")

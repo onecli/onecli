@@ -4641,6 +4641,62 @@
       ]
     }
   },
+  "snowflake": {
+    "databases_get": {
+      "hostPattern": "*.snowflakecomputing.com",
+      "paths": [
+        "/api/v2/databases/*"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "databases_list": {
+      "hostPattern": "*.snowflakecomputing.com",
+      "paths": [
+        "/api/v2/databases"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "statements_cancel": {
+      "hostPattern": "*.snowflakecomputing.com",
+      "paths": [
+        "/api/v2/statements/*/cancel"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "statements_get": {
+      "hostPattern": "*.snowflakecomputing.com",
+      "paths": [
+        "/api/v2/statements/*"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "statements_submit": {
+      "hostPattern": "*.snowflakecomputing.com",
+      "paths": [
+        "/api/v2/statements"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "warehouses_list": {
+      "hostPattern": "*.snowflakecomputing.com",
+      "paths": [
+        "/api/v2/warehouses"
+      ],
+      "methods": [
+        "GET"
+      ]
+    }
+  },
   "supabase": {
     "create_function": {
       "hostPattern": "api.supabase.com",

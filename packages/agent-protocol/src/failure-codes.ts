@@ -30,6 +30,13 @@
  *   the raw provider response on every chat surface — the raw text stays
  *   operator material (the control plane's server log and the stored
  *   transcript events).
+ * - `trial_credit_exhausted`: the harness lived but the GATEWAY paused the
+ *   platform's trial-credit key at its spend cap (the `budget_exceeded` 403
+ *   for the `platform:anthropic` credential). A sibling of
+ *   `model_provider_error` with a sharper fix — there is no user key to
+ *   check; the person needs to CONNECT one — so it earns its own code and
+ *   copy. Classified by the supervisor from the gateway's coded JSON body,
+ *   never from prose.
  * - `harness_busy`: the harness refused to take the turn's message because
  *   its session was still executing an earlier, platform-abandoned run — and
  *   the adapter's self-heal (cancel the orphan, resend with backoff) could
@@ -43,6 +50,7 @@ export const TURN_FAILURE_CODES = {
   agentRestarted: "agent_restarted",
   agentStartFailed: "agent_start_failed",
   modelProviderError: "model_provider_error",
+  trialCreditExhausted: "trial_credit_exhausted",
   harnessBusy: "harness_busy",
 } as const;
 export type TurnFailureCode =

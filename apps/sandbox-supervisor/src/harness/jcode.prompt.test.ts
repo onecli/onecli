@@ -194,6 +194,21 @@ describe("the swarm prompt override", () => {
     );
     expect(flat).toContain("prefer ending your turn over waiting");
   });
+
+  it("states the deliverable-extraction laws", () => {
+    // Observed live: a lead looped for minutes unable to pull four ~2.4k-char
+    // deliverables out of completed helpers — every tool relay truncated the
+    // text, and messages to the completed helpers were dropped after
+    // reporting success. Each pin below is one leg of the way out; drop any
+    // leg and leads re-enter the retry loop.
+    const flat = SWARM_PROMPT_OVERRIDE.replace(/\s+/g, " ");
+    expect(flat).toContain("name an exact file path");
+    expect(flat).toContain("full text, never a summary");
+    expect(flat).toContain("Collect helpers ONE at a time");
+    expect(flat).toContain("Never message a helper that has already completed");
+    expect(flat).toContain("verified in hand");
+    expect(flat).toContain("a stopped helper is gone for good");
+  });
 });
 
 describe("the wake honesty line", () => {
