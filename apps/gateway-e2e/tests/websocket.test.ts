@@ -443,7 +443,7 @@ describe("websocket sessions", () => {
     expect(ws.status).toBe(101);
     const [seen] = await upstream.waitForUpgrades(1);
     // The product, on this leg: a credential the client never held arrives
-    // upstream, decrypted from a real KMS envelope.
+    // upstream, decrypted from a real stored ciphertext.
     expect(seen?.header("x-test-key")).toBe(SECRET);
     // The path rewrite applies to the handshake target too. Asserting the URL
     // catches a regression that sends the original path — invisible to the

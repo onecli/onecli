@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import type { NextRequest } from "next/server";
 import { isMissingSessionSecret } from "@onecli/api/lib/session-secret";
 import { IS_CLOUD, SECRET_ENCRYPTION_KEY } from "@/lib/env";
+import { buildCsp, createCspNonce } from "@/lib/csp";
 import { WORKSPACE_PATH_RE, ORG_PATH_RE } from "@/lib/navigation";
 
 type SetupErrorCode = "missing-auth-secret" | "missing-encryption-key";
@@ -104,6 +105,31 @@ export const proxy = (request: NextRequest) => {
     (fromQuery ? searchParams.get("orgId") : null);
   if (orgId) {
     requestHeaders.set("x-organization-id", orgId);
+  }
+
+  // Never trust an inbound x-nonce: the layout stamps it into script tags,
+  // so only the value minted below may reach it (cloud overwrites; onprem
+  // must not let a client-supplied one through).
+  requestHeaders.delete("x-nonce");
+
+  // Cloud: per-request nonce CSP (OC-01). The header must be on the
+  // FORWARDED REQUEST — Next.js parses it during SSR and stamps the nonce
+  // onto every script it emits — and mirrored onto the response so the
+  // browser enforces the same policy. `x-nonce` hands the value to server
+  // components (the layout) for scripts Next does not own. Onprem keeps its
+  // current no-CSP behavior; adding one there is a follow-up with its own
+  // design (self-host origins are runtime-configured).
+  if (IS_CLOUD) {
+    const nonce = createCspNonce();
+    const csp = buildCsp(nonce);
+    requestHeaders.set("x-nonce", nonce);
+    requestHeaders.set("content-security-policy", csp);
+
+    const response = NextResponse.next({
+      request: { headers: requestHeaders },
+    });
+    response.headers.set("content-security-policy", csp);
+    return response;
   }
 
   return NextResponse.next({

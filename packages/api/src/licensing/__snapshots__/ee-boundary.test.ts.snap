@@ -172,6 +172,7 @@ exports[`enterprise-license boundary > the licensed file set changes only by del
     "hooks/rule-action-gate.ts",
     "hooks/team-hooks.ts",
     "index.ts",
+    "kms-crypto.contract.test.ts",
     "kms-crypto.ts",
     "middleware/cloud-only.ts",
     "middleware/enterprise-gate.ts",

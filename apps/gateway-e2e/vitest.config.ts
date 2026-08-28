@@ -16,5 +16,12 @@ export default defineConfig({
     // Diagnostics matter more than brevity here: when a black-box test fails you
     // are looking at captured child-process output, not a stack trace.
     printConsoleTrace: false,
+    env: {
+      // The one symmetric secret every process in a scenario must share: the
+      // fixtures encrypt with it (via @onecli/api's local-AES service, which
+      // reads it at module load) and the spawned gateway decrypts with it. A
+      // fixed test key, never a production value.
+      SECRET_ENCRYPTION_KEY: "3q2+7wEhI0VniavN7xEjRWeJq83vESNFZ4mrze8RI0U=",
+    },
   },
 });

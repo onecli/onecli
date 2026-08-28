@@ -24,6 +24,14 @@ export interface HostedE2EConfig {
    * runner's ExtraHosts `host-gateway` entry (set alongside this).
    */
   readonly hostGatewayHost: string;
+  /**
+   * Optional Redis for the spawned gateway (the licensed HA stores). Set in
+   * CI so the enterprise lane runs the canonical Redis-backed deployment;
+   * unset locally the entitled gateway falls back to its in-memory stores —
+   * a legitimate licensed configuration, so nothing skips.
+   */
+  readonly redisHost: string | undefined;
+  readonly redisPort: string;
 }
 
 const read = (name: string): string | undefined => {
@@ -68,6 +76,8 @@ const resolve = (): HostedE2EConfig | null => {
     agentImage: read("E2E_AGENT_IMAGE") ?? "onecli-agent:dev",
     dockerSocket: read("E2E_DOCKER_SOCKET") ?? "/var/run/docker.sock",
     hostGatewayHost: read("E2E_HOST_GATEWAY_HOST") ?? "host.docker.internal",
+    redisHost: read("E2E_REDIS_HOST"),
+    redisPort: read("E2E_REDIS_PORT") ?? "6379",
   };
 };
 

@@ -1,7 +1,7 @@
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { gatewayBinary, secretEncryptionKey } from "./env.js";
+import { e2eConfig, gatewayBinary, secretEncryptionKey } from "./env.js";
 import {
   messageIncludes,
   spawnService,
@@ -40,6 +40,18 @@ export const startGateway = async (
 ): Promise<GatewayHandle> => {
   const dataDir = mkdtempSync(join(tmpdir(), "onecli-hosted-e2e-gw-"));
 
+  // The licensed HA stores when CI provides a Redis; the in-memory stores
+  // otherwise — both are legitimate entitled configurations (see env.ts).
+  const config = e2eConfig();
+  const redisEnv: Record<string, string> =
+    config?.redisHost !== undefined
+      ? {
+          REDIS_HOST: config.redisHost,
+          REDIS_PORT: config.redisPort,
+          REDIS_TLS: "false",
+        }
+      : {};
+
   const service: ServiceChild = spawnService(
     gatewayBinary(),
     ["--port", "0", "--data-dir", dataDir],
@@ -47,9 +59,13 @@ export const startGateway = async (
       env: {
         PATH: process.env.PATH ?? "",
         HOME: process.env.HOME ?? "",
+        // The enterprise edition: an entitled self-host — the canonical
+        // licensed deployment, matching the gateway-e2e default lane.
         EDITION: "onprem",
+        ENTERPRISE_ENABLED: "true",
         DATABASE_URL: opts.databaseUrl,
         SECRET_ENCRYPTION_KEY: secretEncryptionKey(),
+        ...redisEnv,
         // The stub upstream's self-signed cert lives on 127.0.0.1 — narrower
         // than the global danger flag, same as gateway-e2e.
         GATEWAY_SKIP_VERIFY_HOSTS: "127.0.0.1",

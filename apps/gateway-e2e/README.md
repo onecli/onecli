@@ -12,15 +12,32 @@ move essentially every file in it. A suite coupled to internals would break duri
 and protect nothing; a suite that only knows the wire protocol survives it and is exactly the
 regression net the restructure needs.
 
-## Why cloud edition only
+## The edition model: enterprise by default, arms per lane
 
-The suite spawns the one edition-less binary with `EDITION=cloud`. That edition uses Redis for its cache and
-approval stores and KMS for secret decryption, so the tests need both — which is also what
-makes them faithful to what actually runs in production.
+The binary is edition-less; the runtime env selects behavior. The suite's default spawn env
+is the **enterprise edition** — an entitled self-host (`EDITION=onprem` +
+`ENTERPRISE_ENABLED=true`) running the **licensed Redis-backed HA stores** (`REDIS_HOST`
+set) and the local AES crypto backend (`SECRET_ENCRYPTION_KEY`, pinned by
+`vitest.config.ts`). That is the canonical licensed deployment, and it exercises the
+entitled feature set (group principals, resource scoping, budgets, RBAC rechecks, HA
+stores) that a plain self-host never runs.
+
+Two lanes override it per test:
+
+- **The unlicensed lane** (`unlicensed.test.ts`) blanks `ENTERPRISE_ENABLED` and
+  `REDIS_HOST` and proves the decided flag-off posture from the outside — licensed features
+  get a differential twin (same seeds, opposite outcome), free surfaces get parity twins.
+- **The cloud lane** (`platform-llm.test.ts`) sets `EDITION=cloud` and covers cloud-only
+  wire behavior: the platform Anthropic trial credit and the cloud boot posture. The
+  Cognito/KMS values it sets are dummies satisfying the cloud fail-fast — never dialed
+  (sessions stay on agent tokens; the pinned `SECRET_ENCRYPTION_KEY` selects local AES by
+  config precedence). The KMS envelope FORMAT itself is unit-pinned on both sides of the
+  TS↔Rust contract (`packages/api/src/ee/kms-crypto.contract.test.ts`,
+  `apps/gateway/src/ee/kms_crypto.rs`); only the live AWS KMS call is proven by deploys.
 
 ## Running locally
 
-Three containers, then migrate, then run. Use `127.0.0.1` throughout, never `localhost`:
+Two containers, then migrate, then run. Use `127.0.0.1` throughout, never `localhost`:
 Node 17+ resolves `localhost` with `verbatim` DNS ordering and can answer `::1` first, which
 fails to connect while other clients on the same host succeed.
 
@@ -31,22 +48,16 @@ docker run -d --name gwe2e-db -p 5434:5432 \
   -e POSTGRES_USER=ci -e POSTGRES_PASSWORD=ci -e POSTGRES_DB=onecli \
   postgres:18-alpine -c max_connections=200
 
-# 2. Redis — the cloud edition connects to it unconditionally at startup.
+# 2. Redis — the enterprise lane runs the licensed Redis-backed stores.
 docker run -d --name gwe2e-redis -p 6379:6379 redis:7-alpine
 
-# 3. KMS emulator. MiniStack, not LocalStack (whose Community edition was
-#    discontinued and whose free tier is non-commercial only). Pinned by digest
-#    to match CI exactly — keep this in step with .github/workflows/ci.yml.
-docker run -d --name gwe2e-kms -p 4566:4566 \
-  ministackorg/ministack@sha256:c3c2e86f19ff8024aca7488fd0827e2d66117effca0b0c9553088d68d9556a86
-
-# 4. Create and migrate the template database the tests clone per test.
+# 3. Create and migrate the template database the tests clone per test.
 docker exec gwe2e-db psql -U ci -d onecli -c 'CREATE DATABASE onecli_e2e_template'
 DATABASE_URL=postgresql://ci:ci@127.0.0.1:5434/onecli_e2e_template \
   pnpm --filter @onecli/db exec prisma migrate deploy
 
-# 5. Run. `test:e2e` builds the gateway binary (spawned with EDITION=cloud) first; use
-#    `test:e2e:no-build` to skip that when the binary is already current.
+# 4. Run. `test:e2e` builds the gateway binary first; use `test:e2e:no-build`
+#    to skip that when the binary is already current.
 #
 #    The script is deliberately NOT called `test`: the root `pnpm test` runs
 #    `turbo run test`, and this suite must not drag containers and a cargo build
@@ -54,14 +65,10 @@ DATABASE_URL=postgresql://ci:ci@127.0.0.1:5434/onecli_e2e_template \
 export E2E_ADMIN_DATABASE_URL=postgresql://ci:ci@127.0.0.1:5434/postgres
 export E2E_TEMPLATE_DB=onecli_e2e_template
 export E2E_REDIS_HOST=127.0.0.1
-export AWS_ENDPOINT_URL_KMS=http://127.0.0.1:4566
-export AWS_REGION=us-east-1 AWS_ACCESS_KEY_ID=test AWS_SECRET_ACCESS_KEY=test
-export KMS_KEY_ARN=$(aws --endpoint-url http://127.0.0.1:4566 kms create-key \
-                      --query KeyMetadata.Arn --output text)
 pnpm --filter @onecli/gateway-e2e test:e2e
 ```
 
-Teardown: `docker rm -f gwe2e-db gwe2e-redis gwe2e-kms`.
+Teardown: `docker rm -f gwe2e-db gwe2e-redis`.
 
 ## Isolation
 
@@ -118,6 +125,9 @@ Known gaps, all deliberate:
   resolution outcomes (ambiguity, not-found) are covered instead, since they answer before any
   socket opens.
 - **No approval timeout.** It is 180 seconds.
+- **No live KMS decryption.** The KMS backend is hosted-cloud plumbing; its envelope format
+  is unit-pinned cross-language (see above), and the live AWS round-trip is proven by cloud
+  deploys, not this suite.
 
 Tests that name a real provider hostname (`gmail.googleapis.com`) still make no network calls:
 they assert an arm that answers before egress. Where a test needs a host that must _never_
@@ -151,11 +161,11 @@ The gateway's captured stdout and stderr are attached to failures. It runs with
 
 The suite imports no gateway code, but it does read a few things out of the
 gateway's **structured log**: the `starting onecli-gateway` line (to confirm the
-binary really is a cloud-edition build), the `listening for connections` line's
-`addr` field (to discover the port chosen by `--port 0`), and — in
-`shutdown.test.ts` only — the `shutdown started` and `drain complete` messages,
-which pin that a signal starts a real drain rather than the process merely
-dying. It runs the child with `LOG_FORMAT=json` for exactly this reason.
+binary really booted the edition the test meant to start), the `listening for
+connections` line's `addr` field (to discover the port chosen by `--port 0`),
+and — in `shutdown.test.ts` only — the `shutdown started` and `drain complete`
+messages, which pin that a signal starts a real drain rather than the process
+merely dying. It runs the child with `LOG_FORMAT=json` for exactly this reason.
 
 That is the whole interface. Renaming any of these messages, dropping the `addr`
 field, or changing the `edition` value will break the suite in a way that looks

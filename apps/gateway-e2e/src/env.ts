@@ -22,9 +22,6 @@ export interface E2EConfig {
   readonly templateDb: string;
   readonly redisHost: string;
   readonly redisPort: string;
-  readonly kmsEndpoint: string;
-  readonly kmsKeyArn: string;
-  readonly awsRegion: string;
 }
 
 const read = (name: string): string | undefined => {
@@ -38,9 +35,7 @@ const WHY: Readonly<Record<string, string>> = {
     "the maintenance connection used to clone a database per test",
   E2E_TEMPLATE_DB: "the migrated template database each test clones",
   E2E_REDIS_HOST:
-    "the cloud edition connects to Redis unconditionally at startup",
-  AWS_ENDPOINT_URL_KMS: "the KMS emulator the gateway decrypts secrets against",
-  KMS_KEY_ARN: "the key used to mint credential fixtures",
+    "the enterprise lane runs the licensed Redis-backed stores (HA is licensed)",
 };
 
 const resolve = (): E2EConfig | null => {
@@ -49,15 +44,11 @@ const resolve = (): E2EConfig | null => {
   const adminDatabaseUrl = read("E2E_ADMIN_DATABASE_URL");
   const templateDb = read("E2E_TEMPLATE_DB");
   const redisHost = read("E2E_REDIS_HOST");
-  const kmsEndpoint = read("AWS_ENDPOINT_URL_KMS");
-  const kmsKeyArn = read("KMS_KEY_ARN");
 
   const missing = Object.entries({
     E2E_ADMIN_DATABASE_URL: adminDatabaseUrl,
     E2E_TEMPLATE_DB: templateDb,
     E2E_REDIS_HOST: redisHost,
-    AWS_ENDPOINT_URL_KMS: kmsEndpoint,
-    KMS_KEY_ARN: kmsKeyArn,
   })
     .filter(([, value]) => value === undefined)
     .map(([name]) => name);
@@ -65,9 +56,7 @@ const resolve = (): E2EConfig | null => {
   if (
     adminDatabaseUrl === undefined ||
     templateDb === undefined ||
-    redisHost === undefined ||
-    kmsEndpoint === undefined ||
-    kmsKeyArn === undefined
+    redisHost === undefined
   ) {
     const first = missing[0] ?? "E2E_ADMIN_DATABASE_URL";
     if (process.env.CI !== undefined) {
@@ -87,9 +76,6 @@ const resolve = (): E2EConfig | null => {
     templateDb,
     redisHost,
     redisPort: read("E2E_REDIS_PORT") ?? "6379",
-    kmsEndpoint,
-    kmsKeyArn,
-    awsRegion: read("AWS_REGION") ?? "us-east-1",
   };
 };
 
@@ -99,4 +85,20 @@ let cached: E2EConfig | null | undefined;
 export const e2eConfig = (): E2EConfig | null => {
   if (cached === undefined) cached = resolve();
   return cached;
+};
+
+/**
+ * The shared symmetric key every process in a scenario encrypts/decrypts
+ * with — pinned by vitest.config.ts `test.env`, so the fixtures (this process)
+ * and the spawned gateway agree on it. A fixed test key, never a production
+ * value.
+ */
+export const secretEncryptionKey = (): string => {
+  const value = read("SECRET_ENCRYPTION_KEY");
+  if (value === undefined) {
+    throw new Error(
+      "SECRET_ENCRYPTION_KEY missing — vitest.config.ts pins it; run through vitest.",
+    );
+  }
+  return value;
 };

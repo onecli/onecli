@@ -26,7 +26,7 @@ describe("credential injection", () => {
       expect(res.status).toBe(200);
       const [seen] = await upstream.waitForRequests(1);
       // The whole product in one assertion: a credential the client never had
-      // arrived at the upstream, decrypted from a real KMS envelope.
+      // arrived at the upstream, decrypted from a real stored ciphertext.
       expect(seen?.header("x-test-key")).toBe(SECRET);
     },
   );

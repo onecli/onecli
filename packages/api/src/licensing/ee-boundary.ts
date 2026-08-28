@@ -85,12 +85,6 @@ export const SEAMS: readonly Seam[] = [
     permanent: true,
   },
   {
-    from: "apps/gateway-e2e/**",
-    why: "Black-box test harness: builds fixtures with the licensed KMS crypto helper. Tests exercise licensed features by definition.",
-    count: 1,
-    permanent: true,
-  },
-  {
     from: "apps/web/src/lib/**",
     why: "DEBT. Free surfaces that statically embed an enterprise or hosted-platform control: quota dialogs and plan badges (inert without billing), workspace sharing, member provisioning and role management. Each render now sits behind the unified gate (usePlanGate locks by plan on cloud and by license on self-host), but the static imports remain; this number must only go down.",
     count: 43,

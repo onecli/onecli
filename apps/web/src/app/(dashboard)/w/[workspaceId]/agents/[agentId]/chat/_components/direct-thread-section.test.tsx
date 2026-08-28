@@ -18,6 +18,10 @@ import { DirectThreadSection } from "./direct-thread-section";
 // resend's fresh-cache read exercises the same keys the section writes.
 vi.mock("next/navigation", () => ({
   usePathname: () => "/w/ws-1/agents/agent-1/chat",
+  // Real-router behavior for the greeting seam: params reflect the current
+  // URL at render time (jsdom keeps window.location in sync with the
+  // history calls the tests and the section itself make).
+  useSearchParams: () => new URLSearchParams(window.location.search),
 }));
 
 vi.mock("../../_components/agent-page-frame", () => ({
@@ -44,7 +48,14 @@ vi.mock("./chat-thread", () => ({
   ),
 }));
 
-vi.mock("./composer", () => ({ Composer: () => null }));
+// The composer stub surfaces the one prop this section computes for it —
+// `initialDraft` — so the greeting seam (URL flag → draft text) is testable
+// without the real textarea (whose own behavior composer.test.tsx covers).
+vi.mock("./composer", () => ({
+  Composer: ({ initialDraft }: { initialDraft?: string }) => (
+    <div data-testid="composer" data-initial-draft={initialDraft ?? ""} />
+  ),
+}));
 vi.mock("./offline-banner", () => ({ OfflineBanner: () => null }));
 
 vi.mock(
@@ -257,5 +268,63 @@ describe("the chat's in-place model-key door", () => {
       expect(toast.success).toHaveBeenCalledWith("Model key connected."),
     );
     expect(conversations.sendMessage).not.toHaveBeenCalled();
+  });
+});
+
+describe("the onboarding greeting hand-off (?hello=1)", () => {
+  afterEach(() => {
+    vi.mocked(conversations.ensureDirect).mockReset();
+    vi.mocked(conversations.turns).mockReset();
+    window.history.replaceState(null, "", "/w/ws-1/agents/agent-1/chat");
+  });
+
+  const arrange = () => {
+    vi.mocked(conversations.ensureDirect).mockResolvedValue({
+      id: "conv-1",
+    } as never);
+    vi.mocked(conversations.turns).mockResolvedValue([]);
+  };
+
+  it("hands the composer the greeting draft and strips the flag from the URL", async () => {
+    arrange();
+    window.history.replaceState(
+      null,
+      "",
+      "/w/ws-1/agents/agent-1/chat?hello=1",
+    );
+    renderSection();
+
+    await waitFor(() =>
+      expect(screen.getByTestId("composer")).toHaveAttribute(
+        "data-initial-draft",
+        "Hey Agent, what can you do for me?",
+      ),
+    );
+    // Consumed: the flag is gone, so a refresh opens a plain empty chat.
+    expect(window.location.search).toBe("");
+  });
+
+  it("stripping the flag leaves the URL's other params alone", async () => {
+    arrange();
+    window.history.replaceState(
+      null,
+      "",
+      "/w/ws-1/agents/agent-1/chat?attach=slack&hello=1",
+    );
+    renderSection();
+
+    await waitFor(() => expect(window.location.search).toBe("?attach=slack"));
+  });
+
+  it("opens empty without the flag — every non-onboarding route is untouched", async () => {
+    arrange();
+    renderSection();
+
+    await waitFor(() =>
+      expect(screen.getByTestId("composer")).toHaveAttribute(
+        "data-initial-draft",
+        "",
+      ),
+    );
   });
 });

@@ -1,6 +1,7 @@
 import type { Metadata, Viewport } from "next";
 import localFont from "next/font/local";
 import { Source_Serif_4 } from "next/font/google";
+import { headers } from "next/headers";
 import "@onecli/ui/globals.css";
 import "./globals.css";
 import { AuthProvider } from "@/providers/auth-provider";
@@ -63,16 +64,23 @@ export const metadata: Metadata = {
   },
 };
 
-export default function RootLayout({
+export default async function RootLayout({
   children,
 }: Readonly<{
   children: React.ReactNode;
 }>) {
+  // Set by proxy.ts alongside the request's Content-Security-Policy (cloud;
+  // OC-01). Next stamps it on its own scripts automatically; this reaches the
+  // inline scripts Next does not own — next-themes' theme bootstrap and the
+  // self-host origin injection below. Absent (onprem) it renders as no attr.
+  const nonce = (await headers()).get("x-nonce") ?? undefined;
+
   return (
     <html lang="en" suppressHydrationWarning className="bg-background">
       {!IS_CLOUD && (
         <head>
           <script
+            nonce={nonce}
             dangerouslySetInnerHTML={{
               __html: browserOriginScript(),
             }}
@@ -90,6 +98,7 @@ export default function RootLayout({
               defaultTheme="light"
               enableSystem
               disableTransitionOnChange
+              nonce={nonce}
             >
               <ThemeColorSync />
               {children}

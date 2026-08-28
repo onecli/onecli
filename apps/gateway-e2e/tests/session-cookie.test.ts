@@ -24,16 +24,13 @@ import type { Cx } from "../src/scenario.js";
 const SECRET = "e2e-better-auth-secret-e2e-better-auth-secret";
 const PASSWORD = "correct horse battery staple";
 
-/** The gateway serves session cookies only on a self-hosted deployment. */
+/** The gateway serves session cookies only on a self-hosted deployment.
+ * The harness default IS the self-host edition now; what these scenarios add
+ * is the shared cookie secret (and in-memory stores — the session arm needs
+ * no Redis, and one lane deliberately proves it without). */
 const ONPREM_SESSION = {
   expectedEdition: "Onprem",
   env: {
-    EDITION: "onprem",
-    // The edition routes sessions to the cookie arm; the empty pool id only
-    // mirrors a real self-host env (the stray-pool-id scenario keeps it set).
-    COGNITO_USER_POOL_ID: "",
-    // Multi-instance operation is licensed; the unlicensed boot must run on
-    // the in-memory stores.
     REDIS_HOST: "",
     // The same secret the cookie is signed with: one shared value is the
     // whole basis for the gateway trusting a cookie it did not issue.
@@ -107,14 +104,14 @@ describe("self-hosted session cookies at the gateway", () => {
     async (cx) => {
       await cx.seed({ withApiKey: true });
 
-      // EDITION=onprem with the harness default COGNITO_USER_POOL_ID kept: a
-      // shared self-host .env can carry a pool id it never uses, and the
-      // session cookie must still validate. The selector is the edition, not
-      // config presence; before the edition gate this request 401'd.
+      // EDITION=onprem with a STRAY COGNITO_USER_POOL_ID set: a shared
+      // self-host .env can carry a pool id it never uses, and the session
+      // cookie must still validate. The selector is the edition, not config
+      // presence; before the edition gate this request 401'd.
       const gw = await cx.startGateway({
         expectedEdition: "Onprem",
         env: {
-          EDITION: "onprem",
+          COGNITO_USER_POOL_ID: "us-east-1_e2e",
           REDIS_HOST: "",
           BETTER_AUTH_SECRET: SECRET,
         },
@@ -200,8 +197,6 @@ describe("self-hosted session cookies at the gateway", () => {
     const gw = await cx.startGateway({
       expectedEdition: "Onprem",
       env: {
-        EDITION: "onprem",
-        COGNITO_USER_POOL_ID: "",
         REDIS_HOST: "",
         BETTER_AUTH_SECRET: "",
       },

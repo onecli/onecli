@@ -60,8 +60,8 @@ export const gatewayBinary = (): string => {
  * the variable the gateway would silently run as the other edition — different
  * workspace resolution, different key rechecks — and the failures would look
  * like anything but the real cause, so assert the boot line reports what the
- * test meant to start (the suite default is Cloud; the unlicensed lane opts
- * into Onprem).
+ * test meant to start (the suite default is Onprem — the enterprise lane; the
+ * cloud lane opts into Cloud).
  */
 export const assertEdition = (
   bootLine: Readonly<Record<string, unknown>>,

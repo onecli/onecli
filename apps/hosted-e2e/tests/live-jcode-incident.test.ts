@@ -64,6 +64,14 @@ const seedSecondMember = async (cx: Cx): Promise<string> => {
       role: "member",
     },
   });
+  // The suite runs entitled (RBAC armed), so a plain member needs the
+  // production-shape workspace binding for their key to pass the recheck.
+  await cx.prisma.workspaceAccess.create({
+    data: {
+      workspaceId: cx.ids.workspace,
+      userId,
+    },
+  });
   await cx.prisma.apiKey.create({
     data: {
       id: `${cx.ids.workspace}-key-b`,

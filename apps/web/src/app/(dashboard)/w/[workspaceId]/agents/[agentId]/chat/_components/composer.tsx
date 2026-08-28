@@ -59,6 +59,10 @@ interface ComposerProps {
   onStop?: () => void;
   stopPending?: boolean;
   autoFocus?: boolean;
+  /** A first message to open with (the onboarding greeting). Applied once, on
+   * mount, with the caret parked at its end — a later change must never
+   * overwrite words the user is typing. */
+  initialDraft?: string;
   className?: string;
 }
 
@@ -90,9 +94,13 @@ export const Composer = ({
   onStop,
   stopPending = false,
   autoFocus = false,
+  initialDraft,
   className,
 }: ComposerProps) => {
-  const [message, setMessage] = useState("");
+  // Initial state, not an effect: the draft is there on the first paint, so
+  // the field never flashes empty and a re-render can't resurrect it after
+  // the user clears it.
+  const [message, setMessage] = useState(initialDraft ?? "");
   const [staged, setStaged] = useState<StagedAttachment[]>([]);
   const [dragOver, setDragOver] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -100,6 +108,23 @@ export const Composer = ({
    * inside a state updater (see its header). */
   const stagedRef = useRef<StagedAttachment[]>(staged);
   stagedRef.current = staged;
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
+  /** The caret is parked exactly once — a later `initialDraft` change must not
+   * yank the caret out from under someone who is already typing. */
+  const draftPlacedRef = useRef(false);
+
+  // A prefilled field opens with the caret at its END — Enter sends it,
+  // backspace edits it. Never a selection: selected text is one keystroke
+  // from being gone. (Same behavior as the onboarding name field.)
+  useEffect(() => {
+    if (!initialDraft || draftPlacedRef.current) return;
+    const el = textareaRef.current;
+    if (!el) return;
+    draftPlacedRef.current = true;
+    el.focus();
+    const end = el.value.length;
+    el.setSelectionRange(end, end);
+  }, [initialDraft]);
 
   // The field clears optimistically at submit; if that send then fails, put
   // the words back (unless the user already started typing something new).
@@ -351,6 +376,7 @@ export const Composer = ({
           <Paperclip className="size-4" />
         </Button>
         <Textarea
+          ref={textareaRef}
           value={message}
           onChange={(e) => setMessage(e.target.value)}
           onKeyDown={(e) => {

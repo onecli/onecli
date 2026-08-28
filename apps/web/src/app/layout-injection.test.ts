@@ -31,3 +31,17 @@ describe("root layout browser-origin injection", () => {
     expect(source).toContain("{!IS_CLOUD && (");
   });
 });
+
+describe("root layout CSP nonce (OC-01)", () => {
+  it("reads the nonce proxy.ts forwards on x-nonce", () => {
+    expect(source).toContain('(await headers()).get("x-nonce")');
+  });
+
+  it("passes it to next-themes — its inline theme script needs the attr", () => {
+    expect(source).toMatch(/<ThemeProvider[^>]*(\n\s+[^>\n]+)*\n\s+nonce=/);
+  });
+
+  it("stamps the self-host origin script — inert today, ready for an onprem CSP", () => {
+    expect(source).toMatch(/<script\s*\n\s+nonce=\{nonce\}/);
+  });
+});

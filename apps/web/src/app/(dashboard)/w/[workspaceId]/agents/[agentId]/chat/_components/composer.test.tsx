@@ -40,6 +40,56 @@ describe("Composer", () => {
     expect(field).toHaveValue("");
   });
 
+  it("opens prefilled, focused, with the caret parked at the end of the draft", async () => {
+    const user = userEvent.setup();
+    const onSend = vi.fn();
+    render(
+      <Composer
+        {...baseProps}
+        onSend={onSend}
+        initialDraft="Hey Donna, what can you do for me?"
+      />,
+    );
+
+    const field = screen.getByRole("textbox", {
+      name: "Message",
+    }) as HTMLTextAreaElement;
+    expect(field).toHaveValue("Hey Donna, what can you do for me?");
+    await waitFor(() => expect(field).toHaveFocus());
+    // A caret, never a selection: selected text is one keystroke from gone.
+    expect(field.selectionStart).toBe(field.value.length);
+    expect(field.selectionEnd).toBe(field.value.length);
+
+    // Enter accepts the prefilled draft as-is.
+    await user.keyboard("{Enter}");
+    expect(onSend).toHaveBeenCalledExactlyOnceWith({
+      message: "Hey Donna, what can you do for me?",
+      attachments: [],
+    });
+    expect(field).toHaveValue("");
+  });
+
+  it("never resurrects a cleared prefilled draft on a re-render", async () => {
+    const user = userEvent.setup();
+    const { rerender } = render(
+      <Composer
+        {...baseProps}
+        initialDraft="Hey Donna, what can you do for me?"
+      />,
+    );
+
+    const field = screen.getByRole("textbox", { name: "Message" });
+    await user.clear(field);
+    rerender(
+      <Composer
+        {...baseProps}
+        initialDraft="Hey Donna, what can you do for me?"
+      />,
+    );
+
+    expect(field).toHaveValue("");
+  });
+
   it("inserts a newline on Shift+Enter instead of sending", async () => {
     const user = userEvent.setup();
     const onSend = vi.fn();

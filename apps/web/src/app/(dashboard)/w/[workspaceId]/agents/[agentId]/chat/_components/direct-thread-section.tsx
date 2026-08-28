@@ -23,8 +23,12 @@ import {
 import { useUploadAttachment } from "@/hooks/use-attachments";
 import { useConversationStream } from "@/hooks/use-conversation-stream";
 import { useHostedAvailability } from "@/hooks/use-hosted-availability";
-import { usePathname } from "next/navigation";
-import { agentSectionPath } from "@/lib/navigation";
+import { usePathname, useSearchParams } from "next/navigation";
+import {
+  agentSectionPath,
+  agentGreetingDraft,
+  CHAT_GREETING_PARAM,
+} from "@/lib/navigation";
 import { useAgentPageAgent } from "../../_components/agent-page-frame";
 import { EmptyState } from "../../_components/empty-state";
 import { useCreateThenAttachSecret } from "@/hooks/use-create-then-attach-secret";
@@ -61,6 +65,24 @@ export const DirectThreadSection = () => {
   const agentId = agent.id;
   const pathname = usePathname();
   const availability = useHostedAvailability({ poll: true });
+
+  // `?hello=1` (the last step of onboarding) opens the composer with the
+  // first message already typed. Latched ONCE, from `useSearchParams` — the
+  // router-synced source, present already at the render that mounts this
+  // section. `window.location` is NOT that source: on a client-side
+  // navigation (the onboarding hand-off is a `router.replace`) Next only
+  // syncs it at commit, after this initializer has run. Consumed exactly
+  // once: the URL is cleaned immediately, so a refresh never refills a
+  // draft the user deliberately cleared.
+  const searchParams = useSearchParams();
+  const [greeting] = useState(() => searchParams.has(CHAT_GREETING_PARAM));
+
+  useEffect(() => {
+    if (!greeting) return;
+    const url = new URL(window.location.href);
+    url.searchParams.delete(CHAT_GREETING_PARAM);
+    window.history.replaceState(null, "", `${url.pathname}${url.search}`);
+  }, [greeting]);
 
   const direct = useDirectConversation(agentId);
   const conversationId = direct.data?.id;
@@ -321,6 +343,10 @@ export const DirectThreadSection = () => {
         onStop={active ? () => abortTurn.mutate(active.id) : undefined}
         stopPending={abortTurn.isPending}
         autoFocus
+        // The draft is read once, when the composer mounts — which is why the
+        // flag comes from the URL at mount too, rather than from the turns
+        // query that is still in flight at that moment.
+        initialDraft={greeting ? agentGreetingDraft(agent.name) : undefined}
       />
     </>,
   );

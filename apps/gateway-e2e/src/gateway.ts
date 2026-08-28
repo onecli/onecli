@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { assertEdition, gatewayBinary } from "./binary.js";
-import type { E2EConfig } from "./env.js";
+import { secretEncryptionKey, type E2EConfig } from "./env.js";
 
 /** How a gateway process ended, as observed from outside. */
 export interface GatewayExit {
@@ -69,8 +69,8 @@ export interface GatewayOptions {
   readonly dataDir?: string;
   /** Additional or overriding environment for this instance. */
   readonly env?: Readonly<Record<string, string>>;
-  /** The edition the boot line must report (default Cloud — the suite's
-   * standard lane; the unlicensed lane starts Onprem gateways). */
+  /** The edition the boot line must report (default Onprem — the suite's
+   * standard enterprise lane; the cloud lane starts Cloud gateways). */
   readonly expectedEdition?: "Cloud" | "Onprem";
 }
 
@@ -212,32 +212,31 @@ export const startGateway = async (
     opts.dataDir ?? mkdtempSync(join(tmpdir(), "onecli-gateway-e2e-"));
 
   // An explicit environment, never a `process.env` spread: a developer's local
-  // REDIS_PASSWORD, AWS_PROFILE or DATABASE_URL would otherwise silently change
-  // what is under test.
+  // REDIS_PASSWORD or DATABASE_URL would otherwise silently change what is
+  // under test.
   const env: Record<string, string> = {
     PATH: process.env.PATH ?? "",
     HOME: process.env.HOME ?? "",
-    // The binary is edition-less; the suite defaults to the cloud edition, so
-    // the runtime switch must reach the child (assertEdition guards it did —
-    // the unlicensed lane overrides EDITION and expects Onprem).
-    EDITION: "cloud",
-    // Cloud boots fail fast without a Cognito pool configured. The suite never
-    // authenticates Cognito sessions (agent tokens + API keys only), so the
-    // value is used lazily at most to build a JWKS URL that is never fetched.
-    COGNITO_USER_POOL_ID: "us-east-1_e2e",
+    // The binary is edition-less; the suite defaults to the ENTERPRISE
+    // edition — an entitled self-host (`EDITION=onprem` +
+    // `ENTERPRISE_ENABLED=true`), the canonical licensed deployment — so the
+    // runtime switch must reach the child (assertEdition guards it did; the
+    // unlicensed and cloud lanes override per test).
+    EDITION: "onprem",
+    ENTERPRISE_ENABLED: "true",
     DATABASE_URL: databaseUrl,
+    // The licensed HA stores: multi-instance operation is an entitled
+    // feature, and this lane is entitled — so it runs the Redis-backed cache
+    // and approval stores, not the in-memory fallback. (The unlicensed lane
+    // overrides REDIS_HOST to empty and runs in-memory.)
     REDIS_HOST: config.redisHost,
     REDIS_PORT: config.redisPort,
-    // The cloud default is rediss://; a plain container speaks TCP.
+    // The self-host default is plain TCP; a plain container speaks TCP.
     REDIS_TLS: "false",
-    AWS_ENDPOINT_URL_KMS: config.kmsEndpoint,
-    AWS_REGION: config.awsRegion,
-    AWS_ACCESS_KEY_ID: process.env.AWS_ACCESS_KEY_ID ?? "test",
-    AWS_SECRET_ACCESS_KEY: process.env.AWS_SECRET_ACCESS_KEY ?? "test",
-    // Without this the SDK's credential chain can stall for seconds looking for
-    // instance metadata that will never answer.
-    AWS_EC2_METADATA_DISABLED: "true",
-    KMS_KEY_ARN: config.kmsKeyArn,
+    // Local AES-256-GCM — the self-host crypto backend. The fixtures encrypt
+    // with the same key (vitest pins it), which is what keeps the TS→Rust
+    // 3-part format a real cross-language assertion.
+    SECRET_ENCRYPTION_KEY: secretEncryptionKey(),
     // Host-scoped, matched against the port-stripped host — narrower than the
     // global GATEWAY_DANGER_ACCEPT_INVALID_CERTS, so only the stub is exempt.
     GATEWAY_SKIP_VERIFY_HOSTS: "127.0.0.1",
@@ -322,7 +321,7 @@ export const startGateway = async (
       "gateway never logged its startup line, so its edition could not be verified",
     );
   }
-  assertEdition(startLine, opts.expectedEdition ?? "Cloud");
+  assertEdition(startLine, opts.expectedEdition ?? "Onprem");
 
   const addr = bootLine["addr"];
   if (typeof addr !== "string") {

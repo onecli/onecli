@@ -120,6 +120,24 @@ export const agentsCreatePath = (workspaceId: string): string =>
 export const agentChatPath = (workspaceId: string, agentId: string): string =>
   `/w/${encodeURIComponent(workspaceId)}/agents/${encodeURIComponent(agentId)}/chat`;
 
+/**
+ * Marks an arrival that should open with a prefilled first message ("Hey
+ * <Agent>, what can you do for me?"). A param, not local state, because the
+ * onboarding flow navigates to a fresh page — and the chat strips it once
+ * consumed so a refresh doesn't refill a draft the user cleared.
+ */
+export const CHAT_GREETING_PARAM = "hello";
+
+/** The agent's chat, opened with the greeting draft prefilled. */
+export const agentChatGreetingPath = (
+  workspaceId: string,
+  agentId: string,
+): string => `${agentChatPath(workspaceId, agentId)}?${CHAT_GREETING_PARAM}=1`;
+
+/** The prefilled first message. One definition so the copy can't drift. */
+export const agentGreetingDraft = (agentName: string): string =>
+  `Hey ${agentName.trim()}, what can you do for me?`;
+
 /** The last-visited org, written client-side on org pages and read by the
  * Get Started button on account routes (which belong to no org). One
  * definition so writer and reader can't drift. */

@@ -47,7 +47,12 @@ export const startApiServer = async (
         PATH: process.env.PATH ?? "",
         HOME: process.env.HOME ?? "",
         NODE_ENV: "test",
+        // The enterprise edition, matching the spawned gateway: an entitled
+        // self-host, so the licensed control-plane arms (RBAC role resolver,
+        // workspace-access bindings) are wired exactly as a licensed
+        // deployment wires them.
         EDITION: "onprem",
+        ENTERPRISE_ENABLED: "true",
         PORT: String(opts.port),
         DATABASE_URL: opts.databaseUrl,
         SECRET_ENCRYPTION_KEY: secretEncryptionKey(),

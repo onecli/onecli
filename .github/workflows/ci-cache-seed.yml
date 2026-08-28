@@ -2,7 +2,7 @@ name: CI cache seed
 
 # ci.yml runs only on pull_request, and GitHub scopes PR-written caches to
 # the writing PR's merge ref — so nothing ever seeds a cache a NEW PR can
-# restore, and every fresh PR's rust + hosted-e2e lanes recompile the
+# restore, and every fresh PR's unit-rust + e2e lanes recompile the
 # gateway from zero (~14 min each, measured). Base- and default-branch
 # caches are readable by every PR, so this workflow does one warm build per
 # merge and the PR lanes restore from it: the rust caches via the

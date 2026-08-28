@@ -12,20 +12,20 @@ import { scenario } from "../src/scenario.js";
 // outcome); org credentials are FREE, so their scenarios are parity twins —
 // the license flag must change nothing.
 
-/** Unlicensed onprem: overrides the harness's cloud spawn env. */
+/** Unlicensed onprem: overrides the harness's enterprise spawn env. */
 const UNLICENSED = {
   env: {
-    EDITION: "onprem",
-    // The scenarios authenticate with agent tokens and `oc_` API keys only;
-    // the edition keeps sessions on the cookie arm regardless of this var.
-    COGNITO_USER_POOL_ID: "",
+    // The harness default is the ENTITLED self-host; blank the flag (the
+    // parser treats a blank exactly like unset) to boot unlicensed.
+    ENTERPRISE_ENABLED: "",
     // HA is licensed (#7): the unlicensed boot must run the in-memory stores.
     REDIS_HOST: "",
   },
   expectedEdition: "Onprem" as const,
 };
 
-/** The same deployment with the license flag on — the unlock differential. */
+/** The same deployment with the license flag on — the unlock differential.
+ * REDIS_HOST stays blank so the pair differs ONLY in the flag. */
 const LICENSED = {
   env: { ...UNLICENSED.env, ENTERPRISE_ENABLED: "true" },
   expectedEdition: "Onprem" as const,

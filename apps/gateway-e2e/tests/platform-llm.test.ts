@@ -6,6 +6,14 @@ import { throughProxy } from "../src/proxy.js";
 /**
  * The platform Anthropic trial credit (`ee/platform_llm.rs`), black-box.
  *
+ * THE cloud arm of the suite: the trial credit is cloud-only wire behavior
+ * (`parse` returns None off-cloud), so these scenarios override the harness's
+ * enterprise default with `EDITION=cloud` — which also pins the cloud boot
+ * posture end to end (the fail-fast wants Cognito/Redis/KMS configured; the
+ * dummies below satisfy it, and neither is ever dialed: sessions stay on
+ * agent tokens, and the harness's SECRET_ENCRYPTION_KEY selects the local
+ * AES crypto backend by config precedence).
+ *
  * The binary runs with `PLATFORM_ANTHROPIC_API_KEY` set and the injection
  * host overridden to the local stub (`PLATFORM_ANTHROPIC_API_HOST` —
  * production resolves api.anthropic.com). What these prove end to end:
@@ -23,17 +31,30 @@ import { throughProxy } from "../src/proxy.js";
 
 const PLATFORM_KEY = "sk-ant-api03-platform-e2e";
 
+/** The cloud spawn env, layered per scenario (some drop the platform key). */
+const CLOUD_ENV = {
+  EDITION: "cloud",
+  COGNITO_USER_POOL_ID: "us-east-1_e2e",
+  KMS_KEY_ARN: "arn:aws:kms:us-east-1:000000000000:key/e2e-never-dialed",
+} as const;
+
+const CLOUD = { env: CLOUD_ENV, expectedEdition: "Cloud" } as const;
+
 const platformEnv = {
+  ...CLOUD_ENV,
   PLATFORM_ANTHROPIC_API_KEY: PLATFORM_KEY,
   // The e2e upstreams live on 127.0.0.1; production leaves this unset.
   PLATFORM_ANTHROPIC_API_HOST: "127.0.0.1",
 } as const;
 
-describe("platform trial credit", () => {
+describe("platform trial credit (cloud edition)", () => {
   scenario("injects the platform key for a keyless org", async (cx) => {
     const upstream = await cx.upstream();
     await cx.seed(); // no secrets, no grants — a brand-new user's world
-    const gw = await cx.startGateway({ env: platformEnv });
+    const gw = await cx.startGateway({
+      env: platformEnv,
+      expectedEdition: "Cloud",
+    });
 
     const res = await throughProxy(gw.origin, {
       url: upstream.url("/v1/messages"),
@@ -52,7 +73,7 @@ describe("platform trial credit", () => {
   scenario("does not inject without the env key", async (cx) => {
     const upstream = await cx.upstream();
     await cx.seed();
-    const gw = await cx.startGateway(); // no PLATFORM_ANTHROPIC_API_KEY
+    const gw = await cx.startGateway(CLOUD); // no PLATFORM_ANTHROPIC_API_KEY
 
     await throughProxy(gw.origin, {
       url: upstream.url("/v1/messages"),
@@ -72,7 +93,8 @@ describe("platform trial credit", () => {
       const upstream = await cx.upstream();
       await cx.seed();
       const gw = await cx.startGateway({
-        env: { PLATFORM_ANTHROPIC_API_KEY: PLATFORM_KEY },
+        env: { ...CLOUD_ENV, PLATFORM_ANTHROPIC_API_KEY: PLATFORM_KEY },
+        expectedEdition: "Cloud",
       });
 
       await throughProxy(gw.origin, {
@@ -97,7 +119,10 @@ describe("platform trial credit", () => {
           { type: "openai", hostPattern: "api.openai.com", value: "sk-own" },
         ],
       });
-      const gw = await cx.startGateway({ env: platformEnv });
+      const gw = await cx.startGateway({
+        env: platformEnv,
+        expectedEdition: "Cloud",
+      });
 
       await throughProxy(gw.origin, {
         url: upstream.url("/v1/messages"),
@@ -128,7 +153,10 @@ describe("platform trial credit", () => {
           spentNanos: 5_000_000_000n,
         },
       });
-      const gw = await cx.startGateway({ env: platformEnv });
+      const gw = await cx.startGateway({
+        env: platformEnv,
+        expectedEdition: "Cloud",
+      });
 
       const res = await throughProxy(gw.origin, {
         url: upstream.url("/v1/messages"),
@@ -182,7 +210,10 @@ describe("platform trial credit", () => {
           spentNanos: 5_000_000_000n,
         },
       });
-      const gw = await cx.startGateway({ env: platformEnv });
+      const gw = await cx.startGateway({
+        env: platformEnv,
+        expectedEdition: "Cloud",
+      });
 
       const res = await throughProxy(gw.origin, {
         url: upstream.url("/v1/messages"),

@@ -2,6 +2,8 @@ import { describe, expect, it } from "vitest";
 import {
   AGENT_CREATE_PARAM,
   agentChatPath,
+  agentChatGreetingPath,
+  agentGreetingDraft,
   agentPath,
   agentsCreatePath,
   agentSectionPath,
@@ -152,6 +154,34 @@ describe("agentChatPath", () => {
 
   it("encodes both ids so neither can splice extra path segments", () => {
     expect(agentChatPath("w/1", "a/b")).toBe("/w/w%2F1/agents/a%2Fb/chat");
+  });
+});
+
+describe("agentChatGreetingPath", () => {
+  it("carries the greeting flag so the composer opens prefilled", () => {
+    expect(agentChatGreetingPath("w1", "ag-1")).toBe(
+      "/w/w1/agents/ag-1/chat?hello=1",
+    );
+  });
+
+  it("keeps the same encoding guarantees as the plain chat path", () => {
+    expect(agentChatGreetingPath("w/1", "a/b")).toBe(
+      "/w/w%2F1/agents/a%2Fb/chat?hello=1",
+    );
+  });
+});
+
+describe("agentGreetingDraft", () => {
+  it("addresses the agent by name", () => {
+    expect(agentGreetingDraft("Donna")).toBe(
+      "Hey Donna, what can you do for me?",
+    );
+  });
+
+  it("trims the name so a padded value can't read as a typo", () => {
+    expect(agentGreetingDraft("  Donna  ")).toBe(
+      "Hey Donna, what can you do for me?",
+    );
   });
 });
 

@@ -8,7 +8,7 @@ import { Input } from "@onecli/ui/components/input";
 import { Label } from "@onecli/ui/components/label";
 import { cn } from "@onecli/ui/lib/utils";
 import { toast } from "sonner";
-import { agentChatPath } from "@/lib/navigation";
+import { agentChatGreetingPath } from "@/lib/navigation";
 import { useInviteTeammates } from "@/hooks/use-invitations";
 import { useOnboarding } from "./onboarding-context";
 import { useStepGuard } from "./use-step-guard";
@@ -36,7 +36,7 @@ export default function TeamPage() {
 
   const chatDestination =
     createdAgentId && workspaceId
-      ? agentChatPath(workspaceId, createdAgentId)
+      ? agentChatGreetingPath(workspaceId, createdAgentId)
       : undefined;
 
   // The chat page is a heavy surface and it is where both buttons land —
