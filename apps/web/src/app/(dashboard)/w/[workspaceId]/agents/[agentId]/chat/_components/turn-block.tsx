@@ -51,6 +51,9 @@ const FRIENDLY_FAILURE_CODES = new Set<string>(LIFECYCLE_TURN_ERROR_CODES);
 const KEY_FIX_LABELS = new Map<string, string>([
   ["no_model_key", "Connect a model key"],
   ["model_provider_error", "Check the model key"],
+  // The free trial credit ran out — same family, sharper verb: there is no
+  // user key to check, the fix is adding one.
+  ["trial_credit_exhausted", "Add your own model key"],
 ]);
 
 const originLabel = (source: string): string | undefined =>
@@ -167,7 +170,9 @@ export const TurnBlock = ({
               (keyFixLabel ? (
                 <TurnNotice
                   message={errorText}
-                  {...(turn.errorCode === "no_model_key" && onConnectModelKey
+                  {...((turn.errorCode === "no_model_key" ||
+                    turn.errorCode === "trial_credit_exhausted") &&
+                  onConnectModelKey
                     ? {
                         action: {
                           onClick: onConnectModelKey,

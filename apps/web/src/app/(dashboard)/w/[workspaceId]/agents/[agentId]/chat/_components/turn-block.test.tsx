@@ -357,6 +357,54 @@ describe("a turn that could not run for a reason the reader can fix", () => {
     expect(document.querySelector(".text-destructive")).toBeNull();
   });
 
+  it("trial-credit exhaustion opens the in-place add-key door, like no_model_key", async () => {
+    // The free credit ran out: there is no user key to check, so the fix is
+    // ADDING one — the same in-place door as no_model_key (not the Models
+    // navigation the provider-refusal arm takes), with its own label.
+    const user = userEvent.setup();
+    const onConnectModelKey = vi.fn();
+    render(
+      <TurnBlock
+        turn={turn({
+          status: "failed",
+          error:
+            "This agent was running on OneCLI's free trial credit, which is now used up.",
+          errorCode: "trial_credit_exhausted",
+        })}
+        rendered={undefined}
+        modelsHref="/w/p1/agents/a1/models"
+        onConnectModelKey={onConnectModelKey}
+      />,
+    );
+    expect(screen.queryByRole("link")).toBeNull();
+    await user.click(
+      screen.getByRole("button", { name: "Add your own model key" }),
+    );
+    expect(onConnectModelKey).toHaveBeenCalledTimes(1);
+    // Guidance, not a crash: none of the destructive treatment.
+    expect(document.querySelector(".text-destructive")).toBeNull();
+  });
+
+  it("trial-credit exhaustion navigates to Models when no in-place door is wired", () => {
+    render(
+      <TurnBlock
+        turn={turn({
+          status: "failed",
+          error:
+            "This agent was running on OneCLI's free trial credit, which is now used up.",
+          errorCode: "trial_credit_exhausted",
+        })}
+        rendered={undefined}
+        modelsHref="/w/p1/agents/a1/models"
+      />,
+    );
+    const action = screen.getByRole("link", {
+      name: "Add your own model key",
+    });
+    expect(action).toHaveAttribute("href", "/w/p1/agents/a1/models");
+    expect(document.querySelector(".text-destructive")).toBeNull();
+  });
+
   it.each([
     "agent_restarted",
     "agent_start_failed",

@@ -405,6 +405,44 @@ export const isSlackFilesUrl = (raw: string): boolean => {
   return host === "slack.com" || host.endsWith(".slack.com");
 };
 
+/**
+ * Slack's own file CDN domains — where an authenticated `files-pri` download
+ * 302s to. Non-image files redirect to the safe-files CDN
+ * (`slack-files.com/files-pri-safe/…`, a presigned URL that needs NO auth),
+ * so a download that only trusts `*.slack.com` refuses every PDF while
+ * images (served inline from `files.slack.com`) work. These hops are
+ * followed WITHOUT the Authorization header: the presigned URL is its own
+ * credential, and the bot token still never travels beyond
+ * `isSlackFilesUrl` hosts. Kept a separate list from `isSlackFilesUrl` on
+ * purpose — widening THAT pin would send the token to these hosts. Any
+ * redirect outside both sets is still refused without a request: a forged
+ * payload bounced through a slack.com open redirect must not turn the
+ * control plane into a fetch-anything proxy. When SLACK_CDN_BASE_URL points
+ * at a fake server (the test seam), that exact origin is the allowed one.
+ */
+export const isSlackCdnUrl = (raw: string): boolean => {
+  let url: URL;
+  try {
+    url = new URL(raw);
+  } catch {
+    return false;
+  }
+  const base = process.env.SLACK_CDN_BASE_URL;
+  if (base) {
+    try {
+      const baseUrl = new URL(base);
+      return url.protocol === baseUrl.protocol && url.host === baseUrl.host;
+    } catch {
+      // Unparseable override — fall through to the production rule.
+    }
+  }
+  if (url.protocol !== "https:") return false;
+  const host = url.hostname.toLowerCase();
+  return ["slack-files.com", "slack-imgs.com", "slack-edge.com"].some(
+    (domain) => host === domain || host.endsWith(`.${domain}`),
+  );
+};
+
 export type SlackFileDownload =
   | { ok: true; bytes: Buffer; contentType: string | null }
   | { ok: false; reason: string };
@@ -416,7 +454,10 @@ const MAX_DOWNLOAD_REDIRECTS = 3;
  * Download `url_private` bytes with the bot token. Redirects are followed BY
  * HAND so every hop re-passes the host pin — `fetch`'s automatic following
  * would happily replay the Authorization header to wherever Slack (or a
- * forged payload) pointed. An HTML answer is Slack's login page — the
+ * forged payload) pointed. The pin is two-tier: `isSlackFilesUrl` hosts get
+ * the Bearer token; `isSlackCdnUrl` hosts (Slack's presigned file CDN, where
+ * every non-image download 302s) are fetched WITHOUT it; anything else is
+ * refused before any request. An HTML answer is Slack's login page — the
  * documented behavior for a missing `files:read` scope — and is refused as
  * such rather than stored as "the image".
  */
@@ -427,13 +468,16 @@ export const downloadPrivateFile = async (
 ): Promise<SlackFileDownload> => {
   let target = rawUrl;
   for (let hop = 0; hop <= MAX_DOWNLOAD_REDIRECTS; hop += 1) {
-    if (!isSlackFilesUrl(target)) {
+    // The token decision is per-hop and MUST stay in sync with the fence:
+    // only `isSlackFilesUrl` hosts may ever see the Authorization header.
+    const sendToken = isSlackFilesUrl(target);
+    if (!sendToken && !isSlackCdnUrl(target)) {
       return { ok: false, reason: "refused a non-Slack download URL" };
     }
     let response: Response;
     try {
       response = await fetch(target, {
-        headers: { authorization: `Bearer ${botToken}` },
+        headers: sendToken ? { authorization: `Bearer ${botToken}` } : {},
         redirect: "manual",
         signal: AbortSignal.timeout(DOWNLOAD_TIMEOUT_MS),
       });

@@ -1824,6 +1824,11 @@ model Budget {
 // the gateway's Redis hot counter key. The Redis counter is the hot enforcement
 // source of truth; this is the durable floor (rehydrated into Redis on cache miss
 // so a flush can't silently refill a budget). `spentNanos` = nano-dollars (1e-9).
+// `organizationId` holds a RENDERED BUDGET SUBJECT, not a bare org id: the
+// gateway writes `org:<id>` for org budgets and `user:<id>` for the platform
+// trial credit (attributed to the org's founding owner). The column keeps its
+// historical name; the prefix is what makes the value honest. Never join it
+// to organizations without stripping/matching the prefix.
 model BudgetSpend {
   secretId       String   @map("secret_id")
   organizationId String   @map("organization_id")

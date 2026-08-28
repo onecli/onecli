@@ -37,7 +37,10 @@ pub(crate) fn quota_exceeded(limit: u64, org_id: Option<&str>) -> Response<Forwa
 /// Returned when the effective credential for this host has reached its spend
 /// budget for the current period, so the gateway pauses the key. A `403 Forbidden`
 /// with `x-should-retry: false`, like the gateway's other policy blocks; clients
-/// identify it via the `error: "budget_exceeded"` field.
+/// identify it via the `error` field — `"budget_exceeded"` for an
+/// admin-configured org budget, `"trial_credit_exhausted"` for the platform's
+/// free trial credit (the sandbox supervisor keys its friendly add-a-key
+/// classification on the latter).
 pub(crate) fn budget_exceeded(
     binding: &crate::ee::budget::BudgetBinding,
     workspace_id: Option<&str>,
@@ -54,14 +57,35 @@ pub(crate) fn budget_exceeded(
         Some(pid) => format!("{base}/w/{pid}/connections/llms"),
         None => base.to_string(),
     };
+    // The platform trial credit gets its own wording AND its own wire code:
+    // it is a free credit the user exhausted, not a budget an admin
+    // configured — the fix is bringing their own key, not raising a limit —
+    // and downstream classifiers (the sandbox supervisor) key on the error
+    // CODE, so the two conditions must be distinguishable without prose
+    // matching.
+    let is_platform_credit = binding.secret_id == crate::ee::platform_llm::PLATFORM_SECRET_ID;
+    let (error_code, message) = if is_platform_credit {
+        (
+            "trial_credit_exhausted",
+            format!(
+                "Your free OneCLI trial credit (${limit_usd:.2}) is used up. Add your own \
+                 Anthropic API key in the OneCLI dashboard to keep going: {add_key_url}"
+            ),
+        )
+    } else {
+        (
+            "budget_exceeded",
+            format!(
+                "This organization's spend budget for the {} key (${:.2} {}) has been \
+                 reached, so the key is paused. The user can set their own key in the OneCLI \
+                 dashboard to keep going: {}",
+                binding.secret_type, limit_usd, window_label, add_key_url
+            ),
+        )
+    };
     let body = serde_json::json!({
-        "error": "budget_exceeded",
-        "message": format!(
-            "This organization's spend budget for the {} key (${:.2} {}) has been \
-             reached, so the key is paused. The user can set their own key in the OneCLI \
-             dashboard to keep going: {}",
-            binding.secret_type, limit_usd, window_label, add_key_url
-        ),
+        "error": error_code,
+        "message": message,
         "limit_usd": limit_usd,
         "period": period,
         "add_key_url": add_key_url,
@@ -163,12 +187,12 @@ pub(crate) fn forbidden_empty_scope() -> Response<ForwardBody> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ee::budget::{BudgetBinding, BudgetPeriod};
+    use crate::ee::budget::{BudgetBinding, BudgetPeriod, BudgetSubject};
 
     fn budget_binding() -> BudgetBinding {
         BudgetBinding {
             secret_id: "sec_1".into(),
-            organization_id: "org_1".into(),
+            subject: BudgetSubject::Org("org_1".into()),
             secret_type: "anthropic".into(),
             limit_nanos: 50 * 1_000_000_000,
             period: BudgetPeriod::Monthly,
@@ -183,6 +207,47 @@ mod tests {
             budget_exceeded(&budget_binding(), Some("proj_1")).status(),
             StatusCode::FORBIDDEN
         );
+    }
+
+    // The two arms carry DISTINCT wire codes: downstream classifiers (the
+    // sandbox supervisor) key the friendly add-a-key treatment on
+    // `trial_credit_exhausted`, so the org-budget arm leaking onto that code
+    // (or vice versa) would mislabel one condition as the other.
+    #[test]
+    fn budget_exceeded_wire_codes_distinguish_org_budget_from_trial_credit() {
+        use futures_util::FutureExt;
+        use http_body_util::BodyExt;
+        let body_of = |resp: Response<ForwardBody>| {
+            let Either::Left(full) = resp.into_body() else {
+                panic!("expected a buffered body");
+            };
+            let bytes = full
+                .collect()
+                .now_or_never()
+                .expect("body ready")
+                .expect("body ok")
+                .to_bytes();
+            serde_json::from_slice::<serde_json::Value>(&bytes).expect("json")
+        };
+
+        let org = body_of(budget_exceeded(&budget_binding(), Some("proj_1")));
+        assert_eq!(org["error"], "budget_exceeded");
+
+        let platform = body_of(budget_exceeded(
+            &BudgetBinding {
+                secret_id: crate::ee::platform_llm::PLATFORM_SECRET_ID.into(),
+                subject: BudgetSubject::User("user_1".into()),
+                secret_type: "anthropic".into(),
+                limit_nanos: 5 * 1_000_000_000,
+                period: BudgetPeriod::Total,
+            },
+            Some("proj_1"),
+        ));
+        assert_eq!(platform["error"], "trial_credit_exhausted");
+        assert!(platform["message"]
+            .as_str()
+            .expect("message")
+            .contains("trial credit"));
     }
 
     #[test]

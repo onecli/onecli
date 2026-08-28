@@ -106,6 +106,7 @@ export const LIFECYCLE_TURN_ERROR_CODES = [
 export const TURN_ERROR_CODES = [
   "no_model_key",
   "model_provider_error",
+  "trial_credit_exhausted",
   ...LIFECYCLE_TURN_ERROR_CODES,
 ] as const;
 export type TurnErrorCode = (typeof TURN_ERROR_CODES)[number];
@@ -187,6 +188,16 @@ export const IMAGE_UNAVAILABLE_MESSAGE =
 export const MODEL_PROVIDER_ERROR_MESSAGE =
   "The agent's model provider rejected the request. This is usually a usage limit or an expired key. Check the connected model key, or connect a different one, then send your message again.";
 
+/** The platform's free trial credit ran out mid-conversation — the agent was
+ * running on OneCLI's own key (no key of the user's connected), and the
+ * gateway paused it at the cap. The fix is the same family as
+ * `no_model_key`: connect a key, one link away — so the copy points there
+ * and the surfaces reuse the add-key door. Raw gateway 403 bodies never
+ * render on a chat surface; this canonical copy replaces them (the raw text
+ * stays operator material, like `model_provider_error`). */
+export const TRIAL_CREDIT_EXHAUSTED_MESSAGE =
+  "This agent was running on OneCLI's free trial credit, which is now used up. Connect your own model key, then send your message again.";
+
 /** The harness refused the message because its session was still executing
  * earlier, platform-abandoned work and the adapter's self-heal (cancel +
  * resend with backoff) could not free it. Genuinely temporary: the blocked
@@ -235,6 +246,10 @@ export const TURN_FAILURE_COPY: Partial<
   model_provider_error: {
     code: "model_provider_error",
     message: MODEL_PROVIDER_ERROR_MESSAGE,
+  },
+  trial_credit_exhausted: {
+    code: "trial_credit_exhausted",
+    message: TRIAL_CREDIT_EXHAUSTED_MESSAGE,
   },
   harness_busy: {
     code: "harness_busy",

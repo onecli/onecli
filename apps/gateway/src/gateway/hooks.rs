@@ -185,7 +185,7 @@ pub(crate) async fn pre_forward(
         if crate::ee::budget::is_over_budget(cache, pool, binding).await {
             warn!(
                 secret_id = %binding.secret_id,
-                org = %binding.organization_id,
+                subject = %binding.subject,
                 "budget exceeded — blocking request"
             );
             emit_block_telemetry(proxy_ctx, host, method, path, "budget_exceeded");

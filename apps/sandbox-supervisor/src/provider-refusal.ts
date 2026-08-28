@@ -40,6 +40,21 @@ const PROVIDER_REFUSAL_SHAPES =
   /\brate.?limits?|authentication_error|permission_error|overloaded_error|billing_error|invalid_api_key|insufficient[_ ]quota|exceeded your current quota|billing (details|hard limit)|\busage limits?|credit balance/i;
 
 /**
+ * The gateway's trial-credit pause: the coded `trial_credit_exhausted` JSON
+ * body it returns when the PLATFORM's free credit hits its spend cap (the
+ * ORG-budget sibling keeps `budget_exceeded` and the raw passthrough — its
+ * message names an admin-configured budget, which is accurate there).
+ * Matched on the gateway's own code (never prose), and checked BEFORE the
+ * general policy and provider shapes: it is a gateway response, but unlike a
+ * policy block the fix is the user's — connect a key — so it earns canonical
+ * copy with the add-key call to action instead of the raw passthrough.
+ */
+const TRIAL_CREDIT_SHAPE = /"error"\s*:\s*"trial_credit_exhausted"/i;
+
+export const isTrialCreditExhausted = (message: string): boolean =>
+  TRIAL_CREDIT_SHAPE.test(message);
+
+/**
  * Whether a harness terminal error is the MODEL PROVIDER refusing the
  * request (usage limit, exhausted credits, revoked key) — the one live-
  * harness failure a person can actually fix, so it earns a code and

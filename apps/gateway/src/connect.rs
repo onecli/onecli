@@ -400,26 +400,42 @@ impl PolicyEngine {
         hostname: &str,
         selection: &db::InjectSelection,
     ) -> Result<(Vec<InjectionRule>, Vec<crate::ee::budget::BudgetBinding>), ConnectError> {
+        // The platform trial credit decides eligibility on the UNFILTERED
+        // org+workspace pool (an existing-but-restricted LLM key must count as
+        // present — see `ee::platform_llm`), so the pool is fetched when
+        // either consumer needs it: rule-driven narrowing, or a configured
+        // platform key on this host.
+        let platform_candidate = crate::ee::platform_llm::configured_for_host(hostname);
+        let mut pool_secrets = if matches!(secret_pool(selection), InjectionPool::RuleSelected)
+            || platform_candidate
+        {
+            let (org_result, workspace_result) = tokio::join!(
+                db::find_secrets_by_org(&self.pool, &agent.organization_id),
+                db::find_secrets_by_workspace(&self.pool, &agent.workspace_id),
+            );
+            let mut selected = org_result.map_err(db_err)?;
+            selected.extend(workspace_result.map_err(db_err)?);
+            selected
+        } else {
+            Vec::new()
+        };
+        let pool_has_llm =
+            platform_candidate && crate::ee::platform_llm::pool_has_llm_credential(&pool_secrets);
+
         let secrets = match secret_pool(selection) {
             InjectionPool::RuleSelected => {
                 // Rule-driven: the agent's allow rules name specific secrets
                 // (`secret_ids`) and/or "all secrets at a level"
-                // (`secret_scopes`). Fetch the ORG/WORKSPACE-fenced candidate
-                // pool and NARROW to the named ids OR the named levels (a
-                // secret's own `scope` — "organization" / "workspace"). The
-                // org-fence is on the FETCH, so a rule naming another org's
-                // secret can't pull it (the id simply isn't in the pool).
-                let (org_result, workspace_result) = tokio::join!(
-                    db::find_secrets_by_org(&self.pool, &agent.organization_id),
-                    db::find_secrets_by_workspace(&self.pool, &agent.workspace_id),
-                );
-                let mut selected = org_result.map_err(db_err)?;
-                selected.extend(workspace_result.map_err(db_err)?);
-                selected.retain(|s| {
+                // (`secret_scopes`). NARROW the ORG/WORKSPACE-fenced candidate
+                // pool to the named ids OR the named levels (a secret's own
+                // `scope` — "organization" / "workspace"). The org-fence is on
+                // the FETCH, so a rule naming another org's secret can't pull
+                // it (the id simply isn't in the pool).
+                pool_secrets.retain(|s| {
                     selection.secret_ids.contains(&s.id)
                         || selection.secret_scopes.contains(&s.scope)
                 });
-                selected
+                pool_secrets
             }
             // An agent with no rule-driven selection injects nothing: WHICH
             // org/workspace secrets an agent gets comes solely from its v2 allow
@@ -498,13 +514,32 @@ impl PolicyEngine {
         // host-filtered secrets. Dormant today — nothing produces
         // budget-eligible secrets (see `ee::budget`) — kept for a future
         // budget surface. No-op in OSS.
-        let budget_bindings = crate::ee::budget::resolve_bindings(
+        let mut budget_bindings = crate::ee::budget::resolve_bindings(
             &self.pool,
             &agent.organization_id,
             &matching,
             crate::edition::entitled(),
         )
         .await;
+
+        // Platform trial credit (cloud + licensed): when the org has no LLM
+        // credential of its own and this is the Anthropic host, inject the
+        // platform's key under the synthesized lifetime budget — enforced and
+        // metered by the same engine as any other binding. Rules-empty is a
+        // precondition in effect (an own Anthropic key implies pool_has_llm),
+        // so the platform key never shadows a user credential.
+        if let Some((rule, binding)) = crate::ee::platform_llm::platform_credential(
+            &self.pool,
+            &agent.organization_id,
+            hostname,
+            pool_has_llm,
+            crate::edition::entitled(),
+        )
+        .await
+        {
+            rules.push(rule);
+            budget_bindings.push(binding);
+        }
 
         Ok((rules, budget_bindings))
     }
@@ -2103,6 +2138,34 @@ mod tests {
             "jfrog-artifactory",
             Some(&creds),
             "evil.jfrog.io"
+        ));
+    }
+
+    #[test]
+    fn credential_host_mismatch_snowflake_other_tenant() {
+        // Snowflake's PAT is gated on the connection's stored `host` — a
+        // request to another tenant's *.snowflakecomputing.com account must
+        // NOT receive it, and the matching host must.
+        let creds = serde_json::json!({
+            "access_token": "pat",
+            "host": "myorg-myaccount.snowflakecomputing.com",
+        });
+        assert!(credential_host_mismatch(
+            "snowflake",
+            Some(&creds),
+            "evil-tenant.snowflakecomputing.com"
+        ));
+        assert!(!credential_host_mismatch(
+            "snowflake",
+            Some(&creds),
+            "myorg-myaccount.snowflakecomputing.com"
+        ));
+        // A connection stored without a host field fails closed.
+        let no_host = serde_json::json!({ "access_token": "pat" });
+        assert!(credential_host_mismatch(
+            "snowflake",
+            Some(&no_host),
+            "myorg-myaccount.snowflakecomputing.com"
         ));
     }
 

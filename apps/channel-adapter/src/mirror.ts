@@ -280,6 +280,11 @@ export interface MirrorPosts {
   providerError(
     input: ChannelPostTarget & { modelsUrl: string; answer: string },
   ): Promise<void>;
+  /** The free trial credit ran out — the no-model-key family with a sharper
+   * verb (there is no user key to check; the person needs to ADD one). */
+  trialCreditExhausted(
+    input: ChannelPostTarget & { modelsUrl: string; answer: string },
+  ): Promise<void>;
   /** Platform chrome for a turn that ended without a normal answer — a
    * failure line, or the quiet "Stopped." after an abort. Rendered so it
    * cannot be mistaken for the agent's own voice. `warn` picks the failure
@@ -423,6 +428,15 @@ export const mirrorFinishedTurn = async (
       // to point at; without one it falls through to the plain answer.
       if (item.turn.errorCode === "no_model_key" && deps.modelsUrl) {
         await deps.posts.noModelKey({
+          ...target,
+          modelsUrl: deps.modelsUrl,
+          answer,
+        });
+      } else if (
+        item.turn.errorCode === "trial_credit_exhausted" &&
+        deps.modelsUrl
+      ) {
+        await deps.posts.trialCreditExhausted({
           ...target,
           modelsUrl: deps.modelsUrl,
           answer,

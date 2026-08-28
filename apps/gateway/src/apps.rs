@@ -1207,6 +1207,29 @@ static APP_PROVIDERS: &[AppProvider] = &[
         body_transform: None,
     },
     AppProvider {
+        provider: "snowflake",
+        display_name: "Snowflake",
+        // Wildcard suffix: Snowflake hosts are per-account
+        // (`<org>-<account>.snowflakecomputing.com`). As with JFrog, the bare
+        // suffix would inject the PAT into ANY tenant's host, so
+        // `credential_host_field` gates injection to the connection's exact
+        // stored host (see connect.rs).
+        host_rules: &[HostRule {
+            pattern: HostPattern::Suffix(".snowflakecomputing.com"),
+            path_prefix: None,
+            strategy: AuthStrategy::Bearer,
+            intercept: false,
+            credential_host_field: Some("host"),
+        }],
+        refresh: None,
+        metadata_headers: &[],
+        credential_headers: &[],
+        credential_params: &[],
+        host_rewrite: None,
+        finalizer: None,
+        body_transform: None,
+    },
+    AppProvider {
         provider: "aws-role",
         display_name: "AWS Role",
         host_rules: &[
@@ -3695,6 +3718,74 @@ mod tests {
     #[test]
     fn jfrog_has_no_refresh_config() {
         assert!(refresh_config("jfrog-artifactory").is_none());
+    }
+
+    // ── Snowflake ─────────────────────────────────────────────────────
+
+    #[test]
+    fn providers_for_snowflake_host() {
+        assert_eq!(
+            providers_for_host("myorg-myaccount.snowflakecomputing.com"),
+            vec!["snowflake"]
+        );
+    }
+
+    #[test]
+    fn provider_for_host_snowflake() {
+        let result = provider_for_host("myorg-myaccount.snowflakecomputing.com");
+        assert_eq!(result, Some(("snowflake", "Snowflake")));
+    }
+
+    #[test]
+    fn snowflake_suffix_no_false_positives() {
+        // The bare apex must NOT match (suffix requires something before it),
+        // and neither may a lookalike domain that merely ends with the text.
+        assert!(providers_for_host("snowflakecomputing.com").is_empty());
+        assert!(providers_for_host(".snowflakecomputing.com").is_empty());
+        assert!(providers_for_host("evilsnowflakecomputing.com").is_empty());
+    }
+
+    #[test]
+    fn snowflake_other_tenant_still_matches_provider_statically() {
+        // Any *.snowflakecomputing.com matches the provider at the static
+        // level — the per-connection host gate in connect.rs is what blocks
+        // injection to tenants other than the connection's stored host.
+        assert_eq!(
+            providers_for_host("evil-tenant.snowflakecomputing.com"),
+            vec!["snowflake"]
+        );
+    }
+
+    #[test]
+    fn snowflake_uses_bearer() {
+        let injections =
+            build_app_injections("snowflake", "myorg-myaccount.snowflakecomputing.com", "pat");
+        assert_eq!(injections.len(), 1);
+        assert_eq!(
+            injections[0],
+            Injection::SetHeader {
+                name: "authorization".to_string(),
+                value: "Bearer pat".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn snowflake_needs_access_token() {
+        assert!(needs_access_token("snowflake"));
+    }
+
+    #[test]
+    fn snowflake_has_no_refresh_config() {
+        assert!(refresh_config("snowflake").is_none());
+    }
+
+    #[test]
+    fn snowflake_has_credential_host_field() {
+        assert_eq!(
+            credential_host_field("snowflake", "myorg-myaccount.snowflakecomputing.com"),
+            Some("host")
+        );
     }
 
     // ── credential_host_field ─────────────────────────────────────────

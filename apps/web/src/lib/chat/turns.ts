@@ -80,7 +80,14 @@ export const hasUnsettledTurn = (turns: Turn[] | undefined): boolean =>
  */
 export const resendableKeylessTurn = (turns: Turn[]): Turn | null => {
   const last = [...turns].reverse().find((turn) => turn.userId !== null);
-  if (!last || last.errorCode !== "no_model_key") return null;
+  // Both codes are the same situation for the resend: the message failed
+  // for want of a usable key, and the user just connected one.
+  if (
+    !last ||
+    (last.errorCode !== "no_model_key" &&
+      last.errorCode !== "trial_credit_exhausted")
+  )
+    return null;
   if (last.attachments.length > 0) return null;
   if (hasActiveTurn(turns)) return null;
   return last;

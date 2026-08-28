@@ -56,6 +56,8 @@
 export const AMBIENT_HAZARD_VARS: readonly string[] = [
   // Entitlement — flips CAPS.rbac at module load on onprem
   "ENTERPRISE_ENABLED",
+  // Platform trial credit — presence flips container-config advertisement
+  "PLATFORM_ANTHROPIC_API_KEY",
   // Secrets
   "BETTER_AUTH_SECRET",
   "AUTH_SECRET",
@@ -151,6 +153,7 @@ export const AMBIENT_HAZARD_VARS: readonly string[] = [
   "SSH_SESSION_LEASE_SECONDS",
   // Provider base URLs (test doubles point these at fakes per suite)
   "SLACK_API_BASE_URL",
+  "SLACK_CDN_BASE_URL",
   "ANTHROPIC_API_BASE_URL",
   "OPENAI_API_BASE_URL",
   // The shared Slack app (deployment config): ambient real credentials would

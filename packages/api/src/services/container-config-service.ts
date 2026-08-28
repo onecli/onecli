@@ -156,6 +156,18 @@ export const buildContainerConfig = async ({
 
   const meta = parseAnthropicMetadata(anthropicSecret?.metadata);
 
+  // Which LLM key would actually serve this agent — including the platform
+  // trial credential when the pool has no key of its own (cloud-only; scope
+  // "platform"). Resolved BEFORE the env block so the advertisement below can
+  // account for it. Reuses the `where` computed above — building it costs
+  // three queries, and this is the same fenced selection by construction.
+  const llmCredential = await resolveAgentLlmCredential(
+    { id: agent.id, workspaceId },
+    organizationId,
+    injectableSecrets,
+  );
+  const platformCredit = llmCredential?.scope === "platform";
+
   // Only when an Anthropic key is actually injectable.
   //
   // This used to be unconditional, and that was a bug in both directions. In a
@@ -165,11 +177,19 @@ export const buildContainerConfig = async ({
   // than useless: the warning beneath says "the agent will use its own API key
   // if available", while setting the variable to "placeholder" is precisely
   // what SHADOWS the user's own key.
-  const authEnv: Record<string, string> = !anthropicSecret
-    ? {}
-    : meta?.authMode === "oauth"
+  //
+  // The platform trial credential is the deliberate third arm: no secret in
+  // the pool, but the GATEWAY will inject the platform's Anthropic key — so
+  // the placeholder is advertised (harnesses pick Claude), and the gateway
+  // splices the real key at the wire exactly as for a user secret. The
+  // container still never sees a real value.
+  const authEnv: Record<string, string> = anthropicSecret
+    ? meta?.authMode === "oauth"
       ? { CLAUDE_CODE_OAUTH_TOKEN: "placeholder" }
-      : { ANTHROPIC_API_KEY: "placeholder" };
+      : { ANTHROPIC_API_KEY: "placeholder" }
+    : platformCredit
+      ? { ANTHROPIC_API_KEY: "placeholder" }
+      : {};
 
   // Detect OpenAI auth mode for Codex container support.
   const openaiSecret = await findInjectableSecretOfType(
@@ -196,13 +216,13 @@ export const buildContainerConfig = async ({
   }
 
   const warnings: string[] = [];
-  if (!anthropicSecret) {
+  if (!anthropicSecret && !platformCredit) {
     warnings.push(
       "No Anthropic credentials configured. The agent will use its own API key if available. Add one at " +
         (origin ?? "") +
         "/secrets",
     );
-  } else if (anthropicSecret.encryptedValue) {
+  } else if (anthropicSecret?.encryptedValue) {
     // 1Password-sourced secrets have no stored value to decrypt — the
     // gateway resolves them live, so the decryptability check doesn't apply.
     try {
@@ -213,14 +233,6 @@ export const buildContainerConfig = async ({
       );
     }
   }
-
-  // Reuses the `where` computed above — building it costs three queries, and
-  // this is the same fenced selection by construction.
-  const llmCredential = await resolveAgentLlmCredential(
-    { id: agent.id, workspaceId },
-    organizationId,
-    injectableSecrets,
-  );
 
   return {
     ok: true,

@@ -102,6 +102,54 @@ let slackHandlers: Record<string, (call: SlackCall) => unknown> = {};
 const slackCallsFor = (method: string) =>
   slackCalls.filter((c) => c.method === method);
 
+// ── The fake Slack file CDN ─────────────────────────────────────────────────
+// A SECOND origin, deliberately distinct from the fake Web API: Slack 302s
+// authenticated non-image downloads to its presigned safe-files CDN
+// (slack-files.com), and the download path treats that host set differently
+// (no Authorization header). Same recording shape as the Web API fake so the
+// tests can assert what each origin was sent.
+
+let cdnServer: Server;
+let cdnCalls: SlackCall[] = [];
+let cdnHandlers: Record<
+  string,
+  (call: SlackCall) => { bytes: Buffer; contentType: string }
+> = {};
+
+const startCdnFake = (): Promise<string> =>
+  new Promise((resolve) => {
+    cdnServer = createServer((req, res) => {
+      req.on("data", () => {});
+      req.on("end", () => {
+        const path = (req.url ?? "/").slice(1);
+        const auth = req.headers.authorization ?? null;
+        const call: SlackCall = {
+          method: path,
+          form: new URLSearchParams(),
+          token: auth?.startsWith("Bearer ") ? auth.slice(7) : null,
+          authorization: auth,
+        };
+        cdnCalls.push(call);
+        const handler = cdnHandlers[path];
+        if (!handler) {
+          res.writeHead(404, { "content-type": "text/plain" });
+          res.end("not scripted");
+          return;
+        }
+        const binary = handler(call);
+        res.writeHead(200, {
+          "content-type": binary.contentType,
+          "content-length": String(binary.bytes.byteLength),
+        });
+        res.end(binary.bytes);
+      });
+    });
+    cdnServer.listen(0, "127.0.0.1", () => {
+      const { port } = cdnServer.address() as AddressInfo;
+      resolve(`http://127.0.0.1:${port}`);
+    });
+  });
+
 const startSlackFake = (): Promise<string> =>
   new Promise((resolve) => {
     slackServer = createServer((req, res) => {
@@ -146,6 +194,19 @@ const startSlackFake = (): Promise<string> =>
               "content-length": String(binary.bytes.byteLength),
             });
             res.end(binary.bytes);
+            return;
+          }
+          // ... or a REDIRECT (`{ __redirect: url }`) — how Slack answers an
+          // authenticated non-image `files-pri` download (302 to the CDN).
+          if (
+            body &&
+            typeof body === "object" &&
+            "__redirect" in (body as Record<string, unknown>)
+          ) {
+            res.writeHead(302, {
+              location: (body as { __redirect: string }).__redirect,
+            });
+            res.end();
             return;
           }
           res.writeHead(200, { "content-type": "application/json" });
@@ -449,6 +510,7 @@ beforeAll(async () => {
 
   // Fakes first: their addresses feed env vars read at module load below.
   const slackUrl = await startSlackFake();
+  const cdnUrl = await startCdnFake();
   const gatewayUrl = await startGatewayFake();
 
   process.env.DATABASE_URL = PROOF_URL;
@@ -464,6 +526,7 @@ beforeAll(async () => {
   process.env.CHANNEL_ADAPTER_TOKEN = ADAPTER_ANCHOR;
   process.env.GATEWAY_INTERNAL_URL = gatewayUrl;
   process.env.SLACK_API_BASE_URL = slackUrl;
+  process.env.SLACK_CDN_BASE_URL = cdnUrl;
   // The reaction chooser's inference calls land on the SAME recording fake
   // (an unscripted method answers ok:false → the chooser falls back to
   // "eyes") — a pg test must never reach a real model origin.
@@ -572,6 +635,8 @@ beforeEach(async () => {
   decryptCache.resetDecryptCacheForTests();
   slackCalls = [];
   slackHandlers = {};
+  cdnCalls = [];
+  cdnHandlers = {};
   gatewayCalls = [];
   gatewayRespond = () => ({ status: 200, body: { success: true } });
   // Default posture: no public HTTPS → socket. Events tests opt in.
@@ -583,6 +648,7 @@ afterAll(async () => {
   await dropAll();
   await db.$disconnect();
   await new Promise((resolve) => slackServer.close(resolve));
+  await new Promise((resolve) => cdnServer.close(resolve));
   await new Promise((resolve) => gatewayServer.close(resolve));
 });
 
@@ -3728,6 +3794,119 @@ describe.skipIf(!PROOF_URL)("ingestion — attachments (file_share)", () => {
     });
     expect(attachment.status).toBe("failed");
     expect(attachment.error).toContain("non-Slack");
+  });
+
+  it("a CDN redirect (Slack's non-image shape) is followed WITHOUT the token — PDF lands, bot token never reaches the CDN", async () => {
+    // Slack 302s every authenticated non-image `files-pri` download to its
+    // presigned safe-files CDN (slack-files.com) — a DIFFERENT registrable
+    // domain, refused by the pre-fix pin, which is exactly why PDFs failed
+    // while inline-served images worked. MUTATION-TESTED (both directions):
+    // keep sending the Authorization header on the CDN hop and the
+    // no-token assertion fails — the exfiltration fence is the point.
+    const { agentId, integrationId, presenceId } = await seedChannelAgent(
+      "att-cdn",
+      { presenceCredentials: await botCredentials() },
+    );
+    await linkUser(integrationId, "U111", MEMBER);
+    const slackUrl = process.env.SLACK_API_BASE_URL;
+    const cdnUrl = process.env.SLACK_CDN_BASE_URL;
+    const PDF_BYTES = Buffer.from("%PDF-1.4 tiny bill");
+    slackHandlers["files-pri/T1-F8/bill.pdf"] = () => ({
+      __redirect: `${cdnUrl}/files-pri-safe/T1-F8/bill.pdf?c=1234`,
+    });
+    cdnHandlers["files-pri-safe/T1-F8/bill.pdf?c=1234"] = () => ({
+      bytes: PDF_BYTES,
+      contentType: "application/pdf",
+    });
+
+    const result = await dispatch.dispatchSlackEvent({
+      presenceId,
+      identityRef: "UBOT",
+      event: fileShareEvent("U111", "D907", "whats in there?", [
+        {
+          id: "F8",
+          name: "bill.pdf",
+          mimetype: "application/pdf",
+          size: PDF_BYTES.byteLength,
+          url_private: `${slackUrl}/files-pri/T1-F8/bill.pdf`,
+        },
+      ]),
+      eventId: "Ev-att-cdn",
+    });
+
+    expect(result.kind).toBe("message");
+    if (result.kind !== "message") throw new Error("unreachable");
+    expect(result.outcome.kind).toBe("turn");
+
+    // The Slack-host hop carried the bot token (files:read's subject)...
+    const slackHop = fileDownloadCalls().at(-1);
+    expect(slackHop?.token).toMatch(/^xoxb-/);
+    // ...and the CDN hop carried NO Authorization header at all: the
+    // presigned URL is its own credential, and the bot token must never
+    // travel beyond isSlackFilesUrl hosts.
+    expect(cdnCalls).toHaveLength(1);
+    expect(cdnCalls[0]?.authorization).toBeNull();
+
+    const attachment = await db.conversationAttachment.findFirstOrThrow({
+      where: { conversation: { agentId } },
+    });
+    expect(attachment.status).toBe("bound");
+    expect(attachment.name).toBe("bill.pdf");
+    expect(attachment.mimeType).toBe("application/pdf");
+    expect(Buffer.from(attachment.data ?? []).equals(PDF_BYTES)).toBe(true);
+  });
+
+  it("a redirect to a host on NEITHER list (Slack nor its CDN) is refused without a request", async () => {
+    // The open-redirect arm of the SSRF fence: the INITIAL url passes the
+    // Slack pin, but the redirect target is an arbitrary third origin. The
+    // CDN allowance must not widen into follow-anything — zero requests
+    // reach the rogue host, tokenless or otherwise. MUTATION-TESTED: replace
+    // the isSlackCdnUrl check with `true` and the zero-hit assertion fails.
+    const { agentId, integrationId, presenceId } = await seedChannelAgent(
+      "att-rogue-redirect",
+      { presenceCredentials: await botCredentials() },
+    );
+    await linkUser(integrationId, "U111", MEMBER);
+    const slackUrl = process.env.SLACK_API_BASE_URL;
+    let rogueHits = 0;
+    const rogue = createServer((_req, res) => {
+      rogueHits += 1;
+      res.writeHead(200, { "content-type": "application/pdf" });
+      res.end("stolen");
+    });
+    await new Promise<void>((resolve) =>
+      rogue.listen(0, "127.0.0.1", () => resolve()),
+    );
+    const roguePort = (rogue.address() as AddressInfo).port;
+    try {
+      slackHandlers["files-pri/T1-FA/evil.pdf"] = () => ({
+        __redirect: `http://127.0.0.1:${roguePort}/anywhere`,
+      });
+
+      await dispatch.dispatchSlackEvent({
+        presenceId,
+        identityRef: "UBOT",
+        event: fileShareEvent("U111", "D908", "fetch", [
+          {
+            id: "FA",
+            name: "evil.pdf",
+            mimetype: "application/pdf",
+            size: 8,
+            url_private: `${slackUrl}/files-pri/T1-FA/evil.pdf`,
+          },
+        ]),
+        eventId: "Ev-att-rogue",
+      });
+
+      expect(rogueHits).toBe(0);
+      const attachment = await db.conversationAttachment.findFirstOrThrow({
+        where: { conversation: { agentId } },
+      });
+      expect(attachment.status).toBe("failed");
+      expect(attachment.error).toContain("non-Slack");
+    } finally {
+      await new Promise((resolve) => rogue.close(resolve));
+    }
   });
 
   it("REDELIVERY dedupe also bounds the download — one fetch, one row", async () => {

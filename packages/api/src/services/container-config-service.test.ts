@@ -1,4 +1,6 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { beforeEach, afterEach, describe, expect, it, vi } from "vitest";
+
+import { initPlatformLlm } from "../providers/platform-llm";
 
 /**
  * The bootstrap builder's zero-credential invariant (§3.2, invariant 1): what
@@ -256,5 +258,67 @@ describe("which provider's variables the container gets", () => {
     if (!result.ok) throw new Error("expected a config");
 
     expect(result.llmCredential?.provider).toBe("anthropic");
+  });
+});
+
+describe("the platform trial credential", () => {
+  // The provider seam defaults to null under test (uninjected = dark), so
+  // these cases install a stub explicitly and reset it after.
+  afterEach(() => {
+    initPlatformLlm(null);
+  });
+
+  it("advertises Anthropic for a keyless agent when the credit applies", async () => {
+    initPlatformLlm({ trialCreditApplies: () => true });
+
+    const result = await build();
+    if (!result.ok) throw new Error("expected a config");
+
+    // The placeholder is the whole hand-off: the harness picks Claude, the
+    // gateway splices the platform key at the wire. No real value here.
+    expect(result.config.env.ANTHROPIC_API_KEY).toBe("placeholder");
+    expect(result.llmCredential).toMatchObject({
+      provider: "anthropic",
+      scope: "platform",
+      secretId: "platform:anthropic",
+      // The control plane holds no readable value — the key lives only in
+      // the gateway's env.
+      hasReadableValue: false,
+    });
+    // No "connect a key" warning: the agent can run.
+    expect(result.config.warnings).toBeUndefined();
+  });
+
+  it("stands down when the pool has an LLM key — the user's key wins", async () => {
+    // The eligibility stub sees the UNFILTERED pool; a real implementation
+    // answers false for a pool with any LLM key. What this case pins is the
+    // precedence: when a user key resolves, the platform credential is not
+    // even consulted for the result shape.
+    initPlatformLlm({ trialCreditApplies: () => false });
+    mocks.secretFindMany.mockResolvedValue([
+      {
+        id: "sec-own",
+        type: "openai",
+        scope: "workspace",
+        metadata: null,
+        valueSource: "inline",
+        encryptedValue: "enc",
+      },
+    ]);
+
+    const result = await build();
+    if (!result.ok) throw new Error("expected a config");
+
+    expect(result.llmCredential?.provider).toBe("openai");
+    expect(result.llmCredential?.scope).not.toBe("platform");
+  });
+
+  it("stays dark when the provider is not injected (onprem, or cloud unconfigured)", async () => {
+    const result = await build();
+    if (!result.ok) throw new Error("expected a config");
+
+    expect(result.config.env).not.toHaveProperty("ANTHROPIC_API_KEY");
+    expect(result.llmCredential).toBeNull();
+    expect(result.config.warnings?.[0]).toContain("No Anthropic credentials");
   });
 });

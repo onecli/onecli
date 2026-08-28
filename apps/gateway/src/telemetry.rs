@@ -443,7 +443,7 @@ async fn flush_budget(ctx: &FlushContext, events: &[RequestEvent]) {
         *totals
             .entry((
                 charge.secret_id.clone(),
-                charge.organization_id.clone(),
+                charge.subject.clone(),
                 charge.period_key.clone(),
             ))
             .or_default() += charge.cost_nanos;
@@ -454,7 +454,7 @@ async fn flush_budget(ctx: &FlushContext, events: &[RequestEvent]) {
 
     let futs: Vec<_> = totals
         .into_iter()
-        .map(|((secret_id, org_id, period_key), nanos)| {
+        .map(|((secret_id, subject, period_key), nanos)| {
             let cache = Arc::clone(&ctx.cache);
             let pool = ctx.pool.clone();
             async move {
@@ -462,7 +462,7 @@ async fn flush_budget(ctx: &FlushContext, events: &[RequestEvent]) {
                     &*cache,
                     &pool,
                     &secret_id,
-                    &org_id,
+                    &subject,
                     &period_key,
                     nanos,
                 )

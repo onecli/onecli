@@ -146,7 +146,8 @@ export const DirectThreadSection = () => {
           .reverse()
           .find((turn) => turn.userId !== null);
         toast.success(
-          lastOwn?.errorCode === "no_model_key" &&
+          (lastOwn?.errorCode === "no_model_key" ||
+            lastOwn?.errorCode === "trial_credit_exhausted") &&
             lastOwn.attachments.length > 0
             ? "Model key connected. Re-send your message to include its files."
             : "Model key connected.",

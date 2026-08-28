@@ -11,8 +11,10 @@
 //! These are the licensed FEATURES: budgets, granular resource access,
 //! multi-instance operation (the Redis-backed stores, `ha`), directory
 //! group principals + app availability (`principals`), the RBAC API-key
-//! rechecks (`rbac`), the org-scoped routes, and their agent-facing
-//! responses. On an unlicensed deployment each degrades at its own runtime
+//! rechecks (`rbac`), the org-scoped routes, their agent-facing
+//! responses, and the platform trial credit (`platform_llm` — hosted-only
+//! by nature: it injects the PLATFORM's own key, which only the hosted
+//! deployment possesses). On an unlicensed deployment each degrades at its own runtime
 //! gate (`entitled()` at load or startup — budgets resolve empty, session
 //! policies never stamp, group principals and the availability allowlist
 //! never resolve, the key ROLE rechecks stand down, the org approvals feed
@@ -40,6 +42,7 @@ pub(crate) mod granular_access;
 pub(crate) mod ha;
 pub(crate) mod kms_crypto;
 pub(crate) mod org_routes;
+pub(crate) mod platform_llm;
 pub(crate) mod principals;
 pub(crate) mod rbac;
 pub(crate) mod response;

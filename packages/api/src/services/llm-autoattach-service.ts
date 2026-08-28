@@ -192,7 +192,15 @@ export const attachLlmKeyToKeylessAgents = async (
         agent,
         scope.organizationId,
       );
-      if (current) continue;
+      // The platform trial credential must NOT count as "has a key" here.
+      // Today this arm is defense: the key being attached is already in the
+      // pool, which makes the trial ineligible, so `current` can't be the
+      // platform credential in this loop. But if the eligibility rule ever
+      // loosens, skipping the attach would strand the agent — running on
+      // trial credit until the real key's presence turns the trial off, then
+      // holding no credential at all. Pinned so that change can't ship this
+      // bug silently.
+      if (current && current.scope !== "platform") continue;
       await setSecretGrant(scope, agent.id, secret.id, userId);
       agentIds.push(agent.id);
     } catch (err) {
