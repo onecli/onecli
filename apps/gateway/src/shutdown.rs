@@ -75,34 +75,38 @@ pub(crate) fn install() {
     let _ = signal_tx();
 
     tokio::spawn(async move {
-        use tokio::signal::unix::{signal, SignalKind};
+        #[cfg(unix)]
+        {
+            use tokio::signal::unix::{signal, SignalKind};
+            let mut term =
+                signal(SignalKind::terminate()).expect("failed to install SIGTERM handler");
+            let mut int =
+                signal(SignalKind::interrupt()).expect("failed to install SIGINT handler");
 
-        // Registered once and reused for both waits. Re-registering between
-        // them would drop a signal delivered in the gap: a listener created
-        // after a broadcast never sees it, so the operator's second Ctrl-C
-        // would be swallowed exactly when they are trying to force an exit.
-        let Ok(mut term) =
-            signal(SignalKind::terminate()).map_err(|e| warn!(error = %e, "cannot handle SIGTERM"))
-        else {
-            return;
-        };
-        let Ok(mut int) =
-            signal(SignalKind::interrupt()).map_err(|e| warn!(error = %e, "cannot handle SIGINT"))
-        else {
-            return;
-        };
+            tokio::select! {
+                _ = term.recv() => { info!("SIGTERM received, starting graceful shutdown"); },
+                _ = int.recv() => { info!("SIGINT received, starting graceful shutdown"); },
+            }
+            let _ = signal_tx().send(true);
 
-        let name = tokio::select! {
-            _ = term.recv() => "SIGTERM",
-            _ = int.recv() => "SIGINT",
-        };
-        info!(signal = name, "shutdown started");
-        let _ = signal_tx().send(true);
-
-        tokio::select! {
-            _ = term.recv() => {},
-            _ = int.recv() => {},
+            tokio::select! {
+                _ = term.recv() => {},
+                _ = int.recv() => {},
+            }
         }
+
+        #[cfg(not(unix))]
+        {
+            tokio::signal::ctrl_c()
+                .await
+                .expect("failed to install CTRL+C handler");
+            info!("CTRL+C received, starting graceful shutdown");
+            let _ = signal_tx().send(true);
+            tokio::signal::ctrl_c()
+                .await
+                .expect("failed to listen for second CTRL+C");
+        }
+
         warn!("second shutdown signal — exiting immediately");
         std::process::exit(1);
     });
