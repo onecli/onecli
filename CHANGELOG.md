@@ -1,5 +1,13 @@
 # Changelog
 
+## [2.3.1](https://github.com/onecli/onecli/compare/v2.3.0...v2.3.1) (2026-08-29)
+
+
+### Bug Fixes
+
+* **gateway:** limit openai host expansion to oauth secrets only ([#525](https://github.com/onecli/onecli/issues/525)) ([4d9a4e1](https://github.com/onecli/onecli/commit/4d9a4e1e01ba98a02c080b76e4a2e1197f23cd87))
+* nonce-based CSP, enterprise-default E2E suites, chat-first onboarding ([#531](https://github.com/onecli/onecli/issues/531)) ([e1b1555](https://github.com/onecli/onecli/commit/e1b1555dedef469ec089104a56ad3cde3db1236f))
+
 ## [2.3.0](https://github.com/onecli/onecli/compare/v2.2.3...v2.3.0) (2026-08-28)
 
 
