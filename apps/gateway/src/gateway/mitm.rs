@@ -164,7 +164,7 @@ pub(super) async fn mitm(
                                     }
                                     Err(e) => {
                                         warn!(host = %host, error = ?e, "request forwarding failed");
-                                        Ok::<_, anyhow::Error>(response::resolution_failed())
+                                        Ok::<_, anyhow::Error>(response::upstream_unavailable())
                                     }
                                 }
                             }

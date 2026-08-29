@@ -459,6 +459,17 @@ pub(crate) fn resolution_failed<S>() -> Response<ForwardBody<S>> {
     )
 }
 
+/// 502 Bad Gateway — the request could not be forwarded to the upstream host.
+pub(crate) fn upstream_unavailable<S>() -> Response<ForwardBody<S>> {
+    json_error(
+        StatusCode::BAD_GATEWAY,
+        serde_json::json!({
+            "error": "upstream_unavailable",
+            "message": "OneCLI gateway could not connect to the upstream service.",
+        }),
+    )
+}
+
 /// 403 Forbidden — manual approval denied or timed out.
 pub(crate) fn manual_approval_denied<S>(
     approval_id: &str,
@@ -1085,6 +1096,25 @@ mod tests {
         let json: serde_json::Value = serde_json::from_slice(&body).expect("valid JSON");
         let conns = json["connections"].as_array().unwrap();
         assert_eq!(conns[0]["display_name"], "Gmail");
+    }
+
+    #[tokio::test]
+    async fn upstream_unavailable_describes_forwarding_failure() {
+        let resp: Response<TestBody> = upstream_unavailable();
+        assert_eq!(resp.status(), StatusCode::BAD_GATEWAY);
+
+        use http_body_util::BodyExt;
+        let body = match resp.into_body() {
+            Either::Left(full) => full.collect().await.expect("collect").to_bytes(),
+            Either::Right(_) => panic!("expected Left"),
+        };
+        let json: serde_json::Value = serde_json::from_slice(&body).expect("valid JSON");
+        assert_eq!(json["error"], "upstream_unavailable");
+        assert!(json["message"]
+            .as_str()
+            .unwrap()
+            .contains("upstream service"));
+        assert!(!json["message"].as_str().unwrap().contains("rules"));
     }
 
     #[test]
