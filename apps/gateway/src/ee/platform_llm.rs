@@ -363,8 +363,10 @@ mod tests {
 
     #[test]
     fn generic_secret_on_an_llm_host_disqualifies() {
-        let secrets = [secret("generic", "api.openrouter.ai")];
-        assert!(pool_has_llm_credential(&secrets));
+        for host in ["api.openrouter.ai", "api.orcarouter.ai"] {
+            let secrets = [secret("generic", host)];
+            assert!(pool_has_llm_credential(&secrets), "host {host}");
+        }
     }
 
     #[test]
