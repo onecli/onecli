@@ -13,6 +13,7 @@ export const LLM_HOST_FRAGMENTS = [
   "deepseek.com",
   "groq.com",
   "openrouter.ai",
+  "orcarouter.ai",
   "moonshot.cn",
   "generativelanguage.googleapis.com",
 ] as const;

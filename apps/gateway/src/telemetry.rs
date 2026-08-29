@@ -33,7 +33,7 @@ pub(crate) use crate::telemetry_core::{on_request, RequestEvent};
 fn is_llm_provider(provider: &str) -> bool {
     matches!(
         provider,
-        "anthropic" | "openai" | "deepseek" | "groq" | "openrouter"
+        "anthropic" | "openai" | "deepseek" | "groq" | "openrouter" | "orcarouter"
     ) || crate::policy::is_llm_host(provider)
 }
 

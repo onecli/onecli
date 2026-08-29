@@ -53,11 +53,12 @@ describe("eePlatformLlm.trialCreditApplies", () => {
   });
 
   it("a generic secret pointed at an LLM host disqualifies", () => {
-    expect(
-      eePlatformLlm.trialCreditApplies([
-        secret("generic", "api.openrouter.ai"),
-      ]),
-    ).toBe(false);
+    for (const host of ["api.openrouter.ai", "api.orcarouter.ai"]) {
+      expect(
+        eePlatformLlm.trialCreditApplies([secret("generic", host)]),
+        `host ${host}`,
+      ).toBe(false);
+    }
   });
 
   it("non-LLM secrets do not disqualify", () => {

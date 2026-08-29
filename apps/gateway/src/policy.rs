@@ -179,6 +179,7 @@ pub(crate) fn is_llm_host(host: &str) -> bool {
         || h.contains("deepseek.com")
         || h.contains("groq.com")
         || h.contains("openrouter.ai")
+        || h.contains("orcarouter.ai")
         || h.contains("moonshot.cn")
         || h.contains("generativelanguage.googleapis.com")
 }
@@ -352,6 +353,7 @@ mod tests {
         assert!(is_llm_host("api.deepseek.com"));
         assert!(is_llm_host("api.groq.com"));
         assert!(is_llm_host("openrouter.ai"));
+        assert!(is_llm_host("api.orcarouter.ai"));
         assert!(is_llm_host("api.moonshot.cn"));
         assert!(is_llm_host("generativelanguage.googleapis.com"));
     }

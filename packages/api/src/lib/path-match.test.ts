@@ -80,6 +80,7 @@ describe("isLlmHost", () => {
   it("matches known LLM providers (port stripped)", () => {
     expect(isLlmHost("api.anthropic.com")).toBe(true);
     expect(isLlmHost("api.openai.com:443")).toBe(true);
+    expect(isLlmHost("api.orcarouter.ai")).toBe(true);
     expect(isLlmHost("generativelanguage.googleapis.com")).toBe(true);
     expect(isLlmHost("gmail.googleapis.com")).toBe(false);
   });
