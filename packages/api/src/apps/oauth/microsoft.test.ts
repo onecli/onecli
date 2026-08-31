@@ -126,7 +126,7 @@ describe("exchangeMicrosoftCode", () => {
   });
 
   it("returns undefined refresh_token when the response omits it", async () => {
-    const { refresh_token: _refreshToken, ...responseWithout } = tokenResponse;
+    const responseWithout = { ...tokenResponse, refresh_token: undefined };
     vi.stubGlobal(
       "fetch",
       vi
@@ -140,7 +140,7 @@ describe("exchangeMicrosoftCode", () => {
   });
 
   it("returns undefined expires_at when the response omits expires_in", async () => {
-    const { expires_in: _expiresIn, ...responseWithout } = tokenResponse;
+    const responseWithout = { ...tokenResponse, expires_in: undefined };
     vi.stubGlobal(
       "fetch",
       vi
@@ -154,7 +154,7 @@ describe("exchangeMicrosoftCode", () => {
   });
 
   it("returns empty scopes when the response omits scope", async () => {
-    const { scope: _scope, ...responseWithout } = tokenResponse;
+    const responseWithout = { ...tokenResponse, scope: undefined };
     vi.stubGlobal(
       "fetch",
       vi
