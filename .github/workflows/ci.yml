@@ -55,6 +55,19 @@ jobs:
         if: steps.changes.outputs.rust == 'true'
         run: pnpm --filter @onecli/gateway test
 
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup Node.js
+        uses: ./.github/actions/setup-node
+
+      - name: Test
+        run: pnpm --filter @onecli/api test
+
   lint:
     name: Lint & Format
     runs-on: ubuntu-latest
