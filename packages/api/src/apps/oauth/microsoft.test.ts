@@ -125,6 +125,48 @@ describe("exchangeMicrosoftCode", () => {
     );
   });
 
+  it("returns undefined refresh_token when the response omits it", async () => {
+    const { refresh_token: _refreshToken, ...responseWithout } = tokenResponse;
+    vi.stubGlobal(
+      "fetch",
+      vi
+        .fn()
+        .mockResolvedValueOnce(jsonRes(responseWithout))
+        .mockResolvedValueOnce(jsonRes(meResponse)),
+    );
+    const result = await exchangeMicrosoftCode(exchangeParams);
+    expect(result.credentials.access_token).toBe("at-111");
+    expect(result.credentials.refresh_token).toBeUndefined();
+  });
+
+  it("returns undefined expires_at when the response omits expires_in", async () => {
+    const { expires_in: _expiresIn, ...responseWithout } = tokenResponse;
+    vi.stubGlobal(
+      "fetch",
+      vi
+        .fn()
+        .mockResolvedValueOnce(jsonRes(responseWithout))
+        .mockResolvedValueOnce(jsonRes(meResponse)),
+    );
+    const result = await exchangeMicrosoftCode(exchangeParams);
+    expect(result.credentials.access_token).toBe("at-111");
+    expect(result.credentials.expires_at).toBeUndefined();
+  });
+
+  it("returns empty scopes when the response omits scope", async () => {
+    const { scope: _scope, ...responseWithout } = tokenResponse;
+    vi.stubGlobal(
+      "fetch",
+      vi
+        .fn()
+        .mockResolvedValueOnce(jsonRes(responseWithout))
+        .mockResolvedValueOnce(jsonRes(meResponse)),
+    );
+    const result = await exchangeMicrosoftCode(exchangeParams);
+    expect(result.credentials.access_token).toBe("at-111");
+    expect(result.scopes).toEqual([]);
+  });
+
   it("tolerates a failed /me metadata fetch", async () => {
     vi.stubGlobal(
       "fetch",
