@@ -179,6 +179,18 @@ static TODOIST_REFRESH: RefreshConfig = RefreshConfig {
     client_auth: ClientCredentialMethod::Body,
 };
 
+/// Refresh config for Microsoft identity platform v2.0 (Graph APIs).
+/// `scope` is intentionally omitted on refresh — the endpoint re-issues the
+/// originally consented scopes. Microsoft rotates refresh tokens; the rotated
+/// token is returned by `refresh_access_token` and persisted by the caller.
+static MICROSOFT_REFRESH: RefreshConfig = RefreshConfig {
+    token_url: "https://login.microsoftonline.com/common/oauth2/v2.0/token",
+    client_id_env: "MICROSOFT_CLIENT_ID",
+    client_secret_env: "MICROSOFT_CLIENT_SECRET",
+    body_format: TokenBodyFormat::Form,
+    client_auth: ClientCredentialMethod::Body,
+};
+
 /// Shared refresh config for all Google OAuth APIs.
 static GOOGLE_REFRESH: RefreshConfig = RefreshConfig {
     token_url: "https://oauth2.googleapis.com/token",
@@ -323,6 +335,23 @@ static APP_PROVIDERS: &[AppProvider] = &[
             },
         ],
         refresh: Some(&GOOGLE_REFRESH),
+        metadata_headers: &[],
+        credential_headers: &[],
+        credential_params: &[],
+        host_rewrite: None,
+        finalizer: None,
+        body_transform: None,
+    },
+    AppProvider {
+        provider: "microsoft-365",
+        display_name: "Microsoft 365",
+        host_rules: &[HostRule {
+            pattern: HostPattern::Exact("graph.microsoft.com"),
+            path_prefix: None,
+            strategy: AuthStrategy::Bearer,
+            intercept: false,
+        }],
+        refresh: Some(&MICROSOFT_REFRESH),
         metadata_headers: &[],
         credential_headers: &[],
         credential_params: &[],
@@ -2180,6 +2209,52 @@ mod tests {
     fn todoist_refresh_uses_form_body_format() {
         let config = refresh_config("todoist").expect("todoist should have refresh config");
         assert!(matches!(config.body_format, TokenBodyFormat::Form));
+    }
+
+    // ── Microsoft 365 ─────────────────────────────────────────────────
+
+    #[test]
+    fn provider_for_host_microsoft365() {
+        let result = provider_for_host("graph.microsoft.com");
+        assert_eq!(result, Some(("microsoft-365", "Microsoft 365")));
+    }
+
+    #[test]
+    fn microsoft365_matches_any_graph_path() {
+        // Dedicated host, no path-scoped rules — host-only fallback applies.
+        for path in ["/v1.0/me/messages", "/v1.0/me/events/abc", "/v1.0/me"] {
+            assert_eq!(
+                provider_for_host_and_path("graph.microsoft.com", path),
+                Some(("microsoft-365", "Microsoft 365")),
+                "path {path} should resolve to microsoft-365"
+            );
+        }
+    }
+
+    #[test]
+    fn microsoft365_uses_bearer() {
+        let injections =
+            build_app_injections("microsoft-365", "graph.microsoft.com", "ms_token_abc");
+        assert_eq!(injections.len(), 1);
+        assert_eq!(
+            injections[0],
+            Injection::SetHeader {
+                name: "authorization".to_string(),
+                value: "Bearer ms_token_abc".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn microsoft365_refresh_config() {
+        let config =
+            refresh_config("microsoft-365").expect("microsoft-365 should have refresh config");
+        assert_eq!(
+            config.token_url,
+            "https://login.microsoftonline.com/common/oauth2/v2.0/token"
+        );
+        assert!(matches!(config.body_format, TokenBodyFormat::Form));
+        assert!(matches!(config.client_auth, ClientCredentialMethod::Body));
     }
 
     // ── Vercel ────────────────────────────────────────────────────────
