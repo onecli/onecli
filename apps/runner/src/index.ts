@@ -56,6 +56,7 @@ const selectBackend = (
     networkInternal: config.networkInternal,
     socketPath: config.dockerSocket,
     extraHosts: config.sandboxExtraHosts,
+    unsafeSeccomp: config.sandboxUnsafeSeccomp,
   });
 };
 
