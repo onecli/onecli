@@ -26,8 +26,10 @@ nrun() { docker run --rm -u "$(id -u):$(id -g)" \
   -v "$HOME/.cache/onecli-ci/pnpm-store:/pnpm-store" \
   -v "$HOME/.cache/onecli-ci/corepack:/corepack" -e COREPACK_HOME=/corepack \
   -v "$HOME/.cache/onecli-ci/home:/hosthome" -e HOME=/hosthome \
-  node:22-bookworm bash -c "corepack enable >/dev/null 2>&1; pnpm config set store-dir /pnpm-store >/dev/null; $*"; }
+  node:22-bookworm bash -c "export PATH=/hosthome/.bin:\$PATH; corepack enable --install-directory /hosthome/.bin >/dev/null 2>&1; pnpm config set store-dir /pnpm-store >/dev/null; $*"; }
 ```
+
+(`corepack enable` without `--install-directory` tries to write root-owned `/usr/local/bin` and fails silently under the host-UID mapping; the variant above installs shims into the writable cache home.)
 
 `podman` works too if docker is unavailable. Never run `pnpm install` or `cargo` directly on the host.
 
