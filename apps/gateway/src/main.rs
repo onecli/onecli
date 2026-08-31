@@ -1,5 +1,6 @@
 mod auth;
 
+mod anthropic_upstream;
 mod approval;
 mod apps;
 mod ca;

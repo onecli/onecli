@@ -580,7 +580,34 @@ pub(crate) async fn forward_request(
     let mut upstream_path = path.clone();
     let injection_count =
         inject::apply_injections(&mut headers, &mut upstream_path, &injection_rules);
-    let upstream_url = format!("{scheme}://{host}{upstream_path}");
+
+    // Env-gated Anthropic upstream override (e.g. an org's APIM proxy that
+    // speaks the native Anthropic API): swap the final upstream target and add
+    // the proxy's required attribution headers. Deliberately AFTER policy,
+    // approval, and injection — every decision above was made against the
+    // real host, and the injected x-api-key (the stored secret, which holds
+    // the proxy's key when this is configured) rides along unchanged.
+    let upstream_url = match crate::anthropic_upstream::override_for(super::strip_port(host)) {
+        Some(ov) => {
+            for (name, value) in &ov.extra_headers {
+                headers.insert(name.clone(), value.clone());
+            }
+            format!("https://{}{}{}", ov.host, ov.path_prefix, upstream_path)
+        }
+        None => {
+            // A harness pointed straight at the proxy (ANTHROPIC_BASE_URL)
+            // still needs the proxy's attribution headers; the URL is already
+            // right, so only the headers are added.
+            if let Some(extra) =
+                crate::anthropic_upstream::direct_extra_headers(super::strip_port(host))
+            {
+                for (name, value) in extra {
+                    headers.insert(name.clone(), value.clone());
+                }
+            }
+            format!("{scheme}://{host}{upstream_path}")
+        }
+    };
 
     if let Some(resp) = hooks::pre_forward(
         rules,

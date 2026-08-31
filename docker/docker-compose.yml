@@ -258,6 +258,10 @@ services:
       # Where the gateway reaches the api service (internal vault calls — never
       # the public API_URL, which can name a real external host).
       INTERNAL_API_URL: http://api:10256
+      # Optional Anthropic upstream override (org proxy speaking the native
+      # Anthropic API, e.g. Azure APIM → AI Foundry). Empty = off (default).
+      ANTHROPIC_UPSTREAM_URL: ${ANTHROPIC_UPSTREAM_URL:-}
+      ANTHROPIC_UPSTREAM_EXTRA_HEADERS: ${ANTHROPIC_UPSTREAM_EXTRA_HEADERS:-}
     volumes:
       - app-data:/app/data
     env_file:
