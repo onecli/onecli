@@ -201,26 +201,30 @@ fn apply_set_param(request_path: &mut String, name: &str, value: &str) {
 /// Check if a request path matches a rule's path pattern.
 ///
 /// Supported patterns (checked in order):
-/// - `"*"` — matches any path
+/// - `"*"` or `"/*"` — matches any path (every request path starts with `/`,
+///   and AWS query-protocol tools rely on `"/*"` matching `/` itself)
 /// - `"/a/*/b"` — segment wildcard (`*` matches one segment, e.g. `/repos/*/issues`)
 /// - `"/a/*/b/*:action"` — segment wildcard with in-segment glob (`*:predict` matches `ep123:predict`)
 /// - `"/foo/*/bar/*"` — mixed (segment globs + trailing wildcard matches 1+ segments)
-/// - `"/prefix/*"` — prefix with path boundary (`/v1/*` matches `/v1/foo` but not `/v1beta`)
+/// - `"/prefix/*"` — prefix with path boundary and at least one non-empty
+///   trailing segment (`/v1/*` matches `/v1/foo` but NOT `/v1` or `/v1/`,
+///   which are the bare collection endpoint)
 /// - `"/prefix*"` — glob prefix (`/v1.0/me/messages*` matches `/v1.0/me/messages/123`)
 /// - exact match — path must equal pattern exactly
 ///
 /// Query strings in `request_path` are stripped before comparison.
 pub(crate) fn path_matches(request_path: &str, pattern: &str) -> bool {
     let path = request_path.split('?').next().unwrap_or(request_path);
-    if pattern == "*" {
+    if pattern == "*" || pattern == "/*" {
         return true;
     }
     if has_mid_path_wildcard(pattern) {
         return segment_wildcard_matches(path, pattern);
     }
     if let Some(prefix) = pattern.strip_suffix("/*") {
-        return path == prefix
-            || (path.starts_with(prefix) && path.as_bytes().get(prefix.len()) == Some(&b'/'));
+        return path.starts_with(prefix)
+            && path.as_bytes().get(prefix.len()) == Some(&b'/')
+            && path.len() > prefix.len() + 1;
     }
     if let Some(prefix) = pattern.strip_suffix('*') {
         return path.starts_with(prefix);
@@ -402,10 +406,7 @@ mod tests {
     #[test]
     fn path_prefix_wildcard() {
         assert!(path_matches("/v1/messages", "/v1/*"));
-        assert!(path_matches("/v1/", "/v1/*"));
         assert!(path_matches("/v1/completions/stream", "/v1/*"));
-        // The prefix itself without trailing slash
-        assert!(path_matches("/v1", "/v1/*"));
     }
 
     #[test]
@@ -413,6 +414,37 @@ mod tests {
         assert!(!path_matches("/v2/messages", "/v1/*"));
         assert!(!path_matches("/", "/v1/*"));
         assert!(!path_matches("/v1beta/foo", "/v1/*"));
+        // The bare prefix and its trailing-slash form are the collection
+        // endpoint — a separate tool. `/prefix/*` must not cover them.
+        assert!(!path_matches("/v1", "/v1/*"));
+        assert!(!path_matches("/v1/", "/v1/*"));
+    }
+
+    #[test]
+    fn path_slash_star_matches_any_path() {
+        // AWS query-protocol APIs (EC2/IAM/STS/DynamoDB/…) send every request
+        // to "/" — the aws catalogue's "/*" tools must keep matching it.
+        assert!(path_matches("/", "/*"));
+        assert!(path_matches("/bucket/key", "/*"));
+        assert!(path_matches("/anything/deep/here", "/*"));
+    }
+
+    #[test]
+    fn path_prefix_wildcard_requires_nonempty_trailing_segment() {
+        // get_message ("/v1.0/me/messages/*") must not cover the full-mailbox
+        // list endpoint (list_messages), including its trailing-slash and
+        // query-string forms.
+        assert!(!path_matches("/v1.0/me/messages", "/v1.0/me/messages/*"));
+        assert!(!path_matches("/v1.0/me/messages/", "/v1.0/me/messages/*"));
+        assert!(!path_matches(
+            "/v1.0/me/messages?$top=5",
+            "/v1.0/me/messages/*"
+        ));
+        assert!(path_matches(
+            "/v1.0/me/messages/abc123",
+            "/v1.0/me/messages/*"
+        ));
+        assert!(!path_matches("/v1.0/me/events", "/v1.0/me/events/*"));
     }
 
     #[test]

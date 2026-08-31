@@ -36,6 +36,7 @@ export const dockerPermissions: AppPermissionDefinition = {
           description: "Get namespace information",
           hostPattern: "hub.docker.com",
           pathPattern: "/v2/namespaces/*",
+          aliasPatterns: ["/v2/namespaces"],
           method: "GET",
         },
         {

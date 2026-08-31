@@ -12,6 +12,7 @@ export const confluencePermissions: AppPermissionDefinition = {
           description: "Retrieve a specific Confluence page",
           hostPattern: "api.atlassian.com",
           pathPattern: "/wiki/api/v2/pages/*",
+          aliasPatterns: ["/wiki/api/v2/pages"],
           method: "GET",
         },
         {

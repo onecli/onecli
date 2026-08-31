@@ -28,6 +28,7 @@ export const awsPermissions: AppPermissionDefinition = {
           description: "List all Lambda functions in the account",
           hostPattern: "lambda.*.amazonaws.com",
           pathPattern: "/2015-03-31/functions",
+          aliasPatterns: ["/2015-03-31/functions/"],
           method: "GET",
         },
         {

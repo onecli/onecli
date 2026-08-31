@@ -20,6 +20,7 @@ export const vercelPermissions: AppPermissionDefinition = {
           description: "Get a specific project",
           hostPattern: "api.vercel.com",
           pathPattern: "/v9/projects/*",
+          aliasPatterns: ["/v9/projects"],
           method: "GET",
         },
         {
