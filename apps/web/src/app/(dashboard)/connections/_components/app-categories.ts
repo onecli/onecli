@@ -35,8 +35,7 @@ export const APP_CATEGORIES: Record<string, AppCategory> = {
   youtube: "google",
 
   // Microsoft
-  "outlook-mail": "microsoft",
-  "outlook-calendar": "microsoft",
+  "microsoft-365": "microsoft",
   "microsoft-word": "microsoft",
   "microsoft-onenote": "microsoft",
 

@@ -7,6 +7,7 @@ import { githubApp } from "./github-app";
 import { gitlab } from "./gitlab";
 import { gmail } from "./gmail";
 import { jira } from "./jira";
+import { microsoft365 } from "./microsoft365";
 import { googleAdmin } from "./google-admin";
 import { googleAnalytics } from "./google-analytics";
 import { googleCalendar } from "./google-calendar";
@@ -39,6 +40,7 @@ import { vercel } from "./vercel";
 
 const staticApps: AppDefinition[] = [
   gmail,
+  microsoft365,
   github,
   githubApp,
   gitlab,

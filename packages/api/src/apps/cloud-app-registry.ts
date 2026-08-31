@@ -11,22 +11,6 @@ export const cloudApps: AppDefinition[] = [
     available: false,
   },
   {
-    id: "outlook-mail",
-    name: "Outlook Mail",
-    icon: "/icons/outlook-mail.svg",
-    description: "Read, compose, and send emails via Microsoft Outlook.",
-    connectionMethod: { type: "cloud_only" },
-    available: false,
-  },
-  {
-    id: "outlook-calendar",
-    name: "Outlook Calendar",
-    icon: "/icons/outlook-calendar.svg",
-    description: "View and manage calendar events in Microsoft Outlook.",
-    connectionMethod: { type: "cloud_only" },
-    available: false,
-  },
-  {
     id: "microsoft-word",
     name: "Microsoft Word",
     icon: "/icons/microsoft-word.svg",
