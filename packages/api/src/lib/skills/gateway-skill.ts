@@ -35,6 +35,7 @@ credentials automatically.
 
 \`\`\`bash
 curl -s "https://gmail.googleapis.com/gmail/v1/users/me/messages?maxResults=5"
+curl -s "https://graph.microsoft.com/v1.0/me/messages?%24top=5"
 curl -s "https://api.github.com/user/repos?per_page=10"
 curl -s "https://api.stripe.com/v1/charges?limit=5"
 \`\`\`
@@ -89,7 +90,7 @@ the \`connect_url\` so the user can connect the service in OneCLI.
   gateway handles credentials for you.
 - **Never** ask the user for API keys or tokens directly. Direct them to
   connect the service in the OneCLI dashboard.
-- **Never** suggest the user open Gmail/Calendar/GitHub in their browser
+- **Never** suggest the user open Gmail/Outlook/Calendar/GitHub in their browser
   when they ask you to read or interact with those services. You have API
   access. Use it.
 - **Never** use an MCP server's native OAuth or credential flow. Configure
