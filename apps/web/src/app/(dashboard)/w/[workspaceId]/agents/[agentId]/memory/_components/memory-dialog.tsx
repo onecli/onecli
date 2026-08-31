@@ -5,6 +5,7 @@ import { toast } from "sonner";
 import { Button } from "@onecli/ui/components/button";
 import {
   Dialog,
+  DialogBody,
   DialogContent,
   DialogDescription,
   DialogFooter,
@@ -118,7 +119,10 @@ export const MemoryDialog = ({
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="sm:max-w-lg">
+      {/* The FRAME is fixed and the fields scroll inside it — a memory body
+          runs to 100k characters, and a dialog that grew with it would carry
+          its own Save button off a screen that cannot scroll. */}
+      <DialogContent className="flex max-h-[calc(100dvh-2rem)] flex-col sm:max-w-lg">
         <DialogHeader>
           <DialogTitle>{editing ? "Edit memory" : "New memory"}</DialogTitle>
           <DialogDescription>
@@ -128,7 +132,9 @@ export const MemoryDialog = ({
           </DialogDescription>
         </DialogHeader>
 
-        <div className="space-y-4">
+        {/* `-m-1 p-1`: a focus ring is a box-shadow and adds nothing to
+            scrollable overflow, so an edge field's ring needs the gutter. */}
+        <DialogBody className="-m-1 space-y-4 p-1">
           <div className="grid grid-cols-2 gap-3">
             <div className="space-y-1.5">
               <Label htmlFor="memory-key">Key</Label>
@@ -174,6 +180,10 @@ export const MemoryDialog = ({
                 onChange={(event) => setContent(event.target.value)}
                 placeholder="Markdown. Facts, decisions, findings. Never credentials."
                 rows={8}
+                // `field-sizing-content` grows the field with the body it
+                // holds; uncapped, a long memory would claim the whole
+                // scrolling region and hide the fields above it.
+                className="max-h-[min(24rem,40dvh)]"
                 // Mirrors MEMORY_FILE_CONTENT_MAX_CHARS. Hardcoded on purpose,
                 // NOT imported from @onecli/agent-protocol: that barrel now
                 // pulls in memory-file.ts's `node:crypto` (the checksum), and
@@ -186,7 +196,7 @@ export const MemoryDialog = ({
               <Skeleton className="h-40 w-full" />
             )}
           </div>
-        </div>
+        </DialogBody>
 
         <DialogFooter className="gap-2 sm:justify-between">
           {editing ? (

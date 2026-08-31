@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { AGENT_EFFORTS } from "@onecli/agent-protocol";
+import { AGENT_EFFORTS, KNOWN_AGENT_HARNESSES } from "@onecli/agent-protocol";
 
 export const IDENTIFIER_REGEX = /^[a-z0-9][a-z0-9-]{0,49}$/;
 
@@ -38,7 +38,13 @@ export const createAgentSchema = z
         "Identifier must be 1-50 characters, start with a letter or number, and contain only lowercase letters, numbers, and hyphens",
     }),
     kind: z.enum(AGENT_KINDS).default("byo"),
-    harness: z.string().trim().min(1).max(100).optional(),
+    // The column stays a free string (the adapter-#2 seam — schema.prisma),
+    // but the API refuses ids no composition root can boot: a typo here would
+    // otherwise be stored, then silently run the default adapter. "fake" is
+    // deliberately creatable — the conformance/e2e tooling may drive it
+    // through the real API (hosted-e2e seeds via prisma today, but the API
+    // must not be narrower than the composition root it feeds).
+    harness: z.enum(KNOWN_AGENT_HARNESSES).optional(),
     // No `model` at creation, deliberately (§3.10): the granted key names the
     // provider and the provider supplies the default, so asking here would be
     // asking for something nobody can answer yet. It is set afterwards through

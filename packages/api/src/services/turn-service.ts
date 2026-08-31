@@ -557,6 +557,40 @@ export const createFollowUp = async (
 const BRIDGE_EXCERPT_MAX_CHARS = 500;
 /** How many recent reports one bridge note may carry. */
 const BRIDGE_MAX_REPORTS = 3;
+/**
+ * How much of a delivery's own message survives as the note's LABEL.
+ * A headline's worth: enough to name the automation, short enough that the
+ * report stays the thing being read.
+ */
+const BRIDGE_LABEL_MAX_CHARS = 120;
+
+/**
+ * The one-line label naming an automation in a bridge note.
+ *
+ * `turn.message` is NOT reliably a short header. It is one for a delivery
+ * materialized by the settle chain (`Watch on "x"` / `Scheduled run "x"`),
+ * but an IN-ORIGIN wake (watch-fire-service's `fireBucket`) stores the whole
+ * `buildConsolidatedWakeMessage` prompt — platform header, every watch's task
+ * text, and its output excerpt. Relaying that verbatim replayed a full
+ * instruction block into the next human turn, which the model then answered
+ * as work still owed (live, 2026-08-31).
+ *
+ * First line, bounded — the same treatment the Slack mirror gives an
+ * automation caption, for the same reason.
+ */
+const bridgeLabel = (message: string): string => {
+  // \r too: a CRLF header would otherwise carry a stray carriage return.
+  const firstLine =
+    stripControl(message)
+      .split(/[\r\n]/, 1)[0]
+      ?.trim() ?? "";
+  if (firstLine.length <= BRIDGE_LABEL_MAX_CHARS) return firstLine;
+  // Never cut between a surrogate pair — the tail would render as U+FFFD.
+  return `${firstLine
+    .slice(0, BRIDGE_LABEL_MAX_CHARS)
+    .replace(/[\uD800-\uDBFF]$/, "")
+    .trimEnd()}…`;
+};
 
 /**
  * The continuity bridge (step 7). A scheduled/watched run executes in ITS OWN
@@ -592,6 +626,12 @@ export const buildContinuityBridge = async (
     where: {
       conversationId,
       source: { in: [...AUTOMATION_SOURCES] },
+      // COMPLETED runs only. A failed automation produced no report — its
+      // `text` event never landed — so relaying it sent the model the run's
+      // own INSTRUCTION with an empty body, which reads as work still owed
+      // and gets answered in the next human turn (live, 2026-08-31). There
+      // is no "context from your automated runs" in a run that did not run.
+      status: "done",
       createdAt: {
         lt: before,
         ...(lastHumanTurn && { gt: lastHumanTurn.createdAt }),
@@ -616,18 +656,28 @@ export const buildContinuityBridge = async (
 
   const notes = deliveries
     .reverse()
-    .map((delivery) => {
-      const body = stripControl(textOf.get(delivery.id) ?? "").trim();
+    .map((delivery) => ({
+      delivery,
+      body: stripControl(textOf.get(delivery.id) ?? "").trim(),
+    }))
+    // A `done` run that said nothing has no report to relay. Without this,
+    // its label would ride alone — a bare instruction line, the same shape
+    // the status filter above exists to keep out.
+    .filter(({ body }) => body !== "")
+    .map(({ delivery, body }) => {
       const excerpt =
         body.length > BRIDGE_EXCERPT_MAX_CHARS
           ? `${body.slice(0, BRIDGE_EXCERPT_MAX_CHARS)}…`
           : body;
-      // The delivery turn's message IS the platform-authored header
-      // ("Scheduled run "name"" / "Watch on "name""), so reusing it names the
-      // automation without trusting anything the model wrote.
-      return `${stripControl(delivery.message)}\n${excerpt}`;
+      // The delivery's message NAMES the automation — but only its first,
+      // bounded line: an in-origin wake stores its whole prompt there. See
+      // `bridgeLabel`. Still platform-authored either way, so nothing the
+      // model wrote is trusted here.
+      return `${bridgeLabel(delivery.message)}\n${excerpt}`;
     })
     .join("\n\n");
+  // Every delivery in the window was silent — nothing to bridge.
+  if (!notes) return null;
 
   return `[Context from your automated runs — delivered to this chat since the last message; the person may be referring to it:]\n${notes}\n[End of automated-run context]`;
 };

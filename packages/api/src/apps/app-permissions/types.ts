@@ -3,10 +3,44 @@ export interface AppTool {
   name: string;
   description: string;
   hostPattern: string;
+  /**
+   * Additional host patterns this tool ALSO answers on — the host-axis twin of
+   * `aliasPatterns`. Both ports match when the request host matches
+   * `hostPattern` OR any entry here (see `hostPatternsOf`).
+   *
+   * Why: `hostMatches` supports a SINGLE `*` (a prefix/suffix split, pinned by
+   * `path-match.test.ts`), yet one API surface legitimately answers on several
+   * host shapes no single pattern can express together — AWS S3 serves the
+   * global `s3.amazonaws.com` AND the regional `s3.<region>.amazonaws.com`.
+   * Enumerating the shapes keeps every pattern narrow and explicit instead of
+   * widening the matcher (shared with secret targets and injection) or
+   * reaching for a loose glob like `s3*.amazonaws.com`, which would also
+   * swallow the SEPARATE `s3tables.*` / `s3-control.*` services — i.e. grant
+   * across a service boundary.
+   *
+   * Each entry is an ordinary pattern subject to the SAME single-`*` rule, so
+   * the permit surface is exactly what is written. A pattern with two or more
+   * `*` matches NOTHING (the second `*` becomes a literal in the suffix), so
+   * it would fail closed but silently — `catalog-json.test.ts` rejects those
+   * at authoring time rather than letting a dead pattern ship.
+   */
+  hostAliasPatterns?: string[];
   pathPattern: string;
   aliasPatterns?: string[];
   method?: string;
   methods?: string[];
+  /**
+   * GraphQL operation discrimination for tools sharing one `POST /graphql`
+   * endpoint. When set, the tool matches a request only if the buffered body
+   * classifies to this operation kind - with the FAIL-CLOSED law shared by
+   * both ports (TS `classifyGraphqlBody` / Rust `graphql.rs`): a missing,
+   * truncated, or unparsable body, or a document containing ANY non-query
+   * operation, classifies as `mutation`. So a `mutation`-tagged tool matches
+   * every doubtful request (a block on it always holds), and a `query`-tagged
+   * tool matches only a provably pure query document (an allow on it can
+   * never smuggle a mutation). Tools without this field are unaffected.
+   */
+  graphqlOps?: "query" | "mutation";
 }
 
 export interface AppToolGroup {
@@ -23,6 +57,17 @@ export const allGroupTools = <T>(group: { tools: T[]; wildcard?: T }): T[] => [
 const methodsOf = (tool: AppTool): string[] =>
   tool.methods ?? (tool.method ? [tool.method] : []);
 
+/**
+ * Every host pattern a tool matches on: its primary plus any
+ * `hostAliasPatterns`. The single source of the host axis — the TS matchers
+ * and the generated gateway JSON both derive from this, so the two ports can
+ * never disagree about which hosts a tool covers.
+ */
+export const hostPatternsOf = (tool: AppTool): string[] => [
+  tool.hostPattern,
+  ...(tool.hostAliasPatterns ?? []),
+];
+
 // The gateway treats a pattern ending in "*" as a prefix match; tool patterns
 // reuse the wildcard's leading "*" segments verbatim, so comparing the literal
 // text before the trailing "*" with `startsWith` mirrors the matcher — and
@@ -31,8 +76,8 @@ const prefixOf = (pattern: string): string =>
   pattern.endsWith("*") ? pattern.slice(0, -1) : pattern;
 
 /**
- * Is a group's `wildcard` a TRUE superset of every tool in the group — same
- * host, a path prefix covering each tool's paths (+ aliases), and a method set
+ * Is a group's `wildcard` a TRUE superset of every tool in the group — hosts,
+ * a path prefix covering each tool's paths (+ aliases), and a method set
  * containing each tool's methods? Only then does the "All read/write
  * operations" umbrella genuinely mean "all of them". Some read wildcards are
  * NOT supersets (e.g. Jira's `read_all` is GET-only but JQL search is POST;
@@ -50,9 +95,14 @@ export const wildcardCoversGroup = (
     ...(wildcard.aliasPatterns ?? []),
   ].map(prefixOf);
   const wildcardMethods = methodsOf(wildcard);
+  // Host axis is SET containment, not equality: a tool is covered only when
+  // every host it answers on is also a host the wildcard answers on. Comparing
+  // primaries alone would call an umbrella "complete" while a tool's alias host
+  // sat outside it — the misleading "all reads" this guard exists to reject.
+  const wildcardHosts = new Set(hostPatternsOf(wildcard));
   return tools.every(
     (tool) =>
-      tool.hostPattern === wildcard.hostPattern &&
+      hostPatternsOf(tool).every((host) => wildcardHosts.has(host)) &&
       [tool.pathPattern, ...(tool.aliasPatterns ?? [])].every((pattern) =>
         prefixes.some((prefix) => pattern.startsWith(prefix)),
       ) &&

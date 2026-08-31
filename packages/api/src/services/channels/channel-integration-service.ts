@@ -2,12 +2,6 @@ import { db, Prisma } from "@onecli/db";
 import { getCrypto } from "../../providers";
 import { ServiceError } from "../errors";
 import { channelProvider } from "./registry";
-import { sharedSlackApp } from "./providers/slack/shared-app";
-import { SlackApiError } from "./providers/slack/slack-api";
-import {
-  credentialsCanMintApps,
-  type SharedInstallCredentials,
-} from "./shared-install-service";
 import type {
   ChannelProviderId,
   UserLinkSource,
@@ -108,7 +102,7 @@ export const connectIntegration = async (
     if (existing._count.agentChannels > 0) {
       throw new ServiceError(
         "CONFLICT",
-        "This token belongs to a different Slack workspace than the agents already attached here. Detach them first, or paste a token for the connected workspace.",
+        `This token belongs to a different ${channelProvider(provider).displayName} workspace than the agents already attached here. Detach them first, or paste a token for the connected workspace.`,
       );
     }
     // Under the rotate lock: a paste replacing a pair mid-rotation must
@@ -392,71 +386,16 @@ export const withFreshIntegrationCredentials = async <T>(
   provider: ChannelProviderId,
   fn: (accessToken: string, integrationId: string) => Promise<T>,
 ): Promise<T> => {
-  // FAST PATH (managed-apps arm): the shared workspace install carries the
-  // admin's user token with `app_configurations:write` — the same manifest
-  // API the config token drives, minus the paste and the 12h rotation.
-  // Arms on the shared app's credentials. Fall through to the config-token
-  // path when there is no shared app configured, no install, or no user
-  // token on it.
-  if (provider === "slack" && sharedSlackApp() !== null) {
-    const install = await db.channelInstallation.findFirst({
-      where: { provider: "slack", integration: { organizationId } },
-      select: { id: true, integrationId: true, credentials: true },
-    });
-    if (install) {
-      // Decode failures alone fall through to the config token — `fn`'s own
-      // errors must PROPAGATE, never trigger a second run of `fn` on the
-      // other credential (a timed-out-but-succeeded manifest create would
-      // mint a duplicate orphan app in the workspace).
-      let creds: SharedInstallCredentials | null = null;
-      try {
-        creds = JSON.parse(
-          await getCrypto().decrypt(install.credentials),
-        ) as SharedInstallCredentials;
-      } catch (err) {
-        log.warn(
-          { err, organizationId },
-          "shared install credentials unreadable; falling back to the config token",
-        );
-      }
-      if (creds && credentialsCanMintApps(creds) && creds.userToken) {
-        try {
-          return await fn(creds.userToken, install.integrationId);
-        } catch (err) {
-          // Slack gates the manifest API behind approved "app manager"
-          // status (granted at marketplace review). Until then every
-          // mint refuses with invalid_manager_app: record the refusal on
-          // the install so views stop advertising a capability Slack
-          // denies, and fall through to the config token. A reinstall
-          // rewrites the credentials and clears the mark — the natural
-          // retry point once the app is approved.
-          if (
-            err instanceof SlackApiError &&
-            err.code === "invalid_manager_app"
-          ) {
-            log.warn(
-              { organizationId },
-              "slack refused the shared install's user token for manifest calls (app not marketplace-approved); falling back to the config token",
-            );
-            // Compare-and-swap on the exact ciphertext read: the mint call
-            // spans seconds, and a reinstall committing FRESH credentials in
-            // that window must win — re-encrypting the stale tokens over it
-            // would break the just-completed install. Count 0 = someone
-            // rewrote the row; their credentials speak for themselves.
-            await db.channelInstallation.updateMany({
-              where: { id: install.id, credentials: install.credentials },
-              data: {
-                credentials: await getCrypto().encrypt(
-                  JSON.stringify({ ...creds, managerAppRefused: true }),
-                ),
-              },
-            });
-          } else {
-            throw err;
-          }
-        }
-      }
-    }
+  // FAST PATH (managed-apps arm): the provider's shared workspace install
+  // may carry a credential that can mint agent apps — the same manifest API
+  // the automation credential drives, minus the paste and the rotation.
+  // The facet answers null (no shared app, no install, no usable token, or
+  // a recorded may-not-mint refusal) to send us to the credential path; a
+  // real `fn` error propagates — it must never run twice.
+  const sharedApp = channelProvider(provider).sharedApp;
+  if (sharedApp?.configured()) {
+    const minted = await sharedApp.tryMintWith({ organizationId, fn });
+    if (minted) return minted.result;
   }
 
   const row = await db.channelIntegration.findUnique({
@@ -466,7 +405,7 @@ export const withFreshIntegrationCredentials = async <T>(
   if (!row?.credentials) {
     throw new ServiceError(
       "UNPROCESSABLE",
-      "The organization has no Slack automation token. Connect one in the org's Channels settings, or use the manifest flow instead.",
+      `The organization has no ${channelProvider(provider).displayName} automation token. Connect one in the org's Channels settings, or use the manifest flow instead.`,
     );
   }
 
@@ -477,19 +416,19 @@ export const withFreshIntegrationCredentials = async <T>(
   if (result.outcome === "gone") {
     throw new ServiceError(
       "UNPROCESSABLE",
-      "The organization has no Slack automation token. Connect one in the org's Channels settings, or use the manifest flow instead.",
+      `The organization has no ${channelProvider(provider).displayName} automation token. Connect one in the org's Channels settings, or use the manifest flow instead.`,
     );
   }
   if (result.outcome === "cleared") {
     if (result.reason === "foreign_tenant") {
       throw new ServiceError(
         "CONFLICT",
-        "The stored Slack automation token belongs to a different workspace than the one connected to this organization. Paste a token for the connected workspace in the org's Channels settings.",
+        `The stored ${channelProvider(provider).displayName} automation token belongs to a different workspace than the one connected to this organization. Paste a token for the connected workspace in the org's Channels settings.`,
       );
     }
     throw new ServiceError(
       "UNPROCESSABLE",
-      "The stored Slack automation token has expired and could not be refreshed. Paste a fresh one in the org's Channels settings.",
+      `The stored ${channelProvider(provider).displayName} automation token has expired and could not be refreshed. Paste a fresh one in the org's Channels settings.`,
     );
   }
 
@@ -646,7 +585,7 @@ export const addUserLink = async (
     ) {
       throw new ServiceError(
         "CONFLICT",
-        "That member or Slack account is already linked.",
+        `That member or ${channelProvider(provider).displayName} account is already linked.`,
       );
     }
     throw err;

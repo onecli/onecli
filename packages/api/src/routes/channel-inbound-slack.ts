@@ -22,8 +22,8 @@ import {
   startMarketplaceInstall,
   stripSharedInstallUserToken,
   verifyMarketplaceInstallState,
-} from "../services/channels/shared-install-service";
-import { onboardingReplyForSlackUser } from "../services/channels/slack-onboarding-service";
+} from "../services/channels/providers/slack/shared-install-service";
+import { onboardingReplyForSlackUser } from "../services/channels/providers/slack/onboarding-service";
 import { decideApprovalFromChannel } from "../services/channels/channel-approval-service";
 import { agentImageUrlOrNull } from "../services/agent-image-service";
 import { publicApiUrl } from "../services/channels/posture";
@@ -339,7 +339,7 @@ export const channelInboundSlackRoutes = () => {
   const app = new Hono<ApiEnv>();
 
   // POST /channels/slack/events — the Events API arm.
-  app.post("/slack/events", async (c) => {
+  app.post("/events", async (c) => {
     const rawBody = await readCappedBody(c.req.raw);
     if (rawBody === null)
       return c.json({ error: "payload too large" }, 413, NO_RETRY);
@@ -615,7 +615,7 @@ export const channelInboundSlackRoutes = () => {
   });
 
   // POST /channels/slack/interactivity — block actions (approve/deny).
-  app.post("/slack/interactivity", async (c) => {
+  app.post("/interactivity", async (c) => {
     const rawBody = await readCappedBody(c.req.raw);
     if (rawBody === null) return c.json({ error: "payload too large" }, 413);
 
@@ -712,14 +712,14 @@ export const channelInboundSlackRoutes = () => {
   // Marketplace guideline wants state on every authorize) — the org binds
   // later at /slack/installed, from a session. Hint-free 404 when the
   // deployment has no shared app.
-  app.get("/slack/direct-install", (c) => {
+  app.get("/direct-install", (c) => {
     const started = startMarketplaceInstall();
     if (!started) return c.json({ error: "Not found" }, 404);
     return c.redirect(started.installUrl);
   });
 
   // GET /channels/slack/oauth/callback — the events arm's install landing.
-  app.get("/slack/oauth/callback", async (c) => {
+  app.get("/oauth/callback", async (c) => {
     const state = c.req.query("state");
     const code = c.req.query("code");
     const denied = c.req.query("error");

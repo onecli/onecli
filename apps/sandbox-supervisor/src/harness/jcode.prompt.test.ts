@@ -260,6 +260,35 @@ describe("the turn-ending contract", () => {
   });
 });
 
+// The response-style contract (user decision, 2026-08-30): live agents were
+// answering with multi-screen process narration nobody could read in chat.
+// The weak "be concise" line demonstrably did not land, so the directive now
+// SPECIFIES the behavior — outcome first, a few short lines, no narration,
+// detail behind demand. These pins keep the legs that made the difference;
+// the operator's brief still wins on conflict (the identity section's law).
+describe("the response-style contract", () => {
+  it("leads with the outcome", () => {
+    const flat = PLATFORM_SYSTEM_PROMPT.replace(/\s+/g, " ");
+    expect(flat).toContain(
+      "lead with the outcome in the first one or two sentences",
+    );
+  });
+
+  it("bans process narration and internal checklists", () => {
+    const flat = PLATFORM_SYSTEM_PROMPT.replace(/\s+/g, " ");
+    expect(flat).toContain("Do not narrate your process");
+    expect(flat).toContain(
+      "never include your internal checklists or step-by-step commentary",
+    );
+  });
+
+  it("puts detail behind demand instead of inline", () => {
+    const flat = PLATFORM_SYSTEM_PROMPT.replace(/\s+/g, " ");
+    expect(flat).toContain("Detail belongs behind demand");
+    expect(flat).toContain("expand only when asked");
+  });
+});
+
 describe("the swarm-helper visibility contract", () => {
   // Helpers are mirrored as observed background processes (jcode-swarm.ts);
   // these pins keep the agent's world-model matching that machinery — drop

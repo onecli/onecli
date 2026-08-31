@@ -323,9 +323,9 @@ const checkCloudEdition = async (mergedEnv) => {
 // ── redis: who needs it, and starting it ────────────────────────────────────
 // Both rules mirror the GATEWAY's own source, so the launcher can never
 // disagree with what the gateway will do at boot:
-//   entitlement — apps/gateway/src/edition.rs `parse_entitled`: trimmed,
+//   entitlement — apps/gateway/crates/common/src/edition.rs `parse_entitled`: trimmed,
 //     "true" case-insensitive or exactly "1" (cloud is always entitled);
-//   refusal — apps/gateway/src/ee/ha.rs `check_ha_entitlement`: unentitled +
+//   refusal — apps/gateway/crates/ee/ee/src/ha.rs `check_ha_entitlement`: unentitled +
 //     non-empty-after-trim REDIS_HOST refuses to boot.
 const entitled = (mergedEnv) => {
   const raw = (mergedEnv.ENTERPRISE_ENABLED ?? "").trim();

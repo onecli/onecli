@@ -65,14 +65,15 @@ export type IngestOutcome =
     }
   | {
       /** Accepted mid-run: the message steers into the live turn (or runs
-       * next). The ack is the receipt reaction moving — no text is owed. */
+       * next). The ack is the seen-mark moving (the reaction travels; a
+       * session loader already covers the thread) — no text is owed. */
       kind: "followUp";
       conversationId: string;
       turn: Awaited<ReturnType<typeof createTurn>>;
     };
 
-const REFUSAL_NOT_LINKED =
-  "I couldn't match your Slack account to a OneCLI user, so I can't help here yet. Ask an org admin to link your account under the organization's Channels settings.";
+const refusalNotLinked = (provider: ChannelProviderId): string =>
+  `I couldn't match your ${channelProvider(provider).displayName} account to a OneCLI user, so I can't help here yet. Ask an org admin to link your account under the organization's Channels settings.`;
 
 const REFUSAL_NO_ACCESS =
   "Your OneCLI account doesn't have access to my workspace, so I can't help here. Ask a workspace admin to grant you access in the dashboard.";
@@ -294,7 +295,11 @@ const authorizeSpeaker = async (
     },
     select: { id: true },
   });
-  return { refusal: linked ? REFUSAL_NO_ACCESS : REFUSAL_NOT_LINKED };
+  return {
+    refusal: linked
+      ? REFUSAL_NO_ACCESS
+      : refusalNotLinked(presence.provider as ChannelProviderId),
+  };
 };
 
 const upsertThreadLink = async (input: {
@@ -636,7 +641,8 @@ export const ingestGroupInvite = async (
     return {
       kind: "refuse",
       leave: false,
-      message: REFUSAL_NOT_LINKED + STAY_MUTED,
+      message:
+        refusalNotLinked(presence.provider as ChannelProviderId) + STAY_MUTED,
     };
   }
 

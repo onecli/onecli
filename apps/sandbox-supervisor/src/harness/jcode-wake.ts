@@ -52,17 +52,17 @@ const WAKE_SHAPES: Record<string, { label: string; prompt: string }> = {
   background_task_stalled: {
     label: "background task stalled",
     prompt:
-      "A background task you started has gone quiet and may be stalled. Check its state (process_status shows its output), unstick it if you can, and report what happened — your report reaches the chat this task belongs to.",
+      "A background task you started has gone quiet and may be stalled. Check its state (process_status shows its output), unstick it if you can, and report what happened in a line or two — your report reaches the chat this task belongs to.",
   },
   swarm_await_completed: {
     label: "helpers finished",
     prompt:
-      "Helper agents you were waiting on have finished. Collect their results (process_status shows each helper and its completion report), do what you promised with them, and reply with the outcome — your reply reaches the chat this work belongs to.",
+      "Helper agents you were waiting on have finished. Collect their results (process_status shows each helper and its completion report), do what you promised with them, and reply with a SHORT outcome — a line per helper at most; your reply reaches the chat this work belongs to.",
   },
   communication_delivery: {
     label: "message from another agent",
     prompt:
-      "Another agent sent you a message (shown below). Act on it if action is needed and reply with anything the chat should know.",
+      "Another agent sent you a message (shown below). Act on it if action is needed and reply with only what the chat should know, briefly.",
   },
 };
 
@@ -70,7 +70,7 @@ const WAKE_SHAPES: Record<string, { label: string; prompt: string }> = {
 const GENERIC_SHAPE = {
   label: "background wake",
   prompt:
-    "Your runtime requested a wake-up for the work below. Check its state (process_status shows your background work) and report anything the chat should know.",
+    "Your runtime requested a wake-up for the work below. Check its state (process_status shows your background work) and report only what the chat should know, briefly.",
 };
 
 /** The one reason another mirror already owns end to end. */

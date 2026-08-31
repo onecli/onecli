@@ -1,6 +1,6 @@
 /**
  * Seeds the fixtures the gateway's in-crate EE enforce tests read
- * (`apps/gateway/src/ee/policy_engine/enforce_pg_test.rs`).
+ * (`apps/gateway/crates/policy-engine/src/enforce_pg_test.rs`).
  *
  * Type-safe on purpose: every row — including the nested policy targets, whose
  * array is typed straight from Prisma — goes through the generated `@onecli/db`
@@ -54,6 +54,11 @@ export const FIXTURE = {
   // compiler below — the enforce test then proves the gateway enforces genuine
   // service output, not hand-mirrored rows.
   connGcal: `${P}conn-gcal`,
+  // A THIRD github connection carrying the GraphQL-discrimination grant stack
+  // (queries allowed, mutations in the blocked complement) - separate from
+  // connGithub/connGithub2 so the per-connection differential above stays
+  // undisturbed. The enforce test decides real bodies against it.
+  connGhGraphql: `${P}conn-gh-graphql`,
 } as const;
 
 /** Delete every `gwenf-` row, children before parents. */
@@ -165,6 +170,15 @@ const seed = async (): Promise<void> => {
       workspaceId: FIXTURE.workspace,
     },
   });
+  await db.appConnection.create({
+    data: {
+      id: FIXTURE.connGhGraphql,
+      provider: "github",
+      scope: "workspace",
+      status: "connected",
+      workspaceId: FIXTURE.workspace,
+    },
+  });
 
   // Workspace-scope rules, first-match by priority — seeded as DRAFTS (gen 0);
   // the grants-compiler call below publishes the whole draft into generation 1
@@ -247,6 +261,19 @@ const seed = async (): Promise<void> => {
     FIXTURE.agent,
     FIXTURE.connGcal,
     { access: "custom", allow: ["list_events"], ask: ["create_event"] },
+    null,
+  );
+
+  // The GraphQL-discrimination grant stack - the Manage-permissions scenario
+  // the classifier exists for, authored by the REAL service: GraphQL queries
+  // (and PR listing) allowed; graphql_mutation, create_pull, and every other
+  // github tool land in the blocked complement. The enforce test then decides
+  // real request bodies against the exact rows production would write.
+  await setConnectionGrant(
+    { workspaceId: FIXTURE.workspace, organizationId: FIXTURE.org },
+    FIXTURE.agent,
+    FIXTURE.connGhGraphql,
+    { access: "custom", allow: ["graphql_query", "list_pulls"], ask: [] },
     null,
   );
 

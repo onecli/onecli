@@ -63,7 +63,7 @@ import { userSkillRoutes } from "./routes/skills";
 import { orgSkillRoutes } from "./routes/org-skills";
 import { channelAdapterRoutes } from "./routes/channel-adapter";
 import { sshTerminatorRoutes } from "./routes/ssh-terminator";
-import { channelInboundSlackRoutes } from "./routes/channel-inbound-slack";
+import { channelInboundRoutes } from "./routes/channel-inbound";
 import { runnersRoutes } from "./routes/runners";
 import {
   authSessionRoutes,
@@ -212,9 +212,10 @@ export const createApiApp = (
   app.route("/org/apps", orgAppRoutes());
   // Wire-compat forwards for deployed CLIs (/org/app-config/* → /org/apps/*).
   orgAppRoutesLegacy(app);
-  // Slack's inbound HTTP arm: signature-trusted webhooks + the OAuth install
-  // callback. No session auth by design — see the file's trust model.
-  app.route("/channels", channelInboundSlackRoutes());
+  // The channel providers' inbound HTTP arms: signature-trusted webhooks +
+  // OAuth install callbacks, mounted per provider id from the inbound-route
+  // registry. No session auth by design — see each file's trust model.
+  app.route("/channels", channelInboundRoutes());
   app.route("/internal", internalRoutes());
   // The compute plane (hosted agents, §3.3): `/runner` is the daemon's own
   // outbound surface, authenticated by the `rnr_` family alone; `/runners` is

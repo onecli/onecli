@@ -59,7 +59,6 @@ interface ConnectFlowProps {
   connectedId?: string;
   agentName?: string;
   preContent?: ReactNode;
-  hiddenFields?: Record<string, string>;
   workspaceId?: string;
   orgId?: string;
 }
@@ -73,7 +72,6 @@ export const ConnectFlow = ({
   connectedId,
   agentName,
   preContent,
-  hiddenFields,
   workspaceId: explicitWorkspaceId,
   orgId,
 }: ConnectFlowProps) => {
@@ -162,7 +160,6 @@ export const ConnectFlow = ({
         method="api_key"
         connectionId={connectionId}
         preContent={preContent}
-        hiddenFields={hiddenFields}
         workspaceId={explicitWorkspaceId}
         orgId={orgId}
         onBack={() => setMode("oauth")}
@@ -192,7 +189,6 @@ export const ConnectFlow = ({
         fileImport={app.fileImport}
         connectionId={connectionId}
         preContent={preContent}
-        hiddenFields={hiddenFields}
         workspaceId={explicitWorkspaceId}
         orgId={orgId}
         onSuccess={(connection) => {

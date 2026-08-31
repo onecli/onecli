@@ -175,7 +175,7 @@ const WILDCARD_HOSTS = new Set(["0.0.0.0", "::", "[::]"]);
  *
  * (A) DELETE AT THE NEXT MAJOR:
  *   - legacyBindSeed() below (the TS resolver's warned bind seed)
- *   - apps/gateway/src/gateway/response.rs — seedable_bind_host + the
+ *   - apps/gateway/crates/context/src/lib.rs — seedable_bind_host + the
  *     LegacyBind arm and its main.rs warning
  *   - scripts/install.sh — bind_seeds_url + the display-derivation branch
  *   - docker/docker-compose.yml — the ONECLI_BIND_HOST environment rows

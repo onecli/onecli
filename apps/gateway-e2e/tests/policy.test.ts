@@ -257,6 +257,179 @@ describe("body conditions", () => {
     // Buffering the body to evaluate the condition must not corrupt it.
     expect(seen?.body).toBe(body);
   });
+
+  // The #999 regression: a body larger than the condition buffer used to be
+  // evaluated on its truncated prefix and forwarded when the match text sat
+  // past the cap — a fail-open on a policy boundary. The buffer cap is pinned
+  // small via its env override so the test doesn't need a 256KB+ body.
+  const TRUNCATION_BUFFER = 4096; // the env override's floor
+  const truncationEnv = {
+    ONECLI_CONDITION_BODY_BUFFER_BYTES: String(TRUNCATION_BUFFER),
+  };
+
+  scenario(
+    "blocks when the condition value sits past the buffer cap (fail closed)",
+    async (cx) => {
+      const upstream = await cx.upstream();
+      await cx.seed(CONDITION_WORLD);
+      const gw = await cx.startGateway({ env: truncationEnv });
+
+      // Padding pushes the match text well past the cap, so the buffered
+      // prefix never contains it — the old code forwarded this request.
+      const body = JSON.stringify({
+        padding: "x".repeat(TRUNCATION_BUFFER * 2),
+        instruction: "initiate a wire-transfer now",
+      });
+      const res = await throughProxy(gw.origin, {
+        method: "POST",
+        url: upstream.url("/v1/messages"),
+        token: cx.ids.agentToken,
+        headers: { "content-type": "application/json" },
+        body,
+      });
+
+      expect(res.status).toBe(403);
+      expect(res.json()).toMatchObject({
+        error: "blocked_by_policy",
+        rule_name: "block-on-body",
+      });
+      expect(upstream.requests()).toHaveLength(0);
+    },
+  );
+
+  scenario(
+    "blocks an oversized body even when the value is absent entirely (fail closed)",
+    async (cx) => {
+      // The strict form of the law: unseen bytes are undecidable, so a
+      // restrictive rule matches even though the full body never contained
+      // the value. Over-blocking is the accepted cost of never failing open.
+      const upstream = await cx.upstream();
+      await cx.seed(CONDITION_WORLD);
+      const gw = await cx.startGateway({ env: truncationEnv });
+
+      const body = JSON.stringify({
+        padding: "x".repeat(TRUNCATION_BUFFER * 2),
+        instruction: "summarise the inbox",
+      });
+      const res = await throughProxy(gw.origin, {
+        method: "POST",
+        url: upstream.url("/v1/messages"),
+        token: cx.ids.agentToken,
+        headers: { "content-type": "application/json" },
+        body,
+      });
+
+      expect(res.status).toBe(403);
+      expect(upstream.requests()).toHaveLength(0);
+    },
+  );
+
+  scenario(
+    "an oversized body on a host no body rule matches is not buffered or blocked",
+    async (cx) => {
+      // The host-narrowing half of #999: the condition rule targets
+      // 127.0.0.1, so traffic to another host must skip the buffer entirely
+      // and flow untouched, however large the body.
+      const upstream = await cx.upstream();
+      await cx.seed({
+        rules: [
+          {
+            name: "block-on-body-elsewhere",
+            action: "block" as const,
+            conditions: [
+              {
+                target: "body" as const,
+                operator: "contains" as const,
+                value: "wire-transfer",
+              },
+            ],
+            targets: [{ hostPattern: "unrelated.example.invalid" }],
+          },
+        ],
+      });
+      const gw = await cx.startGateway({ env: truncationEnv });
+
+      const body = JSON.stringify({
+        padding: "x".repeat(TRUNCATION_BUFFER * 2),
+        instruction: "initiate a wire-transfer now",
+      });
+      const res = await throughProxy(gw.origin, {
+        method: "POST",
+        url: upstream.url("/v1/messages"),
+        token: cx.ids.agentToken,
+        headers: { "content-type": "application/json" },
+        body,
+      });
+
+      expect(res.status).toBe(200);
+      const [seen] = await upstream.waitForRequests(1);
+      // The un-buffered pass-through must relay the body byte-perfect.
+      expect(seen?.body).toBe(body);
+    },
+  );
+
+  scenario(
+    "blocks past the shipped default cap with no env override (the prod path)",
+    async (cx) => {
+      // The acceptance-shaped run: NO buffer-size override, so this exercises
+      // the exact configuration prod ships — a >256KB body (the default cap)
+      // whose match text sits past it, the #999 signature at real scale.
+      const upstream = await cx.upstream();
+      await cx.seed(CONDITION_WORLD);
+      const gw = await cx.startGateway();
+
+      const body = JSON.stringify({
+        padding: "x".repeat(300 * 1024),
+        instruction: "initiate a wire-transfer now",
+      });
+      const res = await throughProxy(gw.origin, {
+        method: "POST",
+        url: upstream.url("/v1/messages"),
+        token: cx.ids.agentToken,
+        headers: { "content-type": "application/json" },
+        body,
+      });
+
+      expect(res.status).toBe(403);
+      expect(res.json()).toMatchObject({
+        error: "blocked_by_policy",
+        rule_name: "block-on-body",
+      });
+      expect(upstream.requests()).toHaveLength(0);
+    },
+  );
+
+  scenario(
+    "matches within the default cap where the old 16KB cap failed open",
+    async (cx) => {
+      // The differential proof for the issue's observed traffic (~32KB
+      // bodies, 2x the old cap): with the value at ~24KB — past the old
+      // 16KB cap, within the new 256KB one — the body is now FULLY seen and
+      // blocked on a real match, where the pre-fix gateway forwarded it.
+      const upstream = await cx.upstream();
+      await cx.seed(CONDITION_WORLD);
+      const gw = await cx.startGateway();
+
+      const body = JSON.stringify({
+        padding: "x".repeat(24 * 1024),
+        instruction: "initiate a wire-transfer now",
+      });
+      const res = await throughProxy(gw.origin, {
+        method: "POST",
+        url: upstream.url("/v1/messages"),
+        token: cx.ids.agentToken,
+        headers: { "content-type": "application/json" },
+        body,
+      });
+
+      expect(res.status).toBe(403);
+      expect(res.json()).toMatchObject({
+        error: "blocked_by_policy",
+        rule_name: "block-on-body",
+      });
+      expect(upstream.requests()).toHaveLength(0);
+    },
+  );
 });
 
 describe("rule loading", () => {

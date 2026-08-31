@@ -12,9 +12,12 @@ import { showsHostedSurface } from "./availability";
  *
  * - `false` (every org by default): hosted-only. One button, straight into
  *   hosted creation, whatever agents the workspace already holds — the server
- *   refuses BYO creation for these orgs anyway.
+ *   refuses BYO creation for these orgs anyway. With `byoEnabled` set (the
+ *   mixed world, 2026-08-29) the hosted button stays primary and a chevron
+ *   offers BYO creation — the server allows both kinds there.
  * - `true` (set by an operator): the BYO world — exactly the legacy
- *   experience below, whatever agents the workspace holds.
+ *   experience below, whatever agents the workspace holds (`byoEnabled` is
+ *   never consulted).
  *
  * On SELF-HOST (and while the org read is unresolved) the door falls back to
  * what the user already has, because that is the only honest read of what
@@ -38,7 +41,11 @@ export type CreateDoor =
   /** BYO only: one button, exactly today's flow. No hosted surface here. */
   | "byo"
   /** Split: BYO primary + a chevron whose menu offers hosted. */
-  | "byo-with-hosted";
+  | "byo-with-hosted"
+  /** Split, the MIXED world (cloud, byoLegacy=false + byoEnabled=true):
+   *  hosted primary + a chevron whose menu offers BYO creation directly —
+   *  the gradual-migration door. */
+  | "hosted-with-byo";
 
 export interface CreateDoorInput {
   /** The workspace's agents. `undefined` while the list is still loading.
@@ -52,12 +59,18 @@ export interface CreateDoorInput {
    *  `isPending` instead of passing a transient null (the world decides the
    *  PRIMARY button, and swapping a primary after paint breaks the user). */
   orgByoLegacy: boolean | null;
+  /** The mixed-world column beside it — `Organization.byoEnabled` from the
+   *  same read (2026-08-29). Only consulted when `orgByoLegacy` is false:
+   *  true re-opens BYO creation beside the hosted default. `null` follows
+   *  `orgByoLegacy` (self-host / failed read). */
+  orgByoEnabled: boolean | null;
 }
 
 export const createDoor = ({
   agents,
   availability,
   orgByoLegacy,
+  orgByoEnabled,
 }: CreateDoorInput): CreateDoor => {
   const hostedPossible = showsHostedSurface(availability);
   // The org's world is authoritative on cloud — the workspace's agents don't
@@ -65,7 +78,12 @@ export const createDoor = ({
   // a hosted-world org keeps the hosted door even beside old BYO agents,
   // which stay fully functional — only creation is world-gated).
   if (orgByoLegacy === true) return hostedPossible ? "byo-with-hosted" : "byo";
-  if (orgByoLegacy === false) return "hosted";
+  // The mixed world (byoLegacy=false + byoEnabled=true, 2026-08-29): hosted
+  // stays the primary, BYO creation lives one click away in the chevron.
+  // Availability doesn't gate the chevron — BYO needs no runner, and the
+  // hosted-world door already ignores availability on cloud.
+  if (orgByoLegacy === false)
+    return orgByoEnabled === true ? "hosted-with-byo" : "hosted";
   // Still loading: fall back to the flow that always works. A BYO button that
   // later gains a chevron is a quiet upgrade; a hosted button that later
   // disappears is a broken product.

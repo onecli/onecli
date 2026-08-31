@@ -1,4 +1,8 @@
-import { allGroupTools, type AppPermissionDefinition } from "./types";
+import {
+  allGroupTools,
+  hostPatternsOf,
+  type AppPermissionDefinition,
+} from "./types";
 
 // The gateway-facing projection of the #626 catalog: per provider, per tool id,
 // the host + path(×alias) + method(s) that tool fans into — exactly the inputs
@@ -15,9 +19,17 @@ import { allGroupTools, type AppPermissionDefinition } from "./types";
 /** One tool's endpoint fan-out. `methods: []` = any method (mirrors the
  * `[tool.method ?? null]` fallback in `allRuleVariants`). */
 export interface CatalogTool {
-  hostPattern: string;
+  /** Every host this tool answers on (`hostPattern` + `hostAliasPatterns`).
+   * The gateway matches when ANY entry matches. Always non-empty, so a tool
+   * can never degrade into a host-less rule (which would fail OPEN against a
+   * host-only check). */
+  hosts: string[];
   paths: string[];
   methods: string[];
+  /** GraphQL operation discrimination (see `AppTool.graphqlOps`): present
+   * only on tools sharing a `POST /graphql` endpoint. The gateway classifies
+   * the buffered body fail-closed and matches the tool only on its kind. */
+  graphqlOps?: "query" | "mutation";
 }
 
 /** provider → tool id → endpoints. */
@@ -34,7 +46,7 @@ export const buildCatalogJson = (
     for (const group of def.groups) {
       for (const tool of allGroupTools(group)) {
         tools[tool.id] = {
-          hostPattern: tool.hostPattern,
+          hosts: hostPatternsOf(tool),
           paths: [tool.pathPattern, ...(tool.aliasPatterns ?? [])],
           // INVARIANT: empty `methods` means "any method" (the gateway's
           // catalog.rs reads `[]` as any). A tool must therefore never be
@@ -43,6 +55,7 @@ export const buildCatalogJson = (
           // nothing) but any-method in the gateway (fail-open). Use a real method
           // list, or omit both `method`/`methods` for genuine any-method tools.
           methods: tool.methods ?? (tool.method ? [tool.method] : []),
+          ...(tool.graphqlOps ? { graphqlOps: tool.graphqlOps } : {}),
         };
       }
     }

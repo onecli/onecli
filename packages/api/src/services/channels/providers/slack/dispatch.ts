@@ -111,6 +111,7 @@ const receiptForAcceptedTurn = (
       conversationId: outcome.conversationId,
       channel: call.replyChannel,
       messageTs: call.messageTs,
+      threadTs: call.replyThreadTs,
       text: call.text,
     });
     return;
@@ -121,6 +122,9 @@ const receiptForAcceptedTurn = (
     turnId: outcome.turn.id,
     channel: call.replyChannel,
     messageTs: call.messageTs,
+    // Group threads carry the root ts the agent-flavor loader is keyed by;
+    // DMs are null — they answer top-level and never get the loader.
+    threadTs: call.replyThreadTs,
     text: call.text,
   });
 };

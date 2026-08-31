@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { MAX_ATTACHMENTS_PER_MESSAGE } from "@onecli/agent-protocol";
+import { CHANNEL_PROVIDER_IDS } from "../services/channels/types";
 
 /**
  * Conversations and turns (plans/hosted-agents-v2.md step 4). Constants live
@@ -9,10 +10,17 @@ import { MAX_ATTACHMENTS_PER_MESSAGE } from "@onecli/agent-protocol";
 
 /**
  * Where a conversation comes from. `web` is a person in the dashboard; the
- * rest arrive with their own steps (Slack §3.16, crons step 7, watches step
- * 10) and exist now only so those land without a migration.
+ * rest arrive with their own steps (channels §3.16, crons step 7, watches
+ * step 10). Channel ingestion stamps `source: presence.provider`, so the
+ * provider ids ARE sources — composed from the one provider list, a new
+ * provider cannot forget this union.
  */
-export const CONVERSATION_SOURCES = ["web", "slack", "cron", "watch"] as const;
+export const CONVERSATION_SOURCES = [
+  "web",
+  ...CHANNEL_PROVIDER_IDS,
+  "cron",
+  "watch",
+] as const;
 export type ConversationSource = (typeof CONVERSATION_SOURCES)[number];
 
 /** The non-human sources: a turn born from an automation, not a person

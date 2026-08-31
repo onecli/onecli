@@ -6,13 +6,13 @@ import {
   MessageScrollerContent,
   MessageScrollerItem,
   MessageScrollerProvider,
-  MessageScrollerViewport,
 } from "@onecli/ui/components/message-scroller";
 import type { Turn } from "@/lib/api/types";
 import type { OutgoingMessage } from "@/hooks/use-conversations";
 import type { RenderedTurn } from "@/lib/chat/transcript";
 import { isFollowUpRow } from "@/lib/chat/turns";
 import { useApprovalCards, type ApprovalCard } from "./use-approval-cards";
+import { FollowingViewport } from "./following-viewport";
 import { InlineApprovalItem } from "./inline-approval-item";
 import { TurnBlock } from "./turn-block";
 import { UserBubble } from "./user-bubble";
@@ -90,7 +90,10 @@ export const ChatThread = ({
   return (
     <MessageScrollerProvider autoScroll defaultScrollPosition="end">
       <MessageScroller className="min-h-0 flex-1">
-        <MessageScrollerViewport>
+        {/* The follow-preserving viewport, not the stock one: upstream releases
+            auto-follow on any gesture at the clamped bottom (shadcn-ui/ui#11224).
+            Swap back once that fix ships. */}
+        <FollowingViewport>
           <MessageScrollerContent className="mx-auto w-full max-w-3xl gap-6 px-4 py-6">
             {rows.map((turn) => (
               <MessageScrollerItem
@@ -142,7 +145,7 @@ export const ChatThread = ({
               </MessageScrollerItem>
             )}
           </MessageScrollerContent>
-        </MessageScrollerViewport>
+        </FollowingViewport>
         <MessageScrollerButton />
       </MessageScroller>
     </MessageScrollerProvider>

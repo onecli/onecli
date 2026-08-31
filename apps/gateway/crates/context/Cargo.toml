@@ -1,0 +1,28 @@
+[package]
+name = "context"
+version = "0.0.0"
+edition = "2021"
+license = "Apache-2.0"
+publish = false
+
+[dependencies]
+anyhow = { workspace = true }
+async-trait = { workspace = true }
+axum = { workspace = true }
+base64 = { workspace = true }
+futures-util = { workspace = true }
+approval = { path = "../approval" }
+ca = { path = "../ca" }
+cache = { path = "../cache" }
+common = { path = "../common" }
+crypto = { path = "../crypto" }
+db = { path = "../db" }
+vault = { path = "../vault" }
+http-body-util = { workspace = true }
+hyper = { workspace = true }
+percent-encoding = { workspace = true }
+reqwest = { workspace = true }
+ring = { workspace = true }
+sqlx = { workspace = true }
+tokio-rustls = { workspace = true }
+tracing = { workspace = true }

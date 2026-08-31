@@ -1,18 +1,17 @@
-import {
-  escapeSlackText,
-  type AdapterIngestResponse,
-  type AdapterPresence,
-  type AdapterWorkItem,
+import type {
+  AdapterIngestResponse,
+  AdapterPresence,
+  AdapterWorkItem,
 } from "@onecli/agent-protocol";
 import type { AdapterConfig } from "./config";
 import type { ControlPlaneClient } from "./control-plane";
 import { createApprovalsManager } from "./approvals";
 import { mirrorFinishedTurn } from "./mirror";
-import { slackApprovalCardUi } from "./slack/approval-card";
-import { postMessage } from "./slack/client";
-import { botTokenOf } from "./slack/credentials";
-import { slackMirrorPosts } from "./slack/mirror-posts";
-import { openSocketMode, type SocketModeConnection } from "./slack/socket-mode";
+import {
+  channelAdapterProviderFor,
+  type ChannelAdapterProvider,
+  type ProviderTransport,
+} from "./providers";
 
 /**
  * The orchestrator: reconcile provider connections against the config feed,
@@ -22,6 +21,14 @@ import { openSocketMode, type SocketModeConnection } from "./slack/socket-mode";
  * control-plane-side by design, which is what makes `docker restart` a
  * non-event.
  *
+ * Provider-neutral by construction: every channel-shaped decision — the
+ * credential's JSON shape, the transport's dialing, outcome copy, decision
+ * rendering — lives behind the `ChannelAdapterProvider` seam (providers.ts;
+ * Slack: slack/adapter-provider.ts). A presence whose provider this build
+ * does not know is SKIPPED loudly rather than run half-way: the config
+ * feed's provider field is an open string precisely so a newer control
+ * plane's second provider cannot brick the whole slice (version skew).
+ *
  * Answers are posted ONCE, on completion, by the mirror pass — there is no
  * live rendering (the streaming-edit design was removed; the plan doc records
  * the decision). The "seen" signal while a turn runs is the reaction receipt,
@@ -30,27 +37,10 @@ import { openSocketMode, type SocketModeConnection } from "./slack/socket-mode";
 
 interface PresenceRuntime {
   presence: AdapterPresence;
-  botToken: string | null;
-  socket: SocketModeConnection | null;
+  provider: ChannelAdapterProvider;
+  credential: string | null;
+  socket: ProviderTransport | null;
 }
-
-const credentialsOf = (
-  presence: AdapterPresence,
-): { botToken: string | null; appToken: string | null } => {
-  if (!presence.credentialsJson) return { botToken: null, appToken: null };
-  try {
-    const parsed = JSON.parse(presence.credentialsJson) as {
-      botToken?: string;
-      appToken?: string;
-    };
-    return {
-      botToken: parsed.botToken ?? null,
-      appToken: parsed.appToken ?? null,
-    };
-  } catch {
-    return { botToken: null, appToken: null };
-  }
-};
 
 export interface AdapterDeps {
   config: AdapterConfig;
@@ -66,8 +56,15 @@ export const createAdapter = ({ config, controlPlane, log }: AdapterDeps) => {
     controlPlane,
     gatewayUrl: config.gatewayUrl,
     approvalsPollSeconds: config.approvalsPollSeconds,
-    cardUi: slackApprovalCardUi,
-    credentialOf: botTokenOf,
+    // Per-presence resolution through the registry: the approvals manager
+    // stays channel-general and only ever sees the seam. Null for a
+    // provider this build does not know — the manager treats it as a
+    // presence it cannot serve yet.
+    cardUiOf: (presence) =>
+      channelAdapterProviderFor(presence.provider)?.cardUi ?? null,
+    credentialOf: (presence) =>
+      channelAdapterProviderFor(presence.provider)?.credentialOf(presence) ??
+      null,
     onLog: log,
   });
 
@@ -81,64 +78,15 @@ export const createAdapter = ({ config, controlPlane, log }: AdapterDeps) => {
     runtime: PresenceRuntime,
     outcome: AdapterIngestResponse,
   ): Promise<void> => {
-    const botToken = runtime.botToken;
-    if (!botToken) return;
+    const credential = runtime.credential;
+    if (!credential) return;
     const iconUrl = runtime.presence.agent.imageUrl ?? undefined;
-
-    if (outcome.kind === "invite") {
-      if (outcome.outcome === "refuse" && outcome.channel) {
-        if (outcome.message) {
-          await postMessage(botToken, {
-            channel: outcome.channel,
-            text: escapeSlackText(outcome.message),
-            ...(iconUrl && { iconUrl }),
-          }).catch((err: unknown) => log("refusal post failed", { err }));
-        }
-        // Slack's door never asks to leave (exiting needs channel-manage
-        // scopes — see the control plane's refuse-and-stay-muted decision);
-        // the wire field stays for a provider whose exit costs nothing.
-        if (outcome.leave) {
-          log("leave requested but no provider exit is implemented", {
-            channel: outcome.channel,
-          });
-        }
-      }
-      return;
-    }
-    if (outcome.kind === "ignored" || outcome.kind === "duplicate") return;
-
-    const reply = outcome.reply;
-    if (!reply) return;
-    const send = (text: string) =>
-      postMessage(botToken, {
-        channel: reply.channel,
-        text,
-        ...(reply.threadTs && { threadTs: reply.threadTs }),
-        ...(iconUrl && { iconUrl }),
-      }).catch((err: unknown) => log("reply post failed", { err }));
-
-    if (outcome.kind === "refused") {
-      // Covers the follow-up cap too — that refusal must stay visible.
-      await send(escapeSlackText(outcome.message));
-      return;
-    }
-    if (outcome.kind === "busy") {
-      // Version-skew arm only (an OLD control plane still refuses mid-run
-      // messages this way); a current one answers `followUp` instead.
-      await send(
-        escapeSlackText(
-          "Still working on the last message. I'll take this one next.",
-        ),
-      );
-      return;
-    }
-    // kind === "turn": nothing to post now. The completion pass posts every
-    // finished turn's answer — door failures included (they are finished
-    // turns, and their `turn.error` is the answer). Posting the error here
-    // TOO would double-deliver it.
-    // kind === "followUp": nothing to post either — the message joined the
-    // live run (or runs next), and its ack is the receipt reaction moving,
-    // done control-plane-side.
+    await runtime.provider.respondToOutcome({
+      credential,
+      ...(iconUrl && { iconUrl }),
+      outcome,
+      onLog: log,
+    });
   };
 
   // ── The socket pump ─────────────────────────────────────────────────────
@@ -173,82 +121,58 @@ export const createAdapter = ({ config, controlPlane, log }: AdapterDeps) => {
   };
 
   const openSocket = (runtime: PresenceRuntime): void => {
-    const { appToken } = credentialsOf(runtime.presence);
-    if (!appToken) {
-      log("socket presence without app token", {
-        presenceId: runtime.presence.presenceId,
-      });
-      return;
-    }
-    runtime.socket = openSocketMode(
-      { appToken },
-      {
-        onEvent: ({ event, eventId }) => {
-          // The envelope is already acked (Slack's 3s rule), so Slack will
-          // NOT redeliver — a transient control-plane failure here would
-          // silently drop the user's message. Retry with backoff; ingest is
-          // idempotent by eventId, which is exactly what makes retry safe.
-          void ingestWithRetry(runtime, { event, eventId });
-        },
-        onInteractive: (payload) => {
-          void handleInteractive(runtime, payload).catch((err: unknown) =>
-            log("interactive handling failed", { err }),
-          );
-        },
-        onPermanentFailure: (reason) => {
-          log("socket permanently down", {
-            presenceId: runtime.presence.presenceId,
-            reason,
-          });
-          runtime.socket = null;
-        },
-        onLog: (message, detail) =>
-          log(`socket(${runtime.presence.agent.name}): ${message}`, detail),
+    runtime.socket = runtime.provider.openTransport(runtime.presence, {
+      onEvent: ({ event, eventId }) => {
+        // The envelope is already acked (the channel's delivery rule — for
+        // Slack the 3s ack window), so the provider will NOT redeliver — a
+        // transient control-plane failure here would silently drop the
+        // user's message. Retry with backoff; ingest is idempotent by
+        // eventId, which is exactly what makes retry safe.
+        void ingestWithRetry(runtime, { event, eventId });
       },
-    );
+      onApprovalDecision: (decision) => {
+        void handleApprovalDecision(runtime, decision).catch((err: unknown) =>
+          log("interactive handling failed", { err }),
+        );
+      },
+      onPermanentFailure: (reason) => {
+        log("socket permanently down", {
+          presenceId: runtime.presence.presenceId,
+          reason,
+        });
+        runtime.socket = null;
+      },
+      onLog: log,
+    });
   };
 
-  const handleInteractive = async (
+  const handleApprovalDecision = async (
     runtime: PresenceRuntime,
-    payload: Record<string, unknown>,
+    input: {
+      approvalId: string;
+      decision: "approve" | "deny";
+      clickerExternalUserId: string;
+    },
   ): Promise<void> => {
-    const typed = payload as {
-      type?: string;
-      user?: { id?: string };
-      actions?: { action_id?: string; value?: string }[];
-    };
-    const action = typed.actions?.[0];
-    const clicker = typed.user?.id;
-    if (
-      typed.type !== "block_actions" ||
-      !action?.value ||
-      !clicker ||
-      (action.action_id !== "channel_approve" &&
-        action.action_id !== "channel_deny")
-    ) {
-      return;
-    }
     // Fence the poll loop's absence arm for the round-trip: decide() removes
     // the approval from the gateway's pending set before settleDecided runs,
     // and an unfenced poll in that window would rewrite the card as
     // "decided from the dashboard" — wrong provenance for a click made here.
-    approvals.beginDecision(action.value);
+    approvals.beginDecision(input.approvalId);
     try {
       const decision = await controlPlane.decide({
         presenceId: runtime.presence.presenceId,
-        approvalId: action.value,
-        decision: action.action_id === "channel_approve" ? "approve" : "deny",
-        clickerExternalUserId: clicker,
+        approvalId: input.approvalId,
+        decision: input.decision,
+        clickerExternalUserId: input.clickerExternalUserId,
       });
-      const text =
-        decision.kind === "decided"
-          ? `${action.action_id === "channel_approve" ? "✅ Approved" : "⛔ Denied"} by ${escapeSlackText(decision.decidedByName)}`
-          : decision.kind === "already_settled"
-            ? "This request was already decided."
-            : escapeSlackText(decision.message);
-      await approvals.settleDecided(action.value, text);
+      const text = runtime.provider.decisionSettledText({
+        decision: input.decision,
+        result: decision,
+      });
+      await approvals.settleDecided(input.approvalId, text);
     } finally {
-      approvals.endDecision(action.value);
+      approvals.endDecision(input.approvalId);
     }
   };
 
@@ -268,10 +192,28 @@ export const createAdapter = ({ config, controlPlane, log }: AdapterDeps) => {
     let acquired = false;
     for (const [presenceId, presence] of wanted) {
       const existing = runtimes.get(presenceId);
-      const { botToken } = credentialsOf(presence);
+      // The version-skew arm: a newer control plane may feed a provider this
+      // build has no implementation for. Skipping the presence — loudly, and
+      // WITHOUT a runtime — keeps the rest of the slice serving; the control
+      // plane keeps owning the conversation state, so nothing is lost when a
+      // newer adapter picks it up.
+      const provider = channelAdapterProviderFor(presence.provider);
+      if (!provider) {
+        log("unknown provider, skipping presence", {
+          presenceId,
+          provider: presence.provider,
+        });
+        continue;
+      }
+      const credential = provider.credentialOf(presence);
       if (!existing) {
         acquired = true;
-        const runtime: PresenceRuntime = { presence, botToken, socket: null };
+        const runtime: PresenceRuntime = {
+          presence,
+          provider,
+          credential,
+          socket: null,
+        };
         runtimes.set(presenceId, runtime);
         if (presence.transport === "socket") openSocket(runtime);
         log("presence added", {
@@ -281,7 +223,8 @@ export const createAdapter = ({ config, controlPlane, log }: AdapterDeps) => {
         });
       } else {
         existing.presence = presence;
-        existing.botToken = botToken;
+        existing.provider = provider;
+        existing.credential = credential;
         // A socket presence whose connection died permanently is retried
         // whenever the config changes (a re-attach rotates credentials).
         if (presence.transport === "socket" && !existing.socket) {
@@ -313,13 +256,13 @@ export const createAdapter = ({ config, controlPlane, log }: AdapterDeps) => {
 
   const handleFinished = async (item: AdapterWorkItem): Promise<void> => {
     const runtime = runtimes.get(item.presenceId);
-    if (!runtime?.botToken) return;
+    if (!runtime?.credential) return;
     const { agent } = runtime.presence;
     const next = await mirrorFinishedTurn({
       controlPlane,
-      credential: runtime.botToken,
+      credential: runtime.credential,
       provider: runtime.presence.provider,
-      posts: slackMirrorPosts,
+      posts: runtime.provider.posts,
       iconUrl: runtime.presence.agent.imageUrl ?? null,
       // Local cache first; a link acquired mid-history falls back to the
       // item's server-supplied floor (an instance-identity etag no longer

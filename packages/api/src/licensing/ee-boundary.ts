@@ -26,11 +26,13 @@
 export const LICENSED_ROOTS = [
   "apps/web/src/ee",
   "packages/api/src/ee",
-  "apps/gateway/src/ee",
+  "apps/gateway/crates/ee",
 ] as const;
 
-/** Licensed files that sit outside a licensed directory (module roots). */
-export const LICENSED_FILES = ["apps/gateway/src/ee.rs"] as const;
+/** Licensed files that sit outside a licensed directory (module roots).
+ * Empty since the gateway's ee code became the `ee` crate — its old
+ * module root (`ee.rs`) is now the crate's `src/lib.rs`, inside the root. */
+export const LICENSED_FILES = [] as const;
 
 /**
  * Shared files permitted to statically import licensed code, with the reason
@@ -79,15 +81,33 @@ export const SEAMS: readonly Seam[] = [
     permanent: true,
   },
   {
-    from: "apps/gateway/src/**",
-    why: "The gateway is one binary: its shared request path calls into the licensed feature modules (budgets, granular access, group principals + app availability, the Redis HA stores, the RBAC key rechecks, org routes) and the hosted-platform plumbing (Cognito session validation from auth.rs's selector, the KMS envelope backend from crypto.rs's dispatch) at defined points, and shared docs cross-reference the licensed homes. Counted per file/module so a new call site has to be declared. NOTE the detector is anchored on `crate::`/`super::` — main.rs is the crate root and could write a bare `ee::` path that evades counting; always write `crate::ee::…` there.",
-    count: 24,
+    from: "apps/gateway/crates/onecli-gateway/**",
+    why: "Composition root. The bin crate wires every licensed backend into the shared trait seams at startup (Redis cache/approval stores, the KMS envelope backend, the Cognito session validator, the RBAC role resolver, the budget spend sink) and runs the HA entitlement check. It re-exports the licensed crate at its root (`use ee;`), so the wiring reads `crate::ee::…` and stays countable by the `crate::` arm. The count is per FILE, not per module (imports are deduped within a file, then summed across files): `main.rs` reaches 1 module (`ha`, the entitlement check) and `wiring.rs` reaches 5 (`ha` for the two Redis stores, `kms_crypto`, `cognito`, `rbac`, `budget`) = 6. (This was 8 while the crates carried a `gateway-` prefix, but two of those were spelling artefacts rather than dependencies — the `use gateway_ee as ee;` alias declaration itself, and a doc comment naming `crate::ee::…`. The detector now reads Rust code with whole-line comments stripped, and the crate is named `ee`, so the number is the real seam count.)",
+    count: 6,
+    permanent: true,
+  },
+  {
+    from: "apps/gateway/crates/proxy/**",
+    why: "The proxy pipeline calls the licensed features at defined points: connect-time budget bindings, granular-access scoping and the platform trial credential; the forward/websocket app-availability check; the hooks' budget + granular guards; and the licensed agent-facing responses. One binary, so these are direct calls rather than a runtime seam.",
+    count: 11,
+    permanent: true,
+  },
+  {
+    from: "apps/gateway/crates/policy-engine/**",
+    why: "Connect-time policy assembly reads the licensed group-principal set and app-availability allowlist (`enforce.rs`), and the injection selection intersects the licensed granular-access scopes (`inject_select.rs`). Unlicensed deployments resolve these to empty without querying. (The licensed principal parity test lives in the ee crate and reaches the free twin here through a dev-dependency, so it is not a production crossing.) Was 3 while the crates carried a `gateway-` prefix: the third was `loaders.rs`, which only NAMES the licensed loader in doc comments and calls nothing. The detector now strips whole-line Rust comments, so prose no longer spends the allowance.",
+    count: 2,
+    permanent: true,
+  },
+  {
+    from: "apps/gateway/crates/server/**",
+    why: "Route mount: the control-plane router mounts the licensed org-scoped routes (`org_routes::mount`), which answer the license 403 per handler when unentitled. Same role as the API's app.ts — composition, not a feature dependency.",
+    count: 1,
     permanent: true,
   },
   {
     from: "apps/web/src/lib/**",
-    why: "DEBT. Free surfaces that statically embed an enterprise or hosted-platform control: quota dialogs and plan badges (inert without billing), workspace sharing, member provisioning and role management. Each render now sits behind the unified gate (usePlanGate locks by plan on cloud and by license on self-host), but the static imports remain; this number must only go down.",
-    count: 43,
+    why: "DEBT. Free surfaces that statically embed an enterprise or hosted-platform control: quota dialogs and plan badges (inert without billing), workspace sharing, member provisioning and role management. Each render now sits behind the unified gate (usePlanGate locks by plan on cloud and by license on self-host), but the static imports remain; this number must only go down. (43 → 42 when the AWS-external-id server action — which reached requireRole directly — became an admin-gated API route, taking its crossing with it.)",
+    count: 42,
   },
   {
     from: "packages/api/src/routes/**",
@@ -107,7 +127,7 @@ export const SEAMS: readonly Seam[] = [
  * must lower the seam count AND this total in the same change, so freed slack
  * can never be silently re-spent elsewhere.
  */
-export const CROSSING_DEBT = 48;
+export const CROSSING_DEBT = 47;
 
 /**
  * Dynamic (`import(...)` / `next/dynamic`) reaches into licensed code. These
@@ -276,7 +296,24 @@ export const findLicensedImports = (source: string): readonly string[] => {
   // own licensed route mount from this guard.
   const licensed = licensedSpecifier(`"'`);
 
-  const specifiers = [
+  // Rust prose names licensed modules constantly ("the licensed backend in
+  // `ee::ha`"), and since the licensed code became a crate literally named
+  // `ee`, a doc comment is spelled exactly like a real use. A comment is
+  // never a dependency, so the Rust arms below read a copy with whole-line
+  // comments removed.
+  //
+  // Deliberately conservative: only lines whose FIRST non-space token starts
+  // a comment (`//`, `///`, `//!`) are dropped, so this can never eat code.
+  // A trailing comment on a code line is left in place — over-reporting a
+  // crossing that is really prose is a reviewable annoyance, while dropping
+  // real code would blind the guard. (The gateway has no `ee::` in a trailing
+  // comment today, and the bare-path test below keeps the bin honest.)
+  const withoutRustLineComments = withoutTypeImports.replace(
+    /^[ \t]*\/\/.*$/gm,
+    "",
+  );
+
+  const tsSpecifiers = [
     // TS/JS: `… from "<spec>"`.
     new RegExp(String.raw`\bfrom\s+["'](${licensed})["']`, "g"),
     // TS/JS: a bare side-effect import, `import "<spec>"`.
@@ -284,8 +321,23 @@ export const findLicensedImports = (source: string): readonly string[] => {
     // CJS: `require("<spec>")` executes eagerly — a real dependency, not a
     // seam. Nothing in the repo uses it today; the arm keeps that true.
     new RegExp(String.raw`\brequire\s*\(\s*["'](${licensed})["']`, "g"),
+  ];
+
+  const rustSpecifiers = [
     // Rust: `crate::ee::<module>` and `super::…::ee::<module>`.
     /\b(?:crate::|(?:super::)+)ee\b(?:::\w+)?/g,
+    // Rust: the workspace-crate spelling. Since the gateway became a Cargo
+    // workspace the licensed code is a CRATE named `ee`, so a dependent names
+    // it with a BARE `ee::<module>` path — there is no `crate::` prefix from
+    // another crate. Without this arm every crossing outside the bin would be
+    // invisible to the guard.
+    //
+    // The lookbehind is load-bearing in two directions. It stops this arm
+    // double-counting the `crate::ee::`/`super::ee::` forms the arm above
+    // already reports (a Set of distinct strings would otherwise hold both
+    // `crate::ee::budget` and `ee::budget` for one crossing, inflating the
+    // seam count), and it keeps a suffix like `employee::x` from matching.
+    /(?<![:\w])ee::\w+/g,
     // Rust: a grouped `use crate::{ee, …}` / `use crate::{a::{b}, ee::x}`.
     // Matches the `ee` member anywhere in the group, with or without a tail,
     // and tolerates nested groups before it.
@@ -305,15 +357,17 @@ export const findLicensedImports = (source: string): readonly string[] => {
   ];
 
   const hits = new Set<string>();
-  for (const pattern of specifiers) {
-    for (const match of withoutTypeImports.matchAll(pattern)) {
-      // A dynamic import is a seam, not a dependency: skip `import("…")`.
-      const before = withoutTypeImports.slice(
-        Math.max(0, match.index - 20),
-        match.index,
-      );
-      if (/\bimport\s*\($/.test(before)) continue;
-      hits.add(match[1] ?? match[0]);
+  for (const [patterns, text] of [
+    [tsSpecifiers, withoutTypeImports],
+    [rustSpecifiers, withoutRustLineComments],
+  ] as const) {
+    for (const pattern of patterns) {
+      for (const match of text.matchAll(pattern)) {
+        // A dynamic import is a seam, not a dependency: skip `import("…")`.
+        const before = text.slice(Math.max(0, match.index - 20), match.index);
+        if (/\bimport\s*\($/.test(before)) continue;
+        hits.add(match[1] ?? match[0]);
+      }
     }
   }
   // Deduped per file: the unit that matters is "this file depends on that

@@ -1,0 +1,41 @@
+[package]
+name = "onecli-gateway"
+version = "0.1.0"
+edition = "2021"
+# The binary links the licensed `ee` crate in every build — see
+# /LICENSE-ENTERPRISE ("THE LICENSED PATHS") at the repository root.
+license = "Apache-2.0 AND LicenseRef-OneCLI-Enterprise"
+publish = false
+
+[[bin]]
+name = "onecli-gateway"
+path = "src/main.rs"
+
+[dependencies]
+# Workspace crates. The bin is the composition root: it wires these together
+# and owns no domain logic of its own.
+approval = { path = "../approval" }
+ca = { path = "../ca" }
+cache = { path = "../cache" }
+common = { path = "../common" }
+context = { path = "../context" }
+crypto = { path = "../crypto" }
+db = { path = "../db" }
+ee = { path = "../ee/ee" }
+server = { path = "../server" }
+shutdown = { path = "../shutdown" }
+telemetry = { path = "../telemetry" }
+vault = { path = "../vault" }
+
+# Error handling, CLI, async runtime, logging.
+anyhow = { workspace = true }
+clap = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+# The rustls CryptoProvider install (main), the healthcheck self-probe
+# (reqwest), and DB_* URL assembly (percent-encoding).
+percent-encoding = { workspace = true }
+reqwest = { workspace = true }
+rustls = { workspace = true }

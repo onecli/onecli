@@ -29,6 +29,28 @@ export interface OAuthPermission {
   access: "read" | "write";
 }
 
+/**
+ * Where a server-owned connect field's value comes from. Each source is
+ * resolved from the CALLER'S AUTHENTICATED SCOPE by the connect routes — never
+ * from request input — so a field declared here cannot be forged by a client.
+ */
+export type ServerFieldSource = "orgAwsExternalId";
+
+/**
+ * A connect field the server fills in, not the user. It is handed to
+ * `exchangeCredentials` under `name` exactly like a form field, but any
+ * client-submitted value for that name is DISCARDED first.
+ *
+ * This exists for values that are a fact about the tenant rather than an input
+ * — AWS's `sts:ExternalId` being the motivating case: its whole purpose (the
+ * confused-deputy defense) collapses if the caller can choose it.
+ */
+export interface ServerField {
+  /** The field name `exchangeCredentials` reads. */
+  name: string;
+  source: ServerFieldSource;
+}
+
 export type ConnectionMethod =
   | {
       type: "oauth";
@@ -88,6 +110,10 @@ export type ConnectionMethod =
       exchangeCredentials: (
         fields: Record<string, string>,
       ) => Promise<OAuthExchangeResult>;
+      /** Fields the SERVER supplies from the caller's scope (see
+       *  `ServerField`). Merged over the submitted fields — and stripped from
+       *  them first — before `exchangeCredentials` runs. */
+      serverFields?: ServerField[];
       /** Optional file import to auto-fill fields from a JSON file. */
       fileImport?: {
         /** Button label (e.g., "Import from credentials file"). */

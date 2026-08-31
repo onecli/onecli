@@ -1,13 +1,16 @@
 import { ServiceError } from "../../../errors";
 import type { ChannelProvider, PresenceIdentity } from "../../types";
+import { dispatchSlackEvent } from "./dispatch";
+import { slackSharedApp } from "./shared-install-service";
 import {
-  BOT_SCOPES,
+  botScopesFor,
   buildAgentManifest,
   tombstoneAppName,
   withSyncedAppName,
   withTombstoneName,
 } from "./manifest";
 import {
+  agentsSessionsSetStatus,
   authTest,
   downloadPrivateFile,
   filesInfo,
@@ -73,6 +76,14 @@ const appSettingsUrl = (appId: string): string =>
 export const slackProvider: ChannelProvider = {
   id: "slack",
   displayName: "Slack",
+
+  // The one interpreter for both transports (dispatch.ts) — the neutral
+  // dispatch hook the generic ingest door calls by registry lookup.
+  dispatchInbound: dispatchSlackEvent,
+
+  // The deployment-owned shared app (SLACK_SHARED_* env): onboarding +
+  // config-token-free agent-app minting, reached only through this facet.
+  sharedApp: slackSharedApp,
 
   async connectIntegration(rawCredential) {
     const pasted = rawCredential.trim();
@@ -426,11 +437,32 @@ export const slackProvider: ChannelProvider = {
     });
   },
 
+  async setThreadWorkStatus({ credentialsJson, channel, threadTs, working }) {
+    const botToken = credentialsJson
+      ? parseSlackPresenceCredentials(credentialsJson).botToken
+      : undefined;
+    // No credential = cannot set the status — THROW (contract: the caller's
+    // reaction fallback listens for failure, and a silent return here would
+    // record a session receipt with no loader behind it).
+    if (!botToken) throw new Error("no bot credential");
+    await agentsSessionsSetStatus(botToken, {
+      channelId: channel,
+      threadTs,
+      status: working ? "processing" : "active",
+    });
+  },
+
   buildSetupMaterial({ agentName, transport, publicApiUrl }) {
     return buildAgentManifest({ agentName, transport, publicApiUrl });
   },
 
-  rebuildSetupUrls({ externalId, transport, credentialsJson, oauthState }) {
+  rebuildSetupUrls({
+    externalId,
+    transport,
+    appMode,
+    credentialsJson,
+    oauthState,
+  }) {
     const settingsUrl = appSettingsUrl(externalId);
     if (transport !== "events" || !credentialsJson || !oauthState) {
       return { installUrl: null, settingsUrl };
@@ -444,10 +476,11 @@ export const slackProvider: ChannelProvider = {
     if (!clientId) return { installUrl: null, settingsUrl };
     const url = new URL("https://slack.com/oauth/v2/authorize");
     url.searchParams.set("client_id", clientId);
-    // The FULL bot scope list, exactly as the manifest declares it: the
-    // authorize URL's `scope` param is what the install GRANTS — a shorter
-    // list here would mint a bot token missing scopes the agent needs.
-    url.searchParams.set("scope", BOT_SCOPES.join(","));
+    // The FULL bot scope list, exactly as the manifest declares it FOR THIS
+    // APP'S FLAVOR: the authorize URL's `scope` param is what the install
+    // GRANTS — a shorter list here would mint a bot token missing scopes the
+    // agent needs.
+    url.searchParams.set("scope", botScopesFor(appMode).join(","));
     url.searchParams.set("state", oauthState);
     return { installUrl: url.toString(), settingsUrl };
   },

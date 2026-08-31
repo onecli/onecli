@@ -254,6 +254,73 @@ describe("createConnectionSession — open/close contract", () => {
     expect(h.connectionEnded()).toBeGreaterThan(0);
   });
 
+  // The flush alone is a WEAK barrier: it proves the banner reached OUR
+  // socket, not the client. Severing right after it races the DISCONNECT
+  // into the client's same read batch on a loaded host and the banner is
+  // lost (the e2e control-plane-unreachable flake). A channel that can
+  // report its close ack holds the sever until the ack arrives.
+  it("holds the sever until the client acks the channel close", async () => {
+    const h = harness();
+    await h.session.open();
+    let ack: () => void = () => undefined;
+    const pty = {
+      writes: [] as string[],
+      ended: false,
+      write(data: string, flushed?: () => void) {
+        pty.writes.push(data);
+        flushed?.();
+        return true;
+      },
+      end() {
+        pty.ended = true;
+      },
+      once(_event: "close", listener: () => void) {
+        ack = listener;
+      },
+    };
+    h.session.registerChannel(pty, true);
+    const closing = h.session.close("revoked", "your access was revoked");
+    // Flushed, ended — but not acked: the transport must still be up. A full
+    // macrotask (not just microtasks) so the pre-fix flush-only sever would
+    // be observed here — this assertion FAILS against the old close path.
+    expect(pty.ended).toBe(true);
+    await new Promise((done) => setTimeout(done, 20));
+    expect(h.connectionEnded()).toBe(0);
+    ack();
+    await closing;
+    expect(h.connectionEnded()).toBeGreaterThan(0);
+  });
+
+  // A client that never acks (wedged, gone mid-write) cannot pin the
+  // socket: the ack barrier has the same bound as the flush.
+  it("severs on the drain bound when the close ack never arrives", async () => {
+    vi.useFakeTimers();
+    const h = harness();
+    await h.session.open();
+    const pty = {
+      writes: [] as string[],
+      ended: false,
+      write(data: string, flushed?: () => void) {
+        pty.writes.push(data);
+        flushed?.();
+        return true;
+      },
+      end() {
+        pty.ended = true;
+      },
+      once() {
+        // Never acks.
+      },
+    };
+    h.session.registerChannel(pty, true);
+    const closing = h.session.close("revoked", "your access was revoked");
+    await Promise.resolve();
+    expect(h.connectionEnded()).toBe(0);
+    await vi.advanceTimersByTimeAsync(2_500);
+    await closing;
+    expect(h.connectionEnded()).toBeGreaterThan(0);
+  });
+
   it("a close racing an in-flight open still reports once the row exists", async () => {
     const h = harness();
     let release: () => void = () => undefined;

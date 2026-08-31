@@ -53,6 +53,7 @@ const store = vi.hoisted(() => ({
   }[],
   seq: 0,
   orgFlushes: [] as string[],
+  orgs: [] as { id: string; awsExternalId: string | null }[],
 }));
 
 vi.mock("@onecli/db", () => ({
@@ -143,6 +144,22 @@ vi.mock("@onecli/db", () => ({
         return row;
       },
     },
+    organization: {
+      findUnique: async ({ where }: { where: { id: string } }) =>
+        store.orgs.find((o) => o.id === where.id) ?? null,
+      updateMany: async ({
+        where,
+        data,
+      }: {
+        where: { id: string; awsExternalId: null };
+        data: { awsExternalId: string };
+      }) => {
+        const org = store.orgs.find((o) => o.id === where.id);
+        if (!org || org.awsExternalId !== null) return { count: 0 };
+        org.awsExternalId = data.awsExternalId;
+        return { count: 1 };
+      },
+    },
     appConfig: {
       // Org-level BYO credentials for the oauth fixture (settings-only, no
       // encrypted blob → no crypto in the credential-resolve path).
@@ -180,45 +197,71 @@ vi.mock("../lib/logger", () => {
 
 vi.mock("../apps/registry", () => ({
   getApp: (id: string) =>
-    id === "keyapp"
+    // A credentials-import app with a SERVER-OWNED field — the aws-role shape,
+    // whose external ID must come from the caller's org, never the body.
+    id === "serverfieldapp"
       ? {
-          id: "keyapp",
-          name: "Key App",
-          icon: "/icons/keyapp.svg",
-          description: "API-key test app",
+          id: "serverfieldapp",
+          name: "Server Field App",
+          icon: "/icons/sf.svg",
+          description: "credentials-import app with a server-owned field",
           available: true,
           connectionMethod: {
-            type: "api_key",
-            fields: [{ name: "apiKey", label: "API Key", placeholder: "key" }],
+            type: "credentials_import",
+            fields: [
+              { name: "roleArn", label: "Role ARN", placeholder: "arn:" },
+            ],
+            exchangeCredentials: async (fields: Record<string, string>) => ({
+              credentials: {
+                roleArn: fields.roleArn,
+                externalId: fields.externalId,
+              },
+              scopes: [],
+            }),
+            serverFields: [{ name: "externalId", source: "orgAwsExternalId" }],
           },
         }
-      : id === "oauthapp"
+      : id === "keyapp"
         ? {
-            id: "oauthapp",
-            name: "OAuth App",
-            icon: "/icons/oauthapp.svg",
-            description: "OAuth test app",
+            id: "keyapp",
+            name: "Key App",
+            icon: "/icons/keyapp.svg",
+            description: "API-key test app",
             available: true,
             connectionMethod: {
-              type: "oauth",
-              defaultScopes: ["read"],
-              buildAuthUrl: ({ state }: { state: string }) =>
-                `https://provider.example/auth?state=${encodeURIComponent(state)}`,
-              exchangeCode: async () => ({ credentials: {} }),
-            },
-            configurable: {
+              type: "api_key",
               fields: [
-                { name: "clientId", label: "Client ID", placeholder: "id" },
-                {
-                  name: "clientSecret",
-                  label: "Client Secret",
-                  placeholder: "secret",
-                  secret: true,
-                },
+                { name: "apiKey", label: "API Key", placeholder: "key" },
               ],
             },
           }
-        : undefined,
+        : id === "oauthapp"
+          ? {
+              id: "oauthapp",
+              name: "OAuth App",
+              icon: "/icons/oauthapp.svg",
+              description: "OAuth test app",
+              available: true,
+              connectionMethod: {
+                type: "oauth",
+                defaultScopes: ["read"],
+                buildAuthUrl: ({ state }: { state: string }) =>
+                  `https://provider.example/auth?state=${encodeURIComponent(state)}`,
+                exchangeCode: async () => ({ credentials: {} }),
+              },
+              configurable: {
+                fields: [
+                  { name: "clientId", label: "Client ID", placeholder: "id" },
+                  {
+                    name: "clientSecret",
+                    label: "Client Secret",
+                    placeholder: "secret",
+                    secret: true,
+                  },
+                ],
+              },
+            }
+          : undefined,
   getApps: () => [],
 }));
 
@@ -246,6 +289,10 @@ beforeEach(() => {
   store.connections = [];
   store.seq = 0;
   store.orgFlushes = [];
+  store.orgs = [
+    { id: "org-1", awsExternalId: null },
+    { id: "org-2", awsExternalId: "onecli-org-2-external-id" },
+  ];
 });
 
 // Module-level provider singletons (oauthOrg, roleResolver) are write-once per
@@ -438,5 +485,108 @@ describe("with the standard boot wiring", () => {
 
     expect(res.status).toBe(400);
     expect(await res.json()).toEqual({ error: "API Key is required" });
+  });
+  // ── AWS external ID ────────────────────────────────────────────────────
+
+  it("returns the caller's org external id, minting it on first read", async () => {
+    const res = await app.request("/v1/org/apps/aws-external-id", {
+      headers: orgKeyHeaders,
+    });
+
+    expect(res.status).toBe(200);
+    const { externalId } = (await res.json()) as { externalId: string };
+    expect(externalId).toMatch(/^onecli-/);
+    // Persisted, so the value the user pastes into their trust policy is the
+    // same one we will present at AssumeRole time.
+    expect(store.orgs[0]!.awsExternalId).toBe(externalId);
+  });
+
+  it("returns the same external id on a second read", async () => {
+    const first = await app.request("/v1/org/apps/aws-external-id", {
+      headers: orgKeyHeaders,
+    });
+    const second = await app.request("/v1/org/apps/aws-external-id", {
+      headers: orgKeyHeaders,
+    });
+
+    expect(await first.json()).toEqual(await second.json());
+  });
+
+  it("never serves another org's external id", async () => {
+    // The org comes from the membership-fenced auth context, and nothing in
+    // the request names one — so org-2's id is unreachable from org-1's key.
+    const res = await app.request("/v1/org/apps/aws-external-id", {
+      headers: orgKeyHeaders,
+    });
+
+    const { externalId } = (await res.json()) as { externalId: string };
+    expect(externalId).not.toBe("onecli-org-2-external-id");
+  });
+
+  it("RBAC: a mere member cannot read the org external id", async () => {
+    caps.rbac = true;
+    try {
+      store.members = [
+        { organizationId: "org-1", userId: "user-1", role: "member" },
+      ];
+
+      const res = await app.request("/v1/org/apps/aws-external-id", {
+        headers: orgKeyHeaders,
+      });
+
+      expect(res.status).toBe(401);
+    } finally {
+      caps.rbac = false;
+    }
+  });
+
+  it("refuses a legacy connect naming an org the caller is not in", async () => {
+    // The negative control for the cross-tenant arm: `X-Organization-Id` can
+    // re-scope this endpoint to another org, and server-owned fields resolve
+    // (and lazily WRITE) against whichever org that is.
+    //
+    // The downstream org handler refuses non-membership too, but only AFTER
+    // the resolve has run — so without the fence ahead of it, a stranger's
+    // request still MINTS AND PERSISTS an external ID on a foreign org's row.
+    // Starting org-2 unset is what makes that write observable here.
+    store.orgs[1]!.awsExternalId = null;
+
+    const res = await app.request("/v1/apps/serverfieldapp/connect", {
+      method: "POST",
+      headers: { ...orgKeyHeaders, "x-organization-id": "org-2" },
+      body: JSON.stringify({
+        fields: { roleArn: "arn:aws:iam::123456789012:role/R" },
+      }),
+    });
+
+    expect(res.status).toBe(403);
+    expect(await res.json()).toEqual({
+      error: "Not a member of this organization",
+    });
+    expect(store.connections).toHaveLength(0);
+    // The row of the org the caller does not belong to was never written.
+    expect(store.orgs[1]!.awsExternalId).toBeNull();
+  });
+
+  it("connect ignores a client-supplied server field and uses the org's", async () => {
+    // The confused-deputy attempt, end to end through the real route: the body
+    // carries another org's external id, and it must not survive.
+    const res = await app.request("/v1/org/apps/serverfieldapp/connect", {
+      method: "POST",
+      headers: orgKeyHeaders,
+      body: JSON.stringify({
+        fields: {
+          roleArn: "arn:aws:iam::123456789012:role/R",
+          externalId: "onecli-org-2-external-id",
+        },
+      }),
+    });
+
+    expect(res.status).toBe(200);
+    const stored = JSON.parse(
+      store.connections[0]!.credentials.replace(/^enc:/, ""),
+    ) as { externalId: string };
+    expect(stored.externalId).toBe(store.orgs[0]!.awsExternalId);
+    expect(stored.externalId).not.toBe("onecli-org-2-external-id");
   });
 });

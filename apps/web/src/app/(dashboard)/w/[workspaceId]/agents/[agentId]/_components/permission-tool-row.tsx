@@ -58,14 +58,11 @@ export const PermissionToolRow = ({
       : choice;
 
   return (
-    <div className="flex items-center justify-between gap-4 py-2.5">
+    <div className="flex items-start justify-between gap-4 py-2.5">
       <div className="min-w-0">
         <div className="flex items-center gap-2">
           <span
-            className={cn(
-              "truncate text-sm",
-              orgBlocked && "text-muted-foreground",
-            )}
+            className={cn("text-sm", orgBlocked && "text-muted-foreground")}
           >
             {tool.name}
           </span>
@@ -87,17 +84,26 @@ export const PermissionToolRow = ({
             </span>
           )}
         </div>
-        <p className="text-muted-foreground mt-0.5 truncate text-xs">
+        {/* Wraps rather than truncates: the description is the decision
+            support for a security choice, so it must be fully readable -
+            an ellipsis with no affordance to reveal the rest is not.
+            `break-words` guards long unbroken tokens (host names). */}
+        <p className="text-muted-foreground mt-0.5 break-words text-xs">
           {orgFloorsApproval ? "Org minimum: needs approval" : tool.description}
         </p>
       </div>
-      <TriStateControl
-        value={displayedChoice}
-        onSelect={onSelect}
-        isOptionDisabled={isOptionDisabled}
-        disabled={readOnly}
-        askLocked={askLocked}
-      />
+      {/* Top-aligned so a wrapped description grows downward while the
+          control stays anchored beside the title; -mt-1.5 optically centers
+          the 32px control on the ~20px title line. */}
+      <div className="-mt-1.5 shrink-0">
+        <TriStateControl
+          value={displayedChoice}
+          onSelect={onSelect}
+          isOptionDisabled={isOptionDisabled}
+          disabled={readOnly}
+          askLocked={askLocked}
+        />
+      </div>
     </div>
   );
 };

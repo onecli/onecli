@@ -79,7 +79,7 @@ export interface TurnContext {
  * already holds the machine awake; it is the RESULT that evaporates).
  */
 export const TURN_END_SAFETY_NET_PROMPT =
-  "A background task was still running when your turn ended without any watch on it. Check its outcome (process_status shows its output) and report the result concisely — your report reaches the chat this task belongs to. If nothing needs reporting, say so briefly.";
+  "A background task was still running when your turn ended without any watch on it. Check its outcome (process_status shows its output) and report the result in a line or two — outcome first; your report reaches the chat this task belongs to. If nothing needs reporting, say so briefly.";
 
 export type ToolOutcome = {
   ok: boolean;

@@ -48,6 +48,12 @@ model Organization {
   // never written by application code. Inert on self-host, where creation is
   // ungated in both directions.
   byoLegacy           Boolean  @default(false) @map("byo_legacy")
+  // The MIXED creation world (only read when byoLegacy is false): hosted stays
+  // the default door, and BYO creation is additionally allowed — the gradual
+  // migration path for a legacy customer moving to hosted. byoLegacy=true wins
+  // (this column is never consulted there). Set MANUALLY by the cloud
+  // operator, like byoLegacy. Inert on self-host.
+  byoEnabled          Boolean  @default(false) @map("byo_enabled")
   createdAt           DateTime @default(now()) @map("created_at")
   updatedAt           DateTime @updatedAt @map("updated_at")
 
@@ -1169,6 +1175,14 @@ model AgentChannel {
   integrationId       String    @map("integration_id")
   provider            String // "slack"
   externalId          String    @map("external_id") // the agent's own provider app id (Slack: app id)
+  // Which app flavor THIS app was built as ("agent" | "regular") — stamped at
+  // create, like `transport`: the provider-side config baked it in and (Slack)
+  // the agent flavor is irreversible, so the presence must remember what it
+  // is. New apps are always "agent"; "regular" survives on pre-existing rows
+  // (default "regular": every app predating the column was a plain bot) and
+  // the runtime honors the stamp — loader for agent apps, emoji receipt for
+  // regular ones. Switching = detach/re-attach.
+  appMode             String    @default("regular") @map("app_mode")
   identityRef         String?   @map("identity_ref") // the presence's own identity (Slack: bot user id)
   /// The app's own display handle on the provider (Slack: the bot's `user`
   /// from `auth.test`, e.g. "donna"). Captured at completion from a call we
@@ -1322,11 +1336,18 @@ model ChannelTurnReceipt {
   id             String   @id @default(uuid())
   turnId         String   @unique @map("turn_id")
   agentChannelId String   @map("agent_channel_id")
-  // Provider-opaque address of the USER's message the reaction sits on
-  // (Slack: channel id + message ts).
+  // Provider-opaque address of the USER's message the mark sits on
+  // (Slack: channel id + message ts). For `kind: "session"` rows, `messageTs`
+  // is the THREAD ROOT ts the provider's work-status API is keyed by.
   channel        String
   messageTs      String   @map("message_ts")
-  reaction       String
+  // "reaction" = an emoji sits on the message and must come off on clear;
+  // "session" = the provider's native thread work-status (Slack: the agent
+  // session loader) is on and must be set back on clear.
+  kind           String   @default("reaction")
+  // The emoji, for reaction rows. Null on session rows — there is nothing
+  // to take off a specific message.
+  reaction       String?
   createdAt      DateTime @default(now()) @map("created_at")
 
   agentChannel AgentChannel @relation(fields: [agentChannelId], references: [id], onDelete: Cascade)

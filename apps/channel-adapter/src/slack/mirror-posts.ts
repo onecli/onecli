@@ -13,6 +13,48 @@ const SECTION_TEXT_LIMIT = 2900;
  * is rejected whole (`invalid_blocks`). */
 const BLOCK_BUDGET = 48;
 
+/** How much of an automation's caption survives. Roughly a headline's worth:
+ * long enough for a schedule or process name plus its trigger, short enough
+ * that the report below it stays the thing being read. */
+const CAPTION_LIMIT = 120;
+
+/**
+ * The one-line caption for an automation report.
+ *
+ * `turn.message` for a cron or watch fire is the platform's RUN INSTRUCTION,
+ * not a title: a header sentence, then the agent's own stored prompt, then a
+ * recent-output excerpt (see `buildWatchRunMessage` in the API's
+ * watch-fire-service). Posting it verbatim published the instructions —
+ * "finish with a SHORT report", cleanup commands, dozens of excerpt lines —
+ * as if they were the agent's words, which is exactly the wall of text the
+ * caption is supposed to label. The web has always truncated this to one
+ * line (`AutomationTurnHeader`); Slack had no equivalent, so it printed the
+ * whole thing.
+ *
+ * First line, bounded. The stored turn message stays verbatim — this is a
+ * rendering decision, and the API keeps owning the header's own safety
+ * (`cleanName` strips the newlines a forged process name would inject, which
+ * is what keeps a first-line cut from being a security boundary).
+ */
+export const automationCaption = (title: string): string => {
+  // \r too: a CRLF header would otherwise leave a stray carriage return
+  // riding the caption into Slack.
+  const firstLine = title.split(/[\r\n]/, 1)[0]?.trim() ?? "";
+  if (firstLine.length <= CAPTION_LIMIT) return firstLine;
+  // Prefer a word boundary in the back half, so the cut reads as a clipped
+  // phrase rather than a severed word.
+  const window = firstLine.slice(0, CAPTION_LIMIT);
+  const space = window.lastIndexOf(" ");
+  const cut = space > CAPTION_LIMIT / 2 ? space : CAPTION_LIMIT;
+  // Never end on a lone high surrogate — the same cut-safety rule the plain
+  // answer degrade below applies, or the tail renders as a replacement char.
+  const clipped = firstLine
+    .slice(0, cut)
+    .replace(/[\uD800-\uDBFF]$/, "")
+    .trimEnd();
+  return `${clipped}…`;
+};
+
 const sectionChunks = (text: string): string[] => {
   const chunks: string[] = [];
   let rest = text;
@@ -132,11 +174,17 @@ export const slackMirrorPosts: MirrorPosts = {
     // not self-identify). It stays a quiet italic caption (quoted verbatim,
     // escape only) above the report; the body is model markdown — converted
     // (markdownToMrkdwn escapes internally).
+    //
+    // ONE LINE, bounded: the run message behind it is the platform's whole
+    // instruction (header + the agent's prompt + an output excerpt), and
+    // posting all of it made the label longer than the report — see
+    // `automationCaption`.
+    const caption = automationCaption(input.title);
     await postMessage(input.credential, {
       channel: input.channel,
       text: input.body
-        ? `${icon} _${escapeSlackText(input.title)}_\n${markdownToMrkdwn(input.body)}`
-        : `${icon} _${escapeSlackText(input.title)}_`,
+        ? `${icon} _${escapeSlackText(caption)}_\n${markdownToMrkdwn(input.body)}`
+        : `${icon} _${escapeSlackText(caption)}_`,
       ...targetForm(input),
     });
   },

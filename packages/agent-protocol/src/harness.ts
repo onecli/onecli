@@ -9,6 +9,17 @@ import type { AgentEvent } from "./events";
  * exercised.
  */
 
+/**
+ * Every adapter id the platform can boot today. The harness column/env stays
+ * a deliberately free string — that looseness is the seam that keeps adapter
+ * #2 cheap (see the `harness` comment in schema.prisma) — so this list is not
+ * a wire type. It exists so composition roots and validations fail FAST on a
+ * typo instead of silently booting the default adapter. Adapter #2 = one
+ * entry here + one registry line at the composition root.
+ */
+export const KNOWN_AGENT_HARNESSES = ["jcode", "fake"] as const;
+export type KnownAgentHarness = (typeof KNOWN_AGENT_HARNESSES)[number];
+
 /** What an adapter can do, declared up front — never probed at runtime. */
 export interface HarnessCapabilities {
   /** Can reopen a prior session from state on the home volume (§3.6). */

@@ -35,6 +35,18 @@ import {
   memorySearchArgsSchema,
 } from "../validations/memories";
 import {
+  skillCreateArgsSchema,
+  skillDeleteArgsSchema,
+  skillListArgsSchema,
+  skillUpdateArgsSchema,
+} from "../validations/skills";
+import {
+  createSkill,
+  deleteAgentSkillByName,
+  listSkillsReachingAgent,
+  updateAgentSkillByName,
+} from "./skill-service";
+import {
   AUDIT_ACTIONS,
   AUDIT_SERVICES,
   AUDIT_SOURCE,
@@ -70,6 +82,7 @@ const log = logger.child({ component: "platform-tools" });
 interface ToolIdentity {
   agentId: string;
   workspaceId: string;
+  organizationId: string;
 }
 
 export interface ToolContext {
@@ -151,10 +164,22 @@ const resolveIdentity = async (
 ): Promise<ToolIdentity | null> => {
   const sandbox = await db.sandbox.findFirst({
     where: { id: sandboxId, runnerId },
-    select: { agent: { select: { id: true, workspaceId: true } } },
+    select: {
+      agent: {
+        select: {
+          id: true,
+          workspaceId: true,
+          workspace: { select: { organizationId: true } },
+        },
+      },
+    },
   });
   if (!sandbox) return null;
-  return { agentId: sandbox.agent.id, workspaceId: sandbox.agent.workspaceId };
+  return {
+    agentId: sandbox.agent.id,
+    workspaceId: sandbox.agent.workspaceId,
+    organizationId: sandbox.agent.workspace.organizationId,
+  };
 };
 
 /** The tool-call path's context resolution — the shared doctrine, applied to
@@ -633,6 +658,135 @@ export const executePlatformTool = async (
         return {
           ok: true,
           result: buildResult(clipped.content, clipped.truncated),
+        };
+      }
+
+      case "skill_create": {
+        const args = skillCreateArgsSchema.safeParse(request.args);
+        if (!args.success) {
+          return toolError(args.error.issues[0]?.message ?? "Invalid input");
+        }
+        const context = await resolveContext(identity, request, "provenance");
+        // Denormalize the via-user's email into the row (the memory-revision
+        // convention): "whose ask this write carried" must survive that
+        // user's deletion, which SetNulls the FK.
+        const viaUser = context.createdByUserId
+          ? await db.user.findUnique({
+              where: { id: context.createdByUserId },
+              select: { email: true },
+            })
+          : null;
+        const skill = await createSkill(
+          identity.workspaceId,
+          { ...args.data, agentId: identity.agentId },
+          { userId: context.createdByUserId, email: viaUser?.email ?? null },
+        );
+        await auditAsCreator(
+          identity,
+          context.createdByUserId,
+          AUDIT_ACTIONS.CREATE,
+          AUDIT_SERVICES.SKILL,
+          { skillId: skill.id, name: skill.name },
+        );
+        return {
+          ok: true,
+          result: {
+            name: skill.name,
+            scope: skill.scope,
+            enabled: skill.enabled,
+            note: `Created. It materializes into your skills directory as ${skill.name}/SKILL.md within seconds and also appears on your Skills page in the dashboard.`,
+          },
+        };
+      }
+
+      case "skill_list": {
+        const args = skillListArgsSchema.safeParse(request.args ?? {});
+        if (!args.success) {
+          return toolError(args.error.issues[0]?.message ?? "Invalid input");
+        }
+        const skills = await listSkillsReachingAgent(
+          identity.agentId,
+          identity.workspaceId,
+          identity.organizationId,
+        );
+        return {
+          ok: true,
+          result: {
+            skills: skills.map((skill) => ({
+              name: skill.name,
+              scope: skill.scope,
+              description: skill.description,
+              enabled: skill.enabled,
+              // Editable = yours: only agent-tier rows answer skill_update/
+              // skill_delete; the rest are managed in the dashboard.
+              editable: skill.scope === "agent",
+            })),
+            note: "When the same name exists at several scopes, the most specific one wins for you (agent > workspace > organization). Disabled skills are not materialized.",
+          },
+        };
+      }
+
+      case "skill_update": {
+        const args = skillUpdateArgsSchema.safeParse(request.args);
+        if (!args.success) {
+          return toolError(args.error.issues[0]?.message ?? "Invalid input");
+        }
+        const context = await resolveContext(identity, request, "provenance");
+        const { name, ...patch } = args.data;
+        const { skill, noop } = await updateAgentSkillByName(
+          identity.agentId,
+          identity.workspaceId,
+          identity.organizationId,
+          name,
+          patch,
+        );
+        if (!noop) {
+          await auditAsCreator(
+            identity,
+            context.createdByUserId,
+            AUDIT_ACTIONS.UPDATE,
+            AUDIT_SERVICES.SKILL,
+            { skillId: skill.id, name, fields: Object.keys(patch).join(",") },
+          );
+        }
+        return {
+          ok: true,
+          result: {
+            name: skill.name,
+            enabled: skill.enabled,
+            noop,
+            note: noop
+              ? "Nothing changed — the skill already held these values."
+              : `Updated. Your home re-syncs within seconds${skill.enabled ? "" : "; a disabled skill's files leave your skills directory"}.`,
+          },
+        };
+      }
+
+      case "skill_delete": {
+        const args = skillDeleteArgsSchema.safeParse(request.args);
+        if (!args.success) {
+          return toolError(args.error.issues[0]?.message ?? "Invalid input");
+        }
+        const context = await resolveContext(identity, request, "provenance");
+        const deleted = await deleteAgentSkillByName(
+          identity.agentId,
+          identity.workspaceId,
+          identity.organizationId,
+          args.data.name,
+        );
+        await auditAsCreator(
+          identity,
+          context.createdByUserId,
+          AUDIT_ACTIONS.DELETE,
+          AUDIT_SERVICES.SKILL,
+          { skillId: deleted.id, name: args.data.name },
+        );
+        return {
+          ok: true,
+          result: {
+            deleted: args.data.name,
+            note: "Its files leave your skills directory within seconds.",
+          },
         };
       }
 

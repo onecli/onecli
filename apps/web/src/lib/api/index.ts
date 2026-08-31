@@ -21,6 +21,7 @@ import * as appBlocklist from "./app-blocklist";
 import * as appConfig from "./app-config";
 import * as appAvailability from "./app-availability";
 import * as appPermissions from "./app-permissions";
+import * as awsExternalId from "./aws-external-id";
 import * as vaults from "./vaults";
 import * as dropbox from "./dropbox";
 import * as conversations from "./conversations";
@@ -55,6 +56,7 @@ export {
   appConfig,
   appAvailability,
   appPermissions,
+  awsExternalId,
   vaults,
   dropbox,
   conversations,

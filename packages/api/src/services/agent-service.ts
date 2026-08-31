@@ -222,21 +222,29 @@ export const createAgent = async (
     );
   }
 
-  // Cloud creation worlds (sandbox-platform §3.10 as re-decided 2026-08-23):
-  // the org's byoLegacy column picks exactly one creation door — false means
-  // hosted-only, true means BYO-only (hosted starts with an onboarding call).
+  // Cloud creation worlds (sandbox-platform §3.10 as re-decided 2026-08-23,
+  // mixed world added 2026-08-29): the org's byoLegacy column picks the
+  // creation door — false means hosted-first (BYO additionally allowed when
+  // byoEnabled is set: the gradual-migration world), true means BYO-only
+  // (hosted starts with an onboarding call; byoEnabled is never consulted).
   // Self-host is ungated. Placed after the identifier check so a re-created
   // identifier still answers 409 (SDK ensureAgent stays idempotent), and read
   // at call time so tests can pin either edition per case.
   if (!isOnpremEdition()) {
     const ws = await db.workspace.findUnique({
       where: { id: workspaceId },
-      select: { organization: { select: { byoLegacy: true } } },
+      select: {
+        organization: { select: { byoLegacy: true, byoEnabled: true } },
+      },
     });
     if (!ws) {
       throw new ServiceError("NOT_FOUND", "Workspace not found");
     }
-    if (kind === "byo" && !ws.organization.byoLegacy) {
+    if (
+      kind === "byo" &&
+      !ws.organization.byoLegacy &&
+      !ws.organization.byoEnabled
+    ) {
       throw new ServiceError(
         "FORBIDDEN",
         "BYO agent creation isn't enabled for this organization. Create a hosted agent instead.",

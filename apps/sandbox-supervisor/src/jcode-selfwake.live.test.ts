@@ -317,9 +317,18 @@ describe.skipIf(!LIVE)("external wake ownership (live jcode)", () => {
     });
   }, 240_000);
 
-  it("text resuming after a tool batch renders as a new paragraph, not glue", async () => {
-    // Scenario 2 — the separator. One turn: text, a foreground tool call,
-    // more text. The stored answer must read as two paragraphs.
+  it("stores the agent's LAST message as the answer, never glued to its narration", async () => {
+    // Scenario 2 — the message boundary, at the live boundary. One turn:
+    // text, a foreground tool call, more text.
+    //
+    // This pinned the SEPARATOR before ("Part one.\n\nPart two.") — the fix
+    // for text glued mid-sentence. The separator was the right repair for a
+    // rendering bug but the wrong contract: mid-turn text is the agent
+    // narrating its work, and joining it to the closing message published
+    // running commentary as the answer (the multi-screen chat walls, live).
+    // Now the LAST message is the answer, so the anti-glue guarantee holds
+    // by construction — "Part one." cannot touch "Part two." if it is not
+    // in the answer at all — and both halves are still asserted below.
     let sepCalls = 0;
     const script: MockScript = ({ lastUser }) => {
       if (!lastUser.includes("SEP-CHECK")) return undefined;
@@ -352,8 +361,12 @@ describe.skipIf(!LIVE)("external wake ownership (live jcode)", () => {
           60_000,
         );
         expect(mock.requests.some((r) => r.tag === "sep-final")).toBe(true);
-        // Pre-fix this stored "Part one.Part two." — glued mid-sentence.
-        expect(t.answerOf("t-sep")).toContain("Part one.\n\nPart two.");
+        // The closing message IS the answer, alone.
+        expect(t.answerOf("t-sep")).toBe("Part two.");
+        // The original bug's shape can never come back: the narration is not
+        // in the stored answer, glued or otherwise.
+        expect(t.answerOf("t-sep")).not.toContain("Part one.Part two.");
+        expect(t.answerOf("t-sep")).not.toContain("Part one.");
 
         // SWARM-PROMPT TRIPWIRE: the platform's override must be what the
         // MODEL actually sees as the fan-out tool's description — not the

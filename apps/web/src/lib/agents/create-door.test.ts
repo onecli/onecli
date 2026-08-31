@@ -6,7 +6,7 @@ const byo = { kind: "byo" as const };
 const hosted = { kind: "hosted" as const };
 
 // The self-host / fallback arm: no org world in play.
-const open = { orgByoLegacy: null };
+const open = { orgByoLegacy: null, orgByoEnabled: null };
 
 describe("createDoor (self-host / org world unknown — the workspace-derived arm)", () => {
   it("gives a brand-new user the hosted door alone", () => {
@@ -96,10 +96,52 @@ describe("createDoor (cloud — the org's creation world is authoritative)", () 
         "absent",
         "loading",
       ] as const) {
-        expect(createDoor({ agents, availability, orgByoLegacy: false })).toBe(
-          "hosted",
-        );
+        expect(
+          createDoor({
+            agents,
+            availability,
+            orgByoLegacy: false,
+            orgByoEnabled: false,
+          }),
+        ).toBe("hosted");
       }
+    }
+  });
+
+  it("gives a MIXED-world org the hosted-primary split door in every state", () => {
+    // byoLegacy=false + byoEnabled=true (2026-08-29): hosted stays primary,
+    // BYO creation is one click away. Availability doesn't gate the chevron
+    // — BYO needs no runner, and the hosted-world door already ignores
+    // availability on cloud.
+    for (const agents of [[], [byo], [hosted, byo], undefined]) {
+      for (const availability of [
+        "ready",
+        "offline",
+        "absent",
+        "loading",
+      ] as const) {
+        expect(
+          createDoor({
+            agents,
+            availability,
+            orgByoLegacy: false,
+            orgByoEnabled: true,
+          }),
+        ).toBe("hosted-with-byo");
+      }
+    }
+  });
+
+  it("never consults byoEnabled in a BYO-world org — byoLegacy wins", () => {
+    for (const orgByoEnabled of [false, true, null]) {
+      expect(
+        createDoor({
+          agents: [byo],
+          availability: "ready",
+          orgByoLegacy: true,
+          orgByoEnabled,
+        }),
+      ).toBe("byo-with-hosted");
     }
   });
 
@@ -108,7 +150,12 @@ describe("createDoor (cloud — the org's creation world is authoritative)", () 
     // new workspace must not be wrongly hosted-only.
     for (const agents of [[], [hosted], [byo], undefined]) {
       expect(
-        createDoor({ agents, availability: "ready", orgByoLegacy: true }),
+        createDoor({
+          agents,
+          availability: "ready",
+          orgByoLegacy: true,
+          orgByoEnabled: false,
+        }),
       ).toBe("byo-with-hosted");
     }
   });
@@ -116,7 +163,12 @@ describe("createDoor (cloud — the org's creation world is authoritative)", () 
   it("drops a BYO-world org to the plain BYO door where no hosted surface exists", () => {
     for (const availability of ["absent", "loading"] as const) {
       expect(
-        createDoor({ agents: [byo], availability, orgByoLegacy: true }),
+        createDoor({
+          agents: [byo],
+          availability,
+          orgByoLegacy: true,
+          orgByoEnabled: false,
+        }),
       ).toBe("byo");
     }
   });

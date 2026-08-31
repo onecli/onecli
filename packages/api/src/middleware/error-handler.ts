@@ -1,7 +1,8 @@
 import type { ErrorHandler } from "hono";
 import type { ContentfulStatusCode } from "hono/utils/http-status";
 import { ServiceError, type ServiceErrorCode } from "../services/errors";
-import { SlackApiError } from "../services/channels/providers/slack/slack-api";
+import { ChannelProviderApiError } from "../services/channels/errors";
+import { channelProvider } from "../services/channels/registry";
 import { logger } from "../lib/logger";
 
 const STATUS_MAP = {
@@ -45,15 +46,17 @@ export const errorHandler: ErrorHandler = (err, c) => {
       STATUS_MAP[err.code] ?? (500 as const),
     );
   }
-  // A Slack API refusal reaching here is a bad-input outcome the user can act
-  // on (an expired token, `managed_app_limit_reached`, …), not a server bug —
-  // surface Slack's own code as a 422 rather than a blank 500. The plan
-  // requires these codes reach the user verbatim.
-  if (err instanceof SlackApiError) {
+  // A channel provider's API refusal reaching here is a bad-input outcome the
+  // user can act on (an expired token, `managed_app_limit_reached`, …), not a
+  // server bug — surface the provider's own code as a 422 rather than a blank
+  // 500. The plan requires these codes reach the user verbatim. Branches on
+  // the neutral base class; the provider's display name comes from the
+  // registry, so nothing Slack-shaped is imported here.
+  if (err instanceof ChannelProviderApiError) {
     return c.json(
       {
         error: {
-          message: `Slack rejected the request (${err.code}).`,
+          message: `${channelProvider(err.providerId).displayName} rejected the request (${err.code}).`,
           type: "validation_error",
         },
       },

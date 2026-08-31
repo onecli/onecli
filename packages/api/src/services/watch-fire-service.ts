@@ -68,7 +68,7 @@ export const buildWatchRunMessage = (watch: DueWatchFire): string => {
   const destination = watch.originConversationId
     ? "it reaches the chat this watch belongs to"
     : "it is kept as this run's record";
-  const header = `[Watch on process "${label}" fired: ${triggerSentence(watch)} — triggered automatically, not by a person typing. Do the task below and finish with a concise report; ${destination}.]`;
+  const header = `[Watch on process "${label}" fired: ${triggerSentence(watch)} — triggered automatically, not by a person typing. Do the task below and finish with a SHORT report — outcome first, then only what changed or needs attention, a few lines at most; ${destination}.]`;
   const excerpt = watch.excerpt
     ? `\n\n[Recent output:]\n${stripControl(watch.excerpt)}`
     : "";
@@ -91,7 +91,7 @@ export const buildConsolidatedWakeMessage = (
     const only = watches[0];
     if (only) return buildWatchRunMessage(only);
   }
-  const header = `[Platform wake: ${watches.length} background task(s) you were watching finished — triggered automatically, not by a person typing. This runs in the chat the work belongs to. Do what each item below asks and give one concise combined report directly in this reply.]`;
+  const header = `[Platform wake: ${watches.length} background task(s) you were watching finished — triggered automatically, not by a person typing. This runs in the chat the work belongs to. Do what each item below asks and give one SHORT combined report directly in this reply — the outcome per item in a line each, plus anything needing attention.]`;
 
   // Group by identical prompt text, preserving first-seen order.
   const groups = new Map<string, DueWatchFire[]>();

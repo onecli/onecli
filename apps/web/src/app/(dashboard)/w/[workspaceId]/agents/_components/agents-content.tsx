@@ -55,16 +55,19 @@ export const AgentsContent = ({
     agents,
     availability,
     orgByoLegacy: IS_CLOUD ? (org?.byoLegacy ?? null) : null,
+    orgByoEnabled: IS_CLOUD ? (org?.byoEnabled ?? null) : null,
   });
   // A legacy user's move to hosted is a migration, so their hosted entry books
-  // the onboarding call; a new user goes straight into creation. Cloud only:
-  // the call migrates them onto OUR runners. A self-host deployment's hosted
-  // agents run on its own runner — there is nothing for us to migrate, so its
-  // chevron opens hosted creation directly.
+  // the onboarding call; everyone else goes straight into creation. Cloud
+  // only, and only the BYO world: the call migrates a BYO-world org onto OUR
+  // runners. The mixed world (`hosted-with-byo`) is already living on them —
+  // its hosted primary opens creation, never the call. A self-host
+  // deployment's hosted agents run on its own runner — there is nothing for
+  // us to migrate, so its chevron opens hosted creation directly.
   const onCreateHosted = () =>
-    door === "hosted" || !IS_CLOUD
-      ? setHostedOpen(true)
-      : setOnboardingOpen(true);
+    IS_CLOUD && door === "byo-with-hosted"
+      ? setOnboardingOpen(true)
+      : setHostedOpen(true);
 
   // `?new=1` (the primary button's landing): open the create flow on arrival
   // and strip the param, so a refresh doesn't reopen it.
@@ -79,10 +82,10 @@ export const AgentsContent = ({
   // (`createDoor` treats `undefined` as "still loading" and falls back to
   // BYO), on cloud the org's world (an org-world miss would drop a BYO-world
   // user into hosted creation instead of the onboarding call), and
-  // availability — EXCEPT for a hosted-world org, whose door ignores
-  // availability entirely: a failed instance read parks availability on
-  // "loading" forever, and this link must not stall while the page happily
-  // paints the hosted door.
+  // availability — EXCEPT for a byoLegacy=false org (the hosted AND mixed
+  // worlds), whose door ignores availability entirely: a failed instance
+  // read parks availability on "loading" forever, and this link must not
+  // stall while the page happily paints the hosted door.
   //
   // The guard is the PARAM's presence, never a latch: stripping it is what
   // makes this fire once, so pressing the button again on this same page
@@ -191,7 +194,7 @@ export const AgentsContent = ({
                 door over an empty list, where the visible primary is BYO and
                 promising the brief-and-chat flow would point at a button that
                 isn't there. */}
-            {door === "hosted"
+            {door === "hosted" || door === "hosted-with-byo"
               ? "Create an agent, give it a brief, and start chatting."
               : "Create an agent to generate an access token for connecting to the gateway."}
           </p>

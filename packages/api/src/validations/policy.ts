@@ -1,3 +1,4 @@
+import { networkHostPatternShapeError } from "./secret";
 import { z } from "zod";
 import { ruleConditionSchema } from "./policy-rule";
 
@@ -60,7 +61,20 @@ export const policyTargetSchema = z.discriminatedUnion("kind", [
   }),
   z.object({
     kind: z.literal("network"),
-    hostPattern: z.string().min(1).max(1000),
+    // Shape-checked like a secret's, minus the breadth rules: a network target
+    // only decides, never selects a credential, so a broad fence is legitimate
+    // (see `networkHostPatternShapeError`). What it rejects is a pattern the
+    // matcher cannot honour — a partial-label or trailing wildcard.
+    hostPattern: z
+      .string()
+      .min(1)
+      .max(1000)
+      .superRefine((v, ctx) => {
+        const problem = networkHostPatternShapeError(v);
+        if (problem !== null) {
+          ctx.addIssue({ code: "custom", message: problem });
+        }
+      }),
     pathPattern: z.string().max(1000).optional(),
     method: methodSchema.optional(),
   }),

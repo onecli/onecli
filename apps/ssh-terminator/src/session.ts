@@ -61,8 +61,9 @@ const PROGRESS_THROTTLE_MS = 10_000;
  */
 const BANNER_DRAIN_TIMEOUT_MS = 2_000;
 
-/** Resolves when the write reports flushed, or when the bound elapses. */
-const flushed = (write: (done: () => void) => void): Promise<void> =>
+/** Resolves when `settle` reports done, or when the drain bound elapses —
+ * never rejects, so a wedged peer cannot pin a closing session's socket. */
+const drainBounded = (settle: (done: () => void) => void): Promise<void> =>
   new Promise<void>((resolve) => {
     let settled = false;
     const finish = (): void => {
@@ -74,11 +75,31 @@ const flushed = (write: (done: () => void) => void): Promise<void> =>
     const timer = setTimeout(finish, BANNER_DRAIN_TIMEOUT_MS);
     timer.unref();
     try {
-      write(finish);
+      settle(finish);
     } catch {
       finish();
     }
   });
+
+/**
+ * Resolves when the channel reports closed, or when the bound elapses.
+ *
+ * The write-flush callback is a necessary but WEAK barrier: it proves the
+ * banner bytes reached our socket, not that the client processed them. On a
+ * loaded host the DISCONNECT that `endConnection()` sends lands in the same
+ * client read batch as the banner, and OpenSSH exits on the disconnect
+ * without flushing what it buffered — the exact refusal-path failure
+ * documented at REFUSAL_DRAIN_TIMEOUT_MS (server.ts). The channel's 'close'
+ * event is the strong barrier the refusal path already uses: it fires on the
+ * client's CHANNEL_CLOSE ack, which the client only sends after it has read
+ * the banner data ahead of it. Registered BEFORE `channel.end()` so the ack
+ * cannot be missed; channels that cannot report closure resolve immediately.
+ */
+const closeAcked = (channel: NotifiableChannel): Promise<void> => {
+  const once = channel.once?.bind(channel);
+  if (!once) return Promise.resolve();
+  return drainBounded((done) => once("close", done));
+};
 
 export class WakeTimeoutError extends Error {
   constructor() {
@@ -120,6 +141,9 @@ export interface ConnectionSessionInput {
 export interface NotifiableChannel {
   write(data: string, flushed?: () => void): boolean;
   end(): void;
+  /** Close-ack barrier for bannered closes (see closeAcked). Optional so
+   * plain test fakes stay valid; ssh2's ServerChannel satisfies it. */
+  once?(event: "close", listener: () => void): unknown;
 }
 
 export interface ConnectionSession<T> {
@@ -258,8 +282,17 @@ export const createConnectionSession = <T>(
       for (const { channel, hasPty } of channels) {
         try {
           if (banner && hasPty) {
+            // Two barriers, both bounded: the local write flush AND the
+            // client's CHANNEL_CLOSE ack (closeAcked — subscribed before
+            // end() so it cannot be missed). The flush alone proved too
+            // weak: it races the DISCONNECT into the client's same read
+            // batch on a loaded host, and OpenSSH exits without printing
+            // the banner.
+            const acked = closeAcked(channel);
             flushes.push(
-              flushed((done) => channel.write(`\r\n${banner}\r\n`, done)),
+              // The write flush: the banner bytes reached our socket.
+              drainBounded((done) => channel.write(`\r\n${banner}\r\n`, done)),
+              acked,
             );
           }
           channel.end();

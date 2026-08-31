@@ -88,6 +88,10 @@ export interface RuleTargetSpec {
   /** `kind: "connection"` — index into `WorldSpec.appConnections`; the rule
    * binds to that specific connection (per-connection decisions). */
   readonly connectionIndex?: number;
+  /** `kind: "connection" | "app"` - catalog tool ids narrowing the target to
+   * those tools' endpoint fan-out (the production grant stacks' shape). Empty
+   * or omitted = the whole app. */
+  readonly tools?: ReadonlyArray<string>;
 }
 
 /** A `body contains` condition. The matcher lowercases both sides. */
@@ -234,14 +238,21 @@ const targetRow = (
   }
   if (kind === "connection") {
     // The CHECK rejects path/method narrowing columns on a connection row;
-    // narrowing is the `appTools` axis, which no scenario drives yet.
+    // narrowing is the `appTools` axis (`tools` - the grant stacks' shape).
     const connectionId = connectionIds[target.connectionIndex ?? -1];
     if (connectionId === undefined) {
       throw new Error(
         `${id}: connectionIndex ${String(target.connectionIndex)} does not name a seeded connection (${String(connectionIds.length)} seeded)`,
       );
     }
-    return { id, kind, appConnection: { connect: { id: connectionId } } };
+    return {
+      id,
+      kind,
+      appConnection: { connect: { id: connectionId } },
+      ...(target.tools !== undefined && target.tools.length > 0
+        ? { appTools: [...target.tools] }
+        : {}),
+    };
   }
   if (kind === "app") {
     if (target.provider === undefined) {
@@ -253,6 +264,9 @@ const targetRow = (
       kind,
       appProvider: target.provider,
       appConnectionScope: target.connectionScope ?? null,
+      ...(target.tools !== undefined && target.tools.length > 0
+        ? { appTools: [...target.tools] }
+        : {}),
     };
   }
   if (target.hostPattern === undefined) {

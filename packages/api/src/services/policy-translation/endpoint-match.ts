@@ -9,7 +9,7 @@ import type { OldCondition, PolicyRequest } from "./types";
 // discovery bridge, exactly as policy.rs::matches_request does.
 
 /**
- * Port of `apps/gateway/src/ee/condition_match.rs::matches`. Absent/empty
+ * Port of `apps/gateway/crates/policy/src/condition_match.rs::matches`. Absent/empty
  * conditions match; each condition is AND-ed; only `(body, contains)` is
  * meaningful (case-insensitive substring, empty/absent body → false); any other
  * target/operator matches (the `_ => true` arm).
@@ -42,16 +42,21 @@ const conditionMatches = (
   return true;
 };
 
-// Port of `policy.rs::is_git_push_discovery` — `/info/refs?service=git-receive-pack`.
-const isGitPushDiscovery = (path: string): boolean => {
+// Port of `policy.rs::is_git_discovery` - `/info/refs?service=<pack-service>`.
+const isGitDiscovery = (path: string, service: string): boolean => {
   const qIdx = path.indexOf("?");
   const base = qIdx === -1 ? path : path.slice(0, qIdx);
   const query = qIdx === -1 ? "" : path.slice(qIdx + 1);
   return (
     base.endsWith("/info/refs") &&
-    query.split("&").some((p) => p === "service=git-receive-pack")
+    query.split("&").some((p) => p === `service=${service}`)
   );
 };
+
+// The two git-over-HTTPS pack services whose POST rules bridge to their GET
+// discovery request (mirrors the `["git-receive-pack", "git-upload-pack"]`
+// array in `policy.rs::matches_request`).
+const GIT_PACK_SERVICES = ["git-receive-pack", "git-upload-pack"] as const;
 
 export interface EndpointPattern {
   pathPattern: string;
@@ -61,8 +66,11 @@ export interface EndpointPattern {
 
 /**
  * Port of `policy.rs::matches_request` (host excluded — matched by the caller).
- * A rule blocking `POST …/git-receive-pack` also matches the preceding
- * `GET …/info/refs?service=git-receive-pack` push-discovery request.
+ * A rule on a git pack service (`POST …/git-receive-pack` or
+ * `…/git-upload-pack`) also matches its preceding
+ * `GET …/info/refs?service=<service>` discovery request - so a push BLOCK
+ * kills the discovery too, and a clone/pull ALLOW under a deny-by-default
+ * grant stack lets the discovery through.
  */
 export const endpointMatches = (
   request: PolicyRequest,
@@ -75,12 +83,15 @@ export const endpointMatches = (
     conditionsMatch(pattern.conditions, request.body);
   if (direct) return true;
 
-  if (
-    pattern.pathPattern.endsWith("/git-receive-pack") &&
-    asciiLower(request.method) === "get" &&
-    isGitPushDiscovery(request.path)
-  ) {
-    return conditionsMatch(pattern.conditions, request.body);
+  if (asciiLower(request.method) === "get") {
+    for (const service of GIT_PACK_SERVICES) {
+      if (
+        pattern.pathPattern.endsWith(`/${service}`) &&
+        isGitDiscovery(request.path, service)
+      ) {
+        return conditionsMatch(pattern.conditions, request.body);
+      }
+    }
   }
   return false;
 };

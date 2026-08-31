@@ -173,6 +173,44 @@ describe("POST /v1/agents", () => {
     expect(services.createAgent).not.toHaveBeenCalled();
   });
 
+  it("400s an unknown harness without touching the service", async () => {
+    // The column is a free string (the adapter-#2 seam), but the API refuses
+    // ids no composition root can boot — a typo would silently run the
+    // default adapter otherwise.
+    const res = await app.request("/v1/agents", {
+      method: "POST",
+      headers: AUTH,
+      body: JSON.stringify({
+        name: "N",
+        identifier: "n",
+        kind: "hosted",
+        harness: "jcodee",
+      }),
+    });
+    expect(res.status).toBe(400);
+    expect(await res.json()).toMatchObject({ error: expect.any(String) });
+    expect(services.createAgent).not.toHaveBeenCalled();
+  });
+
+  it('keeps "fake" creatable — hosted-e2e drives it through this real API', async () => {
+    const res = await app.request("/v1/agents", {
+      method: "POST",
+      headers: AUTH,
+      body: JSON.stringify({
+        name: "Fake",
+        identifier: "fake-agent",
+        kind: "hosted",
+        harness: "fake",
+      }),
+    });
+    expect(res.status).toBe(201);
+    expect(services.createAgent).toHaveBeenCalledWith(
+      "p1",
+      expect.objectContaining({ harness: "fake" }),
+      "user-1",
+    );
+  });
+
   it("400s hosted-only fields on a byo create", async () => {
     const res = await app.request("/v1/agents", {
       method: "POST",

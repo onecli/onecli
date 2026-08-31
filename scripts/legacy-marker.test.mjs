@@ -17,7 +17,7 @@ const MARKER = ["LEGACY(", "next-major)"].join("");
 
 const SITES = [
   "packages/api/src/lib/public-origins.ts",
-  "apps/gateway/src/gateway/response.rs",
+  "apps/gateway/crates/context/src/lib.rs",
   "scripts/install.sh",
   "docker/docker-compose.yml",
   "apps/web/next.config.js",

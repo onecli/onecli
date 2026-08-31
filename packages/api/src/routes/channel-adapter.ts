@@ -27,7 +27,10 @@ import {
 import { decideApprovalFromChannel } from "../services/channels/channel-approval-service";
 import { rotateStaleIntegrations } from "../services/channels/channel-integration-service";
 import { clearTurnReceipts } from "../services/channels/turn-receipt-service";
-import { dispatchSlackEvent } from "../services/channels/providers/slack/dispatch";
+import {
+  channelProvider,
+  isChannelProviderId,
+} from "../services/channels/registry";
 import { readTranscriptEvents } from "../services/turn-service";
 import {
   adapterApprovalHealthSchema,
@@ -187,13 +190,20 @@ export const channelAdapterRoutes = () => {
 
     // The adapter names the presence; resolve its identity for the echo
     // guard with one narrow query (never the full decrypted config feed).
+    // `provider` picks the interpreter from the registry — the route stays
+    // provider-neutral (§3.16).
     const presence = await db.agentChannel.findUnique({
       where: { id: body.presenceId },
-      select: { identityRef: true },
+      select: { identityRef: true, provider: true },
     });
     if (!presence) throw new ServiceError("NOT_FOUND", "Unknown presence");
+    if (!isChannelProviderId(presence.provider)) {
+      // A DB row from a build that knew a provider this one does not —
+      // refuse loudly rather than misinterpret its events as Slack's.
+      throw new ServiceError("UNPROCESSABLE", "Unknown channel provider");
+    }
 
-    const result = await dispatchSlackEvent({
+    const result = await channelProvider(presence.provider).dispatchInbound({
       presenceId: body.presenceId,
       identityRef: presence.identityRef,
       event: body.event,

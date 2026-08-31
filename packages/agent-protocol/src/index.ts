@@ -25,7 +25,7 @@ export type {
   TurnFailureCode,
 } from "./failure-codes";
 
-export { AGENT_EFFORTS } from "./harness";
+export { AGENT_EFFORTS, KNOWN_AGENT_HARNESSES } from "./harness";
 export type {
   AgentEffort,
   Harness,
@@ -33,6 +33,7 @@ export type {
   HarnessBackgroundTasks,
   HarnessCapabilities,
   HarnessSession,
+  KnownAgentHarness,
   StartSessionOptions,
   SteerInput,
   TurnImage,

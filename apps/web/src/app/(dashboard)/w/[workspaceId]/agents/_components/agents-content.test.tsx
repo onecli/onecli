@@ -38,7 +38,9 @@ const state = vi.hoisted(() => ({
   availability: "ready" as HostedAvailability,
   // The org's creation world; undefined = the read failed (data absent,
   // isPending false), which must fall back, never lock the page.
-  org: { byoLegacy: false } as { byoLegacy: boolean } | undefined,
+  org: { byoLegacy: false, byoEnabled: false } as
+    | { byoLegacy: boolean; byoEnabled: boolean }
+    | undefined,
   orgPending: false,
   quota: {
     current: 1,
@@ -137,7 +139,7 @@ const agent = (kind: string, id = `ag-${kind}`) => ({
 beforeEach(() => {
   state.agents = [];
   state.availability = "ready";
-  state.org = { byoLegacy: false };
+  state.org = { byoLegacy: false, byoEnabled: false };
   state.orgPending = false;
   state.quota = {
     current: 1,
@@ -162,7 +164,7 @@ describe("the agents page create door", () => {
   });
 
   it("keeps a BYO-world org's primary button on the access-token flow", async () => {
-    state.org = { byoLegacy: true };
+    state.org = { byoLegacy: true, byoEnabled: false };
     state.agents = [agent("byo")];
     renderPage();
     await userEvent.click(
@@ -174,7 +176,7 @@ describe("the agents page create door", () => {
   });
 
   it("offers a BYO-world org the onboarding call behind the chevron", async () => {
-    state.org = { byoLegacy: true };
+    state.org = { byoLegacy: true, byoEnabled: false };
     state.agents = [agent("byo")];
     renderPage();
     await userEvent.click(
@@ -209,7 +211,7 @@ describe("the agents page create door", () => {
   it("gives a HOSTED-world org the hosted door even beside its old BYO agents", async () => {
     // The org world, not the workspace's agents, decides (§3.10 re-decided):
     // the old agents keep working, but creation is hosted-only now.
-    state.org = { byoLegacy: false };
+    state.org = { byoLegacy: false, byoEnabled: false };
     state.agents = [agent("byo")];
     renderPage();
     expect(
@@ -219,10 +221,37 @@ describe("the agents page create door", () => {
     expect(screen.getByPlaceholderText(/Support Triage/i)).toBeTruthy();
   });
 
+  it("keeps a MIXED-world org's primary on hosted CREATION — never the call", async () => {
+    // The mixed world (byoEnabled, 2026-08-29): these orgs are already
+    // onboarded — their hosted primary opens the create dialog directly.
+    state.org = { byoLegacy: false, byoEnabled: true };
+    state.agents = [agent("byo")];
+    renderPage();
+    await userEvent.click(screen.getByRole("button", { name: /new agent/i }));
+    expect(screen.getByPlaceholderText(/Support Triage/i)).toBeTruthy();
+    expect(screen.queryByText(/book 15 minutes/i)).toBeNull();
+  });
+
+  it("offers a MIXED-world org BYO creation behind the chevron — the real dialog, no call", async () => {
+    state.org = { byoLegacy: false, byoEnabled: true };
+    state.agents = [];
+    renderPage();
+    await userEvent.click(
+      screen.getByRole("button", { name: /more ways to create an agent/i }),
+    );
+    await userEvent.click(
+      await screen.findByRole("menuitem", { name: /new byo agent/i }),
+    );
+    // The BYO dialog is the one with an SDK identifier field — and it is
+    // creation, not the onboarding booking.
+    expect(screen.getByLabelText(/identifier/i)).toBeTruthy();
+    expect(screen.queryByText(/book 15 minutes/i)).toBeNull();
+  });
+
   it("gives a BYO-world org the split door even in a FRESH workspace", async () => {
     // The exact miss §3.10 item 4 called out: a BYO-world org's new workspace
     // must not be wrongly hosted-only.
-    state.org = { byoLegacy: true };
+    state.org = { byoLegacy: true, byoEnabled: false };
     state.agents = [];
     renderPage();
     expect(
@@ -255,7 +284,7 @@ describe("the agents page create door", () => {
   });
 
   it("leaves a BYO-world runner-less deployment exactly as it was: one BYO button", async () => {
-    state.org = { byoLegacy: true };
+    state.org = { byoLegacy: true, byoEnabled: false };
     state.availability = "absent";
     state.agents = [agent("byo")];
     renderPage();
@@ -269,19 +298,24 @@ describe("the agents page create door", () => {
   });
 
   it("shows exactly ONE create button in every state — the point of the merge", () => {
-    for (const [availability, agents, byoLegacy] of [
-      ["ready", [], false],
-      ["ready", [agent("byo")], false],
-      ["ready", [], true],
-      ["ready", [agent("byo")], true],
-      ["offline", [agent("byo")], true],
-      ["absent", [agent("byo")], true],
-      ["absent", [agent("byo")], false],
-      ["loading", [], false],
+    for (const [availability, agents, byoLegacy, byoEnabled] of [
+      ["ready", [], false, false],
+      ["ready", [agent("byo")], false, false],
+      ["ready", [], true, false],
+      ["ready", [agent("byo")], true, false],
+      ["offline", [agent("byo")], true, false],
+      ["absent", [agent("byo")], true, false],
+      ["absent", [agent("byo")], false, false],
+      ["loading", [], false, false],
+      // The mixed world: hosted primary + BYO chevron is still ONE control.
+      ["ready", [], false, true],
+      ["ready", [agent("byo")], false, true],
+      ["absent", [agent("byo")], false, true],
+      ["loading", [], false, true],
     ] as const) {
       state.availability = availability;
       state.agents = [...agents];
-      state.org = { byoLegacy };
+      state.org = { byoLegacy, byoEnabled };
       renderPage();
       const creates = screen
         .getAllByRole("button")
@@ -312,7 +346,7 @@ describe("the agents page create door", () => {
     cleanup();
     // BYO-world arm: the visible primary is BYO, and the copy must describe
     // it, not the hosted flow behind the chevron.
-    state.org = { byoLegacy: true };
+    state.org = { byoLegacy: true, byoEnabled: false };
     state.agents = undefined;
     renderPage();
     expect(screen.getByRole("button", { name: /create agent/i })).toBeTruthy();
@@ -332,7 +366,7 @@ describe("the create door as the routed page composes it", () => {
   });
 
   it("keeps the split shape when the EE button is the primary", async () => {
-    state.org = { byoLegacy: true };
+    state.org = { byoLegacy: true, byoEnabled: false };
     state.agents = [agent("byo")];
     renderComposed();
     // The quota button must carry the flat inner edge through, or the pair
@@ -363,7 +397,7 @@ describe("the create door as the routed page composes it", () => {
   });
 
   it("does not let the quota block the onboarding CALL — it costs no slot", async () => {
-    state.org = { byoLegacy: true };
+    state.org = { byoLegacy: true, byoEnabled: false };
     state.agents = [agent("byo")];
     state.quota = { ...state.quota, atLimit: true, current: 10 };
     renderComposed();

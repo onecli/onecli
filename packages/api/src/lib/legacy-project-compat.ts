@@ -38,7 +38,7 @@ import { logger } from "./logger";
  * - `apps/api-server/src/app.ts`: drop `LEGACY_PROJECT_HEADER` from CORS
  * - `middleware/auth.ts` (2 sites): strip the "(formerly X-Project-Id)"
  *   hint from the error messages (and their pinned tests)
- * - and the sibling gateway module `apps/gateway/src/compat.rs`
+ * - and the sibling gateway module `apps/gateway/crates/common/src/compat.rs`
  */
 
 /** Exported for the api-server CORS allow-list (browser callers preflight it). */

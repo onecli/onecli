@@ -32,7 +32,7 @@ const PROOF_URL = proofDatabaseUrl();
 
 type Db = typeof import("@onecli/db").db;
 type SharedInstall =
-  typeof import("../services/channels/shared-install-service");
+  typeof import("../services/channels/providers/slack/shared-install-service");
 type OAuthState = typeof import("../../src/lib/oauth-state");
 type Providers = typeof import("../providers");
 
@@ -156,7 +156,8 @@ beforeAll(async () => {
   process.env.APP_URL = "https://app.sharedwire.test";
 
   ({ db } = await import("@onecli/db"));
-  sharedInstall = await import("../services/channels/shared-install-service");
+  sharedInstall =
+    await import("../services/channels/providers/slack/shared-install-service");
   oauthState = await import("../lib/oauth-state");
   const providers = await import("../providers");
   initSelfUrl = providers.initSelfUrl;

@@ -11,6 +11,13 @@
  * credentials. Client code gets its data from the channel endpoints.
  */
 
+// Type-only (erased at runtime, so no import cycle): the outcome unions are
+// the ingestion service's own — the doors' vocabulary, already neutral.
+import type {
+  GroupInviteOutcome,
+  IngestOutcome,
+} from "./channel-ingestion-service";
+
 export const CHANNEL_PROVIDER_IDS = ["slack"] as const;
 export type ChannelProviderId = (typeof CHANNEL_PROVIDER_IDS)[number];
 
@@ -22,6 +29,18 @@ export type ChannelProviderId = (typeof CHANNEL_PROVIDER_IDS)[number];
  */
 export const CHANNEL_TRANSPORTS = ["events", "socket"] as const;
 export type ChannelTransport = (typeof CHANNEL_TRANSPORTS)[number];
+
+/**
+ * Which app flavor a per-agent provider app WAS built as. "agent" = the
+ * provider's native agent UX (Slack: `features.agent_view` + the sessions
+ * work-status loader); "regular" = a plain bot. NEW apps are always "agent";
+ * "regular" survives as a per-presence stamp for pre-existing apps — the
+ * provider-side config baked the flavor in and (Slack) the agent flavor is
+ * irreversible per app, so a regular presence stays regular until it is
+ * detached and re-attached.
+ */
+export const CHANNEL_APP_MODES = ["agent", "regular"] as const;
+export type ChannelAppMode = (typeof CHANNEL_APP_MODES)[number];
 
 export const PRESENCE_STATUSES = [
   "pending_setup",
@@ -92,6 +111,101 @@ export type ChannelAttachmentFetch =
     };
 
 /**
+ * One inbound event's outcome, in neutral vocabulary — what the generic
+ * ingest door (`routes/channel-adapter.ts`) maps onto the adapter wire.
+ * `replyChannel`/`replyThreadTs`/`channel` are provider-opaque addresses
+ * the provider's interpreter minted; the ingest/invite outcome unions are
+ * the ingestion service's own (already provider-neutral).
+ */
+export type ChannelDispatchResult =
+  | { kind: "ignored"; reason: string }
+  | {
+      kind: "message";
+      call: { replyChannel: string; replyThreadTs: string | null };
+      outcome: IngestOutcome;
+    }
+  | {
+      kind: "invite";
+      call: { channel: string };
+      outcome: GroupInviteOutcome;
+    };
+
+/** The org settings page's shared-app posture — one view per org. */
+export interface ChannelSharedAppView {
+  /** ADVERTISE the shared app (the "Add to <provider>" door): the deployment
+   * has it configured and is reachable over public HTTPS. */
+  available: boolean;
+  /** The install carries a credential that can mint agent apps — the org
+   * needs no pasted automation credential. */
+  canMintAgentApps: boolean;
+  /** A NEW install would capture the agent-app minting grant. Until then the
+   * shared app is onboarding-only, so setup leads with the credential paste. */
+  installMintsAgentApps: boolean;
+  /** This org's tenant install, when one exists — returned regardless of
+   * `available`, so an install made from the provider's side stays visible
+   * (and removable) even while the deployment isn't advertising the door. */
+  installation: {
+    tenant: ChannelTenant;
+    botUserId: string | null;
+    createdAt: Date;
+  } | null;
+}
+
+/**
+ * A provider's OPTIONAL deployment-owned shared app: one app per deployment,
+ * installed per tenant with a consent click, powering onboarding and (when
+ * the consent granted it) minting per-agent apps without a pasted automation
+ * credential. Slack is the only implementation today; the generic services
+ * and routes reach the whole lifecycle through this facet alone, so "has no
+ * shared app" is the absence of the facet, never a provider-id comparison.
+ */
+export interface ChannelSharedApp {
+  /** The deployment configured this provider's shared app (env present). */
+  configured(): boolean;
+  view(organizationId: string): Promise<ChannelSharedAppView>;
+  /** Mint the consent URL. Side-effect free; the install lands on the
+   * provider's OAuth callback, possibly days later. */
+  startInstall(input: { organizationId: string; actorUserId: string }): {
+    installUrl: string;
+  };
+  /** Exchange a code parked by a marketplace-side install and name the
+   * tenant it belongs to — binding nothing yet (the informed-confirm step). */
+  inspectInstallCode(input: {
+    organizationId: string;
+    actorUserId: string;
+    code: string;
+  }): Promise<{ team: ChannelTenant; claim: string }>;
+  /** Bind an inspected claim to the caller's org. */
+  confirmInstallFromClaim(input: {
+    organizationId: string;
+    actorUserId: string;
+    claim: string;
+  }): Promise<{ organizationId: string; teamId: string }>;
+  /** The setup document a self-hosted operator creates THEIR shared app
+   * from, or null when the deployment cannot serve one. */
+  setupManifest(): unknown;
+  /** Disconnect the org's install (provider-side best-effort, local delete
+   * regardless). False = there was nothing to disconnect. */
+  disconnectInstall(organizationId: string): Promise<boolean>;
+  /** Does the org's install hold a credential that can mint agent apps? */
+  canMintApps(organizationId: string): Promise<boolean>;
+  /**
+   * The managed-apps arm of rotate-on-use: run `fn` with the install's mint
+   * credential. Answers null — WITHOUT having run `fn` — when there is no
+   * usable install, so the caller falls through to the org's automation
+   * credential. A refusal the provider recognizes as "this credential class
+   * may not mint" (Slack: `invalid_manager_app`) is recorded on the install
+   * and ALSO answers null — that refusal guarantees no app was created, so
+   * the caller's fall-through re-run of `fn` is safe. Any other `fn` error
+   * propagates: a timed-out-but-succeeded mint must never run twice.
+   */
+  tryMintWith<T>(input: {
+    organizationId: string;
+    fn: (accessToken: string, integrationId: string) => Promise<T>;
+  }): Promise<{ result: T } | null>;
+}
+
+/**
  * What one provider contributes to the generic layer. Deliberately only the
  * hooks the generic services call today — the altitude rule: generalize the
  * vocabulary and the dispatch, never speculate on a second provider's needs.
@@ -104,6 +218,29 @@ export interface ChannelProvider {
   id: ChannelProviderId;
   /** Human name for API-served copy ("Slack"). */
   displayName: string;
+
+  /**
+   * One raw inbound event → interpreted door call → outcome, for BOTH
+   * transports: the provider's HTTP events route and the socket adapter's
+   * ingest endpoint hand events here, so classification, the echo guard,
+   * and the fences cannot drift between them. The event payload is
+   * provider-opaque; `identityRef` is the presence's own identity (the echo
+   * guard's input); idempotency by `eventId` runs control-plane-side.
+   */
+  dispatchInbound(input: {
+    presenceId: string;
+    identityRef: string | null;
+    event: unknown;
+    eventId: string;
+  }): Promise<ChannelDispatchResult>;
+
+  /**
+   * The deployment-owned shared app, where the provider has one. Absent =
+   * the provider has no such concept, and every caller degrades to the
+   * pasted-credential arm (routes answer "no shared app" with the
+   * provider's display name).
+   */
+  sharedApp?: ChannelSharedApp;
 
   /**
    * Validate a pasted org automation credential and normalize it into what we
@@ -304,6 +441,26 @@ export interface ChannelProvider {
   }): Promise<void>;
 
   /**
+   * The provider's NATIVE thread work-status (Slack: the agent-session
+   * "Working…" loader) — the ack an agent-flavor app shows in a group thread
+   * instead of the receipt reaction. `working: true` turns it on when a turn
+   * is accepted; `false` clears it when the answer posts. THROWS on refusal
+   * (missing scope, plan-gated workspace, not an agent app): the caller's
+   * fallback to the reaction receipt depends on hearing the failure — this is
+   * the one receipt hook that must not swallow. Only meaningful for
+   * agent-flavor presences in threads; absent = the provider has no native
+   * work-status and reactions are all there is.
+   */
+  setThreadWorkStatus?(input: {
+    credentialsJson: string | null;
+    /** The provider-opaque conversation id (Slack: channel id). */
+    channel: string;
+    /** The thread root the status is keyed by (Slack: `thread_ts`). */
+    threadTs: string;
+    working: boolean;
+  }): Promise<void>;
+
+  /**
    * The paste floor's step 0: the setup document the user recreates the app
    * from by hand (Slack: the manifest JSON). Provider-defined shape; the
    * generic layer serves it opaquely.
@@ -323,6 +480,9 @@ export interface ChannelProvider {
   rebuildSetupUrls(input: {
     externalId: string;
     transport: ChannelTransport;
+    /** The ROW's stamp — a pre-existing pending "regular" attach must mint a
+     * consent URL granting exactly the scopes its remote manifest declared. */
+    appMode: ChannelAppMode;
     credentialsJson: string | null;
     oauthState: string | null;
   }): { installUrl: string | null; settingsUrl: string };

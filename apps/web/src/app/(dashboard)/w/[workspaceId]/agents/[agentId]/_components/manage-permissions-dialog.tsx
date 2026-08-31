@@ -30,6 +30,7 @@ import { usePlanGate } from "@/lib/plan-gate";
 import { ResourceScopeFields } from "@/lib/policy-editor/resource-scope";
 import { PermissionGroup } from "./permission-group";
 import type { ToolChoice } from "./tri-state-control";
+import { grantIntentFromChoices } from "./grant-intent";
 
 interface ManagePermissionsDialogProps {
   agentId: string;
@@ -184,19 +185,14 @@ export const ManagePermissionsDialog = ({
   // stored grant, or the picker's committed draft).
   const resourcesUnchanged =
     JSON.stringify(resources) === JSON.stringify(initialResources);
+  // Presentational only: whether the grant is full as STORED, used for the
+  // "customizing pins the tool list" notice. It must NOT gate what `handleSave`
+  // writes — see `grantIntentFromChoices`.
   const wasFull = grant === undefined || grant.access === "full";
-  const allAllow = toolIds.every((id) => choices[id] === "allow");
 
   const handleSave = () => {
     if (connection === null) return;
-    const allow = toolIds.filter((id) => choices[id] === "allow");
-    const ask = toolIds.filter((id) => choices[id] === "ask");
-    // Keeping every tool allowed keeps (or creates) the uncustomized
-    // whole-app grant — future catalog tools stay auto-allowed.
-    const base =
-      allAllow && wasFull
-        ? { access: "full" as const }
-        : { access: "custom" as const, allow, ask };
+    const base = grantIntentFromChoices(toolIds, choices);
     save.mutate(
       {
         agentId,

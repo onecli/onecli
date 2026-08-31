@@ -214,11 +214,20 @@ const expectedVerdicts = (
     for (const tool of group.tools) {
       const host = subst(tool.hostPattern);
       const verdicts = new Set<string>();
+      // Mirror `synthesizeBody`: GraphQL-tagged tools evaluate with a
+      // representative body of their own kind, exactly like the reflection.
+      const body =
+        tool.graphqlOps === "query"
+          ? JSON.stringify({ query: "query { oc-any }" })
+          : tool.graphqlOps === "mutation"
+            ? JSON.stringify({ query: "mutation { oc-any }" })
+            : undefined;
       for (const variant of allRuleVariants(tool)) {
         const outcome: PolicyOutcome = evaluatePolicyOutcome(rules, {
           host,
           path: subst(variant.pathPattern),
           method: variant.method ?? "GET",
+          body,
           agentId: "agent-1",
           userIds: [],
           groupIds: [],
@@ -337,6 +346,76 @@ describe("the agreement law (per-tool verdicts ≡ the evaluator)", () => {
     expect(read.verdict).toBe("allow");
     expect(read.rateLimit).toBe(100);
     expect(result.basis.credentialAttached).toBe(true);
+  });
+
+  it("github graphql: the panel splits the shared /graphql endpoint by operation kind", async () => {
+    // The Manage-permissions scenario the discrimination exists for: a grant
+    // stack with graphql_mutation (and create_pull) set to Never and
+    // graphql_query allowed. The panel must show exactly what the gateway
+    // enforces: queries allowed, mutations blocked - never the
+    // pre-discrimination lie where the shared endpoint read as one verdict.
+    // (Rule order is irrelevant here BY DESIGN: the body discrimination, not
+    // stack ordering, splits the shared endpoint.)
+    const blocked = simRow({
+      id: "r-blocked",
+      logicalId: "gh-blocked",
+      name: "GitHub: blocked",
+      action: "block",
+      priority: 1,
+      identities: [identityRow({ id: "i-b", agentId: "agent-1" })],
+      targets: [
+        targetRow({
+          kind: "app",
+          appProvider: "github",
+          appTools: ["create_pull", "graphql_mutation"],
+        }),
+      ],
+    });
+    const allowed = simRow({
+      id: "r-allowed",
+      logicalId: "gh-allowed",
+      name: "GitHub: allowed",
+      action: "allow",
+      priority: 2,
+      identities: [identityRow({ id: "i-a", agentId: "agent-1" })],
+      targets: [
+        targetRow({
+          id: "t-allowed",
+          kind: "app",
+          appProvider: "github",
+          appTools: ["graphql_query", "list_pulls"],
+        }),
+      ],
+    });
+    const terminal = simRow({
+      id: "r-terminal",
+      logicalId: "gh-terminal",
+      name: "GitHub: everything else",
+      action: "block",
+      priority: 3,
+      identities: [identityRow({ id: "i-t", agentId: "agent-1" })],
+      targets: [targetRow({ kind: "app", appProvider: "github" })],
+    });
+    armStubs({ workspaceRows: [blocked, allowed, terminal] });
+
+    const result = await effectiveAppPermissions(
+      { provider: "github", agentId: "agent-1" },
+      WORKSPACE_CTX,
+    );
+    const actual = new Map(
+      result.groups.flatMap((g) => g.tools.map((t) => [t.toolId, t.verdict])),
+    );
+    // The two rows share POST api.github.com /graphql, yet each shows its own
+    // setting - the discrimination at work.
+    expect(actual.get("graphql_query")).toBe("allow");
+    expect(actual.get("graphql_mutation")).toBe("block");
+    expect(actual.get("create_pull")).toBe("block");
+    expect(actual.get("list_pulls")).toBe("allow");
+    // And the agreement law still holds across the whole catalog.
+    const expected = expectedVerdicts("github", [blocked, allowed, terminal], {
+      hasInjections: false,
+    });
+    expect(actual).toEqual(expected);
   });
 
   it("mixed: a method-scoped network block splits a multi-method tool", async () => {

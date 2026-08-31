@@ -5,6 +5,7 @@ import { toast } from "sonner";
 import { Button } from "@onecli/ui/components/button";
 import {
   Dialog,
+  DialogBody,
   DialogContent,
   DialogDescription,
   DialogFooter,
@@ -161,7 +162,11 @@ export const CronDialog = ({
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="sm:max-w-md">
+      {/* The FRAME is fixed and the fields scroll inside it: a schedule's
+          prompt is a whole runbook in practice, and a dialog that grows with
+          it would carry its own title and Save button off-screen — with
+          nothing to scroll, since the dialog is positioned `fixed`. */}
+      <DialogContent className="flex max-h-[calc(100dvh-2rem)] flex-col sm:max-w-md">
         <DialogHeader>
           <DialogTitle>
             {editing ? "Edit schedule" : "New schedule"}
@@ -172,7 +177,10 @@ export const CronDialog = ({
           </DialogDescription>
         </DialogHeader>
 
-        <div className="space-y-4">
+        {/* `-m-1 p-1` buys the scroll box a 4px gutter: a focus ring is a
+            box-shadow, which adds nothing to scrollable overflow, so a ring on
+            an edge field would otherwise be shaved off by `overflow-y-auto`. */}
+        <DialogBody className="-m-1 space-y-4 p-1">
           <div className="space-y-1.5">
             <Label htmlFor="cron-name">Name</Label>
             <Input
@@ -192,6 +200,10 @@ export const CronDialog = ({
               onChange={(event) => setPrompt(event.target.value)}
               placeholder="Check the support inbox and summarize anything urgent."
               rows={3}
+              // `field-sizing-content` grows this field with what you type, so
+              // it needs a ceiling of its own: uncapped, a long prompt claims
+              // the whole body and pushes the schedule fields out of reach.
+              className="max-h-[min(18rem,32dvh)]"
               maxLength={10_000}
             />
           </div>
@@ -272,7 +284,7 @@ export const CronDialog = ({
               placeholder="America/Los_Angeles"
             />
           </div>
-        </div>
+        </DialogBody>
 
         <DialogFooter className="gap-2 sm:justify-between">
           {editing ? (

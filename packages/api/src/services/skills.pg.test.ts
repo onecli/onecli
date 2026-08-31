@@ -69,6 +69,7 @@ const resetAll = async () => {
     where: { agent: { identifier: { startsWith: P } } },
   });
   await db.agent.deleteMany({ where: { identifier: { startsWith: P } } });
+  await db.runner.deleteMany({ where: { id: { startsWith: P } } });
   await db.auditLog.deleteMany({ where: { userId: USER } });
   await db.user.deleteMany({ where: { id: USER } });
   await db.apiKey.deleteMany({ where: { workspaceId: { startsWith: P } } });
@@ -387,5 +388,154 @@ describe.skipIf(!PROOF_URL)("deletion paths", () => {
       await db.skill.count({ where: { organizationId: scratchOrg } }),
     ).toBe(0);
     expect(await db.organization.count({ where: { id: scratchOrg } })).toBe(0);
+  });
+});
+
+describe.skipIf(!PROOF_URL)("the agent door (the skill_* tools)", () => {
+  it("lists every tier that reaches the agent, disabled rows included, foreign rows never", async () => {
+    const agent = await seedAgent("lister");
+    await skillService.createSkill(
+      WORKSPACE,
+      { ...input("mine"), agentId: agent, enabled: false },
+      CREATOR,
+    );
+    await skillService.createSkill(WORKSPACE, input("shared"), CREATOR);
+    await skillService.createOrgSkill(ORG, input("org-wide"), CREATOR);
+    // Foreign-tenant negatives: same names elsewhere must not bleed in.
+    await skillService.createSkill(FOREIGN_WORKSPACE, input("shared"), CREATOR);
+    await skillService.createOrgSkill(FOREIGN_ORG, input("org-wide"), CREATOR);
+
+    const rows = await skillService.listSkillsReachingAgent(
+      agent,
+      WORKSPACE,
+      ORG,
+    );
+    expect(rows.map((row) => `${row.scope}:${row.name}`).sort()).toEqual([
+      "agent:mine",
+      "organization:org-wide",
+      "workspace:shared",
+    ]);
+    // The disabled own row is visible — that is how it gets re-enabled.
+    expect(rows.find((row) => row.name === "mine")?.enabled).toBe(false);
+  });
+
+  it("updates its own row by name and bumps only after a real change", async () => {
+    const agent = await seedAgent("updater");
+    await skillService.createSkill(
+      WORKSPACE,
+      { ...input("mine"), agentId: agent },
+      CREATOR,
+    );
+    const runner = await db.runner.create({
+      data: { id: `${P}runner`, name: "proof", token: `rnr_${P}tok` },
+      select: { id: true },
+    });
+    const sandbox = await db.sandbox.create({
+      data: {
+        agentId: agent,
+        runnerId: runner.id,
+        status: "running",
+        homeDesiredGeneration: 1,
+      },
+      select: { id: true },
+    });
+
+    const changed = await skillService.updateAgentSkillByName(
+      agent,
+      WORKSPACE,
+      ORG,
+      "mine",
+      { enabled: false },
+    );
+    expect(changed.noop).toBe(false);
+    expect(changed.skill.enabled).toBe(false);
+    const afterChange = await db.sandbox.findUniqueOrThrow({
+      where: { id: sandbox.id },
+      select: { homeDesiredGeneration: true },
+    });
+    expect(afterChange.homeDesiredGeneration).toBe(2);
+
+    const noop = await skillService.updateAgentSkillByName(
+      agent,
+      WORKSPACE,
+      ORG,
+      "mine",
+      { enabled: false },
+    );
+    expect(noop.noop).toBe(true);
+    const afterNoop = await db.sandbox.findUniqueOrThrow({
+      where: { id: sandbox.id },
+      select: { homeDesiredGeneration: true },
+    });
+    expect(afterNoop.homeDesiredGeneration).toBe(2);
+  });
+
+  it("a broader-tier name answers FORBIDDEN with the dashboard pointer, not a write", async () => {
+    const agent = await seedAgent("fenced");
+    await skillService.createSkill(WORKSPACE, input("shared"), CREATOR);
+    await expect(
+      skillService.updateAgentSkillByName(agent, WORKSPACE, ORG, "shared", {
+        enabled: false,
+      }),
+    ).rejects.toMatchObject({
+      code: "FORBIDDEN",
+      message: expect.stringContaining("dashboard"),
+    });
+    await expect(
+      skillService.deleteAgentSkillByName(agent, WORKSPACE, ORG, "shared"),
+    ).rejects.toMatchObject({ code: "FORBIDDEN" });
+    // The row survived both refusals.
+    expect(await db.skill.count({ where: { name: "shared" } })).toBe(1);
+  });
+
+  it("an unknown name — and ANOTHER AGENT'S name — answer hint-free NOT_FOUND", async () => {
+    const agent = await seedAgent("owner");
+    const otherAgent = await seedAgent("other");
+    await skillService.createSkill(
+      WORKSPACE,
+      { ...input("theirs"), agentId: otherAgent },
+      CREATOR,
+    );
+    // A sibling agent's row is invisible to this agent's door: same words as
+    // a name that exists nowhere.
+    for (const name of ["theirs", "never-existed"]) {
+      await expect(
+        skillService.updateAgentSkillByName(agent, WORKSPACE, ORG, name, {
+          enabled: false,
+        }),
+      ).rejects.toMatchObject({
+        code: "NOT_FOUND",
+        message: expect.stringContaining(`no agent skill named "${name}"`),
+      });
+    }
+  });
+
+  it("deletes its own row by name and bumps", async () => {
+    const agent = await seedAgent("deleter");
+    await skillService.createSkill(
+      WORKSPACE,
+      { ...input("mine"), agentId: agent },
+      CREATOR,
+    );
+    await skillService.deleteAgentSkillByName(agent, WORKSPACE, ORG, "mine");
+    expect(await db.skill.count({ where: { agentId: agent } })).toBe(0);
+  });
+
+  it("the update path re-checks the merged budget (files kept, content patched)", async () => {
+    const agent = await seedAgent("budget");
+    await skillService.createSkill(
+      WORKSPACE,
+      {
+        ...input("fat"),
+        agentId: agent,
+        files: [{ path: "ref.md", content: "x".repeat(20_000) }],
+      },
+      CREATOR,
+    );
+    await expect(
+      skillService.updateAgentSkillByName(agent, WORKSPACE, ORG, "fat", {
+        content: "y".repeat(13_000),
+      }),
+    ).rejects.toMatchObject({ code: "UNPROCESSABLE" });
   });
 });

@@ -29,7 +29,7 @@ import {
  * own session may have already seen the completion (the harness's internal
  * wake), so the prompt asks for a report either way — never a redo. */
 export const IMPLICIT_WAKE_PROMPT =
-  "A background task you started on this machine has finished. Check its outcome (process_status shows its output) and report the result concisely — your report reaches the chat this task belongs to. If you already handled this completion, just summarize the outcome.";
+  "A background task you started on this machine has finished. Check its outcome (process_status shows its output) and report the result in a line or two — outcome first; your report reaches the chat this task belongs to. If you already handled this completion, just summarize the outcome.";
 
 export interface ProcessObserverOptions {
   manager: ProcessManager;

@@ -328,7 +328,7 @@ const scimDataPlaneProbe = {
 const GATEWAY_COVERED: GatewayCovered[] = [
   {
     feature: "ha",
-    file: "apps/gateway/src/ee/ha.rs",
+    file: "apps/gateway/crates/ee/ee/src/ha.rs",
     testName: "ha_entitlement_check_is_table_driven",
     also: "the unlicensed e2e lane (apps/gateway-e2e/tests/unlicensed.test.ts) proves the startup bail black-box",
   },

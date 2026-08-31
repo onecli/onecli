@@ -5,7 +5,7 @@
  * - the api-server, which mounts better-auth and issues the cookie
  * - the browser client, which calls that mount
  * - the Rust gateway, which validates the same cookie on its own
- *   (`apps/gateway/src/auth.rs` — it cannot import this, so it hardcodes the
+ *   (`apps/gateway/crates/context/src/auth.rs` — it cannot import this, so it hardcodes the
  *   matching values and its tests pin them against a real cookie)
  *
  * Deliberately free of imports: this module is reachable from client bundles,

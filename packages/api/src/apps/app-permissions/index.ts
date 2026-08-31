@@ -11,6 +11,7 @@ export type {
 export {
   mapRuleActionToPermission,
   allGroupTools,
+  hostPatternsOf,
   toAppPermissionDefinitionSummary,
 } from "./types";
 

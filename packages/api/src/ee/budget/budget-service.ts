@@ -15,7 +15,7 @@ import type { SetBudgetInput } from "./budget-validations";
  * engine and the `budgets`/`budget_spends` tables) for a future budget
  * surface — which must bring its own authorization (these functions verify
  * only entitlement and that the secret is meterable, not who may budget it)
- * AND widen the gateway binder's eligibility (`apps/gateway/src/ee/budget/
+ * AND widen the gateway binder's eligibility (`apps/gateway/crates/ee/ee/src/budget/
  * binding.rs`, `BUDGET_ELIGIBLE_SCOPE`) in the same change, or budgets set
  * here would never bind or meter.
  */

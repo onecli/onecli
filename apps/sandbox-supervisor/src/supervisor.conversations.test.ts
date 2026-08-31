@@ -680,10 +680,13 @@ describe("the answer survives the turn", () => {
     expect(textsOf(t, "t1")).toEqual([]);
   });
 
-  it("text resuming after a tool batch starts a new paragraph", async () => {
-    // Distinct assistant messages within one turn used to glue mid-sentence
-    // ("…a different address?Got it — no email…", observed live). A tool
-    // batch between deltas is the message boundary the stream does expose.
+  it("drops narration before a tool batch — the last message is the answer", async () => {
+    // Distinct assistant messages within one turn used to be JOINED (first
+    // glued mid-sentence, then separated by a blank line). Both were wrong
+    // about what an answer IS: text before a tool call is the agent
+    // narrating its work, and publishing it as part of the reply produced
+    // the multi-screen chat walls seen live (2026-08-31). The narration
+    // still streams as deltas; only the closing message is the record.
     const t = createTestTransport();
     const run = runSupervisor(
       config(home("sup-answer-")),
@@ -703,18 +706,26 @@ describe("the answer survives the turn", () => {
     await t.until(() => t.of("turn.result").length === 1, "the turn");
     await t.finish(run);
 
-    expect(textsOf(t, "t1")).toEqual(["Part one.\n\nPart two."]);
+    expect(textsOf(t, "t1")).toEqual(["Part two."]);
   });
 
-  it("text resuming after a thinking block starts a new paragraph", async () => {
+  it("keeps a message whole when the model thinks MID-sentence", async () => {
+    // Thinking is NOT a message boundary. Reasoning interleaves inside one
+    // message — the vendor protocol says so itself by giving reasoning its
+    // own start/stop (`reasoning_done`) beside the text stream — so treating
+    // it as a boundary would publish "the retry loop." and silently drop the
+    // half of the sentence that names what broke.
+    //
+    // MUTATION-PROOF: add `thinking.delta` back to the boundary set and this
+    // fails with the truncated fragment.
     const t = createTestTransport();
     const run = runSupervisor(
       config(home("sup-answer-")),
       createFakeHarness({
         script: () => [
-          { type: "text.delta", text: "Before." },
-          { type: "thinking.delta", text: "hmm" },
-          { type: "text.delta", text: "After." },
+          { type: "text.delta", text: "The root cause is " },
+          { type: "thinking.delta", text: "how do I phrase this" },
+          { type: "text.delta", text: "the retry loop." },
           { type: "turn.done" },
         ],
       }),
@@ -725,7 +736,34 @@ describe("the answer survives the turn", () => {
     await t.until(() => t.of("turn.result").length === 1, "the turn");
     await t.finish(run);
 
-    expect(textsOf(t, "t1")).toEqual(["Before.\n\nAfter."]);
+    expect(textsOf(t, "t1")).toEqual(["The root cause is the retry loop."]);
+  });
+
+  it("still drops narration when a tool call sits inside the thinking", async () => {
+    // The two signals together: reasoning does not break the message, but
+    // the tool call between the two texts does.
+    const t = createTestTransport();
+    const run = runSupervisor(
+      config(home("sup-answer-")),
+      createFakeHarness({
+        script: () => [
+          { type: "text.delta", text: "Let me look." },
+          { type: "thinking.delta", text: "which file" },
+          { type: "tool.started", callId: "c1", name: "bash" },
+          { type: "tool.finished", callId: "c1", name: "bash", output: "ok" },
+          { type: "thinking.delta", text: "now I know" },
+          { type: "text.delta", text: "It was the retry loop." },
+          { type: "turn.done" },
+        ],
+      }),
+      t.transport,
+    );
+
+    t.push(deliver("t1", "cv-a"));
+    await t.until(() => t.of("turn.result").length === 1, "the turn");
+    await t.finish(run);
+
+    expect(textsOf(t, "t1")).toEqual(["It was the retry loop."]);
   });
 
   it("never opens the answer with a separator", async () => {

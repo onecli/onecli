@@ -1,7 +1,7 @@
 import { db } from "@onecli/db";
 
 // The TS mirror of the gateway's `find_connection_providers`
-// (apps/gateway/src/db.rs): the providers of the acting org+workspace app
+// (apps/gateway/crates/db/src/lib.rs): the providers of the acting org+workspace app
 // connections, so a `connection` target can resolve to the provider whose
 // catalog hosts it gates (the step-8 secret symmetry). ORG+WORKSPACE-FENCED on
 // both arms — a forged/foreign connection id resolves to NOTHING (it simply

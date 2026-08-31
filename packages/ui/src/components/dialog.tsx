@@ -60,8 +60,19 @@ function DialogContent({
       <DialogOverlay />
       <DialogPrimitive.Content
         data-slot="dialog-content"
+        // LOCAL DEVIATION from upstream shadcn (one segment, re-apply after a
+        // `shadcn add dialog`): `max-h-[calc(100dvh-2rem)] overflow-y-auto
+        // overscroll-contain`. Upstream bounds only the WIDTH, so a dialog
+        // whose content outgrows the viewport centers itself around the
+        // midpoint and hangs off both ends — and because it is `fixed`, the
+        // page cannot scroll to it either: the title and the footer buttons
+        // become literally unreachable. This is the floor that keeps every
+        // dialog operable. Dialogs with a known-long region should still lay
+        // themselves out as `flex flex-col` + `DialogBody` (below), which
+        // keeps the header, footer, and close button pinned while only the
+        // body scrolls; `cn` lets those override the `grid`/`max-h` here.
         className={cn(
-          "bg-background data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0 data-[state=closed]:zoom-out-95 data-[state=open]:zoom-in-95 fixed top-[50%] left-[50%] z-50 grid w-full max-w-[calc(100%-2rem)] translate-x-[-50%] translate-y-[-50%] gap-4 rounded-lg border p-6 shadow-lg duration-200 outline-none sm:max-w-lg",
+          "bg-background data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0 data-[state=closed]:zoom-out-95 data-[state=open]:zoom-in-95 fixed top-[50%] left-[50%] z-50 grid max-h-[calc(100dvh-2rem)] w-full max-w-[calc(100%-2rem)] translate-x-[-50%] translate-y-[-50%] gap-4 overflow-y-auto overscroll-contain rounded-lg border p-6 shadow-lg duration-200 outline-none sm:max-w-lg",
           className,
         )}
         {...props}
@@ -85,7 +96,33 @@ function DialogHeader({ className, ...props }: React.ComponentProps<"div">) {
   return (
     <div
       data-slot="dialog-header"
-      className={cn("flex flex-col gap-2 text-center sm:text-left", className)}
+      className={cn(
+        "flex shrink-0 flex-col gap-2 text-center sm:text-left",
+        className,
+      )}
+      {...props}
+    />
+  );
+}
+
+/**
+ * The scrolling middle of a dialog whose content can outgrow the viewport.
+ *
+ * Use inside a `flex flex-col` DialogContent: the frame then stays put and
+ * only this region scrolls, so the title, the close button, and the footer
+ * actions never leave the screen. `min-h-0` is load-bearing — without it a
+ * flex child refuses to shrink below its content and the scrollbar never
+ * appears. A plain div, not ScrollArea: a Radix viewport under a max-h
+ * parent clips silently.
+ */
+function DialogBody({ className, ...props }: React.ComponentProps<"div">) {
+  return (
+    <div
+      data-slot="dialog-body"
+      className={cn(
+        "min-h-0 flex-1 overflow-y-auto overscroll-contain",
+        className,
+      )}
       {...props}
     />
   );
@@ -103,7 +140,7 @@ function DialogFooter({
     <div
       data-slot="dialog-footer"
       className={cn(
-        "flex flex-col-reverse gap-2 sm:flex-row sm:justify-end",
+        "flex shrink-0 flex-col-reverse gap-2 sm:flex-row sm:justify-end",
         className,
       )}
       {...props}
@@ -146,6 +183,7 @@ function DialogDescription({
 
 export {
   Dialog,
+  DialogBody,
   DialogClose,
   DialogContent,
   DialogDescription,

@@ -47,7 +47,13 @@ vi.mock("@onecli/db", () => ({
       findUnique: async ({ where }: { where: { id: string } }) => {
         state.orgQueries.push(where);
         return where.id === ORG
-          ? { id: ORG, name: "Acme", slug: "acme", byoLegacy: true }
+          ? {
+              id: ORG,
+              name: "Acme",
+              slug: "acme",
+              byoLegacy: true,
+              byoEnabled: false,
+            }
           : null;
       },
     },
@@ -76,6 +82,7 @@ describe("GET /v1/org", () => {
     // The exact-key pin (the instance.test.ts convention): a new field must
     // be added here deliberately, and a leaked column fails loudly.
     expect(Object.keys(body).sort()).toEqual([
+      "byoEnabled",
       "byoLegacy",
       "id",
       "name",
@@ -86,6 +93,7 @@ describe("GET /v1/org", () => {
       name: "Acme",
       slug: "acme",
       byoLegacy: true,
+      byoEnabled: false,
     });
   });
 

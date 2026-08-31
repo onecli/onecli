@@ -564,14 +564,17 @@ export interface AgentWithGrantsSummary extends Agent {
 
 /** The current organization (`GET /v1/org`). `byoLegacy` is the org's
  * creation world on cloud (sandbox-platform §3.10, re-decided 2026-08-23):
- * false = hosted-only creation, true = BYO-only creation (hosted starts with
- * an onboarding call). Operated manually per org; inert on self-host, where
- * the web never fetches it. */
+ * false = hosted-first creation, true = BYO-only creation (hosted starts with
+ * an onboarding call). `byoEnabled` (the mixed world, 2026-08-29) is only
+ * read when `byoLegacy` is false: it additionally allows BYO creation beside
+ * the hosted default — the gradual-migration path. Both operated manually per
+ * org; inert on self-host, where the web never fetches them. */
 export interface OrgInfo {
   id: string;
   name: string;
   slug: string;
   byoLegacy: boolean;
+  byoEnabled: boolean;
 }
 
 /** Runtime instance metadata (`GET /v1/instance`) — the browser's only

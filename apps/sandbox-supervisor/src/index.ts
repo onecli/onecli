@@ -1,4 +1,8 @@
-import type { SupervisorTransport } from "@onecli/agent-protocol";
+import {
+  KNOWN_AGENT_HARNESSES,
+  type Harness,
+  type SupervisorTransport,
+} from "@onecli/agent-protocol";
 import { loadConfig, type SupervisorConfig } from "./config";
 import { createFakeHarness } from "./harness/fake";
 import { createJcodeHarness } from "./harness/jcode";
@@ -30,12 +34,35 @@ const selectTransport = (config: SupervisorConfig): SupervisorTransport => {
   });
 };
 
+// The one sanctioned adapter-id mapping (invariant 9): ids resolve to
+// implementations here and nowhere else. Unset means the default (the real
+// adapter — AGENT_HARNESS is optional), but a SET-and-unknown id throws
+// instead of silently booting the default: a typo'd env would otherwise run
+// the wrong harness with no trace beyond a log line nobody is watching.
+const HARNESS_REGISTRY: Record<string, () => Harness> = {
+  jcode: createJcodeHarness,
+  fake: createFakeHarness,
+};
+
+const selectHarness = (config: SupervisorConfig): Harness => {
+  const id = config.harness ?? "jcode";
+  // `Object.hasOwn`, not bare bracket access: bracket access walks the
+  // prototype chain, so AGENT_HARNESS="constructor" would dodge the throw
+  // and boot garbage (the registry-lookup trap the api's registries pin).
+  const create = Object.hasOwn(HARNESS_REGISTRY, id)
+    ? HARNESS_REGISTRY[id]
+    : undefined;
+  if (!create) {
+    throw new Error(
+      `Unknown AGENT_HARNESS "${config.harness}" — expected one of: ${KNOWN_AGENT_HARNESSES.join(", ")}.`,
+    );
+  }
+  return create();
+};
+
 const main = async (): Promise<void> => {
   const config = loadConfig();
-  // The one sanctioned adapter-id mapping (invariant 9): ids resolve to
-  // implementations here and nowhere else. Default: the real adapter.
-  const harness =
-    config.harness === "fake" ? createFakeHarness() : createJcodeHarness();
+  const harness = selectHarness(config);
 
   log("info", "supervisor starting", {
     harness: harness.id,

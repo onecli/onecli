@@ -12,8 +12,18 @@ vi.hoisted(() => {
 });
 
 const state = vi.hoisted(() => ({
-  sandbox: { agent: { id: "ag-1", workspaceId: "p1" } } as {
-    agent: { id: string; workspaceId: string };
+  sandbox: {
+    agent: {
+      id: "ag-1",
+      workspaceId: "p1",
+      workspace: { organizationId: "org-1" },
+    },
+  } as {
+    agent: {
+      id: string;
+      workspaceId: string;
+      workspace: { organizationId: string };
+    };
   } | null,
   conversation: { id: "conv-1" } as { id: string } | null,
   turn: { id: "t-1", userId: "user-9" } as {
@@ -31,6 +41,13 @@ const memoryService = vi.hoisted(() => ({
 }));
 
 const audit = vi.hoisted(() => ({ recordAuditEvent: vi.fn() }));
+
+const skillService = vi.hoisted(() => ({
+  createSkill: vi.fn(),
+  listSkillsReachingAgent: vi.fn(),
+  updateAgentSkillByName: vi.fn(),
+  deleteAgentSkillByName: vi.fn(),
+}));
 
 vi.mock("@onecli/db", () => ({
   Prisma: {},
@@ -73,6 +90,13 @@ vi.mock("./agent-cron-service", () => ({
   MAX_CRONS_PER_AGENT: 20,
 }));
 
+vi.mock("./skill-service", () => ({
+  createSkill: skillService.createSkill,
+  listSkillsReachingAgent: skillService.listSkillsReachingAgent,
+  updateAgentSkillByName: skillService.updateAgentSkillByName,
+  deleteAgentSkillByName: skillService.deleteAgentSkillByName,
+}));
+
 vi.mock("./audit-service", async (importOriginal) => ({
   ...(await importOriginal<typeof import("./audit-service")>()),
   recordAuditEvent: audit.recordAuditEvent,
@@ -104,7 +128,13 @@ const call = (tool: string, args: unknown, withTurn = true) =>
 
 beforeEach(() => {
   vi.clearAllMocks();
-  state.sandbox = { agent: { id: "ag-1", workspaceId: "p1" } };
+  state.sandbox = {
+    agent: {
+      id: "ag-1",
+      workspaceId: "p1",
+      workspace: { organizationId: "org-1" },
+    },
+  };
   state.conversation = { id: "conv-1" };
   state.turn = { id: "t-1", userId: "user-9" };
   memoryService.upsertMemoryByKey.mockResolvedValue({
@@ -241,6 +271,219 @@ describe("memory reads", () => {
     expect(miss.error).toBe(
       'No memory named "nope". memory_list shows what exists.',
     );
+  });
+});
+
+describe("the skill tools", () => {
+  const SKILL = {
+    id: "sk-1",
+    scope: "agent",
+    agentId: "ag-1",
+    workspaceId: null,
+    organizationId: null,
+    name: "release-checklist",
+    description: "Use when cutting a release",
+    content: "# Steps",
+    enabled: true,
+    createdByEmail: null,
+    createdAt: new Date("2026-08-07T00:00:00Z"),
+    updatedAt: new Date("2026-08-07T00:00:00Z"),
+    files: [],
+  };
+
+  beforeEach(() => {
+    skillService.createSkill.mockResolvedValue(SKILL);
+    skillService.listSkillsReachingAgent.mockResolvedValue([
+      { ...SKILL, fileCount: 0 },
+      {
+        ...SKILL,
+        id: "sk-2",
+        scope: "organization",
+        agentId: null,
+        organizationId: "org-1",
+        name: "org-tone",
+        fileCount: 1,
+      },
+    ]);
+    skillService.updateAgentSkillByName.mockResolvedValue({
+      skill: SKILL,
+      noop: false,
+    });
+    skillService.deleteAgentSkillByName.mockResolvedValue({ id: "sk-1" });
+  });
+
+  it("skill_create lands on the AGENT tier with the via-user denormalized", async () => {
+    const response = await call("skill_create", {
+      name: "release-checklist",
+      description: "Use when cutting a release",
+      content: "# Steps",
+    });
+    expect(response.ok).toBe(true);
+    expect(skillService.createSkill).toHaveBeenCalledWith(
+      "p1",
+      expect.objectContaining({
+        agentId: "ag-1",
+        name: "release-checklist",
+      }),
+      { userId: "user-9", email: "asker@example.com" },
+    );
+    expect(response.result).toEqual(
+      expect.objectContaining({
+        name: "release-checklist",
+        scope: "agent",
+        // Vendor-neutral: the control plane does not know the adapter's real
+        // skills dir (the materializer re-roots the canonical path), so the
+        // note must never hardcode one.
+        note: expect.stringContaining("release-checklist/SKILL.md"),
+      }),
+    );
+    expect(audit.recordAuditEvent).toHaveBeenCalledWith(
+      expect.objectContaining({
+        userId: "user-9",
+        action: "create",
+        service: "skill",
+        metadata: expect.objectContaining({
+          agentId: "ag-1",
+          viaAgent: "true",
+          name: "release-checklist",
+        }),
+      }),
+    );
+  });
+
+  it("skill_create validation words reach the model verbatim", async () => {
+    const response = await call("skill_create", {
+      name: "Release Checklist",
+      description: "d",
+      content: "c",
+    });
+    expect(response.ok).toBe(false);
+    expect(response.error).toContain("lowercase words separated");
+    expect(skillService.createSkill).not.toHaveBeenCalled();
+  });
+
+  it("the reserved gateway name is refused with the belt's words", async () => {
+    const response = await call("skill_create", {
+      name: "onecli-gateway",
+      description: "d",
+      content: "c",
+    });
+    expect(response.ok).toBe(false);
+    expect(response.error).toContain("reserved");
+    expect(skillService.createSkill).not.toHaveBeenCalled();
+  });
+
+  it("skill_list marks only agent rows editable and teaches shadowing", async () => {
+    const response = await call("skill_list", {});
+    expect(response.ok).toBe(true);
+    expect(skillService.listSkillsReachingAgent).toHaveBeenCalledWith(
+      "ag-1",
+      "p1",
+      "org-1",
+    );
+    const result = response.result as {
+      skills: { name: string; editable: boolean }[];
+      note: string;
+    };
+    expect(result.skills).toEqual([
+      expect.objectContaining({ name: "release-checklist", editable: true }),
+      expect.objectContaining({ name: "org-tone", editable: false }),
+    ]);
+    expect(result.skills[0]).not.toHaveProperty("content");
+    expect(result.note).toContain("most specific one wins");
+    expect(audit.recordAuditEvent).not.toHaveBeenCalled();
+  });
+
+  it("skill_update requires an actual change and audits real ones", async () => {
+    const nothing = await call("skill_update", { name: "release-checklist" });
+    expect(nothing.ok).toBe(false);
+    expect(nothing.error).toContain("Nothing to update");
+
+    const response = await call("skill_update", {
+      name: "release-checklist",
+      enabled: false,
+    });
+    expect(response.ok).toBe(true);
+    expect(skillService.updateAgentSkillByName).toHaveBeenCalledWith(
+      "ag-1",
+      "p1",
+      "org-1",
+      "release-checklist",
+      { enabled: false },
+    );
+    expect(audit.recordAuditEvent).toHaveBeenCalledWith(
+      expect.objectContaining({
+        action: "update",
+        service: "skill",
+        metadata: expect.objectContaining({ fields: "enabled" }),
+      }),
+    );
+  });
+
+  it("a no-op update audits nothing and says so", async () => {
+    skillService.updateAgentSkillByName.mockResolvedValue({
+      skill: SKILL,
+      noop: true,
+    });
+    const response = await call("skill_update", {
+      name: "release-checklist",
+      content: "# Steps",
+    });
+    expect(response.ok).toBe(true);
+    expect((response.result as { noop: boolean }).noop).toBe(true);
+    expect(audit.recordAuditEvent).not.toHaveBeenCalled();
+  });
+
+  it("a broader-tier refusal reaches the model verbatim (the dashboard pointer)", async () => {
+    skillService.updateAgentSkillByName.mockRejectedValue(
+      new ServiceError(
+        "FORBIDDEN",
+        '"org-tone" is a organization skill, managed by the people you work with in the dashboard.',
+      ),
+    );
+    const response = await call("skill_update", {
+      name: "org-tone",
+      enabled: false,
+    });
+    expect(response.ok).toBe(false);
+    expect(response.error).toContain("managed by the people you work with");
+  });
+
+  it("skill_delete deletes by name and audits under the via-user", async () => {
+    const response = await call("skill_delete", { name: "release-checklist" });
+    expect(response.ok).toBe(true);
+    expect(skillService.deleteAgentSkillByName).toHaveBeenCalledWith(
+      "ag-1",
+      "p1",
+      "org-1",
+      "release-checklist",
+    );
+    expect(audit.recordAuditEvent).toHaveBeenCalledWith(
+      expect.objectContaining({
+        action: "delete",
+        service: "skill",
+        metadata: expect.objectContaining({
+          skillId: "sk-1",
+          name: "release-checklist",
+        }),
+      }),
+    );
+  });
+
+  it("a skill write from a turn with no user writes but audits nothing", async () => {
+    state.turn = { id: "t-1", userId: null };
+    const response = await call("skill_create", {
+      name: "release-checklist",
+      description: "d",
+      content: "c",
+    });
+    expect(response.ok).toBe(true);
+    expect(skillService.createSkill).toHaveBeenCalledWith(
+      "p1",
+      expect.anything(),
+      { userId: null, email: null },
+    );
+    expect(audit.recordAuditEvent).not.toHaveBeenCalled();
   });
 });
 

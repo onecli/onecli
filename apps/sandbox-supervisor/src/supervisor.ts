@@ -29,7 +29,7 @@ import { connectionsFragment } from "./capabilities/connections";
 import { cronsFragment, cronsTools } from "./capabilities/crons";
 import { machineFragment } from "./capabilities/machine";
 import { memoryFragment, memoryTools } from "./capabilities/memory";
-import { skillsFragment } from "./capabilities/skills";
+import { skillsFragment, skillsTools } from "./capabilities/skills";
 import {
   createProcessTools,
   processesFragment,
@@ -64,7 +64,9 @@ import {
 /**
  * Memory guard on a single turn's accumulated answer. Not a product limit —
  * the wire applies the visible one — just the point past which a runaway
- * model stops being allowed to grow this process's heap.
+ * model stops being allowed to grow this process's heap. Two segments are
+ * live at once (the current one and the never-silent fallback), so the true
+ * ceiling is 2× this — still bounded, which is the whole point.
  */
 export const MAX_ANSWER_CHARS = 256_000;
 
@@ -193,9 +195,9 @@ export const runSupervisor = async (
     // Connections leads and is unconditional: the gateway is a platform
     // property, not a harness capability, and gateway-first is the rule the
     // agent must hold before its first external call — only its skill-path
-    // bullet depends on the adapter. Skills and connections are fragment-only
-    // (no tools); skills is present only when the adapter declares a skills
-    // directory.
+    // bullet depends on the adapter. Connections is fragment-only (no
+    // tools); skills — fragment AND its skill_* tools — is present only
+    // when the adapter declares a skills directory.
     fragments: [
       connectionsFragment(harness.capabilities.skillsDir),
       cronsFragment,
@@ -302,7 +304,14 @@ export const runSupervisor = async (
   // Started before the ready signal so the socket exists by the time the
   // harness spawns the bridge.
   const platformTools = await startPlatformTools({
-    tools: [...cronsTools, ...memoryTools, ...createProcessTools(processes)],
+    tools: [
+      ...cronsTools,
+      ...memoryTools,
+      ...createProcessTools(processes),
+      // The skills tools follow their fragment's condition exactly: no
+      // skillsDir, no skills capability — teaching and tools arrive together.
+      ...(harness.capabilities.skillsDir ? skillsTools : []),
+    ],
     send: (message) => transport.send(message),
     activeTurn,
   });
@@ -503,33 +512,52 @@ export const runSupervisor = async (
             ? TURN_FAILURE_CODES.modelProviderError
             : undefined);
 
-    /** Everything the agent said this turn, rebuilt from the deltas. */
-    let answer = "";
+    /**
+     * The CURRENT message segment — everything the agent has said since its
+     * last tool call or thinking block. NOT the whole turn.
+     *
+     * THE ANSWER IS THE LAST MESSAGE, NOT THE CONCATENATION OF ALL OF THEM
+     * (user decision, 2026-08-31). A working turn interleaves narration with
+     * tools — "Let me check the logs." → bash → "Now the config." → read →
+     * the actual finding — and gluing those together published the agent's
+     * running commentary AS its answer: the multi-screen chat walls that the
+     * response-style prompt could not fix, because every individual message
+     * was already short and compliant. The model was obeying the directive;
+     * this accumulator was undoing it downstream.
+     *
+     * Mid-turn segments are PROGRESS, not the record. They still stream —
+     * `text.delta` reaches every live tail and is ephemeral by the delta law
+     * (§3.17) — so both surfaces keep showing the work as it happens; only
+     * the closing message is what the transcript keeps and the channel posts.
+     */
+    let segment = "";
+    /**
+     * The last COMPLETED segment, kept solely as the never-silent fallback:
+     * a turn that ends on a tool call without a closing word (a stop, a
+     * crash, a failure mid-work) still said something, and posting nothing
+     * would read as the agent ignoring the person.
+     */
+    let previousSegment = "";
     let answerSent = false;
     /**
-     * A tool batch or a thinking block between text deltas marks a message
-     * boundary — the model ended one message and later started another. The
-     * raw concatenation glued them mid-sentence ("…a different address?Got
-     * it — no email…", observed live); a blank line renders as a paragraph
-     * break instead. Only these interleaved events are visible boundaries:
-     * the vendor stream carries no message framing, so two messages with
-     * nothing between them still concatenate (accepted residual).
-     */
-    let boundarySinceText = false;
-    /**
-     * Send the accumulated answer exactly once, whatever ends the turn —
-     * cleanly, with an error, by abort, or by the stream simply stopping. A
-     * partial answer is still what the user watched arrive, so it is still
-     * what the transcript owes them.
+     * Send the answer exactly once, whatever ends the turn — cleanly, with an
+     * error, by abort, or by the stream simply stopping. A partial answer is
+     * still what the user watched arrive, so it is still what the transcript
+     * owes them.
+     *
+     * The final segment wins; when the turn ended mid-tool with nothing said
+     * after it, the last completed segment stands in.
      */
     const emitAnswer = () => {
-      if (answerSent || !answer) return;
+      if (answerSent) return;
+      const text = segment.trim() || previousSegment.trim();
+      if (!text) return;
       answerSent = true;
       transport.send({
         kind: "event",
         turnId: item.turnId,
         conversationId: item.conversationId,
-        event: { type: "text", text: answer },
+        event: { type: "text", text },
       });
     };
 
@@ -658,31 +686,41 @@ export const runSupervisor = async (
           runtime.steered.set(event.followUpId, true);
         }
 
-        // Accumulate what we forward. The deltas themselves are ephemeral by
-        // design (§3.17), and this supervisor is the only party that sees the
-        // whole stream — so if it does not keep the answer, nothing can.
+        // Accumulate the CURRENT segment. The deltas themselves are ephemeral
+        // by design (§3.17), and this supervisor is the only party that sees
+        // the whole stream — so if it does not keep the closing message,
+        // nothing can.
         //
         // BOUNDED, because this process runs inside a container executing
         // model-driven output: a model that loops would otherwise grow this
         // string until the sandbox is killed for memory. The cap sits well
         // above the wire's own limit so the VISIBLE truncation stays the
         // runner's job and a reader sees one marker, not two.
-        if (event.type === "text.delta" && answer.length < MAX_ANSWER_CHARS) {
-          // The separator rides inside the same cap guard and only ever
-          // follows existing text — it can neither make an empty answer
-          // non-empty nor grow a capped one.
-          if (boundarySinceText && answer !== "" && !answer.endsWith("\n\n")) {
-            answer += "\n\n";
-          }
-          boundarySinceText = false;
-          answer += event.text;
+        if (event.type === "text.delta" && segment.length < MAX_ANSWER_CHARS) {
+          segment += event.text;
         }
-        if (
-          event.type === "tool.started" ||
-          event.type === "tool.finished" ||
-          event.type === "thinking.delta"
-        ) {
-          boundarySinceText = true;
+        // A TOOL CALL closes the current segment: the model finished a
+        // message and starts a new one once the tool returns. What it says
+        // NEXT is the answer; this one is demoted to the never-silent
+        // fallback. Empty segments never displace a real one — back-to-back
+        // tool calls must not erase the last words said.
+        //
+        // TOOL CALLS ONLY, deliberately — thinking is NOT a boundary. A tool
+        // call is a structural break the model cannot write across: it must
+        // stop and wait for the result, so the next text is necessarily a new
+        // message. Reasoning is a parallel track that interleaves INSIDE one
+        // message ("The root cause is " → thinks → "the retry loop."), which
+        // the vendor protocol itself implies by giving reasoning its own
+        // start/stop (`reasoning_done`) beside the text stream. Treating it
+        // as a boundary would cut that sentence in half and publish the
+        // fragment — strictly worse than the wall it replaced, because it is
+        // silently wrong rather than merely long. It also buys nothing:
+        // `thinking.delta` is never persisted (turn-service DURABILITY) and
+        // the web does not render it, so reasoning is already discarded
+        // everywhere downstream.
+        if (event.type === "tool.started" || event.type === "tool.finished") {
+          if (segment.trim()) previousSegment = segment;
+          segment = "";
         }
 
         // The answer goes out BEFORE the terminal event, not after: `seq` is

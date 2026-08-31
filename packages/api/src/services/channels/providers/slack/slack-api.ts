@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { readCappedBinaryBody } from "../../../../lib/read-capped-binary-body";
+import { ChannelProviderApiError } from "../../errors";
 
 /**
  * The control plane's thin Slack Web API client — exactly the methods the
@@ -31,14 +32,13 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 /**
  * A Slack refusal (`ok: false`), carrying Slack's own error code verbatim —
  * the plan requires surfacing codes like `managed_app_limit_reached` to the
- * user unaltered, so the code is the message.
+ * user unaltered, so the code is the message. Extends the neutral
+ * `ChannelProviderApiError` so the generic error handler maps it without
+ * importing anything Slack-shaped.
  */
-export class SlackApiError extends Error {
-  constructor(
-    public readonly method: string,
-    public readonly code: string,
-  ) {
-    super(`Slack ${method} refused: ${code}`);
+export class SlackApiError extends ChannelProviderApiError {
+  constructor(method: string, code: string) {
+    super("slack", method, code, `Slack ${method} refused: ${code}`);
     this.name = "SlackApiError";
   }
 }
@@ -346,6 +346,36 @@ export const reactionsAdd = (
   botToken: string,
   input: { channel: string; timestamp: string; name: string },
 ) => reactionCall("reactions.add", botToken, input);
+
+/**
+ * The agent-session work status (the native "Working…" loader an agent-flavor
+ * app shows in a thread). `processing` turns it on; `active` clears it —
+ * NEVER auto-cleared by a message post, so the receipt lifecycle owns both
+ * halves. Throws on refusal (`feature_disabled` on plan-gated workspaces,
+ * `missing_scope` on regular-flavor apps): the caller's reaction fallback
+ * depends on hearing it.
+ */
+export const agentsSessionsSetStatus = (
+  botToken: string,
+  input: {
+    channelId: string;
+    threadTs: string;
+    status: "processing" | "active";
+  },
+) =>
+  slackCall(
+    "agents.sessions.setStatus",
+    {
+      token: botToken,
+      form: {
+        channel_id: input.channelId,
+        thread_ts: input.threadTs,
+        status: input.status,
+      },
+      retry5xx: true,
+    },
+    okEnvelope,
+  );
 
 export const reactionsRemove = (
   botToken: string,

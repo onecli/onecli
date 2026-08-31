@@ -1,122 +1,98 @@
-[package]
-name = "onecli-gateway"
-version = "0.1.0"
-edition = "2021"
-# The crate embeds the licensed src/ee/ modules in every build — see
-# /LICENSE-ENTERPRISE ("THE LICENSED PATHS") at the repository root.
-license = "Apache-2.0 AND LicenseRef-OneCLI-Enterprise"
-publish = false
+# Workspace root for the gateway: a virtual manifest over a flat crates/
+# directory. The binary is crates/onecli-gateway (the composition root); every
+# other member is a library crate, layered so Cargo itself rejects a cycle.
+# See the "Gateway (Rust)" section of CLOUD-DEVELOPMENT.md for the layer map.
+[workspace]
+resolver = "2"
+# Members are listed explicitly, in two groups, because the split IS the
+# licence boundary and a glob would hide it: `crates/*` cannot express "except
+# the licensed ones", and `exclude` silently wins over an explicit glob (tried;
+# it dropped ee from the workspace).
+#
+# APACHE-2.0 — everything the free product needs.
+members = [
+  "crates/approval",
+  "crates/apps",
+  "crates/ca",
+  "crates/cache",
+  "crates/common",
+  "crates/context",
+  "crates/crypto",
+  "crates/db",
+  "crates/inject",
+  "crates/policy",
+  "crates/policy-engine",
+  "crates/proxy",
+  "crates/server",
+  "crates/shutdown",
+  "crates/summary",
+  "crates/telemetry",
+  "crates/vault",
+  "crates/onecli-gateway",
 
-[[bin]]
-name = "onecli-gateway"
-path = "src/main.rs"
+  # ENTERPRISE-LICENSED — see /LICENSE-ENTERPRISE and crates/ee/LICENSE.
+  # The licence is scoped by PATH SEGMENT here, the same shape as
+  # apps/web/src/ee/ and packages/api/src/ee/: anything under `crates/ee/`
+  # is licensed, everything above is not.
+  "crates/ee/ee",
+]
 
-[dependencies]
-# Async runtime
-tokio = { version = "1", features = ["full"] }
+# Deliberately NO `default-members`: with it, a bare `cargo test` in this
+# directory silently runs only the bin crate's 2 tests instead of the
+# workspace's 841 — a false green for anyone who does not type `--workspace`.
+# Without it, bare `cargo build`/`run`/`test` cover every member, and
+# `cargo run` still resolves because the workspace has exactly one bin target.
 
-# HTTP
-hyper = { version = "1", features = ["http1", "server", "client"] }
-hyper-util = { version = "0.1", features = ["tokio"] }
-http-body = "1"
-http-body-util = "0.1"
-axum = "0.8"
-tower = { version = "0.5", features = ["util"] }
-tower-http = { version = "0.6", features = ["cors"] }
-
-# TLS
-tokio-rustls = "0.26"
-rustls = { version = "0.23", features = ["ring"] }
-rustls-pemfile = "2"
-
-# WebSocket upstream TLS root certificates
-webpki-roots = "0.26"
-
-# Certificate generation
-rcgen = "0.13"
-
-# Cryptography (AES-256-GCM for secret decryption)
-ring = "0.17"
-
-# HTTP client (for upstream forwarding in MITM mode)
-reqwest = { version = "0.12", features = ["json", "rustls-tls", "stream"], default-features = false }
-
-# CLI
-clap = { version = "4", features = ["derive"] }
-
-# Logging
-tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
-
-# JWT validation
-jsonwebtoken = "9"
-
-# Serialization
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-
-# Concurrent cache
-dashmap = "6"
-
-# Regex (URL-path secret injection — advanced rewrite mode). Linear-time, no
-# catastrophic backtracking (no ReDoS). Compiled patterns are cached in a DashMap.
-regex = "1"
-
-# Base64 (for gateway auth)
-base64 = "0.22"
-
-# UUID (for approval IDs)
-uuid = { version = "1", features = ["v4"] }
-
-# Stream combinators
-futures-util = "0.3"
-
-# Error handling
+[workspace.dependencies]
+# Single version pin per external dependency; members write
+# `name = { workspace = true }`. Internal crates stay path-declared in
+# the members that use them, so the graph is readable per crate.
 anyhow = "1"
-
-# Time (for certificate validity + RFC 3339 parsing)
-time = { version = "0.3", features = ["parsing"] }
-
-# Direct database access
-sqlx = { version = "0.8", features = ["runtime-tokio", "tls-rustls", "postgres"] }
-
-# Agent Access (Bitwarden vault credential injection)
 ap-client = "0.9.0"
+ap-noise = "0.9.0"
 ap-proxy-client = "0.9.0"
 ap-proxy-protocol = "0.9.0"
-ap-noise = "0.9.0"
 async-trait = "0.1"
+aws-config = { version = "1", features = ["behavior-version-latest"] }
+aws-credential-types = "1"
+aws-sdk-kms = "1"
+aws-sdk-sts = "1"
+aws-sigv4 = "1"
+axum = "0.8"
+base64 = "0.22"
+clap = { version = "4", features = ["derive"] }
+dashmap = "6"
+form_urlencoded = "1"
+futures-util = "0.3"
 hex = "0.4"
-
-[dependencies.aws-sdk-kms]
-version = "1"
-
-[dependencies.aws-config]
-version = "1"
-features = ["behavior-version-latest"]
-
-[dependencies.redis]
-version = "1"
-features = ["tokio-comp", "connection-manager", "tokio-rustls-comp"]
-
-[dependencies.aws-sdk-sts]
-version = "1"
-
-[dependencies.aws-sigv4]
-version = "1"
-
-[dependencies.aws-credential-types]
-version = "1"
-
-[dependencies.percent-encoding]
-version = "2"
-
-[dependencies.form_urlencoded]
-version = "1"
-
-[dev-dependencies]
+http-body = "1"
+http-body-util = "0.1"
+hyper = { version = "1", features = ["http1", "server", "client"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
+jsonwebtoken = "9"
+percent-encoding = "2"
+rcgen = "0.13"
+redis = { version = "1", features = ["tokio-comp", "connection-manager", "tokio-rustls-comp"] }
+regex = "1"
+reqwest = { version = "0.12", features = ["json", "rustls-tls", "stream"], default-features = false }
+ring = "0.17"
+rustls = { version = "0.23", features = ["ring"] }
+rustls-pemfile = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sqlx = { version = "0.8", features = ["runtime-tokio", "tls-rustls", "postgres"] }
 tempfile = "3"
+time = { version = "0.3", features = ["parsing"] }
+tokio = { version = "1", features = ["full"] }
+tokio-rustls = "0.26"
+tower = { version = "0.5", features = ["util"] }
+tower-http = { version = "0.6", features = ["cors"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+uuid = { version = "1", features = ["v4"] }
+webpki-roots = "0.26"
 
+# Profiles are only honored at the workspace root.
 [profile.release]
 opt-level = 3
 strip = true

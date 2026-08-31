@@ -220,7 +220,13 @@ const hostCover = (pattern1: string, pattern2: string): boolean => {
   return !pattern2.includes("*") && hostMatches(pattern2, pattern1);
 };
 
-const GIT_PUSH_SUFFIX = "/git-receive-pack";
+// The git pack services whose POST patterns ALSO match their GET info/refs
+// discovery request (the endpoint-match bridge) - receive-pack (push) and
+// upload-pack (clone/pull).
+const GIT_PACK_SUFFIXES = ["/git-receive-pack", "/git-upload-pack"] as const;
+
+const isGitPackPattern = (p: string): boolean =>
+  GIT_PACK_SUFFIXES.some((suffix) => p.endsWith(suffix));
 
 const networkCover = (
   t1: {
@@ -238,10 +244,10 @@ const networkCover = (
 
   const p1 = t1.pathPattern;
   const p2 = t2.pathPattern;
-  // A git-receive-pack pattern ALSO matches the GET info/refs push-discovery
+  // A git pack-service pattern ALSO matches its GET info/refs discovery
   // request regardless of its own method (the endpoint-match bridge) — only an
   // any-path+any-method earlier target, or the identical path, soundly covers.
-  if (p2 !== null && p2.endsWith(GIT_PUSH_SUFFIX)) {
+  if (p2 !== null && isGitPackPattern(p2)) {
     const universalPath = (p1 === null || p1 === "*") && t1.method === null;
     const samePath =
       p1 === p2 && (t1.method === null || methodEq(t1.method, t2.method));
@@ -254,9 +260,7 @@ const networkCover = (
     (p2 !== null &&
       (p1 === p2 ||
         // Concrete later path = a one-element set — reuse the real matcher.
-        (!p2.includes("*") &&
-          !p1.endsWith(GIT_PUSH_SUFFIX) &&
-          pathMatches(p2, p1))));
+        (!p2.includes("*") && !isGitPackPattern(p1) && pathMatches(p2, p1))));
   if (!pathOk) return false;
 
   return t1.method === null || methodEq(t1.method, t2.method);

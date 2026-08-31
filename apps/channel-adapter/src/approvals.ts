@@ -121,7 +121,11 @@ export interface ApprovalsManagerDeps {
   controlPlane: ControlPlaneClient;
   gatewayUrl: string;
   approvalsPollSeconds: number;
-  cardUi: ApprovalCardUi;
+  /** Resolve a presence's card rendering (the channel's business — Slack:
+   * slack/approval-card.ts, handed out via the provider registry). Null for
+   * a provider this build cannot serve — its prompts stay tracked untouched,
+   * the same way a missing credential parks them. */
+  cardUiOf: (presence: AdapterPresence) => ApprovalCardUi | null;
   /** Extract the channel credential from a presence (the credential's shape
    * is the channel's business — Slack: slack/credentials.ts). */
   credentialOf: (presence: AdapterPresence) => string | null;
@@ -144,6 +148,9 @@ export const createApprovalsManager = (deps: ApprovalsManagerDeps) => {
   let expiryTimer: ReturnType<typeof setInterval> | undefined;
 
   const tokenFor = new Map<string, string>();
+  /** presenceId → the presence's card rendering, resolved alongside the
+   * credential on every reconcile (same lifetime as `tokenFor`). */
+  const cardUiFor = new Map<string, ApprovalCardUi>();
 
   /** Approval ids whose decision is in flight on THIS channel (a click being
    * forwarded to the control plane). The cross-surface absence arm skips
@@ -169,8 +176,9 @@ export const createApprovalsManager = (deps: ApprovalsManagerDeps) => {
   ): Promise<void> => {
     if (prompt.ts) {
       const credential = tokenFor.get(prompt.presenceId);
-      if (!credential) return;
-      await deps.cardUi.settle({
+      const cardUi = cardUiFor.get(prompt.presenceId);
+      if (!credential || !cardUi) return;
+      await cardUi.settle({
         credential,
         channel: prompt.channel,
         ts: prompt.ts,
@@ -206,9 +214,10 @@ export const createApprovalsManager = (deps: ApprovalsManagerDeps) => {
     text: string,
   ): Promise<void> => {
     const credential = tokenFor.get(prompt.presenceId);
-    if (!credential || !prompt.ts) return;
+    const cardUi = cardUiFor.get(prompt.presenceId);
+    if (!credential || !cardUi || !prompt.ts) return;
     try {
-      await deps.cardUi.settle({
+      await cardUi.settle({
         credential,
         channel: prompt.channel,
         ts: prompt.ts,
@@ -240,7 +249,8 @@ export const createApprovalsManager = (deps: ApprovalsManagerDeps) => {
     // the DM (and its link) shows up in a later config feed.
     const presence = presenceById.get(presenceId);
     const credential = presence ? tokenFor.get(presenceId) : undefined;
-    if (!presence || !credential) return;
+    const cardUi = presence ? cardUiFor.get(presenceId) : undefined;
+    if (!presence || !credential || !cardUi) return;
 
     // Where the card goes: the presence's direct thread when there is one,
     // else its first link. No home at all → leave it unclaimed; a later poll
@@ -258,7 +268,7 @@ export const createApprovalsManager = (deps: ApprovalsManagerDeps) => {
     });
     if (!claimed) return;
 
-    const posted = await deps.cardUi.post({
+    const posted = await cardUi.post({
       credential,
       channel: target.channel,
       ...(target.threadTs && { threadTs: target.threadTs }),
@@ -440,6 +450,8 @@ export const createApprovalsManager = (deps: ApprovalsManagerDeps) => {
         presenceById.set(presenceId, presence);
         const credential = deps.credentialOf(presence);
         if (credential) tokenFor.set(presenceId, credential);
+        const cardUi = deps.cardUiOf(presence);
+        if (cardUi) cardUiFor.set(presenceId, cardUi);
       }
       for (const [presenceId, loop] of loops) {
         if (!wanted.has(presenceId)) {
@@ -447,6 +459,7 @@ export const createApprovalsManager = (deps: ApprovalsManagerDeps) => {
           loops.delete(presenceId);
           presenceById.delete(presenceId);
           tokenFor.delete(presenceId);
+          cardUiFor.delete(presenceId);
         }
       }
       for (const presenceId of wanted.keys()) {

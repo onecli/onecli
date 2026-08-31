@@ -246,7 +246,7 @@ jobs:
           DATABASE_URL: postgresql://ci:ci@localhost:5434/onecli
 
       # Seed the fixtures the EE enforce tests read
-      # (apps/gateway/src/policy_engine/enforce_pg_test.rs). Type-safe via the
+      # (apps/gateway/crates/policy-engine/src/enforce_pg_test.rs). Type-safe via the
       # generated @onecli/db client; runs against the same gw-test-db as the tests.
       - name: Seed gateway enforce fixtures
         if: steps.changes.outputs.rust == 'true'

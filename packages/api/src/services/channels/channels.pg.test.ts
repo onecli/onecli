@@ -428,6 +428,7 @@ const seedPresence = async (
     credentials?: string | null;
     externalId?: string;
     apiKeyId?: string | null;
+    appMode?: string;
   } = {},
 ) =>
   db.agentChannel.create({
@@ -439,6 +440,7 @@ const seedPresence = async (
       identityRef:
         options.identityRef === undefined ? "UBOT" : options.identityRef,
       transport: "socket",
+      appMode: options.appMode ?? "regular",
       status: options.status ?? "active",
       credentials: options.credentials ?? null,
       apiKeyId: options.apiKeyId ?? null,
@@ -464,6 +466,7 @@ const seedChannelAgent = async (
     withoutKey?: boolean;
     identityRef?: string | null;
     presenceCredentials?: string | null;
+    appMode?: string;
   } = {},
 ) => {
   const agentId = await seedAgent(suffix, { withoutKey: options.withoutKey });
@@ -485,6 +488,7 @@ const seedChannelAgent = async (
     identityRef: options.identityRef,
     credentials: options.presenceCredentials,
     externalId: `A-${suffix}`,
+    appMode: options.appMode,
   });
   return { agentId, integrationId: integration.id, presenceId: presence.id };
 };
@@ -753,6 +757,41 @@ describe.skipIf(!PROOF_URL)("integration service — connect", () => {
       },
     });
     expect(row.externalId).toBe("T222");
+  });
+});
+
+describe.skipIf(!PROOF_URL)("integration service — app flavor", () => {
+  it("the guided create stamps agent and bakes agent_view + assistant:write into the manifest", async () => {
+    // NEW apps are always agent-flavored — there is no org setting anymore.
+    // The stamp on the row is what the runtime honors (loader vs emoji), and
+    // pre-existing "regular" rows keep theirs.
+    await seedIntegration({
+      credentials: await integrationCredentials(12 * 3600),
+    });
+    const agentId = await seedAgent("stamp-agent");
+    scriptManifestCreate();
+
+    const result = await agentChannels.createPresence(
+      WORKSPACE,
+      agentId,
+      "slack",
+      ADMIN,
+    );
+
+    const row = await db.agentChannel.findUniqueOrThrow({
+      where: { id: result.presenceId },
+    });
+    expect(row.appMode).toBe("agent");
+    const manifest = JSON.parse(
+      slackCallsFor("apps.manifest.create").at(-1)!.form.get("manifest")!,
+    ) as {
+      features: { agent_view?: { agent_description: string } };
+      oauth_config: { scopes: { bot: string[] } };
+    };
+    expect(manifest.features.agent_view?.agent_description).toContain(
+      "a OneCLI hosted agent",
+    );
+    expect(manifest.oauth_config.scopes.bot).toContain("assistant:write");
   });
 });
 
@@ -1720,13 +1759,15 @@ describe.skipIf(!PROOF_URL)("createPresence (the guided arm)", () => {
     // The rebuilt install URL still works, from the STORED client id.
     expect(second.installUrl).toContain("client_id=client-1");
     // The rebuilt URL's `scope` param IS the grant: the provider must join
-    // the FULL bot scope list, exactly as the manifest declared it.
+    // the FULL bot scope list, exactly as the manifest declared it — for
+    // THIS app's flavor (the integration row defaults to "agent", so the
+    // rebuilt grant carries assistant:write like the manifest did).
     // MUTATION-TESTED: shrink the provider's rebuild to a partial list (the
     // old chat:write-only rebuild installed a DEAF bot — without im:history
     // the message.im subscription never delivers) and this equality fails.
-    const { BOT_SCOPES } = await import("./providers/slack/manifest");
+    const { botScopesFor } = await import("./providers/slack/manifest");
     expect(new URL(second.installUrl!).searchParams.get("scope")).toBe(
-      BOT_SCOPES.join(","),
+      botScopesFor("agent").join(","),
     );
     expect(await db.agentChannel.count({ where: { agentId } })).toBe(1);
   });
@@ -5297,6 +5338,365 @@ describe.skipIf(!PROOF_URL)("turn receipts (the reaction 'seen' mark)", () => {
     const before = slackCallsFor("reactions.remove").length;
     await receipts.clearTurnReceipt("turn-that-never-was");
     expect(slackCallsFor("reactions.remove")).toHaveLength(before);
+  });
+
+  it("agent-flavor presence in a thread: the session loader IS the ack, and the clear sets it back", async () => {
+    const { presenceId } = await seedChannelAgent("receipt-session", {
+      appMode: "agent",
+      presenceCredentials: await getCrypto().encrypt(
+        JSON.stringify({ botToken: "xoxb-session" }),
+      ),
+    });
+    slackHandlers["agents.sessions.setStatus"] = () => ({ ok: true });
+    const addsBefore = slackCallsFor("reactions.add").length;
+
+    await receipts.attachTurnReceipt({
+      presenceId,
+      turnId: "turn-session-1",
+      channel: "C900",
+      messageTs: "600.0002",
+      threadTs: "600.0001",
+      text: "do the thing",
+    });
+
+    // The mark is the native loader: a session row keyed by the THREAD ROOT
+    // (the address the clear needs), no emoji, and NO reactions.add call.
+    const row = await db.channelTurnReceipt.findUniqueOrThrow({
+      where: { turnId: "turn-session-1" },
+    });
+    expect(row.kind).toBe("session");
+    expect(row.reaction).toBeNull();
+    expect(row.messageTs).toBe("600.0001");
+    expect(slackCallsFor("reactions.add")).toHaveLength(addsBefore);
+    const set = slackCallsFor("agents.sessions.setStatus").at(-1)!;
+    expect(set.token).toBe("xoxb-session");
+    expect(set.form.get("channel_id")).toBe("C900");
+    expect(set.form.get("thread_ts")).toBe("600.0001");
+    expect(set.form.get("status")).toBe("processing");
+
+    // The clear must set "active" EXPLICITLY — Slack never auto-clears the
+    // sessions loader on a message post.
+    await receipts.clearTurnReceipt("turn-session-1");
+    const cleared = slackCallsFor("agents.sessions.setStatus").at(-1)!;
+    expect(cleared.form.get("status")).toBe("active");
+    expect(cleared.form.get("thread_ts")).toBe("600.0001");
+    expect(
+      await db.channelTurnReceipt.findUnique({
+        where: { turnId: "turn-session-1" },
+      }),
+    ).toBeNull();
+  });
+
+  it("falls back to the reaction when the loader is refused (plan-gated workspace) — the ack never vanishes", async () => {
+    const { presenceId } = await seedChannelAgent("receipt-fallback", {
+      appMode: "agent",
+      presenceCredentials: await getCrypto().encrypt(
+        JSON.stringify({ botToken: "xoxb-fallback" }),
+      ),
+    });
+    // A free workspace: the sessions API answers feature_disabled.
+    slackHandlers["agents.sessions.setStatus"] = () => ({
+      ok: false,
+      error: "feature_disabled",
+    });
+    slackHandlers["reactions.add"] = () => ({ ok: true });
+
+    await receipts.attachTurnReceipt({
+      presenceId,
+      turnId: "turn-fallback-1",
+      channel: "C901",
+      messageTs: "601.0002",
+      threadTs: "601.0001",
+      text: "hello",
+    });
+
+    // MUTATION-TESTED: drop the fallback and this row (and the user's only
+    // ack) never exists.
+    const row = await db.channelTurnReceipt.findUniqueOrThrow({
+      where: { turnId: "turn-fallback-1" },
+    });
+    expect(row.kind).toBe("reaction");
+    expect(row.reaction).toBe("eyes");
+    expect(row.messageTs).toBe("601.0002");
+    const add = slackCallsFor("reactions.add").at(-1)!;
+    expect(add.form.get("channel")).toBe("C901");
+    expect(add.form.get("timestamp")).toBe("601.0002");
+  });
+
+  it("agent-flavor DM (no thread): the reaction, exactly as before — DMs answer top-level and never get the loader", async () => {
+    const { presenceId } = await seedChannelAgent("receipt-agent-dm", {
+      appMode: "agent",
+      presenceCredentials: await getCrypto().encrypt(
+        JSON.stringify({ botToken: "xoxb-agent-dm" }),
+      ),
+    });
+    slackHandlers["reactions.add"] = () => ({ ok: true });
+    const statusBefore = slackCallsFor("agents.sessions.setStatus").length;
+
+    await receipts.attachTurnReceipt({
+      presenceId,
+      turnId: "turn-agent-dm-1",
+      channel: "D901",
+      messageTs: "602.0001",
+      text: "hi",
+    });
+
+    const row = await db.channelTurnReceipt.findUniqueOrThrow({
+      where: { turnId: "turn-agent-dm-1" },
+    });
+    expect(row.kind).toBe("reaction");
+    expect(slackCallsFor("agents.sessions.setStatus")).toHaveLength(
+      statusBefore,
+    );
+  });
+
+  it("a follow-up under a session mark re-keys the row instead of moving a reaction — the loader already covers the thread", async () => {
+    const { agentId, presenceId } = await seedChannelAgent(
+      "receipt-session-move",
+      {
+        appMode: "agent",
+        presenceCredentials: await getCrypto().encrypt(
+          JSON.stringify({ botToken: "xoxb-session-move" }),
+        ),
+      },
+    );
+    slackHandlers["agents.sessions.setStatus"] = () => ({ ok: true });
+    const conversation = await db.conversation.create({
+      data: { agentId, source: "slack", externalRef: "C902:700.0001" },
+      select: { id: true },
+    });
+    const target = await db.turn.create({
+      data: {
+        conversationId: conversation.id,
+        message: "start",
+        status: "running",
+        source: "slack",
+      },
+      select: { id: true },
+    });
+    const followUp = await db.turn.create({
+      data: {
+        conversationId: conversation.id,
+        message: "and also",
+        status: "joined",
+        source: "slack",
+        followUpOfTurnId: target.id,
+      },
+      select: { id: true },
+    });
+    await receipts.attachTurnReceipt({
+      presenceId,
+      turnId: target.id,
+      channel: "C902",
+      messageTs: "700.0002",
+      threadTs: "700.0001",
+      text: "start",
+    });
+    const statusCalls = slackCallsFor("agents.sessions.setStatus").length;
+    const addsBefore = slackCallsFor("reactions.add").length;
+
+    await receipts.moveTurnReceipt({
+      presenceId,
+      followUpTurnId: followUp.id,
+      conversationId: conversation.id,
+      channel: "C902",
+      messageTs: "700.0003",
+      threadTs: "700.0001",
+      text: "and also",
+    });
+
+    // No provider traffic — the loader on the thread already covers the
+    // follow-up. The row just changes owner so the answer-post clear (which
+    // fires off the newest turn id) finds it.
+    expect(slackCallsFor("agents.sessions.setStatus")).toHaveLength(
+      statusCalls,
+    );
+    expect(slackCallsFor("reactions.add")).toHaveLength(addsBefore);
+    expect(
+      await db.channelTurnReceipt.findUnique({ where: { turnId: target.id } }),
+    ).toBeNull();
+    const moved = await db.channelTurnReceipt.findUniqueOrThrow({
+      where: { turnId: followUp.id },
+    });
+    expect(moved.kind).toBe("session");
+    expect(moved.messageTs).toBe("700.0001");
+  });
+
+  it("REGRESSION (dev 2026-08-30): a clear that beats the attach no-ops, and the attach self-clears — no stuck loader", async () => {
+    const { agentId, presenceId } = await seedChannelAgent("receipt-race", {
+      appMode: "agent",
+      presenceCredentials: await getCrypto().encrypt(
+        JSON.stringify({ botToken: "xoxb-race" }),
+      ),
+    });
+    slackHandlers["agents.sessions.setStatus"] = () => ({ ok: true });
+    const conversation = await db.conversation.create({
+      data: { agentId, source: "slack", externalRef: "C903:800.0001" },
+      select: { id: true },
+    });
+    // The turn is ALREADY DONE — the fast answer's cursor advance fired its
+    // clear before the detached attach's Slack round-trip completed. That
+    // clear found no ledger row and no-oped (asserted by the call count).
+    const turn = await db.turn.create({
+      data: {
+        conversationId: conversation.id,
+        message: "what time is it",
+        status: "done",
+        source: "slack",
+      },
+      select: { id: true },
+    });
+    const statusBefore = slackCallsFor("agents.sessions.setStatus").length;
+    await receipts.clearTurnReceipts(turn.id);
+    expect(slackCallsFor("agents.sessions.setStatus")).toHaveLength(
+      statusBefore,
+    );
+
+    // The late attach: loader goes on ("processing"), then the terminal
+    // recheck sees the finished turn and immediately clears ("active").
+    // MUTATION-TESTED: drop `selfClearIfTurnFinished` from the attach and
+    // the last call stays "processing" with the row still in the ledger —
+    // the exact live incident (loader burning under a posted answer).
+    await receipts.attachTurnReceipt({
+      presenceId,
+      turnId: turn.id,
+      channel: "C903",
+      messageTs: "800.0002",
+      threadTs: "800.0001",
+      text: "what time is it",
+    });
+
+    const calls = slackCallsFor("agents.sessions.setStatus");
+    expect(calls.at(-2)!.form.get("status")).toBe("processing");
+    expect(calls.at(-1)!.form.get("status")).toBe("active");
+    expect(calls.at(-1)!.form.get("thread_ts")).toBe("800.0001");
+    expect(
+      await db.channelTurnReceipt.findUnique({ where: { turnId: turn.id } }),
+    ).toBeNull();
+  });
+
+  it("the recheck leaves a LIVE turn's mark alone — the normal path is untouched", async () => {
+    const { agentId, presenceId } = await seedChannelAgent("receipt-live", {
+      appMode: "agent",
+      presenceCredentials: await getCrypto().encrypt(
+        JSON.stringify({ botToken: "xoxb-live" }),
+      ),
+    });
+    slackHandlers["agents.sessions.setStatus"] = () => ({ ok: true });
+    const conversation = await db.conversation.create({
+      data: { agentId, source: "slack", externalRef: "C904:801.0001" },
+      select: { id: true },
+    });
+    const turn = await db.turn.create({
+      data: {
+        conversationId: conversation.id,
+        message: "long task",
+        status: "running",
+        source: "slack",
+      },
+      select: { id: true },
+    });
+
+    await receipts.attachTurnReceipt({
+      presenceId,
+      turnId: turn.id,
+      channel: "C904",
+      messageTs: "801.0002",
+      threadTs: "801.0001",
+      text: "long task",
+    });
+
+    // Still working: the loader stays on and the row stays.
+    const calls = slackCallsFor("agents.sessions.setStatus");
+    expect(calls.at(-1)!.form.get("status")).toBe("processing");
+    const row = await db.channelTurnReceipt.findUniqueOrThrow({
+      where: { turnId: turn.id },
+    });
+    expect(row.kind).toBe("session");
+  });
+
+  it("the stale-session sweep clears only OLD session loaders — young sessions and reaction rows stay", async () => {
+    const { agentId, presenceId } = await seedChannelAgent("receipt-sweep", {
+      appMode: "agent",
+      presenceCredentials: await getCrypto().encrypt(
+        JSON.stringify({ botToken: "xoxb-sweep" }),
+      ),
+    });
+    slackHandlers["agents.sessions.setStatus"] = () => ({ ok: true });
+    slackHandlers["reactions.remove"] = () => ({ ok: true });
+    const conversation = await db.conversation.create({
+      data: { agentId, source: "slack", externalRef: "C905:802.0001" },
+      select: { id: true },
+    });
+    const mkTurn = async (message: string) =>
+      (
+        await db.turn.create({
+          data: {
+            conversationId: conversation.id,
+            message,
+            // Terminal on purpose, twice over: the one-active-turn unique
+            // allows a single live turn per conversation, and the sweep is
+            // age-gated, not status-gated — a leaked loader's turn is done.
+            status: "done",
+            source: "slack",
+          },
+          select: { id: true },
+        })
+      ).id;
+    const oldSession = await mkTurn("old session");
+    const youngSession = await mkTurn("young session");
+    const oldReaction = await mkTurn("old reaction");
+    const before = new Date(Date.now() - 11 * 60 * 1000);
+    await db.channelTurnReceipt.createMany({
+      data: [
+        {
+          turnId: oldSession,
+          agentChannelId: presenceId,
+          channel: "C905",
+          messageTs: "802.0001",
+          kind: "session",
+          createdAt: before,
+        },
+        {
+          turnId: youngSession,
+          agentChannelId: presenceId,
+          channel: "C905",
+          messageTs: "802.0002",
+          kind: "session",
+        },
+        {
+          turnId: oldReaction,
+          agentChannelId: presenceId,
+          channel: "C905",
+          messageTs: "802.0003",
+          kind: "reaction",
+          reaction: "eyes",
+          createdAt: before,
+        },
+      ],
+    });
+
+    await receipts.sweepStaleSessionReceipts();
+
+    // MUTATION-TESTED (the age gate): drop the createdAt filter and the
+    // young session's loader is yanked mid-run.
+    expect(
+      await db.channelTurnReceipt.findUnique({ where: { turnId: oldSession } }),
+    ).toBeNull();
+    const cleared = slackCallsFor("agents.sessions.setStatus").at(-1)!;
+    expect(cleared.form.get("status")).toBe("active");
+    expect(cleared.form.get("thread_ts")).toBe("802.0001");
+    expect(
+      await db.channelTurnReceipt.findUnique({
+        where: { turnId: youngSession },
+      }),
+    ).not.toBeNull();
+    // Reaction rows are the 24h prune's business, not the sweep's.
+    expect(
+      await db.channelTurnReceipt.findUnique({
+        where: { turnId: oldReaction },
+      }),
+    ).not.toBeNull();
   });
 
   /** A conversation with a done target turn and a joining follow-up — the

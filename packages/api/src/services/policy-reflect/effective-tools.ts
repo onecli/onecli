@@ -2,7 +2,9 @@ import { db } from "@onecli/db";
 import { ServiceError } from "../../services/errors";
 import {
   getAppPermissionDefinition,
+  hostPatternsOf,
   type AppPermissionDefinition,
+  type AppTool,
 } from "../../apps/app-permissions";
 import { hostMatches, isLlmHost } from "../../lib/path-match";
 import { allRuleVariants } from "../policy-translation/translate/app-catalog";
@@ -45,6 +47,11 @@ import { buildInjectionProbe } from "./injection";
 // - Body conditions cannot be exercised (no body input) — conditioned rules
 //   that would match live cannot match here, an inherent limit of any static
 //   summary.
+// - A `graphqlOps`-tagged tool's variants synthesize a REPRESENTATIVE body of
+//   the tool's own kind (a minimal pure query / a minimal mutation), so the
+//   fail-closed classifier resolves the same way it will live and the panel's
+//   verdict matches the gateway. (Without a body, every GraphQL-tagged query
+//   tool would fail-close to "mutation" and misreport as blocked.)
 // - `hasInjections` is DERIVED per tool host from the agent's credential pools
 //   (the injection-probe approximation, hoisted once per request); the response
 //   discloses whether a credential is attached so a "Not managed" wall on an
@@ -181,6 +188,19 @@ export const synthesizePath = (pattern: string): string => {
  * `hostMatches` allows a single leading/trailing `*` with ≥1 substituted char. */
 export const synthesizeHost = (pattern: string): string =>
   pattern.replaceAll("*", TOKEN);
+
+/** Synthesize the representative request body for a tool: GraphQL-tagged
+ * tools get a minimal document of their own kind (so the fail-closed
+ * classifier resolves exactly as it will live - see the honesty note above);
+ * everything else stays body-less. The documents are the smallest valid
+ * members of each class under both ports' classifiers. */
+export const synthesizeBody = (tool: AppTool): string | undefined => {
+  if (tool.graphqlOps === "query")
+    return JSON.stringify({ query: `query { ${TOKEN} }` });
+  if (tool.graphqlOps === "mutation")
+    return JSON.stringify({ query: `mutation { ${TOKEN} }` });
+  return undefined;
+};
 
 /** Load the injection POOL (host patterns + connected-connection providers) —
  * the whole fenced pool for the agent-less BASELINE only. An agent draws
@@ -502,6 +522,7 @@ export const computeEffectiveGroups = (input: {
     const tools = group.tools.map((tool) => {
       const host = synthesizeHost(tool.hostPattern);
       if (input.probe(host)) credentialAttached = true;
+      const body = synthesizeBody(tool);
       const evals = allRuleVariants(tool).map((variant) =>
         evaluateVariant(
           input.simRules,
@@ -513,6 +534,7 @@ export const computeEffectiveGroups = (input: {
             // Every catalog tool declares a method (pinned by
             // read-wildcard-coverage.test.ts); GET is a defensive fallback.
             method: variant.method ?? "GET",
+            body,
             hasInjections: input.probe(host),
             isLlmHost: isLlmHost(host),
             winningConnectionId: input.winningConnectionId,
@@ -709,7 +731,7 @@ export const effectiveAppPermissions = async (
   const concreteHosts = [
     ...new Set(
       def.groups
-        .flatMap((g) => g.tools.map((t) => t.hostPattern))
+        .flatMap((g) => g.tools.flatMap((t) => hostPatternsOf(t)))
         .filter((h) => !h.includes("*")),
     ),
   ];

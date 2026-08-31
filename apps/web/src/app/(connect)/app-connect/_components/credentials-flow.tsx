@@ -46,7 +46,6 @@ export interface CredentialsFlowProps {
   fileImport?: FileImportConfig;
   connectionId?: string;
   preContent?: ReactNode;
-  hiddenFields?: Record<string, string>;
   /** Carries the freshly-created connection (absent on reconnects). */
   onSuccess: (connection?: { id: string; label: string | null }) => void;
   onError: (message: string) => void;
@@ -64,7 +63,6 @@ export const CredentialsFlow = ({
   fileImport,
   connectionId,
   preContent,
-  hiddenFields,
   onSuccess,
   onError,
   workspaceId,
@@ -141,7 +139,7 @@ export const CredentialsFlow = ({
       const resp = await apiFetch(`/v1/apps/${app.id}/connect`, {
         method: "POST",
         body: JSON.stringify({
-          fields: { ...values, ...hiddenFields },
+          fields: values,
           connectionId,
           ...(connectionLabel.trim() ? { label: connectionLabel.trim() } : {}),
           ...(method ? { method } : {}),

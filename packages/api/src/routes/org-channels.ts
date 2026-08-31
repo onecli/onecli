@@ -11,18 +11,16 @@ import {
   listUserLinks,
   removeUserLink,
 } from "../services/channels/channel-integration-service";
-import {
-  confirmSharedInstallFromClaim,
-  disconnectSharedInstall,
-  getSharedAppView,
-  inspectSharedInstallCode,
-  sharedAppSetupManifest,
-  startSharedInstall,
-} from "../services/channels/shared-install-service";
-import { publicApiUrl } from "../services/channels/posture";
 import { adapterLiveness } from "../services/channels/channel-adapter-service";
-import { isChannelProviderId } from "../services/channels/registry";
-import type { ChannelProviderId } from "../services/channels/types";
+import {
+  channelProvider,
+  CHANNEL_PROVIDERS,
+  isChannelProviderId,
+} from "../services/channels/registry";
+import type {
+  ChannelProviderId,
+  ChannelSharedApp,
+} from "../services/channels/types";
 import {
   addUserLinkSchema,
   connectIntegrationSchema,
@@ -56,17 +54,20 @@ const parseProvider = (raw: string): ChannelProviderId => {
   return raw;
 };
 
-/** The shared-app routes exist for Slack alone today — one refusal, four
- * routes, so the message can never drift between them. */
-const parseSharedProvider = (raw: string): ChannelProviderId => {
+/** The shared-app routes exist only for providers whose registry entry
+ * carries the `sharedApp` facet — one refusal, four routes, so the message
+ * can never drift between them. Answers the facet so callers need no second
+ * lookup. */
+const requireSharedApp = (raw: string): ChannelSharedApp => {
   const provider = parseProvider(raw);
-  if (provider !== "slack") {
+  const sharedApp = channelProvider(provider).sharedApp;
+  if (!sharedApp) {
     throw new ServiceError(
       "UNPROCESSABLE",
-      "Only Slack has a shared app today.",
+      `${channelProvider(provider).displayName} has no shared app.`,
     );
   }
-  return provider;
+  return sharedApp;
 };
 
 const parseBody = async (raw: Request) =>
@@ -85,14 +86,21 @@ export const orgChannelRoutes = () => {
 
   // GET /org/channels — integrations, user links, adapter liveness, and the
   // shared-app posture. One call drives the whole settings page; credentials
-  // never leave the server.
+  // never leave the server. The response's `sharedApp` is a singleton by
+  // wire-compat: exactly one provider carries the facet today, and the
+  // registry walk (not a provider-id literal) is what finds it.
   app.get("/", async (c) => {
     const { organizationId } = c.get("auth");
+    const sharedAppProvider = Object.values(CHANNEL_PROVIDERS).find(
+      (p) => p.sharedApp,
+    );
     const [integrations, userLinks, adapter, sharedApp] = await Promise.all([
       getIntegrationView(organizationId),
       listUserLinks(organizationId),
       adapterLiveness(),
-      getSharedAppView(organizationId),
+      sharedAppProvider?.sharedApp
+        ? sharedAppProvider.sharedApp.view(organizationId)
+        : Promise.resolve(null),
     ]);
     return c.json({ integrations, userLinks, adapter, sharedApp });
   });
@@ -103,8 +111,9 @@ export const orgChannelRoutes = () => {
   // OAuth callback.
   app.post("/:provider/shared-install", async (c) => {
     const a = c.get("auth");
-    const provider = parseSharedProvider(c.req.param("provider"));
-    const result = startSharedInstall({
+    const provider = parseProvider(c.req.param("provider"));
+    const sharedApp = requireSharedApp(c.req.param("provider"));
+    const result = sharedApp.startInstall({
       organizationId: a.organizationId,
       actorUserId: a.userId,
     });
@@ -129,7 +138,7 @@ export const orgChannelRoutes = () => {
   // "connect workspace X" — instead of a claim the page cannot verify.
   app.post("/:provider/finish-install/inspect", async (c) => {
     const a = c.get("auth");
-    parseSharedProvider(c.req.param("provider"));
+    const sharedApp = requireSharedApp(c.req.param("provider"));
     const body = inspectInstallSchema.safeParse(await parseBody(c.req.raw));
     if (!body.success) {
       throw new ServiceError(
@@ -137,20 +146,11 @@ export const orgChannelRoutes = () => {
         "This install link is not valid.",
       );
     }
-    const apiUrl = publicApiUrl();
-    if (!apiUrl) {
-      throw new ServiceError(
-        "UNPROCESSABLE",
-        "This deployment cannot complete installs.",
-      );
-    }
     return c.json(
-      await inspectSharedInstallCode({
+      await sharedApp.inspectInstallCode({
         organizationId: a.organizationId,
         actorUserId: a.userId,
         code: body.data.code,
-        // The SAME redirect the consent used — Slack checks it on exchange.
-        redirectUri: `${apiUrl}/v1/channels/slack/oauth/callback`,
       }),
     );
   });
@@ -158,7 +158,8 @@ export const orgChannelRoutes = () => {
   // …and the CONFIRM binds the inspected claim to this caller's org.
   app.post("/:provider/finish-install", async (c) => {
     const a = c.get("auth");
-    const provider = parseSharedProvider(c.req.param("provider"));
+    const provider = parseProvider(c.req.param("provider"));
+    const sharedApp = requireSharedApp(c.req.param("provider"));
     const body = finishInstallSchema.safeParse(await parseBody(c.req.raw));
     if (!body.success) {
       throw new ServiceError(
@@ -166,7 +167,7 @@ export const orgChannelRoutes = () => {
         "This install link is not valid.",
       );
     }
-    const result = await confirmSharedInstallFromClaim({
+    const result = await sharedApp.confirmInstallFromClaim({
       organizationId: a.organizationId,
       actorUserId: a.userId,
       claim: body.data.claim,
@@ -180,22 +181,23 @@ export const orgChannelRoutes = () => {
       source: AUDIT_SOURCE.API,
       metadata: {
         provider,
-        sharedInstall: "finished-from-slack",
+        sharedInstall: "finished-from-provider",
         teamId: result.teamId,
       },
     });
     return c.json(result);
   });
 
-  // GET /org/channels/:provider/shared-manifest — the manifest a self-hosted
-  // operator creates THEIR shared app from (then sets SLACK_SHARED_* env).
+  // GET /org/channels/:provider/shared-manifest — the setup document a
+  // self-hosted operator creates THEIR shared app from (then sets the
+  // provider's shared-app env).
   app.get("/:provider/shared-manifest", async (c) => {
-    parseSharedProvider(c.req.param("provider"));
-    const manifest = sharedAppSetupManifest();
+    const sharedApp = requireSharedApp(c.req.param("provider"));
+    const manifest = sharedApp.setupManifest();
     if (!manifest) {
       throw new ServiceError(
         "UNPROCESSABLE",
-        "The shared Slack app needs a public HTTPS API origin.",
+        "The shared app needs a public HTTPS API origin.",
       );
     }
     return c.json({ manifest });
@@ -206,8 +208,9 @@ export const orgChannelRoutes = () => {
   // regardless).
   app.delete("/:provider/shared-install", async (c) => {
     const a = c.get("auth");
-    const provider = parseSharedProvider(c.req.param("provider"));
-    const disconnected = await disconnectSharedInstall(a.organizationId);
+    const provider = parseProvider(c.req.param("provider"));
+    const sharedApp = requireSharedApp(c.req.param("provider"));
+    const disconnected = await sharedApp.disconnectInstall(a.organizationId);
     if (!disconnected) {
       throw new ServiceError("NOT_FOUND", "No shared app install");
     }

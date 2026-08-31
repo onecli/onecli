@@ -1,7 +1,7 @@
 CHANGELOG.md
 
 # Generated app-permission catalog the gateway embeds (derived from the TS catalog; drift-checked in packages/api/src/apps/app-permissions/catalog-json.test.ts)
-apps/gateway/src/policy_engine/catalog.generated.json
+apps/gateway/crates/policy-engine/src/catalog.generated.json
 
 # Nested worktree checkouts (Claude Code sessions) — each is its own repo view;
 # the repo-wide glob must never format-check another checkout's files.

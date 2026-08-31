@@ -8,6 +8,7 @@ import {
 } from "../../lib/env";
 import type { ChannelProviderId, ChannelTransport } from "./types";
 import { publicApiUrl } from "./posture";
+import { sweepStaleSessionReceipts } from "./turn-receipt-service";
 import { agentImageUrlOrNull } from "../agent-image-service";
 
 /**
@@ -229,6 +230,24 @@ export type AdapterConfigResult =
  * not five. */
 export const PRESENCE_LEASE_SECONDS = 45;
 
+/** How often ONE process fires the stale-session sweep off the config poll
+ * (~10s cadence per adapter). Per-process throttle, not a cluster lease: a
+ * few concurrent sweeps are harmless (the clear is idempotent and the
+ * batch is capped), so cheap beats coordinated here. */
+const SESSION_SWEEP_INTERVAL_MS = 5 * 60 * 1000;
+let lastSessionSweepAt = 0;
+
+/** Detached, throttled: the config poll is the one heartbeat that keeps
+ * beating when threads are quiet — exactly when a leaked "working…" loader
+ * has nothing else to clear it (plans/stuck-loader: the attach-vs-clear
+ * race's backstop). Never awaited on the poll path. */
+const maybeSweepStaleSessionReceipts = (): void => {
+  const now = Date.now();
+  if (now - lastSessionSweepAt < SESSION_SWEEP_INTERVAL_MS) return;
+  lastSessionSweepAt = now;
+  void sweepStaleSessionReceipts();
+};
+
 /**
  * The ownership pass — renew, then claim up to fair share, then shed the
  * excess — run at the top of every config poll. Claims follow the due-work
@@ -246,6 +265,13 @@ export const PRESENCE_LEASE_SECONDS = 45;
  * cannot ping-pong one presence.
  */
 const runOwnershipPass = async (adapterId: string): Promise<void> => {
+  // PROVIDER-BLIND, recorded as debt for provider #2: claims cover every
+  // active presence regardless of provider, so an adapter build with no
+  // runtime for some provider would still lease (and starve) its presences.
+  // Before a second provider ships, registration must carry a capability
+  // list and this pass must filter claims by it. Until then the adapter's
+  // unknown-provider skip only wastes the lease, and one provider means the
+  // situation cannot arise.
   await db.$transaction(async (tx) => {
     // RENEW what I own. Fenced on owner = me: a row a peer stole (my lease
     // lapsed) no longer matches, so a comeback never resurrects lost claims.
@@ -328,6 +354,7 @@ export const getAdapterConfig = async (
   ifNoneMatch?: string,
 ): Promise<AdapterConfigResult> => {
   await runOwnershipPass(caller.adapterId);
+  maybeSweepStaleSessionReceipts();
 
   const rows = await db.agentChannel.findMany({
     where: {

@@ -50,7 +50,16 @@ export type AdapterLink = z.infer<typeof adapterLinkSchema>;
 
 export const adapterPresenceSchema = z.object({
   presenceId: z.string(),
-  provider: z.enum(["slack"]),
+  /**
+   * Open string, DELIBERATELY not an enum: a provider list baked into a
+   * deployed adapter binary would reject the whole config feed (zod throws
+   * on the first unknown presence) the day the control plane grows a second
+   * provider — bricking the adapter's existing slice, not just the new
+   * provider. The adapter instead skips presences whose provider it has no
+   * runtime for, loudly. Compile-time safety stays server-side, where the
+   * feed is BUILT from the `ChannelProviderId` union.
+   */
+  provider: z.string(),
   transport: z.enum(["events", "socket"]),
   status: z.string(),
   externalId: z.string(),

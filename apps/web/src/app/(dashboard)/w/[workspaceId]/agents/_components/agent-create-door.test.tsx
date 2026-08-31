@@ -84,27 +84,56 @@ describe("AgentCreateDoor", () => {
     expect(onCreateByo).not.toHaveBeenCalled();
   });
 
+  it("keeps the MIXED world's primary on hosted — 'New agent', like the hosted door", async () => {
+    renderDoor("hosted-with-byo");
+    await userEvent.click(screen.getByRole("button", { name: /new agent/i }));
+    expect(onCreateHosted).toHaveBeenCalledTimes(1);
+    expect(onCreateByo).not.toHaveBeenCalled();
+  });
+
+  it("puts BYO one click away in the MIXED world's chevron", async () => {
+    renderDoor("hosted-with-byo");
+    await userEvent.click(
+      screen.getByRole("button", { name: /more ways to create/i }),
+    );
+    await userEvent.click(
+      await screen.findByRole("menuitem", { name: /new byo agent/i }),
+    );
+    expect(onCreateByo).toHaveBeenCalledTimes(1);
+    expect(onCreateHosted).not.toHaveBeenCalled();
+    // And the OTHER world's menu item is not there — one menu, one path.
+    expect(
+      screen.queryByRole("menuitem", { name: /new hosted agent/i }),
+    ).toBeNull();
+  });
+
   it("assembles the two halves into ONE control", () => {
     // The seam is the whole visual claim, and it is three things agreeing:
     // both inner edges flat, and a row that binds them. Assert them together
     // — any one alone can hold while the pair visibly comes apart, and this
-    // is the part no unit test can SEE.
-    const { container } = renderDoor("byo-with-hosted");
-    const primary = screen.getByRole("button", { name: /create agent/i });
-    const chevron = screen.getByRole("button", {
-      name: /more ways to create/i,
-    });
-    expect(primary.className).toContain("rounded-r-none");
-    expect(chevron.className).toContain("rounded-l-none");
-    // Same row, same parent, in this order: primary then chevron.
-    const row = container.firstElementChild;
-    expect(row?.className).toContain("flex");
-    expect(primary.parentElement).toBe(row);
-    expect(chevron.parentElement).toBe(row);
-    expect(
-      primary.compareDocumentPosition(chevron) &
-        Node.DOCUMENT_POSITION_FOLLOWING,
-    ).toBeTruthy();
+    // is the part no unit test can SEE. Both split doors share the shape.
+    for (const [door, primaryName] of [
+      ["byo-with-hosted", /create agent/i],
+      ["hosted-with-byo", /new agent/i],
+    ] as const) {
+      const { container } = renderDoor(door);
+      const primary = screen.getByRole("button", { name: primaryName });
+      const chevron = screen.getByRole("button", {
+        name: /more ways to create/i,
+      });
+      expect(primary.className).toContain("rounded-r-none");
+      expect(chevron.className).toContain("rounded-l-none");
+      // Same row, same parent, in this order: primary then chevron.
+      const row = container.firstElementChild;
+      expect(row?.className).toContain("flex");
+      expect(primary.parentElement).toBe(row);
+      expect(chevron.parentElement).toBe(row);
+      expect(
+        primary.compareDocumentPosition(chevron) &
+          Node.DOCUMENT_POSITION_FOLLOWING,
+      ).toBeTruthy();
+      cleanup();
+    }
   });
 
   it("leaves a single button with NO flat edges to look glued to", () => {

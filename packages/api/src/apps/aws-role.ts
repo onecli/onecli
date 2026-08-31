@@ -11,8 +11,14 @@ const exchangeCredentials = async (
   if (!roleArn) {
     throw new Error("Role ARN is required");
   }
+  // Server-filled (`serverFields` below), never user input — an empty value
+  // here means the org's external ID could not be resolved, not that a user
+  // left a box blank. Assuming the role without it would drop the
+  // confused-deputy protection the id exists for, so refuse instead.
   if (!externalId) {
-    throw new Error("External ID is required");
+    throw new Error(
+      "Could not resolve this organization's AWS external ID. Please try again.",
+    );
   }
   if (!region) {
     throw new Error("Default region is required");
@@ -73,5 +79,10 @@ export const awsRole: AppDefinition = {
       },
     ],
     exchangeCredentials,
+    // The external ID is OURS to generate, per AWS's guidance on third-party
+    // role access: it defeats the confused-deputy problem only while a
+    // customer cannot choose it. So it is never a form field — the connect
+    // routes fill it from the caller's own organization.
+    serverFields: [{ name: "externalId", source: "orgAwsExternalId" }],
   },
 };

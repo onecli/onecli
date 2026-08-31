@@ -50,17 +50,19 @@ scenario(
     });
     expect(hostedStamped.status).toBe(422);
 
-    // The org read serves the column either way — the web's door input — and
+    // The org read serves the columns either way — the web's door input — and
     // carries exactly the org object, nothing more.
     const org = await stack.v1.json<Record<string, unknown>>(
       await stack.v1.get("/v1/org"),
     );
     expect(Object.keys(org).sort()).toEqual([
+      "byoEnabled",
       "byoLegacy",
       "id",
       "name",
       "slug",
     ]);
     expect(org.byoLegacy).toBe(true);
+    expect(org.byoEnabled).toBe(false);
   },
 );

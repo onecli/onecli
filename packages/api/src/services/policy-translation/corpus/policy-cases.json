@@ -74,7 +74,7 @@
     }
   },
   {
-    "name": "deny-default org rule + injected non-LLM → blocked by default",
+    "name": "deny-default org rule + injected non-LLM \u2192 blocked by default",
     "rules": [
       {
         "scope": "organization",
@@ -105,7 +105,7 @@
     }
   },
   {
-    "name": "deny-default org rule + no injections → allow (enforce_deny false)",
+    "name": "deny-default org rule + no injections \u2192 allow (enforce_deny false)",
     "rules": [
       {
         "scope": "organization",
@@ -135,7 +135,7 @@
     }
   },
   {
-    "name": "deny-default org rule + LLM host → allow (enforce_deny false)",
+    "name": "deny-default org rule + LLM host \u2192 allow (enforce_deny false)",
     "rules": [
       {
         "scope": "organization",
@@ -395,7 +395,7 @@
     }
   },
   {
-    "name": "strictest-wins across scopes: org allow + workspace block → block",
+    "name": "strictest-wins across scopes: org allow + workspace block \u2192 block",
     "rules": [
       {
         "scope": "organization",
@@ -660,7 +660,7 @@
     }
   },
   {
-    "name": "body-contains condition does not match → allow",
+    "name": "body-contains condition does not match \u2192 allow",
     "rules": [
       {
         "scope": "workspace",
@@ -946,7 +946,7 @@
     }
   },
   {
-    "name": "ORG FLOOR is carved: same rules, no injections → the workspace allow stands",
+    "name": "ORG FLOOR is carved: same rules, no injections \u2192 the workspace allow stands",
     "rules": [
       {
         "scope": "organization",
@@ -997,7 +997,7 @@
     }
   },
   {
-    "name": "ORG FLOOR is carved on an LLM host → the workspace allow stands",
+    "name": "ORG FLOOR is carved on an LLM host \u2192 the workspace allow stands",
     "rules": [
       {
         "scope": "organization",
@@ -1767,6 +1767,779 @@
     },
     "expected": {
       "action": "block"
+    }
+  },
+  {
+    "name": "graphql discrimination: a pure query rides the query allow",
+    "rules": [
+      {
+        "scope": "workspace",
+        "priority": 0,
+        "isDefault": false,
+        "source": "grant",
+        "name": "github: allowed",
+        "identities": [],
+        "targets": [
+          {
+            "kind": "app",
+            "provider": "github",
+            "tools": ["graphql_query", "list_pulls", "git_clone"],
+            "connectionScope": null
+          }
+        ],
+        "action": "allow",
+        "requireApproval": false,
+        "rateLimit": null,
+        "rateLimitWindow": null,
+        "conditions": null
+      },
+      {
+        "scope": "workspace",
+        "priority": 1,
+        "isDefault": false,
+        "source": "grant",
+        "name": "github: blocked",
+        "identities": [],
+        "targets": [
+          {
+            "kind": "app",
+            "provider": "github",
+            "tools": ["create_pull", "graphql_mutation"],
+            "connectionScope": null
+          }
+        ],
+        "action": "block",
+        "requireApproval": false,
+        "rateLimit": null,
+        "rateLimitWindow": null,
+        "conditions": null
+      },
+      {
+        "scope": "workspace",
+        "priority": 2,
+        "isDefault": false,
+        "source": "grant",
+        "name": "github: everything else",
+        "identities": [],
+        "targets": [
+          {
+            "kind": "app",
+            "provider": "github",
+            "tools": [],
+            "connectionScope": null
+          }
+        ],
+        "action": "block",
+        "requireApproval": false,
+        "rateLimit": null,
+        "rateLimitWindow": null,
+        "conditions": null
+      }
+    ],
+    "request": {
+      "host": "api.github.com",
+      "path": "/graphql",
+      "method": "POST",
+      "body": "{\"query\": \"query { repository(owner: \\\"o\\\", name: \\\"r\\\") { pullRequests(first: 5) { nodes { title } } } }\"}",
+      "agentId": "agent-1",
+      "hasInjections": true,
+      "isLlmHost": false
+    },
+    "expected": {
+      "action": "allow"
+    }
+  },
+  {
+    "name": "graphql discrimination: a createPullRequest mutation dies on the block despite the query allow",
+    "rules": [
+      {
+        "scope": "workspace",
+        "priority": 0,
+        "isDefault": false,
+        "source": "grant",
+        "name": "github: allowed",
+        "identities": [],
+        "targets": [
+          {
+            "kind": "app",
+            "provider": "github",
+            "tools": ["graphql_query", "list_pulls", "git_clone"],
+            "connectionScope": null
+          }
+        ],
+        "action": "allow",
+        "requireApproval": false,
+        "rateLimit": null,
+        "rateLimitWindow": null,
+        "conditions": null
+      },
+      {
+        "scope": "workspace",
+        "priority": 1,
+        "isDefault": false,
+        "source": "grant",
+        "name": "github: blocked",
+        "identities": [],
+        "targets": [
+          {
+            "kind": "app",
+            "provider": "github",
+            "tools": ["create_pull", "graphql_mutation"],
+            "connectionScope": null
+          }
+        ],
+        "action": "block",
+        "requireApproval": false,
+        "rateLimit": null,
+        "rateLimitWindow": null,
+        "conditions": null
+      },
+      {
+        "scope": "workspace",
+        "priority": 2,
+        "isDefault": false,
+        "source": "grant",
+        "name": "github: everything else",
+        "identities": [],
+        "targets": [
+          {
+            "kind": "app",
+            "provider": "github",
+            "tools": [],
+            "connectionScope": null
+          }
+        ],
+        "action": "block",
+        "requireApproval": false,
+        "rateLimit": null,
+        "rateLimitWindow": null,
+        "conditions": null
+      }
+    ],
+    "request": {
+      "host": "api.github.com",
+      "path": "/graphql",
+      "method": "POST",
+      "body": "{\"query\": \"mutation { createPullRequest(input: {baseRefName: \\\"main\\\"}) { pullRequest { number } } }\"}",
+      "agentId": "agent-1",
+      "hasInjections": true,
+      "isLlmHost": false
+    },
+    "expected": {
+      "action": "block"
+    }
+  },
+  {
+    "name": "graphql discrimination: a mixed query+mutation document fails closed to the block",
+    "rules": [
+      {
+        "scope": "workspace",
+        "priority": 0,
+        "isDefault": false,
+        "source": "grant",
+        "name": "github: allowed",
+        "identities": [],
+        "targets": [
+          {
+            "kind": "app",
+            "provider": "github",
+            "tools": ["graphql_query", "list_pulls", "git_clone"],
+            "connectionScope": null
+          }
+        ],
+        "action": "allow",
+        "requireApproval": false,
+        "rateLimit": null,
+        "rateLimitWindow": null,
+        "conditions": null
+      },
+      {
+        "scope": "workspace",
+        "priority": 1,
+        "isDefault": false,
+        "source": "grant",
+        "name": "github: blocked",
+        "identities": [],
+        "targets": [
+          {
+            "kind": "app",
+            "provider": "github",
+            "tools": ["create_pull", "graphql_mutation"],
+            "connectionScope": null
+          }
+        ],
+        "action": "block",
+        "requireApproval": false,
+        "rateLimit": null,
+        "rateLimitWindow": null,
+        "conditions": null
+      },
+      {
+        "scope": "workspace",
+        "priority": 2,
+        "isDefault": false,
+        "source": "grant",
+        "name": "github: everything else",
+        "identities": [],
+        "targets": [
+          {
+            "kind": "app",
+            "provider": "github",
+            "tools": [],
+            "connectionScope": null
+          }
+        ],
+        "action": "block",
+        "requireApproval": false,
+        "rateLimit": null,
+        "rateLimitWindow": null,
+        "conditions": null
+      }
+    ],
+    "request": {
+      "host": "api.github.com",
+      "path": "/graphql",
+      "method": "POST",
+      "body": "{\"query\": \"query Q { viewer { login } } mutation M { createPullRequest(input: {}) { clientMutationId } }\"}",
+      "agentId": "agent-1",
+      "hasInjections": true,
+      "isLlmHost": false
+    },
+    "expected": {
+      "action": "block"
+    }
+  },
+  {
+    "name": "graphql discrimination: a bodyless POST /graphql fails closed to the block",
+    "rules": [
+      {
+        "scope": "workspace",
+        "priority": 0,
+        "isDefault": false,
+        "source": "grant",
+        "name": "github: allowed",
+        "identities": [],
+        "targets": [
+          {
+            "kind": "app",
+            "provider": "github",
+            "tools": ["graphql_query", "list_pulls", "git_clone"],
+            "connectionScope": null
+          }
+        ],
+        "action": "allow",
+        "requireApproval": false,
+        "rateLimit": null,
+        "rateLimitWindow": null,
+        "conditions": null
+      },
+      {
+        "scope": "workspace",
+        "priority": 1,
+        "isDefault": false,
+        "source": "grant",
+        "name": "github: blocked",
+        "identities": [],
+        "targets": [
+          {
+            "kind": "app",
+            "provider": "github",
+            "tools": ["create_pull", "graphql_mutation"],
+            "connectionScope": null
+          }
+        ],
+        "action": "block",
+        "requireApproval": false,
+        "rateLimit": null,
+        "rateLimitWindow": null,
+        "conditions": null
+      },
+      {
+        "scope": "workspace",
+        "priority": 2,
+        "isDefault": false,
+        "source": "grant",
+        "name": "github: everything else",
+        "identities": [],
+        "targets": [
+          {
+            "kind": "app",
+            "provider": "github",
+            "tools": [],
+            "connectionScope": null
+          }
+        ],
+        "action": "block",
+        "requireApproval": false,
+        "rateLimit": null,
+        "rateLimitWindow": null,
+        "conditions": null
+      }
+    ],
+    "request": {
+      "host": "api.github.com",
+      "path": "/graphql",
+      "method": "POST",
+      "agentId": "agent-1",
+      "hasInjections": true,
+      "isLlmHost": false
+    },
+    "expected": {
+      "action": "block"
+    }
+  },
+  {
+    "name": "clone discovery bridge: an allowed clone's GET info/refs passes the terminal block",
+    "rules": [
+      {
+        "scope": "workspace",
+        "priority": 0,
+        "isDefault": false,
+        "source": "grant",
+        "name": "github: allowed",
+        "identities": [],
+        "targets": [
+          {
+            "kind": "app",
+            "provider": "github",
+            "tools": ["graphql_query", "list_pulls", "git_clone"],
+            "connectionScope": null
+          }
+        ],
+        "action": "allow",
+        "requireApproval": false,
+        "rateLimit": null,
+        "rateLimitWindow": null,
+        "conditions": null
+      },
+      {
+        "scope": "workspace",
+        "priority": 1,
+        "isDefault": false,
+        "source": "grant",
+        "name": "github: blocked",
+        "identities": [],
+        "targets": [
+          {
+            "kind": "app",
+            "provider": "github",
+            "tools": ["create_pull", "graphql_mutation"],
+            "connectionScope": null
+          }
+        ],
+        "action": "block",
+        "requireApproval": false,
+        "rateLimit": null,
+        "rateLimitWindow": null,
+        "conditions": null
+      },
+      {
+        "scope": "workspace",
+        "priority": 2,
+        "isDefault": false,
+        "source": "grant",
+        "name": "github: everything else",
+        "identities": [],
+        "targets": [
+          {
+            "kind": "app",
+            "provider": "github",
+            "tools": [],
+            "connectionScope": null
+          }
+        ],
+        "action": "block",
+        "requireApproval": false,
+        "rateLimit": null,
+        "rateLimitWindow": null,
+        "conditions": null
+      }
+    ],
+    "request": {
+      "host": "github.com",
+      "path": "/owner/repo.git/info/refs?service=git-upload-pack",
+      "method": "GET",
+      "agentId": "agent-1",
+      "hasInjections": true,
+      "isLlmHost": false
+    },
+    "expected": {
+      "action": "allow"
+    }
+  },
+  {
+    "name": "clone discovery bridge: the push discovery still dies on the terminal block (git_push not granted)",
+    "rules": [
+      {
+        "scope": "workspace",
+        "priority": 0,
+        "isDefault": false,
+        "source": "grant",
+        "name": "github: allowed",
+        "identities": [],
+        "targets": [
+          {
+            "kind": "app",
+            "provider": "github",
+            "tools": ["graphql_query", "list_pulls", "git_clone"],
+            "connectionScope": null
+          }
+        ],
+        "action": "allow",
+        "requireApproval": false,
+        "rateLimit": null,
+        "rateLimitWindow": null,
+        "conditions": null
+      },
+      {
+        "scope": "workspace",
+        "priority": 1,
+        "isDefault": false,
+        "source": "grant",
+        "name": "github: blocked",
+        "identities": [],
+        "targets": [
+          {
+            "kind": "app",
+            "provider": "github",
+            "tools": ["create_pull", "graphql_mutation"],
+            "connectionScope": null
+          }
+        ],
+        "action": "block",
+        "requireApproval": false,
+        "rateLimit": null,
+        "rateLimitWindow": null,
+        "conditions": null
+      },
+      {
+        "scope": "workspace",
+        "priority": 2,
+        "isDefault": false,
+        "source": "grant",
+        "name": "github: everything else",
+        "identities": [],
+        "targets": [
+          {
+            "kind": "app",
+            "provider": "github",
+            "tools": [],
+            "connectionScope": null
+          }
+        ],
+        "action": "block",
+        "requireApproval": false,
+        "rateLimit": null,
+        "rateLimitWindow": null,
+        "conditions": null
+      }
+    ],
+    "request": {
+      "host": "github.com",
+      "path": "/owner/repo.git/info/refs?service=git-receive-pack",
+      "method": "GET",
+      "agentId": "agent-1",
+      "hasInjections": true,
+      "isLlmHost": false
+    },
+    "expected": {
+      "action": "block"
+    }
+  },
+  {
+    "name": "graphql discrimination: a query string on /graphql fails closed to the block even with a pure-query body",
+    "rules": [
+      {
+        "scope": "workspace",
+        "priority": 0,
+        "isDefault": false,
+        "source": "grant",
+        "name": "github: allowed",
+        "identities": [],
+        "targets": [
+          {
+            "kind": "app",
+            "provider": "github",
+            "tools": ["graphql_query"],
+            "connectionScope": null
+          }
+        ],
+        "action": "allow",
+        "requireApproval": false,
+        "rateLimit": null,
+        "rateLimitWindow": null,
+        "conditions": null
+      },
+      {
+        "scope": "workspace",
+        "priority": 1,
+        "isDefault": false,
+        "source": "grant",
+        "name": "github: blocked",
+        "identities": [],
+        "targets": [
+          {
+            "kind": "app",
+            "provider": "github",
+            "tools": ["graphql_mutation"],
+            "connectionScope": null
+          }
+        ],
+        "action": "block",
+        "requireApproval": false,
+        "rateLimit": null,
+        "rateLimitWindow": null,
+        "conditions": null
+      },
+      {
+        "scope": "workspace",
+        "priority": 2,
+        "isDefault": false,
+        "source": "grant",
+        "name": "github: everything else",
+        "identities": [],
+        "targets": [
+          {
+            "kind": "app",
+            "provider": "github",
+            "tools": [],
+            "connectionScope": null
+          }
+        ],
+        "action": "block",
+        "requireApproval": false,
+        "rateLimit": null,
+        "rateLimitWindow": null,
+        "conditions": null
+      }
+    ],
+    "request": {
+      "host": "api.github.com",
+      "path": "/graphql?query=mutation%7BcreatePullRequest%7D",
+      "method": "POST",
+      "body": "{\"query\": \"query { viewer { login } }\"}",
+      "agentId": "agent-1",
+      "hasInjections": true,
+      "isLlmHost": false
+    },
+    "expected": {
+      "action": "block"
+    }
+  },
+  {
+    "name": "connection-target grant stack: a mutation dies on the blocked row, a query rides the allow (the winner-bound shape)",
+    "rules": [
+      {
+        "scope": "workspace",
+        "priority": 0,
+        "isDefault": false,
+        "source": "grant",
+        "name": "gh: allowed",
+        "identities": [
+          {
+            "id": "agent-1",
+            "type": "agent"
+          }
+        ],
+        "targets": [
+          {
+            "kind": "connection",
+            "connectionId": "c-gh",
+            "provider": "github",
+            "tools": ["graphql_query", "list_pulls"]
+          }
+        ],
+        "action": "allow",
+        "requireApproval": false,
+        "rateLimit": null,
+        "rateLimitWindow": null,
+        "conditions": null
+      },
+      {
+        "scope": "workspace",
+        "priority": 1,
+        "isDefault": false,
+        "source": "grant",
+        "name": "gh: blocked",
+        "identities": [
+          {
+            "id": "agent-1",
+            "type": "agent"
+          }
+        ],
+        "targets": [
+          {
+            "kind": "connection",
+            "connectionId": "c-gh",
+            "provider": "github",
+            "tools": [
+              "create_pull",
+              "graphql_mutation",
+              "create_comment",
+              "create_issue",
+              "delete_branch",
+              "get_repo",
+              "git_clone",
+              "git_push",
+              "list_issues",
+              "list_repos",
+              "read_raw_content"
+            ]
+          }
+        ],
+        "action": "block",
+        "requireApproval": false,
+        "rateLimit": null,
+        "rateLimitWindow": null,
+        "conditions": null
+      },
+      {
+        "scope": "workspace",
+        "priority": 2,
+        "isDefault": false,
+        "source": "grant",
+        "name": "gh: everything else",
+        "identities": [
+          {
+            "id": "agent-1",
+            "type": "agent"
+          }
+        ],
+        "targets": [
+          {
+            "kind": "connection",
+            "connectionId": "c-gh",
+            "provider": "github",
+            "tools": []
+          }
+        ],
+        "action": "block",
+        "requireApproval": false,
+        "rateLimit": null,
+        "rateLimitWindow": null,
+        "conditions": null
+      }
+    ],
+    "request": {
+      "host": "api.github.com",
+      "path": "/graphql",
+      "method": "POST",
+      "body": "{\"query\": \"mutation { createPullRequest(input: {}) { clientMutationId } }\"}",
+      "agentId": "agent-1",
+      "hasInjections": true,
+      "isLlmHost": false,
+      "winningConnectionId": "c-gh"
+    },
+    "expected": {
+      "action": "block"
+    }
+  },
+  {
+    "name": "connection-target grant stack: the query twin of the mutation case",
+    "rules": [
+      {
+        "scope": "workspace",
+        "priority": 0,
+        "isDefault": false,
+        "source": "grant",
+        "name": "gh: allowed",
+        "identities": [
+          {
+            "id": "agent-1",
+            "type": "agent"
+          }
+        ],
+        "targets": [
+          {
+            "kind": "connection",
+            "connectionId": "c-gh",
+            "provider": "github",
+            "tools": ["graphql_query", "list_pulls"]
+          }
+        ],
+        "action": "allow",
+        "requireApproval": false,
+        "rateLimit": null,
+        "rateLimitWindow": null,
+        "conditions": null
+      },
+      {
+        "scope": "workspace",
+        "priority": 1,
+        "isDefault": false,
+        "source": "grant",
+        "name": "gh: blocked",
+        "identities": [
+          {
+            "id": "agent-1",
+            "type": "agent"
+          }
+        ],
+        "targets": [
+          {
+            "kind": "connection",
+            "connectionId": "c-gh",
+            "provider": "github",
+            "tools": [
+              "create_pull",
+              "graphql_mutation",
+              "create_comment",
+              "create_issue",
+              "delete_branch",
+              "get_repo",
+              "git_clone",
+              "git_push",
+              "list_issues",
+              "list_repos",
+              "read_raw_content"
+            ]
+          }
+        ],
+        "action": "block",
+        "requireApproval": false,
+        "rateLimit": null,
+        "rateLimitWindow": null,
+        "conditions": null
+      },
+      {
+        "scope": "workspace",
+        "priority": 2,
+        "isDefault": false,
+        "source": "grant",
+        "name": "gh: everything else",
+        "identities": [
+          {
+            "id": "agent-1",
+            "type": "agent"
+          }
+        ],
+        "targets": [
+          {
+            "kind": "connection",
+            "connectionId": "c-gh",
+            "provider": "github",
+            "tools": []
+          }
+        ],
+        "action": "block",
+        "requireApproval": false,
+        "rateLimit": null,
+        "rateLimitWindow": null,
+        "conditions": null
+      }
+    ],
+    "request": {
+      "host": "api.github.com",
+      "path": "/graphql",
+      "method": "POST",
+      "body": "{\"query\": \"query { viewer { login } }\"}",
+      "agentId": "agent-1",
+      "hasInjections": true,
+      "isLlmHost": false,
+      "winningConnectionId": "c-gh"
+    },
+    "expected": {
+      "action": "allow"
     }
   }
 ]

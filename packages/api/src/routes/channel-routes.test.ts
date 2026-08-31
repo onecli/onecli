@@ -148,7 +148,7 @@ vi.mock("@onecli/db", () => {
         where.provider_externalId
           ? dbSpies.presenceByAppId({ where })
           : where.id === "pr-1"
-            ? { identityRef: "UBOT" }
+            ? { identityRef: "UBOT", provider: "slack" }
             : null,
     },
     auditLog: { ...empty, create: dbSpies.auditCreate },

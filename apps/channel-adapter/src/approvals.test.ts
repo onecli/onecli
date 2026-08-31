@@ -109,7 +109,7 @@ const makeManager = (
     controlPlane,
     gatewayUrl: gateway.url,
     approvalsPollSeconds: 1,
-    cardUi: slackApprovalCardUi,
+    cardUiOf: () => slackApprovalCardUi,
     credentialOf: botTokenOf,
     // Real pacing is 3s; tests pace in tens of ms like the other cadences.
     pacingMs: overrides.pacingMs ?? 25,
@@ -729,7 +729,7 @@ describe("poll pacing", () => {
       controlPlane,
       gatewayUrl: gateway.url,
       approvalsPollSeconds: 1,
-      cardUi: slackApprovalCardUi,
+      cardUiOf: () => slackApprovalCardUi,
       credentialOf: botTokenOf,
       // Long pacing: the loop must park after ONE answered poll.
       pacingMs: 60_000,

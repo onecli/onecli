@@ -18,13 +18,21 @@ export const orgRoutes = () => {
 
   // GET /v1/org — the org object plus its creation-world posture. `byoLegacy`
   // is the manually-operated per-org switch (sandbox-platform §3.10 as
-  // re-decided 2026-08-23): on cloud, false = hosted-only creation, true =
-  // BYO-only creation. Inert on self-host — the web ignores it there.
+  // re-decided 2026-08-23): on cloud, false = hosted-first creation, true =
+  // BYO-only creation. `byoEnabled` (mixed world, 2026-08-29) is only read
+  // when `byoLegacy` is false: it additionally allows BYO creation beside the
+  // hosted default. Both inert on self-host — the web ignores them there.
   app.get("/", member, async (c) => {
     const authCtx = c.get("auth");
     const org = await db.organization.findUnique({
       where: { id: authCtx.organizationId },
-      select: { id: true, name: true, slug: true, byoLegacy: true },
+      select: {
+        id: true,
+        name: true,
+        slug: true,
+        byoLegacy: true,
+        byoEnabled: true,
+      },
     });
     if (!org) {
       throw new ServiceError("NOT_FOUND", "Organization not found");

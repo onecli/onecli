@@ -210,7 +210,12 @@ export const OnePasswordPickerDialog = ({
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="gap-0 overflow-hidden p-0 sm:max-w-md">
+      {/* `overflow-hidden` clips rather than scrolls (it is what keeps the
+          rounded corners over the flush list), so the column layout has to do
+          the accommodating: the frame is bounded and the RESULT LIST is the
+          part that shrinks, which keeps the path header and the search box on
+          screen however short the window is. */}
+      <DialogContent className="flex max-h-[calc(100dvh-2rem)] flex-col gap-0 overflow-hidden p-0 sm:max-w-md">
         <DialogHeader className="space-y-3 border-b px-4 py-3.5 text-left">
           <div className="flex items-center gap-2.5">
             <Image
@@ -250,7 +255,7 @@ export const OnePasswordPickerDialog = ({
           </div>
         </DialogHeader>
 
-        <div className="flex items-center gap-2 px-4 pb-2 pt-3">
+        <div className="flex shrink-0 items-center gap-2 px-4 pb-2 pt-3">
           <Input
             autoFocus
             value={query}
@@ -265,7 +270,7 @@ export const OnePasswordPickerDialog = ({
           )}
         </div>
 
-        <div className="max-h-[18rem] min-h-[7rem] overflow-y-auto px-1.5 pb-2">
+        <div className="max-h-[18rem] min-h-0 flex-1 overflow-y-auto px-1.5 pb-2 sm:min-h-[7rem]">
           {isLoading ? (
             <div className="space-y-px py-1">
               {["w-28", "w-20", "w-36", "w-16", "w-24"].map((w, i) => (

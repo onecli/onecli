@@ -33,7 +33,7 @@ Two lanes override it per test:
   (sessions stay on agent tokens; the pinned `SECRET_ENCRYPTION_KEY` selects local AES by
   config precedence). The KMS envelope FORMAT itself is unit-pinned on both sides of the
   TS↔Rust contract (`packages/api/src/ee/kms-crypto.contract.test.ts`,
-  `apps/gateway/src/ee/kms_crypto.rs`); only the live AWS KMS call is proven by deploys.
+  `apps/gateway/crates/ee/ee/src/kms_crypto.rs`); only the live AWS KMS call is proven by deploys.
 
 ## Running locally
 

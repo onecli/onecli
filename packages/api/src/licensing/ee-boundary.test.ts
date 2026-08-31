@@ -189,7 +189,9 @@ describe("enterprise-license boundary", () => {
   it("gateway Rust never uses #[path] or include!", () => {
     const offenders: string[] = [];
     for (const file of gitFiles()) {
-      if (!file.startsWith("apps/gateway/src/") || !file.endsWith(".rs"))
+      // The WHOLE workspace, not one crate: since the gateway became a Cargo
+      // workspace a splice could hide in any member.
+      if (!file.startsWith("apps/gateway/crates/") || !file.endsWith(".rs"))
         continue;
       const source = read(file);
       if (/#\[path\b/.test(source)) offenders.push(`${file} uses #[path]`);
@@ -201,15 +203,27 @@ describe("enterprise-license boundary", () => {
     expect(offenders).toEqual([]);
   });
 
-  // The import detector anchors on `crate::`/`super::`, and main.rs is the
-  // crate root — a bare `ee::ha::…` path there would be a real crossing the
-  // seam counter never sees. Close the documented gap mechanically: the crate
-  // root must always write `crate::ee::…`.
-  it("main.rs never reaches ee through a bare crate-root path", () => {
-    const source = read("apps/gateway/src/main.rs");
-    // `mod ee;` (no `::`) is the declaration and is fine; `crate::ee::` is
-    // the counted form. Only an unprefixed `ee::` evades the detector.
-    expect(source.match(/(?<![:\w])ee::/g) ?? []).toEqual([]);
+  // The bin crate re-exports the licensed crate at its root (`use ee;`),
+  // which makes a bare `ee::ha::…` path reachable in every one of its files.
+  // Both spellings are detected, but only one may be used consistently or the
+  // seam count would depend on spelling: inside the bin, always write
+  // `crate::ee::…`. The guard covers the whole crate, not just `main.rs`.
+  it("the bin crate never reaches ee through a bare path", () => {
+    const offenders: string[] = [];
+    for (const file of gitFiles()) {
+      if (
+        !file.startsWith("apps/gateway/crates/onecli-gateway/src/") ||
+        !file.endsWith(".rs")
+      )
+        continue;
+      const source = read(file);
+      // The root re-export (`use ee;`) is the declaration and names no
+      // module, so it is not itself a crossing; only an unprefixed `ee::`
+      // USE would record the crossing under a second spelling.
+      const bare = source.match(/(?<![:\w])ee::/g) ?? [];
+      if (bare.length > 0) offenders.push(`${file} (${bare.length})`);
+    }
+    expect(offenders).toEqual([]);
   });
 
   // ── Rule 1: contents ───────────────────────────────────────────────────
@@ -234,6 +248,50 @@ describe("enterprise-license boundary", () => {
     licensed["(files)"] = [...LICENSED_FILES].filter((f) => files.includes(f));
 
     expect(licensed).toMatchSnapshot();
+  });
+
+  // The file-list snapshot above catches a licensed FILE disappearing, but not
+  // licensed CODE moving out of one — a function lifted from a licensed file
+  // into a shared crate leaves the file (and the snapshot) intact while
+  // un-licensing the logic. That is exactly what happened once: a licensed
+  // principal parity test was relocated into an Apache-2.0 crate during the
+  // gateway workspace split, and every path- and import-based check passed.
+  //
+  // So pin the licensed SYMBOLS too. Adding one is normal review; REMOVING one
+  // means the code either died or emigrated, and the diff makes a human say
+  // which.
+  it("the licensed symbol set changes only by deliberate review", () => {
+    // Rust items (the gateway) and TS exports (web/api) in one shape: the
+    // question "what does the licence cover?" is language-independent.
+    const RUST_ITEM =
+      /^\s*(?:pub(?:\([^)]*\))?\s+)?(?:async\s+)?(?:unsafe\s+)?(?:fn|struct|enum|trait|type|const|static)\s+([A-Za-z_][A-Za-z0-9_]*)/gm;
+    const TS_EXPORT =
+      /^\s*export\s+(?:async\s+)?(?:function|class|interface|type|const|enum)\s+([A-Za-z_$][A-Za-z0-9_$]*)/gm;
+
+    const symbols: Record<string, string[]> = {};
+    for (const file of gitFiles().filter(isSourceFile)) {
+      if (!isUnderLicensedPath(file)) continue;
+      const source = read(file);
+      const pattern = file.endsWith(".rs") ? RUST_ITEM : TS_EXPORT;
+      const found = [...source.matchAll(pattern)]
+        .map((m) => m[1])
+        .filter((name): name is string => Boolean(name));
+      // COUNT each definition, do not just collect the name. A licensed
+      // function lifted into a shared crate often leaves its name behind in
+      // the licensed file (a trait impl forwarding to it, a test calling it),
+      // so a name SET still matches while the definition has emigrated —
+      // observed for real with `user_is_org_admin`. Counting makes the
+      // departure visible: 2 -> 1 fails, and review says which.
+      const tally = new Map<string, number>();
+      for (const name of found) tally.set(name, (tally.get(name) ?? 0) + 1);
+      if (tally.size > 0) {
+        symbols[file] = [...tally.entries()]
+          .sort(([a], [b]) => a.localeCompare(b))
+          .map(([name, n]) => (n > 1 ? `${name} x${n}` : name));
+      }
+    }
+
+    expect(symbols).toMatchSnapshot();
   });
 
   it("every licensed root exists and carries its license copy", () => {
@@ -303,7 +361,7 @@ describe("enterprise-license boundary", () => {
       .filter(Boolean);
 
     // Roots are written with a trailing slash, so a reader cannot mistake
-    // `apps/gateway/src/ee/` for the sibling file `apps/gateway/src/ee.rs`.
+    // the licensed roots; the gateway root is a whole CRATE directory.
     const expected = [
       ...LICENSED_ROOTS.map((root) => `${root}/`),
       ...LICENSED_FILES,
@@ -437,6 +495,33 @@ describe("enterprise-license boundary", () => {
       ).not.toEqual([]);
     });
 
+    // Since the gateway became a Cargo workspace the licensed code is a CRATE
+    // named `ee`, and a dependent names it with a BARE `ee::…` path (no
+    // `crate::` prefix — that only applies within one crate), a spelling the
+    // `crate::ee::` arm cannot see. Without this arm every crossing outside
+    // the bin crate would be invisible.
+    it("flags the workspace-crate spelling of the licensed gateway code", () => {
+      expect(findLicensedImports("use ee::budget;")).toEqual(["ee::budget"]);
+      expect(
+        findLicensedImports("    ee::granular_access::enforce(x)"),
+      ).toEqual(["ee::granular_access"]);
+      // The bin's root re-export makes the bare form reachable crate-wide.
+      expect(findLicensedImports("use ee;")).toEqual([]);
+      // A lookalike crate/identifier must not match: the segment must be
+      // exactly `ee`, never the tail of a longer name.
+      expect(findLicensedImports("use employee::thing;")).toEqual([]);
+      expect(findLicensedImports("use eels::thing;")).toEqual([]);
+      expect(findLicensedImports("let x = free::ee_helper::y();")).toEqual([]);
+      // One crossing counts ONCE: the bin's `crate::ee::x` must not also be
+      // reported as a bare `ee::x`, or every seam count would inflate.
+      expect(findLicensedImports("crate::ee::budget::bind()")).toEqual([
+        "crate::ee::budget",
+      ]);
+      expect(findLicensedImports("super::ee::rbac::resolve()")).toEqual([
+        "super::ee::rbac",
+      ]);
+    });
+
     it("strips a MULTI-LINE type import, not just its first line", () => {
       expect(
         findLicensedImports(
@@ -520,7 +605,9 @@ describe("enterprise-license boundary", () => {
       expect(isUnderLicensedPath("packages/api/src/ee/scim/users.ts")).toBe(
         true,
       );
-      expect(isUnderLicensedPath("apps/gateway/src/ee.rs")).toBe(true);
+      expect(isUnderLicensedPath("apps/gateway/crates/ee/ee/src/lib.rs")).toBe(
+        true,
+      );
       expect(isUnderLicensedPath("packages/api/src/routes/agents.ts")).toBe(
         false,
       );

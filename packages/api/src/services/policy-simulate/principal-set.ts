@@ -1,7 +1,7 @@
 import { db } from "@onecli/db";
 
 // LICENSED-MIRROR: deliberate Apache twin of the gateway's licensed
-// principal CTE (apps/gateway/src/ee/principals/resolve.rs). Free hot paths
+// principal CTE (apps/gateway/crates/ee/ee/src/principals/resolve.rs). Free hot paths
 // execute this file (credential injection, grants summaries, reflections),
 // so it must NOT move into ee/ — declared in ee-boundary.ts LICENSED_MIRRORS.
 //

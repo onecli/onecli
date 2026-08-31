@@ -1,4 +1,5 @@
-import type { AppDefinition, ConnectionMethod } from "./types";
+import { ensureOrgAwsExternalId } from "../services/aws-external-id-service";
+import type { AppDefinition, ConnectionMethod, ServerField } from "./types";
 
 /** Request body accepted by the direct-connect endpoints (workspace and org). */
 export interface ConnectRequestBody {
@@ -26,6 +27,33 @@ export type ResolvedConnectCredentials =
     };
 
 /**
+ * Resolve the values of an app's `serverFields` from the caller's authenticated
+ * scope. Every source reads a fact about the CALLER'S OWN organization, so a
+ * client cannot influence the result by what it submits.
+ */
+const resolveServerFields = async (
+  serverFields: ServerField[],
+  organizationId: string,
+): Promise<Record<string, string>> => {
+  const resolved: Record<string, string> = {};
+  for (const field of serverFields) {
+    switch (field.source) {
+      case "orgAwsExternalId":
+        resolved[field.name] = await ensureOrgAwsExternalId(organizationId);
+        break;
+      default: {
+        // Exhaustiveness guard: a new source that lands here would otherwise
+        // resolve to nothing and silently let the CLIENT'S value stand — the
+        // exact failure this seam exists to prevent. Fail the connect instead.
+        const unhandled: never = field.source;
+        throw new Error(`Unhandled server field source: ${String(unhandled)}`);
+      }
+    }
+  }
+  return resolved;
+};
+
+/**
  * Resolve a direct-connect request body into stored credentials: pick the
  * connection method, validate the submitted fields, and exchange/shape them
  * into `{credentials, scopes, metadata}`. Shared by the workspace-scoped
@@ -33,11 +61,17 @@ export type ResolvedConnectCredentials =
  * (`POST /org/apps/:provider/connect`) endpoints — every guard returns the
  * exact error string the workspace endpoint has always produced, so extraction
  * is behavior-preserving.
+ *
+ * `organizationId` is the CALLER'S org, from the auth context. It is what any
+ * declared `serverFields` resolve against: those names are stripped from the
+ * submitted fields and re-filled server-side, so a forged value in the request
+ * body is discarded rather than trusted.
  */
 export const resolveConnectCredentials = async (
   provider: string,
   appDef: AppDefinition,
   body: ConnectRequestBody | null,
+  organizationId: string,
 ): Promise<ResolvedConnectCredentials> => {
   // Resolve which connection method to use. Apps with `additionalMethods`
   // (e.g. Attio: OAuth primary + API key alternate) pass `method` to select
@@ -71,7 +105,21 @@ export const resolveConnectCredentials = async (
     return { ok: false, error: "Missing fields in request body" };
   }
 
-  const { fields } = body;
+  // Server-owned fields are resolved from the caller's org and MERGED OVER the
+  // submitted ones, so whatever the client sent under those names never reaches
+  // `exchangeCredentials` — the point of declaring them (see `ServerField`).
+  // Resolved before validation, so a server-filled field satisfies a required
+  // check the client cannot satisfy itself.
+  const serverFields =
+    activeMethod.type === "credentials_import"
+      ? (activeMethod.serverFields ?? [])
+      : [];
+  const fields = {
+    ...body.fields,
+    ...(serverFields.length
+      ? await resolveServerFields(serverFields, organizationId)
+      : {}),
+  };
 
   let requiredFields: { name: string; label: string }[];
   if (

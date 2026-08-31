@@ -69,7 +69,8 @@ export const AUDIT_SERVICES = {
   MEMORY: "memory",
   // Skills (hosted-agents v2 step 9): user-authored capabilities materialized
   // into sandboxes. Free — audited from the API routes on both doors
-  // (workspace and org); agents cannot author skills at all.
+  // (workspace and org); agent-authored skill_* tool writes are audited under
+  // the resolved creating user (viaAgent), agent-tier rows only.
   SKILL: "skill",
   // EE-only (policy-engine step 7): the org app-availability allowlist
   // (toggle + per-principal grants).

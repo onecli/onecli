@@ -7,7 +7,7 @@ import {
   supervisorMessageSchema,
   type SupervisorMessage,
 } from "@onecli/agent-protocol";
-import { createFakeHarness } from "./harness/fake";
+import { createFakeHarness, type FakeScript } from "./harness/fake";
 import { createStdioTransport } from "./transport/stdio";
 import { runSupervisor } from "./supervisor";
 
@@ -668,5 +668,135 @@ describe("the harvester is wired into the sync apply", () => {
     expect(readFileSync(join(homeDir, "memory/fact.md"), "utf8")).toBe(
       "the agent's own edit",
     );
+  });
+});
+
+/**
+ * THE ANSWER IS THE LAST MESSAGE (user decision, 2026-08-31).
+ *
+ * The live failure: agents answered chat with multi-screen walls that the
+ * response-style prompt could not fix, because the model was already obeying
+ * it — writing short messages between tool calls. The supervisor concatenated
+ * every one of them into a single durable `text`, so the running commentary
+ * was published AS the answer. These pins hold the boundary: narration
+ * streams and vanishes, the closing message is the record.
+ */
+describe("the answer is the agent's last message, not its whole turn", () => {
+  const runWithScript = async (
+    script: FakeScript,
+  ): Promise<SupervisorMessage[]> => {
+    const homeDir = mkdtempSync(join(tmpdir(), "supervisor-"));
+    const input = new PassThrough();
+    const output = new PassThrough();
+    const run = runSupervisor(
+      {
+        homeDir,
+        model: undefined,
+        effort: undefined,
+        instructions: undefined,
+        agentName: undefined,
+        harness: "fake",
+        runnerWsUrl: undefined,
+        bootstrapToken: undefined,
+      },
+      createFakeHarness({ script }),
+      createStdioTransport(input, output),
+    );
+    input.write(
+      '{"kind":"turn.deliver","turnId":"t1","conversationId":"cv1","message":"go"}\n',
+    );
+    input.write('{"kind":"shutdown"}\n');
+    input.end();
+    await run;
+    return (output.read()?.toString() ?? "")
+      .trim()
+      .split("\n")
+      .map((line: string) => supervisorMessageSchema.parse(JSON.parse(line)));
+  };
+
+  /** The one durable answer this turn produced, or null if it stayed silent. */
+  const answerOf = (messages: SupervisorMessage[]): string | null => {
+    const texts = messages.flatMap((m) =>
+      m.kind === "event" && m.event.type === "text" ? [m.event.text] : [],
+    );
+    expect(texts.length).toBeLessThanOrEqual(1);
+    return texts[0] ?? null;
+  };
+
+  it("keeps only the closing message when narration precedes the tools", async () => {
+    // The exact shape of the reported walls: three compliant one-liners, two
+    // of them mid-work. MUTATION-PROOF: restore the `answer +=`
+    // concatenation and the narration reappears in the stored answer.
+    const messages = await runWithScript(() => [
+      { type: "text.delta", text: "Let me check the logs." },
+      { type: "tool.started", callId: "c1", name: "bash" },
+      { type: "tool.finished", callId: "c1", name: "bash", output: "ok" },
+      { type: "text.delta", text: "Now the config." },
+      { type: "tool.started", callId: "c2", name: "read" },
+      { type: "tool.finished", callId: "c2", name: "read", output: "ok" },
+      { type: "text.delta", text: "CI passed; nothing to do." },
+      { type: "turn.done", usage: { inputTokens: 1, outputTokens: 1 } },
+    ]);
+
+    expect(answerOf(messages)).toBe("CI passed; nothing to do.");
+    // The narration still STREAMED — it is progress, and the surfaces render
+    // it live; it simply is not the record.
+    const deltas = messages.flatMap((m) =>
+      m.kind === "event" && m.event.type === "text.delta" ? [m.event.text] : [],
+    );
+    expect(deltas).toContain("Let me check the logs.");
+    expect(deltas).toContain("Now the config.");
+  });
+
+  it("joins deltas within one message, so a streamed sentence stays whole", async () => {
+    // Segmentation is per MESSAGE, not per delta: token-by-token streaming
+    // inside one message must still concatenate.
+    const messages = await runWithScript(() => [
+      { type: "tool.started", callId: "c1", name: "bash" },
+      { type: "tool.finished", callId: "c1", name: "bash", output: "ok" },
+      { type: "text.delta", text: "All " },
+      { type: "text.delta", text: "four " },
+      { type: "text.delta", text: "gates are green." },
+      { type: "turn.done", usage: { inputTokens: 1, outputTokens: 1 } },
+    ]);
+
+    expect(answerOf(messages)).toBe("All four gates are green.");
+  });
+
+  it("falls back to the last thing said when a turn ends mid-tool", async () => {
+    // Never silent: a turn that stopped while working still said something,
+    // and posting nothing reads as the agent ignoring the person.
+    const messages = await runWithScript(() => [
+      { type: "text.delta", text: "Starting the deploy." },
+      { type: "tool.started", callId: "c1", name: "bash" },
+      { type: "error", message: "the harness died" },
+    ]);
+
+    expect(answerOf(messages)).toBe("Starting the deploy.");
+  });
+
+  it("does not let back-to-back tools erase the last words said", async () => {
+    // An empty segment must never displace a real one — otherwise a trailing
+    // pair of tool calls would blank the fallback and the turn goes silent.
+    const messages = await runWithScript(() => [
+      { type: "text.delta", text: "Found the cause." },
+      { type: "tool.started", callId: "c1", name: "bash" },
+      { type: "tool.finished", callId: "c1", name: "bash", output: "ok" },
+      { type: "tool.started", callId: "c2", name: "bash" },
+      { type: "tool.finished", callId: "c2", name: "bash", output: "ok" },
+      { type: "error", message: "stopped" },
+    ]);
+
+    expect(answerOf(messages)).toBe("Found the cause.");
+  });
+
+  it("stays silent when the agent never said anything", async () => {
+    const messages = await runWithScript(() => [
+      { type: "tool.started", callId: "c1", name: "bash" },
+      { type: "tool.finished", callId: "c1", name: "bash", output: "ok" },
+      { type: "turn.done", usage: { inputTokens: 1, outputTokens: 1 } },
+    ]);
+
+    expect(answerOf(messages)).toBeNull();
   });
 });

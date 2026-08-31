@@ -136,6 +136,19 @@ export const queryKeys = {
     all: () => ["app-permission-definitions"] as const,
     list: () => [...queryKeys.appPermissionDefinitions.all(), "list"] as const,
   },
+  awsExternalId: {
+    // The org's AWS sts:ExternalId, read from the connect popup — whose
+    // pathname is `/app-connect/<provider>` and so carries NO scope for
+    // `scope()` to read (the ids are in the query string). Keying on the
+    // explicit scope instead of the URL is what keeps two popups opened for
+    // different tenants from sharing one cache entry.
+    all: (scope?: { workspaceId?: string; orgId?: string }) =>
+      [
+        "aws-external-id",
+        scope?.orgId ?? "-",
+        scope?.workspaceId ?? "-",
+      ] as const,
+  },
   appConfig: {
     all: () => ["appConfig", ...scope()] as const,
     status: (provider: string, pageScope: PageScope) =>

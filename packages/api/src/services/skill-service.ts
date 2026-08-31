@@ -436,6 +436,105 @@ const getSkillById = async (skillId: string): Promise<SkillView> => {
   return skill;
 };
 
+// ── The agent door (the skill_* MCP tools) ──────────────────────────────────
+// Writes are fenced to the AGENT TIER: a sandbox write must never change what
+// other agents load, so workspace/org rows — member-visible, human-managed —
+// answer FORBIDDEN with a dashboard pointer, and a name that exists nowhere
+// visible answers NOT_FOUND. Reads see all three tiers (the same set the
+// composer materializes, minus the shadow-merge — the agent needs to know
+// what exists and which rows are its own).
+
+/** Every tier that reaches this agent, flat, scope marked — enabled and
+ * disabled alike (an agent must see its own paused rows to re-enable them). */
+export const listSkillsReachingAgent = async (
+  agentId: string,
+  workspaceId: string,
+  organizationId: string,
+): Promise<SkillListItem[]> => {
+  const rows = await db.skill.findMany({
+    where: { OR: [{ agentId }, { workspaceId }, { organizationId }] },
+    orderBy: [{ scope: "asc" }, { name: "asc" }],
+    select: skillListSelect,
+  });
+  return rows.map(toListItem);
+};
+
+/** The write fence for the agent door: the agent's OWN row by name, or the
+ * honest refusal. A broader-tier row with that name is FORBIDDEN with a
+ * pointer (the requireWorkspaceWritableSkill posture); an unknown name is
+ * NOT_FOUND. */
+const requireAgentOwnSkill = async (
+  agentId: string,
+  workspaceId: string,
+  organizationId: string,
+  name: string,
+) => {
+  const own = await db.skill.findFirst({
+    where: { agentId, name },
+    select: {
+      id: true,
+      agentId: true,
+      workspaceId: true,
+      organizationId: true,
+      description: true,
+      content: true,
+      enabled: true,
+      files: { select: { path: true, content: true } },
+    },
+  });
+  if (own) return own;
+  const broader = await db.skill.findFirst({
+    where: { name, OR: [{ workspaceId }, { organizationId }] },
+    select: { scope: true },
+  });
+  if (broader) {
+    throw new ServiceError(
+      "FORBIDDEN",
+      `"${name}" is a ${broader.scope}-level skill, managed by the people you work with in the dashboard. You can only change your own agent skills — or create an agent skill with this name, which takes precedence for you.`,
+    );
+  }
+  throw new ServiceError(
+    "NOT_FOUND",
+    `You hold no agent skill named "${name}". skill_list shows what exists`,
+  );
+};
+
+export const updateAgentSkillByName = async (
+  agentId: string,
+  workspaceId: string,
+  organizationId: string,
+  name: string,
+  patch: SkillPatch,
+): Promise<{ skill: SkillView; noop: boolean }> => {
+  const existing = await requireAgentOwnSkill(
+    agentId,
+    workspaceId,
+    organizationId,
+    name,
+  );
+  const updated = await applyPatch(existing.id, existing, patch);
+  if (!updated) return { skill: await getSkillById(existing.id), noop: true };
+  await bumpHomeForAgent(agentId);
+  return { skill: updated, noop: false };
+};
+
+export const deleteAgentSkillByName = async (
+  agentId: string,
+  workspaceId: string,
+  organizationId: string,
+  name: string,
+): Promise<{ id: string }> => {
+  const existing = await requireAgentOwnSkill(
+    agentId,
+    workspaceId,
+    organizationId,
+    name,
+  );
+  await db.skill.delete({ where: { id: existing.id } });
+  await bumpHomeForAgent(agentId);
+  return { id: existing.id };
+};
+
 // ── The org door ────────────────────────────────────────────────────────────
 
 export const listOrgSkills = async (

@@ -24,6 +24,7 @@ import {
   removeBlocklistRule,
 } from "../services/app-blocklist-service";
 import { parseConfigBody } from "../validations/app-config";
+import { ensureOrgAwsExternalId } from "../services/aws-external-id-service";
 import { invalidateGatewayCache } from "../lib/gateway-invalidate";
 import {
   withAudit,
@@ -74,7 +75,12 @@ export const orgAppRoutes = () => {
       .json()
       .catch(() => null)) as ConnectRequestBody | null;
 
-    const resolved = await resolveConnectCredentials(provider, appDef, body);
+    const resolved = await resolveConnectCredentials(
+      provider,
+      appDef,
+      body,
+      authCtx.organizationId,
+    );
     if (!resolved.ok) {
       return c.json({ error: resolved.error }, 400);
     }
@@ -92,6 +98,21 @@ export const orgAppRoutes = () => {
       body?.connectionId,
       resolved.fields,
     );
+  });
+
+  // ── AWS external ID ─────────────────────────────────────────────────
+  // The org's `sts:ExternalId`, for the AWS Role connect screen's trust-policy
+  // step. Read from the membership-fenced auth context, so a caller can only
+  // ever learn their OWN org's id; minted on first read and stable after.
+  // Admin-only like every other route here — it names an org-level identity.
+  //
+  // A GET that may write on first call is deliberate and safe: the write is an
+  // idempotent lazy initialization (conditional, and it never changes an
+  // existing value), so the endpoint stays effectively idempotent for callers.
+  app.get("/aws-external-id", admin, async (c) => {
+    const authCtx = c.get("auth");
+    const externalId = await ensureOrgAwsExternalId(authCtx.organizationId);
+    return c.json({ externalId });
   });
 
   // ── Config ──────────────────────────────────────────────────────────

@@ -4,12 +4,13 @@
   "private": true,
   "license": "Apache-2.0",
   "scripts": {
-    "build": "cargo build --release",
+    "build": "cargo build --release --bin onecli-gateway",
     "dev": "cargo run",
-    "check": "cargo clippy --all-targets -- -D warnings && cargo fmt --check",
-    "lint": "cargo fmt --check",
-    "format:check": "cargo fmt --check",
-    "check-types": "cargo clippy --all-targets -- -D warnings",
-    "test": "cargo test"
+    "check": "cargo clippy --workspace --all-targets -- -D warnings && cargo fmt --all --check && RUSTDOCFLAGS=\"-D warnings\" cargo doc --workspace --no-deps --quiet",
+    "lint": "cargo fmt --all --check",
+    "format:check": "cargo fmt --all --check",
+    "check-types": "cargo clippy --workspace --all-targets -- -D warnings",
+    "test": "cargo test --workspace",
+    "check-docs": "RUSTDOCFLAGS=\"-D warnings\" cargo doc --workspace --no-deps --quiet"
   }
 }

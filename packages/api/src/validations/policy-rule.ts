@@ -1,5 +1,7 @@
 import { z } from "zod";
 
+import { networkHostPatternShapeError } from "./secret";
+
 export const ruleConditionSchema = z.object({
   target: z.enum(["body"]),
   operator: z.enum(["contains"]),
@@ -12,7 +14,18 @@ export type RuleCondition = z.infer<typeof ruleConditionSchema>;
 export const createPolicyRuleSchema = z
   .object({
     name: z.string().trim().min(1).max(255),
-    hostPattern: z.string().min(1).max(1000),
+    // See `networkHostPatternShapeError`: broad fences stay legal, malformed
+    // wildcard shapes do not.
+    hostPattern: z
+      .string()
+      .min(1)
+      .max(1000)
+      .superRefine((v, ctx) => {
+        const problem = networkHostPatternShapeError(v);
+        if (problem !== null) {
+          ctx.addIssue({ code: "custom", message: problem });
+        }
+      }),
     pathPattern: z.string().max(1000).optional(),
     method: z.enum(["GET", "POST", "PUT", "PATCH", "DELETE"]).optional(),
     action: z.enum(["block", "rate_limit", "manual_approval", "allow"]),
@@ -42,7 +55,17 @@ export type CreatePolicyRuleInput = z.infer<typeof createPolicyRuleSchema>;
 export const updatePolicyRuleSchema = z
   .object({
     name: z.string().trim().min(1).max(255).optional(),
-    hostPattern: z.string().min(1).max(1000).optional(),
+    hostPattern: z
+      .string()
+      .min(1)
+      .max(1000)
+      .superRefine((v, ctx) => {
+        const problem = networkHostPatternShapeError(v);
+        if (problem !== null) {
+          ctx.addIssue({ code: "custom", message: problem });
+        }
+      })
+      .optional(),
     pathPattern: z.string().max(1000).nullable().optional(),
     method: z
       .enum(["GET", "POST", "PUT", "PATCH", "DELETE"])

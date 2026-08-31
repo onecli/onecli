@@ -554,6 +554,37 @@ describe("findPolicyOverlaps — must NOT warn (undecidable or not dead)", () =>
     expect(kinds([all, push])).toEqual(["p:shadowed"]);
   });
 
+  it("a git-upload-pack later path is not covered by a plain path superset (the clone bridge)", () => {
+    // Same law as receive-pack: the upload-pack pattern also matches the GET
+    // info/refs clone discovery, so a plain POST path superset does NOT cover
+    // it and must not report a shadow.
+    const broad = rule({
+      logicalId: "b",
+      priority: 1,
+      targets: [net("github.com", "/acme/*", "POST")],
+    });
+    const clone = rule({
+      logicalId: "c",
+      priority: 2,
+      targets: [net("github.com", "/acme/repo/git-upload-pack", "POST")],
+    });
+    expect(findPolicyOverlaps([broad, clone])).toEqual([]);
+  });
+
+  it("an any-path any-method earlier target DOES cover git-upload-pack", () => {
+    const all = rule({
+      logicalId: "a",
+      priority: 1,
+      targets: [net("github.com")],
+    });
+    const clone = rule({
+      logicalId: "c",
+      priority: 2,
+      targets: [net("github.com", "/acme/repo/git-upload-pack", "POST")],
+    });
+    expect(kinds([all, clone])).toEqual(["c:shadowed"]);
+  });
+
   it("a method-narrowed earlier rule never covers an any-method later rule", () => {
     const get = rule({
       logicalId: "g",

@@ -1,5 +1,11 @@
 import type { AppPermissionDefinition } from "./types";
 
+// Linear's API is a single GraphQL endpoint (POST /graphql). Every read tool
+// is tagged `graphqlOps: "query"` and every write tool `"mutation"`, so the
+// fail-closed body classifier discriminates them: read rows match only
+// provably pure query documents; write rows govern everything else. Within a
+// kind the tools remain aliases of the same endpoint (allowing one read tool
+// allows all reads) - per-field granularity is not modeled.
 export const linearPermissions: AppPermissionDefinition = {
   provider: "linear",
   groups: [
@@ -12,6 +18,7 @@ export const linearPermissions: AppPermissionDefinition = {
           description: "List and filter issues",
           hostPattern: "api.linear.app",
           pathPattern: "/graphql",
+          graphqlOps: "query",
         },
         {
           id: "get_issue",
@@ -19,6 +26,7 @@ export const linearPermissions: AppPermissionDefinition = {
           description: "Retrieve a specific issue",
           hostPattern: "api.linear.app",
           pathPattern: "/graphql",
+          graphqlOps: "query",
         },
         {
           id: "list_projects",
@@ -26,6 +34,7 @@ export const linearPermissions: AppPermissionDefinition = {
           description: "List all projects",
           hostPattern: "api.linear.app",
           pathPattern: "/graphql",
+          graphqlOps: "query",
         },
         {
           id: "list_teams",
@@ -33,6 +42,7 @@ export const linearPermissions: AppPermissionDefinition = {
           description: "List workspace teams",
           hostPattern: "api.linear.app",
           pathPattern: "/graphql",
+          graphqlOps: "query",
         },
         {
           id: "list_labels",
@@ -40,6 +50,7 @@ export const linearPermissions: AppPermissionDefinition = {
           description: "List issue labels",
           hostPattern: "api.linear.app",
           pathPattern: "/graphql",
+          graphqlOps: "query",
         },
         {
           id: "search",
@@ -47,6 +58,7 @@ export const linearPermissions: AppPermissionDefinition = {
           description: "Search issues and projects",
           hostPattern: "api.linear.app",
           pathPattern: "/graphql",
+          graphqlOps: "query",
         },
       ],
     },
@@ -59,6 +71,7 @@ export const linearPermissions: AppPermissionDefinition = {
           description: "Create a new issue",
           hostPattern: "api.linear.app",
           pathPattern: "/graphql",
+          graphqlOps: "mutation",
         },
         {
           id: "update_issue",
@@ -66,6 +79,7 @@ export const linearPermissions: AppPermissionDefinition = {
           description: "Update an existing issue",
           hostPattern: "api.linear.app",
           pathPattern: "/graphql",
+          graphqlOps: "mutation",
         },
         {
           id: "create_comment",
@@ -73,6 +87,7 @@ export const linearPermissions: AppPermissionDefinition = {
           description: "Add a comment to an issue",
           hostPattern: "api.linear.app",
           pathPattern: "/graphql",
+          graphqlOps: "mutation",
         },
         {
           id: "delete_issue",
@@ -80,6 +95,7 @@ export const linearPermissions: AppPermissionDefinition = {
           description: "Delete an issue",
           hostPattern: "api.linear.app",
           pathPattern: "/graphql",
+          graphqlOps: "mutation",
         },
       ],
     },

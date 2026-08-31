@@ -1,4 +1,4 @@
-import type { ChannelTransport } from "../../types";
+import type { ChannelAppMode, ChannelTransport } from "../../types";
 
 /**
  * The generated Slack app manifest for one agent's presence — the single
@@ -7,9 +7,14 @@ import type { ChannelTransport } from "../../types";
  * hand. Transport-aware: `socket` enables Socket Mode; `events` bakes our
  * inbound request URLs and the OAuth redirect.
  *
- * Deliberately a PLAIN BOT — no assistant/`agent_view` features: enabling
- * them is one-way, parts are plan-gated on Slack's side, and `message.im`
- * needs none of it. Revisit post-v2 (recorded non-goal).
+ * Always agent-flavored: every NEW app declares `features.agent_view` (the
+ * native Slack agent UX — the sessions "Working…" loader in threads) plus the
+ * `assistant:write` scope it requires. Declaring `agent_view` is ONE-WAY per
+ * app (Slack refuses to revert it) and parts of the runtime are plan-gated on
+ * Slack's side (`feature_disabled` on free workspaces) — the receipt layer
+ * falls back to the emoji reaction there. Pre-existing apps built as plain
+ * bots keep working: their presence rows stamp `appMode: "regular"` and the
+ * runtime honors the stamp — only creation is agent-only.
  */
 
 /** Slack caps: app name 35 chars, bot display name 80, description 140
@@ -180,6 +185,21 @@ export const BOT_SCOPES = [
   "users:read.email",
 ] as const;
 
+/**
+ * The scope list for one app flavor — the ONE place the manifest and a
+ * resumed attach's consent URL agree on what the app asks for. NEW apps are
+ * always agent-flavored (`assistant:write`: Slack requires it to declare
+ * `agent_view`); the `regular` arm exists for PRE-EXISTING apps only — a
+ * pending regular attach resumed after the agent-only switch must grant
+ * exactly the scopes its remote manifest declared.
+ */
+export const botScopesFor = (appMode: ChannelAppMode): string[] =>
+  appMode === "agent" ? [...BOT_SCOPES, "assistant:write"] : [...BOT_SCOPES];
+
+/** Slack caps `agent_description` at 300 chars — its own budget, distinct
+ * from the 140-char About description. */
+const AGENT_DESCRIPTION_MAX = 300;
+
 export interface AgentManifestInput {
   agentName: string;
   transport: ChannelTransport;
@@ -224,13 +244,23 @@ export const buildAgentManifest = ({
         messages_tab_enabled: true,
         messages_tab_read_only_enabled: false,
       },
+      // Declares the app a Slack agent (required for `agents.sessions.*`).
+      // `agent_description` is required whenever the block is present. No
+      // `suggested_prompts` — the DM should feel like a person, not a
+      // product tour.
+      agent_view: {
+        agent_description: clamp(
+          agentAppDescription(name),
+          AGENT_DESCRIPTION_MAX,
+        ),
+      },
       bot_user: {
         display_name: name,
         always_online: true,
       },
     },
     oauth_config: {
-      scopes: { bot: [...BOT_SCOPES] },
+      scopes: { bot: botScopesFor("agent") },
       ...(events && { redirect_urls: [inbound("oauth/callback")] }),
     },
     settings: {

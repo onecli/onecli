@@ -41,7 +41,7 @@ import { sendPasswordResetEmail } from "../services/password-reset-email";
  * class of bug a single factory removes.
  *
  * The Rust gateway is the third consumer. It cannot import this, so it
- * reimplements the cookie contract (`apps/gateway/src/auth.rs`) against the
+ * reimplements the cookie contract (`apps/gateway/crates/context/src/auth.rs`) against the
  * same secret and the same `sessions` table — see [`SESSION_COOKIE_NAMES`].
  *
  * Cloud runs on Cognito and never builds this instance.

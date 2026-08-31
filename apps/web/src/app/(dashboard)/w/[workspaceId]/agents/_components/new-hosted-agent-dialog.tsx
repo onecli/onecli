@@ -223,7 +223,10 @@ export const NewHostedAgentDialog = ({
                   value={instructions}
                   onChange={(e) => setInstructions(e.target.value)}
                   rows={3}
-                  className="resize-none"
+                  // `resize-none` only removes the drag handle; the field still
+                  // grows itself via `field-sizing-content`, so a pasted brief
+                  // needs a ceiling or it walks Create off the bottom.
+                  className="max-h-[min(14rem,28dvh)] resize-none"
                   autoFocus
                 />
                 {briefTooLong && (

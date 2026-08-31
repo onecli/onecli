@@ -148,3 +148,42 @@ export const updateSkillSchema = z
   .refine((body) => Object.keys(body).length > 0, {
     message: "Nothing to update",
   });
+
+// ── The skill_* MCP tool arguments (the agent door) ─────────────────────────
+// Same bounds as the HTTP doors — one contract, two shells (the crons
+// precedent). Skills are addressed BY NAME here, never by id: the name is
+// the directory the agent sees in its own skills root. Extra files stay
+// dashboard-only (the 32k tool-args pipe cannot carry body + files anyway),
+// so none of these schemas accept `files`.
+
+/** skill_create — always the agent's own tier. */
+export const skillCreateArgsSchema = z
+  .object({
+    name: nameField,
+    description: descriptionField,
+    content: contentField,
+  })
+  .strict();
+
+/** skill_list takes no arguments. */
+export const skillListArgsSchema = z.object({}).strict();
+
+/** skill_update — by name, agent tier only; at least one change. */
+export const skillUpdateArgsSchema = z
+  .object({
+    name: nameField,
+    description: descriptionField.optional(),
+    content: contentField.optional(),
+    enabled: z.boolean().optional(),
+  })
+  .strict()
+  .refine((body) => Object.keys(body).length > 1, {
+    message: "Nothing to update",
+  });
+
+/** skill_delete — by name, agent tier only. */
+export const skillDeleteArgsSchema = z
+  .object({
+    name: nameField,
+  })
+  .strict();

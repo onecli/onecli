@@ -1,10 +1,12 @@
 import {
   allGroupTools,
   getAppPermissionDefinition,
+  hostPatternsOf,
   type AppTool,
 } from "../../../apps/app-permissions";
 import { endpointMatches } from "../endpoint-match";
 import { hostMatches } from "../../../lib/path-match";
+import { classifyGraphqlBody } from "../graphql";
 import type { OldCondition, PolicyRequest } from "../types";
 
 /** Look up a catalog tool by (provider, toolId) — mirrors resolvePermissionChanges. */
@@ -46,7 +48,9 @@ export const allRuleVariants = (tool: AppTool): RuleVariant[] => {
 /**
  * Does `request` hit any tool in an app target? A tool matches when the request
  * host matches the tool's host and any of its path×method variants matches
- * (subject to the rule's conditions). An unknown toolId matches nothing.
+ * (subject to the rule's conditions), and - for a `graphqlOps`-tagged tool -
+ * when the fail-closed body classifier agrees with the tool's operation kind.
+ * An unknown toolId matches nothing.
  */
 export const appTargetMatches = (
   request: PolicyRequest,
@@ -57,7 +61,18 @@ export const appTargetMatches = (
   toolIds.some((toolId) => {
     const tool = getAppTool(provider, toolId);
     if (!tool) return false;
-    if (!hostMatches(request.host, tool.hostPattern)) return false;
+    if (!hostPatternsOf(tool).some((h) => hostMatches(request.host, h)))
+      return false;
+    if (tool.graphqlOps) {
+      // A URL query string fails closed to "mutation": some GraphQL servers
+      // honor `?query=` URL operations and the path matcher strips query
+      // strings, so a URL param could smuggle an operation the body
+      // classifier never saw. Mirrors catalog.rs.
+      const classified = request.path.includes("?")
+        ? "mutation"
+        : classifyGraphqlBody(request.body);
+      if (classified !== tool.graphqlOps) return false;
+    }
     return allRuleVariants(tool).some((v) =>
       endpointMatches(request, {
         pathPattern: v.pathPattern,
@@ -84,6 +99,8 @@ export const providerHostMatches = (
   const def = getAppPermissionDefinition(provider);
   if (!def) return false;
   return def.groups.some((group) =>
-    allGroupTools(group).some((tool) => hostMatches(host, tool.hostPattern)),
+    allGroupTools(group).some((tool) =>
+      hostPatternsOf(tool).some((pattern) => hostMatches(host, pattern)),
+    ),
   );
 };

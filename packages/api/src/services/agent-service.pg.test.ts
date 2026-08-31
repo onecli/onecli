@@ -48,6 +48,8 @@ const HOSTED_WORLD_ORG = `${P}org-hosted-world`;
 const HOSTED_WORLD_WS = `${P}proj-hosted-world`;
 const BYO_WORLD_ORG = `${P}org-byo-world`;
 const BYO_WORLD_WS = `${P}proj-byo-world`;
+const MIXED_WORLD_ORG = `${P}org-mixed-world`;
+const MIXED_WORLD_WS = `${P}proj-mixed-world`;
 const AGENT_ACTIVE = `${P}agent-active`;
 const AGENT_IDLE = `${P}agent-idle`;
 const AGENT_DORMANT = `${P}agent-dormant`;
@@ -126,6 +128,23 @@ beforeAll(async () => {
       id: BYO_WORLD_WS,
       name: BYO_WORLD_WS,
       organizationId: BYO_WORLD_ORG,
+    },
+  });
+  // The mixed world (2026-08-29): byoLegacy false + byoEnabled true — hosted
+  // stays the default, BYO creation is additionally allowed.
+  await db.organization.create({
+    data: {
+      id: MIXED_WORLD_ORG,
+      name: MIXED_WORLD_ORG,
+      slug: MIXED_WORLD_ORG,
+      byoEnabled: true,
+    },
+  });
+  await db.workspace.create({
+    data: {
+      id: MIXED_WORLD_WS,
+      name: MIXED_WORLD_WS,
+      organizationId: MIXED_WORLD_ORG,
     },
   });
 
@@ -427,6 +446,63 @@ describe.skipIf(!PROOF_URL)(
       expect(created.kind).toBe("hosted");
       await db.agent.delete({ where: { id: created.id } });
       await db.runner.delete({ where: { id: `${P}world-runner` } });
+    });
+
+    it("lets a MIXED-world org create BOTH kinds — the gradual-migration world", async () => {
+      // byoLegacy=false + byoEnabled=true (2026-08-29): the hosted default
+      // stays, and BYO creation is re-opened beside it. This is also the
+      // real-join proof for the gate's two-column organization select.
+      process.env.NEXT_PUBLIC_EDITION = "cloud";
+      const byoCreated = await agents.createAgent(MIXED_WORLD_WS, {
+        name: "Mixed BYO",
+        identifier: `${P}mixed-byo`,
+      });
+      expect(byoCreated.kind).toBe("byo");
+      await db.agent.delete({ where: { id: byoCreated.id } });
+
+      await db.runner.create({
+        data: {
+          id: `${P}mixed-runner`,
+          name: "mixed runner",
+          token: `rnr_${P}mixed`,
+          capabilities: {
+            maxSandboxes: 4,
+            backend: "docker",
+            homeDurability: "resident",
+          },
+          lastSeenAt: new Date(),
+        },
+      });
+      const hostedCreated = await agents.createAgent(MIXED_WORLD_WS, {
+        name: "Mixed Hosted",
+        identifier: `${P}mixed-hosted`,
+        kind: "hosted",
+      });
+      expect(hostedCreated.kind).toBe("hosted");
+      await db.agent.delete({ where: { id: hostedCreated.id } });
+      await db.runner.delete({ where: { id: `${P}mixed-runner` } });
+    });
+
+    it("keeps a BYO-world org's hosted refusal even with byoEnabled set — byoLegacy wins", async () => {
+      process.env.NEXT_PUBLIC_EDITION = "cloud";
+      await db.organization.update({
+        where: { id: BYO_WORLD_ORG },
+        data: { byoEnabled: true },
+      });
+      try {
+        await expect(
+          agents.createAgent(BYO_WORLD_WS, {
+            name: "Still Refused Hosted",
+            identifier: `${P}still-refused-hosted`,
+            kind: "hosted",
+          }),
+        ).rejects.toMatchObject({ code: "FORBIDDEN" });
+      } finally {
+        await db.organization.update({
+          where: { id: BYO_WORLD_ORG },
+          data: { byoEnabled: false },
+        });
+      }
     });
 
     it("answers 409, not 403, for an existing identifier — ensureAgent stays idempotent", async () => {

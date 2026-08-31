@@ -847,6 +847,121 @@ describe.skipIf(!PROOF_URL)("settling and delivery", () => {
     );
     expect(secondContext ?? "").not.toContain("the bridge report body");
   });
+
+  it("never relays a FAILED automation run — a run that produced no report is not context", async () => {
+    // THE LIVE FAILURE (2026-08-31). A watch wake died on a model 401, so its
+    // `text` event never landed. The bridge selected it anyway (source +
+    // time only), and with an empty body what reached the model was the run's
+    // own INSTRUCTION — which it answered in the next human turn, reading as
+    // unprompted noise about background tasks nobody asked about.
+    //
+    // MUTATION-PROOF: drop `status: "done"` from the deliveries query and the
+    // failed run's instruction comes back.
+    const { agentId, originId } = await fireAndGetRun("failbridge");
+
+    // A delivery that FAILED: materialized into the origin like a real one,
+    // but terminal-failed with no text event — exactly the live shape.
+    await db.conversation.update({
+      where: { id: originId },
+      data: { lastSeq: { increment: 1 } },
+    });
+    await db.turn.create({
+      data: {
+        conversationId: originId,
+        message:
+          "[Platform wake: 3 background task(s) you were watching finished]\n\nCheck each outcome and report it.",
+        status: "failed",
+        source: "watch",
+        userId: null,
+        startedAt: new Date(),
+        finishedAt: new Date(),
+      },
+    });
+
+    const asked = await turnService.createTurn(
+      WORKSPACE,
+      originId,
+      "hey how are you",
+      { source: "web", userId: USER },
+    );
+    const context = await turnContext.buildTurnContext(
+      agentId,
+      originId,
+      asked.id,
+      asked.message,
+    );
+
+    // Nothing to relay → no bridge block at all.
+    expect(context ?? "").not.toContain("Platform wake");
+    expect(context ?? "").not.toContain("Check each outcome");
+    expect(context ?? "").not.toContain("[Context from your automated runs");
+  });
+
+  it("labels a delivery with its FIRST line only — an in-origin wake stores a whole prompt", async () => {
+    // The second half of the same live failure: `turn.message` is a short
+    // header for a settle-chain delivery, but watch-fire-service's
+    // `fireBucket` stores the ENTIRE consolidated wake prompt there. Relaying
+    // it verbatim replayed a full instruction block as "context".
+    //
+    // MUTATION-PROOF: return `stripControl(delivery.message)` instead of
+    // `bridgeLabel(...)` and the task lines come back.
+    const { agentId, originId } = await fireAndGetRun("labelbridge");
+
+    const conversation = await db.conversation.update({
+      where: { id: originId },
+      data: { lastSeq: { increment: 1 } },
+      select: { lastSeq: true },
+    });
+    const wake = await db.turn.create({
+      data: {
+        conversationId: originId,
+        message: [
+          "[Platform wake: 2 background task(s) you were watching finished]",
+          "",
+          "Run tail -5 /tmp/ci.log and report the result.",
+          "Then clean up: rm -rf /tmp/scratch",
+          "",
+          "[Recent output:]",
+          "RUNNING CI",
+        ].join("\n"),
+        status: "done",
+        source: "watch",
+        userId: null,
+        startedAt: new Date(),
+        finishedAt: new Date(),
+      },
+      select: { id: true },
+    });
+    await db.turnEvent.create({
+      data: {
+        conversationId: originId,
+        turnId: wake.id,
+        seq: conversation.lastSeq,
+        type: "text",
+        payload: { type: "text", text: "Both tasks finished clean." },
+      },
+    });
+
+    const asked = await turnService.createTurn(WORKSPACE, originId, "and?", {
+      source: "web",
+      userId: USER,
+    });
+    const context =
+      (await turnContext.buildTurnContext(
+        agentId,
+        originId,
+        asked.id,
+        asked.message,
+      )) ?? "";
+
+    // The report itself rides, under a one-line label.
+    expect(context).toContain("Both tasks finished clean.");
+    expect(context).toContain("[Platform wake: 2 background task(s)");
+    // The instruction body does NOT.
+    expect(context).not.toContain("rm -rf");
+    expect(context).not.toContain("RUNNING CI");
+    expect(context).not.toContain("Recent output");
+  });
 });
 
 describe.skipIf(!PROOF_URL)("the platform-tool fence", () => {

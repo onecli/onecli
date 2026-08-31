@@ -4,6 +4,7 @@ import { z } from "zod";
 import { db } from "@onecli/db";
 import type { ApiEnv } from "../types";
 import { authMiddleware, requireWorkspaceId, auth } from "../middleware/auth";
+import { hasActiveMembership } from "../middleware/auth/resolve";
 import { getApp, getApps } from "../apps/registry";
 import {
   getAppPermissionDefinition,
@@ -702,7 +703,29 @@ export const appRoutes = () => {
         .json()
         .catch(() => null)) as ConnectRequestBody | null;
 
-      const resolved = await resolveConnectCredentials(provider, appDef, body);
+      // The org this connect actually lands in. The legacy `X-Organization-Id`
+      // interceptor (`tryHandleOrgConnect`, below) re-scopes the request to the
+      // named org, which need NOT be the workspace-derived
+      // `auth.organizationId` — a caller may hold both. Server-owned fields
+      // must resolve against the org the connection really lands in, and that
+      // org has to be fenced HERE, because the interceptor's own membership
+      // gate runs later, after the resolve. (The interceptor still applies the
+      // role check; this is only the "may you touch this org at all" arm.)
+      const headerOrgId = c.req.header("x-organization-id");
+      if (
+        headerOrgId &&
+        headerOrgId !== auth.organizationId &&
+        !(await hasActiveMembership(auth.userId, headerOrgId))
+      ) {
+        return c.json({ error: "Not a member of this organization" }, 403);
+      }
+
+      const resolved = await resolveConnectCredentials(
+        provider,
+        appDef,
+        body,
+        headerOrgId ?? auth.organizationId,
+      );
       if (!resolved.ok) {
         return c.json({ error: resolved.error }, 400);
       }

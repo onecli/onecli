@@ -48,6 +48,42 @@ describe("foldTranscript", () => {
     expect(turns[0]?.ended).toBe(false);
   });
 
+  it("shows narration live, then collapses to the answer alone", () => {
+    // The reader's half of "the answer is the last message" (supervisor,
+    // 2026-08-31). Mid-turn narration is PROGRESS: it streams as deltas so
+    // the person sees work happening, and the durable `text` — which now
+    // carries only the closing message — REPLACES all of it when the turn
+    // ends. Without the replace, the narration the supervisor deliberately
+    // dropped would live on in the reader.
+    const streaming = [
+      event("t1", "text.delta", { text: "Let me check the logs." }),
+      event("t1", "tool.started", { callId: "c1", name: "bash" }),
+      event("t1", "tool.finished", {
+        callId: "c1",
+        name: "bash",
+        output: "ok",
+      }),
+      event("t1", "text.delta", { text: "CI passed; nothing to do." }),
+    ];
+
+    // Mid-turn: the person watches the narration arrive.
+    const live = foldTranscript(streaming);
+    expect(live[0]?.text).toContain("Let me check the logs.");
+    expect(live[0]?.ended).toBe(false);
+
+    // Turn ends: only the closing message survives.
+    const settled = foldTranscript([
+      ...streaming,
+      event("t1", "text", { text: "CI passed; nothing to do." }),
+      event("t1", "turn.done"),
+    ]);
+    expect(settled[0]?.text).toBe("CI passed; nothing to do.");
+    expect(settled[0]?.text).not.toContain("Let me check the logs.");
+    // The work itself stays visible — tools are durable, narration is not.
+    expect(settled[0]?.tools).toHaveLength(1);
+    expect(settled[0]?.ended).toBe(true);
+  });
+
   it("pairs a tool's finish onto its start", () => {
     const turns = foldTranscript([
       event("t1", "tool.started", { callId: "c1", name: "bash" }),

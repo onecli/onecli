@@ -9,7 +9,7 @@ import { intersectPolicies } from "../../lib/resource-axis";
 
 /**
  * LICENSED-MIRROR: deliberate Apache twin of the gateway's boundary
- * derivation (`collect_boundaries`, apps/gateway/src/policy_engine/inject_select.rs
+ * derivation (`collect_boundaries`, apps/gateway/crates/policy-engine/src/inject_select.rs
  * — itself dual-use shared code whose resource-scope composition delegates to
  * the licensed `ee/granular_access`). The free effective-permissions
  * reflection executes this file, so it must NOT move into `ee/` — declared in

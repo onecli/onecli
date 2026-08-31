@@ -52,7 +52,7 @@ const cleanName = (raw: string): string =>
  * authored framing first, then the user-authored content.
  */
 export const buildCronRunMessage = (name: string, prompt: string): string =>
-  `[Scheduled run "${cleanName(name)}" — triggered automatically by a schedule, not by a person typing. Do the task below and finish with a concise report; it will be delivered to the chat where this schedule was created.]\n\n${prompt}`;
+  `[Scheduled run "${cleanName(name)}" — triggered automatically by a schedule, not by a person typing. Do the task below and finish with a SHORT report — outcome first, then only what changed or needs attention, a few lines at most; it will be delivered to the chat where this schedule was created.]\n\n${prompt}`;
 
 const fireOne = async (cron: DueCron, lease: Date): Promise<void> => {
   // Fire-time authorization: the schedule runs under its creator's standing.

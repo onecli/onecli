@@ -11,8 +11,7 @@ back to this list rather than restating it.
 
     apps/web/src/ee/
     packages/api/src/ee/
-    apps/gateway/src/ee/
-    apps/gateway/src/ee.rs
+    apps/gateway/crates/ee/
 
 Those paths are NOT covered by the Apache License. No rights under the Apache
 License, including the rights to use, reproduce, modify, distribute or

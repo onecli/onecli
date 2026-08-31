@@ -42,6 +42,8 @@ const store = vi.hoisted(() => ({
   runners: [] as Array<Record<string, unknown>>,
   // The org's creation world behind the workspace join (cloud gate only).
   orgByoLegacy: false,
+  // The mixed-world column beside it (only read when byoLegacy is false).
+  orgByoEnabled: false,
 }));
 
 // Step 9: render-input edits (name / instructions) reach a live sandbox as a
@@ -113,10 +115,20 @@ vi.mock("@onecli/db", () => {
           select,
         }: {
           where: { id: string };
-          select: { organization: { select: { byoLegacy: boolean } } };
+          select: {
+            organization: {
+              select: { byoLegacy: boolean; byoEnabled: boolean };
+            };
+          };
         }) =>
-          select.organization.select.byoLegacy
-            ? { organization: { byoLegacy: store.orgByoLegacy } }
+          select.organization.select.byoLegacy &&
+          select.organization.select.byoEnabled
+            ? {
+                organization: {
+                  byoLegacy: store.orgByoLegacy,
+                  byoEnabled: store.orgByoEnabled,
+                },
+              }
             : null,
       },
     },
@@ -145,6 +157,7 @@ beforeEach(() => {
   store.runners = [ONLINE_RUNNER];
   store.createThrows = null;
   store.orgByoLegacy = false;
+  store.orgByoEnabled = false;
   homeSync.bumpHomeForAgent.mockClear();
 });
 
@@ -187,6 +200,33 @@ describe("createAgent — the creation-world gates (cloud, §3.10 re-decided)", 
 
   it("lets a BYO-world org create BYO agents", async () => {
     store.orgByoLegacy = true;
+    await createAgent("p1", { name: "B", identifier: "b" });
+    expect(lastCreated().kind).toBe("byo");
+  });
+
+  it("lets a MIXED-world org create BOTH kinds (byoEnabled beside the hosted default)", async () => {
+    // The gradual-migration world (2026-08-29): byoLegacy=false keeps hosted
+    // as the default door, byoEnabled=true re-opens BYO creation beside it.
+    store.orgByoEnabled = true;
+    await createAgent("p1", { name: "B", identifier: "mixed-b" });
+    expect(lastCreated().kind).toBe("byo");
+    await createAgent("p1", {
+      name: "H",
+      identifier: "mixed-h",
+      kind: "hosted",
+    });
+    expect(lastCreated().kind).toBe("hosted");
+  });
+
+  it("ignores byoEnabled in a BYO-world org — byoLegacy wins, hosted stays refused", async () => {
+    // byoEnabled is only consulted when byoLegacy is false: a legacy org
+    // keeps its exact behavior whatever the new column says.
+    store.orgByoLegacy = true;
+    store.orgByoEnabled = true;
+    await expect(
+      createAgent("p1", { name: "H", identifier: "h", kind: "hosted" }),
+    ).rejects.toMatchObject({ code: "FORBIDDEN" });
+    expect(store.created).toHaveLength(0);
     await createAgent("p1", { name: "B", identifier: "b" });
     expect(lastCreated().kind).toBe("byo");
   });
