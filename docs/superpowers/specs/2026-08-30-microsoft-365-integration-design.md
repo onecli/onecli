@@ -155,7 +155,8 @@ Write group (calendar): create `/v1.0/me/events` POST, update
 
 `MICROSOFT_CLIENT_ID` / `MICROSOFT_CLIENT_SECRET` added to:
 
-- `packages/api/src/lib/env.ts` (used by connect flow / env defaults)
+- ~~`packages/api/src/lib/env.ts`~~ not needed — `resolve-credentials.ts` reads
+  `process.env[envVar]` directly
 - `.env.example`
 - gateway runtime environment (read via `std::env` by `RefreshConfig` — no
   code change, just deployment env)
