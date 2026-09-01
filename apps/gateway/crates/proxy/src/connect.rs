@@ -1920,8 +1920,13 @@ fn credential_host_mismatch(
 ///
 /// Matching is case-insensitive, since DNS host names are.
 ///
-/// `pub(crate)` so the policy engine reuses the exact host matcher for its
-/// network targets. Behavior is unchanged.
+/// NOTE: despite the original intent, this is currently only exercised by
+/// this module's own tests — `policy-engine` has its own separate
+/// `common::util::host_matches`, which does NOT yet have the port-qualified
+/// matching added here for #485. See #485 follow-up: the two matchers have
+/// drifted and enforcement (`policy-engine::evaluate`/`enforce`/`catalog`)
+/// still can't match port-qualified hostPatterns.
+#[cfg(test)]
 pub(crate) fn host_matches(request_host: &str, pattern: &str) -> bool {
     let (req_host, req_port) = split_host_port(request_host);
     let (pat_host, pat_port) = split_host_port(pattern);
@@ -1963,6 +1968,7 @@ pub(crate) fn host_matches(request_host: &str, pattern: &str) -> bool {
 ///   since the last `:`-segment will be misread as a port. Bracketed
 ///   IPv6 (`[::1]:port`) is unaffected since `rsplit_once(':')` still
 ///   finds the real port after the closing bracket.
+#[cfg(test)]
 fn split_host_port(s: &str) -> (&str, Option<&str>) {
     match s.rsplit_once(':') {
         Some((h, p)) if !p.is_empty() && p.chars().all(|c| c.is_ascii_digit()) => (h, Some(p)),
