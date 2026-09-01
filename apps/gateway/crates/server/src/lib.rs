@@ -37,7 +37,6 @@ use approval::{ApprovalDecision, ApprovalStore, APPROVAL_TIMEOUT_SECS};
 use ca::CertificateAuthority;
 use cache::CacheStore;
 use context::auth::AuthUser;
-use context::UpstreamClient;
 use proxy::connect::PolicyEngineExt as _;
 use proxy::connect::{self, AppConnectionResult, ConnectError, PolicyEngine};
 
@@ -57,6 +56,18 @@ pub use context::{GatewayState, ProxyContext};
 pub struct GatewayServer {
     state: GatewayState,
     port: u16,
+}
+
+/// Build the HTTP client used for upstream requests.
+///
+/// - Redirects are disabled so 3xx responses are forwarded to the client as-is.
+/// - `accept_invalid_certs` skips TLS certificate validation for upstream connections.
+fn build_http_client(accept_invalid_certs: bool) -> reqwest::Client {
+    reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .danger_accept_invalid_certs(accept_invalid_certs)
+        .build()
+        .expect("build HTTP client")
 }
 
 /// Accepts any server certificate, for the hosts an operator has explicitly
@@ -233,8 +244,8 @@ impl GatewayServer {
 
         let state = GatewayState {
             ca: Arc::new(ca),
-            http_client: Arc::new(UpstreamClient::new(global_skip)),
-            http_client_no_verify: Arc::new(UpstreamClient::new(true)),
+            http_client: build_http_client(global_skip),
+            http_client_no_verify: build_http_client(true),
             skip_verify_hosts,
             ws_connector: TlsConnector::from(build_ws_tls_config(global_skip)),
             ws_connector_no_verify: TlsConnector::from(build_ws_tls_config(true)),
@@ -1221,7 +1232,7 @@ mod tests {
         });
 
         // Act: use the same client the gateway uses in production.
-        let client = context::upstream::build_http_client(false);
+        let client = build_http_client(false);
         let resp = client
             .get(format!("http://{addr}/test"))
             .send()

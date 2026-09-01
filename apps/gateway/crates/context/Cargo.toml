@@ -26,8 +26,3 @@ ring = { workspace = true }
 sqlx = { workspace = true }
 tokio-rustls = { workspace = true }
 tracing = { workspace = true }
-
-[dev-dependencies]
-# Test-only: the rotator itself is synchronous, but the regression tests drive
-# real sockets through `tokio::time::timeout` to prove the header bound.
-tokio = { workspace = true }

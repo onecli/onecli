@@ -24,7 +24,7 @@ use inject::InjectionRule;
 
 use super::forward;
 use super::response;
-use context::{ProxyContext, UpstreamClient};
+use context::ProxyContext;
 
 /// Cap on the client-side TLS handshake inside a tunnel.
 const TLS_HANDSHAKE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
@@ -48,10 +48,7 @@ pub async fn mitm(
     upgraded: hyper::upgrade::Upgraded,
     host: &str,
     ca: &CertificateAuthority,
-    // The rotator, not a client: leasing per request (rather than cloning a
-    // client once per tunnel) is what lets a long-lived tunnel pick up a fresh
-    // generation after some other request found this one stuck.
-    upstream_client: Arc<UpstreamClient>,
+    http_client: reqwest::Client,
     // Upstream TLS for the WebSocket leg, already resolved against the
     // operator's skip-verify configuration at CONNECT time.
     ws_connector: TlsConnector,
@@ -87,7 +84,7 @@ pub async fn mitm(
             io,
             service_fn(move |req: hyper::Request<hyper::body::Incoming>| {
                 let host = host_owned.clone();
-                let client = Arc::clone(&upstream_client);
+                let client = http_client.clone();
                 let ws_tls = ws_connector.clone();
                 let cache = Arc::clone(&cache);
                 let ctx = Arc::clone(&proxy_ctx);

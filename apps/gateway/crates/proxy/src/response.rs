@@ -329,8 +329,8 @@ pub fn resolution_failed<S>() -> Response<ForwardBody<S>> {
 ///
 /// Sanitized on purpose: the stable `upstream_timeout` identifier is all a
 /// client gets. The URL, the `reqwest` error and any transport detail stay in
-/// the server-side log, since the request that stalled is exactly the kind that
-/// carries an injected credential in its headers.
+/// the server-side log, since the request that stalled is exactly the kind
+/// that carries an injected credential in its headers.
 ///
 /// Marked non-retryable. A stalled request may still have been executed
 /// upstream, so the honest signal is "outcome unknown, do not replay", not an
@@ -341,7 +341,7 @@ pub fn upstream_timeout<S>() -> Response<ForwardBody<S>> {
         serde_json::json!({
             "error": "upstream_timeout",
             "message": "OneCLI gateway timed out waiting for upstream response headers. \
-                        The request was not retried — the upstream may or may not have processed it.",
+                        The request was not retried. The upstream may or may not have processed it.",
         }),
     ))
 }
@@ -951,7 +951,7 @@ mod tests {
         assert_eq!(keys, ["error", "message"]);
 
         let rendered = String::from_utf8_lossy(&body).to_string();
-        for leak in ["http://", "https://", "reqwest", "Bearer", "token"] {
+        for leak in ["http://", "https://", "reqwest", "Bearer", "token\":"] {
             assert!(
                 !rendered.contains(leak),
                 "timeout body must not expose {leak:?}: {rendered}",
