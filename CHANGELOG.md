@@ -1,5 +1,17 @@
 # Changelog
 
+## [2.4.0](https://github.com/onecli/onecli/compare/v2.3.1...v2.4.0) (2026-09-01)
+
+
+### Features
+
+* live Slack task cards, web live activity loader, answer extraction fix ([#540](https://github.com/onecli/onecli/issues/540)) ([59df414](https://github.com/onecli/onecli/commit/59df414bfba5cea674f6396a01aae4d287b439f7))
+
+
+### Bug Fixes
+
+* fail-closed policy hardening, cargo-workspace gateway, agent-flavored Slack apps ([#538](https://github.com/onecli/onecli/issues/538)) ([f5ee386](https://github.com/onecli/onecli/commit/f5ee38657c2d6cff07bc19e84f9abf40b3b5af1f))
+
 ## [2.3.1](https://github.com/onecli/onecli/compare/v2.3.0...v2.3.1) (2026-08-29)
 
 
