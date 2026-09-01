@@ -6,6 +6,7 @@
 //! itself — the direction the crate DAG enforces.
 
 pub mod auth;
+pub mod upstream;
 
 use std::pin::Pin;
 use std::sync::Arc;
@@ -19,6 +20,8 @@ use ca::CertificateAuthority;
 use cache::CacheStore;
 use crypto::CryptoService;
 use vault::onepassword::OnePasswordVaultProvider;
+
+pub use upstream::UpstreamClient;
 
 /// Context for a proxied request, resolved at CONNECT time.
 /// Wrapped in `Arc` and shared across all requests within a MITM session.
@@ -39,10 +42,17 @@ pub struct ProxyContext {
 pub struct GatewayState {
     pub ca: Arc<CertificateAuthority>,
     /// Standard upstream client — validates TLS certificates.
-    pub http_client: reqwest::Client,
+    ///
+    /// Rotatable rather than a bare `reqwest::Client`: a clone shares the
+    /// connection pool, so escaping suspect pooled state means replacing the
+    /// client, and requests lease a generation to know which one to blame.
+    pub http_client: Arc<UpstreamClient>,
     /// No-verify upstream client — skips TLS certificate validation.
     /// Selected for hosts matched by `skip_verify_hosts`.
-    pub http_client_no_verify: reqwest::Client,
+    ///
+    /// A separate rotator from `http_client`, so the two pools rotate
+    /// independently and neither can inherit the other's TLS posture.
+    pub http_client_no_verify: Arc<UpstreamClient>,
     /// Hostname patterns for which TLS certificate validation is skipped.
     /// Supports exact match (`internal.corp`) and wildcard prefix (`*.internal.corp`).
     /// Populated from `GATEWAY_SKIP_VERIFY_HOSTS` (comma-separated).
