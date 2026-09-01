@@ -19,36 +19,63 @@ const BLOCK_BUDGET = 48;
 const CAPTION_LIMIT = 120;
 
 /**
- * The one-line caption for an automation report.
+ * What separates an automation header's "what happened" from its "what the
+ * model should do about it" (an em dash with spaces). A PARSER TOKEN for the
+ * API's own wording, never copy we write — built from a code point so the
+ * house em-dash guard, which scans string literals for prose, does not read
+ * it as user-facing text.
+ */
+const HEADER_SEPARATOR = ` ${String.fromCharCode(0x2014)} `;
+
+/**
+ * The one-line caption for an automation report — WHAT HAPPENED, in the
+ * reader's terms.
  *
  * `turn.message` for a cron or watch fire is the platform's RUN INSTRUCTION,
- * not a title: a header sentence, then the agent's own stored prompt, then a
- * recent-output excerpt (see `buildWatchRunMessage` in the API's
- * watch-fire-service). Posting it verbatim published the instructions —
- * "finish with a SHORT report", cleanup commands, dozens of excerpt lines —
- * as if they were the agent's words, which is exactly the wall of text the
- * caption is supposed to label. The web has always truncated this to one
- * line (`AutomationTurnHeader`); Slack had no equivalent, so it printed the
- * whole thing.
+ * addressed to the model: a header sentence, then the agent's stored prompt,
+ * then an output excerpt. Only the first clause of that header is about the
+ * reader's world ("Watch on process \"giraffe\" fired: the process
+ * finished"); everything after the em dash is stage direction for the model
+ * — "triggered automatically, not by a person typing", "finish with a SHORT
+ * report", where the answer will be delivered.
  *
- * First line, bounded. The stored turn message stays verbatim — this is a
- * rendering decision, and the API keeps owning the header's own safety
- * (`cleanName` strips the newlines a forged process name would inject, which
- * is what keeps a first-line cut from being a security boundary).
+ * Publishing the stage direction told the reader nothing and made the label
+ * compete with the report it labels. So the caption keeps the clause BEFORE
+ * the em dash and drops the rest.
+ *
+ * Recognising the header is deliberately loose: the three shapes the API
+ * emits (`watch-fire-service`, `cron-fire-service`) all open with `[` and
+ * carry ` — ` before the instructions, so the rule is structural rather
+ * than a copy of their wording — which would rot the moment either side is
+ * reworded. Anything unrecognised falls back to the bounded first line, so
+ * a future header shape degrades to today's behavior instead of vanishing.
  */
 export const automationCaption = (title: string): string => {
   // \r too: a CRLF header would otherwise leave a stray carriage return
   // riding the caption into Slack.
   const firstLine = title.split(/[\r\n]/, 1)[0]?.trim() ?? "";
-  if (firstLine.length <= CAPTION_LIMIT) return firstLine;
+
+  // The platform header, unwrapped: drop the bracket and everything from the
+  // separator on: everything after it is the model's stage direction.
+  const headline = firstLine.startsWith("[")
+    ? (firstLine.slice(1).split(HEADER_SEPARATOR, 1)[0] ?? "").trim()
+    : firstLine;
+
+  // Trailing punctuation left by the unwrap: the closing bracket when the
+  // header had no separator at all, and a dangling colon when the trigger
+  // clause behind it was empty.
+  const cleaned = headline.replace(/[\]:\s]+$/, "");
+  const caption = cleaned.length > 0 ? cleaned : firstLine;
+
+  if (caption.length <= CAPTION_LIMIT) return caption;
   // Prefer a word boundary in the back half, so the cut reads as a clipped
   // phrase rather than a severed word.
-  const window = firstLine.slice(0, CAPTION_LIMIT);
+  const window = caption.slice(0, CAPTION_LIMIT);
   const space = window.lastIndexOf(" ");
   const cut = space > CAPTION_LIMIT / 2 ? space : CAPTION_LIMIT;
   // Never end on a lone high surrogate — the same cut-safety rule the plain
   // answer degrade below applies, or the tail renders as a replacement char.
-  const clipped = firstLine
+  const clipped = caption
     .slice(0, cut)
     .replace(/[\uD800-\uDBFF]$/, "")
     .trimEnd();
@@ -180,11 +207,49 @@ export const slackMirrorPosts: MirrorPosts = {
     // posting all of it made the label longer than the report — see
     // `automationCaption`.
     const caption = automationCaption(input.title);
-    await postMessage(input.credential, {
+    const captionText = `${icon} ${escapeSlackText(caption)}`;
+    const bodySections = input.body
+      ? sectionChunks(markdownToMrkdwn(input.body))
+      : [];
+    const notificationText = input.body
+      ? `${captionText}\n${markdownToMrkdwn(input.body)}`
+      : captionText;
+    // Past the block budget the caption degrades to a plain post: a
+    // delivered report beats a prettier lost one (the same rule the connect
+    // cards follow).
+    if (bodySections.length + 1 > BLOCK_BUDGET) {
+      await postMessage(input.credential, {
+        channel: input.channel,
+        text: notificationText,
+        ...targetForm(input),
+      });
+      return;
+    }
+    await postBlocks(input.credential, {
       channel: input.channel,
-      text: input.body
-        ? `${icon} _${escapeSlackText(caption)}_\n${markdownToMrkdwn(input.body)}`
-        : `${icon} _${escapeSlackText(caption)}_`,
+      // `text` stays the full line: it is the notification and search
+      // preview, and a blocks-only post shows as blank in both.
+      text: notificationText,
+      // The caption is CHROME — it says why the agent spoke, not what it
+      // said. A `context` block is Slack's own treatment for that: smaller
+      // and grey, so the report below it stays the thing being read. The
+      // report is a normal section, in the agent's ordinary voice.
+      //
+      // CHUNKED: Slack caps a section at 3,000 characters and rejects the
+      // WHOLE post past it — after the mirror cursor already advanced, which
+      // would silently drop the report. An automation body runs to the
+      // mirror's 40k ceiling, so it is split the same way the connect-card
+      // path splits its prose.
+      blocks: [
+        {
+          type: "context",
+          elements: [{ type: "mrkdwn", text: captionText }],
+        },
+        ...bodySections.map((section) => ({
+          type: "section",
+          text: { type: "mrkdwn", text: section },
+        })),
+      ],
       ...targetForm(input),
     });
   },

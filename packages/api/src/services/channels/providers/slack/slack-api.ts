@@ -348,6 +348,55 @@ export const reactionsAdd = (
 ) => reactionCall("reactions.add", botToken, input);
 
 /**
+ * Slack's cap on a task title inside a `plan` block.
+ */
+export const SLACK_TASK_TITLE_MAX = 256;
+
+/**
+ * REPLACE a message's blocks — how the narration card advances.
+ *
+ * `chat.update` rewrites the whole message, so the card is always rendered
+ * from the turn's full task list rather than patched step by step. That is
+ * what makes the mechanism forgiving: there is no half-updated state to
+ * reconcile, and a missed update is corrected by the next one.
+ */
+export const updateBlocksMessage = (
+  botToken: string,
+  input: { channel: string; ts: string; text: string; blocks: unknown[] },
+) =>
+  slackCall(
+    "chat.update",
+    {
+      token: botToken,
+      form: {
+        channel: input.channel,
+        ts: input.ts,
+        text: input.text,
+        blocks: JSON.stringify(input.blocks),
+      },
+    },
+    okEnvelope,
+  );
+
+/**
+ * REMOVE a message the app posted — how the narration card disappears when
+ * the answer lands, so it is never left behind as a second reply.
+ *
+ * Deliberately tolerant: `message_not_found` (already gone, or deleted by
+ * the user) is the expected race between the clear path and a retry, so
+ * callers treat a refusal as "already removed" rather than an error.
+ */
+export const deleteMessage = (
+  botToken: string,
+  input: { channel: string; ts: string },
+) =>
+  slackCall(
+    "chat.delete",
+    { token: botToken, form: { channel: input.channel, ts: input.ts } },
+    okEnvelope,
+  );
+
+/**
  * The agent-session work status (the native "Working…" loader an agent-flavor
  * app shows in a thread). `processing` turns it on; `active` clears it —
  * NEVER auto-cleared by a message post, so the receipt lifecycle owns both

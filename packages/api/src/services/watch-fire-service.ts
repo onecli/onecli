@@ -9,7 +9,11 @@ import {
   type DueWatchFire,
 } from "./due-work";
 import { ensureSourcedConversation } from "./conversation-service";
-import { createTurn, materializeAutomationDelivery } from "./turn-service";
+import {
+  createFollowUp,
+  createTurn,
+  materializeAutomationDelivery,
+} from "./turn-service";
 import { ServiceError } from "./errors";
 import { stripControl } from "../lib/text";
 import { logger } from "../lib/logger";
@@ -237,13 +241,78 @@ interface WakeBucket {
  * - created (running or born-failed) → every watch marked fired in one
  *   guarded batch. A born-failed turn (door 1) is ITSELF visible in the
  *   thread, so no delivery duplicate is materialized.
- * - CONFLICT (the thread's one-active slot is taken) → nothing marked:
- *   unexpired watches stay claimed and retry on the fire lease (the old
- *   path marked them fired and silently dropped the wake); expired ones
- *   downgrade to the hidden path so a forever-busy thread cannot retry
- *   past the watch's own deadline.
+ * - CONFLICT (the thread's one-active slot is taken) → JOIN first: the wake
+ *   steers into the running turn as a follow-up, and the watches are marked
+ *   fired only once that row exists. When there is no running turn to join,
+ *   or the join fails, the older behavior stands — nothing marked, unexpired
+ *   watches stay claimed and retry on the fire lease (the path before that
+ *   marked them fired and silently dropped the wake), and expired ones
+ *   downgrade to the hidden path so a forever-busy thread cannot retry past
+ *   the watch's own deadline.
  * - anything else → nothing marked; the lease retries.
  */
+/**
+ * Steer a busy conversation's wake INTO the turn that is already running,
+ * rather than queueing behind it.
+ *
+ * Returns whether the join landed. `false` means the caller keeps today's
+ * behavior exactly — unexpired watches stay claimed and retry, expired ones
+ * downgrade to the hidden path — so this can only ever REDUCE doubled wakes,
+ * never lose one.
+ *
+ * ORDERING IS THE CONTRACT. The watches are marked fired only once the join
+ * row exists: a crash between the two would otherwise leave them claimed and
+ * deliver the same wake twice. That is the same rule the created-turn arm
+ * above follows, for the same reason.
+ *
+ * Not a guarantee of one message: steering is at-most-once and the harness
+ * takes it at its next safe point. A steer that misses still surfaces —
+ * `listConversationsWithParkedFollowUps` promotes the parked row into its
+ * own turn, which is today's behavior.
+ */
+const joinRunningTurn = async (
+  bucket: WakeBucket,
+  message: string,
+  ids: string[],
+): Promise<boolean> => {
+  try {
+    const running = await db.turn.findFirst({
+      where: { conversationId: bucket.conversationId, status: "running" },
+      select: { id: true },
+    });
+    // The conflict was something other than a live turn (a queued one, a
+    // race that resolved). Nothing to steer into.
+    if (!running) return false;
+
+    await createFollowUp(bucket.conversationId, running.id, message, {
+      source: "watch",
+      userId: null,
+    });
+    // Only now: the row exists, so the wake cannot be delivered twice.
+    await db.processWatch.updateMany({
+      where: { id: { in: ids }, status: "triggered" },
+      data: { status: "fired", firedAt: new Date() },
+    });
+    log.info(
+      {
+        conversationId: bucket.conversationId,
+        turnId: running.id,
+        joined: ids.length,
+      },
+      "origin busy; wake joined the running turn",
+    );
+    return true;
+  } catch (err) {
+    // Best-effort by design: anything unexpected falls back to the retry and
+    // downgrade path, which is what shipped before this existed.
+    log.info(
+      { err: String(err), conversationId: bucket.conversationId },
+      "wake join failed; falling back to retry",
+    );
+    return false;
+  }
+};
+
 const fireBucket = async (bucket: WakeBucket): Promise<void> => {
   const message = buildConsolidatedWakeMessage(
     bucket.watches.map((entry) => entry.watch),
@@ -261,6 +330,17 @@ const fireBucket = async (bucket: WakeBucket): Promise<void> => {
     });
   } catch (error) {
     if (error instanceof ServiceError && error.code === "CONFLICT") {
+      // The thread's one active slot is taken — the agent is mid-answer,
+      // very often about the FIRST watch of this same batch. Waiting is what
+      // produced the running commentary: agent A finishes, the wake fires,
+      // agent B finishes 10s later, and its wake queues behind a turn that
+      // is already talking about A.
+      //
+      // JOIN it instead. `createFollowUp` is built for exactly this — a
+      // `joining` row that steers into the running turn — so the batch is
+      // reported once, by the turn already speaking.
+      if (await joinRunningTurn(bucket, message, ids)) return;
+
       const now = Date.now();
       const expired = bucket.watches.filter(
         (entry) => entry.watch.expiresAt.getTime() < now,

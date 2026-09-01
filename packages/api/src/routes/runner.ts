@@ -51,6 +51,9 @@ import {
 } from "../services/turn-service";
 import { buildTurnContext } from "../services/turn-context-service";
 import { MAX_TURN_CONTEXT_CHARS } from "@onecli/agent-protocol";
+import { activityForTool } from "@onecli/agent-protocol/activity";
+import type { AgentEvent } from "@onecli/agent-protocol";
+import { narrateTurnActivity } from "../services/channels/turn-receipt-service";
 import { buildHomeSyncItem } from "../services/home-sync-service";
 import {
   executeMemoryFileWrite,
@@ -59,6 +62,40 @@ import {
 import { logger } from "../lib/logger";
 
 const log = logger.child({ component: "runner-routes" });
+
+/**
+ * Narrate a batch's work onto the turn's channel loader.
+ *
+ * TOOL CALLS ONLY, deliberately. `tool.started` is durable and coarse — a
+ * handful per turn — which is what keeps this far away from the ~2s edit
+ * loop the de-streaming amendment removed. Reasoning (`thinking.delta`)
+ * is NOT used: it is ephemeral by the delta law, arrives token-by-token,
+ * and narrating it would reintroduce exactly that cadence.
+ *
+ * Only the LAST tool in a batch is sent — intermediate rows are already
+ * stale by the time the batch lands.
+ *
+ * Detached (`void`): the caller must not wait on a channel round-trip to
+ * ack a runner batch.
+ *
+ * Exported for its test: which event becomes a row, and when nothing is
+ * said, is the whole behavior — worth pinning without standing up a Hono
+ * app, a runner token, and a database around it.
+ */
+export const pushTurnNarration = (
+  turnId: string,
+  events: AgentEvent[],
+): void => {
+  let activity: string | undefined;
+  for (const event of events) {
+    // A terminal event ends the turn, and the clear path owns taking the
+    // narration down. Saying anything now would describe finished work.
+    if (event.type === "turn.done" || event.type === "error") return;
+    if (event.type === "tool.started") activity = activityForTool(event.name);
+  }
+  if (!activity) return;
+  void narrateTurnActivity(turnId, activity);
+};
 
 /** The turn-queue telemetry line — see services/claim-wait-log.ts. */
 const logClaimWait = createLogClaimWait(logger);
@@ -421,14 +458,27 @@ export const runnerRoutes = () => {
           case "home.synced":
             await applyRunnerEvent(runnerId, event);
             break;
-          case "turn.events":
-            await applyTurnEvents(
+          case "turn.events": {
+            const accepted = await applyTurnEvents(
               { runnerId, sandboxId: event.sandboxId },
               event.conversationId,
               event.turnId,
               event.events,
             );
+            // The channel's narration rides the SAME batch the web reads —
+            // one source, two consumers — and ONLY when the transcript
+            // accepted it: a batch from a sandbox that does not host this
+            // turn is ignored there, and must not drive another tenant's
+            // channel thread here.
+            //
+            // Detached and best-effort: narration decorates a loader that is
+            // already standing, so it must never delay an ack or fail a
+            // batch. Wired HERE rather than inside `applyTurnEvents` because
+            // the transcript service has no channel dependency and should
+            // not grow one — routes are where the two meet.
+            if (accepted) pushTurnNarration(event.turnId, event.events);
             break;
+          }
           case "turn.progress":
             await applyTurnProgress(
               { runnerId, sandboxId: event.sandboxId },

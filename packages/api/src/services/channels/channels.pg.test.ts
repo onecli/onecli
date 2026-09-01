@@ -87,6 +87,9 @@ const nowSec = () => Math.floor(Date.now() / 1000);
 interface SlackCall {
   method: string;
   form: URLSearchParams;
+  /** The raw request body, for the JSON-bodied methods (the streaming trio
+   * sends a `chunks` array, which cannot survive form encoding). */
+  raw: string;
   /** The Bearer token, when the call carried one (the convenience view). */
   token: string | null;
   /** The RAW Authorization header — the Basic-auth assertion surface
@@ -126,6 +129,8 @@ const startCdnFake = (): Promise<string> =>
         const call: SlackCall = {
           method: path,
           form: new URLSearchParams(),
+          // The CDN fake serves file bytes, never a Web API method body.
+          raw: "",
           token: auth?.startsWith("Bearer ") ? auth.slice(7) : null,
           authorization: auth,
         };
@@ -166,6 +171,7 @@ const startSlackFake = (): Promise<string> =>
           const call: SlackCall = {
             method,
             form: new URLSearchParams(raw),
+            raw,
             token: auth?.startsWith("Bearer ") ? auth.slice(7) : null,
             authorization: auth,
           };
@@ -5655,6 +5661,7 @@ describe.skipIf(!PROOF_URL)("turn receipts (the reaction 'seen' mark)", () => {
           channel: "C905",
           messageTs: "802.0001",
           kind: "session",
+          workStatusSet: true,
           createdAt: before,
         },
         {
@@ -5663,6 +5670,7 @@ describe.skipIf(!PROOF_URL)("turn receipts (the reaction 'seen' mark)", () => {
           channel: "C905",
           messageTs: "802.0002",
           kind: "session",
+          workStatusSet: true,
         },
         {
           turnId: oldReaction,
@@ -6051,6 +6059,460 @@ describe.skipIf(!PROOF_URL)("turn receipts (the reaction 'seen' mark)", () => {
     expect(
       await db.channelTurnReceipt.findUnique({ where: { turnId } }),
     ).toBeNull();
+  });
+});
+
+describe.skipIf(!PROOF_URL)("turn narration (the live task card)", () => {
+  const seedSessionReceipt = async (
+    turnId: string,
+    cardThreadTs: string | null = null,
+  ) => {
+    const { presenceId } = await seedChannelAgent(`narrate-${turnId}`, {
+      presenceCredentials: await getCrypto().encrypt(
+        JSON.stringify({ botToken: "xoxb-narrate" }),
+      ),
+    });
+    await db.channelTurnReceipt.create({
+      data: {
+        turnId,
+        agentChannelId: presenceId,
+        channel: "D950",
+        messageTs: "900.0001",
+        cardThreadTs,
+        kind: "session",
+      },
+    });
+    return presenceId;
+  };
+
+  const planOf = (raw: string) => {
+    const blocks = JSON.parse(
+      new URLSearchParams(raw).get("blocks") ?? "[]",
+    ) as {
+      type: string;
+      title: string;
+      tasks: { title: string; status: string }[];
+    }[];
+    return blocks[0]!;
+  };
+
+  const pastThrottle = (turnId: string) =>
+    db.channelTurnReceipt.update({
+      where: { turnId },
+      data: { cardAt: new Date(Date.now() - 10_000) },
+    });
+
+  it("a DM gets NO native loader — the card is the whole signal", async () => {
+    // Slack's agent-session status opens a thread in a DM ("calling
+    // setStatus on that thread will automatically open the thread for the
+    // user"), and it only says the agent is busy. The card says WHAT it is
+    // doing and sits inline, so the enum costs a thread and buys nothing.
+    //
+    // MUTATION-PROOF: drop the `narratesInline` arm and this fails —
+    // every DM turn would open a thread again.
+    const { presenceId } = await seedChannelAgent("dm-no-enum", {
+      appMode: "agent",
+      presenceCredentials: await getCrypto().encrypt(
+        JSON.stringify({ botToken: "xoxb-dm" }),
+      ),
+    });
+    slackHandlers["agents.sessions.setStatus"] = () => ({ ok: true });
+    slackHandlers["reactions.add"] = () => ({ ok: true });
+
+    await receipts.attachTurnReceipt({
+      presenceId,
+      turnId: "turn-dm-no-enum",
+      channel: "D970",
+      messageTs: "980.0001",
+      threadTs: "980.0001",
+      replyThreadTs: null,
+      isDirect: true,
+      text: "hey",
+    });
+
+    expect(slackCallsFor("agents.sessions.setStatus")).toHaveLength(0);
+    // ...but the receipt still exists, because it is what the card hangs
+    // off. Losing it would lose the narration with the loader.
+    const row = await db.channelTurnReceipt.findUniqueOrThrow({
+      where: { turnId: "turn-dm-no-enum" },
+    });
+    expect(row.kind).toBe("session");
+    expect(row.workStatusSet).toBe(false);
+
+    // And a SEEN mark lands on the user's own message, beside the card.
+    // The card is a separate message; without this, nothing acknowledges
+    // the line they actually typed.
+    // MUTATION-PROOF: drop the seen-mark arm and this fails.
+    const marked = slackCallsFor("reactions.add").at(-1)!;
+    expect(marked.form.get("timestamp")).toBe("980.0001");
+    expect(row.reaction).not.toBeNull();
+    // Its address is stored, because `messageTs` on a session row is the
+    // thread root — unreacting there on clear would miss.
+    expect(row.seenMessageTs).toBe("980.0001");
+  });
+
+  it("the clear does NOT set a status that was never set", async () => {
+    // A card-only DM has no loader to take down. Calling the enum on the
+    // clear would turn one ON at the very moment the turn ends — and in a
+    // DM that also opens the thread this whole path exists to avoid.
+    //
+    // MUTATION-PROOF: drop `&& receipt.workStatusSet` and this fails.
+    const { presenceId } = await seedChannelAgent("dm-clear-no-enum", {
+      appMode: "agent",
+      presenceCredentials: await getCrypto().encrypt(
+        JSON.stringify({ botToken: "xoxb-dm" }),
+      ),
+    });
+    await db.channelTurnReceipt.create({
+      data: {
+        turnId: "turn-dm-clear",
+        agentChannelId: presenceId,
+        channel: "D971",
+        messageTs: "981.0001",
+        kind: "session",
+        workStatusSet: false,
+      },
+    });
+    slackHandlers["agents.sessions.setStatus"] = () => ({ ok: true });
+
+    await receipts.clearTurnReceipt("turn-dm-clear");
+
+    expect(slackCallsFor("agents.sessions.setStatus")).toHaveLength(0);
+    // ...and the row still goes, so nothing is left behind.
+    expect(
+      await db.channelTurnReceipt.findUnique({
+        where: { turnId: "turn-dm-clear" },
+      }),
+    ).toBeNull();
+  });
+
+  it("a CHANNEL still gets the native loader", async () => {
+    // The conversation is threaded anyway, and the loader is what surfaces
+    // the agent in the channel list. MUTATION-PROOF: widen the DM arm to
+    // every conversation and this fails.
+    const { presenceId } = await seedChannelAgent("channel-keeps-enum", {
+      appMode: "agent",
+      presenceCredentials: await getCrypto().encrypt(
+        JSON.stringify({ botToken: "xoxb-ch" }),
+      ),
+    });
+    slackHandlers["agents.sessions.setStatus"] = () => ({ ok: true });
+
+    await receipts.attachTurnReceipt({
+      presenceId,
+      turnId: "turn-channel-enum",
+      channel: "C970",
+      messageTs: "980.0002",
+      threadTs: "980.0001",
+      replyThreadTs: "980.0001",
+      isDirect: false,
+      text: "hey",
+    });
+
+    expect(slackCallsFor("agents.sessions.setStatus")).toHaveLength(1);
+    const row = await db.channelTurnReceipt.findUniqueOrThrow({
+      where: { turnId: "turn-channel-enum" },
+    });
+    expect(row.workStatusSet).toBe(true);
+  });
+
+  it("posts the card TOP-LEVEL in a DM — no thread is opened", async () => {
+    await seedSessionReceipt("turn-card-dm");
+    slackHandlers["chat.postMessage"] = () => ({
+      ok: true,
+      channel: "D950",
+      ts: "950.5001",
+    });
+
+    await receipts.narrateTurnActivity("turn-card-dm", "Running a command");
+
+    const posted = slackCallsFor("chat.postMessage").at(-1)!;
+    // The whole point of the card over Slack's streaming methods: those
+    // demand a thread root, which in a DM means a thread per turn.
+    // MUTATION-PROOF: pass the session root as the card's thread and this
+    // fails.
+    expect(posted.form.get("thread_ts")).toBeNull();
+    expect(planOf(posted.raw).tasks).toEqual([
+      { task_id: "t0", title: "Running a command", status: "in_progress" },
+    ]);
+  });
+
+  it("posts the card IN THREAD for a group mention", async () => {
+    // A channel mention already answers in a thread, so the card belongs
+    // there beside the answer rather than in the channel at large.
+    await seedSessionReceipt("turn-card-group", "700.0009");
+    slackHandlers["chat.postMessage"] = () => ({
+      ok: true,
+      channel: "D950",
+      ts: "950.5002",
+    });
+
+    await receipts.narrateTurnActivity("turn-card-group", "Running a command");
+
+    expect(
+      slackCallsFor("chat.postMessage").at(-1)!.form.get("thread_ts"),
+    ).toBe("700.0009");
+  });
+
+  it("UPDATES the one card as work moves, finishing the earlier steps", async () => {
+    await seedSessionReceipt("turn-card-steps");
+    slackHandlers["chat.postMessage"] = () => ({
+      ok: true,
+      channel: "D950",
+      ts: "950.5003",
+    });
+    slackHandlers["chat.update"] = () => ({ ok: true });
+
+    await receipts.narrateTurnActivity("turn-card-steps", "Running a command");
+    await pastThrottle("turn-card-steps");
+    await receipts.narrateTurnActivity("turn-card-steps", "Reading a file");
+
+    // ONE card: a second post would leave the first stranded.
+    expect(slackCallsFor("chat.postMessage")).toHaveLength(1);
+    const updated = slackCallsFor("chat.update").at(-1)!;
+    expect(updated.form.get("ts")).toBe("950.5003");
+    // Every step but the newest is finished by definition — the agent moved
+    // on from it.
+    expect(planOf(updated.raw).tasks).toEqual([
+      { task_id: "t0", title: "Running a command", status: "complete" },
+      { task_id: "t1", title: "Reading a file", status: "in_progress" },
+    ]);
+    const row = await db.channelTurnReceipt.findUniqueOrThrow({
+      where: { turnId: "turn-card-steps" },
+    });
+    expect(row.cardTs).toBe("950.5003");
+    expect(row.cardSteps).toEqual(["Running a command", "Reading a file"]);
+  });
+
+  it("says nothing twice for the same step", async () => {
+    await seedSessionReceipt("turn-card-repeat");
+    slackHandlers["chat.postMessage"] = () => ({
+      ok: true,
+      channel: "D950",
+      ts: "950.5004",
+    });
+    slackHandlers["chat.update"] = () => ({ ok: true });
+
+    await receipts.narrateTurnActivity("turn-card-repeat", "Running a command");
+    await pastThrottle("turn-card-repeat");
+    await receipts.narrateTurnActivity("turn-card-repeat", "Running a command");
+
+    expect(slackCallsFor("chat.update")).toHaveLength(0);
+  });
+
+  it("THROTTLES: an agent alternating tools cannot hammer Slack", async () => {
+    await seedSessionReceipt("turn-card-throttle");
+    slackHandlers["chat.postMessage"] = () => ({
+      ok: true,
+      channel: "D950",
+      ts: "950.5005",
+    });
+    slackHandlers["chat.update"] = () => ({ ok: true });
+
+    // read → bash → read: the step CHANGES every call, so repeat
+    // suppression alone would let all three through.
+    // MUTATION-PROOF: remove the interval check and this fails.
+    await receipts.narrateTurnActivity("turn-card-throttle", "Reading a file");
+    await receipts.narrateTurnActivity(
+      "turn-card-throttle",
+      "Running a command",
+    );
+    await receipts.narrateTurnActivity("turn-card-throttle", "Reading a file");
+    expect(slackCallsFor("chat.update")).toHaveLength(0);
+
+    // ...and once the floor passes, narration resumes: the throttle delays a
+    // step, it never silences the turn.
+    await pastThrottle("turn-card-throttle");
+    await receipts.narrateTurnActivity(
+      "turn-card-throttle",
+      "Searching the web",
+    );
+    expect(slackCallsFor("chat.update")).toHaveLength(1);
+  });
+
+  it("REMOVES the card when the answer posts — a loader is not a reply", async () => {
+    await seedSessionReceipt("turn-card-clear");
+    slackHandlers["chat.postMessage"] = () => ({
+      ok: true,
+      channel: "D950",
+      ts: "950.5006",
+    });
+    slackHandlers["chat.delete"] = () => ({ ok: true });
+    slackHandlers["agents.sessions.setStatus"] = () => ({ ok: true });
+
+    await receipts.narrateTurnActivity("turn-card-clear", "Running a command");
+    await receipts.clearTurnReceipt("turn-card-clear");
+
+    // MUTATION-PROOF: drop the removal from the clear path and this fails —
+    // every turn would end with a stale card beside its answer.
+    const deleted = slackCallsFor("chat.delete").at(-1)!;
+    expect(deleted.form.get("ts")).toBe("950.5006");
+    expect(
+      await db.channelTurnReceipt.findUnique({
+        where: { turnId: "turn-card-clear" },
+      }),
+    ).toBeNull();
+  });
+
+  it("the stale sweep removes an ABANDONED card", async () => {
+    await seedSessionReceipt("turn-card-sweep");
+    slackHandlers["chat.delete"] = () => ({ ok: true });
+    slackHandlers["agents.sessions.setStatus"] = () => ({ ok: true });
+    // A turn whose process died mid-run: nothing else will ever take its
+    // card down.
+    await db.channelTurnReceipt.update({
+      where: { turnId: "turn-card-sweep" },
+      data: {
+        cardTs: "950.5007",
+        cardSteps: ["Running a command"],
+        createdAt: new Date(Date.now() - 11 * 60 * 1000),
+      },
+    });
+
+    await receipts.sweepStaleSessionReceipts();
+
+    expect(slackCallsFor("chat.delete")).toHaveLength(1);
+  });
+
+  it("leaves the row alone when the workspace REFUSES to narrate", async () => {
+    await seedSessionReceipt("turn-card-refused");
+    slackHandlers["chat.postMessage"] = () => ({
+      ok: false,
+      error: "channel_type_not_supported",
+    });
+
+    await receipts.narrateTurnActivity(
+      "turn-card-refused",
+      "Running a command",
+    );
+
+    const row = await db.channelTurnReceipt.findUniqueOrThrow({
+      where: { turnId: "turn-card-refused" },
+    });
+    // Nothing recorded: a later clear must not try to remove a card that was
+    // never posted, and the steps must not claim a row the reader cannot see.
+    expect(row.cardTs).toBeNull();
+    expect(row.cardSteps).toEqual([]);
+  });
+
+  it("posts ONE card when two batches race", async () => {
+    await seedSessionReceipt("turn-card-race");
+    let posts = 0;
+    let release: (() => void) | undefined;
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    slackHandlers["chat.postMessage"] = async () => {
+      posts += 1;
+      // Hold the first post inside Slack, so the second caller runs its own
+      // claim while the first is still in flight — the only window where the
+      // race exists.
+      if (posts === 1) await held;
+      return { ok: true, channel: "D950", ts: `950.600${posts}` };
+    };
+    slackHandlers["chat.update"] = () => ({ ok: true });
+
+    const first = receipts.narrateTurnActivity(
+      "turn-card-race",
+      "Running a command",
+    );
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    // Clear the throttle stamp WITHOUT touching the steps, so the rate floor
+    // cannot be what stops the second caller and the claim stands alone.
+    await db.channelTurnReceipt.update({
+      where: { turnId: "turn-card-race" },
+      data: { cardAt: null },
+    });
+    await receipts.narrateTurnActivity("turn-card-race", "Reading a file");
+    release?.();
+    await first;
+
+    // MUTATION-PROOF: drop the claim's verdict check and this reads 2 — two
+    // cards for one turn, one of them orphaned.
+    expect(posts).toBe(1);
+  });
+
+  it("no step is LOST when two batches update one card together", async () => {
+    // The claim's job once a card exists. Two callers read the same
+    // revision, each builds its own list from it, and the loser must stand
+    // down — otherwise its list (which never contained the winner's step)
+    // overwrites the winner's, and a step silently disappears from the card.
+    //
+    // MUTATION-PROOF: drop `if (claimed.count === 0) return;` and this
+    // fails — the card ends up showing only one of the two steps.
+    await seedSessionReceipt("turn-card-lost");
+    slackHandlers["chat.postMessage"] = () => ({
+      ok: true,
+      channel: "D950",
+      ts: "950.7001",
+    });
+    let updates = 0;
+    let release: (() => void) | undefined;
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    slackHandlers["chat.update"] = async () => {
+      updates += 1;
+      if (updates === 1) await held;
+      return { ok: true };
+    };
+
+    // A card already exists, with one step on it.
+    await receipts.narrateTurnActivity("turn-card-lost", "Running a command");
+    await pastThrottle("turn-card-lost");
+
+    // Two updates in flight over the same revision.
+    const first = receipts.narrateTurnActivity(
+      "turn-card-lost",
+      "Reading a file",
+    );
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    await db.channelTurnReceipt.update({
+      where: { turnId: "turn-card-lost" },
+      data: { cardAt: null },
+    });
+    await receipts.narrateTurnActivity("turn-card-lost", "Editing a file");
+    release?.();
+    await first;
+
+    const row = await db.channelTurnReceipt.findUniqueOrThrow({
+      where: { turnId: "turn-card-lost" },
+    });
+    // Both steps survive, in order. The claim runs BEFORE the provider call,
+    // so a second caller reads the first's step and appends to it rather
+    // than racing it — which is the property worth having: the card grows,
+    // it never rewinds.
+    expect(row.cardSteps).toEqual([
+      "Running a command",
+      "Reading a file",
+      "Editing a file",
+    ]);
+  });
+
+  it("never narrates onto a REACTION receipt — that mark is the fallback", async () => {
+    const { presenceId } = await seedChannelAgent("narrate-reaction", {
+      presenceCredentials: await getCrypto().encrypt(
+        JSON.stringify({ botToken: "xoxb-narrate" }),
+      ),
+    });
+    await db.channelTurnReceipt.create({
+      data: {
+        turnId: "turn-card-reaction",
+        agentChannelId: presenceId,
+        channel: "D951",
+        messageTs: "900.0002",
+        kind: "reaction",
+        reaction: "eyes",
+      },
+    });
+    const before = slackCallsFor("chat.postMessage").length;
+
+    await receipts.narrateTurnActivity(
+      "turn-card-reaction",
+      "Running a command",
+    );
+
+    expect(slackCallsFor("chat.postMessage")).toHaveLength(before);
   });
 });
 

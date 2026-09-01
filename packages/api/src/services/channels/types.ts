@@ -451,6 +451,52 @@ export interface ChannelProvider {
    * agent-flavor presences in threads; absent = the provider has no native
    * work-status and reactions are all there is.
    */
+  /**
+   * NARRATE what the agent is doing, as a card beside the conversation —
+   * one row per tool call, the newest running and the rest finished.
+   *
+   * Optional twice over: a provider that cannot narrate omits it entirely,
+   * and one that can may still answer `null` for a workspace that refuses.
+   * Either way the caller does nothing further and the native loader stands
+   * — narration is decoration and must never be load-bearing.
+   *
+   * `activities` is the turn's WHOLE list, oldest first, because the card is
+   * re-rendered rather than patched: there is no partial state to reconcile,
+   * and a missed update is corrected by the next one.
+   *
+   * `cardTs` is the provider's handle for a card already posted, or null to
+   * post the first one. The returned handle is persisted by the caller and
+   * handed back next time.
+   *
+   * `threadTs` is where the card belongs when the conversation is threaded
+   * (a channel mention); null means the conversation itself (a DM), where
+   * the card sits inline rather than opening a thread nobody asked for.
+   *
+   * Every activity is UNTRUSTED (model-derived) and already bounded to one
+   * short line by the shared derivation; a provider must not widen it.
+   */
+  narrateThreadWork?(input: {
+    credentialsJson: string | null;
+    channel: string;
+    threadTs: string | null;
+    activities: string[];
+    cardTs: string | null;
+  }): Promise<{ cardTs: string } | null>;
+
+  /**
+   * REMOVE the narration card, once the answer has been posted — the card is
+   * a loader, not a reply, and leaving it behind would make every turn end
+   * with two messages.
+   *
+   * Best-effort and idempotent: it runs on the clear path AND the stale
+   * sweep, so it must tolerate a card that is already gone.
+   */
+  removeThreadNarration?(input: {
+    credentialsJson: string | null;
+    channel: string;
+    cardTs: string;
+  }): Promise<void>;
+
   setThreadWorkStatus?(input: {
     credentialsJson: string | null;
     /** The provider-opaque conversation id (Slack: channel id). */

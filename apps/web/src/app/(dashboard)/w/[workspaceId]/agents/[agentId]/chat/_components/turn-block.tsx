@@ -11,6 +11,7 @@ import {
   isJoiningTurn,
 } from "@/lib/chat/turns";
 import { AutomationTurnHeader } from "./automation-turn";
+import { ActivityLine } from "./activity-line";
 import { ChatMarkdown } from "./chat-markdown";
 import { ConnectorSuggestions } from "./connect-suggestions";
 import { ToolCallRow } from "./tool-call-row";
@@ -85,7 +86,15 @@ export const TurnBlock = ({
   // red blob and then swap to the friendly notice — so an active turn keeps
   // its waiting state and the error renders only from the settled poll view.
   const errorText = turn.error ?? (active ? undefined : rendered?.error);
-  const showWaiting = active && (rendered?.tools.length ?? 0) === 0;
+  // The live caption: what the agent is doing right now. Shown while the turn
+  // runs and while it has not yet said anything — once the answer starts
+  // arriving, the answer itself is the better signal of progress.
+  // Falls back to the lifecycle copy before the agent reports any activity
+  // (waking a sandbox can take a moment, and a blank row reads as broken).
+  const activityText = active
+    ? (rendered?.activity ?? waitingCopy(turn))
+    : undefined;
+  const showActivity = Boolean(activityText) && !rendered?.text;
   // A turn the reader can fix from the Models page — no key yet, or a key
   // the provider refused. Rendered as guidance with the fix attached, rather
   // than as a failure.
@@ -158,10 +167,8 @@ export const TurnBlock = ({
                     (suppressed above): one unmissable call to action. */}
                 <ConnectorSuggestions text={rendered.text} />
               </>
-            ) : showWaiting ? (
-              <p className="text-muted-foreground animate-pulse text-sm">
-                {waitingCopy(turn)}
-              </p>
+            ) : showActivity ? (
+              <ActivityLine text={activityText!} />
             ) : null}
             {rendered?.notices.map((notice, index) => (
               <TurnNotice key={`${index}-${notice}`} message={notice} />

@@ -2,7 +2,8 @@ import { db, Prisma } from "@onecli/db";
 import { getCrypto } from "../../providers";
 import { channelProvider } from "./registry";
 import { chooseReaction } from "./reaction-chooser";
-import type { ChannelProviderId } from "./types";
+import { ChannelProviderApiError } from "./errors";
+import type { ChannelProvider, ChannelProviderId } from "./types";
 import { logger } from "../../lib/logger";
 
 const log = logger.child({ component: "turn-receipts" });
@@ -34,10 +35,22 @@ export interface AttachReceiptInput {
   /** Provider-opaque address of the USER's message (Slack: channel + ts). */
   channel: string;
   messageTs: string;
-  /** The group thread's ROOT ts (Slack: `thread_ts`) — the key the native
-   * work-status is set on. Null for DMs, which never get the loader (they
-   * answer top-level; a loader would rip the reply into a thread). */
+  /** The SESSION root (Slack: `thread_ts`) — the key the native work-status
+   * is set on. A group mention uses the thread it answers in; a DM has no
+   * thread, so the caller passes the user's own message, because Slack
+   * refuses to scope a session without one. */
   threadTs?: string | null;
+  /** Where a narration CARD may be posted: the group thread's root, or null
+   * in a DM so the card sits inline. Deliberately separate from `threadTs`
+   * above — a DM fakes a session root out of the user's message, and reusing
+   * it here would open a thread for every DM turn. */
+  replyThreadTs?: string | null;
+  /** Whether this is a DIRECT conversation. Explicit rather than inferred
+   * from a null thread: the native work-status opens a thread in a DM
+   * (Slack documents it), so a card-capable provider skips the enum there —
+   * and a caller that omits the field must keep today's behavior, not
+   * silently disable every channel's loader. */
+  isDirect?: boolean;
   /** The inbound message text — what the chooser picks against. */
   text: string;
 }
@@ -83,10 +96,25 @@ export const attachTurnReceipt = async (
       : null;
     const provider = channelProvider(presence.provider as ChannelProviderId);
 
-    // Agent-flavor presence in a group thread: the native work-status IS the
-    // ack. Try it first — on any refusal (plan-gated workspace, missing
-    // scope, dead credential) fall through to the reaction, so the user
-    // always sees SOMETHING move.
+    // The native work-status ("<agent> is working…") is the ack for an
+    // agent-flavor presence. Try it first — on any refusal (plan-gated
+    // workspace, missing scope, dead credential) fall through to the
+    // reaction, so the user always sees SOMETHING move.
+    //
+    // NOT IN A DM, when the presence can post a narration card instead.
+    // Slack documents that setting an agent-session status on a DM
+    // "will automatically open the thread for the user", and it says only
+    // that the agent is busy. The card says WHAT it is doing and sits
+    // inline, so in a DM the enum costs a thread nobody asked for and buys
+    // nothing the card does not already show. A channel keeps it: that
+    // conversation is threaded anyway, and the loader is what surfaces the
+    // agent in the channel list.
+    // A DM that can carry a card: the ONLY shape where the enum is skipped.
+    // Keyed on an explicit flag rather than "replyThreadTs is absent" — a
+    // caller that simply does not pass the field would otherwise read as a
+    // DM and silently cost every channel its loader.
+    const narratesInline =
+      input.isDirect === true && provider.narrateThreadWork !== undefined;
     if (
       presence.appMode === "agent" &&
       input.threadTs &&
@@ -95,13 +123,51 @@ export const attachTurnReceipt = async (
       const threadTs = input.threadTs;
       let statusSet = false;
       try {
-        await provider.setThreadWorkStatus({
-          credentialsJson,
-          channel: input.channel,
-          threadTs,
-          working: true,
-        });
-        statusSet = true;
+        // The session receipt is written either way — it is what the
+        // narration card hangs off. Only the ENUM is conditional.
+        if (!narratesInline) {
+          await provider.setThreadWorkStatus({
+            credentialsJson,
+            channel: input.channel,
+            threadTs,
+            working: true,
+          });
+          statusSet = true;
+        }
+        // The SEEN mark, on the user's own message. In a card-only DM this
+        // is the only acknowledgement that lands on what they typed — the
+        // card is a separate message, and a reader who sends and looks away
+        // wants a mark on their own line. It rides ALONGSIDE the card here
+        // rather than instead of it (elsewhere it is the fallback), so both
+        // signals are present: "seen" on the message, "doing" on the card.
+        let seenReaction: string | null = null;
+        if (narratesInline) {
+          seenReaction = await chooseReaction({
+            agent: {
+              id: presence.agent.id,
+              workspaceId: presence.agent.workspaceId,
+            },
+            organizationId: presence.agent.workspace.organizationId,
+            text: input.text,
+          });
+          try {
+            await provider.addReceiptReaction({
+              credentialsJson,
+              channel: input.channel,
+              messageTs: input.messageTs,
+              reaction: seenReaction,
+            });
+          } catch (err) {
+            // Decoration on top of the card: a refused emoji costs the mark,
+            // never the turn.
+            log.info(
+              { err: String(err), turnId: input.turnId },
+              "seen mark skipped; the card stands",
+            );
+            seenReaction = null;
+          }
+        }
+
         try {
           await db.channelTurnReceipt.create({
             data: {
@@ -111,8 +177,20 @@ export const attachTurnReceipt = async (
               // The THREAD ROOT, not the message: it is the address the
               // clear must set the status back on.
               messageTs: threadTs,
+              // The card's home: the group thread when there is one, null in
+              // a DM so the card sits inline. NOT `threadTs` above — that is
+              // the session root, which a DM fakes from the user's message.
+              cardThreadTs: input.replyThreadTs ?? null,
+              // Recorded, not inferred: the clear cannot otherwise tell a
+              // card-only DM from a channel whose loader is standing.
+              workStatusSet: !narratesInline,
               kind: "session",
-              reaction: null,
+              // Set only on a card-only DM, where the mark rides beside the
+              // card. The clear takes it off the USER's message, which is
+              // why `seenMessageTs` is stored next to it — `messageTs` on a
+              // session row is the thread root, not the user's line.
+              reaction: seenReaction,
+              seenMessageTs: seenReaction === null ? null : input.messageTs,
             },
             select: { id: true },
           });
@@ -280,6 +358,170 @@ const pruneOldReceipts = (agentChannelId: string): void => {
 };
 
 /**
+ * Floor between two narration writes on one turn.
+ *
+ * Slack's message write is rate-limited per app and a busy agent can run
+ * tools faster than the ceiling allows, so tool boundaries alone are not a
+ * bound. 1.5s keeps a long turn's narration comfortably inside it while
+ * still reading as live.
+ */
+const NARRATION_MIN_INTERVAL_MS = 1_500;
+
+/**
+ * How many steps a card shows before the oldest fall off.
+ *
+ * A card is a loader, not a transcript: past a screenful it stops being
+ * glanceable, and Slack caps a plan at 50 tasks regardless. The full history
+ * lives in the web transcript, which is the surface built to hold it.
+ */
+const NARRATION_MAX_STEPS = 12;
+
+/**
+ * REMOVE a turn's narration card, if it has one.
+ *
+ * Shared by the clear path and the stale sweep because both must be safe to
+ * run alone and safe to run twice: whichever gets there first removes the
+ * card, and the other finds nothing (or a provider that answers "already
+ * gone", which the provider swallows).
+ */
+const removeNarrationCard = async (
+  provider: ChannelProvider,
+  input: { credentialsJson: string | null; channel: string; cardTs: string },
+): Promise<void> => {
+  if (!provider.removeThreadNarration) return;
+  await provider.removeThreadNarration(input);
+};
+
+/**
+ * NARRATE the turn's current activity on its own card beside the
+ * conversation — one row per tool call, the newest running.
+ *
+ * Best-effort and never load-bearing: the native loader is already standing
+ * from the attach, so a provider that cannot narrate, a workspace that
+ * refuses, and a turn whose receipt has already been cleared all end the
+ * same way — nothing happens, and the turn is unaffected.
+ *
+ * Only a `session` receipt narrates: a `reaction` receipt is the fallback
+ * for a presence whose provider has no native loader at all, and giving it a
+ * card would be a second, louder mark than the one the user opted into.
+ *
+ * Costs one indexed lookup per tool batch on a turn with no channel receipt
+ * (a web-only agent). No lock, no write, and that is why this stays a plain
+ * lookup rather than a cache that would need invalidating.
+ */
+export const narrateTurnActivity = async (
+  turnId: string,
+  activity: string,
+): Promise<void> => {
+  try {
+    const receipt = await db.channelTurnReceipt.findFirst({
+      where: { turnId, kind: "session" },
+      select: {
+        id: true,
+        channel: true,
+        messageTs: true,
+        cardThreadTs: true,
+        cardTs: true,
+        cardSteps: true,
+        cardRev: true,
+        cardAt: true,
+        agentChannel: { select: { provider: true, credentials: true } },
+      },
+    });
+    // No session receipt = nothing to narrate onto (a reaction fallback, or
+    // a turn whose loader already came down). Not a problem.
+    if (!receipt) return;
+    // The same step repeated: the card already says this, and rewriting it
+    // with itself would spend Slack's rate limit on nothing.
+    if (receipt.cardSteps.at(-1) === activity) return;
+    // THROTTLE. Repeat-suppression alone bounds nothing: an agent
+    // alternating two tools changes the step every call, and a fast turn can
+    // pass Slack's ceiling and start collecting 429s. A step that appears a
+    // beat late is invisible to a reader; a rate-limited channel is not.
+    if (
+      receipt.cardAt &&
+      Date.now() - receipt.cardAt.getTime() < NARRATION_MIN_INTERVAL_MS
+    ) {
+      return;
+    }
+
+    const provider = channelProvider(
+      receipt.agentChannel.provider as ChannelProviderId,
+    );
+    if (!provider.narrateThreadWork) return;
+
+    const steps = [...receipt.cardSteps, activity].slice(-NARRATION_MAX_STEPS);
+
+    // RESERVE the step before talking to the provider, and let that write
+    // be what excludes a rival. The route pushes narration detached, so two
+    // batches for one turn can be in flight together; writing the list here
+    // (not after the call) means the second caller reads the first's step
+    // and APPENDS to it rather than racing it — the card grows, it never
+    // rewinds.
+    //
+    // The revision is bumped for the posting rule below, which is the one
+    // window this ordering cannot cover on its own.
+    await db.channelTurnReceipt.updateMany({
+      where: { id: receipt.id },
+      data: { cardSteps: steps, cardAt: new Date(), cardRev: { increment: 1 } },
+    });
+
+    // POSTING is exclusive, and reserving the step does not make it so:
+    // `cardTs` is written only once the provider answers, so a caller
+    // arriving during that round-trip still reads null and would post a
+    // SECOND card. The first writer (the one that found revision 0) posts;
+    // everyone else waits for the handle rather than racing it.
+    if (receipt.cardTs === null && receipt.cardRev > 0) return;
+
+    const credentialsJson = receipt.agentChannel.credentials
+      ? await getCrypto().decrypt(receipt.agentChannel.credentials)
+      : null;
+
+    const result = await provider.narrateThreadWork({
+      credentialsJson,
+      channel: receipt.channel,
+      // A group thread's card belongs in that thread; a DM has none, and
+      // passing null is what keeps the card inline instead of opening a
+      // thread nobody asked for.
+      threadTs: receipt.cardThreadTs,
+      activities: steps,
+      cardTs: receipt.cardTs,
+    });
+    // Null = this provider or workspace cannot narrate. RELEASE the claim so
+    // the row still reflects what is actually on screen, and nothing later
+    // tries to remove a card that was never posted.
+    if (!result) {
+      await db.channelTurnReceipt.updateMany({
+        // Only if nothing else has written since: a later step's list is
+        // fresher than the one we are rolling back to.
+        where: { id: receipt.id, cardRev: receipt.cardRev + 1 },
+        data: { cardSteps: receipt.cardSteps },
+      });
+      return;
+    }
+
+    // Record the card handle. `updateMany` scoped to the row id makes a
+    // clear that landed in between a no-op rather than resurrecting a
+    // deleted receipt.
+    await db.channelTurnReceipt.updateMany({
+      where: { id: receipt.id },
+      data: { cardTs: result.cardTs },
+    });
+  } catch (err) {
+    // A PROVIDER refusal is routine (plan-gated workspace, dead credential)
+    // and stays at info: the loader is untouched and there is nothing to
+    // fix. A fault on OUR side is not routine — it means narration is
+    // broken for everyone, and swallowing it at the same level is how a
+    // missing column looked exactly like a Slack refusal for a whole
+    // afternoon (observed 2026-08-31). Same swallow, louder record.
+    const providerRefusal = err instanceof ChannelProviderApiError;
+    const line = "activity narration skipped; the loader stands";
+    if (providerRefusal) log.info({ err: String(err), turnId }, line);
+    else log.error({ err: String(err), turnId }, line);
+  }
+};
+
+/**
  * The clear half, fired on a WINNING cursor CAS: the answer is posting, so
  * the "seen" mark comes off and the row goes with it. A missing row is the
  * normal case for web-sourced turns (they never had a receipt).
@@ -294,6 +536,9 @@ export const clearTurnReceipt = async (turnId: string): Promise<void> => {
         messageTs: true,
         kind: true,
         reaction: true,
+        workStatusSet: true,
+        seenMessageTs: true,
+        cardTs: true,
         agentChannel: { select: { provider: true, credentials: true } },
       },
     });
@@ -306,7 +551,18 @@ export const clearTurnReceipt = async (turnId: string): Promise<void> => {
       receipt.agentChannel.provider as ChannelProviderId,
     );
 
-    if (receipt.kind === "session") {
+    // Take the CARD down first, while the loader is still up. The card is a
+    // loader, not a reply: the answer is landing, so leaving it would end
+    // every turn with two messages instead of one.
+    if (receipt.cardTs) {
+      await removeNarrationCard(provider, {
+        credentialsJson,
+        channel: receipt.channel,
+        cardTs: receipt.cardTs,
+      });
+    }
+
+    if (receipt.kind === "session" && receipt.workStatusSet) {
       // The native work-status is NOT auto-cleared by the answer post
       // (Slack: `agents.sessions.setStatus` semantics) — this call is the
       // only thing standing between the user and a loader that burns until
@@ -318,11 +574,23 @@ export const clearTurnReceipt = async (turnId: string): Promise<void> => {
         threadTs: receipt.messageTs,
         working: false,
       });
-    } else if (receipt.reaction) {
+    } else if (receipt.reaction && !receipt.seenMessageTs) {
       await provider.removeReceiptReaction({
         credentialsJson,
         channel: receipt.channel,
         messageTs: receipt.messageTs,
+        reaction: receipt.reaction,
+      });
+    }
+
+    // A seen mark riding BESIDE a card comes off with it. Its address is the
+    // user's own message, which on a session row is not `messageTs` — that
+    // is the thread root, so unreacting there would miss.
+    if (receipt.reaction && receipt.seenMessageTs) {
+      await provider.removeReceiptReaction({
+        credentialsJson,
+        channel: receipt.channel,
+        messageTs: receipt.seenMessageTs,
         reaction: receipt.reaction,
       });
     }
@@ -409,6 +677,7 @@ export const moveTurnReceipt = async (input: {
         messageTs: true,
         kind: true,
         reaction: true,
+        workStatusSet: true,
         agentChannel: {
           select: { id: true, provider: true, credentials: true },
         },

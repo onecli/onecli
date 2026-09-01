@@ -329,6 +329,9 @@ importers:
       '@dnd-kit/utilities':
         specifier: ^3.2.2
         version: 3.2.2(react@19.2.4)
+      '@onecli/agent-protocol':
+        specifier: workspace:*
+        version: link:../../packages/agent-protocol
       '@onecli/api':
         specifier: workspace:*
         version: link:../../packages/api

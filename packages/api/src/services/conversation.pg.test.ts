@@ -454,6 +454,45 @@ describe.skipIf(!PROOF_URL)("seq allocation", () => {
     );
   });
 
+  it("FENCES a foreign sandbox's batch — it is ignored, not written", async () => {
+    // The fence is a tenancy boundary, not bookkeeping: a sandbox that does
+    // not host this turn must not be able to append to its transcript, and
+    // the rejection is silent by design (a throw would strand the rescue
+    // events a dying sandbox sends).
+    //
+    // MUTATION-PROOF: drop the sandbox arm of the fence and this fails.
+    const own = await seedTalkable("fence-own");
+    const foreign = await seedTalkable("fence-foreign");
+    const turn = await turns.createTurn(
+      WORKSPACE,
+      own.conversationId,
+      "hi",
+      WEB_A,
+    );
+
+    await turns.applyTurnEvents(
+      reporter(RUNNER_A, own.sandboxId),
+      own.conversationId,
+      turn.id,
+      [{ type: "turn.started" }],
+    );
+
+    // Same runner, WRONG sandbox: the batch is ignored.
+    await turns.applyTurnEvents(
+      reporter(RUNNER_A, foreign.sandboxId),
+      own.conversationId,
+      turn.id,
+      [{ type: "turn.done" }],
+    );
+
+    // Nothing from the rejected batch landed.
+    const rows = await db.turnEvent.findMany({
+      where: { conversationId: own.conversationId },
+      select: { type: true },
+    });
+    expect(rows.map((r) => r.type)).toEqual(["turn.started"]);
+  });
+
   it("counts EVERY event, including the ones it does not store", async () => {
     // Deltas consume seq numbers even though they leave no row: a live tail
     // sees them, so the numbering must be the same on both paths or a reader
@@ -663,6 +702,49 @@ describe.skipIf(!PROOF_URL)("seq allocation", () => {
     expect(page.events).toHaveLength(2);
     expect(page.hasMore).toBe(true);
     expect(page.nextSince).toBe(2);
+  });
+
+  it("REPORTS the fence verdict — a foreign sandbox's batch is not accepted", async () => {
+    // The verdict is a SECURITY signal, not bookkeeping. A rejected batch is
+    // ignored rather than thrown (a dying sandbox's rescue events must still
+    // land), so a caller acting on the same events — the Slack narration in
+    // routes/runner.ts — has nothing else to go on. Swallow it and one
+    // tenant's sandbox could drive another tenant's channel thread.
+    //
+    // MUTATION-PROOF: hardcode `return true` in applyTurnEvents and this
+    // fails.
+    const own = await seedTalkable("verdict-own");
+    const foreign = await seedTalkable("verdict-foreign");
+    const turn = await turns.createTurn(
+      WORKSPACE,
+      own.conversationId,
+      "hi",
+      WEB_A,
+    );
+
+    const accepted = await turns.applyTurnEvents(
+      reporter(RUNNER_A, own.sandboxId),
+      own.conversationId,
+      turn.id,
+      [{ type: "turn.started" }],
+    );
+    expect(accepted).toBe(true);
+
+    // Same runner, WRONG sandbox.
+    const rejected = await turns.applyTurnEvents(
+      reporter(RUNNER_A, foreign.sandboxId),
+      own.conversationId,
+      turn.id,
+      [{ type: "tool.started", callId: "c1", name: "bash" }],
+    );
+    expect(rejected).toBe(false);
+
+    // And the rejected batch really was ignored.
+    const rows = await db.turnEvent.findMany({
+      where: { conversationId: own.conversationId },
+      select: { type: true },
+    });
+    expect(rows.map((r) => r.type)).toEqual(["turn.started"]);
   });
 });
 
@@ -3174,6 +3256,99 @@ describe.skipIf(!PROOF_URL)("conversation titles", () => {
     );
     expect(row?.title).toMatch(/…$/);
     expect(row?.title).not.toMatch(/\s…$/);
+  });
+});
+
+describe.skipIf(!PROOF_URL)("the wake's open-promise note", () => {
+  const answerTurn = async (
+    conversationId: string,
+    text: string,
+    status = "done",
+  ) => {
+    const turn = await turns.createTurn(
+      WORKSPACE,
+      conversationId,
+      "do the thing",
+      WEB_A,
+    );
+    await db.turn.update({ where: { id: turn.id }, data: { status } });
+    if (text !== "") {
+      await db.turnEvent.create({
+        data: {
+          conversationId,
+          turnId: turn.id,
+          seq: 1,
+          type: "text",
+          payload: { text },
+        },
+      });
+    }
+    await db.turn.update({
+      where: { id: turn.id },
+      data: { status, finishedAt: new Date() },
+    });
+    return turn.id;
+  };
+
+  it("carries back the agent's own last reply, bounded", async () => {
+    // The whole point: a wake arrives with the platform's instruction and
+    // no conversation, so this is the only place an unfinished promise can
+    // be read from.
+    const { conversationId } = await seedTalkable("promise-basic");
+    await answerTurn(
+      conversationId,
+      "I'll post the rankings once all 5 finish.",
+    );
+
+    const note = await turns.buildOpenPromiseNote(conversationId, new Date());
+
+    expect(note).toContain("I'll post the rankings once all 5 finish.");
+    expect(note).toContain("deliver it now");
+  });
+
+  it("BOUNDS a long reply — a wake prompt is not a transcript", async () => {
+    // The note rides the model's context budget beside memory. An agent that
+    // answered with a full report would otherwise push the wake's own
+    // instructions out of the window it needs to act on.
+    //
+    // MUTATION-PROOF: drop the slice and this fails.
+    const { conversationId } = await seedTalkable("promise-long");
+    await answerTurn(conversationId, "x".repeat(5_000));
+
+    const note = await turns.buildOpenPromiseNote(conversationId, new Date());
+
+    expect(note).not.toBeNull();
+    expect((note as string).length).toBeLessThan(1_000);
+    expect(note).toContain("…");
+  });
+
+  it("says nothing when the last turn FAILED — a failure promised nothing", async () => {
+    // MUTATION-PROOF: drop `status: "done"` from the lookup and this fails.
+    // A failed turn's text is an error, not a commitment, and relaying it
+    // would tell the agent it owes work that was never accepted.
+    const { conversationId } = await seedTalkable("promise-failed");
+    await answerTurn(conversationId, "boom", "failed");
+
+    expect(
+      await turns.buildOpenPromiseNote(conversationId, new Date()),
+    ).toBeNull();
+  });
+
+  it("says nothing when the reply was EMPTY — a bare label is noise", async () => {
+    const { conversationId } = await seedTalkable("promise-empty");
+    await answerTurn(conversationId, "");
+
+    expect(
+      await turns.buildOpenPromiseNote(conversationId, new Date()),
+    ).toBeNull();
+  });
+
+  it("says nothing on a first-contact wake — no prior reply to owe against", async () => {
+    const { conversationId } = await seedTalkable("promise-first");
+
+    expect(
+      await turns.buildOpenPromiseNote(conversationId, new Date()),
+    ).toBeNull();
   });
 });
 

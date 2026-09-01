@@ -220,11 +220,22 @@ describe("what gets posted", () => {
     });
 
     const posted = slack.callsTo("chat.postMessage");
-    // The title rides every automation post as a quiet caption — two
-    // automations reporting into one thread are indistinguishable without it.
+    // The caption rides every automation post — two automations reporting
+    // into one thread are indistinguishable without it. `text` carries the
+    // whole line because it is the notification and search preview.
     expect(posted.map((call) => call.form.text)).toEqual([
-      ':calendar: _Scheduled run "daily-check"_\nInbox is clear &lt;ok&gt;',
+      ':calendar: Scheduled run "daily-check"\nInbox is clear &lt;ok&gt;',
     ]);
+    // ...and the caption renders as CHROME: a context block (smaller, grey),
+    // with the report itself an ordinary section below it.
+    const blocks = JSON.parse(posted[0]?.form.blocks ?? "[]") as unknown[];
+    expect(blocks[0]).toEqual({
+      type: "context",
+      elements: [
+        { type: "mrkdwn", text: ':calendar: Scheduled run "daily-check"' },
+      ],
+    });
+    expect(blocks[1]).toMatchObject({ type: "section" });
   });
 
   it("posts a watch run's report as ONE labeled message with the stopwatch icon", async () => {
@@ -246,7 +257,7 @@ describe("what gets posted", () => {
 
     const posted = slack.callsTo("chat.postMessage");
     expect(posted.map((call) => call.form.text)).toEqual([
-      ':stopwatch: _Watch on "tests"_\nTests passed &lt;ok&gt;',
+      ':stopwatch: Watch on "tests"\nTests passed &lt;ok&gt;',
     ]);
   });
 
@@ -675,7 +686,7 @@ describe("what gets posted", () => {
     });
 
     expect(slack.callsTo("chat.postMessage").map((c) => c.form.text)).toEqual([
-      ":calendar: _Scheduled run **daily** &lt;sweep&gt;_\n*Inbox*\n• *unread:* 0",
+      ":calendar: Scheduled run **daily** &lt;sweep&gt;\n*Inbox*\n• *unread:* 0",
     ]);
   });
 
@@ -692,7 +703,7 @@ describe("what gets posted", () => {
     });
 
     expect(slack.callsTo("chat.postMessage").map((c) => c.form.text)).toEqual([
-      ":calendar: _Scheduled run **daily** &lt;sweep&gt;_",
+      ":calendar: Scheduled run **daily** &lt;sweep&gt;",
     ]);
   });
 
@@ -739,6 +750,36 @@ describe("what gets posted", () => {
     expect(text).toContain("CI passed on #1004.");
   });
 
+  it("chunks a long automation report instead of losing the post", async () => {
+    // Slack caps a section at 3,000 chars and rejects the WHOLE post past
+    // it — after the cursor advanced, which would silently drop the report.
+    // MUTATION-PROOF: pass the body as ONE section and this fails.
+    const controlPlane = createFakeControlPlane(
+      transcriptWith("word ".repeat(2_000)),
+    );
+
+    await mirror({
+      controlPlane,
+      workItem: item({
+        source: "cron",
+        userId: null,
+        message: 'Scheduled run "big"',
+      }),
+    });
+
+    const posted = slack.callsTo("chat.postMessage")[0];
+    const blocks = JSON.parse(posted?.form.blocks ?? "[]") as {
+      type: string;
+      text?: { text: string };
+    }[];
+    expect(blocks[0]?.type).toBe("context");
+    const sections = blocks.filter((block) => block.type === "section");
+    expect(sections.length).toBeGreaterThan(1);
+    for (const section of sections) {
+      expect((section.text?.text ?? "").length).toBeLessThanOrEqual(3_000);
+    }
+  });
+
   it("clips an over-long single-line caption instead of letting it run", async () => {
     const controlPlane = createFakeControlPlane(transcriptWith("Done."));
 
@@ -753,9 +794,8 @@ describe("what gets posted", () => {
 
     const caption = (slack.callsTo("chat.postMessage")[0]?.form.text ?? "")
       .split("\n")[0]!
-      // Strip the icon and the italic wrapper to measure the caption itself.
-      .replace(/^:calendar: _/, "")
-      .replace(/_$/, "");
+      // Strip the icon to measure the caption itself.
+      .replace(/^:calendar: /, "");
     expect(caption.length).toBeLessThanOrEqual(121);
     expect(caption.endsWith("…")).toBe(true);
   });

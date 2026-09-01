@@ -111,7 +111,11 @@ const receiptForAcceptedTurn = (
       conversationId: outcome.conversationId,
       channel: call.replyChannel,
       messageTs: call.messageTs,
-      threadTs: call.replyThreadTs,
+      // Same session-root rule as the attach below: a DM's root is the
+      // message that started the exchange. Kept identical on purpose — the
+      // move's no-mark fallback calls `attachTurnReceipt`, so a divergence
+      // here would give a follow-up a different session than its own turn.
+      threadTs: call.replyThreadTs ?? call.messageTs,
       text: call.text,
     });
     return;
@@ -122,9 +126,26 @@ const receiptForAcceptedTurn = (
     turnId: outcome.turn.id,
     channel: call.replyChannel,
     messageTs: call.messageTs,
-    // Group threads carry the root ts the agent-flavor loader is keyed by;
-    // DMs are null — they answer top-level and never get the loader.
-    threadTs: call.replyThreadTs,
+    // The session root the agent-flavor loader is keyed by.
+    //
+    // A GROUP mention carries the thread root it will answer in. A DM has no
+    // thread — it answers top-level — but Slack still requires a `thread_ts`
+    // to scope an agent session (`thread_ts_required` otherwise), and the
+    // user's own message IS a valid root: the session hangs off the message
+    // that started the exchange, which is exactly the turn this receipt
+    // marks.
+    //
+    // This is what gives DMs the native loader at all. Before it they fell
+    // through to the emoji reaction, which is a "seen" mark rather than a
+    // "working" one — the agent looked idle for the whole turn.
+    threadTs: call.replyThreadTs ?? call.messageTs,
+    // Where a narration card may go: the real reply thread, which is null in
+    // a DM. Kept apart from the session root above so a DM's card stays
+    // inline instead of opening a thread per turn.
+    replyThreadTs: call.replyThreadTs,
+    // A DM has no reply thread. Stated outright so the receipt does not
+    // have to infer it from an absent field.
+    isDirect: call.replyThreadTs === null,
     text: call.text,
   });
 };

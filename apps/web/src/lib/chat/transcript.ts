@@ -1,3 +1,7 @@
+import {
+  activityForReasoning,
+  activityForTool,
+} from "@onecli/agent-protocol/activity";
 import type { TurnEvent } from "@/lib/api/types";
 
 /**
@@ -22,6 +26,20 @@ export interface RenderedTurn {
   /** The agent's answer. Empty while it is still only deltas. */
   text: string;
   tools: ToolCall[];
+  /**
+   * What the agent is doing RIGHT NOW, in a few words — the live loader
+   * caption ("Reading a file", "Architecting the narrative arc").
+   *
+   * Derived from the ephemeral stream, never from history: `thinking.delta`
+   * says it in the agent's own words, `tool.started` says it by name. It is
+   * REPLACED as work moves and dropped the moment the turn ends, because it
+   * describes the present — a finished turn has no current activity, and a
+   * reader who joins late gets the answer, not a stale caption.
+   *
+   * UNTRUSTED: model text from a sandbox. Bounded and control-stripped at the
+   * source (`activityForReasoning`), and rendered as TEXT, never markup.
+   */
+  activity?: string;
   /** Set when the turn ended badly — rendered instead of a silent stop. */
   error?: string;
   /**
@@ -80,6 +98,10 @@ export const foldTranscript = (events: TurnEvent[]): RenderedTurn[] => {
           callId: str(event.payload, "callId"),
           name: str(event.payload, "name"),
         });
+        // A started tool IS the current activity, and it outranks whatever
+        // the agent was thinking a moment ago: the reasoning explains the
+        // plan, the tool call is the plan happening.
+        turn.activity = activityForTool(str(event.payload, "name"));
         break;
       case "tool.finished": {
         const callId = str(event.payload, "callId");
@@ -108,14 +130,28 @@ export const foldTranscript = (events: TurnEvent[]): RenderedTurn[] => {
       case "error":
         turn.error = str(event.payload, "message");
         turn.ended = true;
+        turn.activity = undefined;
         break;
       case "turn.done":
         turn.ended = true;
+        // The turn is over: there is no current activity, and a caption left
+        // standing would describe work that already finished.
+        turn.activity = undefined;
         break;
+      case "thinking.delta": {
+        // The agent saying what it is about to do, in its own words — the
+        // line that makes the loader feel alive rather than generic. Only
+        // the first line survives (see `activityForReasoning`); null means
+        // the block said nothing worth showing, so the previous caption
+        // stands rather than blanking the row.
+        const said = activityForReasoning(str(event.payload, "text"));
+        if (said) turn.activity = said;
+        break;
+      }
       default:
-        // `turn.started`, `thinking.delta`, `approval.pending` — nothing to
-        // fold here. Approvals render from the live approvals API, which
-        // carries the decision surface the transcript does not.
+        // `turn.started`, `approval.pending` — nothing to fold here.
+        // Approvals render from the live approvals API, which carries the
+        // decision surface the transcript does not.
         break;
     }
   }

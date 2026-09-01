@@ -682,6 +682,62 @@ export const buildContinuityBridge = async (
   return `[Context from your automated runs — delivered to this chat since the last message; the person may be referring to it:]\n${notes}\n[End of automated-run context]`;
 };
 
+/** How much of the agent's own last reply the wake reminder repeats. */
+const OPEN_PROMISE_EXCERPT_MAX_CHARS = 400;
+
+/**
+ * What the agent last told the person, for a wake to answer against.
+ *
+ * A wake arrives with the platform's own instruction ("report what these
+ * background tasks did") and nothing else. That is the whole conversation
+ * the model sees, so an agent that told someone "I'll post the rankings
+ * once all five finish" answers the question it was ASKED — "did anything
+ * go wrong?" — reports that nothing did, and never delivers the thing it
+ * promised. Observed live 2026-09-01.
+ *
+ * So the wake carries the agent's own most recent reply back to it. Not an
+ * inference about intent, not a reconstruction of the thread: one bounded
+ * excerpt of what it actually said, which is the only place an outstanding
+ * promise can be read from without guessing.
+ *
+ * Returns null when there is no prior reply — a first-contact wake has no
+ * promise to keep, and a bare label would be noise.
+ */
+export const buildOpenPromiseNote = async (
+  conversationId: string,
+  before: Date,
+): Promise<string | null> => {
+  const lastHumanTurn = await db.turn.findFirst({
+    where: {
+      conversationId,
+      source: { notIn: [...AUTOMATION_SOURCES] },
+      createdAt: { lt: before },
+      status: "done",
+    },
+    orderBy: { createdAt: "desc" },
+    select: { id: true },
+  });
+  if (!lastHumanTurn) return null;
+
+  // The turn's OWN answer — the coalesced `text` row, the same one the
+  // channel posts. `desc` because a turn's last text is its answer.
+  const answer = await db.turnEvent.findFirst({
+    where: { turnId: lastHumanTurn.id, type: "text" },
+    orderBy: { seq: "desc" },
+    select: { payload: true },
+  });
+  const body = stripControl(
+    String((answer?.payload as { text?: unknown } | null)?.text ?? ""),
+  ).trim();
+  if (body === "") return null;
+
+  const excerpt =
+    body.length > OPEN_PROMISE_EXCERPT_MAX_CHARS
+      ? `${body.slice(0, OPEN_PROMISE_EXCERPT_MAX_CHARS)}…`
+      : body;
+  return `[Your last reply in this chat, for reference — if it promised something once this work finished, deliver it now rather than only reporting the runs:]\n${excerpt}\n[End of your last reply]`;
+};
+
 /**
  * A parked sandbox must come back before its turn can run. Only `stopped` and
  * `failed` are woken — never `running`/`starting`, which would tear down a
@@ -856,14 +912,18 @@ export interface ReporterIdentity {
  * `seq` is allocated by incrementing the conversation counter once for the
  * whole batch, inside the same transaction that writes the rows — so numbers
  * are contiguous, and a rollback takes them back with it.
+ *
+ * Returns whether the batch was ACCEPTED. A rejected batch is ignored rather
+ * than thrown (a dying sandbox's rescue events must still land), so the
+ * verdict is the only signal a caller has.
  */
 export const applyTurnEvents = async (
   reporter: ReporterIdentity,
   conversationId: string,
   turnId: string,
   events: AgentEvent[],
-): Promise<void> => {
-  if (events.length === 0) return;
+): Promise<boolean> => {
+  if (events.length === 0) return true;
 
   // Sanitized BEFORE the transaction opens: it is a deep walk over every
   // event in the batch, including the text deltas that are never stored, and
@@ -936,6 +996,12 @@ export const applyTurnEvents = async (
   // Publish AFTER commit: a subscriber must never see an event that a
   // rollback un-happened, and never one the fence rejected.
   if (published) getEventBus().publish(conversationId, published);
+  // `null` is the fence's own verdict (the transaction above returns it when
+  // the reporter does not host this turn). Returned rather than swallowed
+  // because a caller acting on the SAME events — the channel narration in
+  // routes/runner.ts — must not act on a batch the transcript rejected, or
+  // one tenant's sandbox could drive another tenant's Slack thread.
+  return published !== null;
 };
 
 /**

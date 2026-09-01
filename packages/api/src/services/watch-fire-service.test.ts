@@ -23,10 +23,12 @@ const mocks = vi.hoisted(() => ({
   canAccessWorkspaceAsUser: vi.fn(),
   ensureSourcedConversation: vi.fn(),
   createTurn: vi.fn(),
+  createFollowUp: vi.fn(),
   materializeAutomationDelivery: vi.fn(),
   workspaceFindUnique: vi.fn(),
   watchUpdateMany: vi.fn(),
   conversationFindMany: vi.fn(),
+  turnFindFirst: vi.fn(),
 }));
 
 vi.mock("./due-work", () => ({
@@ -44,6 +46,7 @@ vi.mock("./conversation-service", () => ({
 }));
 vi.mock("./turn-service", () => ({
   createTurn: mocks.createTurn,
+  createFollowUp: mocks.createFollowUp,
   materializeAutomationDelivery: mocks.materializeAutomationDelivery,
 }));
 vi.mock("@onecli/db", () => ({
@@ -51,6 +54,7 @@ vi.mock("@onecli/db", () => ({
     workspace: { findUnique: mocks.workspaceFindUnique },
     processWatch: { updateMany: mocks.watchUpdateMany },
     conversation: { findMany: mocks.conversationFindMany },
+    turn: { findFirst: mocks.turnFindFirst },
   },
 }));
 
@@ -105,6 +109,10 @@ beforeEach(() => {
   });
   mocks.canAccessWorkspaceAsUser.mockResolvedValue(true);
   mocks.ensureSourcedConversation.mockResolvedValue({ id: "conv-run" });
+  // No running turn by default: the join arm needs one, so every existing
+  // case keeps its original path unless it opts in.
+  mocks.turnFindFirst.mockResolvedValue(null);
+  mocks.createFollowUp.mockResolvedValue({ id: "follow-1" });
   mocks.createTurn.mockResolvedValue({ status: "queued", id: "turn-1" });
   mocks.watchUpdateMany.mockResolvedValue({ count: 1 });
   mocks.conversationFindMany.mockResolvedValue([sourcedOrigin]);
@@ -270,6 +278,105 @@ describe("fireDueWatches — the in-origin wake (direct origins)", () => {
 
     expect(mocks.watchUpdateMany).not.toHaveBeenCalled();
     expect(mocks.ensureSourcedConversation).not.toHaveBeenCalled();
+  });
+
+  it("a busy origin JOINS the running turn instead of queueing behind it", async () => {
+    // The doubled-wake fix (#1013). Measured on a live stack: every wake in
+    // a batch was born while an earlier turn was still answering, so the
+    // agent reported partial state, then reported again. Joining makes the
+    // turn that is already speaking say it once.
+    //
+    // MUTATION-PROOF: remove the join arm and this fails — the wake goes
+    // back to waiting for the running turn to finish.
+    mocks.createTurn.mockRejectedValue(new ServiceError("CONFLICT", "busy"));
+    mocks.turnFindFirst.mockResolvedValue({ id: "turn-running" });
+
+    await fireDueWatches();
+
+    expect(mocks.createFollowUp).toHaveBeenCalledWith(
+      "conv-origin",
+      "turn-running",
+      expect.stringContaining("Watch on process"),
+      { source: "watch", userId: null },
+    );
+    // ...and the watches are marked fired, because the join row now exists.
+    expect(mocks.watchUpdateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { id: { in: ["w-1"] }, status: "triggered" },
+      }),
+    );
+  });
+
+  it("marks the watches fired ONLY after the join row exists", async () => {
+    // Ordering is the contract: a crash between the two would leave the
+    // watches claimed and deliver the same wake twice.
+    //
+    // MUTATION-PROOF: mark them before the join and this fails.
+    mocks.createTurn.mockRejectedValue(new ServiceError("CONFLICT", "busy"));
+    mocks.turnFindFirst.mockResolvedValue({ id: "turn-running" });
+    const order: string[] = [];
+    mocks.createFollowUp.mockImplementation(async () => {
+      order.push("join");
+      return { id: "follow-1" };
+    });
+    mocks.watchUpdateMany.mockImplementation(async () => {
+      order.push("mark");
+      return { count: 1 };
+    });
+
+    await fireDueWatches();
+
+    expect(order).toEqual(["join", "mark"]);
+  });
+
+  it("falls back to today's retry when the join FAILS", async () => {
+    // Best-effort by design: the wake must never be lost because a steer
+    // could not be created.
+    mocks.createTurn.mockRejectedValue(new ServiceError("CONFLICT", "busy"));
+    mocks.turnFindFirst.mockResolvedValue({ id: "turn-running" });
+    mocks.createFollowUp.mockRejectedValue(new Error("steer refused"));
+
+    await fireDueWatches();
+
+    // Nothing marked: the watch stays claimed and retries on the fire lease,
+    // exactly as it did before the join existed.
+    expect(mocks.watchUpdateMany).not.toHaveBeenCalled();
+  });
+
+  it("a failed join still DOWNGRADES an expired watch — the deadline still binds", async () => {
+    // The join's return value is what decides whether the rest of the
+    // CONFLICT arm runs. Reporting a failed join as success would strand an
+    // expired watch: no join, no retry, and no hidden-path downgrade, so it
+    // would never be delivered at all.
+    //
+    // MUTATION-PROOF: return `true` from the join's catch and this fails.
+    mocks.claimTriggeredWatches.mockResolvedValue([watch({ expiresAt: PAST })]);
+    mocks.createTurn
+      .mockRejectedValueOnce(new ServiceError("CONFLICT", "busy"))
+      .mockResolvedValueOnce({ status: "queued", id: "turn-2" });
+    mocks.turnFindFirst.mockResolvedValue({ id: "turn-running" });
+    mocks.createFollowUp.mockRejectedValue(new Error("steer refused"));
+
+    await fireDueWatches();
+
+    // The classic hidden-path fire ran for the expired watch.
+    expect(mocks.ensureSourcedConversation).toHaveBeenCalledWith(
+      "pr-1",
+      "ag-1",
+      expect.objectContaining({ externalRef: "w-1" }),
+    );
+  });
+
+  it("falls back when there is no running turn to join", async () => {
+    // The conflict was something other than a live turn (a queued one, a
+    // race that already resolved). Nothing to steer into.
+    mocks.createTurn.mockRejectedValue(new ServiceError("CONFLICT", "busy"));
+    mocks.turnFindFirst.mockResolvedValue(null);
+
+    await fireDueWatches();
+
+    expect(mocks.createFollowUp).not.toHaveBeenCalled();
+    expect(mocks.watchUpdateMany).not.toHaveBeenCalled();
   });
 
   it("a busy origin DOWNGRADES an expired watch to the hidden path so it cannot retry forever", async () => {

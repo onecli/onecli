@@ -23,7 +23,10 @@ const state = vi.hoisted(() => ({
 }));
 
 const search = vi.hoisted(() => ({ searchMemories: vi.fn() }));
-const bridge = vi.hoisted(() => ({ buildContinuityBridge: vi.fn() }));
+const bridge = vi.hoisted(() => ({
+  buildContinuityBridge: vi.fn(),
+  buildOpenPromiseNote: vi.fn(),
+}));
 
 vi.mock("@onecli/db", () => ({
   Prisma: {},
@@ -50,6 +53,7 @@ vi.mock("./agent-memory-service", () => ({
 
 vi.mock("./turn-service", () => ({
   buildContinuityBridge: bridge.buildContinuityBridge,
+  buildOpenPromiseNote: bridge.buildOpenPromiseNote,
 }));
 
 const { buildTurnContext, MEMORY_INJECT_MAX, MEMORY_INJECT_RANK_FLOOR } =
@@ -71,6 +75,8 @@ beforeEach(() => {
   search.searchMemories.mockResolvedValue([]);
   bridge.buildContinuityBridge.mockReset();
   bridge.buildContinuityBridge.mockResolvedValue(null);
+  bridge.buildOpenPromiseNote.mockReset();
+  bridge.buildOpenPromiseNote.mockResolvedValue(null);
 });
 
 describe("the index", () => {
@@ -197,6 +203,42 @@ describe("the continuity bridge (human-only, rides context)", () => {
     await build("ag-1", "run report");
     expect(bridge.buildContinuityBridge).not.toHaveBeenCalled();
   });
+
+  it("a WAKE gets the agent's own last reply — the promise it may still owe", async () => {
+    // The mirror image of the bridge. A wake arrives with the platform's
+    // instruction and no conversation, so an agent that said "I'll post the
+    // rankings once all five finish" answers only the question it was asked
+    // and never delivers. Observed live 2026-09-01.
+    //
+    // MUTATION-PROOF: drop the promise arm and this fails.
+    state.turn = {
+      createdAt: new Date("2026-08-09T00:00:00Z"),
+      source: "watch",
+    };
+    bridge.buildOpenPromiseNote.mockResolvedValue("[Your last reply…]");
+
+    const out = await build("ag-1", "run report");
+
+    expect(bridge.buildOpenPromiseNote).toHaveBeenCalledWith(
+      "c-1",
+      new Date("2026-08-09T00:00:00Z"),
+    );
+    expect(out).toContain("[Your last reply…]");
+  });
+
+  it("a HUMAN turn gets the bridge, never the promise note", async () => {
+    // Exactly one applies. A person is present to say what they want; the
+    // note exists for the turn where nobody is.
+    state.turn = {
+      createdAt: new Date("2026-08-09T00:00:00Z"),
+      source: "slack",
+    };
+
+    await build("ag-1", "hello");
+
+    expect(bridge.buildContinuityBridge).toHaveBeenCalled();
+    expect(bridge.buildOpenPromiseNote).not.toHaveBeenCalled();
+  });
 });
 
 describe("the budget", () => {
@@ -216,6 +258,11 @@ describe("the budget", () => {
       })),
     );
     bridge.buildContinuityBridge.mockResolvedValue("b".repeat(50_000));
+    // The promise note rides the same budget. It cannot appear beside the
+    // bridge today (exactly one applies), but the cap must hold if that
+    // ever changes — a context past the ceiling is silently truncated, and
+    // the tail is where the newest information sits.
+    bridge.buildOpenPromiseNote.mockResolvedValue("p".repeat(50_000));
     const context = await build("ag-1", "m".repeat(50_000));
     expect(context).not.toBeNull();
     expect((context as string).length).toBeLessThanOrEqual(

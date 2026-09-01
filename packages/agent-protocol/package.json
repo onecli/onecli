@@ -5,7 +5,8 @@
   "license": "Apache-2.0",
   "type": "module",
   "exports": {
-    ".": "./src/index.ts"
+    ".": "./src/index.ts",
+    "./activity": "./src/activity.ts"
   },
   "scripts": {
     "check-types": "tsc --noEmit",

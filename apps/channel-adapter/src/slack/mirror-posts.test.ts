@@ -25,8 +25,46 @@ describe("the automation caption", () => {
       "RUNNING CI",
     ].join("\n");
 
+    // The closing bracket goes with it: the header is a wrapper, and half a
+    // wrapper reads like a typo.
     expect(automationCaption(header)).toBe(
-      '[Watch on process "CI watcher" fired: its output matched.]',
+      'Watch on process "CI watcher" fired: its output matched.',
+    );
+  });
+
+  it("drops the model's stage direction, keeping only what HAPPENED", () => {
+    // The real `watch-fire-service` header. Everything after the separator
+    // is addressed to the model — how to report, where the answer goes —
+    // and told the reader nothing while crowding out the report itself.
+    const header =
+      '[Watch on process "giraffe" fired: the process finished \u2014 triggered automatically, not by a person typing. Do the task below and finish with a SHORT report \u2014 outcome first, then only what changed or needs attention, a few lines at most; it reaches the chat this watch belongs to.]';
+
+    expect(automationCaption(header)).toBe(
+      'Watch on process "giraffe" fired: the process finished',
+    );
+  });
+
+  it("does the same for a consolidated wake", () => {
+    const header =
+      "[Platform wake: 2 background task(s) you were watching finished \u2014 triggered automatically, not by a person typing. This runs in the chat the work belongs to. Do what each item below asks and give one SHORT combined report directly in this reply.]";
+
+    expect(automationCaption(header)).toBe(
+      "Platform wake: 2 background task(s) you were watching finished",
+    );
+  });
+
+  it("does the same for a scheduled run", () => {
+    const header =
+      '[Scheduled run "nightly digest" \u2014 triggered automatically by a schedule, not by a person typing. Do the task below and finish with a SHORT report.]';
+
+    expect(automationCaption(header)).toBe('Scheduled run "nightly digest"');
+  });
+
+  it("falls back to the bounded first line when the header shape is unfamiliar", () => {
+    // A future header the API rewords must degrade to today's behavior, not
+    // vanish — the rule is structural, not a copy of their wording.
+    expect(automationCaption("Something else entirely\nbody")).toBe(
+      "Something else entirely",
     );
   });
 

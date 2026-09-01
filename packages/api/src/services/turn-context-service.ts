@@ -7,7 +7,7 @@ import {
 } from "../lib/memory-index";
 import { AUTOMATION_SOURCES } from "../validations/conversation";
 import { searchMemories } from "./agent-memory-service";
-import { buildContinuityBridge } from "./turn-service";
+import { buildContinuityBridge, buildOpenPromiseNote } from "./turn-service";
 
 /**
  * The turn-start memory context (step 8, §3.8): a delivery-only prepend the
@@ -163,16 +163,24 @@ export const buildTurnContext = async (
     turn !== null &&
     !(AUTOMATION_SOURCES as readonly string[]).includes(turn.source);
 
-  const [memory, bridge] = await Promise.all([
+  // The two are mirror images, and exactly one applies. A HUMAN turn needs
+  // the bridge: what landed while they were away, which they may be
+  // referring to. A WAKE needs the opposite — it arrives with the
+  // platform's instruction and no conversation at all, so it gets the
+  // agent's own last reply, which is where an unfinished promise lives.
+  const [memory, bridge, promise] = await Promise.all([
     buildMemoryContext(agentId, message),
     isHuman ? buildContinuityBridge(conversationId, turn.createdAt) : null,
+    isHuman || turn === null
+      ? null
+      : buildOpenPromiseNote(conversationId, turn.createdAt),
   ]);
-  if (!memory && !bridge) return null;
+  if (!memory && !bridge && !promise) return null;
 
-  // Memory first (standing knowledge); the bridge sits NEAREST the message —
-  // it is the immediate "what just landed" the person is most likely
-  // referring to.
-  return [memory, bridge]
+  // Memory first (standing knowledge); the bridge or the promise note sits
+  // NEAREST the message — it is the immediate "what just landed" the person
+  // is most likely referring to, or the commitment the wake must honor.
+  return [memory, bridge, promise]
     .filter((block): block is string => block !== null)
     .join("\n\n")
     .slice(0, MAX_TURN_CONTEXT_CHARS);

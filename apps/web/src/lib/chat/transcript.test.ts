@@ -84,6 +84,56 @@ describe("foldTranscript", () => {
     expect(settled[0]?.ended).toBe(true);
   });
 
+  it("tracks the live activity, and drops it when the turn ends", () => {
+    // THE LOADER (user decision, 2026-08-31). The agent's own words while it
+    // works, replaced as work moves, gone once the turn is over — the answer
+    // is the record, this is the progress.
+    const working = foldTranscript([
+      event("t1", "thinking.delta", {
+        text: "Architecting the narrative arc\nthen I will consider…",
+      }),
+    ]);
+    // First line only — the intent, not the digression.
+    expect(working[0]?.activity).toBe("Architecting the narrative arc");
+
+    // A started tool OUTRANKS the reasoning: the plan is now happening.
+    const running = foldTranscript([
+      event("t1", "thinking.delta", { text: "Architecting the narrative arc" }),
+      event("t1", "tool.started", { callId: "c1", name: "bash" }),
+    ]);
+    expect(running[0]?.activity).toBe("Running a command");
+
+    // Terminal: no current activity. A caption left standing would describe
+    // work that already finished.
+    const done = foldTranscript([
+      event("t1", "thinking.delta", { text: "Architecting the narrative arc" }),
+      event("t1", "tool.started", { callId: "c1", name: "bash" }),
+      event("t1", "text", { text: "Done." }),
+      event("t1", "turn.done"),
+    ]);
+    expect(done[0]?.activity).toBeUndefined();
+    expect(done[0]?.text).toBe("Done.");
+  });
+
+  it("keeps the last caption when a reasoning block says nothing", () => {
+    // Null (nothing worth showing) must not blank the row — the previous
+    // caption is still the truest thing we know.
+    const turns = foldTranscript([
+      event("t1", "thinking.delta", { text: "Checking the CI logs" }),
+      event("t1", "thinking.delta", { text: "   \n  " }),
+    ]);
+    expect(turns[0]?.activity).toBe("Checking the CI logs");
+  });
+
+  it("clears the activity on a failed turn too", () => {
+    const turns = foldTranscript([
+      event("t1", "thinking.delta", { text: "Checking the CI logs" }),
+      event("t1", "error", { message: "the harness died" }),
+    ]);
+    expect(turns[0]?.activity).toBeUndefined();
+    expect(turns[0]?.error).toBe("the harness died");
+  });
+
   it("pairs a tool's finish onto its start", () => {
     const turns = foldTranscript([
       event("t1", "tool.started", { callId: "c1", name: "bash" }),
