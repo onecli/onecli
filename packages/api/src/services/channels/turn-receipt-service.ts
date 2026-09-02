@@ -40,17 +40,22 @@ export interface AttachReceiptInput {
    * thread, so the caller passes the user's own message, because Slack
    * refuses to scope a session without one. */
   threadTs?: string | null;
-  /** Where a narration CARD may be posted: the group thread's root, or null
-   * in a DM so the card sits inline. Deliberately separate from `threadTs`
-   * above — a DM fakes a session root out of the user's message, and reusing
-   * it here would open a thread for every DM turn. */
+  /** Where a narration CARD may be posted: the thread's root — a group
+   * thread, or the DM thread the person typed in — or null at the top level
+   * of a DM, so the card sits inline. Deliberately separate from `threadTs`
+   * above — an unthreaded DM fakes a session root out of the user's message,
+   * and reusing it here would open a thread for every DM turn. */
   replyThreadTs?: string | null;
-  /** Whether this is a DIRECT conversation. Explicit rather than inferred
-   * from a null thread: the native work-status opens a thread in a DM
-   * (Slack documents it), so a card-capable provider skips the enum there —
-   * and a caller that omits the field must keep today's behavior, not
-   * silently disable every channel's loader. */
-  isDirect?: boolean;
+  /** Whether the conversation has NO thread to hang a loader on (the top
+   * level of a DM). Explicit rather than inferred from a null thread: the
+   * native work-status opens a thread there (Slack documents it), so a
+   * card-capable provider skips the enum — and a caller that omits the field
+   * must keep today's behavior, not silently disable every channel's loader.
+   *
+   * Keyed on the ADDRESS, not the door: a DM reply typed inside a thread is
+   * still a direct conversation, but it already has a thread, so it gets the
+   * loader like any other threaded surface. */
+  unthreaded?: boolean;
   /** The inbound message text — what the chooser picks against. */
   text: string;
 }
@@ -101,20 +106,20 @@ export const attachTurnReceipt = async (
     // workspace, missing scope, dead credential) fall through to the
     // reaction, so the user always sees SOMETHING move.
     //
-    // NOT IN A DM, when the presence can post a narration card instead.
-    // Slack documents that setting an agent-session status on a DM
-    // "will automatically open the thread for the user", and it says only
-    // that the agent is busy. The card says WHAT it is doing and sits
-    // inline, so in a DM the enum costs a thread nobody asked for and buys
-    // nothing the card does not already show. A channel keeps it: that
-    // conversation is threaded anyway, and the loader is what surfaces the
-    // agent in the channel list.
-    // A DM that can carry a card: the ONLY shape where the enum is skipped.
+    // NOT AT THE TOP LEVEL OF A DM, when the presence can post a narration
+    // card instead. Slack documents that setting an agent-session status
+    // there "will automatically open the thread for the user", and it says
+    // only that the agent is busy. The card says WHAT it is doing and sits
+    // inline, so the enum would cost a thread nobody asked for and buy
+    // nothing the card does not already show. Anything ALREADY threaded
+    // keeps it — a channel thread, and equally a DM thread the person opened
+    // themselves: the thread exists either way, and the loader is what
+    // surfaces the agent as working in it.
     // Keyed on an explicit flag rather than "replyThreadTs is absent" — a
-    // caller that simply does not pass the field would otherwise read as a
-    // DM and silently cost every channel its loader.
+    // caller that simply does not pass the field would otherwise read as
+    // unthreaded and silently cost every channel its loader.
     const narratesInline =
-      input.isDirect === true && provider.narrateThreadWork !== undefined;
+      input.unthreaded === true && provider.narrateThreadWork !== undefined;
     if (
       presence.appMode === "agent" &&
       input.threadTs &&
@@ -642,9 +647,17 @@ export const moveTurnReceipt = async (input: {
   conversationId: string;
   channel: string;
   messageTs: string;
-  /** The group thread's root ts — threaded through so a no-mark fallback
-   * attach can still choose the session kind. Null for DMs. */
+  /** The session root — threaded through so a no-mark fallback attach can
+   * still choose the session kind. Null only when the caller has none. */
   threadTs?: string | null;
+  /** Where a narration card belongs, for the no-mark fallback below — the
+   * same field `attachTurnReceipt` takes. Carried rather than re-derived so
+   * a follow-up that falls through to an attach lands its card in the same
+   * thread its own turn would have. */
+  replyThreadTs?: string | null;
+  /** Whether there is no thread to hang a loader on, for that same fallback.
+   * Omitted keeps `attachTurnReceipt`'s own default. */
+  unthreaded?: boolean;
   /** The inbound text — chooser input only when no mark exists to move. */
   text: string;
 }): Promise<void> => {
@@ -686,13 +699,17 @@ export const moveTurnReceipt = async (input: {
 
     if (!current) {
       // Nothing to move (a web-opened turn never had a mark): fall back to
-      // the ordinary attach, chooser and all.
+      // the ordinary attach, chooser and all — with the SAME addressing its
+      // own turn would have had, so a threaded follow-up's card opens in its
+      // thread rather than at the top of the conversation.
       await attachTurnReceipt({
         presenceId: input.presenceId,
         turnId: input.followUpTurnId,
         channel: input.channel,
         messageTs: input.messageTs,
         threadTs: input.threadTs,
+        replyThreadTs: input.replyThreadTs,
+        ...(input.unthreaded !== undefined && { unthreaded: input.unthreaded }),
         text: input.text,
       });
       return;

@@ -135,6 +135,21 @@ export const createAdapter = ({ config, controlPlane, log }: AdapterDeps) => {
           log("interactive handling failed", { err }),
         );
       },
+      onReachDecision: (decision) => {
+        // Forward-only: the control plane authorizes the clicker, flips the
+        // grant, and rewrites every posted owner card itself (promptRefs) -
+        // the adapter owes the wire nothing further, so no settle path here.
+        void controlPlane
+          .decideReach({
+            presenceId: runtime.presence.presenceId,
+            grantId: decision.grantId,
+            decision: decision.decision,
+            clickerExternalUserId: decision.clickerExternalUserId,
+          })
+          .catch((err: unknown) =>
+            log("reach decision forward failed", { err }),
+          );
+      },
       onPermanentFailure: (reason) => {
         log("socket permanently down", {
           presenceId: runtime.presence.presenceId,

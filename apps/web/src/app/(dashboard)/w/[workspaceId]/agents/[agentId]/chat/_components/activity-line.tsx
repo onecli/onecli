@@ -40,9 +40,14 @@ export const ActivityLine = ({ text }: { text: string }) => (
     />
     {/* The shimmer rides a background gradient over the glyphs themselves
         (`bg-clip-text` + transparent fill), so it needs no overlay element
-        and cannot desynchronize from the text it describes. Under reduced
-        motion the animation stops AND the normal color is restored — a
-        frozen gradient would leave the line unevenly tinted. */}
+        and cannot desynchronize from the text it describes. `animate-shimmer`
+        resolves through the `--animate-shimmer` theme token in
+        packages/ui/src/styles/globals.css — it must stay a Tailwind theme
+        token (never a hand-written CSS class) or the `motion-safe:` variant
+        silently compiles to nothing and the gradient freezes
+        (activity-shimmer.test.ts pins this). Under reduced motion the
+        animation stops AND the normal color is restored — a frozen gradient
+        would leave the line unevenly tinted. */}
     <span className="from-muted-foreground/40 via-muted-foreground to-muted-foreground/40 motion-safe:animate-shimmer min-w-0 truncate bg-gradient-to-r bg-[length:200%_100%] bg-clip-text text-transparent motion-reduce:bg-none motion-reduce:text-inherit">
       {text}
     </span>

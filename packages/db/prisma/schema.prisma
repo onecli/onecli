@@ -269,6 +269,7 @@ model User {
   uploadedAttachments           ConversationAttachment[]      @relation("AttachmentUploader")
   createdCrons                  AgentCron[]                   @relation("CronCreator")
   channelUserLinks              ChannelUserLink[]             @relation("ChannelUserLinkUser")
+  decidedReachGrants            AgentReachGrant[]             @relation("ReachGrantDecider")
   createdChannelIntegrations    ChannelIntegration[]          @relation("ChannelIntegrationCreator")
   createdChannelInstallations   ChannelInstallation[]         @relation("ChannelInstallationCreator")
   createdAgentChannels          AgentChannel[]                @relation("AgentChannelCreator")
@@ -374,6 +375,7 @@ model Agent {
   crons                AgentCron[]
   memories             AgentMemory[]
   skills               Skill[]
+  reachGrants          AgentReachGrant[]
 
   @@unique([workspaceId, identifier])
   @@index([workspaceId])
@@ -711,6 +713,19 @@ model Turn {
   // outlives a deleted user, attribution drops.
   userId         String? @map("user_id")
   message        String
+  // WHERE THIS TURN WAS ASKED, when the provider surface has a finer address
+  // than the link does (Slack: the DM thread's `thread_ts`). A thread link
+  // resolves ONE address per conversation, which is right for a channel
+  // thread (the thread IS the conversation) but not for a DM: one direct
+  // conversation carries every thread the person opens inside it, so the
+  // link cannot say which one a given turn belongs to. Null = the link's own
+  // address (top-level DM, channel thread) — every turn before this column
+  // and every non-channel door.
+  //
+  // Provider-opaque by design, exactly like `ChannelThreadLink.externalThreadId`:
+  // the platform never parses it, it only hands it back to the provider that
+  // minted it.
+  sourceThreadId String? @map("source_thread_id")
   // Set when someone asks an in-flight turn to stop. The turn stays active
   // until the sandbox confirms — a request is not an outcome, and a sandbox
   // that never answers is recovered by the stale-turn sweep instead.
@@ -1123,6 +1138,7 @@ model ChannelIntegration {
   agentChannels AgentChannel[]
   userLinks     ChannelUserLink[]
   installations ChannelInstallation[]
+  reachGrants   AgentReachGrant[]
 
   @@unique([organizationId, provider])
   @@index([provider, externalId])
@@ -1260,6 +1276,53 @@ model ChannelUserLink {
   @@unique([integrationId, externalUserId])
   @@unique([integrationId, userId])
   @@map("channel_user_links")
+}
+
+// The agent's REACH ledger (who may talk to it), one row per granted subject
+// - provider-generic on purpose: today's rows are Slack spaces, and the
+// designed follow-ups (person grants for stranger DMs, outbound sends) are
+// new `subjectKind` values on this same table, not new tables. Reach is a
+// separate axis from workspace access (governance): the identity lane
+// (`authorizeSpeaker`) always runs FIRST and is never narrowed by a row
+// here - a grant can only widen who is answered, never restrict a member.
+//
+// Keyed by (agent, integration, kind, externalRef) - NOT by agentChannelId -
+// so a presence detach/re-attach never silently wipes decided grants.
+// Precedence law (reserved for person rows): a person-level denied/blocked
+// beats a space-level approved.
+model AgentReachGrant {
+  id            String  @id @default(uuid())
+  agentId       String  @map("agent_id")
+  integrationId String  @map("integration_id")
+  provider      String // "slack"
+  // "space" = a whole group surface (Slack: a channel); "external_user" is
+  // the reserved person kind (the knock) - nothing writes it yet.
+  subjectKind   String  @map("subject_kind")
+  // Provider-opaque subject address (Slack space rows: the channel id).
+  externalRef   String  @map("external_ref")
+  // Display-only label captured at create (Slack: "#channel-name"); never
+  // used for matching - names rename, ids don't.
+  subjectLabel  String? @map("subject_label")
+  state         String  @default("pending") // "pending" | "approved" | "denied" | "revoked"
+
+  // The owner-DM approval cards posted for this grant, claim-before-post
+  // (the ChannelApprovalPrompt lesson): [{channel, ts, userId}]. Recorded so
+  // a decide can rewrite EVERY owner's card and a retry never double-posts.
+  // Empty array = claimed, nothing posted yet (the sweep's retry cue).
+  promptRefs Json? @map("prompt_refs")
+
+  decidedByUserId String?   @map("decided_by_user_id")
+  decidedAt       DateTime? @map("decided_at")
+  createdAt       DateTime  @default(now()) @map("created_at")
+  updatedAt       DateTime  @updatedAt @map("updated_at")
+
+  agent       Agent              @relation(fields: [agentId], references: [id], onDelete: Cascade)
+  integration ChannelIntegration @relation(fields: [integrationId], references: [id], onDelete: Cascade)
+  decidedBy   User?              @relation("ReachGrantDecider", fields: [decidedByUserId], references: [id], onDelete: SetNull)
+
+  @@unique([agentId, integrationId, subjectKind, externalRef])
+  @@index([agentId, state])
+  @@map("agent_reach_grants")
 }
 
 // Provider thread ↔ conversation: the adapter's routing table. "direct" rows

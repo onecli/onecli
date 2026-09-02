@@ -1,44 +1,6 @@
-/* App-specific styles (base styles are in @onecli/ui/globals.css) */
-
-@keyframes pulse-ring {
-  0% {
-    transform: scale(0.4);
-    opacity: 0.8;
-  }
-  80%,
-  100% {
-    transform: scale(1);
-    opacity: 0;
-  }
-}
-
-.animate-pulse-ring {
-  animation: pulse-ring 2s ease-out infinite;
-}
-
-/*
- * The agent's live activity caption (ActivityLine): a slow highlight
- * travelling across the glyphs, so a line of model text reads as "being
- * worked on" rather than as content that has settled.
+/* App-specific styles (base styles are in @onecli/ui/globals.css).
  *
- * Rides a 200%-wide background under `bg-clip-text`, so it animates
- * `background-position` only — no layout, no paint of the text itself.
- * 2.4s is deliberately unhurried: this sits in a chat the user is reading,
- * and a fast shimmer would pull the eye away from the answer above it.
- *
- * The component applies it via `motion-safe:`, so `prefers-reduced-motion`
- * removes the motion entirely (and restores a flat color) rather than
- * leaving a frozen gradient tinting the line.
- */
-@keyframes activity-shimmer {
-  from {
-    background-position: 200% 0;
-  }
-  to {
-    background-position: -200% 0;
-  }
-}
-
-.animate-shimmer {
-  animation: activity-shimmer 2.4s linear infinite;
-}
+ * NOTE: this file is NOT a Tailwind entry point (no `@import "tailwindcss"`),
+ * so `@theme`, `@utility` and hand-written `.animate-*` classes here can
+ * never back a Tailwind variant like `motion-safe:animate-foo` — register
+ * animation tokens in packages/ui/src/styles/globals.css instead. */

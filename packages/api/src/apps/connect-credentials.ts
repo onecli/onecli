@@ -155,7 +155,14 @@ export const resolveConnectCredentials = async (
   } else {
     const primaryField = activeMethod.fields[0];
     credentials = {
-      access_token: fields[primaryField!.name],
+      // Trimmed: the required-field check above already tests `.trim()`, so a
+      // key pasted with a trailing newline passes validation — and would then
+      // be stored and injected VERBATIM, which upstreams reject (Stripe
+      // answers 401 for `Bearer rk_… `). Surrounding whitespace is never
+      // meaningful in a credential, and HTTP strips it around header values
+      // anyway, so normalizing here turns a silently-dead connection into a
+      // working one.
+      access_token: fields[primaryField!.name]?.trim(),
       ...fields,
     };
 

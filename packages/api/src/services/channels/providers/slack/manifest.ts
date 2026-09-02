@@ -151,6 +151,11 @@ const BOT_EVENTS = [
   "message.channels",
   "message.groups",
   "member_joined_channel",
+  // The invite's mirror: the bot's own removal drives the reach/thread-link
+  // cleanup (the leave door). Same scope gating as member_joined_channel;
+  // PRE-EXISTING apps must have their manifest updated (or be re-created)
+  // to gain it — until then their leave cleanup falls back to dismiss.
+  "member_left_channel",
 ] as const;
 
 /**

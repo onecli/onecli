@@ -465,6 +465,33 @@ const linkUser = (
     select: { id: true },
   });
 
+/**
+ * Settle a channel so the IDENTITY lane can be exercised.
+ *
+ * A channel's reach grant is a PRECONDITION (agent-reach-service): until a
+ * human settles it, the agent answers nobody there - member or stranger.
+ * These group-surface arms are about identity, not about reach, so they
+ * settle the channel to `members_only` (the historical behavior they were
+ * written against) and then assert on the lane they actually test.
+ */
+const settleChannel = (
+  agentId: string,
+  integrationId: string,
+  externalRef: string,
+) =>
+  db.agentReachGrant.create({
+    data: {
+      agentId,
+      integrationId,
+      provider: "slack",
+      subjectKind: "space",
+      externalRef,
+      state: "members_only",
+      promptRefs: [],
+    },
+    select: { id: true },
+  });
+
 /** A channel-ready agent: hosted agent + org integration + active presence. */
 const seedChannelAgent = async (
   suffix: string,
@@ -4131,6 +4158,7 @@ describe.skipIf(!PROOF_URL)("ingestion — group surfaces", () => {
     const { agentId, integrationId, presenceId } =
       await seedChannelAgent("grp-mention");
     await linkUser(integrationId, "U222", CTRL_NAME_USER);
+    await settleChannel(agentId, integrationId, "C1");
 
     const result = await dispatch.dispatchSlackEvent({
       presenceId,
@@ -4178,6 +4206,7 @@ describe.skipIf(!PROOF_URL)("ingestion — group surfaces", () => {
     const { agentId, integrationId, presenceId } =
       await seedChannelAgent("grp-follow");
     await linkUser(integrationId, "U111", MEMBER);
+    await settleChannel(agentId, integrationId, "C1");
 
     await dispatch.dispatchSlackEvent({
       presenceId,
@@ -6126,7 +6155,7 @@ describe.skipIf(!PROOF_URL)("turn narration (the live task card)", () => {
       messageTs: "980.0001",
       threadTs: "980.0001",
       replyThreadTs: null,
-      isDirect: true,
+      unthreaded: true,
       text: "hey",
     });
 
@@ -6186,6 +6215,45 @@ describe.skipIf(!PROOF_URL)("turn narration (the live task card)", () => {
     ).toBeNull();
   });
 
+  it("a DM THREAD gets the native loader — it already has a thread", async () => {
+    // A reply typed inside a DM thread has a real thread to hang the loader
+    // on, so the top-level DM's card-instead-of-loader rule does not apply:
+    // the person is reading that thread, and the loader is what says the
+    // agent is working in it.
+    //
+    // MUTATION-PROOF: key the skip off the DOOR (every direct call) instead
+    // of the ADDRESS and this fails.
+    const { presenceId } = await seedChannelAgent("dm-thread-enum", {
+      appMode: "agent",
+      presenceCredentials: await getCrypto().encrypt(
+        JSON.stringify({ botToken: "xoxb-dm-thread" }),
+      ),
+    });
+    slackHandlers["agents.sessions.setStatus"] = () => ({ ok: true });
+
+    await receipts.attachTurnReceipt({
+      presenceId,
+      turnId: "turn-dm-thread-enum",
+      channel: "D972",
+      messageTs: "982.0009",
+      threadTs: "982.0001",
+      replyThreadTs: "982.0001",
+      unthreaded: false,
+      text: "in the thread",
+    });
+
+    const status = slackCallsFor("agents.sessions.setStatus");
+    expect(status).toHaveLength(1);
+    // Scoped to the THREAD the person is reading.
+    expect(status[0]!.form.get("thread_ts")).toBe("982.0001");
+    const row = await db.channelTurnReceipt.findUniqueOrThrow({
+      where: { turnId: "turn-dm-thread-enum" },
+    });
+    expect(row.workStatusSet).toBe(true);
+    // And the narration card belongs in that same thread.
+    expect(row.cardThreadTs).toBe("982.0001");
+  });
+
   it("a CHANNEL still gets the native loader", async () => {
     // The conversation is threaded anyway, and the loader is what surfaces
     // the agent in the channel list. MUTATION-PROOF: widen the DM arm to
@@ -6205,7 +6273,7 @@ describe.skipIf(!PROOF_URL)("turn narration (the live task card)", () => {
       messageTs: "980.0002",
       threadTs: "980.0001",
       replyThreadTs: "980.0001",
-      isDirect: false,
+      unthreaded: false,
       text: "hey",
     });
 

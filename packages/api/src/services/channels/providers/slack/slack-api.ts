@@ -610,7 +610,14 @@ export const downloadPrivateFile = async (
 const usersInfoResponse = z.object({
   user: z.object({
     id: z.string().min(1),
-    /** Guest/void flags — the onboarding mint fences on these: a multi- or
+    /** The user's home workspace - the reach lane's same-tenant fence: a
+     * Slack Connect participant carries a foreign team_id and is refused
+     * even in a granted channel (v1 scope). */
+    team_id: z.string().optional(),
+    /** The display name a guest prefix can carry (cleaned + clamped by the
+     * ingestion door before it touches a turn). */
+    name: z.string().optional(),
+    /** Guest/void flags - the onboarding mint fences on these: a multi- or
      * single-channel guest (contractor, client) is exactly who an admin
      * would NOT consider "my team" when consenting to workspace onboarding,
      * and a deleted or Slack-Connect-external account must never mint. */
@@ -621,7 +628,8 @@ const usersInfoResponse = z.object({
     profile: z
       .object({
         email: z.string().optional(),
-        /** Where a manifest rename lands, ASYNCHRONOUSLY — the field the
+        display_name: z.string().optional(),
+        /** Where a manifest rename lands, ASYNCHRONOUSLY - the field the
          * teardown polls to confirm the tombstone before deleting. */
         real_name: z.string().optional(),
       })
@@ -636,6 +644,60 @@ export const usersInfo = (botToken: string, userId: string) =>
     "users.info",
     { token: botToken, form: { user: userId }, retry5xx: true },
     usersInfoResponse,
+  );
+
+/**
+ * Open (or return) the 1:1 IM with a user - where the platform-composed
+ * reach card is delivered. Needs `im:write` (already in the manifest's
+ * scope list from day one).
+ */
+export const conversationsOpen = (botToken: string, userId: string) =>
+  slackCall(
+    "conversations.open",
+    { token: botToken, form: { users: userId }, retry5xx: true },
+    z.object({ channel: z.object({ id: z.string().min(1) }) }),
+  );
+
+/**
+ * A channel's display name, for the reach card's "#channel" label. Display
+ * only - matching stays on the id (names rename). Best-effort at the
+ * callers: a private channel the token cannot read answers an error they
+ * swallow into the bare id.
+ */
+export const conversationsInfo = (botToken: string, channelId: string) =>
+  slackCall(
+    "conversations.info",
+    { token: botToken, form: { channel: channelId }, retry5xx: true },
+    z.object({
+      channel: z.object({
+        id: z.string().min(1),
+        name: z.string().optional(),
+      }),
+    }),
+  );
+
+/**
+ * Rewrite a posted message (the reach card's settle). The api-server twin
+ * of the adapter's `updateBlocks` - this side posts and settles the
+ * platform-composed reach cards; the adapter's own updater serves gateway
+ * approval cards and never runs here.
+ */
+export const chatUpdate = (
+  botToken: string,
+  input: { channel: string; ts: string; text: string; blocks?: unknown[] },
+) =>
+  slackCall(
+    "chat.update",
+    {
+      token: botToken,
+      form: {
+        channel: input.channel,
+        ts: input.ts,
+        text: input.text,
+        ...(input.blocks && { blocks: JSON.stringify(input.blocks) }),
+      },
+    },
+    z.object({ ts: z.string().min(1) }),
   );
 
 const oauthAccessResponse = z.object({

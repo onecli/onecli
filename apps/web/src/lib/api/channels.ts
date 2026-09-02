@@ -33,6 +33,30 @@ export interface AgentChannelPresence {
   managedBy: { name: string | null; email: string } | null;
   /** Group threads the presence is live in (direct DMs stay private). */
   groupThreads: { externalThreadId: string; createdAt: string }[];
+  /** Per-space reach: every channel the presence is in or was asked about.
+   * `members_only` = no grant (today's default). Absent on older servers. */
+  spaces?: ChannelSpaceReach[];
+}
+
+/**
+ * How a channel is settled. `pending` means nobody has answered yet, and the
+ * agent answers NO ONE there until someone does - it is a real state, not a
+ * flavor of "off". The server normalizes the pre-rename `denied`/`revoked`
+ * spellings to `members_only`, so they never reach this type.
+ */
+export type ChannelReachState =
+  | "pending"
+  | "approved"
+  | "members_only"
+  | "blocked";
+
+/** One channel's reach row on a presence. */
+export interface ChannelSpaceReach {
+  externalRef: string;
+  /** "#channel-name" when known; fall back to the ref. */
+  label: string | null;
+  state: ChannelReachState;
+  decidedAt: string | null;
 }
 
 export interface AgentChannelsView {
@@ -174,6 +198,30 @@ export const attach = (
   apiPost<CreatePresenceResult>(
     agentBase(agentId, `/${provider}`),
     input ?? {},
+  );
+
+/** Settle one channel: open it to everyone in it (same Slack workspace),
+ * keep it to OneCLI users only, or block the agent there entirely. */
+export const setReachState = (
+  agentId: string,
+  provider: ChannelProvider,
+  externalRef: string,
+  state: Exclude<ChannelReachState, "pending">,
+) =>
+  apiPut<{ kind: string }>(
+    agentBase(agentId, `/${provider}/reach/${encodeURIComponent(externalRef)}`),
+    { state },
+  );
+
+/** DISMISS a channel row: forget the channel entirely (grant + thread
+ * links). The next outside message re-knocks; a re-mention re-links. */
+export const dismissReachRow = (
+  agentId: string,
+  provider: ChannelProvider,
+  externalRef: string,
+) =>
+  apiDelete(
+    agentBase(agentId, `/${provider}/reach/${encodeURIComponent(externalRef)}`),
   );
 
 /** The pasted-tokens completion door (socket arm + the whole paste floor). */

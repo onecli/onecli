@@ -216,6 +216,17 @@ export interface TurnOrigin {
    * creator/owner check — no route ever populates TurnOrigin from a client.
    */
   directWake?: { agentId: string };
+  /**
+   * WHERE the message arrived, when the door's surface addresses finer than
+   * its thread link does (Slack: the DM thread the person typed in). Stored
+   * on the turn so the completion pass can answer THERE — a DM link resolves
+   * one address for every thread inside it, so without this the answer to a
+   * threaded question lands at the bottom of the DM.
+   *
+   * Provider-opaque and door-stamped: like `source` and `userId`, an ingest
+   * door derives it from the provider's own event, never from client input.
+   */
+  sourceThreadId?: string | null;
 }
 
 /**
@@ -238,11 +249,22 @@ const createTurnRowWithAttachments = async (
   origin: TurnOrigin,
   attachmentIds?: string[],
 ) => {
+  // The arrival address rides with EVERY turn row, stamped here rather than
+  // at the two call sites: `createTurn` and `createFollowUp` share this
+  // builder, and a threaded follow-up must answer in the same thread its
+  // parent did — a divergence between them would post one exchange's halves
+  // to two different places.
+  const row = {
+    ...data,
+    ...(origin.sourceThreadId != null && {
+      sourceThreadId: origin.sourceThreadId,
+    }),
+  };
   if (!attachmentIds || attachmentIds.length === 0) {
-    return db.turn.create({ data, select: turnSelect });
+    return db.turn.create({ data: row, select: turnSelect });
   }
   return db.$transaction(async (tx) => {
-    const turn = await tx.turn.create({ data, select: { id: true } });
+    const turn = await tx.turn.create({ data: row, select: { id: true } });
     await bindAttachmentsToTurn(tx, {
       conversationId: data.conversationId,
       turnId: turn.id,

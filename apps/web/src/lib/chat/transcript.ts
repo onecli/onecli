@@ -20,12 +20,50 @@ export interface ToolCall {
   isError?: boolean;
 }
 
+/**
+ * One entry in the turn's live work log, in true stream order: the agent
+ * narrates ("Let me check the logs."), a tool runs, it narrates again. The
+ * SUPERVISOR's segment rule, mirrored (supervisor.ts, 2026-08-31): a tool
+ * call is the one structural break the model cannot write across, so it is
+ * the one boundary that closes a narration segment. Thinking is NOT a
+ * boundary — reasoning interleaves inside one message, and cutting there
+ * would publish half a sentence.
+ *
+ * Tool items share object identity with `RenderedTurn.tools`, so a
+ * `tool.finished` folding onto its start updates both views at once.
+ *
+ * SECURITY: narration text is UNTRUSTED model output from a sandbox that
+ * reads the open internet. It is PROGRESS, not the answer — render it as
+ * TEXT, never markdown (the answer path stays the only markdown surface).
+ */
+export type WorkItem =
+  | { kind: "tool"; tool: ToolCall }
+  | { kind: "narration"; text: string };
+
 /** One turn as the reader sees it: what was asked, what happened, what came back. */
 export interface RenderedTurn {
   turnId: string;
-  /** The agent's answer. Empty while it is still only deltas. */
+  /**
+   * The agent's ANSWER — the durable `text` event, nothing else. Empty while
+   * the turn still runs: mid-turn deltas build `liveText`/`work`, never this,
+   * so a consumer of `text` can never mistake narration for the answer.
+   */
   text: string;
   tools: ToolCall[];
+  /**
+   * The work as it happened, chronologically: closed narration segments
+   * interleaved with the tool calls that closed them. Live-tail only in
+   * practice — history carries no deltas, so a reader who joins late gets
+   * tools without narration, which is exactly what the transcript records.
+   */
+  work: WorkItem[];
+  /**
+   * The narration segment CURRENTLY streaming — everything said since the
+   * last tool call. Rendered as the transient tail while the turn runs, and
+   * cleared the moment the durable answer arrives (the answer replaces the
+   * whole delta view, per the reader rule on `textEventSchema`).
+   */
+  liveText: string;
   /**
    * What the agent is doing RIGHT NOW, in a few words — the live loader
    * caption ("Reading a file", "Architecting the narrative arc").
@@ -74,6 +112,8 @@ export const foldTranscript = (events: TurnEvent[]): RenderedTurn[] => {
     const created: RenderedTurn = {
       turnId,
       text: "",
+      work: [],
+      liveText: "",
       notices: [],
       tools: [],
       ended: false,
@@ -87,22 +127,39 @@ export const foldTranscript = (events: TurnEvent[]): RenderedTurn[] => {
     const turn = turnFor(event.turnId);
     switch (event.type) {
       case "text.delta":
-        turn.text += str(event.payload, "text");
+        // Mid-turn narration builds the LIVE TAIL, never the answer: the
+        // supervisor decided the answer is the last message, so until the
+        // durable `text` lands, everything streamed is provisional.
+        turn.liveText += str(event.payload, "text");
         break;
       case "text":
-        // REPLACE. See above — appending double-renders every answer.
+        // REPLACE. See above — appending double-renders every answer. The
+        // live tail dies with it: the answer IS that tail, coalesced (or,
+        // on a turn that ended mid-tool, the last completed segment).
         turn.text = str(event.payload, "text");
+        turn.liveText = "";
         break;
-      case "tool.started":
-        turn.tools.push({
+      case "tool.started": {
+        // The tool call CLOSES the current narration segment (the
+        // supervisor's segment rule, mirrored). Blank segments are never
+        // pushed — back-to-back tools must not litter the log.
+        if (turn.liveText.trim()) {
+          turn.work.push({ kind: "narration", text: turn.liveText });
+        }
+        turn.liveText = "";
+        const tool: ToolCall = {
           callId: str(event.payload, "callId"),
           name: str(event.payload, "name"),
-        });
+        };
+        turn.tools.push(tool);
+        // Same object in both views: the finish below mutates it once.
+        turn.work.push({ kind: "tool", tool });
         // A started tool IS the current activity, and it outranks whatever
         // the agent was thinking a moment ago: the reasoning explains the
         // plan, the tool call is the plan happening.
         turn.activity = activityForTool(str(event.payload, "name"));
         break;
+      }
       case "tool.finished": {
         const callId = str(event.payload, "callId");
         const started = turn.tools.find((t) => t.callId === callId);
@@ -112,12 +169,15 @@ export const foldTranscript = (events: TurnEvent[]): RenderedTurn[] => {
         };
         if (started) Object.assign(started, finished);
         // A finish with no start still happened — show it rather than drop it.
-        else
-          turn.tools.push({
+        else {
+          const orphan: ToolCall = {
             callId,
             name: str(event.payload, "name"),
             ...finished,
-          });
+          };
+          turn.tools.push(orphan);
+          turn.work.push({ kind: "tool", tool: orphan });
+        }
         break;
       }
       case "notice":

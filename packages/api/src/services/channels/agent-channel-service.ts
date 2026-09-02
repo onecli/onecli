@@ -5,6 +5,7 @@ import { signOAuthState, verifyOAuthState } from "../../lib/oauth-state";
 import { ServiceError } from "../errors";
 import { createServiceApiKey, revokeServiceApiKey } from "../api-key-service";
 import { channelProvider } from "./registry";
+import { listSpaceGrants, type ReachState } from "./agent-reach-service";
 import {
   availableTransports,
   defaultTransport,
@@ -57,6 +58,66 @@ const presenceSelect = {
   createdBy: { select: { name: true, email: true } },
 } as const;
 
+/**
+ * Resolve display labels for spaces whose grant row has none, and persist
+ * what we learn.
+ *
+ * Why this exists: a space row can be born without a label (created before
+ * the bot could read the channel, or by a path holding no credentials), and
+ * a bare `C0A1B2C3` tells nobody which room they are opening their agent to.
+ *
+ * Bounded and failure-proof by construction: it only runs for rows actually
+ * missing a label, it fetches the integration credentials itself (they are
+ * kept out of `presenceSelect` on purpose - they must never ride a response
+ * to the browser), and any provider failure leaves the id showing rather
+ * than breaking the page. The write-back is best-effort too: the next read
+ * simply tries again.
+ */
+const hydrateSpaceLabels = async (input: {
+  reach: NonNullable<ReturnType<typeof channelProvider>["reach"]>;
+  spaces: { externalRef: string; label: string | null }[];
+  agentId: string;
+  integrationId: string;
+}): Promise<void> => {
+  const missing = input.spaces.filter((s) => s.label === null);
+  if (missing.length === 0) return;
+
+  const integration = await db.channelIntegration.findUnique({
+    where: { id: input.integrationId },
+    select: { credentials: true },
+  });
+  if (!integration?.credentials) return;
+  const credentialsJson = await getCrypto()
+    .decrypt(integration.credentials)
+    .catch(() => null);
+  if (!credentialsJson) return;
+
+  await Promise.all(
+    missing.map(async (space) => {
+      const label = await input.reach
+        .spaceLabel({ credentialsJson, externalRef: space.externalRef })
+        .catch(() => null);
+      if (!label) return;
+      space.label = label;
+      // Write back so this costs one lookup per space, not one per view.
+      // `updateMany` (not `update`): the row may not exist yet for a
+      // thread-derived space, and a no-op update is the correct outcome.
+      await db.agentReachGrant
+        .updateMany({
+          where: {
+            agentId: input.agentId,
+            integrationId: input.integrationId,
+            subjectKind: "space",
+            externalRef: space.externalRef,
+            subjectLabel: null,
+          },
+          data: { subjectLabel: label },
+        })
+        .catch(() => undefined);
+    }),
+  );
+};
+
 /** The agent fence every entry point shares — workspace-scoped, hosted-only. */
 const requireHostedAgent = async (workspaceId: string, agentId: string) => {
   const agent = await db.agent.findFirst({
@@ -91,6 +152,16 @@ export interface AgentChannelStatus {
   managedBy: { name: string | null; email: string } | null;
   /** Group threads the presence is live in (direct DMs stay private). */
   groupThreads: { externalThreadId: string; createdAt: Date }[];
+  /** Per-space reach: every channel the presence is in or was asked about,
+   * with its grant state. `members_only` = no grant row (today's default).
+   * The union of grant rows and the live thread links' spaces, so a channel
+   * the agent merely sits in still gets a row the toggle can act on. */
+  spaces: {
+    externalRef: string;
+    label: string | null;
+    state: ReachState | "members_only";
+    decidedAt: Date | null;
+  }[];
 }
 
 export interface AgentChannelsView {
@@ -199,22 +270,68 @@ export const getAgentChannels = async (
   ]);
 
   return {
-    presences: presences.map((p) => ({
-      provider: p.provider as ChannelProviderId,
-      status: p.status,
-      transport: p.transport as ChannelTransport,
-      externalId: p.externalId,
-      identityRef: p.identityRef,
-      identityName: p.identityName,
-      tenant: {
-        externalId: p.integration.externalId,
-        name: p.integration.name,
-      },
-      managedBy: p.createdBy
-        ? { name: p.createdBy.name, email: p.createdBy.email }
-        : null,
-      groupThreads: p.threadLinks,
-    })),
+    presences: await Promise.all(
+      presences.map(async (p) => {
+        const provider = p.provider as ChannelProviderId;
+        // The per-space reach rows: grant rows first (they carry state and
+        // label), then any live thread's space with no row yet, shown as
+        // today's default (`members_only`) so the toggle can act on it.
+        const reach = channelProvider(provider).reach;
+        const grants = reach ? await listSpaceGrants(agent.id, provider) : [];
+        const spaces = grants.map((g) => ({
+          externalRef: g.externalRef,
+          label: g.subjectLabel,
+          state: g.state as ReachState,
+          decidedAt: g.decidedAt,
+        }));
+        if (reach) {
+          const known = new Set(spaces.map((s) => s.externalRef));
+          for (const link of p.threadLinks) {
+            const space = reach.spaceOf(link.externalThreadId);
+            if (!space || known.has(space)) continue;
+            known.add(space);
+            spaces.push({
+              externalRef: space,
+              label: null,
+              // Not yet settled: this channel has live threads but no
+              // decision, which is exactly `pending` under the precondition
+              // model - never silently "members_only".
+              state: "pending",
+              decidedAt: null,
+            });
+          }
+          // Fill the labels the grant rows lack. A row created before the
+          // bot could read the channel name (or by a path that had no
+          // credentials in hand) stores null, and the raw `C0…` id is
+          // meaningless to a human deciding who may talk to their agent.
+          // Resolved here on read, then written back so the lookup is a
+          // one-time cost per space rather than per page view.
+          await hydrateSpaceLabels({
+            reach,
+            spaces,
+            agentId: agent.id,
+            integrationId: p.integration.id,
+          });
+        }
+        return {
+          provider,
+          status: p.status,
+          transport: p.transport as ChannelTransport,
+          externalId: p.externalId,
+          identityRef: p.identityRef,
+          identityName: p.identityName,
+          tenant: {
+            externalId: p.integration.externalId,
+            name: p.integration.name,
+          },
+          managedBy: p.createdBy
+            ? { name: p.createdBy.name, email: p.createdBy.email }
+            : null,
+          groupThreads: p.threadLinks,
+          spaces,
+        };
+      }),
+    ),
     posture: {
       transport: defaultTransport(),
       available: availableTransports(),

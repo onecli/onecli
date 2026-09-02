@@ -28,6 +28,9 @@ describe("foldTranscript", () => {
     ]);
 
     expect(turns[0]?.text).toBe("It is 4.");
+    // And the live tail dies with the answer — rendering both would show
+    // the same sentence twice.
+    expect(turns[0]?.liveText).toBe("");
   });
 
   it("repairs a reader that joined mid-turn and missed the deltas", () => {
@@ -39,19 +42,22 @@ describe("foldTranscript", () => {
     expect(turns[0]?.text).toBe("full answer");
   });
 
-  it("streams text before the answer lands", () => {
+  it("streams text into the live tail — never the answer — before it lands", () => {
     const turns = foldTranscript([
       event("t1", "text.delta", { text: "think" }),
       event("t1", "text.delta", { text: "ing…" }),
     ]);
-    expect(turns[0]?.text).toBe("thinking…");
+    expect(turns[0]?.liveText).toBe("thinking…");
+    // The answer stays empty until the durable `text` event: a consumer of
+    // `text` must never mistake streaming narration for the record.
+    expect(turns[0]?.text).toBe("");
     expect(turns[0]?.ended).toBe(false);
   });
 
-  it("shows narration live, then collapses to the answer alone", () => {
+  it("builds the work log live, then collapses to the answer alone", () => {
     // The reader's half of "the answer is the last message" (supervisor,
     // 2026-08-31). Mid-turn narration is PROGRESS: it streams as deltas so
-    // the person sees work happening, and the durable `text` — which now
+    // the person sees work happening, and the durable `text` — which
     // carries only the closing message — REPLACES all of it when the turn
     // ends. Without the replace, the narration the supervisor deliberately
     // dropped would live on in the reader.
@@ -66,9 +72,19 @@ describe("foldTranscript", () => {
       event("t1", "text.delta", { text: "CI passed; nothing to do." }),
     ];
 
-    // Mid-turn: the person watches the narration arrive.
+    // Mid-turn: the closed segment sits in the work log IN STREAM ORDER
+    // (narration, then the tool that closed it), and the open segment is
+    // the live tail.
     const live = foldTranscript(streaming);
-    expect(live[0]?.text).toContain("Let me check the logs.");
+    expect(live[0]?.work).toEqual([
+      { kind: "narration", text: "Let me check the logs." },
+      {
+        kind: "tool",
+        tool: { callId: "c1", name: "bash", output: "ok" },
+      },
+    ]);
+    expect(live[0]?.liveText).toBe("CI passed; nothing to do.");
+    expect(live[0]?.text).toBe("");
     expect(live[0]?.ended).toBe(false);
 
     // Turn ends: only the closing message survives.
@@ -79,9 +95,45 @@ describe("foldTranscript", () => {
     ]);
     expect(settled[0]?.text).toBe("CI passed; nothing to do.");
     expect(settled[0]?.text).not.toContain("Let me check the logs.");
+    expect(settled[0]?.liveText).toBe("");
     // The work itself stays visible — tools are durable, narration is not.
     expect(settled[0]?.tools).toHaveLength(1);
     expect(settled[0]?.ended).toBe(true);
+  });
+
+  it("never pushes a blank segment on back-to-back tool calls", () => {
+    // The supervisor's own guard, mirrored: consecutive tools with nothing
+    // said between them must not litter the log with empty rows.
+    const turns = foldTranscript([
+      event("t1", "tool.started", { callId: "c1", name: "bash" }),
+      event("t1", "text.delta", { text: "   " }),
+      event("t1", "tool.started", { callId: "c2", name: "read" }),
+    ]);
+    expect(turns[0]?.work.map((item) => item.kind)).toEqual(["tool", "tool"]);
+  });
+
+  it("keeps the work log's tool entry in sync with its finish", () => {
+    // The log holds the SAME object as `tools`, so a finish folding onto
+    // its start updates both views — a stale "running" row in one of them
+    // would contradict the other on screen.
+    const turns = foldTranscript([
+      event("t1", "tool.started", { callId: "c1", name: "bash" }),
+      event("t1", "tool.finished", {
+        callId: "c1",
+        name: "bash",
+        output: "hi",
+      }),
+    ]);
+    const logged = turns[0]?.work[0];
+    expect(logged?.kind === "tool" && logged.tool.output).toBe("hi");
+  });
+
+  it("logs an orphaned finish so late-started work is never invisible", () => {
+    const turns = foldTranscript([
+      event("t1", "tool.finished", { callId: "c9", name: "curl", output: "x" }),
+    ]);
+    expect(turns[0]?.work).toHaveLength(1);
+    expect(turns[0]?.work[0]?.kind).toBe("tool");
   });
 
   it("tracks the live activity, and drops it when the turn ends", () => {

@@ -106,7 +106,7 @@ describe("the echo guard", () => {
 });
 
 describe("direct messages", () => {
-  it("routes a DM (channel_type im) to the direct door, threaded nowhere", () => {
+  it("routes a top-level DM (channel_type im) to the direct door, threaded nowhere", () => {
     expect(interpretSlackEvent(dm(), CTX)).toEqual({
       door: "direct",
       externalUserId: "U1111",
@@ -115,10 +115,46 @@ describe("direct messages", () => {
       text: "hello",
       files: [],
       replyChannel: "D0001",
-      // DMs answer top-level, never inside a Slack thread.
+      // A DM typed at the top level answers top-level — no thread is opened
+      // for it (the card, not the loader, carries the progress there).
       replyThreadTs: null,
       // The triggering message's own ts — the receipt reaction's address.
       messageTs: "1111.0001",
+    });
+  });
+
+  it("answers a DM reply IN the thread it was typed in", () => {
+    // THE BUG THIS FIXES (live): a reply typed inside a DM thread was
+    // answered at the bottom of the DM instead, with no progress shown in
+    // the thread — because the direct door hardcoded `replyThreadTs: null`
+    // and discarded the event's `thread_ts`.
+    //
+    // MUTATION-PROOF: restore `replyThreadTs: null` on the direct door and
+    // this fails.
+    expect(
+      interpretSlackEvent(dm({ thread_ts: "1111.0001", ts: "1111.0009" }), CTX),
+    ).toMatchObject({
+      door: "direct",
+      replyChannel: "D0001",
+      replyThreadTs: "1111.0001",
+      messageTs: "1111.0009",
+    });
+  });
+
+  it("keeps a threaded DM on the SAME conversation as the DM itself", () => {
+    // §3.18: a user's DM is ONE thread — the same row their web chat reads.
+    // Threads inside it change WHERE the answer goes, never which
+    // conversation it belongs to. MUTATION-PROOF: address a DM thread as its
+    // own `<channel>:<ts>` conversation and this fails.
+    const threaded = interpretSlackEvent(
+      dm({ thread_ts: "1111.0001", ts: "1111.0009" }),
+      CTX,
+    );
+    expect(threaded).toMatchObject({ externalThreadId: "D0001" });
+    expect(threaded).toMatchObject({
+      externalThreadId: (
+        interpretSlackEvent(dm(), CTX) as { externalThreadId: string }
+      ).externalThreadId,
     });
   });
 
@@ -451,5 +487,46 @@ describe("file_share (attachments)", () => {
     );
     if (call.door !== "group") throw new Error("unreachable");
     expect(call.files).toHaveLength(1);
+  });
+});
+
+describe("threaded DM edge cases", () => {
+  it("carries a file shared INSIDE a DM thread with its thread", () => {
+    // `file_share` is the one subtype that passes the echo guard, and it
+    // must keep the thread like any other DM reply — otherwise attachments
+    // sent in a thread get answered outside it.
+    expect(
+      interpretSlackEvent(
+        dm({
+          subtype: "file_share",
+          thread_ts: "1111.0001",
+          ts: "1111.0055",
+          files: [{ id: "F1", name: "a.png", mimetype: "image/png" }],
+        }),
+        CTX,
+      ),
+    ).toMatchObject({
+      door: "direct",
+      replyThreadTs: "1111.0001",
+      files: [{ id: "F1", name: "a.png" }],
+    });
+  });
+
+  it("still drops the BOT's own threaded DM post (the echo guard wins)", () => {
+    // The agent's own answer now lands IN a thread, so it comes back as a
+    // threaded `message.im`. If the guard missed it, every threaded answer
+    // would start a new turn — an infinite loop in the thread.
+    expect(
+      interpretSlackEvent(
+        dm({ thread_ts: "1111.0001", ts: "1111.0077", bot_id: "B1" }),
+        CTX,
+      ),
+    ).toEqual({ door: "ignore", reason: "bot-authored" });
+    expect(
+      interpretSlackEvent(
+        dm({ thread_ts: "1111.0001", ts: "1111.0078", user: BOT }),
+        CTX,
+      ),
+    ).toEqual({ door: "ignore", reason: "self" });
   });
 });

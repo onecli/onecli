@@ -888,6 +888,104 @@ mod tests {
     }
 
     #[test]
+    fn stripe_rules_cover_the_files_upload_host() {
+        // Stripe injects on api.stripe.com AND files.stripe.com (the Files API's
+        // separate upload host), but every catalog tool lists api.stripe.com
+        // only. Stripe is therefore a SINGLE-host-family app, so both whole-app
+        // and tool-scoped rules must still govern files.stripe.com — otherwise a
+        // request would carry the injected key while no rule matched it, the
+        // exact credentialed-but-ungoverned class this deferral closes.
+        assert!(matches(
+            "stripe",
+            &[],
+            "files.stripe.com",
+            "POST",
+            "/v1/files"
+        ));
+        assert!(matches(
+            "stripe",
+            &["write_all"],
+            "files.stripe.com",
+            "POST",
+            "/v1/files"
+        ));
+        assert!(matches(
+            "stripe",
+            &[],
+            "api.stripe.com",
+            "GET",
+            "/v1/charges"
+        ));
+    }
+
+    #[test]
+    fn stripe_write_gate_covers_both_api_namespaces() {
+        // The "require approval for every write" toggle compiles to the
+        // write_all wildcard. Stripe serves TWO namespaces and /v2 already
+        // carries money-moving writes, so a /v1-only gate would silently let
+        // every v2 write through. Assert through the REAL matcher, not the
+        // authored patterns.
+        for (method, path) in [
+            ("POST", "/v1/refunds"),
+            ("POST", "/v1/payouts"),
+            ("DELETE", "/v1/subscriptions/sub_123"),
+            ("POST", "/v2/money_management/payout_methods"),
+            ("POST", "/v2/core/accounts"),
+        ] {
+            assert!(
+                matches("stripe", &["write_all"], "api.stripe.com", method, path),
+                "write gate must cover {method} {path}"
+            );
+        }
+    }
+
+    #[test]
+    fn stripe_read_only_grant_never_authorizes_a_write() {
+        // A read-scoped grant must not match a mutating request: read_all is
+        // GET-only, so the money-moving calls fall through to the compiled
+        // stack's terminal block (fail-closed).
+        for (method, path) in [
+            ("POST", "/v1/refunds"),
+            ("POST", "/v1/payouts"),
+            ("DELETE", "/v1/customers/cus_123"),
+            ("POST", "/v2/money_management/payout_methods"),
+        ] {
+            assert!(
+                !matches("stripe", &["read_all"], "api.stripe.com", method, path),
+                "a read-only grant must NOT authorize {method} {path}"
+            );
+        }
+        assert!(matches(
+            "stripe",
+            &["read_all"],
+            "api.stripe.com",
+            "GET",
+            "/v1/charges"
+        ));
+    }
+
+    #[test]
+    fn stripe_rules_never_reach_a_foreign_host() {
+        // A Stripe rule must not govern (or imply credentials for) hosts the
+        // provider does not inject on — including Stripe's own browser-facing
+        // hosts and a lookalike suffix an attacker could register.
+        for host in [
+            "dashboard.stripe.com",
+            "checkout.stripe.com",
+            "api.stripe.com.evil.example",
+        ] {
+            assert!(
+                !matches("stripe", &[], host, "GET", "/v1/charges"),
+                "whole-app rule must not reach {host}"
+            );
+            assert!(
+                !matches("stripe", &["read_all"], host, "GET", "/v1/charges"),
+                "tool rule must not reach {host}"
+            );
+        }
+    }
+
+    #[test]
     fn datadog_whole_app_covers_the_eu_region() {
         // EE-only provider: Datadog injects on .datadoghq.com AND .datadoghq.eu
         // but the catalog lists only *.datadoghq.com. A whole-app rule must

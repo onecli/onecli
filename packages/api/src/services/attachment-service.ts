@@ -66,8 +66,10 @@ const normalizeMimeType = (raw: string): string => {
 
 export interface CreateAttachmentInput {
   conversationId: string;
-  /** The authenticated uploader (web) / linked speaker (channel doors). */
-  userId: string;
+  /** The authenticated uploader (web) / linked speaker (channel doors) -
+   * or null for a channel GUEST admitted by an approved reach grant (no
+   * platform identity to attribute; the door's caps still apply). */
+  userId: string | null;
   source: string;
   name: string;
   mimeType: string;
@@ -137,7 +139,7 @@ export const createPendingAttachment = async (input: CreateAttachmentInput) => {
 
 export interface CreateFailedAttachmentInput {
   conversationId: string;
-  userId: string;
+  userId: string | null;
   source: string;
   name: string;
   mimeType: string;
@@ -201,13 +203,12 @@ export const bindAttachmentsToTurn = async (
       `A message may reference at most ${MAX_ATTACHMENT_ROWS_PER_MESSAGE} attachments.`,
     );
   }
-  if (opts.userId === null) {
-    // Platform-authored turns (cron/watch) never carry user uploads.
-    throw new ServiceError(
-      "UNPROCESSABLE",
-      "Attachments require a user author.",
-    );
-  }
+  // A null author binds ONLY null-authored rows: `userId: opts.userId` in
+  // the WHEREs below matches NULL for the channel doors' guest-shared files,
+  // so a guest turn can never claim a user's pending upload (and vice
+  // versa). Platform-authored turns (cron/watch) still never carry
+  // attachments - their doors pass no ids and the empty-ids return above
+  // already covered them.
 
   const bound = await tx.conversationAttachment.updateMany({
     where: {

@@ -507,6 +507,71 @@ export interface ChannelProvider {
   }): Promise<void>;
 
   /**
+   * REACH support - the space-grant lane ("may the agent answer everyone in
+   * this channel?"), one facet like `sharedApp`: absence means the provider
+   * has no space concept, space grants never match, and pending grants
+   * surface in the dashboard alone. Everything here is provider-shaped on
+   * purpose - the generic reach service never parses a provider address,
+   * never calls the provider's user API, and never renders a card.
+   */
+  reach?: {
+    /**
+     * The SPACE behind a group-thread address (Slack: the channel id in
+     * front of `:threadTs`) - the reach ledger's space key. Pure string
+     * surgery on the provider's own thread format.
+     */
+    spaceOf(externalThreadId: string): string;
+
+    /**
+     * The space's display label (Slack: "#channel-name"), for cards and the
+     * dashboard. Display only - matching stays on the id (names rename).
+     * Best-effort by contract: null rather than throw.
+     */
+    spaceLabel(input: {
+      credentialsJson: string | null;
+      externalRef: string;
+    }): Promise<string | null>;
+
+    /**
+     * Resolve a NON-platform speaker for the guest lane: their display name
+     * (untrusted - the caller cleans, clamps, and frames it) and whether
+     * they belong to the presence's own tenant (the v1 same-tenant fence:
+     * a Slack Connect participant is refused even in a granted channel).
+     * Null = cannot verify, and the caller fails closed.
+     */
+    resolveGuestSpeaker(input: {
+      credentialsJson: string | null;
+      externalUserId: string;
+      tenantExternalId: string;
+    }): Promise<{ displayName: string | null; sameTenant: boolean } | null>;
+
+    /**
+     * The owner-DM reach card - the PLATFORM-composed approval prompt for a
+     * reach grant, posted with the presence's own credential. Template text
+     * is the implementation's own; every dynamic field is escaped and
+     * clamped there; the button values carry ONLY the opaque grant id (the
+     * injection rule). `settle` rewrites a posted card with the outcome.
+     */
+    card: {
+      post(input: {
+        credentialsJson: string;
+        recipientExternalUserId: string;
+        grantId: string;
+        agentName: string;
+        subjectLabel: string;
+      }): Promise<{ channel: string; ts: string }>;
+      settle(input: {
+        credentialsJson: string;
+        channel: string;
+        ts: string;
+        subjectLabel: string;
+        outcome: string;
+        decidedByName: string;
+      }): Promise<void>;
+    };
+  };
+
+  /**
    * The paste floor's step 0: the setup document the user recreates the app
    * from by hand (Slack: the manifest JSON). Provider-defined shape; the
    * generic layer serves it opaquely.

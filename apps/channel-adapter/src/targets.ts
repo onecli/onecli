@@ -37,3 +37,30 @@ export const replyTargetForLink = (
     threadTs: link.externalThreadId.slice(separator + 1),
   };
 };
+
+/**
+ * Where ONE TURN's answer belongs — the link's address, narrowed to the
+ * thread the turn actually arrived in when the control plane recorded one.
+ *
+ * A link resolves a single address per conversation, which is exactly right
+ * for a channel thread (the thread IS the conversation) but not for a DM:
+ * one direct conversation carries every thread the person opens inside it,
+ * so answering at the link alone posts a threaded question's answer at the
+ * bottom of the DM, where nobody is looking.
+ *
+ * The CHANNEL always comes from the link — never from the turn. The turn
+ * only ever narrows WHERE IN that conversation the answer lands, so a
+ * malformed or stale value can misplace a reply inside the conversation it
+ * already belongs to, and can never redirect it into another one.
+ */
+export const replyTargetForTurn = (
+  link: Pick<AdapterLink, "kind" | "externalThreadId">,
+  turn: { sourceThreadId?: string | null },
+): ReplyTarget => {
+  const target = replyTargetForLink(link);
+  // Absent (an older control plane, or a turn that arrived at the link's own
+  // address) keeps the link's target verbatim — the pre-existing behavior.
+  return turn.sourceThreadId
+    ? { ...target, threadTs: turn.sourceThreadId }
+    : target;
+};

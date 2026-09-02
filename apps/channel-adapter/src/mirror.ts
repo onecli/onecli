@@ -11,7 +11,7 @@ import {
   TURN_STOPPED_MESSAGE,
 } from "@onecli/api/validations/conversation";
 import type { ControlPlaneClient } from "./control-plane";
-import { replyTargetForLink, type ChannelPostTarget } from "./targets";
+import { replyTargetForTurn, type ChannelPostTarget } from "./targets";
 
 /**
  * The gateway's "connect this app" dashboard links, recognized in an answer
@@ -327,7 +327,9 @@ export const mirrorFinishedTurn = async (
   deps: MirrorDeps,
 ): Promise<string | null> => {
   const { item } = deps;
-  const link = replyTargetForLink(item);
+  // The turn's own address when it has one (a DM thread), else the link's —
+  // so an answer lands in the thread its question was asked in.
+  const link = replyTargetForTurn(item, item.turn);
   const target: ChannelPostTarget = {
     credential: deps.credential,
     channel: link.channel,

@@ -4,6 +4,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { channels } from "@/lib/api";
 import type {
   ChannelProvider,
+  ChannelReachState,
   ChannelTransport,
   CompletePresenceInput,
 } from "@/lib/api";
@@ -94,6 +95,41 @@ export const useDetachChannel = (
       // the delete confirmation) — root(), so the sweep reaches the
       // sidebar's for-workspace key too.
       qc.invalidateQueries({ queryKey: queryKeys.agents.root() });
+    },
+  });
+};
+
+/** Settle one channel (channels view `spaces` rows): anyone in it, OneCLI
+ * users only, or blocked entirely. */
+export const useSetReachState = (
+  agentId: string,
+  provider: ChannelProvider,
+) => {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (input: {
+      externalRef: string;
+      state: Exclude<ChannelReachState, "pending">;
+    }) =>
+      channels.setReachState(agentId, provider, input.externalRef, input.state),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: queryKeys.channels.all() });
+    },
+  });
+};
+
+/** DISMISS a channel row - forget it entirely; the next outside message
+ * re-knocks and a re-mention re-links the threads. */
+export const useDismissReachRow = (
+  agentId: string,
+  provider: ChannelProvider,
+) => {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (input: { externalRef: string }) =>
+      channels.dismissReachRow(agentId, provider, input.externalRef),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: queryKeys.channels.all() });
     },
   });
 };

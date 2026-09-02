@@ -5839,6 +5839,363 @@
       ]
     }
   },
+  "stripe": {
+    "cancel_payment_intent": {
+      "hosts": [
+        "api.stripe.com"
+      ],
+      "paths": [
+        "/v1/payment_intents/*/cancel"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "cancel_subscription": {
+      "hosts": [
+        "api.stripe.com"
+      ],
+      "paths": [
+        "/v1/subscriptions/*"
+      ],
+      "methods": [
+        "DELETE"
+      ]
+    },
+    "create_charge": {
+      "hosts": [
+        "api.stripe.com"
+      ],
+      "paths": [
+        "/v1/charges"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "create_customer": {
+      "hosts": [
+        "api.stripe.com"
+      ],
+      "paths": [
+        "/v1/customers"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "create_invoice": {
+      "hosts": [
+        "api.stripe.com"
+      ],
+      "paths": [
+        "/v1/invoices"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "create_payment_intent": {
+      "hosts": [
+        "api.stripe.com"
+      ],
+      "paths": [
+        "/v1/payment_intents"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "create_payout": {
+      "hosts": [
+        "api.stripe.com"
+      ],
+      "paths": [
+        "/v1/payouts"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "create_price": {
+      "hosts": [
+        "api.stripe.com"
+      ],
+      "paths": [
+        "/v1/prices"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "create_product": {
+      "hosts": [
+        "api.stripe.com"
+      ],
+      "paths": [
+        "/v1/products"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "create_refund": {
+      "hosts": [
+        "api.stripe.com"
+      ],
+      "paths": [
+        "/v1/refunds"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "create_subscription": {
+      "hosts": [
+        "api.stripe.com"
+      ],
+      "paths": [
+        "/v1/subscriptions"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "delete_customer": {
+      "hosts": [
+        "api.stripe.com"
+      ],
+      "paths": [
+        "/v1/customers/*"
+      ],
+      "methods": [
+        "DELETE"
+      ]
+    },
+    "finalize_invoice": {
+      "hosts": [
+        "api.stripe.com"
+      ],
+      "paths": [
+        "/v1/invoices/*/finalize"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "get_account": {
+      "hosts": [
+        "api.stripe.com"
+      ],
+      "paths": [
+        "/v1/account"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "get_balance": {
+      "hosts": [
+        "api.stripe.com"
+      ],
+      "paths": [
+        "/v1/balance"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "get_customer": {
+      "hosts": [
+        "api.stripe.com"
+      ],
+      "paths": [
+        "/v1/customers/*"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_balance_transactions": {
+      "hosts": [
+        "api.stripe.com"
+      ],
+      "paths": [
+        "/v1/balance_transactions"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_charges": {
+      "hosts": [
+        "api.stripe.com"
+      ],
+      "paths": [
+        "/v1/charges"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_customers": {
+      "hosts": [
+        "api.stripe.com"
+      ],
+      "paths": [
+        "/v1/customers"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_disputes": {
+      "hosts": [
+        "api.stripe.com"
+      ],
+      "paths": [
+        "/v1/disputes"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_events": {
+      "hosts": [
+        "api.stripe.com"
+      ],
+      "paths": [
+        "/v1/events"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_invoices": {
+      "hosts": [
+        "api.stripe.com"
+      ],
+      "paths": [
+        "/v1/invoices"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_payment_intents": {
+      "hosts": [
+        "api.stripe.com"
+      ],
+      "paths": [
+        "/v1/payment_intents"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_payouts": {
+      "hosts": [
+        "api.stripe.com"
+      ],
+      "paths": [
+        "/v1/payouts"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_prices": {
+      "hosts": [
+        "api.stripe.com"
+      ],
+      "paths": [
+        "/v1/prices"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_products": {
+      "hosts": [
+        "api.stripe.com"
+      ],
+      "paths": [
+        "/v1/products"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_refunds": {
+      "hosts": [
+        "api.stripe.com"
+      ],
+      "paths": [
+        "/v1/refunds"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_subscriptions": {
+      "hosts": [
+        "api.stripe.com"
+      ],
+      "paths": [
+        "/v1/subscriptions"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "read_all": {
+      "hosts": [
+        "api.stripe.com"
+      ],
+      "paths": [
+        "/v1/*",
+        "/v2/*"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "update_customer": {
+      "hosts": [
+        "api.stripe.com"
+      ],
+      "paths": [
+        "/v1/customers/*"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "update_subscription": {
+      "hosts": [
+        "api.stripe.com"
+      ],
+      "paths": [
+        "/v1/subscriptions/*"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "write_all": {
+      "hosts": [
+        "api.stripe.com"
+      ],
+      "paths": [
+        "/v1/*",
+        "/v2/*"
+      ],
+      "methods": [
+        "POST",
+        "DELETE"
+      ]
+    }
+  },
   "supabase": {
     "create_function": {
       "hosts": [

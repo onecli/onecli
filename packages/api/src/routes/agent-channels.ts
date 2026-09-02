@@ -10,12 +10,17 @@ import {
   getSetupMaterial,
 } from "../services/channels/agent-channel-service";
 import { isChannelProviderId } from "../services/channels/registry";
+import {
+  dismissReachRow,
+  setSpaceReachState,
+} from "../services/channels/agent-reach-service";
 import type { ChannelProviderId } from "../services/channels/types";
 import {
   attachPresenceSchema,
   channelTransportSchema,
   completePresenceSchema,
   detachPresenceSchema,
+  setReachStateSchema,
 } from "../validations/channels";
 import {
   AUDIT_ACTIONS,
@@ -195,6 +200,81 @@ export const agentChannelRoutes = () => {
         provider,
         agentId: c.req.param("agentId"),
         deleteRemote: body.data.deleteRemote ?? false,
+      },
+    });
+    return c.body(null, 204);
+  });
+
+  // PUT /agents/:agentId/channels/:provider/reach/:externalRef — the
+  // dashboard's per-space reach toggle: approve opens the channel to
+  // everyone in it (same provider tenant), revoke returns it to members
+  // only. Idempotent upsert-and-set; the service audits with the decider.
+  // The caller's workspace access IS the decide authority (the same gate
+  // the card click's clicker resolution enforces).
+  app.put("/:agentId/channels/:provider/reach/:externalRef", async (c) => {
+    const a = c.get("auth");
+    const workspaceId = requireWorkspaceId(a);
+    const provider = parseProvider(c.req.param("provider"));
+    // Provider-opaque but bounded: it becomes a DB row's key (Slack channel
+    // ids are ~11 chars; 200 matches the wire schema's cap).
+    const externalRef = c.req.param("externalRef");
+    if (externalRef.length === 0 || externalRef.length > 200) {
+      throw new ServiceError("UNPROCESSABLE", "Invalid channel reference");
+    }
+    const body = setReachStateSchema.safeParse(await parseBody(c.req.raw));
+    if (!body.success) {
+      throw new ServiceError(
+        "UNPROCESSABLE",
+        body.error.issues[0]?.message ?? "Invalid body",
+      );
+    }
+    const result = await setSpaceReachState({
+      workspaceId,
+      agentId: c.req.param("agentId"),
+      provider,
+      externalRef,
+      state: body.data.state,
+      deciderUserId: a.userId,
+    });
+    if (result.kind === "refused") {
+      throw new ServiceError("NOT_FOUND", result.message);
+    }
+    return c.json(result);
+  });
+
+  // DELETE /agents/:agentId/channels/:provider/reach/:externalRef — DISMISS:
+  // forget the channel entirely (grant row + thread links), whatever the
+  // grant's state. The next stranger message re-knocks fresh; a re-mention
+  // re-creates the routing links. Distinct from revoke (PUT state=revoked),
+  // which is the sticky no.
+  app.delete("/:agentId/channels/:provider/reach/:externalRef", async (c) => {
+    const a = c.get("auth");
+    const workspaceId = requireWorkspaceId(a);
+    const provider = parseProvider(c.req.param("provider"));
+    const externalRef = c.req.param("externalRef");
+    if (externalRef.length === 0 || externalRef.length > 200) {
+      throw new ServiceError("UNPROCESSABLE", "Invalid channel reference");
+    }
+    const result = await dismissReachRow({
+      workspaceId,
+      agentId: c.req.param("agentId"),
+      provider,
+      externalRef,
+      dismissedByUserId: a.userId,
+    });
+    await recordAuditEvent({
+      workspaceId,
+      userId: a.userId,
+      userEmail: a.userEmail,
+      action: AUDIT_ACTIONS.DELETE,
+      service: AUDIT_SERVICES.CHANNEL,
+      source: AUDIT_SOURCE.API,
+      metadata: {
+        agentId: c.req.param("agentId"),
+        provider,
+        reachDismissed: externalRef,
+        removedGrant: String(result.removedGrant),
+        removedLinks: String(result.removedLinks),
       },
     });
     return c.body(null, 204);

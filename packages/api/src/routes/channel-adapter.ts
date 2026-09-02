@@ -25,6 +25,10 @@ import {
   settleApprovalPrompt,
 } from "../services/channels/channel-adapter-service";
 import { decideApprovalFromChannel } from "../services/channels/channel-approval-service";
+import {
+  decideReachFromChannel,
+  sweepUnpostedReachCards,
+} from "../services/channels/agent-reach-service";
 import { rotateStaleIntegrations } from "../services/channels/channel-integration-service";
 import { clearTurnReceipts } from "../services/channels/turn-receipt-service";
 import {
@@ -40,6 +44,7 @@ import {
   adapterPromptClaimSchema,
   adapterPromptMessageSchema,
   adapterPromptSettleSchema,
+  adapterReachDecisionSchema,
 } from "../validations/channels";
 import { transcriptQuerySchema } from "../validations/conversation";
 import { logger } from "../lib/logger";
@@ -162,6 +167,13 @@ export const channelAdapterRoutes = () => {
   // scoped to the caller's ownership slice.
   app.get("/work", async (c) => {
     const work = await getAdapterWork(c.get("channelAdapter").adapterId);
+    // The reach-card retry arm rides this ~2s cadence, detached and bounded
+    // (take 5 inside): a card post that failed (Slack down, credential
+    // mid-rotation) self-heals without a dedicated scheduler, and a failure
+    // here must never delay the work answer.
+    void sweepUnpostedReachCards().catch((err: unknown) =>
+      log.warn({ err }, "reach card sweep failed"),
+    );
     const serialize = (items: typeof work.finished) =>
       items.map((item) => ({
         ...item,
@@ -275,6 +287,17 @@ export const channelAdapterRoutes = () => {
       "Invalid decision body",
     );
     return c.json(await decideApprovalFromChannel(body));
+  });
+
+  // POST /channel-adapter/reach-decision — a forwarded reach-card click
+  // (socket arm). The clicker is authorized control-plane-side exactly like
+  // the approval decide; the adapter only relays.
+  app.post("/reach-decision", async (c) => {
+    const body = parsed(
+      adapterReachDecisionSchema.safeParse(await parseBody(c.req.raw)),
+      "Invalid reach decision body",
+    );
+    return c.json(await decideReachFromChannel(body));
   });
 
   // ── Approval prompts: restart-safe dedupe + the update handle ─────────────
