@@ -224,6 +224,118 @@ pub fn scoped_url(base: &str, path: &str, workspace_id: Option<&str>) -> String 
     }
 }
 
+/// The loopback twin of an origin, when it has one (`localhost` ↔ `127.0.0.1`).
+///
+/// The zero-config install advertises `http://localhost:10254` while an
+/// operator (and the e2e suite) may browse `http://127.0.0.1:10254`. They are
+/// the same deployment, but distinct ORIGINS to a browser, so trusting only
+/// the configured spelling turns a working dashboard into an unexplainable
+/// CORS failure. Mirrors `loopbackTwin` in
+/// `packages/api/src/lib/public-origins.ts`.
+fn loopback_twin(origin: &str) -> Option<String> {
+    let (scheme, rest) = origin.split_once("://")?;
+    let (host, port) = match rest.split_once(':') {
+        Some((h, p)) => (h, Some(p)),
+        None => (rest, None),
+    };
+    let twin = match host {
+        "localhost" => "127.0.0.1",
+        "127.0.0.1" => "localhost",
+        _ => return None,
+    };
+    Some(match port {
+        Some(p) => format!("{scheme}://{twin}:{p}"),
+        None => format!("{scheme}://{twin}"),
+    })
+}
+
+/// Trim an operator-supplied origin to a bare `scheme://host[:port]`, or drop
+/// it. Deliberately strict: this value is echoed into an
+/// `Access-Control-Allow-Origin` header, so a path, a wildcard or a stray
+/// control character must never survive into it.
+fn normalize_origin(raw: &str) -> Option<String> {
+    let trimmed = raw.trim().trim_end_matches('/');
+    if trimmed.is_empty() {
+        return None;
+    }
+    let (scheme, rest) = trimmed.split_once("://")?;
+    // Schemes are case-insensitive (RFC 3986), so compare lowercased and emit
+    // lowercased. The host is left as written: it is compared against the
+    // browser's `Origin` header, which browsers already send lowercased.
+    let scheme = scheme.to_ascii_lowercase();
+    if !matches!(scheme.as_str(), "http" | "https") || rest.is_empty() {
+        return None;
+    }
+    // A header value may not carry these, and an origin never legitimately
+    // does: `/` would mean a path, `@` credentials, and the rest are either
+    // header-splitting or plainly not a host.
+    let bad = |c: char| {
+        c == '/'
+            || c == '@'
+            || c == '?'
+            || c == '#'
+            || c == '*'
+            || c.is_whitespace()
+            || c.is_control()
+    };
+    if rest.contains(bad) {
+        return None;
+    }
+    Some(format!("{scheme}://{rest}"))
+}
+
+/// Every browser origin this deployment answers credentialed CORS for.
+///
+/// The dashboard origin, its loopback twin, and any `ONECLI_TRUSTED_ORIGINS`
+/// extras — the same set the Node side builds in `buildTrustedOrigins`, so an
+/// origin that may sign in is exactly one that may call the gateway. Env-free
+/// so it stays table-testable.
+fn build_trusted_origins(dashboard: &str, extra_csv: Option<&str>) -> Vec<String> {
+    let mut origins = Vec::new();
+    let mut push = |value: String| {
+        if !origins.contains(&value) {
+            origins.push(value);
+        }
+    };
+    if let Some(normalized) = normalize_origin(dashboard) {
+        if let Some(twin) = loopback_twin(&normalized) {
+            push(normalized.clone());
+            push(twin);
+        } else {
+            push(normalized);
+        }
+    }
+    for entry in extra_csv.unwrap_or("").split(',') {
+        if let Some(normalized) = normalize_origin(entry) {
+            push(normalized);
+        }
+    }
+    origins
+}
+
+/// The browser origins the gateway's credentialed control plane trusts,
+/// resolved once and cached alongside the dashboard URL.
+///
+/// SECURITY: the control plane authenticates browsers with the same
+/// better-auth session cookie the API issues, so with `allow_credentials(true)`
+/// the allow-list is the only thing standing between a page the user happens
+/// to visit and the approvals API (read pending requests, submit decisions),
+/// vault pairing, and cache invalidation. `SameSite=lax` does not cover it:
+/// SameSite is SITE-scoped while CORS is ORIGIN-scoped, so a sibling subdomain
+/// (or another port on the same host) is same-site and sends the cookie.
+///
+/// Reflecting the request's own origin, which is what this replaced, made
+/// every such page an authenticated caller.
+pub fn trusted_browser_origins() -> &'static [String] {
+    static ORIGINS: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
+    ORIGINS.get_or_init(|| {
+        build_trusted_origins(
+            dashboard_url(),
+            std::env::var("ONECLI_TRUSTED_ORIGINS").ok().as_deref(),
+        )
+    })
+}
+
 // ── Tests ───────────────────────────────────────────────────────────────
 
 impl PolicyEngine {
@@ -347,5 +459,130 @@ mod tests {
         let r = resolve_dashboard_url(Some("  "), Some(""), None, None);
         assert_eq!(r.url, DASHBOARD_URL_FALLBACK);
         assert_eq!(r.source, DashboardUrlSource::Fallback);
+    }
+
+    // ── Trusted browser origins (the credentialed CORS boundary) ─────────
+    //
+    // This set is the ONLY fence on the gateway's browser control plane:
+    // approvals (read + decide), vault pairing, cache invalidation. It
+    // authenticates with the same session cookie the API issues, and
+    // `SameSite=lax` does not help — SameSite is site-scoped while CORS is
+    // origin-scoped, so a sibling subdomain is same-site and sends the cookie.
+
+    /// The regression guard for the reflected-origin bypass. If an attacker's
+    /// origin ever lands in this set, any page the user visits can drive the
+    /// authenticated API — exactly what `AllowOrigin::mirror_request()` did.
+    #[test]
+    fn trusted_origins_exclude_foreign_origins() {
+        let origins = build_trusted_origins("https://onecli.acme.com", None);
+        for foreign in [
+            "https://evil.example",
+            // Same-site with the dashboard, and therefore the case that
+            // matters most: the cookie rides along on its fetch.
+            "https://blog.acme.com",
+            // Another port of the same host is same-site too.
+            "https://onecli.acme.com:8443",
+            // Classic allow-list bypass shapes.
+            "https://onecli.acme.com.evil.example",
+            "https://evil-onecli.acme.com",
+            // Scheme downgrade.
+            "http://onecli.acme.com",
+            "*",
+            "null",
+        ] {
+            assert!(
+                !origins.iter().any(|o| o == foreign),
+                "{foreign} must never be trusted (origins: {origins:?})"
+            );
+        }
+    }
+
+    #[test]
+    fn trusted_origins_hold_the_dashboard_and_its_loopback_twin() {
+        // The zero-config install: configured as localhost, browsed as either.
+        let origins = build_trusted_origins(DASHBOARD_URL_FALLBACK, None);
+        assert!(origins.iter().any(|o| o == "http://localhost:10254"));
+        assert!(origins.iter().any(|o| o == "http://127.0.0.1:10254"));
+
+        // …and the reverse spelling yields the same pair, so an operator who
+        // configures 127.0.0.1 is not locked out of `localhost`.
+        let flipped = build_trusted_origins("http://127.0.0.1:10254", None);
+        assert!(flipped.iter().any(|o| o == "http://localhost:10254"));
+        assert!(flipped.iter().any(|o| o == "http://127.0.0.1:10254"));
+    }
+
+    /// A non-loopback dashboard has no twin to add — and must not gain one.
+    #[test]
+    fn trusted_origins_add_no_twin_for_a_real_host() {
+        let origins = build_trusted_origins("https://onecli.acme.com", None);
+        assert_eq!(origins, vec!["https://onecli.acme.com".to_string()]);
+    }
+
+    /// The documented escape hatch for an install reachable at two addresses
+    /// (docs/self-hosting.md). Same var the Node auth layer reads, so an
+    /// origin that may sign in is exactly one that may call the gateway.
+    #[test]
+    fn trusted_origins_accept_operator_listed_extras() {
+        let origins = build_trusted_origins(
+            "http://192.0.2.10:10254",
+            Some("http://onecli.lan:10254, https://alt.acme.com"),
+        );
+        assert!(origins.iter().any(|o| o == "http://onecli.lan:10254"));
+        assert!(origins.iter().any(|o| o == "https://alt.acme.com"));
+    }
+
+    /// A malformed entry is dropped, never partially honoured: this value is
+    /// echoed into a response header, so a path, wildcard, or embedded CRLF
+    /// must not survive into it.
+    #[test]
+    fn trusted_origins_drop_malformed_entries() {
+        let origins = build_trusted_origins(
+            "https://onecli.acme.com",
+            Some("not-an-origin,javascript:alert(1),https://ok.example/path,*,,  ,https://good.example"),
+        );
+        assert_eq!(
+            origins,
+            vec![
+                "https://onecli.acme.com".to_string(),
+                "https://good.example".to_string()
+            ]
+        );
+        for origin in &origins {
+            assert!(
+                hyper::header::HeaderValue::from_str(origin).is_ok(),
+                "{origin} must be a valid header value"
+            );
+        }
+    }
+
+    #[test]
+    fn trusted_origins_are_deduplicated() {
+        let origins = build_trusted_origins(
+            "https://onecli.acme.com",
+            Some("https://onecli.acme.com,https://onecli.acme.com/"),
+        );
+        assert_eq!(origins, vec!["https://onecli.acme.com".to_string()]);
+    }
+
+    #[test]
+    fn normalize_origin_rejects_header_injection_and_junk() {
+        for bad in [
+            "https://onecli.acme.com\r\nX-Injected: 1",
+            "https://onecli.acme.com/path",
+            "https://user:pw@onecli.acme.com",
+            "ftp://onecli.acme.com",
+            "javascript:alert(1)",
+            "//onecli.acme.com",
+            "onecli.acme.com",
+            "",
+            "   ",
+        ] {
+            assert_eq!(normalize_origin(bad), None, "{bad:?} must be rejected");
+        }
+        // Trailing slash and scheme case are normalization, not new trust.
+        assert_eq!(
+            normalize_origin("HTTPS://onecli.acme.com/"),
+            Some("https://onecli.acme.com".to_string())
+        );
     }
 }
