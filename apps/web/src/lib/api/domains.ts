@@ -1,7 +1,7 @@
 import { apiGet, apiPost, apiDelete } from "./client";
 import type { OrgDomain } from "./types";
 
-// Org email domains are organization-scoped only — no project variant.
+// Org email domains are organization-scoped only — no workspace variant.
 const base = "/v1/org/domains";
 
 export const list = () => apiGet<OrgDomain[]>(base);

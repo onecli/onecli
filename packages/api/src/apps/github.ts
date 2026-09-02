@@ -135,7 +135,6 @@ export const github: AppDefinition = {
       return { credentials, scopes, metadata };
     },
   },
-  available: true,
   configurable: {
     hint: "Create an OAuth App under GitHub Developer Settings.",
     fields: [

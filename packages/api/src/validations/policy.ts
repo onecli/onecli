@@ -1,5 +1,19 @@
+import { networkHostPatternShapeError } from "./secret";
 import { z } from "zod";
 import { ruleConditionSchema } from "./policy-rule";
+
+// Rename compat (temporary — the deletion recipe lives in
+// lib/legacy-project-compat.ts): the two resource-scope enums below also
+// accept the pre-rename "project" literal, stored as "workspace" so the DB
+// CHECKs and the gateway loaders only ever see canonical values. Defined
+// LOCALLY and zod-only because this schema reaches a client bundle
+// (policy-rule-form imports isSessionPolicy) — importing the compat file
+// would drag hono + pino into that chunk. At sunset: delete this const and
+// restore the plain z.enum(["organization", "workspace"]) on both fields.
+const legacyResourceScope = z.preprocess(
+  (value) => (value === "project" ? "workspace" : value),
+  z.enum(["organization", "workspace"]),
+);
 
 // ── Unified policy engine (policy_rules_v2) request shapes ──────────────────
 // Discriminated unions mirror the DB CHECK constraints (one-principal per
@@ -25,8 +39,8 @@ export const policyTargetSchema = z.discriminatedUnion("kind", [
     // Step 8: when set, this app target injects ALL the agent's connections of
     // `provider` at the given level ("all connections"); absent = the
     // app-permission block/allow rule (no injection). `assertTargetsValid` fences
-    // the level (a project rule can't scope to `organization`).
-    connectionScope: z.enum(["organization", "project"]).optional(),
+    // the level (a workspace rule can't scope to `organization`).
+    connectionScope: legacyResourceScope.optional(),
   }),
   z.object({
     kind: z.literal("connection"),
@@ -43,11 +57,24 @@ export const policyTargetSchema = z.discriminatedUnion("kind", [
     // ("all secrets at that level"). Both are optional here; `assertTargetsValid`
     // enforces exactly-one (a clean 422) and the level fence, mirroring `app`.
     secretId: z.string().min(1).optional(),
-    secretScope: z.enum(["organization", "project"]).optional(),
+    secretScope: legacyResourceScope.optional(),
   }),
   z.object({
     kind: z.literal("network"),
-    hostPattern: z.string().min(1).max(1000),
+    // Shape-checked like a secret's, minus the breadth rules: a network target
+    // only decides, never selects a credential, so a broad fence is legitimate
+    // (see `networkHostPatternShapeError`). What it rejects is a pattern the
+    // matcher cannot honour — a partial-label or trailing wildcard.
+    hostPattern: z
+      .string()
+      .min(1)
+      .max(1000)
+      .superRefine((v, ctx) => {
+        const problem = networkHostPatternShapeError(v);
+        if (problem !== null) {
+          ctx.addIssue({ code: "custom", message: problem });
+        }
+      }),
     pathPattern: z.string().max(1000).optional(),
     method: methodSchema.optional(),
   }),

@@ -29,6 +29,28 @@ export interface OAuthPermission {
   access: "read" | "write";
 }
 
+/**
+ * Where a server-owned connect field's value comes from. Each source is
+ * resolved from the CALLER'S AUTHENTICATED SCOPE by the connect routes — never
+ * from request input — so a field declared here cannot be forged by a client.
+ */
+export type ServerFieldSource = "orgAwsExternalId";
+
+/**
+ * A connect field the server fills in, not the user. It is handed to
+ * `exchangeCredentials` under `name` exactly like a form field, but any
+ * client-submitted value for that name is DISCARDED first.
+ *
+ * This exists for values that are a fact about the tenant rather than an input
+ * — AWS's `sts:ExternalId` being the motivating case: its whole purpose (the
+ * confused-deputy defense) collapses if the caller can choose it.
+ */
+export interface ServerField {
+  /** The field name `exchangeCredentials` reads. */
+  name: string;
+  source: ServerFieldSource;
+}
+
 export type ConnectionMethod =
   | {
       type: "oauth";
@@ -41,7 +63,12 @@ export type ConnectionMethod =
        *  of a query parameter. The bridge page extracts the named param from the
        *  fragment and resubmits it as a query parameter for the server. */
       fragmentCallback?: { paramName: string };
-      buildAuthUrl: (params: OAuthBuildAuthUrlParams) => string;
+      /** May be async: the registry graph is client-reachable, so a definition
+       *  needing node builtins (PKCE/JWT crypto) must load them via a lazy
+       *  `await import("node:crypto")` instead of a top-level import. */
+      buildAuthUrl: (
+        params: OAuthBuildAuthUrlParams,
+      ) => string | Promise<string>;
       exchangeCode: (
         params: OAuthExchangeCodeParams,
       ) => Promise<OAuthExchangeResult>;
@@ -83,6 +110,10 @@ export type ConnectionMethod =
       exchangeCredentials: (
         fields: Record<string, string>,
       ) => Promise<OAuthExchangeResult>;
+      /** Fields the SERVER supplies from the caller's scope (see
+       *  `ServerField`). Merged over the submitted fields — and stripped from
+       *  them first — before `exchangeCredentials` runs. */
+      serverFields?: ServerField[];
       /** Optional file import to auto-fill fields from a JSON file. */
       fileImport?: {
         /** Button label (e.g., "Import from credentials file"). */
@@ -92,9 +123,6 @@ export type ConnectionMethod =
         /** Maps JSON keys in the file to field names in the form. */
         keyMap: Record<string, string>;
       };
-    }
-  | {
-      type: "cloud_only";
     };
 
 export interface OAuthConfigField {
@@ -119,10 +147,8 @@ export interface AppDefinition {
    *  connect UI lets the user pick; the connect route resolves the chosen one
    *  via the request's `method` field. */
   additionalMethods?: ConnectionMethod[];
-  available: boolean;
   /** Custom hint for the connection label field (e.g. 'e.g. "staging", "my-org"'). */
   labelHint?: string;
-  teamOnly?: boolean;
   /** Credential stubs for provisioners to write so MCP servers can boot. */
   credentialStubs?: {
     /** Full destination path (e.g., "~/.config/gcloud/application_default_credentials.json"). */

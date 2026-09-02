@@ -2,7 +2,7 @@
 // gateway. Like the 1Password client, these hit the gateway directly (different
 // base URL + auth) rather than the typed JSON API, so they use
 // getGatewayApiUrl() + getGatewayFetchOptions() (edition-aware: Cognito Bearer +
-// X-Project-Id in cloud, cookie credentials in OSS).
+// X-Workspace-Id in cloud, cookie credentials in OSS).
 import { getGatewayApiUrl } from "@/hooks/use-vault-status";
 import { getGatewayFetchOptions } from "@/lib/gateway-auth";
 
@@ -41,6 +41,10 @@ export interface PendingApproval {
 
 export type ApprovalDecisionInput = "approve" | "deny";
 
+/** How a decision landed: delivered, or the approval was already gone
+ * (expired, decided elsewhere, or dropped by a gateway restart). */
+export type DecisionOutcome = "delivered" | "already_settled";
+
 const base = () => `${getGatewayApiUrl()}/v1/approvals`;
 
 const gatewayGet = async <T>(
@@ -61,7 +65,7 @@ const gatewayGet = async <T>(
 };
 
 /**
- * List currently-held approvals for the active project. The gateway long-polls
+ * List currently-held approvals for the active workspace. The gateway long-polls
  * this endpoint (holds up to ~30s when nothing is pending), so callers should
  * pass an abort signal with a timeout slightly above that hold.
  */
@@ -73,13 +77,15 @@ export const listPending = (opts?: {
   );
 
 /**
- * Submit an approve/deny decision. HTTP 410 (already resolved or expired) is
- * treated as success — the outcome the caller wanted has already happened.
+ * Submit an approve/deny decision. HTTP 410 (expired) and 404 (no longer in
+ * the pending set — decided from another surface, or the gateway restarted
+ * and dropped its held requests) both mean the approval is already settled:
+ * the card is stale, not the click wrong. Only a real failure throws.
  */
 export const decide = async (
   id: string,
   decision: ApprovalDecisionInput,
-): Promise<void> => {
+): Promise<DecisionOutcome> => {
   const { headers, credentials } = await getGatewayFetchOptions();
   const resp = await fetch(`${base()}/${encodeURIComponent(id)}/decision`, {
     method: "POST",
@@ -87,7 +93,8 @@ export const decide = async (
     credentials,
     body: JSON.stringify({ decision }),
   });
-  if (resp.ok || resp.status === 410) return;
+  if (resp.ok) return "delivered";
+  if (resp.status === 410 || resp.status === 404) return "already_settled";
   const data = (await resp.json().catch(() => ({}))) as { error?: string };
   throw new Error(data.error ?? `Request failed (${resp.status})`);
 };

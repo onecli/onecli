@@ -35,9 +35,9 @@ describe("policyTargetSchema — connection targets", () => {
       policyTargetSchema.parse({
         kind: "app",
         provider: "gmail",
-        connectionScope: "project",
+        connectionScope: "workspace",
       }),
-    ).toEqual({ kind: "app", provider: "gmail", connectionScope: "project" });
+    ).toEqual({ kind: "app", provider: "gmail", connectionScope: "workspace" });
   });
 
   it("accepts tools AND connectionScope together (the tools-picker shape)", () => {
@@ -48,13 +48,13 @@ describe("policyTargetSchema — connection targets", () => {
         kind: "app",
         provider: "gmail",
         tools: ["search_messages", "read_message"],
-        connectionScope: "project",
+        connectionScope: "workspace",
       }),
     ).toEqual({
       kind: "app",
       provider: "gmail",
       tools: ["search_messages", "read_message"],
-      connectionScope: "project",
+      connectionScope: "workspace",
     });
   });
 });
@@ -136,7 +136,7 @@ describe("createPolicyRuleSchema — conditions dual-use (behavioral | session p
     const res = createPolicyRuleSchema.safeParse({
       ...base,
       targets: [
-        { kind: "app", provider: "github", connectionScope: "project" },
+        { kind: "app", provider: "github", connectionScope: "workspace" },
       ],
       conditions: { repositories: ["owner/repo"] },
     });

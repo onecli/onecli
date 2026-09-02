@@ -14,7 +14,7 @@ import type { ApiEnv } from "../types";
  * origins, which it can only do from a configured `APP_URL`.
  *
  * This lives in its own file because the edition (and so `IS_CLOUD`) is read at
- * module load, and the sibling `apps.test.ts` pins `onprem-slim` for the
+ * module load, and the sibling `apps.test.ts` pins `oss` for the
  * single-host cases. Nothing here is mocked — the real resolution path runs,
  * which is what makes it a trustworthy guard.
  */
@@ -37,7 +37,7 @@ vi.mock("@onecli/db", () => ({ Prisma: {}, db: {} }));
 vi.mock("../apps/registry", () => ({
   getApp: (id: string) =>
     id === "signedapp"
-      ? { id, name: id, available: true, connectionMethod: { type: "oauth" } }
+      ? { id, name: id, connectionMethod: { type: "oauth" } }
       : undefined,
   getApps: () => [],
 }));
@@ -89,7 +89,7 @@ describe("oauth callback redirect origin (split API/dashboard hosts)", () => {
 
     expect(res.status).toBe(302);
     expect(res.headers.get("location")).toBe(
-      `${APP_ORIGIN}/app-connect/signedapp?status=error&message=Missing%20project%20in%20state`,
+      `${APP_ORIGIN}/app-connect/signedapp?status=error&message=Missing%20workspace%20in%20state`,
     );
     expect(res.headers.get("location")).not.toContain(API_ORIGIN);
   });

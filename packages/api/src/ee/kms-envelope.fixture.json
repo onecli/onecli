@@ -1,0 +1,9 @@
+{
+  "comment": "TS<->Rust KMS envelope contract fixture. The envelope was assembled by the exact algorithm packages/api/src/ee/kms-crypto.ts uses (AES-256-GCM, 12-byte IV, 16-byte tag, 4 base64 parts joined by colons). Both sides must open it with the data key. Regenerating it is a CONTRACT CHANGE - both tests must be updated together.",
+  "dataKeyB64": "wyooZ62/3dfNmEcQdo2eHiWqcNKZaQJWkWpGWTI+kHI=",
+  "encryptedDataKeyB64": "Zml4dHVyZS1vcGFxdWUta21zLWNpcGhlcnRleHQtYmxvYi12MQ==",
+  "encryptionContextKey": "purpose",
+  "encryptionContextValue": "onecli-secret-encryption",
+  "plaintext": "{\"access_token\":\"ya29.fixture\",\"refresh_token\":\"1//0e-fixture\",\"expires_at\":1700000000}",
+  "envelope": "Zml4dHVyZS1vcGFxdWUta21zLWNpcGhlcnRleHQtYmxvYi12MQ==:mxHsa0X1zM6OW3S6:lwKv+n/J/awYK/tu8bp7Tg==:m1ZmB3yQrkymKpFPwfDbglLLnBFCxOEeg7ZE/NrbsI1/izsmOLzrfMem8D80aNe3GywKRv6JAoqkbRVEnvJZIIIL62Vy9kVe4qhWN1J2IeZCDJ0RG4V9"
+}

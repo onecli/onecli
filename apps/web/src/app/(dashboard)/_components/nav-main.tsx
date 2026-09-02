@@ -13,7 +13,9 @@ import {
 } from "@onecli/ui/components/sidebar";
 import { cn } from "@onecli/ui/lib/utils";
 
-const sidebarMenuButtonActiveStyles =
+/** One definition of the sidebar's brand-active row, shared with the Agents
+ * group so the two can't drift. */
+export const sidebarMenuButtonActiveStyles =
   "font-normal data-[active=true]:bg-brand/10 data-[active=true]:font-medium data-[active=true]:text-brand data-[active=true]:hover:bg-brand/15 dark:data-[active=true]:bg-brand/10 dark:data-[active=true]:text-brand dark:data-[active=true]:hover:bg-brand/15";
 
 export interface NavItem {

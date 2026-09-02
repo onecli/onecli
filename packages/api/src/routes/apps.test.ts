@@ -11,7 +11,7 @@ const ORG_KEY = "oc_org_test-key";
 // Hermetic to the ambient edition (CI runs with NEXT_PUBLIC_EDITION=cloud):
 // pin everything before any import evaluates (vi.hoisted runs first).
 vi.hoisted(() => {
-  process.env.NEXT_PUBLIC_EDITION = "onprem-slim";
+  process.env.NEXT_PUBLIC_EDITION = "onprem";
   process.env.SECRET_ENCRYPTION_KEY = "test-oauth-state-secret";
   process.env.OAUTH_STATE_SECRET = "test-oauth-state-secret";
 });

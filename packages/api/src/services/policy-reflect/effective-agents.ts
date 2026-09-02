@@ -18,7 +18,7 @@ import { buildInjectionProbe, injectionIdentityMatches } from "./injection";
 import type { CredentialProvenance } from "./effective-credentials";
 
 // The per-agent reflection behind the connection "agent access" dialog
-// (step 9.7b): for every agent in the caller's project, TWO axes —
+// (step 9.7b): for every agent in the caller's workspace, TWO axes —
 //
 // 1. CREDENTIAL (primary — the old dialog's full/assigned/none meaning): would
 //    this connection inject for the agent, under the same laws as the
@@ -36,10 +36,10 @@ import type { CredentialProvenance } from "./effective-credentials";
 //    don't. A catalog-less provider has NO rollup (`decisions: null`) — policy
 //    rules can't target its endpoints, so "0 of 0" would be a lie.
 //
-// Fencing: the connection must be project-owned or org-scoped in the caller's
-// org; agents are the caller's project's. Perf: the rule set, pools, and the
-// principal set load ONCE — the principal set is project-derived, so every
-// agent in the project shares it.
+// Fencing: the connection must be workspace-owned or org-scoped in the caller's
+// org; agents are the caller's workspace's. Perf: the rule set, pools, and the
+// principal set load ONCE — the principal set is workspace-derived, so every
+// agent in the workspace shares it.
 //
 // REDACTION: org rule provenance follows the simulate contract (names are
 // org-admin-only; multiple org refs collapse to one redacted marker).
@@ -88,13 +88,13 @@ export interface EffectiveAgentsResult {
 }
 
 export interface EffectiveAgentsCtx {
-  projectId: string;
+  workspaceId: string;
   organizationId: string;
   viewerSeesOrgRules: boolean;
 }
 
 interface RuleRef {
-  scope: "organization" | "project";
+  scope: "organization" | "workspace";
   logicalId: string;
   name: string;
 }
@@ -131,19 +131,24 @@ export const effectiveAgents = async (
   connectionId: string,
   ctx: EffectiveAgentsCtx,
 ): Promise<EffectiveAgentsResult> => {
-  // Fence — project-owned OR org-scoped in the caller's org; a foreign
+  // Fence — workspace-owned OR org-scoped in the caller's org; a foreign
   // connection is simply not found (existence is never revealed across it).
-  const project = await db.project.findUnique({
-    where: { id: ctx.projectId },
+  const workspace = await db.workspace.findUnique({
+    where: { id: ctx.workspaceId },
     select: { organizationId: true },
   });
   const connection = await db.appConnection.findFirst({
     where: {
       id: connectionId,
       OR: [
-        { projectId: ctx.projectId },
-        ...(project?.organizationId
-          ? [{ organizationId: project.organizationId, scope: "organization" }]
+        { workspaceId: ctx.workspaceId },
+        ...(workspace?.organizationId
+          ? [
+              {
+                organizationId: workspace.organizationId,
+                scope: "organization",
+              },
+            ]
           : []),
       ],
     },
@@ -151,21 +156,21 @@ export const effectiveAgents = async (
   });
   if (!connection) throw new ServiceError("NOT_FOUND", "Connection not found");
 
-  const connectionLevel: "organization" | "project" =
-    connection.scope === "organization" ? "organization" : "project";
+  const connectionLevel: "organization" | "workspace" =
+    connection.scope === "organization" ? "organization" : "workspace";
   const def = getAppPermissionDefinition(connection.provider);
 
   const agents = await db.agent.findMany({
-    where: { projectId: ctx.projectId },
+    where: { workspaceId: ctx.workspaceId },
     select: { id: true, name: true },
-    orderBy: [{ isDefault: "desc" }, { createdAt: "desc" }],
+    orderBy: { createdAt: "desc" },
   });
 
   const [
     orgRows,
-    projectRows,
+    workspaceRows,
     orgInjectRows,
-    projectInjectRows,
+    workspaceInjectRows,
     secretHosts,
     connectionProviders,
     principals,
@@ -175,7 +180,7 @@ export const effectiveAgents = async (
       "published",
     ),
     loadRulesForSimulation(
-      { scope: "project", projectId: ctx.projectId },
+      { scope: "workspace", workspaceId: ctx.workspaceId },
       "published",
     ),
     // Injection rules keep `equipment` (the decision rules above drop it) —
@@ -186,16 +191,16 @@ export const effectiveAgents = async (
       "published",
     ),
     loadInjectionRules(
-      { scope: "project", projectId: ctx.projectId },
+      { scope: "workspace", workspaceId: ctx.workspaceId },
       "published",
     ),
-    loadSecretHosts(ctx.organizationId, ctx.projectId),
-    loadConnectionProviders(ctx.organizationId, ctx.projectId),
-    resolvePrincipalSet(ctx.projectId, ctx.organizationId),
+    loadSecretHosts(ctx.organizationId, ctx.workspaceId),
+    loadConnectionProviders(ctx.organizationId, ctx.workspaceId),
+    resolvePrincipalSet(ctx.workspaceId, ctx.organizationId),
   ]);
 
-  const allRows = [...orgRows, ...projectRows];
-  const injectRows = [...orgInjectRows, ...projectInjectRows];
+  const allRows = [...orgRows, ...workspaceRows];
+  const injectRows = [...orgInjectRows, ...workspaceInjectRows];
   const simRules: SimRule[] = allRows.map((row) =>
     toSimRule(row, secretHosts, connectionProviders),
   );
@@ -232,7 +237,7 @@ export const effectiveAgents = async (
         injectionIdentityMatches(row.identities, agent.id, principals),
       )
       .map((row) => ({
-        scope: row.scope === "organization" ? "organization" : "project",
+        scope: row.scope === "organization" ? "organization" : "workspace",
         logicalId: row.logicalId,
         name: row.name,
       }));

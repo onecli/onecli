@@ -1,0 +1,163 @@
+//! Vault integration — provider-agnostic credential fetching from external vaults.
+//!
+//! The `VaultProvider` trait defines the interface for vault backends (Bitwarden, etc.).
+//! `VaultService` is the orchestrator that routes requests to the correct provider.
+
+pub mod bitwarden;
+pub mod bitwarden_db;
+pub mod onepassword;
+pub mod onepassword_api;
+
+use std::sync::Arc;
+
+use anyhow::{anyhow, Result};
+use async_trait::async_trait;
+use axum::response::{IntoResponse, Response};
+use hyper::StatusCode;
+use sqlx::PgPool;
+
+// ── Types ───────────────────────────────────────────────────────────────
+
+/// Provider-agnostic credential returned by any vault provider.
+#[derive(Debug)]
+pub struct VaultCredential {
+    #[allow(dead_code)]
+    pub username: Option<String>,
+    pub password: Option<String>,
+}
+
+/// Result of a successful pairing operation.
+#[derive(Debug)]
+pub struct PairResult {
+    /// Human-readable name for the connection (shown in UI).
+    pub display_name: Option<String>,
+}
+
+/// Connection status for a provider.
+#[derive(Debug)]
+pub struct ProviderStatus {
+    pub connected: bool,
+    pub name: Option<String>,
+    /// Provider-specific status details (e.g. fingerprint for Bitwarden).
+    /// Serialized as-is into the API response as `status_data`.
+    pub status_data: Option<serde_json::Value>,
+}
+
+// ── Errors ──────────────────────────────────────────────────────────────
+
+/// Error type for vault operations that maps cleanly to HTTP responses.
+#[derive(Debug)]
+pub enum VaultError {
+    BadRequest(String),
+    Forbidden(String),
+    NotFound(String),
+    Internal(String),
+}
+
+impl std::fmt::Display for VaultError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::BadRequest(m) | Self::Forbidden(m) | Self::NotFound(m) | Self::Internal(m) => {
+                write!(f, "{m}")
+            }
+        }
+    }
+}
+
+impl IntoResponse for VaultError {
+    fn into_response(self) -> Response {
+        let (status, msg) = match self {
+            VaultError::BadRequest(m) => (StatusCode::BAD_REQUEST, m),
+            VaultError::Forbidden(m) => (StatusCode::FORBIDDEN, m),
+            VaultError::NotFound(m) => (StatusCode::NOT_FOUND, m),
+            VaultError::Internal(m) => (StatusCode::INTERNAL_SERVER_ERROR, m),
+        };
+        (status, axum::Json(serde_json::json!({ "error": msg }))).into_response()
+    }
+}
+
+// ── Trait ────────────────────────────────────────────────────────────────
+
+#[async_trait]
+pub trait VaultProvider: Send + Sync {
+    /// Provider identifier (e.g., "bitwarden").
+    fn provider_name(&self) -> &'static str;
+
+    /// Pair with the vault using provider-specific credentials.
+    async fn pair(&self, workspace_id: &str, params: &serde_json::Value) -> Result<PairResult>;
+
+    /// Request a credential for a hostname from this workspace's vault.
+    async fn request_credential(
+        &self,
+        workspace_id: &str,
+        hostname: &str,
+    ) -> Option<VaultCredential>;
+
+    /// Get connection status for this workspace.
+    async fn status(&self, workspace_id: &str) -> ProviderStatus;
+
+    /// Disconnect and clean up.
+    async fn disconnect(&self, workspace_id: &str) -> Result<()>;
+}
+
+// ── Orchestrator ────────────────────────────────────────────────────────
+
+/// Provider-agnostic vault service. Routes operations to the correct provider
+/// by name, iterates all providers for credential lookups.
+pub struct VaultService {
+    providers: Vec<Arc<dyn VaultProvider>>,
+    pool: PgPool,
+}
+
+impl VaultService {
+    pub fn new(providers: Vec<Arc<dyn VaultProvider>>, pool: PgPool) -> Self {
+        Self { providers, pool }
+    }
+
+    /// Try each provider in order until one returns a credential.
+    pub async fn request_credential(
+        &self,
+        workspace_id: &str,
+        hostname: &str,
+    ) -> Option<VaultCredential> {
+        for provider in &self.providers {
+            if let Some(cred) = provider.request_credential(workspace_id, hostname).await {
+                return Some(cred);
+            }
+        }
+        None
+    }
+
+    /// Pair with a specific provider. The provider owns DB persistence.
+    pub async fn pair(
+        &self,
+        workspace_id: &str,
+        provider: &str,
+        params: &serde_json::Value,
+    ) -> Result<PairResult> {
+        let p = self.find_provider(provider)?;
+        p.pair(workspace_id, params).await
+    }
+
+    /// Get status for a specific provider.
+    pub async fn status(&self, workspace_id: &str, provider: &str) -> Option<ProviderStatus> {
+        let p = self.find_provider(provider).ok()?;
+        Some(p.status(workspace_id).await)
+    }
+
+    /// Disconnect a specific provider.
+    pub async fn disconnect(&self, workspace_id: &str, provider: &str) -> Result<()> {
+        let p = self.find_provider(provider)?;
+        p.disconnect(workspace_id).await?;
+        db::delete_vault_connection(&self.pool, workspace_id, provider).await?;
+        Ok(())
+    }
+
+    fn find_provider(&self, name: &str) -> Result<&dyn VaultProvider> {
+        self.providers
+            .iter()
+            .find(|p| p.provider_name() == name)
+            .map(|p| p.as_ref())
+            .ok_or_else(|| anyhow!("unknown vault provider: {}", name))
+    }
+}

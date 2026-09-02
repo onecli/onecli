@@ -6,7 +6,7 @@ export interface ResolvedAppCredentials {
   values: Record<string, string>;
   source: "app_config" | "env";
   /**
-   * Id of the AppConfig row that served these credentials (the project row or,
+   * Id of the AppConfig row that served these credentials (the workspace row or,
    * via the org seam, the org row). Absent for the env tier. Mint sites persist
    * it on the connection so refresh and config-removal know the provenance.
    */
@@ -24,7 +24,7 @@ export interface ResolvedAppCredentials {
  * and any future configurable provider.
  */
 export const resolveAppCredentials = async (
-  projectId: string,
+  workspaceId: string,
   app: AppDefinition,
   organizationId?: string,
 ): Promise<ResolvedAppCredentials | null> => {
@@ -32,7 +32,7 @@ export const resolveAppCredentials = async (
 
   const requiredFields = app.configurable.fields.map((f) => f.name);
 
-  const config = await getAppConfigCredentials({ projectId }, app.id);
+  const config = await getAppConfigCredentials({ workspaceId }, app.id);
   if (config && requiredFields.every((f) => !!config.fields[f])) {
     const values: Record<string, string> = {};
     for (const f of requiredFields) values[f] = config.fields[f]!;

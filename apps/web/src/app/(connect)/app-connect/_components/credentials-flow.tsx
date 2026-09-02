@@ -46,11 +46,10 @@ export interface CredentialsFlowProps {
   fileImport?: FileImportConfig;
   connectionId?: string;
   preContent?: ReactNode;
-  hiddenFields?: Record<string, string>;
   /** Carries the freshly-created connection (absent on reconnects). */
   onSuccess: (connection?: { id: string; label: string | null }) => void;
   onError: (message: string) => void;
-  projectId?: string;
+  workspaceId?: string;
   orgId?: string;
   /** Connection method to connect with, when the app offers more than one. */
   method?: string;
@@ -64,10 +63,9 @@ export const CredentialsFlow = ({
   fileImport,
   connectionId,
   preContent,
-  hiddenFields,
   onSuccess,
   onError,
-  projectId,
+  workspaceId,
   orgId,
   method,
   onBack,
@@ -141,13 +139,13 @@ export const CredentialsFlow = ({
       const resp = await apiFetch(`/v1/apps/${app.id}/connect`, {
         method: "POST",
         body: JSON.stringify({
-          fields: { ...values, ...hiddenFields },
+          fields: values,
           connectionId,
           ...(connectionLabel.trim() ? { label: connectionLabel.trim() } : {}),
           ...(method ? { method } : {}),
         }),
         headers: {
-          ...(projectId ? { "X-Project-Id": projectId } : {}),
+          ...(workspaceId ? { "X-Workspace-Id": workspaceId } : {}),
           ...(orgId ? { "X-Organization-Id": orgId } : {}),
         },
       });

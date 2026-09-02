@@ -1,6 +1,6 @@
 import { Hono } from "hono";
 import type { ApiEnv } from "../types";
-import { authMiddleware, requireProjectId } from "../middleware/auth";
+import { authMiddleware, requireWorkspaceId } from "../middleware/auth";
 import { listVaultConnections } from "../services/vault-service";
 
 // Read-only: vault pairing/status/disconnect live on the gateway process
@@ -12,7 +12,7 @@ export const vaultRoutes = () => {
   // ── GET /vaults ── list external vault connections ─────────────────────
   app.get("/", async (c) => {
     const auth = c.get("auth");
-    return c.json(await listVaultConnections(requireProjectId(auth)));
+    return c.json(await listVaultConnections(requireWorkspaceId(auth)));
   });
 
   return app;

@@ -1,0 +1,39 @@
+OneCLI
+Copyright 2025-present ChartDB, Inc.
+
+This product includes software developed for the OneCLI workspace.
+
+Licensing
+---------
+
+Except as stated below, this product is licensed under the Apache License,
+Version 2.0. A copy of the Apache License is included in the LICENSE file at
+the root of this repository.
+
+Certain paths are NOT licensed under the Apache License. They contain
+enterprise features governed by the OneCLI Enterprise License
+(LICENSE-ENTERPRISE). Those paths are enumerated under "THE LICENSED PATHS" in
+the LICENSE-ENTERPRISE file itself, which is the authoritative list; a notice
+pointing at the enterprise license is also placed in each of the licensed
+directories.
+
+The OneCLI Enterprise License permits use for development, testing, evaluation
+and internal non-production purposes. Production use of those components
+requires a valid OneCLI Enterprise subscription. Everything outside the
+licensed paths is Apache-2.0 and may be self-hosted in production with no
+commercial license.
+
+For enterprise licensing enquiries, contact sales@onecli.sh.
+
+Third-party notices
+-------------------
+
+This product includes user-interface components derived from shadcn/ui
+(https://ui.shadcn.com), Copyright (c) 2023 shadcn, licensed under the MIT
+License. The components are vendored into the shared UI package via the
+shadcn CLI.
+
+This product bundles the Geist and Geist Mono fonts, Copyright 2024 The Geist
+Project Authors (https://github.com/vercel/geist-font), licensed under the
+SIL Open Font License, Version 1.1. The license text accompanies the font
+files (OFL.txt in the web app's fonts directory).

@@ -9,22 +9,8 @@ import {
   PopoverContent,
   PopoverTrigger,
 } from "@onecli/ui/components/popover";
-import { getApp, getApps } from "@onecli/api/apps/registry";
-import { AppIcon } from "@/app/(dashboard)/connections/_components/app-icon";
-import { TeamBadge } from "@/lib/components/team-badge";
-
-/**
- * True when the registry knows the app but this edition can't connect it —
- * the same `available` key the Connections list locks on. Only the OSS
- * edition's registry (the shared EE-stub list) carries `available: false`;
- * cloud registers the real EE definitions (all available) and onprem excludes
- * its non-connectable apps outright, so this is false everywhere but OSS.
- * Deliberately ignores plan-gating (`teamOnly`) — that's a billing concern the
- * Connections page enforces at connect time; this lock is edition-capability
- * only, which is what keeps it byte-inert in cloud.
- */
-export const isCloudOnlyApp = (id: string): boolean =>
-  getApp(id)?.available === false;
+import { getApps } from "@onecli/api/apps/registry";
+import { AppIcon } from "@/lib/components/app-icon";
 
 export interface AppSelectProps {
   /** The selected provider id, or "" for none. */
@@ -96,7 +82,6 @@ export const AppSelect = ({ value, onChange, id, invalid }: AppSelectProps) => {
                   size={18}
                 />
                 <span className="truncate">{selectedApp.name}</span>
-                {!selectedApp.available && <TeamBadge />}
               </>
             ) : (
               <span className="text-muted-foreground">Select an app…</span>
@@ -141,7 +126,6 @@ export const AppSelect = ({ value, onChange, id, invalid }: AppSelectProps) => {
                 <span className="min-w-0 flex-1 truncate text-sm">
                   {a.name}
                 </span>
-                {!a.available && <TeamBadge />}
                 {a.id === value && (
                   <Check className="size-4 shrink-0" aria-hidden />
                 )}

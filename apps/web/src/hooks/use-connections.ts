@@ -10,7 +10,7 @@ import { queryKeys } from "@/lib/api/keys";
 // routes invalidate it server-side (withAudit), so there is no client-side
 // gateway call here.
 
-export const useConnections = (scope: PageScope = "project") =>
+export const useConnections = (scope: PageScope = "workspace") =>
   useQuery({
     queryKey: queryKeys.connections.list(scope),
     queryFn: () => connections.list(scope),
@@ -23,7 +23,7 @@ export const useVaultConnections = (enabled = true) =>
     enabled,
   });
 
-export const useRenameConnection = (scope: PageScope = "project") => {
+export const useRenameConnection = (scope: PageScope = "workspace") => {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: ({ id, label }: { id: string; label: string }) =>
@@ -35,7 +35,7 @@ export const useRenameConnection = (scope: PageScope = "project") => {
   });
 };
 
-export const useDisconnectConnection = (scope: PageScope = "project") => {
+export const useDisconnectConnection = (scope: PageScope = "workspace") => {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: (id: string) => connections.disconnect(id, scope),

@@ -1,59 +1,21 @@
-import { auth } from "@/lib/auth/nextauth-config";
-import { db } from "@onecli/db";
-import {
-  findUserDefaultProject,
-  bootstrapOrganization,
-  joinSharedOrganization,
-} from "@onecli/api/services/organization-service";
-import { CAPS } from "@/lib/env";
-import { getAuthMode } from "./auth-mode";
+import { IS_CLOUD } from "@/lib/env";
 import type { AuthUser } from "./types";
-import { LOCAL_AUTH_ID, LOCAL_USER } from "./local-user";
 
-let localUserEnsured = false;
+/**
+ * Edition dispatcher for the server session. Both arms load lazily: the
+ * Cognito module runs `createServerRunner` at module scope (it must never
+ * load outside cloud), and the self-hosted module pulls in the database-backed
+ * session reader — neither belongs in the other edition's server graph. The
+ * chosen arm is resolved once per process and memoized here.
+ */
+let implPromise: Promise<() => Promise<AuthUser | null>> | null = null;
 
-const ensureLocalUser = async () => {
-  if (localUserEnsured) return;
+const loadImpl = (): Promise<() => Promise<AuthUser | null>> =>
+  (implPromise ??= (
+    IS_CLOUD
+      ? import("@/ee/auth/cognito-server")
+      : import("@/lib/auth/auth-server-onprem")
+  ).then((m) => m.getServerSessionImpl));
 
-  const user = await db.user.upsert({
-    where: { externalAuthId: LOCAL_AUTH_ID },
-    create: {
-      externalAuthId: LOCAL_AUTH_ID,
-      email: LOCAL_USER.email,
-      name: LOCAL_USER.name,
-    },
-    update: {},
-    select: { id: true },
-  });
-
-  const existing = await findUserDefaultProject(user.id);
-  if (!existing) {
-    // Mirror the /v1/auth/session gate: onprem (single shared org) joins the one
-    // shared org — which also seeds the bootstrap org API key — while OSS keeps a
-    // per-user org. Without this, local auth always bootstraps the OSS way and the
-    // onprem org key is never seeded.
-    if (CAPS.tenancy === "single-org-shared") {
-      await joinSharedOrganization(user.id, LOCAL_USER.email);
-    } else {
-      await bootstrapOrganization(user.id, LOCAL_USER.email, LOCAL_USER.name);
-    }
-  }
-
-  localUserEnsured = true;
-};
-
-export const getServerSessionImpl = async (): Promise<AuthUser | null> => {
-  if (getAuthMode() === "local") {
-    await ensureLocalUser();
-    return LOCAL_USER;
-  }
-
-  const session = await auth();
-  if (!session?.user?.id || !session.user.email) return null;
-
-  return {
-    id: session.user.id,
-    email: session.user.email,
-    name: session.user.name ?? undefined,
-  };
-};
+export const getServerSessionImpl = async (): Promise<AuthUser | null> =>
+  (await loadImpl())();

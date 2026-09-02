@@ -165,7 +165,6 @@ export const supabase: AppDefinition = {
       return { credentials, scopes, metadata };
     },
   },
-  available: true,
   configurable: {
     hint: "Create an OAuth app in your Supabase organization settings.",
     fields: [

@@ -6,7 +6,7 @@ import type {
   ConnectionGrants,
 } from "./types";
 
-// The attach-model grants API (project scope only — org policy stays rules).
+// The attach-model grants API (workspace scope only — org policy stays rules).
 // Mutations publish atomically server-side; the audited routes also flush the
 // gateway cache, so callers never do either. Signatures are context-safe (no
 // positional param a queryFn context object could fill).

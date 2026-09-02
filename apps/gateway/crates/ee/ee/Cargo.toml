@@ -1,0 +1,49 @@
+[package]
+name = "ee"
+version = "0.0.0"
+edition = "2021"
+# THE LICENSED CRATE: everything in this crate is covered by the OneCLI
+# Enterprise License — see /LICENSE-ENTERPRISE at the repository root and the
+# LICENSE file in this directory. Nothing else in the workspace is.
+license = "LicenseRef-OneCLI-Enterprise"
+publish = false
+
+[dependencies]
+anyhow = { workspace = true }
+async-trait = { workspace = true }
+aws-config = { workspace = true }
+aws-sdk-kms = { workspace = true }
+axum = { workspace = true }
+base64 = { workspace = true }
+futures-util = { workspace = true }
+approval = { path = "../../approval" }
+apps = { path = "../../apps" }
+cache = { path = "../../cache" }
+common = { path = "../../common" }
+context = { path = "../../context" }
+crypto = { path = "../../crypto" }
+db = { path = "../../db" }
+inject = { path = "../../inject" }
+policy = { path = "../../policy" }
+shutdown = { path = "../../shutdown" }
+telemetry = { path = "../../telemetry" }
+http-body-util = { workspace = true }
+hyper = { workspace = true }
+jsonwebtoken = { workspace = true }
+percent-encoding = { workspace = true }
+redis = { workspace = true }
+reqwest = { workspace = true }
+ring = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sqlx = { workspace = true }
+time = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+# TEST-ONLY back-edge: the principal parity tests pin the licensed CTE against
+# the free direct-user twin that lives in the policy engine. A dev-dependency
+# keeps the PRODUCTION graph one-way (policy-engine -> ee), so no free crate
+# depends on licensed code to build.
+policy-engine = { path = "../../policy-engine" }

@@ -33,10 +33,14 @@ export interface ProvenanceRuleRef {
 
 export type EffectiveProvenance =
   | { kind: "rule"; scope: "organization"; redacted: true }
-  | { kind: "rule"; scope: "organization" | "project"; rule: ProvenanceRuleRef }
-  | { kind: "default"; scope: "organization" | "project" };
+  | {
+      kind: "rule";
+      scope: "organization" | "workspace";
+      rule: ProvenanceRuleRef;
+    }
+  | { kind: "default"; scope: "organization" | "workspace" };
 
-/** What the org level ALONE says about the tool — the ceiling the project can
+/** What the org level ALONE says about the tool — the ceiling the workspace can
  * tighten under but never loosen past. Null = the org is silent. */
 export type OrgCeilingVerdict = "allow" | "approval" | "block";
 
@@ -60,7 +64,7 @@ export interface EffectiveAppPermissionsResult {
   basis: {
     agentId: string | null;
     credentialAttached: boolean;
-    scope: "organization" | "project";
+    scope: "organization" | "workspace";
   };
   /** Identity-scoped provider-relevant rules the agent-less baseline can't
    * show (viewer-scoped). */
@@ -71,7 +75,7 @@ export interface EffectiveAppPermissionsResult {
    * explicit basis was given. */
   orgResources: GrantResources | null;
   /** What the credential actually reaches: the org boundary composed with the
-   * project's selection. An empty list = the two don't overlap, so it reaches
+   * workspace's selection. An empty list = the two don't overlap, so it reaches
    * nothing and every request is refused. */
   effectiveResources: GrantResources | null;
   groups: EffectiveToolGroupResult[];
@@ -83,7 +87,7 @@ export interface EffectiveAppPermissionsResult {
  * resources, rate limits). Also the shape behind the public CLI/SDK
  * effective-permissions surface. Takes an optional agent (omitted = the
  * agent-less baseline). Org-rule provenance arrives redacted for
- * non-org-admins. Project scope only — the org-scoped twin
+ * non-org-admins. Workspace scope only — the org-scoped twin
  * (`/v1/org/policy/effective-app-permissions`) serves the CLI/SDK and has no
  * web caller.
  */
@@ -130,7 +134,7 @@ export type CredentialProvenance =
   | { kind: "rule"; scope: "organization"; redacted: true }
   | {
       kind: "rule";
-      scope: "organization" | "project";
+      scope: "organization" | "workspace";
       rule: { logicalId: string; name: string };
     };
 
@@ -157,7 +161,7 @@ export type EffectiveCredentialEntry =
       provider: string;
       status: CredentialAccessStatus;
       /** The organization blocks every tool of this connection for this agent
-       * — a project admin cannot lift it, only the org can. */
+       * — a workspace admin cannot lift it, only the org can. */
       orgBlocked: boolean;
       provenance: CredentialProvenance[];
     };
@@ -171,7 +175,7 @@ export interface EffectiveCredentialsResult {
 }
 
 /** The Credential-access dialog's read-only reflection: which
- * credentials can inject for this agent (its published rule grants). Project
+ * credentials can inject for this agent (its published rule grants). Workspace
  * members; org-rule provenance arrives redacted for non-org-admins. */
 export const effectiveCredentials = (agentId: string) =>
   apiGet<EffectiveCredentialsResult>(
@@ -223,7 +227,7 @@ export interface EffectiveAgentsResult {
 
 /** The "agent access" dialog's read-only reflection: per-agent
  * credential status + the per-tool decisions rollup, from the ENFORCED rules.
- * Project members; org-rule provenance arrives redacted for non-org-admins. */
+ * Workspace members; org-rule provenance arrives redacted for non-org-admins. */
 export const effectiveAgents = (connectionId: string) =>
   apiGet<EffectiveAgentsResult>(
     `/v1/connections/${connectionId}/effective-agents`,

@@ -11,6 +11,7 @@ export type {
 export {
   mapRuleActionToPermission,
   allGroupTools,
+  hostPatternsOf,
   toAppPermissionDefinitionSummary,
 } from "./types";
 
@@ -51,6 +52,25 @@ import { linkedinPermissions } from "./linkedin";
 import { trelloPermissions } from "./trello";
 import { mondayPermissions } from "./monday";
 import { vercelPermissions } from "./vercel";
+import { affinityPermissions } from "./affinity";
+import { awsRolePermissions } from "./aws-role";
+import { datadogPermissions } from "./datadog";
+import { microsoftWordPermissions } from "./microsoft-word";
+import { microsoftOnenotePermissions } from "./microsoft-onenote";
+import { outlookCalendarPermissions } from "./outlook-calendar";
+import { outlookMailPermissions } from "./outlook-mail";
+import { zoomPermissions } from "./zoom";
+import { sentryPermissions } from "./sentry";
+import { granolaPermissions } from "./granola";
+import { hubspotPermissions } from "./hubspot";
+import { linearPermissions } from "./linear";
+import { attioPermissions } from "./attio";
+import { xPermissions } from "./x";
+import { fathomPermissions } from "./fathom";
+import { slackPermissions } from "./slack";
+import { firefliesPermissions } from "./fireflies";
+import { zohoCrmPermissions } from "./zoho-crm";
+import { snowflakePermissions } from "./snowflake";
 
 const permissionRegistry = new Map<string, AppPermissionDefinition>();
 
@@ -105,3 +125,22 @@ register(linkedinPermissions);
 register(trelloPermissions);
 register(mondayPermissions);
 register(vercelPermissions);
+register(affinityPermissions);
+register(awsRolePermissions);
+register(datadogPermissions);
+register(microsoftWordPermissions);
+register(microsoftOnenotePermissions);
+register(outlookCalendarPermissions);
+register(outlookMailPermissions);
+register(zoomPermissions);
+register(sentryPermissions);
+register(hubspotPermissions);
+register(granolaPermissions);
+register(linearPermissions);
+register(attioPermissions);
+register(xPermissions);
+register(fathomPermissions);
+register(slackPermissions);
+register(firefliesPermissions);
+register(zohoCrmPermissions);
+register(snowflakePermissions);

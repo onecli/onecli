@@ -70,7 +70,7 @@ export const dropbox: AppDefinition = {
     exchangeCode: async ({ appCredentials, callbackParams, redirectUri }) => {
       if (callbackParams.error) {
         throw new Error(
-          `Dropbox authorization error: ${callbackParams.error} — ${callbackParams.error_description ?? "no description"}`,
+          `Dropbox authorization error: ${callbackParams.error} (${callbackParams.error_description ?? "no description"})`,
         );
       }
 
@@ -161,7 +161,6 @@ export const dropbox: AppDefinition = {
       return { credentials, scopes, metadata };
     },
   },
-  available: true,
   configurable: {
     fields: [
       {

@@ -1,15 +1,18 @@
 import { Hono } from "hono";
 import { db } from "@onecli/db";
 import type { ApiEnv } from "../types";
-import { authMiddleware, requireProjectId } from "../middleware/auth";
+import { authMiddleware, requireWorkspaceId } from "../middleware/auth";
 import { parseOpenaiMetadata } from "../validations/secret";
 import { buildCodexOAuthStub, CODEX_APIKEY_STUB } from "../lib/codex-stubs";
 
-const resolveCodexStub = async (projectId: string, organizationId: string) => {
+const resolveCodexStub = async (
+  workspaceId: string,
+  organizationId: string,
+) => {
   const openaiSecrets = await db.secret.findMany({
     where: {
       type: "openai",
-      OR: [{ projectId }, { organizationId }],
+      OR: [{ workspaceId }, { organizationId }],
     },
     select: { metadata: true },
     take: 10,
@@ -45,7 +48,7 @@ export const credentialStubRoutes = () => {
     }
     const auth = c.get("auth");
     const stub = await resolveCodexStub(
-      requireProjectId(auth),
+      requireWorkspaceId(auth),
       auth.organizationId,
     );
     return c.json(stub);

@@ -113,7 +113,6 @@ export const todoist: AppDefinition = {
       return { credentials, scopes, metadata };
     },
   },
-  available: true,
   configurable: {
     fields: [
       {

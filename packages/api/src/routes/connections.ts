@@ -1,7 +1,7 @@
 import { Hono } from "hono";
 import { db } from "@onecli/db";
 import type { ApiEnv } from "../types";
-import { authMiddleware, requireProjectId } from "../middleware/auth";
+import { authMiddleware, requireWorkspaceId } from "../middleware/auth";
 import {
   listConnections,
   listConnectionsByProvider,
@@ -23,15 +23,15 @@ import {
 
 type Auth = ApiEnv["Variables"]["auth"];
 
-// Ownership: a project-scoped row in the caller's project, or an org-scoped
-// row in the caller's organization (project members may manage org rows via
-// the project surface — longstanding behavior).
+// Ownership: a workspace-scoped row in the caller's workspace, or an org-scoped
+// row in the caller's organization (workspace members may manage org rows via
+// the workspace surface — longstanding behavior).
 const findOwnedConnection = (auth: Auth, connectionId: string) =>
   db.appConnection.findFirst({
     where: {
       id: connectionId,
       OR: [
-        { projectId: requireProjectId(auth) },
+        { workspaceId: requireWorkspaceId(auth) },
         ...(auth.organizationId
           ? [{ organizationId: auth.organizationId }]
           : []),
@@ -56,13 +56,13 @@ export const disconnectOwnedConnection = async (
   const isOrg = connection.scope === "organization";
   const scope = isOrg
     ? { organizationId: auth.organizationId }
-    : { projectId: requireProjectId(auth) };
+    : { workspaceId: requireWorkspaceId(auth) };
   await withAudit(
     () => deleteConnection(scope, connectionId),
     () => ({
       ...(isOrg
         ? { organizationId: auth.organizationId }
-        : { projectId: requireProjectId(auth) }),
+        : { workspaceId: requireWorkspaceId(auth) }),
       userId: auth.userId,
       userEmail: auth.userEmail,
       action: AUDIT_ACTIONS.DISCONNECT,
@@ -84,7 +84,7 @@ export const disconnectOwnedConnection = async (
     // withAudit's flush ran before the blocklist cleanup — flush once more
     // so removed deny-rules can't linger in the gateway cache.
     if (isOrg) invalidateGatewayCacheForOrg(auth.organizationId);
-    else invalidateGatewayCacheForAccount(requireProjectId(auth));
+    else invalidateGatewayCacheForAccount(requireWorkspaceId(auth));
   }
 
   return true;
@@ -105,14 +105,14 @@ export const renameOwnedConnection = async (
   const isOrg = connection.scope === "organization";
   const scope = isOrg
     ? { organizationId: auth.organizationId }
-    : { projectId: requireProjectId(auth) };
+    : { workspaceId: requireWorkspaceId(auth) };
 
   return withAudit(
     () => updateConnectionLabel(scope, connectionId, label),
     () => ({
       ...(isOrg
         ? { organizationId: auth.organizationId }
-        : { projectId: requireProjectId(auth) }),
+        : { workspaceId: requireWorkspaceId(auth) }),
       userId: auth.userId,
       userEmail: auth.userEmail,
       action: AUDIT_ACTIONS.UPDATE,
@@ -138,7 +138,7 @@ export const connectionRoutes = () => {
     const auth = c.get("auth");
     const provider = c.req.query("provider");
     const scope = {
-      projectId: requireProjectId(auth),
+      workspaceId: requireWorkspaceId(auth),
       organizationId: auth.organizationId,
     };
     const connections = provider

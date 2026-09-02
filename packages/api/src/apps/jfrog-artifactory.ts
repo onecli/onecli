@@ -23,8 +23,8 @@ export const jfrogArtifactory: AppDefinition = {
       {
         name: "subdomain",
         label: "JFrog Host",
-        description: "Your JFrog host, e.g. nanos.jfrog.io",
-        placeholder: "nanos.jfrog.io",
+        description: "Your JFrog host, e.g. mycompany.jfrog.io",
+        placeholder: "mycompany.jfrog.io",
         secret: false,
       },
     ],
@@ -39,6 +39,5 @@ export const jfrogArtifactory: AppDefinition = {
     { id: "npm", name: "npm Registry", hostPattern: "registry.npmjs.org" },
     { id: "pypi", name: "PyPI", hostPattern: "pypi.org" },
   ],
-  labelHint: 'e.g. "nanos.jfrog.io"',
-  available: true,
+  labelHint: 'e.g. "mycompany.jfrog.io"',
 };

@@ -7,7 +7,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 // DECISIONS rollup rides the shared per-tool core, the fence mirrors
 // assertConnectionVisible (org-scoped rows visible, foreign orgs not), the
 // catalog-less axis is honestly absent, and the principal set resolves ONCE
-// per call however many agents (it is project-derived). The db is mocked at
+// per call however many agents (it is workspace-derived). The db is mocked at
 // the boundary; wheres are recorded and asserted.
 
 const state = vi.hoisted(() => ({
@@ -46,9 +46,9 @@ vi.mock("@onecli/db", () => {
   return {
     Prisma: {},
     db: {
-      project: model("project"),
+      workspace: model("workspace"),
       agent: model("agent"),
-      projectAccess: model("projectAccess"),
+      workspaceAccess: model("workspaceAccess"),
       group: model("group"),
       groupMember: model("groupMember"),
       organizationMember: model("organizationMember"),
@@ -74,8 +74,8 @@ beforeEach(() => {
 const simRow = (over: Partial<SimRuleRow>): SimRuleRow =>
   ({
     id: "r1",
-    scope: "project",
-    projectId: "p1",
+    scope: "workspace",
+    workspaceId: "p1",
     organizationId: null,
     status: "published",
     generation: 1,
@@ -130,7 +130,7 @@ const targetRow = (
   }) as SimRuleRow["targets"][number];
 
 const CTX = {
-  projectId: "p1",
+  workspaceId: "p1",
   organizationId: "org-1",
   viewerSeesOrgRules: true,
 };
@@ -138,16 +138,16 @@ const CTX = {
 const GMAIL_CONNECTION = {
   id: "conn-1",
   provider: "gmail",
-  scope: "project",
+  scope: "workspace",
 };
 
 const armStubs = (opts: {
   connection?: { id: string; provider: string; scope: string } | null;
   agents?: { id: string; name: string }[];
   orgRows?: SimRuleRow[];
-  projectRows?: SimRuleRow[];
+  workspaceRows?: SimRuleRow[];
 }) => {
-  state.results.set("project.findUnique", { organizationId: "org-1" });
+  state.results.set("workspace.findUnique", { organizationId: "org-1" });
   state.results.set(
     "appConnection.findFirst",
     opts.connection !== undefined ? opts.connection : GMAIL_CONNECTION,
@@ -166,7 +166,7 @@ const armStubs = (opts: {
     const rows =
       where.scope === "organization"
         ? (opts.orgRows ?? [])
-        : (opts.projectRows ?? []);
+        : (opts.workspaceRows ?? []);
     const excluded = where.source?.not;
     return rows.filter(
       (r: { source?: string }) =>
@@ -190,7 +190,7 @@ describe("the credential axis (the old dialog's meaning)", () => {
         { id: "a-equipped", name: "Equipped" },
         { id: "a-none", name: "None" },
       ],
-      projectRows: [
+      workspaceRows: [
         simRow({
           logicalId: "equip",
           name: "Gmail",
@@ -213,7 +213,7 @@ describe("the credential axis (the old dialog's meaning)", () => {
           provenance: [
             {
               kind: "rule",
-              scope: "project",
+              scope: "workspace",
               rule: { logicalId: "equip", name: "Gmail" },
             },
           ],
@@ -229,7 +229,7 @@ describe("the credential axis (the old dialog's meaning)", () => {
         { id: "a-granted", name: "Granted" },
         { id: "a-other", name: "Other" },
       ],
-      projectRows: [
+      workspaceRows: [
         simRow({
           logicalId: "grant",
           name: "Gmail for granted",
@@ -263,7 +263,7 @@ describe("the credential axis (the old dialog's meaning)", () => {
       provenance: [
         {
           kind: "rule",
-          scope: "project",
+          scope: "workspace",
           rule: { logicalId: "grant", name: "Gmail for granted" },
         },
       ],
@@ -274,20 +274,20 @@ describe("the credential axis (the old dialog's meaning)", () => {
   it("viaRule for an app+connectionScope pool grant matching provider AND level; mismatches don't grant", async () => {
     armStubs({
       agents: [{ id: "a-1", name: "A" }],
-      projectRows: [
+      workspaceRows: [
         simRow({
           logicalId: "pool",
-          name: "Gmail project pool",
+          name: "Gmail workspace pool",
           identities: [identityRow({ agentId: "a-1" })],
           targets: [
             targetRow({
               kind: "app",
               appProvider: "gmail",
-              appConnectionScope: "project",
+              appConnectionScope: "workspace",
             }),
           ],
         }),
-        // Wrong level (org pool, project connection) — no grant.
+        // Wrong level (org pool, workspace connection) — no grant.
         simRow({
           id: "r2",
           logicalId: "wrong-level",
@@ -313,7 +313,7 @@ describe("the credential axis (the old dialog's meaning)", () => {
               id: "t3",
               kind: "app",
               appProvider: "slack",
-              appConnectionScope: "project",
+              appConnectionScope: "workspace",
             }),
           ],
         }),
@@ -335,8 +335,8 @@ describe("the credential axis (the old dialog's meaning)", () => {
       provenance: [
         {
           kind: "rule",
-          scope: "project",
-          rule: { logicalId: "pool", name: "Gmail project pool" },
+          scope: "workspace",
+          rule: { logicalId: "pool", name: "Gmail workspace pool" },
         },
       ],
     });
@@ -352,7 +352,7 @@ describe("the decisions rollup", () => {
         { id: "agent-1", name: "Free" },
         { id: "agent-2", name: "Blocked" },
       ],
-      projectRows: [
+      workspaceRows: [
         simRow({
           logicalId: "block-2",
           name: "Block agent-2 gmail",
@@ -386,10 +386,10 @@ describe("the decisions rollup", () => {
       connection: {
         id: "conn-x",
         provider: "no-catalog-app",
-        scope: "project",
+        scope: "workspace",
       },
       agents: [{ id: "a-1", name: "A" }],
-      projectRows: [
+      workspaceRows: [
         simRow({
           logicalId: "grant-x",
           name: "Grant conn-x",
@@ -417,7 +417,7 @@ describe("the effective-access headline (the user decision)", () => {
         { id: "a-blocked", name: "Blocked" },
         { id: "a-none", name: "Unattached" },
       ],
-      projectRows: [
+      workspaceRows: [
         simRow({
           logicalId: "grant-usable",
           name: "Grant Free",
@@ -465,10 +465,10 @@ describe("the effective-access headline (the user decision)", () => {
       connection: {
         id: "conn-x",
         provider: "no-catalog-app",
-        scope: "project",
+        scope: "workspace",
       },
       agents: [{ id: "a-1", name: "A" }],
-      projectRows: [
+      workspaceRows: [
         simRow({
           logicalId: "grant-x",
           name: "Grant conn-x",
@@ -488,7 +488,7 @@ describe("the effective-access headline (the user decision)", () => {
     // freely usable. The shared rollupToolStatus must say "limited".
     armStubs({
       agents: [{ id: "a-1", name: "A" }],
-      projectRows: [
+      workspaceRows: [
         simRow({
           logicalId: "grant-1",
           name: "Grant conn-1",
@@ -526,7 +526,7 @@ describe("fencing", () => {
     expect((fence?.args as { where: unknown }).where).toEqual({
       id: "foreign-conn",
       OR: [
-        { projectId: "p1" },
+        { workspaceId: "p1" },
         { organizationId: "org-1", scope: "organization" },
       ],
     });
@@ -544,7 +544,7 @@ describe("fencing", () => {
 });
 
 describe("batching", () => {
-  it("resolves the principal set with ONE ProjectAccess read, however many agents", async () => {
+  it("resolves the principal set with ONE WorkspaceAccess read, however many agents", async () => {
     armStubs({
       agents: [
         { id: "a-1", name: "A" },
@@ -555,9 +555,9 @@ describe("batching", () => {
 
     await effectiveAgents("conn-1", CTX);
 
-    expect(state.calls.filter((c) => c.model === "projectAccess")).toHaveLength(
-      1,
-    );
+    expect(
+      state.calls.filter((c) => c.model === "workspaceAccess"),
+    ).toHaveLength(1);
   });
 });
 
@@ -571,7 +571,7 @@ describe("redaction", () => {
         simRow({
           id: "o1",
           scope: "organization",
-          projectId: null,
+          workspaceId: null,
           organizationId: "org-1",
           logicalId: "org-a",
           name: BAIT,
@@ -583,7 +583,7 @@ describe("redaction", () => {
         simRow({
           id: "o2",
           scope: "organization",
-          projectId: null,
+          workspaceId: null,
           organizationId: "org-1",
           logicalId: "org-b",
           name: `${BAIT}-2`,
@@ -621,7 +621,7 @@ describe("redaction", () => {
         simRow({
           id: "o1",
           scope: "organization",
-          projectId: null,
+          workspaceId: null,
           organizationId: "org-1",
           logicalId: "org-a",
           name: BAIT,

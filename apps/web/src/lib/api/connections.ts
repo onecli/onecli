@@ -5,17 +5,17 @@ import type { Connection } from "./types";
 const connectionsPath = (scope: PageScope) =>
   scope === "organization" ? "/v1/org/connections" : "/v1/connections";
 
-export const list = (scope: PageScope = "project") =>
+export const list = (scope: PageScope = "workspace") =>
   apiGet<Connection[]>(connectionsPath(scope));
 
 export const rename = (
   id: string,
   label: string,
-  scope: PageScope = "project",
+  scope: PageScope = "workspace",
 ) =>
   apiPatch<{ id: string; label: string }>(`${connectionsPath(scope)}/${id}`, {
     label,
   });
 
-export const disconnect = (id: string, scope: PageScope = "project") =>
+export const disconnect = (id: string, scope: PageScope = "workspace") =>
   apiDelete(`${connectionsPath(scope)}/${id}`);

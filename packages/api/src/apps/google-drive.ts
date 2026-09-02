@@ -49,7 +49,6 @@ export const googleDrive: AppDefinition = {
     buildAuthUrl: buildGoogleAuthUrl,
     exchangeCode: exchangeGoogleCode,
   },
-  available: true,
   configurable: {
     fields: googleConfigFields,
     envDefaults: googleEnvDefaults,

@@ -128,7 +128,7 @@ export const reconnectConnection = async (
 
 /**
  * Record which AppConfig minted a connection, after the fact — used by the
- * credentials-import path, where the project config row is saved only after the
+ * credentials-import path, where the workspace config row is saved only after the
  * connection is created. Scope-guarded so it can only touch the caller's own row.
  */
 export const linkConnectionToAppConfig = async (

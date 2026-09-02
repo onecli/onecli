@@ -1,0 +1,35 @@
+[package]
+name = "server"
+version = "0.0.0"
+edition = "2021"
+license = "Apache-2.0"
+publish = false
+
+[dependencies]
+anyhow = { workspace = true }
+async-trait = { workspace = true }
+axum = { workspace = true }
+approval = { path = "../approval" }
+apps = { path = "../apps" }
+ca = { path = "../ca" }
+cache = { path = "../cache" }
+common = { path = "../common" }
+context = { path = "../context" }
+db = { path = "../db" }
+ee = { path = "../ee/ee" }
+inject = { path = "../inject" }
+proxy = { path = "../proxy" }
+shutdown = { path = "../shutdown" }
+vault = { path = "../vault" }
+hyper = { workspace = true }
+hyper-util = { workspace = true }
+reqwest = { workspace = true }
+rustls = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+tokio-rustls = { workspace = true }
+tower = { workspace = true }
+tower-http = { workspace = true }
+tracing = { workspace = true }
+webpki-roots = { workspace = true }

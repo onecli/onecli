@@ -1,6 +1,6 @@
 import { db, Prisma } from "@onecli/db";
 import { ServiceError } from "./errors";
-import { isOssEdition } from "../lib/policy-flags";
+import { isOnpremEdition } from "../lib/policy-flags";
 import { type ResourceScope } from "./resource-scope";
 import { getPolicyValidator, getRuleActionGate } from "../providers";
 import type {
@@ -65,13 +65,13 @@ export type PolicyTargetDto =
       kind: "app";
       provider: string;
       tools: string[];
-      connectionScope: "organization" | "project" | null;
+      connectionScope: "organization" | "workspace" | null;
     }
   | { kind: "connection"; connectionId: string; tools: string[] }
   | {
       kind: "secret";
       secretId: string | null;
-      secretScope: "organization" | "project" | null;
+      secretScope: "organization" | "workspace" | null;
     }
   | {
       kind: "network";
@@ -80,8 +80,8 @@ export type PolicyTargetDto =
       method: string | null;
     };
 
-// A rule is scoped to exactly one of org/project (mirrors the scope_shape CHECK);
-// the routes always pass exactly one, so partner scope never reaches here.
+// A rule is scoped to exactly one of org/workspace (mirrors the scope_shape CHECK);
+// the routes always pass exactly one.
 export const policyScope = (scope: ResourceScope) => {
   if (scope.organizationId) {
     return {
@@ -89,19 +89,19 @@ export const policyScope = (scope: ResourceScope) => {
       organizationId: scope.organizationId,
     };
   }
-  if (scope.projectId) {
-    return { scope: "project" as const, projectId: scope.projectId };
+  if (scope.workspaceId) {
+    return { scope: "workspace" as const, workspaceId: scope.workspaceId };
   }
   throw new ServiceError(
     "BAD_REQUEST",
-    "A policy scope requires a project or organization.",
+    "A policy scope requires a workspace or organization.",
   );
 };
 
 export type PolicyScopeBase = ReturnType<typeof policyScope>;
 
 const scopeKeyOf = (base: PolicyScopeBase) =>
-  base.scope === "organization" ? base.organizationId : base.projectId;
+  base.scope === "organization" ? base.organizationId : base.workspaceId;
 
 // Serialize per-scope publish/default mutations so concurrent callers can't
 // double-create a generation or a second Default Rule. (A partial-unique index
@@ -132,7 +132,7 @@ const toTargetDto = (row: RuleRow["targets"][number]): PolicyTargetDto => {
         tools: row.appTools,
         connectionScope:
           row.appConnectionScope === "organization" ||
-          row.appConnectionScope === "project"
+          row.appConnectionScope === "workspace"
             ? row.appConnectionScope
             : null,
       };
@@ -145,7 +145,10 @@ const toTargetDto = (row: RuleRow["targets"][number]): PolicyTargetDto => {
       };
     case "secret":
       // A secret target names EITHER a specific secret OR "all secrets at a level".
-      if (row.secretScope === "organization" || row.secretScope === "project") {
+      if (
+        row.secretScope === "organization" ||
+        row.secretScope === "workspace"
+      ) {
         return { kind: "secret", secretId: null, secretScope: row.secretScope };
       }
       if (!row.secretId) throw new Error("secret target missing id or scope");
@@ -298,22 +301,35 @@ const hasDirectoryIdentity = (
   identities: PolicyIdentityInput[] | undefined,
 ): boolean => (identities ?? []).some((i) => i.type !== "agent");
 
+// True only for GROUP identities — the self-host license splits the directory
+// arm: rules targeting individual users are free, group targeting is licensed.
+// Cloud keeps gating both through "identity_directory" (its plan dial).
+const hasGroupIdentity = (
+  identities: PolicyIdentityInput[] | undefined,
+): boolean => (identities ?? []).some((i) => i.type === "group");
+
 export const rowHasDirectoryIdentity = (rows: RuleRow["identities"]): boolean =>
   rows.some((i) => i.userId != null || i.groupId != null);
+
+export const rowHasGroupIdentity = (rows: RuleRow["identities"]): boolean =>
+  rows.some((i) => i.groupId != null);
 
 // The paid-plan gate keys off the modifiers + directory identities, reusing the
 // existing RuleActionGate (requireApproval → "manual_approval" [team], rateLimit
 // → "rate_limit" [pro], a directory identity → "identity_directory" → "groups"
-// [enterprise]).
+// [enterprise]; a group identity additionally → "identity_directory_group",
+// the action the self-host entitlement gate keys on).
 export const gatedActions = (rule: {
   rateLimit?: number | null;
   requireApproval?: boolean | null;
   hasDirectoryIdentity?: boolean;
+  hasGroupIdentity?: boolean;
 }): string[] => {
   const actions: string[] = [];
   if (rule.requireApproval) actions.push("manual_approval");
   if (rule.rateLimit != null) actions.push("rate_limit");
   if (rule.hasDirectoryIdentity) actions.push("identity_directory");
+  if (rule.hasGroupIdentity) actions.push("identity_directory_group");
   return actions;
 };
 
@@ -343,9 +359,9 @@ const asReferenceError = (err: unknown): never => {
 };
 
 // Validate a rule's identities before write: (1) the LEVEL restriction — a
-// PROJECT rule targets a specific agent or "any"; an ORG rule targets a user /
+// WORKSPACE rule targets a specific agent or "any"; an ORG rule targets a user /
 // user-group or "any"; and (2) OWNERSHIP — every referenced
-// principal must belong to the acting org (agents to the acting project). The
+// principal must belong to the acting org (agents to the acting workspace). The
 // ownership check is a security invariant that closes the IDOR gap
 // `asReferenceError` alone leaves open (it only proves existence, in any org).
 // Reads the shared schema only (no `ee/` dependency), so it runs in every
@@ -363,32 +379,32 @@ export const assertIdentitiesValid = async (
   const userIds = idsOf("user");
   const groupIds = idsOf("group");
 
-  // Level restriction. The OSS edition phrases it as the capability lock it
+  // Level restriction. The onprem edition phrases it as the capability lock it
   // is there (directory identities are a OneCLI Cloud capability); the EE
   // editions keep the scope-shaped message byte-identical.
-  if (base.scope === "project" && (userIds.length || groupIds.length)) {
+  if (base.scope === "workspace" && (userIds.length || groupIds.length)) {
     throw new ServiceError(
       "UNPROCESSABLE",
-      isOssEdition()
+      isOnpremEdition()
         ? "Group and user identities are available on OneCLI Cloud."
-        : "A project rule can target a specific agent or all agents.",
+        : "A workspace rule can target a specific agent or all agents.",
     );
   }
   if (base.scope === "organization" && agentIds.length) {
     throw new ServiceError(
       "UNPROCESSABLE",
-      "An organization rule targets users or user-groups — not a specific agent.",
+      "An organization rule targets users or user-groups, not a specific agent.",
     );
   }
 
   // Ownership — resolve the acting org (agents are additionally scoped to the
-  // acting project).
+  // acting workspace).
   const organizationId =
     base.scope === "organization"
       ? base.organizationId
       : (
-          await db.project.findUnique({
-            where: { id: base.projectId },
+          await db.workspace.findUnique({
+            where: { id: base.workspaceId },
             select: { organizationId: true },
           })
         )?.organizationId;
@@ -398,7 +414,7 @@ export const assertIdentitiesValid = async (
       "Could not resolve the acting organization.",
     );
   }
-  const projectId = base.scope === "project" ? base.projectId : null;
+  const workspaceId = base.scope === "workspace" ? base.workspaceId : null;
 
   const orgReferenceError = (): never => {
     throw new ServiceError(
@@ -417,7 +433,9 @@ export const assertIdentitiesValid = async (
       db.agent.count({
         where: {
           id: { in: agentIds },
-          ...(projectId ? { projectId } : { project: { organizationId } }),
+          ...(workspaceId
+            ? { workspaceId }
+            : { workspace: { organizationId } }),
         },
       }),
     ),
@@ -440,8 +458,8 @@ export const assertIdentitiesValid = async (
 };
 
 // Validate a rule's connection/secret TARGET references before write: every
-// referenced connection / secret must belong to the acting org — a PROJECT rule
-// may name its own project's resources or org-level ones (mirrors the equipment
+// referenced connection / secret must belong to the acting org — a WORKSPACE rule
+// may name its own workspace's resources or org-level ones (mirrors the equipment
 // reference check in `agent-service`); an ORG rule may name org-level resources
 // only. This is the same OWNERSHIP invariant `assertIdentitiesValid` enforces for
 // identities, and it closes the IDOR gap `asReferenceError` leaves open (it only
@@ -468,11 +486,11 @@ export const assertTargetsValid = async (
   }
 
   // Level restriction for an "all resources at a level" target (step 8): a
-  // PROJECT rule can only scope to its OWN project — it can't reach org-level
-  // connections/secrets. An ORG rule may scope to `organization` OR `project`
+  // WORKSPACE rule can only scope to its OWN workspace — it can't reach org-level
+  // connections/secrets. An ORG rule may scope to `organization` OR `workspace`
   // (the level-spanning guardrail that lets each agent use its own resources).
   if (
-    base.scope === "project" &&
+    base.scope === "workspace" &&
     targets.some(
       (t) =>
         (t.kind === "app" && t.connectionScope === "organization") ||
@@ -481,7 +499,7 @@ export const assertTargetsValid = async (
   ) {
     throw new ServiceError(
       "UNPROCESSABLE",
-      "A project rule's target can't scope to organization-level resources.",
+      "A workspace rule's target can't scope to organization-level resources.",
     );
   }
 
@@ -501,15 +519,15 @@ export const assertTargetsValid = async (
   ];
   if (connectionIds.length === 0 && secretIds.length === 0) return;
 
-  // Resolve the acting org (a project rule's resources are additionally scoped to
-  // its own project; an org rule's to org-level resources) — same as the identity
+  // Resolve the acting org (a workspace rule's resources are additionally scoped to
+  // its own workspace; an org rule's to org-level resources) — same as the identity
   // ownership check.
   const organizationId =
     base.scope === "organization"
       ? base.organizationId
       : (
-          await db.project.findUnique({
-            where: { id: base.projectId },
+          await db.workspace.findUnique({
+            where: { id: base.workspaceId },
             select: { organizationId: true },
           })
         )?.organizationId;
@@ -519,15 +537,15 @@ export const assertTargetsValid = async (
       "Could not resolve the acting organization.",
     );
   }
-  const projectId = base.scope === "project" ? base.projectId : null;
+  const workspaceId = base.scope === "workspace" ? base.workspaceId : null;
 
-  // The resources this rule may reference: a PROJECT rule may name ONLY its own
-  // project's resources — org-level connections/secrets are governed at the org
-  // level (an org rule grants them; a project rule can't reach up to reference
+  // The resources this rule may reference: a WORKSPACE rule may name ONLY its own
+  // workspace's resources — org-level connections/secrets are governed at the org
+  // level (an org rule grants them; a workspace rule can't reach up to reference
   // one). An ORG rule names org-level resources. Fences on the acting org either
   // way — a foreign id is simply absent from the count.
-  const ownerScope = projectId
-    ? { projectId }
+  const ownerScope = workspaceId
+    ? { workspaceId }
     : { organizationId, scope: "organization" as const };
 
   const targetReferenceError = (): never => {
@@ -607,8 +625,8 @@ export const assertSessionPolicyValid = async (
     base.scope === "organization"
       ? base.organizationId
       : (
-          await db.project.findUnique({
-            where: { id: base.projectId },
+          await db.workspace.findUnique({
+            where: { id: base.workspaceId },
             select: { organizationId: true },
           })
         )?.organizationId;
@@ -619,8 +637,8 @@ export const assertSessionPolicyValid = async (
     );
   }
   const ownerScope =
-    base.scope === "project"
-      ? { projectId: base.projectId }
+    base.scope === "workspace"
+      ? { workspaceId: base.workspaceId }
       : { organizationId, scope: "organization" as const };
   const conns = await db.appConnection.findMany({
     where: { id: { in: connectionIds }, ...ownerScope },
@@ -708,6 +726,7 @@ export const createPolicyRule = async (
       rateLimit: input.rateLimit,
       requireApproval: input.requireApproval,
       hasDirectoryIdentity: hasDirectoryIdentity(input.identities),
+      hasGroupIdentity: hasGroupIdentity(input.identities),
     }),
   );
   try {
@@ -851,6 +870,7 @@ export const updatePolicyRule = async (
       rateLimit: input.rateLimit,
       requireApproval: input.requireApproval,
       hasDirectoryIdentity: hasDirectoryIdentity(input.identities),
+      hasGroupIdentity: hasGroupIdentity(input.identities),
     }),
   );
 
@@ -950,7 +970,7 @@ export const reorderPolicyRules = async (
       if (!namesEveryRuleOnce) {
         throw new ServiceError(
           "CONFLICT",
-          "Rule set changed — refresh and try again.",
+          "Rule set changed. Refresh and try again.",
         );
       }
       // Ascending: index 0 → priority 1 (lowest = evaluated first / wins).
@@ -970,7 +990,7 @@ export const reorderPolicyRules = async (
     ) {
       throw new ServiceError(
         "CONFLICT",
-        "Rule set changed — refresh and try again.",
+        "Rule set changed. Refresh and try again.",
       );
     }
     throw err;
@@ -1176,6 +1196,7 @@ export const publishPolicy = async (
             rateLimit: r.rateLimit,
             requireApproval: r.requireApproval,
             hasDirectoryIdentity: rowHasDirectoryIdentity(r.identities),
+            hasGroupIdentity: rowHasGroupIdentity(r.identities),
           }),
         ),
       ),
@@ -1225,7 +1246,7 @@ export type BackfillTargetInput =
       kind: "app";
       provider: string;
       tools: string[];
-      connectionScope: "organization" | "project" | null;
+      connectionScope: "organization" | "workspace" | null;
     }
   | { kind: "connection"; connectionId: string; tools: string[] }
   | { kind: "secret"; secretId: string };
@@ -1354,7 +1375,7 @@ export const backfillPublishScope = async (
           },
         });
       }
-      // An empty scope (e.g. a ruleless project — the common case) publishes
+      // An empty scope (e.g. a ruleless workspace — the common case) publishes
       // nothing; report generation null so the verifier treats it as vacuously OK
       // rather than "not backfilled".
       return {

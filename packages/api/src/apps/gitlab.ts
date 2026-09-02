@@ -123,7 +123,6 @@ export const gitlab: AppDefinition = {
       return { credentials, scopes, metadata };
     },
   },
-  available: true,
   configurable: {
     hint: "Create an OAuth application under GitLab User Settings > Applications.",
     fields: [

@@ -20,7 +20,7 @@ export const useCreateDomain = () => {
     mutationFn: (domain: string) => domains.create(domain),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: queryKeys.domains.all() });
-      toast.success("Domain added — publish the TXT record to verify it");
+      toast.success("Domain added. Publish the TXT record to verify it");
     },
     // Surface the server reason (blocklist, already claimed, invalid shape).
     onError: (err) => toast.error(err.message),

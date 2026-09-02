@@ -37,7 +37,7 @@ let svc: Service;
 
 const P = "blproof-";
 const ORG = `${P}org`;
-const PROJECT = `${P}proj`;
+const WORKSPACE = `${P}proj`;
 const FENCE = `${P}fence`;
 
 const NPM = {
@@ -49,15 +49,15 @@ const PYPI = { id: "pypi", name: "PyPI", hostPattern: "pypi.org" };
 const HOSTS = [NPM, PYPI];
 
 /** The gateway's own read: published, live generation, enabled only. */
-const enforcedHosts = async (projectId: string): Promise<string[]> => {
+const enforcedHosts = async (workspaceId: string): Promise<string[]> => {
   const live = await db.policyRuleV2.aggregate({
-    where: { scope: "project", projectId, status: "published" },
+    where: { scope: "workspace", workspaceId, status: "published" },
     _max: { generation: true },
   });
   const rows = await db.policyRuleV2.findMany({
     where: {
-      scope: "project",
-      projectId,
+      scope: "workspace",
+      workspaceId,
       status: "published",
       enabled: true,
       generation: live._max.generation ?? -1,
@@ -71,22 +71,22 @@ const enforcedHosts = async (projectId: string): Promise<string[]> => {
     .filter(Boolean);
 };
 
-const orderedRules = async (projectId: string, status: string) => {
+const orderedRules = async (workspaceId: string, status: string) => {
   const where =
     status === "published"
       ? {
-          scope: "project" as const,
-          projectId,
+          scope: "workspace" as const,
+          workspaceId,
           status,
           generation:
             (
               await db.policyRuleV2.aggregate({
-                where: { scope: "project", projectId, status: "published" },
+                where: { scope: "workspace", workspaceId, status: "published" },
                 _max: { generation: true },
               })
             )._max.generation ?? -1,
         }
-      : { scope: "project" as const, projectId, status };
+      : { scope: "workspace" as const, workspaceId, status };
   return db.policyRuleV2.findMany({
     where: { ...where, isDefault: false },
     select: { name: true, action: true, source: true, priority: true },
@@ -100,18 +100,18 @@ const reset = async () => {
   });
   await db.policyRuleV2.deleteMany({ where: { organizationId: ORG } });
   await db.policyRuleV2.deleteMany({
-    where: { projectId: { in: [PROJECT, FENCE] } },
+    where: { workspaceId: { in: [WORKSPACE, FENCE] } },
   });
-  await db.project.deleteMany({ where: { id: { in: [PROJECT, FENCE] } } });
+  await db.workspace.deleteMany({ where: { id: { in: [WORKSPACE, FENCE] } } });
   await db.organization.deleteMany({ where: { id: ORG } });
 };
 
-/** A project that has already published once — the normal state, since every new
+/** A workspace that has already published once — the normal state, since every new
  * scope is seeded with a published Default Rule. Carries one `allow` rule so the
  * block's placement (before anything looser) is observable. */
-const seedPublishedProject = async (projectId: string) => {
-  await db.project.create({
-    data: { id: projectId, name: projectId, organizationId: ORG },
+const seedPublishedWorkspace = async (workspaceId: string) => {
+  await db.workspace.create({
+    data: { id: workspaceId, name: workspaceId, organizationId: ORG },
   });
   for (const [status, generation] of [
     ["draft", 0],
@@ -119,8 +119,8 @@ const seedPublishedProject = async (projectId: string) => {
   ] as const) {
     await db.policyRuleV2.create({
       data: {
-        scope: "project",
-        projectId,
+        scope: "workspace",
+        workspaceId,
         status,
         generation,
         priority: 0,
@@ -133,14 +133,14 @@ const seedPublishedProject = async (projectId: string) => {
     });
     await db.policyRuleV2.create({
       data: {
-        scope: "project",
-        projectId,
+        scope: "workspace",
+        workspaceId,
         status,
         generation,
         priority: 1,
         isDefault: false,
         source: "custom",
-        logicalId: `${projectId}-allow`,
+        logicalId: `${workspaceId}-allow`,
         name: "Allow everything",
         action: "allow",
         requireApproval: false,
@@ -170,111 +170,127 @@ afterAll(async () => {
 beforeEach(async () => {
   if (!PROOF_URL) return;
   await db.policyRuleV2.deleteMany({
-    where: { projectId: { in: [PROJECT, FENCE] } },
+    where: { workspaceId: { in: [WORKSPACE, FENCE] } },
   });
-  await db.project.deleteMany({ where: { id: { in: [PROJECT, FENCE] } } });
-  await seedPublishedProject(PROJECT);
-  await seedPublishedProject(FENCE);
+  await db.workspace.deleteMany({ where: { id: { in: [WORKSPACE, FENCE] } } });
+  await seedPublishedWorkspace(WORKSPACE);
+  await seedPublishedWorkspace(FENCE);
 });
 
 describe.skipIf(!PROOF_URL)("app blocklist over real PostgreSQL", () => {
   it("a seeded block reaches the generation the gateway enforces", async () => {
-    await svc.initBlocklistDefaults({ projectId: PROJECT }, "jfrog", HOSTS);
+    await svc.initBlocklistDefaults({ workspaceId: WORKSPACE }, "jfrog", HOSTS);
 
     // THE regression: the rule must be in the LIVE PUBLISHED set, not just the
     // draft — a draft-only write is exactly the silent no-op this replaced.
-    await expect(enforcedHosts(PROJECT)).resolves.toEqual(
+    await expect(enforcedHosts(WORKSPACE)).resolves.toEqual(
       expect.arrayContaining([NPM.hostPattern, PYPI.hostPattern]),
     );
 
     // ...and in the draft too, so the next publish carries it forward instead of
     // dropping it.
-    const draft = await orderedRules(PROJECT, "draft");
+    const draft = await orderedRules(WORKSPACE, "draft");
     expect(draft.filter((r) => r.source === "blocklist")).toHaveLength(2);
   });
 
   it("places the block BEFORE looser rules in both sets", async () => {
-    await svc.initBlocklistDefaults({ projectId: PROJECT }, "jfrog", [NPM]);
+    await svc.initBlocklistDefaults({ workspaceId: WORKSPACE }, "jfrog", [NPM]);
     for (const status of ["draft", "published"]) {
-      const rules = await orderedRules(PROJECT, status);
+      const rules = await orderedRules(WORKSPACE, status);
       expect(rules.map((r) => r.action)).toEqual(["block", "allow"]);
       expect(rules[0]!.source).toBe("blocklist");
     }
   });
 
   it("toggling off stops enforcement in the live generation", async () => {
-    await svc.initBlocklistDefaults({ projectId: PROJECT }, "jfrog", [NPM]);
+    await svc.initBlocklistDefaults({ workspaceId: WORKSPACE }, "jfrog", [NPM]);
     const [state] = await svc.getBlocklistState(
-      { projectId: PROJECT },
+      { workspaceId: WORKSPACE },
       "jfrog",
       [NPM],
     );
     expect(state!.enabled).toBe(true);
 
     await svc.toggleBlocklistRule(
-      { projectId: PROJECT },
+      { workspaceId: WORKSPACE },
       state!.ruleId!,
       false,
     );
-    await expect(enforcedHosts(PROJECT)).resolves.not.toContain(
+    await expect(enforcedHosts(WORKSPACE)).resolves.not.toContain(
       NPM.hostPattern,
     );
 
-    await svc.toggleBlocklistRule({ projectId: PROJECT }, state!.ruleId!, true);
-    await expect(enforcedHosts(PROJECT)).resolves.toContain(NPM.hostPattern);
+    await svc.toggleBlocklistRule(
+      { workspaceId: WORKSPACE },
+      state!.ruleId!,
+      true,
+    );
+    await expect(enforcedHosts(WORKSPACE)).resolves.toContain(NPM.hostPattern);
   });
 
   it("removing the app's blocks clears both sets", async () => {
-    await svc.initBlocklistDefaults({ projectId: PROJECT }, "jfrog", HOSTS);
-    await svc.removeAllBlocklistRules({ projectId: PROJECT }, "jfrog", HOSTS);
+    await svc.initBlocklistDefaults({ workspaceId: WORKSPACE }, "jfrog", HOSTS);
+    await svc.removeAllBlocklistRules(
+      { workspaceId: WORKSPACE },
+      "jfrog",
+      HOSTS,
+    );
 
-    await expect(enforcedHosts(PROJECT)).resolves.toEqual([]);
-    const draft = await orderedRules(PROJECT, "draft");
+    await expect(enforcedHosts(WORKSPACE)).resolves.toEqual([]);
+    const draft = await orderedRules(WORKSPACE, "draft");
     expect(draft.filter((r) => r.source === "blocklist")).toHaveLength(0);
   });
 
   it("is idempotent and preserves a user's off-switch across re-seeds", async () => {
-    await svc.initBlocklistDefaults({ projectId: PROJECT }, "jfrog", HOSTS);
-    const [npm] = await svc.getBlocklistState({ projectId: PROJECT }, "jfrog", [
-      NPM,
-    ]);
-    await svc.toggleBlocklistRule({ projectId: PROJECT }, npm!.ruleId!, false);
+    await svc.initBlocklistDefaults({ workspaceId: WORKSPACE }, "jfrog", HOSTS);
+    const [npm] = await svc.getBlocklistState(
+      { workspaceId: WORKSPACE },
+      "jfrog",
+      [NPM],
+    );
+    await svc.toggleBlocklistRule(
+      { workspaceId: WORKSPACE },
+      npm!.ruleId!,
+      false,
+    );
 
     // Re-connecting the app must not silently re-enable a block the user turned
     // off, nor duplicate the rule.
-    await svc.initBlocklistDefaults({ projectId: PROJECT }, "jfrog", HOSTS);
-    const draft = await orderedRules(PROJECT, "draft");
+    await svc.initBlocklistDefaults({ workspaceId: WORKSPACE }, "jfrog", HOSTS);
+    const draft = await orderedRules(WORKSPACE, "draft");
     expect(draft.filter((r) => r.source === "blocklist")).toHaveLength(2);
-    await expect(enforcedHosts(PROJECT)).resolves.not.toContain(
+    await expect(enforcedHosts(WORKSPACE)).resolves.not.toContain(
       NPM.hostPattern,
     );
   });
 
-  it("fences to its own scope — another project's block is untouched", async () => {
-    await svc.initBlocklistDefaults({ projectId: PROJECT }, "jfrog", [NPM]);
-    await svc.initBlocklistDefaults({ projectId: FENCE }, "jfrog", [NPM]);
+  it("fences to its own scope — another workspace's block is untouched", async () => {
+    await svc.initBlocklistDefaults({ workspaceId: WORKSPACE }, "jfrog", [NPM]);
+    await svc.initBlocklistDefaults({ workspaceId: FENCE }, "jfrog", [NPM]);
 
     const [mine] = await svc.getBlocklistState(
-      { projectId: PROJECT },
+      { workspaceId: WORKSPACE },
       "jfrog",
       [NPM],
     );
-    // A rule id from another project must not resolve here.
+    // A rule id from another workspace must not resolve here.
     await expect(
-      svc.toggleBlocklistRule({ projectId: FENCE }, mine!.ruleId!, false),
+      svc.toggleBlocklistRule({ workspaceId: FENCE }, mine!.ruleId!, false),
     ).rejects.toMatchObject({ code: "NOT_FOUND" });
 
-    await svc.removeAllBlocklistRules({ projectId: PROJECT }, "jfrog", [NPM]);
+    await svc.removeAllBlocklistRules({ workspaceId: WORKSPACE }, "jfrog", [
+      NPM,
+    ]);
     await expect(enforcedHosts(FENCE)).resolves.toContain(NPM.hostPattern);
   });
 
-  it("shows an org-level block on the project page, locked and not toggleable", async () => {
-    // The project page passes BOTH ids; an org block applies to every project
+  it("shows an org-level block on the workspace page, locked and not toggleable", async () => {
+    // The workspace page passes BOTH ids; an org block applies to every workspace
     // under it, so it must surface there — and must not be editable from below.
     await svc.initBlocklistDefaults({ organizationId: ORG }, "jfrog", [NPM]);
 
     const [state] = await svc.getBlocklistState(
-      { projectId: PROJECT, organizationId: ORG },
+      { workspaceId: WORKSPACE, organizationId: ORG },
       "jfrog",
       [NPM],
     );
@@ -282,17 +298,23 @@ describe.skipIf(!PROOF_URL)("app blocklist over real PostgreSQL", () => {
 
     // The panel renders that row locked; the service refuses it anyway.
     await expect(
-      svc.toggleBlocklistRule({ projectId: PROJECT }, state!.ruleId!, false),
+      svc.toggleBlocklistRule(
+        { workspaceId: WORKSPACE },
+        state!.ruleId!,
+        false,
+      ),
     ).rejects.toMatchObject({ code: "NOT_FOUND" });
 
-    // ...and the project's own writes still land in the project.
-    await svc.initBlocklistDefaults({ projectId: PROJECT }, "jfrog", [PYPI]);
+    // ...and the workspace's own writes still land in the workspace.
+    await svc.initBlocklistDefaults({ workspaceId: WORKSPACE }, "jfrog", [
+      PYPI,
+    ]);
     const [, pypi] = await svc.getBlocklistState(
-      { projectId: PROJECT, organizationId: ORG },
+      { workspaceId: WORKSPACE, organizationId: ORG },
       "jfrog",
       [NPM, PYPI],
     );
-    expect(pypi).toMatchObject({ enabled: true, scope: "project" });
+    expect(pypi).toMatchObject({ enabled: true, scope: "workspace" });
 
     await svc.removeAllBlocklistRules({ organizationId: ORG }, "jfrog", [NPM]);
   });
@@ -301,14 +323,14 @@ describe.skipIf(!PROOF_URL)("app blocklist over real PostgreSQL", () => {
     // An unseeded scope enforces nothing at all, so a draft-only write is
     // consistent — and the first publish carries the block live.
     await db.policyRuleV2.deleteMany({
-      where: { projectId: PROJECT, status: "published" },
+      where: { workspaceId: WORKSPACE, status: "published" },
     });
-    await svc.initBlocklistDefaults({ projectId: PROJECT }, "jfrog", [NPM]);
+    await svc.initBlocklistDefaults({ workspaceId: WORKSPACE }, "jfrog", [NPM]);
 
-    const draft = await orderedRules(PROJECT, "draft");
+    const draft = await orderedRules(WORKSPACE, "draft");
     expect(draft.filter((r) => r.source === "blocklist")).toHaveLength(1);
     const published = await db.policyRuleV2.count({
-      where: { projectId: PROJECT, status: "published" },
+      where: { workspaceId: WORKSPACE, status: "published" },
     });
     expect(published).toBe(0);
   });

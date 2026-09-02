@@ -28,7 +28,7 @@ export interface BlocklistHostState {
   custom: boolean;
   name: string;
   hostPattern: string;
-  scope: "organization" | "project" | null;
+  scope: "organization" | "workspace" | null;
 }
 
 type BlocklistHost = { id: string; name: string; hostPattern: string };
@@ -138,19 +138,19 @@ const listDraftRules = async (base: PolicyScopeBase) =>
     },
   });
 
-/** The scope this caller OWNS — where its writes land. A project caller carries
+/** The scope this caller OWNS — where its writes land. A workspace caller carries
  * its organizationId too (for the inherited read below), so this can't use
  * `policyScope`, which resolves an org id first. */
 const ownScope = (scope: ResourceScope): PolicyScopeBase =>
-  scope.projectId
-    ? { scope: "project" as const, projectId: scope.projectId }
+  scope.workspaceId
+    ? { scope: "workspace" as const, workspaceId: scope.workspaceId }
     : policyScope(scope);
 
-/** The org scope a PROJECT caller also sees, read-only: an org-level block
- * applies to every project under it, and the panel shows it locked. Null at org
+/** The org scope a WORKSPACE caller also sees, read-only: an org-level block
+ * applies to every workspace under it, and the panel shows it locked. Null at org
  * scope (nothing above it) — mirrors the old `scopeWhere` OR. */
 const inheritedScope = (scope: ResourceScope): PolicyScopeBase | null =>
-  scope.projectId && scope.organizationId
+  scope.workspaceId && scope.organizationId
     ? { scope: "organization" as const, organizationId: scope.organizationId }
     : null;
 
@@ -205,10 +205,10 @@ export const getBlocklistState = async (
   const inherited = inheritedScope(scope);
   const byHost = new Map<
     string,
-    { id: string; enabled: boolean; scope: "organization" | "project" }
+    { id: string; enabled: boolean; scope: "organization" | "workspace" }
   >();
   // Own rules first, then the inherited org ones — an org-level block OVERRIDES
-  // the project's view of that host, because the project can't lift it.
+  // the workspace's view of that host, because the workspace can't lift it.
   for (const [from, rules] of [
     [base, await listDraftRules(base)] as const,
     ...(inherited
@@ -253,7 +253,7 @@ export const toggleBlocklistRule = async (
   ruleId: string,
   enabled: boolean,
 ): Promise<void> => {
-  // Writes stay in the caller's OWN scope: a project can't toggle an org-level
+  // Writes stay in the caller's OWN scope: a workspace can't toggle an org-level
   // block (the panel renders those locked), and `requireDraftRule` 404s it.
   const base = ownScope(scope);
   const rule = await requireDraftRule(base, ruleId);

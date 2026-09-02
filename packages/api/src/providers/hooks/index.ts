@@ -1,13 +1,10 @@
 export {
   type ResourceHooks,
-  initResourceHooks,
   getResourceHooks,
+  initResourceHooks,
 } from "./resource-hooks";
-export {
-  type ConnectionHooks,
-  initConnectionHooks,
-  getConnectionHooks,
-} from "./connection-hooks";
+export { type TeamHooks, getTeamHooks } from "./team-hooks";
+export { type ConnectionHooks, getConnectionHooks } from "./connection-hooks";
 export {
   type PolicyValidator,
   initPolicyValidator,
@@ -21,6 +18,5 @@ export {
 } from "./rule-action-gate";
 export {
   type NewOrgPolicySeeder,
-  initNewOrgPolicySeeder,
   getNewOrgPolicySeeder,
 } from "./new-org-policy-seeder";

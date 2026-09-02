@@ -168,12 +168,12 @@ describe("empty targets match nothing (Layer 1 fail-closed)", () => {
 // resolved host — permit on allow, block on block, like an `app` target — and
 // still injects at connect. The engine sees already-resolved host patterns (the
 // gateway resolves secret_id / secret_scope → hosts at connect). Verifies: the
-// specific + "all of the project's custom secrets" permit, the CHANGE-2 hard floor
-// (a project secret can't self-authorize past the org deny-default), strictest-wins
+// specific + "all of the workspace's custom secrets" permit, the CHANGE-2 hard floor
+// (a workspace secret can't self-authorize past the org deny-default), strictest-wins
 // (an org block beats it), and fail-closed on an unresolved secret.
 describe("secret targets permit their host (step 8)", () => {
   const rule = (
-    scope: "organization" | "project",
+    scope: "organization" | "workspace",
     action: "allow" | "block",
     isDefault: boolean,
     targets: NewTarget[],
@@ -207,10 +207,10 @@ describe("secret targets permit their host (step 8)", () => {
     isLlmHost: false,
   });
 
-  it("a project secret allow cannot self-authorize past the org deny-default (CHANGE 2)", () => {
+  it("a workspace secret allow cannot self-authorize past the org deny-default (CHANGE 2)", () => {
     const rules = [
       denyDefault,
-      rule("project", "allow", false, [secret("google.com")]),
+      rule("workspace", "allow", false, [secret("google.com")]),
     ];
     expect(canonical(evaluateNew(rules, req("google.com")))).toEqual({
       action: "block",
@@ -218,7 +218,7 @@ describe("secret targets permit their host (step 8)", () => {
     });
   });
 
-  it("an org 'all project secrets' allow permits a project secret's host", () => {
+  it("an org 'all workspace secrets' allow permits a workspace secret's host", () => {
     const rules = [
       rule("organization", "allow", false, [
         secret("google.com", "stripe.com"),
@@ -236,23 +236,23 @@ describe("secret targets permit their host (step 8)", () => {
     expect(evaluateNew(rules, req("google.com")).action).toBe("allow");
   });
 
-  it("an org block on the secret's host beats a project secret allow (strictest-wins)", () => {
+  it("an org block on the secret's host beats a workspace secret allow (strictest-wins)", () => {
     const rules = [
       rule("organization", "block", false, [secret("google.com")]),
-      rule("project", "allow", false, [secret("google.com")]),
+      rule("workspace", "allow", false, [secret("google.com")]),
     ];
     expect(evaluateNew(rules, req("google.com")).action).toBe("block");
   });
 
   it("an unresolved secret (empty hosts) matches nothing (fail-closed)", () => {
-    const rules = [denyDefault, rule("project", "allow", false, [secret()])];
+    const rules = [denyDefault, rule("workspace", "allow", false, [secret()])];
     expect(canonical(evaluateNew(rules, req("google.com")))).toEqual({
       action: "block",
       byDefault: true,
     });
   });
 
-  it("'all project secrets' permits only the project's secret hosts, not others", () => {
+  it("'all workspace secrets' permits only the workspace's secret hosts, not others", () => {
     const rules = [
       rule("organization", "allow", false, [
         secret("google.com", "stripe.com"),
@@ -275,7 +275,7 @@ describe("secret targets permit their host (step 8)", () => {
 // An unrewritten `connection` target stays inert (unresolved — fail-closed).
 describe("whole-app targets permit their provider's hosts", () => {
   const rule = (
-    scope: "organization" | "project",
+    scope: "organization" | "workspace",
     action: "allow" | "block",
     isDefault: boolean,
     targets: NewTarget[],
@@ -295,11 +295,11 @@ describe("whole-app targets permit their provider's hosts", () => {
   });
   const wholeApp = (
     provider: string,
-    connectionScope: "organization" | "project" | null = "project",
+    connectionScope: "organization" | "workspace" | null = "workspace",
   ): NewTarget => ({ kind: "app", provider, tools: [], connectionScope });
-  const denyDefault = (scope: "organization" | "project") =>
+  const denyDefault = (scope: "organization" | "workspace") =>
     rule(scope, "block", true, []);
-  const allowDefault = (scope: "organization" | "project") =>
+  const allowDefault = (scope: "organization" | "workspace") =>
     rule(scope, "allow", true, []);
   // A managed request (a credential would be injected → the defaults enforce).
   const req = (host: string, path = "/gmail/v1/messages"): PolicyRequest => ({
@@ -312,11 +312,11 @@ describe("whole-app targets permit their provider's hosts", () => {
     isLlmHost: false,
   });
 
-  it("the user-reported shape: a project 'allow gmail · all connections' permits gmail's host in allowlist mode", () => {
+  it("the user-reported shape: a workspace 'allow gmail · all connections' permits gmail's host in allowlist mode", () => {
     const rules = [
       allowDefault("organization"),
-      rule("project", "allow", false, [wholeApp("gmail")]),
-      denyDefault("project"),
+      rule("workspace", "allow", false, [wholeApp("gmail")]),
+      denyDefault("workspace"),
     ];
     expect(evaluateNew(rules, req("gmail.googleapis.com")).action).toBe(
       "allow",
@@ -326,8 +326,8 @@ describe("whole-app targets permit their provider's hosts", () => {
   it("the permit surface is exactly the provider's catalog hosts", () => {
     const rules = [
       allowDefault("organization"),
-      rule("project", "allow", false, [wholeApp("gmail")]),
-      denyDefault("project"),
+      rule("workspace", "allow", false, [wholeApp("gmail")]),
+      denyDefault("workspace"),
     ];
     expect(
       canonical(evaluateNew(rules, req("api.github.com", "/repos"))),
@@ -346,10 +346,10 @@ describe("whole-app targets permit their provider's hosts", () => {
     ).toBe("block");
   });
 
-  it("a project whole-app allow cannot self-authorize past the org deny-default (CHANGE 2)", () => {
+  it("a workspace whole-app allow cannot self-authorize past the org deny-default (CHANGE 2)", () => {
     const rules = [
       denyDefault("organization"),
-      rule("project", "allow", false, [wholeApp("gmail")]),
+      rule("workspace", "allow", false, [wholeApp("gmail")]),
     ];
     expect(canonical(evaluateNew(rules, req("gmail.googleapis.com")))).toEqual({
       action: "block",
@@ -361,8 +361,8 @@ describe("whole-app targets permit their provider's hosts", () => {
     for (const scope of [null, "organization"] as const) {
       const rules = [
         allowDefault("organization"),
-        rule("project", "allow", false, [wholeApp("gmail", scope)]),
-        denyDefault("project"),
+        rule("workspace", "allow", false, [wholeApp("gmail", scope)]),
+        denyDefault("workspace"),
       ];
       expect(evaluateNew(rules, req("gmail.googleapis.com")).action).toBe(
         "allow",
@@ -373,8 +373,8 @@ describe("whole-app targets permit their provider's hosts", () => {
   it("a catalog-less provider permits nothing (fail-closed)", () => {
     const rules = [
       allowDefault("organization"),
-      rule("project", "allow", false, [wholeApp("no_such_provider")]),
-      denyDefault("project"),
+      rule("workspace", "allow", false, [wholeApp("no_such_provider")]),
+      denyDefault("workspace"),
     ];
     expect(canonical(evaluateNew(rules, req("gmail.googleapis.com")))).toEqual({
       action: "block",
@@ -385,10 +385,10 @@ describe("whole-app targets permit their provider's hosts", () => {
   it("an unrewritten connection target stays inert (unresolved — fail-closed)", () => {
     const rules = [
       allowDefault("organization"),
-      rule("project", "allow", false, [
+      rule("workspace", "allow", false, [
         { kind: "connection", connectionId: "c-gone", tools: [] },
       ]),
-      denyDefault("project"),
+      denyDefault("workspace"),
     ];
     expect(canonical(evaluateNew(rules, req("gmail.googleapis.com")))).toEqual({
       action: "block",
@@ -407,8 +407,8 @@ describe("whole-app targets permit their provider's hosts", () => {
     };
     const rules = [
       allowDefault("organization"),
-      rule("project", "allow", false, [target]),
-      denyDefault("project"),
+      rule("workspace", "allow", false, [target]),
+      denyDefault("workspace"),
     ];
     expect(
       canonical(evaluateNew(rules, req("api.github.com", "/other/path"))),
@@ -423,12 +423,12 @@ describe("whole-app targets permit their provider's hosts", () => {
       kind: "app",
       provider: "github",
       tools: ["create_issue"],
-      connectionScope: "project",
+      connectionScope: "workspace",
     };
     const rules = [
       allowDefault("organization"),
-      rule("project", "allow", false, [target]),
-      denyDefault("project"),
+      rule("workspace", "allow", false, [target]),
+      denyDefault("workspace"),
     ];
     expect(
       canonical(evaluateNew(rules, req("api.github.com", "/other/path"))),
@@ -437,8 +437,8 @@ describe("whole-app targets permit their provider's hosts", () => {
       evaluateNew(
         [
           allowDefault("organization"),
-          rule("project", "allow", false, [target]),
-          denyDefault("project"),
+          rule("workspace", "allow", false, [target]),
+          denyDefault("workspace"),
         ],
         { ...req("api.github.com", "/repos/o/r/issues"), method: "POST" },
       ).action,
@@ -449,13 +449,13 @@ describe("whole-app targets permit their provider's hosts", () => {
     // Structurally orthogonal (toDecision never reads targets) — pinned so a
     // future target-aware modifier can't regress silently.
     const approval = {
-      ...rule("project", "allow", false, [wholeApp("gmail")]),
+      ...rule("workspace", "allow", false, [wholeApp("gmail")]),
       requireApproval: true,
     };
     const rules = [
       allowDefault("organization"),
       approval,
-      denyDefault("project"),
+      denyDefault("workspace"),
     ];
     expect(evaluateNew(rules, req("gmail.googleapis.com"))).toEqual({
       action: "allow",
@@ -469,12 +469,12 @@ describe("whole-app targets permit their provider's hosts", () => {
     const rules = [
       allowDefault("organization"),
       {
-        ...rule("project", "allow", false, [wholeApp("gmail")]),
+        ...rule("workspace", "allow", false, [wholeApp("gmail")]),
         conditions: [
           { target: "body", operator: "contains", value: "absent-token" },
         ],
       },
-      denyDefault("project"),
+      denyDefault("workspace"),
     ];
     expect(evaluateNew(rules, req("gmail.googleapis.com")).action).toBe(
       "allow",
@@ -483,10 +483,10 @@ describe("whole-app targets permit their provider's hosts", () => {
 });
 
 // Appended to the uniform-law coverage after review: the mutation-proven gap
-// (both levels matching + a project default Block) and the org-side-empty cell.
+// (both levels matching + a workspace default Block) and the org-side-empty cell.
 describe("uniform per-level default law — review-added cells", () => {
   const rule = (
-    scope: "organization" | "project",
+    scope: "organization" | "workspace",
     action: "allow" | "block",
     isDefault: boolean,
     path: string | null,
@@ -531,12 +531,12 @@ describe("uniform per-level default law — review-added cells", () => {
       rateLimit: 5,
       rateLimitWindow: "minute",
     };
-    const projectAllow = rule("project", "allow", false, "/api");
+    const workspaceAllow = rule("workspace", "allow", false, "/api");
     const withDefault = evaluateNew(
-      [orgRate, projectAllow, rule("project", "block", true, null)],
+      [orgRate, workspaceAllow, rule("workspace", "block", true, null)],
       req,
     );
-    const without = evaluateNew([orgRate, projectAllow], req);
+    const without = evaluateNew([orgRate, workspaceAllow], req);
     expect(withDefault).toEqual(without);
     expect(withDefault).toEqual({
       action: "allow",
@@ -545,8 +545,8 @@ describe("uniform per-level default law — review-added cells", () => {
     });
   });
 
-  it("a project default Block denies with no org side at all", () => {
-    expect(evaluateNew([rule("project", "block", true, null)], req)).toEqual({
+  it("a workspace default Block denies with no org side at all", () => {
+    expect(evaluateNew([rule("workspace", "block", true, null)], req)).toEqual({
       action: "block",
       byDefault: true,
     });

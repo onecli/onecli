@@ -184,6 +184,38 @@ dependencies = [
 ]
 
 [[package]]
+name = "approval"
+version = "0.0.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "common",
+ "dashmap",
+ "serde",
+ "serde_json",
+ "sqlx",
+ "summary",
+ "time",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "apps"
+version = "0.0.0"
+dependencies = [
+ "anyhow",
+ "base64",
+ "common",
+ "inject",
+ "jsonwebtoken",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "time",
+]
+
+[[package]]
 name = "arc-swap"
 version = "1.9.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -778,6 +810,34 @@ dependencies = [
 ]
 
 [[package]]
+name = "ca"
+version = "0.0.0"
+dependencies = [
+ "anyhow",
+ "base64",
+ "dashmap",
+ "rcgen",
+ "rustls 0.23.37",
+ "rustls-pemfile",
+ "tempfile",
+ "time",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "cache"
+version = "0.0.0"
+dependencies = [
+ "async-trait",
+ "dashmap",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "cc"
 version = "1.2.57"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -951,6 +1011,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "common"
+version = "0.0.0"
+dependencies = [
+ "axum",
+ "base64",
+ "serde_json",
+ "time",
+ "tracing",
+]
+
+[[package]]
 name = "concurrent-queue"
 version = "2.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -970,6 +1041,32 @@ name = "const-oid"
 version = "0.10.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a6ef517f0926dd24a1582492c791b6a4818a4d94e789a334894aa15b0d12f55c"
+
+[[package]]
+name = "context"
+version = "0.0.0"
+dependencies = [
+ "anyhow",
+ "approval",
+ "async-trait",
+ "axum",
+ "base64",
+ "ca",
+ "cache",
+ "common",
+ "crypto",
+ "db",
+ "futures-util",
+ "http-body-util",
+ "hyper 1.8.1",
+ "percent-encoding",
+ "reqwest",
+ "ring",
+ "sqlx",
+ "tokio-rustls 0.26.4",
+ "tracing",
+ "vault",
+]
 
 [[package]]
 name = "core-foundation"
@@ -1050,6 +1147,17 @@ name = "crunchy"
 version = "0.2.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "460fbee9c2c2f33933d720630a6a0bac33ba7053db5344fac858d4b8952d77d5"
+
+[[package]]
+name = "crypto"
+version = "0.0.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "base64",
+ "ring",
+ "tokio",
+]
 
 [[package]]
 name = "crypto-common"
@@ -1154,6 +1262,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d7a1e2f27636f116493b8b860f5546edb47c8d8f8ea73e1d2a20be88e28d1fea"
 
 [[package]]
+name = "db"
+version = "0.0.0"
+dependencies = [
+ "anyhow",
+ "serde",
+ "serde_json",
+ "sqlx",
+]
+
+[[package]]
 name = "der"
 version = "0.7.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1250,6 +1368,44 @@ dependencies = [
  "sha2",
  "subtle",
  "zeroize",
+]
+
+[[package]]
+name = "ee"
+version = "0.0.0"
+dependencies = [
+ "anyhow",
+ "approval",
+ "apps",
+ "async-trait",
+ "aws-config",
+ "aws-sdk-kms",
+ "axum",
+ "base64",
+ "cache",
+ "common",
+ "context",
+ "crypto",
+ "db",
+ "futures-util",
+ "http-body-util",
+ "hyper 1.8.1",
+ "inject",
+ "jsonwebtoken",
+ "percent-encoding",
+ "policy",
+ "policy-engine",
+ "redis",
+ "reqwest",
+ "ring",
+ "serde",
+ "serde_json",
+ "shutdown",
+ "sqlx",
+ "telemetry",
+ "time",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]
@@ -1960,6 +2116,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "inject"
+version = "0.0.0"
+dependencies = [
+ "anyhow",
+ "base64",
+ "common",
+ "crypto",
+ "dashmap",
+ "db",
+ "form_urlencoded",
+ "hyper 1.8.1",
+ "regex",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sqlx",
+ "tracing",
+ "vault",
+]
+
+[[package]]
 name = "inout"
 version = "0.1.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2333,49 +2510,25 @@ name = "onecli-gateway"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "ap-client",
- "ap-noise",
- "ap-proxy-client",
- "ap-proxy-protocol",
- "async-trait",
- "aws-config",
- "aws-credential-types",
- "aws-sdk-kms",
- "aws-sdk-sts",
- "aws-sigv4",
- "axum",
- "base64",
+ "approval",
+ "ca",
+ "cache",
  "clap",
- "dashmap",
- "form_urlencoded",
- "futures-util",
- "hex",
- "http-body 1.0.1",
- "http-body-util",
- "hyper 1.8.1",
- "hyper-util",
- "jsonwebtoken",
+ "common",
+ "context",
+ "crypto",
+ "db",
+ "ee",
  "percent-encoding",
- "rcgen",
- "redis",
- "regex",
  "reqwest",
- "ring",
  "rustls 0.23.37",
- "rustls-pemfile",
- "serde",
- "serde_json",
- "sqlx",
- "tempfile",
- "time",
+ "server",
+ "shutdown",
+ "telemetry",
  "tokio",
- "tokio-rustls 0.26.4",
- "tower",
- "tower-http",
  "tracing",
  "tracing-subscriber",
- "uuid",
- "webpki-roots 0.26.11",
+ "vault",
 ]
 
 [[package]]
@@ -2544,6 +2697,42 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b4596b6d070b27117e987119b4dac604f3c58cfb0b191112e24771b2faeac1a6"
 
 [[package]]
+name = "policy"
+version = "0.0.0"
+dependencies = [
+ "anyhow",
+ "cache",
+ "futures-util",
+ "http-body-util",
+ "hyper 1.8.1",
+ "inject",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "policy-engine"
+version = "0.0.0"
+dependencies = [
+ "anyhow",
+ "apps",
+ "cache",
+ "common",
+ "context",
+ "db",
+ "ee",
+ "inject",
+ "policy",
+ "serde",
+ "serde_json",
+ "sqlx",
+ "tokio",
+]
+
+[[package]]
 name = "poly1305"
 version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2595,6 +2784,50 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8fd00f0bb2e90d81d1044c2b32617f68fcb9fa3bb7640c23e9c748e53fb30934"
 dependencies = [
  "unicode-ident",
+]
+
+[[package]]
+name = "proxy"
+version = "0.0.0"
+dependencies = [
+ "anyhow",
+ "approval",
+ "apps",
+ "async-trait",
+ "aws-config",
+ "aws-credential-types",
+ "aws-sdk-sts",
+ "aws-sigv4",
+ "axum",
+ "base64",
+ "ca",
+ "cache",
+ "common",
+ "context",
+ "dashmap",
+ "db",
+ "ee",
+ "futures-util",
+ "http-body-util",
+ "hyper 1.8.1",
+ "hyper-util",
+ "inject",
+ "percent-encoding",
+ "policy",
+ "policy-engine",
+ "reqwest",
+ "rustls 0.23.37",
+ "serde",
+ "serde_json",
+ "shutdown",
+ "sqlx",
+ "summary",
+ "telemetry",
+ "time",
+ "tokio",
+ "tokio-rustls 0.26.4",
+ "tracing",
+ "uuid",
 ]
 
 [[package]]
@@ -3152,6 +3385,39 @@ dependencies = [
 ]
 
 [[package]]
+name = "server"
+version = "0.0.0"
+dependencies = [
+ "anyhow",
+ "approval",
+ "apps",
+ "async-trait",
+ "axum",
+ "ca",
+ "cache",
+ "common",
+ "context",
+ "db",
+ "ee",
+ "hyper 1.8.1",
+ "hyper-util",
+ "inject",
+ "proxy",
+ "reqwest",
+ "rustls 0.23.37",
+ "serde",
+ "serde_json",
+ "shutdown",
+ "tokio",
+ "tokio-rustls 0.26.4",
+ "tower",
+ "tower-http",
+ "tracing",
+ "vault",
+ "webpki-roots 0.26.11",
+]
+
+[[package]]
 name = "sha1"
 version = "0.10.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3213,6 +3479,14 @@ name = "shlex"
 version = "1.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0fda2ff0d084019ba4d7c6f371c95d8fd75ce3524c3cb8fb653a3023f6323e64"
+
+[[package]]
+name = "shutdown"
+version = "0.0.0"
+dependencies = [
+ "tokio",
+ "tracing",
+]
 
 [[package]]
 name = "signal-hook-registry"
@@ -3540,6 +3814,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "13c2bddecc57b384dee18652358fb23172facb8a2c51ccc10d74c157bdea3292"
 
 [[package]]
+name = "summary"
+version = "0.0.0"
+dependencies = [
+ "base64",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "syn"
 version = "1.0.109"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3579,6 +3862,24 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.117",
+]
+
+[[package]]
+name = "telemetry"
+version = "0.0.0"
+dependencies = [
+ "async-trait",
+ "cache",
+ "common",
+ "futures-util",
+ "policy",
+ "reqwest",
+ "serde_json",
+ "sqlx",
+ "time",
+ "tokio",
+ "tracing",
+ "uuid",
 ]
 
 [[package]]
@@ -4068,6 +4369,32 @@ name = "valuable"
 version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ba73ea9cf16a25df0c8caa16c51acb937d5712a8429db78a3ee29d5dcacd3a65"
+
+[[package]]
+name = "vault"
+version = "0.0.0"
+dependencies = [
+ "anyhow",
+ "ap-client",
+ "ap-noise",
+ "ap-proxy-protocol",
+ "async-trait",
+ "axum",
+ "base64",
+ "crypto",
+ "dashmap",
+ "db",
+ "hex",
+ "hyper 1.8.1",
+ "reqwest",
+ "ring",
+ "serde",
+ "serde_json",
+ "sqlx",
+ "time",
+ "tokio",
+ "tracing",
+]
 
 [[package]]
 name = "vcpkg"

@@ -1,259 +1,149 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-// Minimal in-memory `@onecli/db` mock — just the operations
-// `joinSharedOrganization` touches — so we can assert the single-org invariants
-// (one shared org, per-user projects, idempotency) without a real database.
+/**
+ * Owner-derived workspace naming. `workspaceNameForOwner` is the single
+ * naming law for every auto-provision site; what is pinned here is that its
+ * output is ALWAYS a valid workspace name (the ee create path throws on
+ * invalid names, so a bad derivation would turn an auto-create flow into a
+ * hard failure) and that `bootstrapOrganization` names the workspace after
+ * the OWNER, never after the org's display name.
+ */
 
-interface OrgRow {
-  id: string;
-  slug: string;
-  name: string;
-}
-interface MemberRow {
-  organizationId: string;
-  userId: string;
-  userEmail: string;
-  role: string;
-}
-interface ProjectRow {
-  id: string;
-  name: string | null;
-  slug: string | null;
-  organizationId: string;
-  createdByUserId: string | null;
-  createdByUserEmail: string | null;
-  seq: number;
-}
-interface ApiKeyRow {
-  key: string;
-  userId: string;
-  userEmail: string;
-  organizationId: string;
-  scope: string;
+interface OrgCreateArgs {
+  data: {
+    name: string;
+    workspaces: { create: { name: string; slug: string } };
+  };
 }
 
-const store = vi.hoisted(() => ({
-  orgs: [] as OrgRow[],
-  members: [] as MemberRow[],
-  projects: [] as ProjectRow[],
-  apiKeys: [] as ApiKeyRow[],
-  seq: 0,
+const state = vi.hoisted(() => ({
+  ownerName: null as string | null,
+  orgCreates: [] as OrgCreateArgs[],
 }));
 
+// Deliberately NO `workspace.create` and NO `$transaction`: the bootstrap must
+// stay a single nested `organization.create` (its atomicity guarantee), so a
+// regression back to split writes crashes here instead of passing silently.
 vi.mock("@onecli/db", () => ({
+  Prisma: { PrismaClientKnownRequestError: class extends Error {} },
   db: {
+    user: {
+      findUnique: async () => ({ name: state.ownerName }),
+    },
     organization: {
-      findUnique: async ({ where: { slug } }: { where: { slug: string } }) =>
-        store.orgs.find((o) => o.slug === slug) ?? null,
-      findUniqueOrThrow: async ({
-        where: { slug },
-      }: {
-        where: { slug: string };
-      }) => {
-        const org = store.orgs.find((o) => o.slug === slug);
-        if (!org) throw new Error(`org ${slug} not found`);
-        return org;
-      },
-      create: async ({ data }: { data: OrgRow }) => {
-        if (store.orgs.some((o) => o.slug === data.slug)) {
-          throw new Error("unique constraint: organization.slug");
-        }
-        const org: OrgRow = { id: data.id, slug: data.slug, name: data.name };
-        store.orgs.push(org);
-        return org;
-      },
-    },
-    organizationMember: {
-      upsert: async ({
-        where: { organizationId_userId },
-        create,
-      }: {
-        where: {
-          organizationId_userId: { organizationId: string; userId: string };
+      create: async (args: OrgCreateArgs) => {
+        state.orgCreates.push(args);
+        return {
+          id: "org-1",
+          workspaces: [{ id: "ws-1", organizationId: "org-1" }],
         };
-        create: MemberRow;
-      }) => {
-        const existing = store.members.find(
-          (m) =>
-            m.organizationId === organizationId_userId.organizationId &&
-            m.userId === organizationId_userId.userId,
-        );
-        if (existing) return existing;
-        store.members.push(create);
-        return create;
-      },
-    },
-    project: {
-      findFirst: async ({
-        where: { organizationId, createdByUserId },
-      }: {
-        where: { organizationId: string; createdByUserId: string };
-      }) =>
-        store.projects
-          .filter(
-            (p) =>
-              p.organizationId === organizationId &&
-              p.createdByUserId === createdByUserId,
-          )
-          .sort((a, b) => a.seq - b.seq)[0] ?? null,
-      create: async ({ data }: { data: Omit<ProjectRow, "seq"> }) => {
-        if (
-          store.projects.some(
-            (p) =>
-              p.organizationId === data.organizationId && p.slug === data.slug,
-          )
-        ) {
-          throw new Error("unique constraint: (organizationId, slug)");
-        }
-        const project: ProjectRow = { ...data, seq: store.seq++ };
-        store.projects.push(project);
-        return project;
-      },
-    },
-    apiKey: {
-      findFirst: async ({
-        where: { organizationId, scope },
-      }: {
-        where: { organizationId: string; scope: string };
-      }) =>
-        store.apiKeys.find(
-          (k) => k.organizationId === organizationId && k.scope === scope,
-        ) ?? null,
-      create: async ({ data }: { data: ApiKeyRow }) => {
-        if (store.apiKeys.some((k) => k.key === data.key)) {
-          throw new Error("unique constraint: api_key.key");
-        }
-        store.apiKeys.push(data);
-        return data;
       },
     },
   },
 }));
 
-vi.mock("../lib/logger", () => ({
-  logger: { warn: () => {}, info: () => {}, error: () => {} },
+vi.mock("../providers", () => ({
+  getNewOrgPolicySeeder: () => ({ seed: async () => {} }),
 }));
 
 import {
-  joinSharedOrganization,
-  SHARED_ORG_SLUG,
+  bootstrapOrganization,
+  workspaceNameForOwner,
 } from "./organization-service";
 
 beforeEach(() => {
-  store.orgs = [];
-  store.members = [];
-  store.projects = [];
-  store.apiKeys = [];
-  store.seq = 0;
-  delete process.env.ONECLI_ORG_API_KEY;
-  delete process.env.ONECLI_ORG_API_KEY_FILE;
+  state.ownerName = null;
+  state.orgCreates.length = 0;
 });
 
-describe("joinSharedOrganization", () => {
-  it("creates the one shared org and a project for the first user", async () => {
-    const { organization, project } = await joinSharedOrganization(
-      "user-aaaaaaaa",
-      "a@example.com",
+describe("workspaceNameForOwner", () => {
+  it("uses the owner's display name, trimmed", () => {
+    expect(workspaceNameForOwner("  John Smith  ", "j@x.com")).toBe(
+      "John Smith",
     );
+  });
 
-    expect(store.orgs).toHaveLength(1);
-    expect(store.orgs[0]?.slug).toBe(SHARED_ORG_SLUG);
-    expect(organization.id).toBe(store.orgs[0]?.id);
-    expect(project.organizationId).toBe(organization.id);
-    expect(store.members).toHaveLength(1);
-    expect(store.projects).toHaveLength(1);
-    // The creator's ProjectAccess binding is seeded owner (step 13c) with the project.
+  it("falls back to the email when the name is null or undefined", () => {
+    expect(workspaceNameForOwner(null, "owner@example.com")).toBe(
+      "owner@example.com",
+    );
+    expect(workspaceNameForOwner(undefined, "owner@example.com")).toBe(
+      "owner@example.com",
+    );
+  });
+
+  it("rejects a whitespace-only name (validateDisplayName treats empty as valid)", () => {
+    expect(workspaceNameForOwner("   ", "owner@example.com")).toBe(
+      "owner@example.com",
+    );
+  });
+
+  it("rejects a name below the 2-char minimum", () => {
+    expect(workspaceNameForOwner("J", "owner@example.com")).toBe(
+      "owner@example.com",
+    );
+  });
+
+  it("rejects a name above the 50-char maximum", () => {
+    expect(workspaceNameForOwner("x".repeat(51), "owner@example.com")).toBe(
+      "owner@example.com",
+    );
+  });
+
+  it("rejects a name without an ASCII letter or digit (platform rule)", () => {
+    expect(workspaceNameForOwner("田中太郎", "tanaka@example.jp")).toBe(
+      "tanaka@example.jp",
+    );
+  });
+
+  it("converges when the name IS the email (cloud Cognito claim fallback)", () => {
     expect(
-      (store.projects[0] as { accessBindings?: unknown }).accessBindings,
-    ).toEqual({ create: { userId: "user-aaaaaaaa", role: "owner" } });
+      workspaceNameForOwner("owner@example.com", "owner@example.com"),
+    ).toBe("owner@example.com");
   });
 
-  it("puts a second user in the SAME org with a distinct project", async () => {
-    const first = await joinSharedOrganization(
-      "user-aaaaaaaa",
-      "a@example.com",
-    );
-    const second = await joinSharedOrganization(
-      "user-bbbbbbbb",
-      "b@example.com",
-    );
-
-    expect(store.orgs).toHaveLength(1); // one shared org
-    expect(second.organization.id).toBe(first.organization.id);
-    expect(second.project.id).not.toBe(first.project.id); // distinct projects
-    expect(store.members).toHaveLength(2);
-    expect(store.projects).toHaveLength(2);
+  it("clamps an over-long email to the 50-char maximum", () => {
+    const longEmail = `${"a".repeat(60)}@example.com`;
+    expect(workspaceNameForOwner(null, longEmail)).toBe("a".repeat(50));
   });
 
-  it("is idempotent when the same user joins again", async () => {
-    const first = await joinSharedOrganization(
-      "user-aaaaaaaa",
-      "a@example.com",
-    );
-    const again = await joinSharedOrganization(
-      "user-aaaaaaaa",
-      "a@example.com",
-    );
-
-    expect(again.organization.id).toBe(first.organization.id);
-    expect(again.project.id).toBe(first.project.id);
-    expect(store.orgs).toHaveLength(1);
-    expect(store.members).toHaveLength(1);
-    expect(store.projects).toHaveLength(1);
+  it("survives a pathological email with the final guard", () => {
+    expect(workspaceNameForOwner(null, "   ")).toBe("Personal");
+    expect(workspaceNameForOwner(null, "@-.")).toBe("Personal");
   });
 
-  it("avoids project-slug collisions for ids sharing a prefix", async () => {
-    // Distinct user ids whose first 8 chars match — the per-user project slug
-    // must still be unique within the shared org (it uses the full user id).
-    const first = await joinSharedOrganization(
-      "dup12345-aaaa",
-      "a@example.com",
-    );
-    const second = await joinSharedOrganization(
-      "dup12345-bbbb",
-      "b@example.com",
-    );
-
-    expect(second.organization.id).toBe(first.organization.id);
-    expect(second.project.id).not.toBe(first.project.id);
-    expect(store.projects).toHaveLength(2);
+  it("never splits a surrogate pair at the clamp boundary", () => {
+    // 49 ASCII chars put the emoji (2 UTF-16 units) astride index 50; the
+    // clamp must drop the orphaned high half, not emit an ill-formed string.
+    const email = `${"a".repeat(49)}\u{1F600}@example.com`;
+    expect(workspaceNameForOwner(null, email)).toBe("a".repeat(49));
   });
 });
 
-describe("bootstrap org API key (via joinSharedOrganization)", () => {
-  it("generates one org-scoped key for the shared org, owned by the first user", async () => {
-    await joinSharedOrganization("user-aaaaaaaa", "a@example.com");
-
-    expect(store.apiKeys).toHaveLength(1);
-    const key = store.apiKeys[0]!;
-    expect(key.scope).toBe("organization");
-    expect(key.organizationId).toBe(store.orgs[0]?.id);
-    expect(key.userId).toBe("user-aaaaaaaa");
-    expect(key.key).toMatch(/^oc_org_[0-9a-f]{64}$/);
+describe("bootstrapOrganization workspace naming", () => {
+  it("names the first workspace after the owner, slug derived", async () => {
+    state.ownerName = "John Smith";
+    await bootstrapOrganization("user-1", "john@x.com");
+    expect(state.orgCreates[0]?.data.workspaces.create).toMatchObject({
+      name: "John Smith",
+      slug: "john-smith",
+    });
   });
 
-  it("is idempotent — a second user's join adds no new org key", async () => {
-    await joinSharedOrganization("user-aaaaaaaa", "a@example.com");
-    await joinSharedOrganization("user-bbbbbbbb", "b@example.com");
-
-    expect(store.apiKeys).toHaveLength(1);
+  it("never names the workspace after the org's display name", async () => {
+    state.ownerName = "John Smith";
+    await bootstrapOrganization("user-1", "john@x.com", "Acme Inc");
+    // The org takes the typed display name; the workspace takes the owner's.
+    expect(state.orgCreates[0]?.data.name).toBe("Acme Inc");
+    expect(state.orgCreates[0]?.data.workspaces.create.name).toBe("John Smith");
   });
 
-  it("uses ONECLI_ORG_API_KEY when set and valid", async () => {
-    const supplied = "oc_org_" + "a".repeat(64);
-    process.env.ONECLI_ORG_API_KEY = supplied;
-
-    await joinSharedOrganization("user-aaaaaaaa", "a@example.com");
-
-    expect(store.apiKeys).toHaveLength(1);
-    expect(store.apiKeys[0]?.key).toBe(supplied);
-  });
-
-  it("fails loudly on a malformed ONECLI_ORG_API_KEY", async () => {
-    process.env.ONECLI_ORG_API_KEY = "not-a-valid-key";
-
-    await expect(
-      joinSharedOrganization("user-aaaaaaaa", "a@example.com"),
-    ).rejects.toThrow(/ONECLI_ORG_API_KEY/);
+  it("falls back to the owner's email when they have no display name", async () => {
+    state.ownerName = null;
+    await bootstrapOrganization("user-1", "john@x.com");
+    expect(state.orgCreates[0]?.data.workspaces.create).toMatchObject({
+      name: "john@x.com",
+      slug: "john-x-com",
+    });
   });
 });

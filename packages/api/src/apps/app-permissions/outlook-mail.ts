@@ -1,0 +1,105 @@
+import type { AppPermissionDefinition } from "./types";
+
+export const outlookMailPermissions: AppPermissionDefinition = {
+  provider: "outlook-mail",
+  groups: [
+    {
+      category: "read",
+      tools: [
+        {
+          id: "list_messages",
+          name: "List messages",
+          description: "List and search email messages",
+          hostPattern: "graph.microsoft.com",
+          pathPattern: "/v1.0/me/messages",
+          method: "GET",
+        },
+        {
+          id: "get_message",
+          name: "Read message",
+          description: "Retrieve a specific email message",
+          hostPattern: "graph.microsoft.com",
+          pathPattern: "/v1.0/me/messages/*",
+          method: "GET",
+        },
+        {
+          id: "list_folders",
+          name: "List folders",
+          description: "List all mail folders",
+          hostPattern: "graph.microsoft.com",
+          pathPattern: "/v1.0/me/mailFolders",
+          method: "GET",
+        },
+        {
+          id: "list_folder_messages",
+          name: "List folder messages",
+          description: "List messages in a specific folder",
+          hostPattern: "graph.microsoft.com",
+          pathPattern: "/v1.0/me/mailFolders/*/messages",
+          method: "GET",
+        },
+      ],
+    },
+    {
+      category: "write",
+      tools: [
+        {
+          id: "send_mail",
+          name: "Send email",
+          description: "Send email on your behalf",
+          hostPattern: "graph.microsoft.com",
+          pathPattern: "/v1.0/me/sendMail",
+          method: "POST",
+        },
+        {
+          id: "create_draft",
+          name: "Create draft",
+          description: "Create a new draft email",
+          hostPattern: "graph.microsoft.com",
+          pathPattern: "/v1.0/me/messages",
+          method: "POST",
+        },
+        {
+          id: "reply_message",
+          name: "Reply to message",
+          description: "Reply to an email message",
+          hostPattern: "graph.microsoft.com",
+          pathPattern: "/v1.0/me/messages/*/reply",
+          method: "POST",
+        },
+        {
+          id: "forward_message",
+          name: "Forward message",
+          description: "Forward an email message",
+          hostPattern: "graph.microsoft.com",
+          pathPattern: "/v1.0/me/messages/*/forward",
+          method: "POST",
+        },
+        {
+          id: "move_message",
+          name: "Move message",
+          description: "Move a message to a different folder",
+          hostPattern: "graph.microsoft.com",
+          pathPattern: "/v1.0/me/messages/*/move",
+          method: "POST",
+        },
+        {
+          id: "update_message",
+          name: "Update message",
+          description: "Update message properties (read status, flag, etc.)",
+          hostPattern: "graph.microsoft.com",
+          pathPattern: "/v1.0/me/messages/*",
+          method: "PATCH",
+        },
+        {
+          id: "delete_message",
+          name: "Delete message",
+          description: "Permanently delete a message",
+          hostPattern: "graph.microsoft.com",
+          pathPattern: "/v1.0/me/messages/*",
+          method: "DELETE",
+        },
+      ],
+    },
+  ],
+};

@@ -3,8 +3,8 @@ import type { AuthContext, SessionDenial } from "../../providers";
 import { getSessionProvider, getSessionEnforcer } from "../../providers";
 import {
   resolveOrganizationId,
-  resolveOrganizationIdFromProject,
-  resolveProjectId,
+  resolveOrganizationIdFromWorkspace,
+  resolveWorkspaceId,
 } from "./resolve";
 
 /**
@@ -17,7 +17,7 @@ export type SessionAuthResult = AuthContext | { denied: SessionDenial } | null;
 
 export const authenticateSession = async (
   request: Request,
-  requireProject: boolean,
+  requireWorkspace: boolean,
 ): Promise<SessionAuthResult> => {
   const session = getSessionProvider();
   const user = await session.getSession(request);
@@ -29,7 +29,7 @@ export const authenticateSession = async (
   });
   if (!dbUser) return null;
 
-  // Edition session policy (e.g. enterprise "require SSO") — before project
+  // Edition session policy (e.g. enterprise "require SSO") — before workspace
   // resolution so a rejected session fails early and explicitly.
   const enforcer = getSessionEnforcer();
   if (enforcer) {
@@ -37,18 +37,19 @@ export const authenticateSession = async (
     if (denial) return { denied: denial };
   }
 
-  const projectId = await resolveProjectId(request, dbUser.id);
+  const workspaceId = await resolveWorkspaceId(request, dbUser.id);
 
-  if (!projectId && requireProject) return null;
+  if (!workspaceId && requireWorkspace) return null;
 
-  if (projectId) {
-    const organizationId = await resolveOrganizationIdFromProject(projectId);
+  if (workspaceId) {
+    const organizationId =
+      await resolveOrganizationIdFromWorkspace(workspaceId);
     if (!organizationId) return null;
 
     return {
       userId: dbUser.id,
       userEmail: user.email,
-      projectId,
+      workspaceId,
       organizationId,
       scope: "session",
     };
@@ -60,7 +61,7 @@ export const authenticateSession = async (
   return {
     userId: dbUser.id,
     userEmail: user.email,
-    projectId: undefined,
+    workspaceId: undefined,
     organizationId,
     scope: "session",
   };

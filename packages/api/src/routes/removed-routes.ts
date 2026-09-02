@@ -12,9 +12,8 @@ import { ServiceError } from "../services/errors";
  * release before this one did for the same paths (it answered 410 once v2
  * editing went live).
  *
- * TEMPORARY, but on a different clock from the tables: these go when no
- * supported client still calls them (~one major version), NOT with
- * `policy-legacy-migration/`.
+ * TEMPORARY: these go when no supported client still calls them
+ * (~one major version).
  *
  * Mounted AFTER the live routers in `app.ts`, so a surviving route on a shared
  * base path (`/agents`, `/connections`) always wins — Hono takes the first
@@ -24,22 +23,22 @@ import { ServiceError } from "../services/errors";
 /**
  * Where each scope's capability actually lives — and they now differ.
  *
- * Attach-model step 6 retired project-scope `/v1/policy/*` as well, so the old
- * single "Use /v1/policy" suffix would have pointed a project-scoped client at
- * another 410. Project callers are sent to the grants surface (the only project
+ * Attach-model step 6 retired workspace-scope `/v1/policy/*` as well, so the old
+ * single "Use /v1/policy" suffix would have pointed a workspace-scoped client at
+ * another 410. Workspace callers are sent to the grants surface (the only workspace
  * writer); org callers keep the full rule set at `/v1/org/policy`.
  */
-const PROJECT_REPLACEMENT =
-  "Project access is granted per agent: PUT " +
+const WORKSPACE_REPLACEMENT =
+  "Workspace access is granted per agent: PUT " +
   "/v1/agents/:agentId/grants/connections/:connectionId and " +
   "/v1/agents/:agentId/grants/secrets/:secretId.";
 
 const ORG_REPLACEMENT =
-  "Use /v1/org/policy — one first-match rule set covering blocks, allows, " +
+  "Use /v1/org/policy: one first-match rule set covering blocks, allows, " +
   "rate limits, approvals and app permissions.";
 
 const gone = (what: string): never => {
-  throw new ServiceError("GONE", `${what} ${PROJECT_REPLACEMENT}`);
+  throw new ServiceError("GONE", `${what} ${WORKSPACE_REPLACEMENT}`);
 };
 
 /** The org-scope twin of `gone` — same shape, org pointer. */
@@ -126,12 +125,15 @@ export const removedAgentEquipmentRoutes = () => {
         "/grants/secrets/:secretId instead.",
     ),
   );
+  // The default-agent tombstones live in the LIVE agents router, not here:
+  // this router is mounted last, so `/:agentId` would swallow `/default`
+  // before a shim saw it.
   return app;
 };
 
 /**
- * Project-scope policy CRUD under `/v1/policy` — retired in attach-model step 6
- * so the project level has exactly one writer, the grants API.
+ * Workspace-scope policy CRUD under `/v1/policy` — retired in attach-model step 6
+ * so the workspace level has exactly one writer, the grants API.
  *
  * Every path is enumerated deliberately: `policyReflectRoutes` shares this base
  * and must keep serving `GET /v1/policy/effective-app-permissions`, so a `/*`
@@ -139,16 +141,16 @@ export const removedAgentEquipmentRoutes = () => {
  * a false 410 instead of a 404 — the property `removed-routes.test.ts` pins).
  *
  * Unlike the `/agents` and `/connections` shims, these answer without auth: the
- * project policy router carried the blanket `authMiddleware` for this base path
+ * workspace policy router carried the blanket `authMiddleware` for this base path
  * and went away with it. A tombstone needs no credentials.
  *
  * The ORG mirror at `/v1/org/policy/*` is untouched and keeps the full surface.
  */
-export const removedProjectPolicyRoutes = () => {
+export const removedWorkspacePolicyRoutes = () => {
   const app = new Hono<ApiEnv>();
   const removed = (what: string) => () =>
     gone(
-      `${what} was removed at project scope: project rules are compiled from ` +
+      `${what} was removed at workspace scope: workspace rules are compiled from ` +
         "agent credential grants, not authored directly.",
     );
   app.all("/rules/order", removed("PUT /v1/policy/rules/order"));
@@ -170,6 +172,46 @@ export const removedConnectionAgentRoutes = () => {
         "GET /v1/connections/:connectionId/effective-agents reports who can, " +
         "read-only.",
     ),
+  );
+  return app;
+};
+
+/**
+ * 410 Gone for the agent-groups directory surface (feature removed 2026-07).
+ * Same contract as the shims above: `/v1` is a versioned public surface, so a
+ * withdrawn path says what happened instead of the router's generic 404.
+ *
+ * TEMPORARY: drop once no supported client can plausibly call them
+ * (~one major version).
+ */
+
+const AGENT_GROUPS_GONE =
+  "Agent groups were removed: organize people with user groups " +
+  "(/v1/org/groups); organization policy rules target users or user groups.";
+
+const goneAgentGroups = (what: string): never => {
+  throw new ServiceError("GONE", `${what} ${AGENT_GROUPS_GONE}`);
+};
+
+/** `/v1/org/agent-groups/*` — the whole directory CRUD + membership. */
+export const removedOrgAgentGroupRoutes = () => {
+  const app = new Hono<ApiEnv>();
+  app.all("/*", () => goneAgentGroups("/v1/org/agent-groups was removed."));
+  return app;
+};
+
+/** `GET /v1/org/agents` — existed only as the member-picker's data source. */
+export const removedOrgAgentRoutes = () => {
+  const app = new Hono<ApiEnv>();
+  app.all("/*", () => goneAgentGroups("/v1/org/agents was removed."));
+  return app;
+};
+
+/** The reverse lookup composed on `/v1/agents`. */
+export const removedAgentGroupsLookupRoutes = () => {
+  const app = new Hono<ApiEnv>();
+  app.all("/:agentId/groups", () =>
+    goneAgentGroups("/v1/agents/:agentId/groups was removed."),
   );
   return app;
 };

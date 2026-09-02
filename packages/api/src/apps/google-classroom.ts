@@ -41,7 +41,6 @@ export const googleClassroom: AppDefinition = {
     buildAuthUrl: buildGoogleAuthUrl,
     exchangeCode: exchangeGoogleCode,
   },
-  available: true,
   configurable: {
     fields: googleConfigFields,
   },

@@ -63,6 +63,18 @@ export const gmailPermissions: AppPermissionDefinition = {
           pathPattern: "/gmail/v1/users/*/labels",
           method: "GET",
         },
+        {
+          // The cheap "how many emails" read (messagesTotal/threadsTotal) —
+          // the first thing an agent reaches for on a count question; without
+          // it the catch-all blocks a harmless read.
+          id: "get_profile",
+          name: "Read mailbox profile",
+          description:
+            "Read the mailbox profile: address, message and thread counts",
+          hostPattern: "gmail.googleapis.com",
+          pathPattern: "/gmail/v1/users/*/profile",
+          method: "GET",
+        },
       ],
     },
     {

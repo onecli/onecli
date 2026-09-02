@@ -1,0 +1,28 @@
+{
+  "name": "@onecli/gateway-e2e",
+  "version": "0.0.0",
+  "private": true,
+  "license": "Apache-2.0",
+  "type": "module",
+  "scripts": {
+    "test:e2e": "cargo build --manifest-path ../gateway/Cargo.toml --bin onecli-gateway && vitest run",
+    "test:e2e:no-build": "vitest run",
+    "check-types": "tsc --noEmit",
+    "lint": "eslint --max-warnings 0",
+    "lint:fix": "eslint --fix --max-warnings 0"
+  },
+  "dependencies": {
+    "@onecli/api": "workspace:*",
+    "@onecli/db": "workspace:*",
+    "@prisma/client": "^6.9.0",
+    "undici": "^8.0.0"
+  },
+  "devDependencies": {
+    "@onecli/eslint-config": "workspace:*",
+    "@onecli/typescript-config": "workspace:*",
+    "@types/node": "^22.15.3",
+    "better-auth": "1.6.26",
+    "typescript": "5.9.2",
+    "vitest": "^3.2.6"
+  }
+}

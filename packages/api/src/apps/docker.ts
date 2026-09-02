@@ -92,5 +92,4 @@ export const docker: AppDefinition = {
     exchangeCredentials,
   },
   labelHint: 'e.g. "staging", "my-org"',
-  available: true,
 };

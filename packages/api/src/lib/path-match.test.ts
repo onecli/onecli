@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { hostMatches, isLlmHost, pathMatches } from "./path-match";
 
-// Fidelity cases mirrored from apps/gateway/src/inject.rs + connect.rs. If any
+// Fidelity cases mirrored from apps/gateway/crates/inject/src/lib.rs + connect.rs. If any
 // of these break, the port has drifted from the gateway's matcher.
 
 describe("pathMatches", () => {

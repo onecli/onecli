@@ -7,7 +7,9 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 const ORG_KEY = "oc_org_test-key";
 
 vi.hoisted(() => {
-  process.env.NEXT_PUBLIC_EDITION = "onprem-slim";
+  // Pinned oss: CAPS.rbac off, so the org-key auth needs no role resolver —
+  // the suite tests the routes' HTTP contract, not role enforcement.
+  process.env.NEXT_PUBLIC_EDITION = "onprem";
 });
 
 const services = vi.hoisted(() => ({
@@ -29,7 +31,7 @@ vi.mock("@onecli/db", () => ({
         where.key === ORG_KEY
           ? { userId: "user-1", organizationId: "org-1", scope: "organization" }
           : null,
-      // withAudit's server-side gateway flush borrows a project key; none here
+      // withAudit's server-side gateway flush borrows a workspace key; none here
       // → the flush no-ops (fire-and-forget), which is what the tests want.
       findFirst: async () => null,
     },
@@ -41,7 +43,7 @@ vi.mock("@onecli/db", () => ({
         role: "owner",
       }),
     },
-    project: {
+    workspace: {
       findFirst: async ({ where }: { where: { id: string } }) =>
         where.id === "p1" ? { id: "p1" } : null,
     },
@@ -66,9 +68,7 @@ vi.mock("../services/agent-service", () => ({
   listAgents: services.listAgents,
   createAgent: vi.fn(),
   agentExistsByIdentifier: vi.fn(),
-  getDefaultAgent: vi.fn(),
-  setDefaultAgent: vi.fn(),
-  renameAgent: vi.fn(),
+  updateAgent: vi.fn(),
   deleteAgent: vi.fn(),
   regenerateAgentToken: vi.fn(),
 }));
@@ -79,9 +79,9 @@ const app = createApiApp({ getSession: async () => null });
 
 const AUTH = {
   authorization: `Bearer ${ORG_KEY}`,
-  "x-project-id": "p1",
+  "x-workspace-id": "p1",
 };
-const SCOPE = { projectId: "p1", organizationId: "org-1" };
+const SCOPE = { workspaceId: "p1", organizationId: "org-1" };
 const GRANTS = {
   agentId: "a1",
   mode: "grants",
@@ -108,6 +108,18 @@ beforeEach(() => {
     connectionId: "c1",
     agents: [],
   });
+  services.setSecretGrant.mockResolvedValue({
+    grants: GRANTS,
+    changed: true,
+    ruleIds: ["r2"],
+    generation: 3,
+  });
+  services.removeSecretGrant.mockResolvedValue({
+    grants: GRANTS,
+    changed: true,
+    ruleIds: [],
+    generation: 3,
+  });
   services.listAgentsWithGrantsSummary.mockResolvedValue([]);
   services.listAgents.mockResolvedValue([]);
 });
@@ -118,7 +130,7 @@ describe("agent grants routes", () => {
     expect(res.status).toBe(401);
   });
 
-  it("GET returns the agent's grants with the project scope", async () => {
+  it("GET returns the agent's grants with the workspace scope", async () => {
     const res = await app.request("/v1/agents/a1/grants", { headers: AUTH });
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual(GRANTS);
@@ -164,6 +176,51 @@ describe("agent grants routes", () => {
       SCOPE,
       "a1",
       "c1",
+      "user-1",
+    );
+  });
+});
+
+describe("secret grant routes", () => {
+  // The twin routes the web's attach-on-create drives (lib/api/grants.ts
+  // PUTs `{}` — the route reads no body, only the params and the auth scope).
+
+  it("PUT requires auth", async () => {
+    const res = await app.request("/v1/agents/a1/grants/secrets/s1", {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({}),
+    });
+    expect(res.status).toBe(401);
+    expect(services.setSecretGrant).not.toHaveBeenCalled();
+  });
+
+  it("PUT attaches with the workspace-fenced scope and returns the updated grants", async () => {
+    const res = await app.request("/v1/agents/a1/grants/secrets/s1", {
+      method: "PUT",
+      headers: { ...AUTH, "content-type": "application/json" },
+      body: JSON.stringify({}),
+    });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual(GRANTS);
+    expect(services.setSecretGrant).toHaveBeenCalledWith(
+      SCOPE,
+      "a1",
+      "s1",
+      "user-1",
+    );
+  });
+
+  it("DELETE detaches with 204 through the same workspace-fenced scope", async () => {
+    const res = await app.request("/v1/agents/a1/grants/secrets/s1", {
+      method: "DELETE",
+      headers: AUTH,
+    });
+    expect(res.status).toBe(204);
+    expect(services.removeSecretGrant).toHaveBeenCalledWith(
+      SCOPE,
+      "a1",
+      "s1",
       "user-1",
     );
   });

@@ -5,12 +5,9 @@ import type { ConnectionGrantInput } from "../validations/grants";
 
 /**
  * The PURE half of the step-2 grants compiler: desired-stack computation and
- * stack comparison, with no database access. Extracted from `grants-service`
- * so the step-5 one-shot converter (`policy-grant-conversion/`) compiles the
- * identical row shapes inside its own per-project transaction — one publish
- * per project — instead of round-tripping through the per-stack service
- * writes. `grants-service` re-imports everything here; the two must never
- * drift, so neither duplicates a rule shape the other owns.
+ * stack comparison, with no database access. `grants-service` re-imports
+ * everything here; the two must never drift, so neither duplicates a rule
+ * shape the other owns.
  */
 
 /** Origin marker of every grant-compiled rule row (`source` column). */
@@ -36,7 +33,18 @@ export interface CompiledRule {
 export const sorted = (ids: string[]): string[] => [...ids].sort();
 
 /** The §4.2 stack for one (agent, connection) grant. Order is load-bearing:
- * first-match walks allow → ask → blocked → everything-else. */
+ * first-match walks allow → ask → blocked → everything-else.
+ *
+ * Allow-first is DELIBERATE, not an oversight, for overlapping catalog tools:
+ * read tools overlap by design (google-calendar's `get_calendar` glob covers
+ * `list_events`' endpoints; github's `get_repo` covers the list endpoints), so
+ * a blocked-first walk would let a Never row eat an ALLOWED sibling's
+ * endpoints and break tools the user explicitly enabled (caught by the pg
+ * proof suite). The one security-critical overlap - GraphQL queries vs
+ * mutations on one `POST /graphql` - is not solved by ordering at all but by
+ * the fail-closed `graphqlOps` body discrimination: a mutation body never
+ * matches the query tool's allow row, falls through, and dies on the blocked
+ * or terminal row regardless of this ordering. */
 export const compileConnectionStack = (
   nameBase: string,
   provider: string,
@@ -63,7 +71,7 @@ export const compileConnectionStack = (
   const stack: CompiledRule[] = [];
   if (allow.length > 0) {
     stack.push({
-      name: `${nameBase} — allowed`,
+      name: `${nameBase}: allowed`,
       action: "allow",
       requireApproval: false,
       tools: allow,
@@ -72,7 +80,7 @@ export const compileConnectionStack = (
   }
   if (ask.length > 0) {
     stack.push({
-      name: `${nameBase} — needs approval`,
+      name: `${nameBase}: needs approval`,
       action: "allow",
       requireApproval: true,
       tools: ask,
@@ -81,7 +89,7 @@ export const compileConnectionStack = (
   }
   if (blocked.length > 0) {
     stack.push({
-      name: `${nameBase} — blocked`,
+      name: `${nameBase}: blocked`,
       action: "block",
       requireApproval: false,
       tools: blocked,
@@ -90,7 +98,7 @@ export const compileConnectionStack = (
   // Terminal: the whole app surface — makes "deny" explicit rather than
   // default-dependent, and future catalog tools arrive as Never until enabled.
   stack.push({
-    name: `${nameBase} — everything else`,
+    name: `${nameBase}: everything else`,
     action: "block",
     requireApproval: false,
     tools: [],

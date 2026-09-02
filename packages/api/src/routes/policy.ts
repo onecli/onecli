@@ -32,7 +32,7 @@ import {
 
 // ── Unified policy engine routes (/v1/policy, /v1/org/policy) ───────────────
 // A scope's policy is a singleton aggregate: a `/rules` sub-collection (CRUD +
-// reorder), a terminal `/default`, and a `/publish` action. The project and org
+// reorder), a terminal `/default`, and a `/publish` action. The workspace and org
 // routers share these handlers, differing only in scope + auth. Inert in step 2.
 
 interface PolicyRouteScope {
@@ -40,7 +40,7 @@ interface PolicyRouteScope {
   resolveScope: (auth: AuthContext) => ResourceScope;
   /** The scope keys the audit log + gateway-cache flush key off. */
   auditScope: (auth: AuthContext) => {
-    projectId?: string;
+    workspaceId?: string;
     organizationId?: string;
   };
 }
@@ -188,8 +188,8 @@ export const registerPolicyRoutes = (
   });
 };
 
-// The PROJECT mounting of this factory retired in attach-model step 6: project
+// The WORKSPACE mounting of this factory retired in attach-model step 6: workspace
 // scope has exactly one writer now, the grants API, and `/v1/policy/*` answers
-// 410 there (`removedProjectPolicyRoutes`). The factory itself stays — the ORG
-// mirror (`ee/routes/org-policy.ts`) registers the identical ten handlers with
-// an organization scope, and onprem mounts it the same way.
+// 410 there (`removedWorkspacePolicyRoutes`). The factory itself stays — the ORG
+// mirror (`routes/org-policy.ts`) registers the identical ten handlers with
+// an organization scope.

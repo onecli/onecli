@@ -4,7 +4,8 @@ export type ServiceErrorCode =
   | "UNPROCESSABLE"
   | "CONFLICT"
   | "FORBIDDEN"
-  | "GONE";
+  | "GONE"
+  | "RATE_LIMITED";
 
 export class ServiceError extends Error {
   readonly code: ServiceErrorCode;

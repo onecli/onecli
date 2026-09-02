@@ -18,7 +18,7 @@ const state = vi.hoisted(() => ({
 // incidental — every test asserts the guard's control flow, not the row's data.
 const ruleRow = vi.hoisted(() => (overrides: Record<string, unknown> = {}) => ({
   id: "r1",
-  scope: "project",
+  scope: "workspace",
   status: "draft",
   generation: 0,
   priority: 1,
@@ -69,7 +69,7 @@ vi.mock("@onecli/db", () => {
 
 const { createPolicyRule, updatePolicyRule } = await import("./policy-service");
 
-const SCOPE = { projectId: "p1" };
+const SCOPE = { workspaceId: "p1" };
 const USER = "user-1";
 // A network target reaches no db in `assertTargetsValid` (no owned id to fence),
 // so it isolates the guard without a connection/secret ownership mock.

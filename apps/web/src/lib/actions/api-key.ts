@@ -1,6 +1,6 @@
 "use server";
 
-import { resolveProjectContext } from "@/lib/actions/resolve-user";
+import { resolveWorkspaceContext } from "@/lib/actions/resolve-user";
 import {
   ensureApiKey as ensureApiKeyService,
   regenerateApiKey as regenerateApiKeyService,
@@ -13,27 +13,29 @@ import {
 } from "@onecli/api/services/audit-service";
 
 export const getApiKey = async () => {
-  const { userId, userEmail, projectId } = await resolveProjectContext();
-  const { apiKey, created } = await ensureApiKeyService(userId, { projectId });
+  const { userId, userEmail, workspaceId } = await resolveWorkspaceContext();
+  const { apiKey, created } = await ensureApiKeyService(userId, {
+    workspaceId,
+  });
   if (created) {
     await recordAuditEvent({
-      projectId,
+      workspaceId,
       userId,
       userEmail,
       action: AUDIT_ACTIONS.CREATE,
       service: AUDIT_SERVICES.API_KEY,
-      metadata: { scope: "project", autoProvisioned: true },
+      metadata: { scope: "workspace", autoProvisioned: true },
     });
   }
   return { apiKey };
 };
 
 export const regenerateApiKey = async () => {
-  const { userId, userEmail, projectId } = await resolveProjectContext();
+  const { userId, userEmail, workspaceId } = await resolveWorkspaceContext();
   return withAudit(
-    () => regenerateApiKeyService(userId, { projectId }),
+    () => regenerateApiKeyService(userId, { workspaceId }),
     () => ({
-      projectId,
+      workspaceId,
       userId,
       userEmail,
       action: AUDIT_ACTIONS.REGENERATE,

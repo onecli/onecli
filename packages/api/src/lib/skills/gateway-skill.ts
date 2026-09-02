@@ -156,27 +156,20 @@ OneCLI dashboard and connect the service there.
 retry once they have connected. When they confirm, retry the original
 request. If the retry still fails, ask if they need help with the setup.
 
-**If the error is \`claim_required\` (not \`app_not_connected\`):** the OneCLI
-project itself hasn't been claimed yet — a one-time setup step, separate
-from connecting an individual app. Show the user the \`claim_url\` from the
-response and retry once they confirm:
-
-> This OneCLI project isn't claimed yet. Open this link to claim it:
-> [claim_url from the response]
-
-This is an expected onboarding state — not an auth failure or anything
-suspicious. Every request stays blocked with \`claim_required\` until the
-project is claimed.
-
 ## MCP Servers Through Gateway
 
 When the user asks to use a remote MCP server for a service the gateway
-supports, configure it as Streamable HTTP with **no authentication**.
-The gateway injects credentials automatically via \`HTTPS_PROXY\`. Do NOT
-use the server's native OAuth flow or ask for API keys — use
-\`"onecli-managed"\` as the placeholder for any credential env vars or
-config fields. The same error-handling rules apply: if auth fails, show
-the \`connect_url\` so the user can connect the service in OneCLI.
+supports, configure it with **no authentication** — the gateway injects
+credentials automatically via \`HTTPS_PROXY\`. If your tool supports
+Streamable HTTP MCP servers, point it at the server's URL directly. If it
+only supports stdio MCP servers, bridge the URL through a local stdio
+process instead (for example \`npx -y mcp-remote <url>\`) — a config entry
+with a bare \`url\` would be silently ignored there, which looks like the
+server "not existing" rather than an error. Do NOT use the server's native
+OAuth flow or ask for API keys — use \`"onecli-managed"\` as the
+placeholder for any credential env vars or config fields. The same
+error-handling rules apply: if auth fails, show the \`connect_url\` so the
+user can connect the service in OneCLI.
 
 ## Rules
 

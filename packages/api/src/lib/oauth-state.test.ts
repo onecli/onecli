@@ -3,7 +3,7 @@ import { beforeAll, describe, expect, it, vi } from "vitest";
 // Non-cloud so the signing key may come from SECRET_ENCRYPTION_KEY, and pin the
 // key so signatures are stable across the file.
 vi.hoisted(() => {
-  process.env.NEXT_PUBLIC_EDITION = "oss";
+  process.env.NEXT_PUBLIC_EDITION = "onprem";
   process.env.SECRET_ENCRYPTION_KEY = "test-oauth-state-secret";
   delete process.env.OAUTH_STATE_SECRET;
 });
@@ -33,7 +33,7 @@ describe("oauth state", () => {
   });
 
   it("round trips a payload", () => {
-    const payload = { projectId: "p1", provider: "gmail", nonce };
+    const payload = { workspaceId: "p1", provider: "gmail", nonce };
     expect(verifyOAuthState(signOAuthState(payload))).toEqual(payload);
   });
 
@@ -41,7 +41,7 @@ describe("oauth state", () => {
   // extra keys (origin, connectionId, agentName, …) through the signature.
   it("carries unknown keys through the signature", () => {
     const payload = {
-      projectId: "p1",
+      workspaceId: "p1",
       provider: "gmail",
       nonce,
       origin: "https://onecli.example.com",
@@ -54,7 +54,7 @@ describe("oauth state", () => {
   // that predates `origin` are still in flight and must keep verifying.
   it("verifies a state that carries no origin", () => {
     const verified = verifyOAuthState(
-      signOAuthState({ projectId: "p1", provider: "gmail", nonce }),
+      signOAuthState({ workspaceId: "p1", provider: "gmail", nonce }),
     );
     expect(verified).not.toBeNull();
     expect(verified?.origin).toBeUndefined();
@@ -63,7 +63,7 @@ describe("oauth state", () => {
   it("rejects a tampered payload", () => {
     const envelope = decode(
       signOAuthState({
-        projectId: "p1",
+        workspaceId: "p1",
         provider: "gmail",
         nonce,
         origin: "https://onecli.example.com",
@@ -79,7 +79,7 @@ describe("oauth state", () => {
 
   it("rejects a tampered signature", () => {
     const envelope = decode(
-      signOAuthState({ projectId: "p1", provider: "gmail", nonce }),
+      signOAuthState({ workspaceId: "p1", provider: "gmail", nonce }),
     );
     const flipped = envelope.sig.startsWith("a")
       ? `b${envelope.sig.slice(1)}`
@@ -91,7 +91,7 @@ describe("oauth state", () => {
 
   it("rejects a signature of the wrong length without throwing", () => {
     const envelope = decode(
-      signOAuthState({ projectId: "p1", provider: "gmail", nonce }),
+      signOAuthState({ workspaceId: "p1", provider: "gmail", nonce }),
     );
     expect(
       verifyOAuthState(reencode({ ...envelope, sig: "short" })),

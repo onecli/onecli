@@ -1,7 +1,7 @@
 // ── Policy shapes: the first-match engine's rule / request / decision types ──
 // The surviving new-model shapes for the v2 evaluator, plus `OldCondition` (the
 // body-condition shape, unchanged across models — still read by the endpoint
-// matcher, app-catalog, and the simulator) and the shared enums.
+// matcher and app-catalog) and the shared enums.
 
 export type RateWindow = "minute" | "hour" | "day";
 export type Method = "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
@@ -24,7 +24,7 @@ export interface PolicyRequest {
   agentId: string;
   /**
    * The agent's resolved principal set (step 6): the human users + directory
-   * groups its project inherits via ProjectAccess.
+   * groups its workspace inherits via WorkspaceAccess.
    * A directory-identity rule matches iff its principal is in the matching set.
    * Optional/empty for pure-agent traffic → only agent/"any" rules match.
    */
@@ -69,7 +69,7 @@ export type PolicyOutcome =
   /** A Default Rule's Block decided — org-first when both levels block. */
   | {
       kind: "denyDefault";
-      level: "organization" | "project";
+      level: "organization" | "workspace";
       rule: NewRule | null;
     }
   /** Nothing matched and no default blocks. `managed` = the deny-default carve
@@ -93,8 +93,8 @@ export type NewIdentity =
 /** Where a rule came from. The retired coherence bridge re-materialized only
  * the DERIVED sources (`app_permission`/`blocklist`/`equipment`) from their live
  * source-of-truth, leaving `custom`/`default` untouched. `equipment` (step 8) is
- * the injection allowlist derived from `secretMode`/`AgentSecret`/
- * `AgentAppConnection` — connection/secret-target allow rules. */
+ * the injection allowlist (grant rules naming the agent) —
+ * connection/secret-target allow rules. */
 export type RuleSource =
   | "custom"
   | "app_permission"
@@ -132,7 +132,7 @@ export type NewTarget =
       // Step 8: "all connections at a level" injection scope; null = no
       // injection. Injection-only (the evaluator ignores it — the level picks
       // the injection pool, never the host set).
-      connectionScope: "organization" | "project" | null;
+      connectionScope: "organization" | "workspace" | null;
     }
   | {
       kind: "connection";
@@ -144,7 +144,7 @@ export type NewTarget =
     }
   // Step 8: a secret target gates its host — resolved (at the gateway, at connect)
   // to the secret's host pattern(s): a specific secret → its one host; a level
-  // scope → the union of the org/project secrets' hosts. Permits on allow / blocks
+  // scope → the union of the org/workspace secrets' hosts. Permits on allow / blocks
   // on block, like `app`. Empty = unresolved (deleted) → never matches.
   | { kind: "secret"; hostPatterns: string[] };
 
@@ -156,7 +156,7 @@ export type NewTarget =
  * (the deny/allow fallback) — the only target-less match-all.
  */
 export interface NewRule {
-  scope: "organization" | "project";
+  scope: "organization" | "workspace";
   priority: number;
   isDefault: boolean;
   source: RuleSource;

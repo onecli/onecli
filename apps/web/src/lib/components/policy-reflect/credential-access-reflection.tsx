@@ -196,7 +196,7 @@ export const CredentialAccessReflection = ({
             </div>
           ) : isEmpty ? (
             <div className="flex flex-col items-center gap-3 py-8 text-center">
-              <div className="flex size-10 items-center justify-center rounded-full bg-muted">
+              <div className="flex size-10 items-center justify-center rounded-full bg-muted dark:bg-white/10 dark:border-white/10">
                 <KeyRound
                   className="size-4 text-muted-foreground"
                   aria-hidden="true"
@@ -234,7 +234,7 @@ export const CredentialAccessReflection = ({
           </p>
         )}
 
-        {/* No "Manage in Policy" escape hatch: the project policy page is gone
+        {/* No "Manage in Policy" escape hatch: the workspace policy page is gone
             (step 6), and this dialog's own rows plus the agent page are where
             credential access is changed now. */}
         <DialogFooter className="border-border/50 border-t px-6 py-4">

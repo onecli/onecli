@@ -131,13 +131,22 @@ export const getMatchedRuleName = (log: RequestLogEntry): string | null => {
   return typeof name === "string" ? name : null;
 };
 
-/** The deciding rule's level ("organization" | "project"), recorded beside the
+/** The deciding rule's level ("organization" | "workspace"), recorded beside the
  * name. Survives redaction, so the UI can still say "decided by an
- * organization rule" without the name. */
+ * organization rule" without the name.
+ *
+ * Rows written before the project→workspace rename recorded the tenancy level
+ * as "project". `request_logs` is the highest-volume table, so the rename
+ * migration deliberately does NOT rewrite this JSON — it normalizes here
+ * instead, at the single accessor, which is what makes skipping that backfill
+ * safe. Do not drop this: today both callers only test `=== "organization"`,
+ * so a stale value is harmless by luck, but the first `=== "workspace"` branch
+ * anyone adds would silently mis-handle every pre-rename row. */
 export const getMatchedRuleScope = (log: RequestLogEntry): string | null => {
   const data = log.extraData as Record<string, unknown> | null;
   const scope = data?.matched_rule_scope;
-  return typeof scope === "string" ? scope : null;
+  if (typeof scope !== "string") return null;
+  return scope === "project" ? "workspace" : scope;
 };
 
 /** Who is reading the logs — drives the org-rule redaction below. */
@@ -169,7 +178,7 @@ const viewerSeesOrgRules = async (
  * browsable bulk surface, held to the stricter admin-only visibility even
  * though the one-shot live 403/429 names the rule to the caller). Legacy
  * (old-model) rows carry no `matched_rule_scope`, so their `blocked_by_rule`
- * — always project-level — is untouched, as are project-scoped attributions. */
+ * — always workspace-level — is untouched, as are workspace-scoped attributions. */
 const redactOrgMatchedRule = (entry: RequestLogEntry): RequestLogEntry => {
   if (getMatchedRuleScope(entry) !== "organization") return entry;
   const data = { ...(entry.extraData as Record<string, unknown>) };
@@ -192,12 +201,12 @@ export interface ActivityPageParams {
 }
 
 const resolveAgentNames = async (
-  projectId: string,
+  workspaceId: string,
   agentIds: string[],
 ): Promise<Map<string, string>> => {
   if (agentIds.length === 0) return new Map();
   const agents = await db.agent.findMany({
-    where: { id: { in: agentIds }, projectId },
+    where: { id: { in: agentIds }, workspaceId },
     select: { id: true, name: true },
   });
   return new Map(agents.map((a) => [a.id, a.name]));
@@ -250,19 +259,19 @@ const toEntry = (
 };
 
 export const getRecentRequestLogs = async (
-  projectId: string,
+  workspaceId: string,
   limit = 5,
   viewer?: RequestLogViewer,
 ): Promise<RequestLogEntry[]> => {
   const logs = await db.requestLog.findMany({
-    where: { projectId },
+    where: { workspaceId },
     orderBy: { createdAt: "desc" },
     take: limit,
   });
 
   const agentIds = [...new Set(logs.map((l) => l.agentId))];
   const [agentMap, userMap, seesOrgRules] = await Promise.all([
-    resolveAgentNames(projectId, agentIds),
+    resolveAgentNames(workspaceId, agentIds),
     resolveUserNames(collectApproverIds(logs)),
     viewerSeesOrgRules(viewer),
   ]);
@@ -272,16 +281,16 @@ export const getRecentRequestLogs = async (
 };
 
 /**
- * Build the Prisma `where` for an activity query: project scope, the selected
+ * Build the Prisma `where` for an activity query: workspace scope, the selected
  * {@link ActivityFilter}, and the keyset-pagination cursor. Pure and synchronous
  * so it can be unit-tested without a database.
  */
 export const buildActivityWhere = (
-  projectId: string,
+  workspaceId: string,
   params: Pick<ActivityPageParams, "cursor" | "filter"> = {},
 ): Prisma.RequestLogWhereInput => {
   const { cursor, filter = "all" } = params;
-  const where: Prisma.RequestLogWhereInput = { projectId };
+  const where: Prisma.RequestLogWhereInput = { workspaceId };
 
   if (filter === "blocked") {
     where.status = { gte: 400 };
@@ -308,12 +317,12 @@ export const buildActivityWhere = (
 };
 
 export const getRequestLogs = async (
-  projectId: string,
+  workspaceId: string,
   params: ActivityPageParams = {},
   viewer?: RequestLogViewer,
 ): Promise<RequestLogPage> => {
   const limit = Math.min(params.limit ?? 50, 200);
-  const where = buildActivityWhere(projectId, params);
+  const where = buildActivityWhere(workspaceId, params);
 
   const logs = await db.requestLog.findMany({
     where,
@@ -326,7 +335,7 @@ export const getRequestLogs = async (
 
   const agentIds = [...new Set(page.map((l) => l.agentId))];
   const [agentMap, userMap, seesOrgRules] = await Promise.all([
-    resolveAgentNames(projectId, agentIds),
+    resolveAgentNames(workspaceId, agentIds),
     resolveUserNames(collectApproverIds(page)),
     viewerSeesOrgRules(viewer),
   ]);

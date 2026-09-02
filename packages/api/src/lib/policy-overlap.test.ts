@@ -139,7 +139,7 @@ describe("findPolicyOverlaps — warns (provably dead)", () => {
     const scoped = rule({
       logicalId: "s",
       priority: 1,
-      targets: [app("github", [], "project")],
+      targets: [app("github", [], "workspace")],
     });
     const tooled = rule({
       logicalId: "t",
@@ -189,12 +189,12 @@ describe("findPolicyOverlaps — warns (provably dead)", () => {
     const a = rule({
       logicalId: "a",
       priority: 1,
-      targets: [app("gmail", [], "project")],
+      targets: [app("gmail", [], "workspace")],
     });
     const b = rule({
       logicalId: "b",
       priority: 2,
-      targets: [app("gmail", [], "project")],
+      targets: [app("gmail", [], "workspace")],
       rateLimit: 5,
       rateLimitWindow: "minute",
     });
@@ -374,7 +374,7 @@ describe("findPolicyOverlaps — must NOT warn (undecidable or not dead)", () =>
     const scoped = rule({
       logicalId: "s",
       priority: 2,
-      targets: [app("github", ["a"], "project")],
+      targets: [app("github", ["a"], "workspace")],
     });
     expect(findPolicyOverlaps([broad, scoped])).toEqual([]);
   });
@@ -387,7 +387,7 @@ describe("findPolicyOverlaps — must NOT warn (undecidable or not dead)", () =>
     const appScoped = rule({
       logicalId: "as",
       priority: 2,
-      targets: [app("gmail", [], "project")],
+      targets: [app("gmail", [], "workspace")],
     });
     const conn = rule({
       logicalId: "c",
@@ -397,7 +397,7 @@ describe("findPolicyOverlaps — must NOT warn (undecidable or not dead)", () =>
     const sec = rule({
       logicalId: "sec",
       priority: 4,
-      targets: [{ kind: "secret", secretId: null, secretScope: "project" }],
+      targets: [{ kind: "secret", secretId: null, secretScope: "workspace" }],
     });
     expect(findPolicyOverlaps([all, appScoped, conn, sec])).toEqual([]);
   });
@@ -457,13 +457,13 @@ describe("findPolicyOverlaps — must NOT warn (undecidable or not dead)", () =>
       logicalId: "bh",
       priority: 1,
       action: "block",
-      targets: [app("github", [], "project")],
+      targets: [app("github", [], "workspace")],
     });
     const allowTwin = rule({
       logicalId: "at",
       priority: 2,
       action: "allow",
-      targets: [app("github", [], "project")],
+      targets: [app("github", [], "workspace")],
     });
     expect(findPolicyOverlaps([blockHead, allowTwin])).toEqual([]);
   });
@@ -510,7 +510,7 @@ describe("findPolicyOverlaps — must NOT warn (undecidable or not dead)", () =>
   });
 
   it("two whole-app rules differing only in connectionScope are not duplicates", () => {
-    // Same match surface, but DIFFERENT injection pools (org vs project
+    // Same match surface, but DIFFERENT injection pools (org vs workspace
     // connections) — deleting one would lose its injection level, so the
     // signature keeps the scope and stays silent.
     const org = rule({
@@ -521,7 +521,7 @@ describe("findPolicyOverlaps — must NOT warn (undecidable or not dead)", () =>
     const proj = rule({
       logicalId: "p",
       priority: 2,
-      targets: [app("gmail", [], "project")],
+      targets: [app("gmail", [], "workspace")],
     });
     expect(findPolicyOverlaps([org, proj])).toEqual([]);
   });
@@ -552,6 +552,37 @@ describe("findPolicyOverlaps — must NOT warn (undecidable or not dead)", () =>
       targets: [net("github.com", "/acme/repo/git-receive-pack", "POST")],
     });
     expect(kinds([all, push])).toEqual(["p:shadowed"]);
+  });
+
+  it("a git-upload-pack later path is not covered by a plain path superset (the clone bridge)", () => {
+    // Same law as receive-pack: the upload-pack pattern also matches the GET
+    // info/refs clone discovery, so a plain POST path superset does NOT cover
+    // it and must not report a shadow.
+    const broad = rule({
+      logicalId: "b",
+      priority: 1,
+      targets: [net("github.com", "/acme/*", "POST")],
+    });
+    const clone = rule({
+      logicalId: "c",
+      priority: 2,
+      targets: [net("github.com", "/acme/repo/git-upload-pack", "POST")],
+    });
+    expect(findPolicyOverlaps([broad, clone])).toEqual([]);
+  });
+
+  it("an any-path any-method earlier target DOES cover git-upload-pack", () => {
+    const all = rule({
+      logicalId: "a",
+      priority: 1,
+      targets: [net("github.com")],
+    });
+    const clone = rule({
+      logicalId: "c",
+      priority: 2,
+      targets: [net("github.com", "/acme/repo/git-upload-pack", "POST")],
+    });
+    expect(kinds([all, clone])).toEqual(["c:shadowed"]);
   });
 
   it("a method-narrowed earlier rule never covers an any-method later rule", () => {

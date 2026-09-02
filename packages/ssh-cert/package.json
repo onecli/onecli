@@ -1,0 +1,23 @@
+{
+  "name": "@onecli/ssh-cert",
+  "version": "0.0.0",
+  "private": true,
+  "license": "Apache-2.0",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "check-types": "tsc --noEmit",
+    "lint": "eslint --max-warnings 0",
+    "lint:fix": "eslint --fix --max-warnings 0",
+    "test": "vitest run"
+  },
+  "devDependencies": {
+    "@onecli/eslint-config": "workspace:*",
+    "@onecli/typescript-config": "workspace:*",
+    "@types/node": "^22.15.3",
+    "typescript": "5.9.2",
+    "vitest": "^3.2.6"
+  }
+}

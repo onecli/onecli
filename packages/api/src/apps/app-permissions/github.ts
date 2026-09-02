@@ -48,16 +48,16 @@ const githubGroups: AppToolGroup[] = [
         id: "graphql_query",
         name: "GraphQL API (queries)",
         description:
-          "Query data via GitHub GraphQL API. Used by the gh CLI for listing issues, PRs, and repos.",
+          "Read-only GraphQL queries (how the gh CLI lists issues, PRs, and repos). Anything that isn't clearly a pure query counts as a mutation.",
         hostPattern: "api.github.com",
         pathPattern: "/graphql",
         method: "POST",
+        graphqlOps: "query",
       },
       {
         id: "read_raw_content",
         name: "Read raw file content",
-        description:
-          "Fetch raw file contents directly from raw.githubusercontent.com (the legacy/CDN read host).",
+        description: "Fetch raw file contents from raw.githubusercontent.com",
         hostPattern: "raw.githubusercontent.com",
         pathPattern: "/*",
         method: "GET",
@@ -103,10 +103,11 @@ const githubGroups: AppToolGroup[] = [
         id: "graphql_mutation",
         name: "GraphQL API (mutations)",
         description:
-          "Mutate data via GitHub GraphQL API. Used by the gh CLI for creating issues, PRs, and comments.",
+          "GraphQL writes (how the gh CLI creates issues, PRs, and comments). Blocking this blocks every GraphQL request that isn't a pure query.",
         hostPattern: "api.github.com",
         pathPattern: "/graphql",
         method: "POST",
+        graphqlOps: "mutation",
       },
       {
         id: "delete_branch",

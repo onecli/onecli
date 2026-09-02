@@ -38,6 +38,14 @@ export const googleCalendarPermissions: AppPermissionDefinition = {
           pathPattern: "/calendar/v3/users/me/calendarList",
           method: "GET",
         },
+        {
+          id: "get_calendar",
+          name: "Get calendar",
+          description: "Retrieve a specific calendar",
+          hostPattern: "www.googleapis.com",
+          pathPattern: "/calendar/v3/calendars/*",
+          method: "GET",
+        },
       ],
     },
     {

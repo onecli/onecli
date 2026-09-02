@@ -10,18 +10,10 @@ import {
   SelectValue,
 } from "@onecli/ui/components/select";
 import { cn } from "@onecli/ui/lib/utils";
-import { getApp } from "@onecli/api/apps/registry";
 import { AppSelect } from "./app-select";
 import { AppToolsPicker } from "./app-tools-picker";
-import { TeamBadge } from "@/lib/components/team-badge";
-// Edition seam: EE aliases to the real granular resource editor; the OSS
-// module is a locked "available on OneCLI Cloud" hint. Alias key on purpose —
-// a relative import would bypass turbopack resolveAlias in EE builds.
 import { ResourceScopeFields } from "@/lib/policy-editor/resource-scope";
 import type { Connection } from "@/lib/api";
-
-/** Display name for the locked callout; falls back to the raw id. */
-const providerName = (id: string): string => getApp(id)?.name ?? id;
 
 /** The App target's editable state. A rule's App target is authored one of two
  * ways: `specific` connections (→ `connection` targets) or `all` connections at a
@@ -30,8 +22,8 @@ export interface AppTargetState {
   provider: string;
   mode: "specific" | "all";
   connectionIds: string[];
-  /** Only meaningful for `mode === "all"`; the org/project level to inject. */
-  level: "organization" | "project";
+  /** Only meaningful for `mode === "all"`; the org/workspace level to inject. */
+  level: "organization" | "workspace";
   /** The catalog tool ids the rule is narrowed to ([] = the whole app), in
    * BOTH modes — "all connections" and specific connection(s). Tools narrow
    * which endpoints the rule matches; injection is unaffected. */
@@ -49,8 +41,8 @@ export interface AppTargetFieldsProps {
   /** Connections available at the rule's scope (already level-filtered by the
    * scope-aware `useConnections`). */
   connections: Connection[];
-  /** An ORG rule may choose the injection level (org or project); a PROJECT rule
-   * is fixed to its own project. */
+  /** An ORG rule may choose the injection level (org or workspace); a WORKSPACE rule
+   * is fixed to its own workspace. */
   isOrgRule: boolean;
   /** The rule's action. Granular resource scoping only applies to an Allow (a
    * Block injects nothing, so a session policy would be silently inert), so the
@@ -61,10 +53,6 @@ export interface AppTargetFieldsProps {
    * Resources picker is hidden while behavioral conditions are present (else
    * authoring a session policy would silently discard them). */
   hasBehavioralConditions: boolean;
-  /** The selected provider is a cloud-only app this edition can't connect
-   * (OSS's EE-stub registry entries). The dead sub-fields (connections, tools,
-   * resources) are replaced by a locked callout, and the form locks the save. */
-  cloudLocked: boolean;
   showError: boolean;
   error: string | null;
 }
@@ -72,7 +60,7 @@ export interface AppTargetFieldsProps {
 /**
  * The App target authoring surface: pick a provider, then either specific
  * connection(s) of it, or "all connections" at a chosen level (an org rule can
- * reach down to project-level connections; a project rule is project-only).
+ * reach down to workspace-level connections; a workspace rule is workspace-only).
  * On an allow rule the target permits the app's traffic (its catalog hosts)
  * and injects the chosen connections; on a block rule it blocks the app's
  * traffic. Mirrors {@link SecretTargetFields}.
@@ -84,7 +72,6 @@ export const AppTargetFields = ({
   isOrgRule,
   action,
   hasBehavioralConditions,
-  cloudLocked,
   showError,
   error,
 }: AppTargetFieldsProps) => {
@@ -133,154 +120,121 @@ export const AppTargetFields = ({
         />
       </div>
 
-      {/* A cloud-only app (this edition can't connect it): the sub-fields
-          below would author a dead rule, so they're replaced by the locked
-          callout and the form locks the save. House pattern: the
-          condition-builder OSS stub's dashed card. */}
-      {cloudLocked ? (
-        // role="status": the callout appears dynamically when a cloud-only app
-        // is picked (and the Save button leaves the tab order), so announce it.
-        <div
-          role="status"
-          className="flex items-center gap-2.5 rounded-md border border-dashed px-3 py-2.5"
+      <div className="space-y-1.5">
+        <Label htmlFor="rule-app-mode">Connections</Label>
+        <Select
+          value={value.mode}
+          onValueChange={(mode) =>
+            onChange({
+              ...value,
+              mode: mode === "all" ? "all" : "specific",
+              // Session policy is per-connection; the connection context changes
+              // with the mode, so drop it.
+              sessionPolicy: null,
+            })
+          }
         >
-          <TeamBadge />
-          <p className="text-muted-foreground text-xs">
-            {providerName(value.provider)} connections are available on{" "}
-            <a
-              href="https://app.onecli.sh"
-              target="_blank"
-              rel="noopener noreferrer"
-              className="underline"
-            >
-              OneCLI Cloud
-            </a>
-            .
-          </p>
-        </div>
+          <SelectTrigger id="rule-app-mode" className="w-full bg-card">
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="specific">Specific connection(s)</SelectItem>
+            <SelectItem value="all">All connections</SelectItem>
+          </SelectContent>
+        </Select>
+      </div>
+
+      {value.mode === "specific" ? (
+        <fieldset className="space-y-2 rounded-lg border bg-card p-3">
+          <legend className="px-1 text-xs text-muted-foreground">
+            These connections
+          </legend>
+          {providerConnections.length === 0 ? (
+            <p className="text-xs text-muted-foreground">
+              {value.provider
+                ? "No connections for this app in this scope."
+                : "Pick an app first."}
+            </p>
+          ) : (
+            providerConnections.map((c) => {
+              const id = `conn-${c.id}`;
+              return (
+                <div key={c.id} className="flex items-center gap-2">
+                  <Checkbox
+                    id={id}
+                    checked={value.connectionIds.includes(c.id)}
+                    onCheckedChange={(checked) =>
+                      toggleConnection(c.id, checked === true)
+                    }
+                  />
+                  <Label htmlFor={id} className="font-normal">
+                    {c.label ?? c.id}
+                  </Label>
+                </div>
+              );
+            })
+          )}
+        </fieldset>
       ) : (
-        <>
-          <div className="space-y-1.5">
-            <Label htmlFor="rule-app-mode">Connections</Label>
+        <div className="space-y-1.5">
+          <Label htmlFor="rule-app-level">At level</Label>
+          {isOrgRule ? (
             <Select
-              value={value.mode}
-              onValueChange={(mode) =>
+              value={value.level}
+              onValueChange={(level) =>
                 onChange({
                   ...value,
-                  mode: mode === "all" ? "all" : "specific",
-                  // Session policy is per-connection; the connection context changes
-                  // with the mode, so drop it.
-                  sessionPolicy: null,
+                  level:
+                    level === "organization" ? "organization" : "workspace",
                 })
               }
             >
-              <SelectTrigger id="rule-app-mode" className="w-full bg-card">
+              <SelectTrigger id="rule-app-level" className="w-full bg-card">
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
-                <SelectItem value="specific">Specific connection(s)</SelectItem>
-                <SelectItem value="all">All connections</SelectItem>
+                <SelectItem value="organization">
+                  Organization connections
+                </SelectItem>
+                <SelectItem value="workspace">
+                  Workspace connections (each workspace uses its own)
+                </SelectItem>
               </SelectContent>
             </Select>
-          </div>
-
-          {value.mode === "specific" ? (
-            <fieldset className="space-y-2 rounded-lg border bg-card p-3">
-              <legend className="px-1 text-xs text-muted-foreground">
-                These connections
-              </legend>
-              {providerConnections.length === 0 ? (
-                <p className="text-xs text-muted-foreground">
-                  {value.provider
-                    ? "No connections for this app in this scope."
-                    : "Pick an app first."}
-                </p>
-              ) : (
-                providerConnections.map((c) => {
-                  const id = `conn-${c.id}`;
-                  return (
-                    <div key={c.id} className="flex items-center gap-2">
-                      <Checkbox
-                        id={id}
-                        checked={value.connectionIds.includes(c.id)}
-                        onCheckedChange={(checked) =>
-                          toggleConnection(c.id, checked === true)
-                        }
-                      />
-                      <Label htmlFor={id} className="font-normal">
-                        {c.label ?? c.id}
-                      </Label>
-                    </div>
-                  );
-                })
-              )}
-            </fieldset>
           ) : (
-            <div className="space-y-1.5">
-              <Label htmlFor="rule-app-level">At level</Label>
-              {isOrgRule ? (
-                <Select
-                  value={value.level}
-                  onValueChange={(level) =>
-                    onChange({
-                      ...value,
-                      level:
-                        level === "organization" ? "organization" : "project",
-                    })
-                  }
-                >
-                  <SelectTrigger id="rule-app-level" className="w-full bg-card">
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="organization">
-                      Organization connections
-                    </SelectItem>
-                    <SelectItem value="project">
-                      Project connections (each project uses its own)
-                    </SelectItem>
-                  </SelectContent>
-                </Select>
-              ) : (
-                <p className="text-xs text-muted-foreground">
-                  All of this project&apos;s {value.provider || "app"}{" "}
-                  connections.
-                </p>
-              )}
-            </div>
+            <p className="text-xs text-muted-foreground">
+              All of this workspace&apos;s {value.provider || "app"}{" "}
+              connections.
+            </p>
           )}
+        </div>
+      )}
 
-          {/* Granular resource scoping applies only to an Allow (a Block injects
-          nothing) and is mutually exclusive with behavioral conditions (a rule's
-          `conditions` is one or the other), so it's hidden while those exist. */}
-          {singleConnection &&
-            action === "allow" &&
-            !hasBehavioralConditions && (
-              <ResourceScopeFields
-                connection={singleConnection}
-                policy={value.sessionPolicy}
-                onChange={(sessionPolicy) =>
-                  onChange({ ...value, sessionPolicy })
-                }
-              />
-            )}
+      {/* Granular resource scoping applies only to an Allow (a Block injects
+      nothing) and is mutually exclusive with behavioral conditions (a rule's
+      `conditions` is one or the other), so it's hidden while those exist. */}
+      {singleConnection && action === "allow" && !hasBehavioralConditions && (
+        <ResourceScopeFields
+          connection={singleConnection}
+          policy={value.sessionPolicy}
+          onChange={(sessionPolicy) => onChange({ ...value, sessionPolicy })}
+        />
+      )}
 
-          {value.provider && (
-            <div className="space-y-1.5">
-              <Label htmlFor="rule-app-tools">Tools</Label>
-              <AppToolsPicker
-                id="rule-app-tools"
-                provider={value.provider}
-                value={value.tools}
-                onChange={(tools) => onChange({ ...value, tools })}
-              />
-              <p className="text-xs text-muted-foreground">
-                Empty covers the whole app; narrow to specific tools to limit
-                which operations this rule matches.
-              </p>
-            </div>
-          )}
-        </>
+      {value.provider && (
+        <div className="space-y-1.5">
+          <Label htmlFor="rule-app-tools">Tools</Label>
+          <AppToolsPicker
+            id="rule-app-tools"
+            provider={value.provider}
+            value={value.tools}
+            onChange={(tools) => onChange({ ...value, tools })}
+          />
+          <p className="text-xs text-muted-foreground">
+            Empty covers the whole app; narrow to specific tools to limit which
+            operations this rule matches.
+          </p>
+        </div>
       )}
 
       {showError && error && (

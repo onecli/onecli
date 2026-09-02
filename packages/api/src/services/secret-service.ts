@@ -1,6 +1,7 @@
 import { db, Prisma } from "@onecli/db";
 import { getCrypto } from "../providers";
 import { ServiceError } from "./errors";
+import { attachLlmKeyToKeylessAgents } from "./llm-autoattach-service";
 import type { ResourceScope } from "./resource-scope";
 import { scopeWhere, scopeCreate, scopeOwnership } from "./resource-scope";
 import {
@@ -129,6 +130,15 @@ const buildOnePasswordMetadata = (
 
 export type { CreateSecretInput, UpdateSecretInput };
 
+/** How far back the key-health signal looks — old failures age out, and the
+ * window bounds the per-host log scan. */
+const LAST_ERROR_WINDOW_DAYS = 7;
+
+/** Provider statuses that indict the key itself: auth (401/403), payment
+ * (402), limits (429). Anything else is the request's problem, not the
+ * key's. */
+const KEY_PROBLEM_STATUSES = new Set([401, 402, 403, 429]);
+
 export const listSecrets = async (scope: ResourceScope) => {
   const secrets = await db.secret.findMany({
     where: scopeWhere(scope),
@@ -148,15 +158,125 @@ export const listSecrets = async (scope: ResourceScope) => {
     orderBy: { createdAt: "desc" },
   });
 
+  // The key's recent health, from the gateway's request log: for each LLM
+  // key's host, the latest injected upstream call within the recency window.
+  // Only statuses that indict the KEY itself brand it (auth, payment,
+  // limits) — a plain 400 is the request's fault, not the key's. A failure
+  // is only surfaced while it is the most recent word — one success
+  // afterwards clears it, and silence ages out with the window (which also
+  // bounds the [workspaceId, createdAt] index walk when a host has little
+  // or no traffic). Workspace-scoped logs only, so an org-scoped key shows
+  // health for THIS workspace's traffic.
+  const workspaceId = scope.workspaceId;
+  const healthWindowStart = new Date(
+    Date.now() - LAST_ERROR_WINDOW_DAYS * 24 * 60 * 60 * 1000,
+  );
+  // Wildcard patterns can never match the equality lookup below — skip them
+  // rather than issue a guaranteed-empty query per list call. LIKE
+  // metacharacters are skipped too: Prisma's insensitive/startsWith filters
+  // compile to ILIKE without escaping the value, so a stored `%`/`_` would
+  // turn the member-editable hostPattern into a pattern match against other
+  // hosts' rows. And the fan-out is capped: hostPattern is member-editable,
+  // so distinct-host cardinality is member-controlled — canonical setups
+  // have at most a few LLM hosts, and hosts past the cap simply show no
+  // badge rather than amplifying the per-host window walk.
+  const MAX_HEALTH_HOSTS = 20;
+  const llmHosts = [
+    ...new Set(
+      secrets
+        .filter((s) => s.type !== "generic")
+        .map((s) => s.hostPattern)
+        .filter((host) => Boolean(host) && !/[*%_\\]/.test(host)),
+    ),
+  ].slice(0, MAX_HEALTH_HOSTS);
+  const lastErrorByHost = new Map<
+    string,
+    { status: number; at: Date } | null
+  >();
+  if (workspaceId && llmHosts.length > 0) {
+    await Promise.all(
+      llmHosts.map(async (host) => {
+        // hostPattern is typically bare ("api.anthropic.com") while the log
+        // stores the CONNECT authority verbatim — usually "host:443", but the
+        // port varies and the case is whatever the client sent. Match any
+        // port, case-insensitively (house precedent for this column:
+        // request-log-service.ts).
+        const hostWhere = {
+          OR: [
+            { host: { equals: host, mode: "insensitive" as const } },
+            {
+              host: { startsWith: `${host}:`, mode: "insensitive" as const },
+            },
+          ],
+        };
+        // Health is decoration on the list — a failed probe degrades to "no
+        // badge" for its host, never to a failed GET /v1/secrets.
+        const latest = await db.requestLog
+          .findFirst({
+            where: {
+              workspaceId,
+              injectionCount: { gt: 0 },
+              createdAt: { gte: healthWindowStart },
+              ...hostWhere,
+            },
+            orderBy: { createdAt: "desc" },
+            select: { status: true, createdAt: true },
+          })
+          .catch(() => null);
+        lastErrorByHost.set(
+          host,
+          latest && KEY_PROBLEM_STATUSES.has(latest.status)
+            ? { status: latest.status, at: latest.createdAt }
+            : null,
+        );
+      }),
+    );
+  }
+
   return secrets.map((s) => ({
     ...s,
     typeLabel: SECRET_TYPE_LABELS[s.type] ?? s.type,
+    // LLM keys only, per the published contract — a generic secret that
+    // happens to share an LLM host must not inherit that traffic's badge.
+    lastError:
+      s.type !== "generic"
+        ? (lastErrorByHost.get(s.hostPattern) ?? null)
+        : null,
   }));
+};
+
+/**
+ * Hand a newly created LLM key to the agents that can reach no key at all —
+ * the other half of the auto-attach (see `llm-autoattach-service`). Applied to
+ * BOTH creation arms (inline and 1Password): where the value is stored is
+ * irrelevant to whether an agent may use it.
+ *
+ * Workspace scope only. An ORG-level key is reachable by every workspace in
+ * the org, and quietly granting it across all of them is a widening nobody
+ * asked for; org keys stay an explicit attach.
+ *
+ * Best-effort by contract: the key is already created, and a convenience
+ * grant must never turn that into a failed request.
+ */
+const attachNewKey = async (
+  scope: ResourceScope,
+  secretId: string,
+  userId: string | null,
+): Promise<string[]> => {
+  if (!scope.workspaceId) return [];
+  const { agentIds } = await attachLlmKeyToKeylessAgents(
+    scope.workspaceId,
+    secretId,
+    userId,
+  ).catch(() => ({ agentIds: [] as string[] }));
+  return agentIds;
 };
 
 export const createSecret = async (
   scope: ResourceScope,
   input: CreateSecretInput,
+  /** Who to record as the grantor of any auto-attached grant. */
+  userId: string | null = null,
 ) => {
   const name = input.name.trim();
   if (!name || name.length > 255) {
@@ -196,14 +316,14 @@ export const createSecret = async (
 
   // ── Value resolved from 1Password at request time (nothing stored in PG) ──
   if (valueSource === "onepassword") {
-    // 1Password connections are per-project: the gateway resolves op:// refs via
-    // the requesting agent's project connection. An org/partner-scoped secret
-    // has no single project, so its value would silently fail to resolve —
+    // 1Password connections are per-workspace: the gateway resolves op:// refs via
+    // the requesting agent's workspace connection. An org-scoped secret
+    // has no single workspace, so its value would silently fail to resolve —
     // reject it here instead of creating a secret that can never inject.
-    if (!scope.projectId) {
+    if (!scope.workspaceId) {
       throw new ServiceError(
         "BAD_REQUEST",
-        "1Password is only available for project-scoped secrets",
+        "1Password is only available for workspace-scoped secrets",
       );
     }
     if (!input.opRef) {
@@ -213,7 +333,7 @@ export const createSecret = async (
     if (input.type === "anthropic") hostPattern = "api.anthropic.com";
     if (input.type === "openai") hostPattern = "api.openai.com";
 
-    return db.secret.create({
+    const opSecret = await db.secret.create({
       data: {
         name,
         type: input.type,
@@ -237,6 +357,11 @@ export const createSecret = async (
         createdAt: true,
       },
     });
+
+    return {
+      ...opSecret,
+      attachedAgents: await attachNewKey(scope, opSecret.id, userId),
+    };
   }
 
   // ── Inline value (encrypted at rest) ──
@@ -273,7 +398,11 @@ export const createSecret = async (
     },
   });
 
-  return { ...secret, preview: buildPreview(value) };
+  return {
+    ...secret,
+    preview: buildPreview(value),
+    attachedAgents: await attachNewKey(scope, secret.id, userId),
+  };
 };
 
 export const deleteSecret = async (scope: ResourceScope, secretId: string) => {
@@ -308,13 +437,13 @@ export const updateSecret = async (
   }
 
   if (input.valueSource === "onepassword") {
-    // Switch to / update a value resolved from 1Password. Per-project only, as in
-    // createSecret: the gateway resolves op:// refs via the agent's project
-    // connection, so org/partner scope has no connection to resolve through.
-    if (!scope.projectId) {
+    // Switch to / update a value resolved from 1Password. Per-workspace only, as in
+    // createSecret: the gateway resolves op:// refs via the agent's workspace
+    // connection, so org scope has no connection to resolve through.
+    if (!scope.workspaceId) {
       throw new ServiceError(
         "BAD_REQUEST",
-        "1Password is only available for project-scoped secrets",
+        "1Password is only available for workspace-scoped secrets",
       );
     }
     if (!input.opRef)

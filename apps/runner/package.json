@@ -1,0 +1,42 @@
+{
+  "name": "@onecli/runner",
+  "version": "0.0.0",
+  "private": true,
+  "license": "Apache-2.0",
+  "type": "module",
+  "exports": {
+    "./runner": "./src/runner.ts",
+    "./config": "./src/config.ts",
+    "./installation": "./src/installation.ts",
+    "./control-plane": "./src/control-plane.ts",
+    "./turn-events": "./src/turn-events.ts",
+    "./supervisor-messages": "./src/supervisor-messages.ts",
+    "./backend/docker": "./src/backend/docker/docker-backend.ts",
+    "./ws/server": "./src/ws/server.ts"
+  },
+  "scripts": {
+    "dev": "tsx src/index.ts",
+    "build": "node build.mjs",
+    "start": "node dist/index.mjs",
+    "check-types": "tsc --noEmit",
+    "lint": "eslint --max-warnings 0",
+    "lint:fix": "eslint --fix --max-warnings 0",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@onecli/agent-protocol": "workspace:*",
+    "undici": "^8.0.0",
+    "ws": "^8.18.0",
+    "zod": "^4.3.6"
+  },
+  "devDependencies": {
+    "@onecli/eslint-config": "workspace:*",
+    "@onecli/typescript-config": "workspace:*",
+    "@types/node": "^22.15.3",
+    "@types/ws": "^8.5.13",
+    "esbuild": "^0.28.0",
+    "tsx": "^4.19.4",
+    "typescript": "5.9.2",
+    "vitest": "^3.2.6"
+  }
+}

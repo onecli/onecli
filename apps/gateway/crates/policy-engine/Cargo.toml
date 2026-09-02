@@ -1,0 +1,23 @@
+[package]
+name = "policy-engine"
+version = "0.0.0"
+edition = "2021"
+license = "Apache-2.0"
+publish = false
+
+[dependencies]
+anyhow = { workspace = true }
+apps = { path = "../apps" }
+cache = { path = "../cache" }
+common = { path = "../common" }
+context = { path = "../context" }
+db = { path = "../db" }
+ee = { path = "../ee/ee" }
+inject = { path = "../inject" }
+policy = { path = "../policy" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sqlx = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true }

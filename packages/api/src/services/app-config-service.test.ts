@@ -3,12 +3,12 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 // Pin the edition before any import — lib/env captures env at first load and
 // CI runs the whole workflow with NEXT_PUBLIC_EDITION=cloud.
 vi.hoisted(() => {
-  process.env.NEXT_PUBLIC_EDITION = "onprem-slim";
+  process.env.NEXT_PUBLIC_EDITION = "cloud";
 });
 
 interface Conn {
   id: string;
-  projectId?: string;
+  workspaceId?: string;
   organizationId?: string;
   scope: string;
   provider: string;
@@ -17,7 +17,7 @@ interface Conn {
 
 interface ConnWhere {
   organizationId?: string;
-  projectId?: string;
+  workspaceId?: string;
   scope?: string;
   provider?: string;
   appConfigId?: string;
@@ -40,7 +40,7 @@ const store = vi.hoisted(() => ({
 const matches = (conn: Conn, where: ConnWhere) =>
   (where.organizationId === undefined ||
     conn.organizationId === where.organizationId) &&
-  (where.projectId === undefined || conn.projectId === where.projectId) &&
+  (where.workspaceId === undefined || conn.workspaceId === where.workspaceId) &&
   (where.scope === undefined || conn.scope === where.scope) &&
   (where.provider === undefined || conn.provider === where.provider) &&
   (where.appConfigId === undefined || conn.appConfigId === where.appConfigId);
@@ -84,10 +84,10 @@ vi.mock("@onecli/db", () => ({
           .map((c) => ({ id: c.id }));
       },
     },
-    // No agents are assigned in these tests → no affected projects → the coherence
+    // No agents are assigned in these tests → no affected workspaces → the coherence
     // trigger no-ops (empty Promise.all), so the delete sequence is unchanged.
     agentAppConnection: {
-      findMany: async () => [] as { agent: { projectId: string } }[],
+      findMany: async () => [] as { agent: { workspaceId: string } }[],
     },
   },
 }));
@@ -147,34 +147,34 @@ describe("disconnectIfConnected via deleteAppConfig — org scope", () => {
         provider: "prov",
         appConfigId: "cfg-1",
       },
-      // a project connection this config minted (provenance link)
+      // a workspace connection this config minted (provenance link)
       {
         id: "proj-linked",
-        projectId: "p-1",
-        scope: "project",
+        workspaceId: "p-1",
+        scope: "workspace",
         provider: "prov",
         appConfigId: "cfg-1",
       },
-      // a project connection with NO link (env-minted / legacy) — must survive
+      // a workspace connection with NO link (env-minted / legacy) — must survive
       {
         id: "proj-unlinked",
-        projectId: "p-2",
-        scope: "project",
+        workspaceId: "p-2",
+        scope: "workspace",
         provider: "prov",
         appConfigId: null,
       },
-      // a project connection minted by a DIFFERENT config — must survive
+      // a workspace connection minted by a DIFFERENT config — must survive
       {
         id: "proj-other",
-        projectId: "p-3",
-        scope: "project",
+        workspaceId: "p-3",
+        scope: "workspace",
         provider: "prov",
         appConfigId: "cfg-2",
       },
     ];
   });
 
-  it("disconnects the org-scoped row and exactly the linked project rows", async () => {
+  it("disconnects the org-scoped row and exactly the linked workspace rows", async () => {
     await deleteAppConfig({ organizationId: "org-1" }, "prov");
 
     const survivors = store.connections.map((c) => c.id).sort();
@@ -191,7 +191,7 @@ describe("disconnectIfConnected via deleteAppConfig — org scope", () => {
     });
     expect(store.deleteManyWheres[1]).toEqual({
       appConfigId: "cfg-1",
-      scope: "project",
+      scope: "workspace",
     });
   });
 
@@ -202,30 +202,30 @@ describe("disconnectIfConnected via deleteAppConfig — org scope", () => {
   });
 });
 
-describe("disconnectIfConnected via deleteAppConfig — project scope stays blunt", () => {
-  it("deletes all provider connections in the project and runs NO org FK sweep", async () => {
+describe("disconnectIfConnected via deleteAppConfig — workspace scope stays blunt", () => {
+  it("deletes all provider connections in the workspace and runs NO org FK sweep", async () => {
     seedConfig();
     store.connections = [
       {
         id: "p-conn",
-        projectId: "p-1",
-        scope: "project",
+        workspaceId: "p-1",
+        scope: "workspace",
         provider: "prov",
         appConfigId: "cfg-1",
       },
     ];
 
-    await deleteAppConfig({ projectId: "p-1" }, "prov");
+    await deleteAppConfig({ workspaceId: "p-1" }, "prov");
 
     expect(store.deleteManyWheres).toEqual([
-      { projectId: "p-1", provider: "prov" },
+      { workspaceId: "p-1", provider: "prov" },
     ]);
     expect(store.calls).toEqual(["deleteMany", "configDelete"]);
   });
 });
 
 describe("toggleAppConfigEnabled — org scope disconnects before writing", () => {
-  it("sweeps org + linked project rows, then updates", async () => {
+  it("sweeps org + linked workspace rows, then updates", async () => {
     seedConfig();
     store.connections = [
       {
@@ -237,8 +237,8 @@ describe("toggleAppConfigEnabled — org scope disconnects before writing", () =
       },
       {
         id: "proj-linked",
-        projectId: "p-1",
-        scope: "project",
+        workspaceId: "p-1",
+        scope: "workspace",
         provider: "prov",
         appConfigId: "cfg-1",
       },
@@ -252,7 +252,7 @@ describe("toggleAppConfigEnabled — org scope disconnects before writing", () =
 });
 
 describe("countAppConfigDependents", () => {
-  it("counts org-scoped connections and linked project connections", async () => {
+  it("counts org-scoped connections and linked workspace connections", async () => {
     seedConfig();
     store.connections = [
       {
@@ -271,16 +271,16 @@ describe("countAppConfigDependents", () => {
       },
       {
         id: "proj-a",
-        projectId: "p-1",
-        scope: "project",
+        workspaceId: "p-1",
+        scope: "workspace",
         provider: "prov",
         appConfigId: "cfg-1",
       },
-      // unlinked + different-config project rows must not be counted
+      // unlinked + different-config workspace rows must not be counted
       {
         id: "proj-x",
-        projectId: "p-2",
-        scope: "project",
+        workspaceId: "p-2",
+        scope: "workspace",
         provider: "prov",
         appConfigId: null,
       },
@@ -291,7 +291,7 @@ describe("countAppConfigDependents", () => {
       "prov",
     );
 
-    expect(dependents).toEqual({ orgConnections: 2, projectConnections: 1 });
+    expect(dependents).toEqual({ orgConnections: 2, workspaceConnections: 1 });
     expect(store.countWheres).toContainEqual({
       organizationId: "org-1",
       scope: "organization",
@@ -299,11 +299,11 @@ describe("countAppConfigDependents", () => {
     });
     expect(store.countWheres).toContainEqual({
       appConfigId: "cfg-1",
-      scope: "project",
+      scope: "workspace",
     });
   });
 
-  it("reports zero project dependents when there is no config row", async () => {
+  it("reports zero workspace dependents when there is no config row", async () => {
     store.appConfigRow = null;
     store.connections = [];
 
@@ -312,7 +312,7 @@ describe("countAppConfigDependents", () => {
       "prov",
     );
 
-    expect(dependents).toEqual({ orgConnections: 0, projectConnections: 0 });
+    expect(dependents).toEqual({ orgConnections: 0, workspaceConnections: 0 });
   });
 });
 
@@ -344,7 +344,7 @@ describe("hasAppConfig — configured means usable (enabled + credentials)", () 
       credentials: "enc:secret",
       enabled: false,
     };
-    expect(await hasAppConfig({ projectId: "p-1" }, "prov")).toBe(false);
+    expect(await hasAppConfig({ workspaceId: "p-1" }, "prov")).toBe(false);
   });
 });
 
@@ -357,10 +357,12 @@ describe("getAppConfigCredentials reshape", () => {
       enabled: true,
     };
 
-    expect(await getAppConfigCredentials({ projectId: "p" }, "prov")).toEqual({
-      appConfigId: "cfg-9",
-      fields: { clientId: "cid" },
-    });
+    expect(await getAppConfigCredentials({ workspaceId: "p" }, "prov")).toEqual(
+      {
+        appConfigId: "cfg-9",
+        fields: { clientId: "cid" },
+      },
+    );
   });
 
   it("returns null for a disabled row", async () => {
@@ -372,7 +374,7 @@ describe("getAppConfigCredentials reshape", () => {
     };
 
     expect(
-      await getAppConfigCredentials({ projectId: "p" }, "prov"),
+      await getAppConfigCredentials({ workspaceId: "p" }, "prov"),
     ).toBeNull();
   });
 });

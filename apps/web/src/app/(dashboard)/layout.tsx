@@ -5,12 +5,13 @@ import { useRouter, usePathname } from "next/navigation";
 import { SidebarInset, SidebarProvider } from "@onecli/ui/components/sidebar";
 import { DashboardSidebar } from "@dashboard/dashboard-sidebar";
 import { DashboardHeader } from "@dashboard/dashboard-header";
-import { SettingsNav } from "@/app/(dashboard)/settings/_components/settings-nav";
-import { SettingsMobileNav } from "@/app/(dashboard)/settings/_components/settings-mobile-nav";
+import { SettingsNav } from "@dashboard/settings-nav";
+import { SettingsMobileNav } from "@dashboard/settings-mobile-nav";
 import { useAuth } from "@/providers/auth-provider";
 import { checkDashboardRedirect } from "@/lib/user-plan";
 import { getDashboardRedirect } from "@/lib/dashboard/session-redirect";
 import { apiFetch } from "@/lib/api-fetch";
+import { isAgentPagePath } from "@/lib/navigation";
 import { PlanGateProvider } from "@/lib/plan-gate";
 
 export default function DashboardLayout({
@@ -27,9 +28,15 @@ export default function DashboardLayout({
     signOutRef.current = signOut;
   }, [signOut]);
 
+  // Both settings areas render the same left sub-nav pane: the org's
+  // (`/org/<id>/settings`) and the workspace's (`/w/<id>/settings`, which now
+  // holds General + Install).
   const isSettings =
-    pathname.startsWith("/settings") ||
-    /^\/org\/[^/]+\/settings(\/|$)/.test(pathname);
+    /^\/org\/[^/]+\/settings(\/|$)/.test(pathname) ||
+    /^\/w\/[^/]+\/settings(\/|$)/.test(pathname);
+  // The agent page owns its full height (its Chat section needs the raw
+  // cell), so the chrome skips the scrolling `max-w-6xl` container for it.
+  const isAgentPage = isAgentPagePath(pathname);
 
   useEffect(() => {
     if (!isLoading && !isAuthenticated) {
@@ -56,6 +63,12 @@ export default function DashboardLayout({
         }
         if (res.ok) {
           sessionData = await res.json();
+          break;
+        }
+        if (res.status === 429) {
+          // Rate limited: retrying inside the window only feeds the limiter.
+          // Fall through with no session data — the dashboard renders anyway
+          // (the same graceful arm as a deploy-time outage).
           break;
         }
       } catch {
@@ -124,12 +137,16 @@ export default function DashboardLayout({
                 <SettingsNav />
               </aside>
             )}
-            <div className="min-h-0 min-w-0 flex-1 overflow-y-auto overflow-x-hidden">
-              {isSettings && <SettingsMobileNav />}
-              <main className="mx-auto min-w-0 max-w-6xl p-4 sm:p-6">
-                {children}
-              </main>
-            </div>
+            {isAgentPage ? (
+              children
+            ) : (
+              <div className="min-h-0 min-w-0 flex-1 overflow-y-auto overflow-x-hidden">
+                {isSettings && <SettingsMobileNav />}
+                <main className="mx-auto min-w-0 max-w-6xl p-4 sm:p-6">
+                  {children}
+                </main>
+              </div>
+            )}
           </div>
         </SidebarInset>
       </SidebarProvider>

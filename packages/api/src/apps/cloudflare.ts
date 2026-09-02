@@ -49,5 +49,4 @@ export const cloudflare: AppDefinition = {
     },
   },
   labelHint: 'e.g. "main-zone", "staging"',
-  available: true,
 };

@@ -41,7 +41,7 @@ import { injectionIdentityMatches } from "./injection";
 // the INJECTION one, which keeps `source="equipment"` rows — the retired
 // per-agent assignments live on as those, and `inject_select` walks them like
 // any other grant. Pool grants EXPAND to their concrete credentials so each
-// shows its own status. Rule-named ids resolve through the same org+project
+// shows its own status. Rule-named ids resolve through the same org+workspace
 // fence the gateway uses — a foreign/deleted id resolves to nothing
 // (fail-closed).
 //
@@ -67,7 +67,7 @@ export type CredentialProvenance =
   | { kind: "rule"; scope: "organization"; redacted: true }
   | {
       kind: "rule";
-      scope: "organization" | "project";
+      scope: "organization" | "workspace";
       rule: { logicalId: string; name: string };
     };
 
@@ -88,7 +88,7 @@ export type EffectiveCredentialEntry =
       status: CredentialAccessStatus;
       /** The ORGANIZATION blocks every tool of this connection for this agent.
        * Distinct from `status: "blocked"`, which doesn't say who blocked: a
-       * project can lift its own block, but not the organization's. */
+       * workspace can lift its own block, but not the organization's. */
       orgBlocked: boolean;
       provenance: CredentialProvenance[];
     };
@@ -102,14 +102,14 @@ export interface EffectiveCredentialsResult {
 }
 
 export interface EffectiveCredentialsCtx {
-  projectId: string;
+  workspaceId: string;
   organizationId: string;
   /** Org-admin viewers see org rule details; everyone else gets redaction. */
   viewerSeesOrgRules: boolean;
 }
 
 interface RuleRef {
-  scope: "organization" | "project";
+  scope: "organization" | "workspace";
   logicalId: string;
   name: string;
 }
@@ -197,7 +197,7 @@ const connectionAccessStatus = (
 
 /** A secret's effective status = the decision on a REPRESENTATIVE request to its
  * host (GET /), with the secret assumed attached (the injecting credential). A
- * whole-host block and an allowlist (project-default Block) both read "blocked"
+ * whole-host block and an allowlist (workspace-default Block) both read "blocked"
  * correctly. HONESTY LIMIT (same as `effective-tools`' per-tool view): a
  * method- or path-SPECIFIC block (e.g. only POST, or only `/admin/*`) is not
  * exercised by the representative GET /, so such a secret reads "usable" — an
@@ -235,65 +235,68 @@ export const effectiveCredentials = async (
   agentId: string,
   ctx: EffectiveCredentialsCtx,
 ): Promise<EffectiveCredentialsResult> => {
-  // The agent must belong to the caller's project — a foreign id is simply not
+  // The agent must belong to the caller's workspace — a foreign id is simply not
   // found (existence is never revealed across the fence).
   const agent = await db.agent.findFirst({
-    where: { id: agentId, projectId: ctx.projectId },
+    where: { id: agentId, workspaceId: ctx.workspaceId },
     select: { id: true },
   });
   if (!agent) throw new ServiceError("NOT_FOUND", "Agent not found.");
 
-  const secretPoolWhere = (level: "organization" | "project") =>
-    level === "project"
-      ? { projectId: ctx.projectId }
+  const secretPoolWhere = (level: "organization" | "workspace") =>
+    level === "workspace"
+      ? { workspaceId: ctx.workspaceId }
       : { organizationId: ctx.organizationId, scope: "organization" };
   // Connected-only, matching the gateway's injection pools
   // (`find_app_connections_by_*` all filter `status='connected'`).
-  const connectionPoolWhere = (level: "organization" | "project") =>
-    level === "project"
-      ? { projectId: ctx.projectId, status: "connected" }
+  const connectionPoolWhere = (level: "organization" | "workspace") =>
+    level === "workspace"
+      ? { workspaceId: ctx.workspaceId, status: "connected" }
       : {
           organizationId: ctx.organizationId,
           scope: "organization",
           status: "connected",
         };
   const anySecretPool = {
-    OR: [secretPoolWhere("project"), secretPoolWhere("organization")],
+    OR: [secretPoolWhere("workspace"), secretPoolWhere("organization")],
   };
   const anyConnectionPool = {
-    OR: [connectionPoolWhere("project"), connectionPoolWhere("organization")],
+    OR: [connectionPoolWhere("workspace"), connectionPoolWhere("organization")],
   };
 
   const orgBase = {
     scope: "organization" as const,
     organizationId: ctx.organizationId,
   };
-  const projectBase = { scope: "project" as const, projectId: ctx.projectId };
+  const workspaceBase = {
+    scope: "workspace" as const,
+    workspaceId: ctx.workspaceId,
+  };
   const [
     principals,
     orgRows,
-    projectRows,
+    workspaceRows,
     orgInjectRows,
-    projectInjectRows,
+    workspaceInjectRows,
     secretHosts,
     connectionProviders,
   ] = await Promise.all([
-    resolvePrincipalSet(ctx.projectId, ctx.organizationId),
+    resolvePrincipalSet(ctx.workspaceId, ctx.organizationId),
     // DECISION rules — equipment dropped, as the gateway's assembler drops them.
     loadRulesForSimulation(orgBase, "published"),
-    loadRulesForSimulation(projectBase, "published"),
+    loadRulesForSimulation(workspaceBase, "published"),
     // INJECTION rules — equipment KEPT, as `inject_select` keeps them. These
     // are what an agent's credentials actually come from since step 10 (and
     // the ONLY source since step 7 — there is no all-mode pool arm left); the
     // frozen per-agent grant tables are no longer consulted, so a revoked
     // grant stops being listed instead of lingering as "assigned".
     loadInjectionRules(orgBase, "published"),
-    loadInjectionRules(projectBase, "published"),
-    loadSecretHosts(ctx.organizationId, ctx.projectId),
-    loadConnectionProviders(ctx.organizationId, ctx.projectId),
+    loadInjectionRules(workspaceBase, "published"),
+    loadSecretHosts(ctx.organizationId, ctx.workspaceId),
+    loadConnectionProviders(ctx.organizationId, ctx.workspaceId),
   ]);
-  const allRows = [...orgRows, ...projectRows];
-  const injectRows = [...orgInjectRows, ...projectInjectRows];
+  const allRows = [...orgRows, ...workspaceRows];
+  const injectRows = [...orgInjectRows, ...workspaceInjectRows];
 
   const provenance = new ProvenanceMap();
   const secretById = new Map<string, SecretResolved>();
@@ -311,12 +314,12 @@ export const effectiveCredentials = async (
     const ruleSecretIds = new Map<string, RuleRef[]>();
     const ruleConnectionIds = new Map<string, RuleRef[]>();
     const secretScopeGrants: {
-      level: "organization" | "project";
+      level: "organization" | "workspace";
       ref: RuleRef;
     }[] = [];
     const providerScopeGrants: {
       provider: string;
-      level: "organization" | "project";
+      level: "organization" | "workspace";
       ref: RuleRef;
     }[] = [];
     const push = (m: Map<string, RuleRef[]>, id: string, ref: RuleRef) =>
@@ -327,7 +330,7 @@ export const effectiveCredentials = async (
       if (!injectionIdentityMatches(row.identities, agent.id, principals))
         continue;
       const ref: RuleRef = {
-        scope: row.scope === "organization" ? "organization" : "project",
+        scope: row.scope === "organization" ? "organization" : "workspace",
         logicalId: row.logicalId,
         name: row.name,
       };
@@ -336,7 +339,7 @@ export const effectiveCredentials = async (
           if (t.secretId) push(ruleSecretIds, t.secretId, ref);
           else if (
             t.secretScope === "organization" ||
-            t.secretScope === "project"
+            t.secretScope === "workspace"
           )
             secretScopeGrants.push({ level: t.secretScope, ref });
         } else if (t.kind === "connection") {
@@ -346,7 +349,7 @@ export const effectiveCredentials = async (
           if (
             t.appProvider &&
             (t.appConnectionScope === "organization" ||
-              t.appConnectionScope === "project")
+              t.appConnectionScope === "workspace")
           )
             providerScopeGrants.push({
               provider: t.appProvider,
@@ -357,7 +360,7 @@ export const effectiveCredentials = async (
       }
     }
 
-    // Resolve rule-named ids + expand pool grants — all through the org+project
+    // Resolve rule-named ids + expand pool grants — all through the org+workspace
     // fence, so a foreign/deleted id contributes nothing.
     const secretScopeLevels = [
       ...new Set(secretScopeGrants.map((g) => g.level)),
@@ -390,7 +393,7 @@ export const effectiveCredentials = async (
                 name: true,
                 hostPattern: true,
                 scope: true,
-                projectId: true,
+                workspaceId: true,
               },
             })
           : Promise.resolve([]),
@@ -407,7 +410,7 @@ export const effectiveCredentials = async (
                 label: true,
                 provider: true,
                 scope: true,
-                projectId: true,
+                workspaceId: true,
               },
             })
           : Promise.resolve([]),
@@ -424,8 +427,8 @@ export const effectiveCredentials = async (
         provenance.addRule(`connection:${c.id}`, ref);
     }
     // Expand a secret-scope grant to every secret at that level.
-    const levelOf = (row: { scope: string; projectId: string | null }) =>
-      row.scope === "organization" ? "organization" : "project";
+    const levelOf = (row: { scope: string; workspaceId: string | null }) =>
+      row.scope === "organization" ? "organization" : "workspace";
     for (const s of scopeSecrets) {
       const rowLevel = levelOf(s);
       const grants = secretScopeGrants.filter((g) => g.level === rowLevel);

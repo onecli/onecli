@@ -1,11 +1,16 @@
 import type { SessionEnforcer } from "./types";
+import { createEditionSlot } from "./edition-state";
 
-let _sessionEnforcer: SessionEnforcer | null = null;
+// Edition default: cloud applies enterprise "require SSO" to every
+// authenticated session — injected by `ensureEditionDefaults()`, keeping the
+// SSO module out of client bundles; onprem never enforces.
+const slot = createEditionSlot<SessionEnforcer | null>("sessionEnforcer", null);
 
-/** Null resets to the default (no enforcement) — used by tests. */
-export const initSessionEnforcer = (e: SessionEnforcer | null) => {
-  _sessionEnforcer = e;
-};
+/** Null resets to the edition default — used by tests. */
+export const initSessionEnforcer = (e: SessionEnforcer | null) => slot.init(e);
 
-export const getSessionEnforcer = (): SessionEnforcer | null =>
-  _sessionEnforcer;
+/** Package-internal: the edition-defaults injector. Not exported from the barrel. */
+export const setDefaultSessionEnforcer = (e: SessionEnforcer) =>
+  slot.setCloudDefault(e);
+
+export const getSessionEnforcer = (): SessionEnforcer | null => slot.get();

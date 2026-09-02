@@ -269,7 +269,6 @@ export const notion: AppDefinition = {
       return { credentials, scopes, metadata };
     },
   },
-  available: true,
   configurable: {
     hint: "Create a public integration at notion.so/profile/integrations.",
     fields: [

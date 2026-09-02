@@ -1,20 +1,23 @@
+import { createEditionSlot } from "../edition-state";
+
 export interface ConnectionHooks {
-  beforeConnect(
-    organizationId: string,
-    appDef: { teamOnly?: boolean },
-  ): Promise<void>;
   beforeCreate(organizationId: string): Promise<void>;
 }
 
-const defaultConnectionHooks: ConnectionHooks = {
-  beforeConnect: async () => {},
+const noopConnectionHooks: ConnectionHooks = {
   beforeCreate: async () => {},
 };
 
-let _connectionHooks: ConnectionHooks = defaultConnectionHooks;
+// Edition default: cloud enforces plan quotas before connect/create —
+// injected by `ensureEditionDefaults()`, keeping the quota service (and its
+// Redis client) out of client bundles; onprem has no quotas.
+const slot = createEditionSlot<ConnectionHooks>(
+  "connectionHooks",
+  noopConnectionHooks,
+);
 
-export const initConnectionHooks = (h: ConnectionHooks) => {
-  _connectionHooks = h;
-};
+/** Package-internal: the edition-defaults injector. Not exported from the barrel. */
+export const setDefaultConnectionHooks = (h: ConnectionHooks) =>
+  slot.setCloudDefault(h);
 
-export const getConnectionHooks = (): ConnectionHooks => _connectionHooks;
+export const getConnectionHooks = (): ConnectionHooks => slot.get();

@@ -1,3 +1,14 @@
+# Builds and publishes the OneCLI self-host images — one per
+# docker/<service>.Dockerfile — on every v* tag: multi-arch (amd64 + arm64)
+# manifests at ghcr.io/onecli/onecli-<service>, tagged <version>,
+# <major>.<minor>, and (non-prerelease tags only) latest — exactly the names
+# docker/docker-compose.yml pulls, so `docker compose up` runs from pre-built
+# images with no source build.
+#
+# Maintainer-owned, kept in lockstep with release.yml: the repository guard on
+# every job makes this workflow a no-op anywhere but onecli/onecli (forks and
+# mirrored copies included). Never delete this file — synced copies propagate
+# a deletion.
 name: Publish
 
 on:
@@ -11,15 +22,25 @@ env:
 
 jobs:
   build:
+    # Display name only — without it every run shows 14 rows of
+    # "build (<service>, <arch>)"; this renders "gateway (amd64)" instead.
+    name: ${{ matrix.service }} (${{ matrix.arch }})
+    if: github.repository == 'onecli/onecli'
     strategy:
       matrix:
+        # `agent` and `runner` join the stack with hosted agents: the agent image is
+        # the sandbox base, the runner is the daemon that spawns it. `migrations`
+        # is the one-shot schema runner the api gates on. Paths derive by
+        # convention (docker/<service>.Dockerfile).
+        service: [web, gateway, api, migrations, runner, agent, channel-adapter, ssh-terminator]
+        arch: [amd64, arm64]
         include:
-          - runner: ubuntu-latest
+          - arch: amd64
+            runner: ubuntu-latest
             platform: linux/amd64
-            suffix: amd64
-          - runner: ubuntu-24.04-arm
+          - arch: arm64
+            runner: ubuntu-24.04-arm
             platform: linux/arm64
-            suffix: arm64
     runs-on: ${{ matrix.runner }}
     permissions:
       contents: read
@@ -43,7 +64,7 @@ jobs:
         id: meta
         uses: docker/metadata-action@v6
         with:
-          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}-${{ matrix.service }}
 
       - name: Resolve app version
         id: appversion
@@ -54,14 +75,14 @@ jobs:
         uses: docker/build-push-action@v7
         with:
           context: .
-          file: docker/Dockerfile
+          file: docker/${{ matrix.service }}.Dockerfile
           platforms: ${{ matrix.platform }}
           labels: ${{ steps.meta.outputs.labels }}
           build-args: |
             APP_VERSION=${{ steps.appversion.outputs.value }}
-          outputs: type=image,name=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }},push-by-digest=true,name-canonical=true,push=true
-          cache-from: type=gha,scope=${{ matrix.suffix }}
-          cache-to: type=gha,mode=max,scope=${{ matrix.suffix }}
+          outputs: type=image,name=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}-${{ matrix.service }},push-by-digest=true,name-canonical=true,push=true
+          cache-from: type=gha,scope=${{ matrix.service }}-${{ matrix.arch }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.service }}-${{ matrix.arch }}
 
       - name: Export digest
         run: |
@@ -72,25 +93,33 @@ jobs:
       - name: Upload digest
         uses: actions/upload-artifact@v7
         with:
-          name: digest-${{ matrix.suffix }}
+          name: digest-${{ matrix.service }}-${{ matrix.arch }}
           path: /tmp/digests/*
           if-no-files-found: error
           retention-days: 1
 
   merge:
+    name: ${{ matrix.service }} (manifest)
+    if: github.repository == 'onecli/onecli'
     runs-on: ubuntu-latest
     needs: build
+    strategy:
+      matrix:
+        # `agent` and `runner` join the stack with hosted agents: the agent image is
+        # the sandbox base, the runner is the daemon that spawns it. `migrations`
+        # is the one-shot schema runner the api gates on. Paths derive by
+        # convention (docker/<service>.Dockerfile).
+        service: [web, gateway, api, migrations, runner, agent, channel-adapter, ssh-terminator]
     permissions:
       contents: read
       packages: write
-      id-token: write
 
     steps:
       - name: Download digests
         uses: actions/download-artifact@v8
         with:
           path: /tmp/digests
-          pattern: digest-*
+          pattern: digest-${{ matrix.service }}-*
           merge-multiple: true
 
       - name: Log in to the Container registry
@@ -107,18 +136,18 @@ jobs:
         id: meta
         uses: docker/metadata-action@v6
         with:
-          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}-${{ matrix.service }}
           tags: |
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
-            type=raw,value=latest
+            type=raw,value=latest,enable=${{ !contains(github.ref_name, '-') }}
 
       - name: Create multi-arch manifest and push
         working-directory: /tmp/digests
         run: |
           docker buildx imagetools create $(jq -cr '.tags | map("-t " + .) | join(" ")' <<< "$DOCKER_METADATA_OUTPUT_JSON") \
-            $(printf '${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@sha256:%s ' *)
+            $(printf '${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}-${{ matrix.service }}@sha256:%s ' *)
 
       - name: Inspect image
         run: |
-          docker buildx imagetools inspect ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.meta.outputs.version }}
+          docker buildx imagetools inspect ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}-${{ matrix.service }}:${{ steps.meta.outputs.version }}

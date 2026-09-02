@@ -1,0 +1,27 @@
+{
+  "$schema": "https://v2-7-6.turborepo.dev/schema.json",
+  "extends": ["//"],
+  "tasks": {
+    "test:e2e": {
+      // Never cacheable: these tests spawn real processes and real containers
+      // against a live Postgres and a live Docker daemon — a cache hit would
+      // report success for infrastructure that was never touched.
+      "cache": false,
+      "passThroughEnv": [
+        "CI",
+        "PATH",
+        "HOME",
+        "E2E_ADMIN_DATABASE_URL",
+        "E2E_ANTHROPIC_OAUTH_TOKEN",
+        "E2E_TEMPLATE_DB",
+        "E2E_GATEWAY_BIN",
+        "E2E_AGENT_IMAGE",
+        "E2E_DOCKER_SOCKET",
+        "E2E_HOST_GATEWAY_HOST",
+        "HOSTED_E2E_KEEP_DB",
+        "HOSTED_E2E_RUST_LOG",
+        "SECRET_ENCRYPTION_KEY"
+      ]
+    }
+  }
+}

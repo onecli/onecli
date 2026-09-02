@@ -1,9 +1,9 @@
 "use server";
 
 import { db } from "@onecli/db";
-import { resolveProjectContext } from "@/lib/actions/resolve-user";
+import { resolveWorkspaceContext } from "@/lib/actions/resolve-user";
 import type { ResolveOptions } from "@/lib/actions/resolve-user";
-import { APP_URL, API_URL } from "@/lib/env";
+import { apiOrigin, appOrigin } from "@onecli/api/lib/public-origins";
 import {
   listSecrets,
   createSecret as createSecretService,
@@ -21,19 +21,20 @@ import {
 } from "@onecli/api/services/audit-service";
 
 export const getSecrets = async () => {
-  const { projectId } = await resolveProjectContext();
-  return listSecrets({ projectId });
+  const { workspaceId } = await resolveWorkspaceContext();
+  return listSecrets({ workspaceId });
 };
 
 export const createSecret = async (
   input: CreateSecretInput,
   options?: ResolveOptions,
 ) => {
-  const { userId, userEmail, projectId } = await resolveProjectContext(options);
+  const { userId, userEmail, workspaceId } =
+    await resolveWorkspaceContext(options);
   return withAudit(
-    () => createSecretService({ projectId }, input),
+    () => createSecretService({ workspaceId }, input, userId),
     (secret) => ({
-      projectId,
+      workspaceId,
       userId,
       userEmail,
       action: AUDIT_ACTIONS.CREATE,
@@ -44,11 +45,11 @@ export const createSecret = async (
 };
 
 export const deleteSecret = async (secretId: string): Promise<void> => {
-  const { userId, userEmail, projectId } = await resolveProjectContext();
+  const { userId, userEmail, workspaceId } = await resolveWorkspaceContext();
   return withAudit(
-    () => deleteSecretService({ projectId }, secretId),
+    () => deleteSecretService({ workspaceId }, secretId),
     () => ({
-      projectId,
+      workspaceId,
       userId,
       userEmail,
       action: AUDIT_ACTIONS.DELETE,
@@ -59,43 +60,44 @@ export const deleteSecret = async (secretId: string): Promise<void> => {
 };
 
 export const getInstallInfo = async (options?: ResolveOptions) => {
-  const { projectId, userId, userEmail } = await resolveProjectContext(options);
+  const { workspaceId, userId, userEmail } =
+    await resolveWorkspaceContext(options);
 
-  const keyResult = await ensureApiKey(userId, { projectId });
+  const keyResult = await ensureApiKey(userId, { workspaceId });
 
   if (keyResult.created) {
     await recordAuditEvent({
-      projectId,
+      workspaceId,
       userId,
       userEmail,
       action: AUDIT_ACTIONS.CREATE,
       service: AUDIT_SERVICES.API_KEY,
-      metadata: { scope: "project", autoProvisioned: true },
+      metadata: { scope: "workspace", autoProvisioned: true },
     });
   }
 
   return {
     apiKey: keyResult.apiKey,
-    appUrl: APP_URL,
-    apiUrl: API_URL,
+    appUrl: appOrigin(),
+    apiUrl: apiOrigin(),
   };
 };
 
 export const hasAnthropicSecret = async (
   options?: ResolveOptions,
 ): Promise<boolean> => {
-  const { projectId } = await resolveProjectContext(options);
+  const { workspaceId } = await resolveWorkspaceContext(options);
   const secret = await db.secret.findFirst({
-    where: { projectId, type: "anthropic" },
+    where: { workspaceId, type: "anthropic" },
     select: { id: true },
   });
   return !!secret;
 };
 
 export const hasOpenaiSecret = async (): Promise<boolean> => {
-  const { projectId } = await resolveProjectContext();
+  const { workspaceId } = await resolveWorkspaceContext();
   const secret = await db.secret.findFirst({
-    where: { projectId, type: "openai" },
+    where: { workspaceId, type: "openai" },
     select: { id: true },
   });
   return !!secret;
@@ -182,11 +184,11 @@ export const updateSecret = async (
   secretId: string,
   input: UpdateSecretInput,
 ): Promise<void> => {
-  const { userId, userEmail, projectId } = await resolveProjectContext();
+  const { userId, userEmail, workspaceId } = await resolveWorkspaceContext();
   return withAudit(
-    () => updateSecretService({ projectId }, secretId, input),
+    () => updateSecretService({ workspaceId }, secretId, input),
     () => ({
-      projectId,
+      workspaceId,
       userId,
       userEmail,
       action: AUDIT_ACTIONS.UPDATE,

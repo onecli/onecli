@@ -43,7 +43,7 @@ export const googleContactsPermissions: AppPermissionDefinition = {
           id: "list_other_contacts",
           name: "List other contacts",
           description:
-            "List 'other contacts' — auto-saved people from email and calendar",
+            "List 'other contacts': auto-saved people from email and calendar",
           hostPattern: "people.googleapis.com",
           pathPattern: "/v1/otherContacts",
           method: "GET",

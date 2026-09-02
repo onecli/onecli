@@ -14,16 +14,16 @@ import {
   TooltipContent,
   TooltipTrigger,
 } from "@onecli/ui/components/tooltip";
-import { hasProjectContext } from "@/lib/navigation";
+import { hasWorkspaceContext } from "@/lib/navigation";
 import { usePendingApprovals } from "@/hooks/use-approvals";
 import type { PendingApproval } from "@/lib/api/approvals";
 import { ApprovalsPopover } from "./approvals-popover";
 import { ApprovalDetailsDialog } from "./approval-details-dialog";
 
 /**
- * Header notification bell showing pending approvals for the active project,
+ * Header notification bell showing pending approvals for the active workspace,
  * with a live count and a popover to approve/reject/inspect each held request.
- * Renders nothing outside a project context (in single-project editions every
+ * Renders nothing outside a workspace context (in single-workspace editions every
  * dashboard page has one). Self-contained — drop it into any header with no
  * props.
  */
@@ -33,7 +33,7 @@ export const ApprovalsBell = () => {
   const [open, setOpen] = useState(false);
   const [details, setDetails] = useState<PendingApproval | null>(null);
 
-  if (!hasProjectContext(pathname)) return null;
+  if (!hasWorkspaceContext(pathname)) return null;
 
   const count = approvals.length;
 

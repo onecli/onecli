@@ -1,0 +1,31 @@
+{
+  "name": "@onecli/sandbox-supervisor",
+  "version": "0.0.0",
+  "private": true,
+  "license": "Apache-2.0",
+  "type": "module",
+  "scripts": {
+    "dev:in-sandbox": "tsx src/index.ts",
+    "build": "node build.mjs",
+    "start": "node dist/index.mjs",
+    "check-types": "tsc --noEmit",
+    "lint": "eslint --max-warnings 0",
+    "lint:fix": "eslint --fix --max-warnings 0",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@1jehuang/jcode-sdk": "1.1.0",
+    "@modelcontextprotocol/sdk": "^1.30.0",
+    "@onecli/agent-protocol": "workspace:*",
+    "zod": "^4.3.6"
+  },
+  "devDependencies": {
+    "@onecli/eslint-config": "workspace:*",
+    "@onecli/typescript-config": "workspace:*",
+    "@types/node": "^22.15.3",
+    "esbuild": "^0.28.0",
+    "tsx": "^4.19.4",
+    "typescript": "5.9.2",
+    "vitest": "^3.2.6"
+  }
+}

@@ -12,8 +12,8 @@ import { proofDatabaseUrl } from "../../testing/pg-proof.js";
  * against real rows rather than an assertion about a mock's arguments.
  *
  * Also pins the terms both share — `enabled`, the published-generation pin, and
- * the scope fence — at BOTH scopes, since the org and project loads take the
- * same code path but only the project one had any coverage.
+ * the scope fence — at BOTH scopes, since the org and workspace loads take the
+ * same code path but only the workspace one had any coverage.
  *
  * Env-gated like the other proof suites; see app-blocklist-service.pg.test.ts.
  */
@@ -28,18 +28,18 @@ let loaders: Loaders;
 
 const P = "ldr-";
 const ORG = `${P}org`;
-const PROJECT = `${P}proj`;
+const WORKSPACE = `${P}proj`;
 const OTHER_ORG = `${P}other-org`;
-const OTHER_PROJECT = `${P}other-proj`;
+const OTHER_WORKSPACE = `${P}other-proj`;
 
 const ORG_BASE = { scope: "organization" as const, organizationId: ORG };
-const PROJECT_BASE = { scope: "project" as const, projectId: PROJECT };
+const WORKSPACE_BASE = { scope: "workspace" as const, workspaceId: WORKSPACE };
 
 const rule = async (
   logicalId: string,
   over: Partial<{
-    scope: "organization" | "project";
-    projectId: string | null;
+    scope: "organization" | "workspace";
+    workspaceId: string | null;
     organizationId: string | null;
     status: "draft" | "published";
     generation: number;
@@ -49,16 +49,16 @@ const rule = async (
     action: string;
   }> = {},
 ) => {
-  const scope = over.scope ?? "project";
+  const scope = over.scope ?? "workspace";
   await db.policyRuleV2.create({
     data: {
       scope,
-      projectId:
-        over.projectId === undefined
-          ? scope === "project"
-            ? PROJECT
+      workspaceId:
+        over.workspaceId === undefined
+          ? scope === "workspace"
+            ? WORKSPACE
             : null
-          : over.projectId,
+          : over.workspaceId,
       organizationId:
         over.organizationId === undefined
           ? scope === "organization"
@@ -84,7 +84,7 @@ const ids = (rows: { logicalId: string }[]) =>
 
 const reset = async () => {
   await db.policyRuleV2.deleteMany({ where: { logicalId: { startsWith: P } } });
-  await db.project.deleteMany({ where: { id: { startsWith: P } } });
+  await db.workspace.deleteMany({ where: { id: { startsWith: P } } });
   await db.organization.deleteMany({ where: { id: { startsWith: P } } });
 };
 
@@ -97,11 +97,15 @@ beforeAll(async () => {
   for (const id of [ORG, OTHER_ORG]) {
     await db.organization.create({ data: { id, name: id, slug: id } });
   }
-  await db.project.create({
-    data: { id: PROJECT, name: PROJECT, organizationId: ORG },
+  await db.workspace.create({
+    data: { id: WORKSPACE, name: WORKSPACE, organizationId: ORG },
   });
-  await db.project.create({
-    data: { id: OTHER_PROJECT, name: OTHER_PROJECT, organizationId: OTHER_ORG },
+  await db.workspace.create({
+    data: {
+      id: OTHER_WORKSPACE,
+      name: OTHER_WORKSPACE,
+      organizationId: OTHER_ORG,
+    },
   });
 });
 
@@ -128,10 +132,10 @@ describe.skipIf(!PROOF_URL)(
       await rule(`${P}blocklist`, { source: "blocklist", action: "block" });
 
       await expect(
-        loaders.loadRulesForSimulation(PROJECT_BASE, "published").then(ids),
+        loaders.loadRulesForSimulation(WORKSPACE_BASE, "published").then(ids),
       ).resolves.toEqual([`${P}blocklist`, `${P}custom`]);
       await expect(
-        loaders.loadInjectionRules(PROJECT_BASE, "published").then(ids),
+        loaders.loadInjectionRules(WORKSPACE_BASE, "published").then(ids),
       ).resolves.toEqual([`${P}blocklist`, `${P}custom`, `${P}equip`]);
     });
 
@@ -143,10 +147,10 @@ describe.skipIf(!PROOF_URL)(
       await rule(`${P}o-off`, { scope: "organization", enabled: false });
 
       await expect(
-        loaders.loadRulesForSimulation(PROJECT_BASE, "published").then(ids),
+        loaders.loadRulesForSimulation(WORKSPACE_BASE, "published").then(ids),
       ).resolves.toEqual([`${P}p-on`]);
       await expect(
-        loaders.loadInjectionRules(PROJECT_BASE, "published").then(ids),
+        loaders.loadInjectionRules(WORKSPACE_BASE, "published").then(ids),
       ).resolves.toEqual([`${P}p-on`]);
       await expect(
         loaders.loadRulesForSimulation(ORG_BASE, "published").then(ids),
@@ -164,29 +168,29 @@ describe.skipIf(!PROOF_URL)(
       await rule(`${P}draft`, { status: "draft", generation: 3 });
 
       await expect(
-        loaders.loadRulesForSimulation(PROJECT_BASE, "published").then(ids),
+        loaders.loadRulesForSimulation(WORKSPACE_BASE, "published").then(ids),
       ).resolves.toEqual([`${P}gen2`]);
       await expect(
-        loaders.loadInjectionRules(PROJECT_BASE, "published").then(ids),
+        loaders.loadInjectionRules(WORKSPACE_BASE, "published").then(ids),
       ).resolves.toEqual([`${P}gen2`, `${P}gen2-equip`]);
       await expect(
-        loaders.loadRulesForSimulation(PROJECT_BASE, "draft").then(ids),
+        loaders.loadRulesForSimulation(WORKSPACE_BASE, "draft").then(ids),
       ).resolves.toEqual([`${P}draft`]);
     });
 
     it("a never-published scope loads nothing — not the draft, not everything", async () => {
       await rule(`${P}draft-only`, { status: "draft" });
       await expect(
-        loaders.loadRulesForSimulation(PROJECT_BASE, "published").then(ids),
+        loaders.loadRulesForSimulation(WORKSPACE_BASE, "published").then(ids),
       ).resolves.toEqual([]);
       await expect(
-        loaders.loadInjectionRules(PROJECT_BASE, "published").then(ids),
+        loaders.loadInjectionRules(WORKSPACE_BASE, "published").then(ids),
       ).resolves.toEqual([]);
     });
 
-    it("SCOPE FENCE: another org's and another project's rows never load", async () => {
+    it("SCOPE FENCE: another org's and another workspace's rows never load", async () => {
       await rule(`${P}mine`);
-      await rule(`${P}foreign-proj`, { projectId: OTHER_PROJECT });
+      await rule(`${P}foreign-proj`, { workspaceId: OTHER_WORKSPACE });
       await rule(`${P}org-mine`, { scope: "organization" });
       await rule(`${P}org-foreign`, {
         scope: "organization",
@@ -194,7 +198,7 @@ describe.skipIf(!PROOF_URL)(
       });
 
       await expect(
-        loaders.loadRulesForSimulation(PROJECT_BASE, "published").then(ids),
+        loaders.loadRulesForSimulation(WORKSPACE_BASE, "published").then(ids),
       ).resolves.toEqual([`${P}mine`]);
       await expect(
         loaders.loadInjectionRules(ORG_BASE, "published").then(ids),
@@ -206,7 +210,7 @@ describe.skipIf(!PROOF_URL)(
       await rule(`${P}a`, { priority: 10 });
       await rule(`${P}b`, { priority: 20 });
       const rows = await loaders.loadRulesForSimulation(
-        PROJECT_BASE,
+        WORKSPACE_BASE,
         "published",
       );
       expect(rows.map((r) => r.logicalId)).toEqual([`${P}a`, `${P}b`, `${P}c`]);

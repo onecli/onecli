@@ -76,7 +76,6 @@ export const googleChat: AppDefinition = {
     buildAuthUrl: buildGoogleAuthUrl,
     exchangeCode: exchangeGoogleCode,
   },
-  available: true,
   configurable: {
     fields: googleConfigFields,
   },
