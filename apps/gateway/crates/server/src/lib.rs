@@ -274,8 +274,25 @@ impl GatewayServer {
 
         // CORS configuration for browser → gateway requests.
         // credentials: true requires explicit headers/methods (not wildcard *).
+        //
+        // SECURITY: the allowed origin is resolved from the deployment's own
+        // trusted set (dashboard origin, its loopback twin, any
+        // ONECLI_TRUSTED_ORIGINS extras) — NOT the reflected request origin,
+        // which is what this used to do. The control plane authenticates
+        // browsers with the same session cookie the API issues, so with
+        // credentials on, reflecting every origin made any page the user
+        // visited an authenticated caller of the approvals API (read pending
+        // requests, submit decisions), vault pairing and cache invalidation.
+        // `SameSite=lax` does not close it: SameSite is site-scoped while CORS
+        // is origin-scoped, so a sibling subdomain is same-site and its fetch
+        // carries the cookie. An unlisted origin now gets no
+        // `Access-Control-Allow-Origin` header at all.
+        let allowed_origins: Vec<hyper::header::HeaderValue> = context::trusted_browser_origins()
+            .iter()
+            .filter_map(|origin| hyper::header::HeaderValue::from_str(origin).ok())
+            .collect();
         let cors_layer = CorsLayer::new()
-            .allow_origin(tower_http::cors::AllowOrigin::mirror_request())
+            .allow_origin(tower_http::cors::AllowOrigin::list(allowed_origins))
             .allow_headers([
                 hyper::header::CONTENT_TYPE,
                 hyper::header::AUTHORIZATION,

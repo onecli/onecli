@@ -145,6 +145,103 @@ describe("control-plane routes", () => {
     );
   });
 
+  /**
+   * The credentialed-CORS boundary, against the real binary.
+   *
+   * The control plane authenticates browsers with the same session cookie the
+   * API issues, and runs with `allow_credentials(true)`. It used to reflect
+   * whatever `Origin` arrived, which made every page the operator visited an
+   * authenticated caller of the approvals API (read pending requests, submit
+   * decisions), vault pairing, and cache invalidation.
+   *
+   * `SameSite=lax` does not cover it: SameSite is SITE-scoped while CORS is
+   * ORIGIN-scoped, so a sibling subdomain — the first case below — is
+   * same-site and its fetch carries the cookie. The allow-list is the fence.
+   */
+  scenario(
+    "refuses CORS for origins this deployment does not serve",
+    async (cx) => {
+      await cx.seed({ withApiKey: true });
+      const gw = await cx.startGateway();
+
+      const untrusted = [
+        // Same-site with the dashboard host, so the session cookie would ride
+        // along. This is the case the reflection actually exposed.
+        "http://evil.127.0.0.1.nip.io:10254",
+        "https://evil.example",
+        // Allow-list bypass shapes.
+        "http://127.0.0.1:10254.evil.example",
+        "http://127.0.0.1:9999",
+        // Scheme downgrade of the dashboard origin.
+        "https://127.0.0.1:10254",
+      ];
+
+      for (const origin of untrusted) {
+        for (const method of ["OPTIONS", "GET"] as const) {
+          const res = await fetch(`${gw.origin}/v1/approvals/pending`, {
+            method,
+            headers: {
+              origin,
+              ...(method === "OPTIONS"
+                ? { "access-control-request-method": "GET" }
+                : {}),
+            },
+          });
+          const allow = res.headers.get("access-control-allow-origin");
+          // No header at all — never a wildcard, never the origin echoed back.
+          expect(
+            allow,
+            `${method} from ${origin} must get no allow-origin header`,
+          ).toBeNull();
+        }
+      }
+    },
+  );
+
+  /**
+   * The other half of the same boundary: an install reachable at a second
+   * address stays usable by listing it, the same `ONECLI_TRUSTED_ORIGINS` line
+   * that already unblocks its sign-in on the API side (docs/self-hosting.md).
+   */
+  scenario(
+    "honours ONECLI_TRUSTED_ORIGINS for a second address",
+    async (cx) => {
+      await cx.seed({ withApiKey: true });
+      const extra = "http://onecli.lan:10254";
+      const gw = await cx.startGateway({
+        env: { ONECLI_TRUSTED_ORIGINS: extra },
+      });
+
+      const allowed = await fetch(`${gw.origin}/v1/approvals/pending`, {
+        method: "OPTIONS",
+        headers: { origin: extra, "access-control-request-method": "GET" },
+      });
+      expect(allowed.headers.get("access-control-allow-origin")).toBe(extra);
+
+      // The configured dashboard origin keeps working beside the extra.
+      const dashboard = await fetch(`${gw.origin}/v1/approvals/pending`, {
+        method: "OPTIONS",
+        headers: {
+          origin: "http://127.0.0.1:10254",
+          "access-control-request-method": "GET",
+        },
+      });
+      expect(dashboard.headers.get("access-control-allow-origin")).toBe(
+        "http://127.0.0.1:10254",
+      );
+
+      // Listing one extra must not open the door to anything else.
+      const refused = await fetch(`${gw.origin}/v1/approvals/pending`, {
+        method: "OPTIONS",
+        headers: {
+          origin: "https://evil.example",
+          "access-control-request-method": "GET",
+        },
+      });
+      expect(refused.headers.get("access-control-allow-origin")).toBeNull();
+    },
+  );
+
   scenario("keeps the legacy X-Project-Id scope header working", async (cx) => {
     await cx.seed({ withOrgApiKey: true });
     const gw = await cx.startGateway();
