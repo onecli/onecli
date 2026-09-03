@@ -575,21 +575,35 @@ const readEnvBag = (): PublicOriginsEnvBag => ({
   gatewayBaseUrl: process.env.GATEWAY_BASE_URL,
 });
 
-export const resolveOriginsFromEnv = (): ResolvedPublicOrigins =>
-  resolvePublicOrigins(readEnvBag());
+export const resolveOriginsFromEnv = (
+  requestOrigin?: string,
+): ResolvedPublicOrigins => {
+  const env = readEnvBag();
+  if (
+    requestOrigin &&
+    !firstConfigured(env.externalUrl) &&
+    !firstConfigured(env.appUrl, env.nextPublicAppUrl)
+  ) {
+    env.externalUrl = requestOrigin;
+  }
+  return resolvePublicOrigins(env);
+};
 
 /** The dashboard origin — where a browser opens OneCLI. */
-export const appOrigin = (): string => resolveOriginsFromEnv().app;
+export const appOrigin = (requestOrigin?: string): string =>
+  resolveOriginsFromEnv(requestOrigin).app;
 
 /** The api-server origin — OAuth redirect base, CLI api-host, /v1 calls. */
-export const apiOrigin = (): string => resolveOriginsFromEnv().api;
+export const apiOrigin = (requestOrigin?: string): string =>
+  resolveOriginsFromEnv(requestOrigin).api;
 
 /** The gateway HTTP origin (approvals, vault status) — NOT the CONNECT proxy. */
-export const gatewayHttpOrigin = (): string => resolveOriginsFromEnv().gateway;
+export const gatewayHttpOrigin = (requestOrigin?: string): string =>
+  resolveOriginsFromEnv(requestOrigin).gateway;
 
 /** Scheme-less host:port agent containers use as their CONNECT proxy target. */
-export const agentProxyAddress = (): string =>
-  resolveOriginsFromEnv().agentProxyAddress;
+export const agentProxyAddress = (requestOrigin?: string): string =>
+  resolveOriginsFromEnv(requestOrigin).agentProxyAddress;
 
 /**
  * The public app URL the operator explicitly configured, or `undefined` when
@@ -600,8 +614,10 @@ export const agentProxyAddress = (): string =>
  * seed counts as configured — it replaced a compose-seeded `APP_URL` that was
  * configured too.
  */
-export const configuredAppUrl = (): string | undefined => {
-  const resolved = resolveOriginsFromEnv();
+export const configuredAppUrl = (
+  requestOrigin?: string,
+): string | undefined => {
+  const resolved = resolveOriginsFromEnv(requestOrigin);
   return resolved.externalConfigured ? resolved.app : undefined;
 };
 
@@ -612,7 +628,9 @@ export const configuredAppUrl = (): string | undefined => {
  * origin the request arrived on. A configured external URL answering here is
  * what pins OAuth redirect URIs without a separate `API_URL` line.
  */
-export const configuredApiUrl = (): string | undefined => {
-  const resolved = resolveOriginsFromEnv();
+export const configuredApiUrl = (
+  requestOrigin?: string,
+): string | undefined => {
+  const resolved = resolveOriginsFromEnv(requestOrigin);
   return resolved.sources.api.source === "default" ? undefined : resolved.api;
 };
