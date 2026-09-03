@@ -16,20 +16,20 @@ export const googleDocs: AppDefinition = {
       "openid",
       "email",
       "profile",
-      "https://www.googleapis.com/auth/drive.readonly",
-      "https://www.googleapis.com/auth/drive.file",
+      "https://www.googleapis.com/auth/documents.readonly",
+      "https://www.googleapis.com/auth/documents",
     ],
     permissions: [
       {
-        scope: "https://www.googleapis.com/auth/drive.readonly",
+        scope: "https://www.googleapis.com/auth/documents.readonly",
         name: "Read documents",
         description: "View all your Google Docs",
         access: "read",
       },
       {
-        scope: "https://www.googleapis.com/auth/drive.file",
-        name: "Manage app documents",
-        description: "Create and edit documents opened or created by OneCLI",
+        scope: "https://www.googleapis.com/auth/documents",
+        name: "Edit documents",
+        description: "Create and edit all your Google Docs",
         access: "write",
       },
       {
