@@ -140,6 +140,7 @@ export type {
   ChannelPresenceStatus,
   ChannelProvider,
   ChannelSetupMaterial,
+  ChannelPersonReach,
   ChannelReachState,
   ChannelSpaceReach,
   ChannelTransport,

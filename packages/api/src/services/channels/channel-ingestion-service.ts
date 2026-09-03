@@ -521,9 +521,22 @@ export const ingestDirectMessage = async (
     return { kind: "duplicate" };
   }
 
+  // Lane 1 - IDENTITY, first and unchanged. Note the deliberate ASYMMETRY
+  // with the group door: there the grant is a precondition that holds even
+  // members, because a channel is one shared room with one policy. A DM is
+  // nobody's shared room - holding a linked teammate's own DM pending would
+  // be nonsense - so here identity wins and the person grant is the
+  // fallback for people identity cannot place.
   const speaker = await authorizeSpeaker(presence, input.externalUserId);
-  if ("refusal" in speaker)
+  if ("refusal" in speaker) {
+    // Lane 2 - PERSON REACH: the knock. Admits an approved stranger as a
+    // guest, answers the waiting line while their request is out, and
+    // stays silent for a blocked person. Null = no person lane applies and
+    // the identity refusal stands.
+    const person = await tryPersonLane(presence, input);
+    if (person) return person;
     return { kind: "refused", message: speaker.refusal };
+  }
 
   const conversation = await ensureDirectConversation(
     presence.agent.workspaceId,
@@ -551,6 +564,167 @@ export const ingestDirectMessage = async (
     conversation.id,
     input.text,
     speaker.userId,
+    attachmentIds,
+    input.sourceThreadId,
+  );
+};
+
+/**
+ * Lane 2 of the DM door - the PERSON knock.
+ *
+ * Runs only after the identity lane refused, and answers:
+ *   approved -> admit them as a guest (below);
+ *   pending  -> the waiting line (their request is with the owner);
+ *   blocked  -> silence, the settled "no";
+ *   no row   -> plant it, post the owner cards, answer the waiting line.
+ *
+ * Fails CLOSED to null ("let the identity refusal stand") for everything it
+ * cannot govern: a provider with no reach facet, an unverifiable speaker, or
+ * a foreign-tenant one (the same-tenant fence the space lane uses).
+ *
+ * `members_only` is deliberately NOT a person settlement - it says nothing
+ * about one individual - but a row carrying it (hand-set, or normalized
+ * from a legacy `denied`) reads as "not this person", which is the honest
+ * reading of the pre-rename word.
+ */
+const tryPersonLane = async (
+  presence: PresenceRow,
+  input: DirectMessageInput,
+): Promise<IngestOutcome | null> => {
+  const providerId = presence.provider as ChannelProviderId;
+  const reach = channelProvider(providerId).reach;
+  if (!reach) return null;
+
+  const {
+    ensurePersonGrant,
+    resolvePersonReach,
+    postReachCards,
+    pendingReachMessage,
+  } = await import("./agent-reach-service");
+
+  let state = await resolvePersonReach({
+    agentId: presence.agent.id,
+    integrationId: presence.integrationId,
+    externalRef: input.externalUserId,
+  });
+
+  if (state === null) {
+    // First contact: verify the speaker BEFORE planting anything, so a
+    // foreign-tenant or unverifiable stranger never creates a row or a
+    // card. This ordering is the fence - not a style choice.
+    const credentialsJson = presence.credentials
+      ? await getCrypto().decrypt(presence.credentials)
+      : null;
+    const probe = await reach.resolveGuestSpeaker({
+      credentialsJson,
+      externalUserId: input.externalUserId,
+      tenantExternalId: presence.integration.externalId,
+    });
+    if (!probe || !probe.sameTenant) return null;
+
+    const label = reach.personLabel
+      ? await reach
+          .personLabel({ credentialsJson, externalRef: input.externalUserId })
+          .catch(() => null)
+      : null;
+    const grant = await ensurePersonGrant({
+      agentId: presence.agent.id,
+      integrationId: presence.integrationId,
+      provider: providerId,
+      externalRef: input.externalUserId,
+      subjectLabel: label,
+    });
+    if (grant.created) {
+      // Detached: card posting must never delay or fail the answer.
+      void postReachCards(grant.id).catch((err: unknown) =>
+        log.warn({ err, grantId: grant.id }, "person reach card post failed"),
+      );
+    }
+    state = grant.state;
+  }
+
+  if (state === "approved") return admitPersonGuest(presence, input);
+  if (state === "pending") {
+    return {
+      kind: "refused",
+      message: await pendingReachMessage({
+        agentId: presence.agent.id,
+        workspaceId: presence.agent.workspaceId,
+      }),
+    };
+  }
+  // blocked / members_only (incl. legacy denied|revoked): a settled no. The
+  // person already heard the identity refusal once when they first wrote;
+  // repeating it forever would be nagging, so the agent simply stops.
+  return { kind: "ignored", reason: "person-reach-denied" };
+};
+
+/**
+ * Admit one approved person's DM as a GUEST turn.
+ *
+ * The conversation is SOURCED (keyed by the DM address), never the direct
+ * per-user row: `ensureDirectConversation` is keyed on a platform `userId`
+ * a guest does not have, direct rows are unique per user, and the adapter
+ * mirror pushes a user's web activity into their linked DM - so seating a
+ * guest in a direct row would leak another person's activity to them.
+ *
+ * Same posture as the channel guest lane: `userId: null` (no identity to
+ * attribute), our own "(guest)" framing around a cleaned, clamped name, and
+ * attachments under the same caps as members.
+ */
+const admitPersonGuest = async (
+  presence: PresenceRow,
+  input: DirectMessageInput,
+): Promise<IngestOutcome> => {
+  const providerId = presence.provider as ChannelProviderId;
+  const reach = channelProvider(providerId).reach;
+  if (!reach) return { kind: "ignored", reason: "no-reach-facet" };
+
+  const credentialsJson = presence.credentials
+    ? await getCrypto().decrypt(presence.credentials)
+    : null;
+  // Re-verified on EVERY message, not just at the knock: a grant is not a
+  // standing waiver of the tenant fence, and an account that left the
+  // workspace (or turned out to be a Connect guest) must stop being
+  // answered even though the row still says approved.
+  const guest = await reach.resolveGuestSpeaker({
+    credentialsJson,
+    externalUserId: input.externalUserId,
+    tenantExternalId: presence.integration.externalId,
+  });
+  if (!guest) return { kind: "ignored", reason: "guest-unverifiable" };
+  if (!guest.sameTenant)
+    return { kind: "ignored", reason: "guest-foreign-tenant" };
+
+  const conversation = await ensureSourcedConversation(
+    presence.agent.workspaceId,
+    presence.agent.id,
+    { source: providerId, externalRef: input.externalThreadId },
+  );
+  await upsertThreadLink({
+    agentChannelId: presence.id,
+    conversationId: conversation.id,
+    externalThreadId: input.externalThreadId,
+    kind: "direct",
+    // No platform identity to route by - and critically NOT the guest's
+    // provider id, which would make this link look like a linked member's
+    // DM to anything that reads `externalUserId`.
+    externalUserId: null,
+  });
+
+  const speakerName = cleanName(guest.displayName ?? "someone");
+  const attachmentIds = await ingestMessageFiles(
+    presence,
+    conversation.id,
+    null,
+    input.files ?? [],
+  );
+
+  return createTurnOutcome(
+    presence,
+    conversation.id,
+    `${speakerName} (guest): ${input.text}`,
+    null,
     attachmentIds,
     input.sourceThreadId,
   );
@@ -599,6 +773,20 @@ export const ingestGroupMessage = async (
     // (same provider tenant), so a stranger is admitted as a guest. Under
     // `members_only` the identity refusal stands.
     if (gate.state === "approved") {
+      // THE PRECEDENCE LAW: a person-level "no" beats a space-level "yes".
+      // Opening a channel is a statement about a ROOM; blocking a person is
+      // a statement about a HUMAN, and the narrower, more deliberate one
+      // must win - otherwise a blocked individual walks straight back in
+      // through any open channel, which would make blocking meaningless.
+      const { resolvePersonReach } = await import("./agent-reach-service");
+      const person = await resolvePersonReach({
+        agentId: presence.agent.id,
+        integrationId: presence.integrationId,
+        externalRef: input.externalUserId,
+      });
+      if (person === "blocked" || person === "members_only") {
+        return { kind: "ignored", reason: "person-reach-denied" };
+      }
       const guest = await admitGuest(presence, input);
       if (guest) return guest;
     }

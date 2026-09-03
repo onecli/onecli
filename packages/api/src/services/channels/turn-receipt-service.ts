@@ -632,16 +632,19 @@ export const clearTurnReceipts = async (turnId: string): Promise<void> => {
  * the target turn's message or an earlier follow-up's — and attach the SAME
  * emoji to the new one. Reusing the previous reaction is deliberate: no
  * second chooser inference per follow-up, and the mark visibly travels
- * instead of mutating. A SESSION mark doesn't travel — the thread's loader
- * already covers every message in it — so the row is just re-keyed to the
- * follow-up turn (the clear must fire off the newest turn's id). Detached
+ * instead of mutating. A SESSION mark doesn't travel at all — the thread's
+ * loader already covers every message in it, and the row stays on the turn
+ * that is RUNNING, which is both where the clear looks (it walks the turn
+ * and its joined follow-ups) and where the narration card is keyed. Detached
  * and best-effort like every receipt write; two rapid follow-ups' moves can
  * interleave into a transient double-mark until the answer-post clear
  * converges them — bounded, cosmetic, accepted.
  */
 export const moveTurnReceipt = async (input: {
   presenceId: string;
-  /** The follow-up row — the receipt's new owner. */
+  /** The follow-up row: the reaction mark's new owner, and the excluded id
+   * when resolving where the current mark sits. A SESSION mark does not
+   * change owner — see the session arm below. */
   followUpTurnId: string;
   /** The conversation whose seen-mark is moving. */
   conversationId: string;
@@ -716,28 +719,36 @@ export const moveTurnReceipt = async (input: {
     }
 
     if (current.kind === "session") {
-      // The thread loader already covers the follow-up's message — nothing
-      // moves provider-side. Re-key the row to the follow-up turn so the
-      // clear (which fires off the NEWEST turn's id on answer post) finds it.
-      try {
-        await db.channelTurnReceipt.update({
-          where: { id: current.id },
-          data: { turnId: input.followUpTurnId },
-          select: { id: true },
-        });
-      } catch (err) {
-        if (
-          err instanceof Prisma.PrismaClientKnownRequestError &&
-          (err.code === "P2002" || err.code === "P2025")
-        ) {
-          return; // a twin already moved it (or cleared it) — either stands
-        }
-        throw err;
-      }
-      // The re-key races the exchange's clear exactly like an attach does:
-      // a clear that fired between the lookup above and this write missed
-      // the row under its new key.
-      await selfClearIfTurnFinished(input.followUpTurnId);
+      // The row STAYS on the turn it was attached to. Nothing moves
+      // provider-side (the thread's loader already covers the follow-up's
+      // message), and nothing moves ledger-side either.
+      //
+      // It used to be re-keyed to the follow-up, on the reasoning that the
+      // clear "fires off the newest turn's id". That reasoning was wrong in
+      // one direction and load-bearing in the other:
+      //
+      // - The clear fires off the FINISHED turn's id — the mirror passes
+      //   `item.turn.id` (routes/channel-adapter.ts), and `clearTurnReceipts`
+      //   then walks that turn AND its `joined` follow-ups. A row left here is
+      //   found either way, so the re-key bought nothing.
+      // - The narration card is keyed by turn id, and the supervisor reports
+      //   tool activity under the turn it is RUNNING: a steer never moves
+      //   `runtime.activeTurnId` (apps/sandbox-supervisor). Re-keying moved
+      //   the receipt out from under `narrateTurnActivity`, whose lookup then
+      //   missed and returned silently — so a mid-run follow-up showed a
+      //   frozen card, or in a top-level DM no card at all, for the rest of
+      //   the turn (live 2026-09-02).
+      //
+      // Keeping the row where the narration looks for it is what fixes that,
+      // and it is also the simpler invariant: a session receipt belongs to
+      // the run, not to the last message that joined it.
+      //
+      // The self-clear still runs, against the row's OWN turn: the same
+      // attach-vs-clear race applies here (a clear that fired between the
+      // lookup above and now would have found nothing to do), and the
+      // follow-up's arrival is exactly when the parent may have just
+      // finished.
+      await selfClearIfTurnFinished(current.turnId);
       return;
     }
     if (!current.reaction) return; // malformed row — nothing to move

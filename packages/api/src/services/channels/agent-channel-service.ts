@@ -5,7 +5,11 @@ import { signOAuthState, verifyOAuthState } from "../../lib/oauth-state";
 import { ServiceError } from "../errors";
 import { createServiceApiKey, revokeServiceApiKey } from "../api-key-service";
 import { channelProvider } from "./registry";
-import { listSpaceGrants, type ReachState } from "./agent-reach-service";
+import {
+  listPersonGrants,
+  listSpaceGrants,
+  type ReachState,
+} from "./agent-reach-service";
 import {
   availableTransports,
   defaultTransport,
@@ -162,6 +166,15 @@ export interface AgentChannelStatus {
     state: ReachState | "members_only";
     decidedAt: Date | null;
   }[];
+  /** Per-PERSON reach: everyone who knocked by direct message, with their
+   * standing. Only ever grant rows - unlike spaces there is nothing to
+   * union in, because a DM leaves no "the agent merely sits here" trace. */
+  people: {
+    externalRef: string;
+    label: string | null;
+    state: ReachState;
+    decidedAt: Date | null;
+  }[];
 }
 
 export interface AgentChannelsView {
@@ -278,6 +291,15 @@ export const getAgentChannels = async (
         // today's default (`members_only`) so the toggle can act on it.
         const reach = channelProvider(provider).reach;
         const grants = reach ? await listSpaceGrants(agent.id, provider) : [];
+        // The People section's rows. Same ledger, different subject kind.
+        const people = reach
+          ? (await listPersonGrants(agent.id, provider)).map((g) => ({
+              externalRef: g.externalRef,
+              label: g.subjectLabel,
+              state: g.state,
+              decidedAt: g.decidedAt,
+            }))
+          : [];
         const spaces = grants.map((g) => ({
           externalRef: g.externalRef,
           label: g.subjectLabel,
@@ -329,6 +351,7 @@ export const getAgentChannels = async (
             : null,
           groupThreads: p.threadLinks,
           spaces,
+          people,
         };
       }),
     ),

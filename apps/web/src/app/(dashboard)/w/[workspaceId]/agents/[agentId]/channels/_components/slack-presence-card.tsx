@@ -16,6 +16,7 @@ import { AppIcon } from "@/lib/components/app-icon";
 import { slack as slackApp } from "@onecli/api/apps/slack";
 import type { AgentChannelPresence } from "@/lib/api";
 import { SlackDetachDialog } from "./slack-detach-dialog";
+import { PersonReachRow } from "./person-reach-row";
 import { SpaceReachRow } from "./space-reach-row";
 
 interface SlackPresenceCardProps {
@@ -132,6 +133,33 @@ export const SlackPresenceCard = ({
                     agentId={agentId}
                     provider={presence.provider}
                     space={space}
+                  />
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* People, in their own section rather than mixed into Channels:
+              the two ask different questions (a room's policy vs one
+              person's standing), offer different answers (three vs two),
+              and the person list grows with every stranger who writes. One
+              heading states the kind once, which beats a per-row badge
+              beside a badge that is already the menu trigger. */}
+          {(presence.people?.length ?? 0) > 0 && (
+            <div className="mt-3 border-t pt-3">
+              <p className="mb-0.5 text-xs font-medium">
+                People · direct messages
+              </p>
+              <p className="text-muted-foreground mb-1 text-xs">
+                People without OneCLI accounts who messaged this agent directly.
+              </p>
+              <div className="divide-y">
+                {(presence.people ?? []).map((person) => (
+                  <PersonReachRow
+                    key={person.externalRef}
+                    agentId={agentId}
+                    provider={presence.provider}
+                    person={person}
                   />
                 ))}
               </div>

@@ -4,6 +4,7 @@ import { billingRoutes } from "./routes/billing";
 import { ssoLookupRoutes } from "./routes/sso-lookup";
 import { webhookRoutes } from "./routes/webhooks";
 import { stripeWebhookRoutes } from "./routes/stripe-webhooks";
+import { awsMarketplaceRoutes } from "./routes/aws-marketplace";
 import { reviewerRoutes } from "./routes/reviewer";
 import { workspaceAccessRoutes } from "./routes/workspace-access";
 import { orgDomainRoutes } from "./routes/org-domains";
@@ -32,6 +33,9 @@ export const registerEeRoutes = (app: Hono<ApiEnv>) => {
   app.route("/billing", billingRoutes());
   app.route("/webhooks", webhookRoutes());
   app.route("/webhooks/stripe", stripeWebhookRoutes());
+  // AWS Marketplace license event intake (EventBridge → SNS → /events),
+  // gated by SNS signature verification + topic allowlisting in the router.
+  app.route("/billing/aws-marketplace", awsMarketplaceRoutes());
   app.route("/reviewer", reviewerRoutes());
   // Composed onto the shared `/workspaces` CRUD router mounted in app.ts.
   app.route("/workspaces", workspaceAccessRoutes());

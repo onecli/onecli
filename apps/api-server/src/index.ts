@@ -6,6 +6,7 @@ import {
 } from "@onecli/api/lib/public-origins";
 import { app } from "./app";
 import { logger } from "./logger";
+import { startAwsMarketplaceMeteringJob } from "@onecli/api/ee/billing/aws-marketplace/metering-job";
 
 const port = Number(process.env.PORT || 10256);
 
@@ -20,6 +21,9 @@ for (const warning of origins.warnings) logger.warn(warning);
 const server = serve({ fetch: app.fetch, port }, () => {
   logger.info({ port }, "api-server listening");
 });
+
+// AWS Marketplace overage metering (no-op unless the listing is configured).
+startAwsMarketplaceMeteringJob();
 
 // Must exceed the ALB idle timeout (65s) or the ALB reuses connections
 // Node has already closed → sporadic 502s.

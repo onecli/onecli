@@ -1,4 +1,4 @@
-import { db } from "@onecli/db";
+import { db, Prisma } from "@onecli/db";
 import { getCrypto } from "../../providers";
 import { ServiceError } from "../errors";
 import {
@@ -106,9 +106,10 @@ const promptRefsOf = (raw: unknown): ReachPromptRef[] => {
  * Is this space open to everyone (same provider tenant)? The ingestion
  * door's fallback lane - one indexed read; state alone decides.
  */
-export const resolveSpaceReach = async (input: {
+export const resolveReach = async (input: {
   agentId: string;
   integrationId: string;
+  subjectKind: ReachSubjectKind;
   externalRef: string;
 }): Promise<ReachState | null> => {
   const grant = await db.agentReachGrant.findUnique({
@@ -116,7 +117,7 @@ export const resolveSpaceReach = async (input: {
       agentId_integrationId_subjectKind_externalRef: {
         agentId: input.agentId,
         integrationId: input.integrationId,
-        subjectKind: "space",
+        subjectKind: input.subjectKind,
         externalRef: input.externalRef,
       },
     },
@@ -124,6 +125,28 @@ export const resolveSpaceReach = async (input: {
   });
   return grant ? normalizeState(grant.state) : null;
 };
+
+/** The space-shaped read (a channel's settlement). */
+export const resolveSpaceReach = (input: {
+  agentId: string;
+  integrationId: string;
+  externalRef: string;
+}): Promise<ReachState | null> =>
+  resolveReach({ ...input, subjectKind: "space" });
+
+/**
+ * The person-shaped read (one provider user's standing with this agent).
+ *
+ * Its own name rather than a bare `subjectKind` argument at the call sites,
+ * because the two kinds answer different questions and mixing them up is
+ * exactly the bug this ledger's precedence law exists to prevent.
+ */
+export const resolvePersonReach = (input: {
+  agentId: string;
+  integrationId: string;
+  externalRef: string;
+}): Promise<ReachState | null> =>
+  resolveReach({ ...input, subjectKind: "external_user" });
 
 /**
  * The waiting line a channel hears while its grant is unsettled.
@@ -184,10 +207,11 @@ export const pendingReachMessage = async (input: {
  * row - the bot was removed and is now back (a re-invite, or the dashboard
  * acting on it); the row re-arms to `pending` and the cards go out fresh.
  */
-export const ensureSpaceGrant = async (input: {
+export const ensureGrant = async (input: {
   agentId: string;
   integrationId: string;
   provider: ChannelProviderId;
+  subjectKind: ReachSubjectKind;
   externalRef: string;
   subjectLabel?: string | null;
 }): Promise<{ id: string; state: ReachState; created: boolean }> => {
@@ -195,7 +219,7 @@ export const ensureSpaceGrant = async (input: {
     agentId_integrationId_subjectKind_externalRef: {
       agentId: input.agentId,
       integrationId: input.integrationId,
-      subjectKind: "space" as const,
+      subjectKind: input.subjectKind,
       externalRef: input.externalRef,
     },
   };
@@ -237,7 +261,7 @@ export const ensureSpaceGrant = async (input: {
         agentId: input.agentId,
         integrationId: input.integrationId,
         provider: input.provider,
-        subjectKind: "space",
+        subjectKind: input.subjectKind,
         externalRef: input.externalRef,
         subjectLabel: input.subjectLabel ?? null,
         // Claimed-but-unposted: the card poster (below) and its sweep read
@@ -267,6 +291,32 @@ export const ensureSpaceGrant = async (input: {
     throw err;
   }
 };
+
+/** Get-or-create a SPACE grant (a channel's settlement). */
+export const ensureSpaceGrant = (input: {
+  agentId: string;
+  integrationId: string;
+  provider: ChannelProviderId;
+  externalRef: string;
+  subjectLabel?: string | null;
+}): Promise<{ id: string; state: ReachState; created: boolean }> =>
+  ensureGrant({ ...input, subjectKind: "space" });
+
+/**
+ * Get-or-create a PERSON grant - the DM knock.
+ *
+ * `externalRef` is the provider's own user id (Slack: `U…`), which is stable
+ * across renames; `subjectLabel` is the display name captured for the card
+ * and the dashboard, and is never used for matching.
+ */
+export const ensurePersonGrant = (input: {
+  agentId: string;
+  integrationId: string;
+  provider: ChannelProviderId;
+  externalRef: string;
+  subjectLabel?: string | null;
+}): Promise<{ id: string; state: ReachState; created: boolean }> =>
+  ensureGrant({ ...input, subjectKind: "external_user" });
 
 /**
  * The notify targets: workspace-access OWNER-role holders (the user's
@@ -314,6 +364,7 @@ export const postReachCards = async (grantId: string): Promise<void> => {
       state: true,
       provider: true,
       integrationId: true,
+      subjectKind: true,
       subjectLabel: true,
       externalRef: true,
       promptRefs: true,
@@ -352,6 +403,7 @@ export const postReachCards = async (grantId: string): Promise<void> => {
         credentialsJson,
         recipientExternalUserId: owner.externalUserId,
         grantId: grant.id,
+        subjectKind: grant.subjectKind as ReachSubjectKind,
         agentName: grant.agent.name,
         subjectLabel: grant.subjectLabel ?? grant.externalRef,
       });
@@ -383,14 +435,33 @@ const isReachCardCapable = (provider: string): boolean => {
 };
 
 /**
- * The retry arm: pending space grants whose owner cards are still owed.
- * Called from the adapter work poll's cadence (bounded), so a failed post
- * (Slack down, credential mid-rotation) self-heals without a dedicated
- * scheduler.
+ * The retry arm: pending grants of EVERY kind whose owner cards are still
+ * owed. Called from the adapter work poll's cadence (bounded), so a failed
+ * post (Slack down, credential mid-rotation) self-heals without a dedicated
+ * scheduler. Kind-agnostic on purpose: a person knock whose card never
+ * posted is exactly as stuck as a space one, and the poster already routes
+ * by the row's own `subjectKind`.
  */
 export const sweepUnpostedReachCards = async (): Promise<void> => {
   const pending = await db.agentReachGrant.findMany({
-    where: { state: "pending", subjectKind: "space" },
+    where: {
+      state: "pending",
+      // Only rows that still OWE a card. A pending grant whose owners were
+      // all notified is waiting on a human and may sit for weeks - without
+      // this it still occupied one of the `take` slots, and five such rows
+      // starved every newer knock forever (oldest-first ordering). The
+      // cheap half of the filter runs in SQL (`[]` = claimed, never
+      // posted); the exact per-owner check stays below, because "which
+      // owners are DM-reachable" is a join this query cannot express.
+      //
+      // `equals: []` matches the claim-before-post sentinel; the DB-null
+      // arm (Prisma's own sentinel, not a bare null) keeps legacy rows
+      // sweepable rather than silently stranding them.
+      OR: [
+        { promptRefs: { equals: [] } },
+        { promptRefs: { equals: Prisma.DbNull } },
+      ],
+    },
     select: {
       id: true,
       promptRefs: true,
@@ -445,6 +516,7 @@ export const decideReachGrant = async (input: {
       state: true,
       provider: true,
       integrationId: true,
+      subjectKind: true,
       subjectLabel: true,
       externalRef: true,
       promptRefs: true,
@@ -499,7 +571,7 @@ export const decideReachGrant = async (input: {
     metadata: {
       reachGrantId: grant.id,
       agentId: grant.agent.id,
-      subjectKind: "space",
+      subjectKind: grant.subjectKind,
       externalRef: grant.externalRef,
       decision: input.decision,
     },
@@ -525,6 +597,7 @@ export const decideReachGrant = async (input: {
             channel: ref.channel,
             ts: ref.ts,
             subjectLabel: grant.subjectLabel ?? grant.externalRef,
+            subjectKind: grant.subjectKind as ReachSubjectKind,
             outcome: nextState,
             decidedByName,
           });
@@ -550,10 +623,11 @@ export const decideReachGrant = async (input: {
  * section's per-channel toggle. The caller (route) already fenced workspace
  * access; agent/workspace coherence is fenced HERE (the id pair must hold).
  */
-export const setSpaceReachState = async (input: {
+export const setReachState = async (input: {
   workspaceId: string;
   agentId: string;
   provider: ChannelProviderId;
+  subjectKind: ReachSubjectKind;
   externalRef: string;
   state: ReachDecision;
   deciderUserId: string;
@@ -572,10 +646,11 @@ export const setSpaceReachState = async (input: {
     throw new ServiceError("NOT_FOUND", "No channel presence for this agent");
   }
 
-  const grant = await ensureSpaceGrant({
+  const grant = await ensureGrant({
     agentId: input.agentId,
     integrationId: presence.integrationId,
     provider: input.provider,
+    subjectKind: input.subjectKind,
     externalRef: input.externalRef,
   });
 
@@ -782,21 +857,56 @@ export const parkGrantOnLeave = async (input: {
   }
 };
 
+/** The dashboard's per-SPACE settlement. */
+export const setSpaceReachState = (input: {
+  workspaceId: string;
+  agentId: string;
+  provider: ChannelProviderId;
+  externalRef: string;
+  state: ReachDecision;
+  deciderUserId: string;
+}): Promise<ReachDecisionResult> =>
+  setReachState({ ...input, subjectKind: "space" });
+
 /**
- * The dashboard's DISMISS: forget this channel entirely - delete the grant
+ * The dashboard's per-PERSON settlement. `members_only` is refused rather
+ * than silently stored: it is not a coherent answer about one individual,
+ * and letting it through would put a state on the row that the person card
+ * can never render.
+ */
+export const setPersonReachState = (input: {
+  workspaceId: string;
+  agentId: string;
+  provider: ChannelProviderId;
+  externalRef: string;
+  state: Extract<ReachDecision, "approved" | "blocked">;
+  deciderUserId: string;
+}): Promise<ReachDecisionResult> =>
+  setReachState({ ...input, subjectKind: "external_user" });
+
+/**
+ * The dashboard's DISMISS: forget this subject entirely - delete the grant
  * row (whatever its state; the user's decision: dismiss always available)
- * and the channel's thread links. The next stranger message re-knocks
- * fresh (the lazy re-offer), and a re-mention re-creates the routing links
- * and resumes the same conversations. Distinct from revoke on purpose:
- * revoke is a sticky no; dismiss is "as if never asked".
+ * and, for a SPACE, the channel's thread links. The next message from that
+ * subject re-knocks fresh (the lazy re-offer), and a re-mention re-creates
+ * the routing links and resumes the same conversations. Distinct from
+ * revoke on purpose: revoke is a sticky no; dismiss is "as if never asked".
+ *
+ * The link sweep is space-only by construction: a person's DM thread link
+ * belongs to whoever the DM is WITH, and for a guest there is no link to
+ * this subject at all (their turns live in a sourced conversation keyed by
+ * the DM address). Deleting links on a person dismiss would cut a linked
+ * teammate's own DM routing - a different person's data.
  */
 export const dismissReachRow = async (input: {
   workspaceId: string;
   agentId: string;
   provider: ChannelProviderId;
+  subjectKind?: ReachSubjectKind;
   externalRef: string;
   dismissedByUserId: string;
 }): Promise<{ removedGrant: boolean; removedLinks: number }> => {
+  const subjectKind = input.subjectKind ?? "space";
   const agent = await db.agent.findFirst({
     where: { id: input.agentId, workspaceId: input.workspaceId },
     select: { id: true },
@@ -815,16 +925,16 @@ export const dismissReachRow = async (input: {
     where: {
       agentId: input.agentId,
       integrationId: presence.integrationId,
-      subjectKind: "space",
+      subjectKind,
       externalRef: input.externalRef,
     },
   });
 
   // The channel's thread links go too - "forget" includes the routing rows.
-  // Provider-keyed matching, same as the leave door.
+  // Provider-keyed matching, same as the leave door. SPACE only (see above).
   const reach = channelProvider(input.provider).reach;
   let removedLinks = 0;
-  if (reach) {
+  if (reach && subjectKind === "space") {
     const links = await db.channelThreadLink.findMany({
       where: { agentChannelId: presence.id, kind: "group" },
       select: { id: true, externalThreadId: true },
@@ -843,22 +953,25 @@ export const dismissReachRow = async (input: {
   return { removedGrant: removed.count > 0, removedLinks };
 };
 
-/** The Channels-section projection: every space grant for one agent+provider. */
-export const listSpaceGrants = async (
+export interface ReachGrantRow {
+  externalRef: string;
+  subjectLabel: string | null;
+  state: ReachState;
+  decidedAt: Date | null;
+}
+
+/** The dashboard projection: grants of one kind for one agent+provider. */
+export const listGrants = async (
   agentId: string,
   provider: ChannelProviderId,
-): Promise<
-  {
-    externalRef: string;
-    subjectLabel: string | null;
-    state: ReachState;
-    decidedAt: Date | null;
-  }[]
-> => {
+  subjectKind: ReachSubjectKind,
+): Promise<ReachGrantRow[]> => {
   const rows = await db.agentReachGrant.findMany({
     // `left` rows are parked history (the bot is out of the channel) - the
     // view hides them; a re-invite re-arms and they reappear as pending.
-    where: { agentId, provider, subjectKind: "space", state: { not: "left" } },
+    // Person rows never reach `left` (there is no channel to leave), so the
+    // filter is simply inert for them.
+    where: { agentId, provider, subjectKind, state: { not: "left" } },
     select: {
       externalRef: true,
       subjectLabel: true,
@@ -869,3 +982,15 @@ export const listSpaceGrants = async (
   });
   return rows.map((r) => ({ ...r, state: normalizeState(r.state) }));
 };
+
+/** Every SPACE grant (the Channels section). */
+export const listSpaceGrants = (
+  agentId: string,
+  provider: ChannelProviderId,
+): Promise<ReachGrantRow[]> => listGrants(agentId, provider, "space");
+
+/** Every PERSON grant (the People section). */
+export const listPersonGrants = (
+  agentId: string,
+  provider: ChannelProviderId,
+): Promise<ReachGrantRow[]> => listGrants(agentId, provider, "external_user");

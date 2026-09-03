@@ -141,7 +141,10 @@ describe("customer.subscription.updated", () => {
     );
     expect(res.status).toBe(200);
     expect(state.updateManyCalls).toEqual([
-      { where: { id: "org-1" }, data: { subscriptionStatus: "team" } },
+      {
+        where: { id: "org-1", subscriptionStatus: { not: "aws-marketplace" } },
+        data: { subscriptionStatus: "team" },
+      },
     ]);
   });
 
@@ -248,7 +251,10 @@ describe("checkout.session.completed: superseded trial", () => {
 
     expect(res.status).toBe(200);
     expect(state.updateManyCalls).toEqual([
-      { where: { id: "org-1" }, data: { subscriptionStatus: "team" } },
+      {
+        where: { id: "org-1", subscriptionStatus: { not: "aws-marketplace" } },
+        data: { subscriptionStatus: "team" },
+      },
     ]);
     // supersededBy must land BEFORE the cancel so the deletion event always
     // carries the conversion marker (webhooks are unordered).
@@ -311,7 +317,10 @@ describe("customer.subscription.deleted", () => {
     const res = await post(deletedEvent({ organizationId: "org-1" }));
     expect(res.status).toBe(200);
     expect(state.updateManyCalls).toEqual([
-      { where: { id: "org-1" }, data: { subscriptionStatus: "free" } },
+      {
+        where: { id: "org-1", subscriptionStatus: { not: "aws-marketplace" } },
+        data: { subscriptionStatus: "free" },
+      },
     ]);
     expect(vi.mocked(notifyDiscord)).toHaveBeenCalledTimes(1);
   });
@@ -340,7 +349,10 @@ describe("customer.subscription.deleted", () => {
 
     expect(res.status).toBe(200);
     expect(state.updateManyCalls).toEqual([
-      { where: { id: "org-1" }, data: { subscriptionStatus: "team" } },
+      {
+        where: { id: "org-1", subscriptionStatus: { not: "aws-marketplace" } },
+        data: { subscriptionStatus: "team" },
+      },
     ]);
     expect(vi.mocked(notifyDiscord)).not.toHaveBeenCalled();
   });
@@ -358,7 +370,10 @@ describe("customer.subscription.deleted", () => {
 
     expect(res.status).toBe(200);
     expect(state.updateManyCalls).toEqual([
-      { where: { id: "org-1" }, data: { subscriptionStatus: "free" } },
+      {
+        where: { id: "org-1", subscriptionStatus: { not: "aws-marketplace" } },
+        data: { subscriptionStatus: "free" },
+      },
     ]);
     expect(vi.mocked(notifyDiscord)).toHaveBeenCalledTimes(1);
   });
@@ -370,7 +385,10 @@ describe("customer.subscription.deleted", () => {
 
     expect(res.status).toBe(200);
     expect(state.updateManyCalls).toEqual([
-      { where: { id: "org-1" }, data: { subscriptionStatus: "free" } },
+      {
+        where: { id: "org-1", subscriptionStatus: { not: "aws-marketplace" } },
+        data: { subscriptionStatus: "free" },
+      },
     ]);
     expect(vi.mocked(notifyDiscord)).toHaveBeenCalledTimes(1);
   });

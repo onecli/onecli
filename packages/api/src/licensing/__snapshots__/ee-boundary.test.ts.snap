@@ -74,6 +74,8 @@ exports[`enterprise-license boundary > the licensed file set changes only by del
     "billing/actions.ts",
     "billing/api-request-actions.ts",
     "billing/api-requests-page.tsx",
+    "billing/aws-marketplace/actions.ts",
+    "billing/aws-marketplace/token-cookie.ts",
     "billing/billing-content.tsx",
     "billing/billing-route.tsx",
     "billing/format.ts",
@@ -137,6 +139,11 @@ exports[`enterprise-license boundary > the licensed file set changes only by del
     "auth/cognito-identity.ts",
     "auth/session-hooks.test.ts",
     "auth/session-hooks.ts",
+    "billing/aws-marketplace/client.ts",
+    "billing/aws-marketplace/env.ts",
+    "billing/aws-marketplace/metering-job.ts",
+    "billing/aws-marketplace/service.test.ts",
+    "billing/aws-marketplace/service.ts",
     "billing/env.test.ts",
     "billing/env.ts",
     "billing/plan-features.ts",
@@ -181,6 +188,9 @@ exports[`enterprise-license boundary > the licensed file set changes only by del
     "notifications/discord.onprem.test.ts",
     "notifications/discord.ts",
     "notifications/welcome-email.ts",
+    "routes/aws-marketplace.app.test.ts",
+    "routes/aws-marketplace.test.ts",
+    "routes/aws-marketplace.ts",
     "routes/billing.test.ts",
     "routes/billing.ts",
     "routes/dropbox-folders.ts",
@@ -795,6 +805,14 @@ exports[`enterprise-license boundary > the licensed symbol set changes only by d
     "getPlanUsage",
     "PlanUsage",
   ],
+  "apps/web/src/ee/billing/aws-marketplace/actions.ts": [
+    "completeMarketplaceRegistration",
+    "hasPendingMarketplaceToken",
+    "RegistrationResult",
+  ],
+  "apps/web/src/ee/billing/aws-marketplace/token-cookie.ts": [
+    "AWS_MP_TOKEN_COOKIE",
+  ],
   "apps/web/src/ee/billing/billing-content.tsx": [
     "BillingContent",
   ],
@@ -957,6 +975,37 @@ exports[`enterprise-license boundary > the licensed symbol set changes only by d
   "packages/api/src/ee/auth/session-hooks.ts": [
     "eeSessionHooks",
   ],
+  "packages/api/src/ee/billing/aws-marketplace/client.ts": [
+    "AwsMarketplaceClient",
+    "FakeAwsMarketplaceClient",
+    "getAwsMarketplaceClient",
+    "MarketplaceEntitlement",
+    "ResolvedCustomer",
+    "setAwsMarketplaceClient",
+    "UsageRecordResult",
+  ],
+  "packages/api/src/ee/billing/aws-marketplace/env.ts": [
+    "AWS_MARKETPLACE_CONTRACT_DIMENSION",
+    "AWS_MARKETPLACE_INCLUDED_AGENTS",
+    "AWS_MARKETPLACE_OVERAGE_DIMENSION",
+    "AWS_MARKETPLACE_PRODUCT_CODE",
+    "AWS_MARKETPLACE_REGION",
+    "AWS_MARKETPLACE_SNS_TOPIC_ARN",
+    "isAwsMarketplaceConfigured",
+  ],
+  "packages/api/src/ee/billing/aws-marketplace/metering-job.ts": [
+    "startAwsMarketplaceMeteringJob",
+  ],
+  "packages/api/src/ee/billing/aws-marketplace/service.ts": [
+    "AwsMarketplaceError",
+    "countOrgAgents",
+    "currentContractYearStart",
+    "handleLicenseDeprovisioned",
+    "meterOverages",
+    "pickBillingLicense",
+    "registerMarketplaceCustomer",
+    "syncEntitlements",
+  ],
   "packages/api/src/ee/billing/env.ts": [
     "PLAN_PRICE_IDS",
     "SALES_MANAGED_PRICE_IDS",
@@ -995,6 +1044,7 @@ exports[`enterprise-license boundary > the licensed symbol set changes only by d
     "trialingWithoutPaymentMethod",
   ],
   "packages/api/src/ee/billing/plans.ts": [
+    "AWS_MARKETPLACE_PLAN_CONFIG",
     "BillingInterval",
     "ENTERPRISE_PLAN",
     "ENTERPRISE_PLAN_CONFIG",
@@ -1113,6 +1163,9 @@ exports[`enterprise-license boundary > the licensed symbol set changes only by d
   ],
   "packages/api/src/ee/notifications/welcome-email.ts": [
     "sendWelcomeEmail",
+  ],
+  "packages/api/src/ee/routes/aws-marketplace.ts": [
+    "awsMarketplaceRoutes",
   ],
   "packages/api/src/ee/routes/billing.ts": [
     "billingRoutes",

@@ -32,6 +32,8 @@
     "@1password/sdk": "^0.4.0",
     "@aws-sdk/client-cognito-identity-provider": "^3.1014.0",
     "@aws-sdk/client-kms": "^3.1014.0",
+    "@aws-sdk/client-marketplace-entitlement-service": "^3.1118.0",
+    "@aws-sdk/client-marketplace-metering": "^3.1118.0",
     "@aws-sdk/client-secrets-manager": "^3.1014.0",
     "@onecli/agent-protocol": "workspace:*",
     "@onecli/db": "workspace:*",

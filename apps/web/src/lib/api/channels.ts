@@ -36,6 +36,8 @@ export interface AgentChannelPresence {
   /** Per-space reach: every channel the presence is in or was asked about.
    * `members_only` = no grant (today's default). Absent on older servers. */
   spaces?: ChannelSpaceReach[];
+  /** Absent on older servers that predate the person lane. */
+  people?: ChannelPersonReach[];
 }
 
 /**
@@ -49,6 +51,19 @@ export type ChannelReachState =
   | "approved"
   | "members_only"
   | "blocked";
+
+/** One PERSON's reach row: someone who messaged the agent directly with no
+ * OneCLI account to match. Two settlements only - "members_only" describes
+ * a population, not a person - though a legacy row can still read as one,
+ * so the type stays the full union and the UI treats anything that is not
+ * `approved`/`pending` as "not allowed". */
+export interface ChannelPersonReach {
+  externalRef: string;
+  /** "@display-name" when known; fall back to the ref. */
+  label: string | null;
+  state: ChannelReachState;
+  decidedAt: string | null;
+}
 
 /** One channel's reach row on a presence. */
 export interface ChannelSpaceReach {
@@ -211,6 +226,35 @@ export const setReachState = (
   apiPut<{ kind: string }>(
     agentBase(agentId, `/${provider}/reach/${encodeURIComponent(externalRef)}`),
     { state },
+  );
+
+/** Settle one PERSON: may they message this agent, or not. */
+export const setPersonReachState = (
+  agentId: string,
+  provider: ChannelProvider,
+  externalRef: string,
+  state: "approved" | "blocked",
+) =>
+  apiPut<{ kind: string }>(
+    agentBase(
+      agentId,
+      `/${provider}/reach/people/${encodeURIComponent(externalRef)}`,
+    ),
+    { state },
+  );
+
+/** DISMISS a person row: forget the decision (grant row only - a person's
+ * dismiss never touches thread links, which belong to other people). */
+export const dismissPersonReach = (
+  agentId: string,
+  provider: ChannelProvider,
+  externalRef: string,
+) =>
+  apiDelete(
+    agentBase(
+      agentId,
+      `/${provider}/reach/people/${encodeURIComponent(externalRef)}`,
+    ),
   );
 
 /** DISMISS a channel row: forget the channel entirely (grant + thread

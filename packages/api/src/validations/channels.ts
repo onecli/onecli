@@ -107,6 +107,16 @@ export const setReachStateSchema = z
   })
   .strict();
 
+/** PUT /v1/agents/:agentId/channels/:provider/reach/people/:externalRef -
+ * the dashboard's per-person settlement. Two answers only: a single human
+ * either may reach the agent or may not; "OneCLI users only" describes a
+ * population, not a person, so it is not offered here. */
+export const setPersonReachStateSchema = z
+  .object({
+    state: z.enum(["approved", "blocked"]),
+  })
+  .strict();
+
 // ── The adapter's wire (routes/channel-adapter.ts) ──────────────────────────
 // Registration validates with `adapterRegisterRequestSchema` from
 // @onecli/agent-protocol (the shared wire), not a local copy.

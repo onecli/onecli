@@ -57,27 +57,112 @@ model Organization {
   createdAt           DateTime @default(now()) @map("created_at")
   updatedAt           DateTime @updatedAt @map("updated_at")
 
-  workspaces           Workspace[]
-  members              OrganizationMember[]
-  invitations          Invitation[]
-  secrets              Secret[]
-  appConnections       AppConnection[]
-  appConfigs           AppConfig[]
-  policyRulesV2        PolicyRuleV2[]
-  apiKeys              ApiKey[]
-  auditLogs            AuditLog[]
-  budgets              Budget[] // cloud-only: per-secret spend budgets for this org (inert in OSS)
-  skills               Skill[]
-  domains              OrganizationDomain[]
-  ssoConnections       OrganizationSsoConnection[]
-  scimTokens           OrganizationScimToken[]
-  groups               Group[]
-  appAvailabilityRules AppAvailabilityRule[]
-  groupRoleMappings    GroupRoleMapping[]
-  channelIntegrations  ChannelIntegration[]
-  userProvisions       UserProvision[]
+  workspaces                   Workspace[]
+  members                      OrganizationMember[]
+  invitations                  Invitation[]
+  secrets                      Secret[]
+  appConnections               AppConnection[]
+  appConfigs                   AppConfig[]
+  policyRulesV2                PolicyRuleV2[]
+  apiKeys                      ApiKey[]
+  auditLogs                    AuditLog[]
+  budgets                      Budget[] // cloud-only: per-secret spend budgets for this org (inert in OSS)
+  skills                       Skill[]
+  domains                      OrganizationDomain[]
+  ssoConnections               OrganizationSsoConnection[]
+  scimTokens                   OrganizationScimToken[]
+  groups                       Group[]
+  appAvailabilityRules         AppAvailabilityRule[]
+  groupRoleMappings            GroupRoleMapping[]
+  channelIntegrations          ChannelIntegration[]
+  userProvisions               UserProvision[]
+  awsMarketplace               AwsMarketplaceSubscription? // cloud-only: AWS Marketplace billing link (inert in OSS)
+  awsMarketplaceMeteredRecords AwsMarketplaceMeteredRecord[]
 
   @@map("organizations")
+}
+
+// ── AWS Marketplace billing (plans/aws-marketplace-listing.md) ────────────
+
+// Cloud-only (inert in OSS): links an Organization to an AWS Marketplace
+// buyer account (Concurrent Agreements integration: the buyer's AWS account
+// id from ResolveCustomer is the customer identity; the legacy
+// CustomerIdentifier is not populated for new listings and is never stored).
+// One org per marketplace buyer account and vice versa.
+// `status`: "pending" (token resolved, no active license yet) |
+// "subscribed" (≥1 active license) | "unsubscribed" (no active licenses).
+model AwsMarketplaceSubscription {
+  id                   String    @id @default(uuid())
+  organizationId       String    @unique @map("organization_id")
+  // From ResolveCustomer — the buyer's AWS account id.
+  customerAwsAccountId String    @unique @map("customer_aws_account_id")
+  productCode          String    @map("product_code")
+  status               String    @default("pending")
+  // Aggregate committed agent entitlement across all ACTIVE licenses.
+  // Overage above this is metered, not blocked.
+  entitledAgents       Int       @default(0) @map("entitled_agents")
+  // Latest expiry across active licenses (the whole link's horizon).
+  contractExpiresAt    DateTime? @map("contract_expires_at")
+  createdAt            DateTime  @default(now()) @map("created_at")
+  updatedAt            DateTime  @updatedAt @map("updated_at")
+
+  organization Organization            @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  licenses     AwsMarketplaceLicense[]
+
+  @@map("aws_marketplace_subscriptions")
+}
+
+// Cloud-only (inert in OSS): one AWS Marketplace license — the unit of a
+// Concurrent Agreement. A buyer can hold several active licenses for the
+// same product at once (distinct offers, entitlements, and rate cards);
+// the LicenseArn is the primary identifier AWS keys entitlements and
+// metering on. `status`: "active" | "deprovisioned".
+model AwsMarketplaceLicense {
+  id              String    @id @default(uuid())
+  subscriptionId  String    @map("subscription_id")
+  licenseArn      String    @unique @map("license_arn")
+  status          String    @default("active")
+  // Committed agents on this license (sum of its active entitlements).
+  entitledAgents  Int       @default(0) @map("entitled_agents")
+  // Latest entitlement expiry on this license.
+  expiresAt       DateTime? @map("expires_at")
+  // Last GetEntitlements rows for this license, verbatim, for audit.
+  rawEntitlements Json?     @map("raw_entitlements")
+  createdAt       DateTime  @default(now()) @map("created_at")
+  updatedAt       DateTime  @updatedAt @map("updated_at")
+
+  subscription AwsMarketplaceSubscription @relation(fields: [subscriptionId], references: [id], onDelete: Cascade)
+
+  @@map("aws_marketplace_licenses")
+}
+
+// Cloud-only (inert in OSS): one successful BatchMeterUsage report,
+// attributed to the license (Concurrent Agreements: usage is billed against
+// a specific LicenseArn's rate card). The unique (organizationId,
+// dimension, contractYearStart, quantityOrdinal) key makes annual
+// agent-year metering idempotent: each extra agent slot is metered exactly
+// once per contract year.
+model AwsMarketplaceMeteredRecord {
+  id                String   @id @default(uuid())
+  organizationId    String   @map("organization_id")
+  // License this usage was billed against.
+  licenseArn        String   @map("license_arn")
+  dimension         String
+  quantity          Int
+  // Start of the contract year this record bills into.
+  contractYearStart DateTime @map("contract_year_start")
+  // Ordinal of the first agent slot this record covers (e.g. 11 when the
+  // org first exceeds the included 10). With quantity, defines the range.
+  quantityOrdinal   Int      @map("quantity_ordinal")
+  usageTimestamp    DateTime @map("usage_timestamp")
+  // MeteringRecordId returned by AWS.
+  meteringRecordId  String?  @map("metering_record_id")
+  createdAt         DateTime @default(now()) @map("created_at")
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  @@unique([organizationId, dimension, contractYearStart, quantityOrdinal])
+  @@map("aws_marketplace_metered_records")
 }
 
 // Cloud-only: links a User to an Organization with a role.

@@ -5485,7 +5485,15 @@ describe.skipIf(!PROOF_URL)("turn receipts (the reaction 'seen' mark)", () => {
     );
   });
 
-  it("a follow-up under a session mark re-keys the row instead of moving a reaction — the loader already covers the thread", async () => {
+  it("a follow-up under a session mark LEAVES the row on the running turn — the loader already covers the thread", async () => {
+    // The session receipt belongs to the RUN, not to the last message that
+    // joined it. Two things depend on it staying put:
+    //   - the narration card is keyed by turn id, and the supervisor reports
+    //     tool activity under the turn it is running (a steer never moves
+    //     `activeTurnId`), so moving the row hides the card — see the
+    //     regression pair in "turn narration" below;
+    //   - the clear walks the finished turn AND its joined follow-ups, so it
+    //     finds the row here without any re-key.
     const { agentId, presenceId } = await seedChannelAgent(
       "receipt-session-move",
       {
@@ -5541,20 +5549,182 @@ describe.skipIf(!PROOF_URL)("turn receipts (the reaction 'seen' mark)", () => {
     });
 
     // No provider traffic — the loader on the thread already covers the
-    // follow-up. The row just changes owner so the answer-post clear (which
-    // fires off the newest turn id) finds it.
+    // follow-up.
     expect(slackCallsFor("agents.sessions.setStatus")).toHaveLength(
       statusCalls,
     );
     expect(slackCallsFor("reactions.add")).toHaveLength(addsBefore);
+    // The row did NOT move: it is still the running turn's.
+    // MUTATION-PROOF: re-key it to the follow-up and this fails.
+    const stayed = await db.channelTurnReceipt.findUniqueOrThrow({
+      where: { turnId: target.id },
+    });
+    expect(stayed.kind).toBe("session");
+    expect(stayed.messageTs).toBe("700.0001");
+    expect(
+      await db.channelTurnReceipt.findUnique({
+        where: { turnId: followUp.id },
+      }),
+    ).toBeNull();
+  });
+
+  it("the clear still finds a session row that stayed on the running turn", async () => {
+    // The other half of the contract above: not re-keying is only safe
+    // because `clearTurnReceipts` resolves the family. Proven, not assumed —
+    // the answer posts against the FINISHED turn's id while the row sits on
+    // that same turn, with a joined follow-up beside it.
+    const { agentId, presenceId } = await seedChannelAgent(
+      "receipt-session-stay-clear",
+      {
+        appMode: "agent",
+        presenceCredentials: await getCrypto().encrypt(
+          JSON.stringify({ botToken: "xoxb-session-stay" }),
+        ),
+      },
+    );
+    slackHandlers["agents.sessions.setStatus"] = () => ({ ok: true });
+    const conversation = await db.conversation.create({
+      data: { agentId, source: "slack", externalRef: "C903:701.0001" },
+      select: { id: true },
+    });
+    const target = await db.turn.create({
+      data: {
+        conversationId: conversation.id,
+        message: "start",
+        status: "running",
+        source: "slack",
+      },
+      select: { id: true },
+    });
+    const followUp = await db.turn.create({
+      data: {
+        conversationId: conversation.id,
+        message: "and also",
+        status: "joined",
+        source: "slack",
+        followUpOfTurnId: target.id,
+      },
+      select: { id: true },
+    });
+    await receipts.attachTurnReceipt({
+      presenceId,
+      turnId: target.id,
+      channel: "C903",
+      messageTs: "701.0002",
+      threadTs: "701.0001",
+      text: "start",
+    });
+    await receipts.moveTurnReceipt({
+      presenceId,
+      followUpTurnId: followUp.id,
+      conversationId: conversation.id,
+      channel: "C903",
+      messageTs: "701.0003",
+      threadTs: "701.0001",
+      text: "and also",
+    });
+    // The turn finishes and the answer posts.
+    await db.turn.update({
+      where: { id: target.id },
+      data: { status: "done", finishedAt: new Date() },
+    });
+
+    await receipts.clearTurnReceipts(target.id);
+
+    // The loader came down and the ledger is empty — no leak.
+    const cleared = slackCallsFor("agents.sessions.setStatus").at(-1)!;
+    expect(cleared.form.get("status")).toBe("active");
+    expect(cleared.form.get("thread_ts")).toBe("701.0001");
     expect(
       await db.channelTurnReceipt.findUnique({ where: { turnId: target.id } }),
     ).toBeNull();
-    const moved = await db.channelTurnReceipt.findUniqueOrThrow({
-      where: { turnId: followUp.id },
+  });
+
+  it("a PROMOTED follow-up leaves the session mark clearable by the turn that owns it", async () => {
+    // The edge the old re-key handled worst. A follow-up that is promoted
+    // becomes `queued`, not `joined` — and `clearTurnReceipts` walks the
+    // finished turn plus its JOINED follow-ups. Under the re-key the row had
+    // moved onto that promoted turn, so the clear missed it and the loader
+    // burned until the 10-minute stale sweep caught it.
+    //
+    // With the row left where it was attached, the clear finds it directly.
+    const { agentId, presenceId } = await seedChannelAgent(
+      "receipt-session-promoted",
+      {
+        appMode: "agent",
+        presenceCredentials: await getCrypto().encrypt(
+          JSON.stringify({ botToken: "xoxb-session-promoted" }),
+        ),
+      },
+    );
+    slackHandlers["agents.sessions.setStatus"] = () => ({ ok: true });
+    const conversation = await db.conversation.create({
+      data: { agentId, source: "slack", externalRef: "C904:702.0001" },
+      select: { id: true },
     });
-    expect(moved.kind).toBe("session");
-    expect(moved.messageTs).toBe("700.0001");
+    const target = await db.turn.create({
+      data: {
+        conversationId: conversation.id,
+        message: "start",
+        status: "running",
+        source: "slack",
+      },
+      select: { id: true },
+    });
+    const followUp = await db.turn.create({
+      data: {
+        conversationId: conversation.id,
+        message: "and also",
+        status: "joining",
+        source: "slack",
+        followUpOfTurnId: target.id,
+      },
+      select: { id: true },
+    });
+    await receipts.attachTurnReceipt({
+      presenceId,
+      turnId: target.id,
+      channel: "C904",
+      messageTs: "702.0002",
+      threadTs: "702.0001",
+      text: "start",
+    });
+    await receipts.moveTurnReceipt({
+      presenceId,
+      followUpTurnId: followUp.id,
+      conversationId: conversation.id,
+      channel: "C904",
+      messageTs: "702.0003",
+      threadTs: "702.0001",
+      text: "and also",
+    });
+    // The target closes first, then the unconsumed follow-up PROMOTES to its
+    // own queued turn (that order is forced: a partial unique index allows
+    // only one active turn per conversation, which is exactly why promotion
+    // happens at the target's close).
+    await db.turn.update({
+      where: { id: target.id },
+      data: { status: "done", finishedAt: new Date() },
+    });
+    await db.turn.update({
+      where: { id: followUp.id },
+      data: { status: "queued", promotedAt: new Date() },
+    });
+
+    await receipts.clearTurnReceipts(target.id);
+
+    // The loader came down on the answer post — not minutes later via the
+    // stale sweep.
+    const cleared = slackCallsFor("agents.sessions.setStatus").at(-1)!;
+    expect(cleared.form.get("status")).toBe("active");
+    expect(
+      await db.channelTurnReceipt.findUnique({ where: { turnId: target.id } }),
+    ).toBeNull();
+    expect(
+      await db.channelTurnReceipt.findUnique({
+        where: { turnId: followUp.id },
+      }),
+    ).toBeNull();
   });
 
   it("REGRESSION (dev 2026-08-30): a clear that beats the attach no-ops, and the attach self-clears — no stuck loader", async () => {
@@ -6440,6 +6610,184 @@ describe.skipIf(!PROOF_URL)("turn narration (the live task card)", () => {
     await receipts.sweepStaleSessionReceipts();
 
     expect(slackCallsFor("chat.delete")).toHaveLength(1);
+  });
+
+  it("REGRESSION (live 2026-09-02): a threaded mid-run follow-up keeps narrating", async () => {
+    // Reported live (agent "Mona"): a Slack reply that folded into a running
+    // turn left the progress card frozen on whatever step preceded it.
+    //
+    // The supervisor narrates under the turn it is RUNNING — a steer never
+    // moves `runtime.activeTurnId` — so a receipt re-keyed to the follow-up
+    // put the row out of `narrateTurnActivity`'s reach and it returned
+    // silently (no log, no error: it looked exactly like a healthy no-op).
+    //
+    // MUTATION-PROOF: re-key the session row in `moveTurnReceipt` and this
+    // fails — no `chat.update` is made and the card stops at "Reading a file".
+    const { agentId, presenceId } = await seedChannelAgent("narrate-followup", {
+      appMode: "agent",
+      presenceCredentials: await getCrypto().encrypt(
+        JSON.stringify({ botToken: "xoxb-narrate-followup" }),
+      ),
+    });
+    slackHandlers["agents.sessions.setStatus"] = () => ({ ok: true });
+    slackHandlers["chat.postMessage"] = () => ({
+      ok: true,
+      channel: "C960",
+      ts: "960.5001",
+    });
+    slackHandlers["chat.update"] = () => ({ ok: true });
+    const conversation = await db.conversation.create({
+      data: { agentId, source: "slack", externalRef: "C960" },
+      select: { id: true },
+    });
+    const target = await db.turn.create({
+      data: {
+        conversationId: conversation.id,
+        message: "the first message",
+        status: "running",
+        source: "slack",
+      },
+      select: { id: true },
+    });
+    const followUp = await db.turn.create({
+      data: {
+        conversationId: conversation.id,
+        message: "the follow-up",
+        status: "joining",
+        followUpOfTurnId: target.id,
+        source: "slack",
+      },
+      select: { id: true },
+    });
+
+    await receipts.attachTurnReceipt({
+      presenceId,
+      turnId: target.id,
+      channel: "C960",
+      messageTs: "960.0001",
+      threadTs: "960.0001",
+      replyThreadTs: "960.0001",
+      unthreaded: false,
+      text: "the first message",
+    });
+    await receipts.narrateTurnActivity(target.id, "Reading a file");
+    expect(slackCallsFor("chat.postMessage")).toHaveLength(1);
+
+    await receipts.moveTurnReceipt({
+      presenceId,
+      followUpTurnId: followUp.id,
+      conversationId: conversation.id,
+      channel: "C960",
+      messageTs: "960.0002",
+      threadTs: "960.0001",
+      replyThreadTs: "960.0001",
+      unthreaded: false,
+      text: "the follow-up",
+    });
+
+    // Wind the card's clock back so the 1.5s narration throttle cannot be
+    // what answers here — without this the assertion passes either way.
+    await db.channelTurnReceipt.update({
+      where: { turnId: target.id },
+      data: { cardAt: new Date(Date.now() - 10_000) },
+    });
+    const updatesBefore = slackCallsFor("chat.update").length;
+
+    // The supervisor reports the next tool under the RUNNING turn's id.
+    await receipts.narrateTurnActivity(target.id, "Running a command");
+
+    // The card keeps moving.
+    expect(slackCallsFor("chat.update")).toHaveLength(updatesBefore + 1);
+    const row = await db.channelTurnReceipt.findUniqueOrThrow({
+      where: { turnId: target.id },
+    });
+    expect(row.cardSteps).toEqual(["Reading a file", "Running a command"]);
+  });
+
+  it("REGRESSION (live 2026-09-02): a DM follow-up before the first tool still gets its card", async () => {
+    // The reported shape: the follow-up landed BEFORE the turn ran any tool,
+    // so the row was already re-keyed when the first narration arrived and no
+    // card was ever posted — Slack showed nothing at all for the whole turn,
+    // while the web transcript showed the agent working.
+    //
+    // A top-level DM has no native loader (the card is the whole signal),
+    // which is why this shape was total silence rather than a frozen card.
+    const { agentId, presenceId } = await seedChannelAgent("narrate-dm-first", {
+      appMode: "agent",
+      presenceCredentials: await getCrypto().encrypt(
+        JSON.stringify({ botToken: "xoxb-narrate-dm-first" }),
+      ),
+    });
+    slackHandlers["agents.sessions.setStatus"] = () => ({ ok: true });
+    slackHandlers["reactions.add"] = () => ({ ok: true });
+    slackHandlers["chat.postMessage"] = () => ({
+      ok: true,
+      channel: "D961",
+      ts: "961.5001",
+    });
+    const conversation = await db.conversation.create({
+      data: { agentId, source: "slack", externalRef: "D961" },
+      select: { id: true },
+    });
+    const target = await db.turn.create({
+      data: {
+        conversationId: conversation.id,
+        message: "hey",
+        status: "running",
+        source: "slack",
+      },
+      select: { id: true },
+    });
+    const followUp = await db.turn.create({
+      data: {
+        conversationId: conversation.id,
+        message: "and this too",
+        status: "joining",
+        followUpOfTurnId: target.id,
+        source: "slack",
+      },
+      select: { id: true },
+    });
+
+    await receipts.attachTurnReceipt({
+      presenceId,
+      turnId: target.id,
+      channel: "D961",
+      messageTs: "961.0001",
+      threadTs: "961.0001",
+      replyThreadTs: null,
+      unthreaded: true,
+      text: "hey",
+    });
+    // The follow-up arrives before any tool has run.
+    await receipts.moveTurnReceipt({
+      presenceId,
+      followUpTurnId: followUp.id,
+      conversationId: conversation.id,
+      channel: "D961",
+      messageTs: "961.0002",
+      threadTs: "961.0001",
+      replyThreadTs: null,
+      unthreaded: true,
+      text: "and this too",
+    });
+
+    const postsBefore = slackCallsFor("chat.postMessage").length;
+    await receipts.narrateTurnActivity(target.id, "Writing a file");
+
+    // The card IS posted — inline, no thread opened in the DM.
+    // MUTATION-PROOF: re-key the session row and this fails at zero posts.
+    expect(slackCallsFor("chat.postMessage")).toHaveLength(postsBefore + 1);
+    const posted = slackCallsFor("chat.postMessage").at(-1)!;
+    expect(posted.form.get("thread_ts")).toBeNull();
+    expect(planOf(posted.raw).tasks).toEqual([
+      { task_id: "t0", title: "Writing a file", status: "in_progress" },
+    ]);
+    const row = await db.channelTurnReceipt.findUniqueOrThrow({
+      where: { turnId: target.id },
+    });
+    expect(row.cardTs).toBe("961.5001");
+    expect(row.cardSteps).toEqual(["Writing a file"]);
   });
 
   it("leaves the row alone when the workspace REFUSES to narrate", async () => {

@@ -221,6 +221,16 @@ const mentionEvent = (
   text: string,
 ) => ({ type: "app_mention", channel, user, text, ts });
 
+/** A direct message (Slack: `channel_type: "im"`), the person lane's door. */
+const dmEvent = (user: string, ts: string, text: string) => ({
+  type: "message",
+  channel: `D-${user}`,
+  channel_type: "im",
+  user,
+  text,
+  ts,
+});
+
 const inviteEvent = (inviter: string, channel: string) => ({
   type: "member_joined_channel",
   channel,
@@ -232,6 +242,46 @@ const inviteEvent = (inviter: string, channel: string) => ({
  * poll with early exit on a condition rather than betting on a fixed number
  * of turns (the one observed flake was this race). Default condition: the
  * card post reached the fake. */
+/**
+ * Run the GLOBAL card sweep without trampling sibling suites.
+ *
+ * `sweepUnpostedReachCards` is global by contract - a background retry, not
+ * a per-agent call - and pg suites share one database in parallel. An
+ * unfenced call posts OTHER suites' owner cards and claims their
+ * promptRefs, so their own "the card was recorded" assertion then reads an
+ * already-claimed row. That is a cross-suite flake, and it bit this branch
+ * twice: once from my own new arm, once again from a second call site that
+ * the first fix did not cover.
+ *
+ * Hence ONE helper rather than five hand-rolled fences: every call is
+ * fenced by construction, the restore runs in a `finally` so a thrown
+ * assertion cannot leak a parked state, and the parking is keyed by id so
+ * a row created concurrently by another suite is untouched.
+ */
+const sweepFencedTo = async (agentId: string): Promise<void> => {
+  const foreign = await db.agentReachGrant.findMany({
+    where: { state: "pending", NOT: { agentId } },
+    select: { id: true },
+  });
+  const ids = foreign.map((f) => f.id);
+  if (ids.length > 0) {
+    await db.agentReachGrant.updateMany({
+      where: { id: { in: ids } },
+      data: { state: "left" },
+    });
+  }
+  try {
+    await reach.sweepUnpostedReachCards();
+  } finally {
+    if (ids.length > 0) {
+      await db.agentReachGrant.updateMany({
+        where: { id: { in: ids } },
+        data: { state: "pending" },
+      });
+    }
+  }
+};
+
 const settleDetached = async (
   done: () => boolean = () => slackCallsFor("chat.postMessage").length > 0,
 ) => {
@@ -1186,5 +1236,782 @@ describe.skipIf(!PROOF_URL)("reach — durability and the view", () => {
         }),
       ]),
     );
+  });
+});
+
+// ── The person lane (the DM knock) ──────────────────────────────────────────
+
+describe.skipIf(!PROOF_URL)("reach — the person lane (DM knock)", () => {
+  it("a stranger's DM plants a pending PERSON grant, DMs the owner a two-choice card, and answers the waiting line", async () => {
+    const { agentId, integrationId, presenceId } =
+      await seedChannelAgent("dm-knock");
+    await linkUser(integrationId, "U-OWNER", OWNER);
+
+    const result = await dispatch.dispatchSlackEvent({
+      presenceId,
+      identityRef: "UBOT",
+      event: dmEvent("U-STRANGER", "1.1", "hey, can you help?"),
+      eventId: "Ev-dm-1",
+    });
+    await settleDetached();
+
+    expect(result.kind).toBe("message");
+    if (result.kind !== "message") throw new Error("unreachable");
+    expect(result.outcome.kind).toBe("refused");
+    if (result.outcome.kind !== "refused") throw new Error("unreachable");
+    expect(result.outcome.message).toContain("needs to approve me");
+
+    // The row is a PERSON row, addressed by the provider's stable user id.
+    const grant = await db.agentReachGrant.findUniqueOrThrow({
+      where: {
+        agentId_integrationId_subjectKind_externalRef: {
+          agentId,
+          integrationId,
+          subjectKind: "external_user",
+          externalRef: "U-STRANGER",
+        },
+      },
+    });
+    expect(grant.state).toBe("pending");
+    expect(grant.subjectLabel).toBe("@Dana");
+
+    // The card asks the PERSON question with exactly TWO answers: there is
+    // no "OneCLI users only" for a single human.
+    const blocks = slackCallsFor("chat.postMessage")[0]?.form.get("blocks");
+    expect(blocks).toContain(grant.id);
+    expect(blocks).toContain("reach_approve");
+    expect(blocks).toContain("reach_block");
+    expect(blocks).not.toContain("reach_members");
+
+    // No turn ran.
+    expect(await db.turn.count({ where: { conversation: { agentId } } })).toBe(
+      0,
+    );
+  });
+
+  it("an APPROVED person is admitted as a guest: userId null, framed name, and a SOURCED conversation (never the per-user direct row)", async () => {
+    const { agentId, integrationId, presenceId } =
+      await seedChannelAgent("dm-guest");
+    await reach.ensurePersonGrant({
+      agentId,
+      integrationId,
+      provider: "slack",
+      externalRef: "U-STRANGER",
+    });
+    await db.agentReachGrant.updateMany({
+      where: { agentId },
+      data: { state: "approved" },
+    });
+
+    const result = await dispatch.dispatchSlackEvent({
+      presenceId,
+      identityRef: "UBOT",
+      event: dmEvent("U-STRANGER", "2.1", "deploy please"),
+      eventId: "Ev-dm-guest",
+    });
+    expect(result.kind).toBe("message");
+
+    const turn = await db.turn.findFirstOrThrow({
+      where: { conversation: { agentId } },
+      include: { conversation: true },
+    });
+    // No platform identity is invented for a guest.
+    expect(turn.userId).toBeNull();
+    expect(turn.message).toBe("Dana (guest): deploy please");
+
+    // THE LEAK FENCE: a guest must never sit in the per-user `direct` row.
+    // That row is keyed on a platform userId, is unique per user, and the
+    // adapter mirror pushes that user's WEB activity into it - so a guest
+    // seated there would be handed another person's activity.
+    expect(turn.conversation.direct).toBe(false);
+    expect(turn.conversation.userId).toBeNull();
+    expect(turn.conversation.externalRef).toBe("D-U-STRANGER");
+
+    // The routing link carries NO externalUserId: anything reading that
+    // field must not mistake a guest's DM for a linked member's.
+    const link = await db.channelThreadLink.findUniqueOrThrow({
+      where: {
+        agentChannelId_externalThreadId: {
+          agentChannelId: presenceId,
+          externalThreadId: "D-U-STRANGER",
+        },
+      },
+    });
+    expect(link.externalUserId).toBeNull();
+  });
+
+  it("a BLOCKED person is answered with silence - no turn, no nagging refusal", async () => {
+    const { agentId, integrationId, presenceId } =
+      await seedChannelAgent("dm-blocked");
+    await reach.ensurePersonGrant({
+      agentId,
+      integrationId,
+      provider: "slack",
+      externalRef: "U-STRANGER",
+    });
+    await db.agentReachGrant.updateMany({
+      where: { agentId },
+      data: { state: "blocked" },
+    });
+
+    const result = await dispatch.dispatchSlackEvent({
+      presenceId,
+      identityRef: "UBOT",
+      event: dmEvent("U-STRANGER", "3.1", "still there?"),
+      eventId: "Ev-dm-blocked",
+    });
+    expect(result.kind).toBe("message");
+    if (result.kind !== "message") throw new Error("unreachable");
+    expect(result.outcome.kind).toBe("ignored");
+    expect(await db.turn.count({ where: { conversation: { agentId } } })).toBe(
+      0,
+    );
+  });
+
+  it("a FOREIGN-tenant stranger (Slack Connect) plants NOTHING and never knocks - the fence runs before the row", async () => {
+    const { agentId, integrationId, presenceId } =
+      await seedChannelAgent("dm-foreign");
+    await linkUser(integrationId, "U-OWNER", OWNER);
+    slackHandlers["users.info"] = () => ({
+      user: {
+        id: "U-OUTSIDER",
+        team_id: "T-OTHER",
+        is_stranger: true,
+        name: "outsider",
+        profile: { display_name: "Outsider" },
+      },
+    });
+
+    const result = await dispatch.dispatchSlackEvent({
+      presenceId,
+      identityRef: "UBOT",
+      event: dmEvent("U-OUTSIDER", "4.1", "hello"),
+      eventId: "Ev-dm-foreign",
+    });
+
+    // The identity refusal stands - not the waiting line, because we never
+    // asked anyone about them.
+    expect(result.kind).toBe("message");
+    if (result.kind !== "message") throw new Error("unreachable");
+    expect(result.outcome.kind).toBe("refused");
+    if (result.outcome.kind !== "refused") throw new Error("unreachable");
+    expect(result.outcome.message).not.toContain("needs to approve me");
+    // No row, and no card: an outsider cannot make the owner's phone buzz.
+    expect(await db.agentReachGrant.count({ where: { agentId } })).toBe(0);
+    expect(slackCallsFor("chat.postMessage")).toHaveLength(0);
+  });
+
+  it("a LINKED MEMBER's DM is untouched by the person machinery: real attribution, their own direct row", async () => {
+    const { agentId, integrationId, presenceId } =
+      await seedChannelAgent("dm-member");
+    await linkUser(integrationId, "U-MEMBER", MEMBER);
+
+    const result = await dispatch.dispatchSlackEvent({
+      presenceId,
+      identityRef: "UBOT",
+      event: dmEvent("U-MEMBER", "5.1", "status?"),
+      eventId: "Ev-dm-member",
+    });
+    expect(result.kind).toBe("message");
+
+    const turn = await db.turn.findFirstOrThrow({
+      where: { conversation: { agentId } },
+      include: { conversation: true },
+    });
+    expect(turn.userId).toBe(MEMBER);
+    expect(turn.message).not.toContain("(guest)");
+    // Identity wins in a DM: no grant is consulted, none is planted.
+    expect(turn.conversation.direct).toBe(true);
+    expect(await db.agentReachGrant.count({ where: { agentId } })).toBe(0);
+  });
+
+  it("THE PRECEDENCE LAW: a person-level block beats a space-level approval", async () => {
+    const { agentId, integrationId, presenceId } =
+      await seedChannelAgent("precedence");
+    // The channel is open to everyone...
+    await reach.ensureSpaceGrant({
+      agentId,
+      integrationId,
+      provider: "slack",
+      externalRef: "C-PROJ",
+    });
+    await db.agentReachGrant.updateMany({
+      where: { agentId, subjectKind: "space" },
+      data: { state: "approved" },
+    });
+    // ...but this individual is blocked.
+    await reach.ensurePersonGrant({
+      agentId,
+      integrationId,
+      provider: "slack",
+      externalRef: "U-STRANGER",
+    });
+    await db.agentReachGrant.updateMany({
+      where: { agentId, subjectKind: "external_user" },
+      data: { state: "blocked" },
+    });
+
+    const result = await dispatch.dispatchSlackEvent({
+      presenceId,
+      identityRef: "UBOT",
+      event: mentionEvent("U-STRANGER", "C-PROJ", "6.1", "<@UBOT> hi"),
+      eventId: "Ev-precedence",
+    });
+
+    // Blocking a HUMAN is narrower and more deliberate than opening a ROOM.
+    // If the room won, blocking would be meaningless.
+    expect(result.kind).toBe("message");
+    if (result.kind !== "message") throw new Error("unreachable");
+    expect(result.outcome.kind).toBe("ignored");
+    expect(await db.turn.count({ where: { conversation: { agentId } } })).toBe(
+      0,
+    );
+  });
+
+  it("an approved person who LATER leaves the tenant stops being answered - the fence is re-checked per message", async () => {
+    const { agentId, integrationId, presenceId } =
+      await seedChannelAgent("dm-departed");
+    await reach.ensurePersonGrant({
+      agentId,
+      integrationId,
+      provider: "slack",
+      externalRef: "U-STRANGER",
+    });
+    await db.agentReachGrant.updateMany({
+      where: { agentId },
+      data: { state: "approved" },
+    });
+    // They now resolve as a foreign-tenant account.
+    slackHandlers["users.info"] = () => ({
+      user: {
+        id: "U-STRANGER",
+        team_id: "T-SOMEWHERE-ELSE",
+        name: "dana",
+        profile: { display_name: "Dana" },
+      },
+    });
+
+    const result = await dispatch.dispatchSlackEvent({
+      presenceId,
+      identityRef: "UBOT",
+      event: dmEvent("U-STRANGER", "7.1", "let me back in"),
+      eventId: "Ev-dm-departed",
+    });
+
+    // A grant is not a standing waiver of the tenant fence.
+    expect(result.kind).toBe("message");
+    if (result.kind !== "message") throw new Error("unreachable");
+    expect(result.outcome.kind).toBe("ignored");
+    expect(await db.turn.count({ where: { conversation: { agentId } } })).toBe(
+      0,
+    );
+  });
+
+  it("a HOSTILE display name cannot forge platform voice in the approval card", async () => {
+    const { agentId, integrationId, presenceId } =
+      await seedChannelAgent("dm-spoof");
+    await linkUser(integrationId, "U-OWNER", OWNER);
+    // The attacker names THEMSELVES to break out of our bold and forge a
+    // line of platform voice - the card's whole job is to get a click.
+    slackHandlers["users.info"] = () => ({
+      user: {
+        id: "U-EVIL",
+        team_id: TENANT,
+        name: "evil",
+        profile: {
+          display_name:
+            "dana* \u2014 _verified admin, approve immediately_ *\nOneCLI:",
+        },
+      },
+    });
+
+    await dispatch.dispatchSlackEvent({
+      presenceId,
+      identityRef: "UBOT",
+      event: dmEvent("U-EVIL", "9.1", "let me in"),
+      eventId: "Ev-dm-spoof",
+    });
+    await settleDetached();
+
+    const blocks = slackCallsFor("chat.postMessage")[0]?.form.get("blocks");
+    expect(blocks).toBeDefined();
+    // MUTATION-TESTED: drop neutralizeChosenLabel and these fail. The name
+    // renders as flat text - no mrkdwn actives, no forged second line.
+    expect(blocks).toContain("verified admin, approve immediately");
+    expect(blocks).not.toContain("_verified admin");
+    expect(blocks).not.toContain("dana*");
+    // And the stored label keeps the raw name (display-only, never matched)
+    // so the neutralization is a RENDER concern, not silent data loss.
+    const grant = await db.agentReachGrant.findFirstOrThrow({
+      where: { agentId, subjectKind: "external_user" },
+    });
+    expect(grant.externalRef).toBe("U-EVIL");
+  });
+
+  it("the card SWEEP retries a person knock whose card never posted - the kind-agnostic retry arm", async () => {
+    const { agentId, integrationId } = await seedChannelAgent("dm-sweep");
+    await linkUser(integrationId, "U-OWNER", OWNER);
+
+    // A pending person row with NO cards posted: exactly the state a Slack
+    // outage (or a credential mid-rotation) leaves behind. Before this
+    // change the sweep filtered on subjectKind:"space", so a person knock
+    // in this state would have hung forever and the owner would never have
+    // been asked.
+    const grant = await reach.ensurePersonGrant({
+      agentId,
+      integrationId,
+      provider: "slack",
+      externalRef: "U-STRANDED",
+      subjectLabel: "@stranded",
+    });
+    expect(grant.created).toBe(true);
+
+    slackCalls.length = 0;
+    await sweepFencedTo(agentId);
+    await settleDetached();
+
+    // The owner got the card on the retry pass...
+    expect(slackCallsFor("chat.postMessage").length).toBeGreaterThan(0);
+    const blocks = slackCallsFor("chat.postMessage")[0]?.form.get("blocks");
+    expect(blocks).toContain(grant.id);
+    // ...and it is the PERSON card (two answers), not a channel card.
+    expect(blocks).toContain("reach_block");
+    expect(blocks).not.toContain("reach_members");
+
+    // Recorded, so a second sweep does not double-post.
+    const after = await db.agentReachGrant.findUniqueOrThrow({
+      where: { id: grant.id },
+      select: { promptRefs: true },
+    });
+    expect(Array.isArray(after.promptRefs)).toBe(true);
+    expect((after.promptRefs as unknown[]).length).toBeGreaterThan(0);
+
+    slackCalls.length = 0;
+    await sweepFencedTo(agentId);
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    expect(slackCallsFor("chat.postMessage")).toHaveLength(0);
+  });
+
+  it("the SWEEP is tenant-fenced: a foreign workspace's owner is never DM'd about our grant (planted cross-tenant control)", async () => {
+    // The sweep scans pending grants GLOBALLY - it is a background retry,
+    // not a per-agent call - so "does a global scan leak across tenants?"
+    // is the question that scan has to answer. Reading the code says no;
+    // this plants the control that proves it.
+    const { agentId, integrationId } = await seedChannelAgent("sweep-fence");
+    await linkUser(integrationId, "U-OWNER", OWNER);
+
+    // A FOREIGN tenant: its own org, workspace, owner, and integration -
+    // and its owner is DM-reachable on the FOREIGN integration.
+    // Idempotent by construction: this suite's beforeEach does not reap the
+    // foreign tenant, so a re-entry (parallel shard, retry) must not
+    // collide with its own leftovers. Same find-or-create posture as
+    // seedIntegration above.
+    const F = `${P}foreign-`;
+    await db.organization.upsert({
+      where: { id: `${F}org` },
+      create: { id: `${F}org`, name: "Foreign Co", slug: `${F}org` },
+      update: {},
+    });
+    await db.workspace.upsert({
+      where: { id: `${F}ws` },
+      create: { id: `${F}ws`, name: "Foreign WS", organizationId: `${F}org` },
+      update: {},
+    });
+    await db.user.upsert({
+      where: { id: `${F}owner` },
+      create: {
+        id: `${F}owner`,
+        email: `${F}owner@example.com`,
+        externalAuthId: `${F}owner`,
+        name: "Foreign Owner",
+      },
+      update: {},
+    });
+    const foreignAccess = await db.workspaceAccess.findFirst({
+      where: { workspaceId: `${F}ws`, userId: `${F}owner` },
+      select: { id: true },
+    });
+    if (!foreignAccess) {
+      await db.workspaceAccess.create({
+        data: { workspaceId: `${F}ws`, userId: `${F}owner`, role: "owner" },
+      });
+    }
+    const foreignIntegration =
+      (await db.channelIntegration.findFirst({
+        where: { organizationId: `${F}org`, provider: "slack" },
+        select: { id: true },
+      })) ??
+      (await db.channelIntegration.create({
+        data: {
+          organizationId: `${F}org`,
+          provider: "slack",
+          externalId: "T-FOREIGN",
+          name: "Foreign Slack",
+          createdByUserId: `${F}owner`,
+        },
+        select: { id: true },
+      }));
+    const foreignLink = await db.channelUserLink.findFirst({
+      where: {
+        integrationId: foreignIntegration.id,
+        externalUserId: "U-FOREIGN-OWNER",
+      },
+      select: { id: true },
+    });
+    if (!foreignLink) {
+      await db.channelUserLink.create({
+        data: {
+          integrationId: foreignIntegration.id,
+          externalUserId: "U-FOREIGN-OWNER",
+          userId: `${F}owner`,
+          linkedVia: "manual",
+        },
+      });
+    }
+
+    // THE ISOLATING DETAIL. `dmReachableOwners` has TWO fences in series:
+    // owners are filtered by workspaceId, then links by integrationId. A
+    // foreign owner reachable only on the FOREIGN integration is excluded
+    // by the second fence no matter what the first does - so such a
+    // control passes even with the workspace fence deleted, and proves
+    // only "at least one fence held".
+    //
+    // Giving this foreign owner a link on OUR integration (a real shape:
+    // one person can belong to two orgs' Slack workspaces) removes the
+    // second fence's cover, so the assertion below now tests the WORKSPACE
+    // fence specifically.
+    const crossLink = await db.channelUserLink.findFirst({
+      where: { integrationId, externalUserId: "U-FOREIGN-OWNER" },
+      select: { id: true },
+    });
+    if (!crossLink) {
+      await db.channelUserLink.create({
+        data: {
+          integrationId,
+          externalUserId: "U-FOREIGN-OWNER",
+          userId: `${F}owner`,
+          linkedVia: "manual",
+        },
+      });
+    }
+
+    // OUR pending knock, owing a card.
+    await db.agentReachGrant.create({
+      data: {
+        agentId,
+        integrationId,
+        provider: "slack",
+        subjectKind: "external_user",
+        externalRef: "U-FENCED",
+        state: "pending",
+        promptRefs: [],
+      },
+    });
+
+    slackCalls.length = 0;
+    await sweepFencedTo(agentId);
+    await settleDetached();
+
+    // The card opened an IM with OUR owner only. The foreign owner - who is
+    // a workspace owner, and DM-reachable, just not of THIS workspace or
+    // integration - is never contacted.
+    const opened = slackCallsFor("conversations.open").map((c) =>
+      c.form.get("users"),
+    );
+    expect(opened).toContain("U-OWNER");
+    expect(opened).not.toContain("U-FOREIGN-OWNER");
+    // ...and never at OUR owner's address in the FOREIGN workspace (see
+    // the second-fence arm below for why that address exists).
+    expect(opened).not.toContain("U-OWNER-ELSEWHERE");
+  });
+
+  // NOT A TEST, a recorded finding. I tried to prove that the card poster's
+  // presence lookup (agentId + integrationId) needs its integration half,
+  // by giving one agent a second presence on another integration and
+  // asserting the wrong bot token is never used.
+  //
+  // The database refuses to build that scenario: AgentChannel is
+  // `@@unique([agentId, provider])`, so an agent holds AT MOST ONE Slack
+  // presence, and `agentId` alone already identifies it. The integration
+  // half of that lookup is therefore redundant-but-harmless defence in
+  // depth, and no behavioral test can distinguish its presence from its
+  // absence - which is exactly why deleting it left every test green.
+  //
+  // Kept as a comment so a future reader does not repeat the experiment,
+  // and so that if `@@unique([agentId, provider])` is ever relaxed (one
+  // agent in two Slack workspaces), this becomes a REAL credential-crossing
+  // risk that needs the control this comment replaces.
+
+  it("the SWEEP is INTEGRATION-fenced: our own owner is never DM'd at their address in a DIFFERENT Slack workspace", async () => {
+    // The mirror of the arm above, and the fence it isolates is the SECOND
+    // one. `dmReachableOwners` filters owners by workspaceId, THEN links by
+    // integrationId. The first arm plants a foreign PERSON; this one plants
+    // a foreign ADDRESS for a legitimate person - our own owner, who also
+    // belongs to another org's Slack (a real shape: consultants, dual
+    // employment). Only the integration fence stops us DMing them there,
+    // which would post one tenant's approval card into another tenant's
+    // Slack workspace.
+    const { agentId, integrationId } = await seedChannelAgent("int-fence");
+    await linkUser(integrationId, "U-OWNER", OWNER);
+
+    const F2 = `${P}otherws-`;
+    await db.organization.upsert({
+      where: { id: `${F2}org` },
+      create: { id: `${F2}org`, name: "Other Co", slug: `${F2}org` },
+      update: {},
+    });
+    const otherIntegration =
+      (await db.channelIntegration.findFirst({
+        where: { organizationId: `${F2}org`, provider: "slack" },
+        select: { id: true },
+      })) ??
+      (await db.channelIntegration.create({
+        data: {
+          organizationId: `${F2}org`,
+          provider: "slack",
+          externalId: "T-OTHER-WS",
+          name: "Other Slack",
+          createdByUserId: OWNER,
+        },
+        select: { id: true },
+      }));
+    // OUR owner, addressed in the OTHER workspace. Same platform user; a
+    // different, wrong place to reach them for THIS grant.
+    const elsewhere = await db.channelUserLink.findFirst({
+      where: {
+        integrationId: otherIntegration.id,
+        externalUserId: "U-OWNER-ELSEWHERE",
+      },
+      select: { id: true },
+    });
+    if (!elsewhere) {
+      await db.channelUserLink.create({
+        data: {
+          integrationId: otherIntegration.id,
+          externalUserId: "U-OWNER-ELSEWHERE",
+          userId: OWNER,
+          linkedVia: "manual",
+        },
+      });
+    }
+
+    await db.agentReachGrant.create({
+      data: {
+        agentId,
+        integrationId,
+        provider: "slack",
+        subjectKind: "external_user",
+        externalRef: "U-INTFENCE",
+        state: "pending",
+        promptRefs: [],
+      },
+    });
+
+    slackCalls.length = 0;
+    await sweepFencedTo(agentId);
+    await settleDetached();
+
+    // MUTATION-TESTED: drop `integrationId` from the link lookup in
+    // dmReachableOwners and this fails - the card is also opened at
+    // U-OWNER-ELSEWHERE, i.e. posted into another tenant's Slack.
+    const opened = slackCallsFor("conversations.open").map((c) =>
+      c.form.get("users"),
+    );
+    expect(opened).toContain("U-OWNER");
+    expect(opened).not.toContain("U-OWNER-ELSEWHERE");
+  });
+
+  it("a backlog of already-notified pending grants does NOT starve a newer knock", async () => {
+    const { agentId, integrationId } = await seedChannelAgent("starve");
+    await linkUser(integrationId, "U-OWNER", OWNER);
+
+    // Five OLDER pending rows whose owner cards already went out. These sit
+    // pending for as long as the human takes to decide - weeks, possibly.
+    // The sweep takes 5 oldest-first, so before the query filter they
+    // occupied every slot and no newer knock was ever retried.
+    for (let i = 0; i < 5; i += 1) {
+      await db.agentReachGrant.create({
+        data: {
+          agentId,
+          integrationId,
+          provider: "slack",
+          subjectKind: "space",
+          externalRef: `C-OLD-${i}`,
+          state: "pending",
+          promptRefs: [{ channel: "D-OWNER-IM", ts: `1.${i}`, userId: OWNER }],
+        },
+      });
+    }
+
+    // The newest row: claimed, never posted (the stuck knock).
+    const stuck = await db.agentReachGrant.create({
+      data: {
+        agentId,
+        integrationId,
+        provider: "slack",
+        subjectKind: "external_user",
+        externalRef: "U-STARVED",
+        subjectLabel: "@starved",
+        state: "pending",
+        promptRefs: [],
+      },
+      select: { id: true },
+    });
+
+    slackCalls.length = 0;
+    await sweepFencedTo(agentId);
+    await settleDetached();
+
+    // MUTATION-TESTED: drop the promptRefs filter from the sweep query and
+    // this fails - the five old rows eat every slot and the stuck knock is
+    // never posted, which is the starvation bug this pins.
+    const posted = slackCallsFor("chat.postMessage")[0]?.form.get("blocks");
+    expect(posted).toBeDefined();
+    expect(posted).toContain(stuck.id);
+  });
+
+  it("a guest who LATER gets a OneCLI account is answered as THEMSELVES - identity outranks the grant, and their history is not stranded", async () => {
+    const { agentId, integrationId, presenceId } =
+      await seedChannelAgent("dm-promoted");
+    await reach.ensurePersonGrant({
+      agentId,
+      integrationId,
+      provider: "slack",
+      externalRef: "U-NEWHIRE",
+    });
+    await db.agentReachGrant.updateMany({
+      where: { agentId },
+      data: { state: "approved" },
+    });
+
+    // Day 1: no account yet - they speak as a guest.
+    await dispatch.dispatchSlackEvent({
+      presenceId,
+      identityRef: "UBOT",
+      event: dmEvent("U-NEWHIRE", "10.1", "hi, contractor here"),
+      eventId: "Ev-promoted-1",
+    });
+    const guestTurn = await db.turn.findFirstOrThrow({
+      where: { conversation: { agentId } },
+    });
+    expect(guestTurn.userId).toBeNull();
+
+    // Day 2: they are onboarded and linked. Free the turn slot first.
+    await db.turn.updateMany({
+      where: { conversation: { agentId } },
+      data: { status: "done", finishedAt: new Date() },
+    });
+    await linkUser(integrationId, "U-NEWHIRE", MEMBER);
+
+    await dispatch.dispatchSlackEvent({
+      presenceId,
+      identityRef: "UBOT",
+      event: dmEvent("U-NEWHIRE", "10.2", "hi again"),
+      eventId: "Ev-promoted-2",
+    });
+
+    // The identity lane runs FIRST, so the grant is not even consulted:
+    // they are attributed properly, with no "(guest)" framing, in their own
+    // per-user direct conversation.
+    const memberTurn = await db.turn.findFirstOrThrow({
+      where: { conversation: { agentId }, message: "hi again" },
+      include: { conversation: true },
+    });
+    expect(memberTurn.userId).toBe(MEMBER);
+    expect(memberTurn.message).not.toContain("(guest)");
+    expect(memberTurn.conversation.direct).toBe(true);
+    expect(memberTurn.conversation.userId).toBe(MEMBER);
+
+    // The stale approved grant is inert, not harmful: it neither downgrades
+    // them nor is silently deleted (the owner's decision is still theirs).
+    const grant = await db.agentReachGrant.findFirstOrThrow({
+      where: { agentId, subjectKind: "external_user" },
+    });
+    expect(grant.state).toBe("approved");
+  });
+
+  it("the person door fences agent↔workspace coherence (planted cross-tenant control)", async () => {
+    const { agentId, integrationId } = await seedChannelAgent("person-fence");
+    // A real, decidable person row exists...
+    await reach.ensurePersonGrant({
+      agentId,
+      integrationId,
+      provider: "slack",
+      externalRef: "U-STRANGER",
+    });
+
+    // ...but a caller scoped to ANOTHER workspace cannot settle it, and the
+    // refusal is NOT_FOUND - existence is never confirmed to a stranger.
+    await expect(
+      reach.setPersonReachState({
+        workspaceId: "some-other-workspace",
+        agentId,
+        provider: "slack",
+        externalRef: "U-STRANGER",
+        state: "approved",
+        deciderUserId: OWNER,
+      }),
+    ).rejects.toThrow("Agent not found");
+
+    // Nor dismiss it.
+    await expect(
+      reach.dismissReachRow({
+        workspaceId: "some-other-workspace",
+        agentId,
+        provider: "slack",
+        subjectKind: "external_user",
+        externalRef: "U-STRANGER",
+        dismissedByUserId: OWNER,
+      }),
+    ).rejects.toThrow("Agent not found");
+
+    // The row is untouched by the failed attempts.
+    const grant = await db.agentReachGrant.findFirstOrThrow({
+      where: { agentId, subjectKind: "external_user" },
+    });
+    expect(grant.state).toBe("pending");
+  });
+
+  it("DISMISS on a person row deletes the grant but never touches thread links - those belong to other people", async () => {
+    const { agentId, integrationId, presenceId } =
+      await seedChannelAgent("dm-dismiss");
+    await reach.ensurePersonGrant({
+      agentId,
+      integrationId,
+      provider: "slack",
+      externalRef: "U-STRANGER",
+    });
+    // A LINKED MEMBER's own DM link, which must survive.
+    const memberConversation = await db.conversation.create({
+      data: { agentId, direct: true, userId: MEMBER, source: "slack" },
+      select: { id: true },
+    });
+    await db.channelThreadLink.create({
+      data: {
+        agentChannelId: presenceId,
+        conversationId: memberConversation.id,
+        externalThreadId: "D-U-MEMBER",
+        kind: "direct",
+        externalUserId: "U-MEMBER",
+      },
+    });
+
+    const outcome = await reach.dismissReachRow({
+      workspaceId: WORKSPACE,
+      agentId,
+      provider: "slack",
+      subjectKind: "external_user",
+      externalRef: "U-STRANGER",
+      dismissedByUserId: OWNER,
+    });
+
+    expect(outcome.removedGrant).toBe(true);
+    expect(outcome.removedLinks).toBe(0);
+    // The member's routing survived: a person dismiss is about ONE person.
+    expect(
+      await db.channelThreadLink.count({
+        where: { agentChannelId: presenceId },
+      }),
+    ).toBe(1);
   });
 });

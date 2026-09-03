@@ -533,6 +533,20 @@ export interface ChannelProvider {
     }): Promise<string | null>;
 
     /**
+     * A PERSON's display label (Slack: "@dana" / their display name), for
+     * the card and the dashboard. The person analogue of `spaceLabel`, and
+     * display-only for the same reason: matching stays on the provider's
+     * stable user id, because people rename themselves.
+     *
+     * Optional: a provider with no person concept simply never grows a
+     * person lane, and its rows fall back to the raw ref.
+     */
+    personLabel?(input: {
+      credentialsJson: string | null;
+      externalRef: string;
+    }): Promise<string | null>;
+
+    /**
      * Resolve a NON-platform speaker for the guest lane: their display name
      * (untrusted - the caller cleans, clamps, and frames it) and whether
      * they belong to the presence's own tenant (the v1 same-tenant fence:
@@ -559,6 +573,13 @@ export interface ChannelProvider {
         grantId: string;
         agentName: string;
         subjectLabel: string;
+        /** WHAT is being asked about. The card's question and its buttons
+         * differ by kind: a space has three answers (everyone here / OneCLI
+         * users only / nobody), a person has two (this person may talk to
+         * me, or may not) - "members only" says nothing about one human.
+         * Defaulted by the renderer so an older caller still posts a space
+         * card. */
+        subjectKind?: "space" | "external_user";
       }): Promise<{ channel: string; ts: string }>;
       settle(input: {
         credentialsJson: string;
@@ -567,6 +588,7 @@ export interface ChannelProvider {
         subjectLabel: string;
         outcome: string;
         decidedByName: string;
+        subjectKind?: "space" | "external_user";
       }): Promise<void>;
     };
   };

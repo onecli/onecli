@@ -12,6 +12,7 @@ import {
 import { isChannelProviderId } from "../services/channels/registry";
 import {
   dismissReachRow,
+  setPersonReachState,
   setSpaceReachState,
 } from "../services/channels/agent-reach-service";
 import type { ChannelProviderId } from "../services/channels/types";
@@ -20,6 +21,7 @@ import {
   channelTransportSchema,
   completePresenceSchema,
   detachPresenceSchema,
+  setPersonReachStateSchema,
   setReachStateSchema,
 } from "../validations/channels";
 import {
@@ -241,6 +243,89 @@ export const agentChannelRoutes = () => {
     }
     return c.json(result);
   });
+
+  // PUT /agents/:agentId/channels/:provider/reach/people/:externalRef — the
+  // per-PERSON settlement. A separate path segment rather than a body field
+  // so the two subject kinds can never collide on one key: a channel id and
+  // a user id are both provider-opaque strings, and routing them through
+  // one route would make the kind a guess.
+  app.put(
+    "/:agentId/channels/:provider/reach/people/:externalRef",
+    async (c) => {
+      const a = c.get("auth");
+      const workspaceId = requireWorkspaceId(a);
+      const provider = parseProvider(c.req.param("provider"));
+      const externalRef = c.req.param("externalRef");
+      if (externalRef.length === 0 || externalRef.length > 200) {
+        throw new ServiceError("UNPROCESSABLE", "Invalid person reference");
+      }
+      const body = setPersonReachStateSchema.safeParse(
+        await parseBody(c.req.raw),
+      );
+      if (!body.success) {
+        throw new ServiceError(
+          "UNPROCESSABLE",
+          body.error.issues[0]?.message ?? "Invalid body",
+        );
+      }
+      const result = await setPersonReachState({
+        workspaceId,
+        agentId: c.req.param("agentId"),
+        provider,
+        externalRef,
+        state: body.data.state,
+        deciderUserId: a.userId,
+      });
+      if (result.kind === "refused") {
+        throw new ServiceError("NOT_FOUND", result.message);
+      }
+      return c.json(result);
+    },
+  );
+
+  // DELETE /agents/:agentId/channels/:provider/reach/people/:externalRef —
+  // DISMISS one person: delete the grant row only. Never touches thread
+  // links (those belong to whoever the DM is with). The next message from
+  // them re-knocks fresh.
+  app.delete(
+    "/:agentId/channels/:provider/reach/people/:externalRef",
+    async (c) => {
+      const a = c.get("auth");
+      const workspaceId = requireWorkspaceId(a);
+      const provider = parseProvider(c.req.param("provider"));
+      const externalRef = c.req.param("externalRef");
+      if (externalRef.length === 0 || externalRef.length > 200) {
+        throw new ServiceError("UNPROCESSABLE", "Invalid person reference");
+      }
+      const result = await dismissReachRow({
+        workspaceId,
+        agentId: c.req.param("agentId"),
+        provider,
+        subjectKind: "external_user",
+        externalRef,
+        dismissedByUserId: a.userId,
+      });
+      // Audited like the space dismiss: erasing a permission decision is
+      // itself a governance act, and "who un-decided this person, and when"
+      // must be answerable. Ids only - never a display name.
+      await recordAuditEvent({
+        workspaceId,
+        userId: a.userId,
+        userEmail: a.userEmail,
+        action: AUDIT_ACTIONS.DELETE,
+        service: AUDIT_SERVICES.CHANNEL,
+        source: AUDIT_SOURCE.API,
+        metadata: {
+          agentId: c.req.param("agentId"),
+          provider,
+          subjectKind: "external_user",
+          reachDismissed: externalRef,
+          removedGrant: String(result.removedGrant),
+        },
+      });
+      return c.json(result);
+    },
+  );
 
   // DELETE /agents/:agentId/channels/:provider/reach/:externalRef — DISMISS:
   // forget the channel entirely (grant row + thread links), whatever the

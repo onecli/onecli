@@ -600,6 +600,212 @@ describe.skipIf(!PROOF_URL)(
         }),
       ).toBe(0);
 
+      // ── 8c. THE PERSON LANE over the real wire: a stranger's DM knocks,
+      // the owner settles it from the DASHBOARD, and the person is then
+      // answered as a guest. Proves the routes do not shadow each other -
+      // `/reach/:ref` and `/reach/people/:ref` are different doors, and a
+      // channel id and a user id are both opaque strings. ──
+      slackHandlers["users.info"] = () => ({
+        user: {
+          id: "U-DM",
+          team_id: TEAM,
+          name: "sam",
+          profile: { display_name: "Sam" },
+        },
+      });
+      const dmRes = await postEvent({
+        type: "message",
+        channel: "D-SAM",
+        channel_type: "im",
+        user: "U-DM",
+        text: "can you help me?",
+        ts: "500.1",
+      });
+      expect(dmRes.status).toBe(200);
+      const personGrant = await db.agentReachGrant.findFirstOrThrow({
+        where: { agentId: agent.id, subjectKind: "external_user" },
+      });
+      expect(personGrant.state).toBe("pending");
+      expect(personGrant.externalRef).toBe("U-DM");
+      // The space grant is untouched: the two kinds share a table, never a key.
+      expect(
+        (
+          await db.agentReachGrant.findUniqueOrThrow({
+            where: { id: grant.id },
+          })
+        ).subjectKind,
+      ).toBe("space");
+
+      // The dashboard's PERSON door (its own path segment).
+      currentSession = { id: OWNER, email: `${OWNER}@example.com` };
+      const approvePerson = await app.request(
+        `/v1/agents/${agent.id}/channels/slack/reach/people/U-DM`,
+        {
+          method: "PUT",
+          headers: {
+            "content-type": "application/json",
+            "x-workspace-id": WORKSPACE,
+          },
+          body: JSON.stringify({ state: "approved" }),
+        },
+      );
+      expect(approvePerson.status).toBe(200);
+      // `members_only` is not a coherent answer about one human, and the
+      // schema refuses it rather than storing an unrenderable state.
+      const badPerson = await app.request(
+        `/v1/agents/${agent.id}/channels/slack/reach/people/U-DM`,
+        {
+          method: "PUT",
+          headers: {
+            "content-type": "application/json",
+            "x-workspace-id": WORKSPACE,
+          },
+          body: JSON.stringify({ state: "members_only" }),
+        },
+      );
+      expect(badPerson.status).toBe(422);
+      currentSession = null;
+
+      // Free the turn slot, then the approved person is answered as a guest.
+      await db.turn.updateMany({
+        where: { conversation: { agentId: agent.id } },
+        data: { status: "done", finishedAt: new Date() },
+      });
+      const dmAgain = await postEvent({
+        type: "message",
+        channel: "D-SAM",
+        channel_type: "im",
+        user: "U-DM",
+        text: "thanks!",
+        ts: "500.2",
+      });
+      expect(dmAgain.status).toBe(200);
+      const guestTurn = await db.turn.findFirstOrThrow({
+        where: {
+          conversation: { agentId: agent.id, externalRef: "D-SAM" },
+        },
+        include: { conversation: true },
+      });
+      expect(guestTurn.userId).toBeNull();
+      expect(guestTurn.message).toBe("Sam (guest): thanks!");
+      // The leak fence, asserted on the wire: a guest never lands in the
+      // per-user direct row the mirror pushes web activity into.
+      expect(guestTurn.conversation.direct).toBe(false);
+
+      // ── 8d. THE VIEW carries the person row to the browser. Without
+      // this the whole People section could render empty while every
+      // service-level test still passed - the projection is the seam. ──
+      currentSession = { id: OWNER, email: `${OWNER}@example.com` };
+      const peopleView = await app.request(`/v1/agents/${agent.id}/channels`, {
+        headers: { "x-workspace-id": WORKSPACE },
+      });
+      expect(peopleView.status).toBe(200);
+      const withPeople = (await peopleView.json()) as {
+        presences: {
+          people?: {
+            externalRef: string;
+            state: string;
+            label: string | null;
+          }[];
+          spaces?: { externalRef: string }[];
+        }[];
+      };
+      expect(withPeople.presences[0]?.people).toEqual([
+        expect.objectContaining({
+          externalRef: "U-DM",
+          state: "approved",
+          label: "@Sam",
+        }),
+      ]);
+      // The two kinds stay in their own lists - a person never appears as
+      // a channel row, which is the point of the separate sections.
+      expect(
+        withPeople.presences[0]?.spaces?.some((s) => s.externalRef === "U-DM"),
+      ).toBe(false);
+      currentSession = null;
+
+      // ── 8e. THE ENCODING CONTRACT. The other legs use tame ids, so
+      // they would pass even if the route could not survive a ref needing
+      // percent-encoding. The dashboard percent-encodes both segments
+      // (apps/web/src/lib/api/channels.ts), so the server must accept what
+      // that produces.
+      //
+      // HONEST SCOPE, so nobody over-trusts this leg: it re-states the
+      // client's formula rather than importing it (packages/api must not
+      // import from apps/web), so it does NOT pin a rename of the segment
+      // on its own - the hand-written legs above already fail first for
+      // that. What it uniquely covers is the DECODING behavior: a ref
+      // carrying characters that only appear once encoded. ──
+      const encodedRef = encodeURIComponent("U/DM+1");
+      const browserUrl =
+        `/v1/agents/${encodeURIComponent(agent.id)}/channels` +
+        `/slack/reach/people/${encodedRef}`;
+      // A row whose ref genuinely needs encoding to survive a URL.
+      await db.agentReachGrant.create({
+        data: {
+          agentId: agent.id,
+          integrationId: integration.id,
+          provider: "slack",
+          subjectKind: "external_user",
+          externalRef: "U/DM+1",
+          state: "pending",
+          promptRefs: [],
+        },
+      });
+      currentSession = { id: OWNER, email: `${OWNER}@example.com` };
+      const asBrowserPut = await app.request(browserUrl, {
+        method: "PUT",
+        headers: {
+          "content-type": "application/json",
+          "x-workspace-id": WORKSPACE,
+        },
+        body: JSON.stringify({ state: "blocked" }),
+      });
+      expect(asBrowserPut.status).toBe(200);
+      // The ref round-tripped: the server decoded back to the exact stored
+      // string, not to a mangled or a different row.
+      expect(
+        (
+          await db.agentReachGrant.findFirstOrThrow({
+            where: {
+              agentId: agent.id,
+              subjectKind: "external_user",
+              externalRef: "U/DM+1",
+            },
+          })
+        ).state,
+      ).toBe("blocked");
+      // The OTHER person row is untouched - a slash in a ref must not let
+      // one settlement reach a second subject.
+      expect(
+        (
+          await db.agentReachGrant.findFirstOrThrow({
+            where: {
+              agentId: agent.id,
+              subjectKind: "external_user",
+              externalRef: "U-DM",
+            },
+          })
+        ).state,
+      ).toBe("approved");
+
+      // The dismiss door on the same composed URL.
+      const asBrowserDelete = await app.request(browserUrl, {
+        method: "DELETE",
+        headers: { "x-workspace-id": WORKSPACE },
+      });
+      expect(asBrowserDelete.status).toBe(200);
+      expect(await asBrowserDelete.json()).toMatchObject({
+        removedGrant: true,
+      });
+      // Only the encoded-ref row went; the other person row survives.
+      expect(
+        await db.agentReachGrant.count({
+          where: { agentId: agent.id, subjectKind: "external_user" },
+        }),
+      ).toBe(1);
+      currentSession = null;
+
       // ── 9. TOKEN-FAMILY negative controls on the same doors. ──
       // The adapter door refuses a non-cha_ bearer (an agent token must
       // never drive the adapter surface)...

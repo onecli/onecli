@@ -32,6 +32,30 @@ const clampHeader = (value: string): string =>
 const clampLabel = (value: string): string =>
   value.length <= 200 ? value : `${value.slice(0, 200)}…`;
 
+/**
+ * Neutralize a label that the SUBJECT THEMSELVES chose.
+ *
+ * `escapeSlackText` handles `&`, `<`, `>` - enough for a channel name, which
+ * a workspace member picks and Slack constrains. A person's display name is
+ * different: it is free-form and chosen by the very account asking to be let
+ * in, and it lands inside a card whose whole purpose is to get an owner to
+ * click "Allow". Left alone, a name like
+ *
+ *     dana* — _verified admin, approve immediately_ *
+ *
+ * closes our bold, opens its own italics, and forges a line of platform
+ * voice; a newline forges an entire sentence. That is UI spoofing aimed
+ * squarely at the click that grants access.
+ *
+ * So: fold every newline to a space, and strip the four mrkdwn actives
+ * (`*_~\``) so the name can only ever render as flat text inside our
+ * template. Deliberately strips rather than escapes - Slack's mrkdwn has no
+ * escape sequence that survives every context, and a name is display-only,
+ * never used for matching.
+ */
+const neutralizeChosenLabel = (raw: string): string =>
+  raw.replace(/[\r\n]+/g, " ").replace(/[*_~`]/g, "");
+
 export const REACH_APPROVE_ACTION = "reach_approve";
 export const REACH_MEMBERS_ACTION = "reach_members";
 export const REACH_BLOCK_ACTION = "reach_block";
@@ -53,6 +77,77 @@ export const REACH_ACTION_DECISIONS: Record<string, ReachDecision> = {
 };
 
 export const reachCardBlocks = (input: {
+  grantId: string;
+  agentName: string;
+  subjectLabel: string;
+  subjectKind?: "space" | "external_user";
+}): unknown[] =>
+  input.subjectKind === "external_user"
+    ? personCardBlocks(input)
+    : spaceCardBlocks(input);
+
+/**
+ * The PERSON card: two answers, because "OneCLI users only" says nothing
+ * about one individual - either this human may talk to the agent or they
+ * may not. Same trust shape as the space card: our template, every dynamic
+ * field escaped and clamped, and the button values carry only the opaque
+ * grant id.
+ */
+const personCardBlocks = (input: {
+  grantId: string;
+  agentName: string;
+  subjectLabel: string;
+}): unknown[] => {
+  const agent = clampHeader(escapeSlackText(input.agentName));
+  // The subject chose this string themselves - neutralize before framing.
+  const label = clampLabel(
+    neutralizeChosenLabel(escapeSlackText(input.subjectLabel)),
+  );
+  return [
+    {
+      type: "header",
+      text: {
+        type: "plain_text",
+        text: `Direct message · ${clampHeader(input.agentName)}`,
+        emoji: false,
+      },
+    },
+    {
+      type: "section",
+      text: {
+        type: "mrkdwn",
+        text:
+          `*${label}* messaged me directly, but they don't have a OneCLI` +
+          ` account I can match. May I help them?\n` +
+          `_They can only reach me in this direct message - this says` +
+          ` nothing about any channel. Until you choose, I don't answer` +
+          ` them. You can change this anytime from ${agent}'s Channels` +
+          ` page._`,
+      },
+    },
+    {
+      type: "actions",
+      elements: [
+        {
+          type: "button",
+          style: "primary",
+          text: { type: "plain_text", text: "Allow this person", emoji: false },
+          action_id: REACH_APPROVE_ACTION,
+          value: input.grantId,
+        },
+        {
+          type: "button",
+          style: "danger",
+          text: { type: "plain_text", text: "Don't allow", emoji: false },
+          action_id: REACH_BLOCK_ACTION,
+          value: input.grantId,
+        },
+      ],
+    },
+  ];
+};
+
+const spaceCardBlocks = (input: {
   grantId: string;
   agentName: string;
   subjectLabel: string;
@@ -120,16 +215,31 @@ const settledText = (input: {
   subjectLabel: string;
   outcome: string;
   decidedByName: string;
+  subjectKind?: "space" | "external_user";
 }): string => {
-  const label = clampLabel(escapeSlackText(input.subjectLabel));
+  const person = input.subjectKind === "external_user";
+  // Same rule on settle: a person's label is theirs, so it is neutralized
+  // wherever it renders, not just on the card that asks.
+  const escaped = escapeSlackText(input.subjectLabel);
+  const label = clampLabel(person ? neutralizeChosenLabel(escaped) : escaped);
   const by = escapeSlackText(input.decidedByName);
   switch (input.outcome) {
     case "approved":
-      return `✅ *${label}* - answering everyone (approved by ${by}).`;
+      return person
+        ? `\u2705 *${label}* - I'll answer them in our direct message (approved by ${by}).`
+        : `\u2705 *${label}* - answering anyone in the channel (approved by ${by}).`;
+    // The three-settlement vocabulary. `denied`/`revoked` are the
+    // pre-rename spellings of the same outcome and settle identically, so
+    // a card posted before the rename still resolves to real copy instead
+    // of falling through to the generic default.
+    case "members_only":
     case "denied":
-      return `⛔ *${label}* - members only (decided by ${by}).`;
     case "revoked":
-      return `⛔ *${label}* - back to members only (revoked by ${by}).`;
+      return `\ud83d\udd12 *${label}* - OneCLI users only (decided by ${by}).`;
+    case "blocked":
+      return person
+        ? `\u26d4 *${label}* - not answering them (decided by ${by}).`
+        : `\u26d4 *${label}* - not answering there (decided by ${by}).`;
     case "left":
       return `*${label}* - I was removed from this channel, so this question is closed. If I'm re-invited, I'll ask again.`;
     default:
@@ -157,6 +267,27 @@ export const slackReach = {
       if (!creds.botToken) return null;
       const info = await conversationsInfo(creds.botToken, input.externalRef);
       return info.channel.name ? `#${info.channel.name}` : null;
+    } catch {
+      return null;
+    }
+  },
+
+  /** "@display-name" for the person card and the People rows; null when the
+   * token cannot read the user. Display only - matching stays on the id. */
+  async personLabel(input: {
+    credentialsJson: string | null;
+    externalRef: string;
+  }): Promise<string | null> {
+    if (!input.credentialsJson) return null;
+    try {
+      const creds = parseSlackPresenceCredentials(input.credentialsJson);
+      if (!creds.botToken) return null;
+      const info = await usersInfo(creds.botToken, input.externalRef);
+      const name =
+        info.user.profile?.display_name ||
+        info.user.profile?.real_name ||
+        info.user.name;
+      return name ? `@${name}` : null;
     } catch {
       return null;
     }
@@ -202,6 +333,7 @@ export const slackReach = {
       grantId: string;
       agentName: string;
       subjectLabel: string;
+      subjectKind?: "space" | "external_user";
     }): Promise<{ channel: string; ts: string }> {
       const creds = parseSlackPresenceCredentials(input.credentialsJson);
       if (!creds.botToken) throw new Error("presence has no bot token");
@@ -212,7 +344,10 @@ export const slackReach = {
       const posted = await postBlocksMessage(creds.botToken, {
         channel: im.channel.id,
         // The notification-line fallback (blocks render in-app).
-        text: `How should ${input.agentName} handle ${input.subjectLabel}?`,
+        text:
+          input.subjectKind === "external_user"
+            ? `May ${input.agentName} answer ${input.subjectLabel}?`
+            : `How should ${input.agentName} handle ${input.subjectLabel}?`,
         blocks: reachCardBlocks(input),
       });
       return { channel: posted.channel, ts: posted.ts };
@@ -225,6 +360,7 @@ export const slackReach = {
       subjectLabel: string;
       outcome: string;
       decidedByName: string;
+      subjectKind?: "space" | "external_user";
     }): Promise<void> {
       const creds = parseSlackPresenceCredentials(input.credentialsJson);
       if (!creds.botToken) return;

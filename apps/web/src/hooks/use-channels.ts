@@ -118,6 +118,44 @@ export const useSetReachState = (
   });
 };
 
+/** Settle one PERSON (channels view `people` rows): allowed, or not. */
+export const useSetPersonReachState = (
+  agentId: string,
+  provider: ChannelProvider,
+) => {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (input: {
+      externalRef: string;
+      state: "approved" | "blocked";
+    }) =>
+      channels.setPersonReachState(
+        agentId,
+        provider,
+        input.externalRef,
+        input.state,
+      ),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: queryKeys.channels.all() });
+    },
+  });
+};
+
+/** DISMISS a person row - forget the decision; they re-knock if they write. */
+export const useDismissPersonReach = (
+  agentId: string,
+  provider: ChannelProvider,
+) => {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (input: { externalRef: string }) =>
+      channels.dismissPersonReach(agentId, provider, input.externalRef),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: queryKeys.channels.all() });
+    },
+  });
+};
+
 /** DISMISS a channel row - forget it entirely; the next outside message
  * re-knocks and a re-mention re-links the threads. */
 export const useDismissReachRow = (
