@@ -1,5 +1,19 @@
 # Changelog
 
+## [2.5.0](https://github.com/onecli/onecli/compare/v2.4.0...v2.5.0) (2026-09-03)
+
+
+### Features
+
+* Slack reach grants, Stripe integration, and live turn narration ([#547](https://github.com/onecli/onecli/issues/547)) ([d34bad9](https://github.com/onecli/onecli/commit/d34bad9ba78c74db8fcfbfcc11eb3613ea571301))
+
+
+### Bug Fixes
+
+* AWS Marketplace billing, person reach grants, and the Slack progress card ([#548](https://github.com/onecli/onecli/issues/548)) ([a747a8e](https://github.com/onecli/onecli/commit/a747a8eafe792f6b264003de8ce884dd368ca702))
+* **gateway:** bound upstream response-header wait and rotate suspect client pools ([#541](https://github.com/onecli/onecli/issues/541)) ([630a8ce](https://github.com/onecli/onecli/commit/630a8cec514c64232c29d0c53b05667d52841728))
+* **security:** restrict credentialed CORS to trusted origins ([#520](https://github.com/onecli/onecli/issues/520)) ([51eb53f](https://github.com/onecli/onecli/commit/51eb53ff97046f17dd66de2255106c2b01242f04))
+
 ## [2.4.0](https://github.com/onecli/onecli/compare/v2.3.1...v2.4.0) (2026-09-01)
 
 
