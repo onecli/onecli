@@ -17,7 +17,7 @@ export const googleDocs: AppDefinition = {
       "email",
       "profile",
       "https://www.googleapis.com/auth/drive.readonly",
-      "https://www.googleapis.com/auth/drive.file",
+      "https://www.googleapis.com/auth/documents",
     ],
     permissions: [
       {
@@ -27,9 +27,9 @@ export const googleDocs: AppDefinition = {
         access: "read",
       },
       {
-        scope: "https://www.googleapis.com/auth/drive.file",
-        name: "Manage app documents",
-        description: "Create and edit documents opened or created by OneCLI",
+        scope: "https://www.googleapis.com/auth/documents",
+        name: "Edit documents",
+        description: "Create and edit all your Google Docs documents",
         access: "write",
       },
       {
