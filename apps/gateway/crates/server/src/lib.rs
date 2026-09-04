@@ -768,7 +768,9 @@ async fn handle_connect(
     // Resolve at CONNECT time for the agent identity and the injection posture.
     // DB injection/policy rules are NOT frozen here — they're re-resolved
     // per request inside the MITM tunnel from cache (see mitm.rs).
-    let resp = match connect::resolve(&agent_token, &hostname, &state.policy_engine, &*state.cache)
+    // NOTE: pass `host` (port-inclusive) not `hostname` (stripped) so that
+    // port-qualified hostPatterns can match. See issue #485.
+    let resp = match connect::resolve(&agent_token, &host, &state.policy_engine, &*state.cache)
         .await
     {
         Ok(resp) => resp,
@@ -934,9 +936,11 @@ async fn handle_http_proxy(
 
     let connection_id = connect::extract_connection_id(req.headers());
 
+    // NOTE: pass `authority` (port-inclusive) not `hostname` (stripped) so
+    // that port-qualified hostPatterns can match. See issue #485.
     let mut resolved = match connect::resolve(
         &agent_token,
-        &hostname,
+        &authority,
         &state.policy_engine,
         &*state.cache,
     )
