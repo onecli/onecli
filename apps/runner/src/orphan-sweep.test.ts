@@ -41,6 +41,7 @@ const baseConfig: RunnerConfig = {
   reconcileSeconds: 60,
   dockerSocket: "/var/run/docker.sock",
   sandboxExtraHosts: [],
+  sandboxExtraEnv: {},
   orphanReap: true,
   orphanGraceSeconds: 3600,
   sandboxManagerUrl: null,
