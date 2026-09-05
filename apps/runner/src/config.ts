@@ -23,6 +23,18 @@ export interface RunnerConfig {
   /** `internal` networks have no route out; the gateway is dual-homed onto
    * them. False only for local dev, where the gateway runs on the host. */
   networkInternal: boolean;
+  /**
+   * DANGEROUS, opt-in only: relaxes the sandbox container's `no-new-privileges`
+   * guard and unconfines its seccomp profile. Exists solely for hosts whose
+   * kernel/container runtime cannot exec the agent image's entrypoint under
+   * `no-new-privileges` (observed on some nested/restricted Docker hosts —
+   * `exec ...: operation not permitted`). Defaults to false: leaving this on
+   * re-opens the rootless-podman-on-shared-kernel path the default profile
+   * exists to block (see docker-backend.ts). Set
+   * RUNNER_SANDBOX_UNSAFE_SECCOMP=true only when you understand and accept
+   * that tradeoff for this specific host.
+   */
+  sandboxUnsafeSeccomp: boolean;
   wsPort: number;
   /** How a sandbox addresses this runner — a container-network name. */
   advertisedHost: string;
@@ -132,6 +144,7 @@ export const loadConfig = (
     agentImage: env.RUNNER_AGENT_IMAGE ?? "onecli-agent:dev",
     sandboxNetwork: env.RUNNER_SANDBOX_NETWORK ?? "onecli-sandboxes",
     networkInternal: bool(env.RUNNER_NETWORK_INTERNAL, true),
+    sandboxUnsafeSeccomp: bool(env.RUNNER_SANDBOX_UNSAFE_SECCOMP, false),
     wsPort: int(env.RUNNER_WS_PORT, 8484),
     advertisedHost: env.RUNNER_ADVERTISED_HOST ?? "runner",
     maxSandboxes: int(env.RUNNER_MAX_SANDBOXES, 4),
