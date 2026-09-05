@@ -1,6 +1,10 @@
 import { Hono } from "hono";
 import { cors } from "hono/cors";
-import { createApiApp } from "@onecli/api";
+import {
+  createApiApp,
+  type CreateApiAppOptions,
+  type SessionProvider,
+} from "@onecli/api";
 import { createScimApp } from "@onecli/api/ee/scim";
 import { eeSessionHooks } from "@onecli/api/ee/auth/session-hooks";
 import { IS_CLOUD } from "@onecli/api/lib/env";
@@ -21,6 +25,35 @@ import { requestLogger } from "./middleware/request-logger";
 
 const appUrl = appOrigin();
 
+/**
+ * Loads optional provider options specified by the deployment via the
+ * ONECLI_PROVIDER_OPTIONS_MODULE environment variable.
+ */
+function loadDeploymentProviderOptions(): Partial<CreateApiAppOptions> & {
+  sessionProvider?: SessionProvider;
+} {
+  const modulePath = process.env.ONECLI_PROVIDER_OPTIONS_MODULE;
+  if (!modulePath) {
+    return {};
+  }
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const mod = require(modulePath);
+    return (mod.default ??
+      mod.options ??
+      mod) as Partial<CreateApiAppOptions> & {
+      sessionProvider?: SessionProvider;
+    };
+  } catch (err) {
+    console.error(`Failed to load provider options from ${modulePath}:`, err);
+    throw err;
+  }
+}
+
+const deploymentOptions = loadDeploymentProviderOptions();
+const { sessionProvider: customSessionProvider, ...extraOptions } =
+  deploymentOptions;
+
 // The api-server is the only API server in every edition. Every provider —
 // crypto, org OAuth, quotas, SSO enforcement, the EE routes — resolves from
 // the edition defaults inside `createApiApp`. Host-passed here: the session
@@ -28,11 +61,13 @@ const appUrl = appOrigin();
 // own public origin (OAuth callbacks must come back to the API host, not the
 // web app), and the cloud session hooks (they have no edition default).
 const apiApp = createApiApp(
-  IS_CLOUD ? cognitoSessionProvider : onpremSessionProvider,
+  customSessionProvider ??
+    (IS_CLOUD ? cognitoSessionProvider : onpremSessionProvider),
   {
     selfUrl: apiOrigin(),
     sessionHooks: IS_CLOUD ? eeSessionHooks : onpremSessionHooks,
     version: process.env.APP_VERSION || undefined,
+    ...extraOptions,
   },
 );
 
