@@ -1,6 +1,6 @@
 import { Hono } from "hono";
 import { db } from "@onecli/db";
-import { escapeSlackText } from "@onecli/agent-protocol";
+import { escapeSlackText } from "@onecli/channels/slack";
 import type { ApiEnv } from "../types";
 import { getCrypto } from "../providers";
 import { configuredAppUrl } from "../lib/app-origin";
@@ -9,10 +9,7 @@ import { verifySlackSignature } from "../services/channels/providers/slack/signa
 import { dispatchSlackEvent } from "../services/channels/providers/slack/dispatch";
 import { interpretSlackEvent } from "../services/channels/providers/slack/interpret";
 import { sharedSlackApp } from "../services/channels/providers/slack/shared-app";
-import {
-  postBlocksMessage,
-  postMessage,
-} from "../services/channels/providers/slack/slack-api";
+import { postBlocksMessage, postMessage } from "@onecli/channels/slack";
 import { parseSlackPresenceCredentials } from "../services/channels/providers/slack/types";
 import { completePresenceFromOAuth } from "../services/channels/agent-channel-service";
 import {
@@ -27,6 +24,8 @@ import { onboardingReplyForSlackUser } from "../services/channels/providers/slac
 import { decideApprovalFromChannel } from "../services/channels/channel-approval-service";
 import { decideReachFromChannel } from "../services/channels/agent-reach-service";
 import { REACH_ACTION_DECISIONS } from "../services/channels/providers/slack/reach-card";
+import { decideActionApprovalFromChannel } from "../services/channels/action-approval-service";
+import { ACTION_APPROVAL_DECISIONS } from "../services/channels/providers/slack/action-approval-card";
 import { agentImageUrlOrNull } from "../services/agent-image-service";
 import { publicApiUrl } from "../services/channels/posture";
 import { logger } from "../lib/logger";
@@ -659,6 +658,11 @@ export const channelInboundSlackRoutes = () => {
       payload.type === "block_actions" && action?.action_id
         ? (REACH_ACTION_DECISIONS[action.action_id] ?? null)
         : null;
+    // The action-approval card's own vocabulary - same classification rule.
+    const actionApprovalDecision =
+      payload.type === "block_actions" && action?.action_id
+        ? (ACTION_APPROVAL_DECISIONS[action.action_id] ?? null)
+        : null;
 
     // ── The SHARED app's arm: the onboarding bot has ONE interactive
     // element, a URL button — Slack still posts a block_actions payload on
@@ -681,7 +685,7 @@ export const channelInboundSlackRoutes = () => {
 
     // The reach card's own branch: decide + settle-via-response_url, then
     // ack. The service rewrites every OTHER owner's card through its
-    // promptRefs; THIS card is rewritten through response_url below (the
+    // cardRefs; THIS card is rewritten through response_url below (the
     // 3s-window pattern the approval branch uses).
     if (reachDecisionKind && action?.value && clicker) {
       const reachDecision = await decideReachFromChannel({
@@ -705,6 +709,51 @@ export const channelInboundSlackRoutes = () => {
               ? "This request was already decided."
               : escapeSlackText(reachDecision.message);
         const replaceOriginal = reachDecision.kind !== "refused";
+        fireReply(() =>
+          fetch(responseUrl, {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify(
+              replaceOriginal
+                ? { replace_original: true, text }
+                : {
+                    replace_original: false,
+                    response_type: "ephemeral",
+                    text,
+                  },
+            ),
+            signal: AbortSignal.timeout(10_000),
+          }),
+        );
+      }
+      return c.json({ ok: true });
+    }
+
+    // The ACTION-approval card's branch (action-approval-service): the
+    // one-shot hold's Approve/Reject. Same shape as the reach branch — its
+    // own action-id vocabulary, the clicker authorized service-side, THIS
+    // card rewritten through response_url (other owners' cards through the
+    // service's cardRefs settle).
+    if (actionApprovalDecision && action?.value && clicker) {
+      const outcome = await decideActionApprovalFromChannel({
+        presenceId: presence.id,
+        approvalId: action.value,
+        decision: actionApprovalDecision,
+        clickerExternalUserId: clicker,
+      });
+      if (payload.response_url && isSlackResponseUrl(payload.response_url)) {
+        const responseUrl = payload.response_url;
+        const text =
+          outcome.kind === "decided"
+            ? outcome.status === "executed"
+              ? "✅ Approved and done."
+              : outcome.status === "rejected"
+                ? "⛔ Rejected."
+                : "⚠️ Approved, but it failed - the agent was told."
+            : outcome.kind === "already_settled"
+              ? "This request was already decided."
+              : escapeSlackText(outcome.message);
+        const replaceOriginal = outcome.kind !== "refused";
         fireReply(() =>
           fetch(responseUrl, {
             method: "POST",

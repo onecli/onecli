@@ -1,4 +1,4 @@
-import { connectionsOpen, SlackApiError } from "./client";
+import { connectionsOpen, SlackApiError } from "@onecli/channels/slack";
 
 /**
  * One Socket Mode connection: `apps.connections.open` → a wss URL → an

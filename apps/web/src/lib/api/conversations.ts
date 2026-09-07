@@ -4,7 +4,7 @@ import type {
   Conversation,
   SendMessageOutcome,
   TranscriptPage,
-  Turn,
+  TurnsPage,
 } from "./types";
 
 /**
@@ -39,10 +39,22 @@ export const ensureDirect = (agentId: string) =>
     {},
   );
 
-export const turns = (conversationId: string) =>
-  apiGet<{ turns: Turn[] }>(conversationPath(conversationId, "/turns")).then(
-    (r) => r.turns,
-  );
+/**
+ * One newest-first window of the conversation's turns (ascending in the
+ * answer). No params = the newest ~50 — the industry-standard chat-open
+ * window; `before` (a turn id off a previous window's oldest row) walks
+ * older history from the scroll-up loader.
+ */
+export const turns = (
+  conversationId: string,
+  options: { limit?: number; before?: string } = {},
+) => {
+  const query = new URLSearchParams();
+  if (options.limit !== undefined) query.set("limit", String(options.limit));
+  if (options.before !== undefined) query.set("before", options.before);
+  const suffix = query.toString() ? `?${query}` : "";
+  return apiGet<TurnsPage>(conversationPath(conversationId, `/turns${suffix}`));
+};
 
 /**
  * Say something whatever the agent is doing: a free conversation gets an
@@ -77,10 +89,11 @@ export const abortTurn = (turnId: string) =>
  */
 export const events = (
   conversationId: string,
-  options: { since?: number; limit?: number } = {},
+  options: { since?: number; until?: number; limit?: number } = {},
 ) => {
   const query = new URLSearchParams();
   if (options.since !== undefined) query.set("since", String(options.since));
+  if (options.until !== undefined) query.set("until", String(options.until));
   if (options.limit !== undefined) query.set("limit", String(options.limit));
   const suffix = query.toString() ? `?${query}` : "";
   return apiGet<TranscriptPage>(
@@ -105,6 +118,32 @@ export const allEvents = async (
 
   for (let page = 0; page < MAX_HISTORY_PAGES; page += 1) {
     const chunk = await events(conversationId, { since });
+    collected.push(...chunk.events);
+    if (!chunk.hasMore) {
+      return { events: collected, nextSince: chunk.nextSince, hasMore: false };
+    }
+    since = chunk.nextSince;
+  }
+
+  return { events: collected, nextSince: since ?? 0, hasMore: true };
+};
+
+/**
+ * Every event in `(since, until]` — an OLDER window's transcript, walked to
+ * exhaustion within the bound. The scroll-up loader's read: `until` is the
+ * previously-held floor minus one (`oldestSeq - 1`), so held events are never
+ * re-fetched. Bounded like `allEvents`; a pathological window past the page
+ * bound returns what it got.
+ */
+export const eventRange = async (
+  conversationId: string,
+  range: { since?: number; until: number },
+): Promise<TranscriptPage> => {
+  let since = range.since;
+  const collected: TranscriptPage["events"] = [];
+
+  for (let page = 0; page < MAX_HISTORY_PAGES; page += 1) {
+    const chunk = await events(conversationId, { since, until: range.until });
     collected.push(...chunk.events);
     if (!chunk.hasMore) {
       return { events: collected, nextSince: chunk.nextSince, hasMore: false };

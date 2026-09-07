@@ -287,6 +287,23 @@ describe("the response-style contract", () => {
     expect(flat).toContain("Detail belongs behind demand");
     expect(flat).toContain("expand only when asked");
   });
+
+  it("teaches the delivery rule: only the final message is the reply", () => {
+    // The swallowed-answer incident (dev, 2026-09-04): asked two things at
+    // once, the model answered the second question fully, THEN called
+    // memory_save, then closed with "Updated — I've got you as Guy now."
+    // The supervisor's last-segment rule (#1007) discarded the real answer
+    // as mid-turn narration, and the person saw only the confirmation.
+    // The rule was invisible to the model — nothing told it that pre-tool
+    // text is not delivered. MUTATION-PROOF: drop the delivery sentence or
+    // the completeness demand and this fails.
+    const flat = PLATFORM_SYSTEM_PROMPT.replace(/\s+/g, " ");
+    expect(flat).toContain(
+      "Only your FINAL message — what you write after your last tool call — is delivered as your reply",
+    );
+    expect(flat).toContain("Never bury an answer before a tool call");
+    expect(flat).toContain("make the final message complete on its own");
+  });
 });
 
 describe("the swarm-helper visibility contract", () => {

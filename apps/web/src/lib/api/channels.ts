@@ -347,3 +347,59 @@ export const finishSharedInstall = (
 /** Disconnect the org's shared-app install. */
 export const disconnectSharedInstall = (provider: ChannelProvider) =>
   apiDelete(`/v1/org/channels/${provider}/shared-install`);
+
+// ── Action approvals (the one-shot hold→card→decide primitive) ─────────────
+
+export type ActionApprovalStatus =
+  | "pending"
+  | "approved"
+  | "executed"
+  | "failed"
+  | "rejected"
+  | "expired";
+
+/** The agent's action approvals — pending first is the caller's sort. */
+
+export interface ActionApprovalDecisionInput {
+  /** approve_always = approve AND stop asking about this recipient. */
+  decision: "approve" | "approve_always" | "reject";
+  /** Dashboard-only: relayed verbatim to the agent on reject. */
+  reason?: string;
+}
+
+export const decideActionApproval = (
+  agentId: string,
+  approvalId: string,
+  input: ActionApprovalDecisionInput,
+) =>
+  apiPost<{
+    kind: "decided" | "already_settled";
+    status?: ActionApprovalStatus;
+  }>(`/v1/agents/${agentId}/approvals/${approvalId}/decision`, input);
+
+export interface AgentContact {
+  id: string;
+  kind: "person" | "channel" | "app";
+  externalRef: string;
+  displayName: string;
+  policy: "ask" | "allow" | "blocked";
+  updatedAt: string;
+}
+
+/** The agent's outbound address book (send_message's standing decisions). */
+export const listContacts = (agentId: string) =>
+  apiGet<{ contacts: AgentContact[] }>(`/v1/agents/${agentId}/contacts`);
+
+/** Flip a contact's policy — `ask` is the revoke direction. */
+export const setContactPolicy = (
+  agentId: string,
+  contactId: string,
+  policy: "ask" | "allow" | "blocked",
+) =>
+  apiPut<{ id: string; policy: string }>(
+    `/v1/agents/${agentId}/contacts/${contactId}`,
+    { policy },
+  );
+
+export const deleteContact = (agentId: string, contactId: string) =>
+  apiDelete(`/v1/agents/${agentId}/contacts/${contactId}`);

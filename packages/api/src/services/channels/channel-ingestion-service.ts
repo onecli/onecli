@@ -18,6 +18,7 @@ import type {
   ChannelProviderId,
   ThreadLinkKind,
 } from "./types";
+import { decodeSlackTokens } from "@onecli/channels/slack";
 import { logger } from "../../lib/logger";
 // Type-only: the runtime import of the reach service stays dynamic (below)
 // so this hot ingestion path does not eagerly pull the reach module graph.
@@ -447,10 +448,14 @@ const createTurnOutcome = async (
   sourceThreadId?: string | null,
 ): Promise<IngestOutcome> => {
   try {
+    // Decode provider tokens LAST, after the speaker prefix was framed:
+    // the prefix is our template around a cleaned name and carries no
+    // tokens, while the person's text may - one seam, all four doors.
+    const decoded = await decodeInboundText(presence, message);
     const sent = await sendConversationMessage(
       presence.agent.workspaceId,
       conversationId,
-      message,
+      decoded,
       {
         source: presence.provider as ChannelProviderId,
         userId,
@@ -490,6 +495,92 @@ const cleanName = (raw: string): string =>
     .join("")
     .trim()
     .slice(0, 80);
+
+/**
+ * Decode inbound Slack tokens (`<@U…>`, `<#C…|name>`, `<!here>`, links)
+ * into text the model can READ - the retrieval-parsing algorithm in
+ * @onecli/channels/slack. Without this the model sees `<@U0B0WPLS8MC>`,
+ * cannot know who that is (or recognize its OWN name in `<@UBOT>`),
+ * pattern-matches the token, and stores broken habits.
+ *
+ * The NAME RULE mirrors the speaker prefix: a mention of a LINKED platform
+ * user decodes to their platform name (provider display names are
+ * attacker-chosen; ours are governance data), the agent's own id decodes to
+ * the agent's name, and only an unlinked stranger falls back to the
+ * provider profile lookup. Fail-open at every level: a failed lookup leaves
+ * that token verbatim, and a thrown decode returns the raw text - a
+ * comprehension gap must never cost the turn.
+ */
+const decodeInboundText = async (
+  presence: PresenceRow,
+  text: string,
+): Promise<string> => {
+  if (!text.includes("<")) return text;
+  const providerId = presence.provider as ChannelProviderId;
+  if (providerId !== "slack") return text;
+
+  // Lazy per-call credential decrypt, shared across this text's lookups.
+  let credentialsJson: string | null | undefined;
+  const credentials = async (): Promise<string | null> => {
+    if (credentialsJson === undefined) {
+      credentialsJson = presence.credentials
+        ? await getCrypto().decrypt(presence.credentials)
+        : null;
+    }
+    return credentialsJson;
+  };
+
+  try {
+    const reachFacet = channelProvider(providerId).reach;
+    return await decodeSlackTokens(
+      text,
+      async (externalUserId) => {
+        // The agent itself.
+        if (presence.identityRef && externalUserId === presence.identityRef) {
+          return presence.agent.name;
+        }
+        // A linked platform user: OUR name, never the provider's.
+        const link = await db.channelUserLink.findUnique({
+          where: {
+            integrationId_externalUserId: {
+              integrationId: presence.integrationId,
+              externalUserId,
+            },
+          },
+          select: { user: { select: { name: true, email: true } } },
+        });
+        if (link?.user) {
+          return link.user.name || link.user.email || null;
+        }
+        // An unlinked person: the provider profile (best-effort, fail open).
+        const creds = await credentials();
+        if (!creds) return null;
+        const reach = channelProvider(providerId).reach;
+        if (!reach) return null;
+        const probe = await reach
+          .resolveGuestSpeaker({
+            credentialsJson: creds,
+            externalUserId,
+            tenantExternalId: presence.integration.externalId,
+          })
+          .catch(() => null);
+        return probe?.displayName ?? null;
+      },
+      // Label-less <#C…> refs (live Slack sends these for private
+      // channels): the reach facet's spaceLabel is exactly this lookup.
+      async (channelId) => {
+        if (!reachFacet) return null;
+        const creds = await credentials();
+        if (!creds) return null;
+        return reachFacet
+          .spaceLabel({ credentialsJson: creds, externalRef: channelId })
+          .catch(() => null);
+      },
+    );
+  } catch {
+    return text;
+  }
+};
 
 export interface DirectMessageInput {
   agentChannelId: string;
@@ -607,6 +698,12 @@ const tryPersonLane = async (
     integrationId: presence.integrationId,
     externalRef: input.externalUserId,
   });
+
+  // An `expired` park is a CLOSED question, not a settled answer: the next
+  // knock re-poses it. Reading it as first-contact routes into the ensure
+  // call below, whose re-arm arm flips expired→pending atomically and
+  // posts fresh cards.
+  if (state === "expired") state = null;
 
   if (state === null) {
     // First contact: verify the speaker BEFORE planting anything, so a
@@ -876,6 +973,11 @@ const checkChannelGate = async (
     integrationId: presence.integrationId,
     externalRef: space,
   });
+
+  // An `expired` park re-poses the question on the next message - same
+  // rule as the person door: read as ungoverned, let the ensure call's
+  // re-arm arm flip it back to pending with fresh cards.
+  if (state === "expired") state = null;
 
   if (state === null) {
     // The lazy knock: the first message in an ungoverned channel plants the

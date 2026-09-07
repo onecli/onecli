@@ -1,3 +1,4 @@
+import { groupThreadId, userMentionToken } from "@onecli/channels/slack";
 import { z } from "zod";
 import type { ChannelFileRef } from "../../types";
 
@@ -98,11 +99,9 @@ export const slackEventSchema = z.union([
 ]);
 export type SlackEvent = z.infer<typeof slackEventSchema>;
 
-/** The group-thread address (§step-6 decision 2): the THREAD, not the
- * channel — parallel threads get parallel contexts. A top-level trigger
- * starts a thread rooted at itself. */
-export const groupThreadId = (channel: string, threadRootTs: string): string =>
-  `${channel}:${threadRootTs}`;
+// The address codec lives in @onecli/channels/slack (one encoder/decoder
+// for both runtimes); re-exported here for this file's existing callers.
+export { groupThreadId };
 
 export type SlackDoorCall =
   | {
@@ -264,7 +263,10 @@ export const interpretSlackEvent = (
     // authoritative (it's addressed to us); drop the `message` twin so a
     // threaded mention doesn't create a second turn — which would 409 into a
     // spurious "still working" reply on every in-thread mention.
-    if (ctx.botUserId && (message.text ?? "").includes(`<@${ctx.botUserId}>`)) {
+    if (
+      ctx.botUserId &&
+      (message.text ?? "").includes(userMentionToken(ctx.botUserId))
+    ) {
       return { door: "ignore", reason: "mention-twin" };
     }
 

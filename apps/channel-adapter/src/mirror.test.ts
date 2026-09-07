@@ -1350,3 +1350,201 @@ describe("post failure after the cursor advanced", () => {
     expect(slack.callsTo("chat.postMessage")).toHaveLength(1);
   });
 });
+
+describe("outbound mentions — resolve, render, report", () => {
+  it("resolves @[Name] through the control plane and posts a real mention", async () => {
+    let asked: { presenceId: string; names: string[] } | null = null;
+    const controlPlane = createFakeControlPlane({
+      ...transcriptWith("ping @[Dan Abramov] about the deploy"),
+      resolveMentions: async (presenceId, names) => {
+        asked = { presenceId, names };
+        return [
+          {
+            kind: "resolved",
+            name: "dan abramov",
+            externalUserId: "U0DAN1",
+            displayName: "Dan Abramov",
+          },
+        ];
+      },
+    });
+    await mirror({ controlPlane, workItem: item({ source: "slack" }) });
+
+    expect(asked).toEqual({ presenceId: "p1", names: ["dan abramov"] });
+    const posted = slack.callsTo("chat.postMessage");
+    expect(posted).toHaveLength(1);
+    expect(posted[0]?.form.text).toBe("ping <@U0DAN1> about the deploy");
+  });
+
+  it("degrades unresolved names to plain text and reports them - the loud failure", async () => {
+    let reported: { turnId: string; failures: unknown } | null = null;
+    const controlPlane = createFakeControlPlane({
+      ...transcriptWith("ask @[Nobody] and @[Dan] please"),
+      resolveMentions: async () => [
+        { kind: "unknown", name: "nobody" },
+        {
+          kind: "ambiguous",
+          name: "dan",
+          candidates: ["Dan Abramov", "Dan Kim"],
+        },
+      ],
+      reportMentionFailures: async (turnId, failures) => {
+        reported = { turnId, failures };
+      },
+    });
+    await mirror({ controlPlane, workItem: item({ source: "slack" }) });
+
+    const posted = slack.callsTo("chat.postMessage");
+    expect(posted[0]?.form.text).toBe("ask @Nobody and @Dan please");
+    expect(reported).toEqual({
+      turnId: "t1",
+      failures: [
+        { kind: "unknown", name: "nobody" },
+        {
+          kind: "ambiguous",
+          name: "dan",
+          candidates: ["Dan Abramov", "Dan Kim"],
+        },
+      ],
+    });
+  });
+
+  it("fails OPEN on a resolve outage: posts degraded, reports nothing", async () => {
+    let reportCalls = 0;
+    const controlPlane = createFakeControlPlane({
+      ...transcriptWith("hi @[Dan]"),
+      resolveMentions: async () => {
+        throw new Error("control plane down");
+      },
+      reportMentionFailures: async () => {
+        reportCalls += 1;
+      },
+    });
+    await mirror({ controlPlane, workItem: item({ source: "slack" }) });
+
+    const posted = slack.callsTo("chat.postMessage");
+    expect(posted[0]?.form.text).toBe("hi @Dan");
+    expect(reportCalls).toBe(0);
+  });
+
+  it("an answer with no tokens never calls resolve", async () => {
+    let resolveCalls = 0;
+    const controlPlane = createFakeControlPlane({
+      ...transcriptWith("no mentions here"),
+      resolveMentions: async () => {
+        resolveCalls += 1;
+        return [];
+      },
+    });
+    await mirror({ controlPlane, workItem: item({ source: "slack" }) });
+    expect(resolveCalls).toBe(0);
+  });
+
+  it("a lost report never blocks the post (already posted, best-effort report)", async () => {
+    const logs: string[] = [];
+    const controlPlane = createFakeControlPlane({
+      ...transcriptWith("hi @[Ghost]"),
+      resolveMentions: async () => [{ kind: "unknown", name: "ghost" }],
+      reportMentionFailures: async () => {
+        throw new Error("report route down");
+      },
+    });
+    const cursor = await mirror({
+      controlPlane,
+      workItem: item({ source: "slack" }),
+      onLog: (message) => logs.push(message),
+    });
+    expect(cursor).not.toBeNull();
+    expect(slack.callsTo("chat.postMessage")).toHaveLength(1);
+    expect(logs).toContain("mention failure report failed");
+  });
+
+  it("an automation body never resolves mentions (chrome is not the agent's voice)", async () => {
+    let resolveCalls = 0;
+    const controlPlane = createFakeControlPlane({
+      ...transcriptWith("cron says hi @[Dan]"),
+      resolveMentions: async () => {
+        resolveCalls += 1;
+        return [];
+      },
+    });
+    await mirror({ controlPlane, workItem: item({ source: "cron" }) });
+    expect(resolveCalls).toBe(0);
+    // The token stays visible as literal text in the automation post.
+    const posted = slack.callsTo("chat.postMessage");
+    expect(JSON.stringify(posted[0]?.form)).toContain("@[Dan]");
+  });
+});
+
+describe("outbound mentions — the near-miss (plain @name that matched a teammate)", () => {
+  it("reports a RESOLVED plain candidate as near_miss without rendering it", async () => {
+    let reported: unknown = null;
+    const controlPlane = createFakeControlPlane({
+      ...transcriptWith("thanks @guy, will do"),
+      resolveMentions: async (_p, names) => {
+        expect(names).toEqual(["guy"]);
+        return [
+          {
+            kind: "resolved",
+            name: "guy",
+            externalUserId: "U0GUY1",
+            displayName: "guy",
+          },
+        ];
+      },
+      reportMentionFailures: async (_turnId, failures) => {
+        reported = failures;
+      },
+    });
+    await mirror({ controlPlane, workItem: item({ source: "slack" }) });
+
+    // The posted text is UNCHANGED (plain prose stays prose)...
+    const posted = slack.callsTo("chat.postMessage");
+    expect(posted[0]?.form.text).toBe("thanks @guy, will do");
+    // ...but the miss is reported so the next turn corrects the habit.
+    expect(reported).toEqual([{ kind: "near_miss", name: "guy" }]);
+  });
+
+  it("an unresolvable plain candidate is noise, never a failure", async () => {
+    let reportCalls = 0;
+    const controlPlane = createFakeControlPlane({
+      ...transcriptWith("email me @ home, or @weird-handle"),
+      resolveMentions: async () => [
+        { kind: "unknown", name: "home" },
+        { kind: "unknown", name: "weird-handle" },
+      ],
+      reportMentionFailures: async () => {
+        reportCalls += 1;
+      },
+    });
+    await mirror({ controlPlane, workItem: item({ source: "slack" }) });
+    expect(reportCalls).toBe(0);
+  });
+
+  it("token failures and near-misses ride ONE report", async () => {
+    let reported: unknown = null;
+    const controlPlane = createFakeControlPlane({
+      ...transcriptWith("ask @[Ghost] and thanks @guy"),
+      resolveMentions: async (_p, names) => {
+        expect(names).toEqual(["ghost", "guy"]);
+        return [
+          { kind: "unknown", name: "ghost" },
+          {
+            kind: "resolved",
+            name: "guy",
+            externalUserId: "U0GUY1",
+            displayName: "guy",
+          },
+        ];
+      },
+      reportMentionFailures: async (_turnId, failures) => {
+        reported = failures;
+      },
+    });
+    await mirror({ controlPlane, workItem: item({ source: "slack" }) });
+    expect(reported).toEqual([
+      { kind: "unknown", name: "ghost" },
+      { kind: "near_miss", name: "guy" },
+    ]);
+  });
+});

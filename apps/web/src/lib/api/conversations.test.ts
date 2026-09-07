@@ -16,7 +16,8 @@ vi.mock("./client", () => ({
   apiPut: (...args: unknown[]) => apiPut(...args),
 }));
 
-const { allEvents, ensureDirect, events } = await import("./conversations");
+const { allEvents, ensureDirect, eventRange, events, turns } =
+  await import("./conversations");
 
 const page = (seqs: number[], hasMore: boolean): TranscriptPage => ({
   events: seqs.map((seq) => ({
@@ -107,6 +108,41 @@ describe("ensureDirect", () => {
     await ensureDirect("../secrets");
     expect(apiPut.mock.calls[0]?.[0]).toBe(
       "/v1/agents/..%2Fsecrets/conversations/direct",
+    );
+  });
+});
+
+describe("eventRange", () => {
+  it("carries both bounds — since exclusive, until inclusive", () => {
+    apiGet.mockResolvedValueOnce(page([6, 7], false));
+    return eventRange("cv1", { since: 5, until: 7 }).then((got) => {
+      expect(apiGet.mock.calls[0]?.[0]).toContain("since=5");
+      expect(apiGet.mock.calls[0]?.[0]).toContain("until=7");
+      expect(got.events.map((e) => e.seq)).toEqual([6, 7]);
+    });
+  });
+
+  it("walks a bounded range past one page, like allEvents", () => {
+    // A window whose events exceed a page must not silently lose its middle.
+    apiGet
+      .mockResolvedValueOnce(page([1, 2], true))
+      .mockResolvedValueOnce(page([3], false));
+    return eventRange("cv1", { until: 3 }).then((got) => {
+      expect(got.events.map((e) => e.seq)).toEqual([1, 2, 3]);
+      expect(apiGet.mock.calls[1]?.[0]).toContain("since=2");
+      expect(apiGet.mock.calls[1]?.[0]).toContain("until=3");
+    });
+  });
+});
+
+describe("turns", () => {
+  it("asks bare for the newest window, and windowed with limit/before", async () => {
+    apiGet.mockResolvedValue({ turns: [], hasMore: false, oldestSeq: null });
+    await turns("cv1");
+    await turns("cv1", { limit: 50, before: "t-9" });
+    expect(apiGet.mock.calls[0]?.[0]).toBe("/v1/conversations/cv1/turns");
+    expect(apiGet.mock.calls[1]?.[0]).toBe(
+      "/v1/conversations/cv1/turns?limit=50&before=t-9",
     );
   });
 });

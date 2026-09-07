@@ -1036,6 +1036,8 @@ exports[`enterprise-license boundary > the licensed symbol set changes only by d
     "buildPlanSwitchItems",
     "findActivePlanSubscription",
     "findKnownBaseItem",
+    "findOrgLiveSubscription",
+    "findOrgLiveSubscriptions",
     "hasPendingCancellation",
     "PlanSwitchItem",
     "previewRenewalDate",

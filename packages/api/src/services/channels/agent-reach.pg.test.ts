@@ -14,7 +14,7 @@ import { proofDatabaseUrl } from "../../testing/pg-proof.js";
  * - everything else fails CLOSED to today's refusal (pending gets the
  *   softer line), foreign-tenant and unverifiable speakers are ignored;
  * - the invite plants the pending grant + owner-DM cards (claim-before-post
- *   in promptRefs); the lazy re-offer plants it for pre-existing channels;
+ *   in cardRefs); the lazy re-offer plants it for pre-existing channels;
  * - deciding is governance: the card click's clicker must authorize as a
  *   workspace-access holder; the dashboard door upserts idempotently;
  * - a detach/re-attach never wipes decided grants (keyed by integration).
@@ -248,7 +248,7 @@ const inviteEvent = (inviter: string, channel: string) => ({
  * `sweepUnpostedReachCards` is global by contract - a background retry, not
  * a per-agent call - and pg suites share one database in parallel. An
  * unfenced call posts OTHER suites' owner cards and claims their
- * promptRefs, so their own "the card was recorded" assertion then reads an
+ * cardRefs, so their own "the card was recorded" assertion then reads an
  * already-claimed row. That is a cross-suite flake, and it bit this branch
  * twice: once from my own new arm, once again from a second call site that
  * the first fix did not cover.
@@ -287,7 +287,7 @@ const settleDetached = async (
 ) => {
   for (let i = 0; i < 40; i += 1) {
     if (done()) {
-      // One extra macrotask so the promptRefs write AFTER the post lands.
+      // One extra macrotask so the cardRefs write AFTER the post lands.
       await new Promise((resolve) => setTimeout(resolve, 15));
       return;
     }
@@ -449,7 +449,7 @@ describe.skipIf(!PROOF_URL)("reach — the guest lane", () => {
     });
     expect(grant.state).toBe("pending");
     expect(grant.subjectLabel).toBe("#proj-x");
-    expect(grant.promptRefs).toEqual([
+    expect(grant.cardRefs).toEqual([
       { channel: "D-OWNER-IM", ts: "999.111", userId: OWNER },
     ]);
 
@@ -496,7 +496,7 @@ describe.skipIf(!PROOF_URL)("reach — the guest lane", () => {
     });
     // No platform identity; the framing is OURS, the name is cleaned.
     expect(turn.userId).toBeNull();
-    expect(turn.message).toBe("Dana (guest): <@UBOT> deploy");
+    expect(turn.message).toBe("Dana (guest): @[agent guest] deploy");
   });
 
   it("a FOREIGN-tenant speaker (Slack Connect) is ignored even under an approved grant", async () => {
@@ -664,7 +664,7 @@ describe.skipIf(!PROOF_URL)("reach — the guest lane", () => {
     // Guest lane, not their platform identity: suspension still cut the
     // identity lane's attribution and everything it carries.
     expect(turn.userId).toBeNull();
-    expect(turn.message).toBe("Dana (guest): <@UBOT> hello");
+    expect(turn.message).toBe("Dana (guest): @[agent susp] hello");
   });
 
   it("a MEMBER is untouched by the grant machinery: real attribution, no guest framing", async () => {
@@ -696,7 +696,7 @@ describe.skipIf(!PROOF_URL)("reach — the guest lane", () => {
       where: { conversation: { agentId } },
     });
     expect(turn.userId).toBe(MEMBER);
-    expect(turn.message).toBe("Morgan Member: <@UBOT> status");
+    expect(turn.message).toBe("Morgan Member: @[agent member] status");
     // The guest lane never ran: no users.info probe was needed.
     expect(slackCallsFor("users.info")).toHaveLength(0);
   });
@@ -778,7 +778,7 @@ describe.skipIf(!PROOF_URL)("reach — deciding", () => {
     await db.agentReachGrant.update({
       where: { id: grantId },
       data: {
-        promptRefs: [{ channel: "D-OWNER-IM", ts: "999.111", userId: OWNER }],
+        cardRefs: [{ channel: "D-OWNER-IM", ts: "999.111", userId: OWNER }],
       },
     });
 
@@ -1581,10 +1581,10 @@ describe.skipIf(!PROOF_URL)("reach — the person lane (DM knock)", () => {
     // Recorded, so a second sweep does not double-post.
     const after = await db.agentReachGrant.findUniqueOrThrow({
       where: { id: grant.id },
-      select: { promptRefs: true },
+      select: { cardRefs: true },
     });
-    expect(Array.isArray(after.promptRefs)).toBe(true);
-    expect((after.promptRefs as unknown[]).length).toBeGreaterThan(0);
+    expect(Array.isArray(after.cardRefs)).toBe(true);
+    expect((after.cardRefs as unknown[]).length).toBeGreaterThan(0);
 
     slackCalls.length = 0;
     await sweepFencedTo(agentId);
@@ -1704,7 +1704,7 @@ describe.skipIf(!PROOF_URL)("reach — the person lane (DM knock)", () => {
         subjectKind: "external_user",
         externalRef: "U-FENCED",
         state: "pending",
-        promptRefs: [],
+        cardRefs: [],
       },
     });
 
@@ -1803,7 +1803,7 @@ describe.skipIf(!PROOF_URL)("reach — the person lane (DM knock)", () => {
         subjectKind: "external_user",
         externalRef: "U-INTFENCE",
         state: "pending",
-        promptRefs: [],
+        cardRefs: [],
       },
     });
 
@@ -1838,7 +1838,7 @@ describe.skipIf(!PROOF_URL)("reach — the person lane (DM knock)", () => {
           subjectKind: "space",
           externalRef: `C-OLD-${i}`,
           state: "pending",
-          promptRefs: [{ channel: "D-OWNER-IM", ts: `1.${i}`, userId: OWNER }],
+          cardRefs: [{ channel: "D-OWNER-IM", ts: `1.${i}`, userId: OWNER }],
         },
       });
     }
@@ -1853,7 +1853,7 @@ describe.skipIf(!PROOF_URL)("reach — the person lane (DM knock)", () => {
         externalRef: "U-STARVED",
         subjectLabel: "@starved",
         state: "pending",
-        promptRefs: [],
+        cardRefs: [],
       },
       select: { id: true },
     });
@@ -1862,7 +1862,7 @@ describe.skipIf(!PROOF_URL)("reach — the person lane (DM knock)", () => {
     await sweepFencedTo(agentId);
     await settleDetached();
 
-    // MUTATION-TESTED: drop the promptRefs filter from the sweep query and
+    // MUTATION-TESTED: drop the cardRefs filter from the sweep query and
     // this fails - the five old rows eat every slot and the stuck knock is
     // never posted, which is the starvation bug this pins.
     const posted = slackCallsFor("chat.postMessage")[0]?.form.get("blocks");
@@ -2013,5 +2013,285 @@ describe.skipIf(!PROOF_URL)("reach — the person lane (DM knock)", () => {
         where: { agentChannelId: presenceId },
       }),
     ).toBe(1);
+  });
+});
+
+describe.skipIf(!PROOF_URL)("reach — the approve-time recheck", () => {
+  const plantPendingPerson = async (suffix: string) => {
+    const seeded = await seedChannelAgent(suffix);
+    const grant = await reach.ensurePersonGrant({
+      agentId: seeded.agentId,
+      integrationId: seeded.integrationId,
+      provider: "slack",
+      externalRef: "U-GHOST",
+      subjectLabel: "Casper",
+    });
+    return { ...seeded, grantId: grant.id };
+  };
+
+  it("approving a DEACTIVATED guest refuses, parks the grant expired, and rewrites the card", async () => {
+    const { grantId } = await plantPendingPerson("ghost");
+    await db.agentReachGrant.update({
+      where: { id: grantId },
+      data: {
+        cardRefs: [{ channel: "D-OWNER-IM", ts: "999.111", userId: OWNER }],
+      },
+    });
+    // The subject vanished while the card sat: users.info answers deleted.
+    slackHandlers["users.info"] = (call) => ({
+      user: { id: call.form.get("user"), team_id: TENANT, deleted: true },
+    });
+
+    const result = await reach.decideReachGrant({
+      grantId,
+      decision: "approved",
+      deciderUserId: OWNER,
+    });
+
+    expect(result.kind).toBe("refused");
+    const grant = await db.agentReachGrant.findUniqueOrThrow({
+      where: { id: grantId },
+    });
+    // Parked, not approved: the ghost never got a settlement...
+    expect(grant.state).toBe("expired");
+    // ...and the dangling card was rewritten to say so.
+    expect(slackCallsFor("chat.update")).toHaveLength(1);
+  });
+
+  it("approving a channel the bot LEFT refuses and parks; blocking skips the probe entirely", async () => {
+    const seeded = await seedChannelAgent("botleft");
+    const grant = await reach.ensureSpaceGrant({
+      agentId: seeded.agentId,
+      integrationId: seeded.integrationId,
+      provider: "slack",
+      externalRef: "C-GONE",
+      subjectLabel: "#gone",
+    });
+    slackHandlers["conversations.info"] = (call) => ({
+      channel: { id: call.form.get("channel"), name: "gone", is_member: false },
+    });
+
+    const approved = await reach.decideReachGrant({
+      grantId: grant.id,
+      decision: "approved",
+      deciderUserId: OWNER,
+    });
+    expect(approved.kind).toBe("refused");
+    expect(
+      (await db.agentReachGrant.findUniqueOrThrow({ where: { id: grant.id } }))
+        .state,
+    ).toBe("expired");
+
+    // BLOCKING needs no live subject — a second pending grant, same dead
+    // channel, blocks fine and the probe records no extra Slack read.
+    const grant2 = await reach.ensureSpaceGrant({
+      agentId: seeded.agentId,
+      integrationId: seeded.integrationId,
+      provider: "slack",
+      externalRef: "C-GONE-2",
+      subjectLabel: "#gone-2",
+    });
+    const infoCallsBefore = slackCallsFor("conversations.info").length;
+    const blocked = await reach.decideReachGrant({
+      grantId: grant2.id,
+      decision: "blocked",
+      deciderUserId: OWNER,
+    });
+    expect(blocked).toMatchObject({ kind: "decided", state: "blocked" });
+    expect(slackCallsFor("conversations.info")).toHaveLength(infoCallsBefore);
+  });
+
+  it("FORCE (the dashboard override) bypasses the recheck", async () => {
+    const seeded = await seedChannelAgent("force");
+    const grant = await reach.ensureSpaceGrant({
+      agentId: seeded.agentId,
+      integrationId: seeded.integrationId,
+      provider: "slack",
+      externalRef: "C-FORCED",
+      subjectLabel: "#forced",
+    });
+    // The probe would refuse — but force is the management escape hatch.
+    slackHandlers["conversations.info"] = (call) => ({
+      channel: { id: call.form.get("channel"), is_member: false },
+    });
+
+    const result = await reach.decideReachGrant({
+      grantId: grant.id,
+      decision: "approved",
+      deciderUserId: OWNER,
+      force: true,
+    });
+    expect(result).toMatchObject({ kind: "decided", state: "approved" });
+  });
+
+  it("a TRANSPORT failure fails open: the approve stands", async () => {
+    const seeded = await seedChannelAgent("failopen");
+    const grant = await reach.ensureSpaceGrant({
+      agentId: seeded.agentId,
+      integrationId: seeded.integrationId,
+      provider: "slack",
+      externalRef: "C-FLAKY",
+      subjectLabel: "#flaky",
+    });
+    // Slack answers an error envelope — the client throws, the probe
+    // catches, and governance proceeds (fail-open by contract).
+    slackHandlers["conversations.info"] = () => ({
+      ok: false,
+      error: "internal_error",
+    });
+
+    const result = await reach.decideReachGrant({
+      grantId: grant.id,
+      decision: "approved",
+      deciderUserId: OWNER,
+    });
+    expect(result).toMatchObject({ kind: "decided", state: "approved" });
+  });
+});
+
+describe.skipIf(!PROOF_URL)("reach — pending expiry", () => {
+  it("the sweep parks only OLD pending rows, idempotently; settled and parked rows are untouched", async () => {
+    const seeded = await seedChannelAgent("expiry");
+    const old = new Date(Date.now() - 20 * 24 * 60 * 60 * 1000);
+
+    const stale = await reach.ensureSpaceGrant({
+      agentId: seeded.agentId,
+      integrationId: seeded.integrationId,
+      provider: "slack",
+      externalRef: "C-STALE",
+      subjectLabel: "#stale",
+    });
+    await db.agentReachGrant.update({
+      where: { id: stale.id },
+      data: {
+        createdAt: old,
+        cardRefs: [{ channel: "D-OWNER-IM", ts: "111.222", userId: OWNER }],
+      },
+    });
+
+    const fresh = await reach.ensureSpaceGrant({
+      agentId: seeded.agentId,
+      integrationId: seeded.integrationId,
+      provider: "slack",
+      externalRef: "C-FRESH",
+      subjectLabel: "#fresh",
+    });
+
+    const settled = await reach.ensureSpaceGrant({
+      agentId: seeded.agentId,
+      integrationId: seeded.integrationId,
+      provider: "slack",
+      externalRef: "C-SETTLED",
+      subjectLabel: "#settled",
+    });
+    await db.agentReachGrant.update({
+      where: { id: settled.id },
+      data: { createdAt: old, state: "approved" },
+    });
+
+    const first = await reach.expireStaleReachGrants();
+    expect(first.expired).toBe(1);
+    expect(
+      (await db.agentReachGrant.findUniqueOrThrow({ where: { id: stale.id } }))
+        .state,
+    ).toBe("expired");
+    expect(
+      (await db.agentReachGrant.findUniqueOrThrow({ where: { id: fresh.id } }))
+        .state,
+    ).toBe("pending");
+    expect(
+      (
+        await db.agentReachGrant.findUniqueOrThrow({
+          where: { id: settled.id },
+        })
+      ).state,
+    ).toBe("approved");
+    // The stale ask's card was rewritten.
+    expect(slackCallsFor("chat.update")).toHaveLength(1);
+
+    // Idempotent: the second pass finds nothing.
+    const second = await reach.expireStaleReachGrants();
+    expect(second.expired).toBe(0);
+  });
+
+  it("an EXPIRED space grant re-knocks through the real ingestion door (the acceptance path)", async () => {
+    const { agentId, integrationId, presenceId } =
+      await seedChannelAgent("reknock");
+    await linkUser(integrationId, "U-OWNER", OWNER);
+
+    // Plant an expired park directly (the sweep's outcome).
+    const grant = await reach.ensureSpaceGrant({
+      agentId,
+      integrationId,
+      provider: "slack",
+      externalRef: "C-PROJ",
+      subjectLabel: "#proj-x",
+    });
+    await db.agentReachGrant.update({
+      where: { id: grant.id },
+      data: {
+        state: "expired",
+        createdAt: new Date(Date.now() - 30 * 24 * 60 * 60 * 1000),
+      },
+    });
+
+    // A stranger speaks again: the door must re-pose the question, not
+    // treat the park as a settled no.
+    const result = await dispatch.dispatchSlackEvent({
+      presenceId,
+      identityRef: "UBOT",
+      event: mentionEvent("U-STRANGER", "C-PROJ", "77.1", "<@UBOT> anyone?"),
+      eventId: "Ev-reknock-1",
+    });
+    await settleDetached();
+
+    expect(result.kind).toBe("message");
+    if (result.kind !== "message") throw new Error("unreachable");
+    // The waiting line again — the question is live once more.
+    expect(result.outcome.kind).toBe("refused");
+
+    const rearmed = await db.agentReachGrant.findUniqueOrThrow({
+      where: { id: grant.id },
+    });
+    expect(rearmed.state).toBe("pending");
+    // The ask clock reset — the sweep will not instantly re-park it.
+    expect(rearmed.createdAt.getTime()).toBeGreaterThan(Date.now() - 60 * 1000);
+  });
+
+  it("a fresh knock after expiry re-arms to pending with a RESET ask clock", async () => {
+    const seeded = await seedChannelAgent("rearm");
+    const grant = await reach.ensureSpaceGrant({
+      agentId: seeded.agentId,
+      integrationId: seeded.integrationId,
+      provider: "slack",
+      externalRef: "C-REARM",
+      subjectLabel: "#rearm",
+    });
+    const old = new Date(Date.now() - 20 * 24 * 60 * 60 * 1000);
+    await db.agentReachGrant.update({
+      where: { id: grant.id },
+      data: { createdAt: old, state: "expired" },
+    });
+
+    const rearmed = await reach.ensureSpaceGrant({
+      agentId: seeded.agentId,
+      integrationId: seeded.integrationId,
+      provider: "slack",
+      externalRef: "C-REARM",
+      subjectLabel: "#rearm",
+    });
+    expect(rearmed).toMatchObject({
+      id: grant.id,
+      state: "pending",
+      created: true,
+    });
+
+    // The clock reset: the re-armed ask is NOT instantly re-expired.
+    const sweep = await reach.expireStaleReachGrants();
+    expect(sweep.expired).toBe(0);
+    expect(
+      (await db.agentReachGrant.findUniqueOrThrow({ where: { id: grant.id } }))
+        .state,
+    ).toBe("pending");
   });
 });

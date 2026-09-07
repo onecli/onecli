@@ -41,6 +41,9 @@ vi.mock("@onecli/db", () => ({
         contentHead: content.slice(0, 400),
       })),
     turn: { findUnique: async () => state.turn },
+    // These suites are web conversations: no thread link, so the mention
+    // note (its own pg-tested builder) stays null and out of frame here.
+    channelThreadLink: { findUnique: async () => null },
   },
 }));
 

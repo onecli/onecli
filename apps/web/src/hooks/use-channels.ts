@@ -171,3 +171,36 @@ export const useDismissReachRow = (
     },
   });
 };
+
+/** The agent's outbound address book — send_message's standing decisions. */
+export const useAgentContacts = (agentId: string) =>
+  useQuery({
+    queryKey: queryKeys.channels.contacts(agentId),
+    queryFn: () => channels.listContacts(agentId),
+  });
+
+/** Flip one contact's policy (`ask` revokes the standing permission). */
+export const useSetContactPolicy = (agentId: string) => {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (input: {
+      contactId: string;
+      policy: "ask" | "allow" | "blocked";
+    }) => channels.setContactPolicy(agentId, input.contactId, input.policy),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: queryKeys.channels.contacts(agentId) });
+    },
+  });
+};
+
+/** Remove a contact row entirely — back to ask-by-default. */
+export const useDeleteContact = (agentId: string) => {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (contactId: string) =>
+      channels.deleteContact(agentId, contactId),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: queryKeys.channels.contacts(agentId) });
+    },
+  });
+};

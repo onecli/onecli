@@ -4,6 +4,7 @@ import type { ChannelProvider, PresenceIdentity } from "../../types";
 import { dispatchSlackEvent } from "./dispatch";
 import { slackSharedApp } from "./shared-install-service";
 import { slackReach } from "./reach-card";
+import { slackActionApprovalCard } from "./action-approval-card";
 import {
   botScopesFor,
   buildAgentManifest,
@@ -30,7 +31,7 @@ import {
   reactionsRemove,
   rotateConfigToken,
   usersInfo,
-} from "./slack-api";
+} from "@onecli/channels/slack";
 import {
   parseSlackIntegrationCredentials,
   parseSlackPresenceCredentials,
@@ -100,6 +101,10 @@ export const slackProvider: ChannelProvider = {
   // address, the guest-speaker probe, and the platform-composed owner-DM
   // card - everything provider-shaped about space grants in one home.
   reach: slackReach,
+
+  // The one-shot action-approval card (action-approval-card.ts): the
+  // owner-DM prompt for a held privileged agent action.
+  actionApprovalCard: slackActionApprovalCard,
 
   // The deployment-owned shared app (SLACK_SHARED_* env): onboarding +
   // config-token-free agent-app minting, reached only through this facet.

@@ -32,12 +32,38 @@ vi.mock("@/hooks/use-hosted-availability", () => ({
   useHostedAvailability: () => "ready",
 }));
 
+// Caught up by default, so the single-reveal gate opens — most tests here
+// exercise the key door and greeting seams; the reveal describe overrides.
+// `vi.hoisted` because the mock factory below runs at import time, before
+// ordinary consts initialize.
+interface StreamMockResult {
+  events: never[];
+  status: "idle" | "connecting" | "streaming" | "reconnecting" | "error";
+  error: undefined;
+  caughtUp: boolean;
+}
+const streamMock = vi.hoisted(() =>
+  vi.fn(
+    (
+      conversationId: string | undefined,
+      options?: { replayFloor?: number },
+    ): StreamMockResult => {
+      void conversationId;
+      void options;
+      return {
+        events: [],
+        status: "streaming",
+        error: undefined,
+        caughtUp: true,
+      };
+    },
+  ),
+);
+
 vi.mock("@/hooks/use-conversation-stream", () => ({
-  useConversationStream: () => ({
-    events: [],
-    status: "streaming",
-    error: undefined,
-  }),
+  useConversationStream: (
+    ...args: Parameters<typeof streamMock>
+  ): ReturnType<typeof streamMock> => streamMock(...args),
 }));
 
 vi.mock("./chat-thread", () => ({
@@ -158,7 +184,11 @@ describe("the chat's in-place model-key door", () => {
     vi.mocked(conversations.ensureDirect).mockResolvedValue({
       id: "conv-1",
     } as never);
-    vi.mocked(conversations.turns).mockResolvedValue(turns);
+    vi.mocked(conversations.turns).mockResolvedValue({
+      turns,
+      hasMore: false,
+      oldestSeq: null,
+    });
     vi.mocked(secrets.create).mockResolvedValue({ id: "sec-9" } as never);
     vi.mocked(grants.attachSecret).mockResolvedValue({} as never);
     vi.mocked(conversations.sendMessage).mockResolvedValue({
@@ -258,10 +288,19 @@ describe("the chat's in-place model-key door", () => {
     await openDoorAndSave();
     await waitFor(() => expect(grants.attachSecret).toHaveBeenCalled());
 
-    queryClient.setQueryData(queryKeys.conversations.turns("conv-1"), [
-      turn(),
-      turn({ id: "t-active", status: "running", errorCode: null, error: null }),
-    ]);
+    queryClient.setQueryData(queryKeys.conversations.turns("conv-1"), {
+      turns: [
+        turn(),
+        turn({
+          id: "t-active",
+          status: "running",
+          errorCode: null,
+          error: null,
+        }),
+      ],
+      hasMore: false,
+      oldestSeq: null,
+    });
     resolveAttach({});
 
     await waitFor(() =>
@@ -282,7 +321,11 @@ describe("the onboarding greeting hand-off (?hello=1)", () => {
     vi.mocked(conversations.ensureDirect).mockResolvedValue({
       id: "conv-1",
     } as never);
-    vi.mocked(conversations.turns).mockResolvedValue([]);
+    vi.mocked(conversations.turns).mockResolvedValue({
+      turns: [],
+      hasMore: false,
+      oldestSeq: null,
+    });
   };
 
   it("hands the composer the greeting draft and strips the flag from the URL", async () => {
@@ -326,5 +369,106 @@ describe("the onboarding greeting hand-off (?hello=1)", () => {
         "",
       ),
     );
+  });
+});
+
+describe("the single reveal", () => {
+  afterEach(() => {
+    vi.mocked(conversations.ensureDirect).mockReset();
+    vi.mocked(conversations.turns).mockReset();
+    streamMock.mockClear();
+    // Back to the file default: caught up.
+    streamMock.mockImplementation(() => ({
+      events: [],
+      status: "streaming",
+      error: undefined,
+      caughtUp: true,
+    }));
+  });
+
+  const arrangeThread = (turns: Turn[], oldestSeq: number | null) => {
+    vi.mocked(conversations.ensureDirect).mockResolvedValue({
+      id: "conv-1",
+    } as never);
+    vi.mocked(conversations.turns).mockResolvedValue({
+      turns,
+      hasMore: false,
+      oldestSeq,
+    });
+  };
+
+  it("holds the skeleton until the stream catches up, then reveals whole", async () => {
+    arrangeThread([turn()], 1);
+    streamMock.mockImplementation(() => ({
+      events: [],
+      status: "streaming",
+      error: undefined,
+      caughtUp: false,
+    }));
+    renderSection();
+
+    // Rows are loaded, but the replay is not done: no thread yet — this gap
+    // is exactly the "user rows without answers" flash being prevented.
+    await waitFor(() =>
+      expect(vi.mocked(conversations.turns)).toHaveBeenCalled(),
+    );
+    expect(screen.queryByTestId("connect-key")).not.toBeInTheDocument();
+
+    streamMock.mockImplementation(() => ({
+      events: [],
+      status: "streaming",
+      error: undefined,
+      caughtUp: true,
+    }));
+    // Any re-render picks the new stream state up; the reveal follows.
+    renderSection();
+    await waitFor(() =>
+      expect(screen.getAllByTestId("connect-key").length).toBeGreaterThan(0),
+    );
+  });
+
+  it("reveals an EMPTY thread immediately — nothing to catch up to", async () => {
+    arrangeThread([], null);
+    streamMock.mockImplementation(() => ({
+      events: [],
+      status: "connecting",
+      error: undefined,
+      caughtUp: false,
+    }));
+    renderSection();
+    await waitFor(() =>
+      expect(screen.getByTestId("connect-key")).toBeInTheDocument(),
+    );
+  });
+
+  it("hands the stream the window's replay floor — oldestSeq minus one", async () => {
+    arrangeThread([turn()], 41);
+    renderSection();
+    await waitFor(() =>
+      expect(
+        streamMock.mock.calls.some(
+          ([, options]) => options?.replayFloor === 40,
+        ),
+      ).toBe(true),
+    );
+  });
+
+  it("keeps the stream waiting (no floor) until the first window lands", async () => {
+    vi.mocked(conversations.ensureDirect).mockResolvedValue({
+      id: "conv-1",
+    } as never);
+    // The turns query never resolves in this test.
+    vi.mocked(conversations.turns).mockReturnValue(
+      new Promise(() => undefined) as never,
+    );
+    renderSection();
+    await waitFor(() =>
+      expect(vi.mocked(conversations.turns)).toHaveBeenCalled(),
+    );
+    expect(
+      streamMock.mock.calls.every(
+        ([, options]) => options?.replayFloor === undefined,
+      ),
+    ).toBe(true);
   });
 });

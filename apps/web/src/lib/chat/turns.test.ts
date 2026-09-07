@@ -5,6 +5,7 @@ import {
   hasUnsettledTurn,
   isJoinedTurn,
   isJoiningTurn,
+  mergeTurnRows,
   resendableKeylessTurn,
 } from "./turns";
 
@@ -120,5 +121,62 @@ describe("the in-place key door's resend guard", () => {
 
   it("an empty thread has nothing to re-send", () => {
     expect(resendableKeylessTurn([])).toBeNull();
+  });
+});
+
+describe("mergeTurnRows", () => {
+  const at = (id: string, createdAt: string): Turn =>
+    turn("done", { id, createdAt });
+
+  it("stitches an older page under the live window, ascending, seam deduped", () => {
+    const older = [
+      at("t1", "2026-08-10T00:00:01.000Z"),
+      at("t2", "2026-08-10T00:00:02.000Z"),
+    ];
+    const live = [
+      at("t2", "2026-08-10T00:00:02.000Z"), // the seam turn, in both
+      at("t3", "2026-08-10T00:00:03.000Z"),
+    ];
+    expect(mergeTurnRows(older, live).map((t) => t.id)).toEqual([
+      "t1",
+      "t2",
+      "t3",
+    ]);
+  });
+
+  it("keeps a row the sliding live window dropped — pages never lose turns", () => {
+    // The live window refetched and slid past t1; its older page holds it.
+    const older = [at("t1", "2026-08-10T00:00:01.000Z")];
+    const live = [
+      at("t2", "2026-08-10T00:00:02.000Z"),
+      at("t3", "2026-08-10T00:00:03.000Z"),
+    ];
+    expect(mergeTurnRows(older, live).map((t) => t.id)).toEqual([
+      "t1",
+      "t2",
+      "t3",
+    ]);
+  });
+
+  it("the incoming row wins a collision — the live refetch is the fresher read", () => {
+    const held = [at("t1", "2026-08-10T00:00:01.000Z")];
+    const fresh = turn("done", {
+      id: "t1",
+      createdAt: "2026-08-10T00:00:01.000Z",
+      message: "updated",
+    });
+    expect(mergeTurnRows(held, [fresh])[0]!.message).toBe("updated");
+  });
+
+  it("tiebreaks equal createdAt by id — the server's own window order", () => {
+    const same = "2026-08-10T00:00:01.000Z";
+    const merged = mergeTurnRows([at("b", same)], [at("a", same)]);
+    expect(merged.map((t) => t.id)).toEqual(["a", "b"]);
+  });
+
+  it("passes an empty side through untouched", () => {
+    const rows = [at("t1", "2026-08-10T00:00:01.000Z")];
+    expect(mergeTurnRows([], rows)).toBe(rows);
+    expect(mergeTurnRows(rows, [])).toBe(rows);
   });
 });

@@ -8,7 +8,8 @@ import {
   resolveOrgContext,
   requireOrgAdminContext,
 } from "@/lib/actions/resolve-user";
-import { PRICE_TO_PLAN } from "@onecli/api/ee/billing/price-map";
+import { resolveSubscriptionPlan } from "@onecli/api/ee/billing/subscription-plan";
+import { findOrgLiveSubscription } from "@onecli/api/ee/billing/plan-switch";
 import { normalizePlan } from "@onecli/api/ee/billing/plans";
 import {
   getUsageOverview,
@@ -52,22 +53,25 @@ export async function getApiRequests(): Promise<ApiRequestsData> {
 
   if (organization.stripeCustomerId) {
     try {
-      const stripe = getStripe();
-      const subs = await stripe.subscriptions.list({
-        customer: organization.stripeCustomerId,
-        limit: 1,
-      });
-
-      const activeSub = subs.data.find(
-        (s) => s.status === "active" || s.status === "trialing",
+      // Same org-metadata lookup the billing page uses: the stored customer id
+      // can point at a customer with no subscription after a Checkout
+      // conversion, which used to read as "free" here too.
+      const found = await findOrgLiveSubscription(
+        getStripe(),
+        organizationId,
+        organization.stripeCustomerId,
       );
 
-      if (activeSub) {
+      if (found) {
+        const activeSub = found.subscription;
         ({ periodStart, periodEnd } = billingPeriod(
           activeSub.billing_cycle_anchor,
         ));
-        const priceId = activeSub.items.data[0]?.price.id;
-        plan = (priceId && PRICE_TO_PLAN[priceId]) || plan;
+        // Resolve through the shared helper, which finds the item carrying a
+        // KNOWN plan price. Reading items.data[0] blindly misreads any
+        // subscription whose base item isn't first (add-ons, post-swap
+        // ordering) and silently reported the stored plan instead.
+        plan = resolveSubscriptionPlan(activeSub).plan;
       } else {
         ({ periodStart, periodEnd } = calendarMonth());
         plan = "free";

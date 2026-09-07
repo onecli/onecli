@@ -23,8 +23,8 @@ import {
 import { useCreateHostedAgent } from "@/hooks/use-agents";
 import { hostedCreateRefusalCopy } from "@/lib/agents/availability";
 import { nameToIdentifier } from "@/lib/agents/agent-identifier";
+import { agentChatGreetingPath } from "@/lib/navigation";
 import { useOnboarding } from "./onboarding-context";
-import { onboardingPath } from "./steps";
 import { WelcomeVisual } from "./_components/welcome-visual";
 
 /** The field opens filled, so nobody faces an empty required box. */
@@ -53,24 +53,35 @@ const PHASE_ENTRANCE =
 /** The mission and the act of creating the first agent are ONE screen: the
  * picture makes the claim, the name field cashes it in. Three phases —
  * mission (the pitch + one button), form (name it), booting (watch the
- * claims come true). Creation goes through the same POST /v1/agents as the
+ * claims come true, then walk through the "meet your agent" door — the last
+ * click of onboarding). Creation goes through the same POST /v1/agents as the
  * dashboard (same validation, quota and creation-world gates), targeting the
- * boot-resolved default workspace the onboarding URL doesn't carry. */
+ * boot-resolved default workspace the onboarding URL doesn't carry. A resume
+ * with a created agent lands straight on the finished boot screen, where the
+ * door is already open. */
 export default function CreatePage() {
   const router = useRouter();
-  const { recordCreatedAgent, workspaceId } = useOnboarding();
+  const {
+    recordCreatedAgent,
+    workspaceId,
+    createdAgentId,
+    createdAgentName,
+    completing,
+    handleComplete,
+  } = useOnboarding();
   const createAgent = useCreateHostedAgent();
 
   const [name, setName] = useState(DEFAULT_AGENT_NAME);
   const [nameTouched, setNameTouched] = useState(false);
-  const [phase, setPhase] = useState<"mission" | "form" | "booting">("mission");
-  const [bootStep, setBootStep] = useState(0);
+  // Resume with a created agent skips the pitch and the form — the agent
+  // exists, so the only remaining act is meeting it.
+  const [phase, setPhase] = useState<"mission" | "form" | "booting">(
+    createdAgentId ? "booting" : "mission",
+  );
+  const [bootStep, setBootStep] = useState(
+    createdAgentId ? BOOT_LINES.length : 0,
+  );
   const submittingRef = useRef(false);
-  // The narrative is timed from the moment the submit landed, so the wait
-  // after creation resolves is exactly what the remaining lines need — on
-  // retries too, where the old render-captured step count would lie.
-  const bootStartRef = useRef(0);
-  const navTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const unmountedRef = useRef(false);
   const nameInput = useRef<HTMLInputElement>(null);
 
@@ -78,10 +89,16 @@ export default function CreatePage() {
   const showNameError = nameTouched && name.length > 0 && nameError !== null;
   const canSubmit = phase === "form" && name.trim().length > 0 && !nameError;
 
-  // The team step is where the boot narrative lands — have it ready.
+  const chatDestination =
+    createdAgentId && workspaceId
+      ? agentChatGreetingPath(workspaceId, createdAgentId)
+      : undefined;
+
+  // The chat page is a heavy surface and it is where the door leads — have it
+  // ready the moment the destination is known.
   useEffect(() => {
-    router.prefetch(onboardingPath("team"));
-  }, [router]);
+    if (chatDestination) router.prefetch(chatDestination);
+  }, [router, chatDestination]);
 
   useEffect(() => {
     if (phase !== "booting") return;
@@ -102,16 +119,14 @@ export default function CreatePage() {
     return () => cancelAnimationFrame(id);
   }, [phase]);
 
-  // Leaving mid-boot (the escape hatch) must not navigate a page the user
-  // already left — clear a scheduled timer, and remember the unmount so a
-  // mutation that resolves later never schedules a fresh one. The flag is
-  // re-armed in the effect body: StrictMode runs mount → cleanup → mount, so
-  // a cleanup-only write would poison the ref on a page that is still there.
+  // Leaving mid-boot (the escape hatch) must not toast an error onto a page
+  // the user already left. The flag is re-armed in the effect body:
+  // StrictMode runs mount → cleanup → mount, so a cleanup-only write would
+  // poison the ref on a page that is still there.
   useEffect(() => {
     unmountedRef.current = false;
     return () => {
       unmountedRef.current = true;
-      if (navTimerRef.current) clearTimeout(navTimerRef.current);
     };
   }, []);
 
@@ -119,7 +134,6 @@ export default function CreatePage() {
     if (!canSubmit || submittingRef.current) return;
     submittingRef.current = true;
     const trimmed = name.trim();
-    bootStartRef.current = Date.now();
     setPhase("booting");
     setBootStep(0);
 
@@ -143,17 +157,6 @@ export default function CreatePage() {
     }
     // Persist the created agent even if the user already left the page.
     recordCreatedAgent({ agentId: agent.id, agentName: agent.name });
-    if (unmountedRef.current) return;
-
-    // Let the narrative finish before moving on — the agent exists already;
-    // these seconds are where "sandboxed, no keys" lands.
-    const elapsed = Date.now() - bootStartRef.current;
-    const remaining =
-      Math.max(0, BOOT_LINES.length * BOOT_LINE_MS - elapsed) + 400;
-    navTimerRef.current = setTimeout(
-      () => router.push(onboardingPath("team")),
-      remaining,
-    );
   };
 
   // The timer chain is presentational and can outrun a slow create — hold the
@@ -162,6 +165,15 @@ export default function CreatePage() {
   const shownStep = createAgent.isPending
     ? Math.min(bootStep, BOOT_LINES.length - 1)
     : bootStep;
+
+  // The door opens when the narrative has played out AND the agent truly
+  // exists — never on the timers alone, so a slow create keeps its spinner
+  // and a failed one falls back to the form before this can show.
+  const ready = bootStep >= BOOT_LINES.length && !!chatDestination;
+
+  // The created name is the truth once it exists (resume included); the
+  // local field only covers the pre-creation renders of this screen.
+  const bootingName = createdAgentName ?? name.trim();
 
   return (
     <div className="flex w-full flex-col items-center">
@@ -263,54 +275,70 @@ export default function CreatePage() {
           </div>
         </div>
       ) : (
-        <div
-          key="booting"
-          className={cn("w-full max-w-sm", PHASE_ENTRANCE)}
-          role="status"
-          aria-label="Creating your agent"
-        >
-          <h1 className="text-center font-serif text-3xl font-semibold tracking-tight break-words text-balance sm:text-4xl">
-            {name.trim()} is starting up
-          </h1>
-          {/* The visual list conveys progress via opacity only — this text
-              node is what actually changes, so the status region announces
-              each line as it becomes active. */}
-          <p className="sr-only">
-            {BOOT_LINES[Math.min(shownStep, BOOT_LINES.length - 1)]?.text}
-          </p>
-          <ul className="mt-8 space-y-4">
-            {BOOT_LINES.map(({ text, icon: Icon }, i) => {
-              const done = shownStep > i;
-              const active = shownStep === i;
-              return (
-                <li
-                  key={text}
-                  className={cn(
-                    "flex items-center gap-3 transition-opacity",
-                    !done && !active && "opacity-30",
-                  )}
-                >
-                  <span className="bg-brand/10 flex size-8 shrink-0 items-center justify-center rounded-md">
-                    {done ? (
-                      <Check className="text-brand size-4" aria-hidden />
-                    ) : active ? (
-                      <Loader2
-                        className="text-brand size-4 animate-spin"
-                        aria-hidden
-                      />
-                    ) : (
-                      <Icon className="text-brand size-4" aria-hidden />
+        <div key="booting" className={cn("w-full max-w-sm", PHASE_ENTRANCE)}>
+          <div role="status" aria-label="Creating your agent">
+            <h1 className="text-center font-serif text-3xl font-semibold tracking-tight break-words text-balance sm:text-4xl">
+              {bootingName} is starting up
+            </h1>
+            {/* The visual list conveys progress via opacity only — this text
+                node is what actually changes, so the status region announces
+                each line as it becomes active, then the open door. */}
+            <p className="sr-only">
+              {ready
+                ? `${bootingName} is ready to meet you`
+                : BOOT_LINES[Math.min(shownStep, BOOT_LINES.length - 1)]?.text}
+            </p>
+            <ul className="mt-8 space-y-4">
+              {BOOT_LINES.map(({ text, icon: Icon }, i) => {
+                const done = shownStep > i;
+                const active = shownStep === i;
+                return (
+                  <li
+                    key={text}
+                    className={cn(
+                      "flex items-center gap-3 transition-opacity",
+                      !done && !active && "opacity-30",
                     )}
-                  </span>
-                  <span
-                    className={cn("text-sm", done && "text-muted-foreground")}
                   >
-                    {text}
-                  </span>
-                </li>
-              );
-            })}
-          </ul>
+                    <span className="bg-brand/10 flex size-8 shrink-0 items-center justify-center rounded-md">
+                      {done ? (
+                        <Check className="text-brand size-4" aria-hidden />
+                      ) : active ? (
+                        <Loader2
+                          className="text-brand size-4 animate-spin"
+                          aria-hidden
+                        />
+                      ) : (
+                        <Icon className="text-brand size-4" aria-hidden />
+                      )}
+                    </span>
+                    <span
+                      className={cn("text-sm", done && "text-muted-foreground")}
+                    >
+                      {text}
+                    </span>
+                  </li>
+                );
+              })}
+            </ul>
+          </div>
+
+          {/* min-h reserves the door's slot so its arrival extends the page
+              instead of shoving the narrative upward. */}
+          <div className="mt-10 flex min-h-10 justify-center">
+            {ready && (
+              <Button
+                variant="brand"
+                size="lg"
+                className={PHASE_ENTRANCE}
+                onClick={() => void handleComplete(chatDestination)}
+                loading={completing}
+              >
+                Meet your agent
+                <ArrowRight className="size-4" aria-hidden />
+              </Button>
+            )}
+          </div>
         </div>
       )}
     </div>

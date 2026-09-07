@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { readCappedBinaryBody } from "./read-capped-binary-body";
+import { readCappedBinaryBody } from "./http";
 
 /** Build a carrier with a streamed body — the exact shape a Hono Request's
  * `.raw` presents (a web Request with a ReadableStream body). */

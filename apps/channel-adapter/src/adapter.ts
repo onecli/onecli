@@ -137,7 +137,7 @@ export const createAdapter = ({ config, controlPlane, log }: AdapterDeps) => {
       },
       onReachDecision: (decision) => {
         // Forward-only: the control plane authorizes the clicker, flips the
-        // grant, and rewrites every posted owner card itself (promptRefs) -
+        // grant, and rewrites every posted owner card itself (cardRefs) -
         // the adapter owes the wire nothing further, so no settle path here.
         void controlPlane
           .decideReach({
@@ -148,6 +148,21 @@ export const createAdapter = ({ config, controlPlane, log }: AdapterDeps) => {
           })
           .catch((err: unknown) =>
             log("reach decision forward failed", { err }),
+          );
+      },
+      onActionDecision: (decision) => {
+        // Forward-only, the reach shape: the control plane authorizes the
+        // clicker, flips the row atomically, executes the held action, and
+        // rewrites every posted card itself (cardRefs).
+        void controlPlane
+          .decideAction({
+            presenceId: runtime.presence.presenceId,
+            approvalId: decision.approvalId,
+            decision: decision.decision,
+            clickerExternalUserId: decision.clickerExternalUserId,
+          })
+          .catch((err: unknown) =>
+            log("action decision forward failed", { err }),
           );
       },
       onPermanentFailure: (reason) => {
@@ -355,6 +370,17 @@ export const createAdapter = ({ config, controlPlane, log }: AdapterDeps) => {
         }
       } catch (err) {
         log("credential sweep failed", { err: String(err) });
+      }
+      // The expiry sweep rides the same slow loop: pending reach asks that
+      // aged past the server-side window get parked and their cards
+      // rewritten. Idempotent and cheap, so hourly is plenty.
+      try {
+        const result = await controlPlane.expireReach();
+        if (result.expired > 0 || (result.actionsExpired ?? 0) > 0) {
+          log("reach expiry sweep", result);
+        }
+      } catch (err) {
+        log("reach expiry sweep failed", { err: String(err) });
       }
       await sleep(60 * 60 * 1000);
     }

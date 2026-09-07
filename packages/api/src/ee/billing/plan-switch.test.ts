@@ -3,6 +3,8 @@ import type Stripe from "stripe";
 
 import {
   buildPlanSwitchItems,
+  findOrgLiveSubscription,
+  findOrgLiveSubscriptions,
   hasPendingCancellation,
   previewRenewalDate,
   resolveProrationDate,
@@ -408,5 +410,301 @@ describe("resolveProrationDate", () => {
     expect(resolveProrationDate("123", now)).toBeUndefined();
     expect(resolveProrationDate(now - 0.5, now)).toBeUndefined();
     expect(resolveProrationDate(null, now)).toBeUndefined();
+  });
+});
+
+describe("findOrgLiveSubscription", () => {
+  // The live incident this exists for: Checkout billed a converted trial to a
+  // NEW customer, the org row kept pointing at the old (now empty) customer,
+  // and every reconcile-on-read then wrote the paying org back to "free".
+  const live = (id: string, customer: string, organizationId: string) =>
+    ({
+      id,
+      status: "active",
+      customer,
+      metadata: { organizationId },
+    }) as unknown as Stripe.Subscription;
+
+  const stubStripe = (opts: {
+    byCustomer?: Record<string, Stripe.Subscription[]>;
+    search?: Stripe.Subscription[];
+    searchThrows?: boolean;
+    onSearch?: (query: string) => void;
+  }) => {
+    let searchCalls = 0;
+    return {
+      searchCalls: () => searchCalls,
+      stripe: {
+        subscriptions: {
+          list: async ({ customer }: { customer: string }) => ({
+            data: opts.byCustomer?.[customer] ?? [],
+          }),
+          search: async ({ query }: { query: string }) => {
+            searchCalls += 1;
+            opts.onSearch?.(query);
+            if (opts.searchThrows) throw new Error("search unavailable");
+            return { data: opts.search ?? [] };
+          },
+        },
+      } as unknown as Stripe,
+    };
+  };
+
+  it("finds the subscription on a DIFFERENT customer than the one stored", async () => {
+    const moved = live("sub_new", "cus_new", "org-1");
+    const { stripe } = stubStripe({
+      byCustomer: { cus_old: [] },
+      search: [moved],
+    });
+
+    const found = await findOrgLiveSubscription(stripe, "org-1", "cus_old");
+
+    // Both halves matter: the plan is recoverable AND the caller learns the
+    // customer id to heal, so the drift is repaired instead of re-read.
+    expect(found?.subscription.id).toBe("sub_new");
+    expect(found?.customerId).toBe("cus_new");
+  });
+
+  it("uses the stored customer without searching when it still holds the sub", async () => {
+    const { stripe, searchCalls } = stubStripe({
+      byCustomer: { cus_old: [live("sub_1", "cus_old", "org-1")] },
+    });
+
+    const found = await findOrgLiveSubscription(stripe, "org-1", "cus_old");
+
+    expect(found?.subscription.id).toBe("sub_1");
+    expect(searchCalls()).toBe(0); // fast path: no search index hit
+  });
+
+  it("never adopts another org's subscription from the search", async () => {
+    const { stripe } = stubStripe({
+      byCustomer: { cus_old: [] },
+      search: [live("sub_other", "cus_other", "org-2")],
+    });
+
+    // Stripe's search is a query string; a stray match must not become this
+    // org's plan just because it came back.
+    expect(
+      await findOrgLiveSubscription(stripe, "org-1", "cus_old"),
+    ).toBeUndefined();
+  });
+
+  it("scopes the search query to the org id", async () => {
+    let seen = "";
+    const { stripe } = stubStripe({
+      byCustomer: { cus_old: [] },
+      onSearch: (q) => (seen = q),
+    });
+
+    await findOrgLiveSubscription(stripe, "org-1", "cus_old");
+
+    expect(seen).toBe("metadata['organizationId']:'org-1'");
+  });
+
+  it("ignores non-live subscriptions", async () => {
+    const canceled = {
+      id: "sub_dead",
+      status: "canceled",
+      customer: "cus_new",
+      metadata: { organizationId: "org-1" },
+    } as unknown as Stripe.Subscription;
+    const { stripe } = stubStripe({
+      byCustomer: { cus_old: [] },
+      search: [canceled],
+    });
+
+    expect(
+      await findOrgLiveSubscription(stripe, "org-1", "cus_old"),
+    ).toBeUndefined();
+  });
+
+  it("degrades to no-subscription when search is unavailable", async () => {
+    // Search being down must not throw into the webhook/page path; the
+    // stored-customer answer (nothing) is the pre-existing behavior.
+    const { stripe } = stubStripe({
+      byCustomer: { cus_old: [] },
+      searchThrows: true,
+    });
+
+    expect(
+      await findOrgLiveSubscription(stripe, "org-1", "cus_old"),
+    ).toBeUndefined();
+  });
+
+  it("searches even when the org has no stored customer at all", async () => {
+    const { stripe } = stubStripe({
+      search: [live("sub_x", "cus_x", "org-1")],
+    });
+
+    const found = await findOrgLiveSubscription(stripe, "org-1", null);
+
+    expect(found?.customerId).toBe("cus_x");
+  });
+
+  it("never returns a sub belonging to another org on a SHARED customer", async () => {
+    // The cross-tenant negative control. Stripe customers can be shared across
+    // orgs, and /reactivate previously filtered on status alone — so org-1
+    // could act on org-2's subscription. Every caller of this helper depends
+    // on the org fence holding here.
+    const { stripe } = stubStripe({
+      byCustomer: { cus_shared: [live("sub_org2", "cus_shared", "org-2")] },
+    });
+
+    expect(
+      await findOrgLiveSubscription(stripe, "org-1", "cus_shared"),
+    ).toBeUndefined();
+  });
+
+  it("refuses to build a search query from an unsafe org id", async () => {
+    // Negative control for the query-injection boundary: a crafted id must
+    // never reach Stripe's search grammar, where a quote could break out of
+    // the literal and return ANOTHER org's subscription (i.e. read a plan we
+    // are not entitled to). It must fail closed, not fall through.
+    const { stripe, searchCalls } = stubStripe({
+      byCustomer: {},
+      search: [live("sub_other", "cus_other", "org-2")],
+    });
+
+    const found = await findOrgLiveSubscription(
+      stripe,
+      "org-1' OR metadata['organizationId']:'org-2",
+      null,
+    );
+
+    expect(found).toBeUndefined();
+    expect(searchCalls()).toBe(0); // never even issued
+  });
+
+  it("keeps the stored customer id when the sub's customer is absent", async () => {
+    const noCustomer = {
+      id: "sub_1",
+      status: "active",
+      metadata: { organizationId: "org-1" },
+    } as unknown as Stripe.Subscription;
+    const { stripe } = stubStripe({ byCustomer: { cus_old: [noCustomer] } });
+
+    const found = await findOrgLiveSubscription(stripe, "org-1", "cus_old");
+
+    expect(found?.customerId).toBe("cus_old");
+  });
+
+  it("returns a metadata-less live sub on the stored customer", async () => {
+    // Dashboard/ops-created subscriptions carry no organizationId at all
+    // (live prod example: the PO-billed enterprise sub). The org whose row
+    // points at this customer is its one legitimate claimant — dropping it
+    // would downgrade a paying dashboard-managed org to free, the exact bug
+    // this helper exists to prevent.
+    const unlabeled = {
+      id: "sub_ent",
+      status: "active",
+      customer: "cus_old",
+      metadata: {},
+    } as unknown as Stripe.Subscription;
+    const { stripe } = stubStripe({ byCustomer: { cus_old: [unlabeled] } });
+
+    const found = await findOrgLiveSubscription(stripe, "org-1", "cus_old");
+
+    expect(found?.subscription.id).toBe("sub_ent");
+    expect(found?.customerId).toBe("cus_old");
+  });
+
+  it("prefers a labeled sub found by search over an unlabeled stored one", async () => {
+    // The unlabeled sub is the weakest claim: it belongs to the org only by
+    // way of the customer pointer. A subscription explicitly carrying the
+    // org's id — wherever it sits — is the org's real plan.
+    const unlabeled = {
+      id: "sub_unlabeled",
+      status: "active",
+      customer: "cus_old",
+      metadata: {},
+    } as unknown as Stripe.Subscription;
+    const labeled = live("sub_labeled", "cus_new", "org-1");
+    const { stripe } = stubStripe({
+      byCustomer: { cus_old: [unlabeled] },
+      search: [labeled],
+    });
+
+    const found = await findOrgLiveSubscription(stripe, "org-1", "cus_old");
+
+    expect(found?.subscription.id).toBe("sub_labeled");
+    expect(found?.customerId).toBe("cus_new");
+  });
+
+  it("ignores a non-live metadata-less sub on the stored customer", async () => {
+    const dead = {
+      id: "sub_dead",
+      status: "canceled",
+      customer: "cus_old",
+      metadata: {},
+    } as unknown as Stripe.Subscription;
+    const { stripe } = stubStripe({ byCustomer: { cus_old: [dead] } });
+
+    expect(
+      await findOrgLiveSubscription(stripe, "org-1", "cus_old"),
+    ).toBeUndefined();
+  });
+});
+
+describe("findOrgLiveSubscriptions", () => {
+  const live = (id: string, customer: string, organizationId: string) =>
+    ({
+      id,
+      status: "active",
+      customer,
+      metadata: { organizationId },
+    }) as unknown as Stripe.Subscription;
+
+  const stubStripe = (opts: {
+    byCustomer?: Record<string, Stripe.Subscription[]>;
+    search?: Stripe.Subscription[];
+  }) =>
+    ({
+      subscriptions: {
+        list: async ({ customer }: { customer: string }) => ({
+          data: opts.byCustomer?.[customer] ?? [],
+        }),
+        search: async () => ({ data: opts.search ?? [] }),
+      },
+    }) as unknown as Stripe;
+
+  it("collects stored, searched, and unlabeled subs, deduped by id", async () => {
+    // Org deletion cancels every one of these; missing any (the drifted one
+    // on another customer, the unlabeled dashboard-created one) leaves a
+    // subscription billing a deleted org forever.
+    const storedLabeled = live("sub_a", "cus_old", "org-1");
+    const unlabeled = {
+      id: "sub_b",
+      status: "active",
+      customer: "cus_old",
+      metadata: {},
+    } as unknown as Stripe.Subscription;
+    const drifted = live("sub_c", "cus_new", "org-1");
+    const stripe = stubStripe({
+      byCustomer: { cus_old: [storedLabeled, unlabeled] },
+      // Search also re-returns sub_a: the dedup must not double-cancel it.
+      search: [storedLabeled, drifted],
+    });
+
+    const found = await findOrgLiveSubscriptions(stripe, "org-1", "cus_old");
+
+    expect(found.map((m) => m.subscription.id).sort()).toEqual([
+      "sub_a",
+      "sub_b",
+      "sub_c",
+    ]);
+  });
+
+  it("never includes another org's subscription", async () => {
+    // The destructive caller (org deletion CANCELS what this returns): a
+    // shared customer must not let org-1's deletion kill org-2's plan.
+    const otherOrg = live("sub_other", "cus_shared", "org-2");
+    const stripe = stubStripe({
+      byCustomer: { cus_shared: [otherOrg] },
+      search: [otherOrg],
+    });
+
+    expect(
+      await findOrgLiveSubscriptions(stripe, "org-1", "cus_shared"),
+    ).toEqual([]);
   });
 });

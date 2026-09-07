@@ -1,17 +1,21 @@
 import { z } from "zod";
-import { readCappedBinaryBody } from "../../../../lib/read-capped-binary-body";
-import { ChannelProviderApiError } from "../../errors";
+import { readCappedBinaryBody } from "../http";
+import { ChannelProviderApiError } from "../errors";
 
 /**
- * The control plane's thin Slack Web API client — exactly the methods the
- * attach/rotate flows call, nothing more. A typed, zod-parsed `fetch` (the
- * `apps/runner/src/control-plane.ts` shape) instead of `@slack/web-api`:
- * four simple POSTs do not justify a dependency tree, and parsed-not-cast
- * responses are the house rule for every wire boundary.
+ * THE Slack Web API client — the one wire surface both runtimes share. A
+ * typed, zod-parsed `fetch` instead of `@slack/web-api`: a few dozen simple
+ * POSTs do not justify a dependency tree, we must own ack/refresh timing
+ * precisely, and parsed-not-cast responses are the house rule for every
+ * wire boundary.
  *
- * The adapter has its own sibling client for the runtime methods
- * (`apps/channel-adapter/src/providers/slack/client.ts`) — two thin clients
- * in two runtimes beat one shared package.
+ * History: this began as the api's attach-time client with an adapter-side
+ * runtime sibling ("two thin clients in two runtimes beat one shared
+ * package" — the step-6 decision). The merge happened when a third consumer
+ * appeared on the horizon (the outbound resolver): at three copies the
+ * drift risk beats the coupling cost. The adapter's improvements (the
+ * iconless-token memo, blocks-post icon fallback, optional update blocks)
+ * came along; everything else is the api superset.
  */
 
 /** Call-time read so tests can point at a fake server per invocation. */
@@ -219,8 +223,38 @@ const authTestResponse = z.object({
 });
 
 /** Identify a bot token: which workspace, which bot user. */
+/** Socket-mode dial-in: mint the wss URL. App-token (`xapp-`) authed —
+ * the one method here whose bearer is not a bot token. */
+export const connectionsOpen = (appToken: string) =>
+  slackCall(
+    "apps.connections.open",
+    { token: appToken },
+    z.object({ url: z.string().min(1) }),
+  );
+
 export const authTest = (botToken: string) =>
   slackCall("auth.test", { token: botToken, retry5xx: true }, authTestResponse);
+
+/**
+ * Bot tokens whose install predates `chat:write.customize` — the icon
+ * attempt came back `missing_scope` once, so later posts skip it instead of
+ * paying a doomed extra chat.postMessage per message. Time-bounded: Slack
+ * KEEPS the same xoxb token across a scope-granting reinstall (the healing
+ * move), so a permanent memo would strip icons forever after the user fixed
+ * the install — the verdict re-probes once per window (one cheap refused
+ * post). Folded in from the adapter's client at the merge.
+ */
+const ICONLESS_RETRY_MS = 60 * 60 * 1000;
+const iconlessBotTokens = new Map<string, number>();
+
+const iconlessMemoized = (botToken: string): boolean => {
+  const at = iconlessBotTokens.get(botToken);
+  return at !== undefined && Date.now() - at < ICONLESS_RETRY_MS;
+};
+
+export const resetIconlessBotTokensForTests = (): void => {
+  iconlessBotTokens.clear();
+};
 
 const postMessageResponse = z.object({
   channel: z.string().min(1),
@@ -248,16 +282,14 @@ export const postMessage = async (
     text: input.text,
     ...(input.threadTs && { thread_ts: input.threadTs }),
   };
-  if (input.iconUrl) {
+  if (input.iconUrl && !iconlessMemoized(botToken)) {
     try {
       return await slackCall(
         "chat.postMessage",
         // The agent's avatar. Needs `chat:write.customize` — a pre-existing
         // install predating the scope fails the whole post (`missing_scope`),
         // so that one error retries plain: the reply must land even when
-        // the icon cannot. No per-token memo here (unlike the adapter's
-        // client): this arm posts request-scoped replies only, far too
-        // rarely to matter.
+        // the icon cannot.
         {
           token: botToken,
           form: { ...form, icon_url: input.iconUrl },
@@ -268,6 +300,7 @@ export const postMessage = async (
       if (!(err instanceof SlackApiError) || err.code !== "missing_scope") {
         throw err;
       }
+      iconlessBotTokens.set(botToken, Date.now());
     }
   }
   return slackCall(
@@ -290,21 +323,37 @@ export const postBlocksMessage = async (
     text: string;
     blocks: unknown[];
     threadTs?: string;
+    iconUrl?: string;
   },
-) =>
-  slackCall(
+) => {
+  const form = {
+    channel: input.channel,
+    text: input.text,
+    blocks: JSON.stringify(input.blocks),
+    ...(input.threadTs && { thread_ts: input.threadTs }),
+  };
+  if (input.iconUrl && !iconlessMemoized(botToken)) {
+    try {
+      // Same missing_scope fallback as postMessage — the card must land
+      // even on an install predating `chat:write.customize`.
+      return await slackCall(
+        "chat.postMessage",
+        { token: botToken, form: { ...form, icon_url: input.iconUrl } },
+        postMessageResponse,
+      );
+    } catch (err) {
+      if (!(err instanceof SlackApiError) || err.code !== "missing_scope") {
+        throw err;
+      }
+      iconlessBotTokens.set(botToken, Date.now());
+    }
+  }
+  return slackCall(
     "chat.postMessage",
-    {
-      token: botToken,
-      form: {
-        channel: input.channel,
-        text: input.text,
-        blocks: JSON.stringify(input.blocks),
-        ...(input.threadTs && { thread_ts: input.threadTs }),
-      },
-    },
+    { token: botToken, form },
     postMessageResponse,
   );
+};
 
 /**
  * Reaction add/remove — the receipt lifecycle. Slack's idempotency refusals
@@ -362,7 +411,7 @@ export const SLACK_TASK_TITLE_MAX = 256;
  */
 export const updateBlocksMessage = (
   botToken: string,
-  input: { channel: string; ts: string; text: string; blocks: unknown[] },
+  input: { channel: string; ts: string; text: string; blocks?: unknown[] },
 ) =>
   slackCall(
     "chat.update",
@@ -372,7 +421,7 @@ export const updateBlocksMessage = (
         channel: input.channel,
         ts: input.ts,
         text: input.text,
-        blocks: JSON.stringify(input.blocks),
+        ...(input.blocks && { blocks: JSON.stringify(input.blocks) }),
       },
     },
     okEnvelope,
@@ -646,6 +695,93 @@ export const usersInfo = (botToken: string, userId: string) =>
     usersInfoResponse,
   );
 
+const usersListResponse = z.object({
+  members: z.array(
+    z.object({
+      id: z.string().min(1),
+      team_id: z.string().optional(),
+      name: z.string().optional(),
+      deleted: z.boolean().optional(),
+      is_bot: z.boolean().optional(),
+      is_restricted: z.boolean().optional(),
+      is_ultra_restricted: z.boolean().optional(),
+      is_stranger: z.boolean().optional(),
+      profile: z
+        .object({
+          display_name: z.string().optional(),
+          real_name: z.string().optional(),
+        })
+        .optional(),
+    }),
+  ),
+  response_metadata: z
+    .object({ next_cursor: z.string().optional() })
+    .optional(),
+});
+
+/**
+ * One page of the workspace's member roster — the `find_recipient` tool's
+ * people universe. Needs `users:read` (in the manifest from day one).
+ * Cursor-paginated; the CALLER owns the loop and its page budget so a
+ * pathological workspace can't spin this wrapper forever.
+ */
+export const usersList = (
+  botToken: string,
+  input: { cursor?: string; limit?: number } = {},
+) =>
+  slackCall(
+    "users.list",
+    {
+      token: botToken,
+      form: {
+        limit: String(input.limit ?? 200),
+        ...(input.cursor && { cursor: input.cursor }),
+      },
+      retry5xx: true,
+    },
+    usersListResponse,
+  );
+
+const conversationsListResponse = z.object({
+  channels: z.array(
+    z.object({
+      id: z.string().min(1),
+      name: z.string().optional(),
+      is_member: z.boolean().optional(),
+      is_private: z.boolean().optional(),
+      is_archived: z.boolean().optional(),
+    }),
+  ),
+  response_metadata: z
+    .object({ next_cursor: z.string().optional() })
+    .optional(),
+});
+
+/**
+ * One page of the workspace's channels — read-only discovery for
+ * `find_recipient` ("which channels exist / am I in?"). Sees exactly what
+ * `channels:read` + `groups:read` grant: public channels, plus private ones
+ * the bot was invited to. Same caller-owned cursor rule as `usersList`.
+ */
+export const conversationsList = (
+  botToken: string,
+  input: { cursor?: string; limit?: number } = {},
+) =>
+  slackCall(
+    "conversations.list",
+    {
+      token: botToken,
+      form: {
+        types: "public_channel,private_channel",
+        exclude_archived: "true",
+        limit: String(input.limit ?? 200),
+        ...(input.cursor && { cursor: input.cursor }),
+      },
+      retry5xx: true,
+    },
+    conversationsListResponse,
+  );
+
 /**
  * Open (or return) the 1:1 IM with a user - where the platform-composed
  * reach card is delivered. Needs `im:write` (already in the manifest's
@@ -659,10 +795,12 @@ export const conversationsOpen = (botToken: string, userId: string) =>
   );
 
 /**
- * A channel's display name, for the reach card's "#channel" label. Display
- * only - matching stays on the id (names rename). Best-effort at the
+ * A channel's display name and the bot's own membership. The name feeds the
+ * reach card's "#channel" label (display only - matching stays on the id);
+ * `is_member` feeds the approve-time subject recheck (a card approved after
+ * the bot left the channel must not record a settlement). Best-effort at the
  * callers: a private channel the token cannot read answers an error they
- * swallow into the bare id.
+ * swallow into the bare id / a fail-open verdict.
  */
 export const conversationsInfo = (botToken: string, channelId: string) =>
   slackCall(
@@ -672,32 +810,10 @@ export const conversationsInfo = (botToken: string, channelId: string) =>
       channel: z.object({
         id: z.string().min(1),
         name: z.string().optional(),
+        is_member: z.boolean().optional(),
+        is_archived: z.boolean().optional(),
       }),
     }),
-  );
-
-/**
- * Rewrite a posted message (the reach card's settle). The api-server twin
- * of the adapter's `updateBlocks` - this side posts and settles the
- * platform-composed reach cards; the adapter's own updater serves gateway
- * approval cards and never runs here.
- */
-export const chatUpdate = (
-  botToken: string,
-  input: { channel: string; ts: string; text: string; blocks?: unknown[] },
-) =>
-  slackCall(
-    "chat.update",
-    {
-      token: botToken,
-      form: {
-        channel: input.channel,
-        ts: input.ts,
-        text: input.text,
-        ...(input.blocks && { blocks: JSON.stringify(input.blocks) }),
-      },
-    },
-    z.object({ ts: z.string().min(1) }),
   );
 
 const oauthAccessResponse = z.object({

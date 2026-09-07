@@ -20,6 +20,7 @@ import {
   AUDIT_SERVICES,
   AUDIT_SOURCE,
 } from "../services/audit-service";
+import { listWorkspacePendingChannelApprovals } from "../services/channels/workspace-approvals-service";
 
 const read = auth({ requireWorkspace: false });
 const admin = auth({ requireWorkspace: false, role: "admin" });
@@ -37,6 +38,25 @@ export const workspaceRoutes = () => {
       role,
     );
     return c.json(workspaces);
+  });
+
+  // GET /workspaces/:workspaceId/channel-approvals — the approvals bell's
+  // channel arm: every pending action approval and reach ask in one
+  // workspace, age-sorted. Visibility-fenced exactly like the workspace
+  // read below (getWorkspaceById throws NOT_FOUND for the unseen), then
+  // query-fenced again in the service.
+  app.get("/:workspaceId/channel-approvals", read, async (c) => {
+    const authCtx = c.get("auth");
+    const targetId = c.req.param("workspaceId");
+    const role = await getUserRole(authCtx.userId, authCtx.organizationId);
+    await getWorkspaceById(
+      authCtx.userId,
+      authCtx.organizationId,
+      targetId,
+      role,
+    );
+    const items = await listWorkspacePendingChannelApprovals(targetId);
+    return c.json({ items });
   });
 
   // GET /workspaces/:workspaceId

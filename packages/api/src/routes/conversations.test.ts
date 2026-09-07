@@ -172,7 +172,11 @@ beforeEach(() => {
     },
     bytes: Buffer.from("abc"),
   });
-  services.listTurns.mockResolvedValue([TURN]);
+  services.listTurns.mockResolvedValue({
+    turns: [TURN],
+    hasMore: false,
+    oldestSeq: 1,
+  });
   services.abortTurn.mockResolvedValue({ aborted: true, delivered: false });
   services.readTranscript.mockResolvedValue({
     events: [],
@@ -625,6 +629,62 @@ describe("the transcript", () => {
     });
     expect(res.status).toBe(422);
   });
+
+  it("passes the until bound through beside since", async () => {
+    await app.request("/v1/conversations/cv-1/events?since=5&until=40", {
+      headers: AUTH,
+    });
+    expect(services.readTranscript).toHaveBeenCalledWith(
+      "p1",
+      "cv-1",
+      "user-1",
+      { since: 5, until: 40 },
+    );
+  });
+});
+
+describe("the turns window", () => {
+  it("answers the window shape — turns plus hasMore and oldestSeq", async () => {
+    const res = await app.request("/v1/conversations/cv-1/turns", {
+      headers: AUTH,
+    });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({
+      turns: [{ id: "t-1" }],
+      hasMore: false,
+      oldestSeq: 1,
+    });
+    expect(services.listTurns).toHaveBeenCalledWith("p1", "cv-1", "user-1", {});
+  });
+
+  it("passes limit and the before cursor through", async () => {
+    const before = "0b276656-1c53-4dfa-a428-6152bb042108";
+    await app.request(
+      `/v1/conversations/cv-1/turns?limit=25&before=${before}`,
+      { headers: AUTH },
+    );
+    expect(services.listTurns).toHaveBeenCalledWith("p1", "cv-1", "user-1", {
+      limit: 25,
+      before,
+    });
+  });
+
+  it("rejects a limit past the cap instead of quietly clamping", async () => {
+    const res = await app.request("/v1/conversations/cv-1/turns?limit=9999", {
+      headers: AUTH,
+    });
+    expect(res.status).toBe(422);
+    expect(services.listTurns).not.toHaveBeenCalled();
+  });
+
+  it("rejects a non-uuid cursor — an id, never free text", async () => {
+    const res = await app.request(
+      "/v1/conversations/cv-1/turns?before=..%2Fetc",
+      { headers: AUTH },
+    );
+    expect(res.status).toBe(422);
+    expect(services.listTurns).not.toHaveBeenCalled();
+  });
 });
 
 /**
@@ -754,6 +814,24 @@ describe("the live stream", () => {
     expect(text).toContain("id: 2");
     expect(text).toContain("event: transcript");
     expect(text.indexOf("id: 1")).toBeLessThan(text.indexOf("id: 2"));
+  });
+
+  it("marks the end of the replay with ONE caught-up frame, after history", async () => {
+    services.readTranscript.mockResolvedValue({
+      events: [{ seq: 1, turnId: "t-1", type: "turn.started", payload: {} }],
+      nextSince: 1,
+      hasMore: false,
+    });
+
+    const res = await app.request("/v1/conversations/cv-1/stream", {
+      headers: AUTH,
+    });
+    const text = await readStream(res, (t) => t.includes("caught-up"));
+
+    // After the whole replay — the reader may hold its skeleton until this
+    // frame and reveal once, fully folded.
+    expect(text).toContain("event: caught-up");
+    expect(text.indexOf("id: 1")).toBeLessThan(text.indexOf("caught-up"));
   });
 
   it("honours ?since= so a reconnect does not replay what was seen", async () => {

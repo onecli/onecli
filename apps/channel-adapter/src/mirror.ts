@@ -10,6 +10,8 @@ import {
   TURN_FAILED_SILENT_MESSAGE,
   TURN_STOPPED_MESSAGE,
 } from "@onecli/api/validations/conversation";
+import { mentionNamesOf, plainMentionCandidatesOf } from "@onecli/channels";
+import type { AdapterMentionReportRequest } from "@onecli/agent-protocol";
 import type { ControlPlaneClient } from "./control-plane";
 import { replyTargetForTurn, type ChannelPostTarget } from "./targets";
 
@@ -256,8 +258,15 @@ export interface MirrorPosts {
     },
   ): Promise<void>;
   /** The turn's answer — model-authored markdown (or a door failure's plain
-   * `turn.error`). */
-  answer(input: ChannelPostTarget & { markdown: string }): Promise<void>;
+   * `turn.error`). `mentions` is the resolved outbound-mention map
+   * (normalized name → provider user id) for the channel renderer; absent =
+   * render `@[Name]` tokens as literal text. */
+  answer(
+    input: ChannelPostTarget & {
+      markdown: string;
+      mentions?: ReadonlyMap<string, string>;
+    },
+  ): Promise<void>;
   /** An answer that carried connect links: the prose (links already removed)
    * plus one card row per app — name, attach-vs-connect intent line, and a
    * button whose `url` is pre-resolved by the mirror. `fullMarkdown` is the
@@ -268,6 +277,7 @@ export interface MirrorPosts {
       markdown: string;
       links: ConnectLink[];
       fullMarkdown: string;
+      mentions?: ReadonlyMap<string, string>;
     },
   ): Promise<void>;
   /** A no-model-key failure with the web's same call to action: the raw
@@ -377,6 +387,74 @@ export const mirrorFinishedTurn = async (
     // transcript's durable error event — the only record an UNCODED harness
     // failure leaves, which used to fall through to total silence here.
     const answer = outcome.text ?? item.turn.error ?? outcome.error ?? null;
+
+    // OUTBOUND MENTIONS (plan: platform-rendered, loud failure). Scan the
+    // answer for `@[Name]` tokens and ask the control plane to resolve them
+    // against linked teammates BEFORE rendering; the renderer emits `<@U…>`
+    // for resolved names and visible plain `@Name` for the rest — never a
+    // silent drop, never a guess. Fail OPEN: a resolve outage posts the
+    // answer with every token degraded (empty map) rather than blocking it,
+    // and the failure report is best-effort — the post always wins.
+    let mentions: ReadonlyMap<string, string> | undefined;
+    let mentionFailures: AdapterMentionReportRequest["failures"] = [];
+    if (answer && !automated) {
+      const names = mentionNamesOf(answer);
+      // NEAR-MISS candidates: plain `@name` prose runs. A candidate that
+      // RESOLVES names a linked teammate the model addressed without the
+      // grammar - it pinged nobody while reading like it worked, so it is
+      // reported (the token path's failures are visible in the posted text;
+      // this one is invisible without the report). Only resolve calls carry
+      // them; they never enter the render map.
+      const plainCandidates = plainMentionCandidatesOf(answer).filter(
+        (candidate) => !names.includes(candidate),
+      );
+      if (names.length > 0 || plainCandidates.length > 0) {
+        mentions = new Map();
+        try {
+          const resolutions = await deps.controlPlane.resolveMentions(
+            item.presenceId,
+            // One call, tokens first: the service caps at 20 and tokens are
+            // the ones that must not lose their slot to prose candidates.
+            [...names, ...plainCandidates].slice(0, 20),
+            item.conversationId,
+          );
+          const map = new Map<string, string>();
+          const tokenNames = new Set(names);
+          for (const resolution of resolutions) {
+            if (resolution.kind === "resolved") {
+              if (tokenNames.has(resolution.name)) {
+                map.set(resolution.name, resolution.externalUserId);
+              } else {
+                // Plain prose named a real linked teammate: the near-miss.
+                mentionFailures.push({
+                  kind: "near_miss",
+                  name: resolution.name,
+                });
+              }
+            } else if (tokenNames.has(resolution.name)) {
+              // Failures only matter for real tokens - an unresolvable
+              // prose candidate ("@ symbol in a sentence") is noise.
+              if (resolution.kind === "ambiguous") {
+                mentionFailures.push({
+                  kind: "ambiguous",
+                  name: resolution.name,
+                  candidates: resolution.candidates,
+                });
+              } else {
+                mentionFailures.push({
+                  kind: "unknown",
+                  name: resolution.name,
+                });
+              }
+            }
+          }
+          mentions = map;
+        } catch (err) {
+          deps.onLog("mention resolve failed; posting degraded", { err });
+          mentionFailures = []; // unresolved ≠ unknown: report nothing on an outage
+        }
+      }
+    }
     // A failed turn whose post is its PARTIAL answer text must not read as a
     // normal reply — the failure line rides after it. When the answer came
     // from `turn.error` or the error event, that text IS the failure message
@@ -474,6 +552,7 @@ export const mirrorFinishedTurn = async (
           const sep = chatUrl.includes("?") ? "&" : "?";
           await deps.posts.connectCards({
             ...target,
+            ...(mentions && { mentions }),
             markdown: proseWithoutCardedLinks(answer, matches, carded),
             fullMarkdown: answer,
             links: connectLinks.map((link) => ({
@@ -483,7 +562,11 @@ export const mirrorFinishedTurn = async (
             })),
           });
         } else {
-          await deps.posts.answer({ ...target, markdown: answer });
+          await deps.posts.answer({
+            ...target,
+            ...(mentions && { mentions }),
+            markdown: answer,
+          });
         }
         if (failedWithPartialText) {
           await deps.posts.failureNotice({
@@ -509,6 +592,19 @@ export const mirrorFinishedTurn = async (
         message: TURN_STOPPED_MESSAGE,
         warn: false,
       });
+    }
+    // LOUD FAILURE, second half: the answer posted with degraded mentions —
+    // record which, so the next turn's context tells the model instead of
+    // letting it believe the ping happened. After the posts (the answer
+    // always wins over the report) and best-effort (the CAS already made
+    // this adapter the only reporter; a lost report costs one note, never
+    // the answer).
+    if (mentionFailures.length > 0) {
+      await deps.controlPlane
+        .reportMentionFailures(item.turn.id, mentionFailures)
+        .catch((err: unknown) =>
+          deps.onLog("mention failure report failed", { err }),
+        );
     }
   } catch (err) {
     // The cursor already moved: log loudly rather than retry into a double

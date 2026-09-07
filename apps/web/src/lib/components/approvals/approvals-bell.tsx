@@ -15,7 +15,10 @@ import {
   TooltipTrigger,
 } from "@onecli/ui/components/tooltip";
 import { hasWorkspaceContext } from "@/lib/navigation";
-import { usePendingApprovals } from "@/hooks/use-approvals";
+import {
+  usePendingApprovals,
+  usePendingChannelApprovals,
+} from "@/hooks/use-approvals";
 import type { PendingApproval } from "@/lib/api/approvals";
 import { ApprovalsPopover } from "./approvals-popover";
 import { ApprovalDetailsDialog } from "./approval-details-dialog";
@@ -30,12 +33,13 @@ import { ApprovalDetailsDialog } from "./approval-details-dialog";
 export const ApprovalsBell = () => {
   const pathname = usePathname();
   const { data: approvals = [] } = usePendingApprovals();
+  const { data: channelApprovals = [] } = usePendingChannelApprovals();
   const [open, setOpen] = useState(false);
   const [details, setDetails] = useState<PendingApproval | null>(null);
 
   if (!hasWorkspaceContext(pathname)) return null;
 
-  const count = approvals.length;
+  const count = approvals.length + channelApprovals.length;
 
   return (
     <>

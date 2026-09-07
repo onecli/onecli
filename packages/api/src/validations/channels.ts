@@ -140,6 +140,18 @@ export const adapterDecisionSchema = z
   })
   .strict();
 
+/** POST /channel-adapter/action-decision - a forwarded action-approval-card
+ * click (socket arm). Mirrors adapterReachDecisionSchema; the wire schema is
+ * the shared truth (agent-protocol). */
+export const adapterActionDecisionSchema = z
+  .object({
+    presenceId: z.string().trim().min(1).max(200),
+    approvalId: z.string().trim().min(1).max(500),
+    decision: z.enum(["approve", "approve_always", "reject"]),
+    clickerExternalUserId: z.string().trim().min(1).max(200),
+  })
+  .strict();
+
 export const adapterPromptClaimSchema = z
   .object({
     approvalId: z.string().trim().min(1).max(500),
@@ -180,5 +192,22 @@ export const adapterApprovalHealthSchema = z
   .object({
     presenceId: z.string().trim().min(1),
     healthy: z.boolean(),
+  })
+  .strict();
+
+/** The dashboard's action-approval decision — the ONE surface that carries
+ * a rejection reason (relayed verbatim to the agent; clamped server-side). */
+export const actionApprovalDecisionSchema = z
+  .object({
+    decision: z.enum(["approve", "approve_always", "reject"]),
+    reason: z.string().trim().min(1).max(500).optional(),
+  })
+  .strict();
+
+/** PUT /agents/:agentId/contacts/:contactId — the dashboard's policy flip.
+ * `ask` = revoke the standing permission (the row survives). */
+export const contactPolicySchema = z
+  .object({
+    policy: z.enum(["ask", "allow", "blocked"]),
   })
   .strict();

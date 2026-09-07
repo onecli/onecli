@@ -1,4 +1,4 @@
-export type StepSlug = "welcome" | "create" | "team";
+export type StepSlug = "welcome" | "create";
 
 /** Saved answers persisted in `OnboardingSurvey`, used to seed the client
  * flow and to derive which step a user may visit. Only `discovery` survives
@@ -13,14 +13,13 @@ export interface OnboardingProgress {
 export const onboardingPath = (slug?: StepSlug): string =>
   slug ? `/onboarding/${slug}` : "/onboarding";
 
-/** One flow now: mission → create (agent boots) → team. */
-export const STEP_SLUGS: StepSlug[] = ["welcome", "create", "team"];
+/** One flow now: mission → create (agent boots, then "meet your agent"). */
+export const STEP_SLUGS: StepSlug[] = ["welcome", "create"];
 
 /** Human-readable step names, used for progress-dot accessibility labels. */
 export const STEP_LABELS: Record<StepSlug, string> = {
   welcome: "Welcome",
   create: "Create your agent",
-  team: "Invite your team",
 };
 
 const STEP_PATH_RE = /^\/onboarding\/([^/]+)\/?$/;
@@ -31,24 +30,9 @@ export const stepSlugFromPathname = (pathname: string): StepSlug | null => {
 };
 
 /** The furthest step the user's saved progress supports — used by the index
- * resume redirect and as the fallback target when a step guard rejects. */
+ * resume redirect. A user with a created agent resumes on the create step,
+ * which renders its finished boot screen with the "meet your agent" door. */
 export const stepPathForProgress = (progress: OnboardingProgress): string => {
-  if (progress.createdAgentId) return onboardingPath("team");
+  if (progress.createdAgentId) return onboardingPath("create");
   return onboardingPath("welcome");
-};
-
-/** Whether a step's prerequisites are met. Earlier steps stay reachable after
- * later progress so back-navigation always works. `team` needs the agent the
- * step talks about ("while it boots") to exist. */
-export const isStepAllowed = (
-  slug: StepSlug,
-  progress: OnboardingProgress,
-): boolean => {
-  switch (slug) {
-    case "welcome":
-    case "create":
-      return true;
-    case "team":
-      return !!progress.createdAgentId;
-  }
 };

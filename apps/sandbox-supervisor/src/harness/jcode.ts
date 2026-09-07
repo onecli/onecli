@@ -502,6 +502,11 @@ never include your internal checklists or step-by-step commentary.
 Detail belongs behind demand: say where the full story lives (a file, a PR,
 a log) instead of inlining it, and expand only when asked or when your brief
 asks for detail.
+Only your FINAL message — what you write after your last tool call — is
+delivered as your reply; text written before a tool call streams as
+progress and is then discarded. Never bury an answer before a tool call:
+make the final message complete on its own, restating whatever the person
+still needs even if you said it mid-turn.
 `;
 
 /**
