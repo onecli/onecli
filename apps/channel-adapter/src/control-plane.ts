@@ -5,6 +5,7 @@ import {
   adapterDecisionResponseSchema,
   adapterIngestResponseSchema,
   adapterPromptClaimResponseSchema,
+  adapterReachDecisionResponseSchema,
   adapterRegisterResponseSchema,
   adapterTranscriptResponseSchema,
   adapterUnsettledPromptsResponseSchema,
@@ -14,6 +15,8 @@ import {
   type AdapterDecisionResponse,
   type AdapterIngestRequest,
   type AdapterIngestResponse,
+  type AdapterReachDecisionRequest,
+  type AdapterReachDecisionResponse,
   type AdapterWorkResponse,
 } from "@onecli/agent-protocol";
 
@@ -49,6 +52,10 @@ export interface ControlPlaneClient {
   getWork(): Promise<AdapterWorkResponse>;
   ingest(request: AdapterIngestRequest): Promise<AdapterIngestResponse>;
   decide(request: AdapterDecisionRequest): Promise<AdapterDecisionResponse>;
+  /** Forward a reach-card click; authorization is control-plane-side. */
+  decideReach(
+    request: AdapterReachDecisionRequest,
+  ): Promise<AdapterReachDecisionResponse>;
   claimPrompt(input: {
     approvalId: string;
     presenceId: string;
@@ -223,6 +230,14 @@ export const createControlPlane = (options: {
       call("POST", "/channel-adapter/decision", adapterDecisionResponseSchema, {
         body: request,
       }),
+
+    decideReach: (request) =>
+      call(
+        "POST",
+        "/channel-adapter/reach-decision",
+        adapterReachDecisionResponseSchema,
+        { body: request },
+      ),
 
     async claimPrompt(input) {
       const parsed = await call(

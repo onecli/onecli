@@ -39,6 +39,17 @@ export interface ProviderTransportHandlers {
     decision: "approve" | "deny";
     clickerExternalUserId: string;
   }) => void;
+  /** A human clicked a REACH card's button ("how should the agent handle
+   * this channel?"). Same trust shape as the approval click: only the
+   * opaque grant id + the clicker's channel-native id ride the wire, and
+   * the control plane authorizes the clicker. The three settlements are
+   * the card's three answers - open to everyone here, OneCLI users only,
+   * or silent in this channel. */
+  onReachDecision: (input: {
+    grantId: string;
+    decision: "approved" | "members_only" | "blocked";
+    clickerExternalUserId: string;
+  }) => void;
   /** The connection can never come back on its own (bad credential, feature
    * disabled). The owner decides what happens next. */
   onPermanentFailure: (reason: string) => void;

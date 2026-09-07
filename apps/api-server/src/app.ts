@@ -4,7 +4,11 @@ import { createApiApp } from "@onecli/api";
 import { createScimApp } from "@onecli/api/ee/scim";
 import { eeSessionHooks } from "@onecli/api/ee/auth/session-hooks";
 import { IS_CLOUD } from "@onecli/api/lib/env";
-import { apiOrigin, appOrigin } from "@onecli/api/lib/public-origins";
+import {
+  apiOrigin,
+  appOrigin,
+  trustedBrowserOrigin,
+} from "@onecli/api/lib/public-origins";
 import { LEGACY_PROJECT_HEADER } from "@onecli/api/lib/legacy-project-compat";
 import {
   BETTER_AUTH_BASE_PATH,
@@ -34,13 +38,21 @@ const apiApp = createApiApp(
 
 export const app = new Hono();
 
-// Cloud pins the dashboard origin; self-host mirrors the request origin (the
-// dashboard's host/port isn't knowable at image build time — the same posture
-// as the gateway's control-plane CORS).
+// Cloud pins the dashboard origin. Self-host answers with the origin only when
+// it is one this deployment already trusts — the same set the auth layer
+// enforces at sign-in (app/api origins, their loopback twins, any
+// ONECLI_TRUSTED_ORIGINS extras). Reflecting whatever Origin arrived, which is
+// what this did before, hands `credentials: true` to every site the user's
+// browser visits; `SameSite=lax` does not close it, being site-scoped rather
+// than origin-scoped (a sibling subdomain is same-site and carries the session
+// cookie). An install reachable at an address none of those yield lists it in
+// ONECLI_TRUSTED_ORIGINS — the same line that already unblocks its sign-in.
 app.use(
   "*",
   cors({
-    origin: IS_CLOUD ? [appUrl] : (origin) => origin,
+    origin: IS_CLOUD
+      ? [appUrl]
+      : (origin) => trustedBrowserOrigin(origin) ?? null,
     allowMethods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
     allowHeaders: [
       "Authorization",

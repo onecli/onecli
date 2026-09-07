@@ -13,9 +13,15 @@ import { logger } from "../../lib/logger";
 // Stripe is the source of truth for subscriptionStatus: webhook writes are
 // unconditional (updateMany tolerates a deleted org). Enterprise arrives via
 // the shared plan map like any plan, and enterprise churn correctly downgrades.
+// The one exception is AWS-Marketplace-billed orgs: their status is owned by
+// the marketplace fulfillment/SNS flows, so a stray Stripe event (e.g. a
+// leftover customer object) must never overwrite it.
 const applySubscriptionStatus = (organizationId: string, status: string) =>
   db.organization.updateMany({
-    where: { id: organizationId },
+    where: {
+      id: organizationId,
+      subscriptionStatus: { not: "aws-marketplace" },
+    },
     data: { subscriptionStatus: status },
   });
 

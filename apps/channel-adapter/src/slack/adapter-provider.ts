@@ -69,6 +69,49 @@ const approvalDecisionOf = (
   };
 };
 
+/** The reach card's click, same trust shape (see the api-side renderer,
+ * reach-card.ts: action ids `reach_approve` / `reach_members` / `reach_block`,
+ * value = the opaque grant id). Kept as literals here - the adapter is a
+ * separate deployable and the wire vocabulary is pinned by the control
+ * plane's route tests. `reach_deny` is the pre-rename id for members_only,
+ * still honored so cards posted before the third button settle. */
+const DECISIONS: Record<string, "approved" | "members_only" | "blocked"> = {
+  reach_approve: "approved",
+  reach_members: "members_only",
+  reach_block: "blocked",
+  reach_deny: "members_only",
+};
+
+const reachDecisionOf = (
+  payload: Record<string, unknown>,
+): {
+  grantId: string;
+  decision: "approved" | "members_only" | "blocked";
+  clickerExternalUserId: string;
+} | null => {
+  const typed = payload as {
+    type?: string;
+    user?: { id?: string };
+    actions?: { action_id?: string; value?: string }[];
+  };
+  const action = typed.actions?.[0];
+  const clicker = typed.user?.id;
+  const decision = DECISIONS[action?.action_id ?? ""];
+  if (
+    typed.type !== "block_actions" ||
+    !action?.value ||
+    !clicker ||
+    !decision
+  ) {
+    return null;
+  }
+  return {
+    grantId: action.value,
+    decision,
+    clickerExternalUserId: clicker,
+  };
+};
+
 const openTransport = (
   presence: AdapterPresence,
   handlers: ProviderTransportHandlers,
@@ -86,7 +129,12 @@ const openTransport = (
       onEvent: handlers.onEvent,
       onInteractive: (payload) => {
         const decision = approvalDecisionOf(payload);
-        if (decision) handlers.onApprovalDecision(decision);
+        if (decision) {
+          handlers.onApprovalDecision(decision);
+          return;
+        }
+        const reach = reachDecisionOf(payload);
+        if (reach) handlers.onReachDecision(reach);
       },
       onPermanentFailure: handlers.onPermanentFailure,
       onLog: (message, detail) =>

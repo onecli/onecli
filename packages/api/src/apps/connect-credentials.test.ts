@@ -73,6 +73,25 @@ describe("resolveConnectCredentials", () => {
     });
   });
 
+  // Regression: the required-field check tests `.trim()`, so a key pasted with
+  // a trailing newline PASSES validation. Storing it verbatim then injects
+  // `Bearer <key>\n` upstream, which providers reject (Stripe answers 401) —
+  // a connection that looks connected but can never work.
+  it("trims surrounding whitespace off the stored access_token", async () => {
+    const result = await resolveConnectCredentials(
+      "keyapp",
+      apiKeyApp,
+      {
+        fields: { apiKey: "  sk-123\n" },
+      },
+      ORG,
+    );
+    expect(result).toMatchObject({
+      ok: true,
+      credentials: { access_token: "sk-123" },
+    });
+  });
+
   it("rejects a missing required field with the field label", async () => {
     const result = await resolveConnectCredentials(
       "keyapp",

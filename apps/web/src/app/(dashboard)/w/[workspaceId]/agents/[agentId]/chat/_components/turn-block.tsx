@@ -14,6 +14,7 @@ import { AutomationTurnHeader } from "./automation-turn";
 import { ActivityLine } from "./activity-line";
 import { ChatMarkdown } from "./chat-markdown";
 import { ConnectorSuggestions } from "./connect-suggestions";
+import { NarrationText } from "./narration-text";
 import { ToolCallRow } from "./tool-call-row";
 import { TurnNotice } from "./turn-notice";
 import { UserBubble } from "./user-bubble";
@@ -86,15 +87,26 @@ export const TurnBlock = ({
   // red blob and then swap to the friendly notice — so an active turn keeps
   // its waiting state and the error renders only from the settled poll view.
   const errorText = turn.error ?? (active ? undefined : rendered?.error);
-  // The live caption: what the agent is doing right now. Shown while the turn
-  // runs and while it has not yet said anything — once the answer starts
-  // arriving, the answer itself is the better signal of progress.
+  // WORKING vs SETTLED. While the turn runs and no durable answer exists,
+  // the agent block is a live WORK LOG: narration segments and tool calls in
+  // true stream order, deliberately styled as transient (they will not
+  // survive the turn — history carries no deltas, so a refresh never shows
+  // them either). The moment the answer lands, the block SETTLES to the
+  // record: the tool rows and the markdown answer, exactly what a late
+  // joiner gets.
+  const working = active && !rendered?.text;
+  // The live caption: what the agent is doing right now. Shown while it is
+  // NOT talking — when narration is streaming, the words themselves are the
+  // better signal, and a caption above a growing sentence reads as clutter.
   // Falls back to the lifecycle copy before the agent reports any activity
   // (waking a sandbox can take a moment, and a blank row reads as broken).
-  const activityText = active
+  const activityText = working
     ? (rendered?.activity ?? waitingCopy(turn))
     : undefined;
-  const showActivity = Boolean(activityText) && !rendered?.text;
+  // The tail only counts when it has visible words: a model emitting a bare
+  // newline before its first tool call must not blank the caption row.
+  const liveTail = rendered?.liveText.trim() ? rendered.liveText : "";
+  const showActivity = Boolean(activityText) && !liveTail;
   // A turn the reader can fix from the Models page — no key yet, or a key
   // the provider refused. Rendered as guidance with the fix attached, rather
   // than as a failure.
@@ -142,34 +154,81 @@ export const TurnBlock = ({
       {(rendered || active || errorText || turn.status === "aborted") && (
         <Message align="start">
           <MessageContent className="min-w-0">
-            {rendered && rendered.tools.length > 0 && (
-              <div className="flex flex-col">
-                {rendered.tools.map((tool, index) => (
-                  <ToolCallRow
-                    // callId can be empty on an orphaned finish — fall back
-                    // to the position so keys stay unique.
-                    key={tool.callId || `${tool.name}-${index}`}
-                    tool={tool}
-                    turnEnded={!active}
-                  />
-                ))}
+            {working ? (
+              // THE WORK LOG: what is happening, as it happens. Narration is
+              // untrusted mid-turn model text — rendered as plain text by
+              // NarrationText, never markdown. `aria-live` stays off here:
+              // announcing every delta would read the whole log to a
+              // screen-reader user token by token (the ActivityLine below
+              // keeps its own polite announcer).
+              <div className="flex flex-col gap-1.5">
+                {rendered?.work.map((item, index) =>
+                  item.kind === "tool" ? (
+                    <ToolCallRow
+                      // callId can be empty on an orphaned finish — fall
+                      // back to the position so keys stay unique.
+                      key={item.tool.callId || `tool-${index}`}
+                      tool={item.tool}
+                      turnEnded={false}
+                    />
+                  ) : (
+                    // Positional keys are safe here: the log is append-only
+                    // within a turn (segments only ever close, never
+                    // reorder), so an index never changes meaning.
+                    <NarrationText
+                      key={`narration-${index}`}
+                      text={item.text}
+                    />
+                  ),
+                )}
+                {liveTail ? <NarrationText text={liveTail} live /> : null}
+                {showActivity && activityText && (
+                  <ActivityLine text={activityText} />
+                )}
               </div>
-            )}
-            {rendered?.text ? (
+            ) : (
+              // SETTLED: the record. Tool rows grouped first, then the
+              // answer — the same shape a reader who joined late gets from
+              // history, so what you watched and what you reload agree.
               <>
-                <Bubble variant="ghost">
-                  <BubbleContent>
-                    <ChatMarkdown text={rendered.text} suppressConnectLinks />
-                  </BubbleContent>
-                </Bubble>
-                {/* Connect links in the answer render as the card below it —
-                    icon + description + Connect — instead of prose links
-                    (suppressed above): one unmissable call to action. */}
-                <ConnectorSuggestions text={rendered.text} />
+                {rendered && rendered.tools.length > 0 && (
+                  <div className="flex flex-col">
+                    {rendered.tools.map((tool, index) => (
+                      <ToolCallRow
+                        key={tool.callId || `${tool.name}-${index}`}
+                        tool={tool}
+                        turnEnded={!active}
+                      />
+                    ))}
+                  </div>
+                )}
+                {rendered?.text ? (
+                  <>
+                    {/* The promotion moment: the transient log unmounts and
+                        the answer fades in over it — motion says "this is
+                        the keeper", and reduced-motion readers just see the
+                        swap. */}
+                    <Bubble
+                      variant="ghost"
+                      className="motion-safe:animate-in motion-safe:fade-in motion-safe:duration-300"
+                    >
+                      <BubbleContent>
+                        <ChatMarkdown
+                          text={rendered.text}
+                          suppressConnectLinks
+                        />
+                      </BubbleContent>
+                    </Bubble>
+                    {/* Connect links in the answer render as the card below
+                        it — icon + description + Connect — instead of prose
+                        links (suppressed above): one unmissable call to
+                        action. Reads the ANSWER only — never the streamed
+                        narration, which is untrusted progress text. */}
+                    <ConnectorSuggestions text={rendered.text} />
+                  </>
+                ) : null}
               </>
-            ) : showActivity ? (
-              <ActivityLine text={activityText!} />
-            ) : null}
+            )}
             {rendered?.notices.map((notice, index) => (
               <TurnNotice key={`${index}-${notice}`} message={notice} />
             ))}

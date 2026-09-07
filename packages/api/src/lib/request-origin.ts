@@ -6,7 +6,7 @@ import {
   normalizeOrigin,
   originFromHeaders,
 } from "./app-origin";
-import { buildTrustedOrigins, resolveOriginsFromEnv } from "./public-origins";
+import { trustedBrowserOrigin } from "./public-origins";
 
 /**
  * Derive the public origin (scheme + host) from an incoming HTTP request.
@@ -57,7 +57,7 @@ export const getApiCallbackOrigin = (request: Request): string => {
 
 /**
  * The browser's own origin when — and only when — it is one this deployment
- * already trusts (the resolved trusted-origins set: the app origin and its
+ * already trusts ([`trustedBrowserOrigin`]'s set: the app origin and its
  * loopback twin, any `ONECLI_TRUSTED_ORIGINS` extras, the split-host api
  * origin).
  *
@@ -75,19 +75,11 @@ export const getApiCallbackOrigin = (request: Request): string => {
 const trustedRefererOrigin = (request: Request): string | undefined => {
   const referer = request.headers.get("referer");
   if (!referer) return undefined;
-  let origin: string;
   try {
-    origin = new URL(referer).origin;
+    return trustedBrowserOrigin(new URL(referer).origin);
   } catch {
     return undefined;
   }
-  const normalized = normalizeOrigin(origin);
-  if (!normalized) return undefined;
-  const { origins } = buildTrustedOrigins(
-    resolveOriginsFromEnv(),
-    process.env.ONECLI_TRUSTED_ORIGINS,
-  );
-  return origins.includes(normalized) ? normalized : undefined;
 };
 
 /**

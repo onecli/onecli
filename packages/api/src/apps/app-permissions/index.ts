@@ -71,6 +71,7 @@ import { slackPermissions } from "./slack";
 import { firefliesPermissions } from "./fireflies";
 import { zohoCrmPermissions } from "./zoho-crm";
 import { snowflakePermissions } from "./snowflake";
+import { stripePermissions } from "./stripe";
 
 const permissionRegistry = new Map<string, AppPermissionDefinition>();
 
@@ -144,3 +145,4 @@ register(slackPermissions);
 register(firefliesPermissions);
 register(zohoCrmPermissions);
 register(snowflakePermissions);
+register(stripePermissions);

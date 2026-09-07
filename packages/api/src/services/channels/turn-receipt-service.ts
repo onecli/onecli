@@ -40,17 +40,22 @@ export interface AttachReceiptInput {
    * thread, so the caller passes the user's own message, because Slack
    * refuses to scope a session without one. */
   threadTs?: string | null;
-  /** Where a narration CARD may be posted: the group thread's root, or null
-   * in a DM so the card sits inline. Deliberately separate from `threadTs`
-   * above — a DM fakes a session root out of the user's message, and reusing
-   * it here would open a thread for every DM turn. */
+  /** Where a narration CARD may be posted: the thread's root — a group
+   * thread, or the DM thread the person typed in — or null at the top level
+   * of a DM, so the card sits inline. Deliberately separate from `threadTs`
+   * above — an unthreaded DM fakes a session root out of the user's message,
+   * and reusing it here would open a thread for every DM turn. */
   replyThreadTs?: string | null;
-  /** Whether this is a DIRECT conversation. Explicit rather than inferred
-   * from a null thread: the native work-status opens a thread in a DM
-   * (Slack documents it), so a card-capable provider skips the enum there —
-   * and a caller that omits the field must keep today's behavior, not
-   * silently disable every channel's loader. */
-  isDirect?: boolean;
+  /** Whether the conversation has NO thread to hang a loader on (the top
+   * level of a DM). Explicit rather than inferred from a null thread: the
+   * native work-status opens a thread there (Slack documents it), so a
+   * card-capable provider skips the enum — and a caller that omits the field
+   * must keep today's behavior, not silently disable every channel's loader.
+   *
+   * Keyed on the ADDRESS, not the door: a DM reply typed inside a thread is
+   * still a direct conversation, but it already has a thread, so it gets the
+   * loader like any other threaded surface. */
+  unthreaded?: boolean;
   /** The inbound message text — what the chooser picks against. */
   text: string;
 }
@@ -101,20 +106,20 @@ export const attachTurnReceipt = async (
     // workspace, missing scope, dead credential) fall through to the
     // reaction, so the user always sees SOMETHING move.
     //
-    // NOT IN A DM, when the presence can post a narration card instead.
-    // Slack documents that setting an agent-session status on a DM
-    // "will automatically open the thread for the user", and it says only
-    // that the agent is busy. The card says WHAT it is doing and sits
-    // inline, so in a DM the enum costs a thread nobody asked for and buys
-    // nothing the card does not already show. A channel keeps it: that
-    // conversation is threaded anyway, and the loader is what surfaces the
-    // agent in the channel list.
-    // A DM that can carry a card: the ONLY shape where the enum is skipped.
+    // NOT AT THE TOP LEVEL OF A DM, when the presence can post a narration
+    // card instead. Slack documents that setting an agent-session status
+    // there "will automatically open the thread for the user", and it says
+    // only that the agent is busy. The card says WHAT it is doing and sits
+    // inline, so the enum would cost a thread nobody asked for and buy
+    // nothing the card does not already show. Anything ALREADY threaded
+    // keeps it — a channel thread, and equally a DM thread the person opened
+    // themselves: the thread exists either way, and the loader is what
+    // surfaces the agent as working in it.
     // Keyed on an explicit flag rather than "replyThreadTs is absent" — a
-    // caller that simply does not pass the field would otherwise read as a
-    // DM and silently cost every channel its loader.
+    // caller that simply does not pass the field would otherwise read as
+    // unthreaded and silently cost every channel its loader.
     const narratesInline =
-      input.isDirect === true && provider.narrateThreadWork !== undefined;
+      input.unthreaded === true && provider.narrateThreadWork !== undefined;
     if (
       presence.appMode === "agent" &&
       input.threadTs &&
@@ -627,24 +632,35 @@ export const clearTurnReceipts = async (turnId: string): Promise<void> => {
  * the target turn's message or an earlier follow-up's — and attach the SAME
  * emoji to the new one. Reusing the previous reaction is deliberate: no
  * second chooser inference per follow-up, and the mark visibly travels
- * instead of mutating. A SESSION mark doesn't travel — the thread's loader
- * already covers every message in it — so the row is just re-keyed to the
- * follow-up turn (the clear must fire off the newest turn's id). Detached
+ * instead of mutating. A SESSION mark doesn't travel at all — the thread's
+ * loader already covers every message in it, and the row stays on the turn
+ * that is RUNNING, which is both where the clear looks (it walks the turn
+ * and its joined follow-ups) and where the narration card is keyed. Detached
  * and best-effort like every receipt write; two rapid follow-ups' moves can
  * interleave into a transient double-mark until the answer-post clear
  * converges them — bounded, cosmetic, accepted.
  */
 export const moveTurnReceipt = async (input: {
   presenceId: string;
-  /** The follow-up row — the receipt's new owner. */
+  /** The follow-up row: the reaction mark's new owner, and the excluded id
+   * when resolving where the current mark sits. A SESSION mark does not
+   * change owner — see the session arm below. */
   followUpTurnId: string;
   /** The conversation whose seen-mark is moving. */
   conversationId: string;
   channel: string;
   messageTs: string;
-  /** The group thread's root ts — threaded through so a no-mark fallback
-   * attach can still choose the session kind. Null for DMs. */
+  /** The session root — threaded through so a no-mark fallback attach can
+   * still choose the session kind. Null only when the caller has none. */
   threadTs?: string | null;
+  /** Where a narration card belongs, for the no-mark fallback below — the
+   * same field `attachTurnReceipt` takes. Carried rather than re-derived so
+   * a follow-up that falls through to an attach lands its card in the same
+   * thread its own turn would have. */
+  replyThreadTs?: string | null;
+  /** Whether there is no thread to hang a loader on, for that same fallback.
+   * Omitted keeps `attachTurnReceipt`'s own default. */
+  unthreaded?: boolean;
   /** The inbound text — chooser input only when no mark exists to move. */
   text: string;
 }): Promise<void> => {
@@ -686,41 +702,53 @@ export const moveTurnReceipt = async (input: {
 
     if (!current) {
       // Nothing to move (a web-opened turn never had a mark): fall back to
-      // the ordinary attach, chooser and all.
+      // the ordinary attach, chooser and all — with the SAME addressing its
+      // own turn would have had, so a threaded follow-up's card opens in its
+      // thread rather than at the top of the conversation.
       await attachTurnReceipt({
         presenceId: input.presenceId,
         turnId: input.followUpTurnId,
         channel: input.channel,
         messageTs: input.messageTs,
         threadTs: input.threadTs,
+        replyThreadTs: input.replyThreadTs,
+        ...(input.unthreaded !== undefined && { unthreaded: input.unthreaded }),
         text: input.text,
       });
       return;
     }
 
     if (current.kind === "session") {
-      // The thread loader already covers the follow-up's message — nothing
-      // moves provider-side. Re-key the row to the follow-up turn so the
-      // clear (which fires off the NEWEST turn's id on answer post) finds it.
-      try {
-        await db.channelTurnReceipt.update({
-          where: { id: current.id },
-          data: { turnId: input.followUpTurnId },
-          select: { id: true },
-        });
-      } catch (err) {
-        if (
-          err instanceof Prisma.PrismaClientKnownRequestError &&
-          (err.code === "P2002" || err.code === "P2025")
-        ) {
-          return; // a twin already moved it (or cleared it) — either stands
-        }
-        throw err;
-      }
-      // The re-key races the exchange's clear exactly like an attach does:
-      // a clear that fired between the lookup above and this write missed
-      // the row under its new key.
-      await selfClearIfTurnFinished(input.followUpTurnId);
+      // The row STAYS on the turn it was attached to. Nothing moves
+      // provider-side (the thread's loader already covers the follow-up's
+      // message), and nothing moves ledger-side either.
+      //
+      // It used to be re-keyed to the follow-up, on the reasoning that the
+      // clear "fires off the newest turn's id". That reasoning was wrong in
+      // one direction and load-bearing in the other:
+      //
+      // - The clear fires off the FINISHED turn's id — the mirror passes
+      //   `item.turn.id` (routes/channel-adapter.ts), and `clearTurnReceipts`
+      //   then walks that turn AND its `joined` follow-ups. A row left here is
+      //   found either way, so the re-key bought nothing.
+      // - The narration card is keyed by turn id, and the supervisor reports
+      //   tool activity under the turn it is RUNNING: a steer never moves
+      //   `runtime.activeTurnId` (apps/sandbox-supervisor). Re-keying moved
+      //   the receipt out from under `narrateTurnActivity`, whose lookup then
+      //   missed and returned silently — so a mid-run follow-up showed a
+      //   frozen card, or in a top-level DM no card at all, for the rest of
+      //   the turn (live 2026-09-02).
+      //
+      // Keeping the row where the narration looks for it is what fixes that,
+      // and it is also the simpler invariant: a session receipt belongs to
+      // the run, not to the last message that joined it.
+      //
+      // The self-clear still runs, against the row's OWN turn: the same
+      // attach-vs-clear race applies here (a clear that fired between the
+      // lookup above and now would have found nothing to do), and the
+      // follow-up's arrival is exactly when the parent may have just
+      // finished.
+      await selfClearIfTurnFinished(current.turnId);
       return;
     }
     if (!current.reaction) return; // malformed row — nothing to move

@@ -25,6 +25,8 @@ import {
 } from "../services/channels/providers/slack/shared-install-service";
 import { onboardingReplyForSlackUser } from "../services/channels/providers/slack/onboarding-service";
 import { decideApprovalFromChannel } from "../services/channels/channel-approval-service";
+import { decideReachFromChannel } from "../services/channels/agent-reach-service";
+import { REACH_ACTION_DECISIONS } from "../services/channels/providers/slack/reach-card";
 import { agentImageUrlOrNull } from "../services/agent-image-service";
 import { publicApiUrl } from "../services/channels/posture";
 import { logger } from "../lib/logger";
@@ -534,7 +536,14 @@ export const channelInboundSlackRoutes = () => {
       }
 
       const externalUserId = call.externalUserId;
-      const reply = { channel: call.replyChannel };
+      // Answer where they asked: a DM typed inside a thread is replied to in
+      // that thread, not at the bottom of the DM. `postOnboardingReply`
+      // already takes an optional `threadTs` — the interpreter simply had
+      // nothing to give it before.
+      const reply = {
+        channel: call.replyChannel,
+        ...(call.replyThreadTs && { threadTs: call.replyThreadTs }),
+      };
       // Detached from the ack (Slack's 3s window): the reply does a
       // users.info round-trip and possibly an invitation write.
       fireReply(async () => {
@@ -642,6 +651,14 @@ export const channelInboundSlackRoutes = () => {
       p.type === "block_actions" &&
       !!a?.value &&
       (a.action_id === "channel_approve" || a.action_id === "channel_deny");
+    // The reach card's buttons (agent-reach-service): same shape, its own
+    // door. The settlement is null unless this really is a block_actions
+    // click on one of the card's action ids - the type guard is part of the
+    // classification, not a separate check a later edit can drop.
+    const reachDecisionKind =
+      payload.type === "block_actions" && action?.action_id
+        ? (REACH_ACTION_DECISIONS[action.action_id] ?? null)
+        : null;
 
     // ── The SHARED app's arm: the onboarding bot has ONE interactive
     // element, a URL button — Slack still posts a block_actions payload on
@@ -661,6 +678,52 @@ export const channelInboundSlackRoutes = () => {
       payload.api_app_id,
     );
     if (!presence) return c.json({ error: "Unauthorized" }, 401);
+
+    // The reach card's own branch: decide + settle-via-response_url, then
+    // ack. The service rewrites every OTHER owner's card through its
+    // promptRefs; THIS card is rewritten through response_url below (the
+    // 3s-window pattern the approval branch uses).
+    if (reachDecisionKind && action?.value && clicker) {
+      const reachDecision = await decideReachFromChannel({
+        presenceId: presence.id,
+        grantId: action.value,
+        decision: reachDecisionKind,
+        clickerExternalUserId: clicker,
+      });
+      if (payload.response_url && isSlackResponseUrl(payload.response_url)) {
+        const responseUrl = payload.response_url;
+        const text =
+          reachDecision.kind === "decided"
+            ? `${
+                reachDecision.state === "approved"
+                  ? "✅ Answering anyone in the channel"
+                  : reachDecision.state === "blocked"
+                    ? "⛔ Not answering there"
+                    : "🔒 OneCLI users only"
+              } · decided by ${escapeSlackText(reachDecision.decidedByName)}`
+            : reachDecision.kind === "already_settled"
+              ? "This request was already decided."
+              : escapeSlackText(reachDecision.message);
+        const replaceOriginal = reachDecision.kind !== "refused";
+        fireReply(() =>
+          fetch(responseUrl, {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify(
+              replaceOriginal
+                ? { replace_original: true, text }
+                : {
+                    replace_original: false,
+                    response_type: "ephemeral",
+                    text,
+                  },
+            ),
+            signal: AbortSignal.timeout(10_000),
+          }),
+        );
+      }
+      return c.json({ ok: true });
+    }
 
     if (!actionable(payload, action) || !action?.value || !clicker) {
       return c.json({ ok: true });

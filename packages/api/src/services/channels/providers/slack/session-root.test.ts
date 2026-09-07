@@ -67,6 +67,16 @@ const dmEvent = {
   ts: "1717171717.123456",
 };
 
+const threadedDmEvent = {
+  type: "message",
+  channel_type: "im",
+  channel: "D100",
+  user: "U1",
+  text: "following up in the thread",
+  ts: "1717171799.222222",
+  thread_ts: "1717171717.123456",
+};
+
 const mentionEvent = {
   type: "app_mention",
   channel: "C200",
@@ -130,6 +140,74 @@ describe("the Slack session root", () => {
     expect(moveTurnReceipt).toHaveBeenCalledTimes(1);
     const arg = moveTurnReceipt.mock.calls[0]![0] as Record<string, unknown>;
     expect(arg.threadTs).toBe("1717171717.123456");
+  });
+
+  it("keys a THREADED DM session by its thread root, and lights the loader", async () => {
+    // A reply typed inside a DM thread has a real thread to hang the native
+    // loader on, so it gets one — the top-level DM's card-instead-of-loader
+    // rule exists only because there is no thread there to use.
+    //
+    // MUTATION-PROOF: hardcode `unthreaded: true` for every direct call (or
+    // drop the thread root from the interpreter) and this fails.
+    await dispatchSlackEvent({
+      presenceId: "p1",
+      identityRef: "BOT",
+      event: threadedDmEvent,
+      eventId: "e5",
+    });
+
+    expect(attachTurnReceipt).toHaveBeenCalledTimes(1);
+    const arg = attachTurnReceipt.mock.calls[0]![0] as Record<string, unknown>;
+    // The session is scoped to the THREAD, not the message that arrived.
+    expect(arg.threadTs).toBe("1717171717.123456");
+    // ...and the card belongs in that thread too.
+    expect(arg.replyThreadTs).toBe("1717171717.123456");
+    // There IS a thread here, so the loader is not skipped.
+    expect(arg.unthreaded).toBe(false);
+  });
+
+  it("still skips the loader at the TOP LEVEL of a DM", async () => {
+    // The decided posture: setting the status there opens a thread nobody
+    // asked for, so the narration card carries the whole signal instead.
+    // MUTATION-PROOF: key `unthreaded` off the door rather than the address
+    // and this fails.
+    await dispatchSlackEvent({
+      presenceId: "p1",
+      identityRef: "BOT",
+      event: dmEvent,
+      eventId: "e6",
+    });
+
+    const arg = attachTurnReceipt.mock.calls[0]![0] as Record<string, unknown>;
+    expect(arg.unthreaded).toBe(true);
+    expect(arg.replyThreadTs).toBeNull();
+  });
+
+  it("hands the follow-up fallback the SAME addressing as an attach", async () => {
+    // `moveTurnReceipt` falls back to `attachTurnReceipt` when there is no
+    // mark to move (the turn was opened from the web). Without the card
+    // address riding along, a threaded DM follow-up would post its progress
+    // card at the top of the DM instead of in the thread being read.
+    //
+    // MUTATION-PROOF: drop `replyThreadTs`/`unthreaded` from the move call
+    // and this fails.
+    ingestDirectMessage.mockResolvedValue({
+      kind: "followUp",
+      conversationId: "cv1",
+      turn: { id: "t9", errorCode: null },
+    });
+
+    await dispatchSlackEvent({
+      presenceId: "p1",
+      identityRef: "BOT",
+      event: threadedDmEvent,
+      eventId: "e7",
+    });
+
+    const arg = moveTurnReceipt.mock.calls[0]![0] as Record<string, unknown>;
+    expect(arg.threadTs).toBe("1717171717.123456");
+    expect(arg.replyThreadTs).toBe("1717171717.123456");
+    expect(arg.unthreaded).toBe(false);
   });
 
   it("never receipts a turn the door refused", async () => {

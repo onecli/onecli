@@ -50,8 +50,9 @@ export const apiFetch = async (
   return fetch(`${API_ORIGIN}${path}`, {
     ...options,
     // Self-host: the API lives on another port of the same host, so the
-    // session cookie must be sent explicitly (the api-server mirrors the
-    // request origin with credentials). Cloud uses the bearer token instead.
+    // session cookie must be sent explicitly (the api-server allows this
+    // origin — it is one of the deployment's own). Cloud uses the bearer
+    // token instead.
     ...(IS_CLOUD ? null : { credentials: "include" as const }),
     headers: {
       "Content-Type": "application/json",

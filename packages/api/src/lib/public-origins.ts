@@ -496,6 +496,37 @@ export const buildTrustedOrigins = (
   return { origins: [...new Set(origins)], warnings };
 };
 
+/**
+ * An origin echoed back only when this deployment already trusts it —
+ * `undefined` for every other value, malformed input included.
+ *
+ * The set is [`buildTrustedOrigins`]'s, read from the environment: the same
+ * answer the auth layer enforces on sign-in, so a browser that may log in and
+ * one that may call the API can never disagree. Two call sites need exactly
+ * this question and must not drift apart — the api-server's credentialed CORS
+ * allow-list, and `request-origin.ts`'s trusted-referer step.
+ *
+ * Fail-CLOSED, unlike [`normalizeOrigin`]'s other callers, which fall through
+ * to a next-best answer: here there is no next-best. An unlisted origin gets
+ * no `Access-Control-Allow-Origin` header at all, never a wildcard and never
+ * itself reflected back — with `credentials: true`, reflecting an arbitrary
+ * origin would make every site the user's browser visits an ambient caller of
+ * this API. `SameSite=lax` does not cover the gap: it is SITE-scoped, so a
+ * sibling subdomain (or another port of the same host) is same-site and the
+ * session cookie rides along.
+ */
+export const trustedBrowserOrigin = (
+  origin: string | null | undefined,
+): string | undefined => {
+  const normalized = normalizeOrigin(origin);
+  if (!normalized) return undefined;
+  const { origins } = buildTrustedOrigins(
+    resolveOriginsFromEnv(),
+    process.env.ONECLI_TRUSTED_ORIGINS,
+  );
+  return origins.includes(normalized) ? normalized : undefined;
+};
+
 const sourceTag = ({ source, envVar }: ResolvedOriginSource) => {
   switch (source) {
     case "set":

@@ -534,6 +534,9 @@ export interface AdapterWorkItem {
     message: string;
     error: string | null;
     errorCode: string | null;
+    /** The provider-opaque thread the turn arrived in, when finer than the
+     * link's address (Slack: a DM thread). Null = answer at the link. */
+    sourceThreadId: string | null;
     createdAt: Date;
     finishedAt: Date | null;
   };
@@ -562,6 +565,9 @@ const workTurnSelect = {
   message: true,
   error: true,
   errorCode: true,
+  // Where the turn was asked, when finer than the link's address (a DM
+  // thread) — the completion pass answers THERE.
+  sourceThreadId: true,
   createdAt: true,
   finishedAt: true,
 } as const;

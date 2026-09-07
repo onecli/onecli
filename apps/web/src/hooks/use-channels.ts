@@ -4,6 +4,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { channels } from "@/lib/api";
 import type {
   ChannelProvider,
+  ChannelReachState,
   ChannelTransport,
   CompletePresenceInput,
 } from "@/lib/api";
@@ -94,6 +95,79 @@ export const useDetachChannel = (
       // the delete confirmation) — root(), so the sweep reaches the
       // sidebar's for-workspace key too.
       qc.invalidateQueries({ queryKey: queryKeys.agents.root() });
+    },
+  });
+};
+
+/** Settle one channel (channels view `spaces` rows): anyone in it, OneCLI
+ * users only, or blocked entirely. */
+export const useSetReachState = (
+  agentId: string,
+  provider: ChannelProvider,
+) => {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (input: {
+      externalRef: string;
+      state: Exclude<ChannelReachState, "pending">;
+    }) =>
+      channels.setReachState(agentId, provider, input.externalRef, input.state),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: queryKeys.channels.all() });
+    },
+  });
+};
+
+/** Settle one PERSON (channels view `people` rows): allowed, or not. */
+export const useSetPersonReachState = (
+  agentId: string,
+  provider: ChannelProvider,
+) => {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (input: {
+      externalRef: string;
+      state: "approved" | "blocked";
+    }) =>
+      channels.setPersonReachState(
+        agentId,
+        provider,
+        input.externalRef,
+        input.state,
+      ),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: queryKeys.channels.all() });
+    },
+  });
+};
+
+/** DISMISS a person row - forget the decision; they re-knock if they write. */
+export const useDismissPersonReach = (
+  agentId: string,
+  provider: ChannelProvider,
+) => {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (input: { externalRef: string }) =>
+      channels.dismissPersonReach(agentId, provider, input.externalRef),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: queryKeys.channels.all() });
+    },
+  });
+};
+
+/** DISMISS a channel row - forget it entirely; the next outside message
+ * re-knocks and a re-mention re-links the threads. */
+export const useDismissReachRow = (
+  agentId: string,
+  provider: ChannelProvider,
+) => {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (input: { externalRef: string }) =>
+      channels.dismissReachRow(agentId, provider, input.externalRef),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: queryKeys.channels.all() });
     },
   });
 };

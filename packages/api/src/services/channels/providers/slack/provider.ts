@@ -3,6 +3,7 @@ import { logger } from "../../../../lib/logger";
 import type { ChannelProvider, PresenceIdentity } from "../../types";
 import { dispatchSlackEvent } from "./dispatch";
 import { slackSharedApp } from "./shared-install-service";
+import { slackReach } from "./reach-card";
 import {
   botScopesFor,
   buildAgentManifest,
@@ -94,6 +95,11 @@ export const slackProvider: ChannelProvider = {
   // The one interpreter for both transports (dispatch.ts) — the neutral
   // dispatch hook the generic ingest door calls by registry lookup.
   dispatchInbound: dispatchSlackEvent,
+
+  // The reach facet (reach-card.ts): the space key behind a group-thread
+  // address, the guest-speaker probe, and the platform-composed owner-DM
+  // card - everything provider-shaped about space grants in one home.
+  reach: slackReach,
 
   // The deployment-owned shared app (SLACK_SHARED_* env): onboarding +
   // config-token-free agent-app minting, reached only through this facet.

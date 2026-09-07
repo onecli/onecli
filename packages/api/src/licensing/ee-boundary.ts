@@ -64,8 +64,8 @@ export const SEAMS: readonly Seam[] = [
   },
   {
     from: "apps/web/src/app/**",
-    why: "Next.js route files are mount points, not libraries — the app must be able to route to a licensed page when licensed. Each is a one-line re-export or a thin entitlement wrapper (server-side isEntitled() check → the licensed page or the locked card) carrying no feature logic. The two former residuals (`p/[workspaceId]/layout.tsx`, `(admin)/layout.tsx`) now mount free implementations that route role questions through the provider seam.",
-    count: 12,
+    why: "Next.js route files are mount points, not libraries — the app must be able to route to a licensed page when licensed. Each is a one-line re-export or a thin entitlement wrapper (server-side isEntitled() check → the licensed page or the locked card) carrying no feature logic. The two former residuals (`p/[workspaceId]/layout.tsx`, `(admin)/layout.tsx`) now mount free implementations that route role questions through the provider seam. The aws-marketplace fulfillment routes (cloud-billing-only pages; dark off cloud) mount the licensed billing actions the same way.",
+    count: 15,
     permanent: true,
   },
   {
@@ -76,8 +76,8 @@ export const SEAMS: readonly Seam[] = [
   },
   {
     from: "apps/api-server/src/**",
-    why: "Host wiring: the standalone API server mounts the SCIM app and passes the cloud session provider and session hooks into createApiApp. Same role as edition-defaults.ts — a composition root, not a library.",
-    count: 3,
+    why: "Host wiring: the standalone API server mounts the SCIM app, passes the cloud session provider and session hooks into createApiApp, and starts the AWS Marketplace metering job. Same role as edition-defaults.ts — a composition root, not a library.",
+    count: 4,
     permanent: true,
   },
   {

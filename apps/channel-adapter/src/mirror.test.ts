@@ -949,6 +949,41 @@ describe("what gets posted", () => {
     ]);
   });
 
+  it("answers a DM THREAD inside that thread", async () => {
+    // THE BUG THIS FIXES (live): a reply typed in a DM thread was answered
+    // at the bottom of the DM, outside the thread the person was reading.
+    // The link says "D100, top-level" for every thread in the DM, so the
+    // TURN's own arrival address is what puts the answer in the right place.
+    //
+    // MUTATION-PROOF: mirror through `replyTargetForLink` and this fails.
+    const controlPlane = createFakeControlPlane(transcriptWith("Done."));
+
+    await mirror({
+      controlPlane,
+      workItem: item({ source: "slack", sourceThreadId: "1699.123" }),
+    });
+
+    const posted = slack.callsTo("chat.postMessage");
+    expect(posted).toHaveLength(1);
+    expect(posted[0]!.form.channel).toBe("D100");
+    expect(posted[0]!.form.thread_ts).toBe("1699.123");
+  });
+
+  it("keeps a top-level DM answer top-level", async () => {
+    // The other half of the same rule: an unthreaded DM must NOT gain a
+    // thread it never had.
+    const controlPlane = createFakeControlPlane(transcriptWith("Done."));
+
+    await mirror({
+      controlPlane,
+      workItem: item({ source: "slack" }),
+    });
+
+    const posted = slack.callsTo("chat.postMessage");
+    expect(posted).toHaveLength(1);
+    expect("thread_ts" in posted[0]!.form).toBe(false);
+  });
+
   it("threads both posts when the link is a group thread", async () => {
     const controlPlane = createFakeControlPlane(transcriptWith("Done."));
 

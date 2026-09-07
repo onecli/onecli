@@ -77,11 +77,21 @@ const memberJoinedEvent = z.object({
   inviter: z.string().optional(),
 });
 
+/** The invite's mirror: the bot being REMOVED from a channel. Slack sends
+ * `member_left_channel` for every leaver; only the bot's own departure is a
+ * door call (teammates leaving is noise, like joins). */
+const memberLeftEvent = z.object({
+  type: z.literal("member_left_channel"),
+  channel: z.string().min(1),
+  user: z.string().min(1),
+});
+
 /** One event as it arrives — from the HTTP envelope or the socket payload. */
 export const slackEventSchema = z.union([
   messageEvent,
   appMentionEvent,
   memberJoinedEvent,
+  memberLeftEvent,
   // Anything else classifies as ignore below; parse it loosely so an unknown
   // event type is a non-event, never a 500.
   z.object({ type: z.string() }).passthrough(),
@@ -105,8 +115,18 @@ export type SlackDoorCall =
       files: ChannelFileRef[];
       /** Where the answer goes (Slack channel id — the IM). */
       replyChannel: string;
-      /** Slack threads DM replies too when asked; DMs answer top-level. */
-      replyThreadTs: null;
+      /**
+       * WHERE THIS MESSAGE WAS ASKED: the DM thread's root when the person
+       * typed inside a thread, else null for the top-level DM.
+       *
+       * A DM is ONE conversation (§3.18: the same row their web chat reads),
+       * and that stays true — threads inside it are a presentation of the
+       * same exchange, not separate contexts. What they DO change is the
+       * address the answer belongs at: a reply typed in a thread is owed an
+       * answer in that thread, not at the bottom of the DM where nobody is
+       * looking.
+       */
+      replyThreadTs: string | null;
       /** The triggering message's own ts — where the receipt reaction sits. */
       messageTs: string;
     }
@@ -128,6 +148,11 @@ export type SlackDoorCall =
   | {
       door: "invite";
       inviterExternalUserId: string | null;
+      channel: string;
+    }
+  | {
+      /** The bot was removed from a group surface - presence cleanup. */
+      door: "leave";
       channel: string;
     }
   | { door: "ignore"; reason: string };
@@ -161,6 +186,15 @@ export const interpretSlackEvent = (
       inviterExternalUserId: joined.inviter ?? null,
       channel: joined.channel,
     };
+  }
+
+  if (event.type === "member_left_channel") {
+    const left = event as z.infer<typeof memberLeftEvent>;
+    // Only the BOT leaving matters - the mirror of the join rule above.
+    if (!ctx.botUserId || left.user !== ctx.botUserId) {
+      return { door: "ignore", reason: "someone-else-left" };
+    }
+    return { door: "leave", channel: left.channel };
   }
 
   if (event.type === "app_mention") {
@@ -214,7 +248,12 @@ export const interpretSlackEvent = (
         text: message.text ?? "",
         files: normalizeFiles(message.files),
         replyChannel: message.channel,
-        replyThreadTs: null,
+        // The thread the person actually typed in, when they typed in one.
+        // The CONVERSATION is still the DM's single direct row — only the
+        // reply address narrows — so a threaded DM keeps one continuous
+        // context and simply answers where it was asked. Before this, every
+        // DM thread reply was answered at the bottom of the DM instead.
+        replyThreadTs: message.thread_ts ?? null,
         messageTs: message.ts,
       };
     }

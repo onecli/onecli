@@ -4,7 +4,8 @@ export type Plan =
   | "team"
   | "team-legacy"
   | "scale"
-  | "enterprise";
+  | "enterprise"
+  | "aws-marketplace";
 
 export type SubscriptionStatus = Plan;
 
@@ -23,6 +24,8 @@ export const normalizePlan = (status: SubscriptionStatus | string): Plan => {
       return "scale";
     case "enterprise":
       return "enterprise";
+    case "aws-marketplace":
+      return "aws-marketplace";
     default:
       return "free";
   }
@@ -241,7 +244,45 @@ export const ENTERPRISE_PLAN_CONFIG: PlanConfig = {
   features: [...ENTERPRISE_PLAN.features],
 };
 
-const ALL_PLAN_CONFIGS: PlanConfig[] = [...PLANS, ENTERPRISE_PLAN_CONFIG];
+/**
+ * The AWS Marketplace Team Plan (plans/aws-marketplace-listing.md): a
+ * 12-month contract bought through AWS Marketplace — 10 agents included,
+ * extra agents metered as overage (soft cap, never blocked). Marketplace-
+ * managed like enterprise is sales-managed: it is NOT in `PLANS` (never
+ * offered via self-serve checkout), and `subscriptionStatus` is written by
+ * the marketplace fulfillment/SNS flows, not by Stripe reconciliation.
+ * `maxAgents` here is the base contract; the effective entitlement
+ * (base + committed extras) lives on AwsMarketplaceSubscription.
+ */
+export const AWS_MARKETPLACE_PLAN_CONFIG: PlanConfig = {
+  id: "aws-marketplace",
+  name: "Team (AWS Marketplace)",
+  tagline: "Billed through AWS",
+  subtitle: "12-month contract via AWS Marketplace",
+  price: 1650,
+  yearlyPrice: 19800,
+  priceSub: "10 agents included",
+  limits: {
+    maxAgents: 10,
+    maxWorkspaces: Infinity,
+    maxSecrets: Infinity,
+    maxOAuthApps: Infinity,
+    maxMembers: Infinity,
+    maxIntegrationCalls: Infinity,
+    auditLogDays: 90,
+  },
+  features: [
+    "Everything in Scale",
+    "Billed through AWS Marketplace",
+    "Extra agents at $1,200/agent/year",
+  ],
+};
+
+const ALL_PLAN_CONFIGS: PlanConfig[] = [
+  ...PLANS,
+  ENTERPRISE_PLAN_CONFIG,
+  AWS_MARKETPLACE_PLAN_CONFIG,
+];
 
 export const getPlanConfig = (plan: Plan): PlanConfig =>
   ALL_PLAN_CONFIGS.find((p) => p.id === plan) ?? PLANS[0]!;
@@ -257,10 +298,11 @@ const PLAN_RANK: Record<Plan, number> = {
   team: 2,
   "team-legacy": 2,
   scale: 3,
+  "aws-marketplace": 3,
   enterprise: 4,
 };
 
-/** Ordinal tier of a plan (free < pro < team = team-legacy < scale < enterprise). */
+/** Ordinal tier of a plan (free < pro < team = team-legacy < scale = aws-marketplace < enterprise). */
 export const planRank = (plan: Plan): number => PLAN_RANK[plan];
 
 /** Whether `plan` is at least `min` in the tier order (free < pro < team = team-legacy < scale < enterprise). */
@@ -269,7 +311,7 @@ export const isPlanAtLeast = (plan: Plan, min: Plan): boolean =>
 
 /** Sales-managed plans are never purchasable or modifiable via self-serve billing. */
 export const isSalesManagedPlan = (plan: Plan): boolean =>
-  plan === "enterprise";
+  plan === "enterprise" || plan === "aws-marketplace";
 
 /**
  * Plans retired from the pricing page. Grandfathered orgs keep theirs (the

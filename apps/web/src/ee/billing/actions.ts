@@ -35,6 +35,20 @@ export async function getSubscriptionStatus(
 
   let status = organization.subscriptionStatus as SubscriptionStatus;
 
+  // AWS-Marketplace-billed orgs: status is owned by the marketplace
+  // fulfillment/SNS flows, never by Stripe reconciliation. Report it as
+  // sales-managed so the UI hides every self-serve billing control.
+  if (status === "aws-marketplace") {
+    return {
+      status,
+      hasStripeCustomer: !!organization.stripeCustomerId,
+      cancelAtPeriodEnd: false,
+      interval: "year",
+      renewsAt: null,
+      salesManaged: true,
+    };
+  }
+
   if (organization.stripeCustomerId) {
     try {
       const subscriptions = await getStripe().subscriptions.list({

@@ -9,6 +9,7 @@ import {
   formatOriginsBanner,
   resolveOriginsFromEnv,
   resolvePublicOrigins,
+  trustedBrowserOrigin,
 } from "./public-origins";
 
 describe("resolvePublicOrigins — derivation", () => {
@@ -446,6 +447,134 @@ describe("env wrapper and facades", () => {
     expect(configuredApiUrl()).toBe("http://192.0.2.10:10256");
     process.env.ONECLI_EXTERNAL_URL = "https://onecli.acme.com";
     expect(configuredApiUrl()).toBe("https://onecli.acme.com");
+  });
+});
+
+// The credentialed-CORS allow-list and the OAuth trusted-referer step both
+// resolve through this. Fail-closed is the whole point: a `undefined` here
+// means no `Access-Control-Allow-Origin` header, so an attacker's page cannot
+// read an authenticated response (SameSite=lax does not cover it — it is
+// site-scoped, so a sibling subdomain is same-site and sends the cookie).
+describe("trustedBrowserOrigin", () => {
+  const orig: Record<string, string | undefined> = {};
+  for (const key of ENV_KEYS) orig[key] = process.env[key];
+  afterEach(() => {
+    for (const key of ENV_KEYS) {
+      if (orig[key] === undefined) delete process.env[key];
+      else process.env[key] = orig[key];
+    }
+  });
+  const clearAll = () => {
+    for (const key of ENV_KEYS) delete process.env[key];
+  };
+
+  it("echoes the configured app origin", () => {
+    clearAll();
+    process.env.ONECLI_EXTERNAL_URL = "https://onecli.acme.com";
+    expect(trustedBrowserOrigin("https://onecli.acme.com")).toBe(
+      "https://onecli.acme.com",
+    );
+  });
+
+  it("refuses an arbitrary origin", () => {
+    clearAll();
+    process.env.ONECLI_EXTERNAL_URL = "https://onecli.acme.com";
+    expect(trustedBrowserOrigin("https://evil.example")).toBeUndefined();
+  });
+
+  // Hono hands the callback "" when the request carries no Origin (a CLI, a
+  // curl, a server-side caller); null/undefined arrive from other callers.
+  it("refuses an absent, empty or null origin", () => {
+    clearAll();
+    expect(trustedBrowserOrigin(undefined)).toBeUndefined();
+    expect(trustedBrowserOrigin("")).toBeUndefined();
+    expect(trustedBrowserOrigin(null)).toBeUndefined();
+  });
+
+  it("refuses a malformed origin", () => {
+    clearAll();
+    expect(trustedBrowserOrigin("not-an-origin")).toBeUndefined();
+    expect(trustedBrowserOrigin("javascript:alert(1)")).toBeUndefined();
+  });
+
+  // The classic allow-list bypass: a substring match would admit both.
+  it("does not match on a host prefix or suffix", () => {
+    clearAll();
+    process.env.ONECLI_EXTERNAL_URL = "https://onecli.acme.com";
+    expect(
+      trustedBrowserOrigin("https://onecli.acme.com.evil.example"),
+    ).toBeUndefined();
+    expect(
+      trustedBrowserOrigin("https://evil-onecli.acme.com"),
+    ).toBeUndefined();
+  });
+
+  // A sibling subdomain is SAME-SITE, so the session cookie rides along on a
+  // credentialed fetch. The allow-list is the only fence, and a shared cookie
+  // domain (BETTER_AUTH_COOKIE_DOMAIN) does not widen it.
+  it("refuses a sibling subdomain of the dashboard", () => {
+    clearAll();
+    process.env.ONECLI_EXTERNAL_URL = "https://onecli.acme.com";
+    expect(trustedBrowserOrigin("https://blog.acme.com")).toBeUndefined();
+  });
+
+  // Same host, different port is same-site too — and not the dashboard.
+  it("refuses another port on the dashboard's own host", () => {
+    clearAll();
+    process.env.ONECLI_EXTERNAL_URL = "http://192.0.2.10:10254";
+    expect(trustedBrowserOrigin("http://192.0.2.10:9999")).toBeUndefined();
+  });
+
+  it("accepts an ONECLI_TRUSTED_ORIGINS extra", () => {
+    clearAll();
+    process.env.ONECLI_EXTERNAL_URL = "http://192.0.2.10:10254";
+    process.env.ONECLI_TRUSTED_ORIGINS = "http://192.168.1.50:10254";
+    expect(trustedBrowserOrigin("http://192.168.1.50:10254")).toBe(
+      "http://192.168.1.50:10254",
+    );
+  });
+
+  it("accepts the loopback twin of a zero-config install", () => {
+    clearAll();
+    expect(trustedBrowserOrigin("http://127.0.0.1:10254")).toBe(
+      "http://127.0.0.1:10254",
+    );
+  });
+
+  // The split-host shape: the dashboard calls an api on its own hostname, so
+  // that origin has to be answerable too.
+  it("accepts the configured split-host api origin", () => {
+    clearAll();
+    process.env.ONECLI_EXTERNAL_URL = "https://app.acme.com";
+    process.env.API_URL = "https://api.acme.com";
+    expect(trustedBrowserOrigin("https://api.acme.com")).toBe(
+      "https://api.acme.com",
+    );
+  });
+
+  // Trailing-slash and case differences are normalization, not new trust.
+  it("normalizes before comparing", () => {
+    clearAll();
+    process.env.ONECLI_EXTERNAL_URL = "https://onecli.acme.com";
+    expect(trustedBrowserOrigin("https://onecli.acme.com/")).toBe(
+      "https://onecli.acme.com",
+    );
+    expect(trustedBrowserOrigin("HTTPS://onecli.acme.com")).toBe(
+      "https://onecli.acme.com",
+    );
+  });
+
+  // Env is read per call, never frozen at module load: the api-server builds
+  // its CORS middleware once at import, so a cached set would pin whatever
+  // the environment looked like then.
+  it("reads the environment per call", () => {
+    clearAll();
+    process.env.ONECLI_EXTERNAL_URL = "https://first.example";
+    expect(trustedBrowserOrigin("https://second.example")).toBeUndefined();
+    process.env.ONECLI_EXTERNAL_URL = "https://second.example";
+    expect(trustedBrowserOrigin("https://second.example")).toBe(
+      "https://second.example",
+    );
   });
 });
 

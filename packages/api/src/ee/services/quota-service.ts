@@ -78,11 +78,19 @@ const getOrgLimits = async (
   // both directions (600 raises scale's 20 agents, 0 blocks all creation).
   // Applied to the plan limits here so every caller — the invite gate, the
   // pre-check dialog and the usage page — shares one answer.
+  //
+  // AWS Marketplace orgs are SOFT-capped on agents: the contract includes 10
+  // but extras are allowed and metered as overage ($1,200/agent-year,
+  // plans/aws-marketplace-listing.md §5), so agent creation is never blocked.
+  // The ops override still wins if set (a kill switch for abuse).
+  const maxAgents =
+    org.maxAgentsOverride ??
+    (plan === "aws-marketplace" ? Infinity : planLimits.maxAgents);
   return {
     plan,
     limits: {
       ...planLimits,
-      maxAgents: org.maxAgentsOverride ?? planLimits.maxAgents,
+      maxAgents,
       maxMembers: org.maxMembersOverride ?? planLimits.maxMembers,
     },
   };

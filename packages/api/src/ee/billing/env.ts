@@ -54,7 +54,10 @@ export const STRIPE_ENTERPRISE_PRICE_ID =
   process.env.STRIPE_ENTERPRISE_PRICE_ID ?? "";
 
 /** Plans purchasable via self-serve checkout. */
-export type SelfServePlan = Exclude<Plan, "free" | "enterprise">;
+export type SelfServePlan = Exclude<
+  Plan,
+  "free" | "enterprise" | "aws-marketplace"
+>;
 
 /** Self-serve base price ids by plan and billing interval. */
 export const PLAN_PRICE_IDS: Record<

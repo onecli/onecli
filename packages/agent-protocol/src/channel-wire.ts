@@ -103,6 +103,17 @@ export const adapterWorkTurnSchema = z.object({
   message: z.string(),
   error: z.string().nullable(),
   errorCode: z.string().nullable(),
+  /**
+   * WHERE THIS TURN WAS ASKED, when it is finer than the link's own address
+   * (Slack: the DM thread the person typed in). The answer is posted here
+   * rather than at the link's address, so a threaded question is answered in
+   * its thread instead of at the bottom of the DM.
+   *
+   * Provider-opaque; the adapter only hands it back. Optional/nullable for
+   * version skew in BOTH directions: an older control plane never sends it,
+   * and a turn that arrived at the link's own address leaves it null.
+   */
+  sourceThreadId: z.string().nullable().optional(),
   /** ISO timestamps. */
   createdAt: z.string(),
   finishedAt: z.string().nullable(),
@@ -235,6 +246,41 @@ export const adapterDecisionResponseSchema = z.discriminatedUnion("kind", [
 ]);
 export type AdapterDecisionResponse = z.infer<
   typeof adapterDecisionResponseSchema
+>;
+
+// ── Reach grants (space grants: "answer everyone in this channel") ─────────
+
+export const adapterReachDecisionRequestSchema = z.object({
+  presenceId: z.string().min(1),
+  grantId: z.string().min(1).max(500),
+  /**
+   * The settlement the clicker chose: open the channel to everyone in it,
+   * keep it to OneCLI users, or keep the agent silent there.
+   *
+   * The pre-rename `approve`/`deny` pair stays ACCEPTED (never emitted) so
+   * a channel-adapter deployable running older code keeps settling grants
+   * through a rolling deploy - the adapter and the control plane ship
+   * separately, so the wire has to tolerate one being behind. `deny` always
+   * meant "OneCLI users only", which is `members_only`.
+   */
+  decision: z.enum(["approved", "members_only", "blocked", "approve", "deny"]),
+  clickerExternalUserId: z.string().min(1).max(200),
+});
+export type AdapterReachDecisionRequest = z.infer<
+  typeof adapterReachDecisionRequestSchema
+>;
+
+export const adapterReachDecisionResponseSchema = z.discriminatedUnion("kind", [
+  z.object({
+    kind: z.literal("decided"),
+    decidedByName: z.string(),
+    state: z.string(),
+  }),
+  z.object({ kind: z.literal("already_settled") }),
+  z.object({ kind: z.literal("refused"), message: z.string() }),
+]);
+export type AdapterReachDecisionResponse = z.infer<
+  typeof adapterReachDecisionResponseSchema
 >;
 
 export const adapterPromptClaimResponseSchema = z.object({

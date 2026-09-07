@@ -75,6 +75,48 @@ export const detachPresenceSchema = z
   })
   .strict();
 
+/** POST /channel-adapter/reach-decision - a forwarded reach-card click
+ * (socket arm). Mirrors adapterDecisionSchema; the wire schema is the
+ * shared truth (agent-protocol). */
+export const adapterReachDecisionSchema = z
+  .object({
+    presenceId: z.string().trim().min(1).max(200),
+    grantId: z.string().trim().min(1).max(500),
+    // Both vocabularies: the three-way settlement, plus the pre-rename
+    // pair an older channel-adapter deployable still sends mid-rollout
+    // ("deny" always meant "OneCLI users only" = members_only).
+    decision: z
+      .enum(["approved", "members_only", "blocked", "approve", "deny"])
+      .transform((d) =>
+        d === "approve" ? "approved" : d === "deny" ? "members_only" : d,
+      ),
+    clickerExternalUserId: z.string().trim().min(1).max(200),
+  })
+  .strict();
+
+/** PUT /v1/agents/:agentId/channels/:provider/reach/:externalRef - the
+ * dashboard's per-space settlement. The same three answers the card asks
+ * for: open to everyone in the space, OneCLI users only, or silent there.
+ * `revoked` is the pre-rename spelling of `members_only`, still accepted so
+ * an older dashboard bundle keeps working through a deploy. */
+export const setReachStateSchema = z
+  .object({
+    state: z
+      .enum(["approved", "members_only", "blocked", "revoked"])
+      .transform((v) => (v === "revoked" ? "members_only" : v)),
+  })
+  .strict();
+
+/** PUT /v1/agents/:agentId/channels/:provider/reach/people/:externalRef -
+ * the dashboard's per-person settlement. Two answers only: a single human
+ * either may reach the agent or may not; "OneCLI users only" describes a
+ * population, not a person, so it is not offered here. */
+export const setPersonReachStateSchema = z
+  .object({
+    state: z.enum(["approved", "blocked"]),
+  })
+  .strict();
+
 // ── The adapter's wire (routes/channel-adapter.ts) ──────────────────────────
 // Registration validates with `adapterRegisterRequestSchema` from
 // @onecli/agent-protocol (the shared wire), not a local copy.

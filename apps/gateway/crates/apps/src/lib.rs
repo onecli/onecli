@@ -1230,6 +1230,41 @@ static APP_PROVIDERS: &[AppProvider] = &[
         body_transform: None,
     },
     AppProvider {
+        provider: "stripe",
+        display_name: "Stripe",
+        // Stripe authenticates with API keys over `Authorization: Bearer` (the
+        // docs also show `-u key:` Basic; Bearer is what the v2 surface uses
+        // and both are accepted). `files.stripe.com` is the separate upload
+        // host for the Files API and takes the SAME key, so it is listed
+        // explicitly rather than reached with a suffix pattern — every other
+        // *.stripe.com host (dashboard, checkout, js) is browser-facing and
+        // must never receive the key.
+        host_rules: &[
+            HostRule {
+                pattern: HostPattern::Exact("api.stripe.com"),
+                path_prefix: None,
+                strategy: AuthStrategy::Bearer,
+                intercept: false,
+                credential_host_field: None,
+            },
+            HostRule {
+                pattern: HostPattern::Exact("files.stripe.com"),
+                path_prefix: None,
+                strategy: AuthStrategy::Bearer,
+                intercept: false,
+                credential_host_field: None,
+            },
+        ],
+        // API keys don't expire; they're rotated in the Stripe Dashboard.
+        refresh: None,
+        metadata_headers: &[],
+        credential_headers: &[],
+        credential_params: &[],
+        host_rewrite: None,
+        finalizer: None,
+        body_transform: None,
+    },
+    AppProvider {
         provider: "aws-role",
         display_name: "AWS Role",
         host_rules: &[
@@ -3033,6 +3068,73 @@ mod tests {
     fn todoist_refresh_uses_form_body_format() {
         let config = refresh_config("todoist").expect("todoist should have refresh config");
         assert!(matches!(config.body_format, TokenBodyFormat::Form));
+    }
+
+    // ── Stripe ────────────────────────────────────────────────────────
+
+    #[test]
+    fn provider_for_host_stripe() {
+        let result = provider_for_host("api.stripe.com");
+        assert_eq!(result, Some(("stripe", "Stripe")));
+    }
+
+    #[test]
+    fn stripe_api_uses_bearer() {
+        let injections = build_app_injections("stripe", "api.stripe.com", "rk_live_test123");
+        assert_eq!(injections.len(), 1);
+        assert_eq!(
+            injections[0],
+            Injection::SetHeader {
+                name: "authorization".to_string(),
+                value: "Bearer rk_live_test123".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn stripe_files_host_also_uses_bearer() {
+        // The Files API lives on its own upload host and takes the same key.
+        let injections = build_app_injections("stripe", "files.stripe.com", "rk_live_test123");
+        assert_eq!(injections.len(), 1);
+        assert_eq!(
+            injections[0],
+            Injection::SetHeader {
+                name: "authorization".to_string(),
+                value: "Bearer rk_live_test123".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn stripe_browser_facing_hosts_get_no_credentials() {
+        // Only the two API hosts are registered. Stripe's browser-facing hosts
+        // must never receive the secret key, and a lookalike suffix registered
+        // by someone else must never match either.
+        for host in [
+            "dashboard.stripe.com",
+            "checkout.stripe.com",
+            "js.stripe.com",
+            "connect.stripe.com",
+            "stripe.com",
+            "api.stripe.com.evil.example",
+            "evilapi.stripe.com",
+        ] {
+            assert!(
+                providers_for_host(host).is_empty(),
+                "host {host} must not resolve to the stripe provider"
+            );
+        }
+    }
+
+    #[test]
+    fn stripe_needs_access_token() {
+        assert!(needs_access_token("stripe"));
+    }
+
+    #[test]
+    fn stripe_has_no_refresh_config() {
+        // API keys don't expire — there is no refresh flow to run.
+        assert!(refresh_config("stripe").is_none());
     }
 
     // ── Vercel ────────────────────────────────────────────────────────

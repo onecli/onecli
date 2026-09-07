@@ -184,6 +184,7 @@ export const createFakeControlPlane = (
   getWork: async () => ({ finished: [] }),
   ingest: async () => ({ kind: "duplicate" as const }),
   decide: async () => ({ kind: "already_settled" as const }),
+  decideReach: async () => ({ kind: "already_settled" as const }),
   claimPrompt: async () => true,
   recordPromptMessage: async () => {},
   settlePrompt: async () => {},

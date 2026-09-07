@@ -90,6 +90,14 @@ export const AMBIENT_HAZARD_VARS: readonly string[] = [
   "STRIPE_SCALE_SELF_HOSTED_PRICE_ID",
   "STRIPE_SCALE_SELF_HOSTED_YEARLY_PRICE_ID",
   "STRIPE_ENTERPRISE_PRICE_ID",
+  // AWS Marketplace SaaS listing (ee/billing/aws-marketplace/env.ts) —
+  // ambient values would flip the marketplace flows live and aim the real
+  // AWS APIs, so tests always clear them.
+  "AWS_MARKETPLACE_PRODUCT_CODE",
+  "AWS_MARKETPLACE_CONTRACT_DIMENSION",
+  "AWS_MARKETPLACE_OVERAGE_DIMENSION",
+  "AWS_MARKETPLACE_REGION",
+  "AWS_MARKETPLACE_SNS_TOPIC_ARN",
   // Outbound comms
   "RESEND_API_KEY",
   "RESEND_WEBHOOK_SECRET",

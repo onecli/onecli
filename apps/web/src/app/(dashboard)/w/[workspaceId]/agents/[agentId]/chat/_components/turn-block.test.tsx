@@ -40,6 +40,8 @@ const turn = (overrides: Partial<Turn> = {}): Turn => ({
 const rendered = (overrides: Partial<RenderedTurn> = {}): RenderedTurn => ({
   turnId: "t1",
   text: "",
+  work: [],
+  liveText: "",
   notices: [],
   tools: [],
   ended: true,
@@ -127,6 +129,120 @@ describe("TurnBlock", () => {
     const output = screen.getByText(/results/);
     expect(output.textContent).toContain("<script>alert(1)</script>");
     expect(document.querySelector("script")).toBeNull();
+  });
+
+  it("renders the running turn as a work log, in stream order, as plain text", () => {
+    // The live view is a chronological log: narration, the tool that closed
+    // it, then the still-streaming tail. Narration is UNTRUSTED mid-turn
+    // model text and must render as TEXT — markdown syntax stays literal
+    // (the answer bubble is the only markdown surface).
+    const { container } = render(
+      <TurnBlock
+        turn={turn({ status: "running" })}
+        rendered={rendered({
+          ended: false,
+          work: [
+            { kind: "narration", text: "Let me **check** the logs." },
+            {
+              kind: "tool",
+              tool: { callId: "c1", name: "bash", output: "ok" },
+            },
+          ],
+          liveText: "Now the config.",
+        })}
+      />,
+    );
+    // Markdown stays literal — the ** marks render as characters.
+    const narration = screen.getByText("Let me **check** the logs.");
+    expect(narration).toBeInTheDocument();
+    expect(container.querySelector("strong")).toBeNull();
+    expect(screen.getByText("bash")).toBeInTheDocument();
+    expect(screen.getByText(/Now the config\./)).toBeInTheDocument();
+    // Stream order: narration precedes the tool row, which precedes the tail.
+    const tool = screen.getByText("bash");
+    const tail = screen.getByText(/Now the config\./);
+    expect(
+      narration.compareDocumentPosition(tool) &
+        Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+    expect(
+      tool.compareDocumentPosition(tail) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+  });
+
+  it("silences the caption while narration streams — the words are the signal", () => {
+    render(
+      <TurnBlock
+        turn={turn({ status: "running" })}
+        rendered={rendered({
+          ended: false,
+          liveText: "Looking at the failing test now.",
+          activity: "Running a command",
+        })}
+      />,
+    );
+    expect(screen.queryByText("Running a command")).not.toBeInTheDocument();
+    // …and back when the agent goes quiet (a tool closes the segment). A
+    // whitespace-only tail counts as quiet too — a bare newline must not
+    // blank the caption row.
+    render(
+      <TurnBlock
+        turn={turn({ status: "running" })}
+        rendered={rendered({
+          ended: false,
+          liveText: " \n ",
+          activity: "Running a command",
+        })}
+      />,
+    );
+    expect(screen.getByText("Running a command")).toBeInTheDocument();
+  });
+
+  it("drops the narration and promotes only the answer when the turn settles", () => {
+    // The fade-away decision (1a): the work log is transient by design —
+    // history carries no deltas, so what a refresh shows and what the live
+    // viewer ends on must agree: tools + answer, no narration.
+    const { rerender } = render(
+      <TurnBlock
+        turn={turn({ status: "running" })}
+        rendered={rendered({
+          ended: false,
+          work: [
+            { kind: "narration", text: "Let me check the logs." },
+            {
+              kind: "tool",
+              tool: { callId: "c1", name: "bash", output: "ok" },
+            },
+          ],
+          liveText: "CI passed",
+        })}
+      />,
+    );
+    expect(screen.getByText("Let me check the logs.")).toBeInTheDocument();
+
+    rerender(
+      <TurnBlock
+        turn={turn({ status: "done" })}
+        rendered={rendered({
+          ended: true,
+          text: "CI passed; nothing to do.",
+          work: [
+            { kind: "narration", text: "Let me check the logs." },
+            {
+              kind: "tool",
+              tool: { callId: "c1", name: "bash", output: "ok" },
+            },
+          ],
+          tools: [{ callId: "c1", name: "bash", output: "ok" }],
+        })}
+      />,
+    );
+    expect(
+      screen.queryByText("Let me check the logs."),
+    ).not.toBeInTheDocument();
+    expect(screen.getByText("CI passed; nothing to do.")).toBeInTheDocument();
+    // The tool record survives the settle — only narration is transient.
+    expect(screen.getByText("bash")).toBeInTheDocument();
   });
 
   it("prefers the turn row's error — the one witness when no event arrived", () => {

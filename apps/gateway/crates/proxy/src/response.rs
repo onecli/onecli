@@ -324,6 +324,28 @@ pub fn resolution_failed<S>() -> Response<ForwardBody<S>> {
     )
 }
 
+/// 504 Gateway Timeout — upstream accepted the request but never returned
+/// response headers within the gateway's bound.
+///
+/// Sanitized on purpose: the stable `upstream_timeout` identifier is all a
+/// client gets. The URL, the `reqwest` error and any transport detail stay in
+/// the server-side log, since the request that stalled is exactly the kind
+/// that carries an injected credential in its headers.
+///
+/// Marked non-retryable. A stalled request may still have been executed
+/// upstream, so the honest signal is "outcome unknown, do not replay", not an
+/// invitation to send it again.
+pub fn upstream_timeout<S>() -> Response<ForwardBody<S>> {
+    with_no_retry(json_error(
+        StatusCode::GATEWAY_TIMEOUT,
+        serde_json::json!({
+            "error": "upstream_timeout",
+            "message": "OneCLI gateway timed out waiting for upstream response headers. \
+                        The request was not retried. The upstream may or may not have processed it.",
+        }),
+    ))
+}
+
 /// 403 Forbidden — manual approval denied or timed out.
 pub fn manual_approval_denied<S>(approval_id: &str, reason: &str) -> Response<ForwardBody<S>> {
     with_no_retry(json_error(
@@ -893,5 +915,47 @@ mod tests {
             "application/json"
         );
         assert_eq!(resp.headers().get("x-should-retry").unwrap(), "false");
+    }
+
+    #[tokio::test]
+    async fn upstream_timeout_is_a_sanitized_non_retryable_504() {
+        let resp: Response<TestBody> = upstream_timeout();
+
+        assert_eq!(resp.status(), StatusCode::GATEWAY_TIMEOUT);
+        assert_eq!(
+            resp.headers()
+                .get("x-should-retry")
+                .and_then(|v| v.to_str().ok()),
+            Some("false"),
+            "an ambiguous timeout must not invite the client to replay it",
+        );
+
+        use http_body_util::BodyExt;
+        let body = match resp.into_body() {
+            Either::Left(full) => full.collect().await.expect("collect full body").to_bytes(),
+            Either::Right(_) => panic!("expected Left"),
+        };
+        let json: serde_json::Value = serde_json::from_slice(&body).expect("valid JSON");
+
+        assert_eq!(
+            json["error"], "upstream_timeout",
+            "the stable identifier is what callers match on",
+        );
+
+        // Sanitized: the body carries the stable id and a human message and
+        // nothing else. No upstream URL, no transport or `reqwest` detail, and
+        // nothing that could echo an injected credential back to the client.
+        let object = json.as_object().expect("object body");
+        let mut keys: Vec<&str> = object.keys().map(String::as_str).collect();
+        keys.sort_unstable();
+        assert_eq!(keys, ["error", "message"]);
+
+        let rendered = String::from_utf8_lossy(&body).to_string();
+        for leak in ["http://", "https://", "reqwest", "Bearer", "token\":"] {
+            assert!(
+                !rendered.contains(leak),
+                "timeout body must not expose {leak:?}: {rendered}",
+            );
+        }
     }
 }

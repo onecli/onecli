@@ -256,6 +256,48 @@ const AUTH_CHECK_BODY_LIMIT: usize = 8192;
 /// OAuth refresh bodies are tiny; this only guards against pathological inputs.
 const MAX_DEFAULT_INTERCEPT_BODY: usize = 64 * 1024;
 
+/// Default bound on the wait for upstream *response headers*.
+///
+/// Deliberately generous: this is a containment backstop against an operation
+/// that will never make progress, not a latency budget. The gateway fronts LLM
+/// and API providers whose non-streaming responses can legitimately hold
+/// headers for minutes, and the same wait also covers connecting and writing a
+/// large request body upstream. A tight bound would fail slow-but-healthy
+/// requests.
+const DEFAULT_UPSTREAM_HEADER_TIMEOUT: Duration = Duration::from_secs(300);
+
+/// Parse `GATEWAY_UPSTREAM_HEADER_TIMEOUT_SECS` into the header deadline.
+///
+/// Zero would mean "expire immediately", which no operator means by it; treat
+/// it — like anything unparsable — as unset rather than as a gateway that 504s
+/// every request.
+fn parse_upstream_header_timeout(raw: Option<&str>) -> Duration {
+    raw.and_then(|raw| raw.trim().parse::<u64>().ok())
+        .filter(|secs| *secs > 0)
+        .map(Duration::from_secs)
+        .unwrap_or(DEFAULT_UPSTREAM_HEADER_TIMEOUT)
+}
+
+/// The bound applied to the wait for upstream response headers.
+///
+/// Read once: the deadline is a deployment-wide property, and re-reading it
+/// per request would let a mid-flight environment change apply to some
+/// requests and not others. Module-scoped so tests can pin it without
+/// mutating process environment (which would race other tests' env reads).
+static UPSTREAM_HEADER_TIMEOUT: std::sync::OnceLock<Duration> = std::sync::OnceLock::new();
+
+/// The bound applied to the wait for upstream response headers, from
+/// `GATEWAY_UPSTREAM_HEADER_TIMEOUT_SECS` (whole seconds).
+fn upstream_header_timeout() -> Duration {
+    *UPSTREAM_HEADER_TIMEOUT.get_or_init(|| {
+        parse_upstream_header_timeout(
+            std::env::var("GATEWAY_UPSTREAM_HEADER_TIMEOUT_SECS")
+                .ok()
+                .as_deref(),
+        )
+    })
+}
+
 /// Mint any deferred credentials and fold their rules into the request's
 /// injection set. Called once the request is allowed — see
 /// [`crate::connect::PendingInjection`] (this crate's `connect`).
@@ -952,10 +994,36 @@ pub async fn forward_request(
     }
     upstream = upstream.body(forward_body);
 
-    let upstream_resp = upstream
-        .send()
-        .await
-        .with_context(|| format!("forwarding to {url}"))?;
+    // Bounded around `send()` alone. `send()` resolves once the response head
+    // has been read, so this caps the wait for response headers (and the
+    // connect + request-write that precede them) and nothing else: the body is
+    // streamed from the `Response` afterwards, outside this deadline, leaving
+    // SSE and long downloads unbounded as before. `reqwest`'s own
+    // `ClientBuilder::timeout` / `RequestBuilder::timeout` could not be used
+    // for this — both are total deadlines still enforced while the body
+    // streams, and `read_timeout` fires on idle-but-healthy streams.
+    //
+    // Without this bound, an upstream that accepts the request and then never
+    // answers leaves the forwarding future pending forever while the client
+    // sees only its own eventual timeout (issue #493).
+    let upstream_resp = match tokio::time::timeout(upstream_header_timeout(), upstream.send()).await
+    {
+        Ok(result) => result.with_context(|| format!("forwarding to {url}"))?,
+        // Deliberately NOT replayed. Once the request has gone upstream its
+        // outcome is unknown, and re-sending could double a non-idempotent
+        // operation the upstream already performed. Report and stop; the
+        // pooled connection the stall happened on is abandoned when the
+        // request future drops, so it is not handed to a later request.
+        Err(_elapsed) => {
+            warn!(
+                method = %method,
+                url = %url,
+                timeout_secs = upstream_header_timeout().as_secs(),
+                "upstream did not send response headers before the deadline — failing without retry",
+            );
+            return Ok(response::upstream_timeout());
+        }
+    };
 
     let status = upstream_resp.status();
     let resp_headers = upstream_resp.headers().clone();
@@ -1741,5 +1809,292 @@ mod tests {
         // Invalid UTF-8 prefix + "api key"
         let body = &[0xFF, 0xFE, 0x61, 0x70, 0x69, 0x20, 0x6B, 0x65, 0x79];
         assert!(body_indicates_auth_error(body));
+    }
+
+    // ── upstream header deadline (issue #493) ────────────────────────────
+
+    #[test]
+    fn header_timeout_parses_explicit_seconds() {
+        assert_eq!(
+            parse_upstream_header_timeout(Some("7")),
+            Duration::from_secs(7)
+        );
+        assert_eq!(
+            parse_upstream_header_timeout(Some(" 42 ")),
+            Duration::from_secs(42)
+        );
+    }
+
+    #[test]
+    fn header_timeout_rejects_zero_and_garbage() {
+        // Zero means "504 everything", which no operator intends; both fall
+        // back to the containment default.
+        for bad in ["0", "", "abc", "-5", "1.5"] {
+            assert_eq!(
+                parse_upstream_header_timeout(Some(bad)),
+                DEFAULT_UPSTREAM_HEADER_TIMEOUT,
+                "{bad:?} should fall back to the default",
+            );
+        }
+        assert_eq!(
+            parse_upstream_header_timeout(None),
+            DEFAULT_UPSTREAM_HEADER_TIMEOUT
+        );
+    }
+
+    /// An upstream that completes the accept and reads the request, then never
+    /// sends response headers. Counts accepted connections, which is how the
+    /// no-replay assertion detects a second attempt: a replay cannot reuse the
+    /// connection it abandoned, so it must appear as another accept.
+    fn silent_upstream() -> (std::net::SocketAddr, Arc<std::sync::atomic::AtomicUsize>) {
+        use std::io::Read;
+        use std::sync::atomic::AtomicUsize;
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind silent upstream");
+        let addr = listener.local_addr().expect("local addr");
+        let accepts = Arc::new(AtomicUsize::new(0));
+        let counter = Arc::clone(&accepts);
+
+        std::thread::spawn(move || {
+            // Held open: closing would hand the gateway a connection error
+            // instead of the indefinite wait under test.
+            let mut held = Vec::new();
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { break };
+                counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let mut buf = [0u8; 2048];
+                let _ = stream.read(&mut buf);
+                held.push(stream);
+            }
+        });
+
+        (addr, accepts)
+    }
+
+    /// An upstream that sends response headers immediately, then dribbles the
+    /// body out over longer than the header deadline. What the deadline must
+    /// NOT cut off.
+    fn slow_body_upstream(chunks: usize, gap: Duration) -> std::net::SocketAddr {
+        use std::io::{Read, Write};
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind slow upstream");
+        let addr = listener.local_addr().expect("local addr");
+
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { break };
+                let mut buf = [0u8; 2048];
+                let _ = stream.read(&mut buf);
+                let body_len = chunks * 6; // "chunkN" is 6 bytes for N in 0..=9
+                let _ = write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\ncontent-type: text/plain\r\ncontent-length: {body_len}\r\n\r\n"
+                );
+                let _ = stream.flush();
+                for n in 0..chunks {
+                    std::thread::sleep(gap);
+                    let _ = write!(stream, "chunk{n}");
+                    let _ = stream.flush();
+                }
+            }
+        });
+
+        addr
+    }
+
+    /// Uncredentialed, unrestricted rules: no injections (so the request is
+    /// unmanaged traffic), no budget bindings, no session policy. Keeps the
+    /// test on the plain forwarding path.
+    fn permissive_rules() -> ResolvedRules {
+        ResolvedRules {
+            injection_rules: Vec::new(),
+            pending_injections: Vec::new(),
+            policy_rules_v2: db::PolicyV2Rules::default(),
+            available_apps: db::AvailableApps::default(),
+            access_restricted: false,
+            intercept_token: None,
+            plan: "free".to_string(),
+            rewrite_host: None,
+            connection_label: None,
+            finalizer: None,
+            body_transform: None,
+            session_policy: None,
+            winning_connection_id: None,
+            budget_bindings: Vec::new(),
+        }
+    }
+
+    /// Serve exactly one request through the real `forward_request`, forwarding
+    /// to `upstream_addr`. Returns the address a client should call.
+    async fn gateway_serving_one_request(
+        upstream_addr: std::net::SocketAddr,
+    ) -> std::net::SocketAddr {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind gateway");
+        let gateway_addr = listener.local_addr().expect("local addr");
+
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.expect("accept client");
+            let io = hyper_util::rt::TokioIo::new(stream);
+            let host = upstream_addr.to_string();
+
+            let service = hyper::service::service_fn(move |req: Request<Incoming>| {
+                let host = host.clone();
+                async move {
+                    let cache = cache::in_memory();
+                    let approvals = approval::in_memory();
+                    let engine = crate::connect::PolicyEngine::test_stub();
+                    let proxy_ctx = ProxyContext {
+                        workspace_id: None,
+                        organization_id: None,
+                        agent_id: None,
+                        agent_name: None,
+                        agent_identifier: None,
+                        agent_token: "test-token".to_string(),
+                    };
+
+                    forward_request(
+                        req,
+                        &host,
+                        &host,
+                        "http",
+                        reqwest::Client::builder()
+                            .redirect(reqwest::redirect::Policy::none())
+                            .build()
+                            .expect("client"),
+                        &permissive_rules(),
+                        &*cache,
+                        &proxy_ctx,
+                        &approvals,
+                        &engine,
+                    )
+                    .await
+                }
+            });
+
+            let _ = hyper::server::conn::http1::Builder::new()
+                .serve_connection(io, service)
+                .await;
+        });
+
+        gateway_addr
+    }
+
+    /// Pin the process-wide header deadline to 1s before anything reads it.
+    /// Seeds the `OnceLock` directly rather than mutating process environment,
+    /// which would race other tests' env reads. Idempotent, so every test that
+    /// reaches the forwarding path can call it and initialization order between
+    /// them cannot matter.
+    fn pin_test_header_timeout() {
+        let _ = UPSTREAM_HEADER_TIMEOUT.set(Duration::from_secs(1));
+        assert_eq!(
+            upstream_header_timeout(),
+            Duration::from_secs(1),
+            "another test initialized the deadline first with a different value",
+        );
+    }
+
+    /// The regression #493 is about: a POST to an upstream that never sends
+    /// response headers must produce a bounded, sanitized 504 through the real
+    /// forwarding path — and must never be re-sent.
+    ///
+    /// Verified to hang forever without the `tokio::time::timeout` around
+    /// `send()`: only an outer test guard stops it.
+    #[tokio::test]
+    async fn silent_upstream_yields_bounded_sanitized_504_without_replay() {
+        pin_test_header_timeout();
+        let (upstream_addr, accepts) = silent_upstream();
+        let gateway_addr = gateway_serving_one_request(upstream_addr).await;
+
+        // A POST: replaying this would be the dangerous case.
+        let started = std::time::Instant::now();
+        let response = tokio::time::timeout(
+            Duration::from_secs(10),
+            reqwest::Client::new()
+                .post(format!("http://{gateway_addr}/orders"))
+                .body("{\"charge\":true}")
+                .send(),
+        )
+        .await
+        .expect("gateway answered instead of hanging")
+        .expect("gateway responded");
+
+        // 1. Bounded, correctly mapped failure.
+        assert_eq!(
+            response.status(),
+            StatusCode::GATEWAY_TIMEOUT,
+            "a stalled upstream must surface as 504",
+        );
+        assert!(
+            started.elapsed() >= Duration::from_secs(1),
+            "the deadline must actually be waited out",
+        );
+        assert_eq!(
+            response
+                .headers()
+                .get("x-should-retry")
+                .and_then(|v| v.to_str().ok()),
+            Some("false"),
+        );
+
+        // 2. Sanitized, stable identifier.
+        let body: serde_json::Value = response.json().await.expect("JSON body");
+        assert_eq!(body["error"], "upstream_timeout");
+        let rendered = body.to_string();
+        for leak in ["127.0.0.1", "reqwest", "Bearer", "test-token"] {
+            assert!(
+                !rendered.contains(leak),
+                "504 body must not expose {leak:?}: {rendered}",
+            );
+        }
+
+        // 3. Nothing was replayed.
+        tokio::time::sleep(Duration::from_millis(600)).await;
+        assert_eq!(
+            accepts.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "the timed-out POST must reach the upstream exactly once",
+        );
+    }
+
+    /// The deadline covers only the wait for response headers. A body that
+    /// streams for several times the bound must still arrive whole — this is
+    /// the SSE / long-download guarantee, and the reason `reqwest`'s own
+    /// total-deadline timeout could not be used.
+    #[tokio::test]
+    async fn slow_body_streams_past_the_header_deadline() {
+        pin_test_header_timeout();
+        // Headers arrive immediately; the body then takes ~2.5s against the
+        // 1s header bound.
+        let upstream_addr = slow_body_upstream(5, Duration::from_millis(500));
+        let gateway_addr = gateway_serving_one_request(upstream_addr).await;
+
+        let started = std::time::Instant::now();
+        let response = tokio::time::timeout(
+            Duration::from_secs(15),
+            reqwest::Client::new()
+                .get(format!("http://{gateway_addr}/download"))
+                .send(),
+        )
+        .await
+        .expect("gateway answered")
+        .expect("gateway responded");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = tokio::time::timeout(Duration::from_secs(15), response.text())
+            .await
+            .expect("body completed")
+            .expect("body read");
+
+        assert_eq!(
+            body, "chunk0chunk1chunk2chunk3chunk4",
+            "the streamed body must arrive whole",
+        );
+        assert!(
+            started.elapsed() > Duration::from_secs(2),
+            "the body genuinely outlived the 1s header bound (took {:?})",
+            started.elapsed(),
+        );
     }
 }
