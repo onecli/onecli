@@ -54,10 +54,11 @@ beforeEach(() => {
 });
 
 describe("PersonReachRow", () => {
-  it("pending: the amber waiting badge while the owner's card is out", () => {
+  it("pending: points at the approvals bell, offers NO decide menu (4d: the bell is the one inbox)", () => {
     renderRow(person("pending"));
     expect(screen.getByText("@dana")).toBeDefined();
-    expect(screen.getByText("Asked, pending")).toBeDefined();
+    expect(screen.getByText("Waiting in the approvals bell")).toBeDefined();
+    expect(screen.queryByRole("button")).toBeNull();
   });
 
   it("approved: reads as allowed", () => {
@@ -71,7 +72,7 @@ describe("PersonReachRow", () => {
   });
 
   it("offers exactly TWO settlements - a person has no 'OneCLI users only'", async () => {
-    renderRow(person("pending"));
+    renderRow(person("approved"));
     await openMenu();
     const items = screen.getAllByRole("menuitem");
     expect(items).toHaveLength(2);
@@ -82,14 +83,14 @@ describe("PersonReachRow", () => {
     expect(screen.queryByText(/OneCLI users only/)).toBeNull();
   });
 
-  it("allowing drives the mutation with THIS row's ref", async () => {
-    renderRow(person("pending"));
+  it("blocking a settled person drives the mutation with THIS row's ref", async () => {
+    renderRow(person("approved"));
     await openMenu();
     await userEvent.click(
-      screen.getByRole("menuitem", { name: /Allow this person/ }),
+      screen.getByRole("menuitem", { name: /Don’t allow/ }),
     );
     expect(mocks.mutate).toHaveBeenCalledWith(
-      { externalRef: "U123", state: "approved" },
+      { externalRef: "U123", state: "blocked" },
       expect.anything(),
     );
   });
@@ -118,6 +119,7 @@ describe("PersonReachRow", () => {
 
   it("falls back to the raw user id when no label is known", () => {
     renderRow({ ...person("pending"), label: null });
+    // (pending shows the bell badge; the raw id is still the row's name)
     expect(screen.getByText("U123")).toBeDefined();
   });
 

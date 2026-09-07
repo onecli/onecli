@@ -14,6 +14,7 @@ import { isFollowUpRow } from "@/lib/chat/turns";
 import { useApprovalCards, type ApprovalCard } from "./use-approval-cards";
 import { FollowingViewport } from "./following-viewport";
 import { InlineApprovalItem } from "./inline-approval-item";
+import { LoadOlderSentinel } from "./load-older-sentinel";
 import { TurnBlock } from "./turn-block";
 import { UserBubble } from "./user-bubble";
 
@@ -39,6 +40,12 @@ interface ChatThreadProps {
   modelsHref?: string;
   /** In-place add-key door for the no_model_key notice. */
   onConnectModelKey?: () => void;
+  /** Older windows exist above what's loaded — mount the scroll-up loader. */
+  hasOlder?: boolean;
+  /** An older window is in flight — its skeleton row shows at the top. */
+  loadingOlder?: boolean;
+  /** Ask for the next older window (the top sentinel's trigger). */
+  onLoadOlder?: () => void;
 }
 
 export const ChatThread = ({
@@ -48,6 +55,9 @@ export const ChatThread = ({
   conversationId,
   modelsHref,
   onConnectModelKey,
+  hasOlder = false,
+  loadingOlder = false,
+  onLoadOlder,
 }: ChatThreadProps) => {
   const targetIds = new Set(turns.map((turn) => turn.id));
   const followUpsByTarget = new Map<string, Turn[]>();
@@ -95,6 +105,16 @@ export const ChatThread = ({
             Swap back once that fix ships. */}
         <FollowingViewport>
           <MessageScrollerContent className="mx-auto w-full max-w-3xl gap-6 px-4 py-6">
+            {/* The scroll-up loader. Prepended pages hold the reading
+                position via the viewport's own preserveScrollOnPrepend
+                (default on) — the reader never feels the seam. */}
+            {onLoadOlder !== undefined && (
+              <LoadOlderSentinel
+                hasOlder={hasOlder}
+                loading={loadingOlder}
+                onLoadOlder={onLoadOlder}
+              />
+            )}
             {rows.map((turn) => (
               <MessageScrollerItem
                 key={turn.id}

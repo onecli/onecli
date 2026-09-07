@@ -24,6 +24,11 @@ const mocks = vi.hoisted(() => ({
 }));
 
 vi.mock("@/hooks/use-channels", () => ({
+  // The approvals section renders nothing on an empty list — inert here;
+  // its own behavior is covered by action-approvals-section.test.tsx.
+  useAgentContacts: () => ({ data: { contacts: [] } }),
+  useSetContactPolicy: () => ({ mutate: vi.fn(), isPending: false }),
+  useDeleteContact: () => ({ mutate: vi.fn(), isPending: false }),
   useAgentChannels: () => ({
     data: state.view,
     isPending: state.view === undefined,

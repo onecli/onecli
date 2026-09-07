@@ -71,9 +71,10 @@ describe("SpaceReachRow", () => {
     expect(screen.getByText("OneCLI users")).toBeDefined();
   });
 
-  it("pending: the amber Asked, pending badge while the owner card is out", () => {
+  it("pending: points at the approvals bell, offers NO decide menu (4d: the bell is the one inbox)", () => {
     renderRow(space("pending"));
-    expect(screen.getByText("Asked, pending")).toBeDefined();
+    expect(screen.getByText("Waiting in the approvals bell")).toBeDefined();
+    expect(screen.queryByRole("button")).toBeNull();
   });
 
   it("approved: Anyone here badge", () => {
@@ -86,8 +87,8 @@ describe("SpaceReachRow", () => {
     expect(screen.getByText("Not allowed")).toBeDefined();
   });
 
-  it("offers all three exclusive settlements, whatever the current state", async () => {
-    renderRow(space("pending"));
+  it("offers all three exclusive settlements on a SETTLED row", async () => {
+    renderRow(space("members_only"));
     await openMenu();
     expect(
       screen.getByRole("menuitem", { name: /Allow anyone here/ }),
@@ -123,7 +124,7 @@ describe("SpaceReachRow", () => {
   });
 
   it("choosing 'Don't allow' blocks the channel entirely", async () => {
-    renderRow(space("pending"));
+    renderRow(space("members_only"));
     await openMenu();
     await userEvent.click(
       screen.getByRole("menuitem", { name: /Don’t allow/ }),
@@ -183,13 +184,8 @@ describe("SpaceReachRow", () => {
     expect(mocks.dismiss).not.toHaveBeenCalled();
   });
 
-  it("dismiss is offered on EVERY state - approved included (the user's rule)", () => {
-    for (const state of [
-      "members_only",
-      "pending",
-      "approved",
-      "blocked",
-    ] as const) {
+  it("dismiss is offered on every SETTLED state - approved included (the user's rule; pending rows live in the bell)", () => {
+    for (const state of ["members_only", "approved", "blocked"] as const) {
       const { unmount } = renderRow(space(state));
       expect(
         screen.getByRole("button", { name: "Remove #proj-x from this list" }),

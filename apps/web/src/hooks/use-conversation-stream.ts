@@ -18,6 +18,13 @@ export interface ConversationStream {
   status: StreamStatus;
   /** Set iff `status === "error"`: why the stream stopped for good. */
   error?: StreamFatalError;
+  /**
+   * True once this conversation's server replay finished (the `caught-up`
+   * frame) — the transcript on hand is WHOLE back to the replay floor.
+   * Latched per conversation: reconnects re-fire the frame, the reveal
+   * decision only needs the first.
+   */
+  caughtUp: boolean;
 }
 
 /**
@@ -42,15 +49,40 @@ export const useConversationStream = (
      * happy path snappy.
      */
     onTurnBoundary?: () => void;
+    /**
+     * The lowest seq the first connect must replay FROM (exclusive) — the
+     * turns window's `oldestSeq - 1`, so the server replays only the turns
+     * on screen instead of the whole history. `undefined` = not known yet:
+     * the hook WAITS rather than connecting bare, because a bare connect is
+     * precisely the full-history replay this exists to avoid. Pass 0 for
+     * "replay everything" (an empty window, or no floor to honor).
+     *
+     * Read at connect time through a ref, deliberately NOT an effect dep: the
+     * live window's floor slides as new turns land, and a moving floor must
+     * not tear down a healthy connection. Only the first known value gates.
+     */
+    replayFloor?: number;
   } = {},
 ): ConversationStream => {
   const [events, setEvents] = useState<TurnEvent[]>(NO_EVENTS);
   const [status, setStatus] = useState<StreamStatus>("idle");
   const [error, setError] = useState<StreamFatalError | undefined>(undefined);
+  const [caughtUp, setCaughtUp] = useState(false);
 
   // The authoritative accumulation. A ref, not state, because the engine's
   // getCursor must read it synchronously between renders.
   const heldRef = useRef<TurnEvent[]>(NO_EVENTS);
+
+  // The connect-time floor (see `replayFloor`). A ref written in an effect
+  // (never at render), so later slides never re-run the connect effect; the
+  // boolean below is what gates the first connect — and by the time that
+  // effect runs, this one (registered first) has already stored the value.
+  const replayFloorRef = useRef(options.replayFloor);
+  const optionsReplayFloor = options.replayFloor;
+  useEffect(() => {
+    replayFloorRef.current = optionsReplayFloor;
+  }, [optionsReplayFloor]);
+  const floorKnown = optionsReplayFloor !== undefined;
 
   // Effect Events: called from the engine's async continuations, always see
   // the latest props, and are NOT effect deps — a parent re-rendering with a
@@ -77,9 +109,15 @@ export const useConversationStream = (
     },
   );
 
+  const handleCaughtUp = useEffectEvent(() => setCaughtUp(true));
+
   useEffect(() => {
-    if (!conversationId) {
+    if (!conversationId || !floorKnown) {
       setStatus("idle");
+      // A stale latch from the previous conversation (the 404 self-heal
+      // minting a fresh thread) must not leak a caught-up signal into the
+      // next one's loading gate.
+      setCaughtUp(false);
       return;
     }
 
@@ -89,20 +127,28 @@ export const useConversationStream = (
     heldRef.current = NO_EVENTS;
     setEvents(NO_EVENTS);
     setError(undefined);
+    setCaughtUp(false);
 
     const controller = new AbortController();
     void runConversationStream(
       conversationId,
       {
         fetchStream: (path, signal) => apiFetch(path, { signal }),
-        getCursor: () => highestSeq(heldRef.current),
+        // The floor until the replay overtakes it; a reconnect then resumes
+        // from the highest seq actually held, exactly as before.
+        getCursor: () =>
+          Math.max(replayFloorRef.current ?? 0, highestSeq(heldRef.current)),
       },
-      { onEvents: handleEvents, onStatus: handleStatus },
+      {
+        onEvents: handleEvents,
+        onStatus: handleStatus,
+        onCaughtUp: handleCaughtUp,
+      },
       controller.signal,
     );
 
     return () => controller.abort();
-  }, [conversationId]);
+  }, [conversationId, floorKnown]);
 
-  return { events, status, error };
+  return { events, status, error, caughtUp };
 };

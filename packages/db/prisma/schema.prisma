@@ -355,6 +355,7 @@ model User {
   createdCrons                  AgentCron[]                   @relation("CronCreator")
   channelUserLinks              ChannelUserLink[]             @relation("ChannelUserLinkUser")
   decidedReachGrants            AgentReachGrant[]             @relation("ReachGrantDecider")
+  decidedAgentContacts          AgentContact[]                @relation("AgentContactDecider")
   createdChannelIntegrations    ChannelIntegration[]          @relation("ChannelIntegrationCreator")
   createdChannelInstallations   ChannelInstallation[]         @relation("ChannelInstallationCreator")
   createdAgentChannels          AgentChannel[]                @relation("AgentChannelCreator")
@@ -461,6 +462,8 @@ model Agent {
   memories             AgentMemory[]
   skills               Skill[]
   reachGrants          AgentReachGrant[]
+  actionApprovals      ActionApproval[]
+  contacts             AgentContact[]
 
   @@unique([workspaceId, identifier])
   @@index([workspaceId])
@@ -761,15 +764,17 @@ model Conversation {
   createdAt         DateTime @default(now()) @map("created_at")
   updatedAt         DateTime @updatedAt @map("updated_at")
 
-  agent         Agent                    @relation(fields: [agentId], references: [id], onDelete: Cascade)
-  user          User?                    @relation("ConversationOwner", fields: [userId], references: [id], onDelete: Cascade)
-  turns         Turn[]
-  events        TurnEvent[]
-  attachments   ConversationAttachment[]
-  threadLink    ChannelThreadLink?
-  cronsHere     AgentCron[]              @relation("CronOrigin")
-  processesHere SandboxProcess[]         @relation("ProcessOrigin")
-  watchesHere   ProcessWatch[]           @relation("WatchOrigin")
+  agent           Agent                    @relation(fields: [agentId], references: [id], onDelete: Cascade)
+  user            User?                    @relation("ConversationOwner", fields: [userId], references: [id], onDelete: Cascade)
+  turns           Turn[]
+  events          TurnEvent[]
+  attachments     ConversationAttachment[]
+  threadLink      ChannelThreadLink?
+  mentionAnchors  MentionAnchor[]
+  actionApprovals ActionApproval[]
+  cronsHere       AgentCron[]              @relation("CronOrigin")
+  processesHere   SandboxProcess[]         @relation("ProcessOrigin")
+  watchesHere     ProcessWatch[]           @relation("WatchOrigin")
 
   @@unique([agentId, source, externalRef])
   @@index([agentId, createdAt])
@@ -1321,15 +1326,15 @@ model AgentChannel {
   createdAt           DateTime  @default(now()) @map("created_at")
   updatedAt           DateTime  @updatedAt @map("updated_at")
 
-  agent           Agent                   @relation(fields: [agentId], references: [id], onDelete: Cascade)
-  integration     ChannelIntegration      @relation(fields: [integrationId], references: [id], onDelete: Cascade)
-  ownerAdapter    ChannelAdapter?         @relation("PresenceOwner", fields: [ownerAdapterId], references: [id], onDelete: SetNull)
-  createdBy       User?                   @relation("AgentChannelCreator", fields: [createdByUserId], references: [id], onDelete: SetNull)
-  apiKey          ApiKey?                 @relation(fields: [apiKeyId], references: [id], onDelete: SetNull)
-  threadLinks     ChannelThreadLink[]
-  ingestedEvents  ChannelIngestedEvent[]
-  approvalPrompts ChannelApprovalPrompt[]
-  turnReceipts    ChannelTurnReceipt[]
+  agent             Agent                  @relation(fields: [agentId], references: [id], onDelete: Cascade)
+  integration       ChannelIntegration     @relation(fields: [integrationId], references: [id], onDelete: Cascade)
+  ownerAdapter      ChannelAdapter?        @relation("PresenceOwner", fields: [ownerAdapterId], references: [id], onDelete: SetNull)
+  createdBy         User?                  @relation("AgentChannelCreator", fields: [createdByUserId], references: [id], onDelete: SetNull)
+  apiKey            ApiKey?                @relation(fields: [apiKeyId], references: [id], onDelete: SetNull)
+  threadLinks       ChannelThreadLink[]
+  ingestedEvents    ChannelIngestedEvent[]
+  toolApprovalCards ToolApprovalCard[]
+  turnReceipts      ChannelTurnReceipt[]
 
   @@unique([agentId, provider])
   // Unique, not merely indexed: the inbound webhook arm resolves a presence by
@@ -1363,6 +1368,86 @@ model ChannelUserLink {
   @@map("channel_user_links")
 }
 
+// A find_recipient pick: "in this conversation, @[Name] means THIS provider
+// user". The anchor is what makes tagging UNLINKED people safe — the mention
+// renders from the id the agent chose at lookup time, so a display-name
+// rename between lookup and send cannot redirect the ping. Conversation-
+// scoped (not turn-scoped): the agent may pick in one turn and mention in
+// the next, and re-picking the same name overwrites (last pick wins).
+model MentionAnchor {
+  id             String   @id @default(uuid())
+  conversationId String   @map("conversation_id")
+  // The NORMALIZED name (normalizeMentionName) the anchor answers for.
+  name           String
+  externalUserId String   @map("external_user_id")
+  // What the pick pointed at: "person" | "app" | "channel". Recorded at
+  // pick time (the anchor philosophy — decisions freeze when made, never
+  // re-derived later). Null = a legacy row, read as person.
+  kind           String?
+  // The display name shown at pick time — stored so failure notices and
+  // context notes can echo what the agent saw, not a later rename.
+  displayName    String   @map("display_name")
+  createdAt      DateTime @default(now()) @map("created_at")
+  updatedAt      DateTime @updatedAt @map("updated_at")
+
+  conversation Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+
+  @@unique([conversationId, name])
+  @@map("mention_anchors")
+}
+
+// One-shot approval for a privileged AGENT action (send_message is the
+// first; agent-to-agent and spawning follow). The hold→card→decide→execute
+// primitive: the row IS the single truth of what was asked — `payload` is
+// written once at create and never updated (no second copy exists to
+// drift, which is why there is no hash column), the card renders it, and
+// the registered handler executes exactly it on approve.
+//
+// Deliberately SEPARATE from `agent_reach_grants` (standing relationship
+// settlements with a re-knock lifecycle) and `tool_approval_cards`
+// (mirrors of gateway-owned holds): one table per semantic; what they
+// share is the card plumbing, not the rows.
+model ActionApproval {
+  id              String    @id @default(uuid())
+  agentId         String    @map("agent_id")
+  // Origin anchor: where the ask came from and where the outcome notice
+  // lands. SetNull — an approval's audit trail outlives a deleted chat.
+  conversationId  String?   @map("conversation_id")
+  // The requesting turn — the notice event's anchor (turn events attach to
+  // turns). Nullable: an approval can outlive its turn, and a request with
+  // no attributable turn still holds and decides; only the transcript
+  // notice is skipped then.
+  originTurnId    String?   @map("origin_turn_id")
+  // The handler key (registerActionHandler's vocabulary), e.g.
+  // "send_message". An unknown action at decide time fails the approval
+  // loudly rather than executing nothing silently.
+  action          String
+  payload         Json
+  // Card-facing one-liner, PLATFORM-composed by the requesting service —
+  // never raw model output (the card renderer still escapes and clamps).
+  summary         String
+  // pending → approved (transient: the decide flip, before the handler
+  // runs) → executed | failed; or → rejected | expired. `approved` being
+  // durable makes a crash between decide and execute visible and
+  // resumable instead of silently lost or double-run.
+  status          String    @default("pending")
+  // Rejection reason (relayed to the agent) or the execution error.
+  reason          String?
+  decidedByUserId String?   @map("decided_by_user_id")
+  decidedAt       DateTime? @map("decided_at")
+  expiresAt       DateTime  @map("expires_at")
+  // Posted owner cards, claim-before-post: [{channel, ts, userId}].
+  cardRefs        Json?     @map("card_refs")
+  createdAt       DateTime  @default(now()) @map("created_at")
+  updatedAt       DateTime  @updatedAt @map("updated_at")
+
+  agent        Agent         @relation(fields: [agentId], references: [id], onDelete: Cascade)
+  conversation Conversation? @relation(fields: [conversationId], references: [id], onDelete: SetNull)
+
+  @@index([agentId, status])
+  @@map("action_approvals")
+}
+
 // The agent's REACH ledger (who may talk to it), one row per granted subject
 // - provider-generic on purpose: today's rows are Slack spaces, and the
 // designed follow-ups (person grants for stranger DMs, outbound sends) are
@@ -1391,10 +1476,10 @@ model AgentReachGrant {
   state         String  @default("pending") // "pending" | "approved" | "denied" | "revoked"
 
   // The owner-DM approval cards posted for this grant, claim-before-post
-  // (the ChannelApprovalPrompt lesson): [{channel, ts, userId}]. Recorded so
+  // (the ToolApprovalCard lesson): [{channel, ts, userId}]. Recorded so
   // a decide can rewrite EVERY owner's card and a retry never double-posts.
   // Empty array = claimed, nothing posted yet (the sweep's retry cue).
-  promptRefs Json? @map("prompt_refs")
+  cardRefs Json? @map("card_refs")
 
   decidedByUserId String?   @map("decided_by_user_id")
   decidedAt       DateTime? @map("decided_at")
@@ -1408,6 +1493,44 @@ model AgentReachGrant {
   @@unique([agentId, integrationId, subjectKind, externalRef])
   @@index([agentId, state])
   @@map("agent_reach_grants")
+}
+
+// The agent's OUTBOUND address book — who it may proactively message
+// (send_message, 4c). One row per recipient the owner has decided about;
+// NO row means the default: `ask` (every send holds for an action
+// approval). `allow` is the "always allow" upgrade — the card's third
+// button or a dashboard flip. Vocabulary: this is a standing GRANT in the
+// outbound direction (the reach grant's twin); the per-send one-shot stays
+// `action_approvals`.
+//
+// `blocked` (4e) is the owner's standing NO — the per-recipient override:
+// refuses sends before any card AND degrades the recipient's @[mention]
+// to plain text (the block must stop pings too, or it is not a block).
+model AgentContact {
+  id          String @id @default(uuid())
+  agentId     String @map("agent_id")
+  // "person" | "channel" | "app" (4e). Part of the identity key: a user
+  // id and a channel id live in different provider namespaces.
+  kind        String
+  // Provider-opaque recipient address (Slack: U…/W… user id or C… channel
+  // id) — the identity key, never the name (names rename, ids don't).
+  externalRef String @map("external_ref")
+  // Display-only label captured at decision time (the reach grant's
+  // subjectLabel rule) — shown on dashboards, never matched on.
+  displayName String @map("display_name")
+  // "ask" (hold each send for approval) | "allow" (send directly) |
+  // "blocked" (refuse sends, degrade mentions — the standing no).
+  policy      String @default("ask")
+
+  decidedByUserId String?  @map("decided_by_user_id")
+  createdAt       DateTime @default(now()) @map("created_at")
+  updatedAt       DateTime @updatedAt @map("updated_at")
+
+  agent     Agent @relation(fields: [agentId], references: [id], onDelete: Cascade)
+  decidedBy User? @relation("AgentContactDecider", fields: [decidedByUserId], references: [id], onDelete: SetNull)
+
+  @@unique([agentId, kind, externalRef])
+  @@map("agent_contacts")
 }
 
 // Provider thread ↔ conversation: the adapter's routing table. "direct" rows
@@ -1452,10 +1575,15 @@ model ChannelIngestedEvent {
   @@map("channel_ingested_events")
 }
 
-// One approval, one provider prompt. Recorded BEFORE posting so a restarted
-// adapter neither re-posts a card nor loses the handle it needs to update one
-// on decide/expiry.
-model ChannelApprovalPrompt {
+// The posted card's delivery ledger for a GATEWAY TOOL approval — claim
+// dedupe (unique by approval id, so a restarted or twin adapter never
+// re-posts), the update handle (externalMessageRef, so any instance can
+// rewrite the card later), and the gateway's real deadline for restart
+// re-arm. The DECISION itself lives in the gateway — this row only mirrors
+// its card. Vocabulary: Grant = standing permission (AgentReachGrant),
+// Approval = one-shot decision (ActionApproval), Card = a posted mirror of
+// a decision owned elsewhere (this).
+model ToolApprovalCard {
   id                 String    @id @default(uuid())
   approvalId         String    @unique @map("approval_id")
   agentChannelId     String    @map("agent_channel_id")
@@ -1472,7 +1600,7 @@ model ChannelApprovalPrompt {
 
   agentChannel AgentChannel @relation(fields: [agentChannelId], references: [id], onDelete: Cascade)
 
-  @@map("channel_approval_prompts")
+  @@map("tool_approval_cards")
 }
 
 // The reaction receipt: an accepted provider message is marked "seen" with an

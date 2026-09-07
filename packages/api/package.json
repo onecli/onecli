@@ -36,6 +36,7 @@
     "@aws-sdk/client-marketplace-metering": "^3.1118.0",
     "@aws-sdk/client-secrets-manager": "^3.1014.0",
     "@onecli/agent-protocol": "workspace:*",
+    "@onecli/channels": "workspace:*",
     "@onecli/db": "workspace:*",
     "@onecli/ssh-cert": "workspace:*",
     "better-auth": "1.6.26",

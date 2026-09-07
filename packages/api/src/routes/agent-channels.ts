@@ -1,4 +1,5 @@
 import { Hono } from "hono";
+import { db } from "@onecli/db";
 import type { ApiEnv } from "../types";
 import { authMiddleware, requireWorkspaceId } from "../middleware/auth";
 import { ServiceError } from "../services/errors";
@@ -15,6 +16,21 @@ import {
   setPersonReachState,
   setSpaceReachState,
 } from "../services/channels/agent-reach-service";
+import {
+  ACTION_APPROVAL_STATUSES,
+  decideActionApproval,
+  listActionApprovals,
+  type ActionApprovalStatus,
+} from "../services/channels/action-approval-service";
+import {
+  deleteContact,
+  listContacts,
+  setContactPolicy,
+} from "../services/channels/send-message-service";
+import {
+  actionApprovalDecisionSchema,
+  contactPolicySchema,
+} from "../validations/channels";
 import type { ChannelProviderId } from "../services/channels/types";
 import {
   attachPresenceSchema,
@@ -360,6 +376,143 @@ export const agentChannelRoutes = () => {
         reachDismissed: externalRef,
         removedGrant: String(result.removedGrant),
         removedLinks: String(result.removedLinks),
+      },
+    });
+    return c.body(null, 204);
+  });
+
+  // GET /agents/:agentId/approvals — the agent's one-shot action approvals
+  // (the dashboard's pending list + history). Workspace-fenced at the
+  // query inside the service; ?status narrows.
+  app.get("/:agentId/approvals", async (c) => {
+    const workspaceId = requireWorkspaceId(c.get("auth"));
+    const status = c.req.query("status");
+    const approvals = await listActionApprovals({
+      workspaceId,
+      agentId: c.req.param("agentId"),
+      ...(status &&
+      (ACTION_APPROVAL_STATUSES as readonly string[]).includes(status)
+        ? { status: status as ActionApprovalStatus }
+        : {}),
+    });
+    return c.json({ approvals });
+  });
+
+  // POST /agents/:agentId/approvals/:approvalId/decision — the dashboard's
+  // decide door (and the only surface that captures a rejection REASON —
+  // the Slack card's buttons cannot carry text). The caller's workspace
+  // access is the decide authority, same as the reach PUT; the service
+  // audits with the decider.
+  app.post("/:agentId/approvals/:approvalId/decision", async (c) => {
+    const a = c.get("auth");
+    const workspaceId = requireWorkspaceId(a);
+    const body = actionApprovalDecisionSchema.safeParse(
+      await parseBody(c.req.raw),
+    );
+    if (!body.success) {
+      throw new ServiceError(
+        "UNPROCESSABLE",
+        body.error.issues[0]?.message ?? "Invalid body",
+      );
+    }
+    // The approval must belong to THIS workspace's agent — fenced at the
+    // QUERY (never fetch-then-check), not-found-shaped: existence is never
+    // disclosed across tenants.
+    const owned = await db.actionApproval.findFirst({
+      where: {
+        id: c.req.param("approvalId"),
+        agentId: c.req.param("agentId"),
+        agent: { workspaceId },
+      },
+      select: { id: true },
+    });
+    if (!owned) {
+      throw new ServiceError("NOT_FOUND", "This request no longer exists.");
+    }
+    const result = await decideActionApproval({
+      approvalId: c.req.param("approvalId"),
+      decision: body.data.decision,
+      deciderUserId: a.userId,
+      ...(body.data.reason !== undefined && { reason: body.data.reason }),
+    });
+    if (result.kind === "refused") {
+      throw new ServiceError("NOT_FOUND", result.message);
+    }
+    return c.json(result);
+  });
+
+  // GET /agents/:agentId/contacts — the agent's outbound address book
+  // (send_message's standing decisions). Workspace-fenced in the service.
+  app.get("/:agentId/contacts", async (c) => {
+    const workspaceId = requireWorkspaceId(c.get("auth"));
+    const contacts = await listContacts({
+      workspaceId,
+      agentId: c.req.param("agentId"),
+    });
+    return c.json({ contacts });
+  });
+
+  // PUT /agents/:agentId/contacts/:contactId — flip the policy. `ask` is
+  // the revoke direction (the row survives; the standing permission goes).
+  app.put("/:agentId/contacts/:contactId", async (c) => {
+    const a = c.get("auth");
+    const workspaceId = requireWorkspaceId(a);
+    const body = contactPolicySchema.safeParse(await parseBody(c.req.raw));
+    if (!body.success) {
+      throw new ServiceError(
+        "UNPROCESSABLE",
+        body.error.issues[0]?.message ?? "Invalid body",
+      );
+    }
+    const result = await setContactPolicy({
+      workspaceId,
+      agentId: c.req.param("agentId"),
+      contactId: c.req.param("contactId"),
+      policy: body.data.policy,
+      deciderUserId: a.userId,
+    });
+    if (!result) {
+      throw new ServiceError("NOT_FOUND", "This contact no longer exists.");
+    }
+    await recordAuditEvent({
+      workspaceId,
+      userId: a.userId,
+      userEmail: a.userEmail,
+      action: AUDIT_ACTIONS.UPDATE,
+      service: AUDIT_SERVICES.CHANNEL,
+      source: AUDIT_SOURCE.API,
+      metadata: {
+        agentId: c.req.param("agentId"),
+        contactId: result.id,
+        contactPolicy: result.policy,
+      },
+    });
+    return c.json(result);
+  });
+
+  // DELETE /agents/:agentId/contacts/:contactId — remove the row entirely
+  // (back to the ask-by-default pristine state).
+  app.delete("/:agentId/contacts/:contactId", async (c) => {
+    const a = c.get("auth");
+    const workspaceId = requireWorkspaceId(a);
+    const removed = await deleteContact({
+      workspaceId,
+      agentId: c.req.param("agentId"),
+      contactId: c.req.param("contactId"),
+    });
+    if (!removed) {
+      throw new ServiceError("NOT_FOUND", "This contact no longer exists.");
+    }
+    await recordAuditEvent({
+      workspaceId,
+      userId: a.userId,
+      userEmail: a.userEmail,
+      action: AUDIT_ACTIONS.DELETE,
+      service: AUDIT_SERVICES.CHANNEL,
+      source: AUDIT_SOURCE.API,
+      metadata: {
+        agentId: c.req.param("agentId"),
+        contactId: c.req.param("contactId"),
       },
     });
     return c.body(null, 204);

@@ -25,6 +25,8 @@ import {
   AGENT_START_FAILED_MESSAGE,
   AUTOMATION_SOURCES,
   TURN_FAILURE_COPY,
+  TURNS_PAGE_DEFAULT,
+  TURNS_PAGE_MAX,
   type ConversationSource,
   type TurnStatus,
 } from "../validations/conversation";
@@ -774,18 +776,82 @@ export const wakeSandboxFor = async (agentId: string): Promise<void> => {
   });
 };
 
+/**
+ * A window of the conversation's turns — NEWEST first when selecting, always
+ * ASCENDING in the answer (the shape every reader renders and the pre-window
+ * contract). The old `take: 200` ascending read had a real bug hiding in it:
+ * past 200 turns it returned the OLDEST 200 and the newest exchange never
+ * rendered at all.
+ *
+ * `before` is a keyset cursor (a turn id from a previous window), not an
+ * offset: stable while new turns land behind it, and O(window) on
+ * `@@index([conversationId, createdAt])` however deep the history goes.
+ *
+ * `oldestSeq` is the window's replay floor: the lowest event seq any returned
+ * turn owns. The web connects its stream from `oldestSeq - 1` so the SSE
+ * replay covers exactly the turns on screen instead of the whole history —
+ * and fetches an older window's events as `(since, until] = (prevOldest-1 …)`
+ * bounds. One indexed MIN over `@@index([turnId, seq])`; null when the window
+ * (or its events) is empty.
+ */
 export const listTurns = async (
   workspaceId: string,
   conversationId: string,
   viewerUserId: string,
+  params: { limit?: number; before?: string } = {},
 ) => {
   await requireConversation(workspaceId, conversationId, viewerUserId);
-  return db.turn.findMany({
-    where: { conversationId },
+  const limit = Math.min(params.limit ?? TURNS_PAGE_DEFAULT, TURNS_PAGE_MAX);
+
+  // The cursor row, fenced to THIS conversation — never a bare Prisma
+  // `cursor` on a client-supplied id: positioning off a foreign turn's row
+  // would leak a cross-conversation createdAt comparison, and a deleted
+  // cursor should read as "no older rows" rather than as driver-defined
+  // behavior. An explicit keyset predicate keeps both properties and stays
+  // on `@@index([conversationId, createdAt])`.
+  const cursor =
+    params.before !== undefined
+      ? await db.turn.findFirst({
+          where: { id: params.before, conversationId },
+          select: { id: true, createdAt: true },
+        })
+      : null;
+  if (params.before !== undefined && cursor === null) {
+    return { turns: [], hasMore: false, oldestSeq: null };
+  }
+
+  const newestFirst = await db.turn.findMany({
+    where: {
+      conversationId,
+      // Strictly OLDER than the cursor row, `id` tiebreaking equal
+      // createdAt (uuid order is arbitrary but STABLE, which is all a
+      // cursor needs to never skip or double a row) — the same
+      // (createdAt desc, id desc) order the take below walks.
+      ...(cursor !== null && {
+        OR: [
+          { createdAt: { lt: cursor.createdAt } },
+          { createdAt: cursor.createdAt, id: { lt: cursor.id } },
+        ],
+      }),
+    },
     select: turnSelect,
-    orderBy: { createdAt: "asc" },
-    take: 200,
+    orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+    take: limit + 1,
   });
+
+  const hasMore = newestFirst.length > limit;
+  const window = hasMore ? newestFirst.slice(0, limit) : newestFirst;
+  const turns = window.reverse();
+
+  const bounds =
+    turns.length > 0
+      ? await db.turnEvent.aggregate({
+          where: { turnId: { in: turns.map((turn) => turn.id) } },
+          _min: { seq: true },
+        })
+      : null;
+
+  return { turns, hasMore, oldestSeq: bounds?._min.seq ?? null };
 };
 
 /**
@@ -1648,7 +1714,7 @@ export const readTranscript = async (
   workspaceId: string,
   conversationId: string,
   viewerUserId: string,
-  params: { since?: number; limit?: number } = {},
+  params: { since?: number; until?: number; limit?: number } = {},
 ) => {
   await requireConversation(workspaceId, conversationId, viewerUserId);
   return readTranscriptEvents(conversationId, params);
@@ -1663,14 +1729,22 @@ export const readTranscript = async (
  */
 export const readTranscriptEvents = async (
   conversationId: string,
-  params: { since?: number; limit?: number } = {},
+  params: { since?: number; until?: number; limit?: number } = {},
 ) => {
   const limit = Math.min(params.limit ?? 200, 500);
 
   const events = await db.turnEvent.findMany({
     where: {
       conversationId,
-      ...(params.since !== undefined && { seq: { gt: params.since } }),
+      // Half-open below, closed above: `since < seq <= until`. `until` lets a
+      // reader pull an OLDER window's events without re-walking territory it
+      // already holds (the scroll-up page fetch).
+      ...((params.since !== undefined || params.until !== undefined) && {
+        seq: {
+          ...(params.since !== undefined && { gt: params.since }),
+          ...(params.until !== undefined && { lte: params.until }),
+        },
+      }),
     },
     select: { seq: true, turnId: true, type: true, payload: true },
     orderBy: { seq: "asc" },

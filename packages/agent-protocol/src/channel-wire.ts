@@ -283,6 +283,37 @@ export type AdapterReachDecisionResponse = z.infer<
   typeof adapterReachDecisionResponseSchema
 >;
 
+// ── Action approvals (one-shot holds: "may I do this specific thing?") ─────
+
+export const adapterActionDecisionRequestSchema = z.object({
+  presenceId: z.string().min(1),
+  approvalId: z.string().min(1).max(500),
+  // `approve_always` (4c): approve AND record the standing grant. An older
+  // control plane rejects it at the schema and the adapter logs the miss —
+  // the card click degrades loudly, never silently.
+  decision: z.enum(["approve", "approve_always", "reject"]),
+  clickerExternalUserId: z.string().min(1).max(200),
+});
+export type AdapterActionDecisionRequest = z.infer<
+  typeof adapterActionDecisionRequestSchema
+>;
+
+/** Forward-only from the adapter's side: the control plane authorizes the
+ * clicker, flips the row, executes, and rewrites every posted card itself
+ * (cardRefs) — the adapter owes the wire nothing further. The response
+ * exists for logging and version-skew detection only. */
+export const adapterActionDecisionResponseSchema = z.discriminatedUnion(
+  "kind",
+  [
+    z.object({ kind: z.literal("decided"), status: z.string() }),
+    z.object({ kind: z.literal("already_settled") }),
+    z.object({ kind: z.literal("refused"), message: z.string() }),
+  ],
+);
+export type AdapterActionDecisionResponse = z.infer<
+  typeof adapterActionDecisionResponseSchema
+>;
+
 export const adapterPromptClaimResponseSchema = z.object({
   claimed: z.boolean(),
 });
@@ -305,6 +336,84 @@ export const adapterCursorResponseSchema = z.object({
   advanced: z.boolean(),
 });
 
+// ── Outbound mentions (the completion pass's name resolution) ───────────────
+// The model writes `@[Name]`; the ADAPTER asks the control plane to resolve
+// the names before posting (the directory — linked teammates — is
+// control-plane data), then reports what could not resolve so the next
+// turn's context can tell the model. Names travel NORMALIZED (the
+// `normalizeMentionName` form): both sides compare on the canonical form,
+// so the wire never carries two spellings of one name.
+
+export const adapterMentionResolveRequestSchema = z.object({
+  presenceId: z.string(),
+  /** The conversation whose mention ANCHORS apply (a find_recipient pick:
+   * name → provider user id, conversation-scoped). Optional for wire
+   * compatibility with an older adapter; without it resolution is
+   * directory-only, exactly the pre-anchor behavior. */
+  conversationId: z.string().optional(),
+  /** Distinct normalized names (`mentionNamesOf` output), capped client-side
+   * by the scanner; the route re-caps — neither side trusts the other's
+   * bound. */
+  names: z.array(z.string().trim().min(1).max(80)).max(20),
+});
+export type AdapterMentionResolveRequest = z.infer<
+  typeof adapterMentionResolveRequestSchema
+>;
+
+export const adapterMentionResolutionSchema = z.discriminatedUnion("kind", [
+  z.object({
+    kind: z.literal("resolved"),
+    name: z.string(),
+    /** The provider-native user id (Slack: `U…`/`W…`) the PLATFORM verified
+     * for this name — the one identity source the renderer may emit. */
+    externalUserId: z.string(),
+    /** The linked person's platform display name, for the failure/success
+     * note ("resolved to Dan Abramov"). */
+    displayName: z.string(),
+  }),
+  z.object({
+    kind: z.literal("ambiguous"),
+    name: z.string(),
+    /** Display names of the colliding links — the note's "did you mean". */
+    candidates: z.array(z.string()),
+  }),
+  z.object({ kind: z.literal("unknown"), name: z.string() }),
+]);
+export type AdapterMentionResolution = z.infer<
+  typeof adapterMentionResolutionSchema
+>;
+
+export const adapterMentionResolveResponseSchema = z.object({
+  resolutions: z.array(adapterMentionResolutionSchema),
+});
+
+export const adapterMentionReportRequestSchema = z.object({
+  /** The turn whose answer carried the failures — the note rides the NEXT
+   * turn of the same conversation. */
+  turnId: z.string(),
+  failures: z.array(
+    z.discriminatedUnion("kind", [
+      z.object({
+        kind: z.literal("ambiguous"),
+        /** The name as the model wrote it (trimmed), for a note the model
+         * can match to its own output. */
+        name: z.string().max(80),
+        candidates: z.array(z.string().max(80)).max(10),
+      }),
+      z.object({ kind: z.literal("unknown"), name: z.string().max(80) }),
+      /** Plain `@name` prose that MATCHED a linked teammate but was not
+       * written as `@[name]` — it pinged nobody, and the model most likely
+       * believed it did (the exact false belief the loud-failure rule
+       * exists to kill). Reported so the next turn's note can correct the
+       * habit with the specific fix: write `@[name]`. */
+      z.object({ kind: z.literal("near_miss"), name: z.string().max(80) }),
+    ]),
+  ),
+});
+export type AdapterMentionReportRequest = z.infer<
+  typeof adapterMentionReportRequestSchema
+>;
+
 // ── Transcript (the adapter's read of a linked conversation) ────────────────
 
 export const adapterTranscriptEventSchema = z.object({
@@ -319,16 +428,10 @@ export const adapterTranscriptResponseSchema = z.object({
   hasMore: z.boolean(),
 });
 
-// ── Slack text safety (shared by BOTH runtimes on purpose) ──────────────────
-
-/**
- * Make untrusted text inert in Slack `mrkdwn`/`markdown_text`: `<`, `>`, `&`
- * are the ONLY characters Slack treats as syntax openers, and `<!channel>`,
- * `<!here>`, `<@U…>` are live directives — a prompt-injected agent could
- * mass-ping a workspace through its own answer. Every untrusted string
- * (model output, tool output, notices) passes through here before entering
- * ANY Slack payload, in the api's events arm and the adapter alike — which
- * is why the one definition lives in the shared package.
- */
-export const escapeSlackText = (raw: string): string =>
-  raw.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;");
+// ── Slack text safety ───────────────────────────────────────────────────────
+// `escapeSlackText` MOVED to @onecli/channels/slack (the Slack text layer,
+// beside the clamps it composes with) - every consumer was Slack-shaped and
+// this package is the agent<->runner wire, not a provider home. Re-exported
+// for one release so downstream imports do not churn; new code imports from
+// @onecli/channels/slack.
+export { escapeSlackText } from "@onecli/channels/slack";

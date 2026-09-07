@@ -1,5 +1,6 @@
 import { z } from "zod";
 import {
+  adapterActionDecisionResponseSchema,
   adapterConfigResponseSchema,
   adapterCursorResponseSchema,
   adapterDecisionResponseSchema,
@@ -7,9 +8,14 @@ import {
   adapterPromptClaimResponseSchema,
   adapterReachDecisionResponseSchema,
   adapterRegisterResponseSchema,
+  adapterMentionResolveResponseSchema,
   adapterTranscriptResponseSchema,
+  type AdapterMentionReportRequest,
+  type AdapterMentionResolution,
   adapterUnsettledPromptsResponseSchema,
   adapterWorkResponseSchema,
+  type AdapterActionDecisionRequest,
+  type AdapterActionDecisionResponse,
   type AdapterConfigResponse,
   type AdapterDecisionRequest,
   type AdapterDecisionResponse,
@@ -56,6 +62,11 @@ export interface ControlPlaneClient {
   decideReach(
     request: AdapterReachDecisionRequest,
   ): Promise<AdapterReachDecisionResponse>;
+  /** Forward an action-approval-card click; authorization, the atomic flip,
+   * execution, and every card rewrite are control-plane-side. */
+  decideAction(
+    request: AdapterActionDecisionRequest,
+  ): Promise<AdapterActionDecisionResponse>;
   claimPrompt(input: {
     approvalId: string;
     presenceId: string;
@@ -82,10 +93,27 @@ export interface ControlPlaneClient {
   reportApprovalHealth(presenceId: string, healthy: boolean): Promise<void>;
   /** The proactive credential sweep — staleness is decided server-side. */
   rotateIntegrations(): Promise<{ rotated: number; failed: number }>;
+  /** The pending-ask expiry sweep — the window is decided server-side.
+   * `actionsExpired` counts the action-approval ledger's parks (optional:
+   * an older control plane answers without it). */
+  expireReach(): Promise<{ expired: number; actionsExpired?: number }>;
   readTranscript(
     conversationId: string,
     since: number | undefined,
   ): Promise<z.infer<typeof adapterTranscriptResponseSchema>>;
+  /** Resolve `@[Name]` names for the completion pass (normalized in). The
+   * conversation carries the find_recipient anchors that outrank the
+   * directory. */
+  resolveMentions(
+    presenceId: string,
+    names: string[],
+    conversationId: string,
+  ): Promise<AdapterMentionResolution[]>;
+  /** Report a posted answer's unresolved mentions — the CAS winner only. */
+  reportMentionFailures(
+    turnId: string,
+    failures: AdapterMentionReportRequest["failures"],
+  ): Promise<void>;
 }
 
 export const createControlPlane = (options: {
@@ -239,6 +267,14 @@ export const createControlPlane = (options: {
         { body: request },
       ),
 
+    decideAction: (request) =>
+      call(
+        "POST",
+        "/channel-adapter/action-decision",
+        adapterActionDecisionResponseSchema,
+        { body: request },
+      ),
+
     async claimPrompt(input) {
       const parsed = await call(
         "POST",
@@ -303,6 +339,19 @@ export const createControlPlane = (options: {
         { body: {} },
       ),
 
+    expireReach: () =>
+      call(
+        "POST",
+        "/channel-adapter/expire-reach",
+        z.object({
+          expired: z.number().int(),
+          // Action approvals ride the same sweep (optional: an older
+          // control plane answers without it).
+          actionsExpired: z.number().int().optional(),
+        }),
+        { body: {} },
+      ),
+
     readTranscript: (conversationId, since) =>
       call(
         "GET",
@@ -311,5 +360,24 @@ export const createControlPlane = (options: {
         }`,
         adapterTranscriptResponseSchema,
       ),
+
+    resolveMentions: async (presenceId, names, conversationId) => {
+      const parsed = await call(
+        "POST",
+        "/channel-adapter/mentions/resolve",
+        adapterMentionResolveResponseSchema,
+        { body: { presenceId, names, conversationId } },
+      );
+      return parsed.resolutions;
+    },
+
+    reportMentionFailures: async (turnId, failures) => {
+      await call(
+        "POST",
+        "/channel-adapter/mentions/report",
+        z.object({ ok: z.boolean() }),
+        { body: { turnId, failures } },
+      );
+    },
   };
 };

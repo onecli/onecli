@@ -24,6 +24,7 @@ import {
 import {
   buildPlanSwitchItems,
   findActivePlanSubscription,
+  findOrgLiveSubscription,
   findKnownBaseItem,
   hasPendingCancellation,
   previewRenewalDate,
@@ -535,16 +536,19 @@ export const billingRoutes = () => {
 
       try {
         const stripe = getStripe();
-        const subscriptions = await stripe.subscriptions.list({
-          customer: organization.stripeCustomerId,
-          limit: 1,
-        });
-
-        const sub = subscriptions.data.find(
-          (s) =>
-            (s.status === "active" || s.status === "trialing") &&
-            (s.cancel_at_period_end || s.cancel_at !== null),
+        // Resolved by org metadata: `limit: 1` used to inspect whichever
+        // subscription Stripe happened to return first (a canceled one, or
+        // another org's on a shared customer) and reported "nothing to
+        // reactivate" for a customer that plainly had a canceling sub.
+        const found = await findOrgLiveSubscription(
+          stripe,
+          authCtx.organizationId,
+          organization.stripeCustomerId,
         );
+        const sub =
+          found && hasPendingCancellation(found.subscription)
+            ? found.subscription
+            : undefined;
 
         if (!sub) {
           return c.json({ error: "No canceling subscription found" }, 400);

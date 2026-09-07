@@ -1,15 +1,17 @@
-import { escapeSlackText } from "@onecli/agent-protocol";
+import { escapeSlackText, spaceOfThreadAddress } from "@onecli/channels/slack";
 // Type-only: erased at compile, so the service -> registry -> provider ->
 // reach-card import chain stays acyclic at runtime.
 import type { ReachDecision } from "../../agent-reach-service";
 import { parseSlackPresenceCredentials } from "./types";
 import {
-  chatUpdate,
+  updateBlocksMessage,
   conversationsInfo,
   conversationsOpen,
   postBlocksMessage,
   usersInfo,
-} from "./slack-api";
+  clampHeader,
+  clampLabel,
+} from "@onecli/channels/slack";
 
 /**
  * The Slack rendering of the reach card - the PLATFORM-composed owner DM
@@ -24,13 +26,6 @@ import {
  * (no turn is involved), and the bot-authored card can never loop back in
  * (the ingestion echo guard drops bot posts).
  */
-
-/** Slack header blocks cap plain_text at 150 chars. */
-const clampHeader = (value: string): string =>
-  value.length <= 120 ? value : `${value.slice(0, 120)}…`;
-
-const clampLabel = (value: string): string =>
-  value.length <= 200 ? value : `${value.slice(0, 200)}…`;
 
 /**
  * Neutralize a label that the SUBJECT THEMSELVES chose.
@@ -81,10 +76,31 @@ export const reachCardBlocks = (input: {
   agentName: string;
   subjectLabel: string;
   subjectKind?: "space" | "external_user";
-}): unknown[] =>
-  input.subjectKind === "external_user"
-    ? personCardBlocks(input)
-    : spaceCardBlocks(input);
+  firstAskedDaysAgo?: number;
+}): unknown[] => {
+  const blocks =
+    input.subjectKind === "external_user"
+      ? personCardBlocks(input)
+      : spaceCardBlocks(input);
+  // The lateness line: a re-posted or long-lived ask says how old it is,
+  // because an owner approving a weeks-old question deserves to know the
+  // context is weeks old. Numeric input only — nothing user-chosen rides
+  // this block.
+  if (input.firstAskedDaysAgo !== undefined && input.firstAskedDaysAgo > 0) {
+    blocks.push({
+      type: "context",
+      elements: [
+        {
+          type: "mrkdwn",
+          text: `First asked ${Math.floor(input.firstAskedDaysAgo)} day${
+            Math.floor(input.firstAskedDaysAgo) === 1 ? "" : "s"
+          } ago.`,
+        },
+      ],
+    });
+  }
+  return blocks;
+};
 
 /**
  * The PERSON card: two answers, because "OneCLI users only" says nothing
@@ -242,6 +258,10 @@ const settledText = (input: {
         : `\u26d4 *${label}* - not answering there (decided by ${by}).`;
     case "left":
       return `*${label}* - I was removed from this channel, so this question is closed. If I'm re-invited, I'll ask again.`;
+    case "expired":
+      return person
+        ? `*${label}* - this request expired without an answer. If they message me again, I'll ask you fresh.`
+        : `*${label}* - this request expired without an answer. The next message there will ask you fresh.`;
     default:
       return `*${label}* - ${escapeSlackText(input.outcome)} (by ${by}).`;
   }
@@ -252,8 +272,7 @@ export const slackReach = {
   /** Group-thread addresses are minted as `<channelId>:<threadRootTs>`
    * (interpret.ts `groupThreadId`) - the space is the channel. Inverse
    * lives beside the renderer so provider-shaped reach logic has one home. */
-  spaceOf: (externalThreadId: string): string =>
-    externalThreadId.split(":")[0] ?? "",
+  spaceOf: spaceOfThreadAddress,
 
   /** "#channel-name" for cards and the dashboard; null when the token
    * cannot read the channel (private, dead credential). Display only. */
@@ -326,6 +345,65 @@ export const slackReach = {
     }
   },
 
+  /**
+   * The approve-time subject recheck. Each arm REUSES the probe its lane
+   * already trusts: the person arm is `resolveGuestSpeaker`'s own checks
+   * (deleted, foreign tenant, stranger), the space arm is
+   * `conversations.info` with `is_member`. FAIL-OPEN on transport errors —
+   * a Slack outage must not brick governance (the type's contract); the
+   * definite negatives (deleted user, foreign tenant, bot not a member,
+   * archived channel) are the only refusals.
+   */
+  async verifySubject(input: {
+    credentialsJson: string | null;
+    subjectKind: "space" | "external_user";
+    externalRef: string;
+    tenantExternalId: string;
+  }): Promise<{ ok: true } | { ok: false; reason: string }> {
+    if (!input.credentialsJson) return { ok: true }; // cannot check — fail open
+    let botToken: string | undefined;
+    try {
+      botToken = parseSlackPresenceCredentials(input.credentialsJson).botToken;
+    } catch {
+      return { ok: true };
+    }
+    if (!botToken) return { ok: true };
+
+    if (input.subjectKind === "external_user") {
+      try {
+        const info = await usersInfo(botToken, input.externalRef);
+        if (info.user.deleted) {
+          return { ok: false, reason: "this person's account was deactivated" };
+        }
+        if (
+          info.user.team_id !== input.tenantExternalId ||
+          info.user.is_stranger === true
+        ) {
+          return {
+            ok: false,
+            reason: "this person is no longer in your Slack workspace",
+          };
+        }
+        return { ok: true };
+      } catch {
+        return { ok: true }; // transport failure — fail open
+      }
+    }
+
+    try {
+      const info = await conversationsInfo(botToken, input.externalRef);
+      if (info.channel.is_archived === true) {
+        return { ok: false, reason: "the channel was archived" };
+      }
+      if (info.channel.is_member === false) {
+        return { ok: false, reason: "the agent is no longer in the channel" };
+      }
+      return { ok: true };
+    } catch {
+      return { ok: true }; // transport failure (or unreadable channel) — fail open
+    }
+  },
+
   card: {
     async post(input: {
       credentialsJson: string;
@@ -334,6 +412,7 @@ export const slackReach = {
       agentName: string;
       subjectLabel: string;
       subjectKind?: "space" | "external_user";
+      firstAskedDaysAgo?: number;
     }): Promise<{ channel: string; ts: string }> {
       const creds = parseSlackPresenceCredentials(input.credentialsJson);
       if (!creds.botToken) throw new Error("presence has no bot token");
@@ -365,7 +444,7 @@ export const slackReach = {
       const creds = parseSlackPresenceCredentials(input.credentialsJson);
       if (!creds.botToken) return;
       const text = settledText(input);
-      await chatUpdate(creds.botToken, {
+      await updateBlocksMessage(creds.botToken, {
         channel: input.channel,
         ts: input.ts,
         text,

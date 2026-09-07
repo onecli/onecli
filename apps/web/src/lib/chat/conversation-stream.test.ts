@@ -50,6 +50,9 @@ interface Recorded {
   batches: TurnEvent[][];
   paths: string[];
   delays: number[];
+  caughtUp: number;
+  /** `batches.length` at each caught-up fire — the ordering proof. */
+  caughtUpAt: number[];
 }
 
 /** Run the engine against scripted responses with instant sleeps. */
@@ -66,6 +69,8 @@ const run = (
     batches: [],
     paths: [],
     delays: [],
+    caughtUp: 0,
+    caughtUpAt: [],
   };
   const controller = new AbortController();
   const done = runConversationStream(
@@ -91,6 +96,10 @@ const run = (
       onEvents: (incoming) => recorded.batches.push(incoming),
       onStatus: (status, error) =>
         recorded.statuses.push({ status, ...(error && { error }) }),
+      onCaughtUp: () => {
+        recorded.caughtUp += 1;
+        recorded.caughtUpAt.push(recorded.batches.length);
+      },
     },
     controller.signal,
   );
@@ -119,6 +128,45 @@ describe("runConversationStream", () => {
       "reconnecting",
       "streaming",
     ]);
+  });
+
+  it("signals caught-up AFTER the events that preceded the frame", async () => {
+    const { recorded, controller, done } = run((call, signal) =>
+      call === 1
+        ? sseResponse([
+            frame(1) + frame(2) + 'event: caught-up\ndata: {"seq":2}\n\n',
+          ])
+        : hangingSseResponse(signal),
+    );
+    await new Promise<void>((resolve) => {
+      const poll = setInterval(() => {
+        if (recorded.caughtUp > 0) {
+          clearInterval(poll);
+          resolve();
+        }
+      }, 1);
+    });
+    controller.abort();
+    await done;
+
+    // The replay's events were already delivered when the signal fired — a
+    // consumer that reveals on it holds the whole replay.
+    expect(recorded.batches.map((b) => b.map((e) => e.seq))).toEqual([[1, 2]]);
+    expect(recorded.caughtUpAt).toEqual([1]);
+  });
+
+  it("treats a caught-up-only read as no events — never an empty onEvents call", async () => {
+    const { recorded, controller, done } = run((call, signal) =>
+      call === 1
+        ? sseResponse(['event: caught-up\ndata: {"seq":0}\n\n'])
+        : hangingSseResponse(signal),
+    );
+    await new Promise((r) => setTimeout(r, 20));
+    controller.abort();
+    await done;
+
+    expect(recorded.batches).toEqual([]);
+    expect(recorded.caughtUp).toBe(1);
   });
 
   it("resumes with ?since=<cursor> and connects bare at cursor 0", async () => {

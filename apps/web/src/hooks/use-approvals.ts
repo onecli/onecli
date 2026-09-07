@@ -9,6 +9,10 @@ import {
   type ApprovalDecisionInput,
   type PendingApproval,
 } from "@/lib/api/approvals";
+import { listPendingChannelApprovals } from "@/lib/api/channel-approvals";
+import * as channels from "@/lib/api/channels";
+import type { ChannelProvider } from "@/lib/api/channels";
+import { getWorkspaceId } from "@/lib/api-fetch";
 import { queryKeys } from "@/lib/api/keys";
 import { hasWorkspaceContext } from "@/lib/navigation";
 
@@ -137,6 +141,86 @@ export const useDecideApproval = () => {
       // Only the pending list is a React Query resource; the Activity screen
       // refreshes via its own polling, and sidebar counts are unaffected.
       qc.invalidateQueries({ queryKey: queryKeys.approvals.all() });
+    },
+  });
+};
+
+/**
+ * The bell's CHANNEL arm (4d): pending action approvals + reach asks for the
+ * workspace in the URL. Plain 15s poll — these asks live hours, not the
+ * gateway prompt's seconds, so no long-poll ceremony. Same context gate as
+ * the gateway arm.
+ */
+export const usePendingChannelApprovals = () => {
+  const pathname = usePathname();
+  const workspaceId = getWorkspaceId();
+
+  return useQuery({
+    queryKey: queryKeys.approvals.channel(workspaceId ?? "none"),
+    queryFn: () => listPendingChannelApprovals(workspaceId as string),
+    enabled: hasWorkspaceContext(pathname) && workspaceId !== undefined,
+    refetchInterval: 15_000,
+    refetchIntervalInBackground: false,
+  });
+};
+
+/** Decide one action approval from the bell (approve / always-allow /
+ * reject+reason) — the per-agent decide door, bell cache refreshed. */
+export const useDecideChannelAction = (agentId: string) => {
+  const qc = useQueryClient();
+  const workspaceId = getWorkspaceId();
+  return useMutation({
+    mutationFn: (input: {
+      approvalId: string;
+      decision: "approve" | "approve_always" | "reject";
+      reason?: string;
+    }) =>
+      channels.decideActionApproval(agentId, input.approvalId, {
+        decision: input.decision,
+        ...(input.reason !== undefined && { reason: input.reason }),
+      }),
+    onSuccess: () => {
+      if (workspaceId) {
+        qc.invalidateQueries({
+          queryKey: queryKeys.approvals.channel(workspaceId),
+        });
+      }
+      qc.invalidateQueries({ queryKey: queryKeys.channels.all() });
+    },
+  });
+};
+
+/** Decide one reach ask from the bell — space (3-way) or person (2-way),
+ * through the existing per-agent reach doors. */
+export const useDecideChannelReach = (agentId: string, provider: string) => {
+  const qc = useQueryClient();
+  const workspaceId = getWorkspaceId();
+  return useMutation({
+    mutationFn: (input: {
+      externalRef: string;
+      subjectKind: "space" | "external_user";
+      state: "approved" | "members_only" | "blocked";
+    }) =>
+      input.subjectKind === "space"
+        ? channels.setReachState(
+            agentId,
+            provider as ChannelProvider,
+            input.externalRef,
+            input.state,
+          )
+        : channels.setPersonReachState(
+            agentId,
+            provider as ChannelProvider,
+            input.externalRef,
+            input.state === "members_only" ? "blocked" : input.state,
+          ),
+    onSuccess: () => {
+      if (workspaceId) {
+        qc.invalidateQueries({
+          queryKey: queryKeys.approvals.channel(workspaceId),
+        });
+      }
+      qc.invalidateQueries({ queryKey: queryKeys.channels.all() });
     },
   });
 };

@@ -15,7 +15,11 @@ import {
   slackAppManagerApproved,
   type SlackSharedAppConfig,
 } from "./shared-app";
-import { appsUninstall, oauthAccess, SlackApiError } from "./slack-api";
+import {
+  appsUninstall,
+  oauthAccess,
+  SlackApiError,
+} from "@onecli/channels/slack";
 import { publicApiUrl } from "../../posture";
 import type { ChannelSharedApp } from "../../types";
 import {

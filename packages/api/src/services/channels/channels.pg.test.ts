@@ -487,7 +487,7 @@ const settleChannel = (
       subjectKind: "space",
       externalRef,
       state: "members_only",
-      promptRefs: [],
+      cardRefs: [],
     },
     select: { id: true },
   });
@@ -4197,7 +4197,10 @@ describe.skipIf(!PROOF_URL)("ingestion — group surfaces", () => {
     // cleanName — the stored name is "Bad\x07Name\x1b". Delete the
     // control-char strip and the raw escape bytes land inside the turn
     // message (a terminal-escape / prompt-surface hazard).
-    expect(turn.message).toBe("BadName: <@UBOT> deploy please");
+    // The bot's own mention DECODES to the agent's name (inbound token
+    // decoding): the model recognizes being addressed instead of seeing an
+    // opaque `<@UBOT>` id.
+    expect(turn.message).toBe("BadName: @[agent grp-mention] deploy please");
     expect(turn.userId).toBe(CTRL_NAME_USER);
     expect(turn.source).toBe("slack");
   });
@@ -4243,6 +4246,98 @@ describe.skipIf(!PROOF_URL)("ingestion — group surfaces", () => {
     expect(followUp.outcome.kind).toBe("turn");
     // Same thread → same conversation, not a second one.
     expect(await db.conversation.count({ where: { agentId } })).toBe(1);
+  });
+
+  it("INBOUND DECODE: a mention of a LINKED teammate becomes their PLATFORM name - never the provider display name", async () => {
+    const { agentId, integrationId, presenceId } =
+      await seedChannelAgent("grp-decode");
+    await linkUser(integrationId, "U222", CTRL_NAME_USER);
+    // The mentioned person is ALSO linked - platform name "BadName" wins
+    // (control chars stripped by the prefix cleaner) over whatever their
+    // Slack profile says. Provider names are attacker-chosen; ours are
+    // governance data - the speaker-prefix rule, applied to mentions.
+    await linkUser(integrationId, "U333", MEMBER);
+    await settleChannel(agentId, integrationId, "C1");
+
+    const result = await dispatch.dispatchSlackEvent({
+      presenceId,
+      identityRef: "UBOT",
+      event: mentionEvent(
+        "U222",
+        "C1",
+        "121.222",
+        "<@UBOT> hand this to <@U333> and post in <#C024BE7LR|general>",
+      ),
+      eventId: "Ev-grp-decode-1",
+    });
+    expect(result.kind).toBe("message");
+
+    const turn = await db.turn.findFirstOrThrow({
+      where: { conversation: { agentId } },
+    });
+    // Bot -> agent name; linked member -> PLATFORM name; channel -> label.
+    // MEMBER's platform user is seeded with name "Member McMember".
+    const member = await db.user.findUniqueOrThrow({
+      where: { id: MEMBER },
+      select: { name: true, email: true },
+    });
+    const expected = member.name || member.email;
+    // User mentions decode to the OUTBOUND grammar @[Name] (round-trip:
+    // the transcript teaches the form the write side resolves); the agent's
+    // own mention decodes the same way, and channels stay #label.
+    expect(turn.message).toBe(
+      `BadName: @[agent grp-decode] hand this to @[${expected}] and post in #general`,
+    );
+  });
+
+  it("INBOUND DECODE: an UNLINKED mention resolves via the provider profile, fail-open on refusal", async () => {
+    const { agentId, integrationId, presenceId } = await seedChannelAgent(
+      "grp-decode-stranger",
+      // The stranger lookup needs the presence's own bot token (linked
+      // mentions and the agent's own id resolve without one - and DO, in
+      // the arm above, where credentials stay null).
+      {
+        presenceCredentials: await getCrypto().encrypt(
+          JSON.stringify({ botToken: "xoxb-decode" }),
+        ),
+      },
+    );
+    await linkUser(integrationId, "U222", CTRL_NAME_USER);
+    await settleChannel(agentId, integrationId, "C1");
+    // users.info answers for the stranger id.
+    slackHandlers["users.info"] = (call) =>
+      call.form.get("user") === "U909STRANGER"
+        ? {
+            ok: true,
+            user: {
+              id: "U909STRANGER",
+              team_id: "T111",
+              name: "dana",
+              profile: { display_name: "Dana Stranger" },
+            },
+          }
+        : { ok: false, error: "user_not_found" };
+
+    await dispatch.dispatchSlackEvent({
+      presenceId,
+      identityRef: "UBOT",
+      event: mentionEvent(
+        "U222",
+        "C1",
+        "131.222",
+        "<@UBOT> ask <@U909STRANGER> and <@U404GONE>",
+      ),
+      eventId: "Ev-grp-decode-2",
+    });
+
+    const turn = await db.turn.findFirstOrThrow({
+      where: { conversation: { agentId } },
+    });
+    // The resolvable stranger decodes; the dead id stays VERBATIM (fail
+    // open per token) - a comprehension gap, never a lost turn.
+    expect(turn.message).toBe(
+      "BadName: @[agent grp-decode-stranger] ask @[Dana Stranger] and <@U404GONE>",
+    );
   });
 
   it("chatter in an UNJOINED thread is ignored without touching the doors", async () => {
@@ -4735,7 +4830,7 @@ describe.skipIf(!PROOF_URL)("presence ownership (§3.17)", () => {
 
   it("the work and prompt feeds serve ONLY the caller's slice", async () => {
     // MUTATION-TESTED: drop the `ownerAdapterId` WHERE from getAdapterWork or
-    // listUnsettledPrompts and the foreign row leaks into this feed.
+    // listUnsettledToolApprovalCards and the foreign row leaks into this feed.
     const one = await seedChannelAgent("own-feed-1");
     const two = await seedChannelAgent("own-feed-2");
     const a = await seedAdapterCaller();
@@ -4781,20 +4876,20 @@ describe.skipIf(!PROOF_URL)("presence ownership (§3.17)", () => {
     const workA = await adapters.getAdapterWork(a.adapterId);
     expect(workA.finished.map((w) => w.turn.id)).toEqual([turnOne]);
 
-    await adapters.claimApprovalPrompt({
+    await adapters.claimToolApprovalCard({
       approvalId: `${P}own-ap-1`,
       agentChannelId: one.presenceId,
       externalThreadId: "D1",
       expiresAt: null,
     });
-    await adapters.claimApprovalPrompt({
+    await adapters.claimToolApprovalCard({
       approvalId: `${P}own-ap-2`,
       agentChannelId: two.presenceId,
       externalThreadId: "D2",
       expiresAt: null,
     });
     expect(
-      (await adapters.listUnsettledPrompts(a.adapterId)).map(
+      (await adapters.listUnsettledToolApprovalCards(a.adapterId)).map(
         (prompt) => prompt.approvalId,
       ),
     ).toEqual([`${P}own-ap-1`]);
@@ -6982,23 +7077,23 @@ describe.skipIf(!PROOF_URL)("approval prompts (restart-safe dedupe)", () => {
       externalThreadId: "D1",
       expiresAt: null,
     };
-    expect(await adapters.claimApprovalPrompt(input)).toEqual({
+    expect(await adapters.claimToolApprovalCard(input)).toEqual({
       claimed: true,
     });
-    expect(await adapters.claimApprovalPrompt(input)).toEqual({
+    expect(await adapters.claimToolApprovalCard(input)).toEqual({
       claimed: false,
     });
   });
 
-  it("stores the gateway's expiresAt at claim time and surfaces it in listUnsettledPrompts", async () => {
+  it("stores the gateway's expiresAt at claim time and surfaces it in listUnsettledToolApprovalCards", async () => {
     // The restart-safe re-arm: a claim records the gateway's REAL deadline so a
     // restarted adapter re-arms the card against it instead of guessing (and
-    // marking a still-live approval timed-out early). listUnsettledPrompts must
+    // marking a still-live approval timed-out early). listUnsettledToolApprovalCards must
     // hand that deadline back.
     const { presenceId } = await seedChannelAgent("prompt-exp");
     const expiresAt = new Date("2026-08-06T18:00:00.000Z");
     expect(
-      await adapters.claimApprovalPrompt({
+      await adapters.claimToolApprovalCard({
         approvalId: "ap-exp",
         agentChannelId: presenceId,
         externalThreadId: "D1",
@@ -7006,14 +7101,16 @@ describe.skipIf(!PROOF_URL)("approval prompts (restart-safe dedupe)", () => {
       }),
     ).toEqual({ claimed: true });
 
-    const stored = await db.channelApprovalPrompt.findUniqueOrThrow({
+    const stored = await db.toolApprovalCard.findUniqueOrThrow({
       where: { approvalId: "ap-exp" },
       select: { expiresAt: true },
     });
     expect(stored.expiresAt).toEqual(expiresAt);
 
     const caller = await seedClaimedCaller();
-    const unsettled = await adapters.listUnsettledPrompts(caller.adapterId);
+    const unsettled = await adapters.listUnsettledToolApprovalCards(
+      caller.adapterId,
+    );
     expect(unsettled).toHaveLength(1);
     expect(unsettled[0]).toMatchObject({
       approvalId: "ap-exp",
@@ -7023,31 +7120,36 @@ describe.skipIf(!PROOF_URL)("approval prompts (restart-safe dedupe)", () => {
 
   it("settle returns the update handle and flips the state; unknown ids answer null", async () => {
     const { presenceId } = await seedChannelAgent("prompt-settle");
-    await adapters.claimApprovalPrompt({
+    await adapters.claimToolApprovalCard({
       approvalId: "ap-settle",
       agentChannelId: presenceId,
       externalThreadId: "D1",
       expiresAt: null,
     });
-    await adapters.recordApprovalPromptMessage("ap-settle", "169.42");
+    await adapters.recordToolApprovalCardMessage("ap-settle", "169.42");
 
-    const settled = await adapters.settleApprovalPrompt("ap-settle", "expired");
+    const settled = await adapters.settleToolApprovalCard(
+      "ap-settle",
+      "expired",
+    );
     expect(settled).toEqual({
       externalMessageRef: "169.42",
       externalThreadId: "D1",
     });
     expect(
       (
-        await db.channelApprovalPrompt.findUniqueOrThrow({
+        await db.toolApprovalCard.findUniqueOrThrow({
           where: { approvalId: "ap-settle" },
         })
       ).state,
     ).toBe("expired");
     const caller = await seedClaimedCaller();
-    expect(await adapters.listUnsettledPrompts(caller.adapterId)).toEqual([]);
+    expect(
+      await adapters.listUnsettledToolApprovalCards(caller.adapterId),
+    ).toEqual([]);
 
     expect(
-      await adapters.settleApprovalPrompt("ap-nope", "decided"),
+      await adapters.settleToolApprovalCard("ap-nope", "decided"),
     ).toBeNull();
   });
 });
@@ -7075,7 +7177,7 @@ describe.skipIf(!PROOF_URL)("decideApprovalFromChannel", () => {
       data: { apiKeyId: key.id },
     });
     await linkUser(seeded.integrationId, "U111", MEMBER);
-    await db.channelApprovalPrompt.create({
+    await db.toolApprovalCard.create({
       data: {
         approvalId: `ap-${suffix}`,
         agentChannelId: seeded.presenceId,
@@ -7126,7 +7228,7 @@ describe.skipIf(!PROOF_URL)("decideApprovalFromChannel", () => {
     // And the prompt settled.
     expect(
       (
-        await db.channelApprovalPrompt.findUniqueOrThrow({
+        await db.toolApprovalCard.findUniqueOrThrow({
           where: { approvalId },
         })
       ).state,
@@ -7165,7 +7267,7 @@ describe.skipIf(!PROOF_URL)("decideApprovalFromChannel", () => {
     expect(result).toEqual({ kind: "already_settled" });
     expect(
       (
-        await db.channelApprovalPrompt.findUniqueOrThrow({
+        await db.toolApprovalCard.findUniqueOrThrow({
           where: { approvalId },
         })
       ).state,

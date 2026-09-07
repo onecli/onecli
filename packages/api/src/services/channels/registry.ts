@@ -1,4 +1,10 @@
+// The id guard lives in @onecli/channels beside the union. It checks the
+// const ARRAY rather than this Record - equivalent by construction, because
+// this Record is keyed by the same union and a mismatch is a compile error.
+import { isChannelProviderId } from "@onecli/channels";
 import type { ChannelProvider, ChannelProviderId } from "./types";
+
+export { isChannelProviderId };
 import { slackProvider } from "./providers/slack/provider";
 
 // SERVER-ONLY (see `./types`): providers reach outbound fetch logic and
@@ -13,15 +19,6 @@ import { slackProvider } from "./providers/slack/provider";
 export const CHANNEL_PROVIDERS: Record<ChannelProviderId, ChannelProvider> = {
   slack: slackProvider,
 };
-
-/**
- * `Object.hasOwn`, not `in`: `in` walks the prototype chain, so
- * `"constructor"` would answer true and hand back something that is not a
- * provider (the same trap `llm/registry.ts` documents).
- */
-export const isChannelProviderId = (
-  value: string,
-): value is ChannelProviderId => Object.hasOwn(CHANNEL_PROVIDERS, value);
 
 export const channelProvider = (id: ChannelProviderId): ChannelProvider =>
   CHANNEL_PROVIDERS[id];

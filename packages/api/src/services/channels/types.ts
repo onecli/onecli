@@ -18,8 +18,15 @@ import type {
   IngestOutcome,
 } from "./channel-ingestion-service";
 
-export const CHANNEL_PROVIDER_IDS = ["slack"] as const;
-export type ChannelProviderId = (typeof CHANNEL_PROVIDER_IDS)[number];
+// The id union lives in @onecli/channels (both runtimes key on it); the
+// api re-exports it so its ~50 existing import sites keep one path.
+import type { ChannelProviderId } from "@onecli/channels";
+
+export {
+  CHANNEL_PROVIDER_IDS,
+  isChannelProviderId,
+  type ChannelProviderId,
+} from "@onecli/channels";
 
 /**
  * How a presence's inbound events reach us. "events" = the provider calls our
@@ -560,7 +567,26 @@ export interface ChannelProvider {
     }): Promise<{ displayName: string | null; sameTenant: boolean } | null>;
 
     /**
-     * The owner-DM reach card - the PLATFORM-composed approval prompt for a
+     * Re-verify a grant's SUBJECT at decision time — the approve-time
+     * recheck: a card may sit for days, and approving it must not record a
+     * settlement for a subject that no longer exists (a deactivated guest,
+     * a channel the bot left). The person arm re-runs the guest probe
+     * (same tenant, not deleted, not a stranger); the space arm asks the
+     * provider whether the bot is still a member. FAIL-OPEN on provider
+     * outage ({ok: true}): availability must never brick governance — the
+     * ingestion door re-probes on every message anyway, so a wrongly
+     * recorded settlement cannot admit a ghost. The same seam is the
+     * replay-with-grant recheck the approval primitive (PR 4b) calls.
+     */
+    verifySubject(input: {
+      credentialsJson: string | null;
+      subjectKind: "space" | "external_user";
+      externalRef: string;
+      tenantExternalId: string;
+    }): Promise<{ ok: true } | { ok: false; reason: string }>;
+
+    /**
+     * The owner-DM reach card - the PLATFORM-composed ask card for a
      * reach grant, posted with the presence's own credential. Template text
      * is the implementation's own; every dynamic field is escaped and
      * clamped there; the button values carry ONLY the opaque grant id (the
@@ -580,6 +606,11 @@ export interface ChannelProvider {
          * Defaulted by the renderer so an older caller still posts a space
          * card. */
         subjectKind?: "space" | "external_user";
+        /** Whole days since the ask was first raised, when it is old enough
+         * to matter (the caller sends it past its own threshold). A late
+         * card must say it is late — an owner approving a weeks-old ask
+         * deserves to know the context is weeks old. */
+        firstAskedDaysAgo?: number;
       }): Promise<{ channel: string; ts: string }>;
       settle(input: {
         credentialsJson: string;
@@ -591,6 +622,36 @@ export interface ChannelProvider {
         subjectKind?: "space" | "external_user";
       }): Promise<void>;
     };
+  };
+
+  /**
+   * The one-shot ACTION-approval card (action-approval-service): the
+   * owner-DM card for a held privileged agent action, posted with the
+   * presence's own credential. Same trust rules as the reach card — the
+   * template is the implementation's, every dynamic field escaped and
+   * clamped there, button values carry ONLY the opaque approval id.
+   * Optional like `reach`: a provider without it is dashboard-only, which
+   * is the durable surface anyway.
+   */
+  actionApprovalCard?: {
+    post(input: {
+      credentialsJson: string;
+      recipientExternalUserId: string;
+      approvalId: string;
+      agentName: string;
+      summary: string;
+      /** Render the "always allow" upgrade button — set only when the
+       * action's registration declares a standing-grant hook. */
+      offerAlwaysAllow?: boolean;
+    }): Promise<{ channel: string; ts: string }>;
+    settle(input: {
+      credentialsJson: string;
+      channel: string;
+      ts: string;
+      summary: string;
+      outcome: string;
+      decidedByName: string;
+    }): Promise<void>;
   };
 
   /**

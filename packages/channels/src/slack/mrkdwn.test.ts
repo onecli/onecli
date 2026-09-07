@@ -354,3 +354,127 @@ describe("GFM tables", () => {
     expect(out.endsWith("\nafter")).toBe(true);
   });
 });
+
+describe("outbound mentions (the mentions option)", () => {
+  const mentions = new Map([
+    ["dan abramov", "U0DANABR1"],
+    ["kelly", "W0KELLY99"],
+  ]);
+
+  it("renders a resolved @[Name] as a real user mention", () => {
+    expect(markdownToMrkdwn("ask @[Dan Abramov] about it", { mentions })).toBe(
+      "ask <@U0DANABR1> about it",
+    );
+  });
+
+  it("renders a resolved channel ref as a channel LINK (<#C…>), never a ping", () => {
+    const withChannel = new Map([...mentions, ["#guy-private", "C0GPRIV1"]]);
+    expect(
+      markdownToMrkdwn("posted in @[#guy-private] just now", {
+        mentions: withChannel,
+      }),
+    ).toBe("posted in <#C0GPRIV1> just now");
+  });
+
+  it("a NON-id resolution value never becomes a token (the injection fence)", () => {
+    const hostile = new Map([["evil", "!channel"]]);
+    expect(markdownToMrkdwn("hey @[evil]", { mentions: hostile })).toBe(
+      "hey @evil",
+    );
+  });
+
+  it("matches case-insensitively with collapsed whitespace (the normalize contract)", () => {
+    expect(markdownToMrkdwn("hi @[ DAN   abramov ]", { mentions })).toBe(
+      "hi <@U0DANABR1>",
+    );
+  });
+
+  it("accepts Enterprise Grid W-ids", () => {
+    expect(markdownToMrkdwn("hi @[Kelly]", { mentions })).toBe(
+      "hi <@W0KELLY99>",
+    );
+  });
+
+  it("degrades an unresolved name to visible plain text - never dropped", () => {
+    expect(markdownToMrkdwn("ask @[Nobody Here] please", { mentions })).toBe(
+      "ask @Nobody Here please",
+    );
+  });
+
+  it("without the option, @[Name] stays literal text (every non-answer surface)", () => {
+    expect(markdownToMrkdwn("ask @[Dan Abramov]")).toBe("ask @[Dan Abramov]");
+  });
+
+  it("a token inside code is content, not a mention", () => {
+    expect(markdownToMrkdwn("`@[Dan Abramov]`", { mentions })).toBe(
+      "`@[Dan Abramov]`",
+    );
+    expect(
+      markdownToMrkdwn("```\n@[Dan Abramov]\n```", { mentions }),
+    ).toContain("@[Dan Abramov]");
+  });
+
+  it("REFUSES a corrupted map id that is not a Slack user id - emits no wire bytes", () => {
+    const hostile = new Map([
+      ["dan abramov", "!channel"],
+      ["kelly", "S123ABC"], // a subteam id must not become <@S…>
+    ]);
+    const out = markdownToMrkdwn("@[Dan Abramov] @[Kelly]", {
+      mentions: hostile,
+    });
+    expect(out).toBe("@Dan Abramov @Kelly");
+    expect(out).not.toContain("<");
+  });
+
+  it("the model's raw <@U…> and <!channel> stay escaped even WITH mentions on", () => {
+    const out = markdownToMrkdwn("<@U999> <!channel> @[Kelly]", { mentions });
+    expect(out).toBe("&lt;@U999&gt; &lt;!channel&gt; <@W0KELLY99>");
+  });
+
+  it("a name containing markdown emphasis still resolves (escape order)", () => {
+    const escapedName = new Map([["a&b", "U0AB1"]]);
+    expect(markdownToMrkdwn("hi @[a&b]", { mentions: escapedName })).toBe(
+      "hi <@U0AB1>",
+    );
+  });
+
+  it("style passes cannot rewrite an emitted mention (it is lifted)", () => {
+    const starry = new Map([["dan", "U0DAN1"]]);
+    const out = markdownToMrkdwn("*hi @[Dan] there*", { mentions: starry });
+    expect(out).toContain("<@U0DAN1>");
+  });
+
+  it("an unresolved degrade keeps the escaped name (no raw angle brackets)", () => {
+    const out = markdownToMrkdwn("hi @[<script>]", { mentions });
+    expect(out).toBe("hi @&lt;script&gt;");
+  });
+});
+
+describe("outbound mentions — sweep pins", () => {
+  it("a mention inside a link label degrades readable (accepted gap: label keeps its brackets)", () => {
+    const mentions = new Map([["guy", "U0GUY1"]]);
+    // LINK_RE refuses labels containing ] so the markdown form survives with
+    // a real mention inside - readable, never corrupted wire bytes.
+    expect(markdownToMrkdwn("[@[guy]](https://x.com)", { mentions })).toBe(
+      "[<@U0GUY1>](https://x.com)",
+    );
+  });
+
+  it("distinct names past the scanner cap degrade to plain text (the cap contract, end to end)", () => {
+    // 21 distinct names, all resolvable - the scanner caps the RESOLVE list
+    // at 20, so the 21st is never in the map and degrades visibly.
+    const mentions = new Map(
+      Array.from({ length: 21 }, (_, i) => [`user ${i}`, `U0X${i}A`]),
+    );
+    const text = Array.from({ length: 21 }, (_, i) => `@[User ${i}]`).join(" ");
+    const out = markdownToMrkdwn(text, { mentions });
+    expect(out).toContain("<@U0X0A>");
+    expect(out).toContain("<@U0X19A>");
+    // Every name IS in the map, so full replacement would ping 21 - the pin
+    // is that the RENDERER replaces whatever the map holds; the CAP lives in
+    // mentionNamesOf, which builds the map. Simulate the real flow's map:
+    const capped = new Map([...mentions].slice(0, 20));
+    const real = markdownToMrkdwn(text, { mentions: capped });
+    expect(real).toContain("@User 20"); // degraded, visible, unpinged
+  });
+});

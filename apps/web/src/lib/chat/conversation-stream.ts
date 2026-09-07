@@ -32,6 +32,14 @@ export interface StreamCallbacks {
   /** One call per network read that produced at least one transcript event. */
   onEvents: (incoming: TurnEvent[]) => void;
   onStatus: (status: StreamStatus, error?: StreamFatalError) => void;
+  /**
+   * The server finished its history replay for this connection (the
+   * `caught-up` frame — sent after the replay, before any live event). What
+   * lets a reader hold its skeleton until the transcript is WHOLE and reveal
+   * once, instead of showing rows first and answers seconds later. Fires
+   * again on every reconnect's replay; consumers latch it.
+   */
+  onCaughtUp?: () => void;
 }
 
 export interface StreamDeps {
@@ -232,11 +240,19 @@ export const runConversationStream = async (
         );
         parser = pushed.state;
         const events: TurnEvent[] = [];
+        let caughtUp = false;
         for (const frame of pushed.frames) {
+          if (frame.event === "caught-up") {
+            caughtUp = true;
+            continue;
+          }
           const event = parseTranscriptFrame(frame);
           if (event) events.push(event);
         }
         if (events.length > 0) cb.onEvents(events); // ONE delivery per read
+        // AFTER the events it followed, so a consumer that reveals on this
+        // signal already holds everything the replay carried.
+        if (caughtUp) cb.onCaughtUp?.();
       }
     } catch {
       if (signal.aborted) return; // AbortError from teardown: silence

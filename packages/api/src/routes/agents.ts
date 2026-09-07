@@ -29,7 +29,7 @@ import {
   clearAgentImage,
   MAX_AGENT_IMAGE_BYTES,
 } from "../services/agent-image-service";
-import { readCappedBinaryBody } from "../lib/read-capped-binary-body";
+import { readCappedBinaryBody } from "@onecli/channels";
 import { ensureDirectConversation } from "../services/conversation-service";
 import { getAgentModels } from "../services/agent-models-service";
 import { agentsIncludeSchema } from "../validations/grants";

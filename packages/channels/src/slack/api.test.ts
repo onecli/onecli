@@ -1,7 +1,7 @@
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
-import { SlackApiError, usersInfo } from "./slack-api";
+import { SlackApiError, usersInfo } from "./api";
 
 /**
  * The bounded HTTP retry inside `slackCall`: 429/5xx are retried up to 3
