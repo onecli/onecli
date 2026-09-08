@@ -19,6 +19,9 @@
 #   export POSTGRES_PORT=5433
 #   curl -fsSL https://onecli.sh/install | sh
 #
+# Expose PostgreSQL beyond the host only when explicitly required:
+#   export ONECLI_POSTGRES_BIND_HOST=192.168.1.50
+#
 # Custom app/gateway/api ports (e.g. for multi-user hosts):
 #   export ONECLI_APP_PORT=11254
 #   export ONECLI_GATEWAY_PORT=11255
@@ -150,6 +153,25 @@ ensure_env_value() {
   fi
   printf '%s=%s\n' "$1" "$2" >> "$ENV_FILE"
   chmod 600 "$ENV_FILE"
+}
+
+# Persist every shell-provided publish-plane override that must survive a later
+# bare `docker compose up`. Defaults remain implicit in the compose file.
+persist_publish_config() {
+  ensure_env_value ONECLI_BIND_HOST "$ONECLI_BIND_HOST"
+  for pair in \
+    "ONECLI_APP_PORT:${ONECLI_APP_PORT:-}" \
+    "ONECLI_GATEWAY_PORT:${ONECLI_GATEWAY_PORT:-}" \
+    "ONECLI_API_PORT:${ONECLI_API_PORT:-}" \
+    "POSTGRES_PORT:${POSTGRES_PORT:-}" \
+    "ONECLI_POSTGRES_BIND_HOST:${ONECLI_POSTGRES_BIND_HOST:-}" \
+    "ONECLI_SSH_PORT:${ONECLI_SSH_PORT:-}"; do
+    _var="${pair%%:*}"
+    _val="${pair#*:}"
+    if [ -n "$_val" ]; then
+      ensure_env_value "$_var" "$_val"
+    fi
+  done
 }
 
 # The runner's credential (hosted agents): a "rnr_"-prefixed hex token, the
@@ -626,14 +648,7 @@ main() {
   # revert to loopback). Exported custom ports are recorded for the same
   # reason; defaults stay implicit.
 
-  ensure_env_value ONECLI_BIND_HOST "$ONECLI_BIND_HOST"
-  for pair in "ONECLI_APP_PORT:${ONECLI_APP_PORT:-}" "ONECLI_GATEWAY_PORT:${ONECLI_GATEWAY_PORT:-}" "ONECLI_API_PORT:${ONECLI_API_PORT:-}" "POSTGRES_PORT:${POSTGRES_PORT:-}" "ONECLI_SSH_PORT:${ONECLI_SSH_PORT:-}"; do
-    _var="${pair%%:*}"
-    _val="${pair#*:}"
-    if [ -n "$_val" ]; then
-      ensure_env_value "$_var" "$_val"
-    fi
-  done
+  persist_publish_config
 
   # ── Required secrets (split stack) ──
   # Must exist before ANY compose command touches the file — it refuses to
@@ -844,7 +859,7 @@ if [ "$1" = "--provision-url-env" ]; then
     exit 1
   fi
   mkdir -p "$INSTALL_DIR"
-  ensure_env_value ONECLI_BIND_HOST "$ONECLI_BIND_HOST"
+  persist_publish_config
   provision_external_url || exit 1
   exit 0
 fi
