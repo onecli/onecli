@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.6.1](https://github.com/onecli/onecli/compare/v2.6.0...v2.6.1) (2026-09-10)
+
+
+### Bug Fixes
+
+* invite dead ends, apps in agent channels, and a browser-ready agent image ([#554](https://github.com/onecli/onecli/issues/554)) ([3e595ef](https://github.com/onecli/onecli/commit/3e595ef04d1af420aab35bbe014967d1024e3d86))
+
 ## [2.6.0](https://github.com/onecli/onecli/compare/v2.5.0...v2.6.0) (2026-09-07)
 
 
