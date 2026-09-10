@@ -438,15 +438,21 @@ describe("env wrapper and facades", () => {
     expect(configuredApiUrl()).toBeUndefined();
   });
 
-  // The required subtlety: a configured external URL makes the API origin
-  // *derived-but-configured*, pinning OAuth redirect URIs and cookie-domain
-  // inputs without a separate API_URL line.
-  it("configuredApiUrl answers the derived origin when only the external URL is set", () => {
+  // Dynamic requestOrigin fallback
+  it("uses requestOrigin fallback for resolveOriginsFromEnv when no env is set", () => {
     clearAll();
-    process.env.ONECLI_EXTERNAL_URL = "http://192.0.2.10:10254";
-    expect(configuredApiUrl()).toBe("http://192.0.2.10:10256");
-    process.env.ONECLI_EXTERNAL_URL = "https://onecli.acme.com";
-    expect(configuredApiUrl()).toBe("https://onecli.acme.com");
+    const r = resolveOriginsFromEnv("http://192.168.1.100:10254");
+    expect(r.app).toBe("http://192.168.1.100:10254");
+    expect(r.api).toBe("http://192.168.1.100:10256");
+    expect(r.gateway).toBe("http://192.168.1.100:10255");
+  });
+
+  it("ignores requestOrigin fallback when ONECLI_EXTERNAL_URL is set", () => {
+    clearAll();
+    process.env.ONECLI_EXTERNAL_URL = "http://configured.host:10254";
+    const r = resolveOriginsFromEnv("http://fallback.host:10254");
+    expect(r.app).toBe("http://configured.host:10254");
+    expect(r.api).toBe("http://configured.host:10256");
   });
 });
 
