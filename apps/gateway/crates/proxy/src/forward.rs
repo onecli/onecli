@@ -214,6 +214,39 @@ fn upstream_offers_anonymous_token_challenge(headers: &hyper::HeaderMap) -> bool
         .any(value_has_bearer_url_realm)
 }
 
+/// True when the request or response indicates web/browser/HTML traffic rather than
+/// an API call. For unknown hosts, 401/403 responses on HTML pages (e.g. Cloudflare
+/// WAF blocks, anti-bot challenges, or web login pages) must be forwarded as-is rather
+/// than hijacked with `credential_not_found` JSON error nudges.
+fn is_html_or_browser_traffic(
+    req_headers: &hyper::HeaderMap,
+    resp_headers: &hyper::HeaderMap,
+) -> bool {
+    // 1. Upstream returned HTML content (e.g. Cloudflare challenge or 403 HTML page)
+    if let Some(ct) = resp_headers
+        .get(hyper::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+    {
+        let ct_lower = ct.to_ascii_lowercase();
+        if ct_lower.contains("text/html") || ct_lower.contains("application/xhtml+xml") {
+            return true;
+        }
+    }
+
+    // 2. Client requested HTML (e.g. browser navigation or page text extraction)
+    if let Some(accept) = req_headers
+        .get(hyper::header::ACCEPT)
+        .and_then(|v| v.to_str().ok())
+    {
+        let accept_lower = accept.to_ascii_lowercase();
+        if accept_lower.contains("text/html") || accept_lower.contains("application/xhtml+xml") {
+            return true;
+        }
+    }
+
+    false
+}
+
 /// Returns true if the request declares a `Content-Length` no larger than `max`.
 /// Absent or oversized `Content-Length` ⇒ false, so the request is left to
 /// forward normally rather than buffered for a default-interception check.
@@ -1109,6 +1142,13 @@ pub async fn forward_request(
                 status = %status.as_u16(),
                 "forwarding registry/token-exchange auth challenge (no nudge)"
             );
+        } else if is_html_or_browser_traffic(&headers, &resp_headers) {
+            info!(
+                method = %method,
+                url = %url,
+                status = %status.as_u16(),
+                "forwarding web/HTML 401/403 response on unknown host (no nudge)"
+            );
         } else {
             info!(method = %method, url = %url, status = %status.as_u16(), "credential not found");
             return Ok(response::credential_not_found(
@@ -1168,13 +1208,17 @@ pub async fn forward_request(
                     proxy_ctx.workspace_id.as_deref(),
                 ));
             }
-            info!(method = %method, url = %url, status = 400, "auth-related 400 — credential not found");
-            return Ok(response::credential_not_found(
-                StatusCode::BAD_REQUEST,
-                hostname,
-                &path,
-                proxy_ctx.workspace_id.as_deref(),
-            ));
+            if is_html_or_browser_traffic(&headers, &resp_headers) {
+                info!(method = %method, url = %url, status = 400, "forwarding web/HTML 400 response on unknown host (no nudge)");
+            } else {
+                info!(method = %method, url = %url, status = 400, "auth-related 400 — credential not found");
+                return Ok(response::credential_not_found(
+                    StatusCode::BAD_REQUEST,
+                    hostname,
+                    &path,
+                    proxy_ctx.workspace_id.as_deref(),
+                ));
+            }
         }
 
         // Not auth-related: forward the buffered 400 as-is.
@@ -1809,6 +1853,60 @@ mod tests {
         // Invalid UTF-8 prefix + "api key"
         let body = &[0xFF, 0xFE, 0x61, 0x70, 0x69, 0x20, 0x6B, 0x65, 0x79];
         assert!(body_indicates_auth_error(body));
+    }
+
+    // ── is_html_or_browser_traffic ───────────────────────────────────────
+
+    #[test]
+    fn html_or_browser_traffic_matches_html_response_content_type() {
+        let req_headers = hyper::HeaderMap::new();
+        let mut resp_headers = hyper::HeaderMap::new();
+        resp_headers.append(
+            hyper::header::CONTENT_TYPE,
+            hyper::header::HeaderValue::from_static("text/html; charset=utf-8"),
+        );
+        assert!(is_html_or_browser_traffic(&req_headers, &resp_headers));
+
+        let mut resp_xhtml = hyper::HeaderMap::new();
+        resp_xhtml.append(
+            hyper::header::CONTENT_TYPE,
+            hyper::header::HeaderValue::from_static("application/xhtml+xml"),
+        );
+        assert!(is_html_or_browser_traffic(&req_headers, &resp_xhtml));
+    }
+
+    #[test]
+    fn html_or_browser_traffic_matches_browser_accept_header() {
+        let mut req_headers = hyper::HeaderMap::new();
+        req_headers.append(
+            hyper::header::ACCEPT,
+            hyper::header::HeaderValue::from_static(
+                "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            ),
+        );
+        let resp_headers = hyper::HeaderMap::new();
+        assert!(is_html_or_browser_traffic(&req_headers, &resp_headers));
+    }
+
+    #[test]
+    fn html_or_browser_traffic_false_for_api_and_json_traffic() {
+        let mut req_headers = hyper::HeaderMap::new();
+        req_headers.append(
+            hyper::header::ACCEPT,
+            hyper::header::HeaderValue::from_static("application/json"),
+        );
+        let mut resp_headers = hyper::HeaderMap::new();
+        resp_headers.append(
+            hyper::header::CONTENT_TYPE,
+            hyper::header::HeaderValue::from_static("application/json; charset=utf-8"),
+        );
+        assert!(!is_html_or_browser_traffic(&req_headers, &resp_headers));
+
+        // Empty headers
+        assert!(!is_html_or_browser_traffic(
+            &hyper::HeaderMap::new(),
+            &hyper::HeaderMap::new()
+        ));
     }
 
     // ── upstream header deadline (issue #493) ────────────────────────────
