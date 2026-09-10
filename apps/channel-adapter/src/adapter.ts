@@ -365,7 +365,14 @@ export const createAdapter = ({ config, controlPlane, log }: AdapterDeps) => {
     while (!stopped) {
       try {
         const result = await controlPlane.rotateIntegrations();
-        if (result.rotated > 0 || result.failed > 0) {
+        // Deferred rows (a transient provider refusal kept the pair for the
+        // next pass) are logged too: a sweep that keeps deferring the same
+        // row is the operator's early warning before it goes dead.
+        if (
+          result.rotated > 0 ||
+          result.failed > 0 ||
+          (result.deferred ?? 0) > 0
+        ) {
           log("integration credential sweep", result);
         }
       } catch (err) {

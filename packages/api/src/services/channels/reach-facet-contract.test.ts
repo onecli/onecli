@@ -52,6 +52,11 @@ const teamsish: NonNullable<ChannelProvider["reach"]> = {
     return `Person ${externalRef.replace("person@", "")}`;
   },
 
+  // This provider has no app concept: a room's app roster is always empty.
+  async appsIn() {
+    return [];
+  },
+
   async resolveGuestSpeaker({
     credentialsJson,
     externalUserId,
@@ -64,6 +69,7 @@ const teamsish: NonNullable<ChannelProvider["reach"]> = {
     return {
       displayName: `User ${externalUserId.split("#")[0]}`,
       sameTenant: tenant === tenantExternalId,
+      isApp: false,
     };
   },
 

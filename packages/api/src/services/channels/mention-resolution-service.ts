@@ -410,8 +410,16 @@ export const buildMentionContext = async (
   });
   if (!link) return null;
 
-  const [directory, failures] = await Promise.all([
+  const [directory, anchors, failures] = await Promise.all([
     mentionDirectoryOf(link.agentChannel.integrationId),
+    // This conversation's ANCHORS: find_recipient picks, and apps that
+    // spoke here (PR 5a). They resolve ahead of the directory in
+    // `resolveMentionNames`, so the list must name them too — otherwise the
+    // model cannot know the app it is answering is addressable.
+    db.mentionAnchor.findMany({
+      where: { conversationId },
+      select: { name: true, displayName: true },
+    }),
     mentionFailuresOfPreviousTurn(conversationId, turnCreatedAt),
   ]);
   const blockedNames = await blockedNamesAmong(
@@ -421,9 +429,15 @@ export const buildMentionContext = async (
   );
 
   const entries = [...directory.values()].flat();
-  const names = entries
-    .map((entry) => entry.displayName)
-    .sort((a, b) => a.localeCompare(b));
+  // One name per normalized key: an anchor and a directory entry for the
+  // same person are the same mentionable, listed once.
+  const byKey = new Map<string, string>();
+  for (const anchor of anchors) byKey.set(anchor.name, anchor.displayName);
+  for (const entry of entries) {
+    const key = normalizeMentionName(entry.displayName);
+    if (key && !byKey.has(key)) byKey.set(key, entry.displayName);
+  }
+  const names = [...byKey.values()].sort((a, b) => a.localeCompare(b));
 
   const lines: string[] = [
     "[Mentions: to ping someone in this conversation, write @[Their Name] - brackets included; the platform turns it into a real mention. Plain @name WITHOUT brackets never pings anyone. The name must EXACTLY match a name from the list below or a find_recipient result; for anyone not listed, use find_recipient first - it gives the exact form to write. No match posts as plain text and pings nobody. @here/@channel are not available.",

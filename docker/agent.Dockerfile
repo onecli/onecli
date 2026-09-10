@@ -99,6 +99,47 @@ RUN JCODE_NO_AUTO_UPDATE=1 JCODE_NO_TELEMETRY=1 /opt/jcode/jcode --version \
   | grep -F "jcode ${JCODE_VERSION} "
 
 # ──────────────────────────────────────────────
+# Stage 4b: Vendor the PINNED Nix release (checksum-gated), UNPACKED — the
+# agent's durable-install path (plans/agent-owns-its-machine.md Tier 1.5)
+# ──────────────────────────────────────────────
+# Same law as the jcode pin: version and per-arch checksums travel together
+# and a mismatch fails the build. The hashes are the ones the OFFICIAL
+# first-stage installer (https://nixos.org/nix/install) pins for this
+# release — copied from it, verified here unconditionally. The tarball is
+# unpacked HERE (the image ships no xz for the agent to depend on) into a
+# non-/nix path: anything baked under /nix would be shadowed the moment the
+# boot phase bind-mounts the agent's durable store there. The agent runs
+# `onecli-nix-install` (below) to install FROM this directory, offline —
+# no runtime download, no curl-pipe-sh, and no egress-policy dependency.
+FROM base AS nix-dist
+ARG TARGETARCH
+ARG NIX_VERSION=2.35.2
+RUN apt-get update \
+  && apt-get install -y --no-install-recommends curl ca-certificates xz-utils \
+  && rm -rf /var/lib/apt/lists/*
+RUN case "$TARGETARCH" in \
+    arm64) NIX_SYSTEM="aarch64-linux"; \
+      SHA="4d0302a2910f5eec1c33b8deef634f04899a75737e7001ec49908d003ae5efda";; \
+    amd64) NIX_SYSTEM="x86_64-linux"; \
+      SHA="0c3960a9792331a22081c3c7a5d8465db9b17c50b3acdf18587fa4c6f2cb1158";; \
+    *) echo "unsupported TARGETARCH: $TARGETARCH" >&2; exit 1;; \
+  esac \
+  && curl -fsSL -o /tmp/nix.tar.xz \
+    "https://releases.nixos.org/nix/nix-${NIX_VERSION}/nix-${NIX_VERSION}-${NIX_SYSTEM}.tar.xz" \
+  && echo "${SHA}  /tmp/nix.tar.xz" | sha256sum -c - \
+  && mkdir -p /opt/nix-dist \
+  && tar -xJf /tmp/nix.tar.xz -C /opt/nix-dist \
+  && rm /tmp/nix.tar.xz \
+  # Known layout only, or fail HERE: one dir, holding the second-stage
+  # `install` script and the pre-built store it copies from.
+  && [ "$(ls /opt/nix-dist | wc -l)" -eq 1 ] \
+  && test -x "/opt/nix-dist/nix-${NIX_VERSION}-${NIX_SYSTEM}/install" \
+  && test -d "/opt/nix-dist/nix-${NIX_VERSION}-${NIX_SYSTEM}/store" \
+  # Root-owned 0755 like /opt/jcode: readable by the agent, never writable.
+  && chown -R root:root /opt/nix-dist \
+  && chmod -R a-w,a+rX /opt/nix-dist
+
+# ──────────────────────────────────────────────
 # Stage 5: Build — bundle the supervisor (and its MCP bridge) to dist/
 # ──────────────────────────────────────────────
 FROM base AS builder
@@ -168,8 +209,61 @@ WORKDIR /app
 # nano + less: the SSH front door needs an editor and a pager (neither ships
 # in slim, and --no-install-recommends keeps git from pulling less in);
 # EDITOR/PAGER/LESS pin them below.
+# The browser stack — chromium + chromium-sandbox + dbus-x11 + xvfb + fonts +
+# ffmpeg: agents need browsers (decided 2026-09-09, plans/agent-owns-its-
+# machine.md Tier 1). Playwright/Puppeteer from npm or pip drive the baked
+# binary at /usr/bin/chromium; the alternative — the harness's own
+# Firefox-extension browser tool — can never work in a headless guest and is
+# disabled in the adapter. Four load-bearing details:
+# - dbus-x11 is listed BEFORE chromium on purpose: chromium's dbus dependency
+#   is satisfied by either dbus-x11 or dbus-user-session, and apt's default
+#   pick (dbus-user-session) drags in systemd + systemd-sysv + libpam-systemd
+#   — an init system this tini-PID-1 image must never carry. Naming dbus-x11
+#   first makes the resolver take it instead (measured: 162 packages, no
+#   systemd, vs 168 with). The gate below pins systemd's ABSENCE.
+# - chromium-sandbox is the setuid helper (400 KB) that lets chromium's
+#   DEFAULT sandbox run as uid 1000 where user namespaces are available —
+#   the hosted microVM. Under the self-host Docker backend the same
+#   `no-new-privileges` + `CapDrop: ALL` that neuter podman's setuid helpers
+#   neuter this one too, and chromium must be told `--no-sandbox` (Playwright:
+#   `chromiumSandbox: false`). Same law as podman: never weaken the Docker
+#   guards for it; /etc/onecli/README.browser (baked below) tells the agent.
+# - xvfb is the fallback display for the rare tool that refuses headless
+#   mode; fonts-liberation + fonts-noto-color-emoji stop pages rendering as
+#   empty boxes (slim ships no fonts at all).
+# - ffmpeg is the video half: Playwright records .webm natively, and frames
+#   or screenshots are stitched with ffmpeg. The gate proves VP9 encoding.
+# - libnss3-tools is `certutil`, the only way to add a CA to the NSS shared
+#   DB — and that DB is the ONLY trust store chromium reads on Linux
+#   (chromium docs, linux/cert_management.md): it ignores SSL_CERT_FILE and
+#   NODE_EXTRA_CA_CERTS. Every page here is re-signed by the gateway CA, so
+#   without the import agent-entrypoint.sh does with this tool, every load
+#   fails ERR_CERT_AUTHORITY_INVALID and the agent's escape by trial is
+#   ignoreHTTPSErrors — verification off for every site (measured live on
+#   prod, 2026-09-09). The gate below proves the import is what chromium
+#   trusts, on a real handshake.
+# gcc + g++ + make + libc6-dev + python3-dev: the C toolchain for native npm
+# and pip modules (better-sqlite3, sharp, bcrypt, psycopg2, lxml…) that ship
+# no prebuilt binary for this platform/runtime pairing and fall back to
+# compiling at install time — without a compiler the install fails with a
+# wall of gyp/gcc errors and the agent concludes the package is broken.
+# Deliberately NOT build-essential: same compilers, minus 57 MB of dpkg-dev
+# nothing here uses.
+# procps + jq + zip + unzip + wget: the baseline any Linux box has and slim
+# does not (`ps` in particular — an agent that cannot list its own processes
+# burns turns on it).
+# xz-utils: `.tar.xz` is the release format of half the tools an agent will
+# fetch (Nix itself ships that way); slim has no xz.
 RUN apt-get update \
-  && apt-get install -y --no-install-recommends tini git curl ripgrep ca-certificates openssl e2fsprogs util-linux openssh-sftp-server openssh-client podman podman-docker uidmap passt slirp4netns fuse-overlayfs aardvark-dns catatonit iptables python3 python3-pip python3-venv nano less \
+  && apt-get install -y --no-install-recommends \
+    tini git curl ripgrep ca-certificates openssl e2fsprogs util-linux \
+    openssh-sftp-server openssh-client \
+    podman podman-docker uidmap passt slirp4netns fuse-overlayfs aardvark-dns catatonit iptables \
+    python3 python3-pip python3-venv \
+    nano less \
+    dbus-x11 chromium chromium-sandbox xvfb fonts-liberation fonts-noto-color-emoji ffmpeg libnss3-tools \
+    gcc g++ make libc6-dev python3-dev \
+    procps jq zip unzip wget xz-utils \
   && rm -rf /var/lib/apt/lists/*
 ENTRYPOINT ["/usr/bin/tini", "--"]
 
@@ -287,6 +381,144 @@ RUN podman --version \
   && grep -qx 'node:100000:65536' /etc/subuid \
   && grep -qx 'node:100000:65536' /etc/subgid
 
+# The browser note the machine fragment cites (one source, no drift — same
+# pattern as /etc/containers/README.onecli). Root-owned: substrate facts,
+# not agent preferences. The proxy paragraph is the load-bearing one,
+# MEASURED 2026-09-09 against an authenticating test proxy: bare chromium
+# reads the proxy HOST from HTTP_PROXY/HTTPS_PROXY but never the userinfo —
+# it answers the 407 challenge with nothing and every page fails — while
+# Playwright's launch({ proxy: { server, username, password } }) authenticates
+# on the first challenge. The sandbox's proxy URL carries the agent's token
+# as userinfo, so a browser started without that option reaches nothing.
+RUN install -d /etc/onecli \
+  && printf '%s\n' \
+    'OneCLI agent sandbox — the browser stack.' \
+    '' \
+    'Chromium is installed at /usr/bin/chromium (headless-capable), with ffmpeg' \
+    'for video and Xvfb as a fallback display. Drive it with Playwright or' \
+    'Puppeteer from npm/pip and point them at the system binary:' \
+    '  npm install -g playwright   # or: pip install --user playwright' \
+    '' \
+    'PROXY — READ THIS FIRST. Every request leaves this machine through the' \
+    'sandbox proxy, whose URL (in HTTPS_PROXY) carries your access token as' \
+    'user:password. Chromium reads the proxy HOST from that variable but never' \
+    'the credentials, so a browser launched without them loads nothing. Hand' \
+    'them to Playwright explicitly:' \
+    '  const u = new URL(process.env.HTTPS_PROXY);' \
+    '  const browser = await chromium.launch({' \
+    '    executablePath: "/usr/bin/chromium",' \
+    '    proxy: { server: `${u.protocol}//${u.host}`,' \
+    '             username: decodeURIComponent(u.username),' \
+    '             password: decodeURIComponent(u.password) },' \
+    '  });' \
+    '(Python: proxy={"server": ..., "username": ..., "password": ...}.)' \
+    'Puppeteer has no proxy-credential launch option; use' \
+    'page.authenticate({ username, password }) after --proxy-server=<host>.' \
+    '' \
+    'TLS: the proxy re-signs every HTTPS site with the sandbox CA. Chromium does' \
+    'not read SSL_CERT_FILE; it trusts the NSS database at ~/.pki/nssdb, and the' \
+    'sandbox CA is imported there at every boot, so pages load with normal' \
+    'certificate checks. Never set ignoreHTTPSErrors or' \
+    '--ignore-certificate-errors: that turns verification off for every site,' \
+    'not just the proxy. If a page fails with ERR_CERT_AUTHORITY_INVALID, check' \
+    'the import: `certutil -d sql:$HOME/.pki/nssdb -L` must list an' \
+    'onecli-gateway-* entry with trust flags C,,.' \
+    '' \
+    'Playwright can also download its own Chromium build (`playwright install' \
+    'chromium`); it lands under ~/.cache/ms-playwright on the durable home and' \
+    'the shared libraries it needs are already here.' \
+    '' \
+    'Sandbox flag: on the hosted platform, Chromium'"'"'s own sandbox works as-is.' \
+    'Under a self-hosted Docker deployment (no-new-privileges, CapDrop ALL) it' \
+    'cannot start and you must pass --no-sandbox (Playwright:' \
+    '`chromiumSandbox: false`). If launch fails with "No usable sandbox", that' \
+    'is the reason. Never try to weaken the container'"'"'s own hardening for it.' \
+    '' \
+    'Video: Playwright records .webm natively (`recordVideo: { dir }`). It needs' \
+    'its OWN small ffmpeg helper for that (~2 MB, separate from the system one):' \
+    'run `npx playwright install ffmpeg` once; it lands on the durable home. The' \
+    'system ffmpeg stitches screenshots or frames into video and converts formats' \
+    '(`ffmpeg -framerate 10 -i f%03d.png out.webm`).' \
+    > /etc/onecli/README.browser
+
+# The browser/toolchain gate (same law as the podman and jcode gates: prove
+# at build time, not at first agent boot).
+RUN chromium --version \
+  && command -v certutil \
+  && ffmpeg -version | head -1 \
+  && Xvfb -help >/dev/null 2>&1 \
+  && fc-list | grep -qi liberation \
+  && gcc --version | head -1 \
+  && g++ --version | head -1 \
+  && make --version | head -1 \
+  && ps --version \
+  && jq --version \
+  && zip -v | head -1 \
+  && unzip -v | head -1 \
+  && wget --version | head -1 \
+  # chromium-sandbox: the setuid helper must actually be setuid, or the
+  # DEFAULT sandbox path dies as uid 1000 on the hosted substrate.
+  && test -u /usr/lib/chromium/chrome-sandbox \
+  # The systemd guard: the dbus-x11-before-chromium ordering above is what
+  # keeps an init system out of this image, and a dependency change upstream
+  # could silently undo it. Pin the absence, loudly.
+  && ! dpkg-query -W systemd 2>/dev/null \
+  && test -f /etc/onecli/README.browser \
+  # Headless chromium REALLY renders as uid 1000: a screenshot of about:blank
+  # must come out non-empty. --no-sandbox because the build environment has
+  # no user namespaces (the default sandbox is proven live on the hosted
+  # substrate, not here); --disable-gpu because there is no GPU anywhere
+  # this image runs. Both are what a self-host Docker sandbox passes too.
+  # HOME and --user-data-dir are pinned to a throwaway dir: setpriv keeps
+  # root's HOME=/root, which uid 1000 cannot write, and chromium then dies
+  # with "Failed to create headless user data directory" (found live on
+  # this gate's first run). In production HOME is the durable ~ and this is
+  # a non-issue; Playwright manages its own profile dir regardless.
+  && setpriv --reuid node --regid node --init-groups sh -c ' \
+       set -e; d=$(mktemp -d /tmp/gate.XXXXXX); cd "$d"; \
+       HOME="$d" chromium --headless=new --no-sandbox --disable-gpu --disable-dev-shm-usage \
+         --user-data-dir="$d/profile" --screenshot="$d/shot.png" --window-size=640,480 \
+         about:blank >/dev/null 2>&1; \
+       test -s "$d/shot.png"; rm -rf "$d"' \
+  # ffmpeg REALLY encodes the codec the browser-recording story needs (VP9 in
+  # WebM — what Playwright produces and what Slack/web render inline).
+  && setpriv --reuid node --regid node --init-groups sh -c ' \
+       set -e; d=$(mktemp -d /tmp/gate.XXXXXX); cd "$d"; \
+       ffmpeg -loglevel error -f lavfi -i testsrc=duration=1:size=64x64:rate=5 \
+         -c:v libvpx-vp9 "$d/clip.webm"; \
+       test -s "$d/clip.webm"; rm -rf "$d"' \
+  # Chromium trusts a CA imported into ~/.pki/nssdb the way agent-entrypoint.sh
+  # imports the gateway CA (certutil -A -t "C,,"), on a REAL TLS handshake: a
+  # throwaway CA signs a localhost leaf, `openssl s_server` serves a page over
+  # it, and headless chromium — no --ignore-certificate-errors — must dump
+  # that page. The NEGATIVE half runs first and pins that the trust really
+  # comes from the import: the same page from a profile without it must NOT
+  # load. Both as uid 1000 with HOME on a throwaway dir, the production shape
+  # (HOME on the durable home, the entrypoint importing as node). The
+  # server-ready wait is bounded, not a fixed sleep.
+  && setpriv --reuid node --regid node --init-groups sh -c ' \
+       set -e; d=$(mktemp -d /tmp/gate.XXXXXX); cd "$d"; export HOME="$d"; \
+       openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes -days 2 \
+         -subj "/CN=nss-gate-ca" -addext "basicConstraints=critical,CA:TRUE" \
+         -keyout ca.key -out ca.pem 2>/dev/null; \
+       openssl req -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes \
+         -subj "/CN=localhost" -keyout leaf.key -out leaf.csr 2>/dev/null; \
+       printf "subjectAltName=DNS:localhost\nextendedKeyUsage=serverAuth\n" > leaf.ext; \
+       openssl x509 -req -in leaf.csr -CA ca.pem -CAkey ca.key -CAcreateserial -days 2 \
+         -extfile leaf.ext -out leaf.pem 2>/dev/null; \
+       echo "<title>nss-gate-ok</title>" > index.html; \
+       openssl s_server -accept 127.0.0.1:8443 -cert leaf.pem -key leaf.key -WWW -quiet >/dev/null 2>&1 & \
+       srv=$!; i=0; until openssl s_client -connect 127.0.0.1:8443 -CAfile ca.pem </dev/null >/dev/null 2>&1; do \
+         i=$((i+1)); [ "$i" -lt 50 ] || { echo "nss gate: s_server never came up" >&2; exit 1; }; sleep 0.1; done; \
+       load() { chromium --headless=new --no-sandbox --disable-gpu --disable-dev-shm-usage \
+                  --user-data-dir="$d/$1" --dump-dom https://localhost:8443/index.html 2>/dev/null \
+                | grep -q nss-gate-ok; }; \
+       if load p0; then echo "nss gate: chromium loaded an UNTRUSTED page" >&2; exit 1; fi; \
+       mkdir -p "$HOME/.pki/nssdb"; certutil -d "sql:$HOME/.pki/nssdb" -N --empty-password; \
+       certutil -d "sql:$HOME/.pki/nssdb" -A -t "C,," -n onecli-gateway-nss-gate -i ca.pem; \
+       if ! load p1; then echo "nss gate: chromium did not trust the NSS-imported CA" >&2; exit 1; fi; \
+       kill "$srv" 2>/dev/null || true; cd /; rm -rf "$d"'
+
 # The durable POSIX home: ~ = /workspace/.home, ON the home volume. Three
 # pieces:
 # - usermod: passwd is where the Docker substrate derives HOME from (runc
@@ -313,7 +545,52 @@ RUN usermod -d /workspace/.home node \
     '  *":/workspace/.home/.local/bin:"*) ;;' \
     '  *) PATH="$PATH:/workspace/.home/.local/bin" ;;' \
     'esac' \
+    '' \
+    '# Nix (Tier 1.5), when the agent has installed it. Never SOURCE the' \
+    '# agent-writable profile hook from a system file: set the one thing nix' \
+    '# needs (its bin dir, APPENDED - image binaries win name lookups) and' \
+    '# point it at the gateway CA (the hook would pick the system bundle).' \
+    '# Mirrors agent-entrypoint.sh; POSIX-only (dash sources this too).' \
+    'if [ -n "${HOME:-}" ]; then' \
+    '  _onecli_nix="$HOME/.local/state/nix/profile"' \
+    '  [ -e "$_onecli_nix" ] || _onecli_nix="$HOME/.nix-profile"' \
+    '  if [ -e "$_onecli_nix/bin/nix" ]; then' \
+    '    case ":$PATH:" in' \
+    '      *":$_onecli_nix/bin:"*) ;;' \
+    '      *) PATH="$PATH:$_onecli_nix/bin" ;;' \
+    '    esac' \
+    '    export PATH' \
+    '    if [ -n "${SSL_CERT_FILE:-}" ]; then export NIX_SSL_CERT_FILE="$SSL_CERT_FILE"; fi' \
+    '  fi' \
+    '  unset _onecli_nix' \
+    'fi' \
     > /etc/profile.d/onecli-path.sh
+
+# The Nix note the machine fragment cites (one source, no drift — same
+# pattern as README.browser / README.onecli). Root-owned.
+RUN printf '%s\n' \
+    'OneCLI agent sandbox — Nix, the durable install path.' \
+    '' \
+    'For a program that should survive restarts and is not on npm or pip, use' \
+    'Nix. It installs as your own user, needs no root, and its store lives on' \
+    'your durable disk (/workspace/.nix, bind-mounted at /nix every boot).' \
+    '' \
+    '  onecli-nix-install                 # once per agent, ~5 s, offline' \
+    '  nix profile add nixpkgs#ripgrep    # then install anything: search.nixos.org' \
+    '  nix profile list / remove / upgrade' \
+    '' \
+    'New shells have nix on PATH automatically. In the shell you ran the' \
+    'installer from, first:  . ~/.nix-profile/etc/profile.d/nix.sh &&' \
+    'export NIX_SSL_CERT_FILE="$SSL_CERT_FILE"   (the profile hook points Nix at' \
+    'the system CA bundle, which lacks the gateway CA; the export fixes that).' \
+    '' \
+    'Downloads come from cache.nixos.org through the sandbox proxy like every' \
+    'other tool. Your settings are in ~/.config/nix/nix.conf (flakes on,' \
+    'build sandbox off — binary-cache installs are unaffected).' \
+    '' \
+    'Hosted agents only: on a self-hosted Docker deployment nothing mounts /nix,' \
+    'and onecli-nix-install says so. Use npm, pip, or a container image there.' \
+    > /etc/onecli/README.nix
 
 ENV NODE_ENV=production
 ENV NO_COLOR=1
@@ -378,6 +655,11 @@ COPY --from=builder /app/apps/sandbox-supervisor/dist ./apps/sandbox-supervisor/
 # let the agent overwrite its own harness in a live container.
 COPY --from=jcode-runtime /opt/jcode /opt/jcode
 ENV ONECLI_JCODE_BINARY=/opt/jcode/jcode
+# The pinned Nix release, unpacked, root-owned — the offline source
+# `onecli-nix-install` installs from (Stage 4b).
+COPY --from=nix-dist /opt/nix-dist /opt/nix-dist
+COPY docker/onecli-nix-install /usr/local/bin/onecli-nix-install
+RUN chmod 0755 /usr/local/bin/onecli-nix-install
 # Drop the npm-bundled v0.67.1 binary so nothing can silently fall back to
 # it; the SDK's JS client library stays. Hoisted layout: the platform
 # packages sit directly under node_modules/@1jehuang/. Assert the glob
@@ -428,6 +710,24 @@ RUN python3 --version \
        test -x "$HOME/.local/bin/pip"; \
        python3 -m venv "$HOME/gate-venv"; \
        "$HOME/gate-venv/bin/pip" --version' \
+  # The Nix gate. What a build CAN prove: the vendored release is whole and
+  # the helper is sound. `sh -n` catches a syntax slip in the POSIX script;
+  # the REFUSAL path runs for real — with no /nix mount (a build has none)
+  # the helper must exit 2 with the hosted-only note, never install into the
+  # rootfs. The install path itself needs a bind mount root can make, so it
+  # is proven in the live check, not here.
+  && xz --version | head -1 \
+  && sh -n /usr/local/bin/onecli-nix-install \
+  && sh -n /etc/profile.d/onecli-path.sh \
+  && [ "$(ls /opt/nix-dist | wc -l)" -eq 1 ] \
+  && test -x /opt/nix-dist/nix-*/install \
+  && test -f /etc/onecli/README.nix \
+  && setpriv --reuid node --regid node --init-groups sh -c ' \
+       export HOME=/workspace/.home; mkdir -p "$HOME"; \
+       out=$(onecli-nix-install 2>&1); rc=$?; \
+       [ "$rc" -eq 2 ] || { echo "expected refusal (exit 2) without a /nix mount, got $rc: $out" >&2; exit 1; }; \
+       echo "$out" | grep -q "self-hosted Docker" || { echo "refusal lacked the hosted-only note: $out" >&2; exit 1; }; \
+       test ! -e /nix/store' \
   && rm -rf /workspace/.home
 VOLUME ["/workspace"]
 

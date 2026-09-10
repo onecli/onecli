@@ -159,6 +159,11 @@ export const AMBIENT_HAZARD_VARS: readonly string[] = [
   "SSH_MAX_SESSION_SECONDS",
   "SSH_IDLE_TIMEOUT_SECONDS",
   "SSH_SESSION_LEASE_SECONDS",
+  // Published egress identity (plans/stable-egress-identity.md) — presence
+  // flips GET /v1/instance/egress from 404 to a live feed at module load,
+  // and a malformed ambient value throws at import.
+  "EGRESS_IPV4_ADDRESSES",
+  "EGRESS_REGION",
   // Provider base URLs (test doubles point these at fakes per suite)
   "SLACK_API_BASE_URL",
   "SLACK_CDN_BASE_URL",

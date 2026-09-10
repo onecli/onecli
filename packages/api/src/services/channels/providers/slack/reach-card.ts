@@ -6,9 +6,11 @@ import { parseSlackPresenceCredentials } from "./types";
 import {
   updateBlocksMessage,
   conversationsInfo,
+  conversationsMembers,
   conversationsOpen,
   postBlocksMessage,
   usersInfo,
+  usersList,
   clampHeader,
   clampLabel,
 } from "@onecli/channels/slack";
@@ -50,6 +52,11 @@ import {
  */
 const neutralizeChosenLabel = (raw: string): string =>
   raw.replace(/[\r\n]+/g, " ").replace(/[*_~`]/g, "");
+
+/** Pages (200 rows each) the app-roster walk reads from `conversations.members`
+ * and from `users.list`: bounded so a pathological workspace cannot spin it,
+ * generous enough for any room two agents actually talk in. */
+const APPS_IN_MAX_PAGES = 5;
 
 export const REACH_APPROVE_ACTION = "reach_approve";
 export const REACH_MEMBERS_ACTION = "reach_members";
@@ -314,14 +321,79 @@ export const slackReach = {
 
   /**
    * The guest lane's speaker probe: display name (untrusted - the door
-   * cleans and frames it) + the same-tenant verdict. Fail-closed: any
+   * cleans and frames it), the same-tenant verdict, and the app flag the
+   * door confirms the wire's `bot_id` claim against. Fail-closed: any
    * lookup failure answers null and the door refuses.
    */
+  /**
+   * The room's app roster: the channel's member ids (`conversations.members`)
+   * intersected with the workspace directory (`users.list`, which carries
+   * `is_bot`) - both paginated and page-capped, so a 1,000-member channel
+   * costs a handful of calls, never one `users.info` per member. Keeps bot
+   * users of this tenant, minus the agent itself and Slackbot. One walk per
+   * NEW thread, not per message (the door seeds once). Any failure - a
+   * private channel the token cannot read, a rate limit - answers [] per
+   * the facet's contract.
+   */
+  async appsIn(input: {
+    credentialsJson: string | null;
+    externalRef: string;
+    tenantExternalId: string;
+    selfExternalUserId: string | null;
+  }): Promise<{ externalUserId: string; displayName: string }[]> {
+    if (!input.credentialsJson) return [];
+    try {
+      const creds = parseSlackPresenceCredentials(input.credentialsJson);
+      if (!creds.botToken) return [];
+      const token = creds.botToken;
+
+      const memberIds = new Set<string>();
+      let cursor: string | undefined;
+      for (let page = 0; page < APPS_IN_MAX_PAGES; page += 1) {
+        const response = await conversationsMembers(token, {
+          channel: input.externalRef,
+          cursor,
+        });
+        for (const id of response.members) memberIds.add(id);
+        cursor = response.response_metadata?.next_cursor || undefined;
+        if (!cursor) break;
+      }
+      memberIds.delete("USLACKBOT");
+      if (input.selfExternalUserId) memberIds.delete(input.selfExternalUserId);
+      if (memberIds.size === 0) return [];
+
+      const apps: { externalUserId: string; displayName: string }[] = [];
+      cursor = undefined;
+      for (let page = 0; page < APPS_IN_MAX_PAGES; page += 1) {
+        const response = await usersList(token, { cursor });
+        for (const user of response.members) {
+          if (!memberIds.has(user.id)) continue;
+          if (user.is_bot !== true || user.deleted) continue;
+          if (user.team_id !== input.tenantExternalId || user.is_stranger) {
+            continue;
+          }
+          const displayName =
+            user.profile?.display_name || user.profile?.real_name || user.name;
+          if (displayName) apps.push({ externalUserId: user.id, displayName });
+        }
+        cursor = response.response_metadata?.next_cursor || undefined;
+        if (!cursor) break;
+      }
+      return apps;
+    } catch {
+      return [];
+    }
+  },
+
   async resolveGuestSpeaker(input: {
     credentialsJson: string | null;
     externalUserId: string;
     tenantExternalId: string;
-  }): Promise<{ displayName: string | null; sameTenant: boolean } | null> {
+  }): Promise<{
+    displayName: string | null;
+    sameTenant: boolean;
+    isApp: boolean;
+  } | null> {
     if (!input.credentialsJson) return null;
     try {
       const creds = parseSlackPresenceCredentials(input.credentialsJson);
@@ -339,6 +411,7 @@ export const slackReach = {
         sameTenant:
           info.user.team_id === input.tenantExternalId &&
           info.user.is_stranger !== true,
+        isApp: info.user.is_bot === true,
       };
     } catch {
       return null;

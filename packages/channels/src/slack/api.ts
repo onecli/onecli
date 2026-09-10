@@ -674,6 +674,11 @@ const usersInfoResponse = z.object({
     is_ultra_restricted: z.boolean().optional(),
     is_stranger: z.boolean().optional(),
     deleted: z.boolean().optional(),
+    /** True for an app's bot user. The guest lane's app arm CONFIRMS the
+     * wire's classification against this (an event said `bot_id`; the
+     * directory must agree) - the same field the recipient search labels
+     * apps with. */
+    is_bot: z.boolean().optional(),
     profile: z
       .object({
         email: z.string().optional(),
@@ -813,6 +818,36 @@ export const conversationsInfo = (botToken: string, channelId: string) =>
         is_member: z.boolean().optional(),
         is_archived: z.boolean().optional(),
       }),
+    }),
+  );
+
+/**
+ * A channel's member ids (`conversations.members`, docs-verified 2026-09-08:
+ * `members: string[]` + `response_metadata.next_cursor`; scopes
+ * `channels:read` / `groups:read`, both in the manifest). Feeds the room's
+ * APP roster for the mention seam - which bot users a thread may tag from
+ * its first turn. Same caller-owned cursor rule as `usersList`.
+ */
+export const conversationsMembers = (
+  botToken: string,
+  input: { channel: string; cursor?: string; limit?: number },
+) =>
+  slackCall(
+    "conversations.members",
+    {
+      token: botToken,
+      form: {
+        channel: input.channel,
+        limit: String(input.limit ?? 200),
+        ...(input.cursor && { cursor: input.cursor }),
+      },
+      retry5xx: true,
+    },
+    z.object({
+      members: z.array(z.string().min(1)),
+      response_metadata: z
+        .object({ next_cursor: z.string().optional() })
+        .optional(),
     }),
   );
 

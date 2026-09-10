@@ -58,6 +58,14 @@ import { createJcodeWakeFeed } from "./jcode-wake";
  *   ships model-authored feedback to the vendor over telemetry — a no-op
  *   under JCODE_NO_TELEMETRY=1, but its name, description, and refusal
  *   reply all speak as the vendor.
+ *   `browser` joined 2026-09-09 (plans/agent-owns-its-machine.md Tier 1):
+ *   the native tool is a Firefox-extension bridge (an .xpi plus a
+ *   native-messaging host) that can never work in a headless guest, and
+ *   its own description tells the model to "check status first, run setup
+ *   if not ready" — observed live burning a whole turn on setup attempts
+ *   before declaring browsing impossible. The agent image bakes chromium
+ *   instead (docker/agent.Dockerfile); Playwright/Puppeteer from npm or pip
+ *   drive it, and the machine fragment says so.
  *   ⛔ Never add the literal name `mcp` to this list: since v0.75 it is a
  *   meta-entry covering every dynamic `mcp__*` tool, so it would silently
  *   kill the platform-tools bridge.
@@ -162,6 +170,13 @@ export const resolveJcodeBinary = (): string => {
  * selected — and the same law applies: nothing on the agent-writable volume
  * may be something jcode will execute.
  *
+ * `browser/` joined with the browser-tool disable (2026-09-09): it is the
+ * volume's third executable stash — `jcode browser setup` downloads the
+ * Firefox bridge's native-messaging host and a helper binary there, and the
+ * tool execs them. The tool is disabled (JCODE_DISABLED_TOOLS_VALUE), so
+ * nothing repopulates it; a stash a pre-disable session left behind, or an
+ * agent runs the setup subcommand into, is gone at the next boot.
+ *
  * Symlink-safe by the same law as the home materializer: `rmSync`
  * unlinks a link rather than following it, so an agent planting
  * `builds -> /somewhere` costs the link, never the target.
@@ -172,6 +187,7 @@ export const cleanJcodeUpdaterState = (jcodeHome: string): void => {
     "bin",
     "update_metadata.json",
     "provider-backends",
+    "browser",
   ]) {
     rmSync(join(jcodeHome, entry), { recursive: true, force: true });
   }
@@ -408,7 +424,7 @@ export const SWARM_PROMPT_OVERRIDE = `Guidance for spawning helper agents.
  * would pin nothing). Rationale per entry lives in the adapter header above.
  */
 export const JCODE_DISABLED_TOOLS_VALUE =
-  "schedule,skill_manage,gmail,integration_tools,memory,maintainer_feedback,jcode_docs";
+  "schedule,skill_manage,gmail,integration_tools,memory,maintainer_feedback,jcode_docs,browser";
 
 /**
  * THE PLATFORM'S BASE SYSTEM PROMPT — it REPLACES the harness's built-in one.

@@ -9,6 +9,8 @@ export interface PendingActionApprovalItem {
   agentId: string;
   agentName: string;
   summary: string;
+  /** Whether "approve + always allow" is a real choice for this action. */
+  offersAlwaysAllow: boolean;
   /** ISO timestamps. */
   createdAt: string;
   expiresAt: string;

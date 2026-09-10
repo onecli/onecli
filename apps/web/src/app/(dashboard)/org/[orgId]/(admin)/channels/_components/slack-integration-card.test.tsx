@@ -122,6 +122,17 @@ describe("unconnected", () => {
     expect(
       screen.getByRole("link", { name: /api\.slack\.com\/apps/ }),
     ).toHaveAttribute("href", "https://api.slack.com/apps");
+    // The one fact the paste flow lives or dies on: a refresh token is
+    // single-use, so it must be pasted freshly generated and unused. Slack's
+    // own page does not say so, and a stale one answers an opaque
+    // `internal_error`.
+    expect(
+      screen.getByText(/Each refresh token works once/),
+    ).toBeInTheDocument();
+    // Slack's page has two Copy buttons; the hint names which one.
+    expect(
+      screen.getByText(/paste the Refresh Token \(not the Access Token\)/),
+    ).toBeInTheDocument();
 
     const field = screen.getByLabelText("App Configuration refresh token");
     await user.type(field, "xoxe-1-refresh");
@@ -201,8 +212,11 @@ describe("needs credentials", () => {
     });
     render(<SlackIntegrationCard />);
 
+    // Names the cause (Slack refused the rotation) and the fix (generate a
+    // new one) — not "expired", which the old copy claimed even when the
+    // token had been consumed by another tool.
     expect(
-      screen.getByText(/expired and could not be refreshed/),
+      screen.getByText(/could not be refreshed: Slack refused the rotation/),
     ).toBeInTheDocument();
     expect(
       screen.getByLabelText("App Configuration refresh token"),

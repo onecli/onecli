@@ -200,6 +200,62 @@ export const SSH_CERT_MINTS_PER_HOUR = positiveInt(
   30,
 );
 
+// ── Egress identity ─────────────────────────────────────────────────────
+
+const IPV4_LITERAL =
+  /^(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)(?:\.(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)){3}$/;
+
+/**
+ * Parse the comma-joined published egress address list. Exported for its
+ * tests; the module-load constant below is what routes read.
+ *
+ * Strict on purpose: the addresses are a security artifact customers copy
+ * into firewalls, so a malformed entry (a typo, an IPv6 literal, a `/32`
+ * suffix, a trailing comma, a duplicate) throws at boot rather than serving
+ * a wrong list. Unset or blank ⇒ `[]` ⇒ the feed is not published, which is
+ * the self-host posture: a self-hoster's addresses are their own business.
+ */
+export const parseEgressIpv4Addresses = (raw: string | undefined): string[] => {
+  if (raw === undefined || raw.trim() === "") return [];
+  const entries = raw.split(",").map((s) => s.trim());
+  const seen = new Set<string>();
+  for (const entry of entries) {
+    if (entry === "") {
+      throw new Error(
+        `EGRESS_IPV4_ADDRESSES has an empty entry (trailing or doubled comma): ${JSON.stringify(raw)}`,
+      );
+    }
+    if (!IPV4_LITERAL.test(entry)) {
+      throw new Error(
+        `EGRESS_IPV4_ADDRESSES entry is not an IPv4 address: ${JSON.stringify(entry)}`,
+      );
+    }
+    if (seen.has(entry)) {
+      throw new Error(`EGRESS_IPV4_ADDRESSES lists ${entry} twice`);
+    }
+    seen.add(entry);
+  }
+  return entries;
+};
+
+/**
+ * The published egress addresses this deployment calls out from, served by
+ * `GET /v1/instance/egress`. Cloud injects them from the egress-identity
+ * stack; empty everywhere else (the route 404s).
+ */
+export const EGRESS_IPV4_ADDRESSES = parseEgressIpv4Addresses(
+  process.env.EGRESS_IPV4_ADDRESSES,
+);
+
+/**
+ * The region the published egress addresses live in, for the feed's
+ * `region` field. Set explicitly by whoever publishes egress (cloud: the
+ * api-server stack, from its own stack region) — deliberately NOT derived
+ * from `AWS_REGION`, which no api production code reads and which would
+ * make the feed depend on SDK tooling env. Unset or blank ⇒ `null`.
+ */
+export const EGRESS_REGION = firstConfigured(process.env.EGRESS_REGION) ?? null;
+
 /**
  * Concurrent lease-current sessions per agent.
  *
