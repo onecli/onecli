@@ -168,11 +168,14 @@ describe.skipIf(!PROOF_URL)("workspace pending channel approvals (4d)", () => {
 
     const items = await svc.listWorkspacePendingChannelApprovals(WORKSPACE);
     expect(items).toHaveLength(2);
-    // Oldest first: the hour-old action approval leads.
+    // Oldest first: the hour-old action approval leads. `test.wab` has no
+    // registered handler, so it offers no always-allow (the bell row hides
+    // the third button); send_message's registration does.
     expect(items[0]).toMatchObject({
       kind: "action",
       summary: 'send @Tomer: "hello"',
       agentName: "wab agent main",
+      offersAlwaysAllow: false,
     });
     expect(items[1]).toMatchObject({
       kind: "reach",

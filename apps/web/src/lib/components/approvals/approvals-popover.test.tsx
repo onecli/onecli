@@ -62,6 +62,7 @@ describe("ApprovalsPopover (4d, the one inbox)", () => {
         agentId: "ag-1",
         agentName: "Donna",
         summary: 'send @Tomer: "hello"',
+        offersAlwaysAllow: true,
         createdAt: "2026-09-07T10:01:00Z",
         expiresAt: new Date(Date.now() + 3_600_000).toISOString(),
       },

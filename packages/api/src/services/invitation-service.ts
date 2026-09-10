@@ -236,3 +236,74 @@ export const findPendingInvitationByToken = async (
     organizationSlug: invitation.organization.slug,
   };
 };
+
+/**
+ * A join link that was already redeemed by THIS user.
+ *
+ * People re-click invitation emails: the token is single-use, so the pending
+ * lookup above says "invalid", but the person is a member and the right move
+ * is to land them in the organization rather than on an error. Returns the
+ * organization id when the token belongs to an accepted invitation whose
+ * email matches the signed-in user and they hold an active membership there;
+ * null in every other case (unknown token, someone else's invitation,
+ * cancelled/expired, or membership since removed or suspended).
+ */
+export const findAcceptedInvitationOrgForUser = async (
+  token: string,
+  userId: string,
+  userEmail: string,
+  prisma: typeof db = db,
+): Promise<string | null> => {
+  const invitation = await prisma.invitation.findUnique({
+    where: { token },
+    select: { email: true, status: true, organizationId: true },
+  });
+  if (!invitation || invitation.status !== "accepted") return null;
+  if (invitation.email.toLowerCase() !== userEmail.toLowerCase()) return null;
+
+  const membership = await prisma.organizationMember.findUnique({
+    where: {
+      organizationId_userId: {
+        organizationId: invitation.organizationId,
+        userId,
+      },
+    },
+    select: { status: true },
+  });
+  if (!membership || membership.status === "suspended") return null;
+  return invitation.organizationId;
+};
+
+export type UnavailableInvitationReason =
+  | "expired"
+  | "accepted"
+  | "cancelled"
+  | "unknown";
+
+/**
+ * Why a join link cannot be redeemed, for the page that has to say so.
+ *
+ * Reveals nothing beyond the status word: the organization's name and the
+ * invitee's address stay out of it, since anyone holding a guessed or leaked
+ * token could otherwise learn who invited whom. "accepted" here means
+ * someone ELSE redeemed it (or the accepter is no longer a member); the
+ * accepter's own re-click is answered by `findAcceptedInvitationOrgForUser`
+ * before this is consulted.
+ */
+export const explainUnavailableInvitation = async (
+  token: string,
+  prisma: typeof db = db,
+): Promise<UnavailableInvitationReason> => {
+  const invitation = await prisma.invitation.findUnique({
+    where: { token },
+    select: { status: true, expiresAt: true },
+  });
+  if (!invitation) return "unknown";
+  if (invitation.status === "accepted") return "accepted";
+  if (invitation.status === "cancelled") return "cancelled";
+  // "pending" past its date reads as expired too — the status column only
+  // flips lazily, on an attempted accept.
+  if (invitation.status === "expired" || invitation.expiresAt < new Date())
+    return "expired";
+  return "unknown";
+};

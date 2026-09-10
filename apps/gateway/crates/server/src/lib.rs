@@ -33,7 +33,7 @@ use tower::ServiceExt;
 use tower_http::cors::CorsLayer;
 use tracing::{debug, info, info_span, warn, Instrument};
 
-use approval::{ApprovalDecision, ApprovalStore, APPROVAL_TIMEOUT_SECS};
+use approval::{ApprovalDecision, ApprovalStore, PendingApproval, APPROVAL_TIMEOUT_SECS};
 use ca::CertificateAuthority;
 use cache::CacheStore;
 use context::auth::AuthUser;
@@ -582,7 +582,58 @@ async fn get_pending_approvals(
 
 use approval::pending_approval_row;
 
+/// Why a decision could not be matched to a held approval — or that it was.
+///
+/// The two rejection arms answer the same 404 on the wire (naming a foreign
+/// workspace's approval would be an existence oracle) but must never share a
+/// log line: `NotFound` is the everyday shape (the approval expired, was
+/// already decided, or a client re-submitted after settlement — #1074), while
+/// `WrongWorkspace` is a tenant-fencing signal worth alerting on.
+#[derive(Debug, PartialEq, Eq)]
+enum DecisionLookup<'a> {
+    /// A live approval in the caller's workspace.
+    Pending,
+    /// No live approval under this id for the caller's workspace.
+    NotFound,
+    /// A live approval exists but is scoped to another workspace.
+    WrongWorkspace { stored_workspace_id: &'a str },
+}
+
+/// Classify what `get_pending` returned against the authenticated workspace.
+/// Pure, so the three arms are unit-testable without a store.
+///
+/// `WrongWorkspace` is live on the in-memory store, which looks an approval up
+/// by id alone; the Redis store's key already carries the workspace, so a
+/// foreign id misses there and lands as `NotFound`. Keeping the check in the
+/// handler makes the fence independent of which backend is wired in.
+fn classify_decision_lookup<'a>(
+    found: Option<&'a PendingApproval>,
+    auth_workspace_id: &str,
+) -> DecisionLookup<'a> {
+    match found {
+        None => DecisionLookup::NotFound,
+        Some(a) if a.workspace_id == auth_workspace_id => DecisionLookup::Pending,
+        Some(a) => DecisionLookup::WrongWorkspace {
+            stored_workspace_id: &a.workspace_id,
+        },
+    }
+}
+
+/// The wire answer for both rejection arms: identical on purpose, so a caller
+/// cannot tell "never existed" from "exists in another workspace".
+fn approval_not_found() -> (StatusCode, axum::Json<serde_json::Value>) {
+    (
+        StatusCode::NOT_FOUND,
+        axum::Json(serde_json::json!({ "error": "approval_not_found" })),
+    )
+}
+
 /// Submit a decision for a pending manual approval request.
+///
+/// Every log line here carries `approval_id` (and `decision` once parsed) as
+/// an EVENT field, not only on the enclosing span: the span is opened at INFO,
+/// and a WARN-only deployment filter drops span fields with it. #1074 was
+/// investigated from exactly such identifier-less WARNs.
 async fn submit_approval_decision(
     auth: AuthUser,
     State(state): State<GatewayState>,
@@ -596,35 +647,78 @@ async fn submit_approval_decision(
         approval_id = %approval_id,
     );
     async move {
-        let org_id =
-            db::find_organization_id_by_workspace(&state.policy_engine.pool, &auth.workspace_id)
-                .await
-                .ok()
-                .flatten()
-                .unwrap_or_default();
-
-        // O(1) lookup — verify approval exists and belongs to this workspace.
-        match state
-            .approval_store
-            .get_pending(&org_id, &auth.workspace_id, &approval_id)
-            .await
-        {
-            Some(a) if a.workspace_id == auth.workspace_id => {}
-            _ => {
-                warn!("approval decision rejected: not found or wrong workspace");
-                return (
-                    StatusCode::NOT_FOUND,
-                    axum::Json(serde_json::json!({ "error": "approval_not_found" })),
-                );
-            }
-        }
-
         let decision_str = match body.decision {
             ApprovalDecision::Approve => "approve",
             ApprovalDecision::Deny => "deny",
         };
 
-        info!(decision = decision_str, "approval decision submitted");
+        // The org id is part of the Redis key. A lookup failure here would
+        // otherwise degrade silently into an empty org and a guaranteed
+        // "not found" — name it, so the two are never confused in the logs.
+        let org_id = match db::find_organization_id_by_workspace(
+            &state.policy_engine.pool,
+            &auth.workspace_id,
+        )
+        .await
+        {
+            Ok(Some(oid)) => oid,
+            Ok(None) => {
+                warn!(
+                    approval_id = %approval_id,
+                    decision = decision_str,
+                    "approval decision: workspace has no organization; lookup will miss"
+                );
+                String::new()
+            }
+            Err(e) => {
+                warn!(
+                    approval_id = %approval_id,
+                    decision = decision_str,
+                    error = ?e,
+                    "approval decision: failed to resolve organization; lookup will miss"
+                );
+                String::new()
+            }
+        };
+
+        // O(1) lookup — verify the approval exists and belongs to this workspace.
+        let found = state
+            .approval_store
+            .get_pending(&org_id, &auth.workspace_id, &approval_id)
+            .await;
+        match classify_decision_lookup(found.as_ref(), &auth.workspace_id) {
+            DecisionLookup::Pending => {}
+            DecisionLookup::NotFound => {
+                // The common shape: expired, already decided, or a client
+                // re-submitting a decision that has already been honoured.
+                // Correlate on `approval_id` against "holding request for
+                // approval" / "approval decision submitted" before reading
+                // this as a lost decision.
+                warn!(
+                    approval_id = %approval_id,
+                    decision = decision_str,
+                    "approval decision rejected: no pending approval (expired, already decided, or unknown)"
+                );
+                return approval_not_found();
+            }
+            DecisionLookup::WrongWorkspace { stored_workspace_id } => {
+                // Tenant fence. The wire answer is deliberately the same 404 —
+                // the log is where this branch is told apart.
+                warn!(
+                    approval_id = %approval_id,
+                    decision = decision_str,
+                    stored_workspace_id = %stored_workspace_id,
+                    "approval decision rejected: approval belongs to another workspace"
+                );
+                return approval_not_found();
+            }
+        }
+
+        info!(
+            approval_id = %approval_id,
+            decision = decision_str,
+            "approval decision submitted"
+        );
 
         let delivered = state
             .approval_store
@@ -643,7 +737,11 @@ async fn submit_approval_decision(
                 axum::Json(serde_json::json!({ "success": true })),
             )
         } else {
+            // Found a moment ago, gone now: the held request was released
+            // between the lookup and the delivery (timeout, or another
+            // decider won the race).
             warn!(
+                approval_id = %approval_id,
                 decision = decision_str,
                 "approval decision submitted but approval already expired"
             );
@@ -1325,5 +1423,60 @@ mod tests {
             .body(())
             .unwrap();
         assert!(!is_http_proxy_request(&req));
+    }
+
+    // ── classify_decision_lookup ───────────────────────────────────────
+
+    fn pending_in(workspace_id: &str) -> PendingApproval {
+        PendingApproval {
+            id: "ap-1".to_string(),
+            organization_id: "org-1".to_string(),
+            workspace_id: workspace_id.to_string(),
+            agent_id: "ag-1".to_string(),
+            agent_name: "agent".to_string(),
+            agent_identifier: None,
+            method: "POST".to_string(),
+            scheme: "https".to_string(),
+            host: "api.example.com".to_string(),
+            path: "/v1/send".to_string(),
+            headers: Default::default(),
+            body_preview: None,
+            summary: None,
+            created_at: 0,
+            expires_at: u64::MAX,
+        }
+    }
+
+    /// The everyday miss — expired, already decided, or a post-settlement
+    /// re-submit (#1074). Must be told apart from the tenant-fence arm in the
+    /// logs, so it gets its own variant.
+    #[test]
+    fn decision_lookup_miss_is_not_found() {
+        assert_eq!(
+            classify_decision_lookup(None, "ws-1"),
+            DecisionLookup::NotFound
+        );
+    }
+
+    #[test]
+    fn decision_lookup_same_workspace_is_pending() {
+        let a = pending_in("ws-1");
+        assert_eq!(
+            classify_decision_lookup(Some(&a), "ws-1"),
+            DecisionLookup::Pending
+        );
+    }
+
+    /// A hit under another workspace's scope is a fencing signal: the wire
+    /// answer stays 404 (no existence oracle), the log names the mismatch.
+    #[test]
+    fn decision_lookup_other_workspace_is_wrong_workspace() {
+        let a = pending_in("ws-other");
+        assert_eq!(
+            classify_decision_lookup(Some(&a), "ws-1"),
+            DecisionLookup::WrongWorkspace {
+                stored_workspace_id: "ws-other"
+            }
+        );
     }
 }

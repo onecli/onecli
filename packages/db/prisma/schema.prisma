@@ -761,6 +761,16 @@ model Conversation {
   // last seq" lossless. A global sequence would not: values are assigned at
   // nextval time, so a lower seq can commit later and be tailed past forever.
   lastSeq           Int      @default(0) @map("last_seq")
+  // THE APP-TURN CAP (PR 5a). Apps ride the same channel gate humans do; the
+  // one thing they add is that they never get bored, so two automations can
+  // answer each other forever. `appTurnStreak` counts consecutive
+  // app-authored turns admitted since the last HUMAN turn in this
+  // conversation - any human message resets it to 0, so does the owner
+  // approving "continue" on the pause card (one more round, never a
+  // standing lift), the cap is a constant in app-turn-cap-service, and there
+  // is no timer: people meter loops by being present. Defaults inert:
+  // nothing changes for a conversation no app ever speaks in.
+  appTurnStreak     Int      @default(0) @map("app_turn_streak")
   createdAt         DateTime @default(now()) @map("created_at")
   updatedAt         DateTime @updatedAt @map("updated_at")
 

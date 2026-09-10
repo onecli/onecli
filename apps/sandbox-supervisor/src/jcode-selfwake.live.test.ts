@@ -1,4 +1,5 @@
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, readdirSync, readFileSync } from "node:fs";
+import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import type {
   SupervisorMessage,
@@ -23,7 +24,10 @@ import type {
  * and the wake intent rides the platform's own mirror/watch machinery
  * instead. Scenario 2 pins the message separator (text → tool batch → text
  * renders as paragraphs, not glue) and the swarm-prompt override reaching
- * the model-visible tool description.
+ * the model-visible tool description. Scenario 3 pins the disabled-tool
+ * list at the same boundary: every name in JCODE_DISABLED_TOOLS_VALUE is
+ * absent from the tool definitions the model receives, and the tools the
+ * platform relies on are present.
  *
  * Env-gated like the incident suite — it needs a jcode runtime AT THE PIN
  * (v0.81.1; older binaries lack external wake mode):
@@ -57,7 +61,8 @@ vi.mock("./home/fs", async (importOriginal) => {
   };
 });
 
-const { createJcodeHarness } = await import("./harness/jcode");
+const { createJcodeHarness, JCODE_DISABLED_TOOLS_VALUE } =
+  await import("./harness/jcode");
 const { runSupervisor } = await import("./supervisor");
 const { startMockProvider } = await import("./harness/testing/mock-provider");
 type MockScript = import("./harness/testing/mock-provider").MockScript;
@@ -386,6 +391,122 @@ describe.skipIf(!LIVE)("external wake ownership (live jcode)", () => {
           // config path — upstream bytes, outside this law's scope.
           expect(description).not.toMatch(/claude-api|fable/i);
         }
+      } finally {
+        t.push({ kind: "shutdown" });
+        await run;
+      }
+    });
+  }, 240_000);
+
+  it("the disabled tools are ABSENT from what the model sees; the load-bearing ones are present", async () => {
+    // Scenario 3 — the JCODE_DISABLED_TOOLS pin at the live boundary. The
+    // unit pins assert the STRING the launch env carries; only the real
+    // daemon can prove that string removes the definitions from the request
+    // body the model receives (the adapter header's "disabling is safe
+    // because a disabled tool is REMOVED from the model-visible tool list"
+    // claim, verified upstream for `gmail` — here for every entry, including
+    // `browser`, whose removal is the 2026-09-09 trap fix). Captured off the
+    // real request bodies, same tripwire shape as the swarm description.
+    //
+    // TWO turns, asserted on the second: the daemon connects the platform-
+    // tools MCP server asynchronously (~100 ms, measured) and "locks the
+    // tool list for cache stability" per turn, so a fresh session's FIRST
+    // request carries only the native tools (23 at v0.81.1) and the
+    // platform's 17 join once the bridge is up (40). A real turn takes
+    // seconds and never notices; this scripted mock answers in ~5 ms, so
+    // the test waits for the bridge before the second turn — the same
+    // ordering production gets for free. The disabled-list law holds on
+    // both requests; the platform-tool presence law is the second-turn fact.
+    const script: MockScript = ({ lastUser }) =>
+      lastUser.includes("TOOLS-CHECK")
+        ? {
+            kind: "text",
+            text: "tools-seen",
+            tag: lastUser.includes("SECOND") ? "tools-second" : "tools-first",
+          }
+        : undefined;
+
+    await withMock(script, async (mock) => {
+      const t = createTransport();
+      const home = shortHome();
+      const run = runSupervisor(
+        supervisorConfig(home),
+        createJcodeHarness(),
+        t.transport,
+        { memoryHarvester: stubHarvester },
+      );
+      try {
+        t.push(deliver("t-tools-1", "cv-tools", "TOOLS-CHECK say tools-seen"));
+        await t.until(
+          () =>
+            t.resultsOf("t-tools-1").some((r) => r.result.status === "done"),
+          "the first tools turn to finish",
+          60_000,
+        );
+        // The bridge's own readiness signal: the daemon appends the MCP
+        // connect to its log. Poll for it rather than sleeping a guess.
+        const daemonLog = () =>
+          readdirSync(join(home, ".jcode-home", "logs"), {
+            withFileTypes: true,
+          })
+            .filter((e) => e.isFile())
+            .map((e) =>
+              readFileSync(join(home, ".jcode-home", "logs", e.name), "utf8"),
+            )
+            .join("\n");
+        await t.until(
+          () => daemonLog().includes("MCP: Connected to 'onecli'"),
+          "the platform-tools bridge to connect",
+          30_000,
+        );
+        t.push(
+          deliver("t-tools-2", "cv-tools", "TOOLS-CHECK SECOND say tools-seen"),
+        );
+        await t.until(
+          () =>
+            t.resultsOf("t-tools-2").some((r) => r.result.status === "done"),
+          "the second tools turn to finish",
+          60_000,
+        );
+        const first = mock.requests.find((r) => r.tag === "tools-first");
+        const second = mock.requests.find((r) => r.tag === "tools-second");
+        expect(first).toBeDefined();
+        expect(second).toBeDefined();
+
+        // Every disabled name, absent from EVERY request — the constant IS
+        // the launch env, so this reads the same list the daemon parsed.
+        for (const request of [first, second]) {
+          const names = new Set(request?.toolNames);
+          expect(names.size).toBeGreaterThan(0);
+          for (const disabled of JCODE_DISABLED_TOOLS_VALUE.split(",")) {
+            expect(
+              names.has(disabled),
+              `disabled tool ${disabled} leaked`,
+            ).toBe(false);
+          }
+        }
+
+        // The tools the platform's own contracts lean on, present by the
+        // second turn: bash (the agent's hands), bg (observed, deliberately
+        // NOT disabled), swarm (fan-out always on), and the platform tools
+        // themselves — advertised as `mcp__onecli__<name>` at this version
+        // (server name from prepareMcpConfig, then the bridge's tool name).
+        const names = new Set(second?.toolNames);
+        for (const required of [
+          "bash",
+          "bg",
+          "swarm",
+          "mcp__onecli__process_start",
+          "mcp__onecli__process_watch",
+          "mcp__onecli__memory_save",
+        ]) {
+          expect(names.has(required), `required tool ${required} missing`).toBe(
+            true,
+          );
+        }
+        // And the platform tools genuinely joined (23 native → 40 total at
+        // the pin); a stuck-at-native second turn means the bridge is down.
+        expect(names.size).toBeGreaterThan(first?.toolNames.length ?? 0);
       } finally {
         t.push({ kind: "shutdown" });
         await run;

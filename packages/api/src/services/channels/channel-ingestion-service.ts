@@ -13,12 +13,16 @@ import {
   createPendingAttachment,
 } from "../attachment-service";
 import { channelProvider } from "./registry";
+import { anchorRecipient } from "./recipient-search-service";
+import { mentionDirectoryOf } from "./mention-resolution-service";
 import type {
   ChannelFileRef,
   ChannelProviderId,
+  SpeakerKind,
   ThreadLinkKind,
 } from "./types";
 import { decodeSlackTokens } from "@onecli/channels/slack";
+import { normalizeMentionName } from "@onecli/channels";
 import { logger } from "../../lib/logger";
 // Type-only: the runtime import of the reach service stays dynamic (below)
 // so this hot ingestion path does not eagerly pull the reach module graph.
@@ -481,6 +485,120 @@ const createTurnOutcome = async (
 };
 
 /**
+ * The app-turn cap around a group-door turn (PR 5a). Dynamic import on
+ * purpose (the reach-service idiom, plus a cycle: the cap service registers
+ * an action handler with action-approval-service, which imports THIS door
+ * for click authorization).
+ *
+ * An APP message is DECIDED before anything is fetched or created for it -
+ * a paused message must cost nothing, attachments included - and COUNTED
+ * only after its turn lands (`settleAppTurnChain`): a refused or failed
+ * landing costs no streak point. A PERSON's message breaks the chain after
+ * its turn lands (a refused person turn changes nothing).
+ */
+const meterAppTurn = async (
+  presence: PresenceRow,
+  conversationId: string,
+  appExternalRef: string,
+  framedText: string,
+): Promise<IngestOutcome | null> => {
+  const cap = await import("./app-turn-cap-service");
+  const verdict = await cap.admitAppTurn({
+    agentId: presence.agent.id,
+    conversationId,
+    source: presence.provider as ChannelProviderId,
+    message: await decodeInboundText(presence, framedText),
+    appExternalRef,
+  });
+  if (verdict === "pause") {
+    return { kind: "refused", message: cap.APP_TURN_PAUSE_MESSAGE };
+  }
+  if (verdict === "silence") return { kind: "ignored", reason: "app-turn-cap" };
+  return null;
+};
+
+/** After a turn LANDED (turn | followUp): a person breaks the chain, an app
+ * extends it. Anything else (refused, ignored) leaves the streak alone. */
+const settleAppTurnChain = async (
+  conversationId: string,
+  speakerKind: SpeakerKind,
+  outcome: IngestOutcome,
+): Promise<IngestOutcome> => {
+  if (outcome.kind === "turn" || outcome.kind === "followUp") {
+    const cap = await import("./app-turn-cap-service");
+    if (speakerKind === "app") await cap.countAppTurn(conversationId);
+    else await cap.resetAppTurnStreak(conversationId);
+  }
+  return outcome;
+};
+
+/**
+ * THE ROOM'S APPS ARE TAGGABLE (PR 5a): seed a NEW thread's mention anchors
+ * with every app in the channel, so an agent can write `@[Donna2]` from its
+ * first turn - the standing linked humans already have through the
+ * directory. Runs once per conversation (guarded by "no anchors yet"; the
+ * upsert makes a race harmless), never per message.
+ *
+ * Two names are never planted: the agent's OWN bot user (a self-tag is a
+ * self-invocation; the facet drops it), and any app whose display name is a
+ * LINKED PERSON's name. Anchors win over the directory in
+ * `resolveMentionNames`, and only the agent's explicit `find_recipient` pick
+ * may claim a directory name - a bot's self-chosen name must not capture a
+ * human's pings. Such an app stays reachable through `find_recipient`.
+ *
+ * Best-effort end to end: the facet answers [] on any provider failure, and
+ * a thrown seed is logged, never surfaced - a comprehension gap must not
+ * cost the turn.
+ */
+const seedRoomApps = async (
+  presence: PresenceRow,
+  conversationId: string,
+  externalThreadId: string,
+): Promise<void> => {
+  try {
+    const reach = channelProvider(presence.provider as ChannelProviderId).reach;
+    if (!reach) return;
+    const space = reach.spaceOf(externalThreadId);
+    const seeded = await db.mentionAnchor.count({ where: { conversationId } });
+    if (seeded > 0) return;
+    const credentialsJson = presence.credentials
+      ? await getCrypto().decrypt(presence.credentials)
+      : null;
+    const [apps, directory] = await Promise.all([
+      reach.appsIn({
+        credentialsJson,
+        externalRef: space,
+        tenantExternalId: presence.integration.externalId,
+        selfExternalUserId: presence.identityRef,
+      }),
+      mentionDirectoryOf(presence.integrationId),
+    ]);
+    for (const app of apps) {
+      const key = normalizeMentionName(app.displayName);
+      if (!key || directory.has(key)) continue;
+      await anchorRecipient({
+        conversationId,
+        name: app.displayName,
+        externalUserId: app.externalUserId,
+        kind: "app",
+      });
+    }
+  } catch (err) {
+    log.warn(
+      { err: String(err), conversationId },
+      "channel app roster seed failed; find_recipient still works",
+    );
+  }
+};
+
+/** The guest prefix: OUR template around a cleaned name, provenance in the
+ * parenthetical - `(guest)` for a person the room admitted, `(app)` for an
+ * app's bot user. Unforgeable by the name because the name is cleaned,
+ * clamped, and embedded inside the template. */
+const frameGuest = (name: string, kind: SpeakerKind, text: string): string =>
+  `${name} (${kind === "app" ? "app" : "guest"}): ${text}`;
+
+/**
  * Strip control characters and clamp — the speaker prefix goes inside the
  * turn message, and a name is not a place for terminal escapes. Built from
  * char codes rather than a regex range so no literal control byte has to
@@ -830,6 +948,9 @@ const admitPersonGuest = async (
 export interface GroupMessageInput {
   agentChannelId: string;
   externalUserId: string;
+  /** A person, or an app's bot user (PR 5a): the same gate, then the app
+   * arm — no identity lane, `(app)` framing, the app-turn cap. */
+  speakerKind: SpeakerKind;
   /** Provider-defined group-thread address (Slack: `<channel>:<threadTs>`). */
   externalThreadId: string;
   /** Human title for the conversation row (Slack: `#channel-name`). */
@@ -862,6 +983,24 @@ export const ingestGroupMessage = async (
   const gate = await checkChannelGate(presence, input);
   if (gate.kind !== "open") return gate.outcome;
 
+  // THE APP ARM (PR 5a). An app has no identity to link (the email walk is
+  // meaningless for a bot user), so the identity lane is skipped and the
+  // channel's settlement is the whole decision: `approved` opens the room
+  // to everyone in it, apps included ("all approved means all");
+  // `members_only` says nothing about apps and admits none — SILENTLY, not
+  // with the "link your account" refusal a person hears, because text
+  // answered to an app is a loop seed. The blocked-person precedence law
+  // below applies to an app's ref exactly as to a person's.
+  if (input.speakerKind === "app") {
+    if (gate.state !== "approved") {
+      return { kind: "ignored", reason: "app-members-only" };
+    }
+    if (await personReachDenied(presence, input.externalUserId)) {
+      return { kind: "ignored", reason: "person-reach-denied" };
+    }
+    return admitGuest(presence, input);
+  }
+
   // Lane 1 - IDENTITY: a workspace-authorized platform user. Runs inside an
   // open channel; nothing in the reach ledger ever narrows it.
   const speaker = await authorizeSpeaker(presence, input.externalUserId);
@@ -875,13 +1014,7 @@ export const ingestGroupMessage = async (
       // a statement about a HUMAN, and the narrower, more deliberate one
       // must win - otherwise a blocked individual walks straight back in
       // through any open channel, which would make blocking meaningless.
-      const { resolvePersonReach } = await import("./agent-reach-service");
-      const person = await resolvePersonReach({
-        agentId: presence.agent.id,
-        integrationId: presence.integrationId,
-        externalRef: input.externalUserId,
-      });
-      if (person === "blocked" || person === "members_only") {
+      if (await personReachDenied(presence, input.externalUserId)) {
         return { kind: "ignored", reason: "person-reach-denied" };
       }
       const guest = await admitGuest(presence, input);
@@ -906,6 +1039,7 @@ export const ingestGroupMessage = async (
     kind: "group",
     externalUserId: null,
   });
+  await seedRoomApps(presence, conversation.id, input.externalThreadId);
 
   // The speaker prefix uses OUR authenticated user's name — never the
   // provider display name, which is attacker-controlled prompt-injection
@@ -923,13 +1057,36 @@ export const ingestGroupMessage = async (
     input.files ?? [],
   );
 
-  return createTurnOutcome(
-    presence,
+  return settleAppTurnChain(
     conversation.id,
-    `${speakerName}: ${input.text}`,
-    speaker.userId,
-    attachmentIds,
+    "person",
+    await createTurnOutcome(
+      presence,
+      conversation.id,
+      `${speakerName}: ${input.text}`,
+      speaker.userId,
+      attachmentIds,
+    ),
   );
+};
+
+/**
+ * The person-level "no" the precedence law reads: a `blocked` row, or a row
+ * carrying `members_only` (hand-set, or normalized from a legacy `denied`),
+ * which reads as "not this one". Shared by the person and app arms of the
+ * open-channel walk so the law cannot drift between them.
+ */
+const personReachDenied = async (
+  presence: PresenceRow,
+  externalUserId: string,
+): Promise<boolean> => {
+  const { resolvePersonReach } = await import("./agent-reach-service");
+  const person = await resolvePersonReach({
+    agentId: presence.agent.id,
+    integrationId: presence.integrationId,
+    externalRef: externalUserId,
+  });
+  return person === "blocked" || person === "members_only";
 };
 
 /**
@@ -1031,9 +1188,11 @@ const checkChannelGate = async (
 /**
  * Admit one guest message: verify the speaker is same-tenant (fail closed),
  * then create the turn with NO platform identity - `userId: null`, and a
- * framed prefix built from the cleaned display name. The "(guest)" framing
- * is OURS and unforgeable by the name because the name is cleaned, clamped,
- * and embedded inside our template - the same posture as the member prefix.
+ * framed prefix (`frameGuest`) built from the cleaned display name - the
+ * same posture as the member prefix. The directory's app flag must AGREE
+ * with what the wire claimed (fail closed either way): an app is admitted
+ * as an app, a person as a person, and a mismatch is a message the door
+ * cannot place. An app's message is metered BEFORE its files are fetched.
  * Attachments are accepted under the same caps as members (the user's
  * decision: whoever may speak, may speak fully).
  */
@@ -1060,6 +1219,9 @@ const admitGuest = async (
     // Slack Connect / foreign workspace: outside the v1 grant's scope.
     return { kind: "ignored", reason: "guest-foreign-tenant" };
   }
+  if (guest.isApp !== (input.speakerKind === "app")) {
+    return { kind: "ignored", reason: "guest-kind-mismatch" };
+  }
 
   const conversation = await ensureSourcedConversation(
     presence.agent.workspaceId,
@@ -1077,8 +1239,20 @@ const admitGuest = async (
     kind: "group",
     externalUserId: null,
   });
+  await seedRoomApps(presence, conversation.id, input.externalThreadId);
 
   const speakerName = cleanName(guest.displayName ?? "someone");
+  const framed = frameGuest(speakerName, input.speakerKind, input.text);
+
+  if (input.speakerKind === "app") {
+    const capped = await meterAppTurn(
+      presence,
+      conversation.id,
+      input.externalUserId,
+      framed,
+    );
+    if (capped) return capped;
+  }
 
   const attachmentIds = await ingestMessageFiles(
     presence,
@@ -1087,12 +1261,16 @@ const admitGuest = async (
     input.files ?? [],
   );
 
-  return createTurnOutcome(
-    presence,
+  return settleAppTurnChain(
     conversation.id,
-    `${speakerName} (guest): ${input.text}`,
-    null,
-    attachmentIds,
+    input.speakerKind,
+    await createTurnOutcome(
+      presence,
+      conversation.id,
+      framed,
+      null,
+      attachmentIds,
+    ),
   );
 };
 

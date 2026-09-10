@@ -1,9 +1,23 @@
 import { redirect } from "next/navigation";
-import { findPendingInvitationByToken } from "@onecli/api/services/invitation-service";
+import {
+  explainUnavailableInvitation,
+  findAcceptedInvitationOrgForUser,
+  findPendingInvitationByToken,
+} from "@onecli/api/services/invitation-service";
+import { db } from "@onecli/db";
 import { getServerSession } from "@/lib/auth/server";
 import { IS_CLOUD } from "@/lib/env";
 import { JoinForm } from "./_components/join-form";
 import { JoinSignIn } from "./_components/join-sign-in";
+import { JoinUnavailable } from "./_components/join-unavailable";
+import { JoinWrongAccount } from "./_components/join-wrong-account";
+
+/** `max@lizo.ai` → `m***@lizo.ai`: enough to recognise, not enough to harvest. */
+const maskEmail = (email: string): string => {
+  const at = email.indexOf("@");
+  if (at <= 0) return "***";
+  return `${email[0]}***${email.slice(at)}`;
+};
 
 /**
  * Redeeming an invitation.
@@ -31,15 +45,48 @@ export default async function JoinPage({
     redirect(session ? "/" : "/auth/login");
   }
 
-  const invitation = await findPendingInvitationByToken(params.token);
+  const joinUrl = `/join?token=${encodeURIComponent(params.token)}`;
 
-  // Expired, cancelled, already used, or simply not a real token. Say so on
-  // the sign-in screen rather than rendering a join button that cannot work.
+  // Two independent reads, issued together: the invitation behind the token,
+  // and the account behind the session (when there is one). The join page
+  // compares emails against the DB record rather than the raw session claim:
+  // that is the address the accept route checks, so the screen and the route
+  // agree.
+  const [invitation, user] = await Promise.all([
+    findPendingInvitationByToken(params.token),
+    session
+      ? db.user.findUnique({
+          where: { externalAuthId: session.id },
+          select: { id: true, email: true },
+        })
+      : null,
+  ]);
+
   if (!invitation) {
-    redirect(
-      session
-        ? "/?error=invitation_invalid"
-        : "/auth/login?error=invitation_invalid",
+    // The common non-pending case: the signed-in person already redeemed this
+    // very link and clicked it again from the email. They are a member, so
+    // take them into that organization instead of calling the link broken.
+    if (user) {
+      const orgId = await findAcceptedInvitationOrgForUser(
+        params.token,
+        user.id,
+        user.email,
+      );
+      // The org layout pins the default-org cookie on arrival, so the
+      // switch sticks across the rest of the session too.
+      if (orgId) redirect(`/org/${orgId}/workspaces`);
+    }
+
+    // Expired, cancelled, used (by someone else, or by a since-removed
+    // member), or simply not a real token. Say which, rather than rendering a
+    // join button that cannot work or bouncing to a page that says nothing.
+    const reason = await explainUnavailableInvitation(params.token);
+    return (
+      <JoinUnavailable
+        reason={reason}
+        signedIn={Boolean(session)}
+        callbackUrl={joinUrl}
+      />
     );
   }
 
@@ -52,7 +99,27 @@ export default async function JoinPage({
     }
     // Cloud: Cognito owns sign-up inside its own login screen, so the token
     // rides localStorage across the redirect exactly as it always has.
-    return <JoinSignIn callbackUrl={`/join?token=${params.token}`} />;
+    return <JoinSignIn callbackUrl={joinUrl} />;
+  }
+
+  // Signed in as someone the invitation was not addressed to (a second
+  // account, a colleague's browser). "Join" would only be refused by the
+  // accept route's email check, so offer the switch instead. The invited
+  // address is masked: the link holder is by definition NOT that person, and
+  // a forwarded link should not spell out someone else's email.
+  const currentEmail = user?.email ?? session.email;
+  if (
+    currentEmail &&
+    currentEmail.toLowerCase() !== invitation.email.toLowerCase()
+  ) {
+    return (
+      <JoinWrongAccount
+        orgName={invitation.organizationName}
+        invitedEmail={maskEmail(invitation.email)}
+        currentEmail={currentEmail}
+        callbackUrl={joinUrl}
+      />
+    );
   }
 
   return (

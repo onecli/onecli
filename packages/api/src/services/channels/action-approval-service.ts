@@ -120,8 +120,9 @@ export const registerActionHandler = (
 };
 
 /** Whether an action offers the "always allow" upgrade — the card renderer
- * asks this to decide whether the third button exists at all. */
-const actionSupportsAlwaysAllow = (action: string): boolean =>
+ * and the bell's listing ask this to decide whether the third button exists
+ * at all. */
+export const actionSupportsAlwaysAllow = (action: string): boolean =>
   handlers.get(action)?.alwaysAllow !== undefined;
 
 /** Test seam: pg proofs register throwaway actions per arm. */

@@ -1,0 +1,94 @@
+#!/bin/sh
+# onecli-nix-install — set up Nix for THIS agent, once, on the durable home.
+#
+# What it does (plans/agent-owns-its-machine.md Tier 1.5):
+#   1. Refuses unless /nix is a mount point the caller can write. On the
+#      hosted platform the boot phase creates /workspace/.nix as the agent
+#      uid and bind-mounts it onto /nix on every boot, so this is simply
+#      true. On a self-hosted Docker deployment there is no root boot phase,
+#      /nix is never mounted, and this command says so honestly.
+#   2. Runs the OFFICIAL Nix installer in single-user mode from the release
+#      tarball baked into the image (pinned + checksum-verified at build,
+#      /opt/nix-dist) — no network, no runtime download, no curl-pipe-sh.
+#      Flags: --no-daemon (one uid, no systemd, no build users),
+#      --no-channel-add (flakes + `nixpkgs#` is the path; channel state is
+#      legacy), --no-modify-profile (the image owns shell integration — see
+#      agent-entrypoint.sh and /etc/profile.d/onecli-path.sh), --yes.
+#   3. Writes ~/.config/nix/nix.conf ONCE (never clobbers an agent's edits):
+#      experimental-features for `nix profile` and `nixpkgs#…`; sandbox=false
+#      because the build sandbox wants user namespaces the substrate does not
+#      guarantee (the same setting Determinate's container guidance uses).
+#
+# Idempotent: re-running with Nix already installed prints where it is and
+# exits 0. Everything it creates lives on /workspace (the store via the bind,
+# profiles under ~/.local/state/nix, config under ~/.config/nix), so it
+# survives sleep, relaunch, and the machine being replaced.
+set -eu
+
+NIX_DIST_ROOT=/opt/nix-dist
+STORE_MOUNT=/nix
+PROFILE_SH="$HOME/.nix-profile/etc/profile.d/nix.sh"
+USER_CONF_DIR="$HOME/.config/nix"
+USER_CONF="$USER_CONF_DIR/nix.conf"
+
+say() { printf '%s\n' "$*" >&2; }
+
+# ── 0. Already installed? Say so and stop. ────────────────────────────────
+if [ -x "$HOME/.nix-profile/bin/nix" ]; then
+  say "Nix is already installed for this agent: $HOME/.nix-profile/bin/nix"
+  say "To use it in THIS shell:  . $PROFILE_SH && export NIX_SSL_CERT_FILE=\"\${SSL_CERT_FILE:-}\""
+  say "(New shells get this automatically.) Install things with: nix profile add nixpkgs#<name>"
+  exit 0
+fi
+
+# ── 1. /nix must be the boot phase's bind mount, writable by this uid. ───
+if ! mountpoint -q "$STORE_MOUNT" 2>/dev/null; then
+  say "$STORE_MOUNT is not mounted, so Nix cannot be installed here."
+  say ""
+  say "On the hosted platform /nix is bind-mounted from /workspace/.nix at every"
+  say "boot; if you are reading this there, the machine booted without it — ask to"
+  say "be restarted and try again."
+  say ""
+  say "On a self-hosted Docker deployment there is no boot phase that can mount"
+  say "/nix, so Nix is not available; use npm, pip, or a container image instead."
+  exit 2
+fi
+
+if [ ! -w "$STORE_MOUNT" ]; then
+  say "$STORE_MOUNT is mounted but not writable by $(id -un) (uid $(id -u)). Refusing."
+  exit 3
+fi
+
+# ── 2. The pinned, image-baked release. ──────────────────────────────────
+DIST_DIR="$(find "$NIX_DIST_ROOT" -mindepth 1 -maxdepth 1 -type d -name 'nix-*' 2>/dev/null | head -n 1)"
+if [ -z "$DIST_DIR" ] || [ ! -x "$DIST_DIR/install" ]; then
+  say "No Nix distribution under $NIX_DIST_ROOT — this image was built without it. Refusing."
+  exit 4
+fi
+NIX_VERSION="$(basename "$DIST_DIR" | sed 's/^nix-//; s/-[a-z0-9_]*-linux$//')"
+
+say "Installing Nix $NIX_VERSION (single-user) into $STORE_MOUNT …"
+# USER is part of nix.sh's guard; HOME is where the profile links land.
+export USER="${USER:-$(id -un)}"
+# The installer's own nix-env call reads the user nix.conf; write ours first
+# so the very first store write already runs with the intended settings.
+if [ ! -e "$USER_CONF" ]; then
+  mkdir -p "$USER_CONF_DIR"
+  cat > "$USER_CONF" <<'EOF'
+# Written once by onecli-nix-install; yours to edit from here on.
+# `nix profile …` and `nixpkgs#…` need these two features.
+experimental-features = nix-command flakes
+# The build sandbox wants user namespaces the substrate does not guarantee.
+# Binary-cache installs (the common case) are unaffected.
+sandbox = false
+EOF
+fi
+
+"$DIST_DIR/install" --no-daemon --no-channel-add --no-modify-profile --yes
+
+say ""
+say "Nix $NIX_VERSION is installed. To use it in THIS shell:"
+say "  . $PROFILE_SH && export NIX_SSL_CERT_FILE=\"\${SSL_CERT_FILE:-}\""
+say "(New shells get this automatically.) Then, for example:"
+say "  nix profile add nixpkgs#ripgrep"
+say "Everything lands on your durable disk and survives restarts. See /etc/onecli/README.nix."

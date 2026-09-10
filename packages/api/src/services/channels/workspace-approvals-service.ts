@@ -1,4 +1,5 @@
 import { db } from "@onecli/db";
+import { actionSupportsAlwaysAllow } from "./action-approval-service";
 import { normalizeState } from "./agent-reach-service";
 
 /**
@@ -18,6 +19,10 @@ export interface PendingActionApprovalItem {
   agentId: string;
   agentName: string;
   summary: string;
+  /** Whether "approve + always allow" is a real choice for this action (the
+   * registry's answer, the same one the Slack card asks). False = the row
+   * offers approve/reject only. */
+  offersAlwaysAllow: boolean;
   /** ISO timestamps. */
   createdAt: string;
   expiresAt: string;
@@ -59,6 +64,7 @@ export const listWorkspacePendingChannelApprovals = async (
       select: {
         id: true,
         agentId: true,
+        action: true,
         summary: true,
         createdAt: true,
         expiresAt: true,
@@ -89,6 +95,7 @@ export const listWorkspacePendingChannelApprovals = async (
         agentId: a.agentId,
         agentName: a.agent.name,
         summary: a.summary,
+        offersAlwaysAllow: actionSupportsAlwaysAllow(a.action),
         createdAt: a.createdAt.toISOString(),
         expiresAt: a.expiresAt.toISOString(),
       }),

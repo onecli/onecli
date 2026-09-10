@@ -91,8 +91,14 @@ export interface ControlPlaneClient {
     turnId?: string,
   ): Promise<boolean>;
   reportApprovalHealth(presenceId: string, healthy: boolean): Promise<void>;
-  /** The proactive credential sweep — staleness is decided server-side. */
-  rotateIntegrations(): Promise<{ rotated: number; failed: number }>;
+  /** The proactive credential sweep — staleness is decided server-side.
+   * `deferred` counts pairs a transient provider refusal left in place for
+   * the next pass (optional: an older control plane answers without it). */
+  rotateIntegrations(): Promise<{
+    rotated: number;
+    failed: number;
+    deferred?: number;
+  }>;
   /** The pending-ask expiry sweep — the window is decided server-side.
    * `actionsExpired` counts the action-approval ledger's parks (optional:
    * an older control plane answers without it). */
@@ -335,7 +341,11 @@ export const createControlPlane = (options: {
       call(
         "POST",
         "/channel-adapter/rotate-integrations",
-        z.object({ rotated: z.number().int(), failed: z.number().int() }),
+        z.object({
+          rotated: z.number().int(),
+          failed: z.number().int(),
+          deferred: z.number().int().optional(),
+        }),
         { body: {} },
       ),
 

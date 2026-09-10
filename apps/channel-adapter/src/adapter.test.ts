@@ -751,6 +751,9 @@ describe("the rotation loop (proactive credential sweep)", () => {
     const results = [
       { rotated: 0, failed: 0 },
       { rotated: 2, failed: 1 },
+      // A pass that only DEFERRED (a transient provider refusal kept the
+      // pair) is a non-zero result too — the operator's early warning.
+      { rotated: 0, failed: 0, deferred: 1 },
     ];
     let sweeps = 0;
     const logs: [string, unknown][] = [];
@@ -792,6 +795,19 @@ describe("the rotation loop (proactive credential sweep)", () => {
     );
     expect(logs.filter(([m]) => m === "integration credential sweep")).toEqual([
       ["integration credential sweep", { rotated: 2, failed: 1 }],
+    ]);
+
+    // Another hour: the deferred-only pass is logged with its count.
+    await vi.advanceTimersByTimeAsync(60 * 60 * 1000);
+    await waitReal(() => sweeps >= 3, "third sweep");
+    await waitReal(
+      () =>
+        logs.filter(([m]) => m === "integration credential sweep").length >= 2,
+      "deferred sweep logged",
+    );
+    expect(logs.filter(([m]) => m === "integration credential sweep")).toEqual([
+      ["integration credential sweep", { rotated: 2, failed: 1 }],
+      ["integration credential sweep", { rotated: 0, failed: 0, deferred: 1 }],
     ]);
   });
 });

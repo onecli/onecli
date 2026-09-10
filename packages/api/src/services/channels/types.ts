@@ -60,6 +60,13 @@ export type PresenceStatus = (typeof PRESENCE_STATUSES)[number];
 export const THREAD_LINK_KINDS = ["direct", "group"] as const;
 export type ThreadLinkKind = (typeof THREAD_LINK_KINDS)[number];
 
+/**
+ * Who authored an inbound group message: a person, or an APP's bot user
+ * (PR 5a). Same gate for both; the door frames apps as data with provenance
+ * and meters their turns (app-turn-cap-service).
+ */
+export type SpeakerKind = "person" | "app";
+
 export const USER_LINK_SOURCES = ["email", "manual"] as const;
 export type UserLinkSource = (typeof USER_LINK_SOURCES)[number];
 
@@ -264,11 +271,18 @@ export interface ChannelProvider {
    * (Slack: the 12h config-token pair). Returns the replacement JSON plus the
    * tenant the rotation named — the caller asserts it against the stored row,
    * so a swapped credential can never quietly rebind the org to another
-   * workspace — or null when the stored one needs no rotation. Throwing means
-   * the credential is dead and the integration must surface its
-   * needs-attention state.
-   */
-  /**
+   * workspace — or null when the stored one needs no rotation.
+   *
+   * Two failure shapes, and the difference is the whole point:
+   * - throw `DeadIntegrationCredentialError` when the credential is PROVEN
+   *   unusable (the provider refused the refresh half as invalid, the stored
+   *   JSON is unreadable, or the pair is refused while its access half has
+   *   already expired) — the caller clears it and surfaces the re-paste state;
+   * - throw anything else for a refusal that may pass later (a transient
+   *   provider error, a 5xx, a timeout) — the caller KEEPS the pair and tries
+   *   again on the next sweep. An org must never be told to re-paste over a
+   *   provider blip.
+   *
    * `force` rotates regardless of remaining lifetime — the proactive sweep
    * uses it, because whether an UNUSED refresh token survives its access
    * token's expiry is undocumented (verified 2026-08-07), and designing on an
@@ -554,17 +568,41 @@ export interface ChannelProvider {
     }): Promise<string | null>;
 
     /**
+     * The APPS in a space (PR 5a): the bot users among its members, same
+     * tenant, not deleted, never the agent's own bot user (a self-tag is a
+     * self-invocation). The group door seeds a new thread's mention anchors
+     * from this so an agent can tag the other apps in the room from its
+     * first turn - the same standing linked humans already have. Display
+     * names are untrusted (the caller cleans and clamps). Best-effort by
+     * contract: any failure answers [] - a comprehension gap must never cost
+     * a turn.
+     */
+    appsIn(input: {
+      credentialsJson: string | null;
+      externalRef: string;
+      tenantExternalId: string;
+      selfExternalUserId: string | null;
+    }): Promise<{ externalUserId: string; displayName: string }[]>;
+
+    /**
      * Resolve a NON-platform speaker for the guest lane: their display name
-     * (untrusted - the caller cleans, clamps, and frames it) and whether
-     * they belong to the presence's own tenant (the v1 same-tenant fence:
-     * a Slack Connect participant is refused even in a granted channel).
+     * (untrusted - the caller cleans, clamps, and frames it), whether they
+     * belong to the presence's own tenant (the v1 same-tenant fence: a
+     * Slack Connect participant is refused even in a granted channel), and
+     * whether the directory says they are an APP (a bot user). The door
+     * compares `isApp` against what the wire claimed and fails closed on a
+     * mismatch - the classification is confirmed, never trusted.
      * Null = cannot verify, and the caller fails closed.
      */
     resolveGuestSpeaker(input: {
       credentialsJson: string | null;
       externalUserId: string;
       tenantExternalId: string;
-    }): Promise<{ displayName: string | null; sameTenant: boolean } | null>;
+    }): Promise<{
+      displayName: string | null;
+      sameTenant: boolean;
+      isApp: boolean;
+    } | null>;
 
     /**
      * Re-verify a grant's SUBJECT at decision time — the approve-time

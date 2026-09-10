@@ -110,6 +110,12 @@ describe("cleanJcodeUpdaterState", () => {
     // provider is selected.
     mkdirSync(join(home, "provider-backends/grok-build"), { recursive: true });
     writeFileSync(join(home, "provider-backends/grok-build/grok"), "elf");
+    // The third stash (purged since the browser-tool disable, 2026-09-09):
+    // `jcode browser setup` drops the Firefox bridge's native-messaging host
+    // and a helper binary here, and the tool execs them.
+    mkdirSync(join(home, "browser"));
+    writeFileSync(join(home, "browser/firefox-agent-bridge-host"), "elf");
+    writeFileSync(join(home, "browser/browser-agent-bridge.xpi"), "zip");
     // What must SURVIVE: the agent's sessions and our managed files.
     mkdirSync(join(home, "sessions"));
     writeFileSync(join(home, "sessions/s1.jsonl"), "{}");
@@ -122,6 +128,7 @@ describe("cleanJcodeUpdaterState", () => {
     expect(existsSync(join(home, "bin"))).toBe(false);
     expect(existsSync(join(home, "update_metadata.json"))).toBe(false);
     expect(existsSync(join(home, "provider-backends"))).toBe(false);
+    expect(existsSync(join(home, "browser"))).toBe(false);
     expect(readFileSync(join(home, "sessions/s1.jsonl"), "utf8")).toBe("{}");
     expect(existsSync(join(home, "auth.json"))).toBe(true);
     expect(existsSync(join(home, "config.toml"))).toBe(true);
@@ -249,6 +256,15 @@ describe("the disabled native tools", () => {
     // leaves the native tool callable (v0.71.1, still true in v0.78.1) —
     // only this list removes it from the model's definitions.
     expect(JCODE_DISABLED_TOOLS_VALUE.split(",")).toContain("memory");
+  });
+
+  it("browser is in the list — the Firefox-bridge trap is removed", () => {
+    // The native browser tool needs a Firefox extension plus a native-
+    // messaging host, neither of which can exist in a headless guest, and
+    // its own description sends the model into setup attempts (observed
+    // live). Chromium is baked into the agent image instead; disabling the
+    // tool removes it from the model's definitions entirely.
+    expect(JCODE_DISABLED_TOOLS_VALUE.split(",")).toContain("browser");
   });
 });
 

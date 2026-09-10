@@ -147,14 +147,16 @@ export const ActionApprovalRow = ({ item }: ActionApprovalRowProps) => {
               Reject
             </Button>
             <div className="flex gap-2">
-              <Button
-                variant="outline"
-                disabled={pending}
-                onClick={() => submit("approve_always")}
-              >
-                <CheckCheck aria-hidden="true" className="size-4" />
-                Approve + always allow
-              </Button>
+              {item.offersAlwaysAllow && (
+                <Button
+                  variant="outline"
+                  disabled={pending}
+                  onClick={() => submit("approve_always")}
+                >
+                  <CheckCheck aria-hidden="true" className="size-4" />
+                  Approve + always allow
+                </Button>
+              )}
               <Button disabled={pending} onClick={() => submit("approve")}>
                 Approve
               </Button>

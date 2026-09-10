@@ -17,6 +17,8 @@ import {
   createInvitation,
   acceptInvitation,
   cancelInvitation,
+  explainUnavailableInvitation,
+  findAcceptedInvitationOrgForUser,
 } from "./invitation-service";
 
 /**
@@ -228,5 +230,117 @@ describe.skipIf(!PROOF_URL)("invitations over real PostgreSQL", () => {
         where: { organizationId: s.organizationId },
       }),
     ).toBe(1);
+  });
+
+  it("a used link re-clicked by its accepter resolves to the org; by anyone else, to nothing", async () => {
+    // The /join page answers a re-click with a redirect INTO the org, but only
+    // for the person who accepted. Both halves need the real rows: the
+    // membership the accept wrote, and the invitation flipped to `accepted`.
+    seeded = await seed();
+    const s = seeded;
+
+    const { token } = await createInvitation({
+      organizationId: s.organizationId,
+      email: INVITEE_EMAIL,
+      role: "member",
+      invitedById: s.ownerId,
+      invitedByEmail: OWNER_EMAIL,
+    });
+    // Before acceptance, a re-click has nothing to resolve to.
+    expect(
+      await findAcceptedInvitationOrgForUser(token, s.inviteeId, INVITEE_EMAIL),
+    ).toBeNull();
+
+    await acceptInvitation(token, s.inviteeId, INVITEE_EMAIL, null);
+
+    expect(
+      await findAcceptedInvitationOrgForUser(
+        token,
+        s.inviteeId,
+        INVITEE_EMAIL.toUpperCase(),
+      ),
+    ).toBe(s.organizationId);
+
+    // The owner holds the same bearer token (forwarded email) but is not
+    // the accepter: the page must call the link used, not open the org.
+    expect(
+      await findAcceptedInvitationOrgForUser(token, s.ownerId, OWNER_EMAIL),
+    ).toBeNull();
+    expect(await explainUnavailableInvitation(token)).toBe("accepted");
+  });
+
+  it("a used link stops resolving once the accepter is removed from the org", async () => {
+    seeded = await seed();
+    const s = seeded;
+
+    const { token } = await createInvitation({
+      organizationId: s.organizationId,
+      email: INVITEE_EMAIL,
+      role: "member",
+      invitedById: s.ownerId,
+      invitedByEmail: OWNER_EMAIL,
+    });
+    await acceptInvitation(token, s.inviteeId, INVITEE_EMAIL, null);
+    await db.organizationMember.delete({
+      where: {
+        organizationId_userId: {
+          organizationId: s.organizationId,
+          userId: s.inviteeId,
+        },
+      },
+    });
+
+    // Membership gone: the redirect would land them on the org layout's own
+    // "not a member" bounce. Say the link was used instead.
+    expect(
+      await findAcceptedInvitationOrgForUser(token, s.inviteeId, INVITEE_EMAIL),
+    ).toBeNull();
+    expect(await explainUnavailableInvitation(token)).toBe("accepted");
+  });
+
+  it("explains a cancelled, an expired, and an unknown link by status", async () => {
+    seeded = await seed();
+    const s = seeded;
+
+    const first = await createInvitation({
+      organizationId: s.organizationId,
+      email: INVITEE_EMAIL,
+      role: "member",
+      invitedById: s.ownerId,
+      invitedByEmail: OWNER_EMAIL,
+    });
+    await cancelInvitation(s.organizationId, first.id);
+    expect(await explainUnavailableInvitation(first.token)).toBe("cancelled");
+
+    // Re-invite (same row, new token), then age it past its window WITHOUT
+    // flipping the status column: that is how a link the accepter never
+    // clicked actually sits in the table, since expiry is only stamped on an
+    // attempted accept.
+    const second = await createInvitation({
+      organizationId: s.organizationId,
+      email: INVITEE_EMAIL,
+      role: "member",
+      invitedById: s.ownerId,
+      invitedByEmail: OWNER_EMAIL,
+    });
+    await db.invitation.update({
+      where: { id: second.id },
+      data: { expiresAt: new Date(Date.now() - 60_000) },
+    });
+    expect(
+      await db.invitation.findUniqueOrThrow({ where: { id: second.id } }),
+    ).toMatchObject({ status: "pending" });
+    expect(await explainUnavailableInvitation(second.token)).toBe("expired");
+
+    // An attempted accept stamps it; the explanation must not change.
+    await expect(
+      acceptInvitation(second.token, s.inviteeId, INVITEE_EMAIL, null),
+    ).rejects.toThrow(/expired/i);
+    expect(
+      await db.invitation.findUniqueOrThrow({ where: { id: second.id } }),
+    ).toMatchObject({ status: "expired" });
+    expect(await explainUnavailableInvitation(second.token)).toBe("expired");
+
+    expect(await explainUnavailableInvitation(randomUUID())).toBe("unknown");
   });
 });

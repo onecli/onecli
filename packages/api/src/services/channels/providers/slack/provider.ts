@@ -1,5 +1,6 @@
 import { ServiceError } from "../../../errors";
 import { logger } from "../../../../lib/logger";
+import { DeadIntegrationCredentialError } from "../../errors";
 import type { ChannelProvider, PresenceIdentity } from "../../types";
 import { dispatchSlackEvent } from "./dispatch";
 import { slackSharedApp } from "./shared-install-service";
@@ -30,11 +31,13 @@ import {
   reactionsAdd,
   reactionsRemove,
   rotateConfigToken,
+  SlackApiError,
   usersInfo,
 } from "@onecli/channels/slack";
 import {
   parseSlackIntegrationCredentials,
   parseSlackPresenceCredentials,
+  type SlackIntegrationCredentials,
   type SlackPresenceCredentials,
 } from "./types";
 
@@ -46,6 +49,54 @@ import {
 /** Rotate when this close to expiry, so an in-flight create never races the
  * 12h cliff with a token about to die under it. */
 const ROTATE_SLACK_SECONDS = 10 * 60;
+
+/**
+ * `tooling.tokens.rotate` refusals that name the REFRESH HALF itself as
+ * unusable — deterministic, never worth a retry, so a stored pair answering
+ * one of these is dead and the org must re-paste.
+ *
+ * `internal_error` is deliberately absent: Slack documents it on this method
+ * as "likely a transient issue on our end", yet it is ALSO what a refresh
+ * token that was already consumed elsewhere answers (a well-formed but spent
+ * token, as other integrators report; malformed ones answer
+ * `invalid_refresh_token` — probed live 2026-09-09). The wire cannot tell
+ * those apart, so the rotation path keeps the pair and retries, and lets the
+ * access half's own `exp` settle it: a pair still refused once nothing usable
+ * is left is dead (see `rotateIntegrationCredential`).
+ */
+const DEAD_REFRESH_TOKEN_CODES: ReadonlySet<string> = new Set([
+  "invalid_refresh_token",
+  "token_revoked",
+  "token_expired",
+  "invalid_auth",
+  "account_inactive",
+]);
+
+/**
+ * What a PASTED refresh token answers when it has already been spent: the
+ * pair was rotated by an earlier paste here or by another tool, or the user
+ * regenerated on api.slack.com (which invalidates the previous pair). On the
+ * paste path there is no stored access half to fall back on, so both codes
+ * mean one thing — generate a fresh pair — and the message says so instead of
+ * echoing Slack's opaque code alone.
+ */
+const SPENT_PASTED_TOKEN_CODES: ReadonlySet<string> = new Set([
+  "invalid_refresh_token",
+  "internal_error",
+]);
+
+/** The stored shape, minted from a rotate answer — both the paste path and
+ * the rotation path persist exactly this. */
+const rotatedCredential = (
+  rotated: Awaited<ReturnType<typeof rotateConfigToken>>,
+) => ({
+  tenant: { externalId: rotated.team_id, name: null },
+  credentialsJson: JSON.stringify({
+    accessToken: rotated.token,
+    refreshToken: rotated.refresh_token,
+    expiresAt: rotated.exp,
+  } satisfies SlackIntegrationCredentials),
+});
 
 const identityFromAuthTest = (probe: {
   team_id: string;
@@ -112,43 +163,85 @@ export const slackProvider: ChannelProvider = {
 
   async connectIntegration(rawCredential) {
     const pasted = rawCredential.trim();
-    // Config refresh tokens are the `xoxe-` family. A loose prefix check so
-    // the common mistake — pasting a bot or user token — gets a real message
-    // instead of Slack's opaque `invalid_refresh_token`.
-    if (!pasted.startsWith("xoxe")) {
+    // Slack's "Your App Configuration Tokens" page has two Copy buttons. The
+    // ACCESS token is `xoxe.xoxp-…`, the REFRESH token `xoxe-…` — both start
+    // with `xoxe`, and a real access token sent as `refresh_token` answers an
+    // opaque `internal_error` (the live report behind this fix, 2026-09-09),
+    // the same code a spent refresh token answers. Tell the two apart HERE,
+    // before any Slack call, or the user gets "generate a new one" advice for
+    // a copy-paste mix-up.
+    if (pasted.startsWith("xoxe.")) {
       throw new ServiceError(
         "UNPROCESSABLE",
-        'That doesn\'t look like an app-configuration refresh token (it should start with "xoxe"). Copy the Refresh Token from Slack\'s "Your App Configuration Tokens" page.',
+        'That is the Access Token. Paste the Refresh Token instead: the other Copy button on Slack\'s "Your App Configuration Tokens" page (it starts with "xoxe-").',
+      );
+    }
+    // A loose family check so the other common mistake — pasting a bot or
+    // user token — gets a real message instead of `invalid_refresh_token`.
+    if (!pasted.startsWith("xoxe-")) {
+      throw new ServiceError(
+        "UNPROCESSABLE",
+        'That doesn\'t look like an app-configuration refresh token (it should start with "xoxe-"). Copy the Refresh Token from Slack\'s "Your App Configuration Tokens" page.',
       );
     }
     // Rotation IS the validation: it proves the token works, names the
     // workspace, and replaces the (single-use) pasted pair with a fresh one.
-    const rotated = await rotateConfigToken(pasted);
-    return {
-      tenant: { externalId: rotated.team_id, name: null },
-      credentialsJson: JSON.stringify({
-        accessToken: rotated.token,
-        refreshToken: rotated.refresh_token,
-        expiresAt: rotated.exp,
-      }),
-    };
+    try {
+      return rotatedCredential(await rotateConfigToken(pasted));
+    } catch (err) {
+      if (
+        err instanceof SlackApiError &&
+        SPENT_PASTED_TOKEN_CODES.has(err.code)
+      ) {
+        throw new ServiceError(
+          "UNPROCESSABLE",
+          `Slack refused this refresh token (${err.code}). A refresh token works once: if it was pasted here before, rotated by another tool, or regenerated on api.slack.com, it is spent. Generate a new token under "Your App Configuration Tokens" and paste the new Refresh Token.`,
+        );
+      }
+      // Every other refusal keeps Slack's own code verbatim (the generic 422).
+      throw err;
+    }
   },
 
   async rotateIntegrationCredential(credentialsJson, options) {
-    const stored = parseSlackIntegrationCredentials(credentialsJson);
+    let stored: SlackIntegrationCredentials;
+    try {
+      stored = parseSlackIntegrationCredentials(credentialsJson);
+    } catch {
+      // A blob that no longer parses cannot be rotated from, ever. The parse
+      // error is deliberately NOT attached as the cause: a JSON.parse
+      // SyntaxError echoes a slice of its input, and this input is the
+      // decrypted credential.
+      throw new DeadIntegrationCredentialError("slack", "unreadable");
+    }
     const now = Math.floor(Date.now() / 1000);
     if (!options?.force && stored.expiresAt - now > ROTATE_SLACK_SECONDS) {
       return null;
     }
-    const rotated = await rotateConfigToken(stored.refreshToken);
-    return {
-      tenant: { externalId: rotated.team_id, name: null },
-      credentialsJson: JSON.stringify({
-        accessToken: rotated.token,
-        refreshToken: rotated.refresh_token,
-        expiresAt: rotated.exp,
-      }),
-    };
+    try {
+      return rotatedCredential(await rotateConfigToken(stored.refreshToken));
+    } catch (err) {
+      if (
+        err instanceof SlackApiError &&
+        DEAD_REFRESH_TOKEN_CODES.has(err.code)
+      ) {
+        throw new DeadIntegrationCredentialError("slack", err.code, {
+          cause: err,
+        });
+      }
+      // Anything else — `internal_error`, `service_unavailable`, a 5xx, a
+      // timeout — may pass on the next attempt. While the access half is
+      // still live the caller keeps the pair and retries later; once it has
+      // expired there is nothing left to use, so the same refusal is final.
+      if (now >= stored.expiresAt) {
+        throw new DeadIntegrationCredentialError(
+          "slack",
+          err instanceof SlackApiError ? err.code : "refused_after_expiry",
+          { cause: err },
+        );
+      }
+      throw err;
+    }
   },
 
   async createManagedPresence({
