@@ -53,24 +53,31 @@ export const pollCliAuthSession = async (code: string) => {
   }
 
   if (session.status === "confirmed" && session.apiKey) {
+    const apiKey = session.apiKey;
+    // Atomic consume — same CAS shape as confirmCliAuthSession. Without the
+    // status+apiKey guard, concurrent polls both read confirmed and both
+    // return the plaintext key before either update lands.
+    const consumed = await db.cliAuthSession.updateMany({
+      where: { code, status: "confirmed", apiKey: { not: null } },
+      data: { apiKey: null, status: "consumed" },
+    });
+    if (consumed.count === 0) {
+      return { status: "expired" as const };
+    }
+
     const apiKeyRecord = await db.apiKey.findUnique({
-      where: { key: session.apiKey },
+      where: { key: apiKey },
       select: { workspaceId: true },
     });
 
-    // Clear the API key after reading so it can only be consumed once
-    await db.cliAuthSession.update({
-      where: { code },
-      data: { apiKey: null, status: "consumed" },
-    });
     return {
       status: "ok" as const,
-      api_key: session.apiKey,
+      api_key: apiKey,
       workspace_id: apiKeyRecord?.workspaceId ?? null,
     };
   }
 
-  if (session.status === "expired") {
+  if (session.status === "consumed" || session.status === "expired") {
     return { status: "expired" as const };
   }
 
