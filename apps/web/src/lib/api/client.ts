@@ -17,11 +17,19 @@ export class ApiError extends Error {
   }
 }
 
-const extractErrorMessage = (body: Record<string, unknown>, status: number) => {
-  const err = body.error;
-  if (typeof err === "string") return err;
-  if (err && typeof err === "object" && "message" in err)
-    return String((err as { message: unknown }).message);
+const extractErrorMessage = (body: unknown, status: number): string => {
+  if (body && typeof body === "object" && "error" in body) {
+    const err = body.error;
+    if (typeof err === "string") return err;
+    if (
+      err &&
+      typeof err === "object" &&
+      "message" in err &&
+      typeof err.message === "string"
+    ) {
+      return err.message;
+    }
+  }
   return `Request failed: ${status}`;
 };
 

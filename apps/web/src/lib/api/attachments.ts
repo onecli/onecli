@@ -1,5 +1,5 @@
 import { apiUpload, apiFetch } from "@/lib/api-fetch";
-import { ApiError } from "./client";
+import { refusal } from "./client";
 import { conversationPath } from "./conversations";
 import type { AttachmentMeta } from "./types";
 
@@ -9,27 +9,6 @@ import type { AttachmentMeta } from "./types";
  * Content-Type. Metadata comes back as ordinary JSON; bytes come back as a
  * Blob the caller turns into an object URL.
  */
-
-/**
- * The house error envelope is `{ error: { message, type } }` for every
- * ServiceError-mapped refusal, and a bare `{ error: "…" }` for the handful of
- * routes that answer directly (the upload's 413). Read BOTH — stringifying
- * the object rendered every refusal as "[object Object]".
- */
-const refused = async (res: Response): Promise<ApiError> => {
-  const body: unknown = await res.json().catch(() => ({}));
-  const err =
-    body && typeof body === "object" && "error" in body
-      ? (body as { error: unknown }).error
-      : undefined;
-  const message =
-    typeof err === "string"
-      ? err
-      : err && typeof err === "object" && "message" in err
-        ? String((err as { message: unknown }).message)
-        : `Request failed: ${res.status}`;
-  return new ApiError(message, res.status);
-};
 
 export const uploadAttachment = async (
   conversationId: string,
@@ -44,7 +23,7 @@ export const uploadAttachment = async (
     contentType: file.type || "application/octet-stream",
     signal,
   });
-  if (!res.ok) throw await refused(res);
+  if (!res.ok) throw await refusal(res);
   return (await res.json()) as AttachmentMeta;
 };
 
@@ -59,6 +38,6 @@ export const fetchAttachmentBlob = async (
       `/attachments/${encodeURIComponent(attachmentId)}`,
     ),
   );
-  if (!res.ok) throw await refused(res);
+  if (!res.ok) throw await refusal(res);
   return res.blob();
 };
