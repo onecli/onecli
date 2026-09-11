@@ -447,6 +447,25 @@ const loopbackTwin = (origin: string): string | undefined => {
 
 const originHost = (origin: string) => parseOrigin(origin)?.[2];
 
+/**
+ * A configured origin spelled the way a browser sends `Origin`: lowercase
+ * host, no default port, compressed IP literal. The trusted set is matched
+ * exactly, so `HTTPS://OneCLI.Example.com:443` would otherwise never match its
+ * own dashboard. Only values `normalizeOrigin` accepts are respelled; anything
+ * else (a legacy alias with a path, a port `URL` rejects) stays as written, so
+ * no origin that wasn't configured can join the set, the opaque "null" least
+ * of all. Advertised URLs keep the operator's spelling; only matching changes.
+ */
+const browserOrigin = (origin: string): string => {
+  const normalized = normalizeOrigin(origin);
+  if (!normalized) return origin;
+  try {
+    return new URL(normalized).origin;
+  } catch {
+    return origin;
+  }
+};
+
 export interface TrustedOrigins {
   origins: string[];
   warnings: string[];
@@ -463,8 +482,10 @@ export const buildTrustedOrigins = (
   extraCsv?: string,
 ): TrustedOrigins => {
   const warnings: string[] = [];
-  const origins = [resolved.app];
-  const appTwin = loopbackTwin(resolved.app);
+  const app = browserOrigin(resolved.app);
+  const api = browserOrigin(resolved.api);
+  const origins = [app];
+  const appTwin = loopbackTwin(app);
   if (appTwin) origins.push(appTwin);
 
   for (const entry of extraCsv?.split(",") ?? []) {
@@ -472,7 +493,7 @@ export const buildTrustedOrigins = (
     if (!trimmed) continue;
     const normalized = normalizeOrigin(trimmed);
     if (normalized) {
-      origins.push(normalized);
+      origins.push(browserOrigin(normalized));
     } else {
       warnings.push(
         `ONECLI_TRUSTED_ORIGINS entry "${trimmed}" is not a valid ` +
@@ -486,10 +507,10 @@ export const buildTrustedOrigins = (
   // config — and better-auth already trusts its own baseURL origin.
   if (
     resolved.sources.api.source !== "default" &&
-    originHost(resolved.api) !== originHost(resolved.app)
+    originHost(api) !== originHost(app)
   ) {
-    origins.push(resolved.api);
-    const apiTwin = loopbackTwin(resolved.api);
+    origins.push(api);
+    const apiTwin = loopbackTwin(api);
     if (apiTwin) origins.push(apiTwin);
   }
 
