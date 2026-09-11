@@ -47,6 +47,16 @@ export const apiFetch = async (
   const workspaceId = getWorkspaceId();
   const organizationId = getOrganizationId();
 
+  const headers = new Headers({
+    "Content-Type": "application/json",
+    ...(token ? { Authorization: `Bearer ${token}` } : {}),
+    ...(workspaceId ? { "X-Workspace-Id": workspaceId } : {}),
+    ...(organizationId ? { "X-Organization-Id": organizationId } : {}),
+  });
+  new Headers(options?.headers).forEach((value, name) => {
+    headers.set(name, value);
+  });
+
   return fetch(`${API_ORIGIN}${path}`, {
     ...options,
     // Self-host: the API lives on another port of the same host, so the
@@ -54,20 +64,14 @@ export const apiFetch = async (
     // origin — it is one of the deployment's own). Cloud uses the bearer
     // token instead.
     ...(IS_CLOUD ? null : { credentials: "include" as const }),
-    headers: {
-      "Content-Type": "application/json",
-      ...(token ? { Authorization: `Bearer ${token}` } : {}),
-      ...(workspaceId ? { "X-Workspace-Id": workspaceId } : {}),
-      ...(organizationId ? { "X-Organization-Id": organizationId } : {}),
-      ...(options?.headers as Record<string, string> | undefined),
-    },
+    headers,
   });
 };
 
 /**
  * The binary sibling of `apiFetch` — same origin, auth, tenancy headers and
  * cookie/bearer split, WITHOUT the forced JSON Content-Type: `apiFetch`
- * spreads caller headers over its own, so a caller can only override (never
+ * merges caller headers over its own, so a caller can only override (never
  * delete) `Content-Type`, and a raw upload's type must be the file's own.
  */
 export const apiUpload = async (
