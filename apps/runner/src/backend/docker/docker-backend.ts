@@ -124,6 +124,13 @@ export interface DockerBackendOptions {
    * docker host) — how a plain-Linux sandbox resolves `host.docker.internal`
    * when the gateway runs on the host. Empty = no entries, no change. */
   extraHosts?: string[];
+  /**
+   * DANGEROUS, opt-in only (RUNNER_SANDBOX_UNSAFE_SECCOMP): drops
+   * `no-new-privileges` and unconfines seccomp for sandbox containers. Exists
+   * only for hosts whose runtime cannot exec the agent image's entrypoint
+   * under the default hardened profile. See config.ts for the full warning.
+   */
+  unsafeSeccomp?: boolean;
   /** Injectable for tests — the real one talks to the docker socket. */
   transport?: EngineTransport;
 }
@@ -371,11 +378,15 @@ export const createDockerBackend = (
               // capability, and no-new-privileges neuters the setuid uidmap
               // helpers — so rootless containers cannot set up their user
               // namespace here (they are a hosted-microVM-only capability; see
-              // apps/runner/README.md). NEVER add a `seccomp=…` SecurityOpt
-              // that weakens the default profile: seccomp is the actual syscall
-              // gate, and `seccomp=unconfined` would re-open single-uid rootless
-              // podman on the shared kernel. Pinned by the test.
-              SecurityOpt: ["no-new-privileges"],
+              // apps/runner/README.md). Do NOT add a `seccomp=…` SecurityOpt
+              // that weakens the default profile except behind the explicit,
+              // documented `unsafeSeccomp` escape hatch below (off by default,
+              // RUNNER_SANDBOX_UNSAFE_SECCOMP): seccomp is the actual syscall
+              // gate, and `seccomp=unconfined` re-opens single-uid rootless
+              // podman on the shared kernel. Default path pinned by the test.
+              SecurityOpt: options.unsafeSeccomp
+                ? ["seccomp=unconfined", "apparmor=unconfined"]
+                : ["no-new-privileges"],
               CapDrop: ["ALL"],
               RestartPolicy: { Name: "no" },
               ...(options.extraHosts &&
