@@ -38,6 +38,15 @@ export interface RunnerConfig {
    */
   sandboxExtraHosts: string[];
   /**
+   * Extra environment variables injected into every sandbox container
+   * (`KEY=VALUE`, comma-separated). Operator-level plumbing for values the
+   * control plane does not know about — e.g. pointing every harness at an
+   * organization LLM proxy with `ANTHROPIC_BASE_URL=https://…`. Entries
+   * without a `=` are dropped. Control-plane-owned variables (SANDBOX_ID,
+   * RUNNER_WS_URL, SANDBOX_WS_TOKEN) always win over these.
+   */
+  sandboxExtraEnv: Record<string, string>;
+  /**
    * The stale-label orphan sweep (step 13): reap containers/volumes whose
    * sandbox no longer exists anywhere in the control plane. False = detect
    * and log, delete nothing — the operator kill-switch.
@@ -154,6 +163,18 @@ export const loadConfig = (
       .split(",")
       .map((entry) => entry.trim())
       .filter((entry) => entry.length > 0),
+    sandboxExtraEnv: Object.fromEntries(
+      (env.RUNNER_SANDBOX_EXTRA_ENV ?? "")
+        .split(",")
+        .map((entry) => entry.trim())
+        .filter((entry) => entry.length > 0)
+        .flatMap((entry) => {
+          const eq = entry.indexOf("=");
+          // A key-less entry is a configuration mistake — drop it rather than
+          // inject an empty-named variable the daemon would reject.
+          return eq > 0 ? [[entry.slice(0, eq), entry.slice(eq + 1)]] : [];
+        }),
+    ),
     orphanReap: bool(env.RUNNER_ORPHAN_REAP, true),
     orphanGraceSeconds: int(env.RUNNER_ORPHAN_GRACE_SECONDS, 3600),
     sandboxManagerUrl,

@@ -35,6 +35,7 @@ const config: RunnerConfig = {
   reconcileSeconds: 60,
   dockerSocket: "/var/run/docker.sock",
   sandboxExtraHosts: [],
+  sandboxExtraEnv: {},
   orphanReap: true,
   orphanGraceSeconds: 3600,
   sandboxManagerUrl: null,
@@ -330,6 +331,31 @@ describe("every start hands the sandbox a live control-channel credential", () =
     expect(backend.sandboxes.get("sb-1")?.spec.env.HTTPS_PROXY).toContain(
       "aoc_ROTATED",
     );
+  });
+
+  it("injects operator sandboxExtraEnv without touching control-channel vars", async () => {
+    runner = createRunner({
+      config: {
+        ...config,
+        sandboxExtraEnv: {
+          ANTHROPIC_BASE_URL: "https://proxy.example.com/aifoundry-sdk",
+        },
+      },
+      backend,
+      controlPlane,
+      wsServer,
+    });
+    queued.push(startItem());
+    await drive();
+
+    const env = backend.sandboxes.get("sb-1")?.spec.env;
+    expect(env?.ANTHROPIC_BASE_URL).toBe(
+      "https://proxy.example.com/aifoundry-sdk",
+    );
+    // Payload and control-channel variables are still present.
+    expect(env?.ANTHROPIC_API_KEY).toBe("placeholder");
+    expect(env?.SANDBOX_ID).toBe("sb-1");
+    expect(env?.SANDBOX_WS_TOKEN).toBeTruthy();
   });
 
   it("keeps the SAME home across a recreate (the durable disk)", async () => {

@@ -76,6 +76,7 @@ export const startTestRunner = async (
     agentImage: opts.config.agentImage,
     sandboxNetwork: opts.ids.network,
     networkInternal: false,
+    sandboxExtraEnv: {},
     wsPort,
     advertisedHost: opts.config.hostGatewayHost,
     maxSandboxes: opts.maxSandboxes ?? 4,
