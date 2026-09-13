@@ -4,25 +4,7 @@ import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { useAuth } from "@/providers/auth-provider";
 import { apiFetch } from "@/lib/api-fetch";
-
-/**
- * The refusal in an accept response, if it carries one a person can read.
- *
- * The accept route answers its own refusals as `{ error: string }`, but a
- * fault reaches the browser as the global envelope `{ error: { message } }` —
- * and only a STRING may reach the screen: rendering an object would crash the
- * signup screen exactly when someone needs to be told what went wrong.
- */
-const refusalMessage = (body: unknown): string | null => {
-  if (typeof body !== "object" || body === null) return null;
-  const error = (body as { error?: unknown }).error;
-  if (typeof error === "string") return error;
-  if (typeof error === "object" && error !== null) {
-    const message = (error as { message?: unknown }).message;
-    if (typeof message === "string") return message;
-  }
-  return null;
-};
+import { refusalMessage } from "@/lib/api/client";
 
 /**
  * Send a freshly authenticated visitor to their dashboard.

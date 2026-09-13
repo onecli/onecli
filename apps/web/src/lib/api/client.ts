@@ -17,27 +17,47 @@ export class ApiError extends Error {
   }
 }
 
-const extractErrorMessage = (body: unknown, status: number): string => {
-  if (body && typeof body === "object" && "error" in body) {
-    const err = body.error;
-    if (typeof err === "string") return err;
-    if (
-      err &&
-      typeof err === "object" &&
-      "message" in err &&
-      typeof err.message === "string"
-    ) {
-      return err.message;
-    }
+/**
+ * The server's own words in a refusal body, or `null` when it has none.
+ *
+ * The API answers in two envelopes: `{ error: { message, type } }` from the
+ * global error handler (every ServiceError-mapped refusal) and a bare
+ * `{ error: "…" }` from the routes that answer directly (the upload's 413,
+ * billing's plan checks, the invitation accept). Read BOTH.
+ *
+ * `body` is whatever `res.json()` parsed — `null`, an array, a number, or an
+ * envelope whose `message` is not a string are all possible when something
+ * between the browser and the API (a proxy, an edge) answers instead. Only a
+ * STRING is ever returned: coercing another shape either throws (a `toString`
+ * that isn't callable) or renders "[object Object]" to a person. Every caller
+ * keeps its own fallback sentence for the `null` case.
+ */
+export const refusalMessage = (body: unknown): string | null => {
+  if (typeof body !== "object" || body === null || !("error" in body)) {
+    return null;
   }
-  return `Request failed: ${status}`;
+  const error = body.error;
+  if (typeof error === "string") return error;
+  if (
+    typeof error === "object" &&
+    error !== null &&
+    "message" in error &&
+    typeof error.message === "string"
+  ) {
+    return error.message;
+  }
+  return null;
 };
 
-/** Exported for the raw-body callers (`uploadImage`) that can't ride the
- * JSON verbs below — every refusal parse lives here, whatever the verb. */
+/** Exported for the raw-body callers (`uploadImage`, the attachments door)
+ * that can't ride the JSON verbs below — every refusal parse lives here,
+ * whatever the verb. */
 export const refusal = async (res: Response): Promise<ApiError> => {
-  const body = await res.json().catch(() => ({}));
-  return new ApiError(extractErrorMessage(body, res.status), res.status);
+  const body: unknown = await res.json().catch(() => null);
+  return new ApiError(
+    refusalMessage(body) ?? `Request failed: ${res.status}`,
+    res.status,
+  );
 };
 
 /** Explicit workspace targeting for callers whose URL carries no scope (the

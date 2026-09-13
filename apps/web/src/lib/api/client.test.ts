@@ -14,10 +14,40 @@ vi.mock("@/lib/api-fetch", () => ({
   apiFetch: (path: string, init?: RequestInit) => apiFetch(path, init),
 }));
 
-const { ApiError, apiPost, refusal } = await import("./client");
+const { ApiError, apiPost, refusal, refusalMessage } = await import("./client");
 
 beforeEach(() => {
   apiFetch.mockReset();
+});
+
+describe("refusalMessage", () => {
+  it.each([
+    [
+      "a nested envelope",
+      { error: { message: "Try again later", type: "busy" } },
+      "Try again later",
+    ],
+    [
+      "a bare string",
+      { error: "Already on this plan" },
+      "Already on this plan",
+    ],
+    ["an empty string", { error: "" }, ""],
+    ["null", null, null],
+    ["an array", [], null],
+    ["a number", 42, null],
+    ["no error key", { message: "stray" }, null],
+    ["a null error", { error: null }, null],
+    ["a numeric message", { error: { message: 42 } }, null],
+    ["an object message", { error: { message: { a: 1 } } }, null],
+    [
+      "an uncallable toString",
+      { error: { message: { toString: null } } },
+      null,
+    ],
+  ])("reads %s", (_label, body, expected) => {
+    expect(refusalMessage(body)).toBe(expected);
+  });
 });
 
 describe("refusal", () => {
