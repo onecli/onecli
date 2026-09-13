@@ -121,8 +121,14 @@ An org admin, in **Organization → Settings → Channels**:
 1. Open Slack's [app settings](https://api.slack.com/apps) → **Your App
    Configuration Tokens** → generate, and copy the **Refresh Token**
    (`xoxe-…`).
-2. Paste it into the Slack card. OneCLI rotates it automatically from then on
-   (Slack expires the pair every 12 hours).
+2. Paste it into the Slack card right away. OneCLI rotates it automatically
+   from then on (Slack expires the pair every 12 hours).
+
+A refresh token works **once**: the first rotation spends it and issues a new
+pair, which OneCLI keeps. So paste a freshly generated token, never one that
+another tool (the Slack CLI, a script) already rotated, and do not reuse the
+same value twice. Regenerating on api.slack.com also invalidates the previous
+pair — if you do, paste the new one here.
 
 This is the accelerator: with it, OneCLI creates each agent's Slack app for
 you. Without it, the socket posture still offers the manual manifest floor;
@@ -163,9 +169,24 @@ self-editing messages — the answer posts once, complete.)
 
 - **"Channels are offline"** — the adapter isn't running or can't reach the
   api service. `docker compose ps channel-adapter`, then its logs.
-- **The org card says the token expired** — Slack refused a rotation (the
-  pair was revoked, or another tool consumed the single-use refresh token).
-  Paste a fresh refresh token; nothing else stops working meanwhile.
+- **"That is the Access Token" when pasting** — Slack's token page has two
+  Copy buttons. The **Access Token** (`xoxe.xoxp-…`, "Expires in N hours") is
+  what the platform mints for itself; OneCLI needs the **Refresh Token**
+  (`xoxe-…`) from the other button.
+- **"Slack refused this refresh token (internal_error)" when pasting** — the
+  token is spent. Slack refresh tokens are single-use, and a well-formed one
+  that was already rotated (an earlier paste here, another tool, or a
+  regenerate on api.slack.com) answers `internal_error` rather than anything
+  descriptive. Generate a new token under **Your App Configuration Tokens**
+  and paste the new Refresh Token. `invalid_refresh_token` means the same for
+  a malformed or truncated paste.
+- **The org card says the token could not be refreshed** — Slack refused a
+  rotation as final: the pair was revoked, or another tool consumed the
+  single-use refresh token (a refresh token that keeps being refused after its
+  access token expires counts as dead too). A passing Slack outage does _not_
+  do this: rotation keeps the stored pair through transient refusals and
+  retries on the next hourly sweep. Paste a fresh refresh token; nothing else
+  stops working meanwhile.
 - **"Approvals need re-attaching" on an agent** — the member who attached
   Slack lost workspace access, so the agent's approvals key is refused. Detach
   and re-attach (any member with access can).

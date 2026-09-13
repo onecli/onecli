@@ -396,7 +396,7 @@ describe.skipIf(!PROOF_URL)(
         user: { id: "U-OWNER" },
         actions: [{ action_id: "reach_approve", value: grant.id }],
         // No response_url: hooks.slack.com is allowlisted by host, so this
-        // leg's card rewrite is proven through promptRefs' chat.update.
+        // leg's card rewrite is proven through cardRefs' chat.update.
       });
       expect(decideRes.status).toBe(200);
       const decided = await db.agentReachGrant.findUniqueOrThrow({
@@ -404,7 +404,7 @@ describe.skipIf(!PROOF_URL)(
       });
       expect(decided.state).toBe("approved");
       expect(decided.decidedByUserId).toBe(OWNER);
-      // Every posted owner card was rewritten (the promptRefs pass).
+      // Every posted owner card was rewritten (the cardRefs pass).
       await waitForSlackCall("chat.update");
       expect(slackCallsFor("chat.update").length).toBeGreaterThan(0);
       // The decision audited under the human who clicked.
@@ -426,7 +426,7 @@ describe.skipIf(!PROOF_URL)(
         where: { conversation: { agentId: agent.id } },
       });
       expect(turn.userId).toBeNull();
-      expect(turn.message).toBe("Dana (guest): <@UBOT> deploy please");
+      expect(turn.message).toBe("Dana (guest): @[wire agent] deploy please");
       expect(turn.source).toBe("slack");
 
       // ── 5. DASHBOARD narrows to members_only (the real PUT). ──
@@ -749,7 +749,7 @@ describe.skipIf(!PROOF_URL)(
           subjectKind: "external_user",
           externalRef: "U/DM+1",
           state: "pending",
-          promptRefs: [],
+          cardRefs: [],
         },
       });
       currentSession = { id: OWNER, email: `${OWNER}@example.com` };

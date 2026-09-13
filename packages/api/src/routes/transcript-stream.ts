@@ -270,6 +270,19 @@ export const streamTranscript = (
         // the tail can never arrive ahead of the history it belongs after.
         await replayHistory(Number.isFinite(since) ? since : undefined);
 
+        // The replay is done: one `caught-up` frame BEFORE the first live
+        // event, so a reader can hold its skeleton through the replay and
+        // reveal the thread exactly once, fully folded — the whole cure for
+        // the "rows first, answers seconds later" jump. Additive by design:
+        // SSE consumers ignore unknown event names per spec, and our own
+        // parser returns null for them. `lastSeq` rides along for debugging.
+        await writeOrCut(() =>
+          stream.writeSSE({
+            event: "caught-up",
+            data: JSON.stringify({ seq: lastSeq }),
+          }),
+        );
+
         // One frame up front, so the client — and every proxy between it and
         // here — sees a live stream even when there is no history to replay.
         await writeOrCut(() => stream.write(KEEP_ALIVE));

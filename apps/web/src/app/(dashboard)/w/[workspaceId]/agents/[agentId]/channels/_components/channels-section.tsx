@@ -14,6 +14,7 @@ import {
   type AppConnectedEvent,
 } from "@/hooks/use-app-connected";
 import { useAgentPageAgent } from "../../_components/agent-page-frame";
+import { ContactsSection } from "./contacts-section";
 import { SlackAttachCard } from "./slack-attach-card";
 import { SlackPresenceCard } from "./slack-presence-card";
 
@@ -112,6 +113,7 @@ export const ChannelsSection = () => {
 
   return (
     <div className="space-y-4">
+      <ContactsSection agentId={agent.id} />
       {showOfflineBanner && (
         <div className="flex items-center gap-3 rounded-lg border border-amber-500/30 bg-amber-500/10 px-4 py-2.5 dark:border-amber-500/40 dark:bg-amber-500/15">
           <AlertTriangle

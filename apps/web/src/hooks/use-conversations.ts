@@ -1,10 +1,19 @@
 "use client";
 
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import {
+  useInfiniteQuery,
+  useMutation,
+  useQuery,
+  useQueryClient,
+} from "@tanstack/react-query";
 import { toast } from "sonner";
 import { conversations } from "@/lib/api";
 import { queryKeys } from "@/lib/api/keys";
-import type { AttachmentMeta, Turn } from "@/lib/api/types";
+import type {
+  AttachmentMeta,
+  TranscriptPage,
+  TurnsPage,
+} from "@/lib/api/types";
 import { hasUnsettledTurn } from "@/lib/chat/turns";
 
 /**
@@ -36,6 +45,10 @@ export interface OutgoingMessage {
  * and a poll that stopped at the active turn's close would leave its bubble
  * reading "received" forever. An errored read stops the loop rather than
  * hammering a 404 (the `use-agents.ts` poll guard).
+ *
+ * Windowed since the lazy-history change: this is the NEWEST window (the
+ * server's default, ~50 turns — the industry chat-open size), not the whole
+ * thread. Older windows ride `useOlderTurns` below, on their own key.
  */
 export const useTurns = (conversationId: string) =>
   useQuery({
@@ -45,10 +58,86 @@ export const useTurns = (conversationId: string) =>
     refetchInterval: (query) =>
       query.state.error
         ? false
-        : hasUnsettledTurn(query.state.data)
+        : hasUnsettledTurn(query.state.data?.turns)
           ? 2_500
           : false,
     refetchIntervalInBackground: false,
+  });
+
+/** One older window plus the transcript events that render its agent side. */
+export interface HistoryPage extends TurnsPage {
+  events: TranscriptPage["events"];
+}
+
+/**
+ * The scroll-up loader: OLDER windows of the thread, walked newest→oldest
+ * through the `before` cursor. Each page also carries its own transcript
+ * events, read as the closed range `(…, until]` where `until` is everything
+ * below what the caller already holds — so a page arrives WHOLE (rows and
+ * answers together) and the reader never sees the answerless flash the
+ * initial load used to show.
+ *
+ * `enabled` waits for the live window's ANCHOR — the caller passes the FIRST
+ * window it saw (its oldest row + `oldestSeq`), latched so a sliding live
+ * window never re-keys the gallery — AND for `wanted`: an infinite query
+ * fetches its first page the moment it is enabled, and that page must cost
+ * nothing until the reader actually scrolls toward history (the whole point
+ * of lazy loading). History is immutable, hence `staleTime: Infinity` and no
+ * refetch — and the key sits OUTSIDE the live `turns` key on purpose, so the
+ * send/settle invalidates never sweep pages that cannot change.
+ */
+export const useOlderTurns = (
+  conversationId: string,
+  anchor: { oldestTurnId: string; oldestSeq: number | null } | undefined,
+  wanted: boolean,
+) =>
+  useInfiniteQuery({
+    queryKey: queryKeys.conversations.turnsHistory(
+      conversationId,
+      anchor?.oldestTurnId ?? "",
+    ),
+    enabled: conversationId.length > 0 && anchor !== undefined && wanted,
+    staleTime: Infinity,
+    gcTime: 5 * 60_000,
+    initialPageParam: {
+      before: anchor?.oldestTurnId ?? "",
+      until: (anchor?.oldestSeq ?? 1) - 1,
+    },
+    queryFn: async ({ pageParam }): Promise<HistoryPage> => {
+      const page = await conversations.turns(conversationId, {
+        before: pageParam.before,
+      });
+      const events =
+        // `until < 1` means nothing below the held floor exists — the live
+        // window's replay already starts at 0 — so the read is skipped.
+        // `oldestSeq` null (an event-less older window) reads to the same
+        // bound as its newer neighbor, which returns empty — correct, cheap.
+        page.turns.length > 0 && pageParam.until >= 1
+          ? await conversations.eventRange(conversationId, {
+              since: page.oldestSeq !== null ? page.oldestSeq - 1 : undefined,
+              until: pageParam.until,
+            })
+          : { events: [], nextSince: 0, hasMore: false };
+      return { ...page, events: events.events };
+    },
+    getNextPageParam: (
+      last,
+      _pages,
+      lastPageParam,
+    ): { before: string; until: number } | undefined =>
+      last.hasMore && last.turns.length > 0
+        ? {
+            before: last.turns[0]!.id,
+            // An event-less page (null oldestSeq) carries its own bound
+            // FORWARD rather than deriving from null — deriving would
+            // collapse the bound to 0 and silently disable event reads for
+            // every older page after it.
+            until:
+              last.oldestSeq !== null
+                ? last.oldestSeq - 1
+                : lastPageParam.until,
+          }
+        : undefined,
   });
 
 /**
@@ -94,12 +183,12 @@ export const useSendMessage = (conversationId: string) => {
         attachments?.map((attachment) => attachment.id),
       ),
     onSuccess: (outcome, variables) => {
-      qc.setQueryData<Turn[]>(
+      qc.setQueryData<TurnsPage>(
         queryKeys.conversations.turns(conversationId),
-        (turns) =>
-          turns && !turns.some((turn) => turn.id === outcome.turn.id)
-            ? [...turns, outcome.turn]
-            : turns,
+        (page) =>
+          page && !page.turns.some((turn) => turn.id === outcome.turn.id)
+            ? { ...page, turns: [...page.turns, outcome.turn] }
+            : page,
       );
       // Hand the composer's local previews to the blob cache: the SETTLED row
       // carries metadata only, so without this its chips would re-download

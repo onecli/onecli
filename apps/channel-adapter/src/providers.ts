@@ -50,6 +50,16 @@ export interface ProviderTransportHandlers {
     decision: "approved" | "members_only" | "blocked";
     clickerExternalUserId: string;
   }) => void;
+  /** A human clicked an ACTION-approval card's button ("may the agent do
+   * this one specific thing?"). Same trust shape again: only the opaque
+   * approval id + the clicker's channel-native id ride the wire, and the
+   * control plane authorizes the clicker, flips the row atomically, and
+   * rewrites every posted card itself. */
+  onActionDecision: (input: {
+    approvalId: string;
+    decision: "approve" | "approve_always" | "reject";
+    clickerExternalUserId: string;
+  }) => void;
   /** The connection can never come back on its own (bad credential, feature
    * disabled). The owner decides what happens next. */
   onPermanentFailure: (reason: string) => void;

@@ -2200,6 +2200,39 @@
       "methods": [
         "GET"
       ]
+    },
+    "search": {
+      "hosts": [
+        "api.github.com"
+      ],
+      "paths": [
+        "/search/*"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "update_issue": {
+      "hosts": [
+        "api.github.com"
+      ],
+      "paths": [
+        "/repos/*/*/issues/*"
+      ],
+      "methods": [
+        "PATCH"
+      ]
+    },
+    "update_pull": {
+      "hosts": [
+        "api.github.com"
+      ],
+      "paths": [
+        "/repos/*/*/pulls/*"
+      ],
+      "methods": [
+        "PATCH"
+      ]
     }
   },
   "github-app": {
@@ -2346,6 +2379,39 @@
       ],
       "methods": [
         "GET"
+      ]
+    },
+    "search": {
+      "hosts": [
+        "api.github.com"
+      ],
+      "paths": [
+        "/search/*"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "update_issue": {
+      "hosts": [
+        "api.github.com"
+      ],
+      "paths": [
+        "/repos/*/*/issues/*"
+      ],
+      "methods": [
+        "PATCH"
+      ]
+    },
+    "update_pull": {
+      "hosts": [
+        "api.github.com"
+      ],
+      "paths": [
+        "/repos/*/*/pulls/*"
+      ],
+      "methods": [
+        "PATCH"
       ]
     }
   },

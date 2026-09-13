@@ -50,17 +50,19 @@ const presence: AdapterPresence = {
 const openWithSpies = () => {
   const approvals: unknown[] = [];
   const reaches: unknown[] = [];
+  const actions: unknown[] = [];
   const handlers: ProviderTransportHandlers = {
     onEvent: () => {},
     onApprovalDecision: (d) => approvals.push(d),
     onReachDecision: (d) => reaches.push(d),
+    onActionDecision: (d) => actions.push(d),
     onPermanentFailure: () => {},
     onLog: () => {},
   };
   const transport = slackAdapterProvider.openTransport(presence, handlers);
   expect(transport).not.toBeNull();
   if (!socketMock.onInteractive) throw new Error("socket never dialed");
-  return { approvals, reaches, deliver: socketMock.onInteractive };
+  return { approvals, reaches, actions, deliver: socketMock.onInteractive };
 };
 
 describe("slack adapter-provider — interactivity classification", () => {
@@ -146,8 +148,58 @@ describe("slack adapter-provider — interactivity classification", () => {
     expect(reaches).toEqual([]);
   });
 
+  it("routes an action-approval card's Approve to onActionDecision with only the opaque approval id", () => {
+    const { approvals, reaches, actions, deliver } = openWithSpies();
+    deliver({
+      type: "block_actions",
+      user: { id: "U-CLICKER" },
+      actions: [{ action_id: "action_approve", value: "act-1" }],
+    });
+    expect(actions).toEqual([
+      {
+        approvalId: "act-1",
+        decision: "approve",
+        clickerExternalUserId: "U-CLICKER",
+      },
+    ]);
+    expect(approvals).toEqual([]);
+    expect(reaches).toEqual([]);
+  });
+
+  it("routes the always-allow button as approve_always - the standing upgrade", () => {
+    const { actions, deliver } = openWithSpies();
+    deliver({
+      type: "block_actions",
+      user: { id: "U-CLICKER" },
+      actions: [{ action_id: "action_approve_always", value: "act-9" }],
+    });
+    expect(actions).toEqual([
+      {
+        approvalId: "act-9",
+        decision: "approve_always",
+        clickerExternalUserId: "U-CLICKER",
+      },
+    ]);
+  });
+
+  it("routes an action-approval card's Reject as reject", () => {
+    const { actions, deliver } = openWithSpies();
+    deliver({
+      type: "block_actions",
+      user: { id: "U-CLICKER" },
+      actions: [{ action_id: "action_reject", value: "act-2" }],
+    });
+    expect(actions).toEqual([
+      {
+        approvalId: "act-2",
+        decision: "reject",
+        clickerExternalUserId: "U-CLICKER",
+      },
+    ]);
+  });
+
   it("drops foreign block_actions (another surface's button) on the floor", () => {
-    const { approvals, reaches, deliver } = openWithSpies();
+    const { approvals, reaches, actions, deliver } = openWithSpies();
     deliver({
       type: "block_actions",
       user: { id: "U-CLICKER" },
@@ -159,7 +211,13 @@ describe("slack adapter-provider — interactivity classification", () => {
       // No clicker: the control plane could not authorize anyone — drop.
       actions: [{ action_id: "reach_approve", value: "grant-1" }],
     });
+    deliver({
+      type: "block_actions",
+      // No clicker on the action card either — same drop.
+      actions: [{ action_id: "action_approve", value: "act-1" }],
+    });
     expect(approvals).toEqual([]);
     expect(reaches).toEqual([]);
+    expect(actions).toEqual([]);
   });
 });

@@ -333,6 +333,32 @@ export const cursorSchema = z.coerce
 
 export const transcriptQuerySchema = z.object({
   since: cursorSchema.optional(),
+  /** Inclusive upper bound, for reading an OLDER window's events without
+   * re-walking territory the caller already holds (`since < seq <= until`).
+   * Same 32-bit bound discipline as `since`. */
+  until: cursorSchema.optional(),
   limit: z.coerce.number().int().min(1).max(500).optional(),
 });
 export type TranscriptQuery = z.infer<typeof transcriptQuerySchema>;
+
+/**
+ * How many turns one window of `GET /turns` returns when the caller doesn't
+ * say. 50 is the industry's chat-history default (Discord's page size; Slack
+ * recommends staying under 200) — and a turn here is a whole exchange, so 50
+ * turns is well over 100 rendered messages.
+ */
+export const TURNS_PAGE_DEFAULT = 50;
+
+/** The window cap — the pre-pagination `take: 200` kept as the ceiling. */
+export const TURNS_PAGE_MAX = 200;
+
+/**
+ * `GET /conversations/:id/turns` — a NEWEST-FIRST window. `before` is a turn
+ * id cursor (keyset, never an offset: stable while new turns land behind it,
+ * O(page) however deep the history). Plain `.uuid()` like `attachmentIds`.
+ */
+export const turnsQuerySchema = z.object({
+  limit: z.coerce.number().int().min(1).max(TURNS_PAGE_MAX).optional(),
+  before: z.string().uuid().optional(),
+});
+export type TurnsQuery = z.infer<typeof turnsQuerySchema>;

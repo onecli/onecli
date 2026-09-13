@@ -67,13 +67,15 @@ const services = vi.hoisted(() => ({
   getAdapterWork: vi.fn(),
   advanceMirrorCursor: vi.fn(),
   reportApprovalAuth: vi.fn(),
-  claimApprovalPrompt: vi.fn(),
-  recordApprovalPromptMessage: vi.fn(),
-  settleApprovalPrompt: vi.fn(),
-  listUnsettledPrompts: vi.fn(),
+  claimToolApprovalCard: vi.fn(),
+  recordToolApprovalCardMessage: vi.fn(),
+  settleToolApprovalCard: vi.fn(),
+  listUnsettledToolApprovalCards: vi.fn(),
   requireLinkedConversation: vi.fn(),
   // channel-approval-service + slack dispatch
   decideApprovalFromChannel: vi.fn(),
+  // action-approval-service (the 4b click door)
+  decideActionApprovalFromChannel: vi.fn(),
   dispatchSlackEvent: vi.fn(),
   // turn-receipt-service
   clearTurnReceipts: vi.fn(),
@@ -190,16 +192,30 @@ vi.mock("../services/channels/channel-adapter-service", () => ({
   getAdapterWork: services.getAdapterWork,
   advanceMirrorCursor: services.advanceMirrorCursor,
   reportApprovalAuth: services.reportApprovalAuth,
-  claimApprovalPrompt: services.claimApprovalPrompt,
-  recordApprovalPromptMessage: services.recordApprovalPromptMessage,
-  settleApprovalPrompt: services.settleApprovalPrompt,
-  listUnsettledPrompts: services.listUnsettledPrompts,
+  claimToolApprovalCard: services.claimToolApprovalCard,
+  recordToolApprovalCardMessage: services.recordToolApprovalCardMessage,
+  settleToolApprovalCard: services.settleToolApprovalCard,
+  listUnsettledToolApprovalCards: services.listUnsettledToolApprovalCards,
   requireLinkedConversation: services.requireLinkedConversation,
 }));
 
 vi.mock("../services/channels/channel-approval-service", () => ({
   decideApprovalFromChannel: services.decideApprovalFromChannel,
 }));
+
+vi.mock(
+  "../services/channels/action-approval-service",
+  async (importOriginal) => {
+    const actual =
+      await importOriginal<
+        typeof import("../services/channels/action-approval-service")
+      >();
+    return {
+      ...actual,
+      decideActionApprovalFromChannel: services.decideActionApprovalFromChannel,
+    };
+  },
+);
 
 vi.mock("../services/channels/providers/slack/dispatch", () => ({
   dispatchSlackEvent: services.dispatchSlackEvent,
@@ -214,8 +230,7 @@ vi.mock("../services/channels/turn-receipt-service", () => ({
 const { createApiApp } = await import("../app");
 const { getCrypto } = await import("../providers");
 const { ServiceError } = await import("../services/errors");
-const { SlackApiError } =
-  await import("../services/channels/providers/slack/slack-api");
+const { SlackApiError } = await import("@onecli/channels/slack");
 
 /**
  * An ambient local session (onprem local-auth shape): present only when the
@@ -806,6 +821,34 @@ describe("the adapter wire (authenticated by a registered cha_ token)", () => {
     });
   });
 
+  it("forwards an ACTION-approval decision to the action decide door (socket arm)", async () => {
+    services.decideActionApprovalFromChannel.mockResolvedValue({
+      kind: "decided",
+      status: "executed",
+    });
+    const res = await appRbacOff.request(
+      "/v1/channel-adapter/action-decision",
+      {
+        method: "POST",
+        headers: { ...CHA_AUTH, "content-type": "application/json" },
+        body: JSON.stringify({
+          presenceId: "pr-1",
+          approvalId: "act-1",
+          decision: "approve",
+          clickerExternalUserId: "U1",
+        }),
+      },
+    );
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ kind: "decided", status: "executed" });
+    expect(services.decideActionApprovalFromChannel).toHaveBeenCalledWith({
+      presenceId: "pr-1",
+      approvalId: "act-1",
+      decision: "approve",
+      clickerExternalUserId: "U1",
+    });
+  });
+
   it("advances the mirror cursor through the CAS service", async () => {
     const res = await appRbacOff.request("/v1/channel-adapter/cursor", {
       method: "POST",
@@ -926,7 +969,7 @@ describe("the adapter wire (authenticated by a registered cha_ token)", () => {
   // ── Approval prompts: the gateway's real deadline crosses the wire ─────────
 
   it("claim parses an ISO expiresAt into a Date for the service", async () => {
-    services.claimApprovalPrompt.mockResolvedValue({ claimed: true });
+    services.claimToolApprovalCard.mockResolvedValue({ claimed: true });
     const res = await appRbacOff.request("/v1/channel-adapter/prompts/claim", {
       method: "POST",
       headers: { ...CHA_AUTH, "content-type": "application/json" },
@@ -938,7 +981,7 @@ describe("the adapter wire (authenticated by a registered cha_ token)", () => {
       }),
     });
     expect(res.status).toBe(200);
-    expect(services.claimApprovalPrompt).toHaveBeenCalledWith({
+    expect(services.claimToolApprovalCard).toHaveBeenCalledWith({
       approvalId: "ap-1",
       agentChannelId: "pr-1",
       externalThreadId: "D1",
@@ -947,7 +990,7 @@ describe("the adapter wire (authenticated by a registered cha_ token)", () => {
   });
 
   it("claim carries a null expiresAt through as null", async () => {
-    services.claimApprovalPrompt.mockResolvedValue({ claimed: true });
+    services.claimToolApprovalCard.mockResolvedValue({ claimed: true });
     const res = await appRbacOff.request("/v1/channel-adapter/prompts/claim", {
       method: "POST",
       headers: { ...CHA_AUTH, "content-type": "application/json" },
@@ -959,7 +1002,7 @@ describe("the adapter wire (authenticated by a registered cha_ token)", () => {
       }),
     });
     expect(res.status).toBe(200);
-    expect(services.claimApprovalPrompt).toHaveBeenCalledWith({
+    expect(services.claimToolApprovalCard).toHaveBeenCalledWith({
       approvalId: "ap-1",
       agentChannelId: "pr-1",
       externalThreadId: "D1",
@@ -978,11 +1021,11 @@ describe("the adapter wire (authenticated by a registered cha_ token)", () => {
       }),
     });
     expect(res.status).toBe(422);
-    expect(services.claimApprovalPrompt).not.toHaveBeenCalled();
+    expect(services.claimToolApprovalCard).not.toHaveBeenCalled();
   });
 
   it("unsettled serializes expiresAt to ISO (and null stays null)", async () => {
-    services.listUnsettledPrompts.mockResolvedValue([
+    services.listUnsettledToolApprovalCards.mockResolvedValue([
       {
         id: "p1",
         approvalId: "ap-1",

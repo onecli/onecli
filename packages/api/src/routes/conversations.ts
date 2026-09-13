@@ -25,12 +25,13 @@ import {
   createTurnSchema,
   cursorSchema,
   transcriptQuerySchema,
+  turnsQuerySchema,
 } from "../validations/conversation";
 import {
   attachmentMimeSchema,
   attachmentNameSchema,
 } from "../validations/attachments";
-import { readCappedBinaryBody } from "../lib/read-capped-binary-body";
+import { readCappedBinaryBody } from "@onecli/channels";
 import { MAX_ATTACHMENT_BYTES } from "@onecli/agent-protocol";
 
 /**
@@ -229,17 +230,26 @@ export const conversationRoutes = () => {
     });
   });
 
-  // GET /conversations/:id/turns — the turns of this conversation.
+  // GET /conversations/:id/turns?limit=&before= — a newest-first window of
+  // the conversation's turns, answered ascending (the render order). Filter
+  // and paginate via query params per the house REST rules; `before` is a
+  // keyset cursor, never an offset. The body keeps its `turns` field (the
+  // pre-window contract), plus the window's `hasMore` + `oldestSeq`.
   app.get("/:conversationId/turns", async (c) => {
     const auth = c.get("auth");
     const workspaceId = requireWorkspaceId(auth);
-    return c.json({
-      turns: await listTurns(
+    const query = parsed(
+      turnsQuerySchema.safeParse(c.req.query()),
+      "Invalid turns query",
+    );
+    return c.json(
+      await listTurns(
         workspaceId,
         c.req.param("conversationId"),
         auth.userId,
+        query,
       ),
-    });
+    );
   });
 
   // POST /conversations/:id/turns — say something. 409 while one is in flight.

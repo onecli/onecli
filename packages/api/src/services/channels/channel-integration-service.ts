@@ -1,6 +1,7 @@
 import { db, Prisma } from "@onecli/db";
 import { getCrypto } from "../../providers";
 import { ServiceError } from "../errors";
+import { DeadIntegrationCredentialError } from "./errors";
 import { channelProvider } from "./registry";
 import type {
   ChannelProviderId,
@@ -241,6 +242,9 @@ const withIntegrationRotateLock = <T>(
 type RotateRowOutcome =
   | { outcome: "rotated"; credentialsJson: string }
   | { outcome: "fresh"; credentialsJson: string }
+  /** The provider refused for a reason that may pass later; the stored pair
+   * is untouched and still usable. */
+  | { outcome: "deferred"; credentialsJson: string }
   | { outcome: "cleared"; reason: "refused" | "foreign_tenant" }
   | { outcome: "gone" };
 
@@ -250,6 +254,13 @@ type RotateRowOutcome =
  * regardless of expiry, but only when still STALE on the in-lock re-read: a
  * claim that lost to a concurrent on-use rotation must not burn the fresh
  * pair's single-use half for nothing).
+ *
+ * A refusal clears the pair ONLY when the provider proves it dead
+ * (`DeadIntegrationCredentialError`). Anything else — a transient provider
+ * error, a 5xx, a timeout — leaves the row exactly as read: the pair is still
+ * the org's, and the next sweep (or the next use) tries again. Before this
+ * distinction one Slack blip during one hourly sweep wiped a healthy
+ * credential and sent the org to re-paste for nothing.
  */
 const rotateIntegrationRow = async (
   tx: Prisma.TransactionClient,
@@ -290,8 +301,15 @@ const rotateIntegrationRow = async (
       opts.force ? { force: true } : undefined,
     );
   } catch (err) {
+    if (!(err instanceof DeadIntegrationCredentialError)) {
+      log.warn(
+        { err, integrationId, provider: row.provider },
+        "integration credential rotation deferred; keeping the stored pair",
+      );
+      return { outcome: "deferred", credentialsJson };
+    }
     log.warn(
-      { err, integrationId, provider: row.provider },
+      { err, integrationId, provider: row.provider, reason: err.reason },
       "integration credential rotation refused; clearing for re-paste",
     );
     // Fenced on the ciphertext we read (a belt — under the lock nothing
@@ -377,9 +395,12 @@ const rotateIntegrationRow = async (
  * read→rotate→persist runs under the per-integration lock; `fn` runs AFTER
  * it commits (it makes its own provider calls and must not extend the lock).
  *
- * A refused rotation clears the stored credential (the pair is dead — Slack
- * refresh tokens are consumed by the attempt) so the org page surfaces the
- * re-paste state, then throws the caller's error envelope.
+ * A refused rotation clears the stored credential only when the provider
+ * proves the pair dead (its refresh half refused as invalid, or nothing usable
+ * left) so the org page surfaces the re-paste state, then throws the caller's
+ * error envelope. A refusal that may pass later keeps the pair and hands `fn`
+ * the still-valid access token — the provider only defers while that half is
+ * live — so a Slack blip costs nothing but a log line.
  */
 export const withFreshIntegrationCredentials = async <T>(
   organizationId: string,
@@ -432,6 +453,10 @@ export const withFreshIntegrationCredentials = async <T>(
     );
   }
 
+  // `rotated`, `fresh` and `deferred` all hand `fn` a live access token: the
+  // freshly minted one, the stored one that needed no rotation, or the stored
+  // one a transient refusal left in place (the provider defers only while
+  // that half is still valid).
   const { accessToken } = JSON.parse(result.credentialsJson) as {
     accessToken: string;
   };
@@ -464,10 +489,16 @@ const ROTATE_SWEEP_LIMIT = 25;
  * staleness in-lock. Each rotation invalidates the previous refresh token
  * (single-use), so "at most one rotation attempt per row anywhere" is the
  * invariant both layers exist for.
+ *
+ * `deferred` counts rows the provider refused for a reason that may pass
+ * later: their pair is untouched and `credentials_rotated_at` did not move,
+ * so they stay stale-eligible and the next pass (after the claim lease ages
+ * out) retries. `failed` counts pairs proven dead and cleared.
  */
 export const rotateStaleIntegrations = async (): Promise<{
   rotated: number;
   failed: number;
+  deferred: number;
 }> => {
   const cutoff = new Date(Date.now() - PROACTIVE_ROTATE_AGE_MS);
   const claimCutoff = new Date(Date.now() - ROTATE_CLAIM_LEASE_MS);
@@ -489,6 +520,7 @@ export const rotateStaleIntegrations = async (): Promise<{
 
   let rotated = 0;
   let failed = 0;
+  let deferred = 0;
   for (const { id } of claimed) {
     try {
       const result = await withIntegrationRotateLock(id, (tx) =>
@@ -496,20 +528,20 @@ export const rotateStaleIntegrations = async (): Promise<{
       );
       if (result.outcome === "rotated") rotated += 1;
       else if (result.outcome === "cleared") failed += 1;
+      else if (result.outcome === "deferred") deferred += 1;
       // "fresh" (a concurrent on-use rotation beat the claim) and "gone"
       // count as neither: nothing was owed.
     } catch (err) {
-      // Transport/transaction failure. Usually the pair was not consumed (a
-      // Slack refusal is handled inside as "cleared") and the claim lease
-      // expiring lets a later sweep retry; the one bad tail — the tx expiring
-      // AFTER Slack consumed the refresh half — loses the pair and surfaces
-      // as a refused retry → re-paste, which the 60s budget exists to make
-      // vanishingly rare.
+      // Transaction failure (the lock wait or the tx budget). Usually the pair
+      // was not consumed and the claim lease expiring lets a later sweep
+      // retry; the one bad tail — the tx expiring AFTER Slack consumed the
+      // refresh half — loses the pair and surfaces as a dead-token retry →
+      // re-paste, which the 60s budget exists to make vanishingly rare.
       log.warn({ err, integrationId: id }, "proactive rotation pass failed");
       failed += 1;
     }
   }
-  return { rotated, failed };
+  return { rotated, failed, deferred };
 };
 
 // ── User links: provider user ↔ platform user, per integration ──────────────

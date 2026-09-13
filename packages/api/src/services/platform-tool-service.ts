@@ -41,6 +41,16 @@ import {
   skillUpdateArgsSchema,
 } from "../validations/skills";
 import {
+  findRecipientArgsSchema,
+  sendMessageArgsSchema,
+} from "../validations/recipients";
+import { requestSend } from "./channels/send-message-service";
+import {
+  anchorRecipient,
+  findChannels,
+  findPeople,
+} from "./channels/recipient-search-service";
+import {
   createSkill,
   deleteAgentSkillByName,
   listSkillsReachingAgent,
@@ -787,6 +797,138 @@ export const executePlatformTool = async (
             deleted: args.data.name,
             note: "Its files leave your skills directory within seconds.",
           },
+        };
+      }
+
+      case "find_recipient": {
+        const args = findRecipientArgsSchema.safeParse(request.args);
+        if (!args.success) {
+          return toolError(args.error.issues[0]?.message ?? "Invalid input");
+        }
+        const query = args.data.query.trim();
+        const wantsChannel =
+          args.data.kind === "channel" || query.startsWith("#");
+        if (wantsChannel) {
+          const channels = await findChannels(identity.agentId, query);
+          // A hyphenated app or person name reads channel-shaped to the
+          // model ("guy-dev", and on retry "#guy-dev") — when the channel
+          // universe answers EMPTY, fall THROUGH to the people/apps search
+          // instead of dead-ending on a kind guess (the guy-dev lesson:
+          // the other universe had the exact answer). Kind labels on the
+          // results keep the answer honest either way.
+          if (channels.length > 0) {
+            // Channels are taggable the same way people are: the anchor
+            // maps @[#name] to the channel id and the renderer emits a
+            // channel LINK (<#C…>), which pings nobody by construction.
+            const context = await resolveContext(
+              identity,
+              request,
+              "provenance",
+            );
+            if (context.originConversationId) {
+              for (const channel of channels) {
+                await anchorRecipient({
+                  conversationId: context.originConversationId,
+                  name: channel.name,
+                  externalUserId: channel.ref,
+                  kind: "channel",
+                });
+              }
+            }
+            return {
+              ok: true,
+              result: {
+                candidates: channels.map((channel) => ({
+                  name: channel.name,
+                  mention: `@[${channel.name}]`,
+                  member: channel.member,
+                })),
+                note:
+                  channels.length === 0
+                    ? "No matching channels visible to this agent."
+                    : "Write the mention form to link the channel in your reply. member: true means you are in it.",
+              },
+            };
+          }
+        }
+        const people = await findPeople(
+          identity.agentId,
+          query.replace(/^#/, ""),
+        );
+        // ANCHOR every returned person in the calling conversation: the
+        // result the model repeats back IS its pick, and anchoring at
+        // answer time (id captured now) is what makes the later mention
+        // rename-proof. Provenance-verified conversation only - a forged
+        // context anchors nothing.
+        const context = await resolveContext(identity, request, "provenance");
+        if (context.originConversationId) {
+          for (const person of people) {
+            await anchorRecipient({
+              conversationId: context.originConversationId,
+              name: person.name,
+              externalUserId: person.ref,
+              kind: person.kind,
+            });
+          }
+        }
+        const hasApps = people.some((p) => p.kind === "app");
+        return {
+          ok: true,
+          result: {
+            // A tag mechanism, clean (the operator's words). No trust labels:
+            // the DETERMINISTIC layer already owns safety - pings are
+            // id-anchored and tenant-bounded, and talking to the agent (or
+            // the agent reaching out) is approval-gated elsewhere. The
+            // verified flag stays server-side for ranking only. Apps carry
+            // their kind — the model must know a result is software (the
+            // Shuf lesson: silence here made agents invent wrong reasons).
+            candidates: people.map((person) => ({
+              name: person.name,
+              mention: `@[${person.name}]`,
+              ...(person.kind === "app" ? { kind: "app" as const } : {}),
+            })),
+            note:
+              people.length === 0
+                ? wantsChannel
+                  ? "No matching channel, person, or app in the connected workspace."
+                  : "Nobody matching in the connected workspace."
+                : hasApps
+                  ? "Write the mention form exactly as given. kind: app = a Slack app - mention it in a channel reply to invoke it."
+                  : "Write the mention form exactly as given to ping that person.",
+          },
+        };
+      }
+
+      case "send_message": {
+        const args = sendMessageArgsSchema.safeParse(request.args);
+        if (!args.success) {
+          return toolError(args.error.issues[0]?.message ?? "Invalid input");
+        }
+        // Provenance-verified origin: the approval's outcome notice lands on
+        // the calling turn, so the model hears the decision where it asked.
+        // A forged context degrades to no anchor, never to authority.
+        const context = await resolveContext(identity, request, "provenance");
+        const outcome = await requestSend({
+          agentId: identity.agentId,
+          to: args.data.to,
+          text: args.data.text,
+          originConversationId: context.originConversationId,
+          originTurnId: context.turnId,
+        });
+        return {
+          ok: true,
+          result:
+            outcome.kind === "sent"
+              ? {
+                  status: "sent",
+                  to: outcome.to,
+                  note: "Delivered.",
+                }
+              : {
+                  status: "held",
+                  to: outcome.to,
+                  note: "The workspace owner was asked first. Their decision arrives as a notice in this conversation.",
+                },
         };
       }
 

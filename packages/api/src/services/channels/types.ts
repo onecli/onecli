@@ -18,8 +18,15 @@ import type {
   IngestOutcome,
 } from "./channel-ingestion-service";
 
-export const CHANNEL_PROVIDER_IDS = ["slack"] as const;
-export type ChannelProviderId = (typeof CHANNEL_PROVIDER_IDS)[number];
+// The id union lives in @onecli/channels (both runtimes key on it); the
+// api re-exports it so its ~50 existing import sites keep one path.
+import type { ChannelProviderId } from "@onecli/channels";
+
+export {
+  CHANNEL_PROVIDER_IDS,
+  isChannelProviderId,
+  type ChannelProviderId,
+} from "@onecli/channels";
 
 /**
  * How a presence's inbound events reach us. "events" = the provider calls our
@@ -52,6 +59,13 @@ export type PresenceStatus = (typeof PRESENCE_STATUSES)[number];
 
 export const THREAD_LINK_KINDS = ["direct", "group"] as const;
 export type ThreadLinkKind = (typeof THREAD_LINK_KINDS)[number];
+
+/**
+ * Who authored an inbound group message: a person, or an APP's bot user
+ * (PR 5a). Same gate for both; the door frames apps as data with provenance
+ * and meters their turns (app-turn-cap-service).
+ */
+export type SpeakerKind = "person" | "app";
 
 export const USER_LINK_SOURCES = ["email", "manual"] as const;
 export type UserLinkSource = (typeof USER_LINK_SOURCES)[number];
@@ -257,11 +271,18 @@ export interface ChannelProvider {
    * (Slack: the 12h config-token pair). Returns the replacement JSON plus the
    * tenant the rotation named — the caller asserts it against the stored row,
    * so a swapped credential can never quietly rebind the org to another
-   * workspace — or null when the stored one needs no rotation. Throwing means
-   * the credential is dead and the integration must surface its
-   * needs-attention state.
-   */
-  /**
+   * workspace — or null when the stored one needs no rotation.
+   *
+   * Two failure shapes, and the difference is the whole point:
+   * - throw `DeadIntegrationCredentialError` when the credential is PROVEN
+   *   unusable (the provider refused the refresh half as invalid, the stored
+   *   JSON is unreadable, or the pair is refused while its access half has
+   *   already expired) — the caller clears it and surfaces the re-paste state;
+   * - throw anything else for a refusal that may pass later (a transient
+   *   provider error, a 5xx, a timeout) — the caller KEEPS the pair and tries
+   *   again on the next sweep. An org must never be told to re-paste over a
+   *   provider blip.
+   *
    * `force` rotates regardless of remaining lifetime — the proactive sweep
    * uses it, because whether an UNUSED refresh token survives its access
    * token's expiry is undocumented (verified 2026-08-07), and designing on an
@@ -547,20 +568,63 @@ export interface ChannelProvider {
     }): Promise<string | null>;
 
     /**
+     * The APPS in a space (PR 5a): the bot users among its members, same
+     * tenant, not deleted, never the agent's own bot user (a self-tag is a
+     * self-invocation). The group door seeds a new thread's mention anchors
+     * from this so an agent can tag the other apps in the room from its
+     * first turn - the same standing linked humans already have. Display
+     * names are untrusted (the caller cleans and clamps). Best-effort by
+     * contract: any failure answers [] - a comprehension gap must never cost
+     * a turn.
+     */
+    appsIn(input: {
+      credentialsJson: string | null;
+      externalRef: string;
+      tenantExternalId: string;
+      selfExternalUserId: string | null;
+    }): Promise<{ externalUserId: string; displayName: string }[]>;
+
+    /**
      * Resolve a NON-platform speaker for the guest lane: their display name
-     * (untrusted - the caller cleans, clamps, and frames it) and whether
-     * they belong to the presence's own tenant (the v1 same-tenant fence:
-     * a Slack Connect participant is refused even in a granted channel).
+     * (untrusted - the caller cleans, clamps, and frames it), whether they
+     * belong to the presence's own tenant (the v1 same-tenant fence: a
+     * Slack Connect participant is refused even in a granted channel), and
+     * whether the directory says they are an APP (a bot user). The door
+     * compares `isApp` against what the wire claimed and fails closed on a
+     * mismatch - the classification is confirmed, never trusted.
      * Null = cannot verify, and the caller fails closed.
      */
     resolveGuestSpeaker(input: {
       credentialsJson: string | null;
       externalUserId: string;
       tenantExternalId: string;
-    }): Promise<{ displayName: string | null; sameTenant: boolean } | null>;
+    }): Promise<{
+      displayName: string | null;
+      sameTenant: boolean;
+      isApp: boolean;
+    } | null>;
 
     /**
-     * The owner-DM reach card - the PLATFORM-composed approval prompt for a
+     * Re-verify a grant's SUBJECT at decision time — the approve-time
+     * recheck: a card may sit for days, and approving it must not record a
+     * settlement for a subject that no longer exists (a deactivated guest,
+     * a channel the bot left). The person arm re-runs the guest probe
+     * (same tenant, not deleted, not a stranger); the space arm asks the
+     * provider whether the bot is still a member. FAIL-OPEN on provider
+     * outage ({ok: true}): availability must never brick governance — the
+     * ingestion door re-probes on every message anyway, so a wrongly
+     * recorded settlement cannot admit a ghost. The same seam is the
+     * replay-with-grant recheck the approval primitive (PR 4b) calls.
+     */
+    verifySubject(input: {
+      credentialsJson: string | null;
+      subjectKind: "space" | "external_user";
+      externalRef: string;
+      tenantExternalId: string;
+    }): Promise<{ ok: true } | { ok: false; reason: string }>;
+
+    /**
+     * The owner-DM reach card - the PLATFORM-composed ask card for a
      * reach grant, posted with the presence's own credential. Template text
      * is the implementation's own; every dynamic field is escaped and
      * clamped there; the button values carry ONLY the opaque grant id (the
@@ -580,6 +644,11 @@ export interface ChannelProvider {
          * Defaulted by the renderer so an older caller still posts a space
          * card. */
         subjectKind?: "space" | "external_user";
+        /** Whole days since the ask was first raised, when it is old enough
+         * to matter (the caller sends it past its own threshold). A late
+         * card must say it is late — an owner approving a weeks-old ask
+         * deserves to know the context is weeks old. */
+        firstAskedDaysAgo?: number;
       }): Promise<{ channel: string; ts: string }>;
       settle(input: {
         credentialsJson: string;
@@ -591,6 +660,36 @@ export interface ChannelProvider {
         subjectKind?: "space" | "external_user";
       }): Promise<void>;
     };
+  };
+
+  /**
+   * The one-shot ACTION-approval card (action-approval-service): the
+   * owner-DM card for a held privileged agent action, posted with the
+   * presence's own credential. Same trust rules as the reach card — the
+   * template is the implementation's, every dynamic field escaped and
+   * clamped there, button values carry ONLY the opaque approval id.
+   * Optional like `reach`: a provider without it is dashboard-only, which
+   * is the durable surface anyway.
+   */
+  actionApprovalCard?: {
+    post(input: {
+      credentialsJson: string;
+      recipientExternalUserId: string;
+      approvalId: string;
+      agentName: string;
+      summary: string;
+      /** Render the "always allow" upgrade button — set only when the
+       * action's registration declares a standing-grant hook. */
+      offerAlwaysAllow?: boolean;
+    }): Promise<{ channel: string; ts: string }>;
+    settle(input: {
+      credentialsJson: string;
+      channel: string;
+      ts: string;
+      summary: string;
+      outcome: string;
+      decidedByName: string;
+    }): Promise<void>;
   };
 
   /**

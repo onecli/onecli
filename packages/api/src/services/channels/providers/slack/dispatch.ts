@@ -91,6 +91,17 @@ export const dispatchSlackEvent = async (input: {
   // Group follow-ups (no mention) count only inside threads the agent
   // already joined — an existing link is the membership test. A mention
   // (`app_mention`) always counts and is what CREATES the link.
+  //
+  // APPS must mention to be heard (PR 5a, the round-2 lesson). A person
+  // talking in the agent's thread is talking to the agent — membership IS
+  // the addressing signal. A bot posting in a thread carries no such
+  // signal (it posts wherever it is wired), so the tag is the only honest
+  // one: exactly the requirement every top-level channel message already
+  // has. Without this, two agents in one thread could never stop — "I'm
+  // done" is itself a message, and every message woke the other side.
+  if (call.speakerKind === "app" && !call.isMention) {
+    return { kind: "ignored", reason: "app-unaddressed" };
+  }
   const isMention = await isMentionOrJoinedThread(input, call);
   if (!isMention) {
     return { kind: "ignored", reason: "unjoined-thread-chatter" };
@@ -99,6 +110,7 @@ export const dispatchSlackEvent = async (input: {
   const outcome = await ingestGroupMessage({
     agentChannelId: input.presenceId,
     externalUserId: call.externalUserId,
+    speakerKind: call.speakerKind,
     externalThreadId: call.externalThreadId,
     title: null,
     text: call.text,

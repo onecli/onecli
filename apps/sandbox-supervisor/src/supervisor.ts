@@ -27,6 +27,7 @@ import { startPlatformTools } from "./platform-tools";
 import { attachmentsFragment } from "./capabilities/attachments";
 import { connectionsFragment } from "./capabilities/connections";
 import { cronsFragment, cronsTools } from "./capabilities/crons";
+import { recipientsFragment, recipientsTools } from "./capabilities/recipients";
 import { machineFragment } from "./capabilities/machine";
 import { memoryFragment, memoryTools } from "./capabilities/memory";
 import { skillsFragment, skillsTools } from "./capabilities/skills";
@@ -202,6 +203,11 @@ export const runSupervisor = async (
       connectionsFragment(harness.capabilities.skillsDir),
       cronsFragment,
       memoryFragment,
+      // Discovery for chat mentions (roadmap PR 3): how to find a person's
+      // exact name and anchor a pick. Unconditional — the tool answers
+      // empty off-channel, and the fragment's rules (verified vs claimed
+      // names, never fake a ping) are good hygiene everywhere.
+      recipientsFragment,
       processesFragment,
       // Unconditional like connections: what survives sleep/relaunch is a
       // substrate property. Registered AFTER processes — its last bullet
@@ -307,6 +313,7 @@ export const runSupervisor = async (
     tools: [
       ...cronsTools,
       ...memoryTools,
+      ...recipientsTools,
       ...createProcessTools(processes),
       // The skills tools follow their fragment's condition exactly: no
       // skillsDir, no skills capability — teaching and tools arrive together.

@@ -8,6 +8,7 @@ import { ServiceError } from "../../services/errors";
 import { isEntitled } from "../../lib/entitlements";
 import { enterpriseLicenseMessage } from "../../lib/entitlements-guard";
 import { getStripe } from "../billing/stripe";
+import { findOrgLiveSubscriptions } from "../billing/plan-switch";
 import { deleteWorkspace } from "./workspace-service";
 import { assertCanCreateOrganization } from "./quota-service";
 import { logger } from "../../lib/logger";
@@ -125,14 +126,30 @@ export const deleteOrganization = async (
     },
   });
 
+  // The stored customer id gates the Stripe call (an org that never touched
+  // billing — every onprem org — skips it), but it does NOT scope the cancel:
+  // resolve the org's own live subscriptions instead of blindly canceling
+  // whatever the stored customer holds. The blind list had both failure modes
+  // of the customer-id drift: it canceled ANOTHER org's subscription on a
+  // shared customer, and it missed the org's real subscription when Checkout
+  // billed it to a different customer — which then kept charging forever
+  // after the org was gone. Errors propagate: an org must not delete while
+  // its subscription may still be billing.
   if (org.stripeCustomerId) {
     const stripe = getStripe();
-    const subs = await stripe.subscriptions.list({
-      customer: org.stripeCustomerId,
-      status: "active",
-    });
-    for (const sub of subs.data) {
-      await stripe.subscriptions.cancel(sub.id);
+    const matches = await findOrgLiveSubscriptions(
+      stripe,
+      organizationId,
+      org.stripeCustomerId,
+    );
+    for (const { subscription } of matches) {
+      // Search-sourced matches ride an eventually-consistent index that can
+      // echo a just-canceled sub as active, and canceling a canceled sub
+      // throws — re-read before the destructive act.
+      const fresh = await stripe.subscriptions.retrieve(subscription.id);
+      if (fresh.status === "active" || fresh.status === "trialing") {
+        await stripe.subscriptions.cancel(subscription.id);
+      }
     }
   }
 

@@ -15,6 +15,7 @@
   },
   "dependencies": {
     "@onecli/agent-protocol": "workspace:*",
+    "@onecli/channels": "workspace:*",
     "zod": "^4.3.6"
   },
   "devDependencies": {

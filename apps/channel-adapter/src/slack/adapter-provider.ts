@@ -1,4 +1,5 @@
-import { escapeSlackText, type AdapterPresence } from "@onecli/agent-protocol";
+import { escapeSlackText } from "@onecli/channels/slack";
+import type { AdapterPresence } from "@onecli/agent-protocol";
 import type {
   ChannelAdapterProvider,
   ProviderOutcomeContext,
@@ -6,7 +7,7 @@ import type {
   ProviderTransportHandlers,
 } from "../providers";
 import { slackApprovalCardUi } from "./approval-card";
-import { postMessage } from "./client";
+import { postMessage } from "@onecli/channels/slack";
 import { botTokenOf } from "./credentials";
 import { slackMirrorPosts } from "./mirror-posts";
 import { openSocketMode } from "./socket-mode";
@@ -112,6 +113,49 @@ const reachDecisionOf = (
   };
 };
 
+/** The ACTION-approval card's click (api-side renderer:
+ * action-approval-card.ts — ids `action_approve` / `action_reject`, value =
+ * the opaque approval id). Same wire vocabulary rule as the reach pair:
+ * literals here because the adapter is a separate deployable. */
+const ACTION_DECISIONS: Record<
+  string,
+  "approve" | "approve_always" | "reject"
+> = {
+  action_approve: "approve",
+  action_approve_always: "approve_always",
+  action_reject: "reject",
+};
+
+const actionDecisionOf = (
+  payload: Record<string, unknown>,
+): {
+  approvalId: string;
+  decision: "approve" | "approve_always" | "reject";
+  clickerExternalUserId: string;
+} | null => {
+  const typed = payload as {
+    type?: string;
+    user?: { id?: string };
+    actions?: { action_id?: string; value?: string }[];
+  };
+  const action = typed.actions?.[0];
+  const clicker = typed.user?.id;
+  const decision = ACTION_DECISIONS[action?.action_id ?? ""];
+  if (
+    typed.type !== "block_actions" ||
+    !action?.value ||
+    !clicker ||
+    !decision
+  ) {
+    return null;
+  }
+  return {
+    approvalId: action.value,
+    decision,
+    clickerExternalUserId: clicker,
+  };
+};
+
 const openTransport = (
   presence: AdapterPresence,
   handlers: ProviderTransportHandlers,
@@ -134,7 +178,12 @@ const openTransport = (
           return;
         }
         const reach = reachDecisionOf(payload);
-        if (reach) handlers.onReachDecision(reach);
+        if (reach) {
+          handlers.onReachDecision(reach);
+          return;
+        }
+        const action = actionDecisionOf(payload);
+        if (action) handlers.onActionDecision(action);
       },
       onPermanentFailure: handlers.onPermanentFailure,
       onLog: (message, detail) =>

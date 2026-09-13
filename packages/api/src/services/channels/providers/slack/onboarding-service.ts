@@ -1,6 +1,6 @@
 import { db } from "@onecli/db";
 import { getCrypto } from "../../../../providers";
-import { usersInfo } from "./slack-api";
+import { usersInfo } from "@onecli/channels/slack";
 import { createInvitation } from "../../../invitation-service";
 import { ServiceError } from "../../../errors";
 import { configuredAppUrl } from "../../../../lib/app-origin";

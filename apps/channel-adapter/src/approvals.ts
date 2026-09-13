@@ -1,3 +1,4 @@
+import { packMessageRef, unpackMessageRef } from "@onecli/channels/slack";
 import { z } from "zod";
 import type { AdapterPresence } from "@onecli/agent-protocol";
 import type { ControlPlaneClient } from "./control-plane";
@@ -14,7 +15,7 @@ import { replyTargetForLink, type ChannelPostTarget } from "./targets";
  * second channel implements the same seam. Settle copy here is plain,
  * channel-neutral text.
  *
- * Restart-safe by the control plane's `ChannelApprovalPrompt` ledger: a card
+ * Restart-safe by the control plane's `ToolApprovalCard` ledger: a card
  * is CLAIMED (unique by approval id) before it is posted, so a restarted or
  * twin adapter never re-posts; the message ref is recorded so any instance
  * can update the card later; unsettled prompts are re-armed at boot.
@@ -277,7 +278,7 @@ export const createApprovalsManager = (deps: ApprovalsManagerDeps) => {
     });
     await deps.controlPlane.recordPromptMessage(
       approval.id,
-      `${posted.channel}:${posted.ts}`,
+      packMessageRef(posted.channel, posted.ts),
     );
     prompts.set(approval.id, {
       approvalId: approval.id,
@@ -483,16 +484,12 @@ export const createApprovalsManager = (deps: ApprovalsManagerDeps) => {
         // record-message would strand looking live). Recovery is for prompts
         // we are NOT tracking — a dead peer's, or our own after a restart.
         if (prompts.has(prompt.approvalId)) continue;
-        const ref = prompt.externalMessageRef;
-        const separator = ref?.indexOf(":") ?? -1;
+        const ref = unpackMessageRef(prompt.externalMessageRef);
         prompts.set(prompt.approvalId, {
           approvalId: prompt.approvalId,
           presenceId: prompt.agentChannelId,
-          channel:
-            ref && separator > 0
-              ? ref.slice(0, separator)
-              : prompt.externalThreadId,
-          ts: ref && separator > 0 ? ref.slice(separator + 1) : null,
+          channel: ref ? ref.channel : prompt.externalThreadId,
+          ts: ref ? ref.ts : null,
           // The gateway's own recorded deadline, so a fast restart never marks
           // a still-live approval timed-out early. A row with no recorded
           // expiry (older) gets one sweep cycle to settle.

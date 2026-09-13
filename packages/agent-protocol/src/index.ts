@@ -165,6 +165,8 @@ export type {
 // The channel-adapter ↔ control-plane wire (step 6). Not agent protocol —
 // see the header note in channel-wire.ts — but the same shared-zod pattern.
 export {
+  adapterActionDecisionRequestSchema,
+  adapterActionDecisionResponseSchema,
   adapterConfigResponseSchema,
   adapterCursorResponseSchema,
   adapterDecisionRequestSchema,
@@ -172,6 +174,10 @@ export {
   adapterIngestRequestSchema,
   adapterIngestResponseSchema,
   adapterLinkSchema,
+  adapterMentionReportRequestSchema,
+  adapterMentionResolutionSchema,
+  adapterMentionResolveRequestSchema,
+  adapterMentionResolveResponseSchema,
   adapterPresenceSchema,
   adapterPromptClaimResponseSchema,
   adapterReachDecisionRequestSchema,
@@ -188,8 +194,13 @@ export {
   escapeSlackText,
 } from "./channel-wire";
 export type {
+  AdapterActionDecisionRequest,
+  AdapterActionDecisionResponse,
   AdapterConfigResponse,
   AdapterDecisionRequest,
+  AdapterMentionReportRequest,
+  AdapterMentionResolution,
+  AdapterMentionResolveRequest,
   AdapterDecisionResponse,
   AdapterIngestRequest,
   AdapterIngestResponse,

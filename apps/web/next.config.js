@@ -101,6 +101,16 @@ const nextConfig = {
     { source: "/p/:path+", destination: "/w/:path+", permanent: true },
     // The docs' two hardcoded pre-org dashboard links.
     { source: "/projects", destination: "/", permanent: false },
+    // The retired invite-your-team step's slot MOVED into the create step's
+    // boot screen. /onboarding resumes by saved progress, so a mid-flow
+    // refresh (or stale tab) lands on the right step instead of a 404
+    // in the middle of first-run. Non-permanent: onboarding's shape is
+    // the least settled surface we have.
+    {
+      source: "/onboarding/team",
+      destination: "/onboarding",
+      permanent: false,
+    },
     // Install did not retire, it moved under Workspace Settings, and the
     // setup one-liner it shows is exactly the kind of page people bookmark
     // and paste to a teammate. Permanent, because the move is.

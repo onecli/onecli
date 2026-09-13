@@ -28,9 +28,12 @@ describe("the disabled harness-native tools", () => {
     // the v0.78.1 bump's vendor-identity kills (rationale in the adapter
     // header). ⛔ The literal name `mcp` must NEVER appear here — upstream
     // treats it as a meta-entry disabling every mcp__* tool, which would
-    // kill the platform-tools bridge.
+    // kill the platform-tools bridge. `browser` is the 2026-09-09 trap
+    // removal: the native tool is a Firefox-extension bridge that can never
+    // work in a headless guest, and its self-description sent the model into
+    // setup loops (observed live); chromium is baked into the image instead.
     expect(JCODE_DISABLED_TOOLS_VALUE).toBe(
-      "schedule,skill_manage,gmail,integration_tools,memory,maintainer_feedback,jcode_docs",
+      "schedule,skill_manage,gmail,integration_tools,memory,maintainer_feedback,jcode_docs,browser",
     );
   });
 });

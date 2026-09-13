@@ -58,10 +58,17 @@ export const usePostAuthRedirect = (options?: {
         // — this is the self-host arm of the handoff the cloud login content
         // handles in ee/auth/login-content.tsx.
         const claimCallback = localStorage.getItem("claimCallbackUrl");
+        // A join link parked by the /join page (signed out, or signed in as
+        // the wrong account and switched): resume it after the sync, with
+        // the same bootstrap suppression the cloud login applies — they are
+        // joining someone else's org, not starting their own.
+        const inviteCallback = options?.invitationToken
+          ? null
+          : localStorage.getItem("inviteCallbackUrl");
         const res = await apiFetch(
           claimCallback
             ? "/v1/auth/session?fromInvitation=1&fromClaim=1"
-            : options?.invitationToken
+            : options?.invitationToken || inviteCallback
               ? "/v1/auth/session?fromInvitation=1"
               : "/v1/auth/session",
         );
@@ -69,6 +76,13 @@ export const usePostAuthRedirect = (options?: {
           if (claimCallback) {
             localStorage.removeItem("claimCallbackUrl");
             router.replace(claimCallback);
+            return;
+          }
+          if (inviteCallback) {
+            localStorage.removeItem("inviteCallbackUrl");
+            // Full navigation: the /join page is a server component that
+            // must see the NEW session, not anything cached for the old one.
+            window.location.assign(inviteCallback);
             return;
           }
           if (options?.invitationToken) {
@@ -94,8 +108,16 @@ export const usePostAuthRedirect = (options?: {
               return;
             }
             // A full navigation: every server component below has already
-            // rendered for someone who was not a member yet.
-            window.location.assign("/");
+            // rendered for someone who was not a member yet. Straight into
+            // the org they joined — the org layout pins it as their default.
+            const joined = (await accepted.json().catch(() => null)) as {
+              organizationId?: string;
+            } | null;
+            window.location.assign(
+              joined?.organizationId
+                ? `/org/${joined.organizationId}/workspaces`
+                : "/",
+            );
             return;
           }
           const data = (await res.json()) as { workspaceId?: string };

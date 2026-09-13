@@ -1,9 +1,14 @@
-import { escapeSlackText } from "@onecli/agent-protocol";
+import { escapeSlackText } from "@onecli/channels/slack";
 import { providerDisplayName, providerIconUrl } from "../mirror";
 import type { MirrorPosts } from "../mirror";
 import type { ChannelPostTarget } from "../targets";
-import { postBlocks, postMessage } from "./client";
-import { markdownToMrkdwn } from "./mrkdwn";
+// The shared client (the old local client merged into @onecli/channels)
+// retries 429s with Retry-After honored — a behavior the local copy lacked.
+// Safe here by the posting model: acks are sent on receipt and posts run
+// async, so a retried post can never sit inside Slack's 3s ack window; and
+// a 429 is pre-execution, so no double-post is possible.
+import { postBlocksMessage, postMessage } from "@onecli/channels/slack";
+import { markdownToMrkdwn } from "@onecli/channels/slack";
 
 /** Slack's per-section text cap is 3,000 — cut with headroom, at a newline
  * where one exists in the back half of the window. */
@@ -123,6 +128,14 @@ const webAttribution = (userName: string | null): string =>
     ? `_(from the web · ${escapeSlackText(userName)})_`
     : "_(from the web)_";
 
+/** The converter's options for an ANSWER post — the one surface allowed to
+ * emit real mentions. Everything else (captions, attributions, chrome)
+ * keeps rendering `@[Name]` as literal text by never passing the map. */
+const mentionsOf = (input: {
+  mentions?: ReadonlyMap<string, string>;
+}): { mentions?: ReadonlyMap<string, string> } =>
+  input.mentions ? { mentions: input.mentions } : {};
+
 const targetForm = (
   input: ChannelPostTarget,
 ): { threadTs?: string; iconUrl?: string } => ({
@@ -136,11 +149,14 @@ const targetForm = (
  * degrade deliberately does NOT ride this: its inputs are past the 40k text
  * cap by construction, so it truncates — see the branch itself. */
 const postPlainAnswer = async (
-  input: ChannelPostTarget & { markdown: string },
+  input: ChannelPostTarget & {
+    markdown: string;
+    mentions?: ReadonlyMap<string, string>;
+  },
 ): Promise<void> => {
   await postMessage(input.credential, {
     channel: input.channel,
-    text: markdownToMrkdwn(input.markdown),
+    text: markdownToMrkdwn(input.markdown, mentionsOf(input)),
     ...targetForm(input),
   });
 };
@@ -156,7 +172,7 @@ const modelKeyCard = async (
   input: ChannelPostTarget & { modelsUrl: string; answer: string },
   copy: { headline: string; context: string; button: string },
 ): Promise<void> => {
-  await postBlocks(input.credential, {
+  await postBlocksMessage(input.credential, {
     channel: input.channel,
     text: markdownToMrkdwn(input.answer),
     blocks: [
@@ -225,7 +241,7 @@ export const slackMirrorPosts: MirrorPosts = {
       });
       return;
     }
-    await postBlocks(input.credential, {
+    await postBlocksMessage(input.credential, {
       channel: input.channel,
       // `text` stays the full line: it is the notification and search
       // preview, and a blocks-only post shows as blank in both.
@@ -261,7 +277,7 @@ export const slackMirrorPosts: MirrorPosts = {
     await postPlainAnswer(input);
   },
   async connectCards(input) {
-    const text = markdownToMrkdwn(input.markdown);
+    const text = markdownToMrkdwn(input.markdown, mentionsOf(input));
     // Slack caps a section's text at 3,000 chars and rejects the WHOLE post
     // past it (invalid_blocks) — after the cursor already advanced, that
     // would silently drop the answer. Hence chunked sections. The chunk
@@ -275,7 +291,7 @@ export const slackMirrorPosts: MirrorPosts = {
     // exact loss the degrade exists to prevent.
     const sections = sectionChunks(text);
     if (sections.length + input.links.length * 2 > BLOCK_BUDGET) {
-      const plain = markdownToMrkdwn(input.fullMarkdown);
+      const plain = markdownToMrkdwn(input.fullMarkdown, mentionsOf(input));
       // Cut backing off a still-open `<url|label>` token (the sectionChunks
       // rule) and a split surrogate pair.
       let cut = 39_000;
@@ -295,7 +311,7 @@ export const slackMirrorPosts: MirrorPosts = {
       });
       return;
     }
-    await postBlocks(input.credential, {
+    await postBlocksMessage(input.credential, {
       channel: input.channel,
       // The notification fallback, not the content (the sections carry
       // that) — and past 40k a text field rejects the whole post

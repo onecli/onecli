@@ -700,6 +700,41 @@ mod tests {
     }
 
     #[test]
+    fn update_issue_matches_patch_on_one_issue_and_nothing_wider() {
+        // update_issue = PATCH api.github.com /repos/*/*/issues/* — the
+        // close/reopen/edit surface (issue #1029's blocked PATCH /issues).
+        assert!(matches(
+            "github",
+            &["update_issue"],
+            "api.github.com",
+            "PATCH",
+            "/repos/o/r/issues/123"
+        ));
+        // Not the collection (that is create_issue's POST), not other methods.
+        assert!(!matches(
+            "github",
+            &["update_issue"],
+            "api.github.com",
+            "PATCH",
+            "/repos/o/r/issues"
+        ));
+        assert!(!matches(
+            "github",
+            &["update_issue"],
+            "api.github.com",
+            "POST",
+            "/repos/o/r/issues/123"
+        ));
+        assert!(!matches(
+            "github",
+            &["update_issue"],
+            "api.github.com",
+            "GET",
+            "/repos/o/r/issues/123"
+        ));
+    }
+
+    #[test]
     fn app_target_unions_its_tools_and_fails_safe_on_unknowns() {
         // A multi-tool target matches any of its tools' endpoints.
         assert!(matches(

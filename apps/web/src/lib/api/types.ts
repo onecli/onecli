@@ -812,6 +812,20 @@ export interface TranscriptPage {
 }
 
 /**
+ * `GET /v1/conversations/:id/turns` — one newest-first window, answered
+ * ascending (the render order). `before` walks older windows; `oldestSeq` is
+ * the window's replay floor (the stream connects from `oldestSeq - 1`, and an
+ * older window's events are read as `(since, until]` bounds off it).
+ */
+export interface TurnsPage {
+  turns: Turn[];
+  /** Older turns exist past this window's oldest row. */
+  hasMore: boolean;
+  /** The lowest event seq any returned turn owns; null when none. */
+  oldestSeq: number | null;
+}
+
+/**
  * `POST /v1/turns/:id/abort` — a queued turn is abandoned outright
  * (`aborted: true`), an in-flight one has the abort delivered for the agent
  * to wind down (`delivered: true`); the terminal state then arrives like any

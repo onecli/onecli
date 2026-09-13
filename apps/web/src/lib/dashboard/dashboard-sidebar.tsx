@@ -103,8 +103,8 @@ export const DashboardSidebar = ({
   return (
     <Sidebar collapsible="icon" variant="inset" {...props}>
       <SidebarHeader className="h-12 justify-center group-data-[collapsible=icon]:px-0">
-        <div className="flex items-center justify-between px-2">
-          <Link href={workspacesUrl} className="flex items-center">
+        <div className="flex items-center justify-between gap-2 px-2">
+          <Link href={workspacesUrl} className="flex shrink-0 items-center">
             <Image
               src="/onecli-full-logo.png"
               alt="OneCLI"
@@ -129,7 +129,7 @@ export const DashboardSidebar = ({
               className="hidden group-data-[collapsible=icon]:block"
             />
           </Link>
-          <div className="group-data-[collapsible=icon]:hidden">
+          <div className="flex min-w-0 justify-end group-data-[collapsible=icon]:hidden">
             <OrgSwitcher />
           </div>
         </div>
@@ -163,8 +163,8 @@ export const DashboardSidebar = ({
             <SidebarQuota />
           </div>
         )}
-        <NavUser />
         <SidebarVersion />
+        <NavUser />
       </SidebarFooter>
       <SidebarRail />
     </Sidebar>

@@ -131,12 +131,15 @@ export type {
   TurnEvent,
   TurnEventKind,
   TranscriptPage,
+  TurnsPage,
   AbortTurnResult,
 } from "./types";
 export type { CreatePolicyRuleInput, UpdatePolicyRuleInput } from "./policy";
 export type {
   AgentChannelPresence,
   AgentChannelsView,
+  ActionApprovalStatus,
+  AgentContact,
   ChannelPresenceStatus,
   ChannelProvider,
   ChannelSetupMaterial,

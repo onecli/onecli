@@ -39,7 +39,8 @@ export default async function SignupPage({
         return null;
       },
     );
-    if (!invitation) redirect("/auth/login?error=invitation_invalid");
+    // /join explains WHY (expired, used, cancelled) instead of a bare error.
+    if (!invitation) redirect(`/join?token=${encodeURIComponent(token)}`);
 
     return (
       <SignupContent

@@ -18,8 +18,8 @@ vi.hoisted(() => {
 
 const state = vi.hoisted(() => ({
   updateManyCalls: [] as Array<{
-    where: { id: string };
-    data: { subscriptionStatus: string };
+    where: Record<string, unknown>;
+    data: Record<string, unknown>;
   }>,
   retrieveSub: null as { status: string } | null,
   /** Per-id retrieve responses (falls back to retrieveSub). */
@@ -28,21 +28,30 @@ const state = vi.hoisted(() => ({
   /** Ordered log of subscription update/cancel calls. */
   subscriptionOps: [] as string[],
   subscriptionUpdates: [] as Array<{ id: string; params: unknown }>,
-  /** Subscriptions returned by subscriptions.list. */
+  /** Subscriptions returned by subscriptions.list (any customer). */
   listSubs: [] as unknown[],
+  /** Per-customer list responses (wins over listSubs when the key exists). */
+  listSubsByCustomer: {} as Record<string, unknown[]>,
   listThrows: false,
+  /** Subscriptions returned by subscriptions.search (org-metadata backstop). */
+  searchSubs: [] as unknown[],
+  /** The org row's stored Stripe customer (deleted-handler lookup scope). */
+  orgStripeCustomerId: "cus_1" as string | null,
 }));
 
 vi.mock("@onecli/db", () => ({
   db: {
     organization: {
       updateMany: async (args: {
-        where: { id: string };
-        data: { subscriptionStatus: string };
+        where: Record<string, unknown>;
+        data: Record<string, unknown>;
       }) => {
         state.updateManyCalls.push(args);
         return { count: 1 };
       },
+      findUnique: async () => ({
+        stripeCustomerId: state.orgStripeCustomerId,
+      }),
     },
   },
 }));
@@ -65,10 +74,14 @@ vi.mock("../billing/stripe", () => ({
         state.subscriptionOps.push(`cancel:${id}`);
         return {} as Stripe.Subscription;
       },
-      list: async () => {
+      list: async ({ customer }: { customer?: string } = {}) => {
         if (state.listThrows) throw new Error("stripe unavailable");
+        if (customer && customer in state.listSubsByCustomer) {
+          return { data: state.listSubsByCustomer[customer] };
+        }
         return { data: state.listSubs };
       },
+      search: async () => ({ data: state.searchSubs }),
     },
     customers: {
       retrieve: async () => ({
@@ -125,7 +138,10 @@ beforeEach(() => {
   state.subscriptionOps = [];
   state.subscriptionUpdates = [];
   state.listSubs = [];
+  state.listSubsByCustomer = {};
   state.listThrows = false;
+  state.searchSubs = [];
+  state.orgStripeCustomerId = "cus_1";
   vi.mocked(notifyDiscord).mockClear();
 });
 
@@ -297,6 +313,51 @@ describe("checkout.session.completed: superseded trial", () => {
   });
 });
 
+describe("checkout.session.completed: customer adoption", () => {
+  // The drift at its source: Checkout can bill a different customer than the
+  // org row stores (converted card-less trial, payment link with
+  // customer_creation "if_required"). The webhook is the one moment Stripe
+  // says which customer won — the org must adopt it, or every later
+  // reconcile-on-read lists an empty customer and downgrades the org.
+  it("repoints the org at the subscription's customer", async () => {
+    state.retrieveSubById = {
+      sub_new: {
+        id: "sub_new",
+        status: "active",
+        customer: "cus_winner",
+        metadata: { organizationId: "org-1" },
+      },
+    };
+
+    const res = await post({
+      type: "checkout.session.completed",
+      data: {
+        object: {
+          mode: "subscription",
+          subscription: "sub_new",
+          customer_details: { address: { country: "US" } },
+        },
+      },
+    });
+
+    expect(res.status).toBe(200);
+    const adopt = state.updateManyCalls.find(
+      (c) => "stripeCustomerId" in c.data,
+    );
+    expect(adopt?.data).toEqual({ stripeCustomerId: "cus_winner" });
+    // The where must reach rows whose stripeCustomerId is NULL: an org whose
+    // first payment came through a payment link never stored a customer at
+    // all, and Prisma's NOT-equals silently skips NULL rows.
+    expect(adopt?.where).toEqual({
+      id: "org-1",
+      OR: [
+        { stripeCustomerId: null },
+        { NOT: { stripeCustomerId: "cus_winner" } },
+      ],
+    });
+  });
+});
+
 describe("customer.subscription.deleted", () => {
   const deletedEvent = (
     metadata: Record<string, string>,
@@ -357,6 +418,56 @@ describe("customer.subscription.deleted", () => {
     expect(vi.mocked(notifyDiscord)).not.toHaveBeenCalled();
   });
 
+  it("keeps the plan of a live subscription on a DIFFERENT customer", async () => {
+    // The drift scenario: the deleted sub's customer holds nothing, but the
+    // org's real subscription sits elsewhere — found via the org-metadata
+    // search, and the org adopts its customer id.
+    state.searchSubs = [
+      {
+        id: "sub_live",
+        status: "active",
+        customer: "cus_other",
+        metadata: { organizationId: "org-1" },
+      },
+    ];
+
+    const res = await post(deletedEvent({ organizationId: "org-1" }));
+
+    expect(res.status).toBe(200);
+    expect(
+      state.updateManyCalls.find((c) => "subscriptionStatus" in c.data)?.data,
+    ).toEqual({ subscriptionStatus: "team" });
+    expect(
+      state.updateManyCalls.find((c) => "stripeCustomerId" in c.data)?.data,
+    ).toEqual({ stripeCustomerId: "cus_other" });
+    expect(vi.mocked(notifyDiscord)).not.toHaveBeenCalled();
+  });
+
+  it("still churns to free when the search only echoes the deleted sub", async () => {
+    // Stripe's search index is eventually consistent: right after a deletion
+    // it can still return the dead subscription as active. Counting it as
+    // "remaining" would leave a churned org on its paid plan.
+    state.searchSubs = [
+      {
+        id: "sub_1",
+        status: "active",
+        customer: "cus_1",
+        metadata: { organizationId: "org-1" },
+      },
+    ];
+
+    const res = await post(deletedEvent({ organizationId: "org-1" }));
+
+    expect(res.status).toBe(200);
+    expect(state.updateManyCalls).toEqual([
+      {
+        where: { id: "org-1", subscriptionStatus: { not: "aws-marketplace" } },
+        data: { subscriptionStatus: "free" },
+      },
+    ]);
+    expect(vi.mocked(notifyDiscord)).toHaveBeenCalledTimes(1);
+  });
+
   it("ignores another org's live subscription on the same customer", async () => {
     state.listSubs = [
       {
@@ -391,5 +502,52 @@ describe("customer.subscription.deleted", () => {
       },
     ]);
     expect(vi.mocked(notifyDiscord)).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not adopt an unlabeled sub on the dead sub's customer when the org row points elsewhere", async () => {
+    // The metadata-less fallback is legitimate only on the customer the org
+    // row uniquely claims (cus_other, empty here). The dead sub's customer
+    // (cus_1) can be shared, and its unlabeled dashboard-created sub may
+    // belong to someone else — churn must not keep this org paid on the
+    // strength of it.
+    state.orgStripeCustomerId = "cus_other";
+    state.listSubsByCustomer = {
+      cus_other: [],
+      cus_1: [{ id: "sub_unlabeled", status: "active", metadata: {} }],
+    };
+
+    const res = await post(deletedEvent({ organizationId: "org-1" }));
+
+    expect(res.status).toBe(200);
+    expect(state.updateManyCalls).toEqual([
+      {
+        where: { id: "org-1", subscriptionStatus: { not: "aws-marketplace" } },
+        data: { subscriptionStatus: "free" },
+      },
+    ]);
+    expect(vi.mocked(notifyDiscord)).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps a labeled sub on the dead sub's customer when the org row is NULL", async () => {
+    // Payment-link org whose adoption write raced or failed: the org row has
+    // no customer, search is empty (eventual consistency), but the event's
+    // customer holds the org's own labeled live subscription.
+    state.orgStripeCustomerId = null;
+    state.listSubs = [
+      {
+        id: "sub_live",
+        status: "active",
+        customer: "cus_1",
+        metadata: { organizationId: "org-1" },
+      },
+    ];
+
+    const res = await post(deletedEvent({ organizationId: "org-1" }));
+
+    expect(res.status).toBe(200);
+    expect(
+      state.updateManyCalls.find((c) => "subscriptionStatus" in c.data)?.data,
+    ).toEqual({ subscriptionStatus: "team" });
+    expect(vi.mocked(notifyDiscord)).not.toHaveBeenCalled();
   });
 });

@@ -1,6 +1,8 @@
 import { Hono } from "hono";
 import { db } from "@onecli/db";
 import {
+  adapterMentionReportRequestSchema,
+  adapterMentionResolveRequestSchema,
   adapterRegisterRequestSchema,
   type AdapterConfigResponse,
   type AdapterIngestResponse,
@@ -13,23 +15,32 @@ import {
 import { ServiceError } from "../services/errors";
 import {
   advanceMirrorCursor,
-  claimApprovalPrompt,
+  claimToolApprovalCard,
   getAdapterConfig,
   getAdapterWork,
   heartbeatAdapter,
-  listUnsettledPrompts,
-  recordApprovalPromptMessage,
+  listUnsettledToolApprovalCards,
+  recordToolApprovalCardMessage,
   registerAdapter,
   reportApprovalAuth,
   requireLinkedConversation,
-  settleApprovalPrompt,
+  settleToolApprovalCard,
 } from "../services/channels/channel-adapter-service";
 import { decideApprovalFromChannel } from "../services/channels/channel-approval-service";
 import {
   decideReachFromChannel,
+  expireStaleReachGrants,
   sweepUnpostedReachCards,
 } from "../services/channels/agent-reach-service";
+import {
+  decideActionApprovalFromChannel,
+  expireStaleActionApprovals,
+} from "../services/channels/action-approval-service";
 import { rotateStaleIntegrations } from "../services/channels/channel-integration-service";
+import {
+  recordMentionFailures,
+  resolveMentionNames,
+} from "../services/channels/mention-resolution-service";
 import { clearTurnReceipts } from "../services/channels/turn-receipt-service";
 import {
   channelProvider,
@@ -37,6 +48,7 @@ import {
 } from "../services/channels/registry";
 import { readTranscriptEvents } from "../services/turn-service";
 import {
+  adapterActionDecisionSchema,
   adapterApprovalHealthSchema,
   adapterCursorSchema,
   adapterDecisionSchema,
@@ -300,7 +312,24 @@ export const channelAdapterRoutes = () => {
     return c.json(await decideReachFromChannel(body));
   });
 
-  // ── Approval prompts: restart-safe dedupe + the update handle ─────────────
+  // POST /channel-adapter/action-decision — a forwarded action-approval-card
+  // click (socket arm). Same trust shape: the clicker is authorized
+  // control-plane-side, the flip is atomic, and every posted card is
+  // rewritten service-side (cardRefs) — the adapter only relays.
+  app.post("/action-decision", async (c) => {
+    const body = parsed(
+      adapterActionDecisionSchema.safeParse(await parseBody(c.req.raw)),
+      "Invalid action decision body",
+    );
+    return c.json(await decideActionApprovalFromChannel(body));
+  });
+
+  // ── Tool-approval cards: restart-safe dedupe + the update handle ──────────
+  // The wire vocabulary is LEGACY-PINNED: the /prompts/* paths and the
+  // `prompt`/`prompts` response keys predate the ToolApprovalCard rename,
+  // and the adapter deploys separately — renaming the wire would strand an
+  // older deployable mid-rollout (the reach_deny precedent). Paths and keys
+  // stay; everything behind them speaks card.
 
   app.post("/prompts/claim", async (c) => {
     const body = parsed(
@@ -308,7 +337,7 @@ export const channelAdapterRoutes = () => {
       "Invalid claim body",
     );
     return c.json(
-      await claimApprovalPrompt({
+      await claimToolApprovalCard({
         approvalId: body.approvalId,
         agentChannelId: body.presenceId,
         externalThreadId: body.externalThreadId,
@@ -322,7 +351,10 @@ export const channelAdapterRoutes = () => {
       adapterPromptMessageSchema.safeParse(await parseBody(c.req.raw)),
       "Invalid prompt-message body",
     );
-    await recordApprovalPromptMessage(body.approvalId, body.externalMessageRef);
+    await recordToolApprovalCardMessage(
+      body.approvalId,
+      body.externalMessageRef,
+    );
     return c.json({ ok: true });
   });
 
@@ -331,16 +363,18 @@ export const channelAdapterRoutes = () => {
       adapterPromptSettleSchema.safeParse(await parseBody(c.req.raw)),
       "Invalid settle body",
     );
-    const prompt = await settleApprovalPrompt(body.approvalId, body.state);
-    return c.json({ prompt });
+    const card = await settleToolApprovalCard(body.approvalId, body.state);
+    // `prompt` is the pinned wire key (see the section note).
+    return c.json({ prompt: card });
   });
 
   app.get("/prompts/unsettled", async (c) => {
-    const prompts = await listUnsettledPrompts(
+    const cards = await listUnsettledToolApprovalCards(
       c.get("channelAdapter").adapterId,
     );
+    // `prompts` is the pinned wire key (see the section note).
     return c.json({
-      prompts: prompts.map((p) => ({
+      prompts: cards.map((p) => ({
         ...p,
         expiresAt: iso(p.expiresAt),
         createdAt: p.createdAt.toISOString(),
@@ -368,11 +402,52 @@ export const channelAdapterRoutes = () => {
     return c.json({ advanced });
   });
 
+  // POST /channel-adapter/mentions/resolve — the completion pass's name
+  // lookup before it renders an answer: `@[Name]` names (normalized) in,
+  // one resolution per name out. Directory = the presence's linked
+  // teammates; the SERVICE owns the exact-match/ambiguity rules.
+  app.post("/mentions/resolve", async (c) => {
+    const body = parsed(
+      adapterMentionResolveRequestSchema.safeParse(await parseBody(c.req.raw)),
+      "Invalid mention resolve body",
+    );
+    const resolutions = await resolveMentionNames(
+      body.presenceId,
+      body.names,
+      body.conversationId,
+    );
+    return c.json({ resolutions });
+  });
+
+  // POST /channel-adapter/mentions/report — what could NOT resolve, after
+  // the post. Stored on the turn so the next turn's context tells the
+  // model; the CAS winner is the only caller (losers post nothing).
+  app.post("/mentions/report", async (c) => {
+    const body = parsed(
+      adapterMentionReportRequestSchema.safeParse(await parseBody(c.req.raw)),
+      "Invalid mention report body",
+    );
+    await recordMentionFailures(body.turnId, body.failures);
+    return c.json({ ok: true });
+  });
+
   // POST /channel-adapter/rotate-integrations — the proactive credential
   // sweep (~hourly from the adapter; staleness is decided server-side).
   app.post("/rotate-integrations", async (c) =>
     c.json(await rotateStaleIntegrations()),
   );
+
+  // POST /channel-adapter/expire-reach — the pending-ask expiry sweep
+  // (slow loop from the adapter; the window is decided server-side). Parks
+  // stale pending grants `expired` and rewrites their cards. Action
+  // approvals expire on the same cadence — one loop, both ledgers.
+  app.post("/expire-reach", async (c) => {
+    const [reach, actions] = await Promise.all([
+      expireStaleReachGrants(),
+      expireStaleActionApprovals(),
+    ]);
+    return c.json({ expired: reach.expired, actionsExpired: actions.expired });
+  });
 
   // POST /channel-adapter/approval-health — the poll's 401 report.
   app.post("/approval-health", async (c) => {

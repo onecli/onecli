@@ -16,7 +16,8 @@ vi.mock("../providers", () => ({
   getSelfUrl: () => "https://api.test.example",
 }));
 
-const { migrateNanoclawRoutes } = await import("./migrate-nanoclaw");
+const { migrateNanoclawRoutes, SECRET_EXTRACTOR_JS } =
+  await import("./migrate-nanoclaw");
 
 const app = migrateNanoclawRoutes();
 const run = promisify(execFile);
@@ -63,5 +64,84 @@ describe("migrate-nanoclaw — frozen .env contract", () => {
     const file = join(dir, "migrate.sh");
     writeFileSync(file, script);
     await expect(run("sh", ["-n", file])).resolves.toBeTruthy();
+  });
+});
+
+describe("migrate-nanoclaw — the secret data step", () => {
+  it("runs the data step BEFORE any config is touched", async () => {
+    // The safety property: a failed migration must leave the user fully on v1.
+    // The extractor heredoc, its abort (`exit 1`), and the no-container skip
+    // all sit before the first mutation (the config.json rewrite).
+    const script = await fetchScript();
+    const dataStep = script.indexOf("Migrate local secrets to cloud");
+    const abort = script.indexOf("Secret migration failed");
+    const firstMutation = script.indexOf('printf \'{\n  "api-host"');
+    expect(dataStep).toBeGreaterThan(-1);
+    expect(abort).toBeGreaterThan(dataStep);
+    expect(firstMutation).toBeGreaterThan(abort);
+  });
+
+  it("aborts the script when migration fails, and only then", async () => {
+    const script = await fetchScript();
+    // The failure arm exits; the no-container arm merely skips.
+    expect(script).toContain("nothing has been changed");
+    expect(script).toContain("exit 1");
+    expect(script).toContain("skipping secret migration");
+  });
+
+  it("no longer pulls or restarts the local OneCLI Docker install", async () => {
+    // The old step upgraded the v1 install mid-migration — pointless risk now
+    // that the extractor reads the database directly. (The closing "to stop
+    // it" hint still mentions compose — informational, not an action.)
+    const script = await fetchScript();
+    expect(script).not.toContain("pull");
+    expect(script).not.toContain("up -d --wait");
+    expect(script).not.toContain("Updating local OneCLI Docker image");
+  });
+
+  it("passes credentials via docker exec -e, never into the heredoc", async () => {
+    const script = await fetchScript();
+    expect(script).toContain(
+      '-e MIGRATE_CLOUD_URL="$MIGRATE_URL" -e MIGRATE_CLOUD_KEY="$ONECLI_API_KEY"',
+    );
+    // Quoted delimiter: the shell must not expand anything inside the JS.
+    expect(script).toContain("<<'ONECLI_MIGRATE_EOF'");
+  });
+
+  it("embeds syntactically valid Node (node --check)", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "onecli-extractor-"));
+    const file = join(dir, "extractor.cjs");
+    writeFileSync(file, SECRET_EXTRACTOR_JS);
+    await expect(run("node", ["--check", file])).resolves.toBeTruthy();
+  });
+
+  it("never prints a secret value", () => {
+    // Every output line in the extractor carries names/counts only. Pin the
+    // one variable that ever holds plaintext out of all console calls.
+    const consoleLines = SECRET_EXTRACTOR_JS.split("\n").filter((l) =>
+      l.includes("console."),
+    );
+    for (const line of consoleLines) {
+      expect(line).not.toContain("value");
+      expect(line).not.toContain("encryptedValue");
+    }
+  });
+
+  it("omits null fields from the import body (cloud rejects explicit null)", () => {
+    expect(SECRET_EXTRACTOR_JS).toContain(
+      "if (r.pathPattern) body.pathPattern",
+    );
+    expect(SECRET_EXTRACTOR_JS).toContain(
+      "if (r.injectionConfig) body.injectionConfig",
+    );
+  });
+
+  it("pre-checks existing names — the idempotency guard", () => {
+    // POST /v1/secrets answers 201 for duplicate names; only this pre-check
+    // makes re-running the script safe.
+    expect(SECRET_EXTRACTOR_JS).toContain(
+      'fetch(CLOUD_URL + "/v1/secrets", { headers })',
+    );
+    expect(SECRET_EXTRACTOR_JS).toContain("have.has(r.name)");
   });
 });

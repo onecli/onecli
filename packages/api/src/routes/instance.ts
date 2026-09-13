@@ -4,6 +4,7 @@ import { isEntitled } from "../lib/entitlements";
 import { resolveOriginsFromEnv } from "../lib/public-origins";
 import { getRunnerAvailability } from "../services/runner-service";
 import { sshAvailable } from "../services/ssh-service";
+import { instanceEgressRoutes } from "./instance-egress";
 
 /**
  * Instance metadata — the browser's only source of runtime truth the client
@@ -21,6 +22,11 @@ import { sshAvailable } from "../services/ssh-service";
  */
 export const instanceRoutes = (version?: string) => {
   const app = new Hono();
+
+  // The published egress addresses (routes/instance-egress.ts): posture like
+  // everything else here, so it lives under /instance rather than at the
+  // top level. 404 when this deployment publishes none.
+  app.route("/egress", instanceEgressRoutes());
 
   app.get("/", async (c) => {
     // Same posture-not-data rule as the rest of the body: these are the

@@ -24,8 +24,10 @@ export const JoinForm = ({ token, orgName, orgSlug }: JoinFormProps) => {
       onSuccess: (result) => {
         toast.success(`You have joined ${result.organizationName}`);
         // A full navigation, not a router push: the dashboard's server
-        // components have already rendered without this membership.
-        window.location.assign("/");
+        // components have already rendered without this membership. Land
+        // INSIDE the org they just joined, not on whatever org the default
+        // cookie pointed at — the org layout re-pins the cookie on arrival.
+        window.location.assign(`/org/${result.organizationId}/workspaces`);
       },
     });
   };

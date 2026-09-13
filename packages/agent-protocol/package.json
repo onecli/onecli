@@ -15,6 +15,7 @@
     "test": "vitest run"
   },
   "dependencies": {
+    "@onecli/channels": "workspace:*",
     "zod": "^4.3.6"
   },
   "devDependencies": {

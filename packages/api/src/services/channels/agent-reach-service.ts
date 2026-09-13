@@ -58,6 +58,12 @@ export const REACH_STATES = [
   // re-invite re-knocks - the room's population may have changed since the
   // original approval, so the old decision is context, never authority.
   "left",
+  // A pending ask that aged out (the 14-day sweep) or whose subject failed
+  // the approve-time recheck: parked exactly like `left` (hidden, inert),
+  // and the next knock/invite re-arms it fresh. Distinct from `left` so
+  // the card and dashboard can say what actually happened - the bot did
+  // not leave anything.
+  "expired",
 ] as const;
 export type ReachState = (typeof REACH_STATES)[number];
 
@@ -79,15 +85,15 @@ export const isSettled = (state: ReachState): boolean =>
 
 /** One posted owner card - recorded claim-before-post so a retry never
  * double-posts and a decide can rewrite every owner's card. */
-export interface ReachPromptRef {
+export interface CardRef {
   channel: string;
   ts: string;
   userId: string;
 }
 
-const promptRefsOf = (raw: unknown): ReachPromptRef[] => {
+export const cardRefsOf = (raw: unknown): CardRef[] => {
   if (!Array.isArray(raw)) return [];
-  const refs: ReachPromptRef[] = [];
+  const refs: CardRef[] = [];
   for (const entry of raw) {
     if (
       typeof entry === "object" &&
@@ -96,7 +102,7 @@ const promptRefsOf = (raw: unknown): ReachPromptRef[] => {
       typeof (entry as { ts?: unknown }).ts === "string" &&
       typeof (entry as { userId?: unknown }).userId === "string"
     ) {
-      refs.push(entry as unknown as ReachPromptRef);
+      refs.push(entry as unknown as CardRef);
     }
   }
   return refs;
@@ -228,16 +234,22 @@ export const ensureGrant = async (input: {
     select: { id: true, state: true },
   });
   if (existing) {
-    if (existing.state === "left") {
-      // Re-invite after a leave: re-knock. Atomic on the state so two
-      // concurrent doors re-arm once; promptRefs resets to "cards owed".
+    if (existing.state === "left" || existing.state === "expired") {
+      // Re-invite after a leave (or a fresh knock after expiry): re-knock.
+      // Atomic on the state so two concurrent doors re-arm once;
+      // cardRefs resets to "cards owed".
       const rearmed = await db.agentReachGrant.updateMany({
-        where: { id: existing.id, state: "left" },
+        where: { id: existing.id, state: existing.state },
         data: {
           state: "pending",
-          promptRefs: [],
+          cardRefs: [],
           decidedByUserId: null,
           decidedAt: null,
+          // A re-arm IS a fresh ask (fresh cards, current context), so the
+          // ask clock resets with it — otherwise a re-knock after expiry is
+          // instantly re-expired by the sweep, and the card's age line
+          // would date the new question by the dead one.
+          createdAt: new Date(),
           ...(input.subjectLabel ? { subjectLabel: input.subjectLabel } : {}),
         },
       });
@@ -266,7 +278,7 @@ export const ensureGrant = async (input: {
         subjectLabel: input.subjectLabel ?? null,
         // Claimed-but-unposted: the card poster (below) and its sweep read
         // the empty array as "cards still owed".
-        promptRefs: [],
+        cardRefs: [],
       },
       select: { id: true, state: true },
     });
@@ -325,7 +337,7 @@ export const ensurePersonGrant = (input: {
  * DM-reachable. Empty = dashboard-only pending, which is the durable
  * surface anyway.
  */
-const dmReachableOwners = async (
+export const dmReachableOwners = async (
   workspaceId: string,
   integrationId: string,
 ): Promise<{ userId: string; externalUserId: string }[]> => {
@@ -346,7 +358,7 @@ const dmReachableOwners = async (
 
 /**
  * Post the owner-DM cards for one pending grant, recording each posted card
- * in `promptRefs` (claim-before-post is the row's creation with `[]`; this
+ * in `cardRefs` (claim-before-post is the row's creation with `[]`; this
  * is the post-and-record half). Card composition and delivery are the
  * provider's business - the service passes only opaque strings and the
  * grant id (the button value; the injection rule: nothing else rides the
@@ -367,7 +379,8 @@ export const postReachCards = async (grantId: string): Promise<void> => {
       subjectKind: true,
       subjectLabel: true,
       externalRef: true,
-      promptRefs: true,
+      cardRefs: true,
+      createdAt: true,
       agent: {
         select: { id: true, name: true, workspaceId: true },
       },
@@ -383,7 +396,7 @@ export const postReachCards = async (grantId: string): Promise<void> => {
   });
   if (!presence?.credentials) return;
 
-  const posted = promptRefsOf(grant.promptRefs);
+  const posted = cardRefsOf(grant.cardRefs);
   const alreadyNotified = new Set(posted.map((p) => p.userId));
 
   const owners = await dmReachableOwners(
@@ -397,6 +410,14 @@ export const postReachCards = async (grantId: string): Promise<void> => {
   const reach = channelProvider(provider as ChannelProviderId).reach;
   if (!reach) return;
 
+  // The lateness line: a card posted days after the ask was first raised
+  // says so (re-arm retries, an owner linked late). Fresh cards carry
+  // nothing — the threshold keeps the common case clean.
+  const ageDays = Math.floor(
+    (Date.now() - grant.createdAt.getTime()) / (24 * 60 * 60 * 1000),
+  );
+  const firstAskedDaysAgo = ageDays > 3 ? ageDays : undefined;
+
   for (const owner of owed) {
     try {
       const ref = await reach.card.post({
@@ -406,6 +427,7 @@ export const postReachCards = async (grantId: string): Promise<void> => {
         subjectKind: grant.subjectKind as ReachSubjectKind,
         agentName: grant.agent.name,
         subjectLabel: grant.subjectLabel ?? grant.externalRef,
+        ...(firstAskedDaysAgo !== undefined && { firstAskedDaysAgo }),
       });
       posted.push({ channel: ref.channel, ts: ref.ts, userId: owner.userId });
       // Record after EACH post, not once at the end: a crash mid-loop must
@@ -414,7 +436,7 @@ export const postReachCards = async (grantId: string): Promise<void> => {
         where: { id: grant.id },
         // Plain JSON in, structurally: Prisma's InputJsonValue wants no class
         // instances - these are string-field literals already.
-        data: { promptRefs: posted.map((p) => ({ ...p })) },
+        data: { cardRefs: posted.map((p) => ({ ...p })) },
       });
     } catch (err) {
       log.warn(
@@ -458,13 +480,13 @@ export const sweepUnpostedReachCards = async (): Promise<void> => {
       // arm (Prisma's own sentinel, not a bare null) keeps legacy rows
       // sweepable rather than silently stranding them.
       OR: [
-        { promptRefs: { equals: [] } },
-        { promptRefs: { equals: Prisma.DbNull } },
+        { cardRefs: { equals: [] } },
+        { cardRefs: { equals: Prisma.DbNull } },
       ],
     },
     select: {
       id: true,
-      promptRefs: true,
+      cardRefs: true,
       agent: { select: { workspaceId: true } },
       integrationId: true,
     },
@@ -472,7 +494,7 @@ export const sweepUnpostedReachCards = async (): Promise<void> => {
     take: 5,
   });
   for (const grant of pending) {
-    const posted = promptRefsOf(grant.promptRefs);
+    const posted = cardRefsOf(grant.cardRefs);
     const owners = await dmReachableOwners(
       grant.agent.workspaceId,
       grant.integrationId,
@@ -482,6 +504,54 @@ export const sweepUnpostedReachCards = async (): Promise<void> => {
       await postReachCards(grant.id);
     }
   }
+};
+
+/** A pending ask older than this is stale enough to mislead: the asker
+ * moved on, the room changed, and an owner approving it acts on dead
+ * context. Constant, not config — revisit with evidence, not a knob. */
+const REACH_PENDING_MAX_AGE_MS = 14 * 24 * 60 * 60 * 1000;
+
+/**
+ * Park pending grants that aged past the window — the expiry sweep, called
+ * from the adapter's slow loop (the api keeps its no-background-loop law).
+ * Parking is `parkReachGrant`'s one body: state → `expired`, cards
+ * rewritten so their buttons don't dangle. A fresh knock or invite re-arms
+ * (the `ensureGrant` re-knock arm), so nothing is lost — the ask is just
+ * re-posed with current context instead of weeks-old context. Idempotent
+ * and bounded; returns the count for the caller's log line.
+ */
+export const expireStaleReachGrants = async (): Promise<{
+  expired: number;
+}> => {
+  const cutoff = new Date(Date.now() - REACH_PENDING_MAX_AGE_MS);
+  const stale = await db.agentReachGrant.findMany({
+    where: { state: "pending", createdAt: { lt: cutoff } },
+    select: {
+      id: true,
+      provider: true,
+      cardRefs: true,
+      subjectLabel: true,
+      externalRef: true,
+      integrationId: true,
+      agent: { select: { id: true } },
+    },
+    orderBy: { createdAt: "asc" },
+    take: 20,
+  });
+  for (const grant of stale) {
+    await parkReachGrant({
+      grantId: grant.id,
+      state: "expired",
+      provider: grant.provider as ChannelProviderId,
+      agentId: grant.agent.id,
+      integrationId: grant.integrationId,
+      cardRefs: grant.cardRefs,
+      subjectLabel: grant.subjectLabel,
+      externalRef: grant.externalRef,
+      rewriteCards: true,
+    });
+  }
+  return { expired: stale.length };
 };
 
 export type ReachDecisionResult =
@@ -519,7 +589,8 @@ export const decideReachGrant = async (input: {
       subjectKind: true,
       subjectLabel: true,
       externalRef: true,
-      promptRefs: true,
+      cardRefs: true,
+      integration: { select: { externalId: true } },
       agent: { select: { id: true, workspaceId: true } },
     },
   });
@@ -540,6 +611,54 @@ export const decideReachGrant = async (input: {
     return { kind: "already_settled" };
   }
 
+  // THE APPROVE-TIME RECHECK (nanoclaw's replay-with-grant lesson): a card
+  // may sit for days, and a click that OPENS something must re-verify the
+  // subject still exists as asked — a deactivated guest or a channel the
+  // bot left must not be recorded as a settlement. Scoped exactly:
+  //  - only decisions that open (`approved`/`members_only`); blocking a
+  //    ghost is harmless and must never be blocked itself;
+  //  - never on `force` — the dashboard override is the management escape
+  //    hatch and may flip anything;
+  //  - fail-open inside the probe (provider outage ≠ governance outage).
+  // A failed recheck parks the grant (`expired`) and rewrites the cards, so
+  // the stale ask dies visibly instead of dangling; the next knock or
+  // invite re-arms it fresh.
+  if (!input.force && input.decision !== "blocked") {
+    const reach = channelProvider(grant.provider as ChannelProviderId).reach;
+    if (reach) {
+      const presence = await db.agentChannel.findFirst({
+        where: { agentId: grant.agent.id, integrationId: grant.integrationId },
+        select: { credentials: true },
+      });
+      const credentialsJson = presence?.credentials
+        ? await getCrypto().decrypt(presence.credentials)
+        : null;
+      const verdict = await reach.verifySubject({
+        credentialsJson,
+        subjectKind: grant.subjectKind as ReachSubjectKind,
+        externalRef: grant.externalRef,
+        tenantExternalId: grant.integration.externalId,
+      });
+      if (!verdict.ok) {
+        await parkReachGrant({
+          grantId: grant.id,
+          state: "expired",
+          provider: grant.provider as ChannelProviderId,
+          agentId: grant.agent.id,
+          integrationId: grant.integrationId,
+          cardRefs: grant.cardRefs,
+          subjectLabel: grant.subjectLabel,
+          externalRef: grant.externalRef,
+          rewriteCards: currentState === "pending",
+        });
+        return {
+          kind: "refused",
+          message: `No longer valid - ${verdict.reason}. A new message or invite will ask again.`,
+        };
+      }
+    }
+  }
+
   const decider = await db.user.findUnique({
     where: { id: input.deciderUserId },
     select: { name: true, email: true },
@@ -548,14 +667,20 @@ export const decideReachGrant = async (input: {
     return { kind: "refused", message: "Unknown decider." };
   }
 
-  await db.agentReachGrant.update({
-    where: { id: grant.id },
+  // Atomic on the state we READ (the re-arm arm's own idiom): the recheck
+  // above is a network call, and a concurrent park (the expiry sweep, the
+  // leave hook) or a racing decide in that window must not be silently
+  // overwritten. A lost race answers already_settled — the honest outcome
+  // for a decision that landed second.
+  const flipped = await db.agentReachGrant.updateMany({
+    where: { id: grant.id, state: grant.state },
     data: {
       state: nextState,
       decidedByUserId: input.deciderUserId,
       decidedAt: new Date(),
     },
   });
+  if (flipped.count === 0) return { kind: "already_settled" };
 
   await recordAuditEvent({
     workspaceId: grant.agent.workspaceId,
@@ -580,7 +705,7 @@ export const decideReachGrant = async (input: {
   // Rewrite every posted owner card - best-effort, the decision is already
   // durable. The provider owns rendering; a dead credential just leaves
   // stale cards whose buttons answer already_settled.
-  const refs = promptRefsOf(grant.promptRefs);
+  const refs = cardRefsOf(grant.cardRefs);
   if (refs.length > 0 && isReachCardCapable(grant.provider)) {
     const presence = await db.agentChannel.findFirst({
       where: { agentId: grant.agent.id, integrationId: grant.integrationId },
@@ -788,6 +913,70 @@ export const decideReachFromChannelWithUser = async (input: {
 };
 
 /**
+ * Park a grant into a terminal-inert state (`left` = the bot lost the
+ * space, `expired` = a pending ask aged out, and the failed approve-time
+ * recheck parks too) and rewrite any posted owner cards so their buttons
+ * don't dangle. ONE body for every parking cause — the state name is the
+ * only difference, and the re-knock arm in `ensureGrant` un-parks both the
+ * same way ("the old decision is context, never authority").
+ *
+ * Card rewrite is best-effort like every settle: the park is durable
+ * first, a dead credential just leaves stale cards whose buttons answer
+ * already_settled.
+ */
+export const parkReachGrant = async (input: {
+  grantId: string;
+  state: "left" | "expired";
+  provider: ChannelProviderId;
+  agentId: string;
+  integrationId: string;
+  cardRefs: unknown;
+  subjectLabel: string | null;
+  externalRef: string;
+  /** Rewrite cards only when the grant was still pending — a settled
+   * grant's cards already show the decision. */
+  rewriteCards: boolean;
+}): Promise<void> => {
+  await db.agentReachGrant.update({
+    where: { id: input.grantId },
+    data: { state: input.state },
+  });
+
+  const refs = cardRefsOf(input.cardRefs);
+  if (
+    input.rewriteCards &&
+    refs.length > 0 &&
+    isReachCardCapable(input.provider)
+  ) {
+    const presence = await db.agentChannel.findFirst({
+      where: { agentId: input.agentId, integrationId: input.integrationId },
+      select: { credentials: true },
+    });
+    if (presence?.credentials) {
+      const credentialsJson = await getCrypto().decrypt(presence.credentials);
+      const reach = channelProvider(input.provider).reach;
+      for (const ref of refs) {
+        try {
+          await reach?.card.settle({
+            credentialsJson,
+            channel: ref.channel,
+            ts: ref.ts,
+            subjectLabel: input.subjectLabel ?? input.externalRef,
+            outcome: input.state,
+            decidedByName: "",
+          });
+        } catch (err) {
+          log.warn(
+            { grantId: input.grantId, err: String(err) },
+            "park card settle failed",
+          );
+        }
+      }
+    }
+  }
+};
+
+/**
  * The leave hook (ingestGroupLeave): park the channel's grant as `left` -
  * hidden from the view, inert in the guest lane, decision history kept -
  * and settle any open owner cards so a pending question about a channel
@@ -811,50 +1000,24 @@ export const parkGrantOnLeave = async (input: {
     select: {
       id: true,
       state: true,
-      promptRefs: true,
+      cardRefs: true,
       subjectLabel: true,
       externalRef: true,
     },
   });
-  if (!grant || grant.state === "left") return;
+  if (!grant || grant.state === "left" || grant.state === "expired") return;
 
-  const wasPending = grant.state === "pending";
-  await db.agentReachGrant.update({
-    where: { id: grant.id },
-    data: { state: "left" },
+  await parkReachGrant({
+    grantId: grant.id,
+    state: "left",
+    provider: input.provider,
+    agentId: input.agentId,
+    integrationId: input.integrationId,
+    cardRefs: grant.cardRefs,
+    subjectLabel: grant.subjectLabel,
+    externalRef: grant.externalRef,
+    rewriteCards: grant.state === "pending",
   });
-
-  // A pending grant's owner cards are now moot - rewrite them so the
-  // buttons don't dangle (a click would answer already_settled anyway;
-  // this is about honesty, not safety). Best-effort, like every settle.
-  const refs = promptRefsOf(grant.promptRefs);
-  if (wasPending && refs.length > 0 && isReachCardCapable(input.provider)) {
-    const presence = await db.agentChannel.findFirst({
-      where: { agentId: input.agentId, integrationId: input.integrationId },
-      select: { credentials: true },
-    });
-    if (presence?.credentials) {
-      const credentialsJson = await getCrypto().decrypt(presence.credentials);
-      const reach = channelProvider(input.provider).reach;
-      for (const ref of refs) {
-        try {
-          await reach?.card.settle({
-            credentialsJson,
-            channel: ref.channel,
-            ts: ref.ts,
-            subjectLabel: grant.subjectLabel ?? grant.externalRef,
-            outcome: "left",
-            decidedByName: "",
-          });
-        } catch (err) {
-          log.warn(
-            { grantId: grant.id, err: String(err) },
-            "leave card settle failed",
-          );
-        }
-      }
-    }
-  }
 };
 
 /** The dashboard's per-SPACE settlement. */
@@ -967,11 +1130,16 @@ export const listGrants = async (
   subjectKind: ReachSubjectKind,
 ): Promise<ReachGrantRow[]> => {
   const rows = await db.agentReachGrant.findMany({
-    // `left` rows are parked history (the bot is out of the channel) - the
-    // view hides them; a re-invite re-arms and they reappear as pending.
-    // Person rows never reach `left` (there is no channel to leave), so the
-    // filter is simply inert for them.
-    where: { agentId, provider, subjectKind, state: { not: "left" } },
+    // `left` and `expired` rows are parked history (the bot is out of the
+    // channel / the ask aged out) - the view hides them; a re-invite or
+    // fresh knock re-arms and they reappear as pending. Person rows never
+    // reach `left` (there is no channel to leave); the filter covers both.
+    where: {
+      agentId,
+      provider,
+      subjectKind,
+      state: { notIn: ["left", "expired"] },
+    },
     select: {
       externalRef: true,
       subjectLabel: true,

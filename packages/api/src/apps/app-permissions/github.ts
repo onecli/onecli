@@ -45,6 +45,15 @@ const githubGroups: AppToolGroup[] = [
         method: "GET",
       },
       {
+        id: "search",
+        name: "Search",
+        description:
+          "Search issues, pull requests, code, repositories, and users",
+        hostPattern: "api.github.com",
+        pathPattern: "/search/*",
+        method: "GET",
+      },
+      {
         id: "graphql_query",
         name: "GraphQL API (queries)",
         description:
@@ -98,6 +107,24 @@ const githubGroups: AppToolGroup[] = [
         hostPattern: "api.github.com",
         pathPattern: "/repos/*/*/issues",
         method: "POST",
+      },
+      {
+        id: "update_issue",
+        name: "Update issue",
+        description:
+          "Edit, close, or reopen an issue, or edit an issue comment",
+        hostPattern: "api.github.com",
+        pathPattern: "/repos/*/*/issues/*",
+        method: "PATCH",
+      },
+      {
+        id: "update_pull",
+        name: "Update pull request",
+        description:
+          "Edit, close, or reopen a pull request, or edit a review comment",
+        hostPattern: "api.github.com",
+        pathPattern: "/repos/*/*/pulls/*",
+        method: "PATCH",
       },
       {
         id: "graphql_mutation",

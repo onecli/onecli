@@ -1,11 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { startFakeSlackServer, type FakeSlackServer } from "../test/fakes";
+import { startFakeSlackServer, type FakeSlackServer } from "./testing";
 import {
-  postBlocks,
+  postBlocksMessage,
   postMessage,
   resetIconlessBotTokensForTests,
   SlackApiError,
-} from "./client";
+} from "./api";
 
 // The icon-carrying post contract: `icon_url` rides when an avatar is set,
 // a `missing_scope` refusal (an install predating `chat:write.customize`)
@@ -123,9 +123,9 @@ describe("postMessage", () => {
   });
 });
 
-describe("postBlocks", () => {
+describe("postBlocksMessage", () => {
   it("carries icon_url on the approval card and shares the missing_scope carve", async () => {
-    await postBlocks("xoxb-a", {
+    await postBlocksMessage("xoxb-a", {
       channel: "D1",
       text: "Approval needed",
       blocks: [{ type: "section" }],
@@ -134,7 +134,7 @@ describe("postBlocks", () => {
     expect(slack.callsTo("chat.postMessage")[0]?.form.icon_url).toBe(ICON);
 
     refuseIconPosts();
-    const posted = await postBlocks("xoxb-old", {
+    const posted = await postBlocksMessage("xoxb-old", {
       channel: "D1",
       text: "Approval needed",
       blocks: [{ type: "section" }],
@@ -151,7 +151,7 @@ describe("postBlocks", () => {
   it("shares the per-token memo with postMessage", async () => {
     refuseIconPosts();
     await postMessage("xoxb-old", { channel: "D1", text: "a", iconUrl: ICON });
-    await postBlocks("xoxb-old", {
+    await postBlocksMessage("xoxb-old", {
       channel: "D1",
       text: "card",
       blocks: [],

@@ -35,14 +35,32 @@ const channelMessage = (overrides: Record<string, unknown> = {}) => ({
 });
 
 describe("the echo guard", () => {
-  it("ignores any bot-authored message (bot_id present)", () => {
-    // MUTATION-TESTED: delete the `if (message.bot_id)` drop and this DM —
+  it("ignores any bot-authored DM (bot_id present) - Slack forbids bot-to-bot DMs", () => {
+    // MUTATION-TESTED: delete the `bot-authored:dm` drop and this DM —
     // which is otherwise a perfectly shaped user DM — becomes a direct-door
     // call, i.e. the agent answering itself forever.
     expect(interpretSlackEvent(dm({ bot_id: "B123" }), CTX)).toEqual({
       door: "ignore",
-      reason: "bot-authored",
+      reason: "bot-authored:dm",
     });
+  });
+
+  it("ignores a bot-authored post with no user (a workflow/legacy integration)", () => {
+    // Nothing to verify or address: no bot user id, only the integration's
+    // bot_id. Dropped before any door, in DMs and channels alike.
+    expect(
+      interpretSlackEvent(dm({ bot_id: "B123", user: undefined }), CTX),
+    ).toEqual({ door: "ignore", reason: "bot-authored:no-user" });
+    expect(
+      interpretSlackEvent(
+        channelMessage({
+          bot_id: "B123",
+          user: undefined,
+          thread_ts: "2222.0000",
+        }),
+        CTX,
+      ),
+    ).toEqual({ door: "ignore", reason: "bot-authored:no-user" });
   });
 
   it('ignores subtype "bot_message"', () => {
@@ -91,13 +109,23 @@ describe("the echo guard", () => {
     ).toEqual({ door: "ignore", reason: "self" });
   });
 
-  it("still applies the bot_id/subtype drops when botUserId is unknown", () => {
-    // A pending presence has identityRef null — the guard's first two arms
-    // must not depend on knowing our own user id.
+  it("drops EVERY bot-authored post when botUserId is unknown - it could be our own echo", () => {
+    // A pending presence has identityRef null. Without our own user id a
+    // bot post cannot be told apart from our own, so the app lane closes
+    // entirely (DM and channel) and the subtype drop still applies.
     const ctx = { botUserId: null };
     expect(interpretSlackEvent(dm({ bot_id: "B123" }), ctx)).toMatchObject({
       door: "ignore",
-      reason: "bot-authored",
+      reason: "bot-authored:unverifiable-self",
+    });
+    expect(
+      interpretSlackEvent(
+        channelMessage({ bot_id: "B123", thread_ts: "2222.0000" }),
+        ctx,
+      ),
+    ).toMatchObject({
+      door: "ignore",
+      reason: "bot-authored:unverifiable-self",
     });
     expect(
       interpretSlackEvent(dm({ subtype: "bot_message" }), ctx),
@@ -182,6 +210,7 @@ describe("group surfaces", () => {
     ).toEqual({
       door: "group",
       externalUserId: "U1111",
+      speakerKind: "person",
       externalThreadId: "C9999:4444.0001",
       text: `<@${BOT}> deploy please`,
       files: [],
@@ -226,6 +255,7 @@ describe("group surfaces", () => {
     ).toEqual({
       door: "group",
       externalUserId: "U1111",
+      speakerKind: "person",
       externalThreadId: "C9999:2222.0000",
       text: "in a channel",
       files: [],
@@ -235,6 +265,62 @@ describe("group surfaces", () => {
       messageTs: "2222.0001",
       isMention: false,
     });
+  });
+
+  it("classifies an app's mention (bot_id + user) as an APP speaker on the group door", () => {
+    // PR 5a: another app's bot user mentioning the agent arrives as an
+    // `app_mention` carrying `bot_id` (docs-verified). Same door as a
+    // person, marked so the ingestion door frames and meters it.
+    expect(
+      interpretSlackEvent(
+        {
+          type: "app_mention",
+          channel: "C9999",
+          user: "UAPP1",
+          bot_id: "BAPP1",
+          text: `<@${BOT}> what time is it?`,
+          ts: "4444.0009",
+        },
+        CTX,
+      ),
+    ).toMatchObject({
+      door: "group",
+      externalUserId: "UAPP1",
+      speakerKind: "app",
+      isMention: true,
+    });
+  });
+
+  it("classifies an app's thread follow-up (bot_id + user, no mention) as an APP speaker", () => {
+    expect(
+      interpretSlackEvent(
+        channelMessage({
+          user: "UAPP1",
+          bot_id: "BAPP1",
+          thread_ts: "2222.0000",
+        }),
+        CTX,
+      ),
+    ).toMatchObject({
+      door: "group",
+      externalUserId: "UAPP1",
+      speakerKind: "app",
+      isMention: false,
+    });
+  });
+
+  it("still drops an app's message twin (the mention-twin rule is speaker-agnostic)", () => {
+    expect(
+      interpretSlackEvent(
+        channelMessage({
+          user: "UAPP1",
+          bot_id: "BAPP1",
+          text: `<@${BOT}> hi`,
+          thread_ts: "2222.0000",
+        }),
+        CTX,
+      ),
+    ).toEqual({ door: "ignore", reason: "mention-twin" });
   });
 
   it("groupThreadId is `<channel>:<threadRootTs>`", () => {
@@ -425,15 +511,15 @@ describe("file_share (attachments)", () => {
     ]);
   });
 
-  it("still drops a BOT-authored file_share — the echo guard's first arm wins", () => {
+  it("still drops a BOT-authored file_share in a DM — the DM arm has no app lane", () => {
     // MUTATION-TESTED: the file_share carve-out must NOT reach past the
-    // bot_id drop, or the agent's own file post loops.
+    // bot-authored DM drop, or the agent's own file post loops.
     expect(
       interpretSlackEvent(
         dm({ subtype: "file_share", bot_id: "B1", files: [file()] }),
         CTX,
       ),
-    ).toEqual({ door: "ignore", reason: "bot-authored" });
+    ).toEqual({ door: "ignore", reason: "bot-authored:dm" });
   });
 
   it("still drops a SELF-authored file_share (own user id)", () => {
@@ -521,7 +607,7 @@ describe("threaded DM edge cases", () => {
         dm({ thread_ts: "1111.0001", ts: "1111.0077", bot_id: "B1" }),
         CTX,
       ),
-    ).toEqual({ door: "ignore", reason: "bot-authored" });
+    ).toEqual({ door: "ignore", reason: "bot-authored:dm" });
     expect(
       interpretSlackEvent(
         dm({ thread_ts: "1111.0001", ts: "1111.0078", user: BOT }),

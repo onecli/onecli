@@ -1,6 +1,7 @@
 /* eslint-disable no-control-regex -- U+0000 / U+0001 are this module's
  * stash placeholders and bold sentinels; the regexes must name them. */
-import { escapeSlackText } from "@onecli/agent-protocol";
+import { replaceMentionTokens } from "../mentions";
+import { escapeSlackText } from "./text";
 
 /**
  * Markdown → Slack `mrkdwn` for MODEL-AUTHORED answers.
@@ -22,10 +23,14 @@ import { escapeSlackText } from "@onecli/agent-protocol";
  * it validated itself (deliberately NARROWER than the web renderer's
  * allowlist, which also admits mailto/irc/ircs/xmpp and relative URLs —
  * those collapse to plain text here), plus the line-start `>` blockquote
- * marker, which formats but cannot mention or ping. Every emitted `<` is
- * immediately followed by `h` of `https?://`, and Slack directives all need
- * `!`, `@` or `#` there — forgery is structurally impossible. Callers
- * therefore use this INSTEAD of escapeSlackText, never both.
+ * marker, which formats but cannot mention or ping — and, on the mirror's
+ * answer path only, a `mentions` map entry emitting `<@U…>` from an id the
+ * CONTROL PLANE resolved against a verified teammate link and this module
+ * re-validated as `^[UW][A-Z0-9]{2,32}$`. Every emitted `<` is therefore
+ * followed by `h` of `https?://` or by `@U`/`@W` of a validated user
+ * mention; Slack's broadcast directives all need `<!` — the model cannot
+ * produce one from either door, so forgery stays structurally impossible.
+ * Callers use this INSTEAD of escapeSlackText, never both.
  *
  * BOUNDED WORK: the input is one untrusted model answer and this runs on
  * the adapter's shared event loop, so the converter must stay linear-ish.
@@ -111,7 +116,36 @@ const stripLabelEmphasis = (label: string): string =>
     .replace(/\*([^*\n]+)\*/g, "$1")
     .replace(/~~([^~\n]+)~~/g, "$1");
 
-export const markdownToMrkdwn = (raw: string): string => {
+/**
+ * A Slack user id the renderer will vouch for: the resolved map's values
+ * are re-checked against this before a mention token is emitted, so even a
+ * corrupted map entry can only ever produce a USER mention (`<@U…>`), never
+ * a broadcast (`<!…>`), a channel (`<#…>`) or arbitrary wire bytes.
+ */
+const SLACK_USER_ID_RE = /^[UW][A-Z0-9]{2,32}$/;
+
+/** Channel refs ride the same mention map: a `C…` id renders `<#C…>` — a
+ * clickable channel link. Pings NOBODY by construction (Slack channel
+ * links never notify), which is why no extra gate is needed. */
+const SLACK_CHANNEL_ID_RE = /^[CG][A-Z0-9]{2,32}$/;
+
+/** Reverse of `escapeSlackText`, for the mention pass only: the scan runs
+ * over already-escaped text, but the resolution map is keyed on raw
+ * normalized names. `&amp;` last, mirroring the escape's `&` first. */
+const unescapeSlackText = (escaped: string): string =>
+  escaped.replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&amp;/g, "&");
+
+export const markdownToMrkdwn = (
+  raw: string,
+  options?: {
+    /** OUTBOUND mentions: normalized platform name (`normalizeMentionName`)
+     * → the platform-resolved Slack user id. Present only on the mirror's
+     * answer path; every other caller renders `@[Name]` as literal text.
+     * Unresolved names degrade to visible plain `@Name` — never dropped,
+     * never guessed (see @onecli/channels `mentions.ts` for the contract). */
+    mentions?: ReadonlyMap<string, string>;
+  },
+): string => {
   // One line model before any anchor runs (see BOUNDED WORK above), then
   // strip forgeable sentinels, then cap — never splitting a surrogate pair
   // at the cut.
@@ -201,6 +235,29 @@ export const markdownToMrkdwn = (raw: string): string => {
     const tail = /[*_~]+$/.exec(m)?.[0] ?? "";
     return `${lift(tail ? m.slice(0, -tail.length) : m)}${tail}`;
   });
+
+  // Outbound mentions: `@[Name]` → `<@U…>` for names the control plane
+  // resolved, `@Name` (visible plain text — the degrade rule) otherwise.
+  // ONLY when the caller passed a map: every other surface keeps the token
+  // as literal text. AFTER the code and URL lifts (a token inside a code
+  // span or a URL is content, not a mention) and BEFORE the style passes.
+  // The scan sees escaped text, so the name is unescaped before lookup;
+  // the emitted token is LIFTED so no later pass can rewrite it, and the id
+  // is re-validated so the token can only ever be a user mention (see
+  // SAFETY ORDER above).
+  if (options?.mentions) {
+    const mentions = options.mentions;
+    text = replaceMentionTokens(text, (escapedName) => {
+      const name = unescapeSlackText(escapedName)
+        .trim()
+        .replace(/\s+/g, " ")
+        .toLowerCase();
+      const id = mentions.get(name);
+      if (id && SLACK_USER_ID_RE.test(id)) return lift(`<@${id}>`);
+      if (id && SLACK_CHANNEL_ID_RE.test(id)) return lift(`<#${id}>`);
+      return `@${escapedName}`;
+    });
+  }
 
   // Blockquotes: the markdown `>` arrived escaped; re-arm it as Slack's own
   // line-start quote marker (pure formatting — it cannot mention or ping).

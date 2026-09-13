@@ -92,3 +92,31 @@ export const resendableKeylessTurn = (turns: Turn[]): Turn | null => {
   if (hasActiveTurn(turns)) return null;
   return last;
 };
+
+/**
+ * Merge turn rows from two windows into one ascending list, by id — the
+ * incoming row wins a collision (it is the fresher read: the live window
+ * refetches, history pages never change).
+ *
+ * Exists because the thread now composes SLIDING sources: older pages from
+ * the scroll-up loader below, the live newest window above. Rows must never
+ * vanish when the live window slides past them (a loaded older page keeps
+ * every row it delivered), and a row present in both (the seam turn) must
+ * render once.
+ *
+ * Ordered by `createdAt` then `id` — the SERVER's window order exactly, so
+ * pages stitch without seams. Known-accepted gap: if more than a whole
+ * window of turns lands between two observed reads, the stitched list can
+ * hide the unseen middle; a reload heals, and the poll/stream cadence makes
+ * the window impossible to outrun in practice.
+ */
+export const mergeTurnRows = (held: Turn[], incoming: Turn[]): Turn[] => {
+  if (held.length === 0) return incoming;
+  if (incoming.length === 0) return held;
+  const byId = new Map(held.map((turn) => [turn.id, turn]));
+  for (const turn of incoming) byId.set(turn.id, turn);
+  return [...byId.values()].sort(
+    (a, b) =>
+      a.createdAt.localeCompare(b.createdAt) || a.id.localeCompare(b.id),
+  );
+};

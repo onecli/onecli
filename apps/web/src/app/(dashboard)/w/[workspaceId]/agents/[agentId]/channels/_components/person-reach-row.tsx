@@ -102,6 +102,25 @@ export const PersonReachRow = ({
   const pending = person.state === "pending";
   const StatusIcon = approved ? UserCheck : pending ? Clock : Slash;
 
+  // A PENDING person is not a setting yet - deciding lives in the
+  // approvals bell (4d), the one inbox.
+  if (pending) {
+    return (
+      <div className="group flex min-h-11 items-center justify-between gap-3 py-1.5">
+        <span className="truncate text-sm" translate="no">
+          {label}
+        </span>
+        <Badge
+          variant="secondary"
+          className="border-amber-500/30 bg-amber-500/10 text-amber-600 dark:text-amber-400"
+        >
+          <Clock className="size-3" aria-hidden />
+          Waiting in the approvals bell
+        </Badge>
+      </div>
+    );
+  }
+
   return (
     <>
       <div className="group flex min-h-11 items-center justify-between gap-3 py-1.5">

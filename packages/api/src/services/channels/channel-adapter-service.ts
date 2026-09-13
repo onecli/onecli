@@ -20,7 +20,7 @@ import { agentImageUrlOrNull } from "../agent-image-service";
  * The §3.17 sharding seam lives HERE, exactly as this module always promised:
  * a presence-ownership claim (the `due-work.ts` pattern) partitions the fleet
  * across adapter instances without touching the adapter's wire contract —
- * each instance's config/work/prompt feeds serve only the presences it holds
+ * each instance's config/work/card feeds serve only the presences it holds
  * a live lease on. One instance therefore claims everything (the self-host
  * singleton, unchanged behavior); N instances divide the fleet and a dead
  * instance's slice fails over when its leases lapse.
@@ -786,9 +786,9 @@ export const reportApprovalAuth = async (
   });
 };
 
-// ── Approval prompts: dedupe + the update handle, restart-safe ──────────────
+// ── Tool-approval cards: dedupe + the update handle, restart-safe ───────────
 
-export const claimApprovalPrompt = async (input: {
+export const claimToolApprovalCard = async (input: {
   approvalId: string;
   agentChannelId: string;
   externalThreadId: string;
@@ -797,7 +797,7 @@ export const claimApprovalPrompt = async (input: {
   expiresAt: Date | null;
 }): Promise<{ claimed: boolean }> => {
   try {
-    await db.channelApprovalPrompt.create({
+    await db.toolApprovalCard.create({
       data: {
         approvalId: input.approvalId,
         agentChannelId: input.agentChannelId,
@@ -818,44 +818,44 @@ export const claimApprovalPrompt = async (input: {
   }
 };
 
-export const recordApprovalPromptMessage = async (
+export const recordToolApprovalCardMessage = async (
   approvalId: string,
   externalMessageRef: string,
 ): Promise<void> => {
-  await db.channelApprovalPrompt.updateMany({
+  await db.toolApprovalCard.updateMany({
     where: { approvalId },
     data: { externalMessageRef },
   });
 };
 
-export const settleApprovalPrompt = async (
+export const settleToolApprovalCard = async (
   approvalId: string,
   state: "decided" | "expired",
 ): Promise<{
   externalMessageRef: string | null;
   externalThreadId: string;
 } | null> => {
-  const prompt = await db.channelApprovalPrompt.findUnique({
+  const card = await db.toolApprovalCard.findUnique({
     where: { approvalId },
     select: { id: true, externalMessageRef: true, externalThreadId: true },
   });
-  if (!prompt) return null;
-  await db.channelApprovalPrompt.update({
-    where: { id: prompt.id },
+  if (!card) return null;
+  await db.toolApprovalCard.update({
+    where: { id: card.id },
     data: { state },
   });
   return {
-    externalMessageRef: prompt.externalMessageRef,
-    externalThreadId: prompt.externalThreadId,
+    externalMessageRef: card.externalMessageRef,
+    externalThreadId: card.externalThreadId,
   };
 };
 
-/** Pending prompts of the CALLER'S slice, for re-arming expiry against the
+/** Pending cards of the CALLER'S slice, for re-arming expiry against the
  * real gateway deadline (`expiresAt`) rather than a guess — at boot, and on
  * every ownership acquisition (the feed is owner-scoped, so a failed-over
  * presence's stranded cards are re-armed by whoever inherits it). */
-export const listUnsettledPrompts = async (adapterId: string) =>
-  db.channelApprovalPrompt.findMany({
+export const listUnsettledToolApprovalCards = async (adapterId: string) =>
+  db.toolApprovalCard.findMany({
     where: { state: "pending", agentChannel: { ownerAdapterId: adapterId } },
     select: {
       approvalId: true,

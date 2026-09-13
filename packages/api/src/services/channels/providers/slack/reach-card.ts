@@ -1,15 +1,19 @@
-import { escapeSlackText } from "@onecli/agent-protocol";
+import { escapeSlackText, spaceOfThreadAddress } from "@onecli/channels/slack";
 // Type-only: erased at compile, so the service -> registry -> provider ->
 // reach-card import chain stays acyclic at runtime.
 import type { ReachDecision } from "../../agent-reach-service";
 import { parseSlackPresenceCredentials } from "./types";
 import {
-  chatUpdate,
+  updateBlocksMessage,
   conversationsInfo,
+  conversationsMembers,
   conversationsOpen,
   postBlocksMessage,
   usersInfo,
-} from "./slack-api";
+  usersList,
+  clampHeader,
+  clampLabel,
+} from "@onecli/channels/slack";
 
 /**
  * The Slack rendering of the reach card - the PLATFORM-composed owner DM
@@ -24,13 +28,6 @@ import {
  * (no turn is involved), and the bot-authored card can never loop back in
  * (the ingestion echo guard drops bot posts).
  */
-
-/** Slack header blocks cap plain_text at 150 chars. */
-const clampHeader = (value: string): string =>
-  value.length <= 120 ? value : `${value.slice(0, 120)}…`;
-
-const clampLabel = (value: string): string =>
-  value.length <= 200 ? value : `${value.slice(0, 200)}…`;
 
 /**
  * Neutralize a label that the SUBJECT THEMSELVES chose.
@@ -55,6 +52,11 @@ const clampLabel = (value: string): string =>
  */
 const neutralizeChosenLabel = (raw: string): string =>
   raw.replace(/[\r\n]+/g, " ").replace(/[*_~`]/g, "");
+
+/** Pages (200 rows each) the app-roster walk reads from `conversations.members`
+ * and from `users.list`: bounded so a pathological workspace cannot spin it,
+ * generous enough for any room two agents actually talk in. */
+const APPS_IN_MAX_PAGES = 5;
 
 export const REACH_APPROVE_ACTION = "reach_approve";
 export const REACH_MEMBERS_ACTION = "reach_members";
@@ -81,10 +83,31 @@ export const reachCardBlocks = (input: {
   agentName: string;
   subjectLabel: string;
   subjectKind?: "space" | "external_user";
-}): unknown[] =>
-  input.subjectKind === "external_user"
-    ? personCardBlocks(input)
-    : spaceCardBlocks(input);
+  firstAskedDaysAgo?: number;
+}): unknown[] => {
+  const blocks =
+    input.subjectKind === "external_user"
+      ? personCardBlocks(input)
+      : spaceCardBlocks(input);
+  // The lateness line: a re-posted or long-lived ask says how old it is,
+  // because an owner approving a weeks-old question deserves to know the
+  // context is weeks old. Numeric input only — nothing user-chosen rides
+  // this block.
+  if (input.firstAskedDaysAgo !== undefined && input.firstAskedDaysAgo > 0) {
+    blocks.push({
+      type: "context",
+      elements: [
+        {
+          type: "mrkdwn",
+          text: `First asked ${Math.floor(input.firstAskedDaysAgo)} day${
+            Math.floor(input.firstAskedDaysAgo) === 1 ? "" : "s"
+          } ago.`,
+        },
+      ],
+    });
+  }
+  return blocks;
+};
 
 /**
  * The PERSON card: two answers, because "OneCLI users only" says nothing
@@ -242,6 +265,10 @@ const settledText = (input: {
         : `\u26d4 *${label}* - not answering there (decided by ${by}).`;
     case "left":
       return `*${label}* - I was removed from this channel, so this question is closed. If I'm re-invited, I'll ask again.`;
+    case "expired":
+      return person
+        ? `*${label}* - this request expired without an answer. If they message me again, I'll ask you fresh.`
+        : `*${label}* - this request expired without an answer. The next message there will ask you fresh.`;
     default:
       return `*${label}* - ${escapeSlackText(input.outcome)} (by ${by}).`;
   }
@@ -252,8 +279,7 @@ export const slackReach = {
   /** Group-thread addresses are minted as `<channelId>:<threadRootTs>`
    * (interpret.ts `groupThreadId`) - the space is the channel. Inverse
    * lives beside the renderer so provider-shaped reach logic has one home. */
-  spaceOf: (externalThreadId: string): string =>
-    externalThreadId.split(":")[0] ?? "",
+  spaceOf: spaceOfThreadAddress,
 
   /** "#channel-name" for cards and the dashboard; null when the token
    * cannot read the channel (private, dead credential). Display only. */
@@ -295,14 +321,79 @@ export const slackReach = {
 
   /**
    * The guest lane's speaker probe: display name (untrusted - the door
-   * cleans and frames it) + the same-tenant verdict. Fail-closed: any
+   * cleans and frames it), the same-tenant verdict, and the app flag the
+   * door confirms the wire's `bot_id` claim against. Fail-closed: any
    * lookup failure answers null and the door refuses.
    */
+  /**
+   * The room's app roster: the channel's member ids (`conversations.members`)
+   * intersected with the workspace directory (`users.list`, which carries
+   * `is_bot`) - both paginated and page-capped, so a 1,000-member channel
+   * costs a handful of calls, never one `users.info` per member. Keeps bot
+   * users of this tenant, minus the agent itself and Slackbot. One walk per
+   * NEW thread, not per message (the door seeds once). Any failure - a
+   * private channel the token cannot read, a rate limit - answers [] per
+   * the facet's contract.
+   */
+  async appsIn(input: {
+    credentialsJson: string | null;
+    externalRef: string;
+    tenantExternalId: string;
+    selfExternalUserId: string | null;
+  }): Promise<{ externalUserId: string; displayName: string }[]> {
+    if (!input.credentialsJson) return [];
+    try {
+      const creds = parseSlackPresenceCredentials(input.credentialsJson);
+      if (!creds.botToken) return [];
+      const token = creds.botToken;
+
+      const memberIds = new Set<string>();
+      let cursor: string | undefined;
+      for (let page = 0; page < APPS_IN_MAX_PAGES; page += 1) {
+        const response = await conversationsMembers(token, {
+          channel: input.externalRef,
+          cursor,
+        });
+        for (const id of response.members) memberIds.add(id);
+        cursor = response.response_metadata?.next_cursor || undefined;
+        if (!cursor) break;
+      }
+      memberIds.delete("USLACKBOT");
+      if (input.selfExternalUserId) memberIds.delete(input.selfExternalUserId);
+      if (memberIds.size === 0) return [];
+
+      const apps: { externalUserId: string; displayName: string }[] = [];
+      cursor = undefined;
+      for (let page = 0; page < APPS_IN_MAX_PAGES; page += 1) {
+        const response = await usersList(token, { cursor });
+        for (const user of response.members) {
+          if (!memberIds.has(user.id)) continue;
+          if (user.is_bot !== true || user.deleted) continue;
+          if (user.team_id !== input.tenantExternalId || user.is_stranger) {
+            continue;
+          }
+          const displayName =
+            user.profile?.display_name || user.profile?.real_name || user.name;
+          if (displayName) apps.push({ externalUserId: user.id, displayName });
+        }
+        cursor = response.response_metadata?.next_cursor || undefined;
+        if (!cursor) break;
+      }
+      return apps;
+    } catch {
+      return [];
+    }
+  },
+
   async resolveGuestSpeaker(input: {
     credentialsJson: string | null;
     externalUserId: string;
     tenantExternalId: string;
-  }): Promise<{ displayName: string | null; sameTenant: boolean } | null> {
+  }): Promise<{
+    displayName: string | null;
+    sameTenant: boolean;
+    isApp: boolean;
+  } | null> {
     if (!input.credentialsJson) return null;
     try {
       const creds = parseSlackPresenceCredentials(input.credentialsJson);
@@ -320,9 +411,69 @@ export const slackReach = {
         sameTenant:
           info.user.team_id === input.tenantExternalId &&
           info.user.is_stranger !== true,
+        isApp: info.user.is_bot === true,
       };
     } catch {
       return null;
+    }
+  },
+
+  /**
+   * The approve-time subject recheck. Each arm REUSES the probe its lane
+   * already trusts: the person arm is `resolveGuestSpeaker`'s own checks
+   * (deleted, foreign tenant, stranger), the space arm is
+   * `conversations.info` with `is_member`. FAIL-OPEN on transport errors —
+   * a Slack outage must not brick governance (the type's contract); the
+   * definite negatives (deleted user, foreign tenant, bot not a member,
+   * archived channel) are the only refusals.
+   */
+  async verifySubject(input: {
+    credentialsJson: string | null;
+    subjectKind: "space" | "external_user";
+    externalRef: string;
+    tenantExternalId: string;
+  }): Promise<{ ok: true } | { ok: false; reason: string }> {
+    if (!input.credentialsJson) return { ok: true }; // cannot check — fail open
+    let botToken: string | undefined;
+    try {
+      botToken = parseSlackPresenceCredentials(input.credentialsJson).botToken;
+    } catch {
+      return { ok: true };
+    }
+    if (!botToken) return { ok: true };
+
+    if (input.subjectKind === "external_user") {
+      try {
+        const info = await usersInfo(botToken, input.externalRef);
+        if (info.user.deleted) {
+          return { ok: false, reason: "this person's account was deactivated" };
+        }
+        if (
+          info.user.team_id !== input.tenantExternalId ||
+          info.user.is_stranger === true
+        ) {
+          return {
+            ok: false,
+            reason: "this person is no longer in your Slack workspace",
+          };
+        }
+        return { ok: true };
+      } catch {
+        return { ok: true }; // transport failure — fail open
+      }
+    }
+
+    try {
+      const info = await conversationsInfo(botToken, input.externalRef);
+      if (info.channel.is_archived === true) {
+        return { ok: false, reason: "the channel was archived" };
+      }
+      if (info.channel.is_member === false) {
+        return { ok: false, reason: "the agent is no longer in the channel" };
+      }
+      return { ok: true };
+    } catch {
+      return { ok: true }; // transport failure (or unreadable channel) — fail open
     }
   },
 
@@ -334,6 +485,7 @@ export const slackReach = {
       agentName: string;
       subjectLabel: string;
       subjectKind?: "space" | "external_user";
+      firstAskedDaysAgo?: number;
     }): Promise<{ channel: string; ts: string }> {
       const creds = parseSlackPresenceCredentials(input.credentialsJson);
       if (!creds.botToken) throw new Error("presence has no bot token");
@@ -365,7 +517,7 @@ export const slackReach = {
       const creds = parseSlackPresenceCredentials(input.credentialsJson);
       if (!creds.botToken) return;
       const text = settledText(input);
-      await chatUpdate(creds.botToken, {
+      await updateBlocksMessage(creds.botToken, {
         channel: input.channel,
         ts: input.ts,
         text,

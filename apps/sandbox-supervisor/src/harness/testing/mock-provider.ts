@@ -68,15 +68,33 @@ export interface MockProvider {
   /** One entry per /chat/completions request: when, the routed kind, for
    * scripted routes the response's tag, and — when the request advertised a
    * fan-out tool — that tool's model-visible description, so a live test can
-   * prove the platform's prompt override actually reached the model. */
+   * prove the platform's prompt override actually reached the model. Every
+   * entry also carries the request's full model-visible tool NAME list, so a
+   * live test can prove a disabled tool (JCODE_DISABLED_TOOLS) is really
+   * absent from what the model sees — the only ground truth for that pin. */
   requests: {
     at: number;
     kind: "long" | "quick" | "scripted";
     tag?: string;
     swarmToolDescription?: string;
+    toolNames: string[];
   }[];
   close: () => Promise<void>;
 }
+
+/** Every tool name an OpenAI-compatible request body advertises. */
+const toolNamesOf = (body: string): string[] => {
+  try {
+    const parsed = JSON.parse(body) as {
+      tools?: { function?: { name?: string } }[];
+    };
+    return (parsed.tools ?? []).flatMap((tool) =>
+      tool.function?.name ? [tool.function.name] : [],
+    );
+  } catch {
+    return [];
+  }
+};
 
 /** The fan-out tool's description from an OpenAI-compatible request body. */
 const swarmToolDescriptionOf = (body: string): string | undefined => {
@@ -217,6 +235,7 @@ export const startMockProvider = (options: {
           return;
         }
         const swarmToolDescription = swarmToolDescriptionOf(body);
+        const toolNames = toolNamesOf(body);
         const scripted = options.script?.({
           lastUser: lastUserContent(body),
           index: served++,
@@ -226,6 +245,7 @@ export const startMockProvider = (options: {
             at: Date.now(),
             kind: "scripted",
             tag: scripted.tag,
+            toolNames,
             ...(swarmToolDescription !== undefined && {
               swarmToolDescription,
             }),
@@ -237,6 +257,7 @@ export const startMockProvider = (options: {
         requests.push({
           at: Date.now(),
           kind: long ? "long" : "quick",
+          toolNames,
           ...(swarmToolDescription !== undefined && { swarmToolDescription }),
         });
         res.writeHead(200, {

@@ -30,6 +30,194 @@ export const findActivePlanSubscription = async (
 };
 
 /**
+ * Stripe's search query language is a string grammar, and `organizationId`
+ * reaches it from subscription metadata as well as our own auth context. Ids
+ * we mint are server-generated (uuid / better-auth slugs), so this is defense
+ * in depth rather than a live hole: a value containing a quote or backslash
+ * would otherwise break out of the quoted literal and change which
+ * subscriptions the query returns — i.e. which org's plan we read. Reject
+ * anything that isn't a plain id instead of trying to escape it.
+ */
+const SAFE_ORG_ID = /^[A-Za-z0-9_-]+$/;
+
+interface OrgSubscriptionMatch {
+  subscription: Stripe.Subscription;
+  /** The customer actually billing it — what `stripeCustomerId` should say. */
+  customerId: string;
+}
+
+const isLive = (s: Stripe.Subscription) =>
+  s.status === "active" || s.status === "trialing";
+
+// A subscription's `customer` is an id, an expanded object, or (deleted
+// customer / trimmed webhook payload) absent — never assume it dereferences.
+const customerOf = (s: Stripe.Subscription): string | undefined =>
+  typeof s.customer === "string" ? s.customer : s.customer?.id;
+
+/**
+ * Live subscriptions on the org's stored customer, split by how surely they
+ * belong to the org. `labeled` carries this org's id in metadata — the same
+ * fence as {@link findActivePlanSubscription}. `unlabeled` carries NO
+ * organizationId at all: dashboard/ops-created subscriptions (live prod
+ * example: the PO-billed enterprise sub, 2026-09 audit) never got the
+ * metadata, and `Organization.stripeCustomerId` is `@unique`, so the org
+ * whose row points at this customer is its one legitimate claimant. A sub
+ * explicitly labeled with ANOTHER org's id is neither — fenced out entirely.
+ *
+ * Dropping unlabeled subs is not an option: the reconcile-on-read paths would
+ * read "no subscription" for a paying dashboard-managed org and write it down
+ * to free — the exact downgrade this module exists to prevent.
+ */
+const listStoredCustomerMatches = async (
+  stripe: Stripe,
+  organizationId: string,
+  storedCustomerId: string,
+): Promise<{
+  labeled: OrgSubscriptionMatch[];
+  unlabeled: OrgSubscriptionMatch[];
+}> => {
+  const existing = await stripe.subscriptions.list({
+    customer: storedCustomerId,
+    limit: 100,
+  });
+
+  const labeled: OrgSubscriptionMatch[] = [];
+  const unlabeled: OrgSubscriptionMatch[] = [];
+  for (const subscription of existing.data) {
+    if (!isLive(subscription)) continue;
+    const owner = subscription.metadata?.organizationId;
+    const match = {
+      subscription,
+      customerId: customerOf(subscription) ?? storedCustomerId,
+    };
+    if (owner === organizationId) labeled.push(match);
+    else if (!owner) unlabeled.push(match);
+    // Explicitly another org's: a shared customer must never leak its plan.
+  }
+  return { labeled, unlabeled };
+};
+
+/**
+ * Live subscriptions carrying this org's id in metadata, anywhere in Stripe.
+ * The search index is eventually consistent (~a minute), so this can miss a
+ * just-created subscription and still return a just-canceled one — callers
+ * that act on the result must re-check liveness (or filter known-dead ids).
+ * Unavailable or unsafe-to-query degrades to "none found".
+ */
+const searchOrgSubscriptions = async (
+  stripe: Stripe,
+  organizationId: string,
+): Promise<OrgSubscriptionMatch[]> => {
+  if (!SAFE_ORG_ID.test(organizationId)) return [];
+
+  try {
+    const found = await stripe.subscriptions.search({
+      query: `metadata['organizationId']:'${organizationId}'`,
+      limit: 100,
+    });
+    // Re-check the org id locally instead of trusting the query alone. The
+    // whole point of findActivePlanSubscription's metadata filter is that a
+    // customer can be shared across orgs; a search result must clear the same
+    // bar before it can become this org's plan.
+    return found.data.flatMap((s) => {
+      if (!isLive(s) || s.metadata?.organizationId !== organizationId) {
+        return [];
+      }
+      const customerId = customerOf(s);
+      return customerId ? [{ subscription: s, customerId }] : [];
+    });
+  } catch {
+    // Search unavailable (or not enabled): fall through to "none found".
+    // Callers treat that as the stored-customer answer, which is the
+    // pre-existing behavior.
+    return [];
+  }
+};
+
+/**
+ * The org's live subscription, found WITHOUT trusting the stored customer id.
+ *
+ * Stripe Checkout can attach a subscription to a *different* customer than the
+ * one on the org: a card-less trial converted through Checkout (see the
+ * checkout route's `supersedesSubscription` path) is billed to whatever
+ * customer the session resolved, and `customer_creation: "if_required"` on a
+ * payment link mints a brand-new one. The org row then still points at the old,
+ * now-subscription-less customer.
+ *
+ * That is not cosmetic: every reconcile-on-read lists subscriptions for the
+ * STORED customer, finds nothing active, and writes `subscriptionStatus` back
+ * to "free" — silently downgrading a paying customer moments after checkout
+ * (live incident, org ifmgushjgmxhqeds on Scale, 2026-09). Searching on the
+ * `organizationId` metadata every subscription we create carries is what makes
+ * the lookup independent of the customer-id drift; the caller then repairs the
+ * stored id.
+ *
+ * Resolution order: the stored customer's org-labeled subscription (one list
+ * call, no search index), then the metadata search (drifted subscriptions on
+ * other customers), then an unlabeled subscription on the stored customer —
+ * the weakest claim, so a labeled one anywhere beats it.
+ *
+ * Returns the subscription plus the customer actually billing it, so callers
+ * can heal `stripeCustomerId` instead of rediscovering this every read.
+ */
+export const findOrgLiveSubscription = async (
+  stripe: Stripe,
+  organizationId: string,
+  storedCustomerId: string | null,
+): Promise<OrgSubscriptionMatch | undefined> => {
+  let unlabeledFallback: OrgSubscriptionMatch | undefined;
+
+  // The stored customer stays the fast path: one list call, no search index.
+  if (storedCustomerId) {
+    const { labeled, unlabeled } = await listStoredCustomerMatches(
+      stripe,
+      organizationId,
+      storedCustomerId,
+    );
+    if (labeled[0]) return labeled[0];
+    unlabeledFallback = unlabeled[0];
+  }
+
+  // Nothing labeled on the stored customer. Before concluding the org
+  // churned, ask Stripe for any subscription carrying this org's id. Search
+  // can miss a just-created subscription — the webhook write is what covers
+  // that window, and this is the backstop that keeps a stale customer id
+  // from downgrading the org.
+  const searched = await searchOrgSubscriptions(stripe, organizationId);
+  if (searched[0]) return searched[0];
+
+  return unlabeledFallback;
+};
+
+/**
+ * Every live subscription the org holds — the stored customer's (labeled and
+ * unlabeled, see {@link listStoredCustomerMatches}) plus any labeled one the
+ * search finds elsewhere, deduped by id. For callers that must act on ALL of
+ * them (org deletion cancels each; the churn webhook filters out the sub that
+ * just died), where {@link findOrgLiveSubscription}'s single answer is not
+ * enough. Search staleness applies: re-check liveness before destructive acts.
+ */
+export const findOrgLiveSubscriptions = async (
+  stripe: Stripe,
+  organizationId: string,
+  storedCustomerId: string | null,
+): Promise<OrgSubscriptionMatch[]> => {
+  const stored = storedCustomerId
+    ? await listStoredCustomerMatches(stripe, organizationId, storedCustomerId)
+    : { labeled: [], unlabeled: [] };
+  const searched = await searchOrgSubscriptions(stripe, organizationId);
+
+  const out: OrgSubscriptionMatch[] = [];
+  const seen = new Set<string>();
+  for (const match of [...stored.labeled, ...searched, ...stored.unlabeled]) {
+    if (seen.has(match.subscription.id)) continue;
+    seen.add(match.subscription.id);
+    out.push(match);
+  }
+  return out;
+};
+
+/**
  * Whether a trialing subscription has no payment method to convert with: none
  * on the subscription, no customer default (invoice settings or legacy
  * source), and nothing attached at all. Such a trial cannot be switched in

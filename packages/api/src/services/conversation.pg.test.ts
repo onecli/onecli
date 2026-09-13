@@ -400,6 +400,123 @@ describe.skipIf(!PROOF_URL)("one active turn per conversation", () => {
   });
 });
 
+describe.skipIf(!PROOF_URL)("the turns window", () => {
+  /** Five finished turns, oldest to newest: msg 0 … msg 4. */
+  const seedFive = async (suffix: string) => {
+    const seeded = await seedTalkable(suffix);
+    for (let i = 0; i < 5; i += 1) {
+      const turn = await turns.createTurn(
+        WORKSPACE,
+        seeded.conversationId,
+        `msg ${i}`,
+        WEB_A,
+      );
+      await turns.finishTurn({
+        reporter: reporter(RUNNER_A, seeded.sandboxId),
+        conversationId: seeded.conversationId,
+        turnId: turn.id,
+        status: "done",
+      });
+    }
+    return seeded;
+  };
+
+  it("returns the NEWEST window, ascending — the old read returned the oldest and hid the newest", async () => {
+    const { conversationId } = await seedFive("window-newest");
+
+    const page = await turns.listTurns(WORKSPACE, conversationId, USER_A, {
+      limit: 2,
+    });
+    expect(page.turns.map((t) => t.message)).toEqual(["msg 3", "msg 4"]);
+    expect(page.hasMore).toBe(true);
+  });
+
+  it("walks older windows through the before cursor, without a skip or a double", async () => {
+    const { conversationId } = await seedFive("window-cursor");
+
+    const first = await turns.listTurns(WORKSPACE, conversationId, USER_A, {
+      limit: 2,
+    });
+    const second = await turns.listTurns(WORKSPACE, conversationId, USER_A, {
+      limit: 2,
+      before: first.turns[0]!.id,
+    });
+    const third = await turns.listTurns(WORKSPACE, conversationId, USER_A, {
+      limit: 2,
+      before: second.turns[0]!.id,
+    });
+
+    expect(second.turns.map((t) => t.message)).toEqual(["msg 1", "msg 2"]);
+    expect(second.hasMore).toBe(true);
+    expect(third.turns.map((t) => t.message)).toEqual(["msg 0"]);
+    expect(third.hasMore).toBe(false);
+  });
+
+  it("reports the window's oldestSeq — the stream's replay floor", async () => {
+    const { conversationId, sandboxId } = await seedTalkable("window-seq");
+    const speak = async (message: string) => {
+      const spoken = await turns.createTurn(
+        WORKSPACE,
+        conversationId,
+        message,
+        WEB_A,
+      );
+      // Durable events are what the floor measures — a finish alone stores
+      // nothing (the terminal marker rides applyTurnEvents in production).
+      await turns.applyTurnEvents(
+        reporter(RUNNER_A, sandboxId),
+        conversationId,
+        spoken.id,
+        [{ type: "turn.started" }, { type: "turn.done" }],
+      );
+      await turns.finishTurn({
+        reporter: reporter(RUNNER_A, sandboxId),
+        conversationId,
+        turnId: spoken.id,
+        status: "done",
+      });
+    };
+    await speak("a");
+    await speak("b");
+
+    // The newest-1 window covers only the second turn's events, so its floor
+    // sits ABOVE the first turn's — a bounded replay, not the whole history.
+    const all = await turns.listTurns(WORKSPACE, conversationId, USER_A);
+    const newest = await turns.listTurns(WORKSPACE, conversationId, USER_A, {
+      limit: 1,
+    });
+    expect(all.oldestSeq).not.toBeNull();
+    expect(newest.oldestSeq).not.toBeNull();
+    expect(newest.oldestSeq!).toBeGreaterThan(all.oldestSeq!);
+  });
+
+  it("answers an empty conversation honestly — no rows, no floor, no more", async () => {
+    const { conversationId } = await seedTalkable("window-empty");
+
+    const page = await turns.listTurns(WORKSPACE, conversationId, USER_A);
+    expect(page).toEqual({ turns: [], hasMore: false, oldestSeq: null });
+  });
+
+  it("FENCES the before cursor to this conversation — a foreign turn id positions nothing", async () => {
+    // The planted negative control: the cursor id is a REAL turn, in another
+    // conversation of the same workspace. Positioning off it would leak a
+    // cross-conversation createdAt comparison; the fence reads it as absent.
+    const mine = await seedFive("window-fence-mine");
+    const other = await seedTalkable("window-fence-other");
+    const foreign = await turns.createTurn(
+      WORKSPACE,
+      other.conversationId,
+      "foreign",
+      WEB_A,
+    );
+
+    const page = await turns.listTurns(WORKSPACE, mine.conversationId, USER_A, {
+      before: foreign.id,
+    });
+    expect(page).toEqual({ turns: [], hasMore: false, oldestSeq: null });
+  });
+});
+
 describe.skipIf(!PROOF_URL)("seq allocation", () => {
   it("numbers a batch contiguously from the conversation counter", async () => {
     const { conversationId, sandboxId } = await seedTalkable("seq-basic");
@@ -702,6 +819,31 @@ describe.skipIf(!PROOF_URL)("seq allocation", () => {
     expect(page.events).toHaveLength(2);
     expect(page.hasMore).toBe(true);
     expect(page.nextSince).toBe(2);
+  });
+
+  it("`until` bounds the read above — the older-window fetch never re-walks held territory", async () => {
+    const { conversationId, sandboxId } = await seedTalkable("until");
+    const turn = await turns.createTurn(WORKSPACE, conversationId, "hi", WEB_A);
+    await turns.applyTurnEvents(
+      reporter(RUNNER_A, sandboxId),
+      conversationId,
+      turn.id,
+      Array.from({ length: 5 }, (_, i) => ({
+        type: "tool.started" as const,
+        callId: `u${i}`,
+        name: "bash",
+      })),
+    );
+
+    // (since, until] — seqs 2 and 3 of the five.
+    const window = await turns.readTranscript(
+      WORKSPACE,
+      conversationId,
+      USER_A,
+      { since: 1, until: 3 },
+    );
+    expect(window.events.map((e) => e.seq)).toEqual([2, 3]);
+    expect(window.hasMore).toBe(false);
   });
 
   it("REPORTS the fence verdict — a foreign sandbox's batch is not accepted", async () => {

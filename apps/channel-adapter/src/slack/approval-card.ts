@@ -1,6 +1,13 @@
-import { escapeSlackText } from "@onecli/agent-protocol";
+import { escapeSlackText } from "@onecli/channels/slack";
 import type { ApprovalCardUi, PendingApproval } from "../approvals";
-import { postBlocks, SlackApiError, updateBlocks } from "./client";
+import {
+  postBlocksMessage,
+  SlackApiError,
+  updateBlocksMessage,
+  clampHeader,
+  clampLabel,
+  normalizeLines,
+} from "@onecli/channels/slack";
 
 /**
  * The Slack rendering of the approvals manager's card seam: Block Kit in,
@@ -9,28 +16,10 @@ import { postBlocks, SlackApiError, updateBlocks } from "./client";
  * lives here.
  */
 
-/** Clamp one ESCAPED dynamic field. Clamping after escaping is what makes
- * the section budget real: escaping expands (`&` → `&amp;`, ×5 worst case),
- * so a pre-escape clamp of 200 could still land 1,000 chars in the block. A
- * torn trailing entity under the ellipsis renders as its literal chars —
- * harmless in already-escaped text. */
-const clampDetail = (value: string): string =>
-  value.length <= 200 ? value : `${value.slice(0, 200)}…`;
-
 /** The joined details string stays under Slack's 3,000-char section cap with
  * margin — one oversized card would otherwise kill the whole post with
  * invalid_blocks and silence the approval. */
 const DETAILS_BUDGET = 2_800;
-
-/** Slack header blocks cap plain_text at 150 chars — clamp with room for the
- *  "Approval needed · " prefix. */
-const clampHeader = (value: string): string =>
-  value.length <= 120 ? value : `${value.slice(0, 120)}…`;
-
-/** Line terminators that would escape the `>` blockquote continuation —
- * normalized to `\n` first (same class slack/mrkdwn.ts normalizes). */
-const normalizeLines = (value: string): string =>
-  value.replace(/\r\n?|[\u{2028}\u{2029}]/gu, "\n");
 
 /** The card. Template text is OURS; every dynamic field is escaped. */
 export const approvalCardBlocks = (approval: PendingApproval): unknown[] => {
@@ -39,12 +28,12 @@ export const approvalCardBlocks = (approval: PendingApproval): unknown[] => {
   const headerAction = approval.summary?.action
     ? clampHeader(approval.summary.action)
     : undefined;
-  const fallbackTitle = `${escapeSlackText(approval.method ?? "?")} ${escapeSlackText(approval.host ?? "")}${clampDetail(escapeSlackText(approval.path ?? ""))}`;
+  const fallbackTitle = `${escapeSlackText(approval.method ?? "?")} ${escapeSlackText(approval.host ?? "")}${clampLabel(escapeSlackText(approval.path ?? ""))}`;
   const detailLines = (approval.summary?.details ?? [])
     .slice(0, 8)
     .map(
       (d) =>
-        `>*${clampDetail(escapeSlackText(normalizeLines(d.label)))}:* ${clampDetail(escapeSlackText(normalizeLines(d.value))).replace(/\n/g, "\n>")}`,
+        `>*${clampLabel(escapeSlackText(normalizeLines(d.label)))}:* ${clampLabel(escapeSlackText(normalizeLines(d.value))).replace(/\n/g, "\n>")}`,
     );
   // Hard section budget: keep whole lines while they fit, and say how many
   // were dropped rather than truncating silently.
@@ -121,7 +110,7 @@ export const approvalCardBlocks = (approval: PendingApproval): unknown[] => {
 
 export const slackApprovalCardUi: ApprovalCardUi = {
   async post(input) {
-    const posted = await postBlocks(input.credential, {
+    const posted = await postBlocksMessage(input.credential, {
       channel: input.channel,
       text: "Approval needed",
       blocks: approvalCardBlocks(input.approval),
@@ -138,7 +127,7 @@ export const slackApprovalCardUi: ApprovalCardUi = {
       ? `${escapeSlackText(clampHeader(normalizeLines(input.title).replace(/\n+/g, " ")))} · ${input.text}`
       : input.text;
     try {
-      await updateBlocks(input.credential, {
+      await updateBlocksMessage(input.credential, {
         channel: input.channel,
         ts: input.ts,
         text,

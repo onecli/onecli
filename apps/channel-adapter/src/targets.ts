@@ -1,3 +1,4 @@
+import { unpackThreadAddress } from "@onecli/channels/slack";
 import type { AdapterLink } from "@onecli/agent-protocol";
 
 /**
@@ -21,22 +22,11 @@ export interface ChannelPostTarget {
 }
 
 /** `direct` links address the IM channel; `group` links pack
- * `<channel>:<threadRootTs>` into the external thread id. */
+ * `<channel>:<threadRootTs>` into the external thread id — the codec lives
+ * in @onecli/channels/slack so both runtimes decode the one format. */
 export const replyTargetForLink = (
   link: Pick<AdapterLink, "kind" | "externalThreadId">,
-): ReplyTarget => {
-  if (link.kind === "direct") {
-    return { channel: link.externalThreadId, threadTs: null };
-  }
-  const separator = link.externalThreadId.indexOf(":");
-  if (separator === -1) {
-    return { channel: link.externalThreadId, threadTs: null };
-  }
-  return {
-    channel: link.externalThreadId.slice(0, separator),
-    threadTs: link.externalThreadId.slice(separator + 1),
-  };
-};
+): ReplyTarget => unpackThreadAddress(link.kind, link.externalThreadId);
 
 /**
  * Where ONE TURN's answer belongs — the link's address, narrowed to the

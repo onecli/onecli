@@ -197,16 +197,95 @@ describe("manual approval", () => {
     await cx.seed({ withApiKey: true });
     const gw = await cx.startGateway();
 
-    const res = await decideApproval(
-      gw,
-      cx.ids.apiKey,
-      "00000000-0000-4000-8000-000000000000",
-      "approve",
-    );
+    const unknownId = "00000000-0000-4000-8000-000000000000";
+    const res = await decideApproval(gw, cx.ids.apiKey, unknownId, "approve");
 
     expect(res.status).toBe(404);
     expect(res.body).toMatchObject({ error: "approval_not_found" });
+
+    // The rejection must be investigable from the log line alone: the
+    // approval id and decision ride on the EVENT, not only on the enclosing
+    // INFO span (which a WARN-only filter drops — #1074).
+    await gw.waitForLog("approval decision rejected: no pending approval");
+    const line = gw
+      .logs()
+      .split("\n")
+      .find((l) =>
+        l.includes("approval decision rejected: no pending approval"),
+      );
+    expect(line).toBeDefined();
+    expect(line).toContain(`"approval_id":"${unknownId}"`);
+    expect(line).toContain('"decision":"approve"');
   });
+
+  scenario(
+    "answers a re-submitted decision with 404 after the first one settled",
+    async (cx) => {
+      // The production shape behind #1074: a client re-sends its decision
+      // (~when its local timeout fires) after the gateway already honoured
+      // it. The held request was released on the FIRST decision; the second
+      // finds nothing pending. 404 is correct — the same answer the web and
+      // channel clients map to "already settled" — and the log names the id
+      // so the two events can be joined instead of read as a lost click.
+      const upstream = await cx.upstream();
+      upstream.respond({
+        status: 200,
+        body: JSON.stringify({ delivered: true }),
+      });
+      await cx.seed(APPROVAL_WORLD);
+      const gw = await cx.startGateway();
+
+      const held = await startHeldRequest(
+        gw.origin,
+        {
+          method: "POST",
+          url: upstream.url("/v1/send"),
+          token: cx.ids.agentToken,
+          body: "{}",
+        },
+        HOLD_MS,
+      );
+      const approval = await waitForApproval(gw, cx.ids.apiKey);
+
+      const first = await decideApproval(
+        gw,
+        cx.ids.apiKey,
+        approval.id,
+        "approve",
+      );
+      const res = await held.response;
+      expect(first.status).toBe(200);
+      expect(res.status).toBe(200);
+      await upstream.waitForRequests(1);
+
+      const again = await decideApproval(
+        gw,
+        cx.ids.apiKey,
+        approval.id,
+        "approve",
+      );
+      expect(again.status).toBe(404);
+      expect(again.body).toMatchObject({ error: "approval_not_found" });
+      // The upstream saw the request exactly once: a re-submit never
+      // re-forwards.
+      expect(upstream.requests()).toHaveLength(1);
+
+      await gw.waitForLog("approval decision rejected: no pending approval");
+      const lines = gw.logs().split("\n");
+      const withMessage = (message: string) =>
+        lines.find((l) => l.includes(`"message":"${message}"`));
+      // Both halves of the join are present under the same id: the honoured
+      // decision and the late re-submit.
+      expect(withMessage("approval decision submitted")).toContain(
+        `"approval_id":"${approval.id}"`,
+      );
+      expect(
+        withMessage(
+          "approval decision rejected: no pending approval (expired, already decided, or unknown)",
+        ),
+      ).toContain(`"approval_id":"${approval.id}"`);
+    },
+  );
 
   scenario("requires a valid API key to list approvals", async (cx) => {
     await cx.seed({ withApiKey: true });

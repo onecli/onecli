@@ -52,6 +52,11 @@ const teamsish: NonNullable<ChannelProvider["reach"]> = {
     return `Person ${externalRef.replace("person@", "")}`;
   },
 
+  // This provider has no app concept: a room's app roster is always empty.
+  async appsIn() {
+    return [];
+  },
+
   async resolveGuestSpeaker({
     credentialsJson,
     externalUserId,
@@ -64,7 +69,28 @@ const teamsish: NonNullable<ChannelProvider["reach"]> = {
     return {
       displayName: `User ${externalUserId.split("#")[0]}`,
       sameTenant: tenant === tenantExternalId,
+      isApp: false,
     };
+  },
+
+  async verifySubject({
+    credentialsJson,
+    subjectKind,
+    externalRef,
+    tenantExternalId,
+  }) {
+    // Fail-open without a credential, per the type's contract.
+    if (!credentialsJson) return { ok: true };
+    if (subjectKind === "external_user") {
+      const [, tenant] = externalRef.split("#");
+      return tenant === tenantExternalId
+        ? { ok: true }
+        : { ok: false, reason: "person left the org" };
+    }
+    // This provider marks dead rooms with a trailing "!".
+    return externalRef.endsWith("!")
+      ? { ok: false, reason: "room is gone" }
+      : { ok: true };
   },
 
   card: {
@@ -214,7 +240,7 @@ describe("the reach facet is provider-generic (contract, not Slack)", () => {
  * `sweepUnpostedReachCards` is global by contract - a background retry, not
  * a per-agent call - and the pg suites share one database in parallel. A
  * test that calls it unfenced posts OTHER suites' owner cards and claims
- * their promptRefs, which surfaces as a sibling suite failing an assertion
+ * their cardRefs, which surfaces as a sibling suite failing an assertion
  * it owns. That is a nightmare to diagnose from a CI log, and it happened
  * twice on this branch: the first fix fenced the one call site I had
  * added, and the four older ones kept doing it.

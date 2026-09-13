@@ -78,6 +78,9 @@ importers:
       '@onecli/agent-protocol':
         specifier: workspace:*
         version: link:../../packages/agent-protocol
+      '@onecli/channels':
+        specifier: workspace:*
+        version: link:../../packages/channels
       zod:
         specifier: ^4.3.6
         version: 4.3.6
@@ -465,6 +468,9 @@ importers:
 
   packages/agent-protocol:
     dependencies:
+      '@onecli/channels':
+        specifier: workspace:*
+        version: link:../channels
       zod:
         specifier: ^4.3.6
         version: 4.3.6
@@ -508,6 +514,9 @@ importers:
       '@onecli/agent-protocol':
         specifier: workspace:*
         version: link:../agent-protocol
+      '@onecli/channels':
+        specifier: workspace:*
+        version: link:../channels
       '@onecli/db':
         specifier: workspace:*
         version: link:../db
@@ -557,6 +566,28 @@ importers:
       pino-pretty:
         specifier: ^13.1.3
         version: 13.1.3
+      typescript:
+        specifier: 5.9.2
+        version: 5.9.2
+      vitest:
+        specifier: ^3.2.6
+        version: 3.2.6(@types/debug@4.1.13)(@types/node@22.19.11)(jiti@2.6.1)(jsdom@30.0.1(@noble/hashes@2.3.0))(lightningcss@1.31.1)(tsx@4.23.12)(yaml@2.8.2)
+
+  packages/channels:
+    dependencies:
+      zod:
+        specifier: ^4.3.6
+        version: 4.3.6
+    devDependencies:
+      '@onecli/eslint-config':
+        specifier: workspace:*
+        version: link:../eslint-config
+      '@onecli/typescript-config':
+        specifier: workspace:*
+        version: link:../typescript-config
+      '@types/node':
+        specifier: ^22.15.3
+        version: 22.19.11
       typescript:
         specifier: 5.9.2
         version: 5.9.2

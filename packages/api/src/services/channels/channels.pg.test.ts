@@ -215,6 +215,21 @@ const startSlackFake = (): Promise<string> =>
             res.end();
             return;
           }
+          // ... or an HTTP-level failure (`{ __status: 503 }`) — Slack's edge
+          // falling over before any `ok` envelope exists. The client turns it
+          // into a plain Error, not a SlackApiError; the rotation tests use it
+          // to prove a transport failure never wipes a stored credential.
+          if (
+            body &&
+            typeof body === "object" &&
+            "__status" in (body as Record<string, unknown>)
+          ) {
+            res.writeHead((body as { __status: number }).__status, {
+              "content-type": "text/plain",
+            });
+            res.end("upstream unavailable");
+            return;
+          }
           res.writeHead(200, { "content-type": "application/json" });
           res.end(JSON.stringify(body));
         })();
@@ -487,7 +502,7 @@ const settleChannel = (
       subjectKind: "space",
       externalRef,
       state: "members_only",
-      promptRefs: [],
+      cardRefs: [],
     },
     select: { id: true },
   });
@@ -741,6 +756,79 @@ describe.skipIf(!PROOF_URL)("integration service — connect", () => {
     expect(slackCalls).toHaveLength(0);
   });
 
+  it("refuses the ACCESS token (xoxe.xoxp-…) by name, before Slack — the other Copy button", async () => {
+    // The live mistake behind this suite: Slack's token page has two Copy
+    // buttons, both values start with `xoxe`, and the access half sent as a
+    // refresh_token answers the same opaque `internal_error` a spent refresh
+    // token does. MUTATION-TESTED: drop the `xoxe.` arm and this paste reaches
+    // Slack (the unscripted rotate answers test_unscripted, so the assertion
+    // on zero calls AND the message both fail).
+    await expect(
+      integrations.connectIntegration(
+        ORG,
+        "slack",
+        "xoxe.xoxp-1-the-access-token",
+        ADMIN,
+      ),
+    ).rejects.toMatchObject({
+      code: "UNPROCESSABLE",
+      message: expect.stringMatching(/That is the Access Token.*Refresh Token/),
+    });
+    expect(slackCalls).toHaveLength(0);
+    expect(
+      await db.channelIntegration.count({ where: { organizationId: ORG } }),
+    ).toBe(0);
+  });
+
+  it.each(["internal_error", "invalid_refresh_token"])(
+    "a SPENT pasted token (%s) gets the generate-a-new-one message, and nothing is stored",
+    async (code) => {
+      // Slack refresh tokens are single-use. A pasted one that was already
+      // rotated (an earlier paste, another tool, a regenerate on
+      // api.slack.com) answers `internal_error` when well-formed (as other
+      // integrators report) and `invalid_refresh_token` when malformed
+      // (probed live 2026-09-09). Slack's code alone ("internal_error") sent
+      // users in circles re-pasting the same dead token; the message must say
+      // what to do.
+      slackHandlers["tooling.tokens.rotate"] = () => ({
+        ok: false,
+        error: code,
+      });
+
+      await expect(
+        integrations.connectIntegration(ORG, "slack", "xoxe-spent", ADMIN),
+      ).rejects.toMatchObject({
+        code: "UNPROCESSABLE",
+        message: expect.stringMatching(
+          new RegExp(`\\(${code}\\).*works once.*new Refresh Token`),
+        ),
+      });
+      expect(slackCallsFor("tooling.tokens.rotate")).toHaveLength(1);
+      expect(
+        await db.channelIntegration.count({ where: { organizationId: ORG } }),
+      ).toBe(0);
+    },
+  );
+
+  it("any OTHER paste refusal keeps Slack's code verbatim (the generic provider 422)", async () => {
+    // The house rule: codes like `managed_app_limit_reached` reach the user
+    // unaltered. Only the two spent-token codes get the guided rewrite.
+    slackHandlers["tooling.tokens.rotate"] = () => ({
+      ok: false,
+      error: "service_unavailable",
+    });
+
+    await expect(
+      integrations.connectIntegration(ORG, "slack", "xoxe-paste", ADMIN),
+    ).rejects.toMatchObject({
+      name: "SlackApiError",
+      code: "service_unavailable",
+    });
+    expect(
+      await db.channelIntegration.count({ where: { organizationId: ORG } }),
+    ).toBe(0);
+  });
+
   it("REFUSES re-connecting a DIFFERENT workspace while presences live on the old one", async () => {
     const integration = await seedIntegration({
       credentials: await integrationCredentials(12 * 3600),
@@ -986,6 +1074,106 @@ describe.skipIf(!PROOF_URL)("withFreshIntegrationCredentials", () => {
     expect(view?.credentialsRotatedAt).not.toBeNull();
   });
 
+  it.each([
+    [
+      "a transient refusal (internal_error)",
+      { ok: false, error: "internal_error" },
+    ],
+    ["an HTTP 503 before any envelope", { __status: 503 }],
+  ])(
+    "%s with a LIVE access half is DEFERRED: fn runs on the stored token, the pair is untouched",
+    async (_label, answer) => {
+      // The regression this exists for: before the dead/deferred split ANY
+      // throw here cleared the pair — Slack documents `internal_error` on
+      // this method as "likely a transient issue on our end", so one blip on
+      // one attempt sent a healthy org to "Token needed". MUTATION-TESTED:
+      // make the service clear on every throw again (drop the instanceof
+      // branch) and both rows below come back null.
+      const integration = await seedIntegration({
+        credentials: await integrationCredentials(60), // inside the rotate window, still live
+        rotatedAt: new Date(Date.now() - 3600_000),
+      });
+      slackHandlers["tooling.tokens.rotate"] = () => answer;
+      const before = await db.channelIntegration.findUniqueOrThrow({
+        where: { id: integration.id },
+        select: { credentials: true, credentialsRotatedAt: true },
+      });
+
+      const got = await integrations.withFreshIntegrationCredentials(
+        ORG,
+        "slack",
+        async (accessToken) => accessToken,
+      );
+
+      // fn ran, on the STORED access half (nothing fresh exists).
+      expect(got).toBe("xoxe.access-stored");
+      expect(slackCallsFor("tooling.tokens.rotate")).toHaveLength(1);
+      const after = await db.channelIntegration.findUniqueOrThrow({
+        where: { id: integration.id },
+        select: { credentials: true, credentialsRotatedAt: true },
+      });
+      expect(after.credentials).toBe(before.credentials);
+      expect(after.credentialsRotatedAt).toEqual(before.credentialsRotatedAt);
+      const [view] = await integrations.getIntegrationView(ORG);
+      expect(view).toMatchObject({
+        hasCredentials: true,
+        needsCredentials: false,
+      });
+    },
+  );
+
+  it("a transient refusal once the access half has EXPIRED is final: cleared, re-paste surfaces", async () => {
+    // The bound on deferral. `internal_error` is also what a refresh token
+    // consumed elsewhere answers, and the wire cannot tell that from a blip —
+    // so a pair still refused when nothing usable is left is dead, never
+    // deferred forever. MUTATION-TESTED: drop the `now >= expiresAt` arm in
+    // the provider and this row keeps a pair with no live half in it.
+    const integration = await seedIntegration({
+      credentials: await integrationCredentials(-30), // already expired
+      rotatedAt: new Date(Date.now() - 13 * 3600_000),
+    });
+    slackHandlers["tooling.tokens.rotate"] = () => ({
+      ok: false,
+      error: "internal_error",
+    });
+
+    await expect(
+      integrations.withFreshIntegrationCredentials(ORG, "slack", async () => 1),
+    ).rejects.toMatchObject({ code: "UNPROCESSABLE" });
+
+    const row = await db.channelIntegration.findUniqueOrThrow({
+      where: { id: integration.id },
+      select: { credentials: true },
+    });
+    expect(row.credentials).toBeNull();
+    const [view] = await integrations.getIntegrationView(ORG);
+    expect(view).toMatchObject({
+      hasCredentials: false,
+      needsCredentials: true,
+    });
+  });
+
+  it("an UNREADABLE stored credential is dead: cleared without touching Slack", async () => {
+    // A blob that no longer parses cannot be rotated from, so keeping it
+    // would defer forever. It is also the one dead shape that never reaches
+    // the wire.
+    const integration = await seedIntegration({
+      credentials: await getCrypto().encrypt('{"legacy":"shape"}'),
+      rotatedAt: new Date(),
+    });
+
+    await expect(
+      integrations.withFreshIntegrationCredentials(ORG, "slack", async () => 1),
+    ).rejects.toMatchObject({ code: "UNPROCESSABLE" });
+
+    expect(slackCallsFor("tooling.tokens.rotate")).toHaveLength(0);
+    const row = await db.channelIntegration.findUniqueOrThrow({
+      where: { id: integration.id },
+      select: { credentials: true },
+    });
+    expect(row.credentials).toBeNull();
+  });
+
   it("a stale REFUSAL does not wipe a credential a concurrent rotate already replaced (the fence)", async () => {
     // The clear-for-re-paste is fenced on the ciphertext we READ
     // (updateMany WHERE credentials = storedCiphertext). MUTATION-TESTED: revert
@@ -1109,7 +1297,7 @@ describe.skipIf(!PROOF_URL)(
 
       const result = await integrations.rotateStaleIntegrations();
 
-      expect(result).toEqual({ rotated: 1, failed: 0 });
+      expect(result).toEqual({ rotated: 1, failed: 0, deferred: 0 });
       // The rotate consumed the STORED refresh token…
       const rotateCalls = slackCallsFor("tooling.tokens.rotate");
       expect(rotateCalls).toHaveLength(1);
@@ -1142,7 +1330,7 @@ describe.skipIf(!PROOF_URL)(
 
       const result = await integrations.rotateStaleIntegrations();
 
-      expect(result).toEqual({ rotated: 0, failed: 0 });
+      expect(result).toEqual({ rotated: 0, failed: 0, deferred: 0 });
       expect(slackCallsFor("tooling.tokens.rotate")).toHaveLength(0);
       const after = await db.channelIntegration.findUniqueOrThrow({
         where: { id: integration.id },
@@ -1164,7 +1352,7 @@ describe.skipIf(!PROOF_URL)(
 
       const result = await integrations.rotateStaleIntegrations();
 
-      expect(result).toEqual({ rotated: 0, failed: 1 });
+      expect(result).toEqual({ rotated: 0, failed: 1, deferred: 0 });
       const row = await db.channelIntegration.findUniqueOrThrow({
         where: { id: integration.id },
         select: { credentials: true },
@@ -1175,6 +1363,81 @@ describe.skipIf(!PROOF_URL)(
       expect(view).toMatchObject({
         hasCredentials: false,
         needsCredentials: true,
+      });
+    });
+
+    it("a TRANSIENT sweep refusal defers: the pair stays, and the next pass (lease aged out, Slack healthy) rotates it", async () => {
+      // The sweep is where the old behavior hurt most: it runs hourly whether
+      // or not anyone uses the credential, so one Slack blip on one pass
+      // silently wiped an idle org's pair. Now the row keeps its ciphertext
+      // AND its credentials_rotated_at (so it stays stale-eligible), and the
+      // claim lease is the only thing standing between it and a retry.
+      const integration = await seedIntegration({
+        credentials: await integrationCredentials(12 * 3600),
+        rotatedAt: SEVEN_HOURS_AGO(),
+      });
+      slackHandlers["tooling.tokens.rotate"] = () => ({
+        ok: false,
+        error: "internal_error",
+      });
+      const before = await db.channelIntegration.findUniqueOrThrow({
+        where: { id: integration.id },
+        select: { credentials: true, credentialsRotatedAt: true },
+      });
+
+      expect(await integrations.rotateStaleIntegrations()).toEqual({
+        rotated: 0,
+        failed: 0,
+        deferred: 1,
+      });
+      const kept = await db.channelIntegration.findUniqueOrThrow({
+        where: { id: integration.id },
+        select: { credentials: true, credentialsRotatedAt: true },
+      });
+      expect(kept.credentials).toBe(before.credentials);
+      expect(kept.credentialsRotatedAt).toEqual(before.credentialsRotatedAt);
+      const [view] = await integrations.getIntegrationView(ORG);
+      expect(view).toMatchObject({
+        hasCredentials: true,
+        needsCredentials: false,
+      });
+
+      // The claim lease ages out (a crashed-claimer's window), Slack is back.
+      await db.channelIntegration.update({
+        where: { id: integration.id },
+        data: { rotateClaimedAt: new Date(Date.now() - 11 * 60 * 1000) },
+      });
+      const exp = nowSec() + 12 * 3600;
+      slackHandlers["tooling.tokens.rotate"] = () => ({
+        ok: true,
+        token: "xoxe.access-retried",
+        refresh_token: "xoxe-refresh-retried",
+        team_id: "T111",
+        exp,
+      });
+
+      expect(await integrations.rotateStaleIntegrations()).toEqual({
+        rotated: 1,
+        failed: 0,
+        deferred: 0,
+      });
+      // Both attempts spent the SAME stored refresh half — the deferral
+      // consumed nothing.
+      const rotateCalls = slackCallsFor("tooling.tokens.rotate");
+      expect(rotateCalls).toHaveLength(2);
+      expect(rotateCalls.map((c) => c.form.get("refresh_token"))).toEqual([
+        "xoxe-refresh-stored",
+        "xoxe-refresh-stored",
+      ]);
+      const rotated = await db.channelIntegration.findUniqueOrThrow({
+        where: { id: integration.id },
+      });
+      expect(
+        JSON.parse(await getCrypto().decrypt(rotated.credentials!)),
+      ).toEqual({
+        accessToken: "xoxe.access-retried",
+        refreshToken: "xoxe-refresh-retried",
+        expiresAt: exp,
       });
     });
 
@@ -1198,7 +1461,7 @@ describe.skipIf(!PROOF_URL)(
 
       const result = await integrations.rotateStaleIntegrations();
 
-      expect(result).toEqual({ rotated: 0, failed: 1 });
+      expect(result).toEqual({ rotated: 0, failed: 1, deferred: 0 });
       const row = await db.channelIntegration.findUniqueOrThrow({
         where: { id: integration.id },
       });
@@ -1233,7 +1496,7 @@ describe.skipIf(!PROOF_URL)(
 
       const result = await integrations.rotateStaleIntegrations();
 
-      expect(result).toEqual({ rotated: 0, failed: 1 });
+      expect(result).toEqual({ rotated: 0, failed: 1, deferred: 0 });
       const row = await db.channelIntegration.findUniqueOrThrow({
         where: { id: integration.id },
         select: { credentials: true },
@@ -1365,6 +1628,7 @@ describe.skipIf(!PROOF_URL)(
       expect(await integrations.rotateStaleIntegrations()).toEqual({
         rotated: 0,
         failed: 0,
+        deferred: 0,
       });
       expect(slackCallsFor("tooling.tokens.rotate")).toHaveLength(0);
 
@@ -1376,6 +1640,7 @@ describe.skipIf(!PROOF_URL)(
       expect(await integrations.rotateStaleIntegrations()).toEqual({
         rotated: 1,
         failed: 0,
+        deferred: 0,
       });
       expect(slackCallsFor("tooling.tokens.rotate")).toHaveLength(1);
     });
@@ -4197,7 +4462,10 @@ describe.skipIf(!PROOF_URL)("ingestion — group surfaces", () => {
     // cleanName — the stored name is "Bad\x07Name\x1b". Delete the
     // control-char strip and the raw escape bytes land inside the turn
     // message (a terminal-escape / prompt-surface hazard).
-    expect(turn.message).toBe("BadName: <@UBOT> deploy please");
+    // The bot's own mention DECODES to the agent's name (inbound token
+    // decoding): the model recognizes being addressed instead of seeing an
+    // opaque `<@UBOT>` id.
+    expect(turn.message).toBe("BadName: @[agent grp-mention] deploy please");
     expect(turn.userId).toBe(CTRL_NAME_USER);
     expect(turn.source).toBe("slack");
   });
@@ -4243,6 +4511,98 @@ describe.skipIf(!PROOF_URL)("ingestion — group surfaces", () => {
     expect(followUp.outcome.kind).toBe("turn");
     // Same thread → same conversation, not a second one.
     expect(await db.conversation.count({ where: { agentId } })).toBe(1);
+  });
+
+  it("INBOUND DECODE: a mention of a LINKED teammate becomes their PLATFORM name - never the provider display name", async () => {
+    const { agentId, integrationId, presenceId } =
+      await seedChannelAgent("grp-decode");
+    await linkUser(integrationId, "U222", CTRL_NAME_USER);
+    // The mentioned person is ALSO linked - platform name "BadName" wins
+    // (control chars stripped by the prefix cleaner) over whatever their
+    // Slack profile says. Provider names are attacker-chosen; ours are
+    // governance data - the speaker-prefix rule, applied to mentions.
+    await linkUser(integrationId, "U333", MEMBER);
+    await settleChannel(agentId, integrationId, "C1");
+
+    const result = await dispatch.dispatchSlackEvent({
+      presenceId,
+      identityRef: "UBOT",
+      event: mentionEvent(
+        "U222",
+        "C1",
+        "121.222",
+        "<@UBOT> hand this to <@U333> and post in <#C024BE7LR|general>",
+      ),
+      eventId: "Ev-grp-decode-1",
+    });
+    expect(result.kind).toBe("message");
+
+    const turn = await db.turn.findFirstOrThrow({
+      where: { conversation: { agentId } },
+    });
+    // Bot -> agent name; linked member -> PLATFORM name; channel -> label.
+    // MEMBER's platform user is seeded with name "Member McMember".
+    const member = await db.user.findUniqueOrThrow({
+      where: { id: MEMBER },
+      select: { name: true, email: true },
+    });
+    const expected = member.name || member.email;
+    // User mentions decode to the OUTBOUND grammar @[Name] (round-trip:
+    // the transcript teaches the form the write side resolves); the agent's
+    // own mention decodes the same way, and channels stay #label.
+    expect(turn.message).toBe(
+      `BadName: @[agent grp-decode] hand this to @[${expected}] and post in #general`,
+    );
+  });
+
+  it("INBOUND DECODE: an UNLINKED mention resolves via the provider profile, fail-open on refusal", async () => {
+    const { agentId, integrationId, presenceId } = await seedChannelAgent(
+      "grp-decode-stranger",
+      // The stranger lookup needs the presence's own bot token (linked
+      // mentions and the agent's own id resolve without one - and DO, in
+      // the arm above, where credentials stay null).
+      {
+        presenceCredentials: await getCrypto().encrypt(
+          JSON.stringify({ botToken: "xoxb-decode" }),
+        ),
+      },
+    );
+    await linkUser(integrationId, "U222", CTRL_NAME_USER);
+    await settleChannel(agentId, integrationId, "C1");
+    // users.info answers for the stranger id.
+    slackHandlers["users.info"] = (call) =>
+      call.form.get("user") === "U909STRANGER"
+        ? {
+            ok: true,
+            user: {
+              id: "U909STRANGER",
+              team_id: "T111",
+              name: "dana",
+              profile: { display_name: "Dana Stranger" },
+            },
+          }
+        : { ok: false, error: "user_not_found" };
+
+    await dispatch.dispatchSlackEvent({
+      presenceId,
+      identityRef: "UBOT",
+      event: mentionEvent(
+        "U222",
+        "C1",
+        "131.222",
+        "<@UBOT> ask <@U909STRANGER> and <@U404GONE>",
+      ),
+      eventId: "Ev-grp-decode-2",
+    });
+
+    const turn = await db.turn.findFirstOrThrow({
+      where: { conversation: { agentId } },
+    });
+    // The resolvable stranger decodes; the dead id stays VERBATIM (fail
+    // open per token) - a comprehension gap, never a lost turn.
+    expect(turn.message).toBe(
+      "BadName: @[agent grp-decode-stranger] ask @[Dana Stranger] and <@U404GONE>",
+    );
   });
 
   it("chatter in an UNJOINED thread is ignored without touching the doors", async () => {
@@ -4735,7 +5095,7 @@ describe.skipIf(!PROOF_URL)("presence ownership (§3.17)", () => {
 
   it("the work and prompt feeds serve ONLY the caller's slice", async () => {
     // MUTATION-TESTED: drop the `ownerAdapterId` WHERE from getAdapterWork or
-    // listUnsettledPrompts and the foreign row leaks into this feed.
+    // listUnsettledToolApprovalCards and the foreign row leaks into this feed.
     const one = await seedChannelAgent("own-feed-1");
     const two = await seedChannelAgent("own-feed-2");
     const a = await seedAdapterCaller();
@@ -4781,20 +5141,20 @@ describe.skipIf(!PROOF_URL)("presence ownership (§3.17)", () => {
     const workA = await adapters.getAdapterWork(a.adapterId);
     expect(workA.finished.map((w) => w.turn.id)).toEqual([turnOne]);
 
-    await adapters.claimApprovalPrompt({
+    await adapters.claimToolApprovalCard({
       approvalId: `${P}own-ap-1`,
       agentChannelId: one.presenceId,
       externalThreadId: "D1",
       expiresAt: null,
     });
-    await adapters.claimApprovalPrompt({
+    await adapters.claimToolApprovalCard({
       approvalId: `${P}own-ap-2`,
       agentChannelId: two.presenceId,
       externalThreadId: "D2",
       expiresAt: null,
     });
     expect(
-      (await adapters.listUnsettledPrompts(a.adapterId)).map(
+      (await adapters.listUnsettledToolApprovalCards(a.adapterId)).map(
         (prompt) => prompt.approvalId,
       ),
     ).toEqual([`${P}own-ap-1`]);
@@ -6982,23 +7342,23 @@ describe.skipIf(!PROOF_URL)("approval prompts (restart-safe dedupe)", () => {
       externalThreadId: "D1",
       expiresAt: null,
     };
-    expect(await adapters.claimApprovalPrompt(input)).toEqual({
+    expect(await adapters.claimToolApprovalCard(input)).toEqual({
       claimed: true,
     });
-    expect(await adapters.claimApprovalPrompt(input)).toEqual({
+    expect(await adapters.claimToolApprovalCard(input)).toEqual({
       claimed: false,
     });
   });
 
-  it("stores the gateway's expiresAt at claim time and surfaces it in listUnsettledPrompts", async () => {
+  it("stores the gateway's expiresAt at claim time and surfaces it in listUnsettledToolApprovalCards", async () => {
     // The restart-safe re-arm: a claim records the gateway's REAL deadline so a
     // restarted adapter re-arms the card against it instead of guessing (and
-    // marking a still-live approval timed-out early). listUnsettledPrompts must
+    // marking a still-live approval timed-out early). listUnsettledToolApprovalCards must
     // hand that deadline back.
     const { presenceId } = await seedChannelAgent("prompt-exp");
     const expiresAt = new Date("2026-08-06T18:00:00.000Z");
     expect(
-      await adapters.claimApprovalPrompt({
+      await adapters.claimToolApprovalCard({
         approvalId: "ap-exp",
         agentChannelId: presenceId,
         externalThreadId: "D1",
@@ -7006,14 +7366,16 @@ describe.skipIf(!PROOF_URL)("approval prompts (restart-safe dedupe)", () => {
       }),
     ).toEqual({ claimed: true });
 
-    const stored = await db.channelApprovalPrompt.findUniqueOrThrow({
+    const stored = await db.toolApprovalCard.findUniqueOrThrow({
       where: { approvalId: "ap-exp" },
       select: { expiresAt: true },
     });
     expect(stored.expiresAt).toEqual(expiresAt);
 
     const caller = await seedClaimedCaller();
-    const unsettled = await adapters.listUnsettledPrompts(caller.adapterId);
+    const unsettled = await adapters.listUnsettledToolApprovalCards(
+      caller.adapterId,
+    );
     expect(unsettled).toHaveLength(1);
     expect(unsettled[0]).toMatchObject({
       approvalId: "ap-exp",
@@ -7023,31 +7385,36 @@ describe.skipIf(!PROOF_URL)("approval prompts (restart-safe dedupe)", () => {
 
   it("settle returns the update handle and flips the state; unknown ids answer null", async () => {
     const { presenceId } = await seedChannelAgent("prompt-settle");
-    await adapters.claimApprovalPrompt({
+    await adapters.claimToolApprovalCard({
       approvalId: "ap-settle",
       agentChannelId: presenceId,
       externalThreadId: "D1",
       expiresAt: null,
     });
-    await adapters.recordApprovalPromptMessage("ap-settle", "169.42");
+    await adapters.recordToolApprovalCardMessage("ap-settle", "169.42");
 
-    const settled = await adapters.settleApprovalPrompt("ap-settle", "expired");
+    const settled = await adapters.settleToolApprovalCard(
+      "ap-settle",
+      "expired",
+    );
     expect(settled).toEqual({
       externalMessageRef: "169.42",
       externalThreadId: "D1",
     });
     expect(
       (
-        await db.channelApprovalPrompt.findUniqueOrThrow({
+        await db.toolApprovalCard.findUniqueOrThrow({
           where: { approvalId: "ap-settle" },
         })
       ).state,
     ).toBe("expired");
     const caller = await seedClaimedCaller();
-    expect(await adapters.listUnsettledPrompts(caller.adapterId)).toEqual([]);
+    expect(
+      await adapters.listUnsettledToolApprovalCards(caller.adapterId),
+    ).toEqual([]);
 
     expect(
-      await adapters.settleApprovalPrompt("ap-nope", "decided"),
+      await adapters.settleToolApprovalCard("ap-nope", "decided"),
     ).toBeNull();
   });
 });
@@ -7075,7 +7442,7 @@ describe.skipIf(!PROOF_URL)("decideApprovalFromChannel", () => {
       data: { apiKeyId: key.id },
     });
     await linkUser(seeded.integrationId, "U111", MEMBER);
-    await db.channelApprovalPrompt.create({
+    await db.toolApprovalCard.create({
       data: {
         approvalId: `ap-${suffix}`,
         agentChannelId: seeded.presenceId,
@@ -7126,7 +7493,7 @@ describe.skipIf(!PROOF_URL)("decideApprovalFromChannel", () => {
     // And the prompt settled.
     expect(
       (
-        await db.channelApprovalPrompt.findUniqueOrThrow({
+        await db.toolApprovalCard.findUniqueOrThrow({
           where: { approvalId },
         })
       ).state,
@@ -7165,7 +7532,7 @@ describe.skipIf(!PROOF_URL)("decideApprovalFromChannel", () => {
     expect(result).toEqual({ kind: "already_settled" });
     expect(
       (
-        await db.channelApprovalPrompt.findUniqueOrThrow({
+        await db.toolApprovalCard.findUniqueOrThrow({
           where: { approvalId },
         })
       ).state,

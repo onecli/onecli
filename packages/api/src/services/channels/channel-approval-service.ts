@@ -10,7 +10,7 @@ import {
 import { authorizeChannelUser } from "./channel-ingestion-service";
 import {
   reportApprovalAuth,
-  settleApprovalPrompt,
+  settleToolApprovalCard,
 } from "./channel-adapter-service";
 import { decideApprovalAtGateway } from "./gateway-approvals";
 import { channelProvider } from "./registry";
@@ -125,11 +125,11 @@ export const decideApprovalFromChannel = async (input: {
     };
   }
   if (result.outcome === "not_found" || result.outcome === "already_settled") {
-    await settleApprovalPrompt(input.approvalId, "decided");
+    await settleToolApprovalCard(input.approvalId, "decided");
     return { kind: "already_settled" };
   }
 
-  await settleApprovalPrompt(input.approvalId, "decided");
+  await settleToolApprovalCard(input.approvalId, "decided");
 
   const decidedBy = await db.user.findUnique({
     where: { id: clicker.userId },

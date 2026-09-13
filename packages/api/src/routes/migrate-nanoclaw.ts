@@ -87,6 +87,209 @@ const buildScript = (
   return parts.join("\n");
 };
 
+/**
+ * The in-container secret extractor (plain Node, zero new dependencies).
+ *
+ * Runs INSIDE the user's own v1 `onecli` container via `docker exec -i … node -`,
+ * because everything needed lives there already: the Postgres connection (the
+ * app's own Prisma client + DATABASE_URL), the AES key (env or the key file the
+ * entrypoint generates), and Node itself. Decryption happens on the user's
+ * machine; plaintext leaves it only over HTTPS to the cloud API — the same
+ * trust boundary as typing the secret into the dashboard.
+ *
+ * Tolerant of every v1 schema by design: `findMany()` with no select (columns
+ * like `valueSource` appeared mid-v1), filtering in JS. Skips instead of
+ * failing on rows it cannot carry (1Password-sourced, platform-owned, empty).
+ * Idempotent: names already present in the destination workspace are skipped,
+ * so re-running the script never duplicates. Exit 1 on any real failure so the
+ * shell wrapper can abort the migration BEFORE any config is touched.
+ *
+ * Exported for tests (`node --check` validates the syntax).
+ */
+export const SECRET_EXTRACTOR_JS = String.raw`const { createDecipheriv } = require("node:crypto");
+const { readFileSync, existsSync } = require("node:fs");
+
+// Env reads use bracket notation deliberately: this string runs inside the
+// USER'S v1 container, not this server — dot access would trip the
+// hermetic-env drift guard, which catalogs this server's own env surface.
+const env = process.env;
+const CLOUD_URL = env["MIGRATE_CLOUD_URL"];
+const CLOUD_KEY = env["MIGRATE_CLOUD_KEY"];
+if (!CLOUD_URL || !CLOUD_KEY) {
+  console.error("missing MIGRATE_CLOUD_URL / MIGRATE_CLOUD_KEY");
+  process.exit(1);
+}
+
+// ── Encryption key: env first, then the file the docker entrypoint generates ──
+const KEY_FILE = "/app/data/secret-encryption-key";
+const keyB64 =
+  env["SECRET_ENCRYPTION_KEY"] ||
+  (existsSync(KEY_FILE) ? readFileSync(KEY_FILE, "utf8").trim() : null);
+if (!keyB64) {
+  console.error("no SECRET_ENCRYPTION_KEY found (env or " + KEY_FILE + ")");
+  process.exit(1);
+}
+const key = Buffer.from(keyB64, "base64");
+
+// v1 format (unchanged across all of v1): base64(iv):base64(tag):base64(ct), AES-256-GCM.
+const decrypt = (stored) => {
+  const [iv, tag, ct] = stored.split(":").map((p) => Buffer.from(p, "base64"));
+  const d = createDecipheriv("aes-256-gcm", key, iv, { authTagLength: 16 });
+  d.setAuthTag(tag);
+  return Buffer.concat([d.update(ct), d.final()]).toString("utf8");
+};
+
+// ── Prisma client: resolve the way the app would, across v1's pnpm layouts ──
+const { createRequire } = require("node:module");
+const resolvePrisma = () => {
+  const roots = [
+    "/app/node_modules/.pnpm/node_modules/x.js", // pnpm virtual store (v1 images)
+    "/app/packages/db/node_modules/x.js",
+    "/app/node_modules/x.js",
+  ];
+  for (const root of roots) {
+    try {
+      return createRequire(root)("@prisma/client");
+    } catch {
+      /* try the next layout */
+    }
+  }
+  console.error("could not resolve @prisma/client inside the container");
+  process.exit(1);
+};
+
+const main = async () => {
+  const { PrismaClient } = resolvePrisma();
+  const db = new PrismaClient();
+  // No select: tolerant of every v1 schema (valueSource arrived mid-v1).
+  const rows = await db.secret.findMany();
+  await db.$disconnect();
+
+  const headers = {
+    Authorization: "Bearer " + CLOUD_KEY,
+    "Content-Type": "application/json",
+  };
+
+  // Existing names in the destination: the idempotency guard (the API answers
+  // 201 for duplicate names, so the pre-check is what makes re-runs safe).
+  const listRes = await fetch(CLOUD_URL + "/v1/secrets", { headers });
+  if (!listRes.ok) {
+    console.error("cloud list failed: HTTP " + listRes.status);
+    process.exit(1);
+  }
+  const have = new Set((await listRes.json()).map((s) => s.name));
+
+  let imported = 0;
+  let failed = 0;
+  const skipped = [];
+  for (const r of rows) {
+    if (r.isPlatform) continue; // platform-owned, never the user's to migrate
+    if (r.valueSource === "onepassword" || !r.encryptedValue) {
+      skipped.push(r.name + " (1Password-sourced; re-add after migrating)");
+      continue;
+    }
+    if (have.has(r.name)) {
+      skipped.push(r.name + " (already exists in cloud)");
+      continue;
+    }
+    have.add(r.name); // a same-name row later in the list (org scope) is a dup
+    let value;
+    try {
+      value = decrypt(r.encryptedValue);
+    } catch {
+      skipped.push(r.name + " (could not decrypt)");
+      continue;
+    }
+    // Null fields must be OMITTED: the cloud validator rejects explicit null.
+    const body = { name: r.name, type: r.type, value, hostPattern: r.hostPattern };
+    if (r.pathPattern) body.pathPattern = r.pathPattern;
+    if (r.injectionConfig) body.injectionConfig = r.injectionConfig;
+    const res = await fetch(CLOUD_URL + "/v1/secrets", {
+      method: "POST",
+      headers,
+      body: JSON.stringify(body),
+    });
+    if (res.ok) {
+      imported++;
+    } else {
+      failed++;
+      const err = await res.text().catch(() => "");
+      // Names only — never a secret value.
+      console.error("  failed: " + r.name + " (HTTP " + res.status + ") " + err.slice(0, 120));
+    }
+  }
+
+  console.log("  Secrets migrated: " + imported);
+  for (const s of skipped) console.log("  Skipped: " + s);
+  if (failed > 0) {
+    console.error("  " + failed + " secret(s) failed to import");
+    process.exit(1);
+  }
+};
+
+main().catch((e) => {
+  console.error(String(e && e.message ? e.message : e));
+  process.exit(1);
+});`;
+
+/**
+ * The data step: carry the v1 instance's secrets to cloud BEFORE any config is
+ * touched, by running the extractor above inside the user's `onecli` container.
+ *
+ * Placement is the safety property: on any failure the script aborts while the
+ * user is still fully on v1 — nothing reconfigured, NanoClaw untouched.
+ * A machine with no local OneCLI container (NanoClaw-only installs, already-
+ * migrated re-runs) skips the step and continues.
+ *
+ * The heredoc uses a quoted delimiter ('ONECLI_MIGRATE_EOF') so the shell
+ * expands nothing inside the JS; the two values the extractor needs cross via
+ * `docker exec -e`. `MIGRATE_CLOUD_URL` is the host-reachable API base — for a
+ * local dev cloud, 127.0.0.1 would resolve to the v1 container itself, so
+ * localhost hosts are rewritten to Docker's host alias when one is known.
+ */
+const secretMigrationStep = (): string[] => [
+  "# ── Migrate local secrets to cloud (before any config changes) ──",
+  'V1_CONTAINER=""',
+  "if command -v docker >/dev/null 2>&1; then",
+  "  # The official installs pin the container name; fall back to the image.",
+  "  V1_CONTAINER=$(docker ps --format '{{.Names}}' 2>/dev/null | grep -x \"onecli\" || true)",
+  '  if [ -z "$V1_CONTAINER" ]; then',
+  "    # Fallback: any container running the official image, whatever its tag.",
+  "    V1_CONTAINER=$(docker ps --format '{{.Names}} {{.Image}}' 2>/dev/null | awk '$2 ~ /^ghcr.io\\/onecli\\/onecli(:|$)/ { print $1; exit }' || true)",
+  "  fi",
+  "fi",
+  "",
+  'if [ -n "$V1_CONTAINER" ]; then',
+  '  echo "  Found local OneCLI container: $V1_CONTAINER"',
+  '  echo "  Migrating secrets to cloud..."',
+  "",
+  "  # From inside the v1 container, localhost is the container itself — use",
+  "  # Docker's host alias for a cloud URL that points at this machine.",
+  '  MIGRATE_URL="$ONECLI_URL"',
+  '  case "$MIGRATE_URL" in',
+  "    http://127.0.0.1*|http://localhost*)",
+  `      MIGRATE_URL=$(echo "$MIGRATE_URL" | sed 's|//127.0.0.1|//host.docker.internal|; s|//localhost|//host.docker.internal|')`,
+  "      ;;",
+  "  esac",
+  "",
+  '  if docker exec -i -e MIGRATE_CLOUD_URL="$MIGRATE_URL" -e MIGRATE_CLOUD_KEY="$ONECLI_API_KEY" "$V1_CONTAINER" node - <<\'ONECLI_MIGRATE_EOF\'',
+  SECRET_EXTRACTOR_JS,
+  "ONECLI_MIGRATE_EOF",
+  "  then",
+  '    echo "  Secret migration complete"',
+  "  else",
+  '    echo ""',
+  '    echo "  Secret migration failed — nothing has been changed."',
+  '    echo "  Your local OneCLI and NanoClaw are untouched and still working."',
+  '    echo "  Fix the issue above and re-run this script."',
+  "    exit 1",
+  "  fi",
+  "else",
+  '  echo "  No local OneCLI container found — skipping secret migration."',
+  "fi",
+  "",
+];
+
 const migrationSteps = (): string[] => [
   "",
   "# ── Detect the current api-host before switching ──",
@@ -102,25 +305,7 @@ const migrationSteps = (): string[] => [
   '  echo "  Current api-host: $CURRENT_HOST"',
   "fi",
   "",
-  "# ── Update local OneCLI Docker (if running) ──",
-  'COMPOSE_FILE="$HOME/.onecli/docker-compose.yml"',
-  'if command -v docker >/dev/null 2>&1 && [ -f "$COMPOSE_FILE" ]; then',
-  "  if docker compose -p onecli ps -q 2>/dev/null | grep -q .; then",
-  '    echo "  Updating local OneCLI Docker image..."',
-  '    PULL_ERR=$(docker compose -p onecli -f "$COMPOSE_FILE" pull 2>&1) || echo "  Warning: docker pull failed: $PULL_ERR"',
-  '    echo "  Restarting local OneCLI..."',
-  '    UP_ERR=$(docker compose -p onecli -f "$COMPOSE_FILE" up -d --wait 2>&1) || echo "  Warning: docker restart failed: $UP_ERR"',
-  '    HEALTH_URL="${CURRENT_HOST:-http://127.0.0.1:10254}/v1/health"',
-  "    for i in 1 2 3 4 5 6 7 8 9 10; do",
-  "      sleep 2",
-  '      if curl -fsSL "$HEALTH_URL" >/dev/null 2>&1; then',
-  '        echo "  Local OneCLI is ready"',
-  "        break",
-  "      fi",
-  "    done",
-  "  fi",
-  "fi",
-  "",
+  ...secretMigrationStep(),
   "# ── Ensure latest OneCLI CLI ──",
   'echo "  Updating OneCLI CLI..."',
   'CLI_ERR=$(curl -fsSL https://onecli.sh/cli/install 2>/dev/null | sh 2>&1) || echo "  Warning: CLI update failed: $CLI_ERR"',
@@ -293,6 +478,10 @@ const migrationSteps = (): string[] => [
   'echo "  ╚══════════════════════════════════════╝"',
   'echo ""',
   'echo "  Dashboard: $DASHBOARD_URL$DASH_PREFIX"',
+  'echo ""',
+  'echo "  Migrated LLM keys attach to your agents automatically."',
+  'echo "  Grant other migrated secrets to agents here:"',
+  'echo "  $DASHBOARD_URL$DASH_PREFIX/agents"',
   'echo ""',
   'echo "  Reconnect your app integrations:"',
   'echo "  $DASHBOARD_URL$DASH_PREFIX/connections"',

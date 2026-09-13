@@ -33,6 +33,20 @@ export const queryKeys = {
       [...queryKeys.conversations.all(), "direct", agentId] as const,
     turns: (conversationId: string) =>
       [...queryKeys.conversations.all(), "turns", conversationId] as const,
+    // The scroll-up loader's OLDER windows (turns + their events), keyed by
+    // the live window's first-seen oldest row (the anchor the pages chain
+    // down from) — a remount with a newer anchor starts fresh pages instead
+    // of chaining onto a stale gallery with a gap above it. Kept apart from
+    // the live `turns` key on purpose: the send/settle invalidates target
+    // `turns` exactly, and history pages are immutable — sweeping them on
+    // every message would refetch what cannot change.
+    turnsHistory: (conversationId: string, anchorTurnId: string) =>
+      [
+        ...queryKeys.conversations.all(),
+        "turns-history",
+        conversationId,
+        anchorTurnId,
+      ] as const,
     // No transcript key: the live transcript is the stream's local state, on
     // purpose — a cache entry would invite a second source of truth.
   },
@@ -194,6 +208,8 @@ export const queryKeys = {
   approvals: {
     all: () => ["approvals", ...scope()] as const,
     list: () => [...queryKeys.approvals.all(), "list"] as const,
+    channel: (workspaceId: string) =>
+      [...queryKeys.approvals.all(), "channel", workspaceId] as const,
   },
   crons: {
     all: () => ["crons", ...scope()] as const,
@@ -241,6 +257,9 @@ export const queryKeys = {
         transport ?? "default",
       ] as const,
     org: () => [...queryKeys.channels.all(), "org"] as const,
+    // The agent's one-shot action approvals (the channels page section).
+    contacts: (agentId: string) =>
+      [...queryKeys.channels.all(), "contacts", agentId] as const,
   },
   appBlocklist: {
     all: () => ["appBlocklist", ...scope()] as const,

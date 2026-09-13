@@ -8,15 +8,17 @@ import { Skeleton } from "@onecli/ui/components/skeleton";
 import { MAX_JOINING_FOLLOW_UPS } from "@onecli/api/validations/conversation";
 import { queryKeys } from "@/lib/api/keys";
 import { ApiError } from "@/lib/api/client";
-import { foldTranscript } from "@/lib/chat/transcript";
+import { foldTranscript, mergeEvents } from "@/lib/chat/transcript";
 import {
   activeTurn,
   isJoiningTurn,
+  mergeTurnRows,
   resendableKeylessTurn,
 } from "@/lib/chat/turns";
 import {
   useAbortTurn,
   useDirectConversation,
+  useOlderTurns,
   useSendMessage,
   useTurns,
 } from "@/hooks/use-conversations";
@@ -33,7 +35,7 @@ import { useAgentPageAgent } from "../../_components/agent-page-frame";
 import { EmptyState } from "../../_components/empty-state";
 import { useCreateThenAttachSecret } from "@/hooks/use-create-then-attach-secret";
 import { SecretDialog } from "@/app/(dashboard)/w/[workspaceId]/connections/_components/secret-dialog";
-import type { Turn } from "@/lib/api";
+import type { TurnsPage } from "@/lib/api";
 import { ChatThread } from "./chat-thread";
 import { Composer } from "./composer";
 import { OfflineBanner } from "./offline-banner";
@@ -92,6 +94,54 @@ export const DirectThreadSection = () => {
   const abortTurn = useAbortTurn(conversationId ?? "");
   const uploadAttachment = useUploadAttachment(conversationId ?? "");
 
+  // The live window's ANCHOR: its oldest row + replay floor, latched from the
+  // FIRST window this mount saw and pinned for the conversation's life here.
+  // Two consumers ride it: the stream's bounded replay (connect from
+  // `oldestSeq - 1`, so the server replays the window on screen instead of
+  // the whole history) and the scroll-up loader (pages chain down from the
+  // anchor row). Latched deliberately — the live window slides as messages
+  // land, and a sliding floor must neither tear the stream down nor re-key
+  // the history gallery. Set-during-render (the React "adjust state when a
+  // prop changes" pattern): the re-render commits before any effect runs, so
+  // the stream never connects on a half-latched value.
+  const [latchedAnchor, setLatchedAnchor] = useState<{
+    conversationId: string;
+    oldestTurnId: string;
+    oldestSeq: number | null;
+  } | null>(null);
+  const liveWindow = turnsQuery.data;
+  if (
+    conversationId !== undefined &&
+    liveWindow !== undefined &&
+    latchedAnchor?.conversationId !== conversationId
+  ) {
+    setLatchedAnchor({
+      conversationId,
+      oldestTurnId: liveWindow.turns[0]?.id ?? "",
+      oldestSeq: liveWindow.oldestSeq,
+    });
+  }
+  const anchor =
+    latchedAnchor?.conversationId === conversationId ? latchedAnchor : null;
+
+  // History is fetched only on DEMAND: the infinite query would fetch its
+  // first page the moment it is enabled, so it stays disabled until the
+  // sentinel first fires — a reader who never scrolls up pays nothing.
+  // Reset per conversation (the 404 self-heal mints a fresh thread).
+  const [historyWanted, setHistoryWanted] = useState(false);
+  useEffect(() => {
+    setHistoryWanted(false);
+  }, [conversationId]);
+
+  const older = useOlderTurns(
+    conversationId ?? "",
+    // No older pages to chain when the window came back empty of rows.
+    anchor !== null && anchor.oldestTurnId !== ""
+      ? { oldestTurnId: anchor.oldestTurnId, oldestSeq: anchor.oldestSeq }
+      : undefined,
+    historyWanted,
+  );
+
   const stream = useConversationStream(conversationId, {
     // Turns only: the invalidate must NOT reach the direct-conversation key,
     // whose query is a PUT — a namespace-wide invalidate would re-run the
@@ -102,16 +152,42 @@ export const DirectThreadSection = () => {
         queryKey: queryKeys.conversations.turns(conversationId),
       });
     },
+    // The bounded-replay floor. `undefined` until the first window lands (the
+    // stream WAITS — connecting bare would replay the whole history, the
+    // exact cost this kills); an empty window (or no events) floors at 0.
+    replayFloor:
+      anchor === null
+        ? undefined
+        : anchor.oldestSeq !== null
+          ? Math.max(0, anchor.oldestSeq - 1)
+          : 0,
   });
 
-  const folded = useMemo(
-    () =>
-      new Map(foldTranscript(stream.events).map((turn) => [turn.turnId, turn])),
-    [stream.events],
-  );
+  // Older pages' events fold WITH the stream's: history pages carry the
+  // durable events for their windows, the stream carries everything from the
+  // replay floor up. Seq-keyed dedupe makes the seam idempotent.
+  const olderPages = older.data?.pages;
+  const folded = useMemo(() => {
+    const historyEvents = (olderPages ?? []).flatMap((page) => page.events);
+    const all = mergeEvents(
+      [...historyEvents].sort((a, b) => a.seq - b.seq),
+      stream.events,
+    );
+    return new Map(foldTranscript(all).map((turn) => [turn.turnId, turn]));
+  }, [olderPages, stream.events]);
 
-  const turnsData = turnsQuery.data;
-  const turns = useMemo(() => turnsData ?? [], [turnsData]);
+  // The rows: older pages under the live window, stitched by id (the seam
+  // turn appears in neither twice, and a row a sliding live window dropped
+  // stays because its page holds it).
+  const liveTurns = liveWindow?.turns;
+  const turns = useMemo(
+    () =>
+      mergeTurnRows(
+        (olderPages ?? []).flatMap((page) => page.turns),
+        liveTurns ?? [],
+      ),
+    [olderPages, liveTurns],
+  );
   const active = activeTurn(turns);
 
   // The belt for a turn the stream knows about but the turns list does not:
@@ -126,6 +202,8 @@ export const DirectThreadSection = () => {
   useEffect(() => {
     if (conversationId === undefined) return;
     const known = new Set(turns.map((turn) => turn.id));
+    // Only ids the LIVE stream saw can be chased into the live window; an
+    // old id folded from a history page is already as present as it gets.
     const unseen = [...folded.keys()].filter(
       (id) => !known.has(id) && !chasedTurnIdsRef.current.has(id),
     );
@@ -153,9 +231,9 @@ export const DirectThreadSection = () => {
       onAttached: () => {
         if (conversationId === undefined) return;
         const fresh =
-          qc.getQueryData<Turn[]>(
+          qc.getQueryData<TurnsPage>(
             queryKeys.conversations.turns(conversationId),
-          ) ?? [];
+          )?.turns ?? [];
         const failed = resendableKeylessTurn(fresh);
         if (failed) {
           sendMessage.mutate({ message: failed.message });
@@ -188,7 +266,7 @@ export const DirectThreadSection = () => {
   const capSeenBacklogRef = useRef(false);
   const { reset: resetSend } = sendMessage;
   const parkedCount = useMemo(
-    () => (turnsQuery.data ?? []).filter(isJoiningTurn).length,
+    () => (turnsQuery.data?.turns ?? []).filter(isJoiningTurn).length,
     [turnsQuery.data],
   );
   useEffect(() => {
@@ -231,6 +309,17 @@ export const DirectThreadSection = () => {
       !turns.some((t) => t.id === sendMessage.data.turn.id))
       ? sendMessage.variables
       : undefined;
+
+  // The reveal watchdog (see `transcriptLoading` below): armed once the
+  // conversation is known, fires after 5s so a stream that cannot deliver
+  // its caught-up frame (a buffering proxy) can never strand the skeleton.
+  const [revealFallback, setRevealFallback] = useState(false);
+  useEffect(() => {
+    setRevealFallback(false);
+    if (conversationId === undefined) return;
+    const timer = setTimeout(() => setRevealFallback(true), 5_000);
+    return () => clearTimeout(timer);
+  }, [conversationId]);
 
   // Everything the thread renders sits in the same frame, so the offline
   // banner is written once rather than per branch.
@@ -293,12 +382,22 @@ export const DirectThreadSection = () => {
   // composer waits with the thread rather than accepting a doomed message.
   if (conversationId === undefined) return frame(<ThreadSkeleton />);
 
-  // `connecting` only exists before the first byte and `idle` before the
-  // effect — events are necessarily empty in both, so the two clauses are
-  // the whole condition.
+  // ONE reveal, whole: skeleton until the live window has landed AND the
+  // stream's bounded replay finished (`caughtUp`) — the cure for "user rows
+  // first, answers popping in seconds later". Escapes so the skeleton can
+  // never strand: an empty thread has nothing to catch up to; a stream error
+  // renders its own frame above; and a watchdog reveals after 5s regardless
+  // (a buffering middlebox proxy can delay SSE forever — showing rows then
+  // is strictly better than skeleton forever, and never worse than the old
+  // behavior).
   const transcriptLoading =
-    turnsQuery.isPending &&
-    (stream.status === "connecting" || stream.status === "idle");
+    turnsQuery.isPending ||
+    (!stream.caughtUp &&
+      !revealFallback &&
+      turns.length > 0 &&
+      (stream.status === "connecting" ||
+        stream.status === "idle" ||
+        stream.status === "streaming"));
 
   return frame(
     <>
@@ -312,6 +411,21 @@ export const DirectThreadSection = () => {
           conversationId={conversationId}
           modelsHref={agentSectionPath(pathname, agentId, "models")}
           onConnectModelKey={() => setKeyDialogOpen(true)}
+          // The scroll-up loader: older windows exist while the live window
+          // said hasMore or the gallery's last page did.
+          hasOlder={
+            older.hasNextPage ||
+            (liveWindow?.hasMore === true && older.data === undefined)
+          }
+          loadingOlder={older.isFetching}
+          onLoadOlder={() => {
+            // First fire arms the gallery (enabling fetches page one);
+            // later fires walk further back.
+            if (!historyWanted) setHistoryWanted(true);
+            else if (older.hasNextPage && !older.isFetching) {
+              void older.fetchNextPage();
+            }
+          }}
         />
       )}
 

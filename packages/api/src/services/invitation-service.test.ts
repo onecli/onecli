@@ -125,7 +125,12 @@ vi.mock("@onecli/db", () => ({
   },
 }));
 
-import { acceptInvitation, createInvitation } from "./invitation-service";
+import {
+  acceptInvitation,
+  createInvitation,
+  explainUnavailableInvitation,
+  findAcceptedInvitationOrgForUser,
+} from "./invitation-service";
 import { memberProvisionOps } from "./organization-service";
 
 beforeEach(() => {
@@ -136,9 +141,86 @@ beforeEach(() => {
   state.invitation = null;
   state.memberByEmail = null;
   state.transactionOps = [];
+  state.membership = null;
   hooks.beforeInviteMember.mockClear();
   hooks.beforeInviteMember.mockResolvedValue(undefined);
   hooks.afterMemberJoined.mockClear();
+});
+
+describe("explainUnavailableInvitation", () => {
+  const future = new Date(Date.now() + 60_000);
+  const past = new Date(Date.now() - 60_000);
+
+  it("names each terminal status", async () => {
+    for (const [status, reason] of [
+      ["accepted", "accepted"],
+      ["cancelled", "cancelled"],
+      ["expired", "expired"],
+    ] as const) {
+      state.invitation = { status, expiresAt: future };
+      await expect(explainUnavailableInvitation("tok")).resolves.toBe(reason);
+    }
+  });
+
+  it("treats a pending invitation past its date as expired", async () => {
+    state.invitation = { status: "pending", expiresAt: past };
+    await expect(explainUnavailableInvitation("tok")).resolves.toBe("expired");
+  });
+
+  it("says unknown for a token that does not exist", async () => {
+    state.invitation = null;
+    await expect(explainUnavailableInvitation("tok")).resolves.toBe("unknown");
+  });
+});
+
+describe("findAcceptedInvitationOrgForUser (re-clicked join link)", () => {
+  const accepted = {
+    email: "g@a.com",
+    status: "accepted",
+    organizationId: "org-1",
+  };
+
+  it("returns the org when the accepter re-opens their own used link", async () => {
+    state.invitation = accepted;
+    state.membership = { status: "active" };
+    await expect(
+      findAcceptedInvitationOrgForUser("tok", "user-1", "G@A.com"),
+    ).resolves.toBe("org-1");
+  });
+
+  it("ignores someone else's accepted invitation", async () => {
+    state.invitation = accepted;
+    state.membership = { status: "active" };
+    await expect(
+      findAcceptedInvitationOrgForUser("tok", "user-2", "other@a.com"),
+    ).resolves.toBeNull();
+  });
+
+  it("ignores pending, cancelled, expired and unknown tokens", async () => {
+    state.membership = { status: "active" };
+    for (const status of ["pending", "cancelled", "expired"]) {
+      state.invitation = { ...accepted, status };
+      await expect(
+        findAcceptedInvitationOrgForUser("tok", "user-1", "g@a.com"),
+      ).resolves.toBeNull();
+    }
+    state.invitation = null;
+    await expect(
+      findAcceptedInvitationOrgForUser("tok", "user-1", "g@a.com"),
+    ).resolves.toBeNull();
+  });
+
+  it("returns null once the membership is gone or suspended", async () => {
+    state.invitation = accepted;
+    state.membership = null;
+    await expect(
+      findAcceptedInvitationOrgForUser("tok", "user-1", "g@a.com"),
+    ).resolves.toBeNull();
+    state.membership = { status: "suspended" };
+    await expect(
+      findAcceptedInvitationOrgForUser("tok", "user-1", "g@a.com"),
+    ).resolves.toBeNull();
+  });
 });
 
 describe("createInvitation seat gating (through TeamHooks)", () => {

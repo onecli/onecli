@@ -5,6 +5,7 @@ import { getStripe } from "@onecli/api/ee/billing/stripe";
 import { resolveOrgContext } from "@/lib/actions/resolve-user";
 import type { ResolveOptions } from "@/lib/actions/resolve-user";
 import { resolveSubscriptionPlan } from "@onecli/api/ee/billing/subscription-plan";
+import { findOrgLiveSubscription } from "@onecli/api/ee/billing/plan-switch";
 import { SALES_MANAGED_PRICE_IDS } from "@onecli/api/ee/billing/env";
 import type {
   BillingInterval,
@@ -51,17 +52,40 @@ export async function getSubscriptionStatus(
 
   if (organization.stripeCustomerId) {
     try {
-      const subscriptions = await getStripe().subscriptions.list({
-        customer: organization.stripeCustomerId,
-        limit: 1,
-      });
-
-      // Filter to active or trialing (7-day trial)
-      const activeSub = subscriptions.data.find(
-        (s) => s.status === "active" || s.status === "trialing",
+      // Looks up by org metadata, not just the stored customer: Checkout can
+      // bill a converted trial to a different customer, and listing only the
+      // stored one then reads as "no subscription" and downgrades a paying
+      // org to free on the next page load. See findOrgLiveSubscription.
+      const found = await findOrgLiveSubscription(
+        getStripe(),
+        organization.id,
+        organization.stripeCustomerId,
       );
 
-      if (activeSub) {
+      if (found) {
+        const activeSub = found.subscription;
+
+        // Heal the drifted pointer so every other Stripe read (usage, portal,
+        // plan switch) converges on the customer actually being billed.
+        //
+        // Isolated from the plan write: `stripeCustomerId` is @unique, so if
+        // another org already claims this customer the update throws. That
+        // must not abort the reconcile — the plan we just resolved is correct
+        // and is the whole point of this call. Heal opportunistically, report
+        // the plan regardless.
+        if (found.customerId !== organization.stripeCustomerId) {
+          try {
+            await db.organization.update({
+              where: { id: organization.id },
+              data: { stripeCustomerId: found.customerId },
+            });
+          } catch {
+            // Another org holds this customer id (shared-customer edge, ops
+            // cleanup mid-flight). Leave the pointer; the metadata lookup
+            // above does not depend on it.
+          }
+        }
+
         const { plan, baseItem } = resolveSubscriptionPlan(activeSub);
         status = plan;
 

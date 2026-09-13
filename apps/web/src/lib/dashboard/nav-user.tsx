@@ -8,6 +8,7 @@ import { useAuth } from "@/providers/auth-provider";
 import { useActiveOrg } from "@/lib/dashboard/use-active-org";
 import { Avatar, AvatarFallback } from "@onecli/ui/components/avatar";
 import { Badge } from "@onecli/ui/components/badge";
+import { OrgSwitcherItems } from "@/lib/dashboard/org-switcher-items";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -15,6 +16,10 @@ import {
   DropdownMenuLabel,
   DropdownMenuSeparator,
   DropdownMenuTrigger,
+  DropdownMenuSub,
+  DropdownMenuSubTrigger,
+  DropdownMenuSubContent,
+  DropdownMenuPortal,
 } from "@onecli/ui/components/dropdown-menu";
 import {
   SidebarMenu,
@@ -26,7 +31,7 @@ import {
 export const NavUser = () => {
   const { isMobile } = useSidebar();
   const { user, signOut } = useAuth();
-  const { activeOrg } = useActiveOrg();
+  const { orgs, activeOrg, activeOrgId, setActiveOrgId } = useActiveOrg();
   const [signingOut, setSigningOut] = useState(false);
 
   const displayName = user?.name ?? user?.email ?? "User";
@@ -49,7 +54,7 @@ export const NavUser = () => {
               <Avatar className="size-8">
                 <AvatarFallback className="text-xs">{initials}</AvatarFallback>
               </Avatar>
-              <div className="grid flex-1 text-left text-sm leading-tight">
+              <div className="grid min-w-0 flex-1 text-left text-sm leading-tight">
                 <span className="truncate font-medium">{displayName}</span>
                 <span className="truncate text-xs">{user?.email}</span>
               </div>
@@ -62,39 +67,53 @@ export const NavUser = () => {
             sideOffset={4}
             className="w-(--radix-dropdown-menu-trigger-width) min-w-56 rounded-lg"
           >
+            {activeOrg && (
+              <>
+                {/* The whole organization block is the submenu trigger: it
+                    reads like the old read-only label (eyebrow, name, role)
+                    but the trailing chevron opens the org list. */}
+                <DropdownMenuSub>
+                  <DropdownMenuSubTrigger className="group">
+                    <div className="grid min-w-0 flex-1 gap-1">
+                      <span className="text-muted-foreground group-focus:text-accent-foreground/80 group-data-[state=open]:text-accent-foreground/80 text-xs">
+                        Organization
+                      </span>
+                      <div className="flex min-w-0 items-center gap-2">
+                        <span className="min-w-0 flex-1 truncate text-sm">
+                          {activeOrg.name}
+                        </span>
+                        <Badge
+                          variant="outline"
+                          className="shrink-0 px-1.5 py-0 text-[10px] capitalize"
+                        >
+                          {activeOrg.role}
+                        </Badge>
+                      </div>
+                    </div>
+                  </DropdownMenuSubTrigger>
+                  <DropdownMenuPortal>
+                    <DropdownMenuSubContent className="max-h-(--radix-dropdown-menu-content-available-height) w-64 max-w-[calc(100vw-2rem)] overflow-y-auto rounded-lg">
+                      <OrgSwitcherItems
+                        orgs={orgs}
+                        activeOrgId={activeOrgId}
+                        setActiveOrgId={setActiveOrgId}
+                      />
+                    </DropdownMenuSubContent>
+                  </DropdownMenuPortal>
+                </DropdownMenuSub>
+                <DropdownMenuSeparator />
+              </>
+            )}
             <DropdownMenuLabel className="font-normal">
-              <div className="flex flex-col space-y-1">
-                <p className="text-sm font-medium leading-none">
+              <div className="flex min-w-0 flex-col gap-1">
+                <p className="truncate text-sm leading-none font-medium">
                   {displayName}
                 </p>
-                <p className="text-muted-foreground text-xs leading-none">
+                <p className="text-muted-foreground truncate text-xs leading-none">
                   {user?.email}
                 </p>
               </div>
             </DropdownMenuLabel>
-            {activeOrg && (
-              <>
-                <DropdownMenuSeparator />
-                <DropdownMenuLabel className="font-normal">
-                  <div className="flex flex-col space-y-1">
-                    <span className="text-muted-foreground text-xs">
-                      Organization
-                    </span>
-                    <div className="flex items-center gap-2">
-                      <span className="min-w-0 flex-1 truncate text-sm">
-                        {activeOrg.name}
-                      </span>
-                      <Badge
-                        variant="secondary"
-                        className="shrink-0 px-1.5 py-0 text-[10px] capitalize"
-                      >
-                        {activeOrg.role}
-                      </Badge>
-                    </div>
-                  </div>
-                </DropdownMenuLabel>
-              </>
-            )}
             <DropdownMenuSeparator />
             <DropdownMenuItem asChild>
               <Link href="/account/preferences">

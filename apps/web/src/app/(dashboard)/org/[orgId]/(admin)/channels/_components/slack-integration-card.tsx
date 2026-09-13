@@ -190,8 +190,9 @@ export const SlackIntegrationCard = ({ choice }: SlackIntegrationCardProps) => {
           api.slack.com/apps
           <ExternalLink className="size-3" />
         </a>{" "}
-        → Your App Configuration Tokens, and paste it once. It rotates
-        automatically from then on.
+        → Your App Configuration Tokens and paste the Refresh Token (not the
+        Access Token) right away. Each refresh token works once; OneCLI rotates
+        it automatically from then on.
       </p>
     </form>
   );
@@ -266,9 +267,10 @@ export const SlackIntegrationCard = ({ choice }: SlackIntegrationCardProps) => {
             <>
               {slack.needsCredentials && !mintsViaShared && (
                 <p className="mb-3 rounded-lg border border-amber-500/30 bg-amber-500/10 px-4 py-3 text-sm dark:border-amber-500/40 dark:bg-amber-500/15">
-                  The stored token expired and could not be refreshed. Paste a
-                  fresh App Configuration refresh token to restore one-click
-                  setup.
+                  The stored token could not be refreshed: Slack refused the
+                  rotation. This happens when the token is revoked, or its
+                  refresh token is used by another tool. Generate a new one and
+                  paste it to restore one-click setup.
                 </p>
               )}
               {slack.hasCredentials ? (
