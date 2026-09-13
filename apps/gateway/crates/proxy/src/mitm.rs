@@ -98,7 +98,9 @@ pub async fn mitm(
 
                     // Re-resolve rules from cache on each request so that
                     // secret/rule changes take effect without a reconnect.
-                    let hostname = common::util::strip_port(&host);
+                    // Keep `host` port-inclusive so port-qualified
+                    // hostPatterns can match on re-resolution. See #485.
+                    let hostname = host.as_str();
                     match resolve_rules(
                         &ctx,
                         hostname,
@@ -312,6 +314,10 @@ async fn resolve_rules(
     let organization_id = ctx.organization_id.as_deref().ok_or_else(|| {
         crate::connect::ConnectError::Internal("MITM session missing organization_id".to_string())
     })?;
+    // Provider host rules (app connections, intercept targets) are defined
+    // as bare hostnames with no port, so they need the stripped form even
+    // though cache/DB rule resolution wants `hostname` port-inclusive (#485).
+    let provider_hostname = common::util::strip_port(hostname);
     let resp = connect::resolve_from_cache(
         organization_id,
         workspace_id,
@@ -349,7 +355,7 @@ async fn resolve_rules(
         match engine
             .resolve_app_injection_for_request(
                 &resp.app_connections,
-                hostname,
+                provider_hostname,
                 request_path,
                 connection_id,
                 organization_id,
@@ -416,7 +422,7 @@ async fn resolve_rules(
     // POSTs for app connections (vertex-ai on oauth2.googleapis.com), so a
     // Bearer-shaped secret or vault credential on the same host must not
     // donate the token.
-    let intercept_token = if apps::host_has_intercept_rules(hostname) {
+    let intercept_token = if apps::host_has_intercept_rules(provider_hostname) {
         app_rules
             .iter()
             .find_map(|rule| {

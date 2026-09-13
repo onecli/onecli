@@ -1906,6 +1906,76 @@ fn credential_host_mismatch(
     stored.is_empty() || apps::normalize_host(hostname) != stored
 }
 
+/// Check if a requested hostname matches a secret or policy host pattern.
+///
+/// Supports an exact match, or a single `*` wildcard anywhere in the pattern:
+/// - leading — `*.example.com` matches `api.example.com` (but not the apex
+///   `example.com`),
+/// - mid-string — `s3.*.amazonaws.com` matches `s3.us-east-1.amazonaws.com`
+///   (the region label).
+///
+/// The length guard keeps the prefix and suffix from overlapping, so the `*`
+/// must stand in for at least one character: the apex is still excluded for
+/// `*.example.com`, and a region is still required for `s3.*.amazonaws.com`.
+///
+/// Matching is case-insensitive, since DNS host names are.
+///
+/// NOTE: despite the original intent, this is currently only exercised by
+/// this module's own tests — `policy-engine` has its own separate
+/// `common::util::host_matches`, which does NOT yet have the port-qualified
+/// matching added here for #485. See #485 follow-up: the two matchers have
+/// drifted and enforcement (`policy-engine::evaluate`/`enforce`/`catalog`)
+/// still can't match port-qualified hostPatterns.
+#[cfg(test)]
+pub(crate) fn host_matches(request_host: &str, pattern: &str) -> bool {
+    let (req_host, req_port) = split_host_port(request_host);
+    let (pat_host, pat_port) = split_host_port(pattern);
+
+    // A port-qualified pattern (e.g. `example.internal:3000`) must match
+    // the request's port exactly. A bare-hostname pattern matches any port.
+    // See issue #485.
+    if let Some(pp) = pat_port {
+        if req_port != Some(pp) {
+            return false;
+        }
+    }
+
+    match pat_host.split_once('*') {
+        None => req_host.eq_ignore_ascii_case(pat_host),
+        Some((prefix, suffix)) => {
+            // `get(..)` keeps the slices on char boundaries, so a non-ASCII
+            // host can never panic — it just won't match an ASCII pattern.
+            req_host.len() >= prefix.len() + suffix.len()
+                && req_host
+                    .get(..prefix.len())
+                    .is_some_and(|p| p.eq_ignore_ascii_case(prefix))
+                && req_host
+                    .get(req_host.len() - suffix.len()..)
+                    .is_some_and(|s| s.eq_ignore_ascii_case(suffix))
+        }
+    }
+}
+
+/// Split a `host` or `host:port` string into (host, Some(port)) or
+/// (host, None). Only splits on a trailing numeric port so IPv6 literals
+/// and bare hostnames pass through untouched.
+///
+/// Known limitations (see #485 review discussion):
+/// - An implicit default port (e.g. `http://host/...` implying `:80`) is
+///   not normalized against an explicit `host:80` pattern — they are
+///   treated as distinct today.
+/// - Unbracketed IPv6 literals (e.g. `::1`) are not handled correctly,
+///   since the last `:`-segment will be misread as a port. Bracketed
+///   IPv6 (`[::1]:port`) is unaffected since `rsplit_once(':')` still
+///   finds the real port after the closing bracket.
+#[cfg(test)]
+fn split_host_port(s: &str) -> (&str, Option<&str>) {
+    match s.rsplit_once(':') {
+        Some((h, p)) if !p.is_empty() && p.chars().all(|c| c.is_ascii_digit()) => (h, Some(p)),
+        _ => (s, None),
+    }
+}
+
 // ── Tests ───────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -2115,6 +2185,77 @@ mod tests {
         let cached = cached.expect("should be cached");
         assert!(cached.access_restricted);
         assert_eq!(cached.workspace_id.as_deref(), Some("proj_restricted"));
+    }
+
+    // ── host_matches ────────────────────────────────────────────────────
+    #[test]
+    fn host_exact_match() {
+        assert!(host_matches("api.anthropic.com", "api.anthropic.com"));
+        assert!(!host_matches("api.anthropic.com", "other.com"));
+    }
+    #[test]
+    fn host_matches_port_qualified_pattern_requires_matching_port() {
+        assert!(host_matches(
+            "example.internal:3000",
+            "example.internal:3000"
+        ));
+        assert!(!host_matches(
+            "example.internal:3200",
+            "example.internal:3000"
+        ));
+    }
+    #[test]
+    fn host_matches_bare_pattern_matches_any_port() {
+        assert!(host_matches("example.internal:3000", "example.internal"));
+        assert!(host_matches("example.internal:3200", "example.internal"));
+        assert!(host_matches("example.internal", "example.internal"));
+    }
+    #[test]
+    fn host_wildcard_match() {
+        assert!(host_matches("api.example.com", "*.example.com"));
+        assert!(host_matches("sub.example.com", "*.example.com"));
+        assert!(!host_matches("example.com", "*.example.com"));
+        assert!(!host_matches("api.other.com", "*.example.com"));
+    }
+
+    #[test]
+    fn host_wildcard_no_match_without_dot() {
+        assert!(!host_matches("notexample.com", "*.example.com"));
+    }
+
+    #[test]
+    fn host_midstring_wildcard() {
+        // Mid-string wildcard: the region label in AWS regional endpoints.
+        assert!(host_matches(
+            "s3.us-east-1.amazonaws.com",
+            "s3.*.amazonaws.com"
+        ));
+        assert!(host_matches(
+            "lambda.eu-west-1.amazonaws.com",
+            "lambda.*.amazonaws.com"
+        ));
+        // Wrong service prefix, or the apex with no region label, must not match.
+        assert!(!host_matches(
+            "ec2.us-east-1.amazonaws.com",
+            "s3.*.amazonaws.com"
+        ));
+        assert!(!host_matches("s3.amazonaws.com", "s3.*.amazonaws.com"));
+        // Exact patterns (no wildcard) still match only themselves.
+        assert!(host_matches("iam.amazonaws.com", "iam.amazonaws.com"));
+        assert!(!host_matches("s3.amazonaws.com", "iam.amazonaws.com"));
+    }
+
+    #[test]
+    fn host_matching_is_case_insensitive() {
+        // DNS host names are case-insensitive; a mixed-case CONNECT authority
+        // must still match a lowercase rule (exact, leading-*, and mid-string).
+        assert!(host_matches("API.GitHub.com", "api.github.com"));
+        assert!(host_matches("Api.Example.com", "*.example.com"));
+        assert!(host_matches(
+            "S3.US-EAST-1.AMAZONAWS.COM",
+            "s3.*.amazonaws.com"
+        ));
+        assert!(!host_matches("api.evil.com", "api.github.com"));
     }
 
     // ── credential_host_mismatch ─────────────────────────────────────────
