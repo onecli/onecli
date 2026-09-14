@@ -939,6 +939,10 @@ pub async fn forward_request(
                 proxy_ctx.agent_name.as_deref(),
                 proxy_ctx.workspace_id.as_deref(),
             ) {
+                // A failed transform (body over the buffer limit, or a read
+                // error) has already consumed the stream, so there is nothing
+                // left to forward. Fail the request, as the finalizers below do,
+                // rather than send upstream a different, empty one.
                 super::transforms::github_commit_trailer::try_inject_trailer(
                     host,
                     &method,
@@ -948,10 +952,7 @@ pub async fn forward_request(
                     workspace_id,
                 )
                 .await
-                .unwrap_or_else(|e| {
-                    tracing::warn!(error = ?e, "body transform failed, forwarding empty body");
-                    reqwest::Body::from(vec![])
-                })
+                .context("applying GitHub commit body transform")?
             } else {
                 forward_body
             }
@@ -1902,6 +1903,35 @@ mod tests {
         addr
     }
 
+    /// An upstream that records the head of every request it receives and
+    /// answers each with `201 Created`. What a request that must never be
+    /// forwarded — not even as a substitute — is checked against.
+    fn recording_upstream() -> (std::net::SocketAddr, Arc<std::sync::Mutex<Vec<String>>>) {
+        use std::io::{Read, Write};
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind recording upstream");
+        let addr = listener.local_addr().expect("local addr");
+        let received = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let log = Arc::clone(&received);
+
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { break };
+                let mut buf = [0u8; 2048];
+                let n = stream.read(&mut buf).unwrap_or(0);
+                log.lock()
+                    .expect("upstream log")
+                    .push(String::from_utf8_lossy(&buf[..n]).into_owned());
+                let _ = stream.write_all(
+                    b"HTTP/1.1 201 Created\r\ncontent-type: application/json\r\ncontent-length: 2\r\n\r\n{}",
+                );
+                let _ = stream.flush();
+            }
+        });
+
+        (addr, received)
+    }
+
     /// Uncredentialed, unrestricted rules: no injections (so the request is
     /// unmanaged traffic), no budget bindings, no session policy. Keeps the
     /// test on the plain forwarding path.
@@ -1929,43 +1959,64 @@ mod tests {
     async fn gateway_serving_one_request(
         upstream_addr: std::net::SocketAddr,
     ) -> std::net::SocketAddr {
+        let (gateway_addr, _served) = gateway_serving_one_request_as(
+            upstream_addr.to_string(),
+            reqwest::Client::builder()
+                .redirect(reqwest::redirect::Policy::none())
+                .build()
+                .expect("client"),
+            permissive_rules,
+            || ProxyContext {
+                workspace_id: None,
+                organization_id: None,
+                agent_id: None,
+                agent_name: None,
+                agent_identifier: None,
+                agent_token: "test-token".to_string(),
+            },
+        )
+        .await;
+        gateway_addr
+    }
+
+    /// [`gateway_serving_one_request`] with the forward target, upstream client,
+    /// rules and caller identity chosen by the test. Also returns the served
+    /// connection, which ends with the error `forward_request` returned, if any.
+    async fn gateway_serving_one_request_as(
+        host: String,
+        http_client: reqwest::Client,
+        rules: fn() -> ResolvedRules,
+        proxy_ctx: fn() -> ProxyContext,
+    ) -> (
+        std::net::SocketAddr,
+        tokio::task::JoinHandle<std::result::Result<(), hyper::Error>>,
+    ) {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .expect("bind gateway");
         let gateway_addr = listener.local_addr().expect("local addr");
 
-        tokio::spawn(async move {
+        let served = tokio::spawn(async move {
             let (stream, _) = listener.accept().await.expect("accept client");
             let io = hyper_util::rt::TokioIo::new(stream);
-            let host = upstream_addr.to_string();
 
             let service = hyper::service::service_fn(move |req: Request<Incoming>| {
                 let host = host.clone();
+                let http_client = http_client.clone();
                 async move {
                     let cache = cache::in_memory();
                     let approvals = approval::in_memory();
                     let engine = crate::connect::PolicyEngine::test_stub();
-                    let proxy_ctx = ProxyContext {
-                        workspace_id: None,
-                        organization_id: None,
-                        agent_id: None,
-                        agent_name: None,
-                        agent_identifier: None,
-                        agent_token: "test-token".to_string(),
-                    };
 
                     forward_request(
                         req,
                         &host,
                         &host,
                         "http",
-                        reqwest::Client::builder()
-                            .redirect(reqwest::redirect::Policy::none())
-                            .build()
-                            .expect("client"),
-                        &permissive_rules(),
+                        http_client,
+                        &rules(),
                         &*cache,
-                        &proxy_ctx,
+                        &proxy_ctx(),
                         &approvals,
                         &engine,
                     )
@@ -1973,12 +2024,12 @@ mod tests {
                 }
             });
 
-            let _ = hyper::server::conn::http1::Builder::new()
+            hyper::server::conn::http1::Builder::new()
                 .serve_connection(io, service)
-                .await;
+                .await
         });
 
-        gateway_addr
+        (gateway_addr, served)
     }
 
     /// Pin the process-wide header deadline to 1s before anything reads it.
@@ -2095,6 +2146,92 @@ mod tests {
             started.elapsed() > Duration::from_secs(2),
             "the body genuinely outlived the 1s header bound (took {:?})",
             started.elapsed(),
+        );
+    }
+
+    // ── GitHub commit body transform failure ─────────────────────────────
+
+    /// A commit whose body the GitHub trailer transform cannot buffer — here,
+    /// one past the 10 MiB `buffer_body` limit — must fail at the gateway. The
+    /// transform has already consumed the stream by then, so the only request
+    /// left to send upstream is a different, empty one; nothing may be sent.
+    #[tokio::test]
+    async fn failed_commit_body_transform_is_not_forwarded_as_an_empty_body() {
+        pin_test_header_timeout();
+        let (upstream_addr, received) = recording_upstream();
+
+        // The transform matches the real GitHub hostname, so route that name to
+        // the local upstream rather than loosening the match.
+        let (gateway_addr, served) = gateway_serving_one_request_as(
+            format!("api.github.com:{}", upstream_addr.port()),
+            reqwest::Client::builder()
+                .redirect(reqwest::redirect::Policy::none())
+                .no_proxy()
+                .resolve("api.github.com", upstream_addr)
+                .build()
+                .expect("client"),
+            || ResolvedRules {
+                body_transform: Some(apps::BodyTransform::GitHubCommitTrailer),
+                ..permissive_rules()
+            },
+            // The transform engages only for an identified agent in a workspace.
+            || ProxyContext {
+                workspace_id: Some("ws_test".to_string()),
+                organization_id: None,
+                agent_id: None,
+                agent_name: Some("deploy-bot".to_string()),
+                agent_identifier: None,
+                agent_token: "test-token".to_string(),
+            },
+        )
+        .await;
+
+        // A commit-creating contents PUT whose payload is just over the limit.
+        let body = format!(
+            r#"{{"message":"Add artifact","content":"{}"}}"#,
+            "A".repeat(10 * 1024 * 1024)
+        );
+        let sent = tokio::time::timeout(
+            Duration::from_secs(30),
+            reqwest::Client::new()
+                .put(format!(
+                    "http://{gateway_addr}/repos/o/r/contents/artifact.bin"
+                ))
+                .body(body)
+                .send(),
+        )
+        .await
+        .expect("gateway answered instead of hanging");
+
+        // 1. Nothing reached the upstream, least of all an empty stand-in.
+        let received = received.lock().expect("upstream log").clone();
+        assert!(
+            received.is_empty(),
+            "a failed body transform must not be forwarded; upstream received: {received:?}",
+        );
+
+        // 2. The client got a failure, not the upstream's 201.
+        assert!(
+            sent.is_err(),
+            "the client must not receive a forwarded response, got {:?}",
+            sent.as_ref().map(|resp| resp.status()),
+        );
+
+        // 3. The failure is the transform's body limit, not a routing accident.
+        let err = tokio::time::timeout(Duration::from_secs(10), served)
+            .await
+            .expect("gateway connection finished")
+            .expect("gateway task")
+            .expect_err("forward_request must fail");
+        let chain: Vec<String> =
+            std::iter::successors(Some(&err as &(dyn std::error::Error + 'static)), |e| {
+                e.source()
+            })
+            .map(ToString::to_string)
+            .collect();
+        assert!(
+            chain.iter().any(|m| m.contains("exceeds")),
+            "expected the body-limit error, got: {chain:?}",
         );
     }
 }
