@@ -72,6 +72,7 @@ import { firefliesPermissions } from "./fireflies";
 import { zohoCrmPermissions } from "./zoho-crm";
 import { snowflakePermissions } from "./snowflake";
 import { stripePermissions } from "./stripe";
+import { serplyPermissions } from "./serply";
 
 const permissionRegistry = new Map<string, AppPermissionDefinition>();
 
@@ -146,3 +147,4 @@ register(firefliesPermissions);
 register(zohoCrmPermissions);
 register(snowflakePermissions);
 register(stripePermissions);
+register(serplyPermissions);
