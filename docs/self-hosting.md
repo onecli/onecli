@@ -186,6 +186,10 @@ and for tunnel access.
 published ports bind on. The installers detect and persist it; it never
 shapes a URL.
 
+PostgreSQL is separate: it binds to `127.0.0.1` by default even when other
+OneCLI ports bind to another interface. Set `ONECLI_POSTGRES_BIND_HOST` only
+when direct database access from another machine or container is required.
+
 ### Scenarios
 
 | Scenario                                              | What to set                                                                                                                                |
