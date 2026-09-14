@@ -5,6 +5,16 @@ import type {
   RoleResolver,
   PolicyValidator,
   RuleActionGate,
+  CryptoService,
+  SshCaSigner,
+  EventBus,
+  AttachmentBlobStore,
+  OAuthOrgHandlers,
+  WorkspaceAccessChecker,
+  SessionEnforcer,
+  SessionThrottle,
+  ResourceHooks,
+  ConnectionHooks,
 } from "./providers";
 import type { ApiEnv } from "./types";
 import {
@@ -14,6 +24,17 @@ import {
   initRoleResolver,
   initPolicyValidator,
   initRuleActionGate,
+  initCrypto,
+  initSshCa,
+  initEventBus,
+  initAttachmentStore,
+  initOAuthOrg,
+  initStrictApiKeyAuth,
+  initWorkspaceAccessChecker,
+  initSessionEnforcer,
+  initSessionThrottle,
+  initResourceHooks,
+  initConnectionHooks,
 } from "./providers";
 import { ensureEditionDefaults } from "./edition-defaults";
 import { registerEeRoutes } from "./ee";
@@ -115,6 +136,17 @@ export interface CreateApiAppOptions {
   /** Override of the edition default (cloud: plan-gated rule actions;
    * onprem: allow-all). */
   ruleActionGate?: RuleActionGate;
+  resourceHooks?: ResourceHooks;
+  connectionHooks?: ConnectionHooks;
+  crypto?: CryptoService;
+  sshCa?: SshCaSigner;
+  eventBus?: EventBus;
+  attachmentStore?: AttachmentBlobStore;
+  oauthOrg?: OAuthOrgHandlers;
+  strictApiKeyAuth?: boolean;
+  workspaceAccessChecker?: WorkspaceAccessChecker;
+  sessionEnforcer?: SessionEnforcer;
+  sessionThrottle?: SessionThrottle;
   sessionHooks?: Partial<SessionHooks>;
   version?: string;
 }
@@ -131,6 +163,19 @@ export const createApiApp = (
   if (options?.policyValidator) initPolicyValidator(options.policyValidator);
   if (options?.ruleActionGate) initRuleActionGate(options.ruleActionGate);
   if (options?.sessionHooks) initSessionHooks(options.sessionHooks);
+  if (options?.crypto) initCrypto(options.crypto);
+  if (options?.sshCa) initSshCa(options.sshCa);
+  if (options?.eventBus) initEventBus(options.eventBus);
+  if (options?.attachmentStore) initAttachmentStore(options.attachmentStore);
+  if (options?.oauthOrg) initOAuthOrg(options.oauthOrg);
+  if (options?.strictApiKeyAuth !== undefined)
+    initStrictApiKeyAuth(options.strictApiKeyAuth);
+  if (options?.workspaceAccessChecker)
+    initWorkspaceAccessChecker(options.workspaceAccessChecker);
+  if (options?.sessionEnforcer) initSessionEnforcer(options.sessionEnforcer);
+  if (options?.sessionThrottle) initSessionThrottle(options.sessionThrottle);
+  if (options?.resourceHooks) initResourceHooks(options.resourceHooks);
+  if (options?.connectionHooks) initConnectionHooks(options.connectionHooks);
 
   const app = new Hono<ApiEnv>().basePath("/v1");
   app.onError(errorHandler);

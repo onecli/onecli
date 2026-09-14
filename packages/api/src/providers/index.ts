@@ -53,6 +53,7 @@ export {
   initResourceHooks,
   type ConnectionHooks,
   getConnectionHooks,
+  initConnectionHooks,
   type PolicyValidator,
   initPolicyValidator,
   getPolicyValidator,
