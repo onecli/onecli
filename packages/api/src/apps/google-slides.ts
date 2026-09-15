@@ -17,7 +17,7 @@ export const googleSlides: AppDefinition = {
       "email",
       "profile",
       "https://www.googleapis.com/auth/drive.readonly",
-      "https://www.googleapis.com/auth/drive.file",
+      "https://www.googleapis.com/auth/presentations",
     ],
     permissions: [
       {
@@ -27,10 +27,9 @@ export const googleSlides: AppDefinition = {
         access: "read",
       },
       {
-        scope: "https://www.googleapis.com/auth/drive.file",
-        name: "Manage app presentations",
-        description:
-          "Create and edit presentations opened or created by OneCLI",
+        scope: "https://www.googleapis.com/auth/presentations",
+        name: "Edit presentations",
+        description: "Create and edit all your Google Slides presentations",
         access: "write",
       },
       {
