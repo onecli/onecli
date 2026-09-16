@@ -461,6 +461,10 @@ export const createRunner = ({
           env: {
             ...item.payload.env,
             ...noProxyForRunner(config.advertisedHost, item.payload.env),
+            // Operator-level extras (e.g. ANTHROPIC_BASE_URL for an org LLM
+            // proxy) — after the payload so the operator wins on conflict,
+            // before the control-channel variables so those stay untouchable.
+            ...config.sandboxExtraEnv,
             ...(item.payload.model && { AGENT_MODEL: item.payload.model }),
             ...(item.payload.effort && { AGENT_EFFORT: item.payload.effort }),
             ...(item.payload.harness && {
