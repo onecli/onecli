@@ -60,6 +60,7 @@ import { fireflies } from "./fireflies";
 import { zohoCrm } from "./zoho-crm";
 import { snowflake } from "./snowflake";
 import { stripe } from "./stripe";
+import { serply } from "./serply";
 
 const staticApps: AppDefinition[] = [
   gmail,
@@ -120,6 +121,7 @@ const staticApps: AppDefinition[] = [
   zohoCrm,
   snowflake,
   stripe,
+  serply,
 ];
 
 export const getApps = (): AppDefinition[] => [...staticApps];
