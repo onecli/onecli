@@ -700,6 +700,53 @@ mod tests {
     }
 
     #[test]
+    fn gitlab_current_user_and_global_issues_are_read_only() {
+        assert!(matches(
+            "gitlab",
+            &["get_current_user"],
+            "gitlab.com",
+            "GET",
+            "/api/v4/user"
+        ));
+        assert!(!matches(
+            "gitlab",
+            &["get_current_user"],
+            "gitlab.com",
+            "POST",
+            "/api/v4/user"
+        ));
+
+        assert!(matches(
+            "gitlab",
+            &["list_issues"],
+            "gitlab.com",
+            "GET",
+            "/api/v4/issues"
+        ));
+        assert!(matches(
+            "gitlab",
+            &["list_issues"],
+            "gitlab.com",
+            "GET",
+            "/api/v4/projects/42/issues"
+        ));
+        assert!(!matches(
+            "gitlab",
+            &["list_issues"],
+            "gitlab.com",
+            "POST",
+            "/api/v4/issues"
+        ));
+        assert!(!matches(
+            "gitlab",
+            &["list_issues"],
+            "gitlab.com",
+            "GET",
+            "/api/v4/user"
+        ));
+    }
+
+    #[test]
     fn update_issue_matches_patch_on_one_issue_and_nothing_wider() {
         // update_issue = PATCH api.github.com /repos/*/*/issues/* — the
         // close/reopen/edit surface (issue #1029's blocked PATCH /issues).

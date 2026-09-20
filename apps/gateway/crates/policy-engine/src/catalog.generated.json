@@ -2482,6 +2482,17 @@
         "DELETE"
       ]
     },
+    "get_current_user": {
+      "hosts": [
+        "gitlab.com"
+      ],
+      "paths": [
+        "/api/v4/user"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
     "get_issue": {
       "hosts": [
         "gitlab.com"
@@ -2531,7 +2542,8 @@
         "gitlab.com"
       ],
       "paths": [
-        "/api/v4/projects/*/issues"
+        "/api/v4/projects/*/issues",
+        "/api/v4/issues"
       ],
       "methods": [
         "GET"
