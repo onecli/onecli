@@ -131,6 +131,38 @@ describe("output tailing", () => {
     expect((await tasks.poll())[0]?.outputDelta).toBeUndefined();
   });
 
+  it("a character split across polls is delivered whole, with nothing skipped", async () => {
+    const { dir, tasks } = rig();
+    statusFile(dir, "t1");
+    const check = Buffer.from("✅", "utf8"); // 3 bytes
+    // The writer is caught mid-character: only the first two bytes landed.
+    writeFileSync(
+      join(dir, "t1.output"),
+      Buffer.concat([Buffer.from("build "), check.subarray(0, 2)]),
+    );
+    const first = (await tasks.poll())[0]?.outputDelta ?? "";
+    writeFileSync(
+      join(dir, "t1.output"),
+      Buffer.concat([Buffer.from("build "), check, Buffer.from(" done\n")]),
+    );
+    const second = (await tasks.poll())[0]?.outputDelta ?? "";
+    expect(first + second).toBe("build ✅ done\n");
+  });
+
+  it("an invalid byte does not advance the offset past unread output", async () => {
+    const { dir, tasks } = rig();
+    statusFile(dir, "t1");
+    // Latin-1 é (0xE9) decodes to U+FFFD, which is 3 bytes re-encoded.
+    const latin1 = Buffer.from([0x63, 0x61, 0x66, 0xe9, 0x0a]);
+    writeFileSync(join(dir, "t1.output"), latin1);
+    expect((await tasks.poll())[0]?.outputDelta).toBe("caf\uFFFD\n");
+    writeFileSync(
+      join(dir, "t1.output"),
+      Buffer.concat([latin1, Buffer.from("next line\n")]),
+    );
+    expect((await tasks.poll())[0]?.outputDelta).toBe("next line\n");
+  });
+
   it("a runaway backlog is skipped ahead with a distinctive gap marker", async () => {
     const { dir, tasks } = rig();
     statusFile(dir, "t1");
