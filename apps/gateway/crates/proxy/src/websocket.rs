@@ -24,6 +24,7 @@ use policy::PolicyDecision;
 
 use super::hooks;
 use super::mitm::ResolvedRules;
+use super::resolve;
 use super::response;
 use context::ProxyContext;
 
@@ -355,7 +356,13 @@ async fn connect_upstream_tls(
     port: u16,
     connector: &TlsConnector,
 ) -> Result<TokioIo<tokio_rustls::client::TlsStream<TcpStream>>> {
-    let tcp = TcpStream::connect((hostname, port))
+    // Resolved here rather than inside `TcpStream::connect`, which would go
+    // back through libc and its all-or-nothing A/AAAA validation (#424).
+    let addrs = resolve::upstream_addrs(hostname, port)
+        .await
+        .context("resolving upstream")?;
+
+    let tcp = TcpStream::connect(&addrs[..])
         .await
         .context("TCP connect to upstream")?;
 

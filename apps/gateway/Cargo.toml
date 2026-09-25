@@ -65,6 +65,7 @@ dashmap = "6"
 form_urlencoded = "1"
 futures-util = "0.3"
 hex = "0.4"
+hickory-resolver = "0.26"
 http-body = "1"
 http-body-util = "0.1"
 hyper = { version = "1", features = ["http1", "server", "client"] }

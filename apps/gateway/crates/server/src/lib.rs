@@ -62,12 +62,16 @@ pub struct GatewayServer {
 ///
 /// - Redirects are disabled so 3xx responses are forwarded to the client as-is.
 /// - `accept_invalid_certs` skips TLS certificate validation for upstream connections.
+/// - DNS goes through [`proxy::resolve`] rather than `getaddrinfo`, so one
+///   address family failing to resolve does not cost us the other.
 fn build_http_client(accept_invalid_certs: bool) -> reqwest::Client {
-    reqwest::Client::builder()
+    let mut builder = reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
-        .danger_accept_invalid_certs(accept_invalid_certs)
-        .build()
-        .expect("build HTTP client")
+        .danger_accept_invalid_certs(accept_invalid_certs);
+    if let Some(resolver) = proxy::resolve::shared() {
+        builder = builder.dns_resolver(Arc::new(resolver.clone()));
+    }
+    builder.build().expect("build HTTP client")
 }
 
 /// Accepts any server certificate, for the hosts an operator has explicitly

@@ -30,6 +30,7 @@ policy-engine = { path = "../policy-engine" }
 shutdown = { path = "../shutdown" }
 summary = { path = "../summary" }
 telemetry = { path = "../telemetry" }
+hickory-resolver = { workspace = true }
 http-body-util = { workspace = true }
 hyper = { workspace = true }
 hyper-util = { workspace = true }
