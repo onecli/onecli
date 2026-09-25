@@ -293,8 +293,10 @@ export const createProcessManager = (
       .forEach((entry) => processes.delete(entry.ref));
   };
 
-  const onOutput = (entry: ProcessEntry, chunk: Buffer): void => {
-    const text = stripNul(chunk.toString("utf8"));
+  const onOutput = (entry: ProcessEntry, chunk: Buffer | string): void => {
+    const text = stripNul(
+      typeof chunk === "string" ? chunk : chunk.toString("utf8"),
+    );
     if (!text) return;
     entry.lastOutputAt = now();
     entry.tail = (entry.tail + text).slice(-TAIL_BUFFER_CHARS);
@@ -475,8 +477,13 @@ export const createProcessManager = (
       entry.child = child;
       processes.set(ref, entry);
 
-      child.stdout?.on("data", (chunk: Buffer) => onOutput(entry, chunk));
-      child.stderr?.on("data", (chunk: Buffer) => onOutput(entry, chunk));
+      // Decode per STREAM, not per chunk: setEncoding keeps a StringDecoder
+      // that holds a multibyte character split across pipe reads until its
+      // remaining bytes arrive, so neither half decodes to U+FFFD.
+      child.stdout?.setEncoding("utf8");
+      child.stderr?.setEncoding("utf8");
+      child.stdout?.on("data", (chunk: string) => onOutput(entry, chunk));
+      child.stderr?.on("data", (chunk: string) => onOutput(entry, chunk));
       // `exit` records the outcome (may fire before stdio drains); `close`
       // finalizes — stdio has flushed, so the terminal frame carries the
       // complete tail.
