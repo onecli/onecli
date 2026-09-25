@@ -10,6 +10,7 @@
 //! - [`websocket`]: the upgrade leg, credential-injected and piped
 //! - [`hooks`]: the licensed pre/post-forward extension points
 //! - [`finalizers`] / [`transforms`]: request signing and body transforms
+//! - [`resolve`]: upstream DNS, per address family
 //! - [`response`]: pre-built gateway responses
 pub mod body;
 pub mod connect;
@@ -18,6 +19,7 @@ pub mod forward;
 pub mod hints;
 pub mod hooks;
 pub mod mitm;
+pub mod resolve;
 pub mod response;
 pub mod transforms;
 pub mod websocket;
