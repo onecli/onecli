@@ -57,7 +57,11 @@ const createRecordingTransport = (
 
 const makeBackend = (
   responses: Record<string, unknown> = {},
-  overrides: { networkInternal?: boolean; extraHosts?: string[] } = {},
+  overrides: {
+    networkInternal?: boolean;
+    extraHosts?: string[];
+    unsafeSeccomp?: boolean;
+  } = {},
 ) => {
   const { transport, calls } = createRecordingTransport(responses);
   const backend: SandboxBackend = createDockerBackend({
@@ -67,6 +71,9 @@ const makeBackend = (
     networkInternal: overrides.networkInternal ?? true,
     socketPath: "/var/run/docker.sock",
     ...(overrides.extraHosts && { extraHosts: overrides.extraHosts }),
+    ...(overrides.unsafeSeccomp !== undefined && {
+      unsafeSeccomp: overrides.unsafeSeccomp,
+    }),
     transport,
   });
   return { backend, calls };
@@ -215,13 +222,14 @@ describe("createSandbox", () => {
     ).toEqual(["ALL"]);
   });
 
-  it("never weakens the daemon's default seccomp profile (the shared-kernel userns gate)", async () => {
+  it("never weakens the daemon's default seccomp profile by default (the shared-kernel userns gate)", async () => {
     // The agent image ships podman; on this SHARED kernel the default seccomp
     // profile is what actually blocks the `unshare`/`clone` namespace syscalls
     // rootless containers need (CapDrop:ALL + no-new-privileges disarm the
     // capability and setuid paths, but seccomp is the syscall gate). A
     // `seccomp=unconfined` SecurityOpt here would silently re-open rootless
-    // podman on the shared kernel — assert no SecurityOpt touches seccomp.
+    // podman on the shared kernel — assert no SecurityOpt touches seccomp
+    // UNLESS the explicit, documented unsafeSeccomp escape hatch is set.
     const { backend, calls } = makeBackend({ "/networks?": [] });
     await backend.prepare();
     await backend.createSandbox(spec);
@@ -234,6 +242,23 @@ describe("createSandbox", () => {
     ).HostConfig.SecurityOpt;
     expect(securityOpt).toEqual(["no-new-privileges"]);
     expect(securityOpt.some((opt) => opt.includes("seccomp"))).toBe(false);
+  });
+
+  it("unconfines seccomp ONLY when unsafeSeccomp is explicitly opted into", async () => {
+    const { backend, calls } = makeBackend(
+      { "/networks?": [] },
+      { unsafeSeccomp: true },
+    );
+    await backend.prepare();
+    await backend.createSandbox(spec);
+
+    const create = calls.find((call) =>
+      call.path.includes("/containers/create"),
+    );
+    const securityOpt = (
+      create?.body as { HostConfig: { SecurityOpt: string[] } }
+    ).HostConfig.SecurityOpt;
+    expect(securityOpt).toEqual(["seccomp=unconfined", "apparmor=unconfined"]);
   });
 
   it("labels the container for reconcile, including the payload hash", async () => {

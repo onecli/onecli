@@ -34,6 +34,7 @@ const baseConfig: RunnerConfig = {
   agentImage: "onecli-agent:test",
   sandboxNetwork: "onecli-sandboxes",
   networkInternal: true,
+  sandboxUnsafeSeccomp: false,
   wsPort: 8484,
   advertisedHost: "runner",
   maxSandboxes: 2,
