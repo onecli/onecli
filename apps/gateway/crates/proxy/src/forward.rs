@@ -1049,9 +1049,22 @@ pub async fn forward_request(
     // guide the agent to connect/configure credentials in OneCLI.
     // Real OAuth exchanges are exempt (see `is_real_oauth_exchange`): their
     // 401s are the provider talking to the client, not a missing credential.
+    //
+    // Also exempt: browser page navigations (GET requests accepting HTML) to
+    // unknown hosts. The gateway is for API credentials, not for gating access
+    // to public web pages. If a browser loads a page and gets 401/403, forward
+    // the response verbatim instead of returning credential_not_found.
+    let is_browser_page_navigation = method == Method::GET
+        && headers
+            .get("accept")
+            .and_then(|v| v.to_str().ok())
+            .map(|accept| accept.contains("text/html"))
+            .unwrap_or(false);
+
     if injection_count == 0
         && !is_real_oauth_exchange
         && (status == StatusCode::UNAUTHORIZED || status == StatusCode::FORBIDDEN)
+        && !is_browser_page_navigation
     {
         let hostname = common::util::strip_port(host);
 
@@ -1124,7 +1137,8 @@ pub async fn forward_request(
     // Buffer the body and check for auth-related keywords before deciding.
     // Real OAuth exchanges are exempt here too: a 400 `invalid_grant` from a
     // token endpoint must reach the client verbatim.
-    if injection_count == 0 && !is_real_oauth_exchange && status == StatusCode::BAD_REQUEST {
+    // Also exempt: browser page navigations (see is_browser_page_navigation above).
+    if injection_count == 0 && !is_real_oauth_exchange && status == StatusCode::BAD_REQUEST && !is_browser_page_navigation {
         let body_bytes = upstream_resp
             .bytes()
             .await
