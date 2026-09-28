@@ -187,4 +187,60 @@ describe("credential guidance", () => {
     expect(res.json()).toMatchObject({ error: "credential_not_found" });
     expect(res.header("x-should-retry")).toBe("false");
   });
+
+  scenario("forwards browser page navigation 401 without credential guidance", async (cx) => {
+    const upstream = await cx.upstream();
+    upstream.respond({ status: 401, body: "Unauthorized" });
+    await cx.seed();
+    const gw = await cx.startGateway();
+
+    const res = await throughProxy(gw.origin, {
+      url: upstream.url("/page"),
+      token: cx.ids.agentToken,
+      headers: { accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8" },
+    });
+
+    // Browser page navigation (GET with Accept: text/html) should not be rewritten
+    // to credential_not_found even for unknown hosts. The gateway is for API
+    // credentials, not for gating access to public web pages.
+    expect(res.status).toBe(401);
+    expect(res.body).toBe("Unauthorized");
+    expect(res.header("x-should-retry")).toBeUndefined();
+  });
+
+  scenario("forwards browser page navigation 403 without credential guidance", async (cx) => {
+    const upstream = await cx.upstream();
+    upstream.respond({ status: 403, body: "Forbidden" });
+    await cx.seed();
+    const gw = await cx.startGateway();
+
+    const res = await throughProxy(gw.origin, {
+      url: upstream.url("/page"),
+      token: cx.ids.agentToken,
+      headers: { accept: "text/html,application/xhtml+xml" },
+    });
+
+    expect(res.status).toBe(403);
+    expect(res.body).toBe("Forbidden");
+    expect(res.header("x-should-retry")).toBeUndefined();
+  });
+
+  scenario("still rewrites API 401 without Accept: text/html", async (cx) => {
+    const upstream = await cx.upstream();
+    upstream.respond({ status: 401, body: '{"error":"missing api key"}' });
+    await cx.seed();
+    const gw = await cx.startGateway();
+
+    const res = await throughProxy(gw.origin, {
+      url: upstream.url("/api/v1/resource"),
+      token: cx.ids.agentToken,
+      headers: { accept: "application/json" },
+    });
+
+    // API requests (without text/html accept) should still get credential guidance
+    expect(res.status).toBe(401);
+    const body = res.json() as { error: string; secret_url: string };
+    expect(body.error).toBe("credential_not_found");
+    expect(body.secret_url).toContain(GATEWAY_APP_URL);
+  });
 });
