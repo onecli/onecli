@@ -1139,7 +1139,6 @@ async fn handle_http_proxy(
     let rules = mitm::ResolvedRules {
         injection_rules: resolved.injection_rules,
         pending_injections,
-        policy_rules_v2: resolved.policy_rules_v2,
         available_apps: resolved.available_apps,
         access_restricted: resolved.access_restricted,
         intercept_token: None,

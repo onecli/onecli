@@ -98,12 +98,6 @@ pub(crate) struct ConnectResponse {
     /// host (0/1 in practice — the response is per-host).
     #[serde(default)]
     pub budget_bindings: Vec<crate::ee::budget::BudgetBinding>,
-    /// Cloud-only: the published new-model policy rules for this connection (org
-    /// and workspace scopes), loaded here (cached ~60s with the rest of this
-    /// response) so the per-request decision path is DB-free. Empty when
-    /// the engine is off, or before the org is backfilled.
-    #[serde(default)]
-    pub policy_rules_v2: db::PolicyV2Rules,
     /// Cloud-only: the apps this connection's workspace may reach (step 7), resolved
     /// here (cached ~60s with the rest of this response) so the per-request app
     /// pre-check is DB-free. Unrestricted (every app available) in OSS, when the
@@ -387,7 +381,6 @@ impl PolicyEngine {
             access_restricted,
             plan,
             budget_bindings,
-            policy_rules_v2,
             available_apps,
         })
     }
@@ -1935,7 +1928,6 @@ mod tests {
             access_restricted: false,
             plan: "pro".to_string(),
             budget_bindings: vec![],
-            policy_rules_v2: db::PolicyV2Rules::default(),
             available_apps: db::AvailableApps::default(),
         };
 
@@ -1980,7 +1972,6 @@ mod tests {
             access_restricted: false,
             plan: "pro".to_string(),
             budget_bindings: vec![],
-            policy_rules_v2: db::PolicyV2Rules::default(),
             available_apps: db::AvailableApps::default(),
         };
 
@@ -2021,7 +2012,6 @@ mod tests {
             access_restricted: true,
             plan: "pro".to_string(),
             budget_bindings: vec![],
-            policy_rules_v2: db::PolicyV2Rules::default(),
             available_apps: db::AvailableApps::default(),
         };
 

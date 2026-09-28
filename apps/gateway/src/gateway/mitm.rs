@@ -247,10 +247,6 @@ pub(crate) struct ResolvedRules {
     /// Cloud-only: spend budgets governing the effective credential for this host
     /// (0/1 in practice).
     pub budget_bindings: Vec<crate::ee::budget::BudgetBinding>,
-    /// The published new-model policy rules for this connection (from
-    /// `ConnectResponse`), passed to the enforce seam. Empty when the
-    /// engine is off, or before the org is backfilled.
-    pub policy_rules_v2: crate::db::PolicyV2Rules,
     /// The apps this connection's workspace may reach (from `ConnectResponse`), for
     /// the per-request availability pre-check. Unrestricted (all available) in
     /// OSS, when the org is "open", or when enforcement is off.
@@ -462,7 +458,6 @@ async fn resolve_rules(
         rules: Box::new(ResolvedRules {
             injection_rules,
             pending_injections,
-            policy_rules_v2: resp.policy_rules_v2,
             available_apps: resp.available_apps,
             access_restricted: resp.access_restricted,
             intercept_token,
