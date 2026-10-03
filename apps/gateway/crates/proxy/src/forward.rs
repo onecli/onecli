@@ -366,6 +366,20 @@ pub async fn materialize_injections<'a>(
     )))
 }
 
+/// True when this request carries a provider-minted JWT that must reach the
+/// provider untouched: an allowlisted endpoint (see
+/// [`apps::preserves_agent_jwt`]) AND an `Authorization` header that is
+/// strictly `Bearer <jwt>`. Anything else (no header, an opaque token, a
+/// placeholder) still gets the real credential, so this can never be used to
+/// dodge injection.
+fn keeps_agent_jwt(hostname: &str, path: &str, headers: &hyper::HeaderMap) -> bool {
+    apps::preserves_agent_jwt(hostname, path)
+        && headers
+            .get(hyper::header::AUTHORIZATION)
+            .and_then(|v| v.to_str().ok())
+            .is_some_and(inject::is_bearer_jwt)
+}
+
 #[allow(clippy::too_many_arguments)]
 pub async fn forward_request(
     req: Request<Incoming>,
@@ -633,6 +647,21 @@ pub async fn forward_request(
     // Apply injection rules — upstream_path may gain query-param secrets;
     // the original `path`/`url` stays clean for logging and approval metadata.
     let mut upstream_path = path.clone();
+    // Provider-minted JWT endpoints (Cloudflare Pages asset upload): when the
+    // agent sent a real `Authorization: Bearer <jwt>`, leave it alone — the
+    // account credential would be rejected there. Applies to every rule
+    // source (app connection or secret). Any non-JWT Authorization is still
+    // overwritten, so this is never a way to dodge credential injection.
+    let agent_jwt_preserved = keeps_agent_jwt(common::util::strip_port(host), &path, &headers);
+    let injection_rules = if agent_jwt_preserved {
+        info!(host = %host, path = %path, "preserving agent-supplied provider JWT Authorization");
+        Cow::Owned(inject::without_header_injections(
+            &injection_rules,
+            "authorization",
+        ))
+    } else {
+        injection_rules
+    };
     let injection_count =
         inject::apply_injections(&mut headers, &mut upstream_path, &injection_rules);
     let upstream_url = format!("{scheme}://{host}{upstream_path}");
@@ -1051,6 +1080,7 @@ pub async fn forward_request(
     // 401s are the provider talking to the client, not a missing credential.
     if injection_count == 0
         && !is_real_oauth_exchange
+        && !agent_jwt_preserved
         && (status == StatusCode::UNAUTHORIZED || status == StatusCode::FORBIDDEN)
     {
         let hostname = common::util::strip_port(host);
@@ -1124,7 +1154,11 @@ pub async fn forward_request(
     // Buffer the body and check for auth-related keywords before deciding.
     // Real OAuth exchanges are exempt here too: a 400 `invalid_grant` from a
     // token endpoint must reach the client verbatim.
-    if injection_count == 0 && !is_real_oauth_exchange && status == StatusCode::BAD_REQUEST {
+    if injection_count == 0
+        && !is_real_oauth_exchange
+        && !agent_jwt_preserved
+        && status == StatusCode::BAD_REQUEST
+    {
         let body_bytes = upstream_resp
             .bytes()
             .await
@@ -1435,6 +1469,45 @@ fn body_indicates_auth_error(body: &[u8]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── keeps_agent_jwt ──────────────────────────────────────────────────
+
+    fn auth_headers(value: &str) -> hyper::HeaderMap {
+        let mut h = hyper::HeaderMap::new();
+        h.insert(
+            hyper::header::AUTHORIZATION,
+            hyper::header::HeaderValue::from_str(value).unwrap(),
+        );
+        h
+    }
+
+    #[test]
+    fn keeps_agent_jwt_needs_endpoint_and_jwt_shape() {
+        let host = "api.cloudflare.com";
+        let path = "/client/v4/pages/assets/check-missing";
+        let jwt = "Bearer eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.c2ln-_x";
+
+        assert!(keeps_agent_jwt(host, path, &auth_headers(jwt)));
+
+        // Same endpoint, but the agent sent something that is not a JWT:
+        // the real credential still replaces it.
+        assert!(!keeps_agent_jwt(
+            host,
+            path,
+            &auth_headers("Bearer placeholder")
+        ));
+        assert!(!keeps_agent_jwt(
+            host,
+            path,
+            &auth_headers("Bearer cfut_abc")
+        ));
+        assert!(!keeps_agent_jwt(host, path, &hyper::HeaderMap::new()));
+
+        // A JWT on an endpoint that is not allowlisted is overwritten.
+        let acct = "/client/v4/accounts/abc/pages/projects/p/upload-token";
+        assert!(!keeps_agent_jwt(host, acct, &auth_headers(jwt)));
+        assert!(!keeps_agent_jwt("example.com", path, &auth_headers(jwt)));
+    }
 
     // ── is_forwarded_request_header ──────────────────────────────────────
 
