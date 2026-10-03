@@ -1,5 +1,18 @@
 # Changelog
 
+## [2.7.0](https://github.com/onecli/onecli/compare/v2.6.0...v2.7.0) (2026-10-03)
+
+
+### Features
+
+* Salesforce and new apps, readable approval cards, send_file, agent-to-agent messaging ([#596](https://github.com/onecli/onecli/issues/596)) ([33ad3d3](https://github.com/onecli/onecli/commit/33ad3d3e8f561658cc84b310a10824207d69fe32))
+
+
+### Bug Fixes
+
+* invite dead ends, apps in agent channels, and a browser-ready agent image ([#554](https://github.com/onecli/onecli/issues/554)) ([3e595ef](https://github.com/onecli/onecli/commit/3e595ef04d1af420aab35bbe014967d1024e3d86))
+* **web:** preserve API status for malformed error bodies ([#559](https://github.com/onecli/onecli/issues/559)) ([8ea47cd](https://github.com/onecli/onecli/commit/8ea47cd88973742e482791600f71199834b54b22))
+
 ## [2.6.0](https://github.com/onecli/onecli/compare/v2.5.0...v2.6.0) (2026-09-07)
 
 
